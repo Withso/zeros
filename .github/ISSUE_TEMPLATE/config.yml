@@ -1,0 +1,41 @@
+# ──────────────────────────────────────────────────────────
+# Issue routing — source-available, closed to contribution
+# ──────────────────────────────────────────────────────────
+#
+# `blank_issues_enabled: false` removes the free-text "Open a blank issue"
+# escape hatch. With no issue *forms* defined alongside this file, the New
+# Issue page becomes nothing but the contact links below — which is the point:
+# every inbound path leads somewhere that can actually answer, and nothing
+# lands in a tracker no one has committed to reading.
+#
+# If Issues are later disabled entirely in repo settings, this file becomes
+# inert rather than wrong — leave it in place.
+# ──────────────────────────────────────────────────────────
+
+blank_issues_enabled: false
+
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/withso/zeros/security/advisories/new
+    about: >-
+      Use GitHub's private vulnerability reporting — never a public issue.
+      Scope, timelines, and disclosure policy are in SECURITY.md.
+
+  - name: Security policy
+    url: https://github.com/withso/zeros/blob/main/SECURITY.md
+    about: >-
+      Supported versions, what is in and out of scope, and what happens after
+      you report.
+
+  - name: Contribution policy — this project does not accept pull requests
+    url: https://github.com/withso/zeros/blob/main/CONTRIBUTING.md
+    about: >-
+      Zeros is source-available under MIT for reading, auditing, and forking.
+      Pull requests are closed unmerged. Read this before you start work.
+
+  - name: Using Zeros — send feedback from inside the app
+    url: https://github.com/withso/zeros/blob/main/SUPPORT.md
+    about: >-
+      There is no support commitment here. The in-app feedback form (⌥⌘F)
+      attaches your version and logs and is the only channel that reaches the
+      maintainer.

@@ -1,0 +1,2025 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-Zeros-root>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Zeros — Setup tab · State catalog</title>
+    <style>
+      /* ============================================================
+         Tokens — lifted verbatim from styles/zeros-tokens.css so the
+         mockups render on the real Zeros Shade (dark) + Light palettes.
+         Toggle themes with the switch in the header.
+         ============================================================ */
+      :root {
+        color-scheme: dark;
+        --bg1: hsl(25 5% 7%);
+        --bg1-hover: hsl(8 5% 12%);
+        --bg1-highlight: hsl(25 5% 10%);
+        --bg2: hsl(25 4% 12%);
+        --bg2-hover: hsl(25 3% 15%);
+        --bg3: hsl(15 4% 16%);
+        --bg3-hover: hsl(15 3% 20%);
+        --sidebar-bg: hsl(25 5% 9%);
+        --fg1: hsl(0 2% 92%);
+        --fg2: hsl(20 4% 66%);
+        --fg3: hsl(15 1% 44%);
+        --muted-fg: hsl(15 4% 44%);
+        --border1: hsl(8 3% 14%);
+        --border2: hsl(25 1% 18%);
+        --border3: hsl(15 0% 24%);
+        --border4: hsl(15 0% 30%);
+        --highlighted-bright: hsl(25 5% 65%);
+        --inverted-bg: hsl(0 2% 92%);
+        --inverted-fg: hsl(5 7% 5%);
+        --green-primary: hsl(142 69% 58%);
+        --green-bg: hsl(120 23% 17%);
+        --green-fg: hsl(142 75% 73%);
+        --red-primary: hsl(0 91% 71%);
+        --red-bg: hsl(13 81% 14%);
+        --red-fg: hsl(20 97% 72%);
+        --yellow-primary: hsl(37 75% 60%);
+        --yellow-bg: hsl(38 68% 17%);
+        --yellow-fg: hsl(44 100% 50%);
+        --blue-primary: hsl(205 80% 73%);
+        --violet-primary: hsl(271 80% 73%);
+        --brown-primary: hsl(9 46% 72%);
+        --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+        --radius-sm: 4px;
+        --radius-md: 6px;
+        --radius-lg: 8px;
+        --sans:
+          "Geist Variable", Inter, ui-sans-serif, -apple-system,
+          BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --mono: "Geist Mono Variable", "SFMono-Regular", Consolas, monospace;
+      }
+
+      [data-theme="light"] {
+        color-scheme: light;
+        --bg1: hsl(0 0% 100%);
+        --bg1-hover: hsl(0 4% 95%);
+        --bg1-highlight: hsl(0 0% 97%);
+        --bg2: hsl(60 4% 95%);
+        --bg2-hover: hsl(60 4% 91%);
+        --bg3: hsl(0 0% 100%);
+        --bg3-hover: hsl(0 0% 95%);
+        --sidebar-bg: hsl(60 9% 98%);
+        --fg1: hsl(20 7% 16%);
+        --fg2: hsl(20 4% 37%);
+        --fg3: hsl(20 4% 56%);
+        --muted-fg: hsl(20 4% 68%);
+        --border1: hsl(30 9% 91%);
+        --border2: hsl(30 9% 91%);
+        --border3: hsl(60 3% 85%);
+        --border4: hsl(0 1% 83%);
+        --highlighted-bright: hsl(25 5% 45%);
+        --inverted-bg: hsl(20 7% 16%);
+        --inverted-fg: hsl(0 0% 100%);
+        --green-primary: hsl(142 75% 36%);
+        --green-bg: hsl(134 38% 89%);
+        --green-fg: hsl(142 70% 30%);
+        --red-primary: hsl(0 72% 51%);
+        --red-bg: hsl(18 87% 91%);
+        --red-fg: hsl(18 89% 40%);
+        --yellow-primary: hsl(37 90% 60%);
+        --yellow-bg: hsl(48 97% 89%);
+        --yellow-fg: hsl(37 100% 51%);
+        --blue-primary: hsl(221 83% 53%);
+        --violet-primary: hsl(271 80% 51%);
+        --brown-primary: hsl(5 35% 50%);
+        --shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        margin: 0;
+        min-width: 320px;
+        min-height: 100vh;
+        background:
+          radial-gradient(
+            circle at 50% -8%,
+            color-mix(in srgb, var(--fg1) 5%, transparent),
+            transparent 30rem
+          ),
+          var(--bg1);
+        color: var(--fg1);
+        font: 14px/1.5 var(--sans);
+        -webkit-font-smoothing: antialiased;
+      }
+      button {
+        font: inherit;
+        color: inherit;
+        cursor: pointer;
+      }
+      svg {
+        display: block;
+      }
+      code {
+        font-family: var(--mono);
+      }
+
+      .page {
+        width: min(1180px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 48px 0 96px;
+      }
+
+      /* ── Hero ── */
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 28px;
+        align-items: end;
+        padding-bottom: 28px;
+        border-bottom: 1px solid var(--border1);
+      }
+      .eyebrow {
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        color: var(--yellow-primary);
+      }
+      h1 {
+        max-width: 760px;
+        margin: 9px 0 10px;
+        font-size: clamp(26px, 3.4vw, 40px);
+        line-height: 1.05;
+        letter-spacing: -0.035em;
+      }
+      .lede {
+        max-width: 720px;
+        margin: 0;
+        color: var(--fg2);
+        font-size: 15px;
+      }
+      .hero-aside {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        align-items: flex-end;
+      }
+      .summary-chip {
+        min-width: 240px;
+        padding: 14px 16px;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 90%, transparent);
+      }
+      .summary-chip strong {
+        display: block;
+        margin-bottom: 3px;
+        font-size: 13px;
+      }
+      .summary-chip span {
+        display: block;
+        color: var(--fg2);
+        font-size: 12px;
+      }
+      .theme-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 11px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: var(--bg2);
+        color: var(--fg1);
+        font-size: 12px;
+      }
+      .theme-toggle:hover {
+        background: var(--bg2-hover);
+      }
+
+      /* ── Thesis cards ── */
+      .thesis {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        margin: 24px 0 12px;
+      }
+      .thesis-card {
+        min-width: 0;
+        padding: 16px 18px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 86%, transparent);
+      }
+      .thesis-card.primary {
+        border-color: color-mix(in srgb, var(--green-primary) 26%, var(--border1));
+        background: color-mix(in srgb, var(--green-primary) 5%, var(--sidebar-bg));
+      }
+      .thesis-card h3 {
+        margin: 0 0 5px;
+        font-size: 13px;
+      }
+      .thesis-card p {
+        margin: 0;
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      /* ── Sticky nav ── */
+      nav {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+        margin: 26px -12px 40px;
+        padding: 10px 12px;
+        border-bottom: 1px solid color-mix(in srgb, var(--border1) 80%, transparent);
+        background: color-mix(in srgb, var(--bg1) 82%, transparent);
+        backdrop-filter: blur(14px);
+      }
+      nav a {
+        flex: none;
+        padding: 5px 9px;
+        border-radius: var(--radius-sm);
+        color: var(--fg2);
+        font-size: 12px;
+        text-decoration: none;
+      }
+      nav a:hover {
+        background: var(--bg2);
+        color: var(--fg1);
+      }
+      .nav-sep {
+        width: 1px;
+        margin: 3px 4px;
+        background: var(--border2);
+      }
+
+      /* ── Section headers ── */
+      .band {
+        margin: 0 0 26px;
+        font-size: 12px;
+        font-weight: 650;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--fg3);
+      }
+      .catalog {
+        display: grid;
+        gap: 56px;
+      }
+      .catalog + .band {
+        margin-top: 64px;
+      }
+      .case {
+        scroll-margin-top: 68px;
+      }
+      .case-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 24px;
+        align-items: flex-start;
+        margin-bottom: 16px;
+      }
+      .case-title-row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        margin-bottom: 6px;
+      }
+      .case-number {
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.06em;
+        color: var(--fg3);
+      }
+      .tag {
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: var(--bg2);
+        color: var(--fg2);
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+      }
+      .tag.ship {
+        background: color-mix(in srgb, var(--green-primary) 12%, transparent);
+        color: var(--green-primary);
+      }
+      .tag.gap {
+        background: color-mix(in srgb, var(--yellow-primary) 12%, transparent);
+        color: var(--yellow-primary);
+      }
+      .tag.context {
+        background: color-mix(in srgb, var(--blue-primary) 12%, transparent);
+        color: var(--blue-primary);
+      }
+      .tag.skip {
+        background: var(--bg2);
+        color: var(--fg3);
+      }
+      .case h2 {
+        margin: 0;
+        font-size: 19px;
+        line-height: 1.22;
+        letter-spacing: -0.02em;
+      }
+      .case-copy {
+        max-width: 720px;
+        margin: 6px 0 0;
+        color: var(--fg2);
+        font-size: 13px;
+      }
+      .meta {
+        flex: none;
+        max-width: 280px;
+        padding-top: 2px;
+        color: var(--fg3);
+        font-size: 11px;
+        line-height: 1.5;
+        text-align: right;
+      }
+
+      /* ── App frame (the Terminal pane) ── */
+      .dual {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+      }
+      .frame-wrap {
+        min-width: 0;
+      }
+      .frame-label {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin-bottom: 8px;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        color: var(--fg3);
+      }
+      .frame-label .dot-lg {
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+        background: var(--fg3);
+      }
+      .frame-label.before .dot-lg {
+        background: var(--red-primary);
+      }
+      .frame-label.after .dot-lg {
+        background: var(--green-primary);
+      }
+      .frame {
+        overflow: hidden;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: var(--bg1);
+        box-shadow: var(--shadow);
+      }
+
+      .rail {
+        display: flex;
+        height: 44px;
+        align-items: center;
+        gap: 8px;
+        padding: 0 12px;
+        border-bottom: 1px solid var(--border1);
+      }
+      .rail-home {
+        display: inline-grid;
+        width: 30px;
+        height: 30px;
+        place-items: center;
+        border-radius: var(--radius-md);
+        color: var(--fg2);
+      }
+      .rail-home.active {
+        background: var(--bg2);
+        color: var(--fg1);
+      }
+      .rail-spacer {
+        flex: 1;
+      }
+      .rail-run {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        height: 28px;
+        padding: 0 9px;
+        border-radius: var(--radius-sm);
+        color: var(--fg1);
+        font-size: 13px;
+      }
+      .rail-run:hover {
+        background: var(--bg2-hover);
+      }
+
+      .subtabs {
+        display: flex;
+        height: 36px;
+        align-items: center;
+        gap: 2px;
+        padding: 0 8px;
+        border-bottom: 1px solid var(--border1);
+      }
+      .subtab {
+        position: relative;
+        display: inline-flex;
+        height: 36px;
+        align-items: center;
+        padding: 0 10px;
+        border: 0;
+        background: transparent;
+        color: var(--fg2);
+        font-size: 12px;
+        font-weight: 500;
+      }
+      .subtab.active {
+        color: var(--fg1);
+      }
+      .subtab.active::after {
+        content: "";
+        position: absolute;
+        left: 8px;
+        right: 8px;
+        bottom: 0;
+        height: 2px;
+        border-radius: 999px;
+        background: var(--fg1);
+      }
+      .subtab .exited {
+        margin-left: 5px;
+        opacity: 0.7;
+      }
+      .subtab .status-dot {
+        width: 6px;
+        height: 6px;
+        margin-left: 6px;
+        border-radius: 999px;
+      }
+      .status-dot.run {
+        background: var(--yellow-primary);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--yellow-primary) 22%, transparent);
+      }
+      .status-dot.ok {
+        background: var(--green-primary);
+      }
+      .status-dot.err {
+        background: var(--red-primary);
+      }
+
+      /* B6 dot legend — the three tab-dot meanings (only shown off-tab). */
+      .dot-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 18px;
+        margin-top: 14px;
+        padding: 11px 14px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-md);
+        background: color-mix(in srgb, var(--sidebar-bg) 88%, transparent);
+        color: var(--fg2);
+        font-size: 12px;
+      }
+      .dot-legend span {
+        display: inline-flex;
+        align-items: center;
+      }
+      .dot-legend .status-dot {
+        width: 7px;
+        height: 7px;
+        margin: 0 7px 0 0;
+        border-radius: 999px;
+      }
+      .subtab-add {
+        display: inline-grid;
+        width: 24px;
+        height: 24px;
+        place-items: center;
+        margin-left: 2px;
+        border-radius: var(--radius-sm);
+        color: var(--fg2);
+      }
+      .subtab-add:hover {
+        background: var(--bg2-hover);
+        color: var(--fg1);
+      }
+
+      .body {
+        position: relative;
+        height: 288px;
+      }
+      .body.tall {
+        height: 320px;
+      }
+
+      /* ── Empty states ── */
+      .empty {
+        display: flex;
+        height: 100%;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        padding: 24px;
+        text-align: center;
+      }
+      .empty-title {
+        font-size: 14px;
+        color: var(--fg1);
+      }
+      .empty-desc {
+        max-width: 340px;
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      .empty-desc code {
+        padding: 1px 5px;
+        border-radius: var(--radius-sm);
+        background: var(--bg2-hover);
+        color: var(--fg1);
+        font-size: 11px;
+      }
+      .empty-glyph {
+        color: var(--muted-fg);
+      }
+
+      /* ── Buttons ── */
+      .btn {
+        display: inline-flex;
+        height: 24px;
+        align-items: center;
+        gap: 6px;
+        padding: 0 10px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-sm);
+        background: var(--bg2);
+        color: var(--fg1);
+        font-size: 12px;
+      }
+      .btn:hover {
+        background: var(--bg2-hover);
+      }
+      .btn.add {
+        border: 0;
+        padding: 0 12px;
+      }
+      .btn.is-disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .btn svg {
+        width: 14px;
+        height: 14px;
+      }
+
+      /* Default secondary button — 24px, no icon (A1/A2 primary action). */
+      .btn-secondary {
+        display: inline-flex;
+        height: 24px;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        padding: 0 10px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--fg1);
+        font-size: 12px;
+      }
+      .btn-secondary:hover {
+        background: var(--bg2);
+      }
+      .btn-secondary svg {
+        width: 14px;
+        height: 14px;
+      }
+
+      /* Empty-state icon illustration — 2px stroke, muted, centered on top. */
+      .illus {
+        color: var(--muted-fg);
+      }
+      .illus svg {
+        width: 40px;
+        height: 40px;
+      }
+
+      /* A4/A5 outcome badge — filled, 24px, no icon; auto-dismisses (see Changes). */
+      .status-badge {
+        display: inline-flex;
+        height: 24px;
+        align-items: center;
+        padding: 0 10px;
+        border-radius: var(--radius-sm);
+        font-size: 12px;
+        font-weight: 500;
+      }
+      .status-badge.ok {
+        background: var(--green-bg);
+        color: var(--green-fg);
+      }
+      .status-badge.err {
+        background: var(--red-bg);
+        color: var(--red-fg);
+      }
+
+      /* "Changes" annotation — this iteration's visual edits + behavior logic. */
+      .tag.changed {
+        background: color-mix(in srgb, var(--violet-primary) 15%, transparent);
+        color: var(--violet-primary);
+      }
+      .changes {
+        margin-top: 14px;
+        padding: 12px 14px 12px 16px;
+        border: 1px solid color-mix(in srgb, var(--violet-primary) 22%, var(--border1));
+        border-left: 2px solid var(--violet-primary);
+        border-radius: var(--radius-md);
+        background: color-mix(in srgb, var(--violet-primary) 5%, var(--sidebar-bg));
+      }
+      .changes-label {
+        margin-bottom: 7px;
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--violet-primary);
+      }
+      .changes ul {
+        margin: 0;
+        padding-left: 16px;
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+      .changes li {
+        margin: 3px 0;
+      }
+      .changes b {
+        color: var(--fg1);
+      }
+      .changes em {
+        color: var(--yellow-primary);
+        font-style: normal;
+      }
+      .changes code {
+        padding: 1px 5px;
+        border-radius: var(--radius-sm);
+        background: var(--bg2-hover);
+        color: var(--fg1);
+        font-size: 11px;
+      }
+
+      /* ── Terminal log + status cluster ── */
+      .term {
+        position: relative;
+        height: 100%;
+      }
+      .term-log {
+        height: 100%;
+        overflow: hidden;
+        padding: 10px 12px;
+        font: 12px/1.62 var(--mono);
+        color: var(--fg1);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .term-log .c-dim {
+        color: var(--fg3);
+      }
+      .term-log .c-ok {
+        color: var(--green-primary);
+      }
+      .term-log .c-err {
+        color: var(--red-primary);
+      }
+      .term-log .c-warn {
+        color: var(--yellow-primary);
+      }
+      .term-log .c-info {
+        color: var(--blue-primary);
+      }
+      .term-log .c-path {
+        color: var(--brown-primary);
+      }
+      .cursor {
+        display: inline-block;
+        width: 7px;
+        height: 13px;
+        vertical-align: -2px;
+        background: var(--fg1);
+        animation: blink 1.05s step-end infinite;
+      }
+      .fade-top {
+        position: absolute;
+        inset: 0 0 auto 0;
+        height: 26px;
+        background: linear-gradient(var(--bg1), transparent);
+        pointer-events: none;
+      }
+
+      .status {
+        position: absolute;
+        right: 12px;
+        bottom: 12px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 12px;
+        color: var(--fg2);
+      }
+      .pill svg {
+        width: 12px;
+        height: 12px;
+      }
+      .pill.ok svg {
+        color: var(--green-primary);
+      }
+      .pill.err svg {
+        color: var(--red-primary);
+      }
+      .pill.run svg {
+        color: var(--fg2);
+        animation: spin 0.9s linear infinite;
+      }
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 3px 8px;
+        border-radius: var(--radius-sm);
+        background: var(--bg2);
+        color: var(--fg2);
+        font-size: 11px;
+      }
+      .chip svg {
+        width: 12px;
+        height: 12px;
+        color: var(--yellow-primary);
+      }
+
+      /* ── Proposed "durable status" card (after states) ── */
+      .status-card {
+        display: flex;
+        height: 100%;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        padding: 24px;
+        text-align: center;
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 5px 12px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .badge svg {
+        width: 14px;
+        height: 14px;
+      }
+      .badge.ok {
+        background: var(--green-bg);
+        color: var(--green-fg);
+      }
+      .badge.err {
+        background: var(--red-bg);
+        color: var(--red-fg);
+      }
+      .badge.warn {
+        background: var(--yellow-bg);
+        color: var(--yellow-fg);
+      }
+      .status-sub {
+        max-width: 320px;
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      /* ── Loading skeleton (proposed) ── */
+      .skeleton {
+        display: flex;
+        height: 100%;
+        flex-direction: column;
+        gap: 9px;
+        padding: 14px 12px;
+      }
+      .sk-line {
+        height: 9px;
+        border-radius: 999px;
+        background: linear-gradient(
+          90deg,
+          var(--bg2) 0%,
+          var(--bg2-hover) 50%,
+          var(--bg2) 100%
+        );
+        background-size: 200% 100%;
+        animation: shimmer 1.3s linear infinite;
+      }
+      .sk-center {
+        display: flex;
+        height: 100%;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 11px;
+        color: var(--fg2);
+        font-size: 12px;
+      }
+      .sk-center svg {
+        width: 18px;
+        height: 18px;
+        animation: spin 0.9s linear infinite;
+        color: var(--fg2);
+      }
+
+      /* ── Behavior / rationale notes ── */
+      .notes {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 14px;
+      }
+      .notes.one {
+        grid-template-columns: 1fr;
+      }
+      .note {
+        padding: 12px 14px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-md);
+        background: color-mix(in srgb, var(--sidebar-bg) 88%, transparent);
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      .note b {
+        color: var(--fg1);
+      }
+      .note.fix {
+        border-color: color-mix(in srgb, var(--green-primary) 24%, var(--border1));
+        background: color-mix(in srgb, var(--green-primary) 5%, var(--sidebar-bg));
+      }
+
+      .single {
+        max-width: 560px;
+      }
+
+      .footer-note {
+        margin-top: 64px;
+        padding-top: 22px;
+        border-top: 1px solid var(--border1);
+        color: var(--fg3);
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @keyframes blink {
+        50% {
+          opacity: 0;
+        }
+      }
+      @keyframes shimmer {
+        to {
+          background-position: -200% 0;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .cursor,
+        .pill.run svg,
+        .sk-center svg,
+        .sk-line {
+          animation: none;
+        }
+      }
+
+      @media (max-width: 900px) {
+        .hero,
+        .thesis,
+        .dual {
+          grid-template-columns: 1fr;
+        }
+        .hero-aside {
+          align-items: flex-start;
+        }
+        .case-head {
+          flex-direction: column;
+          gap: 8px;
+        }
+        .meta {
+          max-width: none;
+          text-align: left;
+        }
+        .notes {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- ── Icon defs (lucide, matching the real components) ── -->
+    <svg aria-hidden="true" width="0" height="0" style="position: absolute">
+      <defs>
+        <symbol id="i-terminal" viewBox="0 0 24 24">
+          <path d="m4 17 6-6-6-6M12 19h8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-globe" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20" fill="none" stroke="currentColor" stroke-width="2" />
+        </symbol>
+        <symbol id="i-split" viewBox="0 0 24 24">
+          <rect x="3" y="3" width="18" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M14 3v18" fill="none" stroke="currentColor" stroke-width="2" />
+        </symbol>
+        <symbol id="i-play" viewBox="0 0 24 24">
+          <polygon points="6 3 20 12 6 21 6 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-play-fill" viewBox="0 0 24 24">
+          <polygon points="6 3 20 12 6 21 6 3" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-rotate" viewBox="0 0 24 24">
+          <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="M21 3v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-check" viewBox="0 0 24 24">
+          <path d="M21.8 10A10 10 0 1 1 17 3.3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="m9 11 3 3L22 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-x-circle" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="m15 9-6 6M9 9l6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-loader" viewBox="0 0 24 24">
+          <path d="M21 12a9 9 0 1 1-6.22-8.56" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-plus" viewBox="0 0 24 24">
+          <path d="M5 12h14M12 5v14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-scissors" viewBox="0 0 24 24">
+          <circle cx="6" cy="6" r="3" fill="none" stroke="currentColor" stroke-width="2" />
+          <circle cx="6" cy="18" r="3" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M20 4 8.12 15.88M14.47 14.48 20 20M8.12 8.12 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-warning" viewBox="0 0 24 24">
+          <path d="m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="M12 9v4M12 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-folder-x" viewBox="0 0 24 24">
+          <path d="M12.5 21H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v3.5" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="m17 17 4 4M21 17l-4 4" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-file-code" viewBox="0 0 24 24">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" fill="none" stroke="currentColor" stroke-width="1" stroke-linejoin="round" />
+          <path d="M14 2v6h6" fill="none" stroke="currentColor" stroke-width="1" stroke-linejoin="round" />
+          <path d="m10 12-2 2.5 2 2.5M14 12l2 2.5-2 2.5" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-square-play" viewBox="0 0 24 24">
+          <rect x="3" y="3" width="18" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="1" />
+          <path d="M9 8.5v7l6-3.5z" fill="none" stroke="currentColor" stroke-width="1" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-stop" viewBox="0 0 24 24">
+          <rect x="6" y="6" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="2" />
+        </symbol>
+        <symbol id="i-file-cog" viewBox="0 0 24 24">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h4M14 2v6h6M14 2l6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+          <circle cx="17" cy="17" r="2.5" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M17 13v1.5M17 19.5V21M20.5 17H19M15 17h-1.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-sun" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+      </defs>
+    </svg>
+
+    <main class="page">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">Terminal pane · Setup tab · State catalog</div>
+          <h1>Every state the Setup tab can show — and where they should converge</h1>
+          <p class="lede">
+            The Setup tab is where a workspace installs its dependencies. Today it
+            shows one thing in a worktree and something different on “main”, and a
+            few states leave the user guessing. This catalog is the full inventory:
+            what ships today, and a before / after for the cases we want to
+            consolidate into one consistent surface.
+          </p>
+        </div>
+        <div class="hero-aside">
+          <button class="theme-toggle" id="themeBtn" type="button">
+            <svg width="14" height="14"><use href="#i-sun" /></svg>
+            <span id="themeLabel">Light preview</span>
+          </button>
+          <div class="summary-chip">
+            <strong>One Setup surface, one status language</strong>
+            <span>Same states, same pill, main and worktrees alike.</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="thesis" aria-label="Consolidation goals">
+        <div class="thesis-card primary">
+          <h3>One status language</h3>
+          <p>
+            Running, complete, and failed always read the same way — a single
+            status pill — no matter which workspace you opened.
+          </p>
+        </div>
+        <div class="thesis-card">
+          <h3>Status that survives</h3>
+          <p>
+            Whether setup last passed or failed is remembered, so reopening or
+            restarting the app never loses the outcome.
+          </p>
+        </div>
+        <div class="thesis-card">
+          <h3>Never a dead end</h3>
+          <p>
+            Loading, interrupted, and trimmed-output moments each say what’s
+            happening and always offer the next action.
+          </p>
+        </div>
+      </section>
+
+      <nav aria-label="Cases">
+        <a href="#a1">A1 · No setup script</a>
+        <a href="#a2">A2 · No output yet</a>
+        <a href="#a3">A3 · Running</a>
+        <a href="#a4">A4 · Complete</a>
+        <a href="#a5">A5 · Failed</a>
+        <span class="nav-sep"></span>
+        <a href="#b1">B1 · “Main” has no status</a>
+        <a href="#b2">B2 · Status lost on restart</a>
+        <a href="#b3">B3 · Loading &amp; first run</a>
+        <a href="#b4">B4 · Trimmed output · skipped</a>
+        <a href="#b5">B5 · Interrupted / stopped</a>
+        <a href="#b6">B6 · Tab status dot</a>
+        <span class="nav-sep"></span>
+        <a href="#c1">C1 · Worktree missing</a>
+      </nav>
+
+      <p class="band">Part A — States that ship today</p>
+
+      <div class="catalog">
+        <!-- A1 ───────────────────────────────────────────── -->
+        <section class="case" id="a1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A1</span>
+                <span class="tag ship">Ships today</span>
+                <span class="tag changed">Changes</span>
+              </div>
+              <h2>No setup script</h2>
+              <p class="case-copy">
+                The user’s project has no setup script configured. A centered
+                illustration sits above a single secondary action to add one, with a
+                one-line explanation of what the script does underneath.
+              </p>
+            </div>
+            <div class="meta">Same empty state for “main” and worktrees.</div>
+          </div>
+
+          <div class="frame single">
+            <div class="rail">
+              <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+              <span class="rail-spacer"></span>
+              <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+            </div>
+            <div class="subtabs">
+              <span class="subtab active">Setup</span>
+              <span class="subtab">Terminal</span>
+              <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+            </div>
+            <div class="body">
+              <div class="empty">
+                <span class="illus"><svg><use href="#i-file-code" /></svg></span>
+                <button class="btn-secondary" type="button">Add setup script</button>
+                <div class="empty-desc">
+                  This script runs on worktree creation to install dependencies or
+                  environment setup.
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Changes</div>
+            <ul>
+              <li>Reordered to <b>illustration → action → description</b> — the icon is centered on top of the button.</li>
+              <li>Added a <b>1px-stroke <code>file-code</code> illustration</b> above the button (thinned from 2px).</li>
+              <li>“Add setup script” is now the <b>default secondary button, 24px height, no icon</b>.</li>
+              <li>Description below the button: <b>“This script runs on worktree creation to install dependencies or environment setup.”</b></li>
+              <li>Removed the old “No setup script” title and the <code>pnpm install</code> example line.</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- A2 ───────────────────────────────────────────── -->
+        <section class="case" id="a2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A2</span>
+                <span class="tag ship">Ships today</span>
+                <span class="tag changed">Changes</span>
+              </div>
+              <h2>No setup output yet</h2>
+              <p class="case-copy">
+                A setup script exists but there’s nothing to show — it hasn’t been
+                run in this session yet. Same illustration → action → description
+                layout as A1, with a button that runs the script.
+              </p>
+            </div>
+            <div class="meta">
+              This is the screen in the reference — and the one that also appears
+              after an app restart (see B2).
+            </div>
+          </div>
+
+          <div class="frame single">
+            <div class="rail">
+              <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+              <span class="rail-spacer"></span>
+              <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+            </div>
+            <div class="subtabs">
+              <span class="subtab active">Setup</span>
+              <span class="subtab">Run</span>
+              <span class="subtab">Terminal</span>
+              <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+            </div>
+            <div class="body">
+              <div class="empty">
+                <span class="illus"><svg><use href="#i-square-play" /></svg></span>
+                <button class="btn-secondary" type="button">Run setup</button>
+                <div class="empty-desc">Run the setup script.</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Changes</div>
+            <ul>
+              <li>Same <b>illustration → action → description</b> layout as A1.</li>
+              <li>Added a <b>1px-stroke <code>square-play</code> illustration</b> above the button (thinned from 2px).</li>
+              <li>Button is a <b>default secondary button, 24px, no icon</b>, labeled <b>“Run setup”</b>.</li>
+              <li>Description below the button: <b>“Run the setup script.”</b></li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- A3 ───────────────────────────────────────────── -->
+        <section class="case" id="a3">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A3</span>
+                <span class="tag ship">Ships today</span>
+                <span class="tag changed">Changes</span>
+              </div>
+              <h2>Setup running</h2>
+              <p class="case-copy">
+                Live install output streams into the tab. While it runs, the only
+                control is a “Stop setup” button bottom-right — the separate
+                “Running…” pill is gone. On a freshly created worktree this starts
+                automatically, so it’s usually the first thing the user sees.
+              </p>
+            </div>
+            <div class="meta">Output updates continuously until the run exits.</div>
+          </div>
+
+          <div class="frame single">
+            <div class="rail">
+              <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+              <span class="rail-spacer"></span>
+              <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+            </div>
+            <div class="subtabs">
+              <span class="subtab active">Setup</span>
+              <span class="subtab">Run</span>
+              <span class="subtab">Terminal</span>
+              <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+            </div>
+            <div class="body">
+              <div class="term">
+                <div class="term-log"><span class="c-dim">$</span> pnpm install
+<span class="c-dim">Scope: all 3 workspace projects</span>
+Lockfile is up to date, resolution step is skipped
+Packages: <span class="c-ok">+1284</span>
+<span class="c-ok">++++++++++++++++++++++++++++++++++++++++</span>
+Progress: resolved <span class="c-info">1284</span>, reused <span class="c-info">1200</span>, downloaded <span class="c-info">84</span>, added <span class="c-info">512</span>
+<span class="c-path">node_modules/.pnpm/react@19.0.0</span>
+Progress: resolved <span class="c-info">1284</span>, reused <span class="c-info">1284</span>, downloaded <span class="c-info">84</span>, added <span class="c-info">640</span><span class="cursor"></span></div>
+                <div class="status">
+                  <button class="btn" type="button">
+                    <svg><use href="#i-stop" /></svg>Stop setup
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Changes</div>
+            <ul>
+              <li>Removed the <b>“Running…” spinner pill</b> entirely.</li>
+              <li>The disabled “Rerun setup” button is replaced by an <b>active “Stop setup”</b> button (square/stop icon) — running now has one clear action.</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- A4 ───────────────────────────────────────────── -->
+        <section class="case" id="a4">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A4</span>
+                <span class="tag ship">Ships today</span>
+                <span class="tag changed">Changes</span>
+              </div>
+              <h2>Setup complete</h2>
+              <p class="case-copy">
+                The run finished successfully. A filled “Setup complete” badge
+                confirms it, then auto-dismisses once the user has looked at the tab;
+                the log stays on screen and “Rerun setup” remains.
+              </p>
+            </div>
+            <div class="meta">The workspace is ready to work in.</div>
+          </div>
+
+          <div class="frame single">
+            <div class="rail">
+              <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+              <span class="rail-spacer"></span>
+              <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+            </div>
+            <div class="subtabs">
+              <span class="subtab active">Setup</span>
+              <span class="subtab">Run</span>
+              <span class="subtab">Terminal</span>
+              <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+            </div>
+            <div class="body">
+              <div class="term">
+                <div class="term-log"><span class="c-dim">$</span> pnpm install
+Packages: <span class="c-ok">+1284</span>
+Progress: resolved <span class="c-info">1284</span>, reused <span class="c-info">1284</span>, downloaded <span class="c-info">0</span>, added <span class="c-info">1284</span>, done
+
+dependencies:
+<span class="c-ok">+</span> react <span class="c-dim">19.0.0</span>
+<span class="c-ok">+</span> zustand <span class="c-dim">5.0.2</span>
+<span class="c-ok">+</span> @xterm/xterm <span class="c-dim">5.5.0</span>
+
+<span class="c-ok">Done in 12.4s</span></div>
+                <div class="status">
+                  <span class="status-badge ok">Setup complete</span>
+                  <button class="btn" type="button">
+                    <svg><use href="#i-rotate" /></svg>Rerun setup
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Changes</div>
+            <ul>
+              <li>Dropped the green check icon. “Setup complete” is now a <b>filled badge</b> — <code>--green-bg</code> background, <code>--green-fg</code> text — <b>24px tall</b>, matching the button.</li>
+              <li><b>Auto-dismiss logic:</b> the badge clears <b>15s after the user is viewing this tab</b>. If setup finishes while they’re on another tab, the badge waits — the 15s countdown only starts once they open the Setup tab. The log + “Rerun setup” stay after it clears.</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- A5 ───────────────────────────────────────────── -->
+        <section class="case" id="a5">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A5</span>
+                <span class="tag ship">Ships today</span>
+                <span class="tag changed">Changes</span>
+              </div>
+              <h2>Setup failed</h2>
+              <p class="case-copy">
+                The run exited with an error. A filled “Setup failed” badge flags it
+                and the error output stays visible so the user can read what went
+                wrong, then “Rerun setup” to try again. A failure doesn’t block the
+                workspace — they can still work in it.
+              </p>
+            </div>
+            <div class="meta">Error tail is preserved for reading.</div>
+          </div>
+
+          <div class="frame single">
+            <div class="rail">
+              <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+              <span class="rail-spacer"></span>
+              <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+            </div>
+            <div class="subtabs">
+              <span class="subtab active">Setup</span>
+              <span class="subtab">Run</span>
+              <span class="subtab">Terminal</span>
+              <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+            </div>
+            <div class="body">
+              <div class="term">
+                <div class="term-log"><span class="c-dim">$</span> pnpm install
+Packages: <span class="c-ok">+1284</span>
+Progress: resolved <span class="c-info">980</span>, reused <span class="c-info">900</span>, downloaded <span class="c-info">12</span>, added <span class="c-info">0</span>
+<span class="c-err">&nbsp;ERR_PNPM_FETCH_404&nbsp;</span>  GET https://registry.npmjs.org/@zeros%2Fmissing-pkg: <span class="c-err">Not Found - 404</span>
+This error happened while installing the dependencies of <span class="c-path">@zeros/app</span>
+<span class="c-warn">&nbsp;WARN&nbsp;</span> 1 deprecated subdependency found
+<span class="c-err">Setup exited with code 1</span></div>
+                <div class="status">
+                  <span class="status-badge err">Setup failed</span>
+                  <button class="btn" type="button">
+                    <svg><use href="#i-rotate" /></svg>Rerun setup
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Changes</div>
+            <ul>
+              <li>Same treatment as A4: “Setup failed” is a <b>filled badge</b> — <code>--red-bg</code> background, <code>--red-fg</code> text — <b>24px tall</b>, no icon.</li>
+              <li><b>Same auto-dismiss logic</b> as A4: clears 15s after the user has viewed the tab; the error log + “Rerun setup” remain.</li>
+            </ul>
+          </div>
+        </section>
+      </div>
+
+      <p class="band">Part B — Gaps to consolidate · before → after</p>
+
+      <div class="catalog">
+        <!-- B1 ───────────────────────────────────────────── -->
+        <section class="case" id="b1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">B1</span>
+                <span class="tag gap">Gap → proposal</span>
+                <span class="tag changed">Changes</span>
+              </div>
+              <h2>“Main” setup shows no status</h2>
+              <p class="case-copy">
+                On the main workspace, running setup drops the user into a plain
+                terminal with no status pill — when it finishes they can’t tell
+                whether it passed or failed, only that it stopped, with a bare
+                “Rerun setup”. In a worktree the same action gives a clear pill.
+                <b>After:</b> main uses the exact same status language as everywhere
+                else.
+              </p>
+            </div>
+            <div class="meta">The single biggest inconsistency to unify.</div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — main today</div>
+              <div class="frame">
+                <div class="rail">
+                  <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+                  <span class="rail-spacer"></span>
+                  <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+                </div>
+                <div class="subtabs">
+                  <span class="subtab active">Setup</span>
+                  <span class="subtab">Terminal</span>
+                  <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+                </div>
+                <div class="body">
+                  <div class="term">
+                    <div class="term-log"><span class="c-dim">$</span> pnpm install
+Packages: <span class="c-ok">+1284</span>
+Progress: resolved <span class="c-info">1284</span>, reused <span class="c-info">1284</span>, added <span class="c-info">1284</span>, done
+<span class="c-ok">Done in 9.1s</span>
+<span class="c-dim">[process exited — press any key]</span></div>
+                    <div class="status">
+                      <button class="btn" type="button">
+                        <svg><use href="#i-rotate" /></svg>Rerun setup
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — proposed</div>
+              <div class="frame">
+                <div class="rail">
+                  <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+                  <span class="rail-spacer"></span>
+                  <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+                </div>
+                <div class="subtabs">
+                  <span class="subtab active">Setup</span>
+                  <span class="subtab">Terminal</span>
+                  <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+                </div>
+                <div class="body">
+                  <div class="term">
+                    <div class="term-log"><span class="c-dim">$</span> pnpm install
+Packages: <span class="c-ok">+1284</span>
+Progress: resolved <span class="c-info">1284</span>, reused <span class="c-info">1284</span>, added <span class="c-info">1284</span>, done
+<span class="c-ok">Done in 9.1s</span></div>
+                    <div class="status">
+                      <span class="pill ok"><svg><use href="#i-check" /></svg>Setup complete</span>
+                      <button class="btn" type="button">
+                        <svg><use href="#i-rotate" /></svg>Rerun setup
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes">
+            <div class="note">
+              <b>Before:</b> no pass/fail signal, no “Running…” indicator — the user
+              is left reading raw terminal output to guess the outcome.
+            </div>
+            <div class="note fix">
+              <b>After:</b> the Running / complete / failed pill behaves identically
+              on main and in worktrees.
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Changes</div>
+            <ul>
+              <li><b>No status dot on the active Setup tab.</b> The tab dot only appears when the user is on <b>another</b> tab — here they’re viewing Setup, so the <b>“Setup complete” pill</b> at the bottom already tells them; a dot would be redundant.</li>
+              <li>The dot appears only after they <b>run setup and switch away</b> to a different tab — green = complete, amber = running, red = failed. See <b>B6</b> for the full rule.</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- B2 ───────────────────────────────────────────── -->
+        <section class="case" id="b2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">B2</span>
+                <span class="tag gap">Gap → proposal</span>
+                <span class="tag changed">Changes</span>
+              </div>
+              <h2>Status disappears after an app restart</h2>
+              <p class="case-copy">
+                Setup passed yesterday — but after quitting and reopening the app,
+                the tab shows the blank “No setup output yet” screen as if it never
+                ran. The live log is gone, and the pass/fail result goes with it.
+                <b>After:</b> the last outcome is remembered and shown as a compact
+                summary, with a clear way to run again.
+              </p>
+            </div>
+            <div class="meta">
+              The result is durable; only the streamed log is in-memory.
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — after restart</div>
+              <div class="frame">
+                <div class="rail">
+                  <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+                  <span class="rail-spacer"></span>
+                  <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+                </div>
+                <div class="subtabs">
+                  <span class="subtab active">Setup</span>
+                  <span class="subtab">Run</span>
+                  <span class="subtab">Terminal</span>
+                  <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+                </div>
+                <div class="body">
+                  <div class="empty">
+                    <div class="empty-title">No setup output yet</div>
+                    <div class="empty-desc">Run the script to setup this workspace.</div>
+                    <button class="btn" type="button">
+                      <svg><use href="#i-play" /></svg>Run setup
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — proposed</div>
+              <div class="frame">
+                <div class="rail">
+                  <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+                  <span class="rail-spacer"></span>
+                  <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+                </div>
+                <div class="subtabs">
+                  <span class="subtab active">Setup</span>
+                  <span class="subtab">Run</span>
+                  <span class="subtab">Terminal</span>
+                  <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+                </div>
+                <div class="body">
+                  <div class="empty">
+                    <span class="illus"><svg><use href="#i-square-play" /></svg></span>
+                    <button class="btn-secondary" type="button">
+                      <svg><use href="#i-rotate" /></svg>Run setup again
+                    </button>
+                    <div class="empty-desc">Last run finished successfully.</div>
+                  </div>
+                  <div class="status">
+                    <span class="status-badge ok">Setup complete</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes">
+            <div class="note">
+              <b>Before:</b> a passed workspace and a never-run workspace look
+              identical — the user loses the fact that setup already succeeded.
+            </div>
+            <div class="note fix">
+              <b>After:</b> the remembered outcome is shown in the same
+              illustration → action → description layout as A2, reinforced by a
+              “Setup complete” badge in the bottom-right.
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Changes</div>
+            <ul>
+              <li>Reuses the <b>A2 layout</b> (illustration → button → description) instead of the earlier summary card.</li>
+              <li>Description reads <b>“Last run finished successfully.”</b></li>
+              <li>Button is <b>“Run setup again” with the rotate icon</b> (secondary, 24px).</li>
+              <li>A <b>“Setup complete” badge</b> (<code>--green-bg</code> / <code>--green-fg</code>) sits <b>bottom-right</b> — the same slot and style as A4 — confirming the last run passed at a glance.</li>
+              <li>If the last run <b>failed</b>, the same layout swaps to a red <b>“Setup failed”</b> badge and a “Last run failed.” description.</li>
+              <li>No tab dot — the Setup tab is active, so status shows in-panel (see B1 / B6).</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- B3 ───────────────────────────────────────────── -->
+        <section class="case" id="b3">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">B3</span>
+                <span class="tag gap">Gap → proposal</span>
+                <span class="tag changed">Changes</span>
+              </div>
+              <h2>Loading &amp; the first-run handoff</h2>
+              <p class="case-copy">
+                Two blank moments: on open the tab can flash “No setup output yet”
+                for an instant before it knows the real state, and after pressing
+                Run it sits on the empty state (with just a spinning button) until
+                the first line of output arrives. <b>After:</b> a brief, honest
+                loading state so the tab never looks empty-but-idle.
+              </p>
+            </div>
+            <div class="meta">Applies to both first paint and first run.</div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — pressed Run, waiting</div>
+              <div class="frame">
+                <div class="rail">
+                  <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+                  <span class="rail-spacer"></span>
+                  <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+                </div>
+                <div class="subtabs">
+                  <span class="subtab active">Setup</span>
+                  <span class="subtab">Run</span>
+                  <span class="subtab">Terminal</span>
+                  <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+                </div>
+                <div class="body">
+                  <div class="empty">
+                    <div class="empty-title">No setup output yet</div>
+                    <div class="empty-desc">Run the script to setup this workspace.</div>
+                    <button class="btn is-disabled" type="button">
+                      <svg style="animation: spin 0.9s linear infinite"><use href="#i-loader" /></svg>Run setup
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — proposed</div>
+              <div class="frame">
+                <div class="rail">
+                  <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+                  <span class="rail-spacer"></span>
+                  <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+                </div>
+                <div class="subtabs">
+                  <span class="subtab active">Setup</span>
+                  <span class="subtab">Run</span>
+                  <span class="subtab">Terminal</span>
+                  <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+                </div>
+                <div class="body">
+                  <div class="term">
+                    <div class="skeleton">
+                      <div class="sk-center">
+                        <svg><use href="#i-loader" /></svg>
+                        Starting setup…
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes">
+            <div class="note">
+              <b>Before:</b> the body says “No setup output yet” while setup is
+              actually starting — the only hint is the spinner inside the button.
+            </div>
+            <div class="note fix">
+              <b>After:</b> the moment Run is pressed the body flips to “Starting
+              setup…”, and the same skeleton covers the first-paint flash on open.
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Changes</div>
+            <ul>
+              <li>Removed the <b>“Running…” spinner pill</b> from the bottom-right — the centered <b>“Starting setup…”</b> spinner is the only indicator during the handoff.</li>
+              <li>No tab dot while the Setup tab is active (see B1 / B6).</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- B4 ───────────────────────────────────────────── -->
+        <section class="case" id="b4">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">B4</span>
+                <span class="tag skip">Skipped</span>
+              </div>
+              <h2>Trimmed (very long) output</h2>
+              <p class="case-copy">
+                A big install produces more output than the tab keeps, so the oldest
+                lines are dropped. The proposal was a persistent “earlier output
+                trimmed” chip in the status row. <b>Decision: skipped</b> — it adds UI
+                clutter for a rare case, and the quiet inline “…earlier setup output
+                truncated…” marker that ships today already covers it.
+              </p>
+            </div>
+            <div class="meta">Not implementing — keep the inline marker as-is.</div>
+          </div>
+
+          <div class="note" style="margin-top: 4px">
+            <b>Skipped:</b> the “earlier output trimmed” chip and top fade are dropped
+            to avoid crowding the status row. Long runs keep the quiet inline
+            “…truncated…” marker that ships today — no visual change.
+          </div>
+        </section>
+
+        <!-- B5 ───────────────────────────────────────────── -->
+        <section class="case" id="b5">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">B5</span>
+                <span class="tag gap">Gap → proposal</span>
+                <span class="tag changed">Changes</span>
+              </div>
+              <h2>Interrupted or stopped run</h2>
+              <p class="case-copy">
+                A run can end without a pass/fail result — the user pressed
+                <b>“Stop setup”</b> (from A3), or the app quit mid-install. The tab
+                comes back with leftover output but no outcome. Today that reads as
+                ambiguous: log present, no pill, no explanation. <b>After:</b> a
+                “Setup stopped” badge names what happened and offers to run it again.
+              </p>
+            </div>
+            <div class="meta">
+              An unfinished run that was reset — neither passed nor failed.
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — output, no status</div>
+              <div class="frame">
+                <div class="rail">
+                  <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+                  <span class="rail-spacer"></span>
+                  <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+                </div>
+                <div class="subtabs">
+                  <span class="subtab active">Setup</span>
+                  <span class="subtab">Run</span>
+                  <span class="subtab">Terminal</span>
+                  <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+                </div>
+                <div class="body">
+                  <div class="term">
+                    <div class="term-log"><span class="c-dim">$</span> pnpm install
+Packages: <span class="c-ok">+1284</span>
+Progress: resolved <span class="c-info">612</span>, reused <span class="c-info">540</span>, downloaded <span class="c-info">72</span>, added <span class="c-info">210</span>
+<span class="c-path">node_modules/.pnpm/esbuild@0.24.0</span></div>
+                    <div class="status">
+                      <button class="btn" type="button">
+                        <svg><use href="#i-rotate" /></svg>Rerun setup
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — proposed</div>
+              <div class="frame">
+                <div class="rail">
+                  <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+                  <span class="rail-spacer"></span>
+                  <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+                </div>
+                <div class="subtabs">
+                  <span class="subtab active">Setup</span>
+                  <span class="subtab">Run</span>
+                  <span class="subtab">Terminal</span>
+                  <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+                </div>
+                <div class="body">
+                  <div class="term">
+                    <div class="term-log"><span class="c-dim">$</span> pnpm install
+Packages: <span class="c-ok">+1284</span>
+Progress: resolved <span class="c-info">612</span>, reused <span class="c-info">540</span>, downloaded <span class="c-info">72</span>, added <span class="c-info">210</span>
+<span class="c-path">node_modules/.pnpm/esbuild@0.24.0</span></div>
+                    <div class="status">
+                      <span class="status-badge err">Setup stopped</span>
+                      <button class="btn" type="button">
+                        <svg><use href="#i-rotate" /></svg>Run setup again
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes">
+            <div class="note">
+              <b>Before:</b> partial output with no pill leaves the user unsure
+              whether setup is done, stuck, or broken.
+            </div>
+            <div class="note fix">
+              <b>After:</b> a “Setup stopped” badge (distinct from a real failure)
+              explains the interruption and points at the next step.
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Changes</div>
+            <ul>
+              <li>Replaced the “Setup didn’t finish” pill (warning icon) with a <b>filled “Setup stopped” badge</b>, same 24px style as A4 / A5.</li>
+              <li>Covers <b>both</b> paths into this state: the user pressing <b>“Stop setup”</b> (A3) and an app quit mid-install.</li>
+              <li><em>Confirm the badge color — shown in red (<code>--red-bg</code> / <code>--red-fg</code>) to match the attached reference, but a manual stop could instead use a neutral yellow to separate it from a true failure.</em></li>
+              <li>No tab dot while the Setup tab is active (see B1 / B6).</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- B6 ───────────────────────────────────────────── -->
+        <section class="case" id="b6">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">B6</span>
+                <span class="tag gap">Gap → proposal</span>
+                <span class="tag changed">Changes</span>
+              </div>
+              <h2>Setup status isn’t visible from another tab</h2>
+              <p class="case-copy">
+                While the user is on a <b>different</b> tab, setup can be installing,
+                done, or failed and the “Setup” label gives no hint. <b>After:</b> a
+                small status dot appears on the Setup tab — <b>amber</b> running,
+                <b>green</b> complete, <b>red</b> failed — but <b>only while that tab
+                is not the active one</b>. The moment the user opens Setup, the dot
+                clears (they’re now seeing the output and pill directly).
+              </p>
+            </div>
+            <div class="meta">The dot is an off-tab signal only.</div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — plain label</div>
+              <div class="frame">
+                <div class="rail">
+                  <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+                  <span class="rail-spacer"></span>
+                  <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+                </div>
+                <div class="subtabs">
+                  <span class="subtab">Setup</span>
+                  <span class="subtab active">Terminal</span>
+                  <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+                </div>
+                <div class="body">
+                  <div class="term">
+                    <div class="term-log"><span class="c-dim">~/project (main) $</span> git status
+On branch <span class="c-ok">main</span>
+nothing to commit, working tree clean
+<span class="c-dim">~/project (main) $</span> <span class="cursor"></span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — status dot on tab</div>
+              <div class="frame">
+                <div class="rail">
+                  <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+                  <span class="rail-spacer"></span>
+                  <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+                </div>
+                <div class="subtabs">
+                  <span class="subtab">Setup<span class="status-dot run"></span></span>
+                  <span class="subtab active">Terminal</span>
+                  <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+                </div>
+                <div class="body">
+                  <div class="term">
+                    <div class="term-log"><span class="c-dim">~/project (main) $</span> git status
+On branch <span class="c-ok">main</span>
+nothing to commit, working tree clean
+<span class="c-dim">~/project (main) $</span> <span class="cursor"></span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="dot-legend" aria-label="Tab status dot meanings">
+            <span><span class="status-dot run"></span>Amber · setup running</span>
+            <span><span class="status-dot ok"></span>Green · setup complete</span>
+            <span><span class="status-dot err"></span>Red · setup failed</span>
+          </div>
+
+          <div class="notes">
+            <div class="note">
+              <b>Before:</b> setup can be mid-install or freshly failed and the tab
+              gives no indication — easy to miss while working in another tab.
+            </div>
+            <div class="note fix">
+              <b>After:</b> the dot mirrors the pill — amber running, green complete,
+              red failed — and clears the moment the user opens the Setup tab.
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Changes</div>
+            <ul>
+              <li><b>The dot shows only when Setup is not the active tab.</b> On the active Setup tab there’s no dot — the in-panel pill / badge already conveys the state.</li>
+              <li><b>Amber</b> = running, <b>green</b> = complete, <b>red</b> = failed; set when a run starts or finishes while the user is on another tab.</li>
+              <li><b>Clears on visit:</b> opening the Setup tab removes the dot immediately — running, complete, or failed alike.</li>
+              <li>This is the shared rule referenced by B1 (green) and B5 (stopped / failed).</li>
+            </ul>
+          </div>
+        </section>
+      </div>
+
+      <p class="band">Part C — Container context</p>
+
+      <div class="catalog">
+        <!-- C1 ───────────────────────────────────────────── -->
+        <section class="case" id="c1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">C1</span>
+                <span class="tag context">Context · ships today</span>
+                <span class="tag changed">Changes</span>
+              </div>
+              <h2>Worktree missing — the Setup tab isn’t shown</h2>
+              <p class="case-copy">
+                If the workspace folder is deleted from disk, the whole panel —
+                Setup included — is replaced by a recovery screen. Worth noting so
+                the consolidation doesn’t try to render a Setup state that can’t
+                exist here; there’s nothing to set up until the worktree is back.
+              </p>
+            </div>
+            <div class="meta">Panel-level state that supersedes the Setup tab.</div>
+          </div>
+
+          <div class="frame single">
+            <div class="rail">
+              <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+              <span class="rail-spacer"></span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+            </div>
+            <div class="body tall">
+              <div class="status-card">
+                <span class="empty-glyph"><svg width="30" height="30"><use href="#i-folder-x" /></svg></span>
+                <div class="empty-title">Worktree missing</div>
+                <div class="status-sub">
+                  This workspace’s folder is no longer on disk. Restore the folder
+                  and refresh, or delete the workspace to reclaim it.
+                </div>
+                <div style="display: flex; gap: 8px">
+                  <button class="btn" type="button">
+                    <svg><use href="#i-rotate" /></svg>Refresh
+                  </button>
+                  <button class="btn" type="button">Delete workspace</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Changes</div>
+            <ul>
+              <li>Icon only: the <code>folder-x</code> glyph is now <b>1px stroke</b> (thinned from 2px). Otherwise unchanged — this panel is good as-is.</li>
+            </ul>
+          </div>
+        </section>
+      </div>
+
+      <p class="footer-note">
+        Visual design reference for the Setup tab consolidation. Buttons and pills
+        demonstrate placement, hierarchy, and the shared status language; they don’t
+        run any commands in this artifact. Colors, radii, and type are pulled from
+        Zeros Foundation (Zeros Shade dark + Light). Toggle the theme in the header
+        to check both.
+      </p>
+    </main>
+
+    <script>
+      (function () {
+        var root = document.documentElement;
+        var btn = document.getElementById("themeBtn");
+        var label = document.getElementById("themeLabel");
+        btn.addEventListener("click", function () {
+          var toLight = root.getAttribute("data-theme") !== "light";
+          root.setAttribute("data-theme", toLight ? "light" : "dark");
+          label.textContent = toLight ? "Dark preview" : "Light preview";
+        });
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"fixture-sess-1","model":"claude-opus-4-7","tools":["Read","Bash","Edit"]}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"what is 2+2?"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Simple arithmetic."}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"2+2=4."}]}}
+{"type":"result","subtype":"success","session_id":"fixture-sess-1","total_cost_usd":0.001,"num_turns":1,"duration_ms":210,"usage":{"input_tokens":12,"output_tokens":6}}

@@ -1,0 +1,1075 @@
+<!DOCTYPE html>
+<html lang="en" data-Zeros-root data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>Zeros — Loaders &amp; Shimmers</title>
+  <style>
+/* ── Design tokens — mirrored from styles/zeros-tokens.css ──
+       Dark = Zeros Shade (:root default); light = [data-theme="light"].
+       The app's appearance store writes data-theme on <html>; here the
+       header toggle flips it. Kept in sync with the app so the loaders read
+       true in both themes (note the bg3 gotcha: dark bg3 = sidebar-bg,
+       light bg3 = bg1). */
+    :root {
+      color-scheme: dark;
+      --bg1: hsl(25 5% 7%);
+      --bg1-hover: hsl(8 5% 12%);
+      --bg2: hsl(25 4% 12%);
+      --bg2-hover: hsl(25 3% 15%);
+      --bg3: hsl(25 5% 9%);         /* = --sidebar-bg */
+      --bg3-hover: hsl(25 2% 15%);  /* = --sidebar-bg-hover */
+      --fg1: hsl(0 2% 92%);
+      --fg2: hsl(20 4% 66%);
+      --fg3: hsl(15 1% 44%);
+      --muted-fg: hsl(15 4% 44%);
+      --border1: hsl(8 3% 14%);
+      --border2: hsl(25 1% 18%);
+      --border3: hsl(15 0% 24%);
+      --blue-primary: hsl(205 80% 73%);
+      --info: var(--blue-primary);
+      --inverted-bg: hsl(0 2% 92%);
+      --inverted-fg: hsl(5 7% 5%);
+      --primary-button-bg: var(--inverted-bg);
+      --primary-button-hover: hsl(25 2% 83%);
+      --primary-button-fg: var(--inverted-fg);
+      --green-primary: hsl(142 69% 58%);
+      --yellow-primary: hsl(37 75% 60%);
+      --red-secondary: hsl(7 83% 39%);
+      --red-secondary-fg: hsl(0 0% 100%);
+      --radius: 0.625rem;
+      --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+
+      /* ── Semantic loader tokens — mirrored from styles/semantic-tokens.css ──
+         The ZerosSpinner's dot colors. Aliases resolve to primitives that
+         already flip per theme, so the light block below needs no override.
+           default  → --loader-active/-rest (fg2 / fg3)
+           inverted → --loader-active/-rest-inverted (the on-inverted fg,
+                      for primary-button fills)
+           inherit  → currentColor (bespoke fills: green Merge, destructive,
+                      the PR island's theme-flipping actions) */
+      --loader-active: var(--fg2);
+      --loader-rest: var(--fg3);
+      --loader-active-inverted: var(--primary-button-fg);
+      --loader-rest-inverted: var(--primary-button-fg);
+    }
+
+    [data-theme="light"] {
+      color-scheme: light;
+      --bg1: hsl(0 0% 100%);
+      --bg1-hover: hsl(0 4% 95%);
+      --bg2: hsl(60 4% 95%);
+      --bg2-hover: hsl(60 4% 91%);
+      --bg3: hsl(0 0% 100%);        /* = --bg1 */
+      --bg3-hover: hsl(0 4% 95%);   /* = --bg1-hover */
+      --fg1: hsl(20 7% 16%);
+      --fg2: hsl(20 4% 37%);
+      --fg3: hsl(20 4% 56%);
+      --muted-fg: hsl(20 4% 68%);
+      --border1: hsl(30 9% 91%);
+      --border2: hsl(30 9% 88%);
+      --border3: hsl(60 3% 85%);
+      --blue-primary: hsl(221 83% 53%);
+      --inverted-bg: hsl(20 7% 16%);
+      --inverted-fg: hsl(0 0% 100%);
+      --primary-button-hover: hsl(22 6% 25%);
+      --green-primary: hsl(142 75% 36%);
+      --yellow-primary: hsl(37 90% 60%);
+      --red-secondary: hsl(0 72% 50%);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg1);
+      color: var(--fg2);
+      font-family: var(--font-sans);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .page {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 48px 24px 80px;
+    }
+
+    header {
+      position: relative;
+      margin-bottom: 48px;
+      border-bottom: 1px solid var(--border1);
+      padding-bottom: 24px;
+    }
+
+    .theme-toggle {
+      position: absolute;
+      top: 0;
+      right: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      font-family: inherit;
+      font-size: 12px;
+      line-height: 1;
+      color: var(--fg2);
+      background: var(--bg2);
+      border: 1px solid var(--border3);
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+    }
+
+    .theme-toggle:hover {
+      background: var(--bg2-hover);
+      color: var(--fg1);
+    }
+
+    header h1 {
+      margin: 0 0 8px;
+      font-size: 24px;
+      font-weight: 600;
+      color: var(--fg1);
+      letter-spacing: -0.02em;
+    }
+
+    header p {
+      margin: 0;
+      max-width: 640px;
+      color: var(--muted-fg);
+      font-size: 13px;
+    }
+
+    section {
+      margin-bottom: 40px;
+    }
+
+    section > h2 {
+      margin: 0 0 4px;
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--fg1);
+    }
+
+    section > .source {
+      margin: 0 0 16px;
+      font-size: 12px;
+      color: var(--muted-fg);
+      font-family: ui-monospace, monospace;
+    }
+
+    section > .source + .source {
+      margin-top: -12px;
+    }
+
+    .demo-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 16px;
+    }
+
+    .demo-card {
+      background: var(--bg2);
+      border: 1px solid var(--border1);
+      border-radius: var(--radius);
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .demo-card.wide {
+      grid-column: 1 / -1;
+    }
+
+    .demo-card h3 {
+      margin: 0;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--fg2);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .demo-stage {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 72px;
+      padding: 12px;
+      background: var(--bg1);
+      border-radius: calc(var(--radius) * 0.8);
+      border: 1px solid var(--border1);
+    }
+
+    .demo-stage.left {
+      justify-content: flex-start;
+      padding-left: 16px;
+    }
+
+    .demo-note {
+      margin: 0;
+      font-size: 11px;
+      color: var(--muted-fg);
+    }
+
+    .tag {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: var(--bg3);
+      font-size: 10px;
+      color: var(--muted-fg);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    /* ── Keyframes from styles/globals.css ── */
+    @keyframes zeros-spinner-wave {
+      0%, 42%, 100% { opacity: var(--zeros-dot-base); }
+      16%           { opacity: var(--zeros-dot-peak); }
+    }
+
+    /* Grid fade — a diagonal sweep (top-left → bottom-right) over the INACTIVE
+       resting dots. One-directional per loop: each dot fades from full down to
+       the trough (0 = fully out) by mid-loop and then HOLDS there — it never
+       fades back in within the loop, it only snaps back at the loop boundary.
+       Runs on the resting dots only, so the active orbit is never touched. */
+    @keyframes zeros-grid-fade {
+      0%        { opacity: var(--zeros-grid-fade-peak); }
+      50%, 100% { opacity: var(--zeros-grid-fade-trough); }
+    }
+
+    @keyframes ocAgentLiveDurationPulse {
+      0%, 100% { opacity: 0.65; }
+      50%      { opacity: 1; }
+    }
+
+    /* ── ZerosSpinner — dot-matrix tetromino morph ── */
+    .zeros-spinner {
+      position: relative;
+      display: inline-grid;
+      box-sizing: border-box;
+      /* Middle, not the default baseline: in inline flow baseline seats the
+         box ON the text baseline — visually low next to a label. Flex
+         parents ignore it. Mirrors `align-middle` on the production root. */
+      vertical-align: middle;
+      color: var(--loader-active, var(--fg2));
+    }
+
+    .zeros-spinner .cell {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .zeros-spinner .dot {
+      border-radius: 50%;
+      background-color: currentColor;
+      display: inline-block;
+      will-change: opacity;
+    }
+
+    /* ── Demo buttons — minimal mirrors of the app's Button recipes
+       (src/zeros/ui/primitives/button.tsx), for the in-button spinner
+       demos below. Disabled = the recipe's `disabled:opacity-50`; the
+       spinner dims with the button, nothing extra needed. ── */
+    .demo-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      height: 28px;
+      padding: 0 10px;
+      border: none;
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: default;
+    }
+    .demo-btn.primary {
+      background: var(--primary-button-bg);
+      color: var(--primary-button-fg);
+    }
+    .demo-btn.secondary {
+      background: transparent;
+      color: var(--fg1);
+      border: 1px solid var(--border2);
+    }
+    .demo-btn.merge {
+      background: var(--green-primary);
+      color: var(--inverted-fg);
+    }
+    .demo-btn.destructive {
+      background: var(--red-secondary);
+      color: var(--red-secondary-fg);
+    }
+    .demo-btn.disabled { opacity: 0.5; pointer-events: none; }
+    /* Spinner mount points inside the demo buttons: as flex items the bare
+       <span>s blockify and the inline-grid spinner inside them seats on the
+       text BASELINE — ~4px below the button's center. Centering the host
+       (and letting it be the flex item) puts the spinner box dead-center,
+       exactly like the production buttons where the spinner is a direct
+       flex item of an items-center button. */
+    .demo-btn > span {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* ── Live duration pulse ── */
+    [data-Zeros-root] .zeros-agent-live-duration {
+      animation: ocAgentLiveDurationPulse 1.6s ease-in-out infinite;
+    }
+
+    .live-duration {
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      color: var(--fg2);
+    }
+
+    /* ── Canvas shimmers + composed activity row ── */
+    .story-shimmer {
+      display: block;
+      flex-shrink: 0;
+      width: 24px;
+      height: 24px;
+    }
+
+    .story-shimmer.story-shimmer-lg {
+      width: 32px;
+      height: 32px;
+    }
+
+    .activity-shimmer {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 0;
+      font-size: 12px;
+      color: var(--fg2);
+    }
+
+    /* ── Run loader study — a pure-vector rotating globe ── */
+    .run-globe-stage {
+      min-height: 132px;
+      gap: 32px;
+      flex-wrap: wrap;
+    }
+
+    /* Each vector globe sizes itself to the <svg> the renderer injects
+       (width/height = data-globe-size); the host only carries the colour the
+       land, graticule, and rim inherit through currentColor. */
+    .run-globe-loader {
+      display: inline-flex;
+      flex: 0 0 auto;
+      color: var(--blue-primary);
+    }
+
+    .run-control-preview {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 28px;
+      padding: 0 10px 0 8px;
+      color: var(--fg1);
+      background: transparent;
+      border: 1px solid var(--border2);
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .run-stop-icon {
+      width: 12px;
+      height: 12px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linejoin: round;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+      }
+    }
+
+</style>
+</head>
+<body style="margin:0">
+  <noscript>
+    <p style="padding:24px;font-family:sans-serif;color:#fff">JavaScript is required to mount the loader demos. Enable JS and reload.</p>
+  </noscript>
+  <div id="loaders-boot" style="position:fixed;top:0;left:0;right:0;z-index:9998;background:#111;color:#666;padding:6px 12px;font:11px/1.4 monospace;text-align:center">Mounting loader demos…</div>
+  <div id="loaders-error" hidden style="position:fixed;inset:0;z-index:9999;background:#3a1010;color:#fff;padding:24px;margin:0;overflow:auto;font:13px/1.5 monospace;white-space:pre-wrap"></div>
+  <div class="page">
+    <header>
+      <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle light and dark theme" aria-pressed="false">☾ Dark</button>
+      <h1>Zeros Loaders &amp; Shimmers</h1>
+      <p style="margin:0 0 12px;padding:10px 12px;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;font-size:12px;color:var(--fg1)">
+        <strong>Preview tip:</strong> Open <code>styles/Artifacts/loaders-preview.html</code> from the file
+        tree in your system browser (no build step or server). Or visit
+        <code>http://localhost:5193/Loaders/loaders-preview.html</code> with <code>pnpm dev</code> running.
+      </p>
+      <p>
+        Current Zeros loading animations plus focused Run-loader studies,
+        rendered as standalone HTML.
+        The Orbit shimmer is the app-wide DEFAULT loader (the Lucide
+        Loader2 Spinner is retired); the Agent shimmer marks
+        agent-working states. Open this file directly in a browser;
+        no build step required.
+      </p>
+    </header>
+
+    <!-- ── 1. StoryShimmer + ActivityShimmer ── -->
+    <section>
+      <h2>StoryShimmer &amp; ActivityShimmer</h2>
+      <p class="source">src/loaders/story-shimmer.tsx · src/loaders/story-shimmer-motion.ts</p>
+      <p class="source">src/loaders/activity-shimmer.tsx · src/loaders/live-duration.tsx</p>
+      <div class="demo-grid">
+        <div class="demo-card">
+          <h3>StoryShimmer — 24px production size</h3>
+          <div class="demo-stage">
+            <canvas id="story-shimmer-24" class="story-shimmer" role="img" aria-label="Agent working"></canvas>
+          </div>
+          <p class="demo-note">Five-story dot-matrix loop: cat and mouse, rolling eyes, rower, train, sunrise.</p>
+        </div>
+        <div class="demo-card">
+          <h3>StoryShimmer — 32px scale check</h3>
+          <div class="demo-stage">
+            <canvas id="story-shimmer-32" class="story-shimmer story-shimmer-lg" role="img" aria-label="Agent working"></canvas>
+          </div>
+          <p class="demo-note"><code>&lt;StoryShimmer size={32} /&gt;</code>; the app uses the authored 24px default.</p>
+        </div>
+        <div class="demo-card wide">
+          <h3>ActivityShimmer — active agent turn tail</h3>
+          <div class="demo-stage left">
+            <div class="activity-shimmer" role="status" aria-live="polite">
+              <canvas id="activity-story-shimmer" class="story-shimmer" aria-hidden="true"></canvas>
+              <span class="live-duration zeros-agent-live-duration" id="activity-duration">0s</span>
+            </div>
+          </div>
+          <p class="demo-note">StoryShimmer (24px) + LiveDuration. This is the only production mount for the five-story animation.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── 2. Run loader replacement study — pure-vector rotating globe ── -->
+    <section>
+      <h2>Run loader — Vector Globe</h2>
+      <p class="source">Exploration only · pure-vector SVG · d3-geo orthographic · Natural Earth 1:110m continent outlines · one uniform stroke</p>
+      <p class="source">styles/Artifacts/run-globe/run-globe.js · run-globe-geo.js · run-globe-d3.min.js</p>
+      <div class="demo-grid">
+        <div class="demo-card">
+          <h3>14px — inline run rows</h3>
+          <div class="demo-stage run-globe-stage">
+            <span class="run-globe-loader" data-run-globe data-globe-size="96" role="img" aria-label="Rotating globe, Run loader"></span>
+            <span class="run-globe-loader" data-run-globe data-globe-size="14" aria-hidden="true"></span>
+          </div>
+          <p class="demo-note">Crisp at any size or DPI — continent coastlines in one uniform stroke, re-projected each frame with a d3-geo orthographic globe. Renders at the true 14px for compact "Running…" rows.</p>
+        </div>
+        <div class="demo-card">
+          <h3>16px — run control &amp; buttons</h3>
+          <div class="demo-stage run-globe-stage">
+            <span class="run-globe-loader" data-run-globe data-globe-size="96" role="img" aria-label="Rotating globe, Run loader"></span>
+            <div class="run-control-preview">
+              <span class="run-globe-loader" data-run-globe data-globe-size="16" aria-hidden="true"></span>
+              <svg class="run-stop-icon" viewBox="0 0 12 12" aria-hidden="true"><rect x="2.5" y="2.5" width="7" height="7"></rect></svg>
+              <span>Stop</span>
+            </div>
+          </div>
+          <p class="demo-note">The true 16px globe in the real Stop control. A clean rim holds while the continents turn behind it — one uniform stroke, no fill, no shimmer.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── 3. ZerosSpinner — Orbit (the DEFAULT loader) ── -->
+    <section>
+      <h2>ZerosSpinner — Orbit Shimmer (default loader)</h2>
+      <p class="source">src/loaders/zeros-spinner.tsx · styles/globals.css · styles/semantic-tokens.css (--loader-*)</p>
+      <div class="demo-grid">
+        <div class="demo-card">
+          <h3>12px — small raw controls</h3>
+          <div class="demo-stage" id="spinner-12"></div>
+          <p class="demo-note">e.g. the browser fork control, the green Merge button.</p>
+        </div>
+        <div class="demo-card">
+          <h3>14px — inline rows</h3>
+          <div class="demo-stage" id="spinner-14"></div>
+          <p class="demo-note">"Running…" headers, PR island actions, dashboard card actions.</p>
+        </div>
+        <div class="demo-card">
+          <h3>16px — buttons &amp; centered states</h3>
+          <div class="demo-stage" id="spinner-16"></div>
+          <p class="demo-note">All &lt;Button&gt; slots (icons are 16px there) + "Starting…" / "Scanning…" covers.</p>
+        </div>
+        <div class="demo-card">
+          <h3>24px — default size</h3>
+          <div class="demo-stage" id="spinner-24"></div>
+          <p class="demo-note">Bare &lt;ZerosSpinner /&gt;. Auth gate uses 20px.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── 3b. ZerosSpinner — Agent Shimmer ── -->
+    <section>
+      <h2>ZerosSpinner — Agent Shimmer</h2>
+      <p class="source">src/loaders/zeros-spinner.tsx · styles/globals.css</p>
+      <div class="demo-grid">
+        <div class="demo-card">
+          <h3>14px — tool rows (subagent / task)</h3>
+          <div class="demo-stage" id="agent-spinner-14"></div>
+        </div>
+        <div class="demo-card">
+          <h3>16px — top bar / chat tabs</h3>
+          <div class="demo-stage" id="agent-spinner-16"></div>
+        </div>
+        <div class="demo-card">
+          <h3>12px — scale check</h3>
+          <div class="demo-stage" id="agent-spinner-12"></div>
+        </div>
+        <div class="demo-card">
+          <h3>24px — scale check</h3>
+          <div class="demo-stage" id="agent-spinner-24"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── 4. Orbit in production — buttons, tones, disabled ── -->
+    <section>
+      <h2>Orbit in buttons — tones</h2>
+      <p class="source">tone="default" | "inverted" | "inherit" · semantic tokens in styles/semantic-tokens.css</p>
+      <p class="source">The old Lucide-Loader2 Spinner is RETIRED (src/loaders/spinner.tsx deleted) — Orbit is the app-wide default loader.</p>
+      <div class="demo-grid">
+        <div class="demo-card">
+          <h3>Primary button — tone="inverted"</h3>
+          <div class="demo-stage">
+            <button class="demo-btn primary" type="button">
+              <span id="btn-primary-spinner"></span>
+              Add project
+            </button>
+          </div>
+          <p class="demo-note">--loader-active/-rest-inverted → the on-inverted fg, so the piece never vanishes on the near-white (Shade) / near-black (Light) fill.</p>
+        </div>
+        <div class="demo-card">
+          <h3>Primary + disabled while loading</h3>
+          <div class="demo-stage">
+            <button class="demo-btn primary disabled" type="button" disabled>
+              <span id="btn-primary-disabled-spinner"></span>
+              Cloning…
+            </button>
+          </div>
+          <p class="demo-note">The Button recipe's <code>disabled:opacity-50</code> dims the whole button — the spinner dims with it; no extra handling.</p>
+        </div>
+        <div class="demo-card">
+          <h3>Secondary button — tone="default"</h3>
+          <div class="demo-stage">
+            <button class="demo-btn secondary" type="button">
+              <span id="btn-secondary-spinner"></span>
+              Comment
+            </button>
+          </div>
+          <p class="demo-note">Transparent fill: the default fg2/fg3 tokens read correctly as-is.</p>
+        </div>
+        <div class="demo-card">
+          <h3>Green Merge — tone="inherit"</h3>
+          <div class="demo-stage">
+            <button class="demo-btn merge" type="button">
+              <span id="btn-merge-spinner"></span>
+              Merge
+            </button>
+          </div>
+          <p class="demo-note">currentColor rides the button's own text color — the same trick the retired Loader2 used.</p>
+        </div>
+        <div class="demo-card">
+          <h3>Destructive — tone="inherit"</h3>
+          <div class="demo-stage">
+            <button class="demo-btn destructive" type="button">
+              <span id="btn-destructive-spinner"></span>
+              Remove
+            </button>
+          </div>
+          <p class="demo-note">White label on the red fill in both themes; the spinner inherits it.</p>
+        </div>
+        <div class="demo-card">
+          <h3>Status color — tone="inherit"</h3>
+          <div class="demo-stage">
+            <span id="status-yellow-spinner" style="color: var(--yellow-primary); display: inline-flex;"></span>
+          </div>
+          <p class="demo-note">Review-check "running" glyph: inherit + <code>text-yellow-primary</code>.</p>
+        </div>
+        <div class="demo-card wide">
+          <h3>In context — standalone loading rows</h3>
+          <div class="demo-stage left" style="flex-direction: column; align-items: stretch; gap: 12px; font-size: 12px; color: var(--fg2);">
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span id="row-spinner-1" style="display:inline-flex;"></span>
+              <span>Running command…</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span id="row-spinner-2" style="display:inline-flex;"></span>
+              <span>Scanning…</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;font-size:13px;">
+              <span id="row-spinner-3" style="display:inline-flex;"></span>
+              <span>Reconnecting…</span>
+            </div>
+          </div>
+          <p class="demo-note">Terminal headers, MCP scanning, reconnect banners — all Orbit, default tone.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── 5. Duration feedback ── -->
+    <section>
+      <h2>LiveDuration &amp; DurationChip</h2>
+      <p class="source">src/loaders/live-duration.tsx · .zeros-agent-live-duration</p>
+      <div class="demo-grid">
+        <div class="demo-card">
+          <h3>LiveDuration — ticking counter</h3>
+          <div class="demo-stage">
+            <span class="live-duration zeros-agent-live-duration" id="live-duration-demo">4s</span>
+          </div>
+          <p class="demo-note">Updates at 1 Hz and pulses only while work is pending or in progress.</p>
+        </div>
+        <div class="demo-card">
+          <h3>DurationChip — settled duration</h3>
+          <div class="demo-stage">
+            <span class="live-duration">1m 4s</span>
+          </div>
+          <p class="demo-note">Final durations at or below 250ms stay hidden to keep completed rows quiet.</p>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- Preview-only motion fixtures; the application implementations and data
+       are canonical under src/loaders. These local scripts keep file:// and
+       Vite previews visually identical without a React build. -->
+  <script src="../../shape%20shimmer/story-poses.js"></script>
+  <script src="../../shape%20shimmer/story-shimmer.js"></script>
+  <!-- Vector globe (Run-loader study): vendored d3-geo + precomputed Natural
+       Earth geometry + the SVG renderer. Load order matters: d3 → geo → globe. -->
+  <script src="./run-globe/run-globe-d3.min.js"></script>
+  <script src="./run-globe/run-globe-geo.js"></script>
+  <script src="./run-globe/run-globe.js"></script>
+  <script>
+(function () {
+  // Polyfill for browsers without Element.replaceChildren (Safari < 14, etc.)
+  if (!Element.prototype.replaceChildren) {
+    Element.prototype.replaceChildren = function (...nodes) {
+      while (this.firstChild) this.removeChild(this.firstChild);
+      this.append(...nodes);
+    };
+  }
+
+  function clearBootBanner() {
+    const boot = document.getElementById("loaders-boot");
+    if (boot) boot.remove();
+  }
+
+  try {
+    const reducedMotion = window.matchMedia
+      && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    // ── StoryShimmer — mirrors src/loaders/story-shimmer.tsx ──
+    if (!window.StoryShimmer || !window.StoryShimmerLibrary) {
+      throw new Error("StoryShimmer preview motion data did not load.");
+    }
+
+    // StoryShimmer reads its colors once at construction, so we keep the
+    // instances and refresh them from the live tokens on every theme change.
+    const storyShimmers = [];
+    const readStoryColors = () => {
+      const t = getComputedStyle(document.documentElement);
+      return {
+        base: t.getPropertyValue("--fg2").trim(),
+        shimmer: t.getPropertyValue("--fg1").trim(),
+      };
+    };
+    {
+      const { base, shimmer } = readStoryColors();
+      ["story-shimmer-24", "story-shimmer-32", "activity-story-shimmer"].forEach((id) => {
+        const canvas = document.getElementById(id);
+        if (!(canvas instanceof HTMLCanvasElement)) return;
+        storyShimmers.push(new window.StoryShimmer(canvas, {
+          baseColor: base,
+          shimmerColor: shimmer,
+          shimmerIntensity: 0.9,
+          speed: 1,
+        }));
+      });
+    }
+
+    // ── ZerosSpinner — mirrors src/loaders/zeros-spinner.tsx ──
+    //
+    // 4×4 dot-matrix tetromino orbit + wave. The full board stays faintly
+    // visible as a --fg3 grid; the active piece lights up on top in --fg1.
+    // Shape order is choreographed so the piece's centroid glides clockwise
+    // around the board — the morph itself reads as a wave lapping the grid.
+    // Joining dots fade in fast, leaving dots fade out slow (comet trail).
+    // A diagonal wave pulse flows continuously through the lit dots (nested
+    // opacities multiply).
+    const HOLD_MS = 45;
+    const FADE_IN_MS = 65;
+    const FADE_OUT_MS = 145;
+    // Shared loop length. BOTH the active shape cycle and the inactive grid-fade
+    // run for exactly this long in EVERY variant, so they stay in lock-step no
+    // matter how many shapes a variant has. 1320ms = the orbit's natural 12-stop
+    // lap (12 × 110ms); a variant with fewer stops just holds each stop longer to
+    // fill the same 1320ms (agent: 10 stops → 132ms each).
+    const LAP_MS = 12 * (HOLD_MS + FADE_IN_MS);   // = 1320ms
+    const STAGGER_MS = 7;
+    const LIT = 0.7;                   // lit active-dot opacity: --fg2 @ 70%
+    const MAX_DIAG = 6;
+    const WAVE_PERIOD_MS = 730;
+    const WAVE_STEP_MS = 85;
+    const WAVE_PEAK = 1;
+    // The faint --fg3 background grid. REST_OPACITY is the inactive dots'
+    // opacity — --fg3 at 40%: the fade peaks here and dissolves to the trough,
+    // and it's also the static value when reduced-motion disables the fade.
+    const REST_OPACITY = 0.4;         // inactive-dot opacity: --fg3 @ 40%
+    // Grid fade — one diagonal sweep (top-left → bottom-right) that fades the
+    // INACTIVE dots only, 0 → full → 0, staggered by (x + y). It lives on the
+    // resting dots, NOT the cell, so the active orbit above is never dimmed and
+    // its animation stays visible throughout the sweep.
+    // The cycle is LAP_MS — the SAME shared loop length as the active shape cycle
+    // (see stepMs / gridFadePeriod in createZerosSpinner) — so exactly one fade
+    // sweep runs per active lap and the inactive fade and the active loop are
+    // always the same 1320ms duration in every variant, phase-locked, no drift.
+    const GRID_FADE_STEP_MS = 100;    // per-diagonal stagger → smaller = wider fade spread
+    const GRID_FADE_TROUGH = 0;       // inactive dots fade fully out (to 0)
+
+    // Uniform proportions — every size is a pure scale of the 24px look, so the
+    // dot size, gaps, and frame padding read identically at 12 / 14 / 16 / 24px.
+    // (No size branching; litFade / waveBase are gone with the gradient + wave.)
+    function tuningFor() {
+      return {
+        innerRatio: 0.75,  // inner 4×4 grid = 75% of the box; the rest is padding
+        dotRatio: 0.66,    // dot diameter = 66% of the cell (the airy 24px gaps)
+        minDotPx: 1,       // tiny safety floor — low enough to never distort scaling
+      };
+    }
+
+    const toSets = (arr) => arr.map((cells) => new Set(cells));
+
+    // ── Variant A: ORBIT — twelve stops per clockwise lap ──
+    const ORBIT_SHAPES = toSets([
+      ["0,0", "1,0", "0,1", "1,1"], // O — top-left corner
+      ["1,0", "2,0", "0,1", "1,1"], // S — sliding right along the top
+      ["1,0", "2,0", "3,0", "2,1"], // T — pointing down, top edge
+      ["2,0", "3,0", "2,1", "3,1"], // O — top-right corner
+      ["3,0", "3,1", "2,1", "2,2"], // S — vertical, turning down the right
+      ["3,1", "3,2", "3,3", "2,3"], // J — down the right edge
+      ["2,2", "3,2", "2,3", "3,3"], // O — bottom-right corner
+      ["2,2", "3,2", "1,3", "2,3"], // S — sliding left along the bottom
+      ["1,2", "0,3", "1,3", "2,3"], // T — pointing up, bottom edge
+      ["0,2", "1,2", "0,3", "1,3"], // O — bottom-left corner
+      ["0,1", "0,2", "0,3", "1,3"], // L — up the left edge
+      ["1,1", "1,2", "0,2", "0,3"], // Z — the Zeros piece, closes the lap
+    ]);
+
+    // ── Variant B: AGENT — a diagonal WAVE crest. A compact four-dot cluster
+    // rolls and tumbles along the main diagonal, top-left → bottom-right, like a
+    // wave washing across the grid. The engine's fast-in / slow-out trail gives
+    // each pose a curl, and at the loop the crest dissolves at the bottom-right
+    // as the next wave surges in at the top-left — "the agent is working." Every
+    // pose echoes the three reference frames (S-piece, square, step). Change
+    // ONLY these active dots to retune the agent motion; the orbit is untouched.
+    // ── Variant B: AGENT — a diagonal WAVE crest. A compact four-dot cluster
+    // rolls and tumbles along the main diagonal, top-left → bottom-right, like a
+    // wave washing across the grid. The engine's fast-in / slow-out trail gives
+    // each pose a curl, and at the loop the crest dissolves at the bottom-right
+    // as the next wave surges in at the top-left — "the agent is working." Every
+    // pose echoes the three reference frames (S-piece, square, step). Change
+    // ONLY these active dots to retune the agent motion; the orbit is untouched.
+    const AGENT_SHAPES = toSets([
+      ["0,0", "0,1", "1,1", "1,2"], // crest rises, top-left        (S-piece)
+      ["0,0", "1,0", "1,1", "2,1"], // rolls right into the trough
+      ["1,0", "2,0", "1,1", "2,1"], // square — the crest peaks     (□)
+      ["2,0", "1,1", "2,1", "1,2"], // curls forward, spilling down
+      ["2,0", "3,0", "2,1", "3,1"], // square, sliding up the right
+      ["3,0", "2,1", "3,1", "2,2"], // curls down the right flank
+      ["2,1", "3,1", "2,2", "3,2"], // square, mid-descent          (rest pose)
+      ["3,1", "2,2", "3,2", "2,3"], // curls toward the floor
+      ["1,2", "2,2", "2,3", "3,3"], // step — breaking on the shore (⌐)
+      ["2,2", "3,2", "2,3", "3,3"], // square, lands bottom-right → loops
+    ]);
+
+    const VARIANTS = {
+      orbit: { shapes: ORBIT_SHAPES, restIndex: 11 },
+      // sync: lock the shape loop to the grid-fade's OWN clock (see the rAF
+      // scheduler in createZerosSpinner) so both loops restart on the same frame.
+      agent: { shapes: AGENT_SHAPES, restIndex: 6, sync: true },
+    };
+
+    // Tone → dot colors, mirroring TONE_COLORS in src/loaders/zeros-spinner.tsx
+    // (semantic --loader-* tokens with primitive fallbacks; "inherit" rides
+    // currentColor for buttons with bespoke fills).
+    const TONES = {
+      default: {
+        active: "var(--loader-active, var(--fg2))",
+        rest: "var(--loader-rest, var(--fg3))",
+      },
+      inverted: {
+        active: "var(--loader-active-inverted, var(--primary-button-fg))",
+        rest: "var(--loader-rest-inverted, var(--primary-button-fg))",
+      },
+      inherit: { active: "inherit", rest: "inherit" },
+    };
+
+    function createZerosSpinner(size, label, variantKey, toneKey) {
+      const { shapes: SHAPES, restIndex: Z_SHAPE_INDEX, sync: SYNC } = VARIANTS[variantKey || "orbit"];
+      const toneColors = TONES[toneKey || "default"];
+      // Every variant fills the SAME lap (LAP_MS). Each shape holds for a slice
+      // of it, so a variant with fewer shapes holds each one longer: orbit
+      // 1320/12 = 110ms, agent 1320/10 = 132ms. The grid-fade runs exactly one
+      // sweep per lap, so the active cycle and the inactive fade are the same
+      // 1320ms — both loops synced, in every variant.
+      const stepMs = LAP_MS / SHAPES.length;
+      const gridFadePeriod = LAP_MS;
+      const { innerRatio, dotRatio, minDotPx } = tuningFor();
+      const innerPx = size * innerRatio;
+      const padPx = (size - innerPx) / 2;
+      const cellPx = innerPx / 4;
+      const dotPx = Math.max(cellPx * dotRatio, minDotPx);
+
+      const root = document.createElement("div");
+      root.setAttribute("role", "status");
+      root.setAttribute("aria-label", label || "Loading");
+      root.className = "zeros-spinner";
+      root.style.cssText = `
+        width: ${size}px;
+        height: ${size}px;
+        padding: ${padPx}px;
+        grid-template-columns: repeat(4, ${cellPx}px);
+        grid-template-rows: repeat(4, ${cellPx}px);
+        color: ${toneColors.active};
+      `;
+
+      const layers = [];
+      let refRestDot = null;   // (0,0) resting dot — its CSS-animation clock drives the synced loop
+      for (let y = 0; y < 4; y++) {
+        for (let x = 0; x < 4; x++) {
+          const cell = document.createElement("span");
+          cell.className = "cell";
+          cell.setAttribute("aria-hidden", "true");
+          cell.style.cssText = `
+            grid-column-start: ${x + 1};
+            grid-row-start: ${y + 1};
+          `;
+
+          const diag = (x + y) / MAX_DIAG;
+          const waveDelay = (x + y) * WAVE_STEP_MS - WAVE_PERIOD_MS;
+
+          // Resting layer — the faint --fg3 background grid, and the ONLY thing
+          // the diagonal fade touches. Each resting dot fades its opacity
+          // 0 → full → 0, staggered by (x + y) so the sweep travels top-left →
+          // bottom-right. The active shape layer above is a separate sibling and
+          // is left untouched, so the orbit's animation stays fully visible
+          // right through the sweep.
+          const gridFadeDelay = (x + y) * GRID_FADE_STEP_MS - gridFadePeriod;
+          const restDot = document.createElement("span");
+          restDot.className = "dot";
+          restDot.style.cssText = `
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: ${dotPx}px;
+            height: ${dotPx}px;
+            color: ${toneColors.rest};
+            --zeros-grid-fade-peak: ${REST_OPACITY};
+            --zeros-grid-fade-trough: ${GRID_FADE_TROUGH};
+            opacity: ${REST_OPACITY};
+            ${reducedMotion ? "" : `animation: zeros-grid-fade ${gridFadePeriod}ms ease-in-out infinite; animation-delay: ${gridFadeDelay}ms;`}
+          `;
+
+          // Outer layer — shape membership (morph crossfade). Lifted above
+          // the resting dot so the lit --fg2 orbit reads on top. Only its
+          // membership (lit / unlit) animates; a lit dot is solid --fg2.
+          const shapeLayer = document.createElement("span");
+          shapeLayer.style.cssText = `
+            position: relative;
+            z-index: 1;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            ${reducedMotion ? "" : `transition: opacity ${FADE_IN_MS}ms ease-in-out ${(x + y) * STAGGER_MS}ms;`}
+          `;
+
+          // Inner dot — solid --fg2, no wave / no opacity variation.
+          const dot = document.createElement("span");
+          dot.className = "dot";
+          dot.style.cssText = `
+            width: ${dotPx}px;
+            height: ${dotPx}px;
+          `;
+
+          shapeLayer.appendChild(dot);
+          cell.appendChild(restDot);
+          if (x === 0 && y === 0) refRestDot = restDot;   // sweep origin = the fade's phase 0
+          cell.appendChild(shapeLayer);
+          root.appendChild(cell);
+          layers.push({ key: `${x},${y}`, el: shapeLayer, diag });
+        }
+      }
+
+      function applyShape(index) {
+        const shape = SHAPES[index];
+        layers.forEach(({ key, el }) => {
+          const lit = shape.has(key);
+          // Joining dots fade in fast; leaving dots trail out slowly.
+          if (!reducedMotion) {
+            el.style.transitionDuration = `${lit ? FADE_IN_MS : FADE_OUT_MS}ms`;
+          }
+          // Lit dots are solid --fg2 (opacity 1) — no gradient, no wave.
+          el.style.opacity = lit ? LIT : 0;
+        });
+      }
+
+      applyShape(Z_SHAPE_INDEX);
+
+      // The synced variant (agent) locks its shape loop to the grid-fade's OWN
+      // clock. It reads the phase straight off the sweep-origin resting dot's CSS
+      // animation timeline (document.timeline), so the wave lap and the fade sweep
+      // share ONE clock — they restart on the exact same frame (pose 0 ↔ fade
+      // phase 0) and can never drift. Every other variant (orbit) keeps the plain
+      // setInterval cadence, unchanged.
+      const canSyncClock = SYNC && !reducedMotion && refRestDot
+        && document.timeline && typeof refRestDot.getAnimations === "function";
+
+      if (canSyncClock) {
+        let refAnim = null, lastIdx = -1;
+        const tick = () => {
+          if (!refAnim) refAnim = refRestDot.getAnimations()[0] || null;
+          if (refAnim && refAnim.startTime != null) {
+            const elapsed = document.timeline.currentTime - refAnim.startTime;
+            const phase = (((elapsed % gridFadePeriod) + gridFadePeriod) % gridFadePeriod) / gridFadePeriod;
+            const idx = Math.floor(phase * SHAPES.length) % SHAPES.length;
+            if (idx !== lastIdx) { applyShape(idx); lastIdx = idx; }
+          }
+          window.requestAnimationFrame(tick);
+        };
+        window.requestAnimationFrame(tick);
+      } else if (!reducedMotion) {
+        let i = Z_SHAPE_INDEX;
+        window.setInterval(() => {
+          i = (i + 1) % SHAPES.length;
+          applyShape(i);
+        }, stepMs);
+      }
+
+      return root;
+    }
+
+    // Mount spinners (default = Orbit variant)
+    ["spinner-12", "spinner-14", "spinner-16", "spinner-24"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const size = id.includes("12") ? 12
+        : id.includes("14") ? 14
+        : id.includes("16") ? 16
+        : 24;
+      el.appendChild(createZerosSpinner(size, "Loading"));
+    });
+
+    // Mount agent-shimmer spinners (Agent variant — diagonal wave crest)
+    ["agent-spinner-12", "agent-spinner-14", "agent-spinner-16", "agent-spinner-24"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const size = id.includes("12") ? 12
+        : id.includes("14") ? 14
+        : id.includes("16") ? 16
+        : 24;
+      el.appendChild(createZerosSpinner(size, "Loading", "agent"));
+    });
+
+    // Mount the tone demos — Orbit inside button recipes (mirrors the
+    // production `tone` prop: inverted on primary fills, inherit on
+    // bespoke fills, default elsewhere).
+    [
+      ["btn-primary-spinner", 16, "inverted"],
+      ["btn-primary-disabled-spinner", 16, "inverted"],
+      ["btn-secondary-spinner", 16, "default"],
+      ["btn-merge-spinner", 12, "inherit"],
+      ["btn-destructive-spinner", 16, "inherit"],
+      ["status-yellow-spinner", 14, "inherit"],
+      ["row-spinner-1", 14, "default"],
+      ["row-spinner-2", 16, "default"],
+      ["row-spinner-3", 16, "default"],
+    ].forEach(([id, size, tone]) => {
+      const el = document.getElementById(id);
+      if (el) el.appendChild(createZerosSpinner(size, "Loading", "orbit", tone));
+    });
+
+    // Live duration tickers
+    function formatElapsed(ms) {
+      if (ms < 1000) return "0s";
+      const totalSec = Math.floor(ms / 1000);
+      if (totalSec < 60) return `${totalSec}s`;
+      const m = Math.floor(totalSec / 60);
+      const s = totalSec % 60;
+      if (m < 60) return `${m}m ${s}s`;
+      const h = Math.floor(m / 60);
+      return `${h}h ${m % 60}m`;
+    }
+
+    const startedAt = Date.now() - 4500;
+    const durationEls = [
+      document.getElementById("activity-duration"),
+      document.getElementById("live-duration-demo"),
+    ].filter(Boolean);
+
+    setInterval(() => {
+      const text = formatElapsed(Math.max(0, Date.now() - startedAt));
+      durationEls.forEach((el) => { el.textContent = text; });
+    }, 1000);
+
+    // ── Light / dark theme toggle ──
+    // CSS-driven loaders and demo buttons re-theme for free — the vector globe
+    // included: its marks ride currentColor + --bg1, so a flip needs no JS here.
+    // Only the StoryShimmer canvases need their colours pushed explicitly.
+    const themeToggle = document.getElementById("theme-toggle");
+    function applyTheme(theme) {
+      document.documentElement.dataset.theme = theme;
+      const { base, shimmer } = readStoryColors();
+      storyShimmers.forEach((s) => s.setColors(base, shimmer));
+      if (themeToggle) {
+        const isLight = theme === "light";
+        themeToggle.textContent = isLight ? "☀ Light" : "☾ Dark";
+        themeToggle.setAttribute("aria-pressed", String(isLight));
+      }
+    }
+    if (themeToggle) {
+      themeToggle.addEventListener("click", () => {
+        const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+        applyTheme(next);
+      });
+    }
+
+    clearBootBanner();
+
+  } catch (err) {
+    clearBootBanner();
+    const box = document.getElementById("loaders-error");
+    if (box) {
+      box.hidden = false;
+      box.textContent = "Loaders showcase failed to start:\n\n" + (err && err.stack ? err.stack : String(err));
+    }
+    console.error(err);
+  }
+})();
+
+</script>
+</body>
+</html>

@@ -1,0 +1,420 @@
+name: Release (beta)
+
+# Beta channel — the STABILIZATION cut. Builds on every push to a `release/X.Y.Z`
+# branch, NOT on merges to main (that's Alpha's job — see release-alpha.yml).
+#
+# WHERE BETA SITS IN THE LADDER:
+#
+#   main ───────────────► Alpha   (release-alpha.yml — auto, every merge, disposable)
+#     └─ release/X.Y.Z ─► Beta    (THIS FILE — a FROZEN cut you stabilize)
+#          └─ dispatch ──► Prod   (release.yml on that SAME branch → tags vX.Y.Z)
+#
+# WHY A BRANCH AND NOT main. Beta exists to be a fixed target: you cut
+# `release/X.Y.Z` from main, test it, and land ONLY cherry-picked fixes on it. The
+# commit Production ships is then the commit Beta validated. Before this model
+# release.yml rebuilt main HEAD at dispatch time, so anything merged after the Beta
+# you validated shipped untested — Beta and Production were two independent builds of
+# a moving target, not a pipeline.
+#
+# Beta is Developer-ID-SIGNED but NOT notarized (notarization is the slow,
+# Apple-queue-variable step — see release.yml's header). The FIRST install of
+# "Zeros Beta" shows the one-time "Apple could not verify…" Gatekeeper prompt →
+# right-click Open, or System Settings ▸ Privacy & Security ▸ Open Anyway. After that
+# every update is an in-place swap. Signing is kept (fast, ~seconds) because
+# electron-updater's macOS in-place update REQUIRES a valid, matching signature —
+# notarization is not part of that check.
+#
+# Beta installs as a SEPARATE app (appId com.zeros.beta · "Zeros Beta") with its OWN
+# data dir (com.zeros.beta), dot-dir (~/.zeros-beta), workspaces root
+# (~/zeros-beta/workspaces), engine port block (24203+) and deep-link scheme
+# (zeros-beta://) — so it coexists with Alpha AND Production and never shares state.
+# Channel-gated features (src/zeros/flags.ts) promote along the ladder:
+# ["dev","alpha"] → +"beta" → +"stable".
+#
+# SERVING: installed betas auto-update straight from the rolling "beta" GitHub
+# prerelease published below — electron-updater's generic provider reads
+# /releases/download/beta/beta-mac.yml and resolves the zip named inside it against
+# the same base. One release is both the manual-install source (constant-named
+# Zeros-Beta-latest-arm64.dmg) and the update feed, so there is nothing to keep in
+# sync and no storage secrets. This used to mirror the payload to Cloudflare R2,
+# which existed only because the repo was private and anonymous clients get 404 on
+# a private repo's release assets.
+#
+# GATED: typecheck · lint · vitest · the six ship guards · engine smoke · packaged-PTY
+# smoke · signature verification. See the "Gates" block below.
+
+on:
+  push:
+    branches: ["release/**"]
+  workflow_dispatch:
+
+# One beta per release branch. Scoped to the ref (unlike Alpha's single global group)
+# so stabilizing 0.0.6 while 0.0.7 is already cut doesn't cancel either build.
+concurrency:
+  group: release-beta-${{ github.ref }}
+  cancel-in-progress: true
+
+# Read-only default. The write scope this workflow genuinely needs (moving the
+# rolling `beta` tag and its prerelease assets) is declared on the job instead, so
+# it is scoped rather than granted to the whole file — which matters here because
+# the same file runs third-party setup actions next to the Developer ID cert.
+permissions:
+  contents: read
+
+jobs:
+  beta:
+    name: Build + publish Beta (macOS arm64 · signed · NOT notarized)
+    # Don't fire on forks (no signing secrets / release perms there). Key this
+    # to repository identity rather than an owner/name pair so an ownership
+    # transfer cannot silently disable the beta release job again.
+    if: github.event.repository.fork == false
+    runs-on: macos-latest
+    # Publishes the rolling "beta" prerelease and retargets its tag.
+    permissions:
+      contents: write
+    env:
+      # Seen by electron:compile (bakes __ZEROS_CHANNEL_BAKED__) AND the
+      # electron-builder wrapper (applies the beta appId/productName/artifact
+      # overrides). One job-level value keeps them in lockstep.
+      ZEROS_CHANNEL: beta
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Full history + tags so compute-version.mjs reads the existing
+          # vMAJOR.MINOR.* release tags to derive the next stable base.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Bun (for engine sidecar compile)
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Compute beta version
+        id: version
+        # Beta version = <X.Y.Z from the branch name>-beta.<run_number>.
+        #
+        # The base comes from the BRANCH, not from compute-version.mjs. Cutting
+        # `release/X.Y.Z` IS the decision about which version this is, so reading it
+        # back is deterministic and matches exactly what release.yml will compute for
+        # Production off the same branch. compute-version.mjs infers "next patch after
+        # the highest tag", which drifts: cut release/0.0.7 before v0.0.6 is tagged and
+        # it would still say 0.0.6, silently labelling the Beta as the wrong release.
+        #
+        # The `-beta.N` prerelease suffix (a) makes electron-builder emit beta-mac.yml
+        # (channel auto-detected from the prerelease tag), and (b) is ignored by
+        # compute-version.mjs's plain-integer patch regex, so beta tags never bump the
+        # stable sequence. run_number is monotonic, so betas sort newest-last.
+        #
+        # run_number goes through `env:` rather than being interpolated straight
+        # into the script. It is a GitHub-controlled integer so nothing can be
+        # smuggled through it, but `${{ }}` inside a `run:` block is the shape of
+        # a script-injection bug, and leaving zero instances of it in the tree
+        # means a reader never has to work out which ones are safe.
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/heads/release/*)
+              BASE="${GITHUB_REF#refs/heads/release/}"
+              ;;
+            *)
+              echo "::error::release-beta must run on a 'release/X.Y.Z' branch (got: $GITHUB_REF). Merges to main build Alpha instead — see release-alpha.yml."
+              exit 1
+              ;;
+          esac
+          if ! printf '%s' "$BASE" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::release branch must be named 'release/X.Y.Z' (got: release/$BASE)."
+            exit 1
+          fi
+          BETA="${BASE}-beta.${RUN_NUMBER}"
+          echo "version=$BETA" >> "$GITHUB_OUTPUT"
+          echo "Beta version: $BETA (release base: $BASE)"
+
+      - name: Write version into package.json
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.version = process.env.VERSION;
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+          '
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      # ── Gates ────────────────────────────────────────────
+      #
+      # These run as STEPS in this job rather than a separate `needs:` job on
+      # purpose: a separate job would re-checkout and re-install (~1-2 min) just to
+      # duplicate work this job already did. Placed before build:sidecar so a
+      # failure costs seconds instead of a full pack.
+      #
+      # WHY THIS EXISTS: Beta is the cut Production is built from, so a Beta broken
+      # for reasons unrelated to the change under test wastes the whole
+      # stabilization window. Gate it exactly as hard as stable.
+      #
+      # NOTE: before this change NEITHER release workflow typechecked or linted.
+      # vite + tsup strip types via esbuild WITHOUT checking them, so nothing on
+      # either release path validated types at all.
+      - name: Typecheck (app · electron · packages)
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Run Vitest suite
+        run: pnpm test:git
+
+      - name: Ship guards (catalog · packaging · prod env · security)
+        # The same set the stable release job runs. Each guards a concrete way the
+        # shipped app breaks: a downgrading model catalog, a dead packaged Cursor, a
+        # missing extraResources path, a build shipped without its VITE_* set, a
+        # desynced Codex protocol, a regressed Electron security posture.
+        run: |
+          pnpm models:verify --strict
+          pnpm check:cursor-asar
+          pnpm check:packaging-paths
+          pnpm check:vite-env
+          pnpm check:codex-pin
+          pnpm check:electron-hardening
+
+      - name: Build engine sidecar (bun → binaries/zeros-engine-*)
+        run: pnpm build:sidecar
+
+      - name: Smoke-test packaged engine (health + workspace lifecycle)
+        run: pnpm smoke:engine
+
+      - name: Compile Electron main + preload (bakes channel=beta)
+        run: pnpm electron:compile
+
+      - name: Build Vite renderer
+        # Same VITE_* secret-set as the prod build (analytics, feedback) PLUS
+        # VITE_ZEROS_CHANNEL=beta so the renderer's feature flags resolve to the
+        # beta channel.
+        env:
+          VITE_POSTHOG_KEY_PROD: ${{ secrets.VITE_POSTHOG_KEY_PROD }}
+          VITE_POSTHOG_HOST: ${{ secrets.VITE_POSTHOG_HOST }}
+          VITE_FEEDBACK_URL: ${{ secrets.VITE_FEEDBACK_URL }}
+          VITE_APP_BASE_URL: ${{ secrets.VITE_APP_BASE_URL }}
+          VITE_CONTROL_PLANE_URL: ${{ secrets.VITE_CONTROL_PLANE_URL }}
+          VITE_ZEROS_CHANNEL: beta
+        run: pnpm build:ui
+
+      - name: Package .dmg + .zip (sign only — NO notarization)
+        # CSC_LINK present → Developer-ID signed (afterPack self-skips its ad-hoc
+        # resign). We deliberately do NOT submit to Apple's notary — that's the
+        # slow part, and beta accepts the one-time "Open Anyway". electron-builder
+        # emits beta-mac.yml because the version is a -beta prerelease.
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: node scripts/electron-builder-run.mjs --publish never
+
+      - name: Assert differential update blockmap
+        # Keep beta representative of production update behavior. Missing this
+        # file is correctness-safe, but makes every update download the full zip.
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          BLOCKMAP="release/Zeros-Beta-${VERSION}-arm64-mac.zip.blockmap"
+          if [ ! -f "$BLOCKMAP" ]; then
+            echo "::error::$BLOCKMAP not found — electron-builder did not emit the differential-update blockmap."
+            ls -la release || true
+            exit 1
+          fi
+          echo "✓ differential-update blockmap: $BLOCKMAP"
+
+      - name: Smoke-test terminal in the packaged app
+        # Catches a native PTY that loads but cannot spawn (the beta.58
+        # `posix_spawnp failed` regression) before the rolling beta is replaced.
+        run: pnpm smoke:packaged-pty
+
+      - name: Verify signature + hardened runtime
+        # This channel had NO signature verification at all, while stable asserts four
+        # things. That mattered more than it looks: electron-updater's macOS
+        # in-place update REQUIRES a valid, matching signature, so a Beta that
+        # silently failed to sign would publish successfully and only surface later
+        # as "auto-update is broken" with no build-time signal.
+        #
+        # Deliberately does NOT run `stapler validate` / `spctl -t exec`: beta is
+        # signed but NOT notarized by design (see the packaging step above), so
+        # those would fail on a correct build. Everything up to notarization IS
+        # asserted.
+        env:
+          SIGNED: ${{ secrets.CSC_LINK != '' }}
+        run: |
+          set -euo pipefail
+          DMG=""
+          for CANDIDATE in release/Zeros-Beta-*-arm64.dmg; do
+            [ -f "$CANDIDATE" ] || continue
+            DMG="$CANDIDATE"
+            break
+          done
+          if [ -z "$DMG" ]; then echo "::error::no versioned Beta .dmg to validate"; exit 1; fi
+          MNT=$(mktemp -d)
+          cleanup() { hdiutil detach "$MNT" -quiet 2>/dev/null || true; }
+          trap cleanup EXIT
+          hdiutil attach "$DMG" -readonly -nobrowse -quiet -mountpoint "$MNT"
+          APP="$MNT/Zeros Beta.app"
+          if [ ! -d "$APP" ]; then
+            echo "::error::No 'Zeros Beta.app' found inside $DMG"
+            ls -la "$MNT" || true
+            exit 1
+          fi
+          echo "Verifying: $APP"
+          # Signature valid + sealed (true for ad-hoc AND Developer ID).
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          if [ "$SIGNED" = "true" ]; then
+            # Hardened runtime flag proves the entitlements were actually applied.
+            # Without this the four entitlements are inert and library validation /
+            # JIT / keychain-ACL behavior silently differs from what users get.
+            if ! codesign --display --verbose=4 "$APP" 2>&1 | grep -qE 'flags=.*runtime'; then
+              echo "::error::Hardened runtime not applied — signing/entitlements misconfigured"
+              exit 1
+            fi
+            echo "✓ Developer ID signed · hardened runtime applied (notarization intentionally skipped for beta)"
+          else
+            echo "✓ ad-hoc signature valid (no CSC_LINK — users run 'xattr -cr')"
+          fi
+
+      - name: Publish rolling "beta" prerelease
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # Assert the channel feed exists — if electron-builder ever stopped
+          # emitting beta-mac.yml (e.g. channel detection changed), fail loudly
+          # rather than ship a build the beta auto-updater can't find.
+          if [ ! -f release/beta-mac.yml ]; then
+            echo "::error::release/beta-mac.yml not found — electron-builder did not emit the beta channel feed. Ensure the version is a -beta prerelease."
+            exit 1
+          fi
+          DMG=""
+          for CANDIDATE in release/Zeros-Beta-*-arm64.dmg; do
+            [ -f "$CANDIDATE" ] || continue
+            DMG="$CANDIDATE"
+            break
+          done
+          ZIP=""
+          for CANDIDATE in release/Zeros-Beta-*-arm64-mac.zip; do
+            [ -f "$CANDIDATE" ] || continue
+            ZIP="$CANDIDATE"
+            break
+          done
+          if [ -z "$DMG" ] || [ -z "$ZIP" ]; then
+            echo "::error::beta .dmg/.zip not found in release/"
+            ls -la release || true
+            exit 1
+          fi
+          ZIP_BLOCKMAP="${ZIP}.blockmap"
+          if [ ! -f "$ZIP_BLOCKMAP" ]; then
+            echo "::error::beta zip blockmap not found: $ZIP_BLOCKMAP"
+            ls -la release || true
+            exit 1
+          fi
+
+          # Constant-named copy of the .dmg → a PERMANENT download link that always
+          # serves the newest beta. electron-updater ignores it (it reads only the
+          # versioned files listed in beta-mac.yml); it exists purely so humans have
+          # one URL that never changes:
+          #   https://github.com/${GITHUB_REPOSITORY}/releases/download/beta/Zeros-Beta-latest-arm64.dmg
+          # Made AFTER the glob above so it can never be picked up as "$DMG".
+          LATEST_DMG="release/Zeros-Beta-latest-arm64.dmg"
+          cp "$DMG" "$LATEST_DMG"
+
+          TAG="beta"
+          TITLE="Zeros Beta v${VERSION}"
+          # Keep the permanent link owner-agnostic. The quoted heredoc protects
+          # Markdown backticks from shell expansion; sed replaces only the
+          # repository placeholder with GitHub's trusted owner/name value.
+          NOTES=$(
+            sed "s|__GITHUB_REPOSITORY__|${GITHUB_REPOSITORY}|g" <<'EOF'
+          Rolling **beta** — the stabilization cut, auto-built from the
+          `release/*` branch it belongs to. Signed but not notarized.
+
+          **⬇︎ Always-newest .dmg (permanent link):**
+          https://github.com/__GITHUB_REPOSITORY__/releases/download/beta/Zeros-Beta-latest-arm64.dmg
+
+          **First install:** right-click **Zeros Beta.app** → Open (or System
+          Settings ▸ Privacy & Security ▸ Open Anyway). One time only — every
+          update after that applies in place silently via the auto-updater.
+
+          Beta is a separate app from production: own data, own auto-update feed.
+          EOF
+          )
+
+          # ONE rolling prerelease at tag "beta": move the tag to this commit and
+          # clobber the assets each push. NOT marked --latest, so the prod
+          # auto-updater (latest-mac.yml) never sees beta builds. Alongside the
+          # versioned .dmg/.zip/blockmap we (re)upload the constant "latest" .dmg
+          # (permanent link) and beta-mac.yml feed; a later step prunes to newest 3.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --prerelease --title "$TITLE" --notes "$NOTES" --target "$GITHUB_SHA"
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+              "$DMG" "$ZIP" "$ZIP_BLOCKMAP" "$LATEST_DMG" "release/beta-mac.yml"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --prerelease --title "$TITLE" --notes "$NOTES" --target "$GITHUB_SHA" \
+              "$DMG" "$ZIP" "$ZIP_BLOCKMAP" "$LATEST_DMG" "release/beta-mac.yml"
+          fi
+          echo "✓ published $TITLE → release '$TAG' (prerelease, beta-mac.yml feed)"
+
+      - name: Prune old beta assets (keep newest 3)
+        # Best-effort retention — NEVER fail a shipped release over cleanup. Each
+        # beta's versioned .dmg/.zip/.blockmap carries a monotonic
+        # "-beta.<N>-arm64" token; we keep the 3 highest N and delete the rest.
+        # The constant "latest" .dmg and beta-mac.yml have no such token, so they
+        # are always kept.
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          TAG="beta"
+          KEEP=3
+
+          NAMES=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+
+          # Newest KEEP distinct beta run-numbers (assets are "...-beta.<N>-arm64...").
+          # awk (not head) takes the top KEEP so sort never gets SIGPIPE under pipefail.
+          KEEP_NUMS=$(printf '%s\n' "$NAMES" \
+            | sed -n 's/.*-beta\.\([0-9][0-9]*\)-arm64.*/\1/p' \
+            | sort -rnu | awk -v k="$KEEP" 'NR<=k')
+
+          # Guard: if nothing parsed (naming scheme drifted), delete NOTHING.
+          if [ -z "$KEEP_NUMS" ]; then
+            echo "No versioned beta assets parsed — nothing to prune."
+            exit 0
+          fi
+          printf 'Keeping newest %s beta(s):' "$KEEP"
+          while IFS= read -r NUMBER; do
+            [ -n "$NUMBER" ] || continue
+            printf ' %s' "$NUMBER"
+          done <<< "$KEEP_NUMS"
+          printf '\n'
+
+          printf '%s\n' "$NAMES" | while IFS= read -r ASSET; do
+            [ -n "$ASSET" ] || continue
+            N=$(printf '%s\n' "$ASSET" | sed -n 's/.*-beta\.\([0-9][0-9]*\)-arm64.*/\1/p')
+            [ -n "$N" ] || continue                        # keep beta-mac.yml + "latest" .dmg
+            if ! printf '%s\n' "$KEEP_NUMS" | grep -qx "$N"; then
+              echo "Pruning $ASSET (beta.$N)"
+              gh release delete-asset "$TAG" "$ASSET" --repo "$GITHUB_REPOSITORY" --yes || true
+            fi
+          done

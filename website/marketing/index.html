@@ -1,0 +1,39 @@
+<!doctype html>
+<!-- Marketing site is dark-by-default. Palette is Zeros Shade from
+     styles/zeros-tokens.css (see src/index.css). No theme switching. -->
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/zeros-logo.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0E0C0C" />
+    <meta
+      name="description"
+      content="Zeros is a Mac workspace where parallel AI agents design, build, and ship across isolated git worktrees. Watch them work, review every change, then merge."
+    />
+
+    <!-- Geist + Geist Mono — matches the Zeros Foundation type system. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Geist:wght@100..900&family=Geist+Mono:wght@100..900&display=swap"
+      rel="stylesheet"
+    />
+
+    <!-- Open Graph / social -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Zeros — design and code, in parallel" />
+    <meta
+      property="og:description"
+      content="A Mac workspace where parallel AI agents design, build, and ship across isolated git worktrees."
+    />
+    <meta property="og:image" content="/zeros-logo.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+
+    <title>Zeros — design and code, in parallel</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

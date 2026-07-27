@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for the Developer ID (notarized, non-MAS) build.
+
+  hardenedRuntime: true (electron-builder.yml) enables the hardened runtime,
+  which DENIES these capabilities by default. Each exception below is required
+  by something Zeros actually does:
+
+    allow-jit / allow-unsigned-executable-memory
+      Electron's V8 JIT-compiles JavaScript. Without these the renderer crashes
+      on launch (EXC_BAD_ACCESS) on a notarized build.
+
+    allow-dyld-environment-variables
+      We pass DYLD/ELECTRON_RUN_AS_NODE and inject env into spawned helpers —
+      notably the Cursor SDK host (ELECTRON_RUN_AS_NODE) and the node-pty host.
+      Hardened runtime ignores dyld env vars unless this is set.
+
+    disable-library-validation
+      We dlopen our OWN native .node addons (node-pty, better-sqlite3, sqlite3,
+      and @cursor's native binding) which are signed ad-hoc / by us, NOT by
+      Apple and NOT with the same Team ID as the app. Library validation would
+      refuse to load them → workspace creation + terminal + Cursor all break in
+      the shipped app.
+
+  These are the standard four for an Electron app that loads native modules and
+  spawns Node helpers. We intentionally do NOT request App Sandbox entitlements
+  (network.client, files.user-selected, etc.) — Developer ID distribution is
+  not sandboxed, and adding them would impose sandbox restrictions we don't want.
+-->
+<plist version="1.0">
+  <dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+  </dict>
+</plist>

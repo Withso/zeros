@@ -1,0 +1,148 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://zeros.build/schemas/settings.repo.schema.json",
+  "title": "Zeros repository settings",
+  "description": "Shared per-repository Zeros settings (<repo>/.zeros/settings.toml — commit this file). Also validates <repo>/.zeros/settings.local.toml (personal, gitignored).",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "JSON Schema URL for editor autocomplete.",
+      "type": "string"
+    },
+    "scripts": {
+      "type": "object",
+      "properties": {
+        "setup": {
+          "type": "string",
+          "description": "Runs when a workspace is created."
+        },
+        "run": {
+          "type": "string",
+          "description": "LEGACY single run command — superseded by run_actions (it migrates to one default action at read time when run_actions is absent; an explicit run_actions list, even empty, wins)."
+        },
+        "run_actions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Stable id — the session-id suffix + status key."
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Label shown on the tab / menu / button."
+              },
+              "command": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Shell command, e.g. `pnpm dev`."
+              },
+              "icon": {
+                "description": "Lucide icon name (curated set; unknown falls back to play).",
+                "type": "string"
+              },
+              "platforms": {
+                "description": "OSes this action shows on. Absent/empty = all.",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "mac",
+                    "linux",
+                    "win"
+                  ]
+                }
+              },
+              "one_shot": {
+                "description": "true → run to completion for a pass/fail verdict; false → long-lived (dev server). Absent = heuristic by command.",
+                "type": "boolean"
+              },
+              "run_on_create": {
+                "description": "Start automatically when a workspace is created.",
+                "type": "boolean"
+              },
+              "default": {
+                "description": "The header split-button face + primary shortcut.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "command"
+            ]
+          },
+          "description": "Named run actions — multiple concurrent run commands, each with an icon. Supersedes the single `run` string (which migrates to one default action at read time)."
+        },
+        "archive": {
+          "type": "string",
+          "description": "Runs before a workspace is archived."
+        },
+        "run_mode": {
+          "type": "string",
+          "enum": [
+            "concurrent",
+            "nonconcurrent"
+          ],
+          "description": "Whether run scripts of multiple workspaces may run at once."
+        },
+        "auto_run_after_setup": {
+          "type": "boolean",
+          "description": "Start the run script automatically after setup."
+        }
+      }
+    },
+    "git": {
+      "type": "object",
+      "properties": {
+        "remote": {
+          "type": "string",
+          "description": "Git remote new workspaces branch from."
+        },
+        "base_branch": {
+          "type": "string",
+          "description": "Branch new workspaces fork from."
+        },
+        "branch_prefix_type": {
+          "type": "string",
+          "description": "How workspace branch names are generated."
+        },
+        "delete_branch_on_archive": {
+          "type": "boolean",
+          "description": "Delete the branch when archiving."
+        },
+        "archive_on_merge": {
+          "type": "boolean",
+          "description": "Archive a workspace automatically when its PR merges."
+        }
+      }
+    },
+    "prompts": {
+      "type": "object",
+      "properties": {
+        "general": {
+          "type": "string",
+          "description": "Appended to every agent session."
+        },
+        "code_review": {
+          "type": "string"
+        },
+        "create_pr": {
+          "type": "string"
+        },
+        "fix_errors": {
+          "type": "string"
+        },
+        "rename_branch": {
+          "type": "string"
+        },
+        "resolve_merge_conflicts": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

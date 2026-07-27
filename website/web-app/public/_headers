@@ -1,0 +1,14 @@
+# Security headers for app.zeros.build static responses.
+#
+# NOTE: The unified zeros-web project also serves zeros.build (marketing) from
+# the same deployment. Per-host CSP is applied in functions/_middleware.ts
+# (marketing needs Google Fonts; app keeps the strict policy below).
+# These /* headers remain as a belt-and-suspenders default for static assets
+# on the app host; middleware overwrites Content-Security-Policy per host.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'
+  Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Cross-Origin-Opener-Policy: same-origin

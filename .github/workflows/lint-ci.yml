@@ -1,0 +1,34 @@
+name: Lint CI workflows
+
+# actionlint over .github/workflows/*.yml — catches silently-broken CI config
+# (invalid ${{ }} expressions, shell-injection-prone run: interpolations, bad
+# action refs, deprecated actions, shellcheck on run: blocks). The worst failure
+# mode for a repo whose merge gate IS the CI. The whole dir is linted so a rename
+# can't let a broken-but-unchanged file ride.
+#
+# Workflow changes are infrastructure changes: invalid expressions, action refs,
+# or shell blocks now fail the PR instead of publishing an advisory green check.
+
+on:
+  pull_request:
+    paths: [".github/workflows/**"]
+  # A workflow-lint check marked Required must also exist on merge-queue SHAs.
+  merge_group:
+  push:
+    branches: [main]
+    paths: [".github/workflows/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: actionlint
+        uses: docker://rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
+        with:
+          args: -color

@@ -1,0 +1,12 @@
+{
+  "fixture": "claude-basic.jsonl",
+  "translator": "ClaudeStreamTranslator",
+  "expectedUpdates": [
+    "agent_thought_chunk",
+    "agent_message_chunk",
+    "usage_update"
+  ],
+  "stopReason": "end_turn",
+  "sawResult": true,
+  "notes": "Minimal round-trip: system.init (no emit) + user echo (INTENTIONALLY NOT re-emitted — the renderer shows the user bubble optimistically and the engine seeds it via persistUserPrompt; re-emitting the stream echo duplicated the bubble and rendered subagent user-turns as the real user) + thinking + answer + result. Tests the happy path for every content-block variant Claude emits in --output-format stream-json."
+}

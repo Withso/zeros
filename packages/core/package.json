@@ -1,0 +1,35 @@
+{
+  "name": "@zeros/core",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Shared Zeros bridge protocol — wire types, zod schemas, protocol versioning, crypto seams, and transport-agnostic runtime primitives. Consumed by the engine and desktop renderer. Single source of truth for the wire contract.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./messages": "./src/messages.ts",
+    "./model-context": "./src/model-context.ts",
+    "./agent-events": "./src/agent-events.ts",
+    "./builtin-commands": "./src/builtin-commands.ts",
+    "./agent-messages": "./src/agent-messages.ts",
+    "./system-instructions": "./src/system-instructions/index.ts",
+    "./version": "./src/version.ts",
+    "./schemas": "./src/schemas.ts",
+    "./run-actions": "./src/run-actions.ts",
+    "./scrub": "./src/scrub.ts",
+    "./crypto": "./src/crypto/index.ts",
+    "./reliable": "./src/reliable.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^2.2.0",
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,241 @@
+// ──────────────────────────────────────────────────────────
+// Encrypted secret store backed by Electron safeStorage + JSON file.
+// ──────────────────────────────────────────────────────────
+//
+// Replaces keytar, which crashed the main process on 2026-05-24
+// when its native C++ threw across the N-API boundary
+// (EXC_CRASH SIGABRT in keytar.node). safeStorage uses Chromium's
+// OSCrypt under the hood — battle-tested in Chrome, raises catchable
+// JS errors on failure, and never abort()s the process.
+//
+// Storage:
+//   <userData>/secrets.json
+//   {
+//     "<account>": "<base64-encoded encrypted blob>"
+//   }
+//
+// File is written atomically (.tmp + rename) so a mid-write crash
+// leaves the previous copy intact. Reads tolerate a missing or
+// malformed file by returning null.
+// ──────────────────────────────────────────────────────────
+
+import { app, safeStorage } from "electron";
+import fs from "node:fs";
+import path from "node:path";
+
+/** The directory holding secrets.json. Shared dev login: electron/main.ts sets
+ *  ZEROS_SHARED_SECRETS_DIR to the channel-PRIMARY data dir (com.zeros.dev) so
+ *  every dev worktree reads/writes ONE secrets.json, decrypted by the ONE
+ *  per-channel keychain key (app.getName() pinned to the channel) → log in once,
+ *  every worktree authed. Falls back to THIS instance's own userData for
+ *  stable/beta (single instance) or a ZEROS_ISOLATE=1 dev worktree. */
+function secretsDir(): string {
+  const shared = process.env.ZEROS_SHARED_SECRETS_DIR?.trim();
+  return shared && shared.length > 0 ? shared : app.getPath("userData");
+}
+
+function filePath(): string {
+  return path.join(secretsDir(), "secrets.json");
+}
+
+/** Absolute path to the on-disk secret store (`<userData>/secrets.json`).
+ *  Exported so the engine sidecar can pass it to the child engine — which
+ *  can't call Electron safeStorage — via the ZEROS_SECRETS_FILE env var,
+ *  for exists-only `secret-account` auth probes. The engine only checks
+ *  key-presence; it never reads or decrypts the stored values. */
+export function secretsFilePath(): string {
+  return filePath();
+}
+
+function readAll(): Record<string, string> {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(filePath(), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return {};
+    console.warn(`[secret-store] read failed: ${(err as Error).message}`);
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object") {
+      return parsed as Record<string, string>;
+    }
+  } catch {
+    /* fall through */
+  }
+  console.warn(`[secret-store] secrets.json malformed — ignoring`);
+  return {};
+}
+
+function writeAll(data: Record<string, string>): void {
+  const file = filePath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  // Per-pid tmp so two worktrees flushing at once don't collide on the tmp name;
+  // the rename is atomic so a reader always sees a complete file.
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(data), { mode: 0o600 });
+  fs.renameSync(tmp, file);
+}
+
+/** Cross-process advisory lock around the secrets file. Multiple dev worktrees
+ *  now share ONE secrets.json (ZEROS_SHARED_SECRETS_DIR), so a naive
+ *  read-modify-write would last-writer-wins CLOBBER a sibling's just-written key
+ *  (both do readAll → mutate → atomic rename of the WHOLE file). Serialize
+ *  mutations with an O_EXCL lockfile; steal a stale lock after a bound so a
+ *  crashed writer can't wedge every instance. Synchronous — mutations are rare
+ *  (login only) and brief. */
+function withSecretsLock<T>(fn: () => T): T {
+  const lock = `${filePath()}.lock`;
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  const waiter = new Int32Array(new SharedArrayBuffer(4));
+  const start = Date.now();
+  const STALE_MS = 5000;
+  let held = false;
+  while (!held) {
+    try {
+      fs.closeSync(fs.openSync(lock, "wx")); // O_CREAT|O_EXCL — fails if held
+      held = true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      let stale = false;
+      try {
+        stale = Date.now() - fs.statSync(lock).mtimeMs > STALE_MS;
+      } catch {
+        stale = true; // lock vanished between open + stat → retry now
+      }
+      if (stale) {
+        try {
+          fs.rmSync(lock, { force: true });
+        } catch {
+          /* raced with another stealer — retry */
+        }
+        continue;
+      }
+      if (Date.now() - start > STALE_MS) break; // proceed unlocked rather than hang
+      Atomics.wait(waiter, 0, 0, 25); // sleep ~25ms with no CPU spin
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    if (held) {
+      try {
+        fs.rmSync(lock, { force: true });
+      } catch {
+        /* best-effort unlock */
+      }
+    }
+  }
+}
+
+function ensureEncryptionAvailable(): void {
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error(
+      "OS keystore unavailable — cannot encrypt secrets. " +
+        "On macOS this usually means Keychain access was denied.",
+    );
+  }
+}
+
+export function setSecret(account: string, value: string): void {
+  ensureEncryptionAvailable();
+  const encrypted = safeStorage.encryptString(value).toString("base64");
+  // Re-read UNDER the lock so a sibling worktree's concurrently-written keys
+  // survive this write (merge, not clobber).
+  withSecretsLock(() => {
+    const data = readAll();
+    data[account] = encrypted;
+    writeAll(data);
+  });
+}
+
+export function getSecret(account: string): string | null {
+  const data = readAll();
+  const b64 = data[account];
+  if (typeof b64 !== "string" || b64.length === 0) return null;
+  try {
+    return safeStorage.decryptString(Buffer.from(b64, "base64"));
+  } catch (err) {
+    console.warn(
+      `[secret-store] decrypt failed for "${account}": ${(err as Error).message}`,
+    );
+    return null;
+  }
+}
+
+/** Whether an entry EXISTS for `account` — key presence only, never decrypts.
+ *  Lets a caller distinguish "never stored" (getSecret null, hasSecret false)
+ *  from "stored but unreadable" (getSecret null after a decrypt failure,
+ *  hasSecret true) — the case a read-modify-write editor must treat as an
+ *  error, not an empty value. */
+export function hasSecret(account: string): boolean {
+  const b64 = readAll()[account];
+  return typeof b64 === "string" && b64.length > 0;
+}
+
+export function deleteSecret(account: string): void {
+  withSecretsLock(() => {
+    const data = readAll();
+    if (!(account in data)) return;
+    delete data[account];
+    writeAll(data);
+  });
+}
+
+/** Number of stored entries. Useful for diagnostics and tests. */
+export function entryCount(): number {
+  return Object.keys(readAll()).length;
+}
+
+/** Watch the (possibly shared) secrets.json and invoke `onChange` — debounced —
+ *  whenever it's rewritten. Dev worktrees share ONE secrets.json
+ *  (ZEROS_SHARED_SECRETS_DIR), so a sign-in / sign-out / token refresh in ANOTHER
+ *  worktree replaces this file; electron/main.ts forwards the signal to the
+ *  renderer ("auth-store-changed") so it can re-sync the session live instead of
+ *  waiting for a reload.
+ *
+ *  Watches the DIRECTORY, not the file: writeAll() replaces the file via atomic
+ *  tmp + rename, which swaps the inode and would silently kill a file-level watch
+ *  after the first write. We filter dir events down to "secrets.json" so the
+ *  `.tmp-<pid>` and `.lock` siblings (touched on every mutation) don't fire it.
+ *  Returns a disposer; never throws (a failed watch just disables live sync). */
+export function watchSecrets(onChange: () => void): () => void {
+  const file = filePath();
+  const dir = path.dirname(file);
+  const base = path.basename(file); // "secrets.json"
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let watcher: fs.FSWatcher | null = null;
+  const fire = () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      try {
+        onChange();
+      } catch (err) {
+        console.warn(
+          `[secret-store] watch onChange threw: ${(err as Error).message}`,
+        );
+      }
+    }, 200);
+  };
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    watcher = fs.watch(dir, (_event, filename) => {
+      // Some platforms hand back a null filename — fire conservatively then.
+      if (!filename || filename === base) fire();
+    });
+  } catch (err) {
+    console.warn(
+      `[secret-store] cannot watch ${dir} for live login sync: ${(err as Error).message}`,
+    );
+  }
+  return () => {
+    if (timer) clearTimeout(timer);
+    try {
+      watcher?.close();
+    } catch {
+      /* already closed */
+    }
+  };
+}

@@ -1,0 +1,2207 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-Zeros-root>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Zeros — PR status island · State catalog</title>
+    <style>
+      /* ============================================================
+         Tokens — lifted verbatim from styles/zeros-tokens.css so the
+         mockups render on the real Zeros Shade (dark) + Light palettes.
+         Toggle themes with the switch in the header.
+         ============================================================ */
+      :root {
+        color-scheme: dark;
+        --bg1: hsl(25 5% 7%);
+        --bg1-hover: hsl(8 5% 12%);
+        --bg1-highlight: hsl(25 5% 10%);
+        --bg2: hsl(25 4% 12%);
+        --bg2-hover: hsl(25 3% 15%);
+        --bg3: hsl(15 4% 16%);
+        --bg3-hover: hsl(15 3% 20%);
+        --sidebar-bg: hsl(25 5% 9%);
+        --fg1: hsl(0 2% 92%);
+        --fg2: hsl(20 4% 66%);
+        --fg3: hsl(15 1% 44%);
+        --muted-fg: hsl(15 4% 44%);
+        --border1: hsl(8 3% 14%);
+        --border2: hsl(25 1% 18%);
+        --border3: hsl(15 0% 24%);
+        --border4: hsl(15 0% 30%);
+        --highlighted-bright: hsl(25 5% 65%);
+        --inverted-bg: hsl(0 2% 92%);
+        --inverted-fg: hsl(5 7% 5%);
+        --green-primary: hsl(142 69% 58%);
+        --green-bg: hsl(120 23% 17%);
+        --green-fg: hsl(142 75% 73%);
+        --red-primary: hsl(0 91% 71%);
+        --red-bg: hsl(13 81% 14%);
+        --red-fg: hsl(20 97% 72%);
+        --yellow-primary: hsl(37 75% 60%);
+        --yellow-bg: hsl(38 68% 17%);
+        --yellow-fg: hsl(44 100% 50%);
+        --blue-primary: hsl(205 80% 73%);
+        --violet-primary: hsl(271 80% 73%);
+        --violet-bg: hsl(255 21% 18%);
+        --violet-fg: hsl(265 66% 77%);
+        --brown-primary: hsl(9 46% 72%);
+        --brown-bg: hsl(10 15% 15%);
+        --brown-fg: hsl(10 80% 72%);
+        /* ramp shades (theme-static) — lifted from zeros-tokens.css; referenced
+           by the PR-status chip-border semantics below. */
+        --green-700: hsl(131 47% 31%);
+        --brown-800: hsl(7 23% 35%); /* #6D4944 */
+        --violet-750: hsl(259 41% 42%); /* #5B3F96 */
+        --red-300: hsl(0 85% 79%); /* #F79C9C — closed chip outline (Light) */
+        --red-750: hsl(10 58% 31%); /* #7b3021 — closed chip outline (Shade) */
+        /* component aliases (verbatim from zeros-tokens.css) */
+        --primary-button-bg: var(--inverted-bg);
+        --primary-button-fg: var(--inverted-fg);
+        --primary-button-hover: hsl(25 2% 83%);
+        /* semantic tokens — PR status island (theme-adaptive). In the app
+           these live in styles/semantic-tokens.css (the semantics layer over
+           the primitives). Mirrored inline here as this catalog is a standalone
+           artifact that doesn't import the token files. */
+        --pr-status-surface: var(--brown-bg); /* brown container surface */
+        --pr-status-action-bg: var(--primary-button-bg);
+        --pr-status-action-fg: var(--primary-button-fg);
+        --pr-status-action-hover: var(--primary-button-hover);
+        --pr-status-merge-fg: var(--inverted-fg);
+        /* #N chip outline — muted per-tone ramp shade (theme-static). */
+        --pr-status-chip-border-active: var(--brown-800);
+        --pr-status-chip-border-success: var(--green-700);
+        --pr-status-chip-border-merged: var(--violet-750);
+        /* Closed chip outline — brick red in Shade; flips to --red-300 in Light. */
+        --pr-status-chip-border-closed: var(--red-750);
+        /* Merged-row "Continue" button — filled violet, label flips per theme. */
+        --pr-status-continue-bg: var(--violet-fg);
+        --pr-status-continue-fg: var(--inverted-fg);
+        --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+        --radius-sm: 4px;
+        --radius-md: 6px;
+        --radius-lg: 8px;
+        --sans:
+          "Geist Variable", Inter, ui-sans-serif, -apple-system,
+          BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --mono: "Geist Mono Variable", "SFMono-Regular", Consolas, monospace;
+      }
+
+      [data-theme="light"] {
+        color-scheme: light;
+        --bg1: hsl(0 0% 100%);
+        --bg1-hover: hsl(0 4% 95%);
+        --bg1-highlight: hsl(0 0% 97%);
+        --bg2: hsl(60 4% 95%);
+        --bg2-hover: hsl(60 4% 91%);
+        --bg3: hsl(0 0% 100%);
+        --bg3-hover: hsl(0 0% 95%);
+        --sidebar-bg: hsl(60 9% 98%);
+        --fg1: hsl(20 7% 16%);
+        --fg2: hsl(20 4% 37%);
+        --fg3: hsl(20 4% 56%);
+        --muted-fg: hsl(20 4% 68%);
+        --border1: hsl(30 9% 91%);
+        --border2: hsl(30 9% 91%);
+        --border3: hsl(60 3% 85%);
+        --border4: hsl(0 1% 83%);
+        --highlighted-bright: hsl(25 5% 45%);
+        --inverted-bg: hsl(20 7% 16%);
+        --inverted-fg: hsl(0 0% 100%);
+        --green-primary: hsl(142 75% 36%);
+        --green-bg: hsl(134 38% 89%);
+        --green-fg: hsl(142 70% 30%);
+        --red-primary: hsl(0 72% 51%);
+        --red-bg: hsl(18 87% 91%);
+        --red-fg: hsl(18 89% 40%);
+        --yellow-primary: hsl(37 90% 60%);
+        --yellow-bg: hsl(48 97% 89%);
+        --yellow-fg: hsl(37 100% 51%);
+        --blue-primary: hsl(221 83% 53%);
+        --violet-primary: hsl(271 80% 51%);
+        --violet-bg: hsl(274 93% 94%);
+        --violet-fg: hsl(271 55% 42%);
+        --brown-primary: hsl(5 35% 50%);
+        --brown-bg: hsl(5 74% 91%);
+        --brown-fg: hsl(0 20% 40%);
+        --primary-button-bg: var(--inverted-bg);
+        --primary-button-fg: var(--inverted-fg);
+        --primary-button-hover: hsl(22 6% 25%);
+        --pr-status-surface: var(--brown-bg);
+        --pr-status-action-bg: var(--brown-fg);
+        --pr-status-action-fg: var(--inverted-fg); /* white text/icon on the mauve button */
+        --pr-status-action-hover: hsl(0 20% 33%);
+        --pr-status-merge-fg: var(--inverted-fg);
+        --pr-status-continue-fg: var(--inverted-fg); /* white label on the mauve Continue button */
+        --pr-status-chip-border-closed: var(--red-300); /* softer pink outline on the light salmon surface */
+        --shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        margin: 0;
+        min-width: 320px;
+        min-height: 100vh;
+        background:
+          radial-gradient(
+            circle at 50% -8%,
+            color-mix(in srgb, var(--fg1) 5%, transparent),
+            transparent 30rem
+          ),
+          var(--bg1);
+        color: var(--fg1);
+        font: 14px/1.5 var(--sans);
+        -webkit-font-smoothing: antialiased;
+      }
+      button {
+        font: inherit;
+        color: inherit;
+        cursor: pointer;
+      }
+      svg {
+        display: block;
+      }
+      code {
+        font-family: var(--mono);
+      }
+
+      .page {
+        width: min(1180px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 48px 0 96px;
+      }
+
+      /* ── Hero ── */
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 28px;
+        align-items: end;
+        padding-bottom: 28px;
+        border-bottom: 1px solid var(--border1);
+      }
+      .eyebrow {
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        color: var(--green-primary);
+      }
+      h1 {
+        max-width: 780px;
+        margin: 9px 0 10px;
+        font-size: clamp(26px, 3.4vw, 40px);
+        line-height: 1.05;
+        letter-spacing: -0.035em;
+      }
+      .lede {
+        max-width: 740px;
+        margin: 0;
+        color: var(--fg2);
+        font-size: 15px;
+      }
+      .hero-aside {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        align-items: flex-end;
+      }
+      .summary-chip {
+        min-width: 240px;
+        padding: 14px 16px;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 90%, transparent);
+      }
+      .summary-chip strong {
+        display: block;
+        margin-bottom: 3px;
+        font-size: 13px;
+      }
+      .summary-chip span {
+        display: block;
+        color: var(--fg2);
+        font-size: 12px;
+      }
+      .theme-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 11px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: var(--bg2);
+        color: var(--fg1);
+        font-size: 12px;
+      }
+      .theme-toggle:hover {
+        background: var(--bg2-hover);
+      }
+
+      /* ── Thesis cards ── */
+      .thesis {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        margin: 24px 0 12px;
+      }
+      .thesis-card {
+        min-width: 0;
+        padding: 16px 18px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 86%, transparent);
+      }
+      .thesis-card.primary {
+        border-color: color-mix(in srgb, var(--green-primary) 26%, var(--border1));
+        background: color-mix(in srgb, var(--green-primary) 5%, var(--sidebar-bg));
+      }
+      .thesis-card h3 {
+        margin: 0 0 5px;
+        font-size: 13px;
+      }
+      .thesis-card p {
+        margin: 0;
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      /* ── Sticky nav ── */
+      nav {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+        margin: 26px -12px 40px;
+        padding: 10px 12px;
+        border-bottom: 1px solid color-mix(in srgb, var(--border1) 80%, transparent);
+        background: color-mix(in srgb, var(--bg1) 82%, transparent);
+        backdrop-filter: blur(14px);
+      }
+      nav a {
+        flex: none;
+        padding: 5px 9px;
+        border-radius: var(--radius-sm);
+        color: var(--fg2);
+        font-size: 12px;
+        text-decoration: none;
+      }
+      nav a:hover {
+        background: var(--bg2);
+        color: var(--fg1);
+      }
+      .nav-sep {
+        width: 1px;
+        margin: 3px 4px;
+        background: var(--border2);
+      }
+
+      /* ── Section headers / case scaffolding ── */
+      .band {
+        margin: 0 0 26px;
+        font-size: 12px;
+        font-weight: 650;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--fg3);
+      }
+      .catalog {
+        display: grid;
+        gap: 56px;
+      }
+      .catalog + .band {
+        margin-top: 64px;
+      }
+      .case {
+        scroll-margin-top: 68px;
+      }
+      .case-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 24px;
+        align-items: flex-start;
+        margin-bottom: 16px;
+      }
+      .case-title-row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        margin-bottom: 6px;
+      }
+      .case-number {
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.06em;
+        color: var(--fg3);
+      }
+      .tag {
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: var(--bg2);
+        color: var(--fg2);
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+      }
+      .tag.ship {
+        background: color-mix(in srgb, var(--green-primary) 12%, transparent);
+        color: var(--green-primary);
+      }
+      .tag.gap {
+        background: color-mix(in srgb, var(--yellow-primary) 12%, transparent);
+        color: var(--yellow-primary);
+      }
+      .tag.context {
+        background: color-mix(in srgb, var(--blue-primary) 12%, transparent);
+        color: var(--blue-primary);
+      }
+      .tag.changed {
+        background: color-mix(in srgb, var(--violet-primary) 15%, transparent);
+        color: var(--violet-primary);
+      }
+      .tag.danger {
+        background: color-mix(in srgb, var(--red-primary) 12%, transparent);
+        color: var(--red-primary);
+      }
+      .case h2 {
+        margin: 0;
+        font-size: 19px;
+        line-height: 1.22;
+        letter-spacing: -0.02em;
+      }
+      .case-copy {
+        max-width: 720px;
+        margin: 6px 0 0;
+        color: var(--fg2);
+        font-size: 13px;
+      }
+      .meta {
+        flex: none;
+        max-width: 280px;
+        padding-top: 2px;
+        color: var(--fg3);
+        font-size: 11px;
+        line-height: 1.5;
+        text-align: right;
+      }
+
+      /* ── App frame — the Changes/Review tab surface ── */
+      .frame {
+        overflow: hidden;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: var(--bg1);
+        box-shadow: var(--shadow);
+      }
+      .subtabs {
+        display: flex;
+        height: 36px;
+        align-items: center;
+        gap: 2px;
+        padding: 0 8px;
+        border-bottom: 1px solid var(--border1);
+        overflow: hidden;
+      }
+      .subtab {
+        position: relative;
+        display: inline-flex;
+        height: 36px;
+        align-items: center;
+        padding: 0 10px;
+        border: 0;
+        background: transparent;
+        color: var(--fg2);
+        font-size: 12px;
+        font-weight: 500;
+        white-space: nowrap;
+      }
+      .subtab.active {
+        color: var(--fg1);
+      }
+      .subtab.active::after {
+        content: "";
+        position: absolute;
+        left: 8px;
+        right: 8px;
+        bottom: 0;
+        height: 2px;
+        border-radius: 999px;
+        background: var(--fg1);
+      }
+
+      /* ── The PR row itself — 40px, flush, border-b, ONE state ── */
+      .pr-row {
+        position: relative;
+        display: flex;
+        height: 40px;
+        align-items: center;
+        gap: 10px;
+        padding: 0 8px;
+        border-bottom: 1px solid var(--border1);
+        background: var(--bg1);
+      }
+      .pr-row.tone-active {
+        background: var(--pr-status-surface);
+        border-top: 1px solid color-mix(in srgb, var(--brown-primary) 10%, transparent);
+        border-bottom-color: color-mix(in srgb, var(--brown-primary) 10%, transparent);
+      }
+      .pr-row.tone-success {
+        background: var(--green-bg);
+        border-top: 1px solid color-mix(in srgb, var(--green-primary) 10%, transparent);
+        border-bottom-color: color-mix(in srgb, var(--green-primary) 10%, transparent);
+      }
+      .pr-row.tone-merged {
+        background: var(--violet-bg);
+        border-top: 1px solid color-mix(in srgb, var(--violet-primary) 10%, transparent);
+        border-bottom-color: color-mix(in srgb, var(--violet-primary) 10%, transparent);
+      }
+      .pr-row.tone-closed {
+        background: var(--red-bg);
+        border-top: 1px solid color-mix(in srgb, var(--red-primary) 10%, transparent);
+        border-bottom-color: color-mix(in srgb, var(--red-primary) 10%, transparent);
+      }
+      .pr-spacer {
+        flex: 1;
+      }
+
+      /* View PR ↗ chip — focuses the Review tab */
+      .pr-chip {
+        display: inline-flex;
+        flex: none;
+        align-items: center;
+        gap: 2px;
+        padding: 2px 6px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--fg2);
+        font-size: 13px;
+        font-variant-numeric: tabular-nums;
+      }
+      .pr-chip:hover {
+        border-color: var(--border4);
+        color: var(--fg1);
+      }
+      .pr-chip svg {
+        width: 12px;
+        height: 12px;
+      }
+      .tone-active .pr-chip {
+        border-color: var(--pr-status-chip-border-active);
+        color: var(--brown-primary);
+      }
+      .tone-success .pr-chip {
+        border-color: var(--pr-status-chip-border-success);
+        color: var(--green-primary);
+      }
+      .tone-merged .pr-chip {
+        border-color: var(--pr-status-chip-border-merged);
+        color: var(--violet-fg);
+      }
+      .tone-closed .pr-chip {
+        border-color: var(--pr-status-chip-border-closed);
+        color: var(--red-fg);
+      }
+
+      /* status label — text-sm font-medium; tone only for success/merged */
+      .pr-label {
+        min-width: 0;
+        /* Sits the status text off from the View-PR chip; the pr-spacer
+           absorbs the right side so only the chip↔label gap grows. */
+        margin-left: 4px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 14px;
+        font-weight: 500;
+        color: var(--fg1);
+      }
+      .tone-active .pr-label {
+        color: var(--fg1);
+      }
+      .tone-success .pr-label {
+        color: var(--green-primary);
+      }
+      .tone-merged .pr-label {
+        color: var(--violet-fg);
+      }
+      .tone-closed .pr-label {
+        color: var(--red-fg);
+      }
+
+      /* island action buttons — h-7 (28px), 12px medium */
+      .act {
+        display: inline-flex;
+        flex: none;
+        height: 28px;
+        align-items: center;
+        gap: 6px;
+        padding: 0 10px;
+        border: 0;
+        border-radius: var(--radius-sm);
+        font-size: 12px;
+        font-weight: 500;
+      }
+      .act svg {
+        width: 14px;
+        height: 14px;
+      }
+      .act.secondary {
+        border: 1px solid var(--border3);
+        background: var(--bg1);
+        color: var(--fg1);
+      }
+      .act.secondary:hover {
+        background: var(--bg2);
+      }
+      .act.dashed {
+        border: 1px dashed var(--border3);
+        background: transparent;
+        color: var(--fg1);
+      }
+      .act.dashed:hover {
+        background: var(--bg2);
+      }
+      .act.primary-merge {
+        background: var(--green-primary);
+        color: var(--pr-status-merge-fg);
+      }
+      .act.primary-merge:hover {
+        opacity: 0.9;
+      }
+      .tone-merged .act.secondary,
+      .tone-success .act.secondary {
+        background: transparent;
+      }
+      .tone-active .act.secondary {
+        border: 0;
+        background: var(--pr-status-action-bg);
+        color: var(--pr-status-action-fg);
+      }
+      .tone-active .act.secondary:hover {
+        background: var(--pr-status-action-hover);
+      }
+      .tone-merged .act.dashed {
+        border-color: transparent;
+        background: var(--pr-status-continue-bg);
+        color: var(--pr-status-continue-fg);
+      }
+      .tone-merged .act.dashed:hover {
+        background: var(--pr-status-continue-bg);
+        opacity: 0.9;
+      }
+      .act.primary-archive {
+        background: var(--inverted-bg);
+        color: var(--inverted-fg);
+      }
+      .act.primary-archive:hover {
+        opacity: 0.9;
+      }
+      /* Closed row (Light): keep Archive a white button on the salmon surface,
+         not the dark inverted fill — a hairline border keeps it legible. */
+      [data-theme="light"] .tone-closed .act.primary-archive {
+        border: 1px solid var(--border3);
+        background: var(--bg1);
+        color: var(--fg1);
+      }
+      [data-theme="light"] .tone-closed .act.primary-archive:hover {
+        background: var(--bg1-hover);
+        opacity: 1;
+      }
+      .act.is-disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      /* pre-PR row: branch → target dropdown + Create PR split (24px family) */
+      .branch-name {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--fg2);
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+      }
+      .branch-arrow {
+        flex: none;
+        color: var(--fg2);
+      }
+      .branch-arrow svg {
+        width: 14px;
+        height: 14px;
+      }
+      .pill-dd {
+        display: inline-flex;
+        flex: none;
+        height: 24px;
+        min-width: 0;
+        align-items: center;
+        gap: 6px;
+        padding: 0 8px 0 10px;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--fg1);
+        font-size: 12px;
+      }
+      .pill-dd:hover {
+        border-color: var(--border3);
+        background: var(--bg2-hover);
+      }
+      .pill-dd b {
+        font-weight: 500;
+        font-variant-numeric: tabular-nums;
+      }
+      .pill-dd svg {
+        width: 13px;
+        height: 13px;
+        color: var(--fg2);
+      }
+      .split {
+        display: inline-flex;
+        flex: none;
+        align-items: stretch;
+        overflow: hidden;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-sm);
+      }
+      .split:hover {
+        border-color: var(--border3);
+      }
+      .split-face {
+        display: inline-flex;
+        height: 24px;
+        align-items: center;
+        gap: 6px;
+        padding: 0 10px 0 8px;
+        background: transparent;
+        color: var(--fg1);
+        font-size: 12px;
+        font-weight: 500;
+      }
+      .split-face:hover {
+        background: var(--bg2-hover);
+      }
+      .split-face svg {
+        width: 14px;
+        height: 14px;
+      }
+      .split-caret {
+        display: inline-grid;
+        width: 24px;
+        place-items: center;
+        border-left: 1px solid var(--border2);
+        color: var(--fg2);
+      }
+      .split-caret:hover {
+        background: var(--bg2-hover);
+        color: var(--fg1);
+      }
+      .split-caret svg {
+        width: 12px;
+        height: 12px;
+      }
+      .split.is-disabled .split-face,
+      .split.is-disabled .split-caret {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      /* dropdown menu (Create PR ▾) */
+      .menu {
+        position: absolute;
+        top: 36px;
+        right: 8px;
+        z-index: 5;
+        width: 200px;
+        padding: 4px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-md);
+        background: var(--bg2);
+        box-shadow: var(--shadow);
+      }
+      .menu-item {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        height: 30px;
+        padding: 0 8px;
+        border-radius: var(--radius-sm);
+        color: var(--fg1);
+        font-size: 13px;
+      }
+      .menu-item:hover {
+        background: var(--bg2-hover);
+      }
+      .menu-item svg {
+        width: 14px;
+        height: 14px;
+        color: var(--fg2);
+        flex: none;
+      }
+
+      /* floating tooltip bubble (drawn state) */
+      .tip {
+        position: absolute;
+        top: 42px;
+        z-index: 6;
+        padding: 5px 9px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: var(--bg3);
+        color: var(--fg1);
+        font-size: 11px;
+        box-shadow: var(--shadow);
+        white-space: nowrap;
+      }
+
+      /* spinner — the island's first-load state */
+      .spin {
+        width: 14px;
+        height: 14px;
+        flex: none;
+        border-radius: 999px;
+        border: 2px solid var(--border3);
+        border-top-color: var(--fg2);
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .spin {
+          animation: none;
+        }
+      }
+
+      /* faded surface hint below the row — the Changes diff list */
+      .below {
+        padding: 10px 12px 14px;
+        display: grid;
+        gap: 9px;
+      }
+      .skel {
+        height: 9px;
+        border-radius: 999px;
+        background: var(--bg2);
+      }
+      .skel.w1 {
+        width: 42%;
+      }
+      .skel.w2 {
+        width: 61%;
+      }
+      .skel.w3 {
+        width: 30%;
+      }
+
+      /* ── "How it works" bullet block ── */
+      .changes {
+        margin-top: 14px;
+        padding: 13px 16px;
+        border: 1px dashed var(--border3);
+        border-radius: var(--radius-md);
+        background: color-mix(in srgb, var(--sidebar-bg) 70%, transparent);
+      }
+      .changes-label {
+        margin-bottom: 6px;
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+        color: var(--fg3);
+      }
+      .changes ul {
+        margin: 0;
+        padding-left: 17px;
+        color: var(--fg2);
+        font-size: 12.5px;
+        line-height: 1.6;
+      }
+      .changes li + li {
+        margin-top: 4px;
+      }
+      .changes b {
+        color: var(--fg1);
+        font-weight: 600;
+      }
+      .changes code {
+        padding: 1px 5px;
+        border-radius: var(--radius-sm);
+        background: var(--bg2-hover);
+        color: var(--fg1);
+        font-size: 11px;
+      }
+
+      /* ── Priority ladder ── */
+      .ladder {
+        display: grid;
+        gap: 6px;
+        margin-top: 4px;
+      }
+      .rung {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 9px 14px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-md);
+        background: color-mix(in srgb, var(--sidebar-bg) 86%, transparent);
+      }
+      .rung-n {
+        flex: none;
+        width: 22px;
+        height: 22px;
+        display: grid;
+        place-items: center;
+        border-radius: 999px;
+        background: var(--bg2);
+        color: var(--fg2);
+        font-size: 11px;
+        font-weight: 650;
+        font-variant-numeric: tabular-nums;
+      }
+      .rung-what {
+        min-width: 0;
+        flex: 1;
+        font-size: 13px;
+      }
+      .rung-what span {
+        color: var(--fg3);
+        font-size: 12px;
+      }
+      .rung-states {
+        flex: none;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        justify-content: flex-end;
+      }
+      .state-chip {
+        padding: 2px 8px;
+        border-radius: 999px;
+        border: 1px solid var(--border2);
+        color: var(--fg2);
+        font-family: var(--mono);
+        font-size: 10.5px;
+      }
+      .state-chip.green {
+        border-color: color-mix(in srgb, var(--green-primary) 40%, transparent);
+        color: var(--green-primary);
+      }
+      .state-chip.violet {
+        border-color: color-mix(in srgb, var(--violet-primary) 40%, transparent);
+        color: var(--violet-primary);
+      }
+      .state-chip.red {
+        border-color: color-mix(in srgb, var(--red-primary) 40%, transparent);
+        color: var(--red-primary);
+      }
+      .state-chip.yellow {
+        border-color: color-mix(in srgb, var(--yellow-primary) 45%, transparent);
+        color: var(--yellow-primary);
+      }
+
+      /* ── Reference table ── */
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12.5px;
+      }
+      thead th {
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--border2);
+        color: var(--fg3);
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        text-align: left;
+        white-space: nowrap;
+      }
+      tbody td {
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--border1);
+        color: var(--fg2);
+        vertical-align: top;
+      }
+      tbody td:first-child {
+        white-space: nowrap;
+      }
+      tbody td b {
+        color: var(--fg1);
+        font-weight: 600;
+      }
+      td code {
+        padding: 1px 5px;
+        border-radius: var(--radius-sm);
+        background: var(--bg2-hover);
+        color: var(--fg1);
+        font-size: 11px;
+        white-space: nowrap;
+      }
+      .table-wrap {
+        overflow-x: auto;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 86%, transparent);
+      }
+
+      @media (max-width: 900px) {
+        .thesis {
+          grid-template-columns: 1fr;
+        }
+        .hero {
+          grid-template-columns: 1fr;
+          align-items: start;
+        }
+        .hero-aside {
+          align-items: flex-start;
+        }
+        .meta {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <defs>
+        <symbol id="i-git-pr" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" />
+            <path d="M13 6h3a2 2 0 0 1 2 2v7" /><line x1="6" x2="6" y1="9" y2="21" />
+          </g>
+        </symbol>
+        <symbol id="i-git-pr-draft" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" />
+            <path d="M18 6V5.5" /><path d="M18 11.5V11" /><line x1="6" x2="6" y1="9" y2="21" />
+          </g>
+        </symbol>
+        <symbol id="i-git-pr-create" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="6" cy="6" r="3" /><path d="M6 9v12" />
+            <path d="M13 6h3a2 2 0 0 1 2 2v3" /><path d="M18 15v6" /><path d="M21 18h-6" />
+          </g>
+        </symbol>
+        <symbol id="i-git-merge-conflict" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 6h4a2 2 0 0 1 2 2v7" /><path d="M6 12v9" />
+            <path d="M9 3 3 9" /><path d="M9 9 3 3" /><circle cx="18" cy="18" r="3" />
+          </g>
+        </symbol>
+        <symbol id="i-git-pr-closed" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="6" cy="6" r="3" /><path d="M6 9v12" />
+            <path d="m21 3-6 6" /><path d="m21 9-6-6" />
+            <path d="M18 11.5V15" /><circle cx="18" cy="18" r="3" />
+          </g>
+        </symbol>
+        <symbol id="i-play" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z" />
+          </g>
+        </symbol>
+        <symbol id="i-commit-push" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m8 6 4-4 4 4" /><path d="M12 2v6" />
+            <circle cx="12" cy="15" r="3" /><path d="M3 15h6" /><path d="M15 15h6" />
+          </g>
+        </symbol>
+        <symbol id="i-git-pr-arrow" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="5" cy="6" r="3" /><path d="M5 9v12" />
+            <circle cx="19" cy="18" r="3" /><path d="m15 9-3-3 3-3" />
+            <path d="M12 6h5a2 2 0 0 1 2 2v7" />
+          </g>
+        </symbol>
+        <symbol id="i-git-merge" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" />
+            <path d="M6 21V9a9 9 0 0 0 9 9" />
+          </g>
+        </symbol>
+        <symbol id="i-arrow-up" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 19V5" /><path d="m5 12 7-7 7 7" />
+          </g>
+        </symbol>
+        <symbol id="i-arrow-down" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 5v14" /><path d="m19 12-7 7-7-7" />
+          </g>
+        </symbol>
+        <symbol id="i-arrow-right" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 12h14" /><path d="m12 5 7 7-7 7" />
+          </g>
+        </symbol>
+        <symbol id="i-arrow-up-right" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M7 7h10v10" /><path d="M7 17 17 7" />
+          </g>
+        </symbol>
+        <symbol id="i-chevrons-right" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m6 17 5-5-5-5" /><path d="m13 17 5-5-5-5" />
+          </g>
+        </symbol>
+        <symbol id="i-chevron-down" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m6 9 6 6 6-6" />
+          </g>
+        </symbol>
+        <symbol id="i-chevrons-up-down" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m7 15 5 5 5-5" /><path d="m7 9 5-5 5 5" />
+          </g>
+        </symbol>
+        <symbol id="i-archive" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect width="20" height="5" x="2" y="3" rx="1" />
+            <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" /><path d="M10 12h4" />
+          </g>
+        </symbol>
+        <symbol id="i-list-checks" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m3 17 2 2 4-4" /><path d="m3 7 2 2 4-4" />
+            <path d="M13 6h8" /><path d="M13 12h8" /><path d="M13 18h8" />
+          </g>
+        </symbol>
+        <symbol id="i-external" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M15 3h6v6" /><path d="M10 14 21 3" />
+            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+          </g>
+        </symbol>
+        <symbol id="i-sun" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="4" />
+            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+          </g>
+        </symbol>
+      </defs>
+    </svg>
+
+    <main class="page">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">Changes tab · Review tab · PR status row · State catalog</div>
+          <h1>Every state the PR status island can show</h1>
+          <p class="lede">
+            The PR status row is the first row of <b>both the Changes tab and the
+            Review tab</b> — one stable 40px home for PR creation and PR status.
+            Without a PR it holds the branch → target picker and Create PR;
+            with a PR it becomes the <b>status island</b>: one derived state at a
+            time, with the button that resolves it. This catalog is the full
+            inventory — every state, when it appears, and what its actions do.
+          </p>
+        </div>
+        <div class="hero-aside">
+          <button class="theme-toggle" id="themeBtn" type="button">
+            <svg width="14" height="14"><use href="#i-sun" /></svg>
+            <span id="themeLabel">Light preview</span>
+          </button>
+          <div class="summary-chip">
+            <strong>14 island states + 3 pre-PR states</strong>
+            <span>First match wins, top to bottom. Fix the tree, then the PR.</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="thesis" aria-label="Principles">
+        <div class="thesis-card primary">
+          <h3>One state at a time</h3>
+          <p>
+            The island never stacks messages. A priority decision over all
+            inputs picks a single label with 0–2 action buttons — the one thing
+            to do next. Local blockers always outrank GitHub's opinion.
+          </p>
+        </div>
+        <div class="thesis-card">
+          <h3>Three data sources, applied atomically</h3>
+          <p>
+            <code>gitStatus</code> (local truth: conflicts, uncommitted,
+            ahead/behind) + <code>ghPrGet</code> (GitHub: draft/merged/closed,
+            mergeable state) + <code>ghPrChecks</code> (CI). Results land as one
+            settled batch, so mixed-generation flashes can't render.
+          </p>
+        </div>
+        <div class="thesis-card">
+          <h3>Actions resolve the state</h3>
+          <p>
+            Most buttons send a prompt to the active chat — the agent does the
+            git work. Only Merge (squash via <code>gh</code>), Archive (parks
+            the workspace) and Show checks (opens Review) act directly.
+          </p>
+        </div>
+      </section>
+
+      <nav aria-label="Cases">
+        <a href="#a1">A1 · No PR yet</a>
+        <a href="#a2">A2 · Nothing to PR</a>
+        <a href="#a3">A3 · PR options</a>
+        <span class="nav-sep"></span>
+        <a href="#b1">B1 · Loading</a>
+        <a href="#b2">B2 · PR open</a>
+        <span class="nav-sep"></span>
+        <a href="#c1">C1 · Conflicts</a>
+        <a href="#c2">C2 · Uncommitted</a>
+        <a href="#c3">C3 · Ahead</a>
+        <a href="#c4">C4 · Behind</a>
+        <span class="nav-sep"></span>
+        <a href="#d1">D1 · Draft</a>
+        <a href="#d2">D2 · Checks pending</a>
+        <a href="#d3">D3 · Unable to merge</a>
+        <a href="#d4">D4 · Behind base</a>
+        <a href="#d5">D5 · Blocked</a>
+        <a href="#d6">D6 · Checking</a>
+        <span class="nav-sep"></span>
+        <a href="#e1">E1 · Ready to merge</a>
+        <a href="#e2">E2 · Merged</a>
+        <a href="#e3">E3 · Closed</a>
+        <span class="nav-sep"></span>
+        <a href="#f1">F1 · Agent gate</a>
+        <a href="#f2">F2 · Priority ladder</a>
+        <a href="#f3">F3 · Reference</a>
+      </nav>
+
+      <p class="band">Part A — Before the PR · the same row, Create-PR mode</p>
+
+      <div class="catalog">
+        <!-- A1 ───────────────────────────────────────────── -->
+        <section class="case" id="a1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A1</span>
+                <span class="tag ship">Ships today</span>
+              </div>
+              <h2>No PR yet — branch → target picker + Create PR</h2>
+              <p class="case-copy">
+                The workspace has changes but no PR. The row shows <b>where this
+                branch is going</b>: the workspace's own branch (plain
+                <code>--fg2</code> text) → the target-branch dropdown, and the
+                Create PR split-button on the right. First match on
+                <code>prNumber == null</code> — the island never renders here.
+              </p>
+            </div>
+            <div class="meta">
+              <code>pr-status-row.tsx</code> ·
+              <code>target-branch-select.tsx</code> ·
+              <code>create-pr-button.tsx</code><br />
+              Not rendered for Local main — it never has a PR.
+            </div>
+          </div>
+
+          <div class="frame">
+            <div class="subtabs">
+              <span class="subtab active">Changes</span>
+              <span class="subtab">Review</span>
+              <span class="subtab">Terminal</span>
+            </div>
+            <div class="pr-row">
+              <span class="branch-name">zeros/plumeria-a26a</span>
+              <span class="branch-arrow"><svg><use href="#i-arrow-right" /></svg></span>
+              <span class="pill-dd"><b>origin/main</b><svg><use href="#i-chevrons-up-down" /></svg></span>
+              <span class="pr-spacer"></span>
+              <span class="split">
+                <span class="split-face"><svg><use href="#i-git-pr-create" /></svg>Create PR</span>
+                <span class="split-caret"><svg><use href="#i-chevron-down" /></svg></span>
+              </span>
+            </div>
+            <div class="below">
+              <div class="skel w2"></div>
+              <div class="skel w1"></div>
+              <div class="skel w3"></div>
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">How it works</div>
+            <ul>
+              <li><b>Branch name</b> is plain fg2 text that truncates on narrow rows; the arrow reads as "merges into". No "Target branch" label — the geometry says it.</li>
+              <li><b>The dropdown</b> opens a searchable picker of <b>remote branches only</b> (a PR merges on GitHub, so the base must exist there). Picking a new base rebases the branch onto it.</li>
+              <li><b>Create PR</b> drops a PR-creation brief into the active chat — the agent reviews the diff, commits, pushes, and runs <code>gh pr create</code>. Once <code>prNumber</code> lands, this row becomes the island.</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- A2 ───────────────────────────────────────────── -->
+        <section class="case" id="a2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A2</span>
+                <span class="tag ship">Ships today</span>
+              </div>
+              <h2>Nothing to PR — Create PR stays put, but inert</h2>
+              <p class="case-copy">
+                The branch has no changes (no diff vs base, nothing uncommitted).
+                The row is the <b>stable home</b> for PR creation, so the button
+                doesn't disappear — it disables at 50% opacity, and its tooltip
+                explains why.
+              </p>
+            </div>
+            <div class="meta">
+              Gate: <code>useWorkspaceHasChanges</code> →
+              <code>disabled</code> + <code>disabledReason</code> on
+              <code>CreatePrButton</code>.
+            </div>
+          </div>
+
+          <div class="frame">
+            <div class="pr-row" style="overflow: visible">
+              <span class="branch-name">zeros/plumeria-a26a</span>
+              <span class="branch-arrow"><svg><use href="#i-arrow-right" /></svg></span>
+              <span class="pill-dd"><b>origin/main</b><svg><use href="#i-chevrons-up-down" /></svg></span>
+              <span class="pr-spacer"></span>
+              <span class="split is-disabled">
+                <span class="split-face"><svg><use href="#i-git-pr-create" /></svg>Create PR</span>
+                <span class="split-caret"><svg><use href="#i-chevron-down" /></svg></span>
+              </span>
+              <span class="tip" style="right: 8px">Nothing to PR yet — this branch has no changes</span>
+            </div>
+            <div class="below" style="padding-top: 26px">
+              <div class="skel w1"></div>
+              <div class="skel w3"></div>
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">How it works</div>
+            <ul>
+              <li>A disabled button still receives pointer events (span wrapper) so the tooltip can explain <b>why</b> it's inert instead of feeling broken.</li>
+              <li>The same disabled treatment applies while the <b>agent is working</b> — see F1 — with the tooltip "Agent is working — available when the turn finishes".</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- A3 ───────────────────────────────────────────── -->
+        <section class="case" id="a3">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A3</span>
+                <span class="tag ship">Ships today</span>
+              </div>
+              <h2>Create PR ▾ — the split-button menu</h2>
+              <p class="case-copy">
+                The caret opens two secondary paths: <b>Create draft PR</b>
+                (v1 stub — surfaces a "coming soon" toast) and
+                <b>Create PR manually</b> (opens GitHub's compare page on the
+                configured remote — fork workflows included).
+              </p>
+            </div>
+            <div class="meta">
+              Manual URL prefers the repo's <code>effectiveRemote</code> over
+              the stored origin — fork workflow safe.
+            </div>
+          </div>
+
+          <div class="frame" style="padding-bottom: 66px">
+            <div class="pr-row" style="overflow: visible; border-bottom: 0">
+              <span class="branch-name">zeros/plumeria-a26a</span>
+              <span class="branch-arrow"><svg><use href="#i-arrow-right" /></svg></span>
+              <span class="pill-dd"><b>origin/main</b><svg><use href="#i-chevrons-up-down" /></svg></span>
+              <span class="pr-spacer"></span>
+              <span class="split">
+                <span class="split-face"><svg><use href="#i-git-pr-create" /></svg>Create PR</span>
+                <span class="split-caret" style="background: var(--bg2-hover); color: var(--fg1)"><svg><use href="#i-chevron-down" /></svg></span>
+              </span>
+              <div class="menu">
+                <div class="menu-item"><svg><use href="#i-git-pr-draft" /></svg>Create draft PR</div>
+                <div class="menu-item"><svg><use href="#i-external" /></svg>Create PR manually</div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <p class="band">Part B — Island bootstrap · loading &amp; the honest fallback</p>
+
+      <div class="catalog">
+        <!-- B1 ───────────────────────────────────────────── -->
+        <section class="case" id="b1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">B1</span>
+                <span class="tag ship">Ships today</span>
+              </div>
+              <h2>First load — chip + "Loading...", no guessed state</h2>
+              <p class="case-copy">
+                The true first load of a workspace's PR: no settled data yet, so
+                the island derives <b>nothing</b>. Just the <code>#N ↗</code>
+                chip and a quiet "Loading..." label. A guessed intermediate ("PR open" →
+                "Ready to merge" a beat later) reads as status churn — a plain
+                "Loading..." says it honestly (no spinner, 2026-07-19 spec).
+              </p>
+            </div>
+            <div class="meta">
+              A last-known cache re-renders the previous status instantly on tab
+              switches — this spinner shows <b>only once</b> per workspace + PR.
+            </div>
+          </div>
+
+          <div class="frame">
+            <div class="pr-row tone-active">
+              <span class="pr-chip">View PR<svg><use href="#i-arrow-up-right" /></svg></span>
+              <span class="pr-label" style="color: var(--fg2)">Loading...</span>
+            </div>
+            <div class="below">
+              <div class="skel w2"></div>
+              <div class="skel w1"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- B2 ───────────────────────────────────────────── -->
+        <section class="case" id="b2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">B2</span>
+                <span class="tag ship">Ships today</span>
+                <span class="tag context">Fallback</span>
+              </div>
+              <h2>"PR open" — GitHub metadata genuinely unavailable</h2>
+              <p class="case-copy">
+                The fetch round settled, the local tree is clean, but
+                <code>ghPrGet</code> returned nothing — offline, or
+                <code>gh</code> unauthenticated. "PR open" is the honest floor:
+                a PR exists, and that's all we can truthfully claim. No actions.
+              </p>
+            </div>
+            <div class="meta">
+              <code>kind: pr-open</code> · tone neutral · 0 actions<br />
+              <code>pr-status.ts</code> step 4 — only after the batch settles.
+            </div>
+          </div>
+
+          <div class="frame">
+            <div class="pr-row tone-active">
+              <span class="pr-chip">View PR<svg><use href="#i-arrow-up-right" /></svg></span>
+              <span class="pr-label">PR open</span>
+            </div>
+            <div class="below">
+              <div class="skel w2"></div>
+              <div class="skel w3"></div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <p class="band">Part C — Local blockers · fix the working tree first</p>
+
+      <div class="catalog">
+        <!-- C1 ───────────────────────────────────────────── -->
+        <section class="case" id="c1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">C1</span>
+                <span class="tag ship">Ships today</span>
+                <span class="tag gap">Warning tone</span>
+              </div>
+              <h2>Merge conflicts</h2>
+              <p class="case-copy">
+                The highest-priority non-terminal state — it wins over everything
+                except merged/closed. Appears when the local tree has conflicted
+                paths (or a conflict state like a paused rebase), <b>or</b> when
+                GitHub reports <code>mergeable_state: dirty</code> (D-branch,
+                same render). <b>Resolve</b> prompts the agent to rebase onto the
+                base, fix every conflict, verify build + tests, then push.
+              </p>
+            </div>
+            <div class="meta">
+              <code>kind: merge-conflicts</code> · tone warning ·
+              <b>Resolve</b> (prompt)<br />
+              Two triggers, one state: local conflicts, or GitHub
+              <code>dirty</code>.
+            </div>
+          </div>
+
+          <div class="frame">
+            <div class="pr-row tone-active">
+              <span class="pr-chip">View PR<svg><use href="#i-arrow-up-right" /></svg></span>
+              <span class="pr-label">Merge conflicts</span>
+              <span class="pr-spacer"></span>
+              <span class="act secondary"><svg><use href="#i-git-merge-conflict" /></svg>Resolve</span>
+            </div>
+            <div class="below">
+              <div class="skel w2"></div>
+              <div class="skel w1"></div>
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Design note</div>
+            <ul>
+              <li>Every open-PR state renders on the shared brown surface (<code>--pr-status-surface</code>) — an <code>--fg1</code> label, a <code>--brown-primary</code> chip, and a filled primary action (the white primary button in Shade, a solid <code>--brown-fg</code> in Light) so its icon stays legible in both themes. The tone is still <b>warning</b> in the state machine; whether conflicts should read hotter than brown (a dedicated red surface) is an open review question.</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- C2 ───────────────────────────────────────────── -->
+        <section class="case" id="c2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">C2</span>
+                <span class="tag ship">Ships today</span>
+              </div>
+              <h2>Uncommitted changes</h2>
+              <p class="case-copy">
+                Staged + unstaged + untracked + conflicted counts sum above zero.
+                The PR can't reflect work that isn't committed, so this outranks
+                everything below it. <b>Commit &amp; Push</b> prompts the agent to
+                commit with a conventional message and push (setting the upstream
+                if the branch has none).
+              </p>
+            </div>
+            <div class="meta">
+              <code>kind: uncommitted</code> · tone neutral ·
+              <b>Commit &amp; Push</b> (prompt)
+            </div>
+          </div>
+
+          <div class="frame">
+            <div class="pr-row tone-active">
+              <span class="pr-chip">View PR<svg><use href="#i-arrow-up-right" /></svg></span>
+              <span class="pr-label">Uncommitted changes</span>
+              <span class="pr-spacer"></span>
+              <span class="act secondary"><svg><use href="#i-commit-push" /></svg>Commit &amp; Push</span>
+            </div>
+            <div class="below">
+              <div class="skel w2"></div>
+              <div class="skel w1"></div>
+              <div class="skel w3"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- C3 ───────────────────────────────────────────── -->
+        <section class="case" id="c3">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">C3</span>
+                <span class="tag ship">Ships today</span>
+              </div>
+              <h2>Ahead by N commits</h2>
+              <p class="case-copy">
+                Everything is committed, but local commits haven't been pushed —
+                the PR on GitHub is stale. The label counts them ("Ahead by 1
+                commit" / "Ahead by 3 commits"). <b>Push</b> prompts the agent to
+                push the branch so the PR catches up.
+              </p>
+            </div>
+            <div class="meta">
+              <code>kind: ahead</code> · tone neutral · <b>Push</b> (prompt)<br />
+              <code>ahead</code> is null (skipped) when the branch has no
+              upstream.
+            </div>
+          </div>
+
+          <div class="frame">
+            <div class="pr-row tone-active">
+              <span class="pr-chip">View PR<svg><use href="#i-arrow-up-right" /></svg></span>
+              <span class="pr-label">Ahead by 2 commits</span>
+              <span class="pr-spacer"></span>
+              <span class="act secondary"><svg><use href="#i-arrow-up" /></svg>Push</span>
+            </div>
+            <div class="below">
+              <div class="skel w1"></div>
+              <div class="skel w2"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- C4 ───────────────────────────────────────────── -->
+        <section class="case" id="c4">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">C4</span>
+                <span class="tag ship">Ships today</span>
+              </div>
+              <h2>Behind by N commits</h2>
+              <p class="case-copy">
+                The upstream has commits this local branch doesn't — e.g. the
+                agent pushed from another session, or a teammate pushed to the
+                same branch. <b>Pull</b> prompts the agent to pull (rebase
+                preferred), resolve anything, and push the result.
+              </p>
+            </div>
+            <div class="meta">
+              <code>kind: behind</code> · tone neutral · <b>Pull</b> (prompt)<br />
+              Distinct from D4 "Behind base branch" — this is behind the
+              branch's <b>own upstream</b>.
+            </div>
+          </div>
+
+          <div class="frame">
+            <div class="pr-row tone-active">
+              <span class="pr-chip">View PR<svg><use href="#i-arrow-up-right" /></svg></span>
+              <span class="pr-label">Behind by 3 commits</span>
+              <span class="pr-spacer"></span>
+              <span class="act secondary"><svg><use href="#i-arrow-down" /></svg>Pull</span>
+            </div>
+            <div class="below">
+              <div class="skel w2"></div>
+              <div class="skel w3"></div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <p class="band">Part D — PR readiness · GitHub's opinion, once the tree is clean</p>
+
+      <div class="catalog">
+        <!-- D1 ───────────────────────────────────────────── -->
+        <section class="case" id="d1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">D1</span>
+                <span class="tag ship">Ships today</span>
+              </div>
+              <h2>Draft PR open</h2>
+              <p class="case-copy">
+                The PR exists but is a draft (persisted <code>prState</code> or
+                GitHub's <code>mergeable_state: draft</code>). <b>Ready for
+                review</b> prompts the agent to double-check the title and
+                description are current, then run <code>gh pr ready</code>.
+              </p>
+            </div>
+            <div class="meta">
+              <code>kind: draft</code> · tone neutral ·
+              <b>Ready for review</b> (prompt)
+            </div>
+          </div>
+
+          <div class="frame">
+            <div class="pr-row tone-active">
+              <span class="pr-chip">View PR<svg><use href="#i-arrow-up-right" /></svg></span>
+              <span class="pr-label">Draft PR open</span>
+              <span class="pr-spacer"></span>
+              <span class="act secondary"><svg><use href="#i-git-pr-arrow" /></svg>Ready for review</span>
+            </div>
+            <div class="below">
+              <div class="skel w2"></div>
+              <div class="skel w1"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- D2 ───────────────────────────────────────────── -->
+        <section class="case" id="d2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">D2</span>
+                <span class="tag ship">Ships today</span>
+              </div>
+              <h2>N checks pending… — CI running, nothing failed</h2>
+              <p class="case-copy">
+                CI is still running and no check has failed yet. There is nothing
+                to do but wait, so the row shows <b>no buttons</b> — just the
+                live count from <code>ghPrChecks</code>, singular/plural aware
+                ("1 check pending…" / "5 checks pending…"). It updates on the
+                shared git-refresh signal.
+              </p>
+            </div>
+            <div class="meta">
+              <code>kind: checks-pending</code> · tone neutral · 0 actions
+            </div>
+          </div>
+
+          <div class="frame">
+            <div class="pr-row tone-active">
+              <span class="pr-chip">View PR<svg><use href="#i-arrow-up-right" /></svg></span>
+              <span class="pr-label">5 checks pending…</span>
+            </div>
+            <div class="below">
+              <div class="skel w1"></div>
+              <div class="skel w2"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- D3 ───────────────────────────────────────────── -->
+        <section class="case" id="d3">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">D3</span>
+                <span class="tag ship">Ships today</span>
+                <span class="tag danger">Danger tone</span>
+              </div>
+              <h2>Unable to merge — a check failed</h2>
+              <p class="case-copy">
+                At least one check failed, or GitHub reports
+                <code>unstable</code>. A known failure <b>wins over
+                "pending"</b>: checks run concurrently, so one commonly fails
+                while others are still in flight — a calm "5 checks pending…"
+                would hide the failure the user needs to see. <b>Show checks</b>
+                opens the Review tab, where the failing run's Checks sub-tab and
+                its "Add to chat" fix-it brief are one click away.
+              </p>
+            </div>
+            <div class="meta">
+              <code>kind: unable-to-merge</code> · tone danger ·
+              <b>Show checks</b> (navigation)<br />
+              Never gated by the agent-working rule — it's pure navigation.
+            </div>
+          </div>
+
+          <div class="frame">
+            <div class="pr-row tone-active">
+              <span class="pr-chip">View PR<svg><use href="#i-arrow-up-right" /></svg></span>
+              <span class="pr-label">1/6 checks failed</span>
+              <span class="pr-spacer"></span>
+              <span class="act secondary"><svg><use href="#i-list-checks" /></svg>Show checks</span>
+            </div>
+            <div class="below">
+              <div class="skel w2"></div>
+              <div class="skel w1"></div>
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Design note</div>
+            <ul>
+              <li>Like C1, tone <b>danger</b> renders on the shared brown surface (<code>--pr-status-surface</code>) rather than a dedicated red one — no red label. The tone hook exists in <code>CARD_TONE</code>/<code>LABEL_TONE</code> if review decides failures should read red.</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- D4 ───────────────────────────────────────────── -->
+        <section class="case" id="d4">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">D4</span>
+                <span class="tag ship">Ships today</span>
+              </div>
+              <h2>Require branch to be up to date (behind base)</h2>
+              <p class="case-copy">
+                GitHub's <code>mergeable_state: behind</code> — the base moved on
+                and the repo requires branches to be current before merging.
+                <b>Update branch</b> prompts the agent to rebase onto the latest
+                base, resolve anything, run relevant tests, and push.
+              </p>
+            </div>
+            <div class="meta">
+              <code>kind: behind-base</code> · tone neutral ·
+              <b>Update branch</b> (prompt)
+            </div>
+          </div>
+
+          <div class="frame">
+            <div class="pr-row tone-active">
+              <span class="pr-chip">View PR<svg><use href="#i-arrow-up-right" /></svg></span>
+              <span class="pr-label">Require branch to be up to date ( 2 commits behind )</span>
+              <span class="pr-spacer"></span>
+              <span class="act secondary"><svg><use href="#i-arrow-down" /></svg>Update branch</span>
+            </div>
+            <div class="below">
+              <div class="skel w1"></div>
+              <div class="skel w3"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- D5 ───────────────────────────────────────────── -->
+        <section class="case" id="d5">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">D5</span>
+                <span class="tag ship">Ships today</span>
+              </div>
+              <h2>Blocked from merging</h2>
+              <p class="case-copy">
+                GitHub's <code>mergeable_state: blocked</code> — branch
+                protection is unsatisfied: a required review is missing, a
+                required check hasn't reported, or a merge queue gate. Nothing in
+                this app can resolve it, so the row shows <b>no buttons</b>.
+              </p>
+            </div>
+            <div class="meta">
+              <code>kind: blocked</code> · tone neutral · 0 actions
+            </div>
+          </div>
+
+          <div class="frame">
+            <div class="pr-row tone-active">
+              <span class="pr-chip">View PR<svg><use href="#i-arrow-up-right" /></svg></span>
+              <span class="pr-label">Blocked from merging</span>
+            </div>
+            <div class="below">
+              <div class="skel w2"></div>
+              <div class="skel w1"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- D6 ───────────────────────────────────────────── -->
+        <section class="case" id="d6">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">D6</span>
+                <span class="tag ship">Ships today</span>
+                <span class="tag context">Transient</span>
+              </div>
+              <h2>Checking mergeability…</h2>
+              <p class="case-copy">
+                The default floor: checks are green (or absent) but GitHub hasn't
+                computed <code>mergeable_state</code> yet — typically the seconds
+                right after a push — or returned a state we don't recognise.
+                Resolves itself on the next refresh. <b>Stability rule
+                (2026-07-19):</b> when a definitive state was already showing,
+                a transient "unknown" from GitHub is MASKED by it for up to
+                30s while the island re-probes quickly — this row renders only
+                on a true first load, right after a direct action, or when
+                GitHub is genuinely stuck.
+              </p>
+            </div>
+            <div class="meta">
+              <code>kind: checking</code> · tone neutral · 0 actions<br />
+              <code>has_hooks</code> is treated as clean, so hook-enabled repos
+              can't get stuck here.
+            </div>
+          </div>
+
+          <div class="frame">
+            <div class="pr-row tone-active">
+              <span class="pr-chip">View PR<svg><use href="#i-arrow-up-right" /></svg></span>
+              <span class="pr-label">Checking mergeability…</span>
+            </div>
+            <div class="below">
+              <div class="skel w3"></div>
+              <div class="skel w2"></div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <p class="band">Part E — Terminal states · ready, merged &amp; closed</p>
+
+      <div class="catalog">
+        <!-- E1 ───────────────────────────────────────────── -->
+        <section class="case" id="e1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">E1</span>
+                <span class="tag ship">Ships today</span>
+                <span class="tag ship">Success tone</span>
+              </div>
+              <h2>Ready to merge — the green row</h2>
+              <p class="case-copy">
+                Tree clean, everything pushed, checks green, GitHub says
+                <code>clean</code> (or <code>has_hooks</code>) and
+                <code>isMergeable</code> isn't false. The whole row turns
+                <code>--green-bg</code> with a <code>--green-fg</code> label —
+                the strongest "you're done, ship it" signal in the tab.
+                <b>Merge</b> is the island's only green filled button; it calls
+                <code>gh pr merge --squash</code> directly and toasts the result.
+              </p>
+            </div>
+            <div class="meta">
+              <code>kind: ready-to-merge</code> · tone success ·
+              <b>Merge</b> (direct, squash)<br />
+              Gated while the agent is working — see F1.
+            </div>
+          </div>
+
+          <div class="frame">
+            <div class="pr-row tone-success">
+              <span class="pr-chip">View PR<svg><use href="#i-arrow-up-right" /></svg></span>
+              <span class="pr-label">Ready to merge</span>
+              <span class="pr-spacer"></span>
+              <span class="act primary-merge"><svg><use href="#i-git-pr-arrow" /></svg>Merge</span>
+            </div>
+            <div class="below">
+              <div class="skel w2"></div>
+              <div class="skel w1"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- E2 ───────────────────────────────────────────── -->
+        <section class="case" id="e2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">E2</span>
+                <span class="tag ship">Ships today</span>
+                <span class="tag changed">Merged tone</span>
+              </div>
+              <h2>Merged — the violet row</h2>
+              <p class="case-copy">
+                The PR merged (state or <code>mergedAt</code>). Terminal: nothing
+                local matters any more, so this wins over <b>every</b> other
+                state. The row turns <code>--violet-bg</code>/<code>--violet-fg</code>
+                and offers two exits: <b>Continue</b> (dashed) prompts the agent
+                to summarise what shipped and plan the next task in this
+                workspace; <b>Archive</b> (filled) parks the workspace — with
+                Undo.
+              </p>
+            </div>
+            <div class="meta">
+              <code>kind: merged</code> · tone merged ·
+              <b>Continue</b> (prompt) + <b>Archive</b> (direct)
+            </div>
+          </div>
+
+          <div class="frame">
+            <div class="pr-row tone-merged">
+              <span class="pr-chip">View PR<svg><use href="#i-arrow-up-right" /></svg></span>
+              <span class="pr-label">Merged</span>
+              <span class="pr-spacer"></span>
+              <span class="act dashed"><svg><use href="#i-play" /></svg>Continue</span>
+              <span class="act primary-archive"><svg><use href="#i-archive" /></svg>Archive</span>
+            </div>
+            <div class="below">
+              <div class="skel w1"></div>
+              <div class="skel w2"></div>
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">How it works</div>
+            <ul>
+              <li><b>Archive</b> stops any running agent turn, repoints the view (so the open chat isn't stranded on a deleted folder), and offers <b>Undo</b> in a toast.</li>
+              <li>The only state with <b>two</b> buttons — "keep going here" vs "this workspace is done".</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- E3 ───────────────────────────────────────────── -->
+        <section class="case" id="e3">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">E3</span>
+                <span class="tag ship">Ships today</span>
+                <span class="tag danger">Closed tone</span>
+              </div>
+              <h2>Closed — without merging</h2>
+              <p class="case-copy">
+                The PR was closed on GitHub without merging. Also terminal, but
+                deliberately <b>not</b> celebratory: the row turns
+                <code>--red-bg</code> with a <code>--red-fg</code> label and
+                chip — abandoned, not shipped, so no violet and no Continue. The
+                lone <b>Archive</b> is the white primary button (same as Merged)
+                — it parks the workspace, with Undo.
+              </p>
+            </div>
+            <div class="meta">
+              <code>kind: closed</code> · red surface ·
+              <b>Archive</b> (direct, filled)
+            </div>
+          </div>
+
+          <div class="frame">
+            <div class="pr-row tone-closed">
+              <span class="pr-chip">View PR<svg><use href="#i-arrow-up-right" /></svg></span>
+              <span class="pr-label" style="display:inline-flex;align-items:center;gap:6px"><svg style="width:14px;height:14px;color:var(--red-fg)"><use href="#i-git-pr-closed" /></svg>Closed</span>
+              <span class="pr-spacer"></span>
+              <span class="act primary-archive"><svg><use href="#i-archive" /></svg>Archive</span>
+            </div>
+            <div class="below">
+              <div class="skel w2"></div>
+              <div class="skel w3"></div>
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Design note</div>
+            <ul>
+              <li>Unlike C1/D3 — warning &amp; danger that still render on the shared brown surface — <b>Closed</b> gets its own <code>--red-bg</code> surface: terminal and unambiguous. The <code>View PR</code> chip outline is a new semantic, <code>--pr-status-chip-border-closed</code> — a muted brick red (<code>--red-750</code> · #7b3021) in Shade that flips to <code>--red-300</code> on the light salmon surface. Label and chip text are <code>--red-fg</code> in both themes.</li>
+              <li><b>Archive</b> is the filled white primary button shared with Merged; in Light it stays white with a hairline border instead of the dark inverted fill, so it still reads as a button on the salmon row.</li>
+            </ul>
+          </div>
+        </section>
+      </div>
+
+      <p class="band">Part F — Cross-cutting behaviour</p>
+
+      <div class="catalog">
+        <!-- F1 ───────────────────────────────────────────── -->
+        <section class="case" id="f1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">F1</span>
+                <span class="tag ship">Ships today</span>
+                <span class="tag context">Gate</span>
+              </div>
+              <h2>Agent working — mutating actions park until the turn ends</h2>
+              <p class="case-copy">
+                While the workspace's agent has a turn in flight, every
+                <b>prompt</b> action and <b>Merge</b> disable at 50% — a prompt
+                would queue behind the very turn still reshaping the branch, and
+                a merge could ship a half-pushed state. <b>Archive</b>
+                (deliberately stops the agent) and <b>Show checks</b> (pure
+                navigation) stay live. The tooltip explains the gate.
+              </p>
+            </div>
+            <div class="meta">
+              <code>isActionGatedWhileAgentWorking</code> ·
+              <code>use-agent-working.ts</code><br />
+              Also gates the Create PR button (A-part).
+            </div>
+          </div>
+
+          <div class="frame">
+            <div class="pr-row tone-success" style="overflow: visible">
+              <span class="pr-chip">View PR<svg><use href="#i-arrow-up-right" /></svg></span>
+              <span class="pr-label">Ready to merge</span>
+              <span class="pr-spacer"></span>
+              <span class="act primary-merge is-disabled"><svg><use href="#i-git-pr-arrow" /></svg>Merge</span>
+              <span class="tip" style="right: 8px">Agent is working — available when the turn finishes</span>
+            </div>
+            <div class="below" style="padding-top: 26px">
+              <div class="skel w2"></div>
+              <div class="skel w1"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- F2 ───────────────────────────────────────────── -->
+        <section class="case" id="f2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">F2</span>
+                <span class="tag context">Model</span>
+              </div>
+              <h2>The priority ladder — first match wins</h2>
+              <p class="case-copy">
+                <code>derivePrIslandState</code> walks top to bottom and returns
+                the first hit. The order encodes the workflow: <b>fix your
+                working tree, then look at the PR</b>. Pure data-in / data-out —
+                the whole matrix is unit tested.
+              </p>
+            </div>
+            <div class="meta">
+              <code>src/shell/pr/pr-status.ts</code> — every branch below is a
+              tested return.
+            </div>
+          </div>
+
+          <div class="ladder">
+            <div class="rung">
+              <span class="rung-n">1</span>
+              <span class="rung-what">Terminal PR states <span>— nothing local matters once it's merged or closed</span></span>
+              <span class="rung-states"><span class="state-chip violet">merged</span><span class="state-chip red">closed</span></span>
+            </div>
+            <div class="rung">
+              <span class="rung-n">2</span>
+              <span class="rung-what">Local blockers <span>— conflicts → uncommitted → ahead → behind</span></span>
+              <span class="rung-states"><span class="state-chip yellow">merge-conflicts</span><span class="state-chip">uncommitted</span><span class="state-chip">ahead</span><span class="state-chip">behind</span></span>
+            </div>
+            <div class="rung">
+              <span class="rung-n">3</span>
+              <span class="rung-what">Draft <span>— offer "Ready for review" before judging mergeability</span></span>
+              <span class="rung-states"><span class="state-chip">draft</span></span>
+            </div>
+            <div class="rung">
+              <span class="rung-n">4</span>
+              <span class="rung-what">No GitHub data after settle <span>— offline / gh unauthenticated</span></span>
+              <span class="rung-states"><span class="state-chip">pr-open</span></span>
+            </div>
+            <div class="rung">
+              <span class="rung-n">5</span>
+              <span class="rung-what">A failed check <span>— wins over "pending"; checks run concurrently</span></span>
+              <span class="rung-states"><span class="state-chip red">unable-to-merge</span></span>
+            </div>
+            <div class="rung">
+              <span class="rung-n">6</span>
+              <span class="rung-what">CI still running <span>— nothing failed yet, nothing to do</span></span>
+              <span class="rung-states"><span class="state-chip">checks-pending</span></span>
+            </div>
+            <div class="rung">
+              <span class="rung-n">7</span>
+              <span class="rung-what">GitHub's merge state <span>— dirty / behind / blocked / clean·has_hooks</span></span>
+              <span class="rung-states"><span class="state-chip yellow">merge-conflicts</span><span class="state-chip">behind-base</span><span class="state-chip">blocked</span><span class="state-chip green">ready-to-merge</span></span>
+            </div>
+            <div class="rung">
+              <span class="rung-n">8</span>
+              <span class="rung-what">Fallback <span>— mergeability still computing, or an unknown state</span></span>
+              <span class="rung-states"><span class="state-chip">checking</span></span>
+            </div>
+          </div>
+        </section>
+
+        <!-- F3 ───────────────────────────────────────────── -->
+        <section class="case" id="f3">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">F3</span>
+                <span class="tag context">Reference</span>
+              </div>
+              <h2>Quick reference — every state at a glance</h2>
+              <p class="case-copy">
+                Kind, label, tone, actions, and the exact trigger. Action
+                behaviours: <b>prompt</b> sends a templated brief to the active
+                chat (the agent does the git work), <b>direct</b> calls the
+                engine, <b>nav</b> focuses the Review tab.
+              </p>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Kind</th>
+                  <th>Label</th>
+                  <th>Tone → render</th>
+                  <th>Actions</th>
+                  <th>Trigger</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>merged</code></td>
+                  <td><b>Merged</b></td>
+                  <td>merged → violet row</td>
+                  <td>Continue (direct, new branch) · Archive (direct)</td>
+                  <td>PR state merged, or <code>mergedAt</code> set</td>
+                </tr>
+                <tr>
+                  <td><code>closed</code></td>
+                  <td><b>Closed</b></td>
+                  <td>closed → red row</td>
+                  <td>Archive (direct, filled)</td>
+                  <td>PR closed without merging</td>
+                </tr>
+                <tr>
+                  <td><code>merge-conflicts</code></td>
+                  <td><b>Merge conflicts</b></td>
+                  <td>warning → brown row</td>
+                  <td>Resolve (prompt)</td>
+                  <td>Local conflicted paths / conflict state, or GitHub <code>dirty</code></td>
+                </tr>
+                <tr>
+                  <td><code>uncommitted</code></td>
+                  <td><b>Uncommitted changes</b></td>
+                  <td>neutral → brown row</td>
+                  <td>Commit &amp; Push (prompt)</td>
+                  <td>staged + unstaged + untracked + conflicted &gt; 0</td>
+                </tr>
+                <tr>
+                  <td><code>ahead</code></td>
+                  <td><b>Ahead by N commit(s)</b></td>
+                  <td>neutral → brown row</td>
+                  <td>Push (direct)</td>
+                  <td>Local commits not on the upstream</td>
+                </tr>
+                <tr>
+                  <td><code>behind</code></td>
+                  <td><b>Behind by N commit(s)</b></td>
+                  <td>neutral → brown row</td>
+                  <td>Pull (direct)</td>
+                  <td>Upstream commits not local</td>
+                </tr>
+                <tr>
+                  <td><code>draft</code></td>
+                  <td><b>Draft PR open</b></td>
+                  <td>neutral → brown row</td>
+                  <td>Ready for review (direct)</td>
+                  <td>PR state draft, or mergeable state <code>draft</code></td>
+                </tr>
+                <tr>
+                  <td><code>pr-open</code></td>
+                  <td><b>PR open</b></td>
+                  <td>neutral → brown row</td>
+                  <td>—</td>
+                  <td>Fetch settled but GitHub metadata unavailable</td>
+                </tr>
+                <tr>
+                  <td><code>unable-to-merge</code></td>
+                  <td><b>N/M checks failed</b> (or "Unable to merge")</td>
+                  <td>danger → brown row</td>
+                  <td>Show checks (nav)</td>
+                  <td>failed &gt; 0, or mergeable state <code>unstable</code></td>
+                </tr>
+                <tr>
+                  <td><code>checks-pending</code></td>
+                  <td><b>N check(s) pending…</b></td>
+                  <td>neutral → brown row</td>
+                  <td>—</td>
+                  <td>pending &gt; 0 and nothing failed</td>
+                </tr>
+                <tr>
+                  <td><code>behind-base</code></td>
+                  <td><b>Require branch to be up to date ( N commits behind )</b></td>
+                  <td>neutral → brown row</td>
+                  <td>Update branch (prompt)</td>
+                  <td>Mergeable state <code>behind</code></td>
+                </tr>
+                <tr>
+                  <td><code>blocked</code></td>
+                  <td><b>Blocked from merging</b></td>
+                  <td>neutral → brown row</td>
+                  <td>—</td>
+                  <td>Mergeable state <code>blocked</code> (branch protection)</td>
+                </tr>
+                <tr>
+                  <td><code>ready-to-merge</code></td>
+                  <td><b>Ready to merge</b></td>
+                  <td>success → green row</td>
+                  <td>Merge (direct, squash)</td>
+                  <td>Mergeable state <code>clean</code>/<code>has_hooks</code>, not un-mergeable</td>
+                </tr>
+                <tr>
+                  <td><code>checking</code></td>
+                  <td><b>Checking mergeability…</b></td>
+                  <td>neutral → brown row</td>
+                  <td>—</td>
+                  <td>Fallback — GitHub still computing, or unknown state</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Freshness</div>
+            <ul>
+              <li>Refetches on the shared <b>git-refresh signal</b> (turn end / DB write) — not a poll. A failed source keeps its last-known value rather than blanking the row.</li>
+              <li>The <b>View PR ↗ chip</b> is constant across every state and focuses the Review tab; the tab's own header keeps the "Open on GitHub" external link.</li>
+            </ul>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <script>
+      const btn = document.getElementById("themeBtn");
+      const label = document.getElementById("themeLabel");
+      btn.addEventListener("click", () => {
+        const root = document.documentElement;
+        const dark = root.getAttribute("data-theme") === "dark";
+        root.setAttribute("data-theme", dark ? "light" : "dark");
+        label.textContent = dark ? "Dark preview" : "Light preview";
+      });
+    </script>
+  </body>
+</html>

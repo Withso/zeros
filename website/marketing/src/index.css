@@ -1,0 +1,172 @@
+@import "tailwindcss";
+
+/* ============================================================
+   ZEROS marketing tokens — Zeros Shade (app dark default)
+   ────────────────────────────────────────────────────────────
+   Aligned with styles/zeros-tokens.css `:root` (Zeros Shade).
+   Marketing + the hero product mock use the same warm-gray
+   canvas, radii (4/6/8), and text-xs = 13px as the Mac app.
+   No theme switching on the marketing site.
+   ============================================================ */
+
+@theme inline {
+  /* Fonts → font-sans / font-mono */
+  --font-sans:
+    "Geist", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono:
+    "Geist Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    monospace;
+
+  /* App type scale — text-xs is 13px (not Tailwind's 12). */
+  --text-xs: 0.8125rem;
+
+  /* Fixed radius scale (matches zeros-tokens.css) */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+
+  /* ── BACKGROUNDS ── */
+  --color-bg0: var(--bg0);
+  --color-bg1: var(--bg1);
+  --color-bg1-hover: var(--bg1-hover);
+  --color-bg1-highlight: var(--bg1-highlight);
+  --color-bg2: var(--bg2);
+  --color-bg2-hover: var(--bg2-hover);
+  --color-bg3: var(--bg3);
+  --color-bg3-hover: var(--bg3-hover);
+  --color-bg4: var(--bg4);
+  --color-bg5: var(--bg5);
+
+  /* ── FOREGROUNDS ── */
+  --color-fg1: var(--fg1);
+  --color-fg2: var(--fg2);
+  --color-fg3: var(--fg3);
+  --color-muted-fg: var(--muted-fg);
+
+  /* ── BORDERS ── */
+  --color-border1: var(--border1);
+  --color-border2: var(--border2);
+  --color-border3: var(--border3);
+  --color-border4: var(--border4);
+
+  /* ── SIDEBAR / TOP BAR ── */
+  --color-sidebar-bg: var(--sidebar-bg);
+  --color-sidebar-bg-hover: var(--sidebar-bg-hover);
+
+  /* ── HIGHLIGHTED ── */
+  --color-highlighted-bg: var(--highlighted-bg);
+  --color-highlighted-bright: var(--highlighted-bright);
+
+  /* ── INVERTED / PRIMARY BUTTON ── */
+  --color-inverted-bg: var(--inverted-bg);
+  --color-inverted-fg: var(--inverted-fg);
+  --color-primary-button-bg: var(--primary-button-bg);
+  --color-primary-button-hover: var(--primary-button-hover);
+  --color-primary-button-fg: var(--primary-button-fg);
+
+  /* ── STATUS + SYNTAX ACCENTS ── */
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
+  --color-destructive: var(--destructive);
+  --color-yellow-primary: var(--yellow-primary);
+  --color-yellow-fg: var(--yellow-fg);
+  --color-green-fg: var(--green-fg);
+  --color-green-bg: var(--green-bg);
+
+  /* ── DIFF ── */
+  --color-diff-fg: var(--diff-fg);
+  --color-diff-add: var(--diff-add);
+  --color-diff-remove: var(--diff-remove);
+  --color-diff-muted: var(--diff-muted);
+}
+
+/* ──────────────────────────────────────────────────────────
+   PRIMITIVE TOKENS — Zeros Shade (verbatim from app :root)
+   ────────────────────────────────────────────────────────── */
+:root {
+  color-scheme: dark;
+
+  --bg0:           hsl(5 5% 5%);    /* #0D0C0C — inactive chat pane */
+  --bg1:           hsl(25 5% 7%);   /* #0E0C0C — canvas / active pane */
+  --bg1-hover:     hsl(8 5% 12%);  /* #201D1D */
+  --bg1-highlight: hsl(25 5% 9%);  /* #181716 */
+  --bg2:           hsl(25 4% 12%); /* #201E1D — composer */
+  --bg2-hover:     hsl(25 3% 15%); /* #292928 */
+  --bg3:           var(--sidebar-bg);
+  --bg3-hover:     var(--sidebar-bg-hover);
+  --bg4:           hsl(5 1% 24%);
+  --bg5:           hsl(8 0% 37%);
+
+  --fg1:        hsl(0 2% 92%);   /* #EBEAEA */
+  --fg2:        hsl(20 4% 66%);  /* #ACA7A5 */
+  --fg3:        hsl(15 1% 44%);  /* #71706F */
+  --muted-fg:   hsl(15 4% 44%);  /* #756E6C */
+
+  --sidebar-bg:       hsl(25 5% 9%);   /* #151413 */
+  --sidebar-bg-hover: hsl(25 2% 15%);  /* #272625 */
+
+  --border1: hsl(8 3% 14%);   /* #252323 */
+  --border2: hsl(25 1% 18%);  /* #2E2E2D */
+  --border3: hsl(15 0% 24%);  /* #3D3D3D */
+  --border4: hsl(15 0% 30%);  /* #4D4D4D */
+
+  --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.35);
+
+  --highlighted-bg:     hsl(25 5% 15%);  /* #282624 — user bubble */
+  --highlighted-bright: hsl(25 5% 65%);  /* #AAA5A1 */
+
+  --inverted-bg: hsl(0 2% 92%);   /* #EBEAEA */
+  --inverted-fg: hsl(5 7% 5%);    /* #0E0C0C */
+
+  --primary-button-bg:    var(--inverted-bg);
+  --primary-button-hover: hsl(25 2% 83%);
+  --primary-button-fg:    var(--inverted-fg);
+
+  --success:     oklch(0.55 0.18 145);
+  --warning:     oklch(0.68 0.17 75);
+  --info:        oklch(0.65 0.18 240);
+  --destructive: oklch(0.704 0.191 22.216);
+
+  --green-bg:  hsl(142 30% 12%);
+  --green-fg:  hsl(142 75% 73%);  /* #87EEAC */
+  --yellow-primary: hsl(37 75% 60%); /* #E6AB4C — Dockerfile keywords */
+  --yellow-fg:      hsl(44 100% 50%);
+
+  --diff-fg:     rgb(230 237 243);
+  --diff-add:    rgb(46 160 67);
+  --diff-remove: rgb(248 81 73);
+  --diff-muted:  rgb(139 148 158);
+}
+
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--border1, currentColor);
+    outline-color: var(--highlighted-bright);
+  }
+
+  html,
+  body {
+    background-color: var(--bg1);
+    color: var(--fg2);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    font-feature-settings: "ss01", "cv11";
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+}

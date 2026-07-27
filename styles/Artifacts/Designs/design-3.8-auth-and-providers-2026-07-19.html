@@ -1,0 +1,1109 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-Zeros-root>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Zeros — §3.8 Auth &amp; providers · Design catalog</title>
+    <style>
+      /* ============================================================
+         Tokens — lifted verbatim from styles/zeros-tokens.css so the
+         mockups render on the real Zeros Shade (dark) + Light palettes.
+         Toggle themes with the switch in the header.
+         ============================================================ */
+      :root {
+        color-scheme: dark;
+        --bg1: hsl(25 5% 7%);
+        --bg1-hover: hsl(8 5% 12%);
+        --bg1-highlight: hsl(25 5% 10%);
+        --bg2: hsl(25 4% 12%);
+        --bg2-hover: hsl(25 3% 15%);
+        --bg3: hsl(15 4% 16%);
+        --bg3-hover: hsl(15 3% 20%);
+        --sidebar-bg: hsl(25 5% 9%);
+        --fg1: hsl(0 2% 92%);
+        --fg2: hsl(20 4% 66%);
+        --fg3: hsl(15 1% 44%);
+        --muted-fg: hsl(15 4% 44%);
+        --border1: hsl(8 3% 14%);
+        --border2: hsl(25 1% 18%);
+        --border3: hsl(15 0% 24%);
+        --border4: hsl(15 0% 30%);
+        --highlighted-bright: hsl(25 5% 65%);
+        --inverted-bg: hsl(0 2% 92%);
+        --inverted-fg: hsl(5 7% 5%);
+        --green-primary: hsl(142 69% 58%);
+        --green-bg: hsl(120 23% 17%);
+        --green-fg: hsl(142 75% 73%);
+        --red-primary: hsl(0 91% 71%);
+        --red-bg: hsl(13 81% 14%);
+        --red-fg: hsl(20 97% 72%);
+        --yellow-primary: hsl(37 75% 60%);
+        --yellow-bg: hsl(38 68% 17%);
+        --yellow-fg: hsl(44 100% 50%);
+        --blue-primary: hsl(205 80% 73%);
+        --blue-bg: hsl(205 45% 17%);
+        --blue-fg: hsl(205 85% 78%);
+        --violet-primary: hsl(271 80% 73%);
+        --brown-primary: hsl(9 46% 72%);
+        --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+        --radius-sm: 4px;
+        --radius-md: 6px;
+        --radius-lg: 8px;
+        --sans:
+          "Geist Variable", Inter, ui-sans-serif, -apple-system,
+          BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --mono: "Geist Mono Variable", "SFMono-Regular", Consolas, monospace;
+      }
+
+      [data-theme="light"] {
+        color-scheme: light;
+        --bg1: hsl(0 0% 100%);
+        --bg1-hover: hsl(0 4% 95%);
+        --bg1-highlight: hsl(0 0% 97%);
+        --bg2: hsl(60 4% 95%);
+        --bg2-hover: hsl(60 4% 91%);
+        --bg3: hsl(0 0% 100%);
+        --bg3-hover: hsl(0 0% 95%);
+        --sidebar-bg: hsl(60 9% 98%);
+        --fg1: hsl(20 7% 16%);
+        --fg2: hsl(20 4% 37%);
+        --fg3: hsl(20 4% 56%);
+        --muted-fg: hsl(20 4% 68%);
+        --border1: hsl(30 9% 91%);
+        --border2: hsl(30 9% 91%);
+        --border3: hsl(60 3% 85%);
+        --border4: hsl(0 1% 83%);
+        --highlighted-bright: hsl(25 5% 45%);
+        --inverted-bg: hsl(20 7% 16%);
+        --inverted-fg: hsl(0 0% 100%);
+        --green-primary: hsl(142 75% 36%);
+        --green-bg: hsl(134 38% 89%);
+        --green-fg: hsl(142 70% 30%);
+        --red-primary: hsl(0 72% 51%);
+        --red-bg: hsl(18 87% 91%);
+        --red-fg: hsl(18 89% 40%);
+        --yellow-primary: hsl(37 90% 60%);
+        --yellow-bg: hsl(48 97% 89%);
+        --yellow-fg: hsl(37 100% 51%);
+        --blue-primary: hsl(221 83% 53%);
+        --blue-bg: hsl(210 60% 93%);
+        --blue-fg: hsl(221 70% 42%);
+        --violet-primary: hsl(271 80% 51%);
+        --brown-primary: hsl(5 35% 50%);
+        --shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+      }
+
+      * { box-sizing: border-box; }
+      html { scroll-behavior: smooth; }
+      body {
+        margin: 0;
+        min-width: 320px;
+        min-height: 100vh;
+        background:
+          radial-gradient(
+            circle at 50% -8%,
+            color-mix(in srgb, var(--fg1) 5%, transparent),
+            transparent 30rem
+          ),
+          var(--bg1);
+        color: var(--fg1);
+        font: 14px/1.5 var(--sans);
+        -webkit-font-smoothing: antialiased;
+      }
+      button { font: inherit; color: inherit; cursor: pointer; }
+      svg { display: block; }
+      code { font-family: var(--mono); }
+
+      .page {
+        width: min(1180px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 48px 0 96px;
+      }
+
+      /* ── Hero ── */
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 28px;
+        align-items: end;
+        padding-bottom: 28px;
+        border-bottom: 1px solid var(--border1);
+      }
+      .eyebrow {
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        color: var(--yellow-primary);
+      }
+      h1 {
+        max-width: 780px;
+        margin: 9px 0 10px;
+        font-size: clamp(26px, 3.4vw, 40px);
+        line-height: 1.05;
+        letter-spacing: -0.035em;
+      }
+      .lede { max-width: 760px; margin: 0; color: var(--fg2); font-size: 15px; }
+      .lede code { padding: 1px 5px; border-radius: var(--radius-sm); background: var(--bg2); color: var(--fg1); font-size: 12.5px; }
+      .hero-aside { display: flex; flex-direction: column; gap: 12px; align-items: flex-end; }
+      .summary-chip {
+        min-width: 240px;
+        padding: 14px 16px;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 90%, transparent);
+      }
+      .summary-chip strong { display: block; margin-bottom: 3px; font-size: 13px; }
+      .summary-chip span { display: block; color: var(--fg2); font-size: 12px; }
+      .theme-toggle {
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 6px 11px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: var(--bg2); color: var(--fg1); font-size: 12px;
+      }
+      .theme-toggle:hover { background: var(--bg2-hover); }
+
+      /* ── Thesis cards ── */
+      .thesis {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        margin: 24px 0 12px;
+      }
+      .thesis-card {
+        min-width: 0;
+        padding: 16px 18px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 86%, transparent);
+      }
+      .thesis-card.primary {
+        border-color: color-mix(in srgb, var(--green-primary) 26%, var(--border1));
+        background: color-mix(in srgb, var(--green-primary) 5%, var(--sidebar-bg));
+      }
+      .thesis-card h3 { margin: 0 0 5px; font-size: 13px; }
+      .thesis-card p { margin: 0; color: var(--fg2); font-size: 12px; line-height: 1.5; }
+
+      /* ── Legend ── */
+      .legend {
+        display: flex; flex-wrap: wrap; gap: 8px 18px;
+        margin: 16px 0 2px; padding: 12px 14px;
+        border: 1px solid var(--border1); border-radius: var(--radius-md);
+        background: color-mix(in srgb, var(--sidebar-bg) 70%, transparent);
+        font-size: 11.5px; color: var(--fg2);
+      }
+      .legend b { color: var(--fg1); font-weight: 600; }
+      .legend .k { color: var(--fg3); }
+
+      /* ── Sticky nav ── */
+      nav {
+        position: sticky; top: 0; z-index: 20;
+        display: flex; flex-wrap: wrap; gap: 5px;
+        margin: 26px -12px 40px;
+        padding: 10px 12px;
+        border-bottom: 1px solid color-mix(in srgb, var(--border1) 80%, transparent);
+        background: color-mix(in srgb, var(--bg1) 82%, transparent);
+        backdrop-filter: blur(14px);
+      }
+      nav a {
+        flex: none; padding: 5px 9px;
+        border-radius: var(--radius-sm);
+        color: var(--fg2); font-size: 12px; text-decoration: none;
+      }
+      nav a:hover { background: var(--bg2); color: var(--fg1); }
+      .nav-sep { width: 1px; margin: 3px 4px; background: var(--border2); }
+
+      /* ── Section headers / case scaffold ── */
+      .band {
+        margin: 0 0 26px;
+        font-size: 12px; font-weight: 650;
+        letter-spacing: 0.08em; text-transform: uppercase;
+        color: var(--fg3);
+      }
+      .catalog { display: grid; gap: 56px; }
+      .catalog + .band { margin-top: 64px; }
+      .case { scroll-margin-top: 68px; }
+      .case-head {
+        display: flex; justify-content: space-between; gap: 24px;
+        align-items: flex-start; margin-bottom: 16px;
+      }
+      .case-title-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px; }
+      .case-number { font-size: 11px; font-weight: 650; letter-spacing: 0.06em; color: var(--fg3); }
+      .tag {
+        padding: 3px 8px; border-radius: 999px;
+        background: var(--bg2); color: var(--fg2);
+        font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+      }
+      .tag.ui { background: color-mix(in srgb, var(--green-primary) 13%, transparent); color: var(--green-fg); }
+      .tag.verify { background: color-mix(in srgb, var(--blue-primary) 14%, transparent); color: var(--blue-primary); }
+      .tag.noui { background: var(--bg2); color: var(--fg3); }
+      .tag.p1 { background: color-mix(in srgb, var(--red-primary) 12%, transparent); color: var(--red-primary); }
+      .tag.p2 { background: color-mix(in srgb, var(--yellow-primary) 13%, transparent); color: var(--yellow-primary); }
+      .tag.gap { background: color-mix(in srgb, var(--yellow-primary) 12%, transparent); color: var(--yellow-primary); }
+      .tag.miss { background: color-mix(in srgb, var(--red-primary) 12%, transparent); color: var(--red-primary); }
+      .case h2 { margin: 0; font-size: 19px; line-height: 1.22; letter-spacing: -0.02em; }
+      .case-copy { max-width: 730px; margin: 6px 0 0; color: var(--fg2); font-size: 13px; line-height: 1.55; }
+      .case-copy b { color: var(--fg1); }
+      .case-copy code { padding: 1px 4px; border-radius: var(--radius-sm); background: var(--bg2); color: var(--fg1); font-size: 11.5px; }
+      .meta {
+        flex: none; max-width: 280px; padding-top: 2px;
+        color: var(--fg3); font-size: 11px; line-height: 1.5; text-align: right;
+      }
+      .meta code { color: var(--fg2); }
+
+      /* ── Frames ── */
+      .dual { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+      .frame-wrap { min-width: 0; }
+      .frame-label {
+        display: flex; align-items: center; gap: 7px;
+        margin-bottom: 8px;
+        font-size: 11px; font-weight: 600; letter-spacing: 0.04em; color: var(--fg3);
+      }
+      .frame-label .dot-lg { width: 7px; height: 7px; border-radius: 999px; background: var(--fg3); }
+      .frame-label.before .dot-lg { background: var(--red-primary); }
+      .frame-label.after .dot-lg { background: var(--green-primary); }
+      .frame {
+        overflow: hidden;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: var(--bg1);
+        box-shadow: var(--shadow);
+      }
+      .frame-note { margin-top: 8px; color: var(--fg3); font-size: 11px; line-height: 1.5; }
+      .frame-note b { color: var(--fg2); }
+      .single { max-width: 720px; }
+
+      /* ============================================================
+         Settings mock kit (set-nav / set-main / rows / fields)
+         ============================================================ */
+      .mock { display: flex; flex-direction: column; font-size: 12px; }
+      .mock-body { display: flex; min-height: 0; background: var(--bg1); }
+      .set-nav {
+        width: 176px; flex: none;
+        padding: 10px 8px;
+        border-right: 1px solid var(--border1);
+        background: var(--sidebar-bg);
+      }
+      .set-main { flex: 1; min-width: 0; padding: 14px 16px; overflow: hidden; }
+      .rail-head {
+        margin: 12px 8px 3px;
+        font-size: 10px; font-weight: 650; letter-spacing: 0.08em;
+        text-transform: uppercase; color: var(--fg3);
+      }
+      .scope-hint { margin: 0 8px 4px; color: var(--fg3); font-size: 10px; font-style: italic; }
+      .rail-item {
+        display: flex; align-items: center; gap: 8px;
+        height: 26px; padding: 0 8px; margin: 1px 0;
+        border-radius: var(--radius-md);
+        color: var(--fg2); font-size: 12px;
+      }
+      .rail-item.active { background: var(--bg2); color: var(--fg1); }
+      .rail-item svg { width: 13px; height: 13px; flex: none; }
+      .page-title { margin: 0 0 12px; font-size: 15px; font-weight: 650; color: var(--fg1); }
+
+      /* provider tabs — the real panel's `--highlighted-bright` underline indicator */
+      .prov-tabs {
+        display: flex; gap: 4px;
+        margin: 0 0 14px;
+        border-bottom: 1px solid var(--border1);
+      }
+      .prov-tab {
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 6px 10px; margin-bottom: -1px;
+        color: var(--fg2); font-size: 12px;
+        border-bottom: 1.5px solid transparent;
+      }
+      .prov-tab.on { color: var(--fg1); font-weight: 600; border-bottom-color: var(--highlighted-bright); }
+      .prov-tab .authdot { margin-left: 1px; }
+
+      /* setting rows */
+      .srow {
+        display: flex; align-items: center; justify-content: space-between; gap: 12px;
+        padding: 10px 0;
+        border-bottom: 1px solid var(--border1);
+      }
+      .srow.top { align-items: flex-start; }
+      .srow .lbl b { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; }
+      .srow .lbl span { display: block; margin-top: 2px; color: var(--fg3); font-size: 11px; }
+      .ctl {
+        display: inline-flex; align-items: center; gap: 6px;
+        height: 24px; padding: 0 9px;
+        border: 1px solid var(--border3); border-radius: var(--radius-sm);
+        background: var(--bg2); color: var(--fg1); font-size: 11.5px;
+        white-space: nowrap;
+      }
+      .ctl.ghost { background: transparent; }
+
+      /* connected/auth status dot — semantic: green=connected, gray=off, yellow=attention */
+      .authdot { width: 7px; height: 7px; border-radius: 999px; flex: none; background: var(--fg3); }
+      .authdot.ok { background: var(--green-primary); }
+      .authdot.off { background: var(--fg3); }
+      .authdot.warn { background: var(--yellow-primary); }
+
+      /* segmented control (Authentication: CLI | API key) */
+      .seg { display: inline-flex; border: 1px solid var(--border3); border-radius: var(--radius-md); overflow: hidden; }
+      .seg span { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; font-size: 11px; color: var(--fg2); }
+      .seg span svg { width: 12px; height: 12px; }
+      .seg span.on { background: var(--bg2); color: var(--fg1); }
+
+      /* connection StatusBadge pill (the panel's green "Connected") */
+      .status-badge {
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 600;
+      }
+      .status-badge.ok { background: var(--green-bg); color: var(--green-fg); }
+      .status-badge.bad { background: var(--red-bg); color: var(--red-fg); }
+
+      /* floating toast (today's remedy: points to Settings) */
+      .toast {
+        position: absolute; right: 12px; bottom: 80px; z-index: 5; width: 282px;
+        padding: 10px 12px; border: 1px solid var(--border2); border-radius: 10px;
+        background: var(--bg3); box-shadow: var(--shadow); font-size: 12px;
+      }
+      .toast b { display: flex; align-items: center; gap: 7px; margin-bottom: 3px; color: var(--fg1); font-size: 12.5px; }
+      .toast b svg { width: 13px; height: 13px; color: var(--yellow-fg); }
+      .toast span { color: var(--fg2); line-height: 1.45; display: block; }
+
+      /* form fields */
+      .field { padding: 12px 0; border-bottom: 1px solid var(--border1); }
+      .field:last-child { border-bottom: 0; }
+      .field-label {
+        display: flex; align-items: center; gap: 8px;
+        margin-bottom: 7px; font-size: 12px; font-weight: 600; color: var(--fg1);
+      }
+      .opt-tag {
+        padding: 0 6px; border-radius: 999px;
+        background: var(--bg2); color: var(--fg3);
+        font: 600 9.5px/1.7 var(--mono); letter-spacing: 0.04em; text-transform: uppercase;
+      }
+      .input {
+        display: flex; align-items: center;
+        height: 30px; padding: 0 10px;
+        border: 1px solid var(--border3); border-radius: var(--radius-md);
+        background: var(--bg1-highlight); color: var(--fg2);
+        font-size: 12px; font-family: var(--mono);
+      }
+      .input.sel { justify-content: space-between; color: var(--fg1); }
+      .input.sel::after { content: "▾"; color: var(--fg3); }
+      .input.ph { color: var(--fg3); }
+      .field-hint { margin-top: 6px; color: var(--fg3); font-size: 11px; line-height: 1.45; }
+      .field-hint code { color: var(--fg2); font-size: 10.5px; }
+
+      /* radio option list ("Route Claude via") */
+      .opt-list { display: flex; flex-direction: column; gap: 6px; }
+      .opt {
+        display: flex; align-items: flex-start; gap: 10px;
+        padding: 9px 11px;
+        border: 1px solid var(--border2); border-radius: var(--radius-md);
+        background: var(--bg1); cursor: pointer;
+      }
+      .opt.on { border-color: var(--highlighted-bright); background: var(--bg1-highlight); }
+      .opt .radio {
+        flex: none; width: 14px; height: 14px; margin-top: 1px;
+        border: 1.5px solid var(--border4); border-radius: 999px;
+      }
+      .opt.on .radio { border-color: var(--green-primary); box-shadow: inset 0 0 0 3px var(--green-primary); }
+      .opt-title { display: flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 600; color: var(--fg1); }
+      .opt-sub { display: block; margin-top: 2px; color: var(--fg3); font-size: 11px; }
+      .prov-glyph { color: var(--fg2); }
+      .prov-glyph svg { width: 13px; height: 13px; }
+
+      /* inline note / callout */
+      .note {
+        display: flex; gap: 9px; align-items: flex-start;
+        margin-top: 14px; padding: 10px 12px;
+        border-radius: var(--radius-md);
+        font-size: 11.5px; line-height: 1.5;
+      }
+      .note svg { flex: none; width: 14px; height: 14px; margin-top: 1px; }
+      .note b { font-weight: 600; }
+      .note.warn { background: var(--yellow-bg); color: var(--yellow-fg); }
+      .note.warn svg { color: var(--yellow-fg); }
+      .note.warn b { color: var(--yellow-fg); }
+      .note.ok { background: var(--green-bg); color: var(--green-fg); }
+      .note.ok svg { color: var(--green-fg); }
+      .note.ok b { color: var(--green-fg); }
+      .note.info { background: color-mix(in srgb, var(--bg2) 70%, transparent); color: var(--fg2); }
+      .note.info svg { color: var(--fg3); }
+      .note.info b { color: var(--fg1); }
+
+      /* ============================================================
+         Chat mock kit (for the mid-chat sign-in case)
+         ============================================================ */
+      .chat-head {
+        display: flex; height: 40px; align-items: center; gap: 8px;
+        padding: 0 14px;
+        border-bottom: 1px solid var(--border1);
+        color: var(--fg2); font-size: 12px;
+      }
+      .chat-head .agent-glyph { color: var(--fg2); }
+      .chat-head .agent-glyph svg { width: 13px; height: 13px; }
+      .chat-head b { color: var(--fg1); font-weight: 600; }
+      .chat-head .head-status { display: inline-flex; align-items: center; gap: 5px; margin-left: 2px; }
+      .chat-body { position: relative; display: flex; flex-direction: column; height: 392px; }
+      .transcript {
+        flex: 1; overflow: hidden;
+        display: flex; flex-direction: column; gap: 11px;
+        padding: 14px 16px 6px;
+        font-size: 13px;
+      }
+      .u-msg {
+        align-self: flex-end; max-width: 80%;
+        padding: 7px 11px;
+        border-radius: 10px;
+        background: var(--bg2); color: var(--fg1);
+      }
+      .a-msg { max-width: 92%; color: var(--fg1); line-height: 1.55; }
+      .work-chip {
+        display: inline-flex; width: fit-content; align-items: center; gap: 7px;
+        padding: 4px 9px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-md);
+        color: var(--fg2); font-size: 12px;
+      }
+      .work-chip svg { width: 12px; height: 12px; color: var(--fg3); }
+
+      /* tool-call error row (the raw "Agent error" recipe) */
+      .toolcall { align-self: flex-start; width: 100%; max-width: 92%; }
+      .tc-head {
+        display: inline-flex; width: fit-content; max-width: 100%;
+        align-items: center; gap: 8px;
+        padding: 4px 8px; margin-left: -8px;
+        border-radius: var(--radius-md);
+        color: var(--fg1); font-size: 13px;
+      }
+      .tc-head .tc-glyph { flex: none; width: 13px; height: 13px; color: var(--fg2); }
+      .tc-head.err .tc-glyph { color: var(--red-primary); }
+      .tc-pill {
+        display: inline-flex; flex-shrink: 0; align-items: center; gap: 4px;
+        padding: 1px 6px;
+        border: 1px solid var(--border1); border-radius: var(--radius-sm);
+        color: var(--fg2); font: 500 10px/1.7 var(--mono);
+        letter-spacing: 0.05em; text-transform: uppercase; white-space: nowrap;
+      }
+      .tc-body {
+        margin: 6px 0 2px 0; padding: 10px 12px;
+        border-radius: var(--radius-md);
+        background: var(--red-bg); color: var(--red-fg);
+        font-size: 12px; line-height: 1.55; max-width: 440px;
+        font-family: var(--mono);
+      }
+
+      /* turn footer */
+      .tf { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 2px; font-size: 12px; color: var(--fg2); }
+      .tf-line { flex-basis: 100%; }
+      .tf-pill {
+        display: inline-flex; width: fit-content; align-items: center; gap: 6px;
+        padding: 2px 8px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: var(--bg1); color: var(--fg1);
+        font-size: 11px; letter-spacing: 0.05em;
+      }
+      .tf-time { font-variant-numeric: tabular-nums; }
+      .tf-icon {
+        display: inline-grid; width: 20px; height: 20px; place-items: center;
+        border-radius: var(--radius-sm); color: var(--fg2); background: transparent; border: 0; padding: 0;
+      }
+      .tf-icon svg { width: 13px; height: 13px; }
+
+      /* auth banner docked above the composer (the new sign-in surface) */
+      .auth-banner {
+        display: flex; align-items: center; gap: 10px;
+        margin: 0 12px 8px; padding: 9px 12px;
+        border: 1px solid color-mix(in srgb, var(--yellow-primary) 32%, var(--border2));
+        border-radius: var(--radius-md);
+        background: color-mix(in srgb, var(--yellow-primary) 8%, var(--bg1));
+      }
+      .auth-banner .ab-ico { flex: none; width: 15px; height: 15px; color: var(--yellow-fg); }
+      .auth-banner .ab-txt { min-width: 0; flex: 1; font-size: 12px; color: var(--fg1); line-height: 1.4; }
+      .auth-banner .ab-txt span { display: block; color: var(--fg3); font-size: 11px; }
+      .signin-btn {
+        display: inline-flex; align-items: center; gap: 6px; flex: none;
+        height: 26px; padding: 0 11px;
+        border: 0; border-radius: var(--radius-md);
+        background: var(--inverted-bg); color: var(--inverted-fg);
+        font-size: 12px; font-weight: 600;
+      }
+      .signin-btn svg { width: 13px; height: 13px; }
+
+      /* composer */
+      .composer {
+        margin: 8px 12px 12px;
+        border: 1px solid var(--border2);
+        border-radius: 12px;
+        background: var(--bg1);
+      }
+      .composer.pending { border-color: var(--border3); }
+      .composer-input { padding: 10px 13px 2px; font-size: 13px; color: var(--fg1); }
+      .composer-input.ph { color: var(--fg3); }
+      .composer-bar {
+        display: flex; align-items: center; justify-content: space-between; gap: 8px;
+        padding: 6px 8px 8px;
+      }
+      .composer-tools { display: flex; align-items: center; gap: 2px; min-width: 0; }
+      .tool-plus {
+        display: inline-grid; width: 26px; height: 26px; place-items: center;
+        border-radius: var(--radius-md); color: var(--fg2);
+      }
+      .tool-plus svg { width: 14px; height: 14px; }
+      .cpill {
+        display: inline-flex; align-items: center; gap: 4px;
+        padding: 4px 8px;
+        border: 0; border-radius: var(--radius-md);
+        background: transparent; color: var(--fg2);
+        font-size: 12px; font-weight: 500; white-space: nowrap;
+      }
+      .cpill svg { width: 14px; height: 14px; }
+      .cpill.icon-16 svg { width: 16px; height: 16px; }
+      .cpill .glyph12 { width: 12px; height: 12px; }
+      .composer-right { display: flex; flex: none; align-items: center; gap: 6px; }
+      .send-btn {
+        display: inline-grid; width: 32px; height: 32px; place-items: center;
+        border: 0; border-radius: 8px;
+        background: var(--inverted-bg); color: var(--inverted-fg);
+      }
+      .send-btn.disabled { background: var(--bg2-hover); color: var(--fg3); }
+      .send-btn svg { width: 15px; height: 15px; }
+
+      /* ── Tables (Part B + implementation) ── */
+      table.grid { width: 100%; border-collapse: collapse; font-size: 12px; }
+      table.grid th, table.grid td {
+        padding: 9px 12px;
+        border: 1px solid var(--border1);
+        text-align: left; vertical-align: top;
+      }
+      table.grid th {
+        background: color-mix(in srgb, var(--sidebar-bg) 90%, transparent);
+        color: var(--fg2); font-weight: 600; font-size: 11px;
+        letter-spacing: 0.03em; text-transform: uppercase;
+      }
+      table.grid td { color: var(--fg2); line-height: 1.5; }
+      table.grid td b { color: var(--fg1); }
+      table.grid td code { color: var(--fg2); font-size: 11px; }
+      table.grid td:first-child { white-space: nowrap; color: var(--fg1); font-weight: 600; }
+      .st { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; font-weight: 600; }
+      .st.done { color: var(--green-fg); }
+      .st.partial { color: var(--yellow-fg); }
+      .st.miss { color: var(--red-fg); }
+      .uichip {
+        display: inline-block; padding: 1px 7px; border-radius: 999px;
+        font: 600 10px/1.7 var(--mono); letter-spacing: 0.03em; white-space: nowrap;
+      }
+      .uichip.ui { background: color-mix(in srgb, var(--green-primary) 14%, transparent); color: var(--green-fg); }
+      .uichip.verify { background: color-mix(in srgb, var(--blue-primary) 14%, transparent); color: var(--blue-primary); }
+      .uichip.noui { background: var(--bg2); color: var(--fg3); }
+
+      .footer-note {
+        margin-top: 64px; padding-top: 18px;
+        border-top: 1px solid var(--border1);
+        color: var(--fg3); font-size: 12px; line-height: 1.6;
+      }
+      .footer-note b { color: var(--fg2); }
+      .footer-note code { color: var(--fg2); }
+
+      @media (max-width: 900px) {
+        .dual, .thesis { grid-template-columns: 1fr; }
+        .hero { grid-template-columns: 1fr; }
+        .hero-aside { align-items: flex-start; }
+        .meta { display: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- ── Icon defs (lucide, matching the real components) ── -->
+    <svg aria-hidden="true" width="0" height="0" style="position: absolute">
+      <defs>
+        <symbol id="i-plus" viewBox="0 0 24 24">
+          <path d="M5 12h14M12 5v14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-send" viewBox="0 0 24 24">
+          <path d="M20 4v7a4 4 0 0 1-4 4H4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="m9 10-5 5 5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-shield" viewBox="0 0 24 24">
+          <path d="M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-zap" viewBox="0 0 24 24">
+          <path d="M13 2 3 14h7l-1 8 11-13h-7l1-7z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-spark" viewBox="0 0 24 24"><!-- generic agent glyph -->
+          <path d="M12 2v20M2 12h20M4.9 4.9l14.2 14.2M19.1 4.9 4.9 19.1" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-key" viewBox="0 0 24 24">
+          <circle cx="7.5" cy="15.5" r="4.5" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="m10.7 12.3 9.3-9.3M17 6l2 2M15 8l1.5 1.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-cloud" viewBox="0 0 24 24">
+          <path d="M17.5 19a4.5 4.5 0 0 0 0-9 6 6 0 0 0-11.6 1.5A4 4 0 0 0 6.5 19Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-server" viewBox="0 0 24 24">
+          <rect x="3" y="4" width="18" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="2" />
+          <rect x="3" y="14" width="18" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M7 7.5h.01M7 17.5h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-login" viewBox="0 0 24 24"><!-- lucide log-in -->
+          <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-alert" viewBox="0 0 24 24"><!-- lucide triangle-alert -->
+          <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+          <path d="M12 9v4M12 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-check-big" viewBox="0 0 24 24"><!-- circle-check-big -->
+          <path d="M21.8 10A10 10 0 1 1 17 3.3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="m9 11 3 3L22 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-x-circle" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="m15 9-6 6M9 9l6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-copy" viewBox="0 0 24 24">
+          <rect x="9" y="9" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" fill="none" stroke="currentColor" stroke-width="2" />
+        </symbol>
+        <symbol id="i-wrench" viewBox="0 0 24 24">
+          <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-external" viewBox="0 0 24 24">
+          <path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-sun" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-terminal" viewBox="0 0 24 24">
+          <path d="m4 17 6-5-6-5M12 19h8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+      </defs>
+    </svg>
+
+    <main class="page">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">§3.8 Auth &amp; providers · Design catalog · 2026-07-19</div>
+          <h1>Four rows, two touch the UI — an honest sign-in dot and one-click cloud hosting</h1>
+          <p class="lede">
+            §3.8 is small but load-bearing: it's how a user knows they're signed in, how the app
+            reacts when a login drops, and where they choose <i>where</i> Claude actually runs.
+            Two of the four rows are done or engine-only; the other two touch pixels — this catalog
+            gives each a before / after on the real Zeros tokens, plus exactly what to implement.
+            Verified against the §3.8 table + the current code (Providers lives at
+            <code>Settings → Agents → Agent providers</code>; the 2026-07-15 IA proposes regrouping
+            it under "Personal — this Mac").
+          </p>
+        </div>
+        <div class="hero-aside">
+          <button class="theme-toggle" id="themeBtn" type="button">
+            <svg width="14" height="14"><use href="#i-sun" /></svg>
+            <span id="themeLabel">Light preview</span>
+          </button>
+          <div class="summary-chip">
+            <strong>A dot you can trust, a host you can pick</strong>
+            <span>Auth state is truthful the instant it changes, and any cloud back-end is one click — never a blocklisted env var hand-edited in TOML.</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="thesis" aria-label="Design goals">
+        <div class="thesis-card primary">
+          <h3>The dot never lies</h3>
+          <p>
+            Auth state is truthful the moment it changes. Expiry already grays the connected
+            dot in seconds and re-auth greens it (shipped self-heal, §2.3). Signing out
+            mid-chat should gray it <b>immediately</b> — not wait for the next message to fail.
+          </p>
+        </div>
+        <div class="thesis-card">
+          <h3>Sign-in comes to you</h3>
+          <p>
+            When a login drops, a sign-in affordance appears <b>in place</b> — a banner above
+            the composer, not a raw red "agent error" inferred from error text. Your pending
+            message sends the instant you're back.
+          </p>
+        </div>
+        <div class="thesis-card">
+          <h3>Bring your own cloud, one click</h3>
+          <p>
+            Anthropic, custom gateway, Amazon Bedrock and Google Vertex become first-class
+            <b>hosting modes</b> in the Providers panel. Zeros writes the CLI env for you — the
+            reserved vars stop being something you edit by hand.
+          </p>
+        </div>
+      </section>
+
+      <div class="legend">
+        <span><b class="k">UI tags —</b>
+          <span class="uichip ui">🎨 UI work</span> new/changed surface ·
+          <span class="uichip verify">🔍 UI-verify</span> wiring, confirm in-app ·
+          <span class="uichip noui">⚙️ No UI</span> engine only</span>
+        <span><b class="k">Status —</b>
+          <b class="st done" style="display:inline">✅ done</b> ·
+          <b class="st partial" style="display:inline">🟡 partial</b> ·
+          <b class="st miss" style="display:inline">❌ missing</b></span>
+      </div>
+
+      <nav aria-label="Cases">
+        <a href="#a1">A1 · Bedrock / Vertex hosting 🎨</a>
+        <a href="#a2">A2 · Immediate sign-in on drop 🔍</a>
+        <span class="nav-sep"></span>
+        <a href="#no-ui">No-UI rows (1 &amp; 2)</a>
+        <a href="#impl">What to implement</a>
+      </nav>
+
+      <p class="band">Part A — The two rows that touch the UI · before → after</p>
+
+      <div class="catalog">
+        <!-- A1 ───────────────────────────────────────────── -->
+        <section class="case" id="a1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">Row 4</span>
+                <span class="tag ui">🎨 UI work</span>
+                <span class="tag p2">P2</span>
+                <span class="tag gap">🟡 Partial → first-class</span>
+              </div>
+              <h2>First-class Bedrock / Vertex hosting — pick where Claude runs, no TOML</h2>
+              <p class="case-copy">
+                Today the Providers panel offers exactly <b>one</b> bring-your-own route: a custom
+                gateway <code>base_url</code> + API key. Running Claude on <b>your own AWS or GCP</b>
+                account isn't one click — <code>CLAUDE_CODE_USE_BEDROCK</code> /
+                <code>CLAUDE_CODE_USE_VERTEX</code> live only on the credential-redirect blocklist
+                (<code>env-names.ts:102-131</code>) — a repo-<code>[env]</code> security backstop, not a
+                user-facing option — so a power user hand-edits
+                <code>settings.toml</code>. <b>After:</b> a "Route Claude via" selector adds
+                <b>Amazon Bedrock</b> and <b>Google Vertex AI</b> next to Anthropic + the existing
+                gateway; picking one reveals its region / credential fields, and Zeros writes the
+                right env for the CLI.
+              </p>
+            </div>
+            <div class="meta">
+              claude · <code>providers-panel.tsx</code> · <code>provider-prefs.ts</code>. The panel
+              writes Bedrock/Vertex through <b>user settings</b> (as it already does the gateway);
+              <code>env-names.ts:102-131</code> stays a repo-<code>[env]</code> backstop.
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — one BYO route, cloud hosting invisible</div>
+              <div class="frame">
+                <div class="mock">
+                  <div class="mock-body" style="height: 388px">
+                    <div class="set-nav">
+                      <div class="rail-head" style="margin-top: 2px">Agents</div>
+                      <div class="rail-item">Models</div>
+                      <div class="rail-item active">Agent providers</div>
+                      <div class="rail-item">Terminal Agents</div>
+                      <div class="rail-head">Workspace</div>
+                      <div class="rail-item">Environment</div>
+                      <div class="rail-item">Git</div>
+                      <div class="rail-item">MCP</div>
+                    </div>
+                    <div class="set-main">
+                      <p class="page-title">Agent providers</p>
+                      <div class="prov-tabs">
+                        <span class="prov-tab on"><span class="authdot ok"></span>Claude Code</span>
+                        <span class="prov-tab">Codex</span>
+                        <span class="prov-tab">Cursor</span>
+                      </div>
+                      <div class="srow top">
+                        <span class="lbl"><b>Authentication</b><span>How the Claude CLI signs in.</span></span>
+                        <span class="seg"><span class="on"><svg><use href="#i-terminal" /></svg>CLI</span><span><svg><use href="#i-key" /></svg>API key</span></span>
+                      </div>
+                      <div class="srow">
+                        <span class="lbl"><b><span class="status-badge ok"><span class="authdot ok"></span>Connected</span></b><span>Claude · Max plan · alex@acme.test</span></span>
+                        <span class="ctl ghost">Run <code>claude login</code></span>
+                      </div>
+                      <div class="field">
+                        <div class="field-label">Anthropic gateway base URL <span class="opt-tag">Optional</span></div>
+                        <div class="input ph">https://api.anthropic.com</div>
+                        <div class="field-hint">Point Claude at a compatible proxy (LiteLLM, corporate gateway). Injected as <code>ANTHROPIC_BASE_URL</code>.</div>
+                      </div>
+                      <div class="note warn">
+                        <svg><use href="#i-alert" /></svg>
+                        <span><b>Bedrock &amp; Vertex aren't here.</b> <code>CLAUDE_CODE_USE_BEDROCK</code> / <code>CLAUDE_CODE_USE_VERTEX</code> are on the credential-redirect blocklist — to run Claude on AWS or GCP you edit <code>settings.toml</code> by hand.</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p class="frame-note">The card's one first-class BYO knob is the gateway base URL (→ <code>ANTHROPIC_BASE_URL</code>, allowed via user settings). Running Claude on AWS/GCP isn't offered — those vars sit on the credential-redirect blocklist, so it's a hand-edited <code>settings.toml</code> path.</p>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — a "Route via" selector; Bedrock in one click</div>
+              <div class="frame">
+                <div class="mock">
+                  <div class="mock-body" style="height: 388px">
+                    <div class="set-nav">
+                      <div class="rail-head" style="margin-top: 2px">Agents</div>
+                      <div class="rail-item">Models</div>
+                      <div class="rail-item active">Agent providers</div>
+                      <div class="rail-item">Terminal Agents</div>
+                      <div class="rail-head">Workspace</div>
+                      <div class="rail-item">Environment</div>
+                      <div class="rail-item">Git</div>
+                      <div class="rail-item">MCP</div>
+                    </div>
+                    <div class="set-main">
+                      <p class="page-title">Agent providers</p>
+                      <div class="prov-tabs">
+                        <span class="prov-tab on"><span class="authdot ok"></span>Claude Code</span>
+                        <span class="prov-tab">Codex</span>
+                        <span class="prov-tab">Cursor</span>
+                      </div>
+                      <div class="field" style="padding-top: 4px">
+                        <div class="field-label">Route Claude via</div>
+                        <div class="opt-list">
+                          <div class="opt">
+                            <span class="radio"></span>
+                            <span><span class="opt-title"><span class="prov-glyph"><svg><use href="#i-spark" /></svg></span>Anthropic</span><span class="opt-sub">Your subscription or API key · default</span></span>
+                          </div>
+                          <div class="opt">
+                            <span class="radio"></span>
+                            <span><span class="opt-title"><span class="prov-glyph"><svg><use href="#i-server" /></svg></span>Custom gateway</span><span class="opt-sub">Base URL + API key</span></span>
+                          </div>
+                          <div class="opt on">
+                            <span class="radio on"></span>
+                            <span><span class="opt-title"><span class="prov-glyph"><svg><use href="#i-cloud" /></svg></span>Amazon Bedrock</span><span class="opt-sub">Run Claude on your AWS account</span></span>
+                          </div>
+                          <div class="opt">
+                            <span class="radio"></span>
+                            <span><span class="opt-title"><span class="prov-glyph"><svg><use href="#i-cloud" /></svg></span>Google Vertex AI</span><span class="opt-sub">Run Claude on your GCP project</span></span>
+                          </div>
+                        </div>
+                      </div>
+                      <div class="field">
+                        <div class="field-label">AWS region</div>
+                        <div class="input sel">us-east-1</div>
+                        <div class="field-hint"><code>AWS_REGION</code></div>
+                      </div>
+                      <div class="field">
+                        <div class="field-label">Credentials</div>
+                        <div class="input sel">Default profile · ~/.aws</div>
+                        <div class="field-hint">Profile · IAM role · access keys — kept in the OS keychain.</div>
+                      </div>
+                      <div class="note ok">
+                        <svg><use href="#i-check-big" /></svg>
+                        <span><b>One click.</b> Zeros writes <code>CLAUDE_CODE_USE_BEDROCK=1</code> + region/credentials through your user settings — the same allowed path as the gateway. The repo-<code>[env]</code> blocklist stays as the security backstop.</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p class="frame-note"><b>What changes:</b> one "Route Claude via" selector adds Bedrock + Vertex beside the gateway that already ships. They write through user settings (like the gateway does today); the credential-redirect blocklist still stops a cloned repo from smuggling the same vars.</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- A2 ───────────────────────────────────────────── -->
+        <section class="case" id="a2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">Row 3</span>
+                <span class="tag verify">🔍 UI-verify + surface</span>
+                <span class="tag p2">P2</span>
+                <span class="tag miss">❌ Missing</span>
+              </div>
+              <h2>Immediate sign-in on auth drop — noticed at once, not on the next failure</h2>
+              <p class="case-copy">
+                Sign out of Claude in another terminal mid-chat and today the connected dot
+                <b>stays green</b> — the loss goes unnoticed until your <b>next message fails</b>.
+                Only then does a text heuristic (<code>AUTH_RX</code>) classify it as
+                <code>auth-required</code>, surfaced as a <b>"SIGN IN REQUIRED"</b> footer pill and a
+                toast that sends you off to <b>Settings → Agent providers</b>. <b>After:</b> the engine
+                consumes a first-class <code>SessionEnd</code> / <code>SDKAuthStatusMessage</code>, so
+                the dot grays <b>the instant</b> auth drops and an <b>in-place sign-in banner</b> docks
+                above the composer — no failed send, no detour. Sign-in opens the Terminal
+                <code>claude /login</code> flow; your pending message sends the moment you're back.
+              </p>
+            </div>
+            <div class="meta">
+              claude · engine + chat header/composer. Today auth is inferred by text match only
+              (<code>AUTH_RX</code>, <code>adapter.ts:101-114</code>, routed in the result/stream loop
+              <code>:1044-1165</code>); doc anchor <code>adapter.ts:97-106/656-714</code>. Reuses the
+              shipped self-heal dot (<code>gateway.ts:290-320</code>).
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — green dot, then a late "sign in" pill + Settings detour</div>
+              <div class="frame">
+                <div class="chat-head">
+                  <span class="agent-glyph"><svg><use href="#i-spark" /></svg></span>
+                  <b>Claude Code</b>
+                  <span class="head-status"><span class="authdot ok"></span><span>connected</span></span>
+                </div>
+                <div class="chat-body">
+                  <div class="transcript">
+                    <div class="u-msg">Refactor the auth probe to read from the keychain</div>
+                    <span class="work-chip"><svg><use href="#i-wrench" /></svg>3 tool calls, 1 message</span>
+                    <div class="a-msg">Done — the probe now checks existence/expiry only.</div>
+                    <!-- signed out of Claude in another terminal — the dot is STILL green -->
+                    <div class="u-msg">Now add a test for the expiry path</div>
+                    <div class="tf">
+                      <span class="tf-line"><span class="tf-pill">SIGN IN REQUIRED</span></span>
+                      <span class="tf-time">0.3s</span>
+                      <button class="tf-icon" type="button"><svg><use href="#i-copy" /></svg></button>
+                    </div>
+                  </div>
+                  <!-- today's only remedy: a toast that sends you away to Settings -->
+                  <div class="toast">
+                    <b><svg><use href="#i-alert" /></svg>Claude: Sign in required</b>
+                    <span>Open Settings → Agent providers to sign in to Claude.</span>
+                  </div>
+                  <div class="composer">
+                    <div class="composer-input ph">Reply to Claude Code…</div>
+                    <div class="composer-bar">
+                      <div class="composer-tools">
+                        <span class="tool-plus"><svg><use href="#i-plus" /></svg></span>
+                        <span class="cpill"><svg class="glyph12"><use href="#i-spark" /></svg>Fable 5</span>
+                        <span class="cpill icon-16"><svg><use href="#i-shield" /></svg></span>
+                      </div>
+                      <div class="composer-right">
+                        <button class="send-btn" type="button"><svg><use href="#i-send" /></svg></button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p class="frame-note">The dot stayed green through the sign-out; the loss shows only when this send fails — and only because the error text matched a heuristic. The remedy is a toast that sends you to Settings, with no way back in place.</p>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — dot grays at once, sign-in comes to you</div>
+              <div class="frame">
+                <div class="chat-head">
+                  <span class="agent-glyph"><svg><use href="#i-spark" /></svg></span>
+                  <b>Claude Code</b>
+                  <span class="head-status"><span class="authdot off"></span><span>signed out</span></span>
+                </div>
+                <div class="chat-body">
+                  <div class="transcript">
+                    <div class="u-msg">Refactor the auth probe to read from the keychain</div>
+                    <span class="work-chip"><svg><use href="#i-wrench" /></svg>3 tool calls, 1 message</span>
+                    <div class="a-msg">Done — the probe now checks existence/expiry only.</div>
+                    <!-- SessionEnd/auth-status fires the instant the login drops -->
+                    <div class="event-row" style="display:flex;align-items:center;gap:8px;color:var(--fg2);font-size:12.5px">
+                      <span style="flex:none;width:13px;height:13px;color:var(--yellow-fg)"><svg width="13" height="13"><use href="#i-key" /></svg></span>
+                      <span style="color:var(--fg1)">Claude signed out</span>
+                      <span class="tc-pill">AUTH LOST</span>
+                    </div>
+                  </div>
+                  <!-- the new surface: a sign-in banner docked above the composer -->
+                  <div class="auth-banner">
+                    <span class="ab-ico"><svg><use href="#i-key" /></svg></span>
+                    <span class="ab-txt">Signed out of Claude — sign in to continue.<span>Your next message sends automatically once you're back.</span></span>
+                    <button class="signin-btn" type="button"><svg><use href="#i-login" /></svg>Sign in</button>
+                  </div>
+                  <div class="composer pending">
+                    <div class="composer-input">Now add a test for the expiry path</div>
+                    <div class="composer-bar">
+                      <div class="composer-tools">
+                        <span class="tool-plus"><svg><use href="#i-plus" /></svg></span>
+                        <span class="cpill"><svg class="glyph12"><use href="#i-spark" /></svg>Fable 5</span>
+                        <span class="cpill icon-16"><svg><use href="#i-shield" /></svg></span>
+                      </div>
+                      <div class="composer-right">
+                        <button class="send-btn disabled" type="button"><svg><use href="#i-send" /></svg></button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p class="frame-note"><b>What changes:</b> the dot grays on the <code>SessionEnd</code>/auth-status event (not on failure), a durable "Claude signed out" row lands in the transcript, and the banner's <b>Sign in</b> opens the Terminal CLI flow. On success the dot greens and the queued message flushes.</p>
+            </div>
+          </div>
+
+          <div class="note info" style="max-width: 720px">
+            <svg><use href="#i-terminal" /></svg>
+            <span><b>Auth posture is unchanged.</b> Sign-in still opens the vendor CLI flow in Terminal (Claude/Codex) — Zeros never stores, transmits, or logs a vendor token; the probe checks existence/expiry only. This row only makes the app <i>notice</i> the change immediately and offer the button, instead of surfacing a decoded error after a failed send.</span>
+          </div>
+        </section>
+      </div>
+
+      <p class="band" id="no-ui">Part B — The two rows with no UI change (documented for completeness)</p>
+
+      <table class="grid">
+        <thead>
+          <tr><th style="width: 210px">Row</th><th style="width: 96px">Status</th><th style="width: 92px">UI</th><th>Why no new surface — and what's left (engine only)</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Auth invalidation self-heal</td>
+            <td><span class="st done">✅ Done</span></td>
+            <td><span class="uichip verify">🔍 verify</span></td>
+            <td>Already shipped (§2.3): the connected dot goes gray seconds after a login expires (TTL + credential-mtime) and greens again on re-sign-in — <b>no restart</b>, and a generic protocol error no longer falsely grays it. The surface already exists; A2 reuses it. <b>Left:</b> nothing to build — just confirm the gray→green cycle in-app. <code>gateway.ts:290-320</code></td>
+          </tr>
+          <tr>
+            <td>In-flight work survives token refresh</td>
+            <td><span class="st partial">🟡 Partial</span></td>
+            <td><span class="uichip noui">⚙️ No UI</span></td>
+            <td>The MCP gateway single-flights concurrent 401 refreshes; agent CLIs refresh under their long-lived process, so a mid-turn token rotation doesn't drop work. Nothing user-visible. <b>Left (optional, engine):</b> a <code>didRefreshFor401</code> one-shot guard for agent auth; proactive idle-session reap on re-auth. <code>gateway/server.ts:91</code>, <code>gateway.ts:598</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p class="band" id="impl">Part C — What to implement for §3.8</p>
+
+      <table class="grid">
+        <thead>
+          <tr><th style="width: 200px">Row</th><th style="width: 84px">UI</th><th>Build (engine + UI)</th><th style="width: 190px">Key files</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Row 4 · Bedrock / Vertex hosting <span class="uichip ui" style="margin-left:4px">🎨</span></td>
+            <td><span class="st partial">🟡→✅</span></td>
+            <td>
+              <b>UI:</b> add a "Route Claude via" selector to the Claude provider tab — Anthropic (default) · Custom gateway (exists) · Amazon Bedrock · Google Vertex AI; selecting Bedrock/Vertex reveals region + credential-source fields.<br />
+              <b>Engine:</b> on save, write the CLI env through <b>user settings</b> — <code>CLAUDE_CODE_USE_BEDROCK=1</code> + <code>AWS_REGION</code>/creds, or <code>CLAUDE_CODE_USE_VERTEX=1</code> + <code>CLOUD_ML_REGION</code> + <code>ANTHROPIC_VERTEX_PROJECT_ID</code> — the same allowed path as today's gateway (<code>deriveProviderEnv</code>, keychain-backed secrets). The credential-redirect blocklist stays as the repo-<code>[env]</code> backstop; the gateway path is untouched.
+            </td>
+            <td><code>providers-panel.tsx</code><br /><code>provider-prefs.ts</code><br /><code>env-names.ts:102-131</code></td>
+          </tr>
+          <tr>
+            <td>Row 3 · Immediate sign-in <span class="uichip verify" style="margin-left:4px">🔍</span></td>
+            <td><span class="st miss">❌→✅</span></td>
+            <td>
+              <b>Engine:</b> consume a first-class <code>SessionEnd</code> hook / <code>SDKAuthStatusMessage</code> so auth loss is an <i>event</i> — today it's inferred by the <code>AUTH_RX</code> heuristic only when a send fails; emit the event end-to-end.<br />
+              <b>UI:</b> gray the agent dot immediately (reuse the self-heal dot), drop a durable "Claude signed out" row, and dock an <b>in-place sign-in banner</b> above the composer whose <b>Sign in</b> runs the Terminal <code>claude /login</code> flow. Today the only pointer is a toast → Settings + a "SIGN IN REQUIRED" footer pill. On re-auth, green the dot and flush the queued message.
+            </td>
+            <td><code>adapter.ts:101-114 / :1044-1165</code><br /><code>agent-chat.tsx</code> · <code>use-agent-session.tsx</code></td>
+          </tr>
+          <tr>
+            <td>Row 2 · Token-refresh resilience <span class="uichip noui" style="margin-left:4px">⚙️</span></td>
+            <td><span class="st partial">🟡</span></td>
+            <td><b>Optional, engine-only:</b> a <code>didRefreshFor401</code> one-shot guard for agent auth + proactive idle-session reap on re-auth. No pixels.</td>
+            <td><code>gateway/server.ts:91</code><br /><code>gateway.ts:598</code></td>
+          </tr>
+          <tr>
+            <td>Row 1 · Self-heal dot <span class="uichip verify" style="margin-left:4px">🔍</span></td>
+            <td><span class="st done">✅</span></td>
+            <td>Shipped — <b>verify only:</b> confirm the dot grays on expiry and greens on re-sign-in without a restart, and that a generic protocol error doesn't falsely gray it.</td>
+            <td><code>gateway.ts:290-320</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p class="footer-note">
+        <b>Scope.</b> §3.8 has two UI-touching rows: <b>Row 4</b> (🎨 first-class Bedrock/Vertex hosting — the only 🎨 in the section) and <b>Row 3</b> (🔍 immediate sign-in, which is tagged UI-verify but genuinely adds a sign-in surface). Rows 1–2 need no new UI. This catalog reuses the shipped connected-dot self-heal; the Providers panel today lives at <code>Settings → Agents → Agent providers</code> (the 2026-07-15 IA proposes regrouping it under "Personal — this Mac"). All mockups render on the verbatim Zeros tokens (toggle the theme in the header). <b>Sources:</b> §3.8 table of <code>docs/agent-capabilities-parity-and-ui-consolidated-2026-07-01.md</code>; design language from <code>design-3.6-models-effort-budget</code> + <code>design-home-settings-ia</code>.
+      </p>
+    </main>
+
+    <script>
+      (function () {
+        var root = document.documentElement;
+        var btn = document.getElementById("themeBtn");
+        var label = document.getElementById("themeLabel");
+        btn.addEventListener("click", function () {
+          var toLight = root.getAttribute("data-theme") !== "light";
+          root.setAttribute("data-theme", toLight ? "light" : "dark");
+          label.textContent = toLight ? "Dark preview" : "Light preview";
+        });
+      })();
+    </script>
+  </body>
+</html>

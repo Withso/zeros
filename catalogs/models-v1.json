@@ -1,0 +1,110 @@
+{
+  "$schema": "./models-v1.schema.json",
+  "version": 8,
+  "updatedAt": "2026-07-25",
+  "notes": "CURATED model catalog — the source of truth for WHICH models the composer picker DISPLAYS (per family), and the env var each family's chosen model is written to. Plain bundled file (NO remote fetch / cache / publish). Live agent discovery only OVERLAYS per-model capabilities and powers `pnpm models:verify`; CURATED CAPABILITIES WIN (a curated model that sets effortLevels/supportsFast is authoritative — live can only FILL a field curated omits). Every entry below sets BOTH effortLevels and supportsFast on purpose, so the effort/fast toggles are 100% deterministic and can't flip-flop as live discovery loads (the Haiku bug). ALL IDS VERIFIED 2026-07-10: gpt-5.6-sol/terra/luna against Codex 0.144.1 (bundled @openai/codex ^0.144.1 — anything older rejects them with 'requires a newer version of Codex'); claude-sonnet-5[1m] LIVE-verified against claude-code 2.1.206 (bundled @anthropic-ai/claude-agent-sdk ^0.3.206 — a live query init reports the id and bills usage under claude-sonnet-5[1m]; CLI 2.1.170 and older did NOT know Sonnet 5 and silently ran Sonnet 4.6, hence minCliVersion 2.1.206 on that entry); claude-opus-5[1m] ADDED 2026-07-25 and verified against the bundled agent SDK's own model registry (bundled @anthropic-ai/claude-agent-sdk bumped ^0.3.206 → ^0.3.220 = claude-code 2.1.220 in the same change, BECAUSE the id is absent from every SDK <= 0.3.218: bisecting 0.3.206…0.3.220 puts the first appearance of `claude-opus-5` in 0.3.219 / CLI 2.1.219, hence minCliVersion 2.1.219. The registry entry reports family opus, display_name `Opus 5`, context.window 1e6 with native_1m + supports_1m_beta + supports_1m_suffix (so the `[1m]` suffix form is legal), pricing tier_5_25, default_effort high, and capabilities [effort, max_effort, xhigh_effort, adaptive_thinking, mid_conv_system, context_management, fast_mode, lean_prompt, refusal_fallback, opus_5_prompt_bundle] — i.e. capability-IDENTICAL to Opus 4.8, which is why it copies 4.8's ladder + supportsFast:true rather than inheriting Fable/Sonnet's no-fast. Upstream also repointed its own `opus` alias and latest_per_family.opus to claude-opus-5; the curated `opus` alias here still resolves to claude-opus-4-8 ON PURPOSE so persisted picks don't silently jump a model generation — `opus-5` is a separate additive alias. Opus 4.8 is intentionally KEPT alongside it); grok-4.5-{low,medium,high,xhigh} + composer-2.5(-fast) + grok-4.5-fast-xhigh against `cursor-agent models` 2026.05.28 (§3.6 R1 2026-07-13: the curated Grok base is now the LEVEL-FREE grok-4.5 — not itself a live id — so the effort pill can id-swap it to grok-4.5-thinking-{level} / grok-4.5-{level}, whichever the account's live catalog offers; with no applicable level applyCursorReasoning completes the bare base to grok-4.5-xhigh. The aliases table maps the previously-curated grok-4.5-xhigh → grok-4.5 so persisted chats resolve to the new entry). IDs are VERBATIM + per-agent (Cursor uses dots; Codex/Claude use dashes). The `[1m]` suffix is the Claude 1M-context convention. LABELS CARRY NO CONTEXT SIZE (2026-07-25): every label previously ended in ' (1M)', which displayModelLabel rendered as a trailing '1M' in the picker. Removed for all Claude + Codex entries because (a) it was redundant — every curated Claude model EXCEPT Haiku 4.5 is 1M, verified against the bundled SDK registry, so the badge carried no signal, and (b) for Codex it was an UNVERIFIABLE claim: neither @openai/codex nor its app-server protocol ships a static per-model context table, and the curated 5.6 ids resolve to 256K in the attachment-budget table — directly contradicting a '1M' label. Context size now comes from ONE place per surface: the runtime gauge prefers the CLI's authoritative number (Claude `query.getContextUsage().maxTokens`, Codex `tokenUsage.modelContextWindow`; Cursor's SDK reports NO context window at all), and the static fallback for Claude lives in packages/core/src/model-context.ts (`claudeContextWindow`) shared by the engine gauge AND the renderer's attachment budget — those two had drifted, leaving Sonnet 5 + Opus 5 on a 100K attachment budget. Do NOT re-add a size to any label, and do NOT strip the `[1m]` from the ids: the suffix is the wire form (redundant for the natively-1M Fable 5 / Sonnet 5 / Opus 5 / Opus 4.8, but live-verified and referenced by persisted chats). EFFORT LADDERS (2026-07 spec): Claude Fable 5 / Opus 5 / Opus 4.8 / Sonnet 5 = low,medium,high,xhigh,max,ultracode; Haiku = NONE (empty ladder → no effort toggle). Codex 5.6 Sol / 5.6 Terra = low,medium,high,xhigh,max,ultracode — displayed as Light/Medium/High/Extra High/Max/Ultra (2026-07-10 follow-up: 'Max' sits between 'Extra High' and 'Ultra'; the internal ultracode level carries the 'Ultra' label). The Codex protocol enum tops out at xhigh, so max AND ultracode both clamp to xhigh at runtime — aspirational display tiers. 5.6 Luna / 5.5 = low,medium,high,xhigh. Cursor Composer 2.5 = none; Grok 4.5 = low,medium,high (§3.6 R1: not a per-request knob — an id-swap, exactly like the Fast pill; each pick maps to a concrete live id). FAST: Opus 5 + Opus 4.8 + all Codex + both Cursor models = yes (Cursor fast works by id swap: composer-2.5 → composer-2.5-fast appends, grok-4.5-xhigh → grok-4.5-fast-xhigh inserts before the level — both shapes handled in applyCursorReasoning); Fable 5, Sonnet 5, Haiku = no. minCliVersion gates: Fable 5 >= 2.1.170, Sonnet 5 >= 2.1.206, Opus 5 >= 2.1.219 — so none of them silently downgrades on an older bundled CLI. NOTE the gate is BUILD-TIME ONLY (models:verify + the catalog vitest); modelsForAgent does NOT hide a gated model at runtime, so the catalog must only ever list ids the PINNED SDK can actually run — adding an entry without bumping the SDK ships a silent downgrade. Re-confirm ids after a CLI bump with `pnpm models:verify --live`. Effort DISPLAY labels are per-family (see EFFORT_LABELS_BY_FAMILY in model-catalog.ts): Codex renders 'Light/…/Extra High/Ultra', Claude 'Low/…/Extra/Max/Ultracode'.",
+  "families": {
+    "claude": [
+      {
+        "value": "claude-fable-5[1m]",
+        "label": "Claude Fable 5",
+        "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
+        "supportsFast": false,
+        "minCliVersion": "2.1.170"
+      },
+      {
+        "value": "claude-opus-5[1m]",
+        "label": "Claude Opus 5",
+        "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
+        "supportsFast": true,
+        "minCliVersion": "2.1.219"
+      },
+      {
+        "value": "claude-opus-4-8[1m]",
+        "label": "Claude Opus 4.8",
+        "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
+        "supportsFast": true
+      },
+      {
+        "value": "claude-sonnet-5[1m]",
+        "label": "Claude Sonnet 5",
+        "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
+        "supportsFast": false,
+        "minCliVersion": "2.1.206"
+      },
+      {
+        "value": "claude-haiku-4-5",
+        "label": "Claude Haiku 4.5",
+        "effortLevels": [],
+        "supportsFast": false
+      }
+    ],
+    "codex": [
+      {
+        "value": "gpt-5.6-sol",
+        "label": "5.6 Sol",
+        "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
+        "supportsFast": true
+      },
+      {
+        "value": "gpt-5.6-terra",
+        "label": "5.6 Terra",
+        "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
+        "supportsFast": true
+      },
+      {
+        "value": "gpt-5.6-luna",
+        "label": "5.6 Luna",
+        "effortLevels": ["low", "medium", "high", "xhigh"],
+        "supportsFast": true
+      },
+      {
+        "value": "gpt-5.5",
+        "label": "5.5",
+        "effortLevels": ["low", "medium", "high", "xhigh"],
+        "supportsFast": true
+      }
+    ],
+    "cursor": [
+      {
+        "value": "composer-2.5",
+        "label": "Composer 2.5",
+        "effortLevels": [],
+        "supportsFast": true
+      },
+      {
+        "value": "grok-4.5",
+        "label": "Grok 4.5",
+        "effortLevels": ["low", "medium", "high"],
+        "supportsFast": true
+      }
+    ]
+  },
+  "modelEnvVars": {
+    "claude": "ANTHROPIC_MODEL",
+    "codex": "OPENAI_MODEL",
+    "cursor": "CURSOR_MODEL"
+  },
+  "defaultFavorites": {
+    "claude": "claude-opus-4-8[1m]",
+    "codex": "gpt-5.6-sol",
+    "cursor": "composer-2.5"
+  },
+  "aliases": {
+    "claude": {
+      "opus": "claude-opus-4-8",
+      "sonnet": "claude-sonnet-5",
+      "haiku": "claude-haiku-4-5",
+      "fable": "claude-fable-5",
+      "best": "claude-fable-5",
+      "default": "claude-opus-4-8",
+      "opus-4.8": "claude-opus-4-8",
+      "opus-5": "claude-opus-5",
+      "sonnet-5": "claude-sonnet-5"
+    },
+    "codex": {},
+    "cursor": {
+      "grok-4.5-xhigh": "grok-4.5"
+    }
+  }
+}

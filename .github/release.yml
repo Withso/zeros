@@ -1,0 +1,50 @@
+# Controls GitHub's auto-generated release notes (used by release.yml via the
+# `releases/generate-notes` API). PRs are grouped into the categories below by
+# label; the trailing "*" catch-all guarantees unlabelled PRs still appear, so
+# this works even before labels are applied consistently. Add labels to PRs to
+# get cleaner grouping over time.
+changelog:
+  exclude:
+    labels:
+      # `automated` + `dependencies` are what Renovate stamps on every PR it opens
+      # (see renovate.json). Bot upgrade PRs are maintenance, not release news —
+      # without these the changelog for a typical release is mostly dependency
+      # bumps filed under "Other changes".
+      - automated
+      - dependencies
+      - provider-drift
+      - skip-changelog
+  categories:
+    - title: ✨ Features
+      labels:
+        - feature
+        - enhancement
+    - title: 🤖 Agents
+      labels:
+        - agents
+        - agent
+    # No `relay` label: packages/relay has no tracked source, so a category named
+    # after it advertised a subsystem a reader can't find. Remote/cloud transport
+    # is real (src/engine/transport/), so that half of the category stays.
+    - title: 🌐 Remote & Cloud
+      labels:
+        - remote
+    - title: 🔀 Git & GitHub
+      labels:
+        - git
+    - title: 🎨 UI & Design
+      labels:
+        - ui
+        - design
+    - title: 🐛 Fixes
+      labels:
+        - fix
+        - bug
+    - title: 🛠️ Maintenance & Docs
+      labels:
+        - chore
+        - docs
+        - refactor
+    - title: 📦 Other changes
+      labels:
+        - "*"

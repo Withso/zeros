@@ -1,0 +1,85 @@
+# Zeros — files to seed into every new worktree
+# ──────────────────────────────────────────────
+#
+# `git worktree add` gives you TRACKED files only. A fresh workspace therefore
+# starts with no .env, no project MCP config, and none of the gitignored
+# machine-local state the project needs to build, run, or read its own working
+# notes. This file lists the paths Zeros copies out of the MAIN checkout into
+# each new worktree at creation time.
+#
+# Implementation: src/engine/git/files-to-copy.ts.
+#
+# Three things about the syntax are worth knowing before you edit this:
+#
+#   1. ANCHOR YOUR PATTERNS. A pattern with no leading `/` is matched by
+#      BASENAME AT ANY DEPTH. `docs/` expands to `**/docs/**` and matches 159
+#      paths here — 95 of them inside node_modules (measured, not guessed).
+#      A bare `.env` likewise matches any nested app's `.env` and copies that
+#      app's secrets into every workspace. Anchor with `/`, and only step
+#      outside that rule deliberately (there is exactly one exception below,
+#      and it is called out).
+#   2. Negation (`!`) is NOT supported. Such lines are skipped with a warning,
+#      so you cannot subtract from a broad pattern — narrow it instead.
+#   3. This file REPLACES the built-in default (`.env*`); it is not merged with
+#      it. Anything the default used to cover has to be spelled out here, which
+#      is why `/.env*` leads the list.
+#
+# Copies are read from the MAIN checkout's working tree, so the canonical .env
+# has to live at the repo root of the main clone. A .env created inside a
+# worktree is local to that worktree and is never propagated anywhere.
+#
+# This file is safe to commit: it lists patterns, never values. Everything it
+# names is gitignored, so a seeded copy cannot be accidentally committed from
+# the worktree either.
+#
+# Deliberately NOT seeded (each verified, not assumed):
+#   node_modules/               installed by the workspace setup script; copying
+#                               a dependency tree is slower and less correct
+#                               than running the install.
+#   .codex-protocol-cache/      multi-GB Rust workspace, only touched when
+#                               package.json#codexProtocolVersion is bumped. The
+#                               generated bindings AND their `.version` stamp
+#                               are committed, so codegen short-circuits in a
+#                               fresh checkout (scripts/codegen-codex.mjs).
+#   snapshots/current|diff/     visual-harness OUTPUT, rewritten every run; the
+#                               baselines it compares against are tracked.
+#   testing/                    a dead ignore rule — nothing in the tree reads
+#                               or writes that path, so there is nothing to seed.
+#   website/**/.env*            no website code reads a local env file (the
+#                               Pages deploys take their config from Cloudflare)
+#                               and no such file exists. Add it if that changes.
+#   .zeros/settings.local.toml  the repo-local settings layer already resolves
+#                               from the main checkout for a linked worktree;
+#                               the workspace-local layer is meant to start
+#                               empty (src/engine/settings/ops.ts).
+
+# Machine-local environment. `/.env*` is the anchored form of the built-in
+# default: the root `.env` plus `.env.local` and friends — and nothing from a
+# sibling directory that happens to keep an env file of its own.
+/.env*
+/backend/.env*
+
+# Cloudflare Workers local secrets, read by `wrangler dev` from the worker's own
+# directory. THE ONE UNANCHORED PATTERN: which package owns a worker changes
+# over time, and this matches nothing else in the tree (verified: 0 matches
+# today, including inside node_modules).
+**/.dev.vars
+
+# Project-scoped MCP servers. Gitignored, but src/engine/agents/mcp-scan.ts
+# reads `<repo>/.mcp.json` per repo root — so without this a new workspace
+# silently loses every project-level MCP server.
+/.mcp.json
+
+# Local-only working notes: `docs/` is the engineering journal. Gitignored and
+# absent from a public clone, but it must exist in every worktree because
+# AGENTS.md and RULES.md send agents into `docs/`.
+#
+# `styles/Artifacts/` is deliberately absent from this list: the design lab is
+# TRACKED, so `git worktree add` already materialises it. Seeding a tracked path
+# would copy the main checkout's working-tree version over the branch's own.
+/docs/
+
+# External worktree-tool config, gitignored for the same reason: it is tool
+# config, not repo content. Seeded so the per-workspace setup command survives
+# into new worktrees instead of silently reverting to the tool's defaults.
+/.conductor/

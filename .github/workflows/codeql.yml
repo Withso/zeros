@@ -1,0 +1,46 @@
+name: CodeQL
+
+# Static taint/dataflow analysis (injection, path-traversal, prototype-pollution,
+# unsafe-deserialization, command-injection, hardcoded-credentials) for the JS/TS
+# in src/ + electron/. Relevant as the app goes multi-user: the engine spawns
+# child processes, reads/writes by path, runs git, and bridges renderer↔main IPC.
+#
+# ADVISORY by nature: findings surface as Code Scanning alerts, NOT job failures,
+# so this never blocks a PR (don't make it a required check — a per-PR CodeQL gate
+# adds minutes + alert-triage churn). Code scanning is free on public repositories,
+# so results are UPLOADED and triaged on the Security tab. JS/TS needs no build step.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+
+permissions:
+  actions: read # analyze step reads this run's metadata via the Actions API (get-a-workflow-run); omitting it defaults the scope to none → "Resource not accessible by integration"
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: codeql
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
+        with:
+          languages: javascript-typescript
+          queries: security-extended
+      - name: Analyze
+        # No `upload:` override — the action's default is `always`, which is what
+        # we want: code scanning is free on public repositories, so the SARIF goes
+        # to the Security tab and findings become tracked, dismissible alerts.
+        # This used to be `upload: never` because a private repo without Advanced
+        # Security rejects the upload ("Advanced Security must be enabled…") and
+        # fails the job as a configuration error. That constraint is gone, and a
+        # scanner whose results are thrown away is worse than no scanner at all.
+        # `security-events: write` above is what authorises the upload.
+        uses: github/codeql-action/analyze@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3

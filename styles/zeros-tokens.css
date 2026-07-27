@@ -1,0 +1,661 @@
+/* ============================================================
+   ZEROS TOKENS — primitive token system (dark mode default)
+   ────────────────────────────────────────────────────────────
+
+   PRIMITIVE TOKENS — the sole source of truth for color in the
+   Zeros Mac app. All components consume these names directly.
+   No shadcn aliases. No canonical depth tokens. No `--tint`
+   family. Component aliases (primary-button-*) are thin
+   aliases over the primitives.
+
+   THEMES: dark default — "Zeros Shade" (2026-07-07) — plus a
+   light theme (2026-07-11). Zeros Shade is a muted warm-gray
+   palette (hues 5-25°, chroma 0-7%); it lives directly in
+   `:root` and is what every mode other than light renders.
+   The light theme is a `[data-theme="light"]` override block
+   (§2b below) — warm off-whites over the same taxonomy. The
+   appearance store writes `data-theme` on <html>. (The retired
+   variants — pure-black Dark, Orka Night, Neutral, Zeros Blue —
+   are in git history if ever needed.)
+
+   ─── STRUCTURE ──────────────────────────────────────────────
+   1. Imports + setup (Tailwind, Geist Variable font, @source, dark variant)
+   2. @theme inline — wire primitive tokens to Tailwind utilities
+   3. :root — Zeros Shade primitive values (the theme)
+   4. @layer base — default border-color + focus outline
+
+   ─── TOKEN TAXONOMY ─────────────────────────────────────────
+
+   BACKGROUNDS (10 surfaces):
+     --bg0                  INACTIVE chat window fill — one step BELOW bg1.
+                            The ACTIVE chat window keeps the plain bg1 canvas
+                            (indistinguishable from the pre-split app); every
+                            OTHER pane fills bg0 AND veils its content with
+                            bg0 at 30% (the "one active window" cue).
+                            Consumed via --pane-bg (see below), never directly
+                            as a window fill.
+     --pane-bg              CONTEXTUAL alias — the surface color of the chat
+                            window an element sits in. :root defaults it to
+                            bg1; ChatPane flips it to bg0 on unfocused panes,
+                            so the window fill, tab-strip edge fades and the
+                            transcript scroll mask all re-tint together.
+     --bg1                  default canvas / app backdrop + ACTIVE chat window
+     --bg1-hover            hover state on bg1 (tool calls, tabs)
+     --bg1-highlight        highlighted content above bg1
+     --bg2                  composer surface (raised above bg1)
+     --bg2-hover            hover state on bg2 (icon buttons)
+     --bg3                  FLOATING popover / dropdown / menu surface ONLY —
+                            always ON TOP of a background, never a fill or a
+                            selected/chip state. Dark = --sidebar-bg, light =
+                            --bg1; the lift is border2 + --shadow-dropdown.
+     --bg3-hover            hover state on bg3 (menu items inside popovers)
+     --bg4                  rare — reserved for specific use cases
+     --bg5                  rare — reserved for specific use cases
+
+   FOREGROUNDS (3 tiers — TEXT + ICONS ONLY, never borders):
+     --fg1                  selected / highlighted text (titles, output, agent chat body)
+     --fg2                  default text + icon color across the app
+     --muted-fg             placeholder text + empty-state icons
+
+   SIDEBAR (workspace col 1 only — NOT settings sidebar):
+     --sidebar-bg           workspace sidebar background
+     --sidebar-bg-hover     sidebar item hover + selected state
+
+   BORDERS (4 tiers — borders only, never text):
+     --border1              default for bg1 surfaces
+     --border2              sidebar, composer focus, bg2 surfaces, popover panels
+     --border3              secondary button, dropdown TRIGGER, input field
+     --border4              highlighted state of border3 consumers (dropdown hover)
+
+   HIGHLIGHTED (brand accents — cool blue family in Zeros Shade):
+     --highlighted-bg              user-message bg in chat (text on it: fg1/fg2)
+     --highlighted-bright          input focus border, brighter accent borders
+
+   INVERTED (polarity-flipping surface — always the OPPOSITE of bg1):
+     --inverted-bg           near-white in dark theme, near-black in light
+     --inverted-fg           text/icon on --inverted-bg (always pairs with it)
+     Consumers: primary button fill, switch/toggle ON track. Never use
+     --inverted-bg without --inverted-fg for the content on it.
+
+   COMPONENT ALIASES (button intents, aliases over primitives):
+     --primary-button-bg     → var(--inverted-bg)  (filled focal CTA fill)
+     --primary-button-hover  own value per theme   (lifted from primary-button-bg)
+     --primary-button-fg     → var(--inverted-fg)  (text/icon on top of primary button)
+
+   ─── USAGE RULES (full reference: styles/zeros-foundation.md) ─
+
+   Default page bg = --bg1. Composer = --bg2. Popover/dropdown/menu = --bg3
+   (floating surfaces only — dialogs/sheets are --bg1, hover-cards --bg2).
+   Workspace sidebar (col 1 only) = --sidebar-bg.
+
+   Hover states (surface-scoped):
+     hover on bg1 surface → --bg1-hover
+     hover on bg2 surface → --bg2-hover
+     hover on bg3 surface → --bg3-hover
+     hover on sidebar     → --sidebar-bg-hover
+
+   Foregrounds: default --fg2, selected/highlighted --fg1, placeholder --muted-fg.
+
+   Buttons:
+     Primary    → bg-primary-button-bg + text-primary-button-fg, hover: bg-primary-button-hover
+     Secondary  → bg-bg{N} (matches parent) + border-border3 + text-fg1, hover bg-bg2
+     Tertiary   → bg-bg1-hover + text-fg2, hover bg-bg2-hover (used on bg1)
+     Ghost      → transparent + text-fg2, hover bg-bg2-hover + text-fg1
+     NOTE: never use bg-bg3 as a hover/selected/chip FILL on any surface, in
+     EITHER theme — light bg3 == bg1 (white) so the fill vanishes; dark bg3 ==
+     sidebar-bg (barely above bg1) so it vanishes on bg1 and INVERTS (goes
+     darker) on bg2. bg2-hover is the universal chip fill; selected states on
+     the sidebar use sidebar-bg-hover; items inside a popover use bg3-hover.
+
+   Inputs:
+     bg-bg{N} (matches parent), border-border3, focus border-highlighted-bright
+     placeholder text-muted-fg, value text-fg1
+
+   Dropdowns:
+     trigger: bg-bg{N} + border-border3, hover bg-bg2-hover + border-border4
+     popover: bg-bg3, items hover bg-bg3-hover
+   ============================================================ */
+
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Engine subtree — make Tailwind v4 compile utilities used inside
+ * [data-Zeros-root] React components (design canvas, agent panel,
+ * themes editor). Without @source the compiled CSS skips classes
+ * that don't appear in normal JSX scan. */
+@source "../src/zeros/engine";
+
+/* Geist Variable + Geist Mono Variable — self-hosted offline fonts.
+ * Family names "Geist Variable" / "Geist Mono Variable" come from
+ * the @fontsource-variable packages and are referenced by --font-sans
+ * / --font-mono in the @theme inline block below. The font is a
+ * Vercel-published typography asset; not to be confused with the
+ * design-system reference (now Zeros Foundation). */
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+
+/* Zeros uses [data-theme="dark"] on <html>. This rebinds Tailwind's
+ * `dark:` variant against that convention. The light theme shipped
+ * 2026-07-11 as the [data-theme="light"] override block (§2b), so
+ * `dark:` styles apply everywhere except light. */
+@custom-variant dark (&:is([data-theme="dark"] *));
+
+
+/* ──────────────────────────────────────────────────────────
+   1. TAILWIND v4 @theme inline — wire primitives → utility classes
+   ──────────────────────────────────────────────────────────
+   Verbatim naming: --color-bg1 → Tailwind class bg-bg1. All
+   primitive tokens get a matching --color-* entry below.
+   Component aliases (primary-button-*) also get utility classes
+   so JSX can write bg-primary-button-bg directly. */
+
+@theme inline {
+  /* Fonts → font-sans, font-mono */
+  --font-sans:
+    "Geist Variable", ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  --font-mono:
+    "Geist Mono Variable", ui-monospace, SFMono-Regular,
+    "SF Mono", Menlo, Consolas, monospace;
+
+  /* ── TYPE SCALE — sub-`sm` steps + `xs` override ──
+   * Tailwind ships `text-sm` (14px) and up; the app needs finer steps
+   * below it, so we name the sizes that used to be written as arbitrary
+   * `text-[Npx]`. Font-size ONLY (no `--text-*--line-height` companion)
+   * so each is a drop-in for the old `text-[Npx]`, which also set
+   * font-size alone — line-height keeps cascading from the parent.
+   *   text-xxs    10px   (replaces text-[10px])
+   *   text-2xxs   11px   (replaces text-[11px])
+   *   text-3xxs   12px   (shortcut-palette category tags; other 12px literals consolidate here)
+   *   text-xs     13px   (overrides Tailwind's 12px default; = text-[13px])
+   * Raw `12px` literals (e.g. CodeMirror theme.ts) are untouched. */
+  --text-xxs: 0.625rem;
+  --text-2xxs: 0.6875rem;
+  --text-3xxs: 0.75rem;
+  --text-xs: 0.8125rem;
+
+  /* ── RADII — fixed 3-step scale (2026-07-12) ──
+   * The whole app uses exactly three corner radii; pick by use case,
+   * never by taste:
+   *   --radius-sm 4px — ALL buttons + icon buttons, pills/chips/badges,
+   *                     kbd, checkboxes, menu items, inputs, user msgs
+   *   --radius-md 6px — tabs + segmented pills, model/composer pills,
+   *                     sidebar + settings nav rows (workspace rows,
+   *                     Dashboard/Create, settings entries), small
+   *                     cards/rows, markdown img/table, tooltips
+   *   --radius-lg 8px — composer shell, dialogs, popovers, menus,
+   *                     cards, code blocks, toasts, panels
+   * Plus rounded-full (circles/scrollbars/switch) and rounded-none
+   * (nested resets). The shadcn calc chain (base 10px → 6/8/10/14/
+   * 18/22/26) was retired 2026-07-12; xs/xl/2xl/3xl/4xl are reset to
+   * `initial` below ON PURPOSE so `rounded-xl` etc. no longer exist —
+   * a class that won't compile beats a fourth radius sneaking in.
+   * Nesting rule: inner radius = outer radius − inset (8px menu with
+   * 4px padding → 4px items). */
+  --radius-*: initial;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+
+  /* ── BACKGROUNDS — `bg-bg0`..`bg-bg5` + hovers ── */
+  --color-bg0: var(--bg0);
+  --color-bg1: var(--bg1);
+  --color-bg1-hover: var(--bg1-hover);
+  --color-bg1-highlight: var(--bg1-highlight);
+  --color-bg2: var(--bg2);
+  --color-bg2-hover: var(--bg2-hover);
+  --color-bg3: var(--bg3);
+  --color-bg3-hover: var(--bg3-hover);
+  --color-bg4: var(--bg4);
+  --color-bg5: var(--bg5);
+  /* Modal overlay veil — `bg-scrim` (dialog/sheet overlays; theme-scoped). */
+  --color-scrim: var(--scrim);
+
+  /* ── FOREGROUNDS — `text-fg1` / `text-fg2` / `text-fg3` / `text-muted-fg` ── */
+  --color-fg1: var(--fg1);
+  --color-fg2: var(--fg2);
+  --color-fg3: var(--fg3);
+  --color-muted-fg: var(--muted-fg);
+
+  /* ── SIDEBAR (workspace col 1 only) ── */
+  --color-sidebar-bg: var(--sidebar-bg);
+  --color-sidebar-bg-hover: var(--sidebar-bg-hover);
+
+  /* ── BORDERS — `border-border1`..`border-border4` ── */
+  --color-border1: var(--border1);
+  --color-border2: var(--border2);
+  --color-border3: var(--border3);
+  --color-border4: var(--border4);
+
+  /* ── HIGHLIGHTED (brand accent — Orka Black family) ── */
+  --color-highlighted-bg: var(--highlighted-bg);
+  --color-highlighted-bright: var(--highlighted-bright);
+
+  /* ── INVERTED (polarity-flipping pair — buttons, switch ON) ── */
+  --color-inverted-bg: var(--inverted-bg);
+  --color-inverted-fg: var(--inverted-fg);
+
+  /* ── COMPONENT ALIASES (button intents) ── */
+  --color-primary-button-bg: var(--primary-button-bg);
+  --color-primary-button-hover: var(--primary-button-hover);
+  --color-primary-button-fg: var(--primary-button-fg);
+
+  /* ── COLOR PALETTES (families → bg-/text-/border- utilities) ── */
+  --color-red-primary: var(--red-primary);
+  --color-red-secondary: var(--red-secondary);
+  --color-red-secondary-fg: var(--red-secondary-fg);
+  --color-red-bg: var(--red-bg);
+  --color-red-fg: var(--red-fg);
+  --color-green-primary: var(--green-primary);
+  --color-green-bg: var(--green-bg);
+  --color-green-fg: var(--green-fg);
+  --color-yellow-primary: var(--yellow-primary);
+  --color-yellow-bg: var(--yellow-bg);
+  --color-yellow-fg: var(--yellow-fg);
+  --color-blue-primary: var(--blue-primary);
+  --color-blue-bg: var(--blue-bg);
+  --color-blue-fg: var(--blue-fg);
+  --color-violet-primary: var(--violet-primary);
+  --color-violet-bg: var(--violet-bg);
+  --color-violet-fg: var(--violet-fg);
+  --color-brown-primary: var(--brown-primary);
+  --color-brown-bg: var(--brown-bg);
+  --color-brown-fg: var(--brown-fg);
+
+  /* ── COLOR RAMPS → Tailwind utilities (bg-red-500, text-green-300, …) ── */
+  --color-red-50: var(--red-50);
+  --color-red-100: var(--red-100);
+  --color-red-200: var(--red-200);
+  --color-red-300: var(--red-300);
+  --color-red-400: var(--red-400);
+  --color-red-500: var(--red-500);
+  --color-red-600: var(--red-600);
+  --color-red-700: var(--red-700);
+  --color-red-750: var(--red-750);
+  --color-red-800: var(--red-800);
+  --color-red-900: var(--red-900);
+  --color-red-950: var(--red-950);
+  --color-green-50: var(--green-50);
+  --color-green-100: var(--green-100);
+  --color-green-200: var(--green-200);
+  --color-green-300: var(--green-300);
+  --color-green-400: var(--green-400);
+  --color-green-500: var(--green-500);
+  --color-green-600: var(--green-600);
+  --color-green-700: var(--green-700);
+  --color-green-800: var(--green-800);
+  --color-green-900: var(--green-900);
+  --color-green-950: var(--green-950);
+  --color-yellow-50: var(--yellow-50);
+  --color-yellow-100: var(--yellow-100);
+  --color-yellow-200: var(--yellow-200);
+  --color-yellow-300: var(--yellow-300);
+  --color-yellow-400: var(--yellow-400);
+  --color-yellow-500: var(--yellow-500);
+  --color-yellow-600: var(--yellow-600);
+  --color-yellow-700: var(--yellow-700);
+  --color-yellow-800: var(--yellow-800);
+  --color-yellow-900: var(--yellow-900);
+  --color-yellow-950: var(--yellow-950);
+  --color-blue-50: var(--blue-50);
+  --color-blue-100: var(--blue-100);
+  --color-blue-200: var(--blue-200);
+  --color-blue-300: var(--blue-300);
+  --color-blue-400: var(--blue-400);
+  --color-blue-500: var(--blue-500);
+  --color-blue-600: var(--blue-600);
+  --color-blue-700: var(--blue-700);
+  --color-blue-800: var(--blue-800);
+  --color-blue-900: var(--blue-900);
+  --color-blue-950: var(--blue-950);
+  --color-violet-50: var(--violet-50);
+  --color-violet-100: var(--violet-100);
+  --color-violet-200: var(--violet-200);
+  --color-violet-300: var(--violet-300);
+  --color-violet-400: var(--violet-400);
+  --color-violet-500: var(--violet-500);
+  --color-violet-600: var(--violet-600);
+  --color-violet-700: var(--violet-700);
+  --color-violet-750: var(--violet-750);
+  --color-violet-800: var(--violet-800);
+  --color-violet-900: var(--violet-900);
+  --color-violet-950: var(--violet-950);
+  --color-brown-50: var(--brown-50);
+  --color-brown-100: var(--brown-100);
+  --color-brown-200: var(--brown-200);
+  --color-brown-300: var(--brown-300);
+  --color-brown-400: var(--brown-400);
+  --color-brown-500: var(--brown-500);
+  --color-brown-600: var(--brown-600);
+  --color-brown-700: var(--brown-700);
+  --color-brown-800: var(--brown-800);
+  --color-brown-900: var(--brown-900);
+  --color-brown-950: var(--brown-950);
+}
+
+
+/* ──────────────────────────────────────────────────────────
+   2. PRIMITIVE TOKENS — Zeros Shade (the default dark theme)
+   ──────────────────────────────────────────────────────────
+   `:root` is Zeros Shade — a muted warm-gray palette (hues
+   5-25°, chroma 0-7%) with a cool blue accent, promoted from
+   its former `[data-theme="zeros-shade"]` variant block on
+   2026-07-07 when all other variants were retired. The light
+   theme overrides these values in the `[data-theme="light"]`
+   block (§2b below). */
+
+:root {
+  /* Native UA hint — form controls, scrollbars, selection.
+   * The light block flips this to `light`. */
+  color-scheme: dark;
+
+  /* ── BACKGROUNDS ── */
+  --bg0:           hsl(5 5% 5%);    /* #0D0C0C — INACTIVE chat window fill (below bg1) */
+  --bg1:           hsl(5 5% 7%);    /* #0E0C0C — default canvas / app backdrop + active chat window */
+  /* Contextual chat-window surface. Defaults to bg1 so the ACTIVE window (and
+   * any chat chrome rendered outside a pane) looks exactly like the plain app
+   * canvas; ChatPane overrides it to bg0 on unfocused panes. Consumers use
+   * bg-(--pane-bg) / from-(--pane-bg) so they re-tint with their pane. */
+  --pane-bg:       var(--bg1);
+  --bg1-hover:     hsl(8 5% 12%);   /* #201D1D — hover on bg1 (tool calls, tabs) */
+  --bg1-highlight: hsl(25 5% 9%);   /* #181716 — highlighted content above bg1 */
+  --bg2:           hsl(25 4% 12%);  /* #201E1D — composer surface */
+  --bg2-hover:     hsl(25 3% 15%);  /* #292928 — hover on bg2 */
+  /* bg3 is a FLOATING-SURFACE-ONLY token (popover / dropdown / menu / select /
+   * command) — always on TOP of a background, NEVER a fill/chip/selected state.
+   * Aliased to --sidebar-bg so a floating panel sits one subtle step above the
+   * bg1 canvas (barely lifted, like the sidebar) and its lift comes from
+   * border2 + --shadow-dropdown, mirroring the light theme where bg3 == bg1.
+   * (--sidebar-bg / --sidebar-bg-hover are defined a few lines below; CSS
+   * custom properties resolve var() lazily, so the forward reference is fine.) */
+  --bg3:           var(--sidebar-bg);        /* = #151413 — floating popover surface */
+  --bg3-hover:     var(--sidebar-bg-hover);  /* = #272625 — hover on bg3 (menu items) */
+  --bg4:           hsl(5 1% 24%);   /* #3E3D3D — rare */
+  --bg5:           hsl(8 0% 37%);   /* #5E5E5E — rare */
+
+  /* ── FOREGROUNDS (text + icons only — NEVER used for borders) ── */
+  --fg1:        hsl(0 2% 92%);   /* #EBEAEA — selected/highlighted text + icons */
+  --fg2:        hsl(20 4% 66%);  /* #ACA7A5 — default text + icon across app */
+  --fg3:        hsl(15 1% 44%);  /* #71706F — third-tier foreground (alias of --muted-fg) */
+  --muted-fg:   hsl(15 4% 44%);  /* #756E6C — placeholder + empty-state icons */
+
+  /* ── SIDEBAR (workspace col 1 only — NOT settings sidebar) ── */
+  --sidebar-bg:       hsl(25 5% 9%);   /* #151413 */
+  --sidebar-bg-hover: hsl(25 2% 15%);  /* #272625 */
+
+  /* ── BORDERS ── */
+  --border1: hsl(8 3% 14%);   /* #252323 — default for bg1 surfaces */
+  --border2: hsl(25 1% 18%);  /* #2E2E2D — sidebar / composer focus / bg2 */
+  --border3: hsl(15 0% 24%);  /* #3D3D3D — secondary btn / dropdown / input */
+  --border4: hsl(15 0% 30%);  /* #4D4D4D — highlighted state of border3 */
+
+  /* ── ELEVATION ──
+   * Lift for floating surfaces (popover / dropdown / context menu).
+   * Defined here once so component files reference the token instead of
+   * inlining an rgba() shadow. */
+  --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.35);
+  /* Modal overlay veil (dialog/sheet). Theme-scoped: a heavy black wash is
+   * right over a dark UI but crushing over a light one (see light block). */
+  --scrim: hsl(0 0% 0% / 0.8);
+
+  /* ── HIGHLIGHTED (warm bg + cool blue accent) ── */
+  --highlighted-bg:               hsl(25 5% 15%);   /* #282624 — user msg bg (text on it: fg1/fg2) (comment hex corrected 2026-07-12) */
+  --highlighted-bright:           hsl(25 5% 65%);    /* #AAA5A1 — input focus border, brighter accents */
+
+  /* ── INVERTED (polarity-flipping pair) ──
+   * The one surface that is always the OPPOSITE of bg1: near-white
+   * in the dark theme, near-black in light. --inverted-fg is the
+   * text/icon color ON it — the pair always ships together.
+   * Consumers: primary button (via the aliases below), switch ON track. */
+  --inverted-bg: hsl(0 2% 92%);   /* #EBEAEA — near-white on dark */
+  --inverted-fg: hsl(5 7% 5%);    /* #0E0C0C — dark text/icon on the inverted fill */
+
+  /* ── COMPONENT ALIASES (button intents) ──
+   * primary-button-bg / primary-button-fg are aliases over the
+   * inverted pair. The hover is its own value per theme (a lifted
+   * neutral that reads against primary-button-bg). */
+  --primary-button-bg:    var(--inverted-bg);     /* #EBEAEA */
+  --primary-button-hover: hsl(25 2% 83%);         /* #D5D4D3 — lifted neutral */
+  --primary-button-fg:    var(--inverted-fg);     /* #0E0C0C */
+
+  /* ── COLOR PALETTES (6 families — explicit HSL, beyond neutral) ──────
+   * primary = vivid accent / icon / border · bg = dark tinted surface ·
+   * fg   = light text / icon ON that surface.
+   * RULE: whenever a surface is --<family>-bg, its text + icons use
+   * --<family>-fg (NOT the vivid primary) — keeps tinted containers from
+   * reading "all red / green / …". The vivid primary is for standalone
+   * accents (counts, icons, borders) on the app canvas.
+   * red also has --red-secondary (deep red 700) for SOLID delete button
+   * fills + delete icons. Full 50–950 ramps live in the palette preview
+   * (.context/color-palette-preview.html); add a shade here only if a
+   * specific step is actually needed. */
+  --red-primary:    hsl(0 91% 71%);    /* #F87272 — −N counts, error accents */
+  --red-secondary:  hsl(7 83% 39%);    /* #B72311 — solid delete fills + delete icons */
+  --red-secondary-fg: hsl(0 0% 100%);  /* #FFFFFF — text/icon on SOLID --red-secondary
+                                        * fills. THEME-STATIC (white in both themes —
+                                        * the red fill stays vivid in light, so fg1,
+                                        * which flips dark, can't sit on it). */
+  --red-bg:         hsl(13 81% 14%);   /* #421407 — error container surface */
+  --red-fg:         hsl(20 97% 72%);   /* #FDA274 — text/icon on --red-bg */
+
+  --green-primary:  hsl(142 69% 58%);  /* #4ADE80 — +N counts, success accents */
+  --green-bg:       hsl(120 23% 17%);  /* #213521 — success container surface */
+  --green-fg:       hsl(142 75% 73%);  /* #87EEAC — text/icon on --green-bg */
+
+  --yellow-primary: hsl(37 75% 60%);  /* #E6AB4C — warning · modified · in-progress */
+  --yellow-bg:      hsl(38 68% 17%);   /* #49330E — warning container surface */
+  --yellow-fg:      hsl(44 100% 50%);  /* #FFB900 — text/icon on --yellow-bg */
+
+  --blue-primary:   hsl(205 80% 73%);  /* #83C3F1 — info · links · accents */
+  --blue-bg:        hsl(226 57% 18%);  /* #142048 — info container surface */
+  --blue-fg:        hsl(211 96% 78%);  /* #92C5FD — text/icon on --blue-bg */
+
+  --violet-primary: hsl(271 80% 73%); /* #BC83F1 — done · merged */
+  --violet-bg:      hsl(255 21% 18%);  /* #2A2539 — done container surface */
+  --violet-fg:      hsl(265 66% 77%);  /* #BE9EEB — text/icon on --violet-bg */
+
+  --brown-primary:  hsl(9 46% 72%);   /* #D9A298 — file paths · warm accents */
+  --brown-bg:       hsl(10 15% 15%);  /* #2D2321 — brown container surface */
+  --brown-fg:       hsl(10 80% 72%);  /* #F1917E — text/icon on --brown-bg */
+
+  /* ── COLOR RAMPS (50–950 — THEME-STATIC absolute scales) ──
+   * Full per-family scales for the rare case a specific shade is needed. Wired
+   * to Tailwind (bg-red-500, text-green-300, …), OVERRIDING v4's built-in
+   * red/green/yellow/blue/violet palettes with ours (brown has no v4 built-in;
+   * ours is the only one). Prefer the semantic anchors
+   * above; check:ui exempts these 6 families (scripts/check-ui-consistency.mjs).
+   * The ramps are LITERALS, deliberately NOT aliased to the anchors: the
+   * anchors re-theme per [data-theme] while a 50→950 scale must keep its
+   * light→dark direction in every theme. (In the dark theme the anchors happen
+   * to coincide: 500 ≈ primary, 900 ≈ bg, red 700 ≈ secondary.) */
+  --red-50: hsl(0 85% 97%);
+  --red-100: hsl(0 85% 93%);
+  --red-200: hsl(0 85% 86%);
+  --red-300: hsl(0 85% 79%);
+  --red-400: hsl(0 85% 71%);
+  --red-500: hsl(0 91% 71%);
+  --red-600: hsl(3 84% 52%);
+  --red-700: hsl(7 83% 39%);
+  --red-750: hsl(10 58% 31%); /* #7b3021 — muted brick · PR-status closed chip border (off-ramp accent, mirrors --violet-750) */
+  --red-800: hsl(10 82% 27%);
+  --red-900: hsl(13 81% 14%);
+  --red-950: hsl(13 81% 10%);
+
+  --green-50: hsl(142 71% 97%);
+  --green-100: hsl(142 71% 91%);
+  --green-200: hsl(142 71% 80%);
+  --green-300: hsl(142 71% 68%);
+  --green-400: hsl(142 71% 57%);
+  --green-500: hsl(142 69% 58%);
+  --green-600: hsl(136 59% 38%);
+  --green-700: hsl(131 47% 31%);
+  --green-800: hsl(125 35% 24%);
+  --green-900: hsl(120 23% 17%);
+  --green-950: hsl(120 23% 12%);
+
+  --yellow-50: hsl(36 96% 97%);
+  --yellow-100: hsl(36 96% 93%);
+  --yellow-200: hsl(36 97% 85%);
+  --yellow-300: hsl(36 98% 76%);
+  --yellow-400: hsl(36 99% 68%);
+  --yellow-500: hsl(37 75% 60%);
+  --yellow-600: hsl(37 92% 49%);
+  --yellow-700: hsl(37 84% 39%);
+  --yellow-800: hsl(37 76% 28%);
+  --yellow-900: hsl(38 68% 17%);
+  --yellow-950: hsl(38 68% 12%);
+
+  --blue-50: hsl(205 90% 97%);
+  --blue-100: hsl(205 90% 94%);
+  --blue-200: hsl(205 90% 89%);
+  --blue-300: hsl(205 90% 84%);
+  --blue-400: hsl(205 90% 78%);
+  --blue-500: hsl(205 80% 73%);
+  --blue-600: hsl(210 82% 59%);
+  --blue-700: hsl(215 73% 45%);
+  --blue-800: hsl(221 65% 32%);
+  --blue-900: hsl(226 57% 18%);
+  --blue-950: hsl(226 57% 13%);
+
+  --violet-50: hsl(271 96% 97%);
+  --violet-100: hsl(271 96% 94%);
+  --violet-200: hsl(271 97% 89%);
+  --violet-300: hsl(271 98% 84%);
+  --violet-400: hsl(271 99% 78%);
+  --violet-500: hsl(271 80% 73%);
+  --violet-600: hsl(267 80% 59%);
+  --violet-700: hsl(263 61% 46%);
+  --violet-750: hsl(259 41% 42%); /* #5B3F96 — muted violet · PR-status chip border (off-ramp accent) */
+  --violet-800: hsl(259 41% 32%);
+  --violet-900: hsl(255 21% 18%);
+  --violet-950: hsl(255 21% 13%);
+
+  --brown-50: hsl(8 75% 97%);
+  --brown-100: hsl(7 74% 93%);
+  --brown-200: hsl(7 70% 88%);
+  --brown-300: hsl(7 62% 83%);
+  --brown-400: hsl(8 53% 77%);
+  --brown-500: hsl(9 46% 72%);
+  --brown-600: hsl(7 38% 58%);
+  --brown-700: hsl(6 30% 45%);
+  --brown-800: hsl(7 23% 35%);   /* #6D4944 — muted brown · PR-status chip border (raised from the ramp for a visible outline) */
+  --brown-900: hsl(10 15% 15%);
+  --brown-950: hsl(10 15% 10%);
+}
+
+
+/* ──────────────────────────────────────────────────────────
+   2b. LIGHT THEME — [data-theme="light"] overrides (2026-07-11)
+   ──────────────────────────────────────────────────────────
+   Warm off-whites over the same taxonomy. Same specificity as
+   `:root` (both target <html>), later in the file, so it wins
+   whenever the appearance store writes data-theme="light".
+   Notes on the ramp shape:
+     • bg1 and bg3 are BOTH pure white — in light mode, popovers
+       get their lift from --shadow-dropdown + border, not fill.
+     • bg4/bg5 continue the neutral ramp as deeper chip greys
+       (fg text must stay readable on them — no polarity flip;
+       the inverted pair is the only surface that flips).
+     • The 50–950 color ramps are theme-static (see §2) and are
+       deliberately NOT overridden here. */
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  /* ── BACKGROUNDS ── */
+  --bg0:           hsl(0 0% 98%);   /* #FAFAFA — INACTIVE chat window fill (below bg1) */
+  --bg1:           hsl(0 0% 100%);  /* #FFFFFF — default canvas / app backdrop + active chat window */
+  --bg1-hover:     hsl(0 4% 95%);   /* #F3F2F2 — hover on bg1 (tool calls, tabs) */
+  --bg1-highlight: hsl(0 0% 97%);   /* #F7F7F7 — highlighted content above bg1 */
+  --bg2:           hsl(60 4% 95%);  /* #F3F3F2 — composer surface */
+  --bg2-hover:     hsl(60 4% 91%);  /* #E9E9E7 — hover on bg2 */
+  /* Floating popover surface = the bg1 canvas itself; lift is border2 +
+   * --shadow-dropdown (bg3 == bg1 in light — see the dark block's note). */
+  --bg3:           var(--bg1);        /* = #FFFFFF — floating popover surface */
+  --bg3-hover:     var(--bg1-hover);  /* = #F3F2F2 — hover on bg3 (menu items) */
+  --bg4:           hsl(0 0% 94%);   /* #F0F0F0 — rare (deepest chip grey) */
+  --bg5:           hsl(0 0% 88%);   /* #E0E0E0 — rare (one step past bg4) */
+
+  /* ── FOREGROUNDS ── */
+  --fg1:        hsl(20 7% 16%);   /* #2C2826 — selected/highlighted text + icons */
+  --fg2:        hsl(20 4% 37%);   /* #625D5B — default text + icon across app (comment hex corrected 2026-07-12 — the old #8E8885 note would read ~3.2:1 on white; the shipped value passes AA at 6.5:1) */
+  --fg3:        hsl(20 4% 56%);   /* #938D8A — third-tier foreground (comment hex corrected 2026-07-12; #B0ACAA was --muted-fg's hex, copy-paste drift) */
+  --muted-fg:   hsl(20 4% 68%);   /* #B1ACAA — placeholder + empty-state icons */
+
+  /* ── SIDEBAR ── */
+  --sidebar-bg:       hsl(60 9% 98%);  /* #FAFAF9 */
+  --sidebar-bg-hover: hsl(60 2% 92%);  /* #EBEBEA */
+
+  /* ── BORDERS ── */
+  --border1: hsl(30 9% 91%);   /* #EAE8E6 — default for bg1 surfaces */
+  --border2: hsl(30 9% 88%);   /* #EAE8E6 — sidebar / composer focus / bg2 */
+  --border3: hsl(60 3% 85%);   /* #DADAD8 — secondary btn / dropdown / input */
+  --border4: hsl(0 1% 83%);    /* #D5D4D4 — highlighted state of border3 */
+
+  /* ── ELEVATION ── softer, wider wash — a light UI reads shadow
+   * against white, so lower alpha than the dark theme's 0.35. */
+  --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.12);
+  /* Lighter veil — 80% black over a white UI reads as a blackout. */
+  --scrim: hsl(0 0% 0% / 0.4);
+
+  /* ── HIGHLIGHTED ── */
+  --highlighted-bg:     hsl(30 5% 92%);  /* #ECEBEA — user msg bg (text on it: fg1/fg2) */
+  --highlighted-bright: hsl(25 5% 45%);  /* #79726D — input focus border, brighter accents */
+
+  /* ── INVERTED (near-black in light) ── */
+  --inverted-bg: hsl(20 7% 16%);  /* #2C2826 — warm near-black */
+  --inverted-fg: hsl(0 0% 100%);  /* #FFFFFF — text/icon on the inverted fill */
+
+  /* ── COMPONENT ALIASES ── bg/fg follow the inverted pair via the
+   * :root aliases; only the hover needs its own light value (a
+   * lifted warm charcoal that reads against the near-black fill). */
+  --primary-button-hover: hsl(22 6% 25%);  /* #433E3B */
+
+  /* ── COLOR PALETTES (6 families — light anchors) ── */
+  --red-primary:    hsl(0 72% 51%);    /* #DC2728 — −N counts, error accents */
+  --red-secondary:  hsl(0 72% 50%);    /* #DC2625 — solid delete fills + delete icons */
+  --red-bg:         hsl(18 87% 91%);   /* #FCDFD3 — error container surface */
+  --red-fg:         hsl(18 89% 40%);   /* #C2410B — text/icon on --red-bg */
+
+  --green-primary:  hsl(142 75% 36%);  /* #17A34A — +N counts, success accents */
+  --green-bg:       hsl(134 38% 89%);  /* #D7EDDC — success container surface */
+  --green-fg:       hsl(142 70% 30%);  /* #17803D — text/icon on --green-bg */
+
+  --yellow-primary: hsl(37 90% 60%);   /* #F5AE3D — warning · modified · in-progress */
+  --yellow-bg:      hsl(48 97% 89%);   /* #FEF3C6 — warning container surface */
+  --yellow-fg:      hsl(37 100% 51%);  /* #FF9F05 — text/icon on --yellow-bg */
+
+  --blue-primary:   hsl(221 83% 53%);  /* #2463EB — info · links · accents */
+  --blue-bg:        hsl(214 100% 97%); /* #EFF6FF — info container surface */
+  --blue-fg:        hsl(224 77% 48%);  /* #1C4ED8 — text/icon on --blue-bg */
+
+  --violet-primary: hsl(271 80% 51%);  /* #851EE6 — done · merged */
+  --violet-bg:      hsl(274 93% 94%);  /* #F2E2FE — done container surface */
+  --violet-fg:      hsl(263 61% 46%);  /* #642EBB — text/icon on --violet-bg */
+
+  --brown-primary:  hsl(5 35% 50%);    /* #AC5A53 — file paths · warm accents (comment hex corrected 2026-07-12) */
+  --brown-bg:       hsl(5 74% 91%);    /* #F9DAD7 — brown container surface */
+  --brown-fg:       hsl(0 20% 40%);    /* #7A5252 — text/icon on --brown-bg (comment hex corrected 2026-07-12) */
+}
+
+
+/* ──────────────────────────────────────────────────────────
+   3. Tailwind v4 default border-color + focus-visible outline
+   ──────────────────────────────────────────────────────────
+   Tailwind v4 changed the default border-color from theme to
+   `currentColor`. Without this base-layer override, every `border`
+   utility paints with the element's text color. shadcn's official
+   Tailwind v4 setup guide uses this pattern; we point at our
+   default border (border1) and our brand accent for focus outlines. */
+
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--border1, currentColor);
+    outline-color: var(--highlighted-bright);
+  }
+}

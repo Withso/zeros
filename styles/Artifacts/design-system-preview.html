@@ -1,0 +1,939 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zeros — Design System</title>
+<style>
+:root{
+  color-scheme:dark;
+
+  /* ── BACKGROUNDS (9 surfaces) ── */
+  --bg1:hsl(25 5% 7%); --bg1-hover:hsl(8 5% 12%); --bg1-highlight:hsl(25 5% 10%);
+  --bg2:hsl(25 4% 12%); --bg2-hover:hsl(15 3% 15%);
+  --bg3:hsl(15 4% 16%); --bg3-hover:hsl(15 3% 20%);
+  --bg4:hsl(5 1% 24%); --bg5:hsl(8 0% 37%);
+
+  /* ── FOREGROUNDS (text + icons only) ── */
+  --fg1:hsl(0 2% 92%); --fg2:hsl(20 4% 66%); --fg3:hsl(15 1% 44%); --muted-fg:hsl(15 4% 44%);
+
+  /* ── SIDEBAR (workspace col 1 only) ── */
+  --sidebar-bg:hsl(25 5% 9%); --sidebar-bg-hover:hsl(25 2% 15%);
+
+  /* ── BORDERS (borders only) ── */
+  --border1:hsl(8 3% 14%); --border2:hsl(25 1% 18%); --border3:hsl(15 0% 24%); --border4:hsl(15 0% 30%);
+
+  /* ── ELEVATION + SCRIM ── */
+  --shadow-dropdown:0 8px 24px rgba(0,0,0,.35);
+  --scrim:hsl(0 0% 0% / 0.8);
+
+  /* ── HIGHLIGHTED (brand accent) ── */
+  --highlighted-bg:hsl(25 5% 15%);
+  --highlighted-bright:hsl(25 5% 65%);
+
+  /* ── INVERTED PAIR + COMPONENT ALIASES (button intents) ── */
+  --inverted-bg:hsl(0 2% 92%); --inverted-fg:hsl(5 7% 5%);
+  --primary-button-bg:var(--inverted-bg); --primary-button-hover:hsl(25 2% 83%); --primary-button-fg:var(--inverted-fg);
+
+  /* ── COLOR PALETTES (6 families) ── */
+  --red-primary:hsl(0 91% 71%);   --red-secondary:hsl(7 83% 39%);  --red-secondary-fg:hsl(0 0% 100%); --red-bg:hsl(13 81% 14%);   --red-fg:hsl(20 97% 72%);
+  --green-primary:hsl(142 69% 58%);                                --green-bg:hsl(120 23% 17%);--green-fg:hsl(142 75% 73%);
+  --yellow-primary:hsl(37 75% 60%);                                --yellow-bg:hsl(38 68% 17%);--yellow-fg:hsl(44 100% 50%);
+  --blue-primary:hsl(205 80% 73%);                                 --blue-bg:hsl(226 57% 18%); --blue-fg:hsl(211 96% 78%);
+  --violet-primary:hsl(271 80% 73%);                               --violet-bg:hsl(255 21% 18%);--violet-fg:hsl(265 66% 77%);
+  --brown-primary:hsl(9 46% 72%);                                  --brown-bg:hsl(10 15% 15%); --brown-fg:hsl(10 80% 72%);
+
+  /* radius scale — fixed 3-step (2026-07-12): 4/6/8px + full. No xl/2xl/3xl. */
+  --radius-sm:4px; --radius-md:6px; --radius-lg:8px;
+}
+
+/* ── LIGHT THEME — [data-theme="light"] overrides (toggle top-right).
+   Warm off-whites over the same taxonomy; bg1 + bg3 are BOTH pure white
+   (popover lift = shadow + border). Ramp steps below are theme-static. */
+[data-theme="light"]{
+  color-scheme:light;
+  --bg1:hsl(0 0% 100%); --bg1-hover:hsl(0 4% 95%); --bg1-highlight:hsl(0 0% 97%);
+  --bg2:hsl(60 4% 95%); --bg2-hover:hsl(60 4% 91%);
+  --bg3:hsl(0 0% 100%); --bg3-hover:hsl(0 0% 95%);
+  --bg4:hsl(0 0% 94%); --bg5:hsl(0 0% 88%);
+  --fg1:hsl(20 7% 16%); --fg2:hsl(20 4% 37%); --fg3:hsl(20 4% 56%); --muted-fg:hsl(20 4% 68%);
+  --sidebar-bg:hsl(60 9% 98%); --sidebar-bg-hover:hsl(60 2% 92%);
+  --border1:hsl(30 9% 91%); --border2:hsl(30 9% 91%); --border3:hsl(60 3% 85%); --border4:hsl(0 1% 83%);
+  --shadow-dropdown:0 8px 24px rgba(0,0,0,.12);
+  --scrim:hsl(0 0% 0% / 0.4);
+  --highlighted-bg:hsl(30 5% 92%); --highlighted-bright:hsl(25 5% 45%);
+  --inverted-bg:hsl(20 7% 16%); --inverted-fg:hsl(0 0% 100%);
+  --primary-button-hover:hsl(22 6% 25%);
+  --red-primary:hsl(0 72% 51%);    --red-secondary:hsl(0 72% 50%);  --red-bg:hsl(18 87% 91%);   --red-fg:hsl(18 89% 40%);
+  --green-primary:hsl(142 75% 36%);                                 --green-bg:hsl(134 38% 89%);--green-fg:hsl(142 70% 30%);
+  --yellow-primary:hsl(37 90% 60%);                                 --yellow-bg:hsl(48 97% 89%);--yellow-fg:hsl(37 100% 51%);
+  --blue-primary:hsl(221 83% 53%);                                  --blue-bg:hsl(214 100% 97%);--blue-fg:hsl(224 77% 48%);
+  --violet-primary:hsl(271 80% 51%);                                --violet-bg:hsl(274 93% 94%);--violet-fg:hsl(263 61% 46%);
+  --brown-primary:hsl(5 35% 50%);                                   --brown-bg:hsl(5 74% 91%);  --brown-fg:hsl(0 20% 40%);
+}
+.themetoggle{position:fixed;top:10px;right:14px;z-index:20;display:inline-flex;align-items:center;gap:7px;
+  background:var(--bg3);color:var(--fg2);border:1px solid var(--border3);border-radius:var(--radius-sm);
+  height:28px;padding:0 10px;font:500 12px "Geist Variable",system-ui;cursor:pointer;box-shadow:var(--shadow-dropdown)}
+.themetoggle:hover{color:var(--fg1);border-color:var(--border4)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg1);color:var(--fg1);
+  font:14px/1.55 "Geist Variable",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  padding:0 0 100px}
+.mono{font-family:"Geist Mono Variable",ui-monospace,Menlo,monospace}
+code{background:var(--bg3);padding:1px 6px;border-radius:4px;font-size:11.5px;color:var(--fg1);
+  font-family:"Geist Mono Variable",ui-monospace,Menlo,monospace;white-space:nowrap}
+em{color:var(--fg1);font-style:normal;font-weight:600}
+a{color:var(--blue-primary);text-decoration:none}
+
+/* header + nav */
+header{padding:30px 40px 0;max-width:1180px}
+h1{font-size:23px;margin:0 0 5px;letter-spacing:-.01em}
+.lede{color:var(--fg2);margin:0;max-width:80ch}
+nav{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg1) 88%,transparent);
+  backdrop-filter:blur(8px);border-bottom:1px solid var(--border1);padding:12px 40px;margin:22px 0 6px;
+  display:flex;gap:6px;flex-wrap:wrap}
+nav a{font-size:12.5px;color:var(--fg2);padding:5px 11px;border-radius:4px}
+nav a:hover{background:var(--bg1-hover);color:var(--fg1)}
+
+main{padding:14px 40px 0;max-width:1180px}
+section{margin:0 0 44px;scroll-margin-top:64px}
+.h2{font-size:17px;margin:0 0 3px;display:flex;align-items:baseline;gap:10px;letter-spacing:-.01em}
+.h2 small{color:var(--fg3);font-weight:400;font-size:12.5px}
+.secintro{color:var(--fg2);margin:0 0 18px;max-width:82ch;font-size:13.5px}
+h3{font-size:13px;color:var(--fg2);letter-spacing:.02em;text-transform:uppercase;margin:26px 0 11px;font-weight:600}
+h3:first-of-type{margin-top:8px}
+.rule{border:0;border-top:1px solid var(--border1);margin:34px 0}
+
+/* ── token swatch grid ── */
+.tokens{display:flex;flex-wrap:wrap;gap:11px}
+.tok{width:212px;border:1px solid var(--border1);border-radius:8px;overflow:hidden;background:var(--bg1-highlight)}
+.tok .chip{height:56px;border-bottom:1px solid var(--border1)}
+.tok .meta{padding:9px 11px}
+.tok .name{font:600 12.5px "Geist Mono Variable",ui-monospace,Menlo,monospace;color:var(--fg1);word-break:break-all}
+.tok .val{font:11px "Geist Mono Variable",ui-monospace,Menlo,monospace;color:var(--fg3);margin-top:2px}
+.tok .cls{font:11px "Geist Mono Variable",ui-monospace,Menlo,monospace;color:var(--blue-primary);margin-top:4px}
+.tok .use{color:var(--fg2);font-size:11.5px;margin-top:6px;line-height:1.45}
+
+/* foreground samples */
+.fgrow{display:flex;flex-direction:column;gap:9px;background:var(--bg1);border:1px solid var(--border1);border-radius:8px;padding:16px 18px;max-width:760px}
+.fgrow .line{display:flex;align-items:baseline;gap:14px}
+.fgrow .swatch{font-size:16px;font-weight:600;min-width:290px}
+.fgrow .desc{color:var(--fg3);font-size:12px}
+
+/* border samples */
+.brow{display:flex;gap:14px;flex-wrap:wrap}
+.brow .bx{width:150px;height:66px;border-radius:8px;background:var(--bg1);display:flex;align-items:flex-end;padding:8px 10px;
+  font:11px "Geist Mono Variable",ui-monospace,Menlo,monospace;color:var(--fg3)}
+
+/* radius samples */
+.rrow{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end}
+.rrow .rx{width:88px}
+.rrow .rbox{height:64px;background:var(--bg3);border:1px solid var(--border3)}
+.rrow .rl{font:11px "Geist Mono Variable",ui-monospace,Menlo,monospace;color:var(--fg3);margin-top:7px;text-align:center}
+
+/* ── palette family ── */
+.fam{margin:0 0 20px}
+.famhead{display:flex;align-items:center;gap:9px;margin:0 0 9px}
+.famhead .dot{width:13px;height:13px;border-radius:50%}
+.famhead .fn{font-weight:600;font-size:14px;text-transform:capitalize}
+.famhead .role{color:var(--fg3);font-size:12px}
+.famhead .cr{margin-left:auto;font:11px "Geist Mono Variable",ui-monospace,Menlo,monospace;color:var(--fg3)}
+.anchors{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:9px}
+.anchor{width:172px;height:78px;border-radius:8px;padding:9px 11px;display:flex;flex-direction:column;justify-content:space-between;border:1px solid rgba(255,255,255,.06)}
+.anchor .al{font:600 12px "Geist Mono Variable",ui-monospace,Menlo,monospace}
+.anchor .av{font:10px "Geist Mono Variable",ui-monospace,Menlo,monospace;opacity:.85;line-height:1.35}
+.ramp{display:flex;gap:5px;flex-wrap:wrap}
+.step{width:76px;height:52px;border-radius:6px;padding:6px 7px;display:flex;flex-direction:column;justify-content:space-between;border:1px solid rgba(255,255,255,.05)}
+.step .sl{font:600 11px "Geist Mono Variable",ui-monospace,Menlo,monospace}
+.step .sv{font:9px "Geist Mono Variable",ui-monospace,Menlo,monospace;opacity:.8}
+.step .anc{font:8px "Geist Mono Variable",ui-monospace,Menlo,monospace;opacity:.7;letter-spacing:.02em}
+
+/* mapping table */
+table{border-collapse:collapse;font-size:13px;margin-top:4px}
+th{text-align:left;color:var(--fg3);font-weight:500;font-size:12px;padding:0 18px 8px 0;border-bottom:1px solid var(--border1)}
+td{padding:7px 18px 7px 0;color:var(--fg2);vertical-align:top;border-bottom:1px solid var(--border1)}
+td:first-child{color:var(--fg1)}
+
+/* rules / anti-patterns */
+.rules{display:grid;grid-template-columns:1fr 1fr;gap:10px 26px;max-width:1000px}
+.rule-card{background:var(--bg1-highlight);border:1px solid var(--border1);border-radius:8px;padding:11px 14px;font-size:13px;color:var(--fg2)}
+.rule-card b{color:var(--fg1)}
+.anti{display:flex;flex-direction:column;gap:7px;max-width:920px}
+.anti .x{display:flex;gap:10px;font-size:13px;color:var(--fg2)}
+.anti .x i{color:var(--red-primary);font-style:normal;flex:none;font-weight:700}
+
+/* ── components ── */
+.demo{background:var(--bg1);border:1px solid var(--border1);border-radius:8px;padding:18px 20px;margin:0 0 12px}
+.demo.raised{background:var(--bg1-highlight)}
+.cap{font:11.5px "Geist Mono Variable",ui-monospace,Menlo,monospace;color:var(--fg3);margin:8px 2px 2px;line-height:1.55}
+.cap b{color:var(--fg2);font-weight:500}
+.cluster{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.grp{display:flex;flex-direction:column;gap:8px}
+.grp .lbl{font-size:11px;color:var(--fg3);text-transform:uppercase;letter-spacing:.04em}
+
+/* buttons — base: rounded-sm (4px), h-7, px-2.5, text-sm font-medium, gap-2, icon size-4 */
+.btn{border:1px solid transparent;border-radius:4px;height:28px;padding:0 10px;font:500 13px "Geist Variable",system-ui;
+  cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap;
+  transition:background-color .12s ease-out,color .12s ease-out,border-color .12s ease-out;line-height:1}
+.btn svg{width:16px;height:16px;flex:none}
+.btn.primary{background:var(--primary-button-bg);color:var(--primary-button-fg);box-shadow:0 1px 2px rgba(0,0,0,.3)}
+.btn.primary:hover{background:var(--primary-button-hover)}
+.btn.secondary{background:var(--bg2);border-color:var(--border2);color:var(--fg1)}
+.btn.secondary:hover{background:var(--bg2-hover);border-color:var(--border3)}
+.btn.ghost{background:transparent;color:var(--fg2)}
+.btn.ghost:hover{background:var(--bg3);color:var(--fg1)}
+.btn.destructive{background:var(--red-secondary);color:var(--red-secondary-fg);box-shadow:0 1px 2px rgba(0,0,0,.3)}
+.btn.destructive:hover{background:color-mix(in srgb,var(--red-secondary) 90%,var(--bg1))}
+.btn.destructive-sec{background:var(--bg2);border-color:var(--border2);color:var(--red-primary)}
+.btn.destructive-sec:hover{background:var(--bg2-hover);border-color:var(--border3)}
+.btn[disabled]{opacity:.5;cursor:not-allowed;pointer-events:none}
+.btn.sm{height:24px;font-size:12px}
+.btn.lg{height:32px}
+.btn.icon-sm{width:24px;height:24px;padding:0}
+.btn.icon{width:28px;height:28px;padding:0}
+.btn.icon-lg{width:32px;height:32px;padding:0}
+
+/* input — h-8, rounded-sm (4px), border3, bg-transparent, placeholder fg2, focus border-only */
+.field{display:flex;flex-direction:column;gap:6px;max-width:300px}
+.field label{font-size:12px;color:var(--fg2)}
+.inp{background:transparent;border:1px solid var(--border3);border-radius:4px;padding:6px 11px;color:var(--fg1);
+  font:14px "Geist Variable",system-ui;outline:none;box-shadow:0 1px 2px rgba(0,0,0,.12);
+  transition:border-color .12s ease-out,box-shadow .12s ease-out}
+.inp::placeholder{color:var(--fg2)}
+.inp:focus,.inp.focus{border-color:var(--highlighted-bright)}
+.inp.on2{background:var(--bg2)}
+.inp.err{border-color:var(--red-primary);box-shadow:0 0 0 3px color-mix(in srgb,var(--red-primary) 20%,transparent)}
+.inp[disabled]{opacity:.5;cursor:not-allowed}
+textarea.inp{resize:vertical;min-height:60px;line-height:1.5}
+.errmsg{font-size:11.5px;color:var(--red-primary)}
+
+/* tabs — recessed bg3 track, active lifts to bg1 */
+.tabs{display:inline-flex;align-items:center;gap:2px;background:var(--bg3);border-radius:8px;padding:4px}
+.tab{padding:5px 13px;font-size:13px;font-weight:500;color:var(--fg2);cursor:pointer;border-radius:6px;
+  transition:background-color .12s ease-out,color .12s ease-out}
+.tab:hover{color:var(--fg1)}
+.tab.active{background:var(--bg1);color:var(--fg1);box-shadow:0 1px 2px rgba(0,0,0,.3)}
+
+/* segmented D1 — bg2 track, active lifts to bg3 (CodeDesignToggle) */
+.seg{display:inline-flex;align-items:stretch;height:32px;background:var(--bg2);border-radius:6px;padding:2px;gap:2px}
+.seg button{border:0;background:transparent;color:var(--fg2);font:500 13px "Geist Variable",system-ui;
+  display:inline-flex;align-items:center;gap:6px;padding:0 10px;border-radius:4px;cursor:pointer;transition:background-color .12s,color .12s}
+.seg button:hover{color:var(--fg1)}
+.seg button.active{background:var(--bg3);color:var(--fg1)}
+.seg svg{width:14px;height:14px}
+/* segmented D2/D3 — bordered bg1 track, active lifts to bg3 */
+.seg2{display:inline-flex;align-items:center;background:var(--bg1);border:1px solid var(--border3);border-radius:6px;padding:2px}
+.seg2 button{border:0;background:transparent;color:var(--fg2);font:500 13px "Geist Variable",system-ui;
+  display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:4px;cursor:pointer;transition:background-color .12s,color .12s}
+.seg2 button:hover{color:var(--fg1)}
+.seg2 button.active{background:var(--bg3);color:var(--fg1)}
+.seg2.sm button{font-size:12px;padding:3px 10px}
+.seg2 svg{width:14px;height:14px}
+/* segmented D4/D5 — translucent bg3/50 track, active lifts to bg1 */
+.seg3{display:inline-flex;align-items:center;background:color-mix(in srgb,var(--bg3) 50%,transparent);border-radius:6px;padding:2px}
+.seg3 button{border:0;background:transparent;color:var(--fg2);font:500 12px "Geist Variable",system-ui;
+  display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:4px;cursor:pointer;transition:background-color .12s,color .12s}
+.seg3 button:hover{color:var(--fg1)}
+.seg3 button.active{background:var(--bg1);color:var(--fg1)}
+.seg3 svg{width:14px;height:14px}
+
+/* chrome-tab strip A — transparent track, active pill = bg3, h-7 rounded-md (6px) */
+.ctabs{display:inline-flex;align-items:center;gap:4px;padding:4px;max-width:100%;flex-wrap:wrap}
+.ctabs.barred{border-bottom:1px solid var(--border1);padding:5px 8px}
+.ctab{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:6px;
+  font:500 12px "Geist Variable",system-ui;color:var(--fg2);cursor:pointer;white-space:nowrap;transition:background-color .12s,color .12s}
+.ctab:hover{background:var(--sidebar-bg-hover);color:var(--fg1)}
+.ctab.onbar:hover{background:color-mix(in srgb,var(--bg3) 50%,transparent)}
+.ctab.active{background:var(--bg3);color:var(--fg1)}
+.ctab svg{width:13px;height:13px}
+.ctab .cnt{font:600 11px "Geist Mono Variable",ui-monospace,Menlo,monospace;color:var(--fg2);font-variant-numeric:tabular-nums}
+
+/* underline tabs B — transparent, active = border-b-2 fg1 (or inset bar), h-9 */
+.utabs{display:inline-flex;align-items:center;gap:2px;border-bottom:1px solid var(--border1)}
+.utab{position:relative;height:36px;padding:0 12px;display:inline-flex;align-items:center;gap:6px;margin-bottom:-1px;
+  font:500 13px "Geist Variable",system-ui;color:var(--fg2);cursor:pointer;border-bottom:2px solid transparent;transition:color .12s,border-color .12s}
+.utab:hover{color:var(--fg1)}
+.utab.active{color:var(--fg1);border-bottom-color:var(--fg1)}
+.utab svg{width:14px;height:14px}
+.utab.bar.active{border-bottom-color:transparent}
+.utab.bar.active::after{content:"";position:absolute;left:8px;right:8px;bottom:0;height:2px;border-radius:2px;background:var(--fg1)}
+
+/* flat text tabs C — Radix primitive OVERRIDDEN to transparent + fg1/font-medium */
+.ftabs{display:inline-flex;align-items:center;gap:0;border-bottom:1px solid var(--border1);padding:0 8px;height:36px}
+.ftab{height:28px;padding:0 10px;border-radius:6px;display:inline-flex;align-items:center;
+  font:400 12px "Geist Variable",system-ui;color:var(--fg2);cursor:pointer;transition:color .12s}
+.ftab:hover{color:var(--fg1)}
+.ftab.active{color:var(--fg1);font-weight:500}
+.ftab.dis{opacity:.5;cursor:not-allowed}
+
+/* switch — h-5 w-9 track, checked bg-fg1, unchecked bg-border3+border4, knob bg-bg3 both states */
+.sw{display:inline-flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;color:var(--fg2)}
+.track{width:36px;height:20px;border-radius:999px;background:var(--border3);border:1px solid var(--border4);position:relative;transition:background-color .15s ease-out,border-color .15s}
+.track .knob{position:absolute;top:1px;left:1px;width:16px;height:16px;border-radius:50%;background:var(--bg3);box-shadow:0 1px 3px rgba(0,0,0,.45);transition:transform .15s ease-out}
+.sw.on .track{background:var(--fg1);border-color:transparent}
+.sw.on .track .knob{transform:translateX(17px)}
+.sw.dis{opacity:.5;cursor:not-allowed}
+
+/* dropdown / select */
+.ddwrap{display:flex;gap:34px;flex-wrap:wrap;align-items:flex-start}
+.trigger{display:inline-flex;align-items:center;gap:9px;background:transparent;border:1px solid var(--border3);
+  border-radius:4px;padding:6px 11px;color:var(--fg1);font-size:13px;cursor:pointer;min-width:180px;justify-content:space-between;
+  box-shadow:0 1px 2px rgba(0,0,0,.12);transition:background-color .12s,border-color .12s}
+.trigger:hover{background:var(--bg2);border-color:var(--border4)}
+.trigger .chev{color:var(--fg2)}
+.menu{width:220px;background:var(--bg3);border:1px solid var(--border1);border-radius:8px;box-shadow:var(--shadow-dropdown);padding:5px}
+.mitem{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:4px;color:var(--fg1);font-size:13px;cursor:pointer}
+.mitem:hover{background:var(--bg3-hover)}
+.mitem .lead{width:15px;display:inline-flex;justify-content:center;color:var(--fg2)}
+.mitem .ck{margin-left:auto;color:var(--fg2)}
+.mitem.muted{color:var(--fg2)}
+.mitem svg{width:14px;height:14px}
+.msep{height:1px;background:var(--border1);margin:5px 2px}
+.mlabel{padding:5px 8px;font-size:11px;color:var(--fg2);text-transform:uppercase;letter-spacing:.04em}
+
+/* badges — rounded-sm (4px), text-xs font-semibold */
+.badges{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
+.badge{font:600 11.5px "Geist Variable",system-ui;padding:2px 9px;border-radius:4px;border:1px solid transparent;display:inline-flex;align-items:center;gap:6px}
+.badge.primary{background:var(--primary-button-bg);color:var(--primary-button-fg)}
+.badge.neutral{background:var(--bg3);color:var(--fg1)}
+.badge.destructive{background:var(--red-secondary);color:var(--fg1)}
+.badge.outline{background:transparent;border-color:var(--border1);color:var(--fg1)}
+.count{font:600 11px "Geist Mono Variable",ui-monospace,Menlo,monospace;background:var(--bg3);color:var(--fg2);border-radius:4px;padding:1px 7px;font-variant-numeric:tabular-nums}
+
+
+/* toast — bg1 card, no border, soft shadow, colored icon only */
+.toast{background:var(--bg1);border:0;border-radius:8px;padding:12px 15px;box-shadow:0 8px 24px -12px rgba(0,0,0,.55);
+  font-size:13px;color:var(--fg1);display:inline-flex;align-items:center;gap:10px;min-width:300px}
+
+/* dialog — bg1 content on a dark overlay */
+.overlay{background:var(--scrim);border-radius:8px;padding:36px;display:flex;justify-content:center}
+.dialog{width:400px;background:var(--bg1);border:1px solid var(--border1);border-radius:8px;box-shadow:0 16px 44px rgba(0,0,0,.5);padding:22px}
+.dialog h4{margin:0 0 6px;font-size:14px;color:var(--fg1);font-weight:600}
+.dialog p{margin:0 0 18px;font-size:13px;color:var(--fg2)}
+.dialog .actions{display:flex;justify-content:flex-end;gap:9px}
+
+/* popover — bg3 surface */
+.pop{width:262px;background:var(--bg3);border:1px solid var(--border1);border-radius:8px;box-shadow:var(--shadow-dropdown);padding:15px}
+.pop .pt{font-size:13px;font-weight:600;color:var(--fg1);margin-bottom:5px}
+.pop .pb{font-size:12.5px;color:var(--fg2)}
+
+/* card — bg3 surface, rounded-lg (8px) */
+.card{width:300px;background:var(--bg3);border:1px solid var(--border1);border-radius:8px;padding:18px 19px}
+.card .ct{font-size:14px;font-weight:600;color:var(--fg1);margin-bottom:4px}
+.card .cb{font-size:13px;color:var(--fg2)}
+.card .cf{margin-top:14px;display:flex;gap:8px}
+
+/* alert */
+.alert{border:1px solid var(--border1);border-radius:8px;padding:12px 15px;font-size:13px;display:flex;gap:11px;max-width:540px;align-items:flex-start}
+.alert svg{width:16px;height:16px;flex:none;margin-top:1px}
+.alert .at{font-weight:600;display:block;margin-bottom:2px}
+.alert.default{background:var(--bg1);color:var(--fg1)}
+.alert.default .ab{color:var(--fg2)}
+.alert.destructive{background:var(--bg1);border-color:color-mix(in srgb,var(--red-primary) 50%,transparent);color:var(--red-primary)}
+
+/* slider */
+.slider{width:230px;height:16px;display:flex;align-items:center;position:relative}
+.slider .strack{height:5px;width:100%;border-radius:999px;background:color-mix(in srgb,var(--primary-button-bg) 20%,transparent)}
+.slider .srange{position:absolute;left:0;height:5px;width:55%;border-radius:999px;background:var(--primary-button-bg)}
+.slider .sthumb{position:absolute;left:calc(55% - 8px);width:16px;height:16px;border-radius:50%;background:var(--bg1);border:1px solid color-mix(in srgb,var(--highlighted-bright) 50%,transparent)}
+</style>
+</head>
+<body>
+<button class="themetoggle" id="themeToggle" type="button" aria-pressed="false">☾ Dark</button>
+<script>
+(function(){
+  var btn=document.getElementById('themeToggle'),root=document.documentElement;
+  function render(){var light=root.getAttribute('data-theme')==='light';
+    btn.textContent=light?'☀ Light':'☾ Dark';btn.setAttribute('aria-pressed',String(light));}
+  btn.addEventListener('click',function(){
+    if(root.getAttribute('data-theme')==='light'){root.removeAttribute('data-theme');}
+    else{root.setAttribute('data-theme','light');}
+    render();});
+  render();
+})();
+</script>
+
+<header>
+  <h1>Zeros — Design System</h1>
+  <p class="lede">The complete token reference for the Zeros Mac app: every primitive in
+  <code>styles/zeros-tokens.css</code>, how each one is used, the usage rules &amp; anti-patterns, and a live
+  component library (mirroring <code>src/zeros/ui/primitives/</code>). Two themes ship: <em>Zeros Shade</em>
+  (dark — muted warm-gray, HSL) and <em>Light</em> (warm off-whites, added 2026-07-11) — flip this page with the
+  toggle (top right), which swaps <code>data-theme="light"</code> on <code>&lt;html&gt;</code> exactly like the app's
+  appearance store. Rendered on the real app canvas (<code>--bg1</code>). For semantic color
+  applied to real UI, see <a href="color-palette-preview.html">color-palette-preview.html</a>.</p>
+</header>
+
+<nav>
+  <a href="#backgrounds">Backgrounds</a>
+  <a href="#foregrounds">Foregrounds</a>
+  <a href="#sidebar">Sidebar</a>
+  <a href="#borders">Borders</a>
+  <a href="#highlighted">Highlighted</a>
+  <a href="#aliases">Aliases</a>
+  <a href="#elevation">Elevation &amp; radius</a>
+  <a href="#palettes">Color palettes</a>
+  <a href="#rules">Usage rules</a>
+  <a href="#components">Components</a>
+</nav>
+
+<main>
+
+<!-- ═══════════ TOKENS ═══════════ -->
+<section id="backgrounds">
+  <div class="h2">Backgrounds <small>9 surfaces · <code>bg-bg1</code> … <code>bg-bg5</code> + hovers</small></div>
+  <p class="secintro">Surface depth ladder: canvas → composer → popover. Hover states are <em>surface-scoped</em> —
+  the hover for a <code>--bg1</code> surface is <code>--bg1-hover</code>, never a jump to <code>--bg3</code>.</p>
+  <div class="tokens">
+    <div class="tok"><div class="chip" style="background:var(--bg1)"></div><div class="meta"><div class="name">--bg1</div><div class="val">hsl(25 5% 7%)</div><div class="cls">bg-bg1</div><div class="use">Default canvas / chat window / app body</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--bg1-hover)"></div><div class="meta"><div class="name">--bg1-hover</div><div class="val">hsl(8 5% 12%)</div><div class="cls">bg-bg1-hover</div><div class="use">Hover on bg1 (tool-call rows, canvas tabs)</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--bg1-highlight)"></div><div class="meta"><div class="name">--bg1-highlight</div><div class="val">hsl(25 5% 10%)</div><div class="cls">bg-bg1-highlight</div><div class="use">Lifted content above bg1 (callouts, blocks)</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--bg2)"></div><div class="meta"><div class="name">--bg2</div><div class="val">hsl(25 4% 12%)</div><div class="cls">bg-bg2</div><div class="use">Composer surface, raised pane above bg1</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--bg2-hover)"></div><div class="meta"><div class="name">--bg2-hover</div><div class="val">hsl(15 3% 15%)</div><div class="cls">bg-bg2-hover</div><div class="use">Hover on bg2 (composer icon buttons)</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--bg3)"></div><div class="meta"><div class="name">--bg3</div><div class="val">hsl(15 4% 16%)</div><div class="cls">bg-bg3</div><div class="use">Popover / dropdown / dialog / card / selected chrome</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--bg3-hover)"></div><div class="meta"><div class="name">--bg3-hover</div><div class="val">hsl(15 3% 20%)</div><div class="cls">bg-bg3-hover</div><div class="use">Menu-item hover inside a popover</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--bg4)"></div><div class="meta"><div class="name">--bg4</div><div class="val">hsl(5 1% 24%)</div><div class="cls">bg-bg4</div><div class="use">Rare — reserved for specific cases</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--bg5)"></div><div class="meta"><div class="name">--bg5</div><div class="val">hsl(8 0% 37%)</div><div class="cls">bg-bg5</div><div class="use">Rare — reserved for specific cases</div></div></div>
+  </div>
+</section>
+
+<section id="foregrounds">
+  <div class="h2">Foregrounds <small>text + icons ONLY — never borders</small></div>
+  <p class="secintro">Three-and-a-bit tiers. <em>The default is <code>fg2</code></em>; reach for <code>fg1</code> only when text/icon should pop
+  (selected, highlighted, focal output). <code>--fg3</code> is the faint-metadata tier; <code>--muted-fg</code> is placeholders / empty states.</p>
+  <div class="fgrow">
+    <div class="line"><span class="swatch" style="color:var(--fg1)">--fg1 · highlighted / selected / focal</span><span class="desc">hsl(0 2% 92%) · text-fg1 · markdown body, titles, active labels</span></div>
+    <div class="line"><span class="swatch" style="color:var(--fg2)">--fg2 · DEFAULT text + icon</span><span class="desc">hsl(20 4% 66%) · text-fg2 · everything by default</span></div>
+    <div class="line"><span class="swatch" style="color:var(--fg3)">--fg3 · faint metadata</span><span class="desc">hsl(15 1% 44%) · timestamps, counts, backlog/cancelled</span></div>
+    <div class="line"><span class="swatch" style="color:var(--muted-fg)">--muted-fg · placeholder / empty</span><span class="desc">hsl(15 4% 44%) · text-muted-fg · input placeholders, empty-state icons</span></div>
+  </div>
+</section>
+
+<section id="sidebar">
+  <div class="h2">Sidebar <small>workspace column 1 ONLY — not the settings sidebar</small></div>
+  <p class="secintro">The workspace sidebar gets its own surface pair. The settings sidebar uses the default tokens
+  (<code>bg-bg1</code> / <code>bg-bg2</code>).</p>
+  <div class="tokens">
+    <div class="tok"><div class="chip" style="background:var(--sidebar-bg)"></div><div class="meta"><div class="name">--sidebar-bg</div><div class="val">hsl(25 5% 9%)</div><div class="cls">bg-sidebar-bg</div><div class="use">Workspace sidebar background</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--sidebar-bg-hover)"></div><div class="meta"><div class="name">--sidebar-bg-hover</div><div class="val">hsl(25 2% 15%)</div><div class="cls">bg-sidebar-bg-hover</div><div class="use">Row hover + selected state</div></div></div>
+  </div>
+</section>
+
+<section id="borders">
+  <div class="h2">Borders <small>4 tiers · borders ONLY — never text or fills</small></div>
+  <p class="secintro">Shown as outlines on the canvas (that's all they're for). Component default is
+  <code>--border3</code>; its highlighted state is <code>--border4</code>. A bare <code>border</code> utility paints <code>--border1</code> (set in the base layer).</p>
+  <div class="brow">
+    <div class="bx" style="border:1.5px solid var(--border1)">--border1</div>
+    <div class="bx" style="border:1.5px solid var(--border2)">--border2</div>
+    <div class="bx" style="border:1.5px solid var(--border3)">--border3</div>
+    <div class="bx" style="border:1.5px solid var(--border4)">--border4</div>
+  </div>
+  <p class="cap"><b>border1</b> default on bg1 · <b>border2</b> sidebar / composer focus / bg2 · <b>border3</b> secondary button / dropdown / input · <b>border4</b> highlighted state of border3</p>
+</section>
+
+<section id="highlighted">
+  <div class="h2">Highlighted <small>brand accent — anchor moments, focus, code-link</small></div>
+  <p class="secintro"><code>--highlighted-bright</code> is the focus / accent-border cue (it is <em>not</em> a button fill).
+  <code>--highlighted-bg</code> is for load-bearing anchor moments (user message bubble); text on it uses <code>fg1</code>/<code>fg2</code>.
+  Values are HSL (source of truth).</p>
+  <div class="tokens">
+    <div class="tok"><div class="chip" style="background:var(--highlighted-bg)"></div><div class="meta"><div class="name">--highlighted-bg</div><div class="val">hsl(25 5% 15%)</div><div class="cls">bg-highlighted-bg</div><div class="use">User-message bubble, selected states (text on it: fg1/fg2)</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--highlighted-bright)"></div><div class="meta"><div class="name">--highlighted-bright</div><div class="val">hsl(25 5% 65%)</div><div class="cls">border-highlighted-bright</div><div class="use">Input focus, accent borders, focus ring, brand cue</div></div></div>
+  </div>
+</section>
+
+<section id="aliases">
+  <div class="h2">Component aliases <small>button intents — thin aliases over primitives</small></div>
+  <p class="secintro">The only component-level aliases. Primary button = inverted fill (<code>--fg1</code> on <code>--bg1</code>), one per screen.
+  The aliases point at the <b>inverted pair</b> (<code>--inverted-bg</code>/<code>--inverted-fg</code>) — the one surface that flips polarity per theme (near-white on dark, near-black on light); the Switch's ON track uses the same pair.</p>
+  <div class="tokens">
+    <div class="tok"><div class="chip" style="background:var(--primary-button-bg)"></div><div class="meta"><div class="name">--primary-button-bg</div><div class="val">→ var(--inverted-bg) · hsl(0 2% 92%)</div><div class="cls">bg-primary-button-bg</div><div class="use">Filled focal CTA fill (also badge/tooltip)</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--primary-button-hover)"></div><div class="meta"><div class="name">--primary-button-hover</div><div class="val">hsl(25 2% 83%)</div><div class="cls">hover:bg-primary-button-hover</div><div class="use">Own value — lifted neutral for hover</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--primary-button-fg)"></div><div class="meta"><div class="name">--primary-button-fg</div><div class="val">→ var(--inverted-fg) · hsl(5 7% 5%)</div><div class="cls">text-primary-button-fg</div><div class="use">Text/icon on the filled CTA</div></div></div>
+  </div>
+</section>
+
+<section id="elevation">
+  <div class="h2">Elevation &amp; radius <small><code>--shadow-dropdown</code> · radius scale</small></div>
+  <h3>Elevation</h3>
+  <div class="cluster">
+    <div style="background:var(--bg3);border:1px solid var(--border1);border-radius:8px;box-shadow:var(--shadow-dropdown);padding:14px 18px;color:var(--fg1);font-size:13px">Floating surface · <code>--shadow-dropdown</code></div>
+    <span class="cap" style="margin:0"><b>--shadow-dropdown</b> — popover / dropdown / context-menu lift (dark: 0 8px 24px rgba(0,0,0,.35) · light: alpha .12) · <b>--scrim</b> — dialog/sheet overlay veil (dark 80% · light 40% black)</span>
+  </div>
+  <h3>Radius</h3>
+  <div class="rrow">
+    <div class="rx"><div class="rbox" style="border-radius:var(--radius-sm)"></div><div class="rl">sm · 4px</div></div>
+    <div class="rx"><div class="rbox" style="border-radius:var(--radius-md)"></div><div class="rl">md · 6px</div></div>
+    <div class="rx"><div class="rbox" style="border-radius:var(--radius-lg)"></div><div class="rl">lg · 8px</div></div>
+    <div class="rx"><div class="rbox" style="border-radius:999px"></div><div class="rl">full</div></div>
+  </div>
+  <p class="cap"><b>sm 4px</b> ALL buttons + icon buttons · pills / chips / badges · kbd · checkboxes · menu items · inputs · user messages &nbsp;·&nbsp;
+  <b>md 6px</b> tabs + segmented tracks · model / composer pills · sidebar + settings nav rows · small cards · tool-call rows · tooltips &nbsp;·&nbsp;
+  <b>lg 8px</b> composer shell · dialogs · popovers · menus · cards · code blocks · toasts &nbsp;·&nbsp;
+  <b>full</b> true circles only (avatar · spinner · switch · slider · dots · scrollbars).
+  <code>rounded-xl/2xl/3xl/xs</code> and bare <code>rounded</code> were removed 2026-07-12 — they no longer compile.
+  Nesting: inner radius = outer radius − inset (8px menu + 4px padding → 4px items).</p>
+</section>
+
+<hr class="rule">
+
+<!-- ═══════════ PALETTES ═══════════ -->
+<section id="palettes">
+  <div class="h2">Color palettes <small>6 semantic families · explicit HSL beyond neutral</small></div>
+  <p class="secintro">Each family = <em>primary</em> (vivid accent / icon / border / count), <em>bg</em> (dark tinted surface),
+  <em>fg</em> (light text/icon on that surface). Red adds <em>secondary</em> (deep red 700) for solid delete fills.
+  <b>The four anchors are the semantic layer</b> — use <code>--red-primary</code>, <code>--green-bg</code>, etc. directly.
+  The numeric ramp steps (50–950) are the <em>private</em> palette backing the anchors; <code>check:ui</code> forbids
+  <code>text-red-500</code> / <code>var(--blue-600)</code> in component code — snap to the nearest anchor.</p>
+
+  <!-- RED -->
+  <div class="fam">
+    <div class="famhead"><span class="dot" style="background:var(--red-primary)"></span><span class="fn">red</span><span class="role">error · −N deletions · deleted · delete button</span><span class="cr">fg/bg 7.96:1</span></div>
+    <div class="anchors">
+      <div class="anchor" style="background:var(--red-primary);color:#111"><span class="al">--red-primary</span><span class="av">hsl(0 91% 71%)<br>#F87272 · ramp 500</span></div>
+      <div class="anchor" style="background:var(--red-secondary);color:#fff"><span class="al">--red-secondary</span><span class="av">hsl(7 83% 39%)<br>#B62411 · ramp 700</span></div>
+      <div class="anchor" style="background:var(--red-secondary-fg);color:#111"><span class="al">--red-secondary-fg</span><span class="av">hsl(0 0% 100%)<br>#FFFFFF</span></div>
+      <div class="anchor" style="background:var(--red-bg);color:var(--red-fg)"><span class="al">--red-bg</span><span class="av">hsl(13 81% 14%)<br>#411307 · ramp 900</span></div>
+      <div class="anchor" style="background:var(--red-fg);color:#111"><span class="al">--red-fg</span><span class="av">hsl(20 97% 72%)<br>#FDA172</span></div>
+    </div>
+    <div class="ramp">
+      <div class="step" style="background:#FEF1F1;color:#111"><span class="sl">50</span><span class="sv">#FEF1F1</span></div>
+      <div class="step" style="background:#FCDEDE;color:#111"><span class="sl">100</span><span class="sv">#FCDEDE</span></div>
+      <div class="step" style="background:#FABDBD;color:#111"><span class="sl">200</span><span class="sv">#FABDBD</span></div>
+      <div class="step" style="background:#F79C9C;color:#111"><span class="sl">300</span><span class="sv">#F79C9C</span></div>
+      <div class="step" style="background:#F47676;color:#111"><span class="sl">400</span><span class="sv">#F47676</span></div>
+      <div class="step" style="background:#F87272;color:#111"><span class="sl">500</span><span class="sv">#F87272</span><span class="anc">primary</span></div>
+      <div class="step" style="background:#EB281E;color:#fff"><span class="sl">600</span><span class="sv">#EB281E</span></div>
+      <div class="step" style="background:#B62411;color:#fff"><span class="sl">700</span><span class="sv">#B62411</span><span class="anc">secondary</span></div>
+      <div class="step" style="background:#7D1F0C;color:#fff"><span class="sl">800</span><span class="sv">#7D1F0C</span></div>
+      <div class="step" style="background:#411307;color:#fff"><span class="sl">900</span><span class="sv">#411307</span><span class="anc">bg</span></div>
+      <div class="step" style="background:#2E0E05;color:#fff"><span class="sl">950</span><span class="sv">#2E0E05</span></div>
+    </div>
+  </div>
+
+  <!-- GREEN -->
+  <div class="fam">
+    <div class="famhead"><span class="dot" style="background:var(--green-primary)"></span><span class="fn">green</span><span class="role">success · +N additions · in-review · created</span><span class="cr">fg/bg 9.31:1</span></div>
+    <div class="anchors">
+      <div class="anchor" style="background:var(--green-primary);color:#111"><span class="al">--green-primary</span><span class="av">hsl(142 69% 58%)<br>#4ADE80 · ramp 500</span></div>
+      <div class="anchor" style="background:var(--green-bg);color:var(--green-fg)"><span class="al">--green-bg</span><span class="av">hsl(120 23% 17%)<br>#213521 · ramp 900</span></div>
+      <div class="anchor" style="background:var(--green-fg);color:#111"><span class="al">--green-fg</span><span class="av">hsl(142 75% 73%)<br>#87EEAC</span></div>
+    </div>
+    <div class="ramp">
+      <div class="step" style="background:#F2FDF6;color:#111"><span class="sl">50</span><span class="sv">#F2FDF6</span></div>
+      <div class="step" style="background:#D8F8E4;color:#111"><span class="sl">100</span><span class="sv">#D8F8E4</span></div>
+      <div class="step" style="background:#A8F0C2;color:#111"><span class="sl">200</span><span class="sv">#A8F0C2</span></div>
+      <div class="step" style="background:#73E79E;color:#111"><span class="sl">300</span><span class="sv">#73E79E</span></div>
+      <div class="step" style="background:#43DF7D;color:#111"><span class="sl">400</span><span class="sv">#43DF7D</span></div>
+      <div class="step" style="background:#4ADE80;color:#111"><span class="sl">500</span><span class="sv">#4ADE80</span><span class="anc">primary</span></div>
+      <div class="step" style="background:#289A46;color:#fff"><span class="sl">600</span><span class="sv">#289A46</span></div>
+      <div class="step" style="background:#2A7438;color:#fff"><span class="sl">700</span><span class="sv">#2A7438</span></div>
+      <div class="step" style="background:#28532B;color:#fff"><span class="sl">800</span><span class="sv">#28532B</span></div>
+      <div class="step" style="background:#213521;color:#fff"><span class="sl">900</span><span class="sv">#213521</span><span class="anc">bg</span></div>
+      <div class="step" style="background:#182618;color:#fff"><span class="sl">950</span><span class="sv">#182618</span></div>
+    </div>
+  </div>
+
+  <!-- YELLOW -->
+  <div class="fam">
+    <div class="famhead"><span class="dot" style="background:var(--yellow-primary)"></span><span class="fn">yellow</span><span class="role">warning · modified · in-progress</span><span class="cr">fg/bg 7.01:1</span></div>
+    <div class="anchors">
+      <div class="anchor" style="background:var(--yellow-primary);color:#111"><span class="al">--yellow-primary</span><span class="av">hsl(37 75% 60%)<br>#E6AB4C · ramp 500</span></div>
+      <div class="anchor" style="background:var(--yellow-bg);color:var(--yellow-fg)"><span class="al">--yellow-bg</span><span class="av">hsl(38 68% 17%)<br>#49330E · ramp 900</span></div>
+      <div class="anchor" style="background:var(--yellow-fg);color:#111"><span class="al">--yellow-fg</span><span class="av">hsl(44 100% 50%)<br>#FFBB00</span></div>
+    </div>
+    <div class="ramp">
+      <div class="step" style="background:#FFF9F0;color:#111"><span class="sl">50</span><span class="sv">#FFF9F0</span></div>
+      <div class="step" style="background:#FEF1DC;color:#111"><span class="sl">100</span><span class="sv">#FEF1DC</span></div>
+      <div class="step" style="background:#FEE0B4;color:#111"><span class="sl">200</span><span class="sv">#FEE0B4</span></div>
+      <div class="step" style="background:#FECE86;color:#111"><span class="sl">300</span><span class="sv">#FECE86</span></div>
+      <div class="step" style="background:#FEBE5D;color:#111"><span class="sl">400</span><span class="sv">#FEBE5D</span></div>
+      <div class="step" style="background:#E6AB4C;color:#111"><span class="sl">500</span><span class="sv">#E6AB4C</span><span class="anc">primary</span></div>
+      <div class="step" style="background:#F0980A;color:#111"><span class="sl">600</span><span class="sv">#F0980A</span></div>
+      <div class="step" style="background:#B77710;color:#fff"><span class="sl">700</span><span class="sv">#B77710</span></div>
+      <div class="step" style="background:#7E5411;color:#fff"><span class="sl">800</span><span class="sv">#7E5411</span></div>
+      <div class="step" style="background:#49330E;color:#fff"><span class="sl">900</span><span class="sv">#49330E</span><span class="anc">bg</span></div>
+      <div class="step" style="background:#33240A;color:#fff"><span class="sl">950</span><span class="sv">#33240A</span></div>
+    </div>
+  </div>
+
+  <!-- BLUE -->
+  <div class="fam">
+    <div class="famhead"><span class="dot" style="background:var(--blue-primary)"></span><span class="fn">blue</span><span class="role">info · links · accents</span><span class="cr">fg/bg 8.73:1</span></div>
+    <div class="anchors">
+      <div class="anchor" style="background:var(--blue-primary);color:#111"><span class="al">--blue-primary</span><span class="av">hsl(205 80% 73%)<br>#83C3F1 · ramp 500</span></div>
+      <div class="anchor" style="background:var(--blue-bg);color:var(--blue-fg)"><span class="al">--blue-bg</span><span class="av">hsl(226 57% 18%)<br>#142048 · ramp 900</span></div>
+      <div class="anchor" style="background:var(--blue-fg);color:#111"><span class="al">--blue-fg</span><span class="av">hsl(211 96% 78%)<br>#91C5FD</span></div>
+    </div>
+    <div class="ramp">
+      <div class="step" style="background:#F0F8FE;color:#111"><span class="sl">50</span><span class="sv">#F0F8FE</span></div>
+      <div class="step" style="background:#E2F2FD;color:#111"><span class="sl">100</span><span class="sv">#E2F2FD</span></div>
+      <div class="step" style="background:#CAE7FC;color:#111"><span class="sl">200</span><span class="sv">#CAE7FC</span></div>
+      <div class="step" style="background:#B1DCFB;color:#111"><span class="sl">300</span><span class="sv">#B1DCFB</span></div>
+      <div class="step" style="background:#94CFF9;color:#111"><span class="sl">400</span><span class="sv">#94CFF9</span></div>
+      <div class="step" style="background:#83C3F1;color:#111"><span class="sl">500</span><span class="sv">#83C3F1</span><span class="anc">primary</span></div>
+      <div class="step" style="background:#4196EC;color:#fff"><span class="sl">600</span><span class="sv">#4196EC</span></div>
+      <div class="step" style="background:#1F65C7;color:#fff"><span class="sl">700</span><span class="sv">#1F65C7</span></div>
+      <div class="step" style="background:#1D3E87;color:#fff"><span class="sl">800</span><span class="sv">#1D3E87</span></div>
+      <div class="step" style="background:#142048;color:#fff"><span class="sl">900</span><span class="sv">#142048</span><span class="anc">bg</span></div>
+      <div class="step" style="background:#0E1734;color:#fff"><span class="sl">950</span><span class="sv">#0E1734</span></div>
+    </div>
+  </div>
+
+  <!-- VIOLET -->
+  <div class="fam">
+    <div class="famhead"><span class="dot" style="background:var(--violet-primary)"></span><span class="fn">violet</span><span class="role">done · merged</span><span class="cr">fg/bg 6.61:1</span></div>
+    <div class="anchors">
+      <div class="anchor" style="background:var(--violet-primary);color:#111"><span class="al">--violet-primary</span><span class="av">hsl(271 80% 73%)<br>#BC83F1 · ramp 500</span></div>
+      <div class="anchor" style="background:var(--violet-bg);color:var(--violet-fg)"><span class="al">--violet-bg</span><span class="av">hsl(255 21% 18%)<br>#292438 · ramp 900</span></div>
+      <div class="anchor" style="background:var(--violet-fg);color:#111"><span class="al">--violet-fg</span><span class="av">hsl(265 66% 77%)<br>#BE9EEB</span></div>
+    </div>
+    <div class="ramp">
+      <div class="step" style="background:#F8F0FF;color:#111"><span class="sl">50</span><span class="sv">#F8F0FF</span></div>
+      <div class="step" style="background:#F0E1FE;color:#111"><span class="sl">100</span><span class="sv">#F0E1FE</span></div>
+      <div class="step" style="background:#E4C8FE;color:#111"><span class="sl">200</span><span class="sv">#E4C8FE</span></div>
+      <div class="step" style="background:#D8AEFE;color:#111"><span class="sl">300</span><span class="sv">#D8AEFE</span></div>
+      <div class="step" style="background:#C98FFE;color:#111"><span class="sl">400</span><span class="sv">#C98FFE</span></div>
+      <div class="step" style="background:#BC83F1;color:#111"><span class="sl">500</span><span class="sv">#BC83F1</span><span class="anc">primary</span></div>
+      <div class="step" style="background:#8E43EA;color:#fff"><span class="sl">600</span><span class="sv">#8E43EA</span></div>
+      <div class="step" style="background:#652EBD;color:#fff"><span class="sl">700</span><span class="sv">#652EBD</span></div>
+      <div class="step" style="background:#5B3F96;color:#fff"><span class="sl">750</span><span class="sv">#5B3F96</span></div>
+      <div class="step" style="background:#453073;color:#fff"><span class="sl">800</span><span class="sv">#453073</span></div>
+      <div class="step" style="background:#292438;color:#fff"><span class="sl">900</span><span class="sv">#292438</span><span class="anc">bg</span></div>
+      <div class="step" style="background:#1E1A28;color:#fff"><span class="sl">950</span><span class="sv">#1E1A28</span></div>
+    </div>
+  </div>
+
+  <!-- BROWN -->
+  <div class="fam">
+    <div class="famhead"><span class="dot" style="background:var(--brown-primary)"></span><span class="fn">brown</span><span class="role">file paths · warm accents</span><span class="cr">fg/bg 6.74:1</span></div>
+    <div class="anchors">
+      <div class="anchor" style="background:var(--brown-primary);color:#111"><span class="al">--brown-primary</span><span class="av">hsl(9 46% 72%)<br>#D8A197 · ramp 500</span></div>
+      <div class="anchor" style="background:var(--brown-bg);color:var(--brown-fg)"><span class="al">--brown-bg</span><span class="av">hsl(10 15% 15%)<br>#2C2221 · ramp 900</span></div>
+      <div class="anchor" style="background:var(--brown-fg);color:#111"><span class="al">--brown-fg</span><span class="av">hsl(10 80% 72%)<br>#F1927E</span></div>
+    </div>
+    <div class="ramp">
+      <div class="step" style="background:#FDF3F2;color:#111"><span class="sl">50</span><span class="sv">#FDF3F2</span></div>
+      <div class="step" style="background:#FAE3E0;color:#111"><span class="sl">100</span><span class="sv">#FAE3E0</span></div>
+      <div class="step" style="background:#F6D0CB;color:#111"><span class="sl">200</span><span class="sv">#F6D0CB</span></div>
+      <div class="step" style="background:#EFBFB9;color:#111"><span class="sl">300</span><span class="sv">#EFBFB9</span></div>
+      <div class="step" style="background:#E3AEA5;color:#111"><span class="sl">400</span><span class="sv">#E3AEA5</span></div>
+      <div class="step" style="background:#D8A197;color:#111"><span class="sl">500</span><span class="sv">#D8A197</span><span class="anc">primary</span></div>
+      <div class="step" style="background:#BD756B;color:#fff"><span class="sl">600</span><span class="sv">#BD756B</span></div>
+      <div class="step" style="background:#955750;color:#fff"><span class="sl">700</span><span class="sv">#955750</span></div>
+      <div class="step" style="background:#6D4944;color:#fff"><span class="sl">800</span><span class="sv">#6D4944</span></div>
+      <div class="step" style="background:#2C2221;color:#fff"><span class="sl">900</span><span class="sv">#2C2221</span><span class="anc">bg</span></div>
+      <div class="step" style="background:#1D1716;color:#fff"><span class="sl">950</span><span class="sv">#1D1716</span></div>
+    </div>
+  </div>
+
+  <h3>Semantic / status → family</h3>
+  <table>
+    <tr><th>Role</th><th>Token(s)</th></tr>
+    <tr><td>Destructive (fill)</td><td><code>--red-secondary</code> (red 700)</td></tr>
+    <tr><td>Destructive (text / icon / outline)</td><td><code>--red-primary</code></td></tr>
+    <tr><td>Success</td><td><code>--green-primary</code></td></tr>
+    <tr><td>Warning</td><td><code>--yellow-primary</code></td></tr>
+    <tr><td>Info</td><td><code>--blue-primary</code></td></tr>
+    <tr><td>Status: in-progress</td><td><code>--yellow-primary</code></td></tr>
+    <tr><td>Status: in-review</td><td><code>--green-primary</code></td></tr>
+    <tr><td>Status: done / merged</td><td><code>--violet-primary</code></td></tr>
+    <tr><td>File paths (agent output)</td><td><code>--brown-primary</code></td></tr>
+    <tr><td>Status: backlog / cancelled</td><td>neutral <code>--fg3</code> / <code>--muted-fg</code></td></tr>
+    <tr><td>Filled callout (any family)</td><td>surface <code>--&lt;family&gt;-bg</code> + text <code>--&lt;family&gt;-fg</code></td></tr>
+  </table>
+</section>
+
+<hr class="rule">
+
+<!-- ═══════════ RULES ═══════════ -->
+<section id="rules">
+  <div class="h2">Usage rules <small>surface map · recipes · anti-patterns</small></div>
+  <p class="secintro">Full reference: <code>styles/zeros-foundation.md</code>. The essentials:</p>
+
+  <h3>Surface &amp; foreground map</h3>
+  <div class="rules">
+    <div class="rule-card"><b>Depth ladder.</b> Canvas <code>bg-bg1</code> → composer <code>bg-bg2</code> → popover/dropdown/card <code>bg-bg3</code>. Dialog content is the exception (<code>bg-bg1</code>). Workspace sidebar (col 1) <code>bg-sidebar-bg</code>.</div>
+    <div class="rule-card"><b>Hover is surface-scoped.</b> bg1 → <code>bg-bg1-hover</code>, bg2 → <code>bg-bg2-hover</code>, bg3 → <code>bg-bg3-hover</code>, sidebar → <code>bg-sidebar-bg-hover</code>. Never jump two tiers.</div>
+    <div class="rule-card"><b>Foregrounds.</b> Default <code>text-fg2</code>; highlighted/selected/focal <code>text-fg1</code>; placeholder <code>text-muted-fg</code>.</div>
+    <div class="rule-card"><b>Selected = the sticky hover.</b> A selected row uses that surface's hover token, just persistently.</div>
+    <div class="rule-card"><b>Borders.</b> Default <code>border-border1</code>; components <code>border-border3</code>; highlighted state <code>border-border4</code>.</div>
+    <div class="rule-card"><b>Focus.</b> Most controls get a <code>ring-[3px] ring-highlighted-bright/50</code>; inputs &amp; selects swap the border to <code>border-highlighted-bright</code> with no ring.</div>
+  </div>
+
+  <h3>Anti-patterns (most likely to slip)</h3>
+  <div class="anti">
+    <div class="x"><i>✗</i> Never use a foreground token as a border — <code>--fg*</code> are text + icons only.</div>
+    <div class="x"><i>✗</i> Never use a background token as text, or a border token for fills/text. Each family stays in its lane.</div>
+    <div class="x"><i>✗</i> One primary button per visible screen. A second focal CTA → demote to secondary or ghost.</div>
+    <div class="x"><i>✗</i> <code>--highlighted-bright</code> is the focus/border accent, <em>not</em> a button fill.</div>
+    <div class="x"><i>✗</i> No inline hex / rgb / oklch / hsl in components — if a value isn't a token, add it to <code>zeros-tokens.css</code> first.</div>
+    <div class="x"><i>✗</i> No bare Tailwind color classes (<code>bg-white</code>, <code>text-gray-500</code>) — only Zeros primitive utilities.</div>
+    <div class="x"><i>✗</i> Never reference a numeric ramp step (<code>text-red-500</code>, <code>var(--blue-600)</code>) in component code — snap to the anchor. <code>check:ui</code> enforces this.</div>
+  </div>
+
+  <h3>Typography · spacing · motion</h3>
+  <div class="rules">
+    <div class="rule-card"><b>Type (strict 12/14 chrome).</b> Titles <code>text-sm font-medium</code>, body <code>text-sm</code>, captions/badges <code>text-xs</code>, counts <code>text-xs tabular-nums</code>. Fonts: Geist Variable / Geist Mono Variable.</div>
+    <div class="rule-card"><b>Spacing (4px grid).</b> <code>p-2</code> / <code>p-3</code> / <code>p-4</code> / <code>p-6</code>. No <code>p-3.5</code>, no <code>space-y-5</code>.</div>
+    <div class="rule-card"><b>Radius (fixed 3-step).</b> <code>rounded-sm</code> 4 (ALL buttons · pills · badges · kbd · menu items · inputs · user msgs) · <code>rounded-md</code> 6 (tabs · model pill · sidebar/settings nav rows · small cards · tooltips) · <code>rounded-lg</code> 8 (composer · dialogs · popovers · cards) · <code>rounded-full</code> circles only. Nothing else compiles.</div>
+    <div class="rule-card"><b>Motion.</b> Hover 120ms ease-out · popover 180ms · dialog 240ms. Only animate color/bg/border/opacity/shadow/transform — <em>never</em> <code>transition:all</code>.</div>
+  </div>
+</section>
+
+<hr class="rule">
+
+<!-- ═══════════ COMPONENTS ═══════════ -->
+<section id="components">
+  <div class="h2">Components <small>mirroring <code>src/zeros/ui/primitives/</code> — hover them, they're live</small></div>
+  <p class="secintro">Basic components and their real variants. Default text/icon color is <code>fg2</code>; highlighted/active is <code>fg1</code>.
+  Focus: most controls use a 3px <code>ring-highlighted-bright/50</code>; inputs &amp; selects focus with a border swap only.</p>
+
+  <h3>Buttons</h3>
+  <div class="demo">
+    <div class="cluster">
+      <button class="btn primary">Primary</button>
+      <button class="btn secondary">Secondary</button>
+      <button class="btn ghost">Ghost</button>
+      <button class="btn destructive">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/></svg>
+        Delete
+      </button>
+      <button class="btn destructive-sec">Delete (secondary)</button>
+    </div>
+  </div>
+  <p class="cap"><b>secondary is the default variant</b> — the everyday button. <b>Primary</b> (<code>variant="default"</code>) bg-primary-button-bg / text-primary-button-fg / hover:bg-primary-button-hover — <em>one per screen</em> ·
+  <b>Secondary</b> bg-bg2 + border-border2 + text-fg1, hover:bg-bg2-hover + border-border3 (restyled 2026-07-12) ·
+  <b>Ghost</b> transparent + text-fg2, hover:bg-bg3 + text-fg1 ·
+  <b>Destructive</b> bg-red-secondary + text-red-secondary-fg · <b>Destructive-secondary</b> same neutral surface as Secondary, text-red-primary.
+  <code>variant="outline"</code> is retired — use Secondary. (“Tertiary” — <code>bg-bg1-hover</code> — is a foundation recipe applied inline, not a Button variant.)</p>
+
+  <div class="demo" style="margin-top:14px">
+    <div class="cluster">
+      <div class="grp"><span class="lbl">sizes</span><div class="cluster">
+        <button class="btn secondary sm">Small</button>
+        <button class="btn secondary">Default</button>
+        <button class="btn secondary lg">Large</button>
+        <button class="btn secondary icon-sm" title="icon-sm" aria-label="icon-sm"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></button>
+        <button class="btn secondary icon" title="icon" aria-label="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></button>
+        <button class="btn secondary icon-lg" title="icon-lg" aria-label="icon-lg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></button>
+      </div></div>
+      <div class="grp" style="margin-left:24px"><span class="lbl">states</span><div class="cluster">
+        <button class="btn primary">Enabled</button>
+        <button class="btn primary" disabled>Disabled</button>
+      </div></div>
+    </div>
+  </div>
+  <p class="cap">Heights: sm <code>h-6</code> 24px + text-xs · default <code>h-7</code> 28px · lg <code>h-8</code> 32px. Icon-only squares share the same scale: icon-sm <code>h-6 w-6</code> 24px · icon <code>h-7 w-7</code> 28px · icon-lg <code>h-8 w-8</code> 32px. Disabled <code>opacity-50 pointer-events-none</code>.</p>
+
+  <h3>Input &amp; textarea</h3>
+  <div class="demo">
+    <div class="cluster" style="align-items:flex-start;gap:26px">
+      <div class="field"><label>Default</label><input class="inp" placeholder="Placeholder text…"></div>
+      <div class="field"><label>Focus (border-highlighted-bright)</label><input class="inp focus" value="Focused value"></div>
+      <div class="field"><label>Disabled</label><input class="inp" value="Can't edit" disabled></div>
+      <div class="field"><label>Error (aria-invalid)</label><input class="inp err" value="bad@value"><span class="errmsg">Enter a valid email.</span></div>
+      <div class="field"><label>Textarea</label><textarea class="inp" placeholder="Multi-line input…"></textarea></div>
+    </div>
+  </div>
+  <p class="cap">h-8 · rounded-sm · border-border3 · bg-transparent · value text-fg1 · placeholder text-fg2 (as shipped) · focus border-highlighted-bright, <em>no ring</em> · error <code>aria-invalid:border-red-primary + ring-red-primary/20</code> (via InputGroup/Select). Textarea = same recipe, min-h-[60px].</p>
+
+  <h3>Tabs, tab strips &amp; segmented controls</h3>
+  <p class="secintro" style="margin-bottom:14px">Reality check: there is <em>no shared tab abstraction</em>. The Radix <code>Tabs</code> primitive exists but its default look renders <em>nowhere</em> — the app ships <b>~9 hand-rolled controls</b> across four visual families. Each demo names its real instances + source file.</p>
+
+  <!-- FAMILY 1 — chrome-tab strips (the dominant style) -->
+  <div class="demo">
+    <div class="grp"><span class="lbl">1 · chrome-tab strip — transparent track, active pill = bg3 (dominant)</span>
+      <div class="ctabs">
+        <div class="ctab active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></svg>Terminal</div>
+        <div class="ctab"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z"/></svg>Browser</div>
+        <div class="ctab"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>Files</div>
+      </div>
+      <div class="ctabs barred" style="margin-top:4px">
+        <div class="ctab onbar active">Changes <span class="cnt">3</span></div>
+        <div class="ctab onbar">Commits</div>
+        <div class="ctab onbar">Checks</div>
+        <div class="ctab onbar">Reviews</div>
+      </div>
+    </div>
+  </div>
+  <p class="cap"><b>h-7 rounded-md px-2.5</b> pills on a <b>transparent</b> track · active <code>bg-bg3 + text-fg1</code> · idle <code>text-fg2</code>, hover <code>bg-sidebar-bg-hover</code> (col-3 / source strip) or <code>bg-bg1-hover</code> (chat). Instances: <b>Column-3 home tabs</b> Terminal/Browser/Files (<code>column3-tab-strip.tsx</code>) · <b>chat session tabs</b> (<code>column2-chat-tabs.tsx</code>) · <b>Source strip</b> All&nbsp;Files/Changes/PR (<code>source-tab-strip.tsx</code>) · <b>Review sub-nav</b> on a <code>border-b</code> bar, hover <code>bg-bg3/50</code> (<code>review-tab.tsx</code>).</p>
+
+  <!-- FAMILY 2 — underline tabs -->
+  <div class="demo" style="margin-top:14px">
+    <div class="cluster" style="gap:40px;align-items:flex-start">
+      <div class="grp"><span class="lbl">2 · underline tab — active = border-b-2 fg1</span>
+        <div class="utabs">
+          <div class="utab active">Claude Code</div>
+          <div class="utab">Cursor Agent</div>
+          <div class="utab">Codex</div>
+        </div>
+      </div>
+      <div class="grp"><span class="lbl">variant — rounded inset accent bar</span>
+        <div class="utabs">
+          <div class="utab bar active">Setup</div>
+          <div class="utab bar">Run</div>
+          <div class="utab bar">Terminal</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="cap">Transparent, <b>h-9</b>, active <code>text-fg1</code>. Full-border form <code>border-b-2 border-fg1</code> — <b>Providers tabs</b> (<code>providers-panel.tsx</code>) &amp; <b>terminal-agent tabs</b> (<code>terminal-agents-section.tsx</code>). Inset-bar form (rounded <code>bg-fg1</code> bar, inset from edges) — <b>terminal sub-tabs</b> Setup/Run/Terminal (<code>terminal-tab.tsx</code>).</p>
+
+  <!-- FAMILY 3 — Radix primitive + its flat override -->
+  <div class="demo" style="margin-top:14px">
+    <div class="cluster" style="gap:40px;align-items:flex-start">
+      <div class="grp"><span class="lbl">3 · Radix Tabs PRIMITIVE default — ships nowhere</span>
+        <div class="tabs">
+          <div class="tab active">Tab A</div><div class="tab">Tab B</div><div class="tab">Tab C</div>
+        </div>
+      </div>
+      <div class="grp"><span class="lbl">…both consumers override it to flat text</span>
+        <div class="ftabs">
+          <div class="ftab active">Pull requests</div><div class="ftab">Branches</div><div class="ftab dis">Issues</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="cap"><code>tabs.tsx</code> primitive = recessed <code>bg-bg3</code> track + active <code>bg-bg1</code> + shadow — but its only two users, the <b>Create-from-picker</b> (<code>create-from-picker.tsx</code>) and <b>Create-from-source</b> (<code>create-from-source.tsx</code>) dialogs, strip it to <code>bg-transparent</code> + active <code>text-fg1 font-medium</code>. So the recessed-pill look on the left is <em>not shipped anywhere</em>.</p>
+
+  <!-- FAMILY 4 — segmented / pill toggles -->
+  <div class="demo" style="margin-top:14px">
+    <div class="cluster" style="gap:26px 30px;align-items:flex-start;flex-wrap:wrap">
+      <div class="grp"><span class="lbl">4a · bg2 track → active bg3</span>
+        <div class="seg">
+          <button class="active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 16 4-4-4-4"/><path d="m6 8-4 4 4 4"/><path d="m14.5 4-5 16"/></svg>Code</button>
+          <button><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>Design</button>
+        </div>
+      </div>
+      <div class="grp"><span class="lbl">4b · bordered bg1 track → active bg3</span>
+        <div class="cluster" style="gap:10px">
+          <div class="seg2">
+            <button class="active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></svg>CLI</button>
+            <button><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg>API key</button>
+          </div>
+          <div class="seg2 sm">
+            <button class="active">You</button><button>Team</button>
+          </div>
+        </div>
+      </div>
+      <div class="grp"><span class="lbl">4c · bg3/50 track → active bg1</span>
+        <div class="seg3">
+          <button class="active">Diff</button><button>Preview</button><button>Edit</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="cap">Three distinct track schemes. <b>4a</b> <code>bg-bg2</code> → active <code>bg-bg3</code>, h-8, icons, hover lifts text only — <b>CodeDesignToggle</b> (<code>code-design-toggle.tsx</code>). <b>4b</b> bordered <code>bg-bg1</code> + <code>border-border3</code> → active <code>bg-bg3</code> — <b>AuthMethodSegmented</b> CLI/API&nbsp;key (<code>providers-panel.tsx</code>, <code>role=radiogroup</code>) &amp; smaller <b>You/Team</b> (<code>settings-page.tsx</code>). <b>4c</b> translucent <code>bg-bg3/50</code> → active <code>bg-bg1</code> — file-viewer <b>Unified/Split</b> &amp; <b>Diff/Preview/Edit</b> (<code>file-viewer.tsx</code>). No shared component backs any of these.</p>
+
+  <h3>Toggle · switch</h3>
+  <div class="demo">
+    <div class="cluster" style="gap:28px">
+      <span class="sw on"><span class="track"><span class="knob"></span></span> On</span>
+      <span class="sw"><span class="track"><span class="knob"></span></span> Off</span>
+      <span class="sw on dis"><span class="track"><span class="knob"></span></span> Disabled</span>
+    </div>
+  </div>
+  <p class="cap">Switch (Radix): track h-5 w-9 — off bg-border3 + border-border4, on bg-fg1. Knob h-4 w-4 <code>bg-bg3</code> in <em>both</em> states, slides 18px. <em>No standalone Checkbox/Radio primitive</em> — the on/off control is Switch; checkbox/radio exist only as dropdown-menu items (below).</p>
+
+  <h3>Dropdown / select</h3>
+  <div class="demo">
+    <div class="ddwrap">
+      <div class="grp"><span class="lbl">trigger</span>
+        <div class="trigger">Opus 4.8 <span class="chev">▾</span></div>
+        <span class="cap" style="margin-top:4px">bg-transparent + border-border3 + text-fg1, hover:bg-bg2 + border-border4, focus:border-highlighted-bright</span>
+      </div>
+      <div class="grp"><span class="lbl">open menu (popover)</span>
+        <div class="menu">
+          <div class="mlabel">Model</div>
+          <div class="mitem"><span class="lead"></span>Opus 4.8 <span class="ck">✓</span></div>
+          <div class="mitem"><span class="lead"></span>Sonnet 4.6</div>
+          <div class="mitem"><span class="lead"></span>Haiku 4.5</div>
+          <div class="msep"></div>
+          <div class="mitem"><span class="lead"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span>Show thinking</div>
+          <div class="mitem muted"><span class="lead"></span>Manage models…</div>
+        </div>
+        <span class="cap" style="margin-top:4px">bg-bg3 + border-border1 + shadow-dropdown · items text-fg1, hover(focus):bg-bg3-hover · check text-fg2 · checkbox item = leading Check</span>
+      </div>
+    </div>
+  </div>
+
+  <h3>Badges &amp; status pills</h3>
+  <div class="demo">
+    <div class="badges">
+      <span class="badge primary">Primary</span>
+      <span class="badge neutral">Secondary</span>
+      <span class="badge destructive">Destructive</span>
+      <span class="badge outline">Outline</span>
+      <span class="badge" style="background:var(--green-bg);color:var(--green-fg)">Open</span>
+      <span class="badge" style="background:var(--red-bg);color:var(--red-fg)">Failed</span>
+      <span class="badge" style="background:var(--yellow-bg);color:var(--yellow-fg)">Pending</span>
+      <span class="badge" style="background:var(--violet-bg);color:var(--violet-fg)">Merged</span>
+      <span class="count">12</span>
+    </div>
+  </div>
+  <p class="cap">Badge (rounded-md, text-xs font-semibold): primary bg-primary-button-bg/-fg · secondary bg-bg3 + text-fg1 · destructive bg-red-secondary + text-fg1 · outline text-fg1 + border-border1. StatusBadge = bg-&lt;family&gt;-bg + text-&lt;family&gt;-fg · count text-xs tabular-nums.</p>
+
+  <h3>Toast</h3>
+  <div class="demo raised">
+    <div class="cluster">
+      <div class="toast"><span style="color:var(--green-primary)">✔</span> Pushed to main.</div>
+    </div>
+  </div>
+  <p class="cap">Toast is a neutral <code>bg-bg1</code> card, no border, soft shadow; only the status icon carries family color (success green-primary, error red-primary, warning yellow-primary, info fg2). On a bg1-highlight backdrop for contrast. · <b>Tooltip has moved to its own artifact →</b> <a href="components/tooltips.html"><code>Artifacts/components/tooltips.html</code></a> (the single glass tooltip; native <code>title=</code> tooltips are being removed app-wide).</p>
+
+  <h3>Dialog · popover</h3>
+  <div class="demo" style="padding:0;overflow:hidden">
+    <div class="cluster" style="gap:0;align-items:stretch">
+      <div class="overlay" style="flex:1;border-radius:0">
+        <div class="dialog">
+          <h4>Delete workspace?</h4>
+          <p>This removes the workspace and its cloud sandbox. This action can't be undone.</p>
+          <div class="actions">
+            <button class="btn secondary sm">Cancel</button>
+            <button class="btn destructive sm">Delete</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="demo">
+    <div class="pop">
+      <div class="pt">Rename branch</div>
+      <div class="pb" style="margin-bottom:10px">Give this branch a new name.</div>
+      <input class="inp" style="width:100%" value="acme/battery-pill">
+    </div>
+  </div>
+  <p class="cap">Dialog content = <code>bg-bg1</code> + border1 + shadow over a bg-black/80 overlay (the surface exception — everything else floating is bg3). · Popover = <code>bg-bg3</code> + border1 + shadow-md, w-72. Title text-fg1, body text-fg2.</p>
+
+  <h3>Card · alert · slider</h3>
+  <div class="demo">
+    <div class="cluster" style="gap:20px;align-items:flex-start">
+      <div class="card">
+        <div class="ct">Project settings</div>
+        <div class="cb">Configure the repo, branch, and environment for this workspace.</div>
+        <div class="cf"><button class="btn secondary sm">Configure</button></div>
+      </div>
+      <div class="grp" style="gap:12px">
+        <div class="alert default">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+          <div><span class="at">Heads up</span><span class="ab">This workspace runs in an isolated cloud sandbox.</span></div>
+        </div>
+        <div class="alert destructive">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>
+          <div><span class="at">Build failed</span>2 files have type errors.</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:14px">
+          <div class="slider"><div class="strack"></div><div class="srange"></div><div class="sthumb"></div></div>
+          <span class="cap" style="margin:0">Slider</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="cap">Card = <code>bg-bg3</code> + border1 + rounded-xl, title text-fg1, body text-fg2. · Alert: default bg-bg1 + text-fg1; destructive border-red-primary/50 + text-red-primary. · Slider: track primary-button-bg/20, range primary-button-bg, thumb bg-bg1 + border-highlighted-bright/50.</p>
+</section>
+
+</main>
+</body>
+</html>

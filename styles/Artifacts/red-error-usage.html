@@ -1,0 +1,129 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Red / error — how the UI looks</title><style>
+:root{color-scheme:dark;
+  --destructive:oklch(0.68 0.15 25);
+  --red-primary:hsl(0 85% 64%);--red-secondary:hsl(7 83% 39%);--red-bg:hsl(13 81% 14%);--red-fg:hsl(20 97% 72%);
+  --green:hsl(142 71% 45%);--green-bg:hsl(120 23% 17%);--green-fg:hsl(142 75% 73%);}
+*{box-sizing:border-box}
+body{margin:0;background:#0E0C0C;color:#EBEAEA;font:14px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:30px 40px 80px;max-width:1040px}
+h1{font-size:21px;margin:0 0 4px}.intro{color:#A2A0A0;margin:0 0 22px;max-width:80ch}
+h2{font-size:14px;border-bottom:1px solid #252323;padding-bottom:7px;margin:26px 0 14px}
+.case{margin:0 0 16px}.chead{display:flex;align-items:center;gap:10px;margin-bottom:7px;flex-wrap:wrap}
+.tag{font-size:10.5px;font-weight:600;color:#FDA274;background:#F1565618;border:1px solid #F1565644;border-radius:20px;padding:1px 9px}
+.cdesc{font-size:13px;color:#C9C7C7}.cid{margin-left:auto;font:11.5px ui-monospace,Menlo,monospace;color:#71706F}
+.compare,.stage3{display:grid;grid-template-columns:1fr 1fr;gap:10px}.stage3{grid-template-columns:1fr 1fr 1fr;margin-bottom:8px}
+.col,.ch{min-width:0}.collbl{font-size:11px;color:#71706F;margin-bottom:5px}
+.stage,.ch>.box{background:#0E0C0C;border:1px solid #201E1D;border-radius:10px;padding:16px}
+.stage{display:flex;align-items:center;min-height:64px}
+
+/* ── error box ── */
+.box{display:flex;align-items:flex-start;gap:8px;border-radius:7px;padding:8px 12px;font-size:12.5px;width:100%}
+.box.center{justify-content:center;text-align:center;max-width:320px;margin:0 auto}
+.box.mono{font-family:ui-monospace,Menlo,monospace;font-size:11.5px}
+.box svg{margin-top:1px;flex:0 0 auto}
+.now-box{background:oklch(0.68 0.15 25/.1);color:oklch(0.68 0.15 25);border:1px solid oklch(0.68 0.15 25/.3)}
+.red-box{background:var(--red-bg);color:var(--red-fg)}                          /* container: red-bg → red-fg */
+.redc-box{background:var(--red-bg);color:var(--red-fg)}                          /* container */
+
+/* ── badges ── */
+.badge{display:inline-flex;align-items:center;border-radius:6px;padding:2px 9px;font-size:11.5px;font-weight:600;margin-right:6px}
+.now-badge{background:oklch(0.68 0.15 25/.15);color:oklch(0.68 0.15 25)}
+.red-badge{background:var(--red-bg);color:var(--red-fg)}
+.now-ok-badge{background:oklch(0.72 0.13 155/.15);color:oklch(0.72 0.13 155)}
+.red-ok-badge{background:hsl(142 71% 45%/.15);color:var(--green)}
+
+/* ── worktree icon container ── */
+.wt{display:flex;align-items:center;gap:12px}.wticon{width:46px;height:46px;border-radius:9px;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.now-iconbox{background:oklch(0.68 0.15 25/.1);border:1px solid oklch(0.68 0.15 25/.4);color:oklch(0.68 0.15 25)}
+.red-iconbox{background:var(--red-bg);color:var(--red-fg)}
+.wttxt{display:flex;flex-direction:column}.wttxt b{font-size:13px;color:#EBEAEA}.wttxt span{font-size:11.5px;color:#A2A0A0}
+
+/* ── fail output row (neutral text!) ── */
+.failrow{width:100%;border-radius:7px;padding:7px 11px;font-size:12px;color:#EBEAEA}
+.now-fail{background:oklch(0.68 0.15 25/.05);box-shadow:0 0 0 1px oklch(0.68 0.15 25/.15) inset}
+.red-fail{background:hsl(0 85% 64%/.05);box-shadow:0 0 0 1px hsl(0 85% 64%/.18) inset}
+
+/* ── outline button ── */
+.obtn{display:inline-flex;align-items:center;gap:7px;border-radius:8px;padding:6px 13px;font:600 12.5px system-ui;background:transparent;cursor:pointer}
+.now-obtn{border:1px solid oklch(0.68 0.15 25/.4);color:oklch(0.68 0.15 25)}.now-obtn:hover{background:oklch(0.68 0.15 25/.1)}
+.red-obtn{border:1px solid var(--red-primary);color:var(--red-primary)}.red-obtn:hover{background:hsl(0 85% 64%/.1)}
+
+/* ── icon-button hover ── */
+.ib{display:inline-flex;padding:6px;border-radius:7px;color:#A2A0A0;margin-right:6px}
+.ib.hov.now-ibhov{background:oklch(0.68 0.15 25/.1);color:oklch(0.68 0.15 25)}
+.ib.hov.red-ibhov{background:hsl(0 85% 64%/.1);color:var(--red-primary)}
+.hint{font-size:10.5px;color:#71706F;margin-left:4px}
+
+/* solid delete (the decided treatment) */
+.solid{display:inline-flex;align-items:center;gap:6px;border:0;border-radius:8px;padding:7px 14px;font:600 13px system-ui;color:#fff;background:var(--red-secondary);cursor:pointer}
+code{background:#201E1D;padding:1px 6px;border-radius:5px;font-size:12px;color:#EBEAEA}
+.note{color:#A2A0A0;font-size:12.5px;margin:6px 0 0}
+</style></head><body>
+<h1>Red / error — how each case looks</h1>
+<p class="intro">Every red/error UI case rendered on the app canvas: <b>Today</b> (current <code>--destructive</code>, oklch) vs
+<b>Proposed</b> (red palette, borders dropped). Faithful to the real markup — icons, mono text, the neutral-text fail row, the green sibling badge, etc.</p>
+
+<h2>Rule</h2>
+<p class="note"><b>On a <code>--red-bg</code> surface, text + icons use <code>--red-fg</code></b> (softer salmon) — never the vivid <code>--red-primary</code>. Vivid red is only for standalone accents (−N counts, icons, borders); solid delete = <code>--red-secondary</code>. The Proposed column below applies this.</p>
+
+<h2>The cases (11)</h2>
+<div class="case">
+  <div class="chead"><span class="tag">error box</span><span class="cdesc">Repo add/clone error (mono)</span><code class="cid">repositories-panel.tsx:338</code></div>
+  <div class="compare">
+    <div class="col"><div class="collbl">Today · <code>--destructive</code></div><div class="stage"><div class="box now-box mono"><span>fatal: could not read Username for 'https://github.com'</span></div></div></div>
+    <div class="col"><div class="collbl">Proposed · red palette (borderless)</div><div class="stage"><div class="box red-box mono"><span>fatal: could not read Username for 'https://github.com'</span></div></div></div>
+  </div></div><div class="case">
+  <div class="chead"><span class="tag">badge (pair)</span><span class="cdesc">Provider key state — red error / green sibling</span><code class="cid">providers-panel.tsx:1200</code></div>
+  <div class="compare">
+    <div class="col"><div class="collbl">Today · <code>--destructive</code></div><div class="stage"><span class="badge now-ok-badge">✔ Validated</span> <span class="badge now-badge">Invalid key</span></div></div>
+    <div class="col"><div class="collbl">Proposed · red palette (borderless)</div><div class="stage"><span class="badge red-ok-badge">✔ Validated</span> <span class="badge red-badge">Invalid key</span></div></div>
+  </div></div><div class="case">
+  <div class="chead"><span class="tag">error box + icon</span><span class="cdesc">GitHub connect/auth error</span><code class="cid">github-section.tsx:259</code></div>
+  <div class="compare">
+    <div class="col"><div class="collbl">Today · <code>--destructive</code></div><div class="stage"><div class="box now-box"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg><span>Couldn't reach GitHub — check your connection.</span></div></div></div>
+    <div class="col"><div class="collbl">Proposed · red palette (borderless)</div><div class="stage"><div class="box red-box"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg><span>Couldn't reach GitHub — check your connection.</span></div></div></div>
+  </div></div><div class="case">
+  <div class="chead"><span class="tag">error box</span><span class="cdesc">Review tab — diff/load error</span><code class="cid">review-tab.tsx:672</code></div>
+  <div class="compare">
+    <div class="col"><div class="collbl">Today · <code>--destructive</code></div><div class="stage"><div class="box now-box"><span>Failed to load diff.</span></div></div></div>
+    <div class="col"><div class="collbl">Proposed · red palette (borderless)</div><div class="stage"><div class="box red-box"><span>Failed to load diff.</span></div></div></div>
+  </div></div><div class="case">
+  <div class="chead"><span class="tag">error box (centered)</span><span class="cdesc">Changes tab — publish/git error</span><code class="cid">changes-tab.tsx:418</code></div>
+  <div class="compare">
+    <div class="col"><div class="collbl">Today · <code>--destructive</code></div><div class="stage"><div class="box now-box center"><span>Couldn't publish to GitHub.</span></div></div></div>
+    <div class="col"><div class="collbl">Proposed · red palette (borderless)</div><div class="stage"><div class="box red-box center"><span>Couldn't publish to GitHub.</span></div></div></div>
+  </div></div><div class="case">
+  <div class="chead"><span class="tag">error box</span><span class="cdesc">Changes tab — load error (2nd scope)</span><code class="cid">changes-tab.tsx:894</code></div>
+  <div class="compare">
+    <div class="col"><div class="collbl">Today · <code>--destructive</code></div><div class="stage"><div class="box now-box"><span>Unable to load changes.</span></div></div></div>
+    <div class="col"><div class="collbl">Proposed · red palette (borderless)</div><div class="stage"><div class="box red-box"><span>Unable to load changes.</span></div></div></div>
+  </div></div><div class="case">
+  <div class="chead"><span class="tag">icon container</span><span class="cdesc">Worktree-missing empty state</span><code class="cid">worktree-missing-panel.tsx:70</code></div>
+  <div class="compare">
+    <div class="col"><div class="collbl">Today · <code>--destructive</code></div><div class="stage"><div class="wt"><div class="wticon now-iconbox"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="m9.5 10.5 5 5"/><path d="m14.5 10.5-5 5"/></svg></div><div class="wttxt"><b>Worktree missing</b><span>The folder for this workspace was moved or deleted.</span></div></div></div></div>
+    <div class="col"><div class="collbl">Proposed · red palette (borderless)</div><div class="stage"><div class="wt"><div class="wticon red-iconbox"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="m9.5 10.5 5 5"/><path d="m14.5 10.5-5 5"/></svg></div><div class="wttxt"><b>Worktree missing</b><span>The folder for this workspace was moved or deleted.</span></div></div></div></div>
+  </div></div><div class="case">
+  <div class="chead"><span class="tag">fail output row</span><span class="cdesc">Agent error output — faint tint + ring, NEUTRAL text</span><code class="cid">event-row.tsx:218</code></div>
+  <div class="compare">
+    <div class="col"><div class="collbl">Today · <code>--destructive</code></div><div class="stage"><div class="failrow now-fail mono">Error: command failed with exit code 1</div></div></div>
+    <div class="col"><div class="collbl">Proposed · red palette (borderless)</div><div class="stage"><div class="failrow red-fail mono">Error: command failed with exit code 1</div></div></div>
+  </div></div><div class="case">
+  <div class="chead"><span class="tag">status badge</span><span class="cdesc">PR ‘Closed’ pill</span><code class="cid">review-tab.tsx:630</code></div>
+  <div class="compare">
+    <div class="col"><div class="collbl">Today · <code>--destructive</code></div><div class="stage"><span class="badge now-badge">Closed</span></div></div>
+    <div class="col"><div class="collbl">Proposed · red palette (borderless)</div><div class="stage"><span class="badge red-badge">Closed</span></div></div>
+  </div></div><div class="case">
+  <div class="chead"><span class="tag">outline button</span><span class="cdesc">Destructive outline button (hover fills)</span><code class="cid">settings-page.tsx:1111</code></div>
+  <div class="compare">
+    <div class="col"><div class="collbl">Today · <code>--destructive</code></div><div class="stage"><button class="obtn now-obtn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/></svg> Delete workspace</button></div></div>
+    <div class="col"><div class="collbl">Proposed · red palette (borderless)</div><div class="stage"><button class="obtn red-obtn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/></svg> Delete workspace</button></div></div>
+  </div></div><div class="case">
+  <div class="chead"><span class="tag">icon-button hover</span><span class="cdesc">Remove/delete icon — turns red on hover</span><code class="cid">repositories-panel.tsx:745 · mcp-panel.tsx:744</code></div>
+  <div class="compare">
+    <div class="col"><div class="collbl">Today · <code>--destructive</code></div><div class="stage"><span class="ib"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/></svg></span><span class="ib hov now-ibhov"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/></svg></span><span class="hint">default · hover</span></div></div>
+    <div class="col"><div class="collbl">Proposed · red palette (borderless)</div><div class="stage"><span class="ib"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/></svg></span><span class="ib hov red-ibhov"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/></svg></span><span class="hint">default · hover</span></div></div>
+  </div></div>
+
+<h2>Solid delete — the decided treatment</h2>
+<div class="stage"><button class="solid"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/></svg> Delete</button> &nbsp;<span class="note">solid · white text · <code>--red-secondary</code> (red 700). Used by the destructive Button + Badge, and delete icons.</span></div>
+</body></html>

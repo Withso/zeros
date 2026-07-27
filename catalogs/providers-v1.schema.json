@@ -1,0 +1,143 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://withso.github.io/zeros/catalogs/providers-v1.schema.json",
+  "title": "Zeros Provider Manifest",
+  "description": "Hot-updatable subset of AGENT_MANIFEST. Code-side factories live in src/engine/agents/adapters/<id>/index.ts and are matched by `id`. Anything in this file can change without an app release; anything in the factories cannot.",
+  "type": "object",
+  "required": ["version", "updatedAt", "providers"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "type": "integer", "const": 1 },
+    "updatedAt": { "type": "string", "format": "date" },
+    "notes": { "type": "string" },
+    "providers": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z][a-z0-9-]*$": { "$ref": "#/definitions/provider" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "definitions": {
+    "provider": {
+      "type": "object",
+      "required": ["name", "description", "cliBinary", "source", "authProbe", "loginCommand"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "cliBinary": { "type": "string" },
+        "icon": { "type": "string", "format": "uri" },
+        "deprecated": { "type": "boolean", "default": false },
+        "installHint": {
+          "type": "object",
+          "required": ["command"],
+          "additionalProperties": false,
+          "properties": {
+            "command": { "type": "string" },
+            "docsUrl": { "type": "string", "format": "uri" }
+          }
+        },
+        "loginCommand": {
+          "type": "object",
+          "required": ["binary", "args"],
+          "additionalProperties": false,
+          "properties": {
+            "binary": { "type": "string" },
+            "args": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "minCliVersion": { "type": "string" },
+        "maxCliVersion": { "type": "string" },
+        "source": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["kind", "package"],
+              "additionalProperties": false,
+              "properties": {
+                "kind": { "const": "npm" },
+                "package": { "type": "string" }
+              }
+            },
+            {
+              "type": "object",
+              "required": ["kind", "owner", "repo"],
+              "additionalProperties": false,
+              "properties": {
+                "kind": { "const": "github" },
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "tagPrefix": { "type": "string" }
+              }
+            },
+            {
+              "type": "object",
+              "required": ["kind", "watchUrl"],
+              "additionalProperties": false,
+              "properties": {
+                "kind": { "const": "manual" },
+                "watchUrl": { "type": "string", "format": "uri" },
+                "reason": { "type": "string" }
+              }
+            }
+          ]
+        },
+        "authProbe": { "$ref": "#/definitions/authProbe" }
+      }
+    },
+    "authProbe": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "paths"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "file" },
+            "paths": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "service"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "keychain" },
+            "service": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "binary", "args"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "command" },
+            "binary": { "type": "string" },
+            "args": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "path", "expiryFieldPath"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "file-with-expiry" },
+            "path": { "type": "string" },
+            "expiryFieldPath": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+            "expiryUnit": { "enum": ["ms", "s"] }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "probes"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "any-of" },
+            "probes": { "type": "array", "items": { "$ref": "#/definitions/authProbe" }, "minItems": 1 }
+          }
+        }
+      ]
+    }
+  }
+}

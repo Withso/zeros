@@ -1,0 +1,282 @@
+# ──────────────────────────────────────────────────────────
+# electron-builder config — Zeros macOS .app + .dmg
+# ──────────────────────────────────────────────────────────
+#
+# Unsigned build path. Because we don't have an Apple Developer
+# cert, macOS flags the downloaded .app with the com.apple.quarantine
+# xattr and Gatekeeper blocks it with "damaged" / "unidentified
+# developer" errors. User runs this once after install:
+#
+#   xattr -cr /Applications/Zeros.app
+#
+# to strip the quarantine flag. After that the app launches
+# normally. Once we have a Developer ID cert, flip mac.identity
+# back on and drop this workaround.
+#
+# ──────────────────────────────────────────────────────────
+
+# appId == the DB/userData/cache identity (com.zeros), so CFBundleIdentifier,
+# the Preferences plist, Application Support, Caches and Logs all share ONE
+# reverse-DNS identifier. (Historically design.zeros.app — the lone outlier that
+# left prod's identity split; realigned so a shipped install is a single id.)
+appId: com.zeros
+productName: Zeros
+# Bundle metadata only (Finder "Get Info"). The visible "About Zeros" panel
+# copyright is blanked via app.setAboutPanelOptions() in electron/main.ts — this
+# value is the no-stale-brand fallback, never "Zeros Design".
+copyright: © 2026 Zeros
+
+# Deep ad-hoc re-sign after packaging — electron-builder's default
+# identity:null sign is incomplete on arm64 and macOS Gatekeeper
+# rejects it silently. See scripts/electron-after-pack.cjs.
+afterPack: ./scripts/electron-after-pack.cjs
+# Source the version from package.json at build time.
+
+# Where electron-builder looks for the bundled JS + assets.
+# main.cjs and preload.cjs come from `tsup` (pnpm electron:compile),
+# the renderer assets come from `vite build`.
+directories:
+  output: release
+  buildResources: build/icons
+
+# Files to include in the .app bundle. electron-builder auto-walks
+# the production-dependency tree based on package.json's
+# "dependencies" so all transitive deps (fs-extra, etc.) come along.
+# Past regression: a hand-curated allow-list missed fs-extra and
+# electron-updater threw at module-load time, silently exiting the
+# packaged app with no log trail. Never again — trust the auto-walk.
+files:
+  - dist-electron/**/*
+  - dist/**/*
+  - package.json
+  # EXCLUDE the Claude Code platform package from the asar. It is a single ~250 MiB
+  # native executable (@anthropic-ai/claude-agent-sdk-<platform>-<arch>/claude),
+  # and the auto-walk above would otherwise pull it INSIDE app.asar — where macOS
+  # cannot exec it and the bun-compiled engine cannot resolve it anyway. It ships
+  # exactly once, via the extraResources `claude` entry below (staged by
+  # scripts/stage-claude-cli.mjs). Without this negation the app carries the blob
+  # twice: ~250 MiB of dead weight in the asar plus the usable copy.
+  - "!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**"
+
+# The bun-compiled engine binary sits outside dist-electron, so bundle
+# it as an extra resource. Renderer code at runtime reaches it via
+# process.resourcesPath/zeros-engine (handled in electron/sidecar.ts).
+extraResources:
+  - from: binaries/zeros-engine-aarch64-apple-darwin
+    to: zeros-engine
+    filter:
+      - "**/*"
+  # The Node PTY host script. The engine runs under bun (where node-pty I/O is
+  # broken) and drives node-pty from this Node subprocess instead. The sidecar
+  # hands the engine this path via ZEROS_PTY_HOST_SCRIPT; node-pty itself ships
+  # via the auto-walked dependency tree + asarUnpack below.
+  - from: src/engine/pty/pty-host.cjs
+    to: pty-host.cjs
+  # Runtime-safe node-pty copy. On current macOS, the signed spawn-helper is
+  # rejected with `posix_spawnp failed` when it lives below app.asar.unpacked,
+  # even though the same signed bytes work elsewhere under Contents/Resources
+  # (Cursor uses the latter layout too). The host is pointed at this copy.
+  # Include only JS + the one architecture we ship; the dependency auto-walked
+  # copy remains as a compatibility fallback but is not the primary runtime.
+  - from: node_modules/node-pty
+    to: node-pty
+    filter:
+      - "lib/**/*"
+      - "prebuilds/darwin-arm64/**/*"
+  # The Cursor SDK host script. The engine runs under bun (where @cursor/sdk's
+  # agent-run http2 transport can't reach Cursor) and drives the SDK from this
+  # Node subprocess instead. The sidecar hands the engine this path via
+  # ZEROS_CURSOR_HOST_SCRIPT; @cursor/sdk + its deps ship via the auto-walked
+  # dependency tree + asarUnpack below.
+  - from: src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs
+    to: cursor-host.cjs
+  # The Claude Code CLI — the runtime `query()` actually spawns.
+  #
+  # @anthropic-ai/claude-agent-sdk ships NO cli.js: the executable lives in a
+  # platform-specific OPTIONAL dep that the SDK finds with
+  # `createRequire(sdk.mjs).resolve('<pkg>/claude')`. That lookup is IMPOSSIBLE in
+  # the packaged app — the engine is a `bun build --compile` single-file binary, so
+  # sdk.mjs is bundled in, import.meta.url points into bun's $bunfs, and no
+  # node_modules exists on disk. The SDK then throws "Native CLI binary for
+  # darwin-arm64 not found" and the user sees "AGENT RESPONSE FAILURE" on every
+  # send. In dev the engine is `bun <repo>/src/cli.ts` and the same lookup works,
+  # which is why this only ever broke Beta + Production (field report: 0.0.14).
+  #
+  # scripts/stage-claude-cli.mjs (run from beforePack) hardlinks the resolved
+  # platform binary to binaries/claude and writes its claude-code version beside
+  # it; electron/sidecar.ts passes both to the engine as ZEROS_CLAUDE_CLI_PATH /
+  # ZEROS_CLAUDE_CLI_VERSION. It MUST live here in plain Resources rather than
+  # under asar: it is exec'd directly, and `files:` above excludes the npm copy so
+  # the blob ships exactly once. `pnpm check:packaging-paths` name-matches these
+  # two entries against the stage script's constants.
+  - from: binaries/claude
+    to: claude
+  - from: binaries/claude-cli-version.txt
+    to: claude-cli-version.txt
+
+# ── macOS ────────────────────────────────────────────────
+mac:
+  # Explicit icon so the packaged .app uses the Zeros logo rather
+  # than the generic Electron atom. Without this the Dock icon is
+  # indistinguishable from any other Electron app the user has open.
+  icon: build/icons/icon.icns
+  target:
+    - target: dmg
+      arch:
+        - arm64
+    - target: zip
+      arch:
+        - arm64
+  category: public.app-category.developer-tools
+  # ── Developer ID signing + notarization (PRODUCTION) ──
+  # electron-builder signs with the Developer ID cert from CSC_LINK (a base64
+  # .p12 in the CSC_LINK repo secret, unlocked with CSC_KEY_PASSWORD), then
+  # notarizes + staples via Apple's notarytool using APPLE_ID /
+  # APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID. release.yml forwards all five
+  # secrets; scripts/electron-after-pack.cjs self-skips its ad-hoc re-sign when
+  # CSC_LINK is set, so it never clobbers the real signature/notarization.
+  #
+  # GRACEFUL UNSIGNED FALLBACK: when CSC_LINK is ABSENT (a local build, or any
+  # CI run without the secrets) electron-builder finds no Developer ID and SKIPS
+  # signing — hardenedRuntime + notarize become no-ops — and the afterPack hook
+  # applies a complete ad-hoc signature (the old beta path needing `xattr -cr`).
+  # One config covers both states.
+  #
+  # WARNING: do NOT re-add `identity: null` — that FORCE-disables Developer ID
+  # signing even when the cert is present, silently shipping an unsigned build.
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  # Hardened runtime blocks JIT, unsigned executable memory, dyld env vars, and
+  # loading non-Apple-signed libraries by default. Electron's V8 needs JIT +
+  # unsigned exec memory; we set env and run the Cursor host under
+  # ELECTRON_RUN_AS_NODE (dyld env vars); and we dlopen our own native .node
+  # addons (node-pty, better-sqlite3, sqlite3, @cursor) → disable-library-
+  # validation. All declared in the entitlements file below.
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  # Notarization is done MANUALLY in release.yml (the "Notarize + staple" step),
+  # NOT by electron-builder — so disable eb's own notarization here. Why: eb's
+  # @electron/notarize uses `notarytool ... --wait`, whose long (multi-minute)
+  # poll intermittently dies on GitHub runners with `-1009 "Internet connection
+  # appears to be offline"` (the UPLOAD succeeds — it gets a submission id — but
+  # the poll blips). The release.yml step instead submits with `--no-wait` and
+  # polls `notarytool info` with retries (a blip just retries one quick poll),
+  # then staples the DMG — robust to those blips. (`mac.notarize` is a BOOLEAN in
+  # 26.x; `false` disables; the old `{ teamId }` object form was removed.)
+  notarize: false
+  # zeros:// protocol — electron-builder writes the CFBundleURLTypes
+  # block into Info.plist so macOS LaunchServices routes zeros://
+  # URLs to our .app.
+  extendInfo:
+    CFBundleURLTypes:
+      - CFBundleURLName: Zeros
+        CFBundleURLSchemes:
+          - zeros
+        CFBundleTypeRole: Viewer
+  # icon auto-resolved via directories.buildResources (build/icons/).
+  # electron-builder picks up `icon.icns` or generates one from pngs.
+
+dmg:
+  # Window layout for the drag-to-install image
+  sign: false
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+  window:
+    width: 540
+    height: 380
+
+# ── Auto-updater metadata ────────────────────────────────
+#
+# electron-updater reads latest-mac.yml to decide when an update is available.
+# The feed + artifacts are served from GitHub Releases:
+# /releases/latest/download/ always resolves to whatever release is marked
+# Latest, which release.yml sets explicitly with `--latest`.
+#
+# This was Cloudflare R2 until the repo went public. The ONLY reason for R2 was
+# that anonymous clients get HTTP 404 on a PRIVATE repo's release assets, so an
+# installed app could never read the feed. That reason is gone, the GitHub
+# release already carries every file the feed needs, and R2 was pure duplication
+# on top of three secrets and a free-tier ceiling to stay under.
+#
+# `provider: generic`, NOT `github` — electron-updater's GitHub provider accepts
+# stable tags through its channel filter, which breaks the pre-release channels
+# (see electron/updater.ts UPDATER_FEED_BY_CHANNEL).
+#
+# This block is baked into the bundle's app-update.yml at package time — it is
+# what the STABLE updater actually uses at runtime (alpha/beta override via
+# setFeedURL in electron/updater.ts). The generic provider fetches
+# <url>/latest-mac.yml and resolves the zip filenames inside it against the
+# same base.
+#
+# The `?static=1` query pins electron-updater's per-poll `noCache=<timestamp>`
+# OFF — the generic provider only appends it when the base URL carries no query
+# (see newUrlFromBase in electron-updater). A unique query per poll would miss
+# GitHub's CDN on every check; a constant one keeps a single cache key. This was
+# load-bearing on R2 (a cache miss was a billable read); on GitHub it is just
+# the polite thing to do at a 5-minute poll interval.
+publish:
+  provider: generic
+  url: https://github.com/Withso/zeros/releases/latest/download?static=1
+
+# ── Native module rebuild ────────────────────────────────
+#
+# better-sqlite3 is V8-ABI-bound and MUST be rebuilt for Electron, but node-pty
+# is N-API and ships a tested Darwin prebuild. A blanket source rebuild creates
+# a higher-priority node-pty build/ tree and makes the shipped native selection
+# depend on prior build/cache state. Disable it and let beforePack rebuild ONLY
+# better-sqlite3 from source, then validate/select node-pty's Darwin prebuild.
+# The packaged PTY smoke below the release workflows separately catches the
+# macOS spawn-helper location failure that caused beta.58.
+npmRebuild: false
+beforePack: ./scripts/electron-before-pack.cjs
+
+# asar compression — smaller bundle, faster boot. Works with the
+# afterPack re-sign because deep signing doesn't touch the asar's
+# content hash recorded in Info.plist ElectronAsarIntegrity.
+asar: true
+# Native .node binaries must live outside asar so dyld can dlopen.
+asarUnpack:
+  - "**/node_modules/node-pty/**/*"
+  # Cursor SDK host (cursor-host.cjs) runs under ELECTRON_RUN_AS_NODE, which
+  # DISABLES Electron's asar support — so @cursor/sdk, every package its CJS
+  # build require()s, and the native sqlite3 binding it pulls must all live
+  # OUTSIDE asar (plain Node can't read modules from inside the archive). The
+  # globs intentionally match pnpm's nested `.pnpm/<pkg>@<ver>/node_modules/<pkg>`
+  # layout too. The scopes below were verified against @cursor/sdk's actual
+  # load-time require() closure (require('@cursor/sdk') → inspect require.cache);
+  # the `ajv*` / `fast-*` / `uri-js` / `require-from-string` entries are kept as
+  # belt-and-suspenders for deps that are only require()d lazily mid-run.
+  # Two guards keep this list honest: `pnpm check:cursor-asar` fails CI if
+  # @cursor/sdk's require() closure drifts past these globs, and `pnpm cursor:smoke`
+  # (point its ZEROS_* env at the packaged app) spawns the real host and asserts no
+  # MODULE_NOT_FOUND. STILL run the smoke against a real DMG once: a lazy require()
+  # during an authenticated agent run could pull a scope not seen at load — if so,
+  # add its glob here. (esbuild-bundling the host was evaluated and rejected: the
+  # SDK's exports/.d.ts layout doesn't bundle cleanly, and sqlite3 + the @cursor
+  # native addon load relative to their on-disk location, so they must stay
+  # unpacked regardless — bundling wouldn't shrink this list to just sqlite3.)
+  - "**/node_modules/@cursor/**/*"
+  - "**/node_modules/@connectrpc/**/*"
+  - "**/node_modules/@bufbuild/**/*"
+  - "**/node_modules/@statsig/**/*"
+  # @fastify (@fastify/busboy via undici) + undici: @cursor/sdk's fetch transport.
+  - "**/node_modules/@fastify/**/*"
+  - "**/node_modules/undici/**/*"
+  # bindings + file-uri-to-path: how sqlite3 locates its native .node at runtime —
+  # without these the SqliteLocalAgentStore (Cursor error recovery) can't load.
+  - "**/node_modules/bindings/**/*"
+  - "**/node_modules/file-uri-to-path/**/*"
+  - "**/node_modules/ajv/**/*"
+  - "**/node_modules/ajv-formats/**/*"
+  - "**/node_modules/json-schema-traverse/**/*"
+  - "**/node_modules/fast-deep-equal/**/*"
+  - "**/node_modules/fast-uri/**/*"
+  - "**/node_modules/uri-js/**/*"
+  - "**/node_modules/require-from-string/**/*"
+  - "**/node_modules/zod/**/*"
+  - "**/node_modules/sqlite3/**/*"

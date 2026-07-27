@@ -1,0 +1,134 @@
+// ──────────────────────────────────────────────────────────
+// TurnEventList — render a turn as a working group + answer
+// ──────────────────────────────────────────────────────────
+//
+// 2026-06-18. A turn splits into two parts (see turn-partition.ts):
+//
+//   • the WORKING group — tools, thinking, in-between narration,
+//     sub-agents — handed to one EventStripe. While the turn is
+//     live the stripe is expanded + dimmed (the reasoning feed);
+//     once it settles the stripe collapses to a single summary
+//     chip ("<N> tool calls, <M> messages, <K> agents").
+//
+//   • the FINAL OUTPUT — the trailing agent text — rendered
+//     brightly below the group as the actual answer.
+//
+// The shape is deliberate: watch the agent work, then the work
+// folds away and the answer remains.
+// ──────────────────────────────────────────────────────────
+
+import { memo, useMemo, type ReactNode } from "react";
+
+import { ActivityShimmer } from "@/loaders";
+import { pickStartedAt } from "./activity-hud";
+import { EventStripe } from "./renderers/event-stripe";
+import { MessageView } from "./renderers";
+import type { RendererContext } from "./renderers";
+import type { AgentMessage } from "./use-agent-session";
+import { partitionTurn } from "./turn-partition";
+
+interface TurnEventListProps {
+  events: AgentMessage[];
+  /** True for the most recent turn. Combined with `isStreaming` it decides
+   *  whether the working group is "live" (expanded + dimmed) or settled
+   *  (collapsed to a summary chip). */
+  isActive: boolean;
+  /** Whether the session is streaming. Drives the live working group + the
+   *  tail shimmer. */
+  isStreaming?: boolean;
+  /** The turn footer (run time, copy, "…", file pills). Rendered INSIDE this
+   *  component's 768 lane so it hugs the answer and the pills align under it —
+   *  as a TurnContainer sibling it picked up the container's gap-4 (a ~20px gap
+   *  the user flagged). Null/absent for turns with no footer. */
+  footer?: ReactNode;
+  ctx: RendererContext;
+}
+
+export const TurnEventList = memo(function TurnEventList({
+  events,
+  isActive,
+  isStreaming,
+  footer,
+  ctx,
+}: TurnEventListProps) {
+  // "Live" = this is the active turn AND the session is still streaming, i.e.
+  // the agent is working right now. The working group stays expanded while
+  // live; the instant the turn settles it collapses into one chip and the
+  // final answer (finalOutput) is what remains bright.
+  const live = isActive && !!isStreaming;
+
+  // Pass `live` so a streaming turn keeps its (provisional) trailing narration
+  // INSIDE the working feed — same uniform gap as the rest — instead of peeling
+  // it out as a separated `finalOutput` whose larger gap (this list's `gap-4` +
+  // the Message's `py-2`) would snap tight the instant the next event lands
+  // (user report 2026-06-18). The answer only separates out once it settles.
+  const { working, finalOutput } = useMemo(
+    () => partitionTurn(events, { live }),
+    [events, live],
+  );
+
+  // The tail shimmer + TIMER always runs while the turn is live — including
+  // while a subagent/task runs (2026-07-04, per user: subagent rows are now
+  // collapsed by default, so without the tail shimmer a running Agent/Task
+  // turn showed no working cue at all). A running Agent/Task row ALSO spins
+  // its own leading icon (tool-subagent / tool-cursor-task) so the row reads
+  // as working even when it's scrolled far from this tail — but only the
+  // tail carries the elapsed timer, so the time is never shown twice.
+  //
+  // While the agent is PARKED on the user — a blocking question, a permission
+  // gate, or Claude's plan review — it isn't "working": hide the tail shimmer
+  // + ticking timer (user feedback 2026-07-04, extended to plan review the
+  // same day). The elapsed clock still runs underneath (the shimmer derives
+  // its time from startedAt), so when the user answers/approves or the wait
+  // times out the indicator returns with the true total.
+  const awaitingUserInput =
+    ctx.pendingQuestionToolCallIds.size > 0 || !!ctx.pendingPermission;
+  const showShimmer = live && !awaitingUserInput;
+
+  // 2026-06-18: the agent's output + tool calls render in a LEFT-aligned lane
+  // capped at max-w-[768px] (`w-full max-w-[768px] self-start`) — the reading
+  // measure for the answer + tool feed. This cap is NARROWER than the
+  // conversation envelope: the band (agent-chat.tsx `.zeros-agent-messages`)
+  // and the composer are max-w-[1152px], but each turn's content reads at a
+  // comfortable 768. `self-start` left-anchors the lane to the band's left edge
+  // (which lines up with the composer's left edge); the user prompt is its
+  // right-anchored counterpart (turn-container.tsx: `items-end` +
+  // `max-w-[768px]`) — the answer hugs the LEFT, the prompt hugs the RIGHT,
+  // both capped at 768 inside the wide 1152 band. RESPONSIVE: the cap is
+  // ABSOLUTE, so `w-full` fills the band whenever it is narrower than 768 (a
+  // shrunk col 2 → content fits the window) and only caps once it would exceed
+  // 768. A proportional cap (max-w-[80%]) was tried and reverted — it reserved
+  // a fixed % gutter at *every* width, so content never filled a narrow window
+  // ("only [cap] when it hits the width, not every time"). `min-w-0` keeps the
+  // per-row `truncate` (event-row.tsx) working so long tool commands/paths
+  // single-line-ellipsize to the lane width instead of wrapping; nested
+  // sub-agent rows inherit a tighter measure from their indented body and so
+  // truncate harder.
+  // Render nothing when the turn has no events yet AND isn't streaming, so an
+  // empty wrapper doesn't render.
+  if (
+    working.length === 0 &&
+    finalOutput.length === 0 &&
+    !showShimmer &&
+    !footer
+  ) {
+    return null;
+  }
+
+  return (
+    <div className="flex w-full min-w-0 max-w-[768px] flex-col self-start">
+      {working.length > 0 && (
+        <EventStripe events={working} ctx={ctx} live={live} />
+      )}
+      {finalOutput.map((event) => (
+        <MessageView key={event.id} message={event} ctx={ctx} />
+      ))}
+      {/* Shimmer + live timer at the tail of the active turn while streaming
+          (pickStartedAt anchors the timer to the most recent in-flight tool —
+          for a running subagent that's the subagent's own start time). */}
+      {showShimmer && <ActivityShimmer startedAt={pickStartedAt(events)} />}
+      {/* Per-turn footer, in-lane so it hugs the answer (see prop doc). */}
+      {footer}
+    </div>
+  );
+});

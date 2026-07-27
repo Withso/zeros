@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zeros — Color in Context</title>
+<style>
+:root{
+  color-scheme:dark;
+  /* ── neutral surfaces / text / borders (from styles/zeros-tokens.css) ── */
+  --bg1:hsl(5 7% 5%); --bg1-hover:hsl(8 5% 12%); --bg1-highlight:hsl(25 5% 9%);
+  --bg2:hsl(25 4% 12%); --bg2-hover:hsl(15 1% 16%);
+  --bg3:hsl(15 4% 16%); --bg3-hover:hsl(15 3% 20%);
+  --fg1:hsl(0 2% 92%); --fg2:hsl(20 4% 66%); --fg3:hsl(15 1% 44%); --muted-fg:hsl(15 4% 44%);
+  --border1:hsl(8 3% 14%); --border2:hsl(25 1% 18%); --border3:hsl(15 0% 24%);
+  --shadow-dropdown:0 8px 24px rgba(0,0,0,.35);
+  /* ── the 5 semantic color families ── */
+  --red-primary:hsl(0 85% 64%);   --red-secondary:hsl(7 83% 39%); --red-bg:hsl(13 81% 14%);  --red-fg:hsl(20 97% 72%);
+  --green-primary:hsl(142 71% 45%);                               --green-bg:hsl(120 23% 17%);--green-fg:hsl(142 75% 73%);
+  --yellow-primary:hsl(36 100% 60%);                              --yellow-bg:hsl(38 68% 17%);--yellow-fg:hsl(44 100% 50%);
+  --blue-primary:hsl(205 90% 73%);                                --blue-bg:hsl(226 57% 18%); --blue-fg:hsl(211 96% 78%);
+  --violet-primary:hsl(271 100% 73%);                             --violet-bg:hsl(255 21% 18%);--violet-fg:hsl(265 66% 77%);
+  --brown-primary:hsl(9 46% 72%);                                 --brown-bg:hsl(10 15% 15%); --brown-fg:hsl(10 80% 72%);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg1);color:var(--fg1);
+  font:14px/1.55 "Geist Variable",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  padding:30px 40px 90px}
+h1{font-size:22px;margin:0 0 5px;letter-spacing:-.01em}
+.intro{color:var(--fg2);margin:0 0 8px;max-width:76ch}
+.intro a{color:var(--blue-primary);text-decoration:none;border-bottom:1px solid color-mix(in srgb,var(--blue-primary) 40%,transparent);padding-bottom:1px}
+.mono{font-family:"Geist Mono Variable",ui-monospace,Menlo,monospace}
+
+/* semantic legend */
+.legend{display:flex;flex-wrap:wrap;gap:8px 20px;margin:18px 0 30px;padding:12px 16px;background:var(--bg1-highlight);border:1px solid var(--border1);border-radius:10px}
+.legend span{display:inline-flex;align-items:center;gap:8px;color:var(--fg2);font-size:13px}
+.legend b{color:var(--fg1);font-weight:600}
+.dot{width:11px;height:11px;border-radius:50%;display:inline-block;flex:none}
+
+/* section scaffolding */
+section{margin:0 0 34px}
+h2{font-size:15px;display:flex;align-items:center;gap:9px;margin:0 0 4px;padding-bottom:8px;border-bottom:1px solid var(--border1)}
+.h2n{width:20px;height:20px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;background:var(--bg3);color:var(--fg2);flex:none}
+h2 .cr{margin-left:auto;font:11px "Geist Mono Variable",ui-monospace,Menlo,monospace;color:var(--fg3);font-weight:400}
+.sub{color:var(--fg3);font-size:12.5px;margin:0 0 12px}
+h3{font-size:13px;color:var(--fg2);margin:16px 0 8px;font-weight:600}
+
+/* the app canvas demo card */
+.demo{background:var(--bg1);border:1px solid var(--border1);border-radius:10px;padding:15px 17px;margin:0 0 10px}
+.tok{font-family:"Geist Mono Variable",ui-monospace,Menlo,monospace;font-size:11px;color:var(--fg3);margin:7px 2px 0;display:block}
+.tok b{color:var(--fg2);font-weight:500}
+code{background:var(--bg3);padding:1px 6px;border-radius:5px;font-size:11.5px;color:var(--fg1);font-family:"Geist Mono Variable",ui-monospace,Menlo,monospace}
+
+/* 1 · diff */
+.difflist{font-family:"Geist Mono Variable",ui-monospace,Menlo,monospace;font-size:13px;line-height:2}
+.difflist .fname{color:var(--fg2)}
+.sq{font-family:"Geist Mono Variable",ui-monospace,Menlo,monospace;border:1.5px solid currentColor;border-radius:4px;padding:0 4px;font-size:11px;margin-right:3px;display:inline-block}
+.statuskey{display:flex;gap:26px;flex-wrap:wrap;font-family:"Geist Mono Variable",ui-monospace,Menlo,monospace;font-size:13px;color:var(--fg2)}
+
+/* 2 · kanban */
+.kanban{display:flex;gap:26px;flex-wrap:wrap}
+.kanban span{display:flex;align-items:center;gap:8px;color:var(--fg2);font-size:13px}
+.kanban b{color:var(--fg3);font-weight:500}
+.kd{width:12px;height:12px;border-radius:50%;display:inline-block;flex:none}
+.kd.ring{border:2px dotted var(--fg3);background:transparent!important}
+.kd.x{border:2px solid var(--fg3);background:transparent!important;position:relative}
+
+/* 3 · buttons/icons */
+.btns{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.btn{border:0;border-radius:8px;padding:8px 14px;font:600 13px "Geist Variable",system-ui;cursor:pointer;display:inline-flex;align-items:center;gap:7px}
+.iconbtn{display:inline-flex;align-items:center;padding:7px;border-radius:8px;background:transparent}
+.callout-ok{font-size:12.5px;color:var(--green-fg)}
+
+/* 4 · callouts */
+.callouts{display:flex;flex-direction:column;gap:9px;max-width:660px}
+.callout{border-radius:9px;padding:11px 15px;font-size:13px;position:relative}
+.callout .lead{font-weight:600;margin-right:7px}
+.callout .cr{position:absolute;right:11px;top:11px;font:10px "Geist Mono Variable",ui-monospace,Menlo,monospace;opacity:.6}
+.callout .use{display:block;font-size:11.5px;opacity:.82;margin-top:4px}
+
+/* 5 · PR islands */
+.prrow{display:flex;align-items:center;gap:12px;border-radius:9px;padding:11px 14px;margin-bottom:9px}
+.prpill{font:12px "Geist Mono Variable",ui-monospace,Menlo,monospace;color:var(--fg2);border:1px solid var(--border3);border-radius:6px;padding:2px 8px;background:rgba(0,0,0,.2)}
+.prbtn{margin-left:auto;border:0;border-radius:7px;padding:6px 13px;font:600 12.5px "Geist Variable",system-ui;cursor:pointer;display:inline-flex;align-items:center;gap:6px}
+
+/* 6 · links */
+.linkdemo a{text-decoration:none;border-bottom:1px solid color-mix(in srgb,var(--blue-primary) 45%,transparent);padding-bottom:1px}
+
+/* 7 · toasts */
+.toastrow{max-width:440px;display:flex;flex-direction:column;gap:8px}
+.toast{background:var(--bg2);border:1px solid var(--border2);border-radius:9px;padding:10px 13px;box-shadow:var(--shadow-dropdown);font-size:13px;color:var(--fg1);display:flex;align-items:center;gap:9px}
+.note{color:var(--fg3);font-size:11.5px;margin:9px 2px 0}
+
+/* mapping table */
+table{border-collapse:collapse;margin-top:6px;font-size:13px}
+td{padding:5px 16px 5px 0;color:var(--fg2);vertical-align:top}
+td:first-child{color:var(--fg1);font-weight:500}
+.rolechip{display:inline-flex;align-items:center;gap:7px}
+</style>
+</head>
+<body>
+
+<h1>Zeros — Color in Context</h1>
+<p class="intro">The six semantic color families applied to real Zeros UI, rendered on the app canvas
+(<code>--bg1</code>). This page is about <b>how color is used</b>, not the raw palette — for the token
+definitions, ramps, and component library see <a href="design-system-preview.html">design-system-preview.html</a>.</p>
+
+<div class="legend">
+  <span><i class="dot" style="background:var(--red-primary)"></i> <b>red</b> — error · −N deletions · deleted</span>
+  <span><i class="dot" style="background:var(--green-primary)"></i> <b>green</b> — success · +N additions · in-review · created</span>
+  <span><i class="dot" style="background:var(--yellow-primary)"></i> <b>yellow</b> — warning · modified · in-progress</span>
+  <span><i class="dot" style="background:var(--blue-primary)"></i> <b>blue</b> — info · links · accents</span>
+  <span><i class="dot" style="background:var(--violet-primary)"></i> <b>violet</b> — done · merged</span>
+  <span><i class="dot" style="background:var(--brown-primary)"></i> <b>brown</b> — file paths · warm accents</span>
+</div>
+
+<!-- 1 -->
+<section>
+  <h2><span class="h2n">1</span> Diff counts &amp; status squares</h2>
+  <p class="sub">Standalone counts and icons on the canvas use the vivid <code>--&lt;family&gt;-primary</code> accent.</p>
+  <div class="demo">
+    <div class="difflist">
+      <div><span style="color:var(--green-primary)">+985</span> &nbsp;<span style="color:var(--green-primary)">✚</span>&nbsp; <span class="fname">new-feature.tsx</span></div>
+      <div><span style="color:var(--green-primary)">+12</span> <span style="color:var(--red-primary)">−4</span> &nbsp;<span style="color:var(--fg3)">•</span>&nbsp; <span class="fname">edited.ts</span></div>
+      <div><span style="color:var(--red-primary)">−58</span> &nbsp;<span style="color:var(--red-primary)">—</span>&nbsp; <span class="fname">removed.md</span></div>
+    </div>
+  </div>
+  <div class="demo">
+    <div class="statuskey">
+      <span><span class="sq" style="color:var(--green-primary)">✚</span> created</span>
+      <span><span class="sq" style="color:var(--yellow-primary)">•</span> modified</span>
+      <span><span class="sq" style="color:var(--red-primary)">—</span> deleted</span>
+    </div>
+  </div>
+  <span class="tok"><b>tokens:</b> +N <code>--green-primary</code> · −N <code>--red-primary</code> · modified <code>--yellow-primary</code></span>
+</section>
+
+<!-- 2 -->
+<section>
+  <h2><span class="h2n">2</span> Kanban statuses</h2>
+  <p class="sub">Colored dots for active states; neutral <code>--fg3</code> for backlog / cancelled (no color = not started / dropped).</p>
+  <div class="demo kanban">
+    <span><i class="kd ring"></i> Backlog <b>0</b></span>
+    <span><i class="kd" style="background:var(--yellow-primary)"></i> In progress <b>0</b></span>
+    <span><i class="kd" style="background:var(--green-primary)"></i> In review <b>1</b></span>
+    <span><i class="kd" style="background:var(--violet-primary)"></i> Done <b>0</b></span>
+    <span><i class="kd x"></i> Cancelled <b>0</b></span>
+  </div>
+  <span class="tok"><b>tokens:</b> in-progress <code>--yellow-primary</code> · in-review <code>--green-primary</code> · done <code>--violet-primary</code> · backlog/cancelled <code>--fg3</code></span>
+</section>
+
+<!-- 3 -->
+<section>
+  <h2><span class="h2n">3</span> Delete button + icon</h2>
+  <p class="sub">The one place a family uses a <em>solid fill</em>: destructive actions fill with <code>--red-secondary</code> (deep red 700), white text. Standalone delete icons use the same token.</p>
+  <div class="demo btns">
+    <button class="btn" style="background:var(--red-secondary);color:#fff">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/></svg>
+      Delete
+    </button>
+    <span class="iconbtn" title="delete icon = --red-secondary" style="color:var(--red-secondary)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/></svg>
+    </span>
+    <span class="callout-ok">solid · white text · bg = <code>--red-secondary</code></span>
+  </div>
+  <span class="tok"><b>tokens:</b> fill + icon <code>--red-secondary</code>. Inline error <em>text</em> instead uses <code>--red-primary</code>.</span>
+</section>
+
+<!-- 4 -->
+<section>
+  <h2><span class="h2n">4</span> Tinted callouts <span class="cr">fg / bg contrast</span></h2>
+  <p class="sub">Filled notices: surface = <code>--&lt;family&gt;-bg</code>, text + icon = <code>--&lt;family&gt;-fg</code> (never the vivid primary — that would read "all red/green"). No border.</p>
+  <div class="callouts">
+    <div class="callout" style="background:var(--red-bg);color:var(--red-fg)">
+      <span class="cr">7.9:1</span>
+      <span class="lead" style="color:var(--red-primary)">Error</span>Failed to write file — permission denied.
+      <span class="use">✔ used: panel error boxes, git errors, error event rows (~13 sites)</span>
+    </div>
+    <div class="callout" style="background:var(--green-bg);color:var(--green-fg)">
+      <span class="cr">9.3:1</span>
+      <span class="lead" style="color:var(--green-primary)">Success</span>Cursor validated your API key.
+      <span class="use">✔ used: PR ready-to-merge island, provider ‘validated’ box, PR ‘Open’ badge</span>
+    </div>
+    <div class="callout" style="background:var(--yellow-bg);color:var(--yellow-fg)">
+      <span class="cr">6.9:1</span>
+      <span class="lead" style="color:var(--yellow-primary)">Warning</span>3 files have uncommitted changes.
+      <span class="use">✗ NOT a container today — warning is icon / text only</span>
+    </div>
+    <div class="callout" style="background:var(--blue-bg);color:var(--blue-fg)">
+      <span class="cr">8.7:1</span>
+      <span class="lead" style="color:var(--blue-primary)">Info</span>This runs in an isolated workspace.
+      <span class="use">✗ NOT a container today — info is text / links only</span>
+    </div>
+    <div class="callout" style="background:var(--violet-bg);color:var(--violet-fg)">
+      <span class="cr">6.5:1</span>
+      <span class="lead" style="color:var(--violet-primary)">Merged</span>PR #12 merged into main.
+      <span class="use">✔ used: PR ‘merged’ island + badge</span>
+    </div>
+  </div>
+  <span class="tok"><b>tokens:</b> surface <code>--&lt;family&gt;-bg</code> · body <code>--&lt;family&gt;-fg</code> · bold lead label <code>--&lt;family&gt;-primary</code></span>
+</section>
+
+<!-- 5 -->
+<section>
+  <h2><span class="h2n">5</span> PR states</h2>
+  <p class="sub">Pull-request islands reuse the tinted-surface recipe: green for ready-to-merge, violet for merged.</p>
+  <div class="demo" style="border:none;padding:0;background:none">
+    <div class="prrow" style="background:var(--green-bg)">
+      <span class="prpill">#12 ↗</span>
+      <span style="color:var(--green-fg);font-weight:600">Ready to merge</span>
+      <button class="prbtn" style="background:var(--green-primary);color:var(--green-bg)">⑂ Merge</button>
+    </div>
+    <div class="prrow" style="background:var(--violet-bg)">
+      <span class="prpill">#12 ↗</span>
+      <span style="color:var(--violet-fg);font-weight:600">Merged</span>
+    </div>
+  </div>
+  <span class="tok"><b>tokens:</b> ready <code>--green-bg</code>/<code>--green-fg</code>, action fill <code>--green-primary</code> · merged <code>--violet-bg</code>/<code>--violet-fg</code></span>
+</section>
+
+<!-- 6 -->
+<section>
+  <h2><span class="h2n">6</span> Links / info</h2>
+  <p class="sub">Inline links and info text use <code>--blue-primary</code> — text only, no container.</p>
+  <div class="demo linkdemo">
+    Open the <a style="color:var(--blue-primary)">documentation</a> or view
+    <a style="color:var(--blue-primary)">#12 on GitHub</a>.
+  </div>
+  <span class="tok"><b>tokens:</b> link + info text <code>--blue-primary</code></span>
+  <h3>Inline file paths (agent output)</h3>
+  <div class="demo">
+    Edited <code style="background:var(--bg1-highlight);border:none;color:var(--brown-primary)">src/shell/column3.tsx</code> and
+    <code style="background:var(--bg1-highlight);border:none;color:var(--brown-primary)">styles/globals.css</code> — clickable chips, brown to stay distinct from blue links.
+  </div>
+  <span class="tok"><b>tokens:</b> file-path chip text <code>--brown-primary</code> on <code>--bg1-highlight</code></span>
+</section>
+
+<!-- 7 -->
+<section>
+  <h2><span class="h2n">7</span> Toasts</h2>
+  <p class="sub">Toasts stay a neutral card — only the status <em>icon</em> is colored. No tint (this is deliberately different from the tinted callouts above).</p>
+  <div class="toastrow">
+    <div class="toast"><span style="color:var(--green-primary)">✔</span> Pushed to main.</div>
+    <div class="toast"><span style="color:var(--red-primary)">✕</span> Couldn’t add this project.</div>
+    <div class="toast"><span style="color:var(--yellow-primary)">▲</span> Attachment is too large.</div>
+  </div>
+  <p class="note">Card = <code>--bg2</code> + <code>--border2</code> + <code>--shadow-dropdown</code>; only the leading icon carries the family <code>--&lt;family&gt;-primary</code>.</p>
+</section>
+
+<!-- mapping -->
+<section>
+  <h2><span class="h2n">→</span> Role → family (quick reference)</h2>
+  <table>
+    <tr><td><span class="rolechip"><i class="dot" style="background:var(--red-primary)"></i> Error / delete</span></td>
+        <td>text/icon <code>--red-primary</code> · solid fill <code>--red-secondary</code> · callout <code>--red-bg</code>/<code>--red-fg</code></td></tr>
+    <tr><td><span class="rolechip"><i class="dot" style="background:var(--green-primary)"></i> Success / +N / in-review / created</span></td>
+        <td>accent <code>--green-primary</code> · callout <code>--green-bg</code>/<code>--green-fg</code></td></tr>
+    <tr><td><span class="rolechip"><i class="dot" style="background:var(--yellow-primary)"></i> Warning / modified / in-progress</span></td>
+        <td>accent <code>--yellow-primary</code> · callout <code>--yellow-bg</code>/<code>--yellow-fg</code></td></tr>
+    <tr><td><span class="rolechip"><i class="dot" style="background:var(--blue-primary)"></i> Info / links</span></td>
+        <td>accent <code>--blue-primary</code> · callout <code>--blue-bg</code>/<code>--blue-fg</code></td></tr>
+    <tr><td><span class="rolechip"><i class="dot" style="background:var(--violet-primary)"></i> Done / merged</span></td>
+        <td>accent <code>--violet-primary</code> · callout <code>--violet-bg</code>/<code>--violet-fg</code></td></tr>
+    <tr><td><span class="rolechip"><i class="dot" style="background:var(--brown-primary)"></i> File paths / warm accents</span></td>
+        <td>accent <code>--brown-primary</code> · callout <code>--brown-bg</code>/<code>--brown-fg</code></td></tr>
+    <tr><td><span class="rolechip"><i class="kd ring" style="width:11px;height:11px"></i> Backlog / cancelled</span></td>
+        <td>neutral <code>--fg3</code> / <code>--muted-fg</code> — no color</td></tr>
+  </table>
+</section>
+
+</body>
+</html>

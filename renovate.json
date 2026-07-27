@@ -1,0 +1,53 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "─────────────────────────────────────────────────────────",
+    "Renovate is the ONLY dependency bot on this repository.",
+    "─────────────────────────────────────────────────────────",
+    "WHY ONE BOT: this repo previously ran Renovate and Dependabot side by side, with .github/dependabot.yml reduced to `open-pull-requests-limit: 0` purely so the two would not fight over the same lockfile. Two bots that must be configured not to collide is a maintenance tax with no upside, and on a public repo it doubles the visible PR noise. Dependabot's config was deleted and Renovate kept, because Renovate is the one carrying real intent here: an opt-in allowlist, grouping, a schedule, and per-rule reasoning. It also natively understands SHA-pinned GitHub Actions, which is now load-bearing (see the github-actions rule below).",
+    "WHAT REPLACED DEPENDABOT: the `vulnerabilityAlerts` block below. Renovate reads GitHub's own advisory data, so security fixes still arrive automatically — they just arrive from one bot instead of two. Repository setting to match: Settings ▸ Code security ▸ leave Dependabot ALERTS on (they cost nothing and feed Renovate), and turn Dependabot SECURITY UPDATES off so it stops opening a competing PR for the same advisory.",
+    "CLOSED TO CONTRIBUTION: this project is source-available and does not accept outside pull requests. Renovate's PRs are not an exception to that — they are automated maintenance opened by a bot against the maintainer's own repo, which is why every one of them is labelled `automated` (excluded from the generated release notes in .github/release.yml) and carries an explicit header saying so."
+  ],
+  "extends": [
+    ":dependencyDashboard",
+    ":semanticCommits",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "enabledManagers": ["npm", "github-actions"],
+  "labels": ["dependencies", "automated"],
+  "prHeader": "Automated maintenance opened by Renovate. This repository is source-available and closed to outside contribution; bot upgrade PRs are the only non-maintainer PRs that are ever merged here.",
+  "packageRules": [
+    {
+      "description": "Opt-in per package: this repo only automates the bundled agent-CLI pins for now. Disable everything else so Renovate doesn't flood the repo. Broaden later by removing this rule (or scoping it).",
+      "matchPackageNames": ["*"],
+      "enabled": false
+    },
+    {
+      "description": "Bundled agent runtimes. A bump to @anthropic-ai/claude-agent-sdk updates the pinned Claude Code CLI (its claudeCodeVersion); @openai/codex updates the bundled Codex binary; @cursor/sdk the cursor-sdk fallback. Grouped into one weekly PR, labeled, and gated by CI (pnpm test:git + pnpm models:verify --strict) so a bump that can't run a curated model fails the PR. NOT auto-merged: a new SDK can carry protocol/API changes the adapters must adapt to — a human reviews the green PR.",
+      "matchPackageNames": [
+        "@anthropic-ai/claude-agent-sdk",
+        "@openai/codex",
+        "@cursor/sdk"
+      ],
+      "enabled": true,
+      "groupName": "agent CLIs",
+      "labels": ["dependencies", "automated", "agent-pin"],
+      "schedule": ["before 6am on monday"],
+      "automerge": false
+    },
+    {
+      "description": "GitHub Actions are pinned to full commit SHAs (with the version in a trailing comment) so a compromised upstream can't repoint a tag into a job that holds the Developer ID cert and the R2 write keys. A SHA pin only stays safe if something bumps it, and that something is this rule — without it the pins silently rot into permanently-outdated code. Grouped into one monthly PR so the pin refresh is a single reviewable diff rather than a trickle, and never auto-merged: the whole point of a SHA pin is that a human looks at what the new SHA is.",
+      "matchManagers": ["github-actions"],
+      "enabled": true,
+      "groupName": "github actions",
+      "labels": ["dependencies", "automated", "ci"],
+      "schedule": ["before 6am on the first day of the month"],
+      "automerge": false
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "description": "Security fixes bypass the opt-in allowlist above. `enabled: true` here overrides the `matchPackageNames: [*] / enabled: false` rule for advisory-driven updates only, so a vulnerable transitive dependency still gets a PR even though routine version bumps for that package are muted. This is the capability that made Dependabot worth keeping before it was removed; unscheduled on purpose, because an advisory should not wait for Monday.",
+    "enabled": true,
+    "labels": ["dependencies", "automated", "security"]
+  }
+}

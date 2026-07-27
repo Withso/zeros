@@ -1,0 +1,1314 @@
+// ──────────────────────────────────────────────────────────
+// Claude stream-json → SessionNotification translator
+// ──────────────────────────────────────────────────────────
+//
+// The live feeder is the Agent SDK's `SDKMessage` stream (this class is
+// reused by `claude-sdk/adapter.ts`). Those messages mirror the JSON
+// objects Claude Code emits one-per-line under
+// `--output-format stream-json --verbose`, so the shapes below still
+// describe the input verbatim. Shape roughly:
+//
+//   {"type":"system","subtype":"init","session_id":"...","model":"...","tools":[...]}
+//   {"type":"user","message":{"role":"user","content":[...]}}
+//   {"type":"assistant","message":{"role":"assistant","content":[
+//     {"type":"thinking","thinking":"..."},
+//     {"type":"text","text":"..."},
+//     {"type":"tool_use","id":"toolu_01","name":"Read","input":{...}}
+//   ]}}
+//   {"type":"user","message":{"role":"user","content":[
+//     {"type":"tool_result","tool_use_id":"toolu_01","content":"...","is_error":false}
+//   ]}}
+//   {"type":"result","subtype":"success","result":"...","total_cost_usd":0.01,"usage":{...},"session_id":"..."}
+//
+// This class converts each Claude event into one or more
+// SessionNotification payloads matching the wire shape. The UI
+// already knows how to render them (unchanged).
+//
+// State is per-translator-instance, keyed on the Zeros session id
+// passed at construction. Each new session gets a fresh translator.
+//
+// ──────────────────────────────────────────────────────────
+
+import { randomUUID } from "node:crypto";
+
+import { claudeContextWindow } from "@zeros/core/model-context";
+
+import { isDevRuntime } from "../../../runtime";
+import type { ContentBlock, SessionNotification, TurnUsage } from "../../types";
+
+// engine ToolKind union — hoisted as a string set for runtime checks.
+// Mirrors @zeros/core/agent-events ToolKind. Stage 4 added
+// web_search / subagent / mcp / question for the new card kinds.
+type ToolKind =
+  | "read"
+  | "edit"
+  | "delete"
+  | "move"
+  | "search"
+  | "list"
+  | "web_search"
+  | "execute"
+  | "think"
+  | "fetch"
+  | "switch_mode"
+  | "subagent"
+  | "mcp"
+  | "question"
+  | "skill"
+  | "tool_search"
+  | "other";
+
+type Emit = (notification: SessionNotification) => void;
+
+interface ClaudeAssistantContentBlock {
+  type: string;
+  text?: string;
+  thinking?: string;
+  id?: string;
+  name?: string;
+  input?: unknown;
+}
+
+interface ClaudeMessageEvent {
+  type: "user" | "assistant";
+  /** Anthropic stamps `parent_tool_use_id` at the envelope level when
+   *  the message originates from inside a Task subagent. Roadmap
+   *  §2.4.7 — the renderer uses this to route child events into the
+   *  parent SubagentCard's nested transcript. */
+  parent_tool_use_id?: string | null;
+  /** Claude Code's rich result for THIS user event's tool_result (SDK
+   *  `tool_use_result`). For Edit/Write/MultiEdit it carries
+   *  `structuredPatch` — real hunks with real file line numbers, which the
+   *  EditCard renders directly instead of a snippet diff that restarts at
+   *  line 1. */
+  tool_use_result?: unknown;
+  message?: {
+    role?: string;
+    /** The model that actually produced this assistant message (the Anthropic
+     *  API message's `model` field). §3.6 R2 — when a fallback model answers
+     *  (primary overloaded), this is the per-message signal of the swap. */
+    model?: string;
+    content?: ClaudeAssistantContentBlock[];
+  };
+}
+
+interface ClaudeSystemInitEvent {
+  type: "system";
+  subtype: "init";
+  session_id?: string;
+  model?: string;
+  tools?: string[];
+  mcp_servers?: Array<{ name: string; status?: string }>;
+}
+
+interface ClaudeResultEvent {
+  type: "result";
+  subtype?: "success" | "error_max_turns" | "error_during_execution" | string;
+  session_id?: string;
+  total_cost_usd?: number;
+  num_turns?: number;
+  duration_ms?: number;
+  is_error?: boolean;
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
+  };
+  /** §3.6 R5 — the Anthropic stop reason of the turn's final API call
+   *  ("end_turn" | "max_tokens" | …). "max_tokens" = the answer was cut by
+   *  the output-token cap and must not render as complete. */
+  stop_reason?: string | null;
+  /** §3.6 R5 — the SDK's structured terminal reason ("budget_exhausted",
+   *  "blocking_limit", "prompt_too_long", …). Richer than subtype. */
+  terminal_reason?: string;
+  /** §3.6 R6 — per-model usage breakdown (SDK `result.modelUsage`, keyed by
+   *  model id, camelCase fields — unlike the snake_case aggregate `usage`). */
+  modelUsage?: Record<
+    string,
+    {
+      inputTokens?: number;
+      outputTokens?: number;
+      cacheReadInputTokens?: number;
+      cacheCreationInputTokens?: number;
+      costUSD?: number;
+    }
+  >;
+  result?: string;
+}
+
+interface ClaudeToolResultBlock {
+  type: "tool_result";
+  tool_use_id: string;
+  content?: string | Array<{ type: string; text?: string }>;
+  is_error?: boolean;
+}
+
+export interface ClaudeTranslatorOptions {
+  /** Zeros-side session id — goes into every emitted SessionNotification. */
+  sessionId: string;
+  /** Called once for each SessionNotification produced. */
+  emit: Emit;
+  /** Optional hook for diagnostics of unknown Claude event shapes. */
+  onUnknown?: (event: unknown) => void;
+  /** When the SDK runs with `includePartialMessages: true`, it emits
+   *  `stream_event` deltas (token-by-token) BEFORE the final full
+   *  `assistant` message. With this on we render text/thinking from those
+   *  deltas (live typing animation) and SKIP the matching blocks of the
+   *  final message to avoid double-rendering. Off (default) = the legacy
+   *  full-message-per-chunk behavior. */
+  streamPartials?: boolean;
+}
+
+/** A `stream_event` (SDKPartialAssistantMessage): the raw Anthropic
+ *  streaming event wrapped by the Agent SDK. We only consume content
+ *  deltas; block-start/stop + message-level events are boundary noise we
+ *  derive from the existing reset points (result/user/tool_use). */
+interface ClaudeStreamEvent {
+  type: "stream_event";
+  parent_tool_use_id?: string | null;
+  event?: {
+    type?: string;
+    delta?: { type?: string; text?: string; thinking?: string };
+  };
+}
+
+export class ClaudeStreamTranslator {
+  private readonly sessionId: string;
+  private readonly emit: Emit;
+  private readonly onUnknown?: (event: unknown) => void;
+
+  /** Zeros-side tool call ids keyed by Claude's tool_use_id so
+   *  tool_call_update can cross-reference a prior tool_call. */
+  private readonly toolCallIds = new Map<string, string>();
+
+  /** Zeros-side (minted) tool call id for a native tool_use id — lets the
+   *  adapter address a timeline row it only knows by vendor id (the
+   *  question-stamp tool_call_update on AskUserQuestion settle). Undefined
+   *  until the tool_use block has streamed through onAssistant. */
+  toolCallIdFor(nativeToolUseId: string): string | undefined {
+    return this.toolCallIds.get(nativeToolUseId);
+  }
+
+  /** Stage 4.2: Claude tool_use_ids whose corresponding tool_result
+   *  should be swallowed instead of emitted as a tool_call_update.
+   *
+   *  Currently this is the TodoWrite path — the tool_use is intercepted
+   *  and routed to a canonical `plan` notification, so emitting the
+   *  matching tool_result as a regular update would create an orphan
+   *  tool message in the UI. */
+  private readonly suppressedToolUseIds = new Set<string>();
+
+  /** Messages emitted in this turn get stable IDs so the UI can
+   *  merge chunks. Claude doesn't send a messageId today — we
+   *  synthesize one and share it across consecutive text-only
+   *  assistant events so a multi-block reply stays in one bubble.
+   *  Rotated on tool_use, onUser, or onResult. */
+  private currentAssistantMessageId: string | null = null;
+  /** Running concatenation of text we've already emitted under
+   *  `currentAssistantMessageId` — deltas AND full blocks. onAssistant's
+   *  dedup branch compares full text blocks against it, so a final
+   *  full-text event that matches what already streamed adds nothing,
+   *  while a SYNTHETIC assistant message that never streamed (e.g. the
+   *  CLI's "Not enough messages to compact." after a failed /compact —
+   *  no API call, no deltas) still renders. Before 2026-07-12 the
+   *  streamPartials path skipped ALL text blocks unconditionally, which
+   *  silently swallowed those synthetic messages. */
+  private emittedAssistantText = "";
+
+  private lastStopReason: string = "end_turn";
+  private hasSeenResult = false;
+  /** Error text carried by a result{is_error:true} event. The adapter
+   *  surfaces it as a failure when it matches the session-expired
+   *  keywords (e.g. a stale-resume "No conversation found with session
+   *  ID …"). Null on clean turns. */
+  private terminalErrorMsg: string | null = null;
+
+  /** Claude's session id from the `system.init` event. Kept for
+   *  resume bookkeeping; not emitted to the UI. */
+  claudeSessionId: string | null = null;
+
+  /** Stage 5.2 — model id from `system.init.model`. Drives per-model
+   *  context-window sizing on usage updates. Falls back to
+   *  CLAUDE_DEFAULT_CONTEXT_WINDOW when undefined or unrecognised. */
+  private currentModel: string | null = null;
+
+  /** Phase 2.5 — per-turn token/cost usage from the result event. */
+  private currentTurnUsage: TurnUsage | undefined;
+
+  /** True once the CURRENT retry burst has produced its error_notice row.
+   *  The CLI emits one `system/api_retry` per attempt (up to ~10 with
+   *  exponential backoff); one row per burst tells the user the stall is a
+   *  network blip being retried without writing ten rows into the
+   *  transcript. Cleared by any non-system event (the call got through). */
+  private retryBurstNoticed = false;
+
+  // ── Compaction lifecycle (§3.5 Task C, extended 2026-07-12) ──
+  //
+  // The SDK narrates a compaction as: `system/status {status:"compacting"}`
+  // (start) → on success a `system/compact_boundary` with metadata; on
+  // failure a `system/status {compact_result:"failed", compact_error}`.
+  // We open ONE two-state row on the start signal and settle it on
+  // whichever end signal arrives.
+  /** Open compaction row id, or null. Cleared on boundary/failure (the
+   *  definitive settles) and at result (turn end), so a second compaction
+   *  in a later run opens a fresh row. */
+  private pendingCompactionToolCallId: string | null = null;
+  /** True when the row was already settled (success-status may arrive
+   *  before the boundary; the boundary then only merges metadata). */
+  private pendingCompactionSettled = false;
+  /** Armed by the adapter's compactContext() right before it feeds
+   *  "/compact" — stamps the row's rawInput.trigger as "manual" so the
+   *  renderer places it standalone (user-initiated) instead of inside the
+   *  turn's working group (auto). Cleared when the row opens. */
+  private manualCompactionExpected = false;
+
+  /** Adapter hook: the next compaction this stream narrates was initiated
+   *  by the user (Compact now / typed /compact routed via AGENT_COMPACT). */
+  expectManualCompaction(): void {
+    this.manualCompactionExpected = true;
+  }
+
+  // ── §3.6 R2 — overload-fallback detection ─────────────────
+  //
+  // The SDK swaps to Options.fallbackModel silently when the primary is
+  // overloaded/unavailable; the only per-message trace is the assistant
+  // message's `model` field. The adapter arms detection with the primary
+  // model it configured; we surface ONE "Model switched" tool call per turn
+  // when a top-level assistant message answers on a different model.
+  /** The primary model the adapter configured (verbatim id, may carry the
+   *  `[1m]` suffix). Null = no explicit model → detection disabled. */
+  private expectedModel: string | null = null;
+  /** True when Options.fallbackModel was set — detection is meaningless
+   *  (and false-positive-prone) without a configured fallback. */
+  private fallbackArmed = false;
+  /** One "Model switched" record per turn; reset at result. */
+  private fallbackNoticedThisTurn = false;
+
+  /** Adapter hook: arm overload-fallback detection for this session.
+   *  `primaryModel` is the configured model id; `fallbackConfigured` mirrors
+   *  whether Options.fallbackModel was actually set. */
+  armFallbackDetection(
+    primaryModel: string | null,
+    fallbackConfigured: boolean,
+  ): void {
+    this.expectedModel = primaryModel;
+    this.fallbackArmed = fallbackConfigured;
+  }
+
+  // ── §3.6 R3 — budget-cap context ──────────────────────────
+  /** The per-turn USD cap the adapter configured (Options.maxBudgetUsd).
+   *  Only used to render the cap amount inside the "Turn stopped" record. */
+  budgetCapUsd: number | null = null;
+
+  private readonly streamPartials: boolean;
+
+  constructor(opts: ClaudeTranslatorOptions) {
+    this.sessionId = opts.sessionId;
+    this.emit = opts.emit;
+    this.onUnknown = opts.onUnknown;
+    this.streamPartials = opts.streamPartials ?? false;
+  }
+
+  /** Feed a parsed JSON event from Claude's stdout. */
+  feed(event: unknown): void {
+    if (!isObj(event) || typeof event.type !== "string") {
+      this.onUnknown?.(event);
+      return;
+    }
+    // Any non-system event means the API call got through (or the turn
+    // settled) — the current retry burst, if any, is over. The next
+    // api_retry starts a NEW burst and gets its own notice row.
+    if (event.type !== "system") this.retryBurstNoticed = false;
+    switch (event.type) {
+      case "system":
+        this.onSystem(event as unknown as ClaudeSystemInitEvent);
+        break;
+      case "user":
+        this.onUser(event as unknown as ClaudeMessageEvent);
+        break;
+      case "assistant":
+        this.onAssistant(event as unknown as ClaudeMessageEvent);
+        break;
+      case "stream_event":
+        this.onStreamEvent(event as unknown as ClaudeStreamEvent);
+        break;
+      case "result":
+        this.onResult(event as unknown as ClaudeResultEvent);
+        break;
+      default:
+        this.onUnknown?.(event);
+    }
+  }
+
+  // ── Partial stream deltas (token-by-token) ──────────────
+  //
+  // Only active with `includePartialMessages: true`. We emit text/thinking
+  // deltas under the SAME messageId machinery the full-message path uses,
+  // so the renderer coalesces them into one growing bubble. The matching
+  // full blocks of the final `assistant` message are then skipped (see
+  // onAssistant) to avoid rendering the content twice.
+  private onStreamEvent(event: ClaudeStreamEvent): void {
+    if (!this.streamPartials) return;
+    const ev = event.event;
+    if (!ev || ev.type !== "content_block_delta" || !ev.delta) return;
+
+    // Subagent deltas carry parent_tool_use_id — route them into the parent
+    // SubagentCard rather than the top-level transcript (mirrors onAssistant).
+    const claudeParentId = event.parent_tool_use_id ?? undefined;
+    const parentToolId = claudeParentId
+      ? this.toolCallIds.get(claudeParentId)
+      : undefined;
+
+    const d = ev.delta;
+    if (
+      d.type === "text_delta" &&
+      typeof d.text === "string" &&
+      d.text.length > 0
+    ) {
+      if (!this.currentAssistantMessageId) {
+        this.currentAssistantMessageId = randomUUID();
+        this.emittedAssistantText = "";
+      }
+      // Grow the accumulator on BOTH paths: onAssistant's dedup branch
+      // compares the final full text block against it, which is what lets
+      // a streamed message add nothing while a SYNTHETIC no-delta message
+      // (e.g. the /compact failure text) still renders (2026-07-12 fix —
+      // the old streamPartials skip swallowed synthetics entirely).
+      this.emittedAssistantText += d.text;
+      this.emit({
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: d.text } as ContentBlock,
+          messageId: this.currentAssistantMessageId,
+          ...(parentToolId ? { parentToolId } : {}),
+        },
+      });
+    } else if (
+      d.type === "thinking_delta" &&
+      typeof d.thinking === "string" &&
+      d.thinking.length > 0
+    ) {
+      if (!this.currentAssistantMessageId) {
+        this.currentAssistantMessageId = randomUUID();
+        this.emittedAssistantText = "";
+      }
+      this.emit({
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "agent_thought_chunk",
+          content: { type: "text", text: d.thinking } as ContentBlock,
+          messageId: this.currentAssistantMessageId,
+          ...(parentToolId ? { parentToolId } : {}),
+        },
+      });
+    }
+  }
+
+  /** Retrieve the last terminal reason the translator saw. Defaults
+   *  to "end_turn" until a `result` event arrives. */
+  get stopReason():
+    | "end_turn"
+    | "max_tokens"
+    | "max_turn_requests"
+    | "refusal"
+    | "cancelled"
+    | "budget_exhausted"
+    | "blocking_limit"
+    | "prompt_too_long" {
+    switch (this.lastStopReason) {
+      case "end_turn":
+      case "max_tokens":
+      case "max_turn_requests":
+      case "refusal":
+      case "cancelled":
+      case "budget_exhausted":
+      case "blocking_limit":
+      case "prompt_too_long":
+        return this.lastStopReason;
+      default:
+        return "end_turn";
+    }
+  }
+
+  get sawResult(): boolean {
+    return this.hasSeenResult;
+  }
+
+  /** Surfaced to the shared adapter so a stale-resume error carried by
+   *  the result event (is_error + "No conversation found") becomes a real
+   *  session-expired failure instead of a silent clean "refusal". */
+  get terminalError(): string | null {
+    return this.terminalErrorMsg;
+  }
+
+  /** Phase 2.5 — per-turn token/cost usage for LLM analytics. */
+  get turnUsage(): TurnUsage | undefined {
+    return this.currentTurnUsage;
+  }
+
+  // ── System init ─────────────────────────────────────────
+  private onSystem(event: ClaudeSystemInitEvent): void {
+    if (event.subtype === "init" && typeof event.session_id === "string") {
+      this.claudeSessionId = event.session_id;
+    }
+    if (event.subtype === "init" && typeof event.model === "string") {
+      this.currentModel = event.model;
+    }
+    // `api_retry` — the CLI hit a retryable API error (network blip, 5xx,
+    // overload) and is retrying the SAME call itself after a backoff delay.
+    // The turn is still alive; nothing is lost. Surface ONE compact
+    // error_notice row per burst so the user sees why the stream stalled
+    // instead of a silent multi-minute shimmer. (SDKAPIRetryMessage shape:
+    // attempt / max_retries / retry_delay_ms / error_status|null.)
+    if ((event as { subtype?: string }).subtype === "api_retry") {
+      this.onApiRetry(
+        event as unknown as {
+          max_retries?: number;
+          error_status?: number | null;
+        },
+      );
+    }
+    // `status` — the CLI's live activity signal. `status:"compacting"`
+    // opens the two-state compaction row ("Compacting.."); a later
+    // `compact_result:"failed"` settles it as a visible failure with the
+    // CLI's reason (wire-verified 2026-07-12: a too-small conversation
+    // answers /compact with status:compacting → compact_result:"failed",
+    // compact_error:"Not enough messages to compact." and NO boundary —
+    // before this handler, all of it was dropped and /compact looked like
+    // it did nothing). `compact_result:"success"` settles early when it
+    // beats the boundary; the boundary then only merges its metadata.
+    if ((event as { subtype?: string }).subtype === "status") {
+      this.onStatus(
+        event as unknown as {
+          status?: string | null;
+          compact_result?: string;
+          compact_error?: string;
+        },
+      );
+    }
+    // `compact_boundary` — marks the exact seam where the CLI folded the
+    // history (auto near the window limit, or manual /compact). Settles the
+    // open row from `status:"compacting"` with trigger/preTokens metadata;
+    // older CLIs that never emit status messages still get a directly-
+    // settled row (§3.5 Task C).
+    if ((event as { subtype?: string }).subtype === "compact_boundary") {
+      const meta = (
+        event as unknown as {
+          compact_metadata?: { trigger?: string; pre_tokens?: number };
+        }
+      ).compact_metadata;
+      const rawInput = {
+        ...(typeof meta?.trigger === "string" ? { trigger: meta.trigger } : {}),
+        ...(typeof meta?.pre_tokens === "number"
+          ? { preTokens: meta.pre_tokens }
+          : {}),
+      };
+      if (this.pendingCompactionToolCallId) {
+        this.emit({
+          sessionId: this.sessionId,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: this.pendingCompactionToolCallId,
+            title: "Context compacted",
+            status: "completed",
+            ...(Object.keys(rawInput).length > 0 ? { rawInput } : {}),
+          },
+        });
+        // The boundary is the definitive settle — a second compaction in
+        // the same run opens a fresh row.
+        this.pendingCompactionToolCallId = null;
+        this.pendingCompactionSettled = false;
+      } else {
+        this.emit({
+          sessionId: this.sessionId,
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: `compact-${randomUUID()}`,
+            title: "Context compacted",
+            kind: "compaction",
+            status: "completed",
+            rawInput,
+          },
+        });
+      }
+    }
+    // `model_refusal_fallback` — §3.6 R2: the SDK retried a refused turn on
+    // the fallback model and made the swap persistent for the session. The
+    // structured sibling of the silent overload swap (detected per-message in
+    // onAssistant) — both surface the same "Model switched" record.
+    if ((event as { subtype?: string }).subtype === "model_refusal_fallback") {
+      const ev = event as unknown as {
+        original_model?: string;
+        fallback_model?: string;
+      };
+      this.emitModelSwitched({
+        fromModel:
+          typeof ev.original_model === "string" ? ev.original_model : null,
+        toModel: typeof ev.fallback_model === "string" ? ev.fallback_model : "",
+        reason: "refusal",
+      });
+    }
+    // `local_command_output` — a slash command's textual output (e.g.
+    // /usage, /cost). The SDK docs say "displayed as assistant-style text";
+    // dropping it made those commands look dead.
+    if ((event as { subtype?: string }).subtype === "local_command_output") {
+      const content = (event as unknown as { content?: unknown }).content;
+      if (typeof content === "string" && content.trim().length > 0) {
+        this.emit({
+          sessionId: this.sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: content } as ContentBlock,
+            messageId: randomUUID(),
+          },
+        });
+        // Its own bubble — the next streamed text starts fresh.
+        this.currentAssistantMessageId = null;
+        this.emittedAssistantText = "";
+      }
+    }
+    // Nothing else to emit to the UI — the init event is just bookkeeping.
+  }
+
+  /** `system/status` — open/settle the compaction row (see onSystem). */
+  private onStatus(event: {
+    status?: string | null;
+    compact_result?: string;
+    compact_error?: string;
+  }): void {
+    if (event.status === "compacting") {
+      if (this.pendingCompactionToolCallId) return; // already narrating one
+      const toolCallId = `compact-${randomUUID()}`;
+      this.pendingCompactionToolCallId = toolCallId;
+      this.pendingCompactionSettled = false;
+      const trigger = this.manualCompactionExpected ? "manual" : "auto";
+      this.manualCompactionExpected = false;
+      this.emit({
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId,
+          title: "Compacting context",
+          kind: "compaction",
+          status: "in_progress",
+          rawInput: { trigger },
+        },
+      });
+      return;
+    }
+    if (!this.pendingCompactionToolCallId) return;
+    if (event.compact_result === "failed") {
+      this.emit({
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: this.pendingCompactionToolCallId,
+          title: "Compaction failed",
+          status: "failed",
+          ...(typeof event.compact_error === "string" && event.compact_error
+            ? { rawOutput: { error: event.compact_error } }
+            : {}),
+        },
+      });
+      this.pendingCompactionToolCallId = null;
+      this.pendingCompactionSettled = false;
+    } else if (
+      event.compact_result === "success" &&
+      !this.pendingCompactionSettled
+    ) {
+      // Early success signal — settle now; keep the id so the boundary
+      // (usually right behind) can merge trigger/preTokens onto this row.
+      this.pendingCompactionSettled = true;
+      this.emit({
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: this.pendingCompactionToolCallId,
+          title: "Context compacted",
+          status: "completed",
+        },
+      });
+    }
+  }
+
+  /** §3.6 R2 — one durable "Model switched" transcript record (the FALLBACK
+   *  card). Collapsible tool call, same recipe as the "User input" card; the
+   *  renderer builds the detail copy from rawInput. Deduped per turn. */
+  private emitModelSwitched(info: {
+    fromModel: string | null;
+    toModel: string;
+    reason: "overloaded" | "refusal";
+  }): void {
+    if (this.fallbackNoticedThisTurn) return;
+    this.fallbackNoticedThisTurn = true;
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: `model-switch-${randomUUID()}`,
+        title: "Model switched",
+        kind: "model_switch",
+        status: "completed",
+        rawInput: {
+          ...(info.fromModel ? { fromModel: info.fromModel } : {}),
+          toModel: info.toModel,
+          reason: info.reason,
+        },
+      },
+    });
+  }
+
+  /** §3.6 R2 — the silent overload swap: the only per-message trace is the
+   *  assistant message's `model` field differing from the configured primary.
+   *  Top-level messages only (subagents legitimately run other models), and
+   *  only when a fallback was actually configured. */
+  private maybeNoticeFallback(
+    event: ClaudeMessageEvent,
+    parentToolId: string | undefined,
+  ): void {
+    if (!this.fallbackArmed || this.fallbackNoticedThisTurn || parentToolId)
+      return;
+    const actual = event.message?.model;
+    const expected = this.expectedModel;
+    if (!actual || !expected) return;
+    // The configured id may carry the `[1m]` long-context suffix or lack the
+    // dated-snapshot tail the wire reports — prefix-match the normalized id
+    // so "claude-opus-4-8[1m]" matches "claude-opus-4-8-20260115".
+    const prefix = expected.replace(/\[1m\]$/i, "");
+    if (actual === expected || actual.startsWith(prefix)) return;
+    this.emitModelSwitched({
+      fromModel: expected,
+      toModel: actual,
+      reason: "overloaded",
+    });
+  }
+
+  private onApiRetry(event: {
+    max_retries?: number;
+    error_status?: number | null;
+  }): void {
+    if (this.retryBurstNoticed) return;
+    this.retryBurstNoticed = true;
+    const status =
+      typeof event.error_status === "number"
+        ? `HTTP ${event.error_status}`
+        : "connection error";
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "error_notice",
+        noticeId: `claude-api-retry-${randomUUID()}`,
+        severity: "warning",
+        recoverable: true,
+        // `code` drives the renderer's live treatment: while this row is the
+        // streaming tail it renders as a shimmer + "Reconnecting agent"
+        // instead of a warning row (user spec 2026-07-10). The message is
+        // the settled row's expandable record — kept SIMPLE by design (the
+        // user can't act on retry mechanics; only the status hints why).
+        code: "api_retry",
+        message: `Temporary connection problem (${status}) — retrying automatically…`,
+      },
+    });
+  }
+
+  // ── User turn (tool results only) ───────────────────────
+  //
+  // In `claude -p --output-format stream-json`, a `{"type":"user"}`
+  // event is NEVER a new user turn we should render. It is one of:
+  //   1. Claude echoing back the prompt we just sent (the real user
+  //      bubble is already shown optimistically by the renderer AND
+  //      seeded into the transcript by the engine's persistUserPrompt,
+  //      so re-emitting it produces a DUPLICATE user bubble).
+  //   2. A tool_result wrapper (the result of a tool the assistant ran).
+  //   3. A SUBAGENT's internal user turn — stamped with
+  //      `parent_tool_use_id`. Emitting these as top-level
+  //      user_message_chunks is exactly why "a subagent's message shows
+  //      up as MY message" — the reported bug.
+  //
+  // So we NEVER emit a user_message_chunk from the live stream. We only
+  // forward tool_result blocks (correlated by tool_use_id to the
+  // tool_call we already emitted). This mirrors how Paseo / t3code /
+  // open-design all handle `type:"user"` stream events — they extract
+  // only tool_result blocks and never re-emit a user message. History
+  // replay (history.ts) still renders prior user prompts for a cold
+  // import; the LIVE stream must not.
+  private onUser(event: ClaudeMessageEvent): void {
+    // A user event ends the previous assistant message logically — the
+    // next assistant chunk should start a fresh bubble even if it's
+    // text-only (e.g. tool result → assistant continues with more text).
+    this.currentAssistantMessageId = null;
+    this.emittedAssistantText = "";
+
+    // `message.content` can be a plain STRING, not a block array — the SDK
+    // emits string-content user messages (e.g. the continuation summary it
+    // replays after a /compact). There's nothing to forward from those
+    // (only tool_result blocks matter here), but `.filter` on a string
+    // crashed the whole translate call ("blocks.filter is not a function",
+    // observed 2026-07-12 running /compact on Claude).
+    const content = event.message?.content;
+    const blocks = Array.isArray(content) ? content : [];
+
+    // The envelope's `tool_use_result` (Claude Code's rich result) carries
+    // `structuredPatch` for edit tools — real hunks with REAL file line
+    // numbers. Surface just that field as rawOutput so the EditCard renders
+    // the true patch (line numbers, correct collapse regions) instead of
+    // re-diffing the input snippets from line 1. Only when this event holds
+    // exactly ONE tool_result — the envelope field can't be attributed
+    // across a batched result message. The rest of the rich result (e.g.
+    // `originalFile`, the whole pre-edit file) is deliberately dropped:
+    // rawOutput persists to SQLite per tool call.
+    const resultCount = blocks.filter((b) => b.type === "tool_result").length;
+    const structuredPatch =
+      resultCount === 1 ? readStructuredPatch(event.tool_use_result) : null;
+
+    // Tool results — emit as tool_call_update with completed status.
+    // Suppressed tool_use_ids (currently TodoWrite — its tool_use was
+    // already routed to a canonical `plan` notification) get skipped so
+    // we don't leave an orphan tool message in the UI.
+    for (const b of blocks) {
+      if (b.type !== "tool_result") continue;
+      const tool = b as unknown as ClaudeToolResultBlock;
+      if (this.suppressedToolUseIds.has(tool.tool_use_id)) {
+        this.suppressedToolUseIds.delete(tool.tool_use_id);
+        continue;
+      }
+      const toolCallId =
+        this.toolCallIds.get(tool.tool_use_id) ?? tool.tool_use_id;
+      const text = toolResultText(tool);
+      this.emit({
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId,
+          status: tool.is_error ? "failed" : "completed",
+          rawOutput: structuredPatch ? { structuredPatch } : tool.content,
+          content: text
+            ? [
+                {
+                  type: "content",
+                  content: { type: "text", text } as ContentBlock,
+                },
+              ]
+            : null,
+        },
+      });
+    }
+  }
+
+  // ── Assistant turn (thinking, text, tool_use) ───────────
+  private onAssistant(event: ClaudeMessageEvent): void {
+    // Same string-content guard as onUser — never trust `content` to be an
+    // array (a string would crash `.every`/iteration below).
+    const rawContent = event.message?.content;
+    const blocks = Array.isArray(rawContent) ? rawContent : [];
+    // Roadmap §2.4.7 — when Claude routes a Task subagent's emissions
+    // through the parent stream, every event in this assistant chunk
+    // is stamped with `parent_tool_use_id` pointing at the Task tool's
+    // tool_use_id. We translate that to the parent's Zeros-side tool
+    // id (so the renderer can match it against the SubagentCard's
+    // toolCallId) and propagate it onto every emitted update.
+    const claudeParentId = event.parent_tool_use_id ?? undefined;
+    const parentToolId = claudeParentId
+      ? this.toolCallIds.get(claudeParentId)
+      : undefined;
+
+    // §3.6 R2 — did a fallback model answer this message? Checked before the
+    // blocks render so the "Model switched" record lands where the swap
+    // happened, ahead of the fallback model's own output.
+    this.maybeNoticeFallback(event, claudeParentId ?? parentToolId);
+
+    // Only the SDK adapter (claude-sdk/adapter.ts) constructs this
+    // translator, always with streamPartials:true. Under that path text
+    // and thinking already streamed token-by-token via onStreamEvent, so
+    // this full assistant event is consumed mainly for tool_use blocks
+    // (text/thinking are skipped just below). We still share one messageId
+    // across consecutive text-only assistant events — a single turn can
+    // surface as several text/thinking blocks — and rotate it whenever a
+    // boundary fires (tool_use seen here, or onUser / onResult elsewhere).
+    //
+    // The legacy non-streamPartials path (no live caller today) instead
+    // rendered the full block here and used the emittedAssistantText dedup
+    // branch below to fold a repeated final full-text event into one bubble.
+    //
+    // `redacted_thinking` counts as non-boundary too: Anthropic interleaves
+    // it WITH the plaintext `thinking` of the same reasoning block. Under
+    // partial streaming the plaintext already streamed under the current id;
+    // if redacted_thinking rotated the id, the redacted sentinel would land
+    // in a SEPARATE thought bubble instead of coalescing onto (and flagging)
+    // the streamed one. Only a real `tool_use` should rotate.
+    const isInlineReasoningOrText = blocks.every(
+      (b) =>
+        b.type === "text" ||
+        b.type === "thinking" ||
+        b.type === "redacted_thinking",
+    );
+    // Snapshot what already STREAMED for this logical message BEFORE any id
+    // rotation below resets the accumulator — a `[text, tool_use]` event
+    // rotates first, and the text block's dedup must still see the streamed
+    // deltas or it would re-emit the whole text (2026-07-12).
+    const streamedBeforeRotation = this.emittedAssistantText;
+    if (!this.currentAssistantMessageId || !isInlineReasoningOrText) {
+      this.currentAssistantMessageId = randomUUID();
+      this.emittedAssistantText = "";
+    }
+
+    for (const block of blocks) {
+      // With partial streaming on, THINKING already arrived token-by-token
+      // via stream_event deltas (onStreamEvent) — re-emitting the final full
+      // block would double-render it. redacted_thinking has NO partial
+      // representation, so it still falls through below. TEXT is NOT skipped
+      // wholesale any more (2026-07-12): the dedup branch below compares
+      // against the delta accumulator, so a streamed final block still adds
+      // nothing while a synthetic no-delta message (a slash command's
+      // response, the /compact failure text) finally renders.
+      if (this.streamPartials && block.type === "thinking") {
+        continue;
+      }
+      if (block.type === "thinking" && typeof block.thinking === "string") {
+        this.emit({
+          sessionId: this.sessionId,
+          update: {
+            sessionUpdate: "agent_thought_chunk",
+            content: { type: "text", text: block.thinking } as ContentBlock,
+            messageId: this.currentAssistantMessageId,
+            ...(parentToolId ? { parentToolId } : {}),
+          },
+        });
+      } else if (block.type === "redacted_thinking") {
+        // Roadmap §2.4.8 — Anthropic encrypted-thinking blocks. The
+        // model produced reasoning but won't surface it in plaintext;
+        // the wire payload is a `data` blob we don't decode. Emit a
+        // sentinel so the renderer shows a "Thinking · redacted"
+        // badge with no expandable body. Use a single space so the
+        // appendText coalesce path doesn't reject it as empty.
+        this.emit({
+          sessionId: this.sessionId,
+          update: {
+            sessionUpdate: "agent_thought_chunk",
+            content: { type: "text", text: " " } as ContentBlock,
+            messageId: this.currentAssistantMessageId,
+            redacted: true,
+            ...(parentToolId ? { parentToolId } : {}),
+          },
+        });
+      } else if (block.type === "text" && typeof block.text === "string") {
+        const text = block.text;
+        // Dedup against what already streamed for this logical message
+        // (the pre-rotation snapshot — see above). Live path: the final
+        // full block of a streamed message matches the delta accumulator
+        // and adds nothing; a SYNTHETIC no-delta message (slash-command
+        // response, /compact failure text) has an empty snapshot and
+        // renders in full — before 2026-07-12 those were swallowed by an
+        // unconditional skip. Four cases:
+        //   1. snapshot empty       → nothing streamed; emit in full
+        //   2. text ⊆ snapshot      → already streamed (exact final block,
+        //                             or one block of a multi-block final)
+        //   3. text = snapshot+new  → stream died mid-message; emit the tail
+        //   4. else                 → genuinely new content; emit in full
+        let toEmit: string;
+        if (
+          streamedBeforeRotation.length > 0 &&
+          (text === streamedBeforeRotation ||
+            streamedBeforeRotation.includes(text))
+        ) {
+          continue;
+        } else if (
+          streamedBeforeRotation.length > 0 &&
+          text.startsWith(streamedBeforeRotation)
+        ) {
+          toEmit = text.slice(streamedBeforeRotation.length);
+          this.emittedAssistantText = text;
+        } else {
+          toEmit = text;
+          this.emittedAssistantText += text;
+        }
+        if (!toEmit) continue;
+        this.emit({
+          sessionId: this.sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: toEmit } as ContentBlock,
+            messageId: this.currentAssistantMessageId,
+            ...(parentToolId ? { parentToolId } : {}),
+          },
+        });
+      } else if (
+        block.type === "tool_use" &&
+        typeof block.id === "string" &&
+        typeof block.name === "string"
+      ) {
+        // Tool use ends the current logical message — next text stream
+        // is a separate reply.
+        this.currentAssistantMessageId = null;
+        this.emittedAssistantText = "";
+
+        const toolCallId = randomUUID();
+        this.toolCallIds.set(block.id, toolCallId);
+        // Stage 4.2: mergeKey collapses consecutive Edit/Write calls
+        // against the same file into one card with "+N more changes"
+        // history. Path is the only stable group key the renderer needs.
+        const mergeKey = computeMergeKey(block.name, block.input);
+        this.emit({
+          sessionId: this.sessionId,
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId,
+            // Claude's own tool_use id. Blocking-interaction requests
+            // (AskUserQuestion → QuestionRequest.toolCallId, canUseTool
+            // permissions) reference THIS id, not our minted uuid — the
+            // renderer correlates them to this row through it.
+            nativeToolCallId: block.id,
+            title: describeTool(block.name, block.input),
+            kind: mapToolKind(block.name),
+            status: "in_progress",
+            rawInput: block.input,
+            ...(mergeKey ? { mergeKey } : {}),
+            ...(parentToolId ? { parentToolId } : {}),
+          },
+        });
+      }
+    }
+  }
+
+  // ── Result (final) ──────────────────────────────────────
+  private onResult(event: ClaudeResultEvent): void {
+    this.hasSeenResult = true;
+    // Turn boundary — any text after this should bubble separately.
+    this.currentAssistantMessageId = null;
+    this.emittedAssistantText = "";
+    // A compaction row that never got its definitive settle (success-status
+    // with no boundary, or a run cut short) must not leak into the next
+    // run — a later compaction opens its own row. If it settled we just
+    // drop the reference; if it's still in_progress, close it out so the
+    // spinner can't shimmer forever.
+    if (this.pendingCompactionToolCallId && !this.pendingCompactionSettled) {
+      this.emit({
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: this.pendingCompactionToolCallId,
+          title: "Context compacted",
+          status: "completed",
+        },
+      });
+    }
+    this.pendingCompactionToolCallId = null;
+    this.pendingCompactionSettled = false;
+    // A manual-compact expectation that never materialised must not
+    // mislabel a later AUTO compaction as user-initiated.
+    this.manualCompactionExpected = false;
+    // Reset the terminal-error capture at the START of every result so it
+    // reflects ONLY this turn. The SDK adapter reuses ONE translator for the
+    // whole session (persistent query()), and the adapter reads
+    // `terminalError` after each result to classify auth-required /
+    // session-expired. If we left a prior turn's error string in place, a
+    // later SUCCESSFUL turn would re-match AUTH_RX/SESSION_EXPIRED and be
+    // wrongly rejected — permanently poisoning the session. (The legacy
+    // per-prompt adapter got a fresh translator each turn, so this never
+    // surfaced there.)
+    this.terminalErrorMsg = null;
+    // §3.6 R2 — a new turn re-tries the primary model; a fresh fallback gets
+    // its own "Model switched" record.
+    this.fallbackNoticedThisTurn = false;
+    // §3.6 R5 — named endings first: the SDK's subtype/terminal_reason carry
+    // structured stop causes that must NOT degrade into a generic "refusal"
+    // (they'd render as an error toast) or a clean "end_turn" (a truncated
+    // answer masquerading as finished). Checked BEFORE is_error because the
+    // budget/blocking results arrive as SDKResultError with is_error set.
+    const terminalReason =
+      typeof event.terminal_reason === "string" ? event.terminal_reason : null;
+    if (
+      event.subtype === "error_max_budget_usd" ||
+      terminalReason === "budget_exhausted"
+    ) {
+      // §3.6 R3 — the user's own spend cap ended the turn cleanly. Record it
+      // as the "Turn stopped · BUDGET" tool call right above the footer (the
+      // card replaces a footer pill — it already names the ending).
+      this.lastStopReason = "budget_exhausted";
+      this.emit({
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: `budget-stop-${randomUUID()}`,
+          title: "Turn stopped",
+          kind: "budget_stop",
+          status: "completed",
+          rawInput: {
+            ...(typeof this.budgetCapUsd === "number" && this.budgetCapUsd > 0
+              ? { capUsd: this.budgetCapUsd }
+              : {}),
+            scope: "claude",
+          },
+        },
+      });
+    } else if (terminalReason === "blocking_limit") {
+      this.lastStopReason = "blocking_limit";
+    } else if (terminalReason === "prompt_too_long") {
+      this.lastStopReason = "prompt_too_long";
+    } else if (
+      event.subtype === "error_max_turns" ||
+      terminalReason === "max_turns"
+    ) {
+      this.lastStopReason = "max_turn_requests";
+    } else if (event.is_error) {
+      this.lastStopReason = "refusal";
+      // Capture the error text so the adapter can promote stale-resume
+      // failures ("No conversation found …") to session-expired. The
+      // text can live in `result` or, failing that, the subtype.
+      const raw =
+        typeof (event as { result?: unknown }).result === "string"
+          ? ((event as { result?: string }).result as string)
+          : typeof event.subtype === "string"
+            ? event.subtype
+            : "";
+      this.terminalErrorMsg = raw || "claude turn ended with an error";
+    } else if (event.stop_reason === "max_tokens") {
+      // §3.6 R5 — the output-token cap cut the answer mid-thought. Was dead
+      // code before: the result settled as a clean end_turn and the truncated
+      // answer rendered as complete.
+      this.lastStopReason = "max_tokens";
+    } else {
+      this.lastStopReason = "end_turn";
+    }
+
+    // Stage 5.2 — usage reporting. Claude's `result.usage` gives the
+    // CUMULATIVE tokens billed across the turn's tool-use loop (one
+    // user prompt → multiple internal API calls; each can carry up to
+    // the model's window in prompt tokens). It is *not* the current
+    // window fill. The UI used to compare `used` against the window
+    // cap and render a percentage, which produced "Window 291.4k /
+    // 200.0k · 100%" on perfectly normal Haiku turns. We now just
+    // report tokens-this-turn and let the UI present it as a counter,
+    // not a ratio.
+    //
+    // size still carries the per-model window so the UI can show "of
+    // 1M" / "of 200k" context for users who want the absolute bound;
+    // the renderer keeps the number out of the headline ratio.
+    const u = event.usage;
+    if (u) {
+      const used =
+        (u.input_tokens ?? 0) +
+        (u.cache_read_input_tokens ?? 0) +
+        (u.cache_creation_input_tokens ?? 0);
+      // §3.6 R6 — itemize the turn's bill per model (main loop vs subagents
+      // vs fallback). camelCase per the SDK's ModelUsage, unlike the
+      // snake_case aggregate above. Order by cost, priciest first, so the
+      // popover reads main-model-first without re-sorting.
+      const perModel = Object.entries(event.modelUsage ?? {})
+        .filter(([model]) => typeof model === "string" && model.length > 0)
+        .map(([model, v]) => ({
+          model,
+          inputTokens: v?.inputTokens,
+          outputTokens: v?.outputTokens,
+          cacheReadTokens: v?.cacheReadInputTokens,
+          cacheWriteTokens: v?.cacheCreationInputTokens,
+          costUsd: v?.costUSD,
+        }))
+        .sort((a, b) => (b.costUsd ?? 0) - (a.costUsd ?? 0));
+      this.currentTurnUsage = {
+        inputTokens: u.input_tokens,
+        outputTokens: u.output_tokens,
+        cacheReadTokens: u.cache_read_input_tokens,
+        cacheWriteTokens: u.cache_creation_input_tokens,
+        totalCostUsd:
+          typeof event.total_cost_usd === "number"
+            ? event.total_cost_usd
+            : undefined,
+        ...(perModel.length > 0 ? { perModel } : {}),
+      };
+      // Dev-only cache-health signal: the fraction of this turn's input
+      // tokens Anthropic served from the prompt cache. Tail the engine log
+      // across a multi-turn chat — the ratio should climb once the stable
+      // prefix (system prompt + tools + prior turns) starts hitting cache,
+      // which is the concrete proof the harness's caching is working.
+      if (isDevRuntime() && used > 0) {
+        const read = u.cache_read_input_tokens ?? 0;
+        console.info(
+          `[claude-sdk] cache-read ratio: ${((read / used) * 100).toFixed(0)}% ` +
+            `(read=${read} / input-total=${used})`,
+        );
+      }
+      // size/used only when this result BILLED something. A command-style
+      // run (e.g. the /compact turn) settles with ~zero usage — writing
+      // that into the store made the gauge dip to 0 for the second until
+      // the adapter's getContextUsage overwrite landed (user report
+      // 2026-07-12). Omitted fields keep the store's previous reading;
+      // cost still rides along either way.
+      this.emit({
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "usage_update",
+          ...(used > 0
+            ? { size: contextWindowForClaudeModel(this.currentModel), used }
+            : {}),
+          cost:
+            typeof event.total_cost_usd === "number"
+              ? ({ totalCostUsd: event.total_cost_usd } as never)
+              : null,
+        } as never,
+      });
+    }
+  }
+}
+
+/** Stage 5.2 — per-model context window, now delegated to the SHARED
+ *  `claudeContextWindow` in @zeros/core so the engine's gauge fallback and the
+ *  renderer's attachment budget can't drift apart again. The local copy this
+ *  replaced granted 1M only to `/opus-4-[78].*\[1m\]/`, so Fable 5, Sonnet 5,
+ *  and Opus 5 — all natively 1M — reported 200k here while the picker showed
+ *  them as 1M models. See packages/core/src/model-context.ts for the
+ *  registry-verified table and why Haiku is special-cased. */
+function contextWindowForClaudeModel(model: string | null): number {
+  return claudeContextWindow(model);
+}
+
+// ── helpers ──────────────────────────────────────────────
+
+function isObj(x: unknown): x is Record<string, unknown> {
+  return !!x && typeof x === "object" && !Array.isArray(x);
+}
+
+/** The `structuredPatch` array from a Claude Code `tool_use_result` — jsdiff
+ *  hunks (`{oldStart, oldLines, newStart, newLines, lines}`) with REAL file
+ *  line numbers, present on Edit/Write/MultiEdit results. Null for any other
+ *  shape so non-edit results keep their content-array rawOutput. */
+function readStructuredPatch(result: unknown): unknown[] | null {
+  if (!isObj(result)) return null;
+  const sp = result.structuredPatch;
+  if (!Array.isArray(sp) || sp.length === 0) return null;
+  const valid = sp.every(
+    (h) =>
+      isObj(h) &&
+      typeof h.oldStart === "number" &&
+      typeof h.newStart === "number" &&
+      Array.isArray(h.lines),
+  );
+  return valid ? sp : null;
+}
+
+function toolResultText(t: ClaudeToolResultBlock): string {
+  if (typeof t.content === "string") return stripToolUseError(t.content);
+  if (Array.isArray(t.content)) {
+    return t.content
+      .map((c) =>
+        typeof c?.text === "string" ? stripToolUseError(c.text) : "",
+      )
+      .filter(Boolean)
+      .join("\n");
+  }
+  return "";
+}
+
+/** Claude wraps failed tool results in `<tool_use_error>…</tool_use_error>` —
+ *  protocol plumbing meant for the model, not the user. Unwrap it so error
+ *  rows show the plain message ("Unknown skill: foo") instead of raw XML.
+ *  The failed status already carries the error semantics (is_error → the
+ *  red status tone), so nothing is lost. */
+function stripToolUseError(s: string): string {
+  const m = s.match(/^\s*<tool_use_error>([\s\S]*?)<\/tool_use_error>\s*$/);
+  return m ? m[1].trim() : s;
+}
+
+/**
+ * Short human-readable title for the tool-call pill. Matches the
+ * phrasing the UI uses for ToolCall titles — "Reading file",
+ * "Running shell command", etc.
+ */
+export function describeTool(name: string, input: unknown): string {
+  const inp = isObj(input) ? input : {};
+  switch (name) {
+    case "Read":
+    case "ReadFile":
+      return `Reading ${inp.file_path ?? inp.path ?? "file"}`;
+    case "Edit":
+    case "Write":
+    case "MultiEdit":
+      return `Editing ${inp.file_path ?? inp.path ?? "file"}`;
+    case "Bash":
+      return `Running ${
+        typeof inp.command === "string"
+          ? truncate(inp.command, 60)
+          : "shell command"
+      }`;
+    case "Glob":
+      return `Searching for ${inp.pattern ?? "files"}`;
+    case "Grep":
+      return `Grep ${truncate(String(inp.pattern ?? ""), 40)}`;
+    case "WebFetch":
+      return `Fetching ${inp.url ?? "URL"}`;
+    case "TodoWrite":
+      return "Updating plan";
+    case "Skill":
+      return typeof inp.skill === "string" && inp.skill
+        ? `Skill /${inp.skill}`
+        : "Skill";
+    case "ToolSearch": {
+      const q = typeof inp.query === "string" ? inp.query : "";
+      return q.startsWith("select:")
+        ? `Loading ${q.slice("select:".length)}`
+        : q
+          ? `Finding tools: ${truncate(q, 40)}`
+          : "Finding tools";
+    }
+    default:
+      return name;
+  }
+}
+
+/** Stage 4.2 — mergeKey for collapsing repeated edits to one file
+ *  into a single card with "+N more changes" history. Returns null
+ *  for tools that shouldn't merge. */
+function computeMergeKey(name: string, input: unknown): string | null {
+  if (!/^(Edit|Write|MultiEdit)$/i.test(name)) return null;
+  const path = isObj(input)
+    ? typeof input.file_path === "string"
+      ? input.file_path
+      : typeof input.path === "string"
+        ? input.path
+        : null
+    : null;
+  if (!path) return null;
+  return `edit:${path}`;
+}
+
+/** Coarse ToolKind categorization. */
+export function mapToolKind(name: string): ToolKind {
+  if (/^Read$/i.test(name)) return "read";
+  if (/^LS$/i.test(name)) return "list";
+  if (/^(Glob|Grep)$/i.test(name)) return "search";
+  if (/^WebSearch$/i.test(name)) return "web_search";
+  // MultiEdit applies several old→new replacements to one file; route it to
+  // the same EditCard as Edit/Write (the renderer stacks the edits into a diff).
+  if (/^(Edit|Write|MultiEdit)$/i.test(name)) return "edit";
+  if (/^Bash$/i.test(name)) return "execute";
+  if (/^WebFetch$/i.test(name)) return "fetch";
+  // Claude Code 2.1.63 renamed `Task` → `Agent` for subagent dispatch
+  // (https://github.com/anthropics/claude-code/releases). Match both so
+  // the SubagentCard still fires on the rename — code that hard-coded
+  // "Task" alone silently misses subagent invocations on newer Claude.
+  if (/^(Task|Agent)$/i.test(name)) return "subagent";
+  if (/^AskUserQuestion$/i.test(name)) return "question";
+  // Stage 6.3 — ExitPlanMode is Claude's "I'm done planning, please
+  // approve and pick the next mode" tool. Routes to the dedicated
+  // ExitPlanModeCard via canonical kind=switch_mode. Future agents
+  // with similar plan-mode tools land here too.
+  if (/^ExitPlanMode$/i.test(name)) return "switch_mode";
+  // Skill = slash-command execution; ToolSearch = loading a deferred tool's
+  // schema before calling it (the SDK defers rarely-used built-ins like
+  // ExitPlanMode behind ToolSearch to save prompt tokens). Both get their own
+  // kinds so event-meta can render a quiet labelled row instead of the
+  // "other" fallback with raw JSON.
+  if (/^Skill$/i.test(name)) return "skill";
+  if (/^ToolSearch$/i.test(name)) return "tool_search";
+  // MCP-prefixed tool names: `mcp__<server>__<tool>`. Anthropic's
+  // convention. Surface as `mcp` so the dedicated card renders.
+  if (/^mcp__/i.test(name)) return "mcp";
+  return "other";
+}
+
+function truncate(s: string, n: number): string {
+  if (s.length <= n) return s;
+  return s.slice(0, n - 1) + "…";
+}

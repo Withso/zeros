@@ -1,0 +1,6 @@
+# Marks backend/ as its own pnpm root (stops pnpm from walking up into the
+# Electron app's workspace) and approves the one install script we need.
+# esbuild ships platform binaries via optionalDependencies; its postinstall
+# is a fallback — approved so pnpm v10/v11 never hard-fails the install.
+onlyBuiltDependencies:
+  - esbuild

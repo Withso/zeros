@@ -1,0 +1,46 @@
+packages:
+  - "packages/*"
+  - "website/marketing"
+
+# Note: a sibling app, the legacy `website/accounts` site and its
+# `packages/auth-client` — all on the retired Supabase project — were removed in
+# the 2026-06 cleanup. An empty, untracked `apps/` husk may remain on disk; it
+# no longer participates in this workspace and is gitignored.
+#
+# Note: website/web-app (Cloudflare Pages project `zeros-web` — app.zeros.build
+# hub/auth/handoff AND zeros.build marketing, assembled at build time) is
+# intentionally excluded from this workspace. It has its own package.json /
+# package-lock.json so Cloudflare can `npm install` Functions deps without
+# touching the root pnpm-lock.yaml. Marketing source stays a workspace member
+# (`website/marketing`) but ALSO commits its own pnpm-lock.yaml: zeros-web's
+# assemble-marketing.mjs runs `pnpm install --ignore-workspace
+# --frozen-lockfile` inside website/marketing during the Pages build, so CF
+# never installs the monorepo's Electron/native deps (`--filter` can't narrow
+# a workspace install — pnpm/pnpm#8318). After changing marketing's
+# package.json, regenerate that lockfile:
+#   cd website/marketing && pnpm install --ignore-workspace --lockfile-only
+# (The retired website/auth-app was folded into web-app on 2026-07-06.)
+
+# pnpm v10 moved package-level "pnpm" settings to the workspace yaml. The
+# previous home in package.json's `"pnpm": { ... }` block prints a deprecation
+# warning on every install ("The 'pnpm' field in package.json is no longer
+# read by pnpm. The following keys were ignored: pnpm.onlyBuiltDependencies").
+# `onlyBuiltDependencies` is an allowlist of packages whose postinstall scripts
+# we trust to run. Keep this list tight: native-binding packages
+# (better-sqlite3, node-pty, electron) need it; everything else stays
+# script-blocked for supply-chain safety.
+onlyBuiltDependencies:
+  - better-sqlite3
+  - electron
+  - electron-builder
+  - esbuild
+  - "@parcel/watcher"
+  - node-pty
+  # @cursor/sdk eagerly imports `sqlite3` (its default local checkpoint
+  # store) at the top of its bundle, so the native binding must build for
+  # the SDK to import at all — even when we pass a JsonlLocalAgentStore.
+  - sqlite3
+  # @vscode/ripgrep downloads a prebuilt `rg` binary in postinstall; the
+  # cursor-sdk adapter points CURSOR_RIPGREP_PATH at it so @cursor/sdk's
+  # codebase search / ignore-mapping works (it doesn't bundle ripgrep).
+  - "@vscode/ripgrep"

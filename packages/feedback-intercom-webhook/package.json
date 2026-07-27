@@ -1,0 +1,17 @@
+{
+  "name": "@zeros/feedback-intercom-webhook",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "Cloudflare Worker: the app's Help→Feedback modal → Intercom (contact + user-initiated conversation, type-tagged) → Inbox → native Create-with-Linear-Agent → Linear. Standalone.",
+  "dependencies": {
+    "jose": "^6.0.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "dev": "npx wrangler@4 dev",
+    "deploy": "npx wrangler@4 deploy",
+    "tail": "npx wrangler@4 tail"
+  }
+}

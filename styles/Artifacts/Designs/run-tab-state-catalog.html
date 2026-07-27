@@ -1,0 +1,2750 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-Zeros-root>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Zeros — Run tab · State catalog</title>
+    <style>
+      /* ============================================================
+         Tokens — lifted verbatim from styles/zeros-tokens.css so the
+         mockups render on the real Zeros Shade (dark) + Light palettes.
+         Toggle themes with the switch in the header.
+         ============================================================ */
+      :root {
+        color-scheme: dark;
+        --bg1: hsl(25 5% 7%);
+        --bg1-hover: hsl(8 5% 12%);
+        --bg1-highlight: hsl(25 5% 10%);
+        --bg2: hsl(25 4% 12%);
+        --bg2-hover: hsl(25 3% 15%);
+        --bg3: hsl(15 4% 16%);
+        --bg3-hover: hsl(15 3% 20%);
+        --sidebar-bg: hsl(25 5% 9%);
+        --fg1: hsl(0 2% 92%);
+        --fg2: hsl(20 4% 66%);
+        --fg3: hsl(15 1% 44%);
+        --muted-fg: hsl(15 4% 44%);
+        --border1: hsl(8 3% 14%);
+        --border2: hsl(25 1% 18%);
+        --border3: hsl(15 0% 24%);
+        --border4: hsl(15 0% 30%);
+        --highlighted-bright: hsl(25 5% 65%);
+        --inverted-bg: hsl(0 2% 92%);
+        --inverted-fg: hsl(5 7% 5%);
+        --green-primary: hsl(142 69% 58%);
+        --green-bg: hsl(120 23% 17%);
+        --green-fg: hsl(142 75% 73%);
+        --red-primary: hsl(0 91% 71%);
+        --red-bg: hsl(13 81% 14%);
+        --red-fg: hsl(20 97% 72%);
+        --yellow-primary: hsl(37 75% 60%);
+        --yellow-bg: hsl(38 68% 17%);
+        --yellow-fg: hsl(44 100% 50%);
+        --blue-primary: hsl(205 80% 73%);
+        --violet-primary: hsl(271 80% 73%);
+        --brown-primary: hsl(9 46% 72%);
+        --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+        --radius-sm: 4px;
+        --radius-md: 6px;
+        --radius-lg: 8px;
+        --sans:
+          "Geist Variable", Inter, ui-sans-serif, -apple-system,
+          BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --mono: "Geist Mono Variable", "SFMono-Regular", Consolas, monospace;
+      }
+
+      [data-theme="light"] {
+        color-scheme: light;
+        --bg1: hsl(0 0% 100%);
+        --bg1-hover: hsl(0 4% 95%);
+        --bg1-highlight: hsl(0 0% 97%);
+        --bg2: hsl(60 4% 95%);
+        --bg2-hover: hsl(60 4% 91%);
+        --bg3: hsl(0 0% 100%);
+        --bg3-hover: hsl(0 0% 95%);
+        --sidebar-bg: hsl(60 9% 98%);
+        --fg1: hsl(20 7% 16%);
+        --fg2: hsl(20 4% 37%);
+        --fg3: hsl(20 4% 56%);
+        --muted-fg: hsl(20 4% 68%);
+        --border1: hsl(30 9% 91%);
+        --border2: hsl(30 9% 91%);
+        --border3: hsl(60 3% 85%);
+        --border4: hsl(0 1% 83%);
+        --highlighted-bright: hsl(25 5% 45%);
+        --inverted-bg: hsl(20 7% 16%);
+        --inverted-fg: hsl(0 0% 100%);
+        --green-primary: hsl(142 75% 36%);
+        --green-bg: hsl(134 38% 89%);
+        --green-fg: hsl(142 70% 30%);
+        --red-primary: hsl(0 72% 51%);
+        --red-bg: hsl(18 87% 91%);
+        --red-fg: hsl(18 89% 40%);
+        --yellow-primary: hsl(37 90% 60%);
+        --yellow-bg: hsl(48 97% 89%);
+        --yellow-fg: hsl(37 100% 51%);
+        --blue-primary: hsl(221 83% 53%);
+        --violet-primary: hsl(271 80% 51%);
+        --brown-primary: hsl(5 35% 50%);
+        --shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        margin: 0;
+        min-width: 320px;
+        min-height: 100vh;
+        background:
+          radial-gradient(
+            circle at 50% -8%,
+            color-mix(in srgb, var(--fg1) 5%, transparent),
+            transparent 30rem
+          ),
+          var(--bg1);
+        color: var(--fg1);
+        font: 14px/1.5 var(--sans);
+        -webkit-font-smoothing: antialiased;
+      }
+      button {
+        font: inherit;
+        color: inherit;
+        cursor: pointer;
+      }
+      svg {
+        display: block;
+      }
+      code {
+        font-family: var(--mono);
+      }
+
+      .page {
+        width: min(1180px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 48px 0 96px;
+      }
+
+      /* ── Hero ── */
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 28px;
+        align-items: end;
+        padding-bottom: 28px;
+        border-bottom: 1px solid var(--border1);
+      }
+      .eyebrow {
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        color: var(--yellow-primary);
+      }
+      h1 {
+        max-width: 760px;
+        margin: 9px 0 10px;
+        font-size: clamp(26px, 3.4vw, 40px);
+        line-height: 1.05;
+        letter-spacing: -0.035em;
+      }
+      .lede {
+        max-width: 720px;
+        margin: 0;
+        color: var(--fg2);
+        font-size: 15px;
+      }
+      .hero-aside {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        align-items: flex-end;
+      }
+      .summary-chip {
+        min-width: 240px;
+        padding: 14px 16px;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 90%, transparent);
+      }
+      .summary-chip strong {
+        display: block;
+        margin-bottom: 3px;
+        font-size: 13px;
+      }
+      .summary-chip span {
+        display: block;
+        color: var(--fg2);
+        font-size: 12px;
+      }
+      .theme-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 11px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: var(--bg2);
+        color: var(--fg1);
+        font-size: 12px;
+      }
+      .theme-toggle:hover {
+        background: var(--bg2-hover);
+      }
+
+      /* ── Thesis cards ── */
+      .thesis {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        margin: 24px 0 12px;
+      }
+      .thesis-card {
+        min-width: 0;
+        padding: 16px 18px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 86%, transparent);
+      }
+      .thesis-card.primary {
+        border-color: color-mix(in srgb, var(--green-primary) 26%, var(--border1));
+        background: color-mix(in srgb, var(--green-primary) 5%, var(--sidebar-bg));
+      }
+      .thesis-card h3 {
+        margin: 0 0 5px;
+        font-size: 13px;
+      }
+      .thesis-card p {
+        margin: 0;
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      /* ── Sticky nav ── */
+      nav {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+        margin: 26px -12px 40px;
+        padding: 10px 12px;
+        border-bottom: 1px solid color-mix(in srgb, var(--border1) 80%, transparent);
+        background: color-mix(in srgb, var(--bg1) 82%, transparent);
+        backdrop-filter: blur(14px);
+      }
+      nav a {
+        flex: none;
+        padding: 5px 9px;
+        border-radius: var(--radius-sm);
+        color: var(--fg2);
+        font-size: 12px;
+        text-decoration: none;
+      }
+      nav a:hover {
+        background: var(--bg2);
+        color: var(--fg1);
+      }
+      .nav-sep {
+        width: 1px;
+        margin: 3px 4px;
+        background: var(--border2);
+      }
+
+      /* ── Section headers ── */
+      .band {
+        margin: 0 0 26px;
+        font-size: 12px;
+        font-weight: 650;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--fg3);
+      }
+      .catalog {
+        display: grid;
+        gap: 56px;
+      }
+      .catalog + .band {
+        margin-top: 64px;
+      }
+      .case {
+        scroll-margin-top: 68px;
+      }
+      .case-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 24px;
+        align-items: flex-start;
+        margin-bottom: 16px;
+      }
+      .case-title-row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        margin-bottom: 6px;
+      }
+      .case-number {
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.06em;
+        color: var(--fg3);
+      }
+      .tag {
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: var(--bg2);
+        color: var(--fg2);
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+      }
+      .tag.ship {
+        background: color-mix(in srgb, var(--green-primary) 12%, transparent);
+        color: var(--green-primary);
+      }
+      .tag.gap {
+        background: color-mix(in srgb, var(--yellow-primary) 12%, transparent);
+        color: var(--yellow-primary);
+      }
+      .tag.context {
+        background: color-mix(in srgb, var(--blue-primary) 12%, transparent);
+        color: var(--blue-primary);
+      }
+      /* "Changes" annotation — proposed iterations on a shipping state. */
+      .tag.changed {
+        background: color-mix(in srgb, var(--violet-primary) 15%, transparent);
+        color: var(--violet-primary);
+      }
+      .case h2 {
+        margin: 0;
+        font-size: 19px;
+        line-height: 1.22;
+        letter-spacing: -0.02em;
+      }
+      .case-copy {
+        max-width: 720px;
+        margin: 6px 0 0;
+        color: var(--fg2);
+        font-size: 13px;
+      }
+      .meta {
+        flex: none;
+        max-width: 280px;
+        padding-top: 2px;
+        color: var(--fg3);
+        font-size: 11px;
+        line-height: 1.5;
+        text-align: right;
+      }
+
+      /* ── App frame (the Terminal pane) ── */
+      .dual {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+      }
+      .frame-wrap {
+        min-width: 0;
+      }
+      .frame-label {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin-bottom: 8px;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        color: var(--fg3);
+      }
+      .frame-label .dot-lg {
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+        background: var(--fg3);
+      }
+      .frame-label.before .dot-lg {
+        background: var(--red-primary);
+      }
+      .frame-label.after .dot-lg {
+        background: var(--green-primary);
+      }
+      .frame {
+        overflow: hidden;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: var(--bg1);
+        box-shadow: var(--shadow);
+      }
+
+      .rail {
+        display: flex;
+        height: 44px;
+        align-items: center;
+        gap: 8px;
+        padding: 0 12px;
+        border-bottom: 1px solid var(--border1);
+      }
+      .rail-home {
+        display: inline-grid;
+        width: 30px;
+        height: 30px;
+        place-items: center;
+        border-radius: var(--radius-md);
+        color: var(--fg2);
+      }
+      .rail-home.active {
+        background: var(--bg2);
+        color: var(--fg1);
+      }
+      .rail-spacer {
+        flex: 1;
+      }
+      /* Header Run affordance — single button (ships today). */
+      .rail-run {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        height: 28px;
+        padding: 0 9px;
+        border-radius: var(--radius-sm);
+        color: var(--fg2);
+        font-size: 13px;
+      }
+      .rail-run:hover {
+        background: var(--bg2-hover);
+        color: var(--fg1);
+      }
+
+      /* Header split-button (PROPOSED) — [ ▷ Dev  ⌘R ][ ⌄ ]. */
+      .split {
+        display: inline-flex;
+        align-items: stretch;
+        height: 28px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        overflow: hidden;
+      }
+      .split-face {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 0 9px;
+        background: var(--bg2);
+        color: var(--fg1);
+        font-size: 13px;
+      }
+      .split-face:hover {
+        background: var(--bg2-hover);
+      }
+      .split-face svg {
+        width: 14px;
+        height: 14px;
+      }
+      .split-caret {
+        display: inline-grid;
+        width: 22px;
+        place-items: center;
+        border-left: 1px solid var(--border3);
+        background: var(--bg2);
+        color: var(--fg2);
+      }
+      .split-caret:hover {
+        background: var(--bg2-hover);
+        color: var(--fg1);
+      }
+      .split-caret svg {
+        width: 13px;
+        height: 13px;
+      }
+      .kbd {
+        padding: 1px 5px;
+        border-radius: var(--radius-sm);
+        background: var(--bg3);
+        color: var(--fg3);
+        font-family: var(--mono);
+        font-size: 10px;
+      }
+      /* running badge that sits on the caret when N actions are live */
+      .split-caret .live-count {
+        position: absolute;
+        top: -5px;
+        right: -5px;
+        min-width: 14px;
+        height: 14px;
+        padding: 0 3px;
+        border-radius: 999px;
+        background: var(--green-primary);
+        color: var(--inverted-fg);
+        font-size: 9px;
+        font-weight: 700;
+        line-height: 14px;
+        text-align: center;
+      }
+
+      /* Dropdown menu (PROPOSED) — the actions list under the caret. */
+      .menu {
+        width: 232px;
+        margin-top: 6px;
+        padding: 4px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-md);
+        background: var(--bg2);
+        box-shadow: var(--shadow);
+      }
+      .menu-item {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        height: 30px;
+        padding: 0 8px;
+        border-radius: var(--radius-sm);
+        color: var(--fg1);
+        font-size: 13px;
+      }
+      .menu-item:hover {
+        background: var(--bg2-hover);
+      }
+      .menu-item.active {
+        background: var(--bg3);
+      }
+      .menu-item svg.lead {
+        width: 15px;
+        height: 15px;
+        color: var(--fg2);
+        flex: none;
+      }
+      .menu-item .m-label {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .menu-item .m-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 999px;
+        flex: none;
+      }
+      .menu-item .m-dot.run {
+        background: var(--yellow-primary);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--yellow-primary) 22%, transparent);
+      }
+      .menu-item .m-dot.ok {
+        background: var(--green-primary);
+      }
+      .menu-item .m-dot.err {
+        background: var(--red-primary);
+      }
+      .menu-item .m-kbd {
+        color: var(--fg3);
+        font-family: var(--mono);
+        font-size: 10px;
+      }
+      .menu-sep {
+        height: 1px;
+        margin: 4px 6px;
+        background: var(--border2);
+      }
+      .menu-item.muted {
+        color: var(--fg2);
+      }
+      .menu-item.muted svg.lead {
+        color: var(--fg3);
+      }
+
+      .subtabs {
+        display: flex;
+        height: 36px;
+        align-items: center;
+        gap: 2px;
+        padding: 0 8px;
+        border-bottom: 1px solid var(--border1);
+        overflow: hidden;
+      }
+      .subtab {
+        position: relative;
+        display: inline-flex;
+        height: 36px;
+        align-items: center;
+        padding: 0 10px;
+        border: 0;
+        background: transparent;
+        color: var(--fg2);
+        font-size: 12px;
+        font-weight: 500;
+        white-space: nowrap;
+      }
+      .subtab.active {
+        color: var(--fg1);
+      }
+      .subtab.active::after {
+        content: "";
+        position: absolute;
+        left: 8px;
+        right: 8px;
+        bottom: 0;
+        height: 2px;
+        border-radius: 999px;
+        background: var(--fg1);
+      }
+      .subtab .exited {
+        margin-left: 5px;
+        opacity: 0.7;
+      }
+      .subtab .status-dot {
+        width: 6px;
+        height: 6px;
+        margin-left: 6px;
+        border-radius: 999px;
+      }
+      .subtab .tab-ico {
+        width: 13px;
+        height: 13px;
+        margin-right: 6px;
+        color: var(--fg3);
+      }
+      .subtab.active .tab-ico {
+        color: var(--fg2);
+      }
+      .status-dot.run {
+        background: var(--yellow-primary);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--yellow-primary) 22%, transparent);
+      }
+      .status-dot.ok {
+        background: var(--green-primary);
+      }
+      .status-dot.err {
+        background: var(--red-primary);
+      }
+      .subtab-add {
+        display: inline-grid;
+        width: 24px;
+        height: 24px;
+        place-items: center;
+        margin-left: 2px;
+        border-radius: var(--radius-sm);
+        color: var(--fg2);
+        flex: none;
+      }
+      .subtab-add:hover {
+        background: var(--bg2-hover);
+        color: var(--fg1);
+      }
+      .subtab-x {
+        display: inline-grid;
+        width: 15px;
+        height: 15px;
+        place-items: center;
+        margin-left: 5px;
+        border-radius: var(--radius-sm);
+        color: var(--fg3);
+      }
+      .subtab-x:hover {
+        background: var(--bg3);
+        color: var(--fg1);
+      }
+      .subtab-x svg {
+        width: 10px;
+        height: 10px;
+      }
+
+      .body {
+        position: relative;
+        height: 288px;
+      }
+      .body.tall {
+        height: 320px;
+      }
+
+      /* ── Empty states ── */
+      .empty {
+        display: flex;
+        height: 100%;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        padding: 24px;
+        text-align: center;
+      }
+      .empty-title {
+        font-size: 14px;
+        color: var(--fg1);
+      }
+      .empty-desc {
+        max-width: 340px;
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      .empty-desc code {
+        padding: 1px 5px;
+        border-radius: var(--radius-sm);
+        background: var(--bg2-hover);
+        color: var(--fg1);
+        font-size: 11px;
+      }
+      .empty-glyph {
+        color: var(--muted-fg);
+      }
+      /* Empty-state icon illustration — 1px stroke, muted, centered on top. */
+      .illus {
+        color: var(--muted-fg);
+      }
+      .illus svg {
+        width: 40px;
+        height: 40px;
+      }
+
+      /* ── Buttons ── */
+      .btn {
+        display: inline-flex;
+        height: 24px;
+        align-items: center;
+        gap: 6px;
+        padding: 0 10px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-sm);
+        background: var(--bg2);
+        color: var(--fg1);
+        font-size: 12px;
+      }
+      .btn:hover {
+        background: var(--bg2-hover);
+      }
+      .btn.add {
+        border: 0;
+        padding: 0 12px;
+      }
+      .btn.is-disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .btn svg {
+        width: 14px;
+        height: 14px;
+      }
+      /* Default secondary button — 24px, no icon (empty-state primary action). */
+      .btn-secondary {
+        display: inline-flex;
+        height: 24px;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        padding: 0 10px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--fg1);
+        font-size: 12px;
+      }
+      .btn-secondary:hover {
+        background: var(--bg2);
+      }
+      .btn-secondary svg {
+        width: 14px;
+        height: 14px;
+      }
+
+      /* ── Terminal log + status cluster ── */
+      .term {
+        position: relative;
+        height: 100%;
+      }
+      .term-log {
+        height: 100%;
+        overflow: hidden;
+        padding: 10px 12px;
+        font: 12px/1.62 var(--mono);
+        color: var(--fg1);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .term-log .c-dim {
+        color: var(--fg3);
+      }
+      .term-log .c-ok {
+        color: var(--green-primary);
+      }
+      .term-log .c-err {
+        color: var(--red-primary);
+      }
+      .term-log .c-warn {
+        color: var(--yellow-primary);
+      }
+      .term-log .c-info {
+        color: var(--blue-primary);
+      }
+      .term-log .c-path {
+        color: var(--brown-primary);
+      }
+      .cursor {
+        display: inline-block;
+        width: 7px;
+        height: 13px;
+        vertical-align: -2px;
+        background: var(--fg1);
+        animation: blink 1.05s step-end infinite;
+      }
+
+      .status {
+        position: absolute;
+        right: 12px;
+        bottom: 12px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 12px;
+        color: var(--fg2);
+      }
+      .pill svg {
+        width: 12px;
+        height: 12px;
+      }
+      .pill.ok svg {
+        color: var(--green-primary);
+      }
+      .pill.err svg {
+        color: var(--red-primary);
+      }
+      .pill.run svg {
+        color: var(--fg2);
+        animation: spin 0.9s linear infinite;
+      }
+      /* Filled outcome badge — 24px, no icon (matches Setup A4/A5). */
+      .status-badge {
+        display: inline-flex;
+        height: 24px;
+        align-items: center;
+        padding: 0 10px;
+        border-radius: var(--radius-sm);
+        font-size: 12px;
+        font-weight: 500;
+      }
+      .status-badge.ok {
+        background: var(--green-bg);
+        color: var(--green-fg);
+      }
+      .status-badge.err {
+        background: var(--red-bg);
+        color: var(--red-fg);
+      }
+
+      /* ── Durable status card (restart / last-run) ── */
+      .status-card {
+        display: flex;
+        height: 100%;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        padding: 24px;
+        text-align: center;
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 5px 12px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .badge svg {
+        width: 14px;
+        height: 14px;
+      }
+      .badge.ok {
+        background: var(--green-bg);
+        color: var(--green-fg);
+      }
+      .badge.err {
+        background: var(--red-bg);
+        color: var(--red-fg);
+      }
+      .status-sub {
+        max-width: 320px;
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      /* ── Loading skeleton ── */
+      .sk-center {
+        display: flex;
+        height: 100%;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 11px;
+        color: var(--fg2);
+        font-size: 12px;
+      }
+      .sk-center svg {
+        width: 18px;
+        height: 18px;
+        animation: spin 0.9s linear infinite;
+        color: var(--fg2);
+      }
+
+      /* ── Settings surface (Repositories → Run scripts) ── */
+      .settings {
+        height: 100%;
+        overflow: hidden;
+        padding: 16px;
+        background: var(--bg1);
+      }
+      .settings-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 4px;
+      }
+      .settings-title {
+        font-size: 15px;
+        color: var(--fg1);
+      }
+      .settings-sub {
+        margin: 3px 0 14px;
+        color: var(--fg2);
+        font-size: 12px;
+      }
+      .settings-card {
+        position: relative;
+        padding: 12px;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 80%, transparent);
+      }
+      .field-label {
+        margin-bottom: 6px;
+        font-size: 10px;
+        font-weight: 650;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+        color: var(--fg3);
+      }
+      .field + .field {
+        margin-top: 11px;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .icon-btn {
+        display: inline-grid;
+        width: 28px;
+        height: 28px;
+        place-items: center;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: var(--bg2);
+        color: var(--fg1);
+        flex: none;
+      }
+      .icon-btn:hover {
+        background: var(--bg2-hover);
+      }
+      .icon-btn svg {
+        width: 15px;
+        height: 15px;
+      }
+      .input {
+        flex: 1;
+        height: 28px;
+        min-width: 0;
+        padding: 0 10px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--fg1);
+        font-size: 12px;
+      }
+      .input.mono {
+        font-family: var(--mono);
+        font-size: 11px;
+      }
+      .input.placeholder {
+        color: var(--fg3);
+      }
+      .input.focus {
+        border-color: var(--highlighted-bright);
+      }
+      .chips {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      .chip-toggle {
+        height: 24px;
+        padding: 0 10px;
+        display: inline-flex;
+        align-items: center;
+        border-radius: 999px;
+        background: transparent;
+        color: var(--fg3);
+        font-size: 11px;
+      }
+      .chip-toggle.on {
+        background: var(--bg3);
+        color: var(--fg1);
+      }
+      .card-trash {
+        position: absolute;
+        right: 10px;
+        bottom: 10px;
+        color: var(--fg3);
+      }
+      .card-trash:hover {
+        color: var(--red-primary);
+      }
+      .card-trash svg {
+        width: 15px;
+        height: 15px;
+      }
+
+      /* ── Icon picker popover ── */
+      .picker {
+        width: 260px;
+        padding: 8px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-md);
+        background: var(--bg2);
+        box-shadow: var(--shadow);
+      }
+      .picker-search {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        height: 30px;
+        padding: 0 9px;
+        margin-bottom: 8px;
+        border: 1px solid var(--highlighted-bright);
+        border-radius: var(--radius-sm);
+        color: var(--fg3);
+        font-size: 12px;
+      }
+      .picker-search svg {
+        width: 14px;
+        height: 14px;
+      }
+      .icon-grid {
+        display: grid;
+        grid-template-columns: repeat(6, 1fr);
+        gap: 2px;
+      }
+      .icon-cell {
+        display: inline-grid;
+        aspect-ratio: 1;
+        place-items: center;
+        border-radius: var(--radius-sm);
+        color: var(--fg2);
+      }
+      .icon-cell:hover {
+        background: var(--bg2-hover);
+        color: var(--fg1);
+      }
+      .icon-cell.sel {
+        background: color-mix(in srgb, var(--violet-primary) 18%, transparent);
+        color: var(--violet-primary);
+      }
+      .icon-cell svg {
+        width: 16px;
+        height: 16px;
+      }
+
+      /* ── Behavior / rationale notes ── */
+      .notes {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 14px;
+      }
+      .notes.one {
+        grid-template-columns: 1fr;
+      }
+      .note {
+        padding: 12px 14px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-md);
+        background: color-mix(in srgb, var(--sidebar-bg) 88%, transparent);
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      .note b {
+        color: var(--fg1);
+      }
+      .note.fix {
+        border-color: color-mix(in srgb, var(--green-primary) 24%, var(--border1));
+        background: color-mix(in srgb, var(--green-primary) 5%, var(--sidebar-bg));
+      }
+
+      /* "Changes" callout — this iteration's visual edits + behavior logic. */
+      .changes {
+        margin-top: 14px;
+        padding: 12px 14px 12px 16px;
+        border: 1px solid color-mix(in srgb, var(--violet-primary) 22%, var(--border1));
+        border-left: 2px solid var(--violet-primary);
+        border-radius: var(--radius-md);
+        background: color-mix(in srgb, var(--violet-primary) 5%, var(--sidebar-bg));
+      }
+      .changes-label {
+        margin-bottom: 7px;
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--violet-primary);
+      }
+      .changes ul {
+        margin: 0;
+        padding-left: 16px;
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+      .changes li {
+        margin: 3px 0;
+      }
+      .changes b {
+        color: var(--fg1);
+      }
+      .changes em {
+        color: var(--yellow-primary);
+        font-style: normal;
+      }
+      .changes code {
+        padding: 1px 5px;
+        border-radius: var(--radius-sm);
+        background: var(--bg2-hover);
+        color: var(--fg1);
+        font-size: 11px;
+      }
+
+      .single {
+        max-width: 560px;
+      }
+      .wide {
+        max-width: 620px;
+      }
+
+      .footer-note {
+        margin-top: 64px;
+        padding-top: 22px;
+        border-top: 1px solid var(--border1);
+        color: var(--fg3);
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      /* ============================================================
+         Running indicator — the rotating "indianised star".
+         A Zeros-palette conic gradient, masked by a parametric petal
+         shape (generated in the script below), that spins, shimmers,
+         and cycles colour through the palette on every turn. Its mere
+         presence means "a run is live" — no dot, no waveform, no text.
+         ============================================================ */
+      @property --sh1 {
+        syntax: "<color>";
+        inherits: false;
+        initial-value: rgb(74 222 128);
+      }
+      @property --sh2 {
+        syntax: "<color>";
+        inherits: false;
+        initial-value: rgb(96 165 250);
+      }
+      @property --sh3 {
+        syntax: "<color>";
+        inherits: false;
+        initial-value: rgb(167 139 250);
+      }
+      @property --sh-from {
+        syntax: "<angle>";
+        inherits: false;
+        initial-value: 0deg;
+      }
+
+      .run-shape {
+        /* Finalized tempo: a brisk ~2.2s/turn (was 5s) per user review. */
+        --sh-spin: 2.2s;
+        --sh-color: 6.6s;
+        --sh-shimmer: 3.3s;
+        display: inline-block;
+        width: 15px;
+        height: 15px;
+        flex: none;
+        vertical-align: middle;
+        background: conic-gradient(
+          from var(--sh-from),
+          var(--sh1),
+          var(--sh2),
+          var(--sh3),
+          var(--sh1)
+        );
+        /* Mask longhands set as static values; the mask-image itself is applied
+           per-element in JS. A `var()` inside the `mask` shorthand silently
+           fails in WebKit/Safari (renders the whole square), so we avoid it. */
+        -webkit-mask-repeat: no-repeat;
+        -webkit-mask-position: center;
+        -webkit-mask-size: contain;
+        mask-repeat: no-repeat;
+        mask-position: center;
+        mask-size: contain;
+        animation:
+          sh-spin var(--sh-spin) linear infinite,
+          sh-color var(--sh-color) linear infinite,
+          sh-shimmer var(--sh-shimmer) linear infinite;
+      }
+      .run-shape--tab {
+        width: 14px;
+        height: 14px;
+        margin-right: 6px;
+      }
+      .run-shape--btn {
+        width: 15px;
+        height: 15px;
+      }
+      .run-shape--menu {
+        width: 15px;
+        height: 15px;
+      }
+      .run-shape--md {
+        width: 42px;
+        height: 42px;
+      }
+      .run-shape--lg {
+        width: 72px;
+        height: 72px;
+        filter: drop-shadow(0 1px 9px color-mix(in srgb, var(--sh2) 55%, transparent));
+      }
+      .run-shape.is-fast {
+        --sh-spin: 1.3s;
+        --sh-shimmer: 2s;
+      }
+      .run-shape.is-slow {
+        --sh-spin: 5s;
+        --sh-shimmer: 6.5s;
+      }
+      .run-shape.is-reverse {
+        animation:
+          sh-spin var(--sh-spin) linear infinite reverse,
+          sh-color var(--sh-color) linear infinite,
+          sh-shimmer var(--sh-shimmer) linear infinite;
+      }
+      .run-shape.is-pulse {
+        animation:
+          sh-spin-pulse var(--sh-spin) ease-in-out infinite,
+          sh-color var(--sh-color) linear infinite,
+          sh-shimmer var(--sh-shimmer) linear infinite;
+      }
+
+      /* STATIC-MASKS-START — generated by _build-studio-masks.cjs so the
+         shapes render without JS (a viewer that skips scripts would otherwise
+         show blank squares). */
+      .run-shape[data-shape="sparkle"] {
+        -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox%3D'0%200%20100%20100'%3E%3Cpath%20d%3D'M41.58%2029.67%20Q39.14%20-4.61%2050.00%202.00%20Q60.86%20-4.61%2058.42%2029.67%20Q80.93%203.70%2083.94%2016.06%20Q96.30%2019.07%2070.33%2041.58%20Q104.61%2039.14%2098.00%2050.00%20Q104.61%2060.86%2070.33%2058.42%20Q96.30%2080.93%2083.94%2083.94%20Q80.93%2096.30%2058.42%2070.33%20Q60.86%20104.61%2050.00%2098.00%20Q39.14%20104.61%2041.58%2070.33%20Q19.07%2096.30%2016.06%2083.94%20Q3.70%2080.93%2029.67%2058.42%20Q-4.61%2060.86%202.00%2050.00%20Q-4.61%2039.14%2029.67%2041.58%20Q3.70%2019.07%2016.06%2016.06%20Q19.07%203.70%2041.58%2029.67%20Z'%2F%3E%3C%2Fsvg%3E");
+        mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox%3D'0%200%20100%20100'%3E%3Cpath%20d%3D'M41.58%2029.67%20Q39.14%20-4.61%2050.00%202.00%20Q60.86%20-4.61%2058.42%2029.67%20Q80.93%203.70%2083.94%2016.06%20Q96.30%2019.07%2070.33%2041.58%20Q104.61%2039.14%2098.00%2050.00%20Q104.61%2060.86%2070.33%2058.42%20Q96.30%2080.93%2083.94%2083.94%20Q80.93%2096.30%2058.42%2070.33%20Q60.86%20104.61%2050.00%2098.00%20Q39.14%20104.61%2041.58%2070.33%20Q19.07%2096.30%2016.06%2083.94%20Q3.70%2080.93%2029.67%2058.42%20Q-4.61%2060.86%202.00%2050.00%20Q-4.61%2039.14%2029.67%2041.58%20Q3.70%2019.07%2016.06%2016.06%20Q19.07%203.70%2041.58%2029.67%20Z'%2F%3E%3C%2Fsvg%3E");
+      }
+      .run-shape[data-shape="lotus6"] {
+        -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox%3D'0%200%20100%20100'%3E%3Cpath%20d%3D'M38.00%2029.22%20Q35.34%20-4.71%2050.00%202.00%20Q64.66%20-4.71%2062.00%2029.22%20Q90.05%209.95%2091.57%2026.00%20Q104.71%2035.34%2074.00%2050.00%20Q104.71%2064.66%2091.57%2074.00%20Q90.05%2090.05%2062.00%2070.78%20Q64.66%20104.71%2050.00%2098.00%20Q35.34%20104.71%2038.00%2070.78%20Q9.95%2090.05%208.43%2074.00%20Q-4.71%2064.66%2026.00%2050.00%20Q-4.71%2035.34%208.43%2026.00%20Q9.95%209.95%2038.00%2029.22%20Z'%2F%3E%3C%2Fsvg%3E");
+        mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox%3D'0%200%20100%20100'%3E%3Cpath%20d%3D'M38.00%2029.22%20Q35.34%20-4.71%2050.00%202.00%20Q64.66%20-4.71%2062.00%2029.22%20Q90.05%209.95%2091.57%2026.00%20Q104.71%2035.34%2074.00%2050.00%20Q104.71%2064.66%2091.57%2074.00%20Q90.05%2090.05%2062.00%2070.78%20Q64.66%20104.71%2050.00%2098.00%20Q35.34%20104.71%2038.00%2070.78%20Q9.95%2090.05%208.43%2074.00%20Q-4.71%2064.66%2026.00%2050.00%20Q-4.71%2035.34%208.43%2026.00%20Q9.95%209.95%2038.00%2029.22%20Z'%2F%3E%3C%2Fsvg%3E");
+      }
+      .run-shape[data-shape="sparkle"] {
+        -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox%3D'0%200%20100%20100'%3E%3Cpath%20d%3D'M50.00%201.00%20Q59.19%2040.81%2099.00%2050.00%20Q59.19%2059.19%2050.00%2099.00%20Q40.81%2059.19%201.00%2050.00%20Q40.81%2040.81%2050.00%201.00%20Z'%2F%3E%3C%2Fsvg%3E");
+        mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox%3D'0%200%20100%20100'%3E%3Cpath%20d%3D'M50.00%201.00%20Q59.19%2040.81%2099.00%2050.00%20Q59.19%2059.19%2050.00%2099.00%20Q40.81%2059.19%201.00%2050.00%20Q40.81%2040.81%2050.00%201.00%20Z'%2F%3E%3C%2Fsvg%3E");
+      }
+      .run-shape[data-shape="star6"] {
+        -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox%3D'0%200%20100%20100'%3E%3Cpath%20d%3D'M50.00%202.00%20Q60.00%2032.68%2091.57%2026.00%20Q70.00%2050.00%2091.57%2074.00%20Q60.00%2067.32%2050.00%2098.00%20Q40.00%2067.32%208.43%2074.00%20Q30.00%2050.00%208.43%2026.00%20Q40.00%2032.68%2050.00%202.00%20Z'%2F%3E%3C%2Fsvg%3E");
+        mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox%3D'0%200%20100%20100'%3E%3Cpath%20d%3D'M50.00%202.00%20Q60.00%2032.68%2091.57%2026.00%20Q70.00%2050.00%2091.57%2074.00%20Q60.00%2067.32%2050.00%2098.00%20Q40.00%2067.32%208.43%2074.00%20Q30.00%2050.00%208.43%2026.00%20Q40.00%2032.68%2050.00%202.00%20Z'%2F%3E%3C%2Fsvg%3E");
+      }
+      .run-shape[data-shape="bloom8"] {
+        -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox%3D'0%200%20100%20100'%3E%3Cpath%20d%3D'M42.35%2031.52%20C37.01%204.83%2062.99%204.83%2057.65%2031.52%20C72.76%208.88%2091.12%2027.24%2068.48%2042.35%20C95.17%2037.01%2095.17%2062.99%2068.48%2057.65%20C91.12%2072.76%2072.76%2091.12%2057.65%2068.48%20C62.99%2095.17%2037.01%2095.17%2042.35%2068.48%20C27.24%2091.12%208.88%2072.76%2031.52%2057.65%20C4.83%2062.99%204.83%2037.01%2031.52%2042.35%20C8.88%2027.24%2027.24%208.88%2042.35%2031.52%20Z'%2F%3E%3C%2Fsvg%3E");
+        mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox%3D'0%200%20100%20100'%3E%3Cpath%20d%3D'M42.35%2031.52%20C37.01%204.83%2062.99%204.83%2057.65%2031.52%20C72.76%208.88%2091.12%2027.24%2068.48%2042.35%20C95.17%2037.01%2095.17%2062.99%2068.48%2057.65%20C91.12%2072.76%2072.76%2091.12%2057.65%2068.48%20C62.99%2095.17%2037.01%2095.17%2042.35%2068.48%20C27.24%2091.12%208.88%2072.76%2031.52%2057.65%20C4.83%2062.99%204.83%2037.01%2031.52%2042.35%20C8.88%2027.24%2027.24%208.88%2042.35%2031.52%20Z'%2F%3E%3C%2Fsvg%3E");
+      }
+      .run-shape[data-shape="marigold"] {
+        -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox%3D'0%200%20100%20100'%3E%3Cpath%20d%3D'M41.98%2020.06%20C42.51%203.60%2057.49%203.60%2058.02%2020.06%20C66.72%206.07%2079.68%2013.56%2071.92%2028.08%20C86.44%2020.32%2093.93%2033.28%2079.94%2041.98%20C96.40%2042.51%2096.40%2057.49%2079.94%2058.02%20C93.93%2066.72%2086.44%2079.68%2071.92%2071.92%20C79.68%2086.44%2066.72%2093.93%2058.02%2079.94%20C57.49%2096.40%2042.51%2096.40%2041.98%2079.94%20C33.28%2093.93%2020.32%2086.44%2028.08%2071.92%20C13.56%2079.68%206.07%2066.72%2020.06%2058.02%20C3.60%2057.49%203.60%2042.51%2020.06%2041.98%20C6.07%2033.28%2013.56%2020.32%2028.08%2028.08%20C20.32%2013.56%2033.28%206.07%2041.98%2020.06%20Z'%2F%3E%3C%2Fsvg%3E");
+        mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox%3D'0%200%20100%20100'%3E%3Cpath%20d%3D'M41.98%2020.06%20C42.51%203.60%2057.49%203.60%2058.02%2020.06%20C66.72%206.07%2079.68%2013.56%2071.92%2028.08%20C86.44%2020.32%2093.93%2033.28%2079.94%2041.98%20C96.40%2042.51%2096.40%2057.49%2079.94%2058.02%20C93.93%2066.72%2086.44%2079.68%2071.92%2071.92%20C79.68%2086.44%2066.72%2093.93%2058.02%2079.94%20C57.49%2096.40%2042.51%2096.40%2041.98%2079.94%20C33.28%2093.93%2020.32%2086.44%2028.08%2071.92%20C13.56%2079.68%206.07%2066.72%2020.06%2058.02%20C3.60%2057.49%203.60%2042.51%2020.06%2041.98%20C6.07%2033.28%2013.56%2020.32%2028.08%2028.08%20C20.32%2013.56%2033.28%206.07%2041.98%2020.06%20Z'%2F%3E%3C%2Fsvg%3E");
+      }
+      .run-shape[data-shape="burst12"] {
+        -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox%3D'0%200%20100%20100'%3E%3Cpath%20d%3D'M50.00%201.00%20Q58.54%2018.12%2074.50%207.56%20Q73.33%2026.67%2092.44%2025.50%20Q81.88%2041.46%2099.00%2050.00%20Q81.88%2058.54%2092.44%2074.50%20Q73.33%2073.33%2074.50%2092.44%20Q58.54%2081.88%2050.00%2099.00%20Q41.46%2081.88%2025.50%2092.44%20Q26.67%2073.33%207.56%2074.50%20Q18.12%2058.54%201.00%2050.00%20Q18.12%2041.46%207.56%2025.50%20Q26.67%2026.67%2025.50%207.56%20Q41.46%2018.12%2050.00%201.00%20Z'%2F%3E%3C%2Fsvg%3E");
+        mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox%3D'0%200%20100%20100'%3E%3Cpath%20d%3D'M50.00%201.00%20Q58.54%2018.12%2074.50%207.56%20Q73.33%2026.67%2092.44%2025.50%20Q81.88%2041.46%2099.00%2050.00%20Q81.88%2058.54%2092.44%2074.50%20Q73.33%2073.33%2074.50%2092.44%20Q58.54%2081.88%2050.00%2099.00%20Q41.46%2081.88%2025.50%2092.44%20Q26.67%2073.33%207.56%2074.50%20Q18.12%2058.54%201.00%2050.00%20Q18.12%2041.46%207.56%2025.50%20Q26.67%2026.67%2025.50%207.56%20Q41.46%2018.12%2050.00%201.00%20Z'%2F%3E%3C%2Fsvg%3E");
+      }
+      /* STATIC-MASKS-END */
+
+      @keyframes sh-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @keyframes sh-shimmer {
+        to {
+          --sh-from: 360deg;
+        }
+      }
+      @keyframes sh-spin-pulse {
+        0% {
+          transform: rotate(0) scale(1);
+        }
+        50% {
+          transform: rotate(180deg) scale(0.82);
+        }
+        100% {
+          transform: rotate(360deg) scale(1);
+        }
+      }
+      @keyframes sh-color {
+        0% {
+          --sh1: var(--green-primary);
+          --sh2: var(--blue-primary);
+          --sh3: var(--violet-primary);
+        }
+        20% {
+          --sh1: var(--blue-primary);
+          --sh2: var(--violet-primary);
+          --sh3: var(--red-primary);
+        }
+        40% {
+          --sh1: var(--violet-primary);
+          --sh2: var(--red-primary);
+          --sh3: var(--yellow-primary);
+        }
+        60% {
+          --sh1: var(--red-primary);
+          --sh2: var(--yellow-primary);
+          --sh3: var(--green-primary);
+        }
+        80% {
+          --sh1: var(--yellow-primary);
+          --sh2: var(--green-primary);
+          --sh3: var(--blue-primary);
+        }
+        100% {
+          --sh1: var(--green-primary);
+          --sh2: var(--blue-primary);
+          --sh3: var(--violet-primary);
+        }
+      }
+
+      /* Tab / menu icon status tints — replace the old coloured dots. */
+      .subtab .tab-ico.ok,
+      .subtab.active .tab-ico.ok,
+      .menu-item svg.lead.ok {
+        color: var(--green-primary);
+      }
+      .subtab .tab-ico.err,
+      .subtab.active .tab-ico.err,
+      .menu-item svg.lead.err {
+        color: var(--red-primary);
+      }
+
+      /* ── Shape studio ── */
+      .shape-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .shape-card {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 9px;
+        padding: 20px 16px 18px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 86%, transparent);
+        text-align: center;
+      }
+      .shape-card.primary {
+        border-color: color-mix(in srgb, var(--violet-primary) 30%, var(--border1));
+        background: color-mix(in srgb, var(--violet-primary) 6%, var(--sidebar-bg));
+      }
+      .shape-stage {
+        display: grid;
+        place-items: center;
+        height: 88px;
+      }
+      .shape-card .name {
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .shape-card .cap {
+        color: var(--fg3);
+        font-size: 11px;
+        line-height: 1.45;
+      }
+      .usage {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        margin-top: 12px;
+      }
+      .usage-cell {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        height: 54px;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-md);
+        background: var(--bg1);
+      }
+      .usage-cell .mini-tab {
+        display: inline-flex;
+        align-items: center;
+        padding: 5px 9px;
+        border-radius: var(--radius-sm);
+        background: var(--bg2);
+        color: var(--fg1);
+        font-size: 12px;
+      }
+
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @keyframes blink {
+        50% {
+          opacity: 0;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .cursor,
+        .pill.run svg,
+        .sk-center svg {
+          animation: none;
+        }
+        /* Keep a gentle colour cycle so the "running" signal survives,
+           but stop the rotation / shimmer / pulse. */
+        .run-shape,
+        .run-shape.is-reverse,
+        .run-shape.is-pulse {
+          animation: sh-color var(--sh-color) linear infinite !important;
+        }
+      }
+
+      @media (max-width: 900px) {
+        .hero,
+        .thesis,
+        .dual {
+          grid-template-columns: 1fr;
+        }
+        .hero-aside {
+          align-items: flex-start;
+        }
+        .case-head {
+          flex-direction: column;
+          gap: 8px;
+        }
+        .meta {
+          max-width: none;
+          text-align: left;
+        }
+        .notes {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- ── Icon defs (lucide, matching the real components) ── -->
+    <svg aria-hidden="true" width="0" height="0" style="position: absolute">
+      <defs>
+        <symbol id="i-terminal" viewBox="0 0 24 24">
+          <path d="m4 17 6-6-6-6M12 19h8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-globe" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20" fill="none" stroke="currentColor" stroke-width="2" />
+        </symbol>
+        <symbol id="i-split" viewBox="0 0 24 24">
+          <rect x="3" y="3" width="18" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M14 3v18" fill="none" stroke="currentColor" stroke-width="2" />
+        </symbol>
+        <symbol id="i-play" viewBox="0 0 24 24">
+          <polygon points="6 3 20 12 6 21 6 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-play-fill" viewBox="0 0 24 24">
+          <polygon points="6 3 20 12 6 21 6 3" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+        </symbol>
+        <!-- Thin 1px-stroke variants for the empty-state illustrations. -->
+        <symbol id="i-play-line" viewBox="0 0 24 24">
+          <polygon points="6 3 20 12 6 21 6 3" fill="none" stroke="currentColor" stroke-width="1" stroke-linejoin="round" vector-effect="non-scaling-stroke" />
+        </symbol>
+        <symbol id="i-flask-line" viewBox="0 0 24 24">
+          <path d="M14 2v6a2 2 0 0 0 .245.96l5.51 10.08A2 2 0 0 1 18 22H6a2 2 0 0 1-1.755-2.96l5.51-10.08A2 2 0 0 0 10 8V2M6.453 15h11.094M8.5 2h7" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" />
+        </symbol>
+        <symbol id="i-rotate" viewBox="0 0 24 24">
+          <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="M3 3v5h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-check" viewBox="0 0 24 24">
+          <path d="M21.8 10A10 10 0 1 1 17 3.3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="m9 11 3 3L22 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-x-circle" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="m15 9-6 6M9 9l6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-loader" viewBox="0 0 24 24">
+          <path d="M21 12a9 9 0 1 1-6.22-8.56" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-plus" viewBox="0 0 24 24">
+          <path d="M5 12h14M12 5v14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-x" viewBox="0 0 24 24">
+          <path d="M18 6 6 18M6 6l12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-square" viewBox="0 0 24 24">
+          <rect x="5" y="5" width="14" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="2" />
+        </symbol>
+        <symbol id="i-chevron-down" viewBox="0 0 24 24">
+          <path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-search" viewBox="0 0 24 24">
+          <circle cx="11" cy="11" r="8" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="m21 21-4.3-4.3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-settings" viewBox="0 0 24 24">
+          <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2" />
+        </symbol>
+        <symbol id="i-bug" viewBox="0 0 24 24">
+          <path d="m8 2 1.88 1.88M14.12 3.88 16 2M9 7.13v-1a3.003 3.003 0 1 1 6 0v1M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6M12 20v-9M6.53 9C4.6 8.8 3 7.1 3 5M6 13H2M3 21c0-2.1 1.7-3.9 3.8-4M20.97 5c0 2.1-1.6 3.8-3.5 4M22 13h-4M17.2 17c2.1.1 3.8 1.9 3.8 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-flask" viewBox="0 0 24 24">
+          <path d="M14 2v6a2 2 0 0 0 .245.96l5.51 10.08A2 2 0 0 1 18 22H6a2 2 0 0 1-1.755-2.96l5.51-10.08A2 2 0 0 0 10 8V2M6.453 15h11.094M8.5 2h7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-wrench" viewBox="0 0 24 24">
+          <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-trash" viewBox="0 0 24 24">
+          <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M10 11v6M14 11v6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-clock" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M12 6v6l4 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-package" viewBox="0 0 24 24">
+          <path d="m7.5 4.27 9 5.15M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z M3.3 7 12 12l8.7-5M12 22V12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-database" viewBox="0 0 24 24">
+          <ellipse cx="12" cy="5" rx="9" ry="3" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M3 5v14a9 3 0 0 0 18 0V5M3 12a9 3 0 0 0 18 0" fill="none" stroke="currentColor" stroke-width="2" />
+        </symbol>
+        <symbol id="i-cloud" viewBox="0 0 24 24">
+          <path d="M17.5 19a4.5 4.5 0 1 0 0-9h-1.8A7 7 0 1 0 4 15.7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-folder-x" viewBox="0 0 24 24">
+          <path d="M12.5 21H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="m17 17 4 4M21 17l-4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-plug" viewBox="0 0 24 24">
+          <path d="M12 22v-5M9 8V2M15 8V2M18 8v3a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-sun" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+      </defs>
+    </svg>
+
+    <main class="page">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">Terminal pane · Run tab · State catalog</div>
+          <h1>Every state the Run tab can show — and how to make it multi-run</h1>
+          <p class="lede">
+            Today “Run” is a single command typed into a shell: one script per
+            repo, one tab, and no way to tell whether it passed or failed. This
+            catalog is the full inventory — what ships now, and a before / after
+            for the leap to <b>many named actions</b>, each with its own status —
+            a rotating star while it runs, a green or red icon once it’s done —
+            an icon you pick, and a header split-button to launch them.
+          </p>
+        </div>
+        <div class="hero-aside">
+          <button class="theme-toggle" id="themeBtn" type="button">
+            <svg width="14" height="14"><use href="#i-sun" /></svg>
+            <span id="themeLabel">Light preview</span>
+          </button>
+          <div class="summary-chip">
+            <strong>From one “Run” to a shelf of actions</strong>
+            <span>Many scripts, real status, icons, one header button.</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="thesis" aria-label="Goals">
+        <div class="thesis-card primary">
+          <h3>One run, or many</h3>
+          <p>
+            Launch several scripts at once — Dev, Test, Storybook — each in its
+            own Run tab. The PTY engine already runs them concurrently; only the
+            model says “one”.
+          </p>
+        </div>
+        <div class="thesis-card">
+          <h3>Status you can read</h3>
+          <p>
+            Running is a rotating star; finished and failed tint the tab icon
+            green or red — on the tab, in the header, and surviving a restart.
+            The same status backbone Setup just got.
+          </p>
+        </div>
+        <div class="thesis-card">
+          <h3>Actions you configure</h3>
+          <p>
+            Name it, give it an icon from a searchable grid, set its command and
+            platforms — then launch it from one header split-button.
+          </p>
+        </div>
+      </section>
+
+      <nav aria-label="Cases">
+        <a href="#studio">★ Shape studio</a>
+        <span class="nav-sep"></span>
+        <a href="#a1">A1 · No run script</a>
+        <a href="#a2">A2 · No run yet</a>
+        <a href="#a3">A3 · Running</a>
+        <a href="#a4">A4 · Exited</a>
+        <a href="#a5">A5 · Header button</a>
+        <span class="nav-sep"></span>
+        <a href="#b1">B1 · Run many at once</a>
+        <a href="#b2">B2 · Header split-button</a>
+        <a href="#b3">B3 · Configure &amp; icons</a>
+        <a href="#b4">B4 · Real run status</a>
+        <a href="#b5">B5 · Status survives restart</a>
+        <span class="nav-sep"></span>
+        <a href="#c1">C1 · Worktree missing</a>
+        <a href="#c2">C2 · No host</a>
+      </nav>
+
+      <p class="band">The running indicator — shape studio</p>
+
+      <div class="catalog">
+        <!-- Studio ─────────────────────────────────────────── -->
+        <section class="case" id="studio">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">★</span>
+                <span class="tag changed">New</span>
+              </div>
+              <h2>A rotating “indianised star” means a run is live</h2>
+              <p class="case-copy">
+                Rather than a waveform or a coloured dot, a live
+                run is marked by a small <b>rotating star</b> — a Zeros-palette
+                gradient that spins, shimmers, and shifts colour on every turn.
+                It replaces the status dot on Run tabs, sits beside the header
+                Stop button, and lands on the split-button face.
+                <b>Finalized: Sparkle</b> — the 4-point star — at the faster
+                spin, shown wherever an action is running. The other shapes
+                below are kept for reference only.
+              </p>
+            </div>
+            <div class="meta">
+              Pure CSS + an SVG mask — no images, no canvas. Colours are the real
+              tokens; honours <code>prefers-reduced-motion</code>.
+            </div>
+          </div>
+
+          <div class="shape-grid">
+            <div class="shape-card primary">
+              <div class="shape-stage"><span class="run-shape run-shape--lg" data-shape="sparkle"></span></div>
+              <div class="name">Sparkle <span class="tag changed" style="margin-left: 4px">Final</span></div>
+              <div class="cap">4-point star · bright and quick</div>
+            </div>
+            <div class="shape-card">
+              <div class="shape-stage"><span class="run-shape run-shape--lg" data-shape="lotus8"></span></div>
+              <div class="name">Lotus</div>
+              <div class="cap">8 pointed petals · spin + shimmer</div>
+            </div>
+            <div class="shape-card">
+              <div class="shape-stage"><span class="run-shape run-shape--lg" data-shape="bloom8"></span></div>
+              <div class="name">Bloom</div>
+              <div class="cap">8 rounded lobes · soft and friendly</div>
+            </div>
+            <div class="shape-card">
+              <div class="shape-stage"><span class="run-shape run-shape--lg is-reverse" data-shape="star6"></span></div>
+              <div class="name">Star</div>
+              <div class="cap">6-point star · reverse spin</div>
+            </div>
+            <div class="shape-card">
+              <div class="shape-stage"><span class="run-shape run-shape--lg is-pulse" data-shape="marigold"></span></div>
+              <div class="name">Marigold</div>
+              <div class="cap">12 lobes · spin + breathing pulse</div>
+            </div>
+            <div class="shape-card">
+              <div class="shape-stage"><span class="run-shape run-shape--lg is-fast" data-shape="burst12"></span></div>
+              <div class="name">Burst</div>
+              <div class="cap">12-point starburst · fast spin</div>
+            </div>
+          </div>
+
+          <div class="usage">
+            <div class="usage-cell">
+              <span class="mini-tab"><span class="run-shape run-shape--tab" data-shape="sparkle"></span>Dev</span>
+            </div>
+            <div class="usage-cell">
+              <span class="run-shape run-shape--btn" data-shape="sparkle"></span>
+              <span class="btn-secondary" style="height: 28px"><svg width="14" height="14"><use href="#i-square" /></svg>Stop</span>
+            </div>
+            <div class="usage-cell">
+              <span class="split" style="height: 28px">
+                <span class="split-face"><span class="run-shape run-shape--btn" data-shape="sparkle"></span>Dev</span>
+                <span class="split-caret"><svg><use href="#i-chevron-down" /></svg></span>
+              </span>
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">How it behaves</div>
+            <ul>
+              <li><b>Shown only while a run is live.</b> It appears when the process starts and vanishes the instant it exits — its <em>presence</em> is the “running” signal, so no “(exited)” text or amber dot is needed (see A3/A4).</li>
+              <li><b>Colours cycle through the palette</b> — green → blue → violet → red → yellow — so every rotation looks a little different, and the gradient shimmers <em>within</em> the shape while the shape itself turns.</li>
+              <li><b>One shape everywhere:</b> every running action wears the same Sparkle, so “that star = something is running” stays a single learnable signal; the tab’s icon and label carry the which-action distinction (see B1/B2).</li>
+              <li><b>Reduced motion:</b> rotation, shimmer, and pulse stop; a slow colour cycle remains so the signal never disappears entirely.</li>
+            </ul>
+          </div>
+        </section>
+      </div>
+
+      <p class="band">Part A — What ships today</p>
+
+      <div class="catalog">
+        <!-- A1 ───────────────────────────────────────────── -->
+        <section class="case" id="a1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A1</span>
+                <span class="tag ship">Ships today</span>
+                <span class="tag changed">Changes</span>
+              </div>
+              <h2>No run script configured</h2>
+              <p class="case-copy">
+                When the repo defines no <code>scripts.run</code>, the Run
+                sub-tab and the header “Run” button both simply <b>don’t
+                appear</b> — the whole affordance is invisible, with no hint that
+                a run command can be added or where.
+              </p>
+            </div>
+            <div class="meta">Today the user can’t discover “Run” at all here.</div>
+          </div>
+
+          <div class="frame single">
+            <div class="rail">
+              <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+              <span class="rail-spacer"></span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+            </div>
+            <div class="subtabs">
+              <span class="subtab active">Setup</span>
+              <span class="subtab">Terminal</span>
+              <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+            </div>
+            <div class="body">
+              <div class="empty">
+                <span class="illus"><svg viewBox="0 0 24 24"><use href="#i-play-line" /></svg></span>
+                <button class="btn-secondary" type="button">Add run script</button>
+                <div class="empty-desc">
+                  Run a dev server or test command in this workspace.
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Changes</div>
+            <ul>
+              <li>Give the empty case a <b>discoverable state</b> instead of an absent tab: <b>illustration → “Add run script” (24px secondary, no icon) → description</b> — the exact A1/A2 layout Setup now uses.</li>
+              <li>“Add run script” deep-links to <b>Settings → Repositories → Run scripts</b> (see B3). The Run sub-tab still hides until at least one action exists — but the user now knows it’s possible.</li>
+              <li><em>Open question:</em> show this only when the Setup tab is present, or always seed a Run sub-tab so the affordance is never fully hidden?</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- A2 ───────────────────────────────────────────── -->
+        <section class="case" id="a2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A2</span>
+                <span class="tag ship">Ships today</span>
+                <span class="tag changed">Changes</span>
+              </div>
+              <h2>No run yet — idle</h2>
+              <p class="case-copy">
+                A run command exists but hasn’t started this session. Today: a big
+                translucent play glyph, a “Start Run” button with a cosmetic “⌘R”
+                hint, and “Test your changes here.”
+              </p>
+            </div>
+            <div class="meta">
+              The “⌘R” hint is cosmetic — Cmd+R is blocked app-wide and never
+              bound.
+            </div>
+          </div>
+
+          <div class="frame single">
+            <div class="rail">
+              <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+              <span class="rail-spacer"></span>
+              <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+            </div>
+            <div class="subtabs">
+              <span class="subtab">Setup</span>
+              <span class="subtab active">Run</span>
+              <span class="subtab">Terminal</span>
+              <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+            </div>
+            <div class="body">
+              <div class="empty">
+                <span class="illus"><svg viewBox="0 0 24 24"><use href="#i-play-line" /></svg></span>
+                <button class="btn-secondary" type="button">Start run</button>
+                <div class="empty-desc">Start the dev server for this workspace.</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Changes</div>
+            <ul>
+              <li>Adopt the Setup empty-state rhythm: <b>1px-stroke illustration → 24px secondary “Start run” (no icon) → one-line description</b> (was: opacity-40 glyph + inline “Start Run · ⌘R” + “Test your changes here.”).</li>
+              <li><b>Drop the cosmetic “⌘R”</b> until a real shortcut is bound — OR wire Cmd+R for real (it’s currently <code>preventDefault</code>’d in <code>electron/main.ts</code>). Showing a shortcut that does nothing is worse than none.</li>
+              <li>With multiple actions (B1) the description names the action: <em>“Start Dev — <code>pnpm dev</code>.”</em></li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- A3 ───────────────────────────────────────────── -->
+        <section class="case" id="a3">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A3</span>
+                <span class="tag ship">Ships today</span>
+                <span class="tag changed">Changes</span>
+              </div>
+              <h2>Run running — live output</h2>
+              <p class="case-copy">
+                The command runs live in an interactive shell. There is <b>no
+                status pill, no spinner, no tab dot, and no Stop control</b> — just
+                streaming output. The tab label stays “Run”.
+              </p>
+            </div>
+            <div class="meta">
+              It’s a shell with the command typed in — Ctrl-C drops you back to a
+              live prompt, not an exit. Status treatment proposed in B4.
+            </div>
+          </div>
+
+          <div class="frame single">
+            <div class="rail">
+              <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+              <span class="rail-spacer"></span>
+              <span class="run-shape run-shape--btn" data-shape="sparkle"></span>
+              <span class="rail-run"><svg width="14" height="14"><use href="#i-square" /></svg>Stop</span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+            </div>
+            <div class="subtabs">
+              <span class="subtab">Setup</span>
+              <span class="subtab active"><span class="run-shape run-shape--tab" data-shape="sparkle"></span>Run</span>
+              <span class="subtab">Terminal</span>
+              <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+            </div>
+            <div class="body">
+              <div class="term">
+                <div class="term-log"><span class="c-dim">~/project (feat) $</span> pnpm dev
+<span class="c-dim">&gt; vite</span>
+
+  <span class="c-ok">VITE v6.0.3</span>  ready in <span class="c-info">412</span> ms
+
+  ➜  Local:   <span class="c-info">http://localhost:5173/</span>
+  ➜  Network: use <span class="c-dim">--host</span> to expose
+  ➜  press <span class="c-dim">h + enter</span> to show help
+<span class="cursor"></span></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Changes</div>
+            <ul>
+              <li>A live run now carries the <b>rotating star</b> — on the Run tab (as its leading glyph) and beside the header control — so “something is running” is legible at a glance, even from another tab.</li>
+              <li>The header <b>“Run” becomes “Stop”</b> (□ Stop) while the process is alive, giving a real way to end it instead of Ctrl-C inside the shell.</li>
+              <li>The star <em>is</em> the running signal: when the process exits it simply disappears (A4). No status pill or dot is added to the tab.</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- A4 ───────────────────────────────────────────── -->
+        <section class="case" id="a4">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A4</span>
+                <span class="tag ship">Ships today</span>
+                <span class="tag changed">Changes</span>
+              </div>
+              <h2>Run exited — success and failure look identical</h2>
+              <p class="case-copy">
+                When the shell exits, the tab gains a dim “(exited)” suffix and the
+                body prints <code>[process exited with code N] — press any key to
+                restart</code>. That exit code is the <b>only</b> pass/fail signal,
+                and it’s never stored — <b>a code 0 and a code 1 look the same</b>.
+              </p>
+            </div>
+            <div class="meta">
+              No pill, no color, no persistence. Pressing any key restarts.
+            </div>
+          </div>
+
+          <div class="frame single">
+            <div class="rail">
+              <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+              <span class="rail-spacer"></span>
+              <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+            </div>
+            <div class="subtabs">
+              <span class="subtab">Setup</span>
+              <span class="subtab active">Run</span>
+              <span class="subtab">Terminal</span>
+              <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+            </div>
+            <div class="body">
+              <div class="term">
+                <div class="term-log"><span class="c-dim">~/project (feat) $</span> pnpm test
+<span class="c-dim">&gt; vitest run</span>
+
+ <span class="c-err">FAIL</span>  src/engine/run/service.test.ts <span class="c-dim">&gt;</span> spawns concurrent runs
+ <span class="c-err">AssertionError</span>: expected 2 sessions, got 1
+Tests  <span class="c-err">1 failed</span> | <span class="c-ok">42 passed</span> (43)
+
+<span class="c-dim">[process exited with code 1] — press any key to restart</span></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Changes</div>
+            <ul>
+              <li><b>Drop the “(exited)” suffix.</b> The rotating star (A3) was the “running” marker; when the run ends the star is already gone, so its absence <em>is</em> “not running” — the grey text just repeats that.</li>
+              <li>The real verdict — <b>finished</b> or <b>failed</b> — is what’s missing today, and it arrives via the tab icon’s colour plus a corner badge in <b>B4/B5</b>, not a throwaway log line.</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- A5 ───────────────────────────────────────────── -->
+        <section class="case" id="a5">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A5</span>
+                <span class="tag ship">Ships today</span>
+                <span class="tag changed">Changes</span>
+              </div>
+              <h2>Header “Run” button — one command, no state</h2>
+              <p class="case-copy">
+                At the right of Column 3’s header sits a single stateless button:
+                a play glyph + the literal word “Run” (never the script’s name).
+                It launches <code>scripts.run</code> and jumps to the Run sub-tab.
+                It looks <b>exactly the same whether the dev server is stopped or
+                running</b> — no Stop, no spinner, no indicator.
+              </p>
+            </div>
+            <div class="meta">
+              One repo = one run command. Multiple actions proposed in B1/B2.
+            </div>
+          </div>
+
+          <div class="frame single">
+            <div class="rail">
+              <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+              <span class="rail-spacer"></span>
+              <span class="run-shape run-shape--btn" data-shape="sparkle"></span>
+              <span class="rail-run"><svg width="14" height="14"><use href="#i-square" /></svg>Stop</span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+            </div>
+            <div class="subtabs">
+              <span class="subtab active">Setup</span>
+              <span class="subtab">Run</span>
+              <span class="subtab">Terminal</span>
+              <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+            </div>
+            <div class="body">
+              <div class="empty">
+                <div class="empty-desc" style="max-width: 320px">
+                  While a run is live the header now shows the <b>rotating
+                  star</b> and the button reads <b>Stop</b> — so it reflects
+                  what’s running instead of a fixed “Run”. The tooltip still
+                  names the command.
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Changes</div>
+            <ul>
+              <li>When a run is live the header pairs the <b>rotating star</b> with a <b>Stop</b> button — was a single “Run” that looked identical whether the server was stopped or running.</li>
+              <li>With multiple actions this becomes the split-button (B2); the star lands on the face of whichever action is running.</li>
+            </ul>
+          </div>
+        </section>
+      </div>
+
+      <p class="band">Part B — Gaps to build · before → after</p>
+
+      <div class="catalog">
+        <!-- B1 ───────────────────────────────────────────── -->
+        <section class="case" id="b1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">B1</span>
+                <span class="tag gap">Gap → proposal</span>
+              </div>
+              <h2>Run many scripts at once</h2>
+              <p class="case-copy">
+                Today only one run exists — a single <code>scripts.run</code> string
+                and one deterministic <code>pty-run-&lt;hash&gt;</code> session that
+                every launch reattaches to. <b>After:</b> each configured action
+                gets its own Run sub-tab and its own PTY, so Dev, Test, and
+                Storybook run <b>side by side</b>. The engine already supports
+                unlimited concurrent terminals — plain terminals prove it.
+              </p>
+            </div>
+            <div class="meta">
+              The cap is the data model, not the engine. One id per action, not
+              per folder.
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — one Run tab</div>
+              <div class="frame">
+                <div class="rail">
+                  <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+                  <span class="rail-spacer"></span>
+                  <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+                </div>
+                <div class="subtabs">
+                  <span class="subtab">Setup</span>
+                  <span class="subtab active">Run</span>
+                  <span class="subtab">Terminal</span>
+                  <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+                </div>
+                <div class="body">
+                  <div class="term">
+                    <div class="term-log"><span class="c-dim">~/project (feat) $</span> pnpm dev
+  <span class="c-ok">VITE v6.0.3</span>  ready in <span class="c-info">412</span> ms
+  ➜  Local:   <span class="c-info">http://localhost:5173/</span><span class="cursor"></span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — one tab per action</div>
+              <div class="frame">
+                <div class="rail">
+                  <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+                  <span class="rail-spacer"></span>
+                  <span class="split">
+                    <span class="split-face"><span class="run-shape run-shape--btn" data-shape="sparkle"></span>Dev</span>
+                    <span class="split-caret"><svg><use href="#i-chevron-down" /></svg></span>
+                  </span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+                </div>
+                <div class="subtabs">
+                  <span class="subtab">Setup</span>
+                  <span class="subtab active"><span class="run-shape run-shape--tab" data-shape="sparkle"></span>Dev</span>
+                  <span class="subtab"><svg class="tab-ico err"><use href="#i-flask" /></svg>Test</span>
+                  <span class="subtab"><svg class="tab-ico ok"><use href="#i-globe" /></svg>Storybook</span>
+                  <span class="subtab">Terminal</span>
+                  <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+                </div>
+                <div class="body">
+                  <div class="term">
+                    <div class="term-log"><span class="c-dim">~/project (feat) $</span> pnpm dev
+  <span class="c-ok">VITE v6.0.3</span>  ready in <span class="c-info">412</span> ms
+  ➜  Local:   <span class="c-info">http://localhost:5173/</span>
+<span class="c-dim">hmr update</span> <span class="c-path">/src/shell/run-tab.tsx</span><span class="cursor"></span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes">
+            <div class="note">
+              <b>Before:</b> a second launch never spawns a second run — it just
+              reattaches to the one live session. You can’t run Dev and Test at the
+              same time.
+            </div>
+            <div class="note fix">
+              <b>After:</b> ids become <code>pty-run-&lt;hash&gt;-&lt;actionId&gt;</code>;
+              each action opens/focuses its own tab, wears its own icon — a
+              <b>rotating star</b> while it runs, then green / red when it’s done —
+              and closes independently. A running action’s tab can’t be closed
+              without a confirm.
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Changes · no dots</div>
+            <ul>
+              <li><b>The status dot is gone.</b> A running tab shows the <b>rotating star</b> in place of its icon (here: Dev); a finished tab tints its icon <b>green</b> (Storybook), a failed one <b>red</b> (Test).</li>
+              <li>Because the star only shows while live, several running tabs each get one — the same <b>Sparkle</b> on each, with the tab label telling the actions apart.</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- B2 ───────────────────────────────────────────── -->
+        <section class="case" id="b2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">B2</span>
+                <span class="tag gap">Gap → proposal</span>
+              </div>
+              <h2>A header split-button for your actions</h2>
+              <p class="case-copy">
+                One button can’t launch five scripts. <b>After:</b> the header
+                becomes a <b>split-button</b> — the face runs your default action
+                (with a real shortcut), the caret opens a menu of <b>every</b>
+                action — its icon (a rotating star while it runs) and shortcut —
+                plus a “Configure…” entry into settings.
+              </p>
+            </div>
+            <div class="meta">
+              Mirrors the reference “▷ Preview ⌘R ⌄ → Preview / Testing /
+              Configure”.
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — single button</div>
+              <div class="frame">
+                <div class="rail">
+                  <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+                  <span class="rail-spacer"></span>
+                  <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+                </div>
+                <div class="subtabs">
+                  <span class="subtab active">Setup</span>
+                  <span class="subtab">Run</span>
+                  <span class="subtab">Terminal</span>
+                  <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+                </div>
+                <div class="body">
+                  <div class="empty">
+                    <div class="empty-desc" style="max-width: 280px">
+                      Launches the one <code>scripts.run</code> command. No way to
+                      reach a second script, and no sign of what’s live.
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — split-button + menu</div>
+              <div class="frame">
+                <div class="rail">
+                  <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+                  <span class="rail-spacer"></span>
+                  <span class="split" style="position: relative">
+                    <span class="split-face"><span class="run-shape run-shape--btn" data-shape="sparkle"></span>Dev<span class="kbd">⌘R</span></span>
+                    <span class="split-caret"><svg><use href="#i-chevron-down" /></svg></span>
+                  </span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+                </div>
+                <div class="body" style="height: 250px">
+                  <div style="padding: 8px 12px; display: flex; justify-content: flex-end">
+                    <div class="menu">
+                      <div class="menu-item active"><span class="run-shape run-shape--menu lead" data-shape="sparkle"></span><span class="m-label">Dev</span><span class="m-kbd">⌘R</span></div>
+                      <div class="menu-item"><span class="run-shape run-shape--menu lead" data-shape="sparkle"></span><span class="m-label">Storybook</span><span class="m-kbd">⌘S</span></div>
+                      <div class="menu-item"><svg class="lead err"><use href="#i-flask" /></svg><span class="m-label">Test</span><span class="m-kbd">⌘T</span></div>
+                      <div class="menu-item"><svg class="lead ok"><use href="#i-package" /></svg><span class="m-label">Build</span></div>
+                      <div class="menu-sep"></div>
+                      <div class="menu-item muted"><svg class="lead"><use href="#i-settings" /></svg><span class="m-label">Configure actions…</span></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes">
+            <div class="note">
+              <b>Before:</b> the button hard-codes the glyph <code>Play</code> and
+              the label “Run”; the script name and any second command are
+              unreachable from the header.
+            </div>
+            <div class="note fix">
+              <b>After:</b> the face carries the default action’s icon — or its
+              <b>rotating star</b> while it runs, alongside a Stop affordance;
+              menu items launch/focus each action, showing the <b>Sparkle per
+              live run</b> (here Dev + Storybook) and a red icon for a failure. Model it on the existing “Open in” split-button
+              so it’s primitive-consistent.
+            </div>
+          </div>
+        </section>
+
+        <!-- B3 ───────────────────────────────────────────── -->
+        <section class="case" id="b3">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">B3</span>
+                <span class="tag gap">Gap → proposal</span>
+              </div>
+              <h2>Configure actions — with a searchable icon picker</h2>
+              <p class="case-copy">
+                Today “Scripts” settings offer three fixed slots — Setup / Run /
+                Archive — plain strings with no name and no icon. <b>After:</b> a
+                real <b>actions list</b>: add as many as you like, each with a
+                name, a command, platforms, and an <b>icon chosen from a searchable
+                grid</b> (not a 4-item preset).
+              </p>
+            </div>
+            <div class="meta">
+              Needs a new <code>icon</code> + <code>platforms</code> field, and an
+              icon-name → component renderer (none exists yet).
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — 3 fixed script slots</div>
+              <div class="frame">
+                <div class="body tall">
+                  <div class="settings">
+                    <div class="settings-title">Scripts</div>
+                    <div class="settings-sub">Run automatically at key moments in a workspace’s life.</div>
+                    <div class="field">
+                      <div class="field-label">Setup</div>
+                      <div class="row"><span class="input mono placeholder">pnpm install</span></div>
+                    </div>
+                    <div class="field">
+                      <div class="field-label">Run</div>
+                      <div class="row"><span class="input mono">pnpm dev</span></div>
+                    </div>
+                    <div class="field">
+                      <div class="field-label">Archive</div>
+                      <div class="row"><span class="input mono placeholder">git clean -fdx</span></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — an actions list + icon picker</div>
+              <div class="frame">
+                <div class="body tall">
+                  <div class="settings">
+                    <div class="settings-head">
+                      <div>
+                        <div class="settings-title">Run actions</div>
+                      </div>
+                      <button class="btn add" type="button"><svg><use href="#i-plus" /></svg>Add action</button>
+                    </div>
+                    <div class="settings-sub">Named commands you can launch from the header and Run tabs.</div>
+                    <div class="settings-card">
+                      <div class="field">
+                        <div class="field-label">Name</div>
+                        <div class="row" style="position: relative">
+                          <button class="icon-btn" type="button"><svg><use href="#i-play" /></svg></button>
+                          <span class="input">Dev</span>
+                          <!-- icon picker popover -->
+                          <div class="picker" style="position: absolute; top: 34px; left: 0; z-index: 5">
+                            <div class="picker-search"><svg><use href="#i-search" /></svg>Search icons</div>
+                            <div class="icon-grid">
+                              <span class="icon-cell sel"><svg><use href="#i-play" /></svg></span>
+                              <span class="icon-cell"><svg><use href="#i-flask" /></svg></span>
+                              <span class="icon-cell"><svg><use href="#i-bug" /></svg></span>
+                              <span class="icon-cell"><svg><use href="#i-wrench" /></svg></span>
+                              <span class="icon-cell"><svg><use href="#i-package" /></svg></span>
+                              <span class="icon-cell"><svg><use href="#i-globe" /></svg></span>
+                              <span class="icon-cell"><svg><use href="#i-database" /></svg></span>
+                              <span class="icon-cell"><svg><use href="#i-cloud" /></svg></span>
+                              <span class="icon-cell"><svg><use href="#i-terminal" /></svg></span>
+                              <span class="icon-cell"><svg><use href="#i-settings" /></svg></span>
+                              <span class="icon-cell"><svg><use href="#i-rotate" /></svg></span>
+                              <span class="icon-cell"><svg><use href="#i-plug" /></svg></span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes">
+            <div class="note">
+              <b>Before:</b> the <code>scripts</code> schema is a fixed 3-key object
+              (setup/run/archive), no names, no icons. A dormant
+              <code>RepoScript[]</code> stub exists but nothing reads it — and it
+              has no icon/platforms field either.
+            </div>
+            <div class="note fix">
+              <b>After:</b> each card = icon button (opens the searchable grid) +
+              Name + Command (textarea) + Platforms chips + “Run on create” + “Set
+              as default”. Icons persist as a <b>Lucide name string</b> (the Skills
+              precedent) rendered through a new name→component map.
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Design notes</div>
+            <ul>
+              <li>The reference used a tiny <b>Tool / Run / Debug / Test</b> dropdown — too few. Ship the <b>“Search icons” grid</b> instead; the <b>12 curated Lucide icons</b> shown here are enough to start — searchable and keyboard-navigable, room to grow later.</li>
+              <li><em>Naming collision:</em> Settings already has an <b>“Actions”</b> section (agent instruction prompts). Call this <b>“Run actions”</b> or <b>“Commands”</b> — do not reuse the bare word “Actions”.</li>
+              <li>Full card (Name + Command + Platforms + toggles + delete) shown in the report; the frame highlights the <b>icon picker</b> moment.</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- B4 ───────────────────────────────────────────── -->
+        <section class="case" id="b4">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">B4</span>
+                <span class="tag gap">Gap → proposal</span>
+              </div>
+              <h2>Give Run a real status — running / finished / failed</h2>
+              <p class="case-copy">
+                “How is the run status captured?” Today: it isn’t — only a boolean
+                <code>alive</code> and a throwaway exit line. <b>After:</b> Run
+                borrows Setup’s exact status language — a filled outcome badge
+                (green <b>finished</b> / red <b>failed</b>) and a tab-icon tint —
+                driven by the real exit code.
+              </p>
+            </div>
+            <div class="meta">
+              A one-shot action reports pass/fail; a long-lived dev server shows
+              “running” until you stop it.
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — “(exited)”, no verdict</div>
+              <div class="frame">
+                <div class="rail">
+                  <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+                  <span class="rail-spacer"></span>
+                  <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+                </div>
+                <div class="subtabs">
+                  <span class="subtab">Setup</span>
+                  <span class="subtab active">Run<span class="exited">(exited)</span></span>
+                  <span class="subtab">Terminal</span>
+                  <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+                </div>
+                <div class="body">
+                  <div class="term">
+                    <div class="term-log"><span class="c-dim">$</span> pnpm test
+ <span class="c-err">FAIL</span>  1 failed | <span class="c-ok">42 passed</span>
+<span class="c-dim">[process exited with code 1] — press any key to restart</span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — outcome badge + red icon</div>
+              <div class="frame">
+                <div class="rail">
+                  <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+                  <span class="rail-spacer"></span>
+                  <span class="split">
+                    <span class="split-face"><svg><use href="#i-play" /></svg>Dev</span>
+                    <span class="split-caret"><svg><use href="#i-chevron-down" /></svg></span>
+                  </span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+                </div>
+                <div class="subtabs">
+                  <span class="subtab">Setup</span>
+                  <span class="subtab active"><svg class="tab-ico err"><use href="#i-flask" /></svg>Test</span>
+                  <span class="subtab">Terminal</span>
+                  <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+                </div>
+                <div class="body">
+                  <div class="term">
+                    <div class="term-log"><span class="c-dim">$</span> pnpm test
+ <span class="c-err">FAIL</span>  1 failed | <span class="c-ok">42 passed</span>
+<span class="c-err">Test exited with code 1</span></div>
+                    <div class="status">
+                      <span class="status-badge err">Run failed</span>
+                      <button class="btn" type="button"><svg><use href="#i-rotate" /></svg>Rerun</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes">
+            <div class="note">
+              <b>Before:</b> pass and fail are visually identical; the exit code
+              lives only in dim body text and is discarded. Nothing on the tab, in
+              the header, or after restart tells you the verdict.
+            </div>
+            <div class="note fix">
+              <b>After:</b> a <code>RunManager</code> (mirroring
+              <code>SetupManager</code>) captures <code>running → finished |
+              failed | stopped</code> from the exit code, shows the 24px filled
+              badge + “Rerun”, and marks the tab — a rotating star while running,
+              then a green / red icon — the identical rule Setup uses.
+            </div>
+          </div>
+
+          <div class="changes">
+            <div class="changes-label">Status rules (shared with Setup)</div>
+            <ul>
+              <li><b>Long-lived vs one-shot:</b> a dev server has no meaningful exit while alive → it shows the <b>rotating star</b> and a <b>Stop</b> control, not a verdict. A one-shot (test/build) resolves to <b>finished</b>/<b>failed</b>.</li>
+              <li><b>The tab carries the state on its icon</b> — a rotating star while running, then the icon tints <b>green</b> (finished) or <b>red</b> (failed). No separate dot; the star clears on exit, the colour persists until the next run.</li>
+              <li><b>Stopped is not failed:</b> hitting Stop records <em>stopped</em> (neutral) — the icon returns to its normal colour, not red.</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- B5 ───────────────────────────────────────────── -->
+        <section class="case" id="b5">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">B5</span>
+                <span class="tag gap">Gap → proposal</span>
+              </div>
+              <h2>Status that survives a restart</h2>
+              <p class="case-copy">
+                Run state is in-memory only; on reload <code>alive</code> is forced
+                back to true and the command never re-fires — so a finished or
+                failed run comes back looking <b>idle, as if it never ran</b>.
+                <b>After:</b> the last outcome is remembered per action and shown as
+                a compact summary with a timestamp and “Run again”.
+              </p>
+            </div>
+            <div class="meta">
+              The result is durable (a DB row); only the live log is transient.
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — after restart, looks idle</div>
+              <div class="frame">
+                <div class="rail">
+                  <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+                  <span class="rail-spacer"></span>
+                  <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+                </div>
+                <div class="subtabs">
+                  <span class="subtab">Setup</span>
+                  <span class="subtab active">Test</span>
+                  <span class="subtab">Terminal</span>
+                  <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+                </div>
+                <div class="body">
+                  <div class="empty">
+                    <span class="illus"><svg viewBox="0 0 24 24"><use href="#i-flask-line" /></svg></span>
+                    <button class="btn-secondary" type="button">Start Test</button>
+                    <div class="empty-desc">Run the test command for this workspace.</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — remembered last run</div>
+              <div class="frame">
+                <div class="rail">
+                  <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+                  <span class="rail-spacer"></span>
+                  <span class="split">
+                    <span class="split-face"><svg><use href="#i-play" /></svg>Dev</span>
+                    <span class="split-caret"><svg><use href="#i-chevron-down" /></svg></span>
+                  </span>
+                  <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+                </div>
+                <div class="subtabs">
+                  <span class="subtab">Setup</span>
+                  <span class="subtab active"><svg class="tab-ico"><use href="#i-flask" /></svg>Test</span>
+                  <span class="subtab">Terminal</span>
+                  <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+                </div>
+                <div class="body">
+                  <div class="term">
+                    <div class="empty">
+                      <span class="illus"><svg viewBox="0 0 24 24"><use href="#i-flask-line" /></svg></span>
+                      <button class="btn-secondary" type="button"><svg><use href="#i-rotate" /></svg>Run again</button>
+                      <div class="empty-desc">
+                        Last run failed — <code>pnpm test</code> exited with code 1,
+                        8 minutes ago. The live log clears on restart; run again for
+                        fresh output.
+                      </div>
+                    </div>
+                    <div class="status">
+                      <span class="status-badge err">Last run failed</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes">
+            <div class="note">
+              <b>Before:</b> a passed, failed, and never-run action all look
+              identical after reopening the app — the verdict is silently lost.
+            </div>
+            <div class="note fix">
+              <b>After:</b> the remembered outcome uses Setup’s own last-run
+              layout — the action’s illustration, a “Run again” button, a one-line
+              summary with a relative timestamp, and a filled outcome badge pinned
+              to the corner (<em>no icon</em>). Orphaned “running” rows from a crash
+              reconcile to <em>stopped</em> at boot — exactly Setup’s pattern.
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <p class="band">Part C — Container context</p>
+
+      <div class="catalog">
+        <!-- C1 ───────────────────────────────────────────── -->
+        <section class="case" id="c1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">C1</span>
+                <span class="tag context">Context · ships today</span>
+              </div>
+              <h2>Worktree missing — the whole panel is replaced</h2>
+              <p class="case-copy">
+                If the workspace folder is gone from disk, the entire 3-column
+                shell — Run tabs included — is replaced by a recovery screen. No
+                Run state can render here; noted so the redesign doesn’t try.
+              </p>
+            </div>
+            <div class="meta">Panel-level state that supersedes every Run tab.</div>
+          </div>
+
+          <div class="frame single">
+            <div class="rail">
+              <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+              <span class="rail-spacer"></span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+            </div>
+            <div class="body tall">
+              <div class="status-card">
+                <span class="empty-glyph"><svg width="30" height="30"><use href="#i-folder-x" /></svg></span>
+                <div class="empty-title">Worktree missing</div>
+                <div class="status-sub">
+                  This workspace’s folder is no longer on disk. Terminals and file
+                  actions are unavailable until it’s restored.
+                </div>
+                <div style="display: flex; gap: 8px">
+                  <button class="btn" type="button"><svg><use href="#i-rotate" /></svg>Refresh</button>
+                  <button class="btn" type="button">Delete workspace</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- C2 ───────────────────────────────────────────── -->
+        <section class="case" id="c2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">C2</span>
+                <span class="tag context">Context · ships today</span>
+              </div>
+              <h2>No host connection — a run can’t spawn</h2>
+              <p class="case-copy">
+                In web/dev mode with no paired Mac app or relay, the PTY can’t be
+                created, so a Run tab shows a yellow notice instead of a shell.
+                Any run status (B4) must degrade gracefully to this — there’s
+                nothing to report until a host is present.
+              </p>
+            </div>
+            <div class="meta">The run affordance depends on a live PTY host.</div>
+          </div>
+
+          <div class="frame single wide">
+            <div class="rail">
+              <span class="rail-home active"><svg width="16" height="16"><use href="#i-terminal" /></svg></span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-globe" /></svg></span>
+              <span class="rail-spacer"></span>
+              <span class="rail-run"><svg width="14" height="14"><use href="#i-play" /></svg>Run</span>
+              <span class="rail-home"><svg width="16" height="16"><use href="#i-split" /></svg></span>
+            </div>
+            <div class="subtabs">
+              <span class="subtab">Setup</span>
+              <span class="subtab active">Run</span>
+              <span class="subtab">Terminal</span>
+              <span class="subtab-add"><svg width="14" height="14"><use href="#i-plus" /></svg></span>
+            </div>
+            <div class="body">
+              <div class="term">
+                <div class="term-log"><span class="c-warn">(No host connection — terminal needs the Mac app or a paired relay session.)</span></div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <p class="footer-note">
+        Visual design reference for the Run tab evolution. Buttons, pills, tabs,
+        menus, and the icon picker demonstrate placement, hierarchy, and the shared
+        status language; they don’t run commands in this artifact. Colors, radii,
+        and type are pulled from Zeros Foundation (Zeros Shade dark + Light). Toggle
+        the theme in the header to check both. “Changes” callouts mark proposed
+        iterations on states that ship today; before / after frames mark gaps to
+        build. The rotating “running” star — in the shape studio and on every live
+        Run tab — is live CSS (spin + shimmer + palette colour-cycling through an
+        SVG mask), not a video or a GIF.
+      </p>
+    </main>
+
+    <script>
+      (function () {
+        var root = document.documentElement;
+        var btn = document.getElementById("themeBtn");
+        var label = document.getElementById("themeLabel");
+        btn.addEventListener("click", function () {
+          var toLight = root.getAttribute("data-theme") !== "light";
+          root.setAttribute("data-theme", toLight ? "light" : "dark");
+          label.textContent = toLight ? "Dark preview" : "Light preview";
+        });
+      })();
+
+      /* ── Running-indicator shapes ──
+         Parametric petal/star geometry, built once and applied to every
+         .run-shape as an SVG mask (data URI). Keeping the geometry here
+         means the shapes stay crisp at any size and are easy to tune. */
+      (function () {
+        var TAU = Math.PI * 2;
+        var C = 50; // centre of the 0 0 100 100 viewBox
+
+        function pt(r, a) {
+          return (
+            (C + r * Math.cos(a)).toFixed(2) + " " + (C + r * Math.sin(a)).toFixed(2)
+          );
+        }
+
+        // Concave curved-edge star (sparkle / pointed star): a quadratic
+        // curve dips through the inner "valley" between each pair of tips.
+        function concave(points, R, r) {
+          var d = "", i, aTip, aNext, aVal;
+          for (i = 0; i < points; i++) {
+            aTip = (i / points) * TAU - Math.PI / 2;
+            aNext = ((i + 1) / points) * TAU - Math.PI / 2;
+            aVal = (aTip + aNext) / 2;
+            if (i === 0) d += "M" + pt(R, aTip) + " ";
+            d += "Q" + pt(r, aVal) + " " + pt(R, aNext) + " ";
+          }
+          return d + "Z";
+        }
+
+        // Pointed petals that bulge outward (lotus / rangoli): two quadratics
+        // per petal meet in a sharp tip, with control points pushed past R.
+        function lotus(points, R, r, bulge) {
+          var d = "", i, a0, aT, a1, cR = R * bulge;
+          for (i = 0; i < points; i++) {
+            a0 = ((i - 0.5) / points) * TAU - Math.PI / 2;
+            aT = (i / points) * TAU - Math.PI / 2;
+            a1 = ((i + 0.5) / points) * TAU - Math.PI / 2;
+            if (i === 0) d += "M" + pt(r, a0) + " ";
+            d += "Q" + pt(cR, (a0 + aT) / 2) + " " + pt(R, aT) + " ";
+            d += "Q" + pt(cR, (aT + a1) / 2) + " " + pt(r, a1) + " ";
+          }
+          return d + "Z";
+        }
+
+        // Rounded-lobe flower (bloom / marigold): one cubic per petal with
+        // its two control points splayed around the tip to round it off.
+        function flower(petals, R, r, spread) {
+          var d = "", i, a0, aT, a1;
+          for (i = 0; i < petals; i++) {
+            a0 = ((i - 0.5) / petals) * TAU - Math.PI / 2;
+            aT = (i / petals) * TAU - Math.PI / 2;
+            a1 = ((i + 0.5) / petals) * TAU - Math.PI / 2;
+            if (i === 0) d += "M" + pt(r, a0) + " ";
+            d +=
+              "C" + pt(R, aT - spread) + " " + pt(R, aT + spread) + " " + pt(r, a1) + " ";
+          }
+          return d + "Z";
+        }
+
+        var SHAPES = {
+          lotus8: lotus(8, 48, 22, 1.16),
+          lotus6: lotus(6, 48, 24, 1.18),
+          sparkle: concave(4, 49, 13),
+          star6: concave(6, 48, 20),
+          bloom8: flower(8, 47, 20, 0.28),
+          marigold: flower(12, 47, 31, 0.16),
+          burst12: concave(12, 49, 33),
+        };
+
+        function maskFor(name) {
+          var p = SHAPES[name] || SHAPES.lotus8;
+          var svg =
+            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>" +
+            "<path d='" + p + "'/></svg>";
+          return 'url("data:image/svg+xml,' + encodeURIComponent(svg) + '")';
+        }
+
+        var nodes = document.querySelectorAll(".run-shape");
+        for (var i = 0; i < nodes.length; i++) {
+          var name = nodes[i].getAttribute("data-shape") || "lotus8";
+          var uri = maskFor(name);
+          // Set the longhand directly (Safari ignores var() in the shorthand).
+          nodes[i].style.webkitMaskImage = uri;
+          nodes[i].style.maskImage = uri;
+        }
+      })();
+    </script>
+  </body>
+</html>

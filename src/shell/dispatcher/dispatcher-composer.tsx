@@ -1,0 +1,390 @@
+// ──────────────────────────────────────────────────────────
+// DispatcherComposer — the "What do you want to work on?" composer
+// ──────────────────────────────────────────────────────────
+//
+// The new-workspace dispatcher's body. Reuses the SAME TipTap composer
+// (useComposerEditor) the chat surfaces use, the shared pill block
+// (AgentModelPicker · Fast · Effort · Permissions), the same "+" menu (Add
+// attachment / Link workspaces), and a primary "Create" button in place of
+// Send. There is no live agent session here — the editor only serializes
+// text + inline mention/attachment pills, and the pill state + linked dirs +
+// permission posture are held locally (seeded from the default agent's
+// new-chat born defaults), so "Create" can stamp the fresh chat.
+//
+// Borderless + full-width by design: the modal is one continuous surface (no
+// card chrome, no separator), so this renders flush with consistent px-4 inset.
+//
+// Empty composer → Create still works: the parent creates the workspace on the
+// chosen agent/model with no first turn. Non-empty → seed + auto-send.
+// ──────────────────────────────────────────────────────────
+
+import { useEffect, useRef, useState } from "react";
+import { CornerDownLeft, FolderInput, Paperclip, Plus } from "lucide-react";
+
+import { Button } from "../../zeros/ui";
+import { Tooltip } from "@/zeros/ui/primitives";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "../../zeros/ui/primitives/dropdown-menu";
+import {
+  PromptInput,
+  PromptInputBody,
+  PromptInputToolbar,
+  PromptInputTools,
+} from "../../zeros/ui/primitives/elements";
+import {
+  useComposerEditor,
+  type ComposerSerialized,
+} from "../../zeros/agent/composer-editor";
+import {
+  EffortPill,
+  FastPill,
+  PermissionToggle,
+} from "../../zeros/agent/composer-pills";
+import {
+  agentHasPermissionMenu,
+  agentSupportsEffort,
+  agentSupportsFast,
+  coerceModeIdForModel,
+  effortLevelsFor,
+  nativeModeIdForPosture,
+  nearestEffort,
+  permissionForAgentMode,
+} from "../../zeros/agent/model-catalog";
+import {
+  getDefaultEffort,
+  newChatBornDefaults,
+} from "../../zeros/agent/new-chat-defaults";
+import { effectiveFavoriteModel } from "../../zeros/agent/model-favorites";
+import { pickDefaultAgent } from "../../zeros/panels/default-agent";
+import { COMPOSER_FILE_ACCEPT } from "../../zeros/agent/composer-shell";
+import { AddedDirectories } from "../../zeros/agent/added-directories";
+import { WorkspaceDirectoryPicker } from "../../zeros/agent/workspace-directory-picker";
+import type { BridgeRegistryAgent } from "../../zeros/bridge/messages";
+import type { ChatEffort, ChatPermissionMode } from "../../zeros/store/store";
+import { AgentModelPicker, type AgentModelSelection } from "./agent-model-picker";
+import { ZerosSpinner } from "@/loaders";
+
+/** Everything the parent needs to create + (optionally) dispatch. `serialized`
+ *  is null when the composer is empty — create the workspace with no first
+ *  turn. */
+export interface DispatcherCreatePayload {
+  serialized: ComposerSerialized | null;
+  selection: AgentModelSelection;
+  effort: ChatEffort;
+  fast: boolean;
+  permissionMode: ChatPermissionMode;
+  /** The EXACT native mode id the user picked (e.g. Claude "accept-edits" vs
+   *  "auto" — both posture "auto"), so the born chat's lastModeId round-trips it
+   *  losslessly at bind instead of collapsing to the posture's default native
+   *  mode. null ⇒ let bind resolve from `permissionMode`. */
+  lastModeId: string | null;
+  /** Linked workspaces/dirs (Claude /add-dir) → ChatThread.additionalDirectories. */
+  additionalDirectories: string[];
+}
+
+interface DispatcherComposerProps {
+  /** Registry snapshot — null while loading. */
+  agents: BridgeRegistryAgent[] | null;
+  /** Selected project root — the @-file picker reads files from here, and it's
+   *  the cwd the "Link workspaces" picker excludes. */
+  cwd: string | null;
+  /** Selected project origin — enables the #-PR picker. */
+  originUrl: string | null;
+  /** Create pressed (button or ⌘/Ctrl+Enter). */
+  onCreate: (payload: DispatcherCreatePayload) => void;
+  /** Disable the controls while a create is in flight. */
+  busy?: boolean;
+}
+
+export function DispatcherComposer({
+  agents,
+  cwd,
+  originUrl,
+  onCreate,
+  busy,
+}: DispatcherComposerProps) {
+  const [selection, setSelection] = useState<AgentModelSelection | null>(null);
+  const [effort, setEffort] = useState<ChatEffort>("high");
+  const [fast, setFast] = useState(false);
+  const [permissionMode, setPermissionMode] = useState<ChatPermissionMode>("auto");
+  // The EXACT native mode id chosen (kept alongside the posture so a dispatcher
+  // pick round-trips losslessly — see DispatcherCreatePayload.lastModeId). Seeded
+  // from the born posture and updated on every Permissions-menu pick.
+  const [modeId, setModeId] = useState<string | null>(null);
+  const [linkedDirs, setLinkedDirs] = useState<string[]>([]);
+  const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Seed the agent/model + pill posture from the default ("starred") agent the
+  // first time the registry resolves. newChatBornDefaults is the same source of
+  // truth every other spawn path stamps a chat with, so the dispatcher can't
+  // drift from "+" → Chat / ⌘T.
+  useEffect(() => {
+    if (selection || !agents) return;
+    const agent = pickDefaultAgent(agents);
+    if (!agent) return;
+    const born = newChatBornDefaults(agent.id);
+    setSelection({ agentId: agent.id, agentName: agent.name, model: born.model });
+    setEffort(born.effort);
+    setFast(born.fast);
+    setPermissionMode(born.permissionMode);
+    setModeId(nativeModeIdForPosture(agent.id, born.permissionMode));
+  }, [agents, selection]);
+
+  // Picking a model (possibly a different agent) re-derives the effort/fast
+  // posture for that agent+model so the pills stay valid (Sonnet has no
+  // xhigh/ultracode; Cursor has no effort knob, etc.).
+  const handleSelect = (next: AgentModelSelection) => {
+    const agentChanged = selection?.agentId !== next.agentId;
+    setSelection(next);
+    const born = newChatBornDefaults(next.agentId);
+    const ladder = effortLevelsFor(next.agentId, next.model, null);
+    // 2026-07-10 spec (same chain as the chat composer's switch): the
+    // FAVORITE model's saved default effort wins; otherwise CARRY the
+    // current effort, sliding to the nearest ladder level below when the
+    // picked model doesn't offer it (max → Grok lands on high).
+    const favDefault =
+      next.model === effectiveFavoriteModel(next.agentId)
+        ? getDefaultEffort(next.agentId)
+        : null;
+    setEffort(
+      favDefault && ladder.includes(favDefault)
+        ? favDefault
+        : (nearestEffort(ladder, effort) ?? effort),
+    );
+    setFast(agentSupportsFast(next.agentId, next.model, null) ? born.fast : false);
+    // A native mode id can't cross families (Claude "accept-edits" is meaningless
+    // to Codex), so reset the permission to the new agent's born default when the
+    // AGENT changes. A model swap WITHIN one agent keeps the user's pick.
+    if (agentChanged) {
+      setPermissionMode(born.permissionMode);
+      setModeId(nativeModeIdForPosture(next.agentId, born.permissionMode));
+    }
+  };
+
+  const agentId = selection?.agentId ?? null;
+  const model = selection?.model ?? null;
+
+  // Enter / ⌘Enter route here through a ref (the editor is built once, so it
+  // can't close over the latest handler directly). Declared before the editor
+  // hook so the onSubmit closure resolves it; assigned below.
+  const submitRef = useRef<() => void>(() => {});
+
+  const composer = useComposerEditor({
+    agentId,
+    agentName: selection?.agentName ?? null,
+    agentSupportsImage: true,
+    modelId: model,
+    cwd,
+    originUrl,
+    availableCommands: [],
+    placeholder: "What do you want to work on?",
+    onSubmit: () => submitRef.current(),
+  });
+  const {
+    serialize,
+    insertFiles,
+    editorContent,
+    suggestionPopup,
+    imagePreviewOverlay,
+    dragActive,
+    dragHandlers,
+  } = composer;
+
+  submitRef.current = () => {
+    if (busy || !selection) return;
+    const snapshot = serialize();
+    const hasContent = snapshot != null && !snapshot.isEmpty;
+    onCreate({
+      serialized: hasContent ? snapshot : null,
+      selection,
+      effort,
+      fast,
+      permissionMode,
+      lastModeId: modeId,
+      additionalDirectories: linkedDirs,
+    });
+  };
+
+  // Route a permission-toggle pick to the EXACT native mode: remember the native
+  // id (for lossless lastModeId) AND derive the posture bucket the ChatThread
+  // carries. Mirrors agent-chat's selectNativeMode, minus the live session (none
+  // exists pre-create).
+  const selectNativeMode = (id: string) => {
+    setModeId(id);
+    setPermissionMode(permissionForAgentMode(id, agentId));
+  };
+
+  const handleFileInput = async (files: FileList | null) => {
+    await insertFiles(files);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  // The permission toggle cycles the agent's REAL native modes (Claude:
+  // Manual/Accept Edits/Plan/Auto/Bypass — Haiku drops Auto; Codex: Ask for
+  // approval/Approve for me/Full access; Cursor: Ask/Edit). Shown whenever the
+  // agent has a native-mode vocabulary (now includes Cursor).
+  const showPermissionToggle = agentHasPermissionMenu(agentId, model);
+
+  return (
+    <div
+      className="relative flex w-full min-w-0 flex-col"
+      {...(dragHandlers ?? {})}
+    >
+      {/* @ / # / slash pickers anchor to this surface (position: relative). */}
+      {suggestionPopup}
+      {dragActive && (
+        <div
+          className="pointer-events-none absolute inset-0 z-[5] flex flex-col items-center justify-center gap-1.5 bg-bg3/75 p-3 text-xs text-fg2"
+          aria-hidden="true"
+        >
+          <Paperclip size={18} />
+          <span>Drop files to attach</span>
+        </div>
+      )}
+      <PromptInput
+        onSubmit={(e) => {
+          e.preventDefault();
+          submitRef.current();
+        }}
+      >
+        <PromptInputBody className="items-stretch border-0 bg-transparent dark:bg-transparent rounded-none shadow-none p-0 gap-0 has-[[data-slot=input-group-control]:focus-visible]:ring-0">
+          {/* Linked workspaces (Claude /add-dir) — removable chips above the
+              editor, same as the chat composer. */}
+          {linkedDirs.length > 0 && (
+            <div className="px-4 pt-3">
+              <AddedDirectories
+                dirs={linkedDirs}
+                onRemove={(dir) =>
+                  setLinkedDirs((prev) => prev.filter((d) => d !== dir))
+                }
+              />
+            </div>
+          )}
+          {/* TipTap editor — tall body so it reads as a "what do you want to
+              work on?" canvas. Full-width with an px-4 text inset. */}
+          <div className="min-h-[96px] px-4 pt-3">{editorContent}</div>
+          <PromptInputToolbar className="min-w-0 gap-1.5 px-4 pb-3 pt-1.5">
+            {/* gap-0.5: exactly 2px between the + / model / fast / effort /
+                permission pills, matching the chat composer (2026-07-10). */}
+            <PromptInputTools className="gap-0.5">
+              {/* "+" menu — add an attachment, link a workspace, or set the
+                  permission posture. The same composer affordance the chat uses.
+                  Actions deferred past menu-close so the file dialog / modal
+                  don't fight Radix's focus-restore. */}
+              <DropdownMenu>
+                <Tooltip label="Attach or link">
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      type="button"
+                      aria-label="Add attachment or link a workspace"
+                      disabled={busy}
+                      className="rounded-sm"
+                    >
+                      <Plus size={14} />
+                    </Button>
+                  </DropdownMenuTrigger>
+                </Tooltip>
+                <DropdownMenuContent align="start" side="top">
+                  <DropdownMenuItem
+                    onSelect={() =>
+                      window.setTimeout(() => fileInputRef.current?.click(), 0)
+                    }
+                  >
+                    <Paperclip size={14} />
+                    Add attachment
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={() =>
+                      window.setTimeout(() => setWorkspacePickerOpen(true), 0)
+                    }
+                  >
+                    <FolderInput size={14} />
+                    Link workspaces
+                  </DropdownMenuItem>
+                  {/* Permission modes moved OUT of this menu (2026-07-10):
+                  they're cycled by the PermissionToggle in the pill row. */}
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={COMPOSER_FILE_ACCEPT}
+                multiple
+                style={{ display: "none" }}
+                onChange={(e) => void handleFileInput(e.target.files)}
+              />
+              <AgentModelPicker
+                agents={agents}
+                value={selection}
+                onChange={handleSelect}
+              />
+              {agentSupportsFast(agentId, model, null) && (
+                <FastPill active={fast} onToggle={() => setFast((v) => !v)} />
+              )}
+              {agentSupportsEffort(agentId, model, null) && (
+                <EffortPill
+                  agentId={agentId}
+                  levels={effortLevelsFor(agentId, model, null)}
+                  value={effort}
+                  onChange={setEffort}
+                />
+              )}
+              {/* 2026-07-10 spec: the permission toggle sits where the Plan pill
+                  used to — icon-only, cycles the agent's native modes on click,
+                  names the current mode on hover. The current id is coerced to
+                  one THIS model offers (a Claude "auto" seed on Haiku shows
+                  Accept Edits), matching the chat composer's coercion. */}
+              {showPermissionToggle && (
+                <PermissionToggle
+                  agentId={agentId}
+                  model={model}
+                  currentModeId={coerceModeIdForModel(agentId, model, modeId)}
+                  onSelectMode={selectNativeMode}
+                />
+              )}
+            </PromptInputTools>
+            <Tooltip label="Create workspace" shortcut="↵">
+              <Button
+                variant="default"
+                size="sm"
+                type="submit"
+                className="h-7 gap-1.5"
+                disabled={busy || !selection}
+              >
+                {busy ? (
+                  <ZerosSpinner size={16} tone="inverted" />
+                ) : (
+                  <>
+                    <span>Create</span>
+                    <CornerDownLeft className="size-3" />
+                  </>
+                )}
+              </Button>
+            </Tooltip>
+          </PromptInputToolbar>
+        </PromptInputBody>
+      </PromptInput>
+      {imagePreviewOverlay}
+      {/* "Link workspaces" picker — pick worktrees / browse a folder to grant
+          the agent extra access; stamped onto the new chat's
+          additionalDirectories on Create. */}
+      <WorkspaceDirectoryPicker
+        open={workspacePickerOpen}
+        onOpenChange={setWorkspacePickerOpen}
+        linkedDirs={linkedDirs}
+        cwd={cwd ?? ""}
+        onLink={(dir) =>
+          setLinkedDirs((prev) => (prev.includes(dir) ? prev : [...prev, dir]))
+        }
+        onUnlink={(dir) => setLinkedDirs((prev) => prev.filter((d) => d !== dir))}
+      />
+    </div>
+  );
+}

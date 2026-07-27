@@ -1,0 +1,392 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://zeros.build/schemas/settings.schema.json",
+  "title": "Zeros user settings",
+  "description": "User-wide Zeros settings (~/.zeros/settings.toml). Includes user-only keys (models, workspaces, tool approvals) that repository settings may not set.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "JSON Schema URL for editor autocomplete.",
+      "type": "string"
+    },
+    "scripts": {
+      "type": "object",
+      "properties": {
+        "setup": {
+          "type": "string",
+          "description": "Runs when a workspace is created."
+        },
+        "run": {
+          "type": "string",
+          "description": "LEGACY single run command — superseded by run_actions (it migrates to one default action at read time when run_actions is absent; an explicit run_actions list, even empty, wins)."
+        },
+        "run_actions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Stable id — the session-id suffix + status key."
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Label shown on the tab / menu / button."
+              },
+              "command": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Shell command, e.g. `pnpm dev`."
+              },
+              "icon": {
+                "description": "Lucide icon name (curated set; unknown falls back to play).",
+                "type": "string"
+              },
+              "platforms": {
+                "description": "OSes this action shows on. Absent/empty = all.",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "mac",
+                    "linux",
+                    "win"
+                  ]
+                }
+              },
+              "one_shot": {
+                "description": "true → run to completion for a pass/fail verdict; false → long-lived (dev server). Absent = heuristic by command.",
+                "type": "boolean"
+              },
+              "run_on_create": {
+                "description": "Start automatically when a workspace is created.",
+                "type": "boolean"
+              },
+              "default": {
+                "description": "The header split-button face + primary shortcut.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "command"
+            ]
+          },
+          "description": "Named run actions — multiple concurrent run commands, each with an icon. Supersedes the single `run` string (which migrates to one default action at read time)."
+        },
+        "archive": {
+          "type": "string",
+          "description": "Runs before a workspace is archived."
+        },
+        "run_mode": {
+          "type": "string",
+          "enum": [
+            "concurrent",
+            "nonconcurrent"
+          ],
+          "description": "Whether run scripts of multiple workspaces may run at once."
+        },
+        "auto_run_after_setup": {
+          "type": "boolean",
+          "description": "Start the run script automatically after setup."
+        }
+      }
+    },
+    "git": {
+      "type": "object",
+      "properties": {
+        "remote": {
+          "type": "string",
+          "description": "Git remote new workspaces branch from."
+        },
+        "base_branch": {
+          "type": "string",
+          "description": "Branch new workspaces fork from."
+        },
+        "branch_prefix_type": {
+          "type": "string",
+          "description": "How workspace branch names are generated."
+        },
+        "delete_branch_on_archive": {
+          "type": "boolean",
+          "description": "Delete the branch when archiving."
+        },
+        "archive_on_merge": {
+          "type": "boolean",
+          "description": "Archive a workspace automatically when its PR merges."
+        }
+      }
+    },
+    "prompts": {
+      "type": "object",
+      "properties": {
+        "general": {
+          "type": "string",
+          "description": "Appended to every agent session."
+        },
+        "code_review": {
+          "type": "string"
+        },
+        "create_pr": {
+          "type": "string"
+        },
+        "fix_errors": {
+          "type": "string"
+        },
+        "rename_branch": {
+          "type": "string"
+        },
+        "resolve_merge_conflicts": {
+          "type": "string"
+        }
+      }
+    },
+    "env": {
+      "description": "Non-secret environment variables passed to agents.",
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "env_files": {
+      "description": "Env files parsed at spawn time; values never enter TOML.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "file_include_globs": {
+      "description": "Gitignored files matching these globs are seeded into each new worktree (e.g. \".env*\"). A repo-root .worktreeinclude file, if present, takes precedence.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "mcp": {
+      "type": "object",
+      "properties": {
+        "servers": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Unique server name (the tool namespace)."
+                  },
+                  "transport": {
+                    "type": "string",
+                    "const": "stdio"
+                  },
+                  "command": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Executable to spawn for the stdio server."
+                  },
+                  "args": {
+                    "description": "Arguments passed to the command.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "env": {
+                    "description": "Environment variables for the server process (non-secret / refs).",
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "enabled": {
+                    "description": "Set false to keep the entry but skip loading it.",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "name",
+                  "transport",
+                  "command"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Unique server name (the tool namespace)."
+                  },
+                  "transport": {
+                    "type": "string",
+                    "const": "http"
+                  },
+                  "url": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Streamable-HTTP endpoint URL."
+                  },
+                  "headers": {
+                    "description": "HTTP headers sent on every request (e.g. Authorization; non-secret / refs). Applies to auth=\"none\" (injected directly) and auth=\"header\" (sent alongside the brokered secret); IGNORED for auth=\"oauth\" (the gateway manages the connection).",
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "auth": {
+                    "description": "Routes this server through the Zeros MCP gateway: \"oauth\" brokers OAuth 2.1 once and holds the token; \"header\" holds a static auth header (its VALUE lives in the engine vault, never here) and adds it when proxying. Default \"none\" = injected directly with the headers above.",
+                    "type": "string",
+                    "enum": [
+                      "none",
+                      "oauth",
+                      "header"
+                    ]
+                  },
+                  "header_name": {
+                    "description": "For auth=\"header\": the header NAME the gateway sets (e.g. Authorization). The value is stored in the engine secret vault, not this file.",
+                    "type": "string"
+                  },
+                  "oauth_client_id": {
+                    "description": "For auth=\"oauth\": a pre-registered OAuth client_id for servers that don't support Dynamic Client Registration (Auth0/Okta/Cognito/enterprise). Non-secret. Omit to auto-register (DCR).",
+                    "type": "string"
+                  },
+                  "disabled_tools": {
+                    "description": "For a gateway-fronted server (auth oauth/header): tool NAMES to hide from agents — e.g. to stay under Cursor's ~40-tool cap. Empty/absent = all tools exposed.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "enabled": {
+                    "description": "Set false to keep the entry but skip loading it.",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "name",
+                  "transport",
+                  "url"
+                ]
+              }
+            ]
+          },
+          "description": "MCP servers shared across every agent."
+        }
+      }
+    },
+    "models": {
+      "type": "object",
+      "properties": {
+        "default": {
+          "type": "string",
+          "description": "Default model for new chats."
+        },
+        "default_agent": {
+          "type": "string",
+          "description": "Agent the default model belongs to (claude/codex/cursor). Disambiguates a model id that's shared across agents or whose value embeds another family's name."
+        },
+        "review": {
+          "type": "string",
+          "description": "Model used for code reviews."
+        },
+        "default_fast_mode": {
+          "type": "boolean",
+          "description": "Start new chats in fast mode."
+        },
+        "default_plan_mode": {
+          "type": "boolean",
+          "description": "Start new chats in plan mode."
+        },
+        "claude_code": {
+          "type": "object",
+          "properties": {
+            "default_effort_level": {
+              "type": "string",
+              "enum": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultracode"
+              ],
+              "description": "Default reasoning effort for Claude models in new chats."
+            }
+          },
+          "description": "Claude-specific model defaults."
+        },
+        "codex": {
+          "type": "object",
+          "properties": {
+            "default_thinking_level": {
+              "type": "string",
+              "enum": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultracode"
+              ],
+              "description": "Default reasoning effort for Codex (GPT) models in new chats."
+            }
+          },
+          "description": "Codex-specific model defaults."
+        }
+      }
+    },
+    "workspaces": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Root folder where new worktrees are created."
+        }
+      }
+    },
+    "tool_approvals_enabled": {
+      "type": "boolean"
+    },
+    "providers": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "auth": {
+            "type": "string",
+            "enum": [
+              "cli",
+              "api-key"
+            ],
+            "description": "How this agent authenticates."
+          },
+          "executable_path": {
+            "type": "string",
+            "description": "Override the agent executable path."
+          },
+          "base_url": {
+            "type": "string",
+            "description": "Gateway/base-URL override (non-secret)."
+          }
+        }
+      }
+    }
+  }
+}

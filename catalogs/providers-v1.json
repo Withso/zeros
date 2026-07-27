@@ -1,0 +1,78 @@
+{
+  "$schema": "./providers-v1.schema.json",
+  "version": 1,
+  "updatedAt": "2026-05-29",
+  "notes": "Hot-updatable subset of AGENT_MANIFEST.",
+  "providers": {
+    "claude": {
+      "name": "Claude Code",
+      "description": "Anthropic's Claude Code CLI (subscription or API key).",
+      "cliBinary": "claude",
+      "icon": "https://unpkg.com/@lobehub/icons-static-svg@latest/icons/claude.svg",
+      "installHint": {
+        "command": "npm install -g @anthropic-ai/claude-code",
+        "docsUrl": "https://code.claude.com/docs"
+      },
+      "loginCommand": { "binary": "claude", "args": ["/login"] },
+      "minCliVersion": "1.0.0",
+      "source": { "kind": "npm", "package": "@anthropic-ai/claude-code" },
+      "authProbe": {
+        "kind": "any-of",
+        "probes": [
+          { "kind": "keychain", "service": "Claude Code-credentials" },
+          {
+            "kind": "file-with-expiry",
+            "path": "~/.claude/.credentials.json",
+            "expiryFieldPath": ["claudeAiOauth", "expiresAt"],
+            "expiryUnit": "ms"
+          },
+          {
+            "kind": "file",
+            "paths": ["~/.claude/auth.json", "~/.claude/settings.json"]
+          }
+        ]
+      }
+    },
+    "codex": {
+      "name": "Codex",
+      "description": "OpenAI Codex CLI (ChatGPT subscription or API key).",
+      "cliBinary": "codex",
+      "icon": "https://unpkg.com/@lobehub/icons-static-svg@latest/icons/openai.svg",
+      "installHint": {
+        "command": "npm install -g @openai/codex",
+        "docsUrl": "https://developers.openai.com/codex"
+      },
+      "loginCommand": { "binary": "codex", "args": ["login"] },
+      "minCliVersion": "0.8.0",
+      "source": { "kind": "npm", "package": "@openai/codex" },
+      "authProbe": {
+        "kind": "command",
+        "binary": "codex",
+        "args": ["login", "status"]
+      }
+    },
+    "cursor": {
+      "name": "Cursor Agent",
+      "description": "Cursor's coding agent CLI.",
+      "cliBinary": "cursor-agent",
+      "icon": "https://unpkg.com/@lobehub/icons-static-svg@latest/icons/cursor.svg",
+      "installHint": {
+        "command": "curl https://cursor.com/install -sSf | bash",
+        "docsUrl": "https://cursor.com/docs/cli"
+      },
+      "loginCommand": { "binary": "cursor-agent", "args": ["login"] },
+      "source": {
+        "kind": "manual",
+        "watchUrl": "https://cursor.com/changelog",
+        "reason": "cursor-agent ships via curl|bash installer; no public npm or tagged GitHub releases."
+      },
+      "authProbe": {
+        "kind": "any-of",
+        "probes": [
+          { "kind": "file", "paths": ["~/.cursor/cli-config.json"] },
+          { "kind": "command", "binary": "cursor-agent", "args": ["status"] }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,615 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zeros — Buttons</title>
+<style>
+:root{
+  color-scheme:dark;
+
+  /* ── BACKGROUNDS ── */
+  --bg1:hsl(25 5% 7%); --bg1-hover:hsl(8 5% 12%); --bg1-highlight:hsl(25 5% 10%);
+  --bg2:hsl(25 4% 12%); --bg2-hover:hsl(15 3% 15%);
+  --bg3:hsl(15 4% 16%); --bg3-hover:hsl(15 3% 20%);
+  --bg4:hsl(5 1% 24%); --bg5:hsl(8 0% 37%);
+
+  /* ── FOREGROUNDS ── */
+  --fg1:hsl(0 2% 92%); --fg2:hsl(20 4% 66%); --fg3:hsl(15 1% 44%); --muted-fg:hsl(15 4% 44%);
+
+  /* ── BORDERS ── */
+  --border1:hsl(8 3% 14%); --border2:hsl(25 1% 18%); --border3:hsl(15 0% 24%); --border4:hsl(15 0% 30%);
+
+  /* ── ELEVATION + SCRIM ── */
+  --shadow-dropdown:0 8px 24px rgba(0,0,0,.35);
+  --scrim:hsl(0 0% 0% / 0.8);
+
+  /* ── HIGHLIGHTED (focus / accent) ── */
+  --highlighted-bg:hsl(25 5% 15%);
+  --highlighted-bright:hsl(25 5% 65%);
+
+  /* ── INVERTED PAIR + PRIMARY-BUTTON ALIASES ── */
+  --inverted-bg:hsl(0 2% 92%); --inverted-fg:hsl(5 7% 5%);
+  --primary-button-bg:var(--inverted-bg); --primary-button-hover:hsl(25 2% 83%); --primary-button-fg:var(--inverted-fg);
+
+  /* ── RED FAMILY (destructive) ── */
+  --red-primary:hsl(0 91% 71%); --red-secondary:hsl(7 83% 39%); --red-secondary-fg:hsl(0 0% 100%);
+  --red-bg:hsl(13 81% 14%); --red-fg:hsl(20 97% 72%);
+  --blue-primary:hsl(205 80% 73%);
+
+  /* radius scale — fixed 3-step (2026-07-12): 4/6/8px + full */
+  --radius-sm:4px; --radius-md:6px; --radius-lg:8px;
+}
+
+/* ── LIGHT THEME — mirrors the appearance store's data-theme="light" ── */
+[data-theme="light"]{
+  color-scheme:light;
+  --bg1:hsl(0 0% 100%); --bg1-hover:hsl(0 4% 95%); --bg1-highlight:hsl(0 0% 97%);
+  --bg2:hsl(60 4% 95%); --bg2-hover:hsl(60 4% 91%);
+  --bg3:hsl(0 0% 100%); --bg3-hover:hsl(0 0% 95%);
+  --bg4:hsl(0 0% 94%); --bg5:hsl(0 0% 88%);
+  --fg1:hsl(20 7% 16%); --fg2:hsl(20 4% 37%); --fg3:hsl(20 4% 56%); --muted-fg:hsl(20 4% 68%);
+  --border1:hsl(30 9% 91%); --border2:hsl(30 9% 91%); --border3:hsl(60 3% 85%); --border4:hsl(0 1% 83%);
+  --shadow-dropdown:0 8px 24px rgba(0,0,0,.12);
+  --scrim:hsl(0 0% 0% / 0.4);
+  --highlighted-bg:hsl(30 5% 92%); --highlighted-bright:hsl(25 5% 45%);
+  --inverted-bg:hsl(20 7% 16%); --inverted-fg:hsl(0 0% 100%);
+  --primary-button-hover:hsl(22 6% 25%);
+  --red-primary:hsl(0 72% 51%); --red-secondary:hsl(0 72% 50%); --red-bg:hsl(18 87% 91%); --red-fg:hsl(18 89% 40%);
+  --blue-primary:hsl(221 83% 53%);
+}
+.themetoggle{position:fixed;top:10px;right:14px;z-index:20;display:inline-flex;align-items:center;gap:7px;
+  background:var(--bg3);color:var(--fg2);border:1px solid var(--border3);border-radius:var(--radius-sm);
+  height:28px;padding:0 10px;font:500 12px "Geist Variable",system-ui;cursor:pointer;box-shadow:var(--shadow-dropdown)}
+.themetoggle:hover{color:var(--fg1);border-color:var(--border4)}
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg1);color:var(--fg1);
+  font:14px/1.55 "Geist Variable",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  padding:0 0 100px}
+code{background:var(--bg3);padding:1px 6px;border-radius:4px;font-size:11.5px;color:var(--fg1);
+  font-family:"Geist Mono Variable",ui-monospace,Menlo,monospace;white-space:nowrap;border:1px solid var(--border1)}
+em{color:var(--fg1);font-style:normal;font-weight:600}
+a{color:var(--blue-primary);text-decoration:none}
+
+/* header + nav */
+header{padding:30px 40px 0;max-width:1180px}
+.crumbs{font-size:12.5px;color:var(--fg3);margin:0 0 10px}
+h1{font-size:23px;margin:0 0 5px;letter-spacing:-.01em}
+.lede{color:var(--fg2);margin:0;max-width:82ch}
+nav{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg1) 88%,transparent);
+  backdrop-filter:blur(8px);border-bottom:1px solid var(--border1);padding:12px 40px;margin:22px 0 6px;
+  display:flex;gap:6px;flex-wrap:wrap}
+nav a{font-size:12.5px;color:var(--fg2);padding:5px 11px;border-radius:4px}
+nav a:hover{background:var(--bg1-hover);color:var(--fg1)}
+
+main{padding:14px 40px 0;max-width:1180px}
+section{margin:0 0 44px;scroll-margin-top:64px}
+.h2{font-size:17px;margin:0 0 3px;display:flex;align-items:baseline;gap:10px;letter-spacing:-.01em}
+.h2 small{color:var(--fg3);font-weight:400;font-size:12.5px}
+.secintro{color:var(--fg2);margin:0 0 18px;max-width:84ch;font-size:13.5px}
+h3{font-size:13px;color:var(--fg2);letter-spacing:.02em;text-transform:uppercase;margin:26px 0 11px;font-weight:600}
+h3:first-of-type{margin-top:8px}
+.rule{border:0;border-top:1px solid var(--border1);margin:34px 0}
+
+/* demo canvas + captions */
+.demo{background:var(--bg1);border:1px solid var(--border1);border-radius:8px;padding:20px 22px;margin:0 0 12px}
+.demo.raised{background:var(--bg1-highlight)}
+.cap{font:11.5px "Geist Mono Variable",ui-monospace,Menlo,monospace;color:var(--fg3);margin:8px 2px 2px;line-height:1.6}
+.cap b{color:var(--fg2);font-weight:500}
+.cluster{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.col{display:flex;flex-direction:column;gap:16px;align-items:flex-start}
+.grp{display:flex;flex-direction:column;gap:9px;align-items:flex-start}
+.grp .lbl{font-size:11px;color:var(--fg3);text-transform:uppercase;letter-spacing:.04em}
+
+/* spec table */
+table{border-collapse:collapse;font-size:13px;margin-top:4px;width:100%;max-width:940px}
+th{text-align:left;color:var(--fg3);font-weight:500;font-size:12px;padding:0 18px 8px 0;border-bottom:1px solid var(--border1)}
+td{padding:8px 18px 8px 0;color:var(--fg2);vertical-align:middle;border-bottom:1px solid var(--border1)}
+td:first-child{color:var(--fg1)}
+td .mono{font-family:"Geist Mono Variable",ui-monospace,Menlo,monospace;font-size:12px}
+
+/* ══════════════════════════════════════════════════════════════
+   BUTTON — the real primitive (src/zeros/ui/primitives/button.tsx)
+   Base shared by EVERY button: inline-flex, w-fit, gap-2 (8px),
+   px-2.5 (10px), rounded-sm (4px), text-sm (13px) font-medium,
+   [&_svg]:size-4 (16px). Size variants set HEIGHT only.
+   ══════════════════════════════════════════════════════════════ */
+.btn{
+  display:inline-flex;width:fit-content;align-items:center;justify-content:center;gap:8px;
+  white-space:nowrap;border:1px solid transparent;border-radius:var(--radius-sm);
+  height:28px;padding:0 10px;font:500 13px "Geist Variable",system-ui;line-height:1;cursor:pointer;
+  transition:background-color .12s ease-out,color .12s ease-out,border-color .12s ease-out,box-shadow .12s ease-out}
+.btn svg{width:16px;height:16px;flex:none;pointer-events:none}
+
+/* ── VARIANTS ── */
+/* PRIMARY (variant="default") — inverted fill, the single main CTA per view */
+.btn.primary{background:var(--primary-button-bg);color:var(--primary-button-fg);box-shadow:0 1px 2px rgba(0,0,0,.3)}
+.btn.primary:hover{background:var(--primary-button-hover)}
+/* SECONDARY — the everyday button (also the primitive's default variant)
+   Restyled 2026-07-12 (shipped): bg2 fill + border2 → hover bg2-hover + border3 */
+.btn.secondary{background:var(--bg2);border-color:var(--border2);color:var(--fg1)}
+.btn.secondary:hover{background:var(--bg2-hover);border-color:var(--border3)}
+/* GHOST — transparent; icon buttons + subtle text actions */
+.btn.ghost{background:transparent;color:var(--fg2)}
+.btn.ghost:hover{background:var(--bg2-hover);color:var(--fg1)}
+/* DESTRUCTIVE (primary) — solid deep-red fill, static white text */
+.btn.destructive{background:var(--red-secondary);color:var(--red-secondary-fg);box-shadow:0 1px 2px rgba(0,0,0,.3)}
+.btn.destructive:hover{background:color-mix(in srgb,var(--red-secondary) 90%,var(--bg1))}
+/* DESTRUCTIVE (secondary) — restyled 2026-07-12 (shipped): same neutral surface
+   as Secondary (bg2/border2 → bg2-hover/border3); red-primary text stays. */
+.btn.destructive-sec{background:var(--bg2);border-color:var(--border2);color:var(--red-primary)}
+.btn.destructive-sec:hover{background:var(--bg2-hover);border-color:var(--border3)}
+
+/* ── STATES ── */
+.btn:focus-visible,.btn.focus{outline:none;border-color:var(--highlighted-bright);
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--highlighted-bright) 50%,transparent)}
+.btn[disabled],.btn.disabled{opacity:.5;cursor:not-allowed;pointer-events:none}
+
+/* ── SIZES (height only; icon sizes are square + drop padding) ──
+   Icon-only squares mirror the text heights: 24 / 28 / 32. */
+.btn.sm{height:24px;font-size:12px}            /* size="sm"      h-6 text-xs */
+.btn.lg{height:32px}                           /* size="lg"      h-8         */
+.btn.icon-sm{width:24px;height:24px;padding:0} /* icon-sm · matches sm      */
+.btn.icon{width:28px;height:28px;padding:0}    /* icon    · matches default */
+.btn.icon-lg{width:32px;height:32px;padding:0} /* icon-lg · matches lg      */
+
+/* ── WIDTH ── */
+.btn.block{width:100%}                          /* w-full — stretch to container */
+.btn.fixed{width:180px}                         /* explicit fixed width          */
+.wbox{width:340px;display:flex;flex-direction:column;gap:10px;
+  border:1px dashed var(--border2);border-radius:8px;padding:12px}
+.wbox .wlbl{font:11px "Geist Mono Variable",ui-monospace,Menlo,monospace;color:var(--fg3)}
+
+/* spinner for loading state */
+.spin{width:14px;height:14px;border-radius:50%;border:2px solid currentColor;border-top-color:transparent;
+  animation:spin .7s linear infinite;flex:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ══ SPLIT BUTTON — primary action welded to a chevron menu trigger ══
+   Two buttons share one silhouette: a 1px hairline seam divides them,
+   outer corners keep the 4px radius, inner corners square off. */
+.split{display:inline-flex;align-items:stretch}
+.split>.btn{border-radius:0}
+.split>.btn:first-child{border-top-left-radius:var(--radius-sm);border-bottom-left-radius:var(--radius-sm)}
+.split>.btn:last-child{border-top-right-radius:var(--radius-sm);border-bottom-right-radius:var(--radius-sm);
+  width:28px;padding:0}                          /* chevron half is square */
+.split.lg>.btn:last-child{width:32px}
+.split.sm>.btn:last-child{width:24px}
+/* seam between the two halves */
+.split.primary>.btn:last-child{box-shadow:inset 1px 0 0 color-mix(in srgb,var(--primary-button-fg) 22%,transparent)}
+.split.secondary>.btn:last-child{margin-left:-1px}
+.split.destructive>.btn:last-child{box-shadow:inset 1px 0 0 color-mix(in srgb,var(--red-secondary-fg) 30%,transparent)}
+.split>.btn:last-child svg{width:14px;height:14px}
+
+/* attached menu preview under a split button */
+.menucard{width:210px;background:var(--bg3);border:1px solid var(--border1);border-radius:8px;
+  box-shadow:var(--shadow-dropdown);padding:5px;margin-top:8px}
+.mitem{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:4px;color:var(--fg1);font-size:13px;cursor:pointer}
+.mitem:hover{background:var(--bg3-hover)}
+.mitem svg{width:14px;height:14px;color:var(--fg2);flex:none}
+.msep{height:1px;background:var(--border1);margin:5px 2px}
+</style>
+</head>
+<body>
+<button class="themetoggle" id="themeToggle" type="button" aria-pressed="false">☾ Dark</button>
+<script>
+(function(){
+  var btn=document.getElementById('themeToggle'),root=document.documentElement;
+  function render(){var light=root.getAttribute('data-theme')==='light';
+    btn.textContent=light?'☀ Light':'☾ Dark';btn.setAttribute('aria-pressed',String(light));}
+  btn.addEventListener('click',function(){
+    if(root.getAttribute('data-theme')==='light'){root.removeAttribute('data-theme');}
+    else{root.setAttribute('data-theme','light');}
+    render();});
+  render();
+})();
+</script>
+
+<!-- reusable icon defs -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <g id="i-plus"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></g>
+  <g id="i-trash"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></g>
+  <g id="i-chevron"><polyline points="6 9 12 15 18 9"/></g>
+  <g id="i-arrow"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></g>
+  <g id="i-check"><polyline points="20 6 9 17 4 12"/></g>
+  <g id="i-git"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></g>
+  <g id="i-more"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></g>
+  <g id="i-copy"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></g>
+</defs></svg>
+
+<header>
+  <p class="crumbs">Zeros · Components · Buttons</p>
+  <h1>Buttons</h1>
+  <p class="lede">Every button the Zeros app ships, straight from the primitive in
+  <code>src/zeros/ui/primitives/button.tsx</code>. Five <em>variants</em> (Primary, Secondary, Ghost, Destructive,
+  Destructive-secondary — the old <code>outline</code> alias is retired; use Secondary) across a shared 3-step height
+  scale (24 / 28 / 32px, for text and icon-only alike), with and without icons, width options, split buttons, and every
+  interaction state. Flip dark / light with the toggle (top-right). Base for all: <code>rounded-sm</code> 4px,
+  <code>px-2.5</code> 10px, <code>gap-2</code> 8px, <code>text-sm</code> 13px medium, icon <code>size-4</code> 16px.</p>
+</header>
+
+<nav>
+  <a href="#variants">Variants</a>
+  <a href="#sizes">Sizes</a>
+  <a href="#icons">Icons</a>
+  <a href="#icononly">Icon-only</a>
+  <a href="#width">Width</a>
+  <a href="#split">Split</a>
+  <a href="#states">States</a>
+  <a href="#matrix">Full matrix</a>
+</nav>
+
+<main>
+
+<!-- ═══════════ VARIANTS ═══════════ -->
+<section id="variants">
+  <div class="h2">Variants <small>5 intents · the canonical set from <code>buttonVariants</code></small></div>
+  <p class="secintro">The row from the reference screenshot. <em>Primary</em> is the inverted fill — reserve it for the
+  single main action on a view. <em>Secondary</em> is the everyday button and the primitive's default variant.
+  <em>Ghost</em> carries icon buttons and subtle text actions. The two <em>Destructive</em> flavors gate irreversible
+  actions — solid red for the confirming action, red-outline for the secondary/inline one.</p>
+  <div class="demo">
+    <div class="cluster">
+      <button class="btn primary">Primary</button>
+      <button class="btn secondary">Secondary</button>
+      <button class="btn ghost">Ghost</button>
+      <button class="btn destructive"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"/></svg>Delete</button>
+      <button class="btn destructive-sec">Delete (secondary)</button>
+    </div>
+  </div>
+  <p class="cap"><b>primary</b> <code>variant="default"</code> · <b>secondary</b> <code>variant="secondary"</code> (default) ·
+  <b>ghost</b> <code>variant="ghost"</code> · <b>destructive</b> <code>variant="destructive"</code> ·
+  <b>destructive-sec</b> <code>variant="destructive-secondary"</code></p>
+
+  <h3>Retired alias</h3>
+  <div class="demo">
+    <div class="cluster">
+      <button class="btn secondary">Secondary</button>
+      <span class="cap" style="margin:0"><code>variant="outline"</code> is retired — wherever it appears, use the <em>Secondary</em> button instead.</span>
+    </div>
+  </div>
+</section>
+
+<hr class="rule">
+
+<!-- ═══════════ SIZES ═══════════ -->
+<section id="sizes">
+  <div class="h2">Sizes <small>height only — width always follows content</small></div>
+  <p class="secintro">Three text heights. <em>default</em> (28px) is the everyday size; <em>sm</em> (24px) for dense
+  toolbars and inline rows; <em>lg</em> (32px) for roomy dialog footers and primary CTAs. Only the height (and, for
+  <code>sm</code>, the font size) changes — padding, radius, and gap are shared.</p>
+  <div class="demo">
+    <div class="col">
+      <div class="grp">
+        <span class="lbl">sm · h-6 · 24px</span>
+        <div class="cluster">
+          <button class="btn primary sm">Primary</button>
+          <button class="btn secondary sm">Secondary</button>
+          <button class="btn ghost sm">Ghost</button>
+          <button class="btn destructive sm">Delete</button>
+        </div>
+      </div>
+      <div class="grp">
+        <span class="lbl">default · h-7 · 28px</span>
+        <div class="cluster">
+          <button class="btn primary">Primary</button>
+          <button class="btn secondary">Secondary</button>
+          <button class="btn ghost">Ghost</button>
+          <button class="btn destructive">Delete</button>
+        </div>
+      </div>
+      <div class="grp">
+        <span class="lbl">lg · h-8 · 32px</span>
+        <div class="cluster">
+          <button class="btn primary lg">Primary</button>
+          <button class="btn secondary lg">Secondary</button>
+          <button class="btn ghost lg">Ghost</button>
+          <button class="btn destructive lg">Delete</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="cap"><b>sm</b> <code>size="sm"</code> h-6 text-xs · <b>default</b> <code>size="default"</code> h-7 · <b>lg</b> <code>size="lg"</code> h-8</p>
+</section>
+
+<hr class="rule">
+
+<!-- ═══════════ WITH / WITHOUT ICON ═══════════ -->
+<section id="icons">
+  <div class="h2">With &amp; without icon <small>leading, trailing, both — 16px icon, 8px gap</small></div>
+  <p class="secintro">Icons sit inside the same flex row at <code>size-4</code> (16px) with the shared <code>gap-2</code>
+  (8px). Leading icon is the common case (an action verb + its glyph); a trailing chevron/arrow signals "opens more" or
+  "moves forward."</p>
+  <div class="demo">
+    <div class="col">
+      <div class="grp">
+        <span class="lbl">no icon</span>
+        <div class="cluster">
+          <button class="btn primary">Create workspace</button>
+          <button class="btn secondary">Cancel</button>
+        </div>
+      </div>
+      <div class="grp">
+        <span class="lbl">leading icon</span>
+        <div class="cluster">
+          <button class="btn primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-plus"/></svg>New workspace</button>
+          <button class="btn secondary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-git"/></svg>Create PR</button>
+          <button class="btn destructive"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"/></svg>Delete</button>
+        </div>
+      </div>
+      <div class="grp">
+        <span class="lbl">trailing icon</span>
+        <div class="cluster">
+          <button class="btn primary">Continue<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-arrow"/></svg></button>
+          <button class="btn secondary">Options<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></button>
+        </div>
+      </div>
+      <div class="grp">
+        <span class="lbl">leading + trailing</span>
+        <div class="cluster">
+          <button class="btn secondary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg>Copy branch<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-check"/></svg></button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="rule">
+
+<!-- ═══════════ ICON-ONLY ═══════════ -->
+<section id="icononly">
+  <div class="h2">Icon-only <small>square buttons — same 3-step scale as text sizes</small></div>
+  <p class="secintro">Square buttons that drop text and padding. The squares mirror the text heights so mixed rows line
+  up: <code>icon-sm</code> 24×24, <code>icon</code> 28×28, <code>icon-lg</code> 32×32. Always pair with a tooltip or
+  <code>aria-label</code> since there's no visible text.</p>
+  <div class="demo">
+    <div class="col">
+      <div class="grp">
+        <span class="lbl">icon-sm · 24×24</span>
+        <div class="cluster">
+          <button class="btn primary icon-sm" aria-label="Add"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-plus"/></svg></button>
+          <button class="btn secondary icon-sm" aria-label="Copy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></button>
+          <button class="btn ghost icon-sm" aria-label="More"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-more"/></svg></button>
+          <button class="btn destructive icon-sm" aria-label="Delete"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"/></svg></button>
+          <button class="btn destructive-sec icon-sm" aria-label="Delete"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"/></svg></button>
+        </div>
+      </div>
+      <div class="grp">
+        <span class="lbl">icon · 28×28</span>
+        <div class="cluster">
+          <button class="btn primary icon" aria-label="Add"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-plus"/></svg></button>
+          <button class="btn secondary icon" aria-label="Copy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></button>
+          <button class="btn ghost icon" aria-label="More"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-more"/></svg></button>
+          <button class="btn destructive icon" aria-label="Delete"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"/></svg></button>
+          <button class="btn destructive-sec icon" aria-label="Delete"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"/></svg></button>
+        </div>
+      </div>
+      <div class="grp">
+        <span class="lbl">icon-lg · 32×32</span>
+        <div class="cluster">
+          <button class="btn primary icon-lg" aria-label="Add"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-plus"/></svg></button>
+          <button class="btn secondary icon-lg" aria-label="Copy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></button>
+          <button class="btn ghost icon-lg" aria-label="More"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-more"/></svg></button>
+          <button class="btn destructive icon-lg" aria-label="Delete"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"/></svg></button>
+          <button class="btn destructive-sec icon-lg" aria-label="Delete"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"/></svg></button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="cap"><b>icon-sm</b> 24×24 pairs with <code>sm</code> · <b>icon</b> 28×28 pairs with <code>default</code> · <b>icon-lg</b> 32×32 pairs with <code>lg</code></p>
+</section>
+
+<hr class="rule">
+
+<!-- ═══════════ WIDTH ═══════════ -->
+<section id="width">
+  <div class="h2">Width <small>fit (default) · fixed · full-block</small></div>
+  <p class="secintro">Buttons are <code>w-fit</code> by default — width follows the content. Add <code>w-full</code> to
+  stretch across a container (dialog footers, empty-state CTAs, mobile sheets), or set an explicit width to line up a
+  column of equal-width actions.</p>
+  <div class="demo">
+    <div class="cluster" style="align-items:flex-start;gap:26px">
+      <div class="grp">
+        <span class="lbl">fit — follows content</span>
+        <button class="btn primary">Save</button>
+        <button class="btn secondary">Save changes to workspace</button>
+      </div>
+      <div class="wbox">
+        <span class="wlbl">// fixed · width:180px</span>
+        <button class="btn secondary fixed">Confirm</button>
+        <button class="btn secondary fixed">Cancel</button>
+      </div>
+      <div class="wbox">
+        <span class="wlbl">// full-block · w-full</span>
+        <button class="btn primary block">Create workspace</button>
+        <button class="btn secondary block">Import from GitHub</button>
+        <button class="btn destructive-sec block">Delete project</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="rule">
+
+<!-- ═══════════ SPLIT ═══════════ -->
+<section id="split">
+  <div class="h2">Split buttons <small>primary action + attached chevron menu</small></div>
+  <p class="secintro">A composed pattern (not a primitive variant): the main action welded to a chevron that opens
+  related choices. Two <code>&lt;Button&gt;</code>s share one silhouette — a 1px seam splits them, outer corners keep the
+  4px radius, inner corners square off, and the chevron half is a square icon button.</p>
+  <div class="demo">
+    <div class="col">
+      <div class="grp">
+        <span class="lbl">variants</span>
+        <div class="cluster">
+          <div class="split primary">
+            <button class="btn primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-git"/></svg>Create PR</button>
+            <button class="btn primary" aria-label="More create options"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></button>
+          </div>
+          <div class="split secondary">
+            <button class="btn secondary">Commit</button>
+            <button class="btn secondary" aria-label="More commit options"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></button>
+          </div>
+          <div class="split destructive">
+            <button class="btn destructive"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"/></svg>Delete</button>
+            <button class="btn destructive" aria-label="More delete options"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></button>
+          </div>
+        </div>
+      </div>
+      <div class="grp">
+        <span class="lbl">sizes</span>
+        <div class="cluster">
+          <div class="split secondary sm">
+            <button class="btn secondary sm">Run</button>
+            <button class="btn secondary sm" aria-label="More"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></button>
+          </div>
+          <div class="split secondary">
+            <button class="btn secondary">Run</button>
+            <button class="btn secondary" aria-label="More"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></button>
+          </div>
+          <div class="split secondary lg">
+            <button class="btn secondary lg">Run</button>
+            <button class="btn secondary lg" aria-label="More"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></button>
+          </div>
+        </div>
+      </div>
+      <div class="grp">
+        <span class="lbl">open — with attached menu</span>
+        <div style="display:inline-flex;flex-direction:column">
+          <div class="split primary">
+            <button class="btn primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-git"/></svg>Create PR</button>
+            <button class="btn primary" aria-label="More create options"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></button>
+          </div>
+          <div class="menucard">
+            <div class="mitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-git"/></svg>Create pull request</div>
+            <div class="mitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg>Create as draft</div>
+            <div class="msep"></div>
+            <div class="mitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-arrow"/></svg>Push branch only</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="rule">
+
+<!-- ═══════════ STATES ═══════════ -->
+<section id="states">
+  <div class="h2">States <small>default · hover · focus · disabled · loading</small></div>
+  <p class="secintro">Focus shows a 3px <code>highlighted-bright/50</code> ring plus a solid accent border. Disabled drops
+  to 50% opacity and blocks pointer events. Loading swaps the leading glyph for a spinner and holds the button disabled
+  so the action can't fire twice.</p>
+  <div class="demo">
+    <table>
+      <thead><tr><th style="width:130px">State</th><th>Primary</th><th>Secondary</th><th>Destructive</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>default</td>
+          <td><button class="btn primary">Button</button></td>
+          <td><button class="btn secondary">Button</button></td>
+          <td><button class="btn destructive">Delete</button></td>
+        </tr>
+        <tr>
+          <td>hover <span class="mono" style="color:var(--fg3)">(forced)</span></td>
+          <td><button class="btn primary" style="background:var(--primary-button-hover)">Button</button></td>
+          <td><button class="btn secondary" style="background:var(--bg2-hover);border-color:var(--border3)">Button</button></td>
+          <td><button class="btn destructive" style="background:color-mix(in srgb,var(--red-secondary) 90%,var(--bg1))">Delete</button></td>
+        </tr>
+        <tr>
+          <td>focus-visible</td>
+          <td><button class="btn primary focus">Button</button></td>
+          <td><button class="btn secondary focus">Button</button></td>
+          <td><button class="btn destructive focus">Delete</button></td>
+        </tr>
+        <tr>
+          <td>disabled</td>
+          <td><button class="btn primary" disabled>Button</button></td>
+          <td><button class="btn secondary" disabled>Button</button></td>
+          <td><button class="btn destructive" disabled>Delete</button></td>
+        </tr>
+        <tr>
+          <td>loading</td>
+          <td><button class="btn primary" disabled><span class="spin"></span>Creating…</button></td>
+          <td><button class="btn secondary" disabled><span class="spin"></span>Saving…</button></td>
+          <td><button class="btn destructive" disabled><span class="spin"></span>Deleting…</button></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">Try it live: <code>Tab</code> onto any button above to see the real focus ring; hover for the true transition.</p>
+</section>
+
+<hr class="rule">
+
+<!-- ═══════════ FULL MATRIX ═══════════ -->
+<section id="matrix">
+  <div class="h2">Full matrix <small>every variant × every size</small></div>
+  <p class="secintro">All five variants across the shared 3-step scale — 24 / 28 / 32px — each shown with a leading icon
+  so the icon-slot alignment is verifiable at every height. Icon-only squares sit on the same scale, so each column
+  reads as one consistent height.</p>
+  <div class="demo raised">
+    <table>
+      <thead><tr><th style="width:190px">Variant</th><th>sm · 24px</th><th>default · 28px</th><th>lg · 32px</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><span class="mono">default</span> — Primary</td>
+          <td><button class="btn primary sm"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-plus"/></svg>New</button></td>
+          <td><button class="btn primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-plus"/></svg>New</button></td>
+          <td><button class="btn primary lg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-plus"/></svg>New</button></td>
+        </tr>
+        <tr>
+          <td><span class="mono">secondary</span></td>
+          <td><button class="btn secondary sm"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg>Copy</button></td>
+          <td><button class="btn secondary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg>Copy</button></td>
+          <td><button class="btn secondary lg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg>Copy</button></td>
+        </tr>
+        <tr>
+          <td><span class="mono">ghost</span></td>
+          <td><button class="btn ghost sm"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-more"/></svg>More</button></td>
+          <td><button class="btn ghost"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-more"/></svg>More</button></td>
+          <td><button class="btn ghost lg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-more"/></svg>More</button></td>
+        </tr>
+        <tr>
+          <td><span class="mono">destructive</span></td>
+          <td><button class="btn destructive sm"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"/></svg>Delete</button></td>
+          <td><button class="btn destructive"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"/></svg>Delete</button></td>
+          <td><button class="btn destructive lg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"/></svg>Delete</button></td>
+        </tr>
+        <tr>
+          <td><span class="mono">destructive-secondary</span></td>
+          <td><button class="btn destructive-sec sm"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"/></svg>Delete</button></td>
+          <td><button class="btn destructive-sec"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"/></svg>Delete</button></td>
+          <td><button class="btn destructive-sec lg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"/></svg>Delete</button></td>
+        </tr>
+        <tr>
+          <td><span class="mono">icon-only</span> — 24 / 28 / 32</td>
+          <td>
+            <button class="btn primary icon-sm" aria-label="Add"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-plus"/></svg></button>
+            <button class="btn secondary icon-sm" aria-label="Copy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></button>
+            <button class="btn ghost icon-sm" aria-label="More"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-more"/></svg></button>
+            <button class="btn destructive icon-sm" aria-label="Delete"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"/></svg></button>
+          </td>
+          <td>
+            <button class="btn primary icon" aria-label="Add"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-plus"/></svg></button>
+            <button class="btn secondary icon" aria-label="Copy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></button>
+            <button class="btn ghost icon" aria-label="More"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-more"/></svg></button>
+            <button class="btn destructive icon" aria-label="Delete"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"/></svg></button>
+          </td>
+          <td>
+            <button class="btn primary icon-lg" aria-label="Add"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-plus"/></svg></button>
+            <button class="btn secondary icon-lg" aria-label="Copy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></button>
+            <button class="btn ghost icon-lg" aria-label="More"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-more"/></svg></button>
+            <button class="btn destructive icon-lg" aria-label="Delete"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"/></svg></button>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">Source of truth: <code>src/zeros/ui/primitives/button.tsx</code> · <code>buttonVariants</code> (class-variance-authority)</p>
+</section>
+
+</main>
+</body>
+</html>

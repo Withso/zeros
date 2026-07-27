@@ -1,0 +1,111 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zeros — diff theming (plan + preview)</title>
+<style>
+:root{
+  color-scheme:dark;
+  --canvas:#0E0C0C;                 /* --bg1, the diff surface */
+  --fg1:#EBEAEA; --fg2:#A2A0A0; --fg3:#71706F;
+  /* Zeros palette (the 3 bases we override @pierre/diffs with) */
+  --green-primary:hsl(142 71% 45%);
+  --red-primary:hsl(0 85% 64%);
+  --blue-primary:hsl(205 90% 73%);
+  --highlighted-bright:hsl(25 5% 65%);
+  /* DERIVED exactly like @pierre (dark-mode formulas):
+     row  = color-mix(in lab, canvas 80%, base)
+     emph = rgb(from base r g b / .2)   (the changed-word highlight)
+     bar/number = base */
+  --add-row: color-mix(in lab, var(--canvas) 80%, var(--green-primary));
+  --add-emph: rgb(from var(--green-primary) r g b / .22);
+  --del-row: color-mix(in lab, var(--canvas) 80%, var(--red-primary));
+  --del-emph: rgb(from var(--red-primary) r g b / .22);
+  /* selection / "modified": OPTION A = our blue, OPTION B = neutral */
+  --sel-blue: color-mix(in lab, var(--canvas) 82%, var(--blue-primary));
+  --sel-neutral: color-mix(in lab, var(--canvas) 86%, var(--highlighted-bright));
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--canvas);color:var(--fg1);font:14px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:30px 40px 80px;max-width:1040px}
+h1{font-size:21px;margin:0 0 4px}.intro{color:var(--fg2);margin:0 0 22px;max-width:82ch}
+h2{font-size:14px;border-bottom:1px solid #252323;padding-bottom:7px;margin:26px 0 12px}
+h3{font-size:12.5px;color:var(--fg2);margin:16px 0 7px;font-weight:600}
+/* diff panel */
+.diff{border:1px solid #201E1D;border-radius:10px;overflow:hidden;font:12.5px/1.7 ui-monospace,Menlo,Consolas,monospace}
+.hunk{display:flex;align-items:center;gap:10px;background:#1a1918;color:var(--fg2);padding:5px 14px;font-size:12px;border-block:1px solid #201E1D}
+.hunk .chev{color:var(--fg3)}
+.row{display:grid;grid-template-columns:52px 1fr;border-left:3px solid transparent}
+.row .num{color:var(--fg3);text-align:right;padding-right:12px;user-select:none;opacity:.8}
+.row .code{padding-right:14px;white-space:pre-wrap;word-break:break-word}
+.ctx{background:var(--canvas)}
+.del{background:var(--del-row);border-left-color:var(--red-primary)}
+.del .num{color:var(--red-primary);opacity:.9}
+.add{background:var(--add-row);border-left-color:var(--green-primary)}
+.add .num{color:var(--green-primary);opacity:.9}
+.sel{border-left-color:transparent}
+.sel.blue{background:var(--sel-blue)} .sel.neutral{background:var(--sel-neutral)}
+.sel .num{color:var(--fg2)}
+mark.e-add{background:var(--add-emph);color:inherit;border-radius:2px;padding:0 1px}
+mark.e-del{background:var(--del-emph);color:inherit;border-radius:2px;padding:0 1px}
+/* fake shiki syntax */
+.k{color:#e5989b}.s{color:#9ec89b}.f{color:#c0a5e8}.p{color:var(--fg2)}.c{color:var(--fg3)}.n{color:var(--fg1)}
+table{border-collapse:collapse;margin:6px 0 4px;font-size:13px;width:100%}
+th,td{text-align:left;padding:6px 10px;border-bottom:1px solid #201E1D;vertical-align:top}
+th{color:var(--fg2);font-weight:600}
+code{background:#201E1D;padding:1px 6px;border-radius:5px;font-size:12px}
+.swatch{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-2px;margin-right:6px;border:1px solid rgba(255,255,255,.1)}
+.note{color:var(--fg2);font-size:12.5px;margin:8px 0}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.col h3{margin-top:0}
+</style></head><body>
+<h1>Diff theming — plan &amp; preview</h1>
+<p class="intro">How <code>@pierre/diffs</code> will look once wired to the Zeros palette. We set <b>three base overrides</b>;
+@pierre derives every tint (row background, the changed-word emphasis, the edge bar, the line numbers) from them — so
+the whole diff stays consistent. Syntax colors keep coming from the Shiki code theme; context/gutter stay neutral.
+The mockup below uses the <b>same <code>color-mix</code> formulas @pierre uses</b>, so it's a true preview.</p>
+
+<h2>Tokens — what we set &amp; what each controls</h2>
+<table>
+<tr><th>@pierre override we set</th><th>Zeros value</th><th>Controls (derived)</th></tr>
+<tr><td><code>--diffs-addition-color-override</code></td><td><span class="swatch" style="background:var(--green-primary)"></span><code>var(--green-primary)</code></td><td>added line: row wash · <b>changed-word emphasis</b> · left edge bar · line number</td></tr>
+<tr><td><code>--diffs-deletion-color-override</code></td><td><span class="swatch" style="background:var(--red-primary)"></span><code>var(--red-primary)</code></td><td>removed line: row wash · changed-word emphasis · edge bar · line number</td></tr>
+<tr><td><code>--diffs-modified-color-override</code></td><td><span class="swatch" style="background:var(--blue-primary)"></span><code>var(--blue-primary)</code> <i>(or neutral — see below)</i></td><td>the “modified” / <b>selected-line</b> accent — replaces @pierre's navy <code>#69b1ff</code></td></tr>
+<tr><td class="c" colspan="3">Derived automatically by @pierre (shown for reference — we don't set these unless fine-tuning):</td></tr>
+<tr><td><code>--diffs-bg-addition</code> / <code>-deletion</code></td><td><code>color-mix(canvas 80%, base)</code></td><td>the row background wash</td></tr>
+<tr><td><code>--diffs-bg-addition-emphasis</code> / <code>-deletion-…</code></td><td><code>base / 20% alpha</code></td><td>the darker highlight on changed words</td></tr>
+<tr><td>Shiki theme tokens</td><td><i>unchanged</i></td><td>the code syntax colors</td></tr>
+<tr><td>context / gutter / hunk header</td><td><i>unchanged (neutral)</i></td><td>unmodified rows + “N unmodified lines”</td></tr>
+</table>
+
+<h2>Preview</h2>
+<div class="diff">
+  <div class="hunk"><span class="chev">▲</span> 37 unmodified lines</div>
+  <div class="row ctx"><span class="num">40</span><span class="code"><span class="p">} </span><span class="k">from</span> <span class="s">"react"</span>;</span></div>
+  <div class="row ctx"><span class="num">41</span><span class="code"><span class="k">import</span> { <span class="n">Col1ToggleButton</span> } <span class="k">from</span> <span class="s">"./column-toggle-buttons"</span>;</span></div>
+  <div class="row add"><span class="num">42</span><span class="code"><span class="k">import</span> { <mark class="e-add"><span class="n">CodeDesignToggle</span></mark> } <span class="k">from</span> <mark class="e-add"><span class="s">"./code-design-toggle"</span></mark>;</span></div>
+  <div class="row ctx"><span class="num">43</span><span class="code"><span class="k">import</span> { <span class="n">useCustomWindowDrag</span> } <span class="k">from</span> <span class="s">"./use-custom-window-drag"</span>;</span></div>
+  <div class="row del"><span class="num">48</span><span class="code"><span class="k">import</span> { <span class="n">Archive</span>, <span class="n">ChevronDown</span>, <mark class="e-del"><span class="n">LayoutGrid</span> <span class="k">as</span></mark> <mark class="e-del"><span class="n">DashboardIcon</span>,</mark> <span class="n">Plus</span> } <span class="k">from</span> <span class="s">"lucide-react"</span>;</span></div>
+  <div class="row add"><span class="num">49</span><span class="code"><span class="k">import</span> { <span class="n">Archive</span>, <span class="n">ChevronDown</span>, <mark class="e-add"><span class="n">PanelsTopLeft</span> <span class="k">as</span></mark> <mark class="e-add"><span class="n">DashboardIcon</span>,</mark> <span class="n">Plus</span> } <span class="k">from</span> <span class="s">"lucide-react"</span>;</span></div>
+  <div class="row ctx"><span class="num">50</span><span class="code"></span></div>
+  <div class="row del"><span class="num">51</span><span class="code"><span class="c">// default </span><mark class="e-del"><span class="c">text-info</span></mark><span class="c">) sitting under the grey shimmer</span></span></div>
+  <div class="row add"><span class="num">51</span><span class="code"><span class="c">// default </span><mark class="e-add"><span class="c">text-blue-primary</span></mark><span class="c">) sitting under the grey shimmer</span></span></div>
+  <div class="hunk"><span class="chev">▼</span> 60 unmodified lines</div>
+</div>
+
+<h2>The one decision — the “modified / selected line” accent</h2>
+<p class="note">@pierre uses a navy blue (<code>#69b1ff</code>) for a selected line + “modified” markers. Pick what replaces it:</p>
+<div class="two">
+  <div class="col"><h3>A · our blue (<code>--blue-primary</code>)</h3>
+    <div class="diff"><div class="row sel blue"><span class="num">997</span><span class="code"><span class="k">const</span> <span class="n">x</span> = <span class="s">"selected line"</span>;</span></div></div>
+    <p class="note">Keeps a cool “selection” feel, on-palette.</p></div>
+  <div class="col"><h3>B · neutral (<code>--highlighted-bright</code>)</h3>
+    <div class="diff"><div class="row sel neutral"><span class="num">997</span><span class="code"><span class="k">const</span> <span class="n">x</span> = <span class="s">"selected line"</span>;</span></div></div>
+    <p class="note">No hue at all — selection reads as a warm-gray band (most “navy gone”).</p></div>
+</div>
+
+<h2>Plan (once you approve)</h2>
+<ol class="note">
+  <li>In <code>src/zeros/appearance/diff-theme.ts</code> → <code>DIFF_SHADOW_CSS</code>, add the 3 <code>--diffs-*-color-override</code> vars (green/red + chosen modified). They inherit into the diff shadow root and win because @pierre leaves the <code>-override</code> slots unset.</li>
+  <li>@pierre derives row wash + word emphasis + edge bars + line numbers from them — no per-tint work needed.</li>
+  <li>Optional fine-tune: if the wash reads too strong/soft vs. these mocks, set <code>--diffs-bg-addition-override</code> / <code>--diffs-bg-addition-emphasis-override</code> (and deletion) explicitly.</li>
+  <li>Applies everywhere the renderer is used: Changes tab, Review tab, file-tab diff mode, chat EditCards.</li>
+  <li>Verify: typecheck + eslint + check:ui, and eyeball a real diff.</li>
+</ol>
+</body></html>

@@ -1,0 +1,571 @@
+name: Release
+
+# Manual-only trigger. Run with:
+#   gh workflow run release.yml      (or the Actions tab ▸ Release ▸ Run workflow)
+#
+# Pipeline (THREE jobs): gate on the Vitest suite → BUILD + sign + submit the
+# .dmg/.zip/.zip.blockmap/latest-mac.yml to Apple's notary (no waiting) and
+# upload them as a run artifact → NOTARIZE: poll Apple, staple, verify, and
+# publish the GitHub Release. That release is BOTH the durable per-version
+# archive and the serving layer: the auto-updater polls
+# /releases/latest/download/latest-mac.yml, which follows whatever is marked
+# Latest (`--latest` below). No separate CDN and no storage secrets — the repo
+# is public, so anonymous clients can read release assets directly.
+#
+# WHY the build and the notarize-wait are SEPARATE jobs: Apple's notary service
+# periodically backs up for tens of minutes to several HOURS (see Apple DTS
+# FB21856584). When that happens we do NOT want to throw away a good, signed
+# build and re-run the whole ~10-min pack from scratch. So `build` submits and
+# stops; the signed artifact is preserved; `notarize` polls + publishes. If the
+# notary is slow and `notarize` times out, just RE-RUN THE FAILED JOB
+# (`gh run rerun <id> --failed`) — it re-downloads the SAME signed artifact and
+# re-polls Apple with NO rebuild. The expensive part runs once.
+#
+# Version is AUTO-COMPUTED (release.config.json + scripts/compute-version.mjs):
+# PATCH auto-increments by +1 per release (0.0.1 → 0.0.2 → 0.0.3 …); MAJOR/MINOR
+# are MANUAL — run `pnpm version:set X.Y.Z` on main and commit
+# release.config.json BEFORE triggering (e.g. `version:set 0.1.0` for a feature
+# drop, `version:set 1.0.0` for a milestone). The workflow reads the committed
+# config + the existing release tags, so the version can never silently desync.
+#
+# Signing: Developer-ID signed + notarized when the CSC_*/APPLE_* repo secrets
+# are present (the "Verify code signature" step fails the run loudly if
+# notarization didn't take). With the secrets ABSENT it falls back to an ad-hoc
+# unsigned build (users run `xattr -cr`); electron-builder.yml + the afterPack
+# hook handle both states. See the doc §5.
+
+on:
+  workflow_dispatch:
+
+# ── Least privilege ──────────────────────────────────────
+#
+# Read-only by default. This workflow holds the Developer ID .p12, the Apple
+# notary credentials, and it runs third-party setup actions
+# in the same job — so `test` and `build` get exactly the scope that `checkout`
+# needs and nothing else. Only `notarize` publishes, and it raises itself to
+# `contents: write` at the job level (below).
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Vitest suite (release gate)
+    runs-on: ubuntu-latest
+    # Never release from a fork. `workflow_dispatch` is triggerable by anyone who
+    # forks a public repo, and the ref assertion below does NOT catch that — a
+    # fork's default branch is also `main`. Without this a fork run burns ~30 min
+    # of macOS minutes before failing at the publish step, and a fork that supplied
+    # its own signing secrets could publish something calling itself "Zeros vX.Y.Z".
+    # Keyed to repository identity, not an owner/name pair, so an ownership
+    # transfer can't silently disable releases. `build` and `notarize` chain off
+    # this job via `needs:`, so gating here gates the whole pipeline.
+    if: github.event.repository.fork == false
+    steps:
+      - name: Assert release runs on main or a release branch
+        # PREFERRED: dispatch from `release/X.Y.Z`. That branch is the exact commit
+        # Beta was cut from and validated on, so Production ships what was tested.
+        # Before this, release.yml only accepted `main` and rebuilt main HEAD at
+        # dispatch time — so any commits that landed after the validated Beta shipped
+        # untested, and the bytes tested in Beta were never the bytes released.
+        #
+        # `main` is still accepted for back-compat (and for a hotfix straight off
+        # main), in which case the version falls back to the tag-derived next patch.
+        # Any OTHER ref is rejected: workflow_dispatch lets you pick anything, and a
+        # feature branch would compute a wrong or duplicate version and tag the wrong
+        # commit.
+        run: |
+          case "$GITHUB_REF" in
+            refs/heads/main|refs/heads/release/*) ;;
+            *)
+              echo "::error::Release must be dispatched from 'main' or 'release/X.Y.Z' (got: $GITHUB_REF)."
+              exit 1
+              ;;
+          esac
+          echo "Releasing from $GITHUB_REF"
+
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup pnpm
+        # Reads pnpm version from package.json's `packageManager` field —
+        # passing `with: version:` here conflicts ("Multiple versions of pnpm").
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck (app · electron · packages)
+        # vite + tsup strip types via esbuild WITHOUT checking them, so before this
+        # the ONLY type safety on the release path was that preflight gated the PR
+        # earlier. A direct push to main, or a merge-skew interaction between two
+        # independently-green PRs, reached users unchecked.
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Run Vitest suite
+        # Same suite as the standalone "Vitest suite" workflow — a red suite
+        # blocks the release instead of shipping a known regression.
+        run: pnpm test:git
+
+      - name: Ship guards (catalog · packaging · prod env · security)
+        # Defense-in-depth on the ONLY path that produces a public DMG. These are
+        # fast, deterministic, secret-free, and each guards a way the shipped app
+        # breaks: a downgrading model catalog, a dead packaged Cursor, a missing
+        # extraResources path, a prod build shipped without its VITE_* secret-set,
+        # a desynced Codex protocol, or a regressed Electron security posture.
+        run: |
+          pnpm models:verify --strict
+          pnpm check:cursor-asar
+          pnpm check:packaging-paths
+          pnpm check:vite-env
+          pnpm check:codex-pin
+          pnpm check:electron-hardening
+
+  build:
+    name: Build + sign + submit to notary (macOS arm64)
+    needs: test
+    # macos-latest (Apple Silicon): plentiful runners, no queue, native arm64
+    # build. Notarization is submitted here (--no-wait) and AWAITED in the
+    # separate `notarize` job so an Apple-side queue backlog never forces a
+    # rebuild — see the header.
+    runs-on: macos-latest
+    # Expose the computed version to the `notarize` job (release tag + asset
+    # names + title) so it never recomputes and risks a mismatch.
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Full history + tags. The contiguous patch number is computed from the
+          # existing vMAJOR.MINOR.* release tags (scripts/compute-version.mjs), and
+          # generated notes diff against history. fetch-depth:0 alone does not
+          # reliably bring tags on checkout@v4, so request them explicitly.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Bun (for engine sidecar compile)
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Compute version
+        id: version
+        # On a `release/X.Y.Z` branch the version is X.Y.Z — taken from the branch
+        # name, because cutting that branch IS the decision about which version this
+        # is. Deterministic: the same branch always produces the same version, so
+        # Production and the Beta cut from it agree, and a re-run is idempotent.
+        #
+        # On `main` it falls back to compute-version.mjs (next patch after the highest
+        # vMAJOR.MINOR.PATCH tag) — the pre-existing behavior, kept for hotfixes.
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/heads/release/*)
+              BRANCH_VERSION="${GITHUB_REF#refs/heads/release/}"
+              if ! printf '%s' "$BRANCH_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+                echo "::error::release branch must be named 'release/X.Y.Z' (got: release/$BRANCH_VERSION)."
+                exit 1
+              fi
+              VERSION="$BRANCH_VERSION"
+              echo "Version from release branch: $VERSION"
+              # Refuse to re-release an already-tagged version — `gh release create`
+              # would fail later anyway, but far past the expensive build+notarize.
+              if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+                echo "::error::tag v${VERSION} already exists — bump the release branch or delete the tag."
+                exit 1
+              fi
+              ;;
+            *)
+              VERSION=$(node scripts/compute-version.mjs)
+              echo "Computed version (from tags): $VERSION"
+              ;;
+          esac
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Write version into package.json
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.version = process.env.VERSION;
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+          '
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build engine sidecar (bun → binaries/zeros-engine-*)
+        run: pnpm build:sidecar
+
+      - name: Smoke-test packaged engine (health + workspace lifecycle)
+        # The engine ships as a `bun --compile` single-file binary. CI built it
+        # but never RAN it — so 0.0.1–0.0.3 shipped with an engine that
+        # crash-looped on a native-module load (@parcel/watcher's watcher.node
+        # can't load from inside a bun binary) and the app never started. A later
+        # beta also bound TCP but deadlocked before it could answer HTTP/WS, so a
+        # connect-only check is insufficient. Boot the real binary and require an
+        # external exact-shape /health response plus create/archive/restore before
+        # expensive sign/notarize. This is the macOS runner; preflight's Ubuntu
+        # cross-compile can only link.
+        run: pnpm smoke:engine
+
+      - name: Compile Electron main + preload
+        run: pnpm electron:compile
+
+      - name: Build Vite renderer
+        # VITE_* values are inlined into the renderer bundle at BUILD time
+        # (import.meta.env). They MUST be present on this step or the packaged
+        # app ships without them — analytics + feedback go dark (auth has no
+        # VITE_* dependency: the desktop never talks to Auth0 directly, only to
+        # app.zeros.build). .env is gitignored (absent in CI), so
+        # these come from repo secrets. The DEV PostHog key is intentionally
+        # omitted (a packaged build always runs in prod mode). POSTHOG_HOST and
+        # APP_BASE_URL are optional pass-throughs: if the secret is unset they
+        # resolve to "" and the code falls back to its defaults
+        # (us.i.posthog.com / https://app.zeros.build).
+        env:
+          VITE_POSTHOG_KEY_PROD: ${{ secrets.VITE_POSTHOG_KEY_PROD }}
+          VITE_POSTHOG_HOST: ${{ secrets.VITE_POSTHOG_HOST }}
+          VITE_FEEDBACK_URL: ${{ secrets.VITE_FEEDBACK_URL }}
+          VITE_APP_BASE_URL: ${{ secrets.VITE_APP_BASE_URL }}
+          VITE_CONTROL_PLANE_URL: ${{ secrets.VITE_CONTROL_PLANE_URL }}
+        run: pnpm build:ui
+
+      - name: Package .dmg + .zip with electron-builder (sign only)
+        # `--publish never` disables eb's own upload; the explicit `gh release
+        # create` in the notarize job does it. better-sqlite3 is rebuilt against
+        # Electron's V8 ABI; node-pty keeps its N-API Darwin prebuild and ships a
+        # runtime-safe copy outside app.asar.unpacked.
+        #
+        # With CSC_LINK set, eb SIGNS with the Developer ID cert (the afterPack
+        # hook self-skips). Notarization is `false` in electron-builder.yml and is
+        # done manually (--no-wait submit here, poll in the notarize job). With the
+        # secrets absent it falls back to an ad-hoc unsigned build. Signing is fast
+        # + reliable, so no retry harness here.
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: pnpm exec electron-builder --config electron-builder.yml --publish never
+
+      - name: Assert differential update blockmap
+        # electron-updater falls back to downloading the entire ~170 MB zip when
+        # this sidecar is missing. Fail before notarization rather than silently
+        # shipping a release that cannot use differential updates.
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          BLOCKMAP="release/Zeros-${VERSION}-arm64-mac.zip.blockmap"
+          if [ ! -f "$BLOCKMAP" ]; then
+            echo "::error::$BLOCKMAP not found — electron-builder did not emit the differential-update blockmap."
+            ls -la release || true
+            exit 1
+          fi
+          echo "✓ differential-update blockmap: $BLOCKMAP"
+
+      - name: Smoke-test terminal in the packaged app
+        # Requiring node-pty is insufficient: beta.58 loaded its signed addon but
+        # every pty.spawn failed. Exercise the exact .app executable + dedicated
+        # native resource + shipped PTY host and require real shell output.
+        run: pnpm smoke:packaged-pty
+
+      - name: Submit to Apple notary (--no-wait, no poll)
+        # Submit the DMG and STOP — do NOT block this job on Apple's analysis. The
+        # `--no-wait` submit returns immediately with a submission id, which we
+        # record into the artifact so the `notarize` job (and any cheap re-run of
+        # it) can poll for the result without re-uploading or rebuilding. The
+        # UPLOAD itself is reliable; it's Apple's server-side processing that drags.
+        # Skips for the unsigned fallback.
+        env:
+          SIGNED: ${{ secrets.CSC_LINK != '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -uo pipefail
+          if [ "$SIGNED" != "true" ]; then echo "unsigned build — skipping notarization submit"; exit 0; fi
+          DMG=""
+          for CANDIDATE in release/Zeros-*-arm64.dmg; do
+            [ -f "$CANDIDATE" ] || continue
+            DMG="$CANDIDATE"
+            break
+          done
+          if [ -z "$DMG" ]; then echo "::error::no versioned .dmg to notarize"; exit 1; fi
+          echo "Submitting $DMG to Apple notary (--no-wait)…"
+          SUB=$(xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+            --no-wait --output-format json 2>/dev/null | jq -r '.id // empty' || true)
+          if [ -z "$SUB" ]; then echo "::error::notarytool submit returned no submission id (upload failed)"; exit 1; fi
+          printf '%s' "$SUB" > release/notarization-submission-id.txt
+          echo "Submission id: $SUB (recorded → release/notarization-submission-id.txt)"
+
+      - name: Upload signed build artifact
+        # Carry the signed, NOT-YET-stapled build (+ the submission id) to the
+        # `notarize` job. This is the keystone of the slow-notary recovery: the
+        # artifact also survives a `gh run rerun --failed`, so re-finalizing never
+        # rebuilds. (.app is intentionally NOT uploaded — upload-artifact breaks
+        # the bundle's symlinks; the notarize job verifies by mounting the DMG.)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zeros-macos-arm64-build
+          if-no-files-found: error
+          retention-days: 5
+          path: |
+            release/Zeros-*-arm64.dmg
+            release/Zeros-*-arm64-mac.zip
+            release/Zeros-*-arm64-mac.zip.blockmap
+            release/latest-mac.yml
+            release/notarization-submission-id.txt
+
+  notarize:
+    name: Notarize + verify + publish (macOS arm64)
+    needs: build
+    # macOS for xcrun notarytool/stapler/spctl. This job is CHEAP and re-runnable:
+    # on an Apple slow-day it may time out polling — just re-run it
+    # (`gh run rerun <id> --failed`) and it re-downloads the same signed artifact
+    # and re-polls, no rebuild.
+    runs-on: macos-latest
+    # The ONE job that writes: it creates the vX.Y.Z tag + GitHub Release. Raised
+    # above the workflow-level `contents: read` default here and nowhere else.
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download signed build artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: zeros-macos-arm64-build
+          path: release
+
+      - name: Poll Apple notary + staple
+        # Poll `notarytool info` for the submission the build job recorded. Each
+        # poll is a quick request, so a `-1009` blip just retries the next poll
+        # instead of killing the whole wait. MAX_POLLS×POLL_SLEEP sets the budget
+        # (default ~2h); if Apple is slower than that the build artifact is still
+        # saved, so re-running THIS job picks up where it left off with no rebuild.
+        # Staples the DMG on success. Skips for the unsigned fallback.
+        timeout-minutes: 130
+        env:
+          SIGNED: ${{ secrets.CSC_LINK != '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # ~2h budget (120 × 60s). Bump for a known Apple backlog; a timeout is
+          # recoverable by re-running this job, so this is a soft ceiling.
+          MAX_POLLS: "120"
+          POLL_SLEEP: "60"
+        run: |
+          set -uo pipefail
+          if [ "$SIGNED" != "true" ]; then echo "unsigned build — skipping notarization"; exit 0; fi
+          DMG=""
+          for CANDIDATE in release/Zeros-*-arm64.dmg; do
+            [ -f "$CANDIDATE" ] || continue
+            DMG="$CANDIDATE"
+            break
+          done
+          if [ -z "$DMG" ]; then echo "::error::no versioned .dmg in the downloaded artifact"; exit 1; fi
+          SUB=$(cat release/notarization-submission-id.txt 2>/dev/null || true)
+          if [ -z "$SUB" ]; then echo "::error::no submission id recorded by the build job"; exit 1; fi
+          echo "Polling submission $SUB for $DMG (resilient to -1009 blips)…"
+          status="Unknown"
+          for ((i=1; i<=MAX_POLLS; i++)); do
+            out=$(xcrun notarytool info "$SUB" \
+              --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+              --output-format json 2>/dev/null || echo '{}')
+            status=$(printf '%s' "$out" | jq -r '.status // "Unknown"')
+            echo "[poll $i/$MAX_POLLS] status=$status"
+            case "$status" in
+              Accepted) break ;;
+              Invalid|Rejected)
+                echo "::error::notarization $status — notarytool log follows:"
+                xcrun notarytool log "$SUB" --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" 2>/dev/null || true
+                exit 1 ;;
+              *) sleep "$POLL_SLEEP" ;;
+            esac
+          done
+          if [ "$status" != "Accepted" ]; then
+            echo "::error::notarization still '$status' after ${MAX_POLLS} polls. Apple is still analysing; submission $SUB is queued. The signed build is saved as the 'zeros-macos-arm64-build' artifact — RE-RUN this 'notarize' job ('gh run rerun <run-id> --failed') to pick up the result with NO rebuild."
+            exit 1
+          fi
+          # Brace the var: this script runs under /bin/bash (3.2) with `set -u`,
+          # and the trailing multibyte ellipsis glued to `$DMG…` gets swallowed
+          # into the variable name → "unbound variable" → the publish aborts the
+          # instant notarization is Accepted. Masked until now because the first
+          # run timed out on a slow notary and never reached this line.
+          echo "Stapling ${DMG}…"
+          xcrun stapler staple "$DMG"
+          echo "✓ notarized + stapled"
+
+      - name: Verify code signature + notarization
+        # Fail the release LOUDLY if signing/notarization silently didn't take —
+        # otherwise we'd ship a build Gatekeeper blocks with no error here. The app
+        # bundle lives inside the DMG (we don't upload the .app — that would break
+        # its symlinks), so mount the DMG read-only and assert against the app
+        # inside. Always checks the signature is valid + sealed; when signed
+        # (CSC_LINK set) it additionally enforces hardened runtime, a stapled DMG
+        # notarization ticket, and Gatekeeper acceptance.
+        env:
+          SIGNED: ${{ secrets.CSC_LINK != '' }}
+        run: |
+          set -euo pipefail
+          DMG=""
+          for CANDIDATE in release/Zeros-*-arm64.dmg; do
+            [ -f "$CANDIDATE" ] || continue
+            DMG="$CANDIDATE"
+            break
+          done
+          if [ -z "$DMG" ]; then echo "::error::no versioned .dmg to validate"; exit 1; fi
+          MNT=$(mktemp -d)
+          cleanup() { hdiutil detach "$MNT" -quiet 2>/dev/null || true; }
+          trap cleanup EXIT
+          hdiutil attach "$DMG" -readonly -nobrowse -quiet -mountpoint "$MNT"
+          APP="$MNT/Zeros.app"
+          if [ ! -d "$APP" ]; then
+            echo "::error::No Zeros.app found inside $DMG"
+            exit 1
+          fi
+          echo "Verifying: $APP"
+          # Signature valid + sealed (true for both ad-hoc and Developer ID).
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          if [ "$SIGNED" = "true" ]; then
+            # Hardened runtime flag must be present (proves entitlements applied).
+            if ! codesign --display --verbose=4 "$APP" 2>&1 | grep -qE 'flags=.*runtime'; then
+              echo "::error::Hardened runtime not applied — signing/entitlements misconfigured"
+              exit 1
+            fi
+            # Assert the DMG staple is present and Gatekeeper accepts the app
+            # (-t exec; -t install is for .pkg and would falsely reject an app).
+            # The app passes via the cloud notarization recorded by the DMG
+            # submission.
+            xcrun stapler validate "$DMG"
+            spctl -a -vvv -t exec "$APP"
+            echo "✓ Developer ID signed · hardened · notarized · stapled DMG · Gatekeeper-accepted"
+          else
+            echo "✓ ad-hoc signature valid (unsigned beta path — users run 'xattr -cr')"
+          fi
+
+      - name: Publish GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.build.outputs.version }}
+          # "true" when a signing cert is configured — drives the install copy
+          # (signed builds don't need the xattr step).
+          SIGNED: ${{ secrets.CSC_LINK != '' }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+
+          # Auto-generated, PR-based notes grouped per .github/release.yml.
+          GENERATED=$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$TAG" \
+            -f target_commitish="$GITHUB_SHA" \
+            --jq .body 2>/dev/null || true)
+
+          # Strip @-handle credits before the body is published. The
+          # generate-notes API emits one "* <PR title> by @<handle> in <url>" line
+          # per PR plus a "## New Contributors" block. This repo is
+          # source-available and closed to outside contribution, so every merged
+          # PR is a maintainer or a dependency bot: the handle adds no information
+          # the PR link doesn't already carry, and baking it into a permanent,
+          # world-readable release body turns it into a standing ping target on
+          # every future release. The PR title, number and link all survive.
+          if [ -n "$GENERATED" ]; then
+            GENERATED=$(printf '%s\n' "$GENERATED" \
+              | sed -E 's/ by @[A-Za-z0-9][A-Za-z0-9-]*( in )/\1/g' \
+              | sed -E '/^\*? ?@[A-Za-z0-9][A-Za-z0-9-]* made their first contribution/d' \
+              | sed -E '/^#+ New Contributors[[:space:]]*$/d')
+          fi
+
+          # Install header — signed builds are notarized (clean launch); unsigned
+          # falls back to xattr. Quoted heredoc keeps markdown literal; VERSION after.
+          if [ "$SIGNED" = "true" ]; then
+            INSTALL=$(cat <<'EOF'
+          ## Install
+
+          1. Download `Zeros-__V__-arm64.dmg` below.
+          2. Open it and drag **Zeros.app** into `/Applications`.
+          3. Launch from Spotlight / Finder.
+
+          Installed apps update in place via the built-in auto-updater.
+          EOF
+          )
+          else
+            INSTALL=$(cat <<'EOF'
+          ## Install (unsigned beta)
+
+          1. Download `Zeros-__V__-arm64.dmg` below.
+          2. Drag **Zeros.app** into `/Applications`.
+          3. Strip the quarantine flag (this build is not yet Apple-signed):
+             ```bash
+             xattr -cr /Applications/Zeros.app
+             ```
+          4. Launch from Spotlight / Finder.
+
+          Installed apps detect new versions on launch and open the latest DMG to download.
+          EOF
+          )
+          fi
+          INSTALL="${INSTALL//__V__/$VERSION}"
+
+          # These are the per-release, auto-generated technical notes. The
+          # curated, milestone-only story lives on the public changelog — link to
+          # it so readers know where the human-written highlights are.
+          FOOTER=$'\n\n---\n'"📝 Curated highlights & media: https://zeros.build/changelog"
+          BODY="${INSTALL}"$'\n\n'"${GENERATED}${FOOTER}"
+
+          # Idempotent: drop any prior release + tag of the same version, then
+          # recreate. Marks this the Latest release even though the new 0.0.x
+          # line sorts BELOW the retired 0.1.x tags.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete "$TAG" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          fi
+
+          # Stable-named copy so the website Download button can point at a fixed
+          # URL — /releases/latest/download/Zeros-arm64.dmg — that always serves
+          # the newest build, no per-release edits (website/marketing/src/lib/site.ts).
+          # The versioned dmg + latest-mac.yml feed the in-app auto-updater.
+          cp "release/Zeros-${VERSION}-arm64.dmg" "release/Zeros-arm64.dmg"
+
+          # --target pins the NEW tag to the commit that was actually built,
+          # notarized and verified above. Without it `gh release create` creates
+          # vX.Y.Z on the DEFAULT branch's HEAD — which was harmless while this
+          # workflow only accepted `main`, but is wrong now that `release/X.Y.Z` is
+          # the preferred ref: the tag would point at main HEAD while the shipped
+          # artifacts came from the release branch, silently breaking the "the bytes
+          # tested in Beta are the bytes shipped" property this pipeline exists for.
+          # release-alpha.yml / release-beta.yml already pass --target for the same
+          # reason.
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Zeros v${VERSION}" \
+            --latest \
+            --notes "$BODY" \
+            "release/Zeros-${VERSION}-arm64.dmg" \
+            "release/Zeros-arm64.dmg" \
+            "release/Zeros-${VERSION}-arm64-mac.zip" \
+            "release/Zeros-${VERSION}-arm64-mac.zip.blockmap" \
+            "release/latest-mac.yml"
+

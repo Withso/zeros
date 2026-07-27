@@ -1,0 +1,6 @@
+{
+  "$comment": "Release version baseline. MAJOR.MINOR are MANUAL — they change ONLY when you run `pnpm version:set X.Y.Z` (on main, then commit this file). PATCH is automatic + contiguous: every release = (highest vMAJOR.MINOR.* tag patch) + 1, starting from the baseline below. So with {0,0,1} and no tags, the first release is 0.0.1, then 0.0.2, 0.0.3, … For a feature drop run `pnpm version:set 0.1.0`; for a milestone `pnpm version:set 1.0.0`. No base-100 rollover (patch is unbounded). See scripts/compute-version.mjs.",
+  "major": 0,
+  "minor": 1,
+  "patch": 0
+}

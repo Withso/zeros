@@ -1,0 +1,1948 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-Zeros-root>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Zeros — §3.6 Models, effort &amp; budget · Design catalog</title>
+    <style>
+      /* ============================================================
+         Tokens — lifted verbatim from styles/zeros-tokens.css so the
+         mockups render on the real Zeros Shade (dark) + Light palettes.
+         Toggle themes with the switch in the header.
+         ============================================================ */
+      :root {
+        color-scheme: dark;
+        --bg1: hsl(25 5% 7%);
+        --bg1-hover: hsl(8 5% 12%);
+        --bg1-highlight: hsl(25 5% 10%);
+        --bg2: hsl(25 4% 12%);
+        --bg2-hover: hsl(25 3% 15%);
+        --bg3: hsl(15 4% 16%);
+        --bg3-hover: hsl(15 3% 20%);
+        --sidebar-bg: hsl(25 5% 9%);
+        --fg1: hsl(0 2% 92%);
+        --fg2: hsl(20 4% 66%);
+        --fg3: hsl(15 1% 44%);
+        --muted-fg: hsl(15 4% 44%);
+        --border1: hsl(8 3% 14%);
+        --border2: hsl(25 1% 18%);
+        --border3: hsl(15 0% 24%);
+        --border4: hsl(15 0% 30%);
+        --highlighted-bright: hsl(25 5% 65%);
+        --inverted-bg: hsl(0 2% 92%);
+        --inverted-fg: hsl(5 7% 5%);
+        --green-primary: hsl(142 69% 58%);
+        --green-bg: hsl(120 23% 17%);
+        --green-fg: hsl(142 75% 73%);
+        --red-primary: hsl(0 91% 71%);
+        --red-bg: hsl(13 81% 14%);
+        --red-fg: hsl(20 97% 72%);
+        --yellow-primary: hsl(37 75% 60%);
+        --yellow-bg: hsl(38 68% 17%);
+        --yellow-fg: hsl(44 100% 50%);
+        --blue-primary: hsl(205 80% 73%);
+        --violet-primary: hsl(271 80% 73%);
+        --brown-primary: hsl(9 46% 72%);
+        --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+        --radius-sm: 4px;
+        --radius-md: 6px;
+        --radius-lg: 8px;
+        --sans:
+          "Geist Variable", Inter, ui-sans-serif, -apple-system,
+          BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --mono: "Geist Mono Variable", "SFMono-Regular", Consolas, monospace;
+      }
+
+      [data-theme="light"] {
+        color-scheme: light;
+        --bg1: hsl(0 0% 100%);
+        --bg1-hover: hsl(0 4% 95%);
+        --bg1-highlight: hsl(0 0% 97%);
+        --bg2: hsl(60 4% 95%);
+        --bg2-hover: hsl(60 4% 91%);
+        --bg3: hsl(0 0% 100%);
+        --bg3-hover: hsl(0 0% 95%);
+        --sidebar-bg: hsl(60 9% 98%);
+        --fg1: hsl(20 7% 16%);
+        --fg2: hsl(20 4% 37%);
+        --fg3: hsl(20 4% 56%);
+        --muted-fg: hsl(20 4% 68%);
+        --border1: hsl(30 9% 91%);
+        --border2: hsl(30 9% 91%);
+        --border3: hsl(60 3% 85%);
+        --border4: hsl(0 1% 83%);
+        --highlighted-bright: hsl(25 5% 45%);
+        --inverted-bg: hsl(20 7% 16%);
+        --inverted-fg: hsl(0 0% 100%);
+        --green-primary: hsl(142 75% 36%);
+        --green-bg: hsl(134 38% 89%);
+        --green-fg: hsl(142 70% 30%);
+        --red-primary: hsl(0 72% 51%);
+        --red-bg: hsl(18 87% 91%);
+        --red-fg: hsl(18 89% 40%);
+        --yellow-primary: hsl(37 90% 60%);
+        --yellow-bg: hsl(48 97% 89%);
+        --yellow-fg: hsl(37 100% 51%);
+        --blue-primary: hsl(221 83% 53%);
+        --violet-primary: hsl(271 80% 51%);
+        --brown-primary: hsl(5 35% 50%);
+        --shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+      }
+
+      * { box-sizing: border-box; }
+      html { scroll-behavior: smooth; }
+      body {
+        margin: 0;
+        min-width: 320px;
+        min-height: 100vh;
+        background:
+          radial-gradient(
+            circle at 50% -8%,
+            color-mix(in srgb, var(--fg1) 5%, transparent),
+            transparent 30rem
+          ),
+          var(--bg1);
+        color: var(--fg1);
+        font: 14px/1.5 var(--sans);
+        -webkit-font-smoothing: antialiased;
+      }
+      button { font: inherit; color: inherit; cursor: pointer; }
+      svg { display: block; }
+      code { font-family: var(--mono); }
+
+      .page {
+        width: min(1180px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 48px 0 96px;
+      }
+
+      /* ── Hero ── */
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 28px;
+        align-items: end;
+        padding-bottom: 28px;
+        border-bottom: 1px solid var(--border1);
+      }
+      .eyebrow {
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        color: var(--yellow-primary);
+      }
+      h1 {
+        max-width: 780px;
+        margin: 9px 0 10px;
+        font-size: clamp(26px, 3.4vw, 40px);
+        line-height: 1.05;
+        letter-spacing: -0.035em;
+      }
+      .lede { max-width: 740px; margin: 0; color: var(--fg2); font-size: 15px; }
+      .hero-aside { display: flex; flex-direction: column; gap: 12px; align-items: flex-end; }
+      .summary-chip {
+        min-width: 240px;
+        padding: 14px 16px;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 90%, transparent);
+      }
+      .summary-chip strong { display: block; margin-bottom: 3px; font-size: 13px; }
+      .summary-chip span { display: block; color: var(--fg2); font-size: 12px; }
+      .theme-toggle {
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 6px 11px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: var(--bg2); color: var(--fg1); font-size: 12px;
+      }
+      .theme-toggle:hover { background: var(--bg2-hover); }
+
+      /* ── Thesis cards ── */
+      .thesis {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        margin: 24px 0 12px;
+      }
+      .thesis-card {
+        min-width: 0;
+        padding: 16px 18px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 86%, transparent);
+      }
+      .thesis-card.primary {
+        border-color: color-mix(in srgb, var(--green-primary) 26%, var(--border1));
+        background: color-mix(in srgb, var(--green-primary) 5%, var(--sidebar-bg));
+      }
+      .thesis-card h3 { margin: 0 0 5px; font-size: 13px; }
+      .thesis-card p { margin: 0; color: var(--fg2); font-size: 12px; line-height: 1.5; }
+
+      /* ── Sticky nav ── */
+      nav {
+        position: sticky; top: 0; z-index: 20;
+        display: flex; flex-wrap: wrap; gap: 5px;
+        margin: 26px -12px 40px;
+        padding: 10px 12px;
+        border-bottom: 1px solid color-mix(in srgb, var(--border1) 80%, transparent);
+        background: color-mix(in srgb, var(--bg1) 82%, transparent);
+        backdrop-filter: blur(14px);
+      }
+      nav a {
+        flex: none; padding: 5px 9px;
+        border-radius: var(--radius-sm);
+        color: var(--fg2); font-size: 12px; text-decoration: none;
+      }
+      nav a:hover { background: var(--bg2); color: var(--fg1); }
+      .nav-sep { width: 1px; margin: 3px 4px; background: var(--border2); }
+
+      /* ── Section headers / case scaffold ── */
+      .band {
+        margin: 0 0 26px;
+        font-size: 12px; font-weight: 650;
+        letter-spacing: 0.08em; text-transform: uppercase;
+        color: var(--fg3);
+      }
+      .catalog { display: grid; gap: 56px; }
+      .catalog + .band { margin-top: 64px; }
+      .case { scroll-margin-top: 68px; }
+      .case-head {
+        display: flex; justify-content: space-between; gap: 24px;
+        align-items: flex-start; margin-bottom: 16px;
+      }
+      .case-title-row { display: flex; gap: 10px; align-items: center; margin-bottom: 6px; }
+      .case-number { font-size: 11px; font-weight: 650; letter-spacing: 0.06em; color: var(--fg3); }
+      .tag {
+        padding: 3px 8px; border-radius: 999px;
+        background: var(--bg2); color: var(--fg2);
+        font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+      }
+      .tag.gap { background: color-mix(in srgb, var(--yellow-primary) 12%, transparent); color: var(--yellow-primary); }
+      .tag.p1 { background: color-mix(in srgb, var(--red-primary) 12%, transparent); color: var(--red-primary); }
+      .tag.skip { background: color-mix(in srgb, var(--blue-primary) 12%, transparent); color: var(--blue-primary); }
+      .case h2 { margin: 0; font-size: 19px; line-height: 1.22; letter-spacing: -0.02em; }
+      .case-copy { max-width: 720px; margin: 6px 0 0; color: var(--fg2); font-size: 13px; }
+      .case-copy b { color: var(--fg1); }
+      .meta {
+        flex: none; max-width: 280px; padding-top: 2px;
+        color: var(--fg3); font-size: 11px; line-height: 1.5; text-align: right;
+      }
+
+      /* ── Frames ── */
+      .dual { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+      .frame-wrap { min-width: 0; }
+      .frame-label {
+        display: flex; align-items: center; gap: 7px;
+        margin-bottom: 8px;
+        font-size: 11px; font-weight: 600; letter-spacing: 0.04em; color: var(--fg3);
+      }
+      .frame-label .dot-lg { width: 7px; height: 7px; border-radius: 999px; background: var(--fg3); }
+      .frame-label.before .dot-lg { background: var(--red-primary); }
+      .frame-label.after .dot-lg { background: var(--green-primary); }
+      .frame {
+        overflow: hidden;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: var(--bg1);
+        box-shadow: var(--shadow);
+      }
+      .single { max-width: 620px; }
+
+      /* ── Chat pane mock ── */
+      .chat-head {
+        display: flex; height: 40px; align-items: center; gap: 8px;
+        padding: 0 14px;
+        border-bottom: 1px solid var(--border1);
+        color: var(--fg2); font-size: 12px;
+      }
+      .chat-head .agent-glyph { color: var(--fg2); }
+      .chat-head b { color: var(--fg1); font-weight: 600; }
+      .chat-body { position: relative; display: flex; flex-direction: column; height: 380px; }
+      .chat-body.tall { height: 430px; }
+      .transcript {
+        flex: 1; overflow: hidden;
+        display: flex; flex-direction: column; gap: 11px;
+        padding: 14px 16px 6px;
+        font-size: 13px;
+      }
+      .u-msg {
+        align-self: flex-end; max-width: 80%;
+        padding: 7px 11px;
+        border-radius: 10px;
+        background: var(--bg2); color: var(--fg1);
+      }
+      .a-msg { max-width: 92%; color: var(--fg1); line-height: 1.55; }
+      .a-msg .cut { color: var(--fg1); }
+
+      /* collapsed working-group chip (turn-partition) */
+      .work-chip {
+        display: inline-flex; width: fit-content; align-items: center; gap: 7px;
+        padding: 4px 9px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-md);
+        color: var(--fg2); font-size: 12px;
+      }
+      .work-chip svg { width: 12px; height: 12px; color: var(--fg3); }
+
+      /* inline system-notice row (EventRow recipe: icon cell + label + chip) */
+      .event-row { display: flex; align-items: center; gap: 8px; color: var(--fg2); font-size: 12.5px; }
+      .event-row .ev-icon { flex: none; width: 13px; height: 13px; color: var(--fg2); }
+      .event-row .ev-icon.spin svg { animation: spin 0.9s linear infinite; }
+      .event-row .ev-label { color: var(--fg1); }
+      .event-row .ev-sub { color: var(--fg2); }
+      .mini-chip {
+        margin-left: 2px;
+        padding: 1px 6px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-md);
+        color: var(--fg2);
+        font: 600 10px/1.7 var(--mono);
+        letter-spacing: 0.04em; text-transform: uppercase;
+      }
+
+      /* ── Tool-call card (AskUserQuestion "User input" recipe) ──────────
+         The exact EventRow + StatusChip chrome the "User input · ANSWERED"
+         card uses (event-row.tsx / question-card.tsx). A collapsible island
+         in the transcript: a w-fit header row [glyph + label + status pill]
+         and a bg-bg2/60 detail panel below. Model fallback (R2) and the
+         budget stop (R3) render as these — either can occur mid-turn, so they
+         live in the transcript like any other tool call, never as a toast.
+         (No chevron: the real leading glyph swaps to −/＋ on hover; shown at
+         rest here, as in the screenshots.) */
+      .toolcall { align-self: flex-start; width: 100%; max-width: 92%; }
+      .tc-head {
+        display: inline-flex; width: fit-content; max-width: 100%;
+        align-items: center; gap: 8px;
+        padding: 4px 8px; margin-left: -8px;
+        border-radius: var(--radius-md);
+        color: var(--fg1); font-size: 13px; cursor: pointer;
+      }
+      .tc-head:hover { background: var(--bg2-hover); }
+      .tc-head .tc-glyph { flex: none; width: 13px; height: 13px; color: var(--fg2); }
+      .tc-head .tc-label { white-space: nowrap; }
+      /* the status pill inside the header — the ANSWERED / AWAITING-RESPONSE
+         StatusChip: border-border1, text-fg2, rounded-sm, mono 10px, uppercase */
+      .tc-pill {
+        display: inline-flex; flex-shrink: 0; align-items: center; gap: 4px;
+        padding: 1px 6px;
+        border: 1px solid var(--border1); border-radius: var(--radius-sm);
+        color: var(--fg2); font: 500 10px/1.7 var(--mono);
+        letter-spacing: 0.05em; text-transform: uppercase; white-space: nowrap;
+      }
+      .tc-pill svg { width: 10px; height: 10px; }
+      /* muted scope pill (e.g. "Claude") — the non-file target-pill recipe */
+      .tc-scope {
+        padding: 1px 6px; border-radius: var(--radius-sm);
+        background: var(--bg1-hover); color: var(--fg3);
+        font: 500 10px/1.7 var(--mono); letter-spacing: 0.03em;
+        text-transform: uppercase; white-space: nowrap;
+      }
+      /* expanded detail panel — the copy that used to live in a toast */
+      .tc-body {
+        margin: 6px 0 2px 0;
+        padding: 10px 12px;
+        border-radius: var(--radius-md);
+        background: color-mix(in srgb, var(--bg2) 60%, transparent);
+        color: var(--fg1); font-size: 13px; line-height: 1.6;
+        max-width: 440px;
+      }
+      .tc-body b { color: var(--fg1); font-weight: 600; }
+      .tc-body .tc-lead { color: var(--fg2); }
+      .tc-body .tc-kv { display: block; margin-top: 7px; color: var(--fg3); font-size: 11.5px; }
+      .tc-body .tc-kv b { color: var(--fg2); font-weight: 500; }
+
+      /* turn footer (turn-footer.tsx recipe) */
+      .tf { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 2px; font-size: 12px; color: var(--fg2); }
+      .tf-line { flex-basis: 100%; }
+      .tf-pill {
+        display: inline-flex; width: fit-content; align-items: center; gap: 6px;
+        padding: 2px 8px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: var(--bg1); color: var(--fg1);
+        font-size: 11px; letter-spacing: 0.05em;
+      }
+      .tf-time { font-variant-numeric: tabular-nums; }
+      .tf-icon {
+        display: inline-grid; width: 20px; height: 20px; place-items: center;
+        border-radius: var(--radius-sm); color: var(--fg2); background: transparent; border: 0; padding: 0;
+      }
+      .tf-icon:hover { background: var(--bg2-hover); }
+      .tf-icon svg { width: 13px; height: 13px; }
+      .file-pill {
+        display: inline-flex; height: 20px; align-items: center; gap: 5px;
+        padding: 0 6px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: var(--bg1); color: var(--fg2); font-size: 11px;
+      }
+      .file-pill svg { width: 12px; height: 12px; }
+      .file-pill .add { color: var(--green-primary); font-variant-numeric: tabular-nums; }
+      .file-pill .del { color: var(--red-primary); font-variant-numeric: tabular-nums; }
+      /* Separate action row BELOW the footer — the turn-end action buttons
+         (Continue / Sign in / Retry) live here, one row, not inline with the
+         time + copy + file pills. */
+      .tf-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 7px; }
+      .tf-actions-hint { color: var(--fg3); font-size: 11px; line-height: 1.4; }
+      .tf-action {
+        display: inline-flex; align-items: center; gap: 5px;
+        height: 22px; padding: 0 8px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: var(--bg2); color: var(--fg1); font-size: 11px; font-weight: 500;
+      }
+      .tf-action:hover { background: var(--bg2-hover); }
+      .tf-action svg { width: 11px; height: 11px; }
+
+      /* Below-footer action catalog table */
+      .action-cat { padding: 6px 4px 10px; }
+      .action-row {
+        display: grid;
+        grid-template-columns: 128px 150px 88px minmax(0, 1fr);
+        gap: 12px; align-items: center;
+        padding: 9px 12px;
+        border-top: 1px solid var(--border1);
+        font-size: 12px; color: var(--fg2); line-height: 1.45;
+      }
+      .action-row:first-child { border-top: 0; }
+      .action-row.action-head {
+        font-size: 10.5px; font-weight: 650; letter-spacing: 0.05em;
+        text-transform: uppercase; color: var(--fg3);
+      }
+      .action-row .a-state { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--fg1); font-weight: 500; }
+      .action-row .a-scope { color: var(--fg3); font-size: 11px; }
+      .action-row .a-do b { color: var(--fg1); font-weight: 500; }
+      .action-row .a-do code { padding: 1px 4px; border-radius: var(--radius-sm); background: var(--bg2-hover); color: var(--fg1); font-size: 10.5px; }
+      .cat-group {
+        margin: 15px 14px 3px; font-size: 10.5px; font-weight: 650;
+        letter-spacing: 0.05em; text-transform: uppercase; color: var(--fg3);
+      }
+      .ship-tag {
+        padding: 0 5px;
+        border-radius: 999px; font: 600 9.5px/1.6 var(--mono);
+        letter-spacing: 0.03em; text-transform: uppercase; white-space: nowrap;
+      }
+      .ship-tag.now { background: color-mix(in srgb, var(--green-primary) 14%, transparent); color: var(--green-fg); }
+      .ship-tag.new { background: color-mix(in srgb, var(--blue-primary) 14%, transparent); color: var(--blue-primary); }
+      .ship-tag.route { background: var(--bg2-hover); color: var(--fg2); }
+      @media (max-width: 700px) {
+        .action-row { grid-template-columns: 1fr; gap: 3px; }
+        .action-row.action-head { display: none; }
+      }
+
+      /* composer */
+      .composer {
+        margin: 8px 12px 12px;
+        border: 1px solid var(--border2);
+        border-radius: 12px;
+        background: var(--bg1);
+      }
+      .composer-input { padding: 10px 13px 2px; font-size: 13px; color: var(--fg3); }
+      .composer-bar {
+        display: flex; align-items: center; justify-content: space-between; gap: 8px;
+        padding: 6px 8px 8px;
+      }
+      .composer-tools { display: flex; align-items: center; gap: 2px; min-width: 0; }
+      .tool-plus {
+        display: inline-grid; width: 26px; height: 26px; place-items: center;
+        border-radius: var(--radius-md); color: var(--fg2);
+      }
+      .tool-plus svg { width: 14px; height: 14px; }
+      .cpill {
+        display: inline-flex; align-items: center; gap: 4px;
+        padding: 4px 8px;
+        border: 0; border-radius: var(--radius-md);
+        background: transparent; color: var(--fg2);
+        font-size: 12px; font-weight: 500; white-space: nowrap;
+      }
+      .cpill:hover { background: var(--bg2-hover); color: var(--fg1); }
+      .cpill svg { width: 14px; height: 14px; }
+      .cpill.icon-16 svg { width: 16px; height: 16px; }
+      .cpill.fast-on { gap: 6px; background: var(--bg2-hover); color: var(--yellow-fg); }
+      .cpill.fast-on svg { fill: currentColor; }
+      .cpill .glyph12 { width: 12px; height: 12px; }
+      .flash-hint { margin-left: 2px; color: var(--fg3); font-size: 11px; white-space: nowrap; animation: fadein 0.35s ease; }
+      .composer-right { display: flex; flex: none; align-items: center; gap: 6px; }
+      .gauge-btn {
+        display: inline-grid; width: 32px; height: 32px; place-items: center;
+        border-radius: 6px; color: var(--fg2); background: transparent; border: 0; padding: 0;
+      }
+      .gauge-btn:hover { background: var(--bg2-hover); }
+      .send-btn {
+        display: inline-grid; width: 32px; height: 32px; place-items: center;
+        border: 0; border-radius: 8px;
+        background: var(--inverted-bg); color: var(--inverted-fg);
+      }
+      .send-btn.stop { background: var(--bg2-hover); color: var(--fg1); }
+      .send-btn svg { width: 15px; height: 15px; }
+
+      /* ring (context gauge) — circumference 2π·6 ≈ 37.7 */
+      .ring { transform: rotate(-90deg); }
+      .ring .track { stroke: var(--border3); }
+      .ring .arc { stroke: var(--fg2); }
+      .ring .arc.hot { stroke: var(--red-primary); }
+
+      /* floating toast mock */
+      .toast {
+        position: absolute; right: 12px; bottom: 76px; z-index: 5;
+        width: 300px;
+        padding: 11px 13px;
+        border: 1px solid var(--border2);
+        border-radius: 10px;
+        background: var(--bg3);
+        box-shadow: var(--shadow);
+        font-size: 12px;
+      }
+      .toast b { display: flex; align-items: center; gap: 7px; margin-bottom: 3px; color: var(--fg1); font-size: 12.5px; }
+      .toast b svg { width: 13px; height: 13px; color: var(--red-primary); }
+      .toast span { color: var(--fg2); line-height: 1.45; display: block; }
+
+      /* usage popover mock */
+      .popover {
+        position: absolute; z-index: 6;
+        width: 300px;
+        padding: 13px 14px;
+        border: 1px solid var(--border2);
+        border-radius: 10px;
+        background: var(--bg3);
+        box-shadow: var(--shadow);
+      }
+      .pop-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
+      .pop-head b { font-size: 13px; color: var(--fg1); }
+      .pop-head span { font: 500 11px var(--mono); color: var(--fg2); }
+      .pop-row {
+        display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+        padding: 4px 2px;
+        font-size: 12.5px; color: var(--fg2);
+      }
+      .pop-row .nm { display: flex; align-items: center; gap: 6px; min-width: 0; }
+      .pop-row .nm i { font-style: normal; color: var(--fg3); font-size: 10.5px; }
+      .pop-row .val { font: 500 11px var(--mono); color: var(--fg2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+      .pop-row.total { margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--border2); color: var(--fg1); }
+      .pop-row.total .val { color: var(--fg1); }
+      .pop-foot { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border2); }
+      .pop-foot button {
+        width: 100%; padding: 5px 7px; text-align: left;
+        border: 0; border-radius: var(--radius-sm);
+        background: transparent; color: var(--fg2); font-size: 12px; font-weight: 500;
+      }
+      .pop-foot button:hover { background: var(--bg3-hover); }
+      .pop-bar { height: 6px; margin: 4px 0 10px; border-radius: 999px; background: var(--bg2); overflow: hidden; }
+      .pop-bar i { display: block; height: 100%; border-radius: 999px; background: var(--fg1); }
+
+      /* settings pane mock */
+      .settings-body { padding: 18px 22px 22px; }
+      .set-title { margin: 0 0 2px; font-size: 14px; font-weight: 600; color: var(--fg1); }
+      .set-desc { margin: 0 0 10px; font-size: 12px; color: var(--fg2); }
+      .set-row {
+        display: flex; align-items: center; justify-content: space-between; gap: 16px;
+        padding: 14px 0;
+        border-bottom: 1px solid var(--border1);
+      }
+      .set-row:last-child { border-bottom: 0; }
+      .set-l { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+      .set-label { font-size: 13px; font-weight: 500; color: var(--fg1); }
+      .set-hint { font-size: 11.5px; line-height: 1.5; color: var(--fg2); }
+      .sel, .inp {
+        display: inline-flex; align-items: center; gap: 7px;
+        padding: 5px 10px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-md);
+        background: var(--bg2); color: var(--fg1);
+        font-size: 12px; white-space: nowrap;
+      }
+      .sel svg { width: 12px; height: 12px; color: var(--fg3); }
+      .inp { font-family: var(--mono); min-width: 92px; justify-content: flex-end; }
+      .inp .unit { color: var(--fg3); }
+      .switch { position: relative; width: 30px; height: 18px; border-radius: 999px; background: var(--bg3-hover); border: 1px solid var(--border3); }
+      .switch.on { background: var(--inverted-bg); border-color: var(--inverted-bg); }
+      .switch i { position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 999px; background: var(--fg2); }
+      .switch.on i { left: auto; right: 2px; background: var(--inverted-fg); }
+
+      /* effort ladder strip */
+      .ladder { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 12px 14px; }
+      .ladder .step {
+        padding: 3px 9px;
+        border: 1px solid var(--border2);
+        border-radius: 999px;
+        color: var(--fg2); font-size: 11.5px; font-weight: 500;
+      }
+      .ladder .step.cur { border-color: var(--border4); background: var(--bg2-hover); color: var(--fg1); }
+      .ladder .step.new { border-style: dashed; border-color: color-mix(in srgb, var(--green-primary) 45%, var(--border2)); color: var(--green-fg); }
+      .ladder .sep { color: var(--fg3); font-size: 11px; }
+      .ladder-note { padding: 0 14px 12px; color: var(--fg3); font-size: 11px; }
+
+      /* pill vocabulary strip */
+      .vocab { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px; }
+      .vocab-note { padding: 0 14px 14px; color: var(--fg3); font-size: 11px; line-height: 1.5; }
+
+      /* notes */
+      .notes {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 14px;
+      }
+      .notes.one { grid-template-columns: 1fr; }
+      .notes.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .note {
+        padding: 12px 14px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-md);
+        background: color-mix(in srgb, var(--sidebar-bg) 88%, transparent);
+        color: var(--fg2); font-size: 12px; line-height: 1.55;
+      }
+      .note b { color: var(--fg1); }
+      .note.fix {
+        border-color: color-mix(in srgb, var(--green-primary) 24%, var(--border1));
+        background: color-mix(in srgb, var(--green-primary) 5%, var(--sidebar-bg));
+      }
+      .note.flow {
+        border-color: color-mix(in srgb, var(--blue-primary) 22%, var(--border1));
+        background: color-mix(in srgb, var(--blue-primary) 4%, var(--sidebar-bg));
+      }
+      .note ol { margin: 6px 0 0; padding-left: 17px; }
+      .note li { margin: 2px 0; }
+      .note code {
+        padding: 1px 5px;
+        border-radius: var(--radius-sm);
+        background: var(--bg2-hover);
+        color: var(--fg1); font-size: 11px;
+      }
+
+      .footer-note {
+        margin-top: 64px;
+        padding-top: 22px;
+        border-top: 1px solid var(--border1);
+        color: var(--fg3); font-size: 12px; line-height: 1.6;
+      }
+
+      @keyframes spin { to { transform: rotate(360deg); } }
+      @keyframes fadein { from { opacity: 0; transform: translateX(-3px); } }
+      @media (prefers-reduced-motion: reduce) {
+        .event-row .ev-icon.spin svg { animation: none; }
+      }
+      @media (max-width: 900px) {
+        .hero, .thesis, .dual, .notes, .notes.three { grid-template-columns: 1fr; }
+        .hero-aside { align-items: flex-start; }
+        .case-head { flex-direction: column; gap: 8px; }
+        .meta { max-width: none; text-align: left; }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- ── Icon defs (lucide, matching the real components) ── -->
+    <svg aria-hidden="true" width="0" height="0" style="position: absolute">
+      <defs>
+        <symbol id="i-plus" viewBox="0 0 24 24">
+          <path d="M5 12h14M12 5v14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-send" viewBox="0 0 24 24"><!-- corner-down-left -->
+          <path d="M20 4v7a4 4 0 0 1-4 4H4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="m9 10-5 5 5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-square" viewBox="0 0 24 24">
+          <rect x="6" y="6" width="12" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="2" />
+        </symbol>
+        <symbol id="i-zap" viewBox="0 0 24 24">
+          <path d="M13 2 3 14h7l-1 8 11-13h-7l1-7z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-shield" viewBox="0 0 24 24">
+          <path d="M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-map" viewBox="0 0 24 24">
+          <path d="M14.1 6.1 9.9 4 4.6 6.4A1 1 0 0 0 4 7.3v11.2a1 1 0 0 0 1.4.9L9.9 17l4.2 2.1 5.3-2.4a1 1 0 0 0 .6-.9V4.6a1 1 0 0 0-1.4-.9L14.1 6.1ZM9.9 4v13M14.1 6.1v13" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-more" viewBox="0 0 24 24">
+          <circle cx="5" cy="12" r="1.4" fill="currentColor" /><circle cx="12" cy="12" r="1.4" fill="currentColor" /><circle cx="19" cy="12" r="1.4" fill="currentColor" />
+        </symbol>
+        <symbol id="i-copy" viewBox="0 0 24 24">
+          <rect x="9" y="9" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" fill="none" stroke="currentColor" stroke-width="2" />
+        </symbol>
+        <symbol id="i-rotate-ccw" viewBox="0 0 24 24">
+          <path d="M3 12a9 9 0 1 0 9-9c-2.52 0-4.93 1-6.74 2.74L3 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="M3 3v5h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-loader" viewBox="0 0 24 24">
+          <path d="M21 12a9 9 0 1 1-6.22-8.56" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-check-big" viewBox="0 0 24 24"><!-- circle-check-big -->
+          <path d="M21.8 10A10 10 0 1 1 17 3.3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="m9 11 3 3L22 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-x-circle" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="m15 9-6 6M9 9l6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-file" viewBox="0 0 24 24">
+          <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+          <path d="M14 2v4a2 2 0 0 0 2 2h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-chev" viewBox="0 0 24 24">
+          <path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-spark" viewBox="0 0 24 24"><!-- generic agent glyph -->
+          <path d="M12 2v20M2 12h20M4.9 4.9l14.2 14.2M19.1 4.9 4.9 19.1" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-wrench" viewBox="0 0 24 24">
+          <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-sun" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-play" viewBox="0 0 24 24"><!-- lucide play — the Continue affordance -->
+          <polygon points="6 3 20 12 6 21 6 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-repeat" viewBox="0 0 24 24"><!-- lucide repeat-2 — model fallback -->
+          <path d="m2 9 3-3 3 3M13 18H7a2 2 0 0 1-2-2V6M22 15l-3 3-3-3M11 6h6a2 2 0 0 1 2 2v10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-wallet" viewBox="0 0 24 24"><!-- lucide wallet — budget stop -->
+          <path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 1-1 1v0a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-dollar-circle" viewBox="0 0 24 24"><!-- lucide circle-dollar-sign — per-model usage -->
+          <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8M12 18V6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+      </defs>
+    </svg>
+
+    <main class="page">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">§3.6 Models, effort &amp; budget · Design catalog</div>
+          <h1>Six rows, five builds, one reopened — every model/effort/budget gap, before → after</h1>
+          <p class="lede">
+            §3.6 is greenfield: nothing in it has shipped yet. This catalog gives each
+            row its user story, the exact surface it touches (composer pills, turn
+            footer, system-notice rows, Settings → Models), and a before / after
+            mockup on the real Zeros tokens. Verified against code 2026-07-13; the
+            user decisions of the same day are baked in — no reasoning-token readout
+            anywhere, R2/R3 render as tool calls, and R1 re-examined (Grok 4.5's ladder
+            is reopenable).
+          </p>
+        </div>
+        <div class="hero-aside">
+          <button class="theme-toggle" id="themeBtn" type="button">
+            <svg width="14" height="14"><use href="#i-sun" /></svg>
+            <span id="themeLabel">Light preview</span>
+          </button>
+          <div class="summary-chip">
+            <strong>Honest endings, bounded spend</strong>
+            <span>A turn always says how it ended, never silently truncates, and can never outrun its budget.</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="thesis" aria-label="Design goals">
+        <div class="thesis-card primary">
+          <h3>Every ending is named</h3>
+          <p>
+            Token cap, budget, blocking limit, fallback, user stop — each gets its own
+            footer pill and notice row, reusing the existing status-pill language. A
+            truncated answer never masquerades as a finished one.
+          </p>
+        </div>
+        <div class="thesis-card">
+          <h3>The turn survives the failure</h3>
+          <p>
+            Overload no longer kills the turn: the model falls back and the transcript
+            says so inline. Budget hits stop the turn cleanly with a one-click way to
+            continue.
+          </p>
+        </div>
+        <div class="thesis-card">
+          <h3>No new surfaces, sharper existing ones</h3>
+          <p>
+            Everything lands on surfaces users already know: the effort pill's cycle,
+            the turn footer, the EventRow notice, the "…" menu, and Settings → Models.
+            Zero new panels.
+          </p>
+        </div>
+      </section>
+
+      <nav aria-label="Cases">
+        <a href="#r5">R5 · Distinct stop reasons (P1)</a>
+        <a href="#r2">R2 · Model fallback</a>
+        <a href="#r3">R3 · Budget caps</a>
+        <a href="#r4">R4 · Thinking off + live Max</a>
+        <a href="#r6">R6 · Per-model usage</a>
+        <span class="nav-sep"></span>
+        <a href="#r1">R1 · Cursor effort (Grok 4.5)</a>
+      </nav>
+
+      <p class="band">Part A — Builds · before → after (in suggested ship order)</p>
+
+      <div class="catalog">
+        <!-- R5 ───────────────────────────────────────────── -->
+        <section class="case" id="r5">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">R5</span>
+                <span class="tag p1">P1 · Gap → proposal</span>
+              </div>
+              <h2>Distinct stop reasons — a truncated answer must say so</h2>
+              <p class="case-copy">
+                Today the translator reads only <code>is_error</code>/<code>subtype</code>: a turn
+                cut by the token cap settles as a clean <code>end_turn</code> (the answer just…
+                ends mid-thought, footer shows only a run time), and a budget/blocking stop
+                collapses into a generic error toast. The SDK's
+                <code>stop_reason</code>/<code>terminal_reason</code> are never read; the
+                <code>max_tokens</code> branch is dead code. <b>After:</b> each ending maps to
+                its own footer status pill — the exact chrome "STOPPED BY USER" already uses —
+                plus a one-click <b>Continue</b> for recoverable truncation.
+              </p>
+            </div>
+            <div class="meta">
+              claude · engine + turn-footer. Reads <code>result.stop_reason</code> +
+              <code>terminal_reason</code> (sdk.d.ts:4152/6708); kills the dead
+              <code>max_tokens</code> branch (translator.ts:343).
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — truncation looks complete</div>
+              <div class="frame">
+                <div class="chat-head">
+                  <span class="agent-glyph"><svg width="13" height="13"><use href="#i-spark" /></svg></span>
+                  <b>Claude Code</b><span>· Fable 5</span>
+                </div>
+                <div class="chat-body">
+                  <div class="transcript">
+                    <div class="u-msg">Write the migration guide for the v13 turn schema</div>
+                    <span class="work-chip"><svg><use href="#i-wrench" /></svg>7 tool calls, 2 messages</span>
+                    <div class="a-msg">
+                      …and step 4 rewrites each <code>refs/zeros/turns/*</code> entry. Step 5
+                      then re-attributes tool calls to the <span class="cut">new pre/post snapshot pair, whi</span>
+                    </div>
+                    <div class="tf">
+                      <span class="tf-time">4m 12s</span>
+                      <button class="tf-icon" type="button"><svg><use href="#i-copy" /></svg></button>
+                      <button class="tf-icon" type="button"><svg><use href="#i-more" /></svg></button>
+                      <span class="file-pill"><svg><use href="#i-file" /></svg>migration-v13.md <span class="add">+214</span></span>
+                    </div>
+                  </div>
+                  <div class="composer">
+                    <div class="composer-input">Reply to Claude Code…</div>
+                    <div class="composer-bar">
+                      <div class="composer-tools">
+                        <span class="tool-plus"><svg><use href="#i-plus" /></svg></span>
+                        <span class="cpill"><svg class="glyph12"><use href="#i-spark" /></svg>Fable 5</span>
+                        <span class="cpill icon-16"><svg><use href="#i-zap" /></svg></span>
+                        <span class="cpill">High</span>
+                        <span class="cpill icon-16"><svg><use href="#i-shield" /></svg></span>
+                      </div>
+                      <div class="composer-right">
+                        <button class="gauge-btn" type="button">
+                          <svg class="ring" width="16" height="16" viewBox="0 0 16 16">
+                            <circle class="track" cx="8" cy="8" r="6" fill="none" stroke-width="2" />
+                            <circle class="arc" cx="8" cy="8" r="6" fill="none" stroke-width="2" stroke-linecap="round" stroke-dasharray="24 37.7" />
+                          </svg>
+                        </button>
+                        <button class="send-btn" type="button"><svg><use href="#i-send" /></svg></button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — the ending is named + continuable</div>
+              <div class="frame">
+                <div class="chat-head">
+                  <span class="agent-glyph"><svg width="13" height="13"><use href="#i-spark" /></svg></span>
+                  <b>Claude Code</b><span>· Fable 5</span>
+                </div>
+                <div class="chat-body">
+                  <div class="transcript">
+                    <div class="u-msg">Write the migration guide for the v13 turn schema</div>
+                    <span class="work-chip"><svg><use href="#i-wrench" /></svg>7 tool calls, 2 messages</span>
+                    <div class="a-msg">
+                      …and step 4 rewrites each <code>refs/zeros/turns/*</code> entry. Step 5
+                      then re-attributes tool calls to the <span class="cut">new pre/post snapshot pair, whi</span>
+                    </div>
+                    <div class="tf">
+                      <span class="tf-line">
+                        <span class="tf-pill">TOKEN LIMIT — ANSWER TRUNCATED</span>
+                      </span>
+                      <span class="tf-time">4m 12s</span>
+                      <button class="tf-icon" type="button"><svg><use href="#i-copy" /></svg></button>
+                      <button class="tf-icon" type="button"><svg><use href="#i-more" /></svg></button>
+                      <span class="file-pill"><svg><use href="#i-file" /></svg>migration-v13.md <span class="add">+214</span></span>
+                    </div>
+                    <!-- Continue lives on its own row BELOW the footer, not inline
+                      with the time/copy/file pills (user spec 2026-07-13). -->
+                    <!-- Continue uses the lucide play glyph (user spec 2026-07-13). -->
+                    <div class="tf-actions">
+                      <button class="tf-action" type="button"><svg><use href="#i-play" /></svg>Continue</button>
+                      <span class="tf-actions-hint">Resends “Continue” to the same session — full context is kept, so the answer picks up exactly where the token cap cut it off.</span>
+                    </div>
+                  </div>
+                  <div class="composer">
+                    <div class="composer-input">Reply to Claude Code…</div>
+                    <div class="composer-bar">
+                      <div class="composer-tools">
+                        <span class="tool-plus"><svg><use href="#i-plus" /></svg></span>
+                        <span class="cpill"><svg class="glyph12"><use href="#i-spark" /></svg>Fable 5</span>
+                        <span class="cpill icon-16"><svg><use href="#i-zap" /></svg></span>
+                        <span class="cpill">High</span>
+                        <span class="cpill icon-16"><svg><use href="#i-shield" /></svg></span>
+                      </div>
+                      <div class="composer-right">
+                        <button class="gauge-btn" type="button">
+                          <svg class="ring" width="16" height="16" viewBox="0 0 16 16">
+                            <circle class="track" cx="8" cy="8" r="6" fill="none" stroke-width="2" />
+                            <circle class="arc" cx="8" cy="8" r="6" fill="none" stroke-width="2" stroke-linecap="round" stroke-dasharray="24 37.7" />
+                          </svg>
+                        </button>
+                        <button class="send-btn" type="button"><svg><use href="#i-send" /></svg></button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- pill vocabulary -->
+          <div class="frame" style="margin-top: 16px">
+            <div class="vocab">
+              <span class="tf-pill">STOPPED BY USER</span>
+              <span class="tf-pill">AGENT STOPPED</span>
+              <span class="tf-pill">TOKEN LIMIT — ANSWER TRUNCATED</span>
+              <span class="tf-pill">BLOCKED BY USAGE LIMIT</span>
+              <span class="tf-pill">PROMPT TOO LONG</span>
+            </div>
+            <div class="vocab-note">
+              The footer stop-pill vocabulary after R5 — <b>text only, no severity dot</b>
+              (user spec 2026-07-13). Every terminal state reads in one glance from the label
+              alone, matching the two that ship today. First two are live
+              (<code>turnFooterStatusLabel</code>); the three new ones reuse the identical
+              chrome (<code>border-border3 bg-bg1 rounded-sm text-xs</code>). <b>Continue</b>
+              is <i>not</i> part of the pill — it renders on its own row below the footer (see
+              the After frame), and only for the recoverable stops.
+            </div>
+            <!-- The two mid-turn events are NOT footer pills — they're tool calls
+                 (R2 fallback, R3 budget), shown here for the full stop-language map. -->
+            <div class="vocab" style="border-top: 1px solid var(--border1)">
+              <span class="tc-head" style="cursor: default; margin: 0">
+                <span class="tc-glyph"><svg width="13" height="13"><use href="#i-repeat" /></svg></span>
+                <span class="tc-label">Model switched</span>
+                <span class="tc-pill">Fallback</span>
+              </span>
+              <span class="tc-head" style="cursor: default; margin: 0">
+                <span class="tc-glyph"><svg width="13" height="13"><use href="#i-wallet" /></svg></span>
+                <span class="tc-label">Turn stopped</span>
+                <span class="tc-pill">Budget</span>
+                <span class="tc-scope">Claude</span>
+              </span>
+            </div>
+            <div class="vocab-note">
+              <b>Fallback</b> (R2) and <b>Budget</b> (R3) are <i>tool calls</i>, not footer
+              pills — either can occur mid-turn, so they live in the transcript as collapsible
+              records (the "User input" recipe). Budget's tool call replaces its footer pill:
+              it sits directly above the footer and already names the ending.
+            </div>
+          </div>
+
+          <!-- ── Below-footer / turn-end action catalog ──────────────────
+               Answers the user's question: what else lives under the agent
+               output besides Continue (e.g. the "Sign in" affordance)? Two
+               families — footer-level actions, and above-composer cards. -->
+          <div class="frame" style="margin-top: 16px">
+            <div class="chat-head">
+              <b>Below-footer actions</b>
+              <span>· everything actionable under the agent output — the family <b>Continue</b> joins</span>
+            </div>
+
+            <p class="cat-group">Turn-footer actions — on their own row below a settled turn, paired with a stop pill</p>
+            <div class="action-cat">
+              <div class="action-row action-head">
+                <span>Action</span><span>Appears when</span><span>Agent</span><span>What it does</span>
+              </div>
+              <div class="action-row">
+                <span class="a-state">
+                  <button class="tf-action" type="button"><svg><use href="#i-play" /></svg>Continue</button>
+                  <span class="ship-tag new">New · R5/R3</span>
+                </span>
+                <span>TOKEN LIMIT pill · Budget tool call</span>
+                <span class="a-scope">Claude</span>
+                <span class="a-do">Resends <b>“Continue”</b> to the same session (token cap) or opens a fresh-budget turn (budget cap). Full context is retained; the pill / tool call stays on the earlier turn as history.</span>
+              </div>
+              <div class="action-row">
+                <span class="a-state">
+                  <button class="tf-action" type="button"><svg><use href="#i-shield" /></svg>Sign in</button>
+                  <span class="ship-tag route">Today: pill + toast</span>
+                </span>
+                <span>SIGN IN REQUIRED stop</span>
+                <span class="a-scope">All</span>
+                <span class="a-do">Today it's a <code>SIGN IN REQUIRED</code> pill + a toast routing to Settings → Agent providers (Claude also runs <code>/login</code> in the embedded terminal). <b>Not an inline button yet</b> — the natural next member of this family, for parity with Continue.</span>
+              </div>
+              <div class="action-row">
+                <span class="a-state">
+                  <button class="tf-action" type="button"><svg><use href="#i-rotate-ccw" /></svg>Retry</button>
+                  <span class="ship-tag route">Today: send again</span>
+                </span>
+                <span>CONNECTION LOST · AGENT EXITED · RESPONSE FAILURE / TIMEOUT · SESSION EXPIRED</span>
+                <span class="a-scope">All</span>
+                <span class="a-do">Today the composer stays live and re-sending <i>is</i> the retry. Same candidate: a one-click Retry on the failed turn's footer.</span>
+              </div>
+            </div>
+
+            <p class="cat-group">Above-composer cards — interactive islands between the transcript and composer (shipped today)</p>
+            <div class="action-cat">
+              <div class="action-row action-head">
+                <span>Action</span><span>Appears when</span><span>Agent</span><span>What it does</span>
+              </div>
+              <div class="action-row">
+                <span class="a-state">Allow · Allow always · Deny<span class="ship-tag now">Shipped</span></span>
+                <span>A tool call needs permission</span>
+                <span class="a-scope">All</span>
+                <span class="a-do">The one permission gate; <b>replaces</b> the composer until answered. "Allow always" scopes to this chat or project.</span>
+              </div>
+              <div class="action-row">
+                <span class="a-state">Answer options<span class="ship-tag now">Shipped</span></span>
+                <span>Agent asks a blocking question (AskUserQuestion)</span>
+                <span class="a-scope">All*</span>
+                <span class="a-do">Answering resolves the parked engine turn; <b>replaces</b> the composer.</span>
+              </div>
+              <div class="action-row">
+                <span class="a-state">Approve · Reject · Copy<span class="ship-tag now">Shipped</span></span>
+                <span>Plan review (Claude ExitPlanMode / Codex plan)</span>
+                <span class="a-scope">Claude · Codex</span>
+                <span class="a-do">Approves the plan + exits Plan mode; keeps the composer <b>live</b> so a typed follow-up refines it.</span>
+              </div>
+              <div class="action-row">
+                <span class="a-state">Edit · Delete · Send now<span class="ship-tag now">Shipped</span></span>
+                <span>Messages queued mid-turn</span>
+                <span class="a-scope">All</span>
+                <span class="a-do">Manages the queue tucked under the next composer slot; "Send now" steers the running turn on Claude/Codex.</span>
+              </div>
+              <div class="action-row">
+                <span class="a-state">Reconnecting…<span class="ship-tag now">Shipped</span></span>
+                <span>The chat's agent session dropped</span>
+                <span class="a-scope">All</span>
+                <span class="a-do">Passive — a slow-spin card; the chat silently re-creates its session on the next send. No button.</span>
+              </div>
+              <div class="action-row">
+                <span class="a-state">Embedded terminal<span class="ship-tag now">Shipped</span></span>
+                <span>An interactive CLI command runs (<code>/login</code>, <code>/mcp</code>)</span>
+                <span class="a-scope">Claude</span>
+                <span class="a-do">Mounts a live inline PTY above the composer for the duration of the command, then reaps it.</span>
+              </div>
+            </div>
+
+            <div class="vocab-note">
+              The footer already carries <b>always-present</b> buttons — Copy output, the
+              "…" menu (Reset to this point), and the file-diff pills (all in every mockup
+              here). This catalog is the <b>state-driven</b> layer on top of them.
+              <b>Turn-footer actions</b> attach to a settled turn's stop pill, on their own
+              row beneath the footer: today only the pills render, so <b>Continue is the
+              first real footer action button</b> — Sign in / Retry are the obvious next
+              members (today each is a non-clickable pill + a toast to Settings + a
+              red-tinted Send that re-sends; there is <i>no</i> inline Sign-in button yet).
+              <b>Above-composer cards</b> are the interactive islands between transcript and
+              composer — some <i>replace</i> it (permission, question), some sit <i>above</i>
+              it (plan review, queued, reconnecting, embedded terminal — the last is where
+              Claude's <code>/login</code> actually runs). A fully removed agent swaps the
+              whole chat body for a <b>Switch agent</b> panel. *AskUserQuestion support
+              varies by agent.
+            </div>
+          </div>
+
+          <div class="notes three">
+            <div class="note flow">
+              <b>User workflow</b>
+              <ol>
+                <li>User asks for a long deliverable; the turn hits the output-token cap mid-answer.</li>
+                <li>The turn settles with the <b>TOKEN LIMIT</b> pill above the footer — no more guessing whether the agent "just stopped".</li>
+                <li>One click on <b>Continue</b> resumes the answer in the same session; the pill stays on the earlier turn as history.</li>
+                <li>Budget/blocking stops read differently (their own pills) so the user knows whether to wait, raise a limit, or re-prompt.</li>
+              </ol>
+            </div>
+            <div class="note">
+              <b>Before:</b> only three stop reasons ever get assigned
+              (<code>refusal</code> / <code>max_turn_requests</code> / <code>end_turn</code>,
+              translator.ts:849-865). Token truncation lands on <code>end_turn</code> —
+              rendered as nothing at all. Budget errors fold into <code>refusal</code> —
+              rendered as a generic toast.
+            </div>
+            <div class="note fix">
+              <b>After (engine):</b> <code>onResult</code> reads
+              <code>result.stop_reason</code> ("max_tokens") and
+              <code>result.terminal_reason</code>
+              (<code>budget_exhausted</code>/<code>blocking_limit</code>/<code>prompt_too_long</code>),
+              maps <code>error_max_budget_usd</code> distinctly, and the footer's existing
+              <code>fallbackStopReason</code> plumbing (agent-chat.tsx:2835) carries the new
+              labels. No new event types needed.
+            </div>
+          </div>
+        </section>
+
+        <!-- R2 ───────────────────────────────────────────── -->
+        <section class="case" id="r2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">R2</span>
+                <span class="tag gap">Gap → proposal</span>
+              </div>
+              <h2>Model fallback — overload keeps working instead of failing</h2>
+              <p class="case-copy">
+                Today an overloaded / not-found model hard-fails the turn: the user gets a
+                red toast and an "AGENT STOPPED" pill, and must manually resend (the engine's
+                only mercy is retrying the <i>same</i> model). The SDK's
+                <code>Options.fallbackModel</code> — "try these in order if the primary is
+                overloaded or unavailable" — is never set. <b>After:</b> the turn continues on
+                the fallback and the transcript records it as a <b>collapsible tool call</b> —
+                the same EventRow + StatusChip chrome as the "User input" card — dropped inline
+                wherever the overload happened, since a fallback can fire mid-turn.
+              </p>
+            </div>
+            <div class="meta">
+              claude · 1-field engine wire (<code>sdk.d.ts:1435</code>) + a tool-call
+              record + one Settings row. Fallback is silent-but-visible: never a toast,
+              never a blocked turn — a collapsible tool call in the working group.
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — overload kills the turn</div>
+              <div class="frame">
+                <div class="chat-head">
+                  <span class="agent-glyph"><svg width="13" height="13"><use href="#i-spark" /></svg></span>
+                  <b>Claude Code</b><span>· Fable 5</span>
+                </div>
+                <div class="chat-body" style="height: 440px">
+                  <div class="transcript">
+                    <div class="u-msg">Refactor the auth module to the new token store</div>
+                    <span class="work-chip"><svg><use href="#i-wrench" /></svg>2 tool calls</span>
+                    <div class="tf">
+                      <span class="tf-line"><span class="tf-pill">AGENT STOPPED</span></span>
+                      <span class="tf-time">0m 41s</span>
+                      <button class="tf-icon" type="button"><svg><use href="#i-copy" /></svg></button>
+                      <button class="tf-icon" type="button"><svg><use href="#i-more" /></svg></button>
+                    </div>
+                  </div>
+                  <div class="toast">
+                    <b><svg><use href="#i-x-circle" /></svg>Claude Code: Model overloaded</b>
+                    <span>The provider returned 529 — try again in a moment.</span>
+                  </div>
+                  <div class="composer">
+                    <div class="composer-input">Reply to Claude Code…</div>
+                    <div class="composer-bar">
+                      <div class="composer-tools">
+                        <span class="tool-plus"><svg><use href="#i-plus" /></svg></span>
+                        <span class="cpill"><svg class="glyph12"><use href="#i-spark" /></svg>Fable 5</span>
+                        <span class="cpill icon-16"><svg><use href="#i-zap" /></svg></span>
+                        <span class="cpill">High</span>
+                        <span class="cpill icon-16"><svg><use href="#i-shield" /></svg></span>
+                      </div>
+                      <div class="composer-right">
+                        <button class="gauge-btn" type="button">
+                          <svg class="ring" width="16" height="16" viewBox="0 0 16 16">
+                            <circle class="track" cx="8" cy="8" r="6" fill="none" stroke-width="2" />
+                            <circle class="arc" cx="8" cy="8" r="6" fill="none" stroke-width="2" stroke-linecap="round" stroke-dasharray="8 37.7" />
+                          </svg>
+                        </button>
+                        <button class="send-btn" type="button"><svg><use href="#i-send" /></svg></button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — falls back, keeps going, says so</div>
+              <div class="frame">
+                <div class="chat-head">
+                  <span class="agent-glyph"><svg width="13" height="13"><use href="#i-spark" /></svg></span>
+                  <b>Claude Code</b><span>· Fable 5</span>
+                </div>
+                <div class="chat-body" style="height: 440px">
+                  <div class="transcript">
+                    <div class="u-msg">Refactor the auth module to the new token store</div>
+                    <!-- Fallback renders as a tool call in the transcript, not a
+                      toast: it can fire mid-turn, so it lives inline like any other
+                      tool call — collapsible, part of the working group. Header is
+                      the EventRow + StatusChip recipe. User spec 2026-07-13. -->
+                    <div class="toolcall">
+                      <div class="tc-head">
+                        <span class="tc-glyph"><svg width="13" height="13"><use href="#i-repeat" /></svg></span>
+                        <span class="tc-label">Model switched</span>
+                        <span class="tc-pill">Fallback</span>
+                      </div>
+                      <div class="tc-body">
+                        <span class="tc-lead"><b>Fable 5</b> was overloaded — the provider returned 529 — so the turn continued on <b>Sonnet 5</b> and finished normally.</span>
+                        <span class="tc-kv">Returns to <b>Fable 5</b> on the next turn · no action needed</span>
+                      </div>
+                    </div>
+                    <span class="work-chip"><svg><use href="#i-wrench" /></svg>11 tool calls, 3 messages</span>
+                    <div class="a-msg">
+                      Done — the auth module now reads and writes through
+                      <code>TokenStore</code>; all 14 call sites migrated and the suite is green.
+                    </div>
+                    <div class="tf">
+                      <span class="tf-time">3m 05s</span>
+                      <button class="tf-icon" type="button"><svg><use href="#i-copy" /></svg></button>
+                      <button class="tf-icon" type="button"><svg><use href="#i-more" /></svg></button>
+                      <span class="file-pill"><svg><use href="#i-file" /></svg>token-store.ts <span class="add">+96</span> <span class="del">−31</span></span>
+                      <span class="file-pill"><svg><use href="#i-file" /></svg>auth.ts <span class="add">+42</span> <span class="del">−57</span></span>
+                    </div>
+                  </div>
+                  <div class="composer">
+                    <div class="composer-input">Reply to Claude Code…</div>
+                    <div class="composer-bar">
+                      <div class="composer-tools">
+                        <span class="tool-plus"><svg><use href="#i-plus" /></svg></span>
+                        <span class="cpill"><svg class="glyph12"><use href="#i-spark" /></svg>Fable 5</span>
+                        <span class="cpill icon-16"><svg><use href="#i-zap" /></svg></span>
+                        <span class="cpill">High</span>
+                        <span class="cpill icon-16"><svg><use href="#i-shield" /></svg></span>
+                      </div>
+                      <div class="composer-right">
+                        <button class="gauge-btn" type="button">
+                          <svg class="ring" width="16" height="16" viewBox="0 0 16 16">
+                            <circle class="track" cx="8" cy="8" r="6" fill="none" stroke-width="2" />
+                            <circle class="arc" cx="8" cy="8" r="6" fill="none" stroke-width="2" stroke-linecap="round" stroke-dasharray="12 37.7" />
+                          </svg>
+                        </button>
+                        <button class="send-btn" type="button"><svg><use href="#i-send" /></svg></button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- settings row for fallback -->
+          <div class="frame single" style="margin-top: 16px">
+            <div class="chat-head"><b>Settings</b><span>· Agents → Models</span></div>
+            <div class="settings-body">
+              <h4 class="set-title">Reliability</h4>
+              <p class="set-desc">What happens when the chosen model is overloaded or unavailable.</p>
+              <div class="set-row">
+                <div class="set-l">
+                  <span class="set-label">Fallback model</span>
+                  <span class="set-hint">Used automatically when the primary model returns overloaded / not-found. The transcript shows a Fallback notice whenever it kicks in.</span>
+                </div>
+                <span class="sel">Sonnet 5<svg><use href="#i-chev" /></svg></span>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes three">
+            <div class="note flow">
+              <b>User workflow</b>
+              <ol>
+                <li>(Once) User picks a fallback model in Settings → Models — defaulted sensibly per family (Fable 5 → Sonnet 5), "None" restores today's fail-fast.</li>
+                <li>Mid-turn overload: nothing to do. The turn keeps streaming on the fallback.</li>
+                <li>The inline <b>Fallback</b> tool call is the only trace — collapsed to a one-line header, expandable to show which model finished the turn and why.</li>
+                <li>Next turn returns to the primary model automatically; the model pill never lies about the user's choice.</li>
+              </ol>
+            </div>
+            <div class="note">
+              <b>Before:</b> no <code>fallbackModel</code> concept in the codebase at all.
+              Overload → toast + "AGENT STOPPED" + a same-model retry
+              (adapter.ts:127 <code>TRANSIENT_NETWORK_RX</code>), which loops if the model
+              stays overloaded.
+            </div>
+            <div class="note fix">
+              <b>After (engine):</b> set <code>Options.fallbackModel</code> in
+              <code>buildOptions</code> (adapter.ts:2014); when the SDK reports the swap,
+              emit a <b>Model switched</b> tool call (same EventRow + StatusChip recipe as
+              the "User input" card: 13px glyph + label + mono uppercase pill, a
+              <code>bg-bg2/60</code> detail panel). Durable in the transcript — a turn
+              answered by a different model is an auditable, expandable fact.
+            </div>
+          </div>
+        </section>
+
+        <!-- R3 ───────────────────────────────────────────── -->
+        <section class="case" id="r3">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">R3</span>
+                <span class="tag gap">Gap → proposal</span>
+              </div>
+              <h2>Budget caps — a runaway turn stops itself</h2>
+              <p class="case-copy">
+                Today nothing bounds a turn's spend: the only ceiling anywhere is the
+                <code>CLAUDE_MAX_TURNS</code> turn cap. A misfiring loop can burn dollars until
+                the user notices and hits Stop. <b>After:</b> a per-turn dollar cap in
+                Settings → Models; when hit, the turn ends cleanly with a <b>Turn stopped</b>
+                tool call — a <b>Budget</b> status pill, a muted <b>Claude</b> scope pill,
+                expandable to the cap detail — work completed so far is kept, and "Continue"
+                starts a fresh turn under a fresh budget.
+              </p>
+            </div>
+            <div class="meta">
+              claude first (SDK-native <code>maxBudgetUsd</code>, sdk.d.ts:1643) —
+              Codex/Cursor expose no budget hook yet, so the setting reads "Claude Code
+              only" until they do.
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — only the eye on the Stop button</div>
+              <div class="frame">
+                <div class="chat-head">
+                  <span class="agent-glyph"><svg width="13" height="13"><use href="#i-spark" /></svg></span>
+                  <b>Claude Code</b><span>· Fable 5</span>
+                </div>
+                <div class="chat-body" style="height: 480px">
+                  <div class="transcript">
+                    <div class="u-msg">Fix every type error in packages/core</div>
+                    <div class="event-row">
+                      <span class="ev-icon spin"><svg width="13" height="13"><use href="#i-loader" /></svg></span>
+                      <span><span class="ev-label">Bash</span> <span class="ev-sub">pnpm typecheck — attempt 23…</span></span>
+                    </div>
+                    <div class="event-row">
+                      <span class="ev-icon"><svg width="13" height="13"><use href="#i-wrench" /></svg></span>
+                      <span><span class="ev-sub">61 tool calls this turn and counting — no ceiling applies</span></span>
+                    </div>
+                  </div>
+                  <div class="composer">
+                    <div class="composer-input">Claude Code is working…</div>
+                    <div class="composer-bar">
+                      <div class="composer-tools">
+                        <span class="tool-plus"><svg><use href="#i-plus" /></svg></span>
+                        <span class="cpill"><svg class="glyph12"><use href="#i-spark" /></svg>Fable 5</span>
+                        <span class="cpill icon-16"><svg><use href="#i-zap" /></svg></span>
+                        <span class="cpill">High</span>
+                        <span class="cpill icon-16"><svg><use href="#i-shield" /></svg></span>
+                      </div>
+                      <div class="composer-right">
+                        <button class="gauge-btn" type="button">
+                          <svg class="ring" width="16" height="16" viewBox="0 0 16 16">
+                            <circle class="track" cx="8" cy="8" r="6" fill="none" stroke-width="2" />
+                            <circle class="arc hot" cx="8" cy="8" r="6" fill="none" stroke-width="2" stroke-linecap="round" stroke-dasharray="35 37.7" />
+                          </svg>
+                        </button>
+                        <button class="send-btn stop" type="button"><svg><use href="#i-square" /></svg></button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — the cap ends the turn cleanly</div>
+              <div class="frame">
+                <div class="chat-head">
+                  <span class="agent-glyph"><svg width="13" height="13"><use href="#i-spark" /></svg></span>
+                  <b>Claude Code</b><span>· Fable 5</span>
+                </div>
+                <div class="chat-body" style="height: 480px">
+                  <div class="transcript">
+                    <div class="u-msg">Fix every type error in packages/core</div>
+                    <span class="work-chip"><svg><use href="#i-wrench" /></svg>48 tool calls, 6 messages</span>
+                    <div class="a-msg">
+                      Progress so far: 31 of 47 errors fixed (all of <code>db/</code> and
+                      <code>git/</code>). Remaining 16 are in <code>workspace/service.ts</code>.
+                    </div>
+                    <!-- The budget stop renders as a tool call too — same recipe as R2's
+                      fallback. Wallet glyph, "Turn stopped" label, a BUDGET status pill + a
+                      muted "Claude" scope pill (budget caps are Claude-only for now). Expand
+                      for the cap detail. It replaces the footer status pill — the tool call
+                      sits right above the footer and already names the ending. User spec
+                      2026-07-13. -->
+                    <div class="toolcall">
+                      <div class="tc-head">
+                        <span class="tc-glyph"><svg width="13" height="13"><use href="#i-wallet" /></svg></span>
+                        <span class="tc-label">Turn stopped</span>
+                        <span class="tc-pill">Budget</span>
+                        <span class="tc-scope">Claude</span>
+                      </div>
+                      <div class="tc-body">
+                        <span class="tc-lead">The <b>$5.00</b> per-turn budget was reached, so the turn ended cleanly. Everything completed so far is kept.</span>
+                        <span class="tc-kv">Budget caps are <b>Claude Code only</b> for now — Codex &amp; Cursor expose no budget hook yet</span>
+                      </div>
+                    </div>
+                    <div class="tf">
+                      <span class="tf-time">11m 44s</span>
+                      <button class="tf-icon" type="button"><svg><use href="#i-copy" /></svg></button>
+                      <button class="tf-icon" type="button"><svg><use href="#i-more" /></svg></button>
+                      <span class="file-pill"><svg><use href="#i-file" /></svg>turns.ts <span class="add">+38</span> <span class="del">−12</span></span>
+                      <span class="file-pill">+6 more</span>
+                    </div>
+                    <!-- Continue uses the lucide play glyph (user spec 2026-07-13), on its
+                      own row below the footer — same as R5. -->
+                    <div class="tf-actions">
+                      <button class="tf-action" type="button"><svg><use href="#i-play" /></svg>Continue</button>
+                      <span class="tf-actions-hint">Starts a fresh turn under a new budget cap — work already done this turn is kept.</span>
+                    </div>
+                  </div>
+                  <div class="composer">
+                    <div class="composer-input">Reply to Claude Code…</div>
+                    <div class="composer-bar">
+                      <div class="composer-tools">
+                        <span class="tool-plus"><svg><use href="#i-plus" /></svg></span>
+                        <span class="cpill"><svg class="glyph12"><use href="#i-spark" /></svg>Fable 5</span>
+                        <span class="cpill icon-16"><svg><use href="#i-zap" /></svg></span>
+                        <span class="cpill">High</span>
+                        <span class="cpill icon-16"><svg><use href="#i-shield" /></svg></span>
+                      </div>
+                      <div class="composer-right">
+                        <button class="gauge-btn" type="button">
+                          <svg class="ring" width="16" height="16" viewBox="0 0 16 16">
+                            <circle class="track" cx="8" cy="8" r="6" fill="none" stroke-width="2" />
+                            <circle class="arc" cx="8" cy="8" r="6" fill="none" stroke-width="2" stroke-linecap="round" stroke-dasharray="20 37.7" />
+                          </svg>
+                        </button>
+                        <button class="send-btn" type="button"><svg><use href="#i-send" /></svg></button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- settings for budget -->
+          <div class="frame single" style="margin-top: 16px">
+            <div class="chat-head"><b>Settings</b><span>· Agents → Models</span></div>
+            <div class="settings-body">
+              <h4 class="set-title">Budget</h4>
+              <p class="set-desc">Hard ceilings that end a turn cleanly instead of letting it run away.</p>
+              <div class="set-row">
+                <div class="set-l">
+                  <span class="set-label">Cap spend per turn</span>
+                  <span class="set-hint">Ends the turn with a "Budget limit reached" status once the cap is hit. Claude Code only for now — Codex and Cursor don't expose a budget hook yet.</span>
+                </div>
+                <span class="switch on"><i></i></span>
+              </div>
+              <div class="set-row">
+                <div class="set-l">
+                  <span class="set-label">Maximum per turn</span>
+                  <span class="set-hint">Work already done is kept; "Continue" starts the next turn under a fresh cap.</span>
+                </div>
+                <span class="inp"><span class="unit">$</span>5.00</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes three">
+            <div class="note flow">
+              <b>User workflow</b>
+              <ol>
+                <li>(Once) User flips on "Cap spend per turn" in Settings → Models and sets the amount. Off by default — behavior is unchanged until opted in.</li>
+                <li>User fires a broad task and walks away — the cap is the babysitter.</li>
+                <li>On a hit: turn ends cleanly, agent's partial summary + files are kept; the <b>Turn stopped</b> tool call says exactly why it stopped — expand for the cap detail.</li>
+                <li><b>Continue</b> resumes under a fresh cap; or the user raises the cap in Settings first.</li>
+              </ol>
+            </div>
+            <div class="note">
+              <b>Before:</b> zero hits for <code>maxBudgetUsd</code>/<code>costCap</code>
+              anywhere; the sole ceiling is <code>CLAUDE_MAX_TURNS</code>
+              (adapter.ts:1991/2064) — a turn-count, blind to cost. The
+              <code>error_max_budget_usd</code> result subtype would today collapse into a
+              generic "refusal".
+            </div>
+            <div class="note fix">
+              <b>After (engine):</b> pass <code>Options.maxBudgetUsd</code> in
+              <code>buildOptions</code>; map <code>error_max_budget_usd</code> → a
+              <b>Turn stopped</b> tool call (Budget pill) — reuses R5's stop-reason mapping,
+              which is why R5 ships first. Deliberately <b>per-turn</b>, not per-session —
+              simple to reason about, and compaction/multi-day sessions don't complicate the
+              ledger.
+            </div>
+          </div>
+        </section>
+
+        <!-- R4 ───────────────────────────────────────────── -->
+        <section class="case" id="r4">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">R4</span>
+                <span class="tag gap">Gap → proposal</span>
+              </div>
+              <h2>Effort ladder: a true "Off", and Max that says when it applies</h2>
+              <p class="case-copy">
+                The effort pill cycles Claude's ladder live — except there's no way to turn
+                thinking <b>off</b> (the floor is Low), and picking <b>Max</b> silently does
+                nothing until the next message (it needs a respawn; the SDK has no live
+                setter for it). <b>After:</b> the cycle gains an <b>Off</b> tier
+                (<code>Options.thinking:{type:'disabled'}</code>), and Max gets an honest
+                inline hint — "applies to next message" — using the same 3-second flash the
+                permission toggle already uses.
+              </p>
+            </div>
+            <div class="meta">
+              claude · composer-pills only; no new components. Off tier appeals to
+              cost-sensitive quick edits; the Max hint converts silent deferral into
+              stated behavior.
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — no Off, silent Max</div>
+              <div class="frame">
+                <div class="ladder">
+                  <span class="step">Low</span><span class="sep">→</span>
+                  <span class="step">Medium</span><span class="sep">→</span>
+                  <span class="step cur">High</span><span class="sep">→</span>
+                  <span class="step">Extra</span><span class="sep">→</span>
+                  <span class="step">Max</span><span class="sep">→</span>
+                  <span class="step">Ultracode</span><span class="sep">↺</span>
+                </div>
+                <div class="ladder-note">
+                  The click-cycle today (Claude Fable/Opus ladder). Floor is Low — thinking
+                  can't be disabled. Clicking through to Max updates the label but the tier
+                  only takes effect on the next message, with no indication.
+                </div>
+                <div class="composer" style="margin-top: 0">
+                  <div class="composer-input">Message Claude Code…</div>
+                  <div class="composer-bar">
+                    <div class="composer-tools">
+                      <span class="tool-plus"><svg><use href="#i-plus" /></svg></span>
+                      <span class="cpill"><svg class="glyph12"><use href="#i-spark" /></svg>Fable 5</span>
+                      <span class="cpill icon-16"><svg><use href="#i-zap" /></svg></span>
+                      <span class="cpill">Max</span>
+                      <span class="cpill icon-16"><svg><use href="#i-shield" /></svg></span>
+                    </div>
+                    <div class="composer-right">
+                      <button class="gauge-btn" type="button">
+                        <svg class="ring" width="16" height="16" viewBox="0 0 16 16">
+                          <circle class="track" cx="8" cy="8" r="6" fill="none" stroke-width="2" />
+                          <circle class="arc" cx="8" cy="8" r="6" fill="none" stroke-width="2" stroke-linecap="round" stroke-dasharray="10 37.7" />
+                        </svg>
+                      </button>
+                      <button class="send-btn" type="button"><svg><use href="#i-send" /></svg></button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — Off in the cycle, Max states its timing</div>
+              <div class="frame">
+                <div class="ladder">
+                  <span class="step new">Off</span><span class="sep">→</span>
+                  <span class="step">Low</span><span class="sep">→</span>
+                  <span class="step">Medium</span><span class="sep">→</span>
+                  <span class="step cur">High</span><span class="sep">→</span>
+                  <span class="step">Extra</span><span class="sep">→</span>
+                  <span class="step">Max</span><span class="sep">→</span>
+                  <span class="step">Ultracode</span><span class="sep">↺</span>
+                </div>
+                <div class="ladder-note">
+                  Off joins the front of the cycle (Claude only —
+                  <code>thinking:{type:'disabled'}</code> applies live like the other tiers).
+                  Ladders without the affordance (Codex) are unchanged.
+                </div>
+                <div class="composer" style="margin-top: 0">
+                  <div class="composer-input">Message Claude Code…</div>
+                  <div class="composer-bar">
+                    <div class="composer-tools">
+                      <span class="tool-plus"><svg><use href="#i-plus" /></svg></span>
+                      <span class="cpill"><svg class="glyph12"><use href="#i-spark" /></svg>Fable 5</span>
+                      <span class="cpill icon-16"><svg><use href="#i-zap" /></svg></span>
+                      <span class="cpill">Max</span>
+                      <span class="flash-hint">applies to next message</span>
+                      <span class="cpill icon-16"><svg><use href="#i-shield" /></svg></span>
+                    </div>
+                    <div class="composer-right">
+                      <button class="gauge-btn" type="button">
+                        <svg class="ring" width="16" height="16" viewBox="0 0 16 16">
+                          <circle class="track" cx="8" cy="8" r="6" fill="none" stroke-width="2" />
+                          <circle class="arc" cx="8" cy="8" r="6" fill="none" stroke-width="2" stroke-linecap="round" stroke-dasharray="10 37.7" />
+                        </svg>
+                      </button>
+                      <button class="send-btn" type="button"><svg><use href="#i-send" /></svg></button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes three">
+            <div class="note flow">
+              <b>User workflow</b>
+              <ol>
+                <li>Quick mechanical edit → user clicks the effort pill back to <b>Off</b>; replies get snappier and cheaper, applied live mid-session.</li>
+                <li>Hard problem → cycles up to <b>Max</b>; the 3s flash "applies to next message" (same pattern as the permission toggle's mode-name flash) tells them the current stream is unaffected.</li>
+                <li>No dropdown, no new UI — the pill keeps its single-click cycle and drop-in animation.</li>
+              </ol>
+            </div>
+            <div class="note">
+              <b>Before:</b> ladder floor is <code>low</code>
+              (<code>SETTINGS_EFFORTS</code>, adapter.ts:1948); <code>Options.thinking</code>
+              never constructed. A Max toggle silently sets
+              <code>pendingRestart = true</code> (adapter.ts:1389) — correct behavior,
+              invisible to the user.
+            </div>
+            <div class="note fix">
+              <b>After (engine):</b> Off tier rides the live path
+              (<code>applyFlagSettings</code> + <code>thinking:{type:'disabled'}</code>).
+              Max keeps its deferred respawn — the SDK offers no live effort setter above
+              xhigh — but the deferral becomes <i>stated</i>. Honesty over magic.
+            </div>
+          </div>
+        </section>
+
+        <!-- R6 ───────────────────────────────────────────── -->
+        <section class="case" id="r6">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">R6</span>
+                <span class="tag gap">Gap → proposal</span>
+              </div>
+              <h2>Per-model usage — the turn's bill, itemized on demand</h2>
+              <p class="case-copy">
+                Usage is captured as one lump per turn and rendered <b>nowhere</b> (the old
+                token/cost pill was removed; numbers flow only to the context gauge and
+                analytics). Yet a single Claude turn can span models — subagents fan out on
+                Haiku while the main loop runs Fable. <b>After:</b> a quiet circle-dollar
+                button in the turn footer opens a per-model breakdown popover <b>above the
+                icon</b> — tokens in/out and cost per model, plus the turn total. <b>Per the
+                2026-07-13 decision, no
+                reasoning-token line for any agent</b> — Claude's SDK folds thinking into
+                output tokens, so showing it for Codex only would be an inconsistent readout.
+              </p>
+            </div>
+            <div class="meta">
+              claude · reads <code>result.modelUsage</code> (sdk.d.ts:4155). Codex shows
+              its single-model row via the same popover; Cursor reports no usage — button
+              hidden (same rule as the gauge).
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — usage exists, renders nowhere</div>
+              <div class="frame">
+                <div class="chat-head">
+                  <span class="agent-glyph"><svg width="13" height="13"><use href="#i-spark" /></svg></span>
+                  <b>Claude Code</b><span>· Fable 5</span>
+                </div>
+                <div class="chat-body tall">
+                  <div class="transcript">
+                    <div class="u-msg">Audit the checkpoint system for edge cases</div>
+                    <span class="work-chip"><svg><use href="#i-wrench" /></svg>23 tool calls, 4 messages, 3 agents</span>
+                    <div class="a-msg">
+                      Audit complete — three edge cases documented in
+                      <code>docs/native-checkpoint-audit.md</code>: crash-mid-turn,
+                      gitignored paths, and the 100-turn prune window.
+                    </div>
+                    <div class="tf">
+                      <span class="tf-time">6m 51s</span>
+                      <button class="tf-icon" type="button"><svg><use href="#i-copy" /></svg></button>
+                      <button class="tf-icon" type="button"><svg><use href="#i-more" /></svg></button>
+                      <span class="file-pill"><svg><use href="#i-file" /></svg>native-checkpoint-audit.md <span class="add">+167</span></span>
+                    </div>
+                    <div class="event-row" style="margin-top: 2px">
+                      <span class="ev-sub" style="font-size: 11px; color: var(--fg3)">
+                        The turn cost $1.87 across three models — but the footer shows only a run time.
+                      </span>
+                    </div>
+                  </div>
+                  <div class="composer">
+                    <div class="composer-input">Reply to Claude Code…</div>
+                    <div class="composer-bar">
+                      <div class="composer-tools">
+                        <span class="tool-plus"><svg><use href="#i-plus" /></svg></span>
+                        <span class="cpill"><svg class="glyph12"><use href="#i-spark" /></svg>Fable 5</span>
+                        <span class="cpill icon-16"><svg><use href="#i-zap" /></svg></span>
+                        <span class="cpill">High</span>
+                        <span class="cpill icon-16"><svg><use href="#i-shield" /></svg></span>
+                      </div>
+                      <div class="composer-right">
+                        <button class="gauge-btn" type="button">
+                          <svg class="ring" width="16" height="16" viewBox="0 0 16 16">
+                            <circle class="track" cx="8" cy="8" r="6" fill="none" stroke-width="2" />
+                            <circle class="arc" cx="8" cy="8" r="6" fill="none" stroke-width="2" stroke-linecap="round" stroke-dasharray="18 37.7" />
+                          </svg>
+                        </button>
+                        <button class="send-btn" type="button"><svg><use href="#i-send" /></svg></button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — coins button → itemized popover</div>
+              <div class="frame">
+                <div class="chat-head">
+                  <span class="agent-glyph"><svg width="13" height="13"><use href="#i-spark" /></svg></span>
+                  <b>Claude Code</b><span>· Fable 5</span>
+                </div>
+                <div class="chat-body tall">
+                  <!-- Bottom-aligned so the upward popover clears the transcript top. -->
+                  <div class="transcript" style="justify-content: flex-end">
+                    <div class="u-msg">Audit the checkpoint system for edge cases</div>
+                    <span class="work-chip"><svg><use href="#i-wrench" /></svg>23 tool calls, 4 messages, 3 agents</span>
+                    <div class="a-msg">
+                      Audit complete — three edge cases documented in
+                      <code>docs/native-checkpoint-audit.md</code>: a crash mid-turn that
+                      leaves a dangling pre-snapshot, gitignored paths silently skipped by the
+                      diff, and the 100-turn prune window dropping recoverable history. Each
+                      now has repro steps and a proposed guard.
+                    </div>
+                    <div class="tf" style="position: relative">
+                      <span class="tf-time">6m 51s</span>
+                      <button class="tf-icon" type="button" style="background: var(--bg2-hover); color: var(--fg1)"><svg><use href="#i-dollar-circle" /></svg></button>
+                      <button class="tf-icon" type="button"><svg><use href="#i-copy" /></svg></button>
+                      <button class="tf-icon" type="button"><svg><use href="#i-more" /></svg></button>
+                      <span class="file-pill"><svg><use href="#i-file" /></svg>native-checkpoint-audit.md <span class="add">+167</span></span>
+                      <!-- Popover opens ABOVE the icon (bottom-anchored), flipping below
+                        only when there's no room above — responsive. User spec 2026-07-13. -->
+                      <div class="popover" style="left: 0; bottom: 30px">
+                        <div class="pop-head"><b>Turn usage</b><span>$1.87</span></div>
+                        <div class="pop-bar"><i style="width: 71%"></i></div>
+                        <div class="pop-row">
+                          <span class="nm">Fable 5</span>
+                          <span class="val">48.2k in · 9.1k out · $1.62</span>
+                        </div>
+                        <div class="pop-row">
+                          <span class="nm">Haiku 4.5 <i>subagents ×3</i></span>
+                          <span class="val">31.5k in · 6.4k out · $0.19</span>
+                        </div>
+                        <div class="pop-row">
+                          <span class="nm">Sonnet 5 <i>fallback</i></span>
+                          <span class="val">4.1k in · 1.2k out · $0.06</span>
+                        </div>
+                        <div class="pop-row total">
+                          <span class="nm">Total</span>
+                          <span class="val">83.8k in · 16.7k out · $1.87</span>
+                        </div>
+                        <div class="pop-foot"><button type="button">Copy breakdown</button></div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="composer">
+                    <div class="composer-input">Reply to Claude Code…</div>
+                    <div class="composer-bar">
+                      <div class="composer-tools">
+                        <span class="tool-plus"><svg><use href="#i-plus" /></svg></span>
+                        <span class="cpill"><svg class="glyph12"><use href="#i-spark" /></svg>Fable 5</span>
+                        <span class="cpill icon-16"><svg><use href="#i-zap" /></svg></span>
+                        <span class="cpill">High</span>
+                        <span class="cpill icon-16"><svg><use href="#i-shield" /></svg></span>
+                      </div>
+                      <div class="composer-right">
+                        <button class="gauge-btn" type="button">
+                          <svg class="ring" width="16" height="16" viewBox="0 0 16 16">
+                            <circle class="track" cx="8" cy="8" r="6" fill="none" stroke-width="2" />
+                            <circle class="arc" cx="8" cy="8" r="6" fill="none" stroke-width="2" stroke-linecap="round" stroke-dasharray="18 37.7" />
+                          </svg>
+                        </button>
+                        <button class="send-btn" type="button"><svg><use href="#i-send" /></svg></button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes three">
+            <div class="note flow">
+              <b>User workflow</b>
+              <ol>
+                <li>Turn settles; the footer gains a quiet circle-dollar icon between the run time and Copy — visible only when usage exists for the turn.</li>
+                <li>Click → popover opens <b>above</b> the icon (gauge-popover recipe: bg3 card, mono tabular numbers), flipping below only when there's no room above: one row per model with in/out tokens + cost, total row beneath the hairline.</li>
+                <li>Subagent and fallback rows carry a small annotation so the user sees <i>why</i> a second model billed.</li>
+                <li>"Copy breakdown" drops the table as markdown for expense notes.</li>
+              </ol>
+            </div>
+            <div class="note">
+              <b>Before:</b> <code>TurnUsage</code> feeds only session accounting (the
+              context gauge) and PostHog (sessions-provider.tsx:1532/1608). No per-turn or
+              per-session usage element exists anywhere; <code>result.modelUsage</code> is
+              never read.
+            </div>
+            <div class="note fix">
+              <b>After (engine):</b> translator reads <code>result.modelUsage</code>
+              (per-model in/out/cache/cost, sdk.d.ts:1233) into
+              <code>TurnUsage.perModel[]</code>. <b>Scope cut:</b>
+              <code>reasoningTokens</code> is dropped for Claude <i>and</i> Codex — Codex's
+              populated value stays analytics-only, never rendered — one consistent readout
+              across agents.
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <p class="band">Part B — Cursor effort · re-examined 2026-07-13 (Grok 4.5)</p>
+
+      <div class="catalog">
+        <!-- R1 ───────────────────────────────────────────── -->
+        <section class="case" id="r1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">R1</span>
+                <span class="tag skip">Re-examined 2026-07-13 · your question</span>
+              </div>
+              <h2>Cursor effort — hidden by design, but Grok 4.5 is reopenable</h2>
+              <p class="case-copy">
+                You're right to push on this. Cursor is the one family without the effort pill
+                because the SDK exposes <b>no per-request effort/reasoning parameter</b> (unlike
+                Claude's <code>fastMode</code> or Codex's <code>serviceTier</code>): reasoning
+                depth can only change by <b>swapping the model id</b>
+                (<code>applyCursorReasoning</code> → <code>&lt;base&gt;-thinking-high</code> /
+                <code>-fast</code>). Today the catalog pins <code>effortLevels: []</code> and
+                <code>agentSupportsEffort("cursor") === false</code> is locked by tests.
+                <b>But Grok 4.5 genuinely has a low/medium/high ladder</b> — the ids
+                <code>grok-4.5-low|medium|high</code> exist (verified against
+                <code>cursor-agent&nbsp;models</code>) and the swap machinery is already built
+                and tested. So a Grok effort pill is <b>reopenable via id-swap</b> — with one
+                catch (right).
+              </p>
+            </div>
+            <div class="meta">
+              Answer: <b>possible for Grok 4.5, not Composer 2.5.</b> Not a per-request knob —
+              an id-swap, exactly like the Fast pill already does. A true effort <i>param</i>
+              is still "revisit only if the Cursor SDK grows one."
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Today — Grok 4.5, no effort pill</div>
+              <div class="frame">
+                <div class="chat-head">
+                  <span class="agent-glyph"><svg width="13" height="13"><use href="#i-spark" /></svg></span>
+                  <b>Cursor</b><span>· Grok 4.5</span>
+                </div>
+                <div class="chat-body" style="height: 178px">
+                  <div style="flex: 1"></div>
+                  <div class="composer">
+                    <div class="composer-input">Message Cursor…</div>
+                    <div class="composer-bar">
+                      <div class="composer-tools">
+                        <span class="tool-plus"><svg><use href="#i-plus" /></svg></span>
+                        <span class="cpill"><svg class="glyph12"><use href="#i-spark" /></svg>Grok 4.5</span>
+                        <span class="cpill fast-on"><svg width="16" height="16"><use href="#i-zap" /></svg>Fast</span>
+                        <span class="cpill icon-16"><svg><use href="#i-shield" /></svg></span>
+                      </div>
+                      <div class="composer-right">
+                        <button class="gauge-btn" type="button" style="color: var(--muted-fg)">
+                          <svg class="ring" width="16" height="16" viewBox="0 0 16 16">
+                            <circle class="track" cx="8" cy="8" r="6" fill="none" stroke-width="2" />
+                          </svg>
+                        </button>
+                        <button class="send-btn" type="button"><svg><use href="#i-send" /></svg></button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>Possible — Low/Medium/High via id-swap</div>
+              <div class="frame">
+                <div class="chat-head">
+                  <span class="agent-glyph"><svg width="13" height="13"><use href="#i-spark" /></svg></span>
+                  <b>Cursor</b><span>· Grok 4.5</span>
+                </div>
+                <div class="chat-body" style="height: 178px">
+                  <div class="ladder" style="padding-bottom: 3px">
+                    <span class="step">Low</span><span class="sep">→</span>
+                    <span class="step">Medium</span><span class="sep">→</span>
+                    <span class="step cur">High</span><span class="sep">↺</span>
+                  </div>
+                  <div class="ladder-note" style="padding-top: 0">
+                    Grok's whole ladder — three tiers (no Off/Extra/Max). Each pick maps to a
+                    concrete id: <code>grok-4.5-thinking-{low|medium|high}</code>.
+                  </div>
+                  <div style="flex: 1"></div>
+                  <div class="composer">
+                    <div class="composer-input">Message Cursor…</div>
+                    <div class="composer-bar">
+                      <div class="composer-tools">
+                        <span class="tool-plus"><svg><use href="#i-plus" /></svg></span>
+                        <span class="cpill"><svg class="glyph12"><use href="#i-spark" /></svg>Grok 4.5</span>
+                        <span class="cpill fast-on"><svg width="16" height="16"><use href="#i-zap" /></svg>Fast</span>
+                        <span class="cpill">High</span>
+                        <span class="cpill icon-16"><svg><use href="#i-shield" /></svg></span>
+                      </div>
+                      <div class="composer-right">
+                        <button class="gauge-btn" type="button" style="color: var(--muted-fg)">
+                          <svg class="ring" width="16" height="16" viewBox="0 0 16 16">
+                            <circle class="track" cx="8" cy="8" r="6" fill="none" stroke-width="2" />
+                          </svg>
+                        </button>
+                        <button class="send-btn" type="button"><svg><use href="#i-send" /></svg></button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes three">
+            <div class="note">
+              <b>The catch:</b> the curated id is <code>grok-4.5-xhigh</code> (top tier baked
+              in). That <code>-xhigh</code> suffix trips
+              <code>applyCursorReasoning</code>'s "already encodes reasoning" guard, so it
+              returns the id <i>unchanged</i> — Low/Med/High picks would be silently ignored
+              (locked by <code>model-passing.test.ts:135</code>).
+            </div>
+            <div class="note fix">
+              <b>The path (two catalog edits, no new UI):</b> (a) set
+              <code>effortLevels: ["low","medium","high"]</code> on the Grok entry — that alone
+              flips the EffortPill on; and (b) change the curated base
+              <code>grok-4.5-xhigh</code> → level-free <code>grok-4.5</code> (+ alias, + relax
+              the locking tests). Then the pill swaps to
+              <code>grok-4.5-thinking-{low|medium|high}</code> live.
+            </div>
+            <div class="note flow">
+              <b>The trade-off:</b> the pill <i>renames the model</i> underneath the user per
+              level rather than tuning a knob — which is why it was hidden. <b>But the Fast
+              pill already does exactly this id-swap</b>, so a Grok effort pill would be
+              consistent with shipped behavior. <b>Composer 2.5</b> has no such ladder — it
+              stays genuinely effort-less.
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <p class="footer-note">
+        Visual design reference for §3.6 (Models, effort &amp; budget), authored
+        2026-07-13 against the audited code state (all six rows verified that day).
+        Buttons and popovers demonstrate placement, hierarchy, and the shared status
+        language; they don't run anything. Colors, radii, and type are pulled from Zeros
+        Foundation (Zeros Shade dark + Light) — toggle the theme in the header to check
+        both. Suggested ship order: R5 (P1, unlocks R3's result mapping) → R2 → R4 → R6;
+        R3 last of the builds since it layers Settings + engine + footer. R1 re-examined
+        2026-07-13 — Grok 4.5's Low/Med/High is reopenable via id-swap (two catalog edits).
+      </p>
+    </main>
+
+    <script>
+      (function () {
+        var root = document.documentElement;
+        var btn = document.getElementById("themeBtn");
+        var label = document.getElementById("themeLabel");
+        btn.addEventListener("click", function () {
+          var toLight = root.getAttribute("data-theme") !== "light";
+          root.setAttribute("data-theme", toLight ? "light" : "dark");
+          label.textContent = toLight ? "Dark preview" : "Light preview";
+        });
+      })();
+    </script>
+  </body>
+</html>

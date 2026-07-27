@@ -1,0 +1,1211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zeros — Popups &amp; Overlays</title>
+<style>
+:root{
+  color-scheme:dark;
+
+  /* ── BACKGROUNDS ── */
+  --bg1:hsl(25 5% 7%); --bg1-hover:hsl(8 5% 12%); --bg1-highlight:hsl(25 5% 10%);
+  --bg2:hsl(25 4% 12%); --bg2-hover:hsl(25 3% 15%);
+  /* bg3 = FLOATING-surface-only (popover/dropdown/menu/select/command). Aliased
+     to --sidebar-bg so a floating panel sits one subtle step above the bg1
+     canvas — the lift is border2 + --shadow-dropdown, NOT a lighter fill. */
+  --bg3:var(--sidebar-bg); --bg3-hover:var(--sidebar-bg-hover);
+  --bg4:hsl(5 1% 24%); --bg5:hsl(8 0% 37%);
+  --sidebar-bg:hsl(25 5% 9%); --sidebar-bg-hover:hsl(25 2% 15%);
+
+  /* ── FOREGROUNDS ── */
+  --fg1:hsl(0 2% 92%); --fg2:hsl(20 4% 66%); --fg3:hsl(15 1% 44%); --muted-fg:hsl(15 4% 44%);
+
+  /* ── BORDERS ── */
+  --border1:hsl(8 3% 14%); --border2:hsl(25 1% 18%); --border3:hsl(15 0% 24%); --border4:hsl(15 0% 30%);
+
+  /* ── ELEVATION + SCRIM ── */
+  --shadow-dropdown:0 8px 24px rgba(0,0,0,.35);
+  --scrim:hsl(0 0% 0% / 0.8);
+
+  /* ── HIGHLIGHTED / INVERTED ── */
+  --highlighted-bg:hsl(25 5% 15%); --highlighted-bright:hsl(25 5% 65%);
+  --inverted-bg:hsl(0 2% 92%); --inverted-fg:hsl(5 7% 5%);
+  --primary-button-bg:var(--inverted-bg); --primary-button-hover:hsl(25 2% 83%); --primary-button-fg:var(--inverted-fg);
+
+  /* ── FAMILY COLORS ── */
+  --red-primary:hsl(0 91% 71%); --red-secondary:hsl(7 83% 39%); --red-secondary-fg:hsl(0 0% 100%); --red-bg:hsl(13 81% 14%); --red-fg:hsl(20 97% 72%);
+  --green-primary:hsl(142 69% 58%); --green-bg:hsl(120 23% 17%); --green-fg:hsl(142 75% 73%);
+  --yellow-primary:hsl(37 75% 60%); --yellow-bg:hsl(38 68% 17%); --yellow-fg:hsl(44 100% 50%);
+  --blue-primary:hsl(205 80% 73%); --violet-primary:hsl(271 80% 73%);
+
+  /* radius scale — fixed 3-step: 4/6/8px */
+  --radius-sm:4px; --radius-md:6px; --radius-lg:8px;
+
+  /* custom text scale (font-size only) */
+  --text-xxs:10px; --text-2xxs:11px; --text-3xxs:12px; --text-xs:13px;
+
+  /* semantic (styles/semantic-tokens.css): selected-state fill on glass surfaces */
+  --selected-glass:color-mix(in oklab,var(--bg5) 25%,transparent);
+}
+
+/* ── LIGHT THEME — mirrors the appearance store's data-theme="light" ── */
+[data-theme="light"]{
+  color-scheme:light;
+  --bg1:hsl(0 0% 100%); --bg1-hover:hsl(0 4% 95%); --bg1-highlight:hsl(0 0% 97%);
+  --bg2:hsl(60 4% 95%); --bg2-hover:hsl(60 4% 91%);
+  --bg3:var(--bg1); --bg3-hover:var(--bg1-hover);
+  --bg4:hsl(0 0% 94%); --bg5:hsl(0 0% 88%);
+  --sidebar-bg:hsl(60 9% 98%); --sidebar-bg-hover:hsl(60 2% 92%);
+  --fg1:hsl(20 7% 16%); --fg2:hsl(20 4% 37%); --fg3:hsl(20 4% 56%); --muted-fg:hsl(20 4% 68%);
+  --border1:hsl(30 9% 91%); --border2:hsl(30 9% 88%); --border3:hsl(60 3% 85%); --border4:hsl(0 1% 83%);
+  --shadow-dropdown:0 8px 24px rgba(0,0,0,.12);
+  --scrim:hsl(0 0% 0% / 0.4);
+  --selected-glass:color-mix(in oklab,var(--bg3) 30%,transparent);
+  --highlighted-bg:hsl(30 5% 92%); --highlighted-bright:hsl(25 5% 45%);
+  --inverted-bg:hsl(20 7% 16%); --inverted-fg:hsl(0 0% 100%);
+  --primary-button-hover:hsl(22 6% 25%);
+  --red-primary:hsl(0 72% 51%); --red-secondary:hsl(0 72% 50%); --red-bg:hsl(18 87% 91%); --red-fg:hsl(18 89% 40%);
+  --green-primary:hsl(142 75% 36%); --green-bg:hsl(134 38% 89%); --green-fg:hsl(142 70% 30%);
+  --yellow-primary:hsl(37 90% 60%); --yellow-bg:hsl(48 97% 89%); --yellow-fg:hsl(37 100% 51%);
+  --blue-primary:hsl(221 83% 53%); --violet-primary:hsl(271 80% 51%);
+}
+
+.themetoggle{position:fixed;top:10px;right:14px;z-index:80;display:inline-flex;align-items:center;gap:7px;
+  background:var(--bg3);color:var(--fg2);border:1px solid var(--border3);border-radius:var(--radius-sm);
+  height:28px;padding:0 10px;font:500 12px "Geist Variable",system-ui;cursor:pointer;box-shadow:var(--shadow-dropdown)}
+.themetoggle:hover{color:var(--fg1);border-color:var(--border4)}
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg1);color:var(--fg1);
+  font:14px/1.55 "Geist Variable",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:0 0 120px}
+code{background:var(--bg3);padding:1px 6px;border-radius:4px;font-size:11.5px;color:var(--fg1);
+  font-family:"Geist Mono Variable",ui-monospace,Menlo,monospace;white-space:nowrap;border:1px solid var(--border1)}
+em{color:var(--fg1);font-style:normal;font-weight:600}
+a{color:var(--blue-primary);text-decoration:none}
+svg{display:block}
+
+/* header + nav */
+header{padding:30px 40px 0;max-width:1180px}
+.crumbs{font-size:12.5px;color:var(--fg3);margin:0 0 10px}
+h1{font-size:23px;margin:0 0 5px;letter-spacing:-.01em}
+.lede{color:var(--fg2);margin:0;max-width:88ch}
+nav{position:sticky;top:0;z-index:60;background:color-mix(in srgb,var(--bg1) 88%,transparent);
+  backdrop-filter:blur(8px);border-bottom:1px solid var(--border1);padding:12px 40px;margin:22px 0 6px;
+  display:flex;gap:6px;flex-wrap:wrap}
+nav a{font-size:12.5px;color:var(--fg2);padding:5px 11px;border-radius:4px}
+nav a:hover{background:var(--bg1-hover);color:var(--fg1)}
+
+main{padding:14px 40px 0;max-width:1180px}
+section{margin:0 0 46px;scroll-margin-top:64px}
+.h2{font-size:17px;margin:0 0 3px;display:flex;align-items:baseline;gap:10px;letter-spacing:-.01em}
+.h2 small{color:var(--fg3);font-weight:400;font-size:12.5px}
+.secintro{color:var(--fg2);margin:0 0 18px;max-width:90ch;font-size:13.5px}
+h3{font-size:13px;color:var(--fg2);letter-spacing:.02em;text-transform:uppercase;margin:26px 0 12px;font-weight:600}
+h3:first-of-type{margin-top:8px}
+.rule{border:0;border-top:1px solid var(--border1);margin:34px 0}
+
+/* demo canvas + captions */
+.demo{background:var(--bg1);border:1px solid var(--border1);border-radius:8px;padding:22px;margin:0 0 12px}
+.demo.raised{background:var(--bg1-highlight)}
+.demo.pad0{padding:0;overflow:hidden}
+.cap{font:11.5px "Geist Mono Variable",ui-monospace,Menlo,monospace;color:var(--fg3);margin:8px 2px 2px;line-height:1.65}
+.cap b{color:var(--fg2);font-weight:500}
+.cluster{display:flex;align-items:flex-start;gap:30px;flex-wrap:wrap}
+.grp{display:flex;flex-direction:column;gap:12px;align-items:flex-start}
+.grp .lbl{font-size:11px;color:var(--fg3);text-transform:uppercase;letter-spacing:.04em}
+
+/* spec tables */
+table{border-collapse:collapse;font-size:12.5px;margin-top:4px;width:100%}
+th{text-align:left;color:var(--fg3);font-weight:500;font-size:11.5px;padding:0 16px 8px 0;border-bottom:1px solid var(--border1);vertical-align:bottom}
+td{padding:8px 16px 8px 0;color:var(--fg2);vertical-align:top;border-bottom:1px solid var(--border1)}
+td:first-child,th:first-child{padding-left:0}
+td b{color:var(--fg1);font-weight:600}
+.mono{font-family:"Geist Mono Variable",ui-monospace,Menlo,monospace;font-size:11.5px}
+.p1{color:var(--red-primary)}
+.tag{display:inline-block;font:600 10px "Geist Mono Variable",ui-monospace,Menlo,monospace;padding:1px 6px;border-radius:4px;
+  background:var(--bg3);color:var(--fg2);border:1px solid var(--border1);white-space:nowrap;text-transform:uppercase;letter-spacing:.03em}
+.tag.x{color:var(--red-fg);background:var(--red-bg);border-color:transparent}
+.tag.ok{color:var(--green-fg);background:var(--green-bg);border-color:transparent}
+
+/* anti-pattern / rules list */
+.anti{display:flex;flex-direction:column;gap:8px;max-width:980px}
+.anti .x{display:flex;gap:10px;font-size:13px;color:var(--fg2);line-height:1.5}
+.anti .x i{font-style:normal;flex:none;font-weight:700}
+.anti .x.no i{color:var(--red-primary)} .anti .x.yes i{color:var(--green-primary)}
+.anti .x b{color:var(--fg1);font-weight:600}
+
+/* ══════════════════════════════════════════════════════════════
+   SHARED PRIMITIVE CHROME
+   ══════════════════════════════════════════════════════════════ */
+
+/* buttons (from buttons.html) */
+.btn{display:inline-flex;width:fit-content;align-items:center;justify-content:center;gap:8px;white-space:nowrap;
+  border:1px solid transparent;border-radius:var(--radius-sm);height:28px;padding:0 10px;
+  font:500 13px "Geist Variable",system-ui;line-height:1;cursor:pointer}
+.btn svg{width:16px;height:16px;flex:none}
+.btn.primary{background:var(--primary-button-bg);color:var(--primary-button-fg);box-shadow:0 1px 2px rgba(0,0,0,.3)}
+.btn.primary:hover{background:var(--primary-button-hover)}
+.btn.secondary{background:var(--bg2);border-color:var(--border2);color:var(--fg1)}
+.btn.secondary:hover{background:var(--bg2-hover);border-color:var(--border3)}
+.btn.ghost{background:transparent;color:var(--fg2)}
+.btn.ghost:hover{background:var(--bg2-hover);color:var(--fg1)}
+.btn.destructive{background:var(--red-secondary);color:var(--red-secondary-fg);box-shadow:0 1px 2px rgba(0,0,0,.3)}
+.btn.destructive:hover{background:color-mix(in srgb,var(--red-secondary) 90%,var(--bg1))}
+.btn.destructive-sec{background:var(--bg2);border-color:var(--border2);color:var(--red-primary)}
+.btn.sm{height:24px;font-size:12px}
+.btn.icon{width:28px;height:28px;padding:0}
+.btn.icon.sm{width:24px;height:24px}
+.btn svg.s14{width:14px;height:14px}
+.btn.focusring{outline:none;border-color:var(--highlighted-bright);
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--highlighted-bright) 50%,transparent)}
+
+/* Kbd chip — src/zeros/ui/primitives/kbd.tsx */
+.kbd{display:inline-flex;flex:none;user-select:none;align-items:center;border-radius:var(--radius-sm);
+  border:1px solid var(--border1);padding:1px 4px;font:500 var(--text-2xxs)/1 "Geist Variable",system-ui;
+  font-variant-numeric:tabular-nums;color:var(--fg2);background:transparent}
+
+/* inline dropdown-shortcut text variant */
+.sc{margin-left:auto;font-size:var(--text-xs);letter-spacing:.18em;opacity:.6;color:var(--fg2)}
+
+/* form controls */
+.field{display:flex;flex-direction:column;gap:6px;width:100%}
+.field>label{font-size:12.5px;color:var(--fg2);font-weight:500}
+.field .hint{font-size:11.5px;color:var(--fg3)}
+.inp,.ta{width:100%;background:var(--bg1);border:1px solid var(--border3);border-radius:var(--radius-sm);
+  color:var(--fg1);font:13px "Geist Variable",system-ui;padding:7px 10px;outline:none}
+.inp::placeholder,.ta::placeholder{color:var(--muted-fg)}
+.inp:focus,.ta:focus{border-color:var(--highlighted-bright);box-shadow:0 0 0 3px color-mix(in srgb,var(--highlighted-bright) 40%,transparent)}
+.inp.mono,.ta.mono{font-family:"Geist Mono Variable",ui-monospace,Menlo,monospace;font-size:12px}
+.ta{resize:none;min-height:70px;line-height:1.5}
+
+/* select trigger — src/zeros/ui/primitives/select.tsx */
+.seltrig{display:inline-flex;align-items:center;justify-content:space-between;gap:8px;height:32px;
+  background:transparent;border:1px solid var(--border3);border-radius:var(--radius-sm);color:var(--fg1);
+  font:14px "Geist Variable",system-ui;padding:0 12px;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.1);min-width:150px}
+.seltrig:hover{background:var(--bg2);border-color:var(--border4)}
+.seltrig .ph{color:var(--fg2)}
+.seltrig svg{width:16px;height:16px;color:var(--fg2);opacity:.5;flex:none}
+
+/* switch */
+.switch{width:36px;height:20px;border-radius:999px;background:var(--fg1);border:1px solid transparent;position:relative;flex:none}
+.switch.off{background:var(--border3);border-color:var(--border4)}
+.switch i{position:absolute;top:1.5px;width:15px;height:15px;border-radius:50%;background:var(--bg3);transition:left .15s}
+.switch.on i{left:18px} .switch.off i{left:2px}
+.switchrow{display:flex;align-items:center;justify-content:space-between;gap:14px;width:100%}
+
+/* ── FLOATING MENU (dropdown / context / select / command panel) ──
+   bg-bg3 + border-border2 + rounded-lg + shadow-dropdown + p-1 (4px) */
+.menu{background:var(--bg3);border:1px solid var(--border2);border-radius:var(--radius-lg);
+  box-shadow:var(--shadow-dropdown);padding:4px;min-width:128px}
+.mitem{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:var(--radius-sm);
+  color:var(--fg1);font-size:var(--text-xs);cursor:default;line-height:1.2;position:relative}
+.mitem:hover,.mitem.sel{background:var(--bg3-hover)}
+.mitem>svg{width:16px;height:16px;flex:none;color:var(--fg2)}
+.mitem.muted{color:var(--fg2)} .mitem.dis{opacity:.5}
+.mitem.destructive{color:var(--red-primary)} .mitem.destructive>svg{color:var(--red-primary)}
+.mitem .ck{margin-left:auto;width:16px;height:16px;color:var(--fg1);flex:none}
+.ck svg{width:100%;height:100%;display:block}
+.mitem .chev{margin-left:auto;width:16px;height:16px;color:var(--fg2);flex:none}
+.mitem .sub{display:flex;flex-direction:column;gap:1px}
+.mitem .sub .s2{font-size:var(--text-2xxs);color:var(--fg3)}
+/* select item — check on the RIGHT, pr for it */
+.mitem.selopt{padding-left:8px;padding-right:30px}
+.mitem.selopt .ck{position:absolute;right:8px;margin:0;color:var(--fg2)}
+.mlabel{padding:6px 8px;font-size:var(--text-xs);color:var(--fg2);font-weight:600}
+.mlabel.ctx{font-weight:400}
+.msep{height:1px;background:var(--border2);margin:4px -4px}
+.msep.b3{background:var(--border3)}
+/* radio dot */
+.mradio{width:16px;height:16px;flex:none;display:inline-flex;align-items:center;justify-content:center}
+.mradio i{width:7px;height:7px;border-radius:50%;background:var(--fg1)}
+
+/* ── POPOVER (rich anchored panel) ── bg-bg3 + border2 + rounded-lg + p-4 + w-72 */
+.popover{background:var(--bg3);border:1px solid var(--border2);border-radius:var(--radius-lg);
+  box-shadow:var(--shadow-dropdown);padding:16px;width:288px;color:var(--fg1)}
+.popover.p0{padding:0;overflow:hidden}
+.popover .ptitle{font-size:13px;font-weight:600;color:var(--fg1);margin:0 0 5px}
+.popover .pbody{font-size:12.5px;color:var(--fg2);line-height:1.5}
+
+/* ── HOVER CARD ── bg-bg2 + border2 + rounded-lg + p-4 + w-64 */
+.hovercard{background:var(--bg2);border:1px solid var(--border2);border-radius:var(--radius-lg);
+  box-shadow:var(--shadow-dropdown);padding:16px;width:256px;color:var(--fg1)}
+
+/* command palette rows */
+.cmdinput{display:flex;flex:none;align-items:center;gap:8px;height:48px;border-bottom:1px solid var(--border2);padding:0 14px}
+.cmdinput svg{width:16px;height:16px;color:var(--fg2);opacity:.5;flex:none}
+.cmdinput input{border:0;background:transparent;outline:none;color:var(--fg1);font:13px "Geist Variable",system-ui;width:100%}
+.cmdinput input::placeholder{color:var(--fg2)}
+.cmdlist{padding:4px;max-height:340px;overflow:auto}
+.cmdgroup>.gh{padding:6px 8px;font-size:var(--text-xs);color:var(--fg2);font-weight:500}
+.cmditem{display:flex;align-items:center;gap:8px;padding:12px 8px;border-radius:var(--radius-sm);color:var(--fg1);font-size:var(--text-xs);cursor:default;position:relative}
+.cmditem:hover,.cmditem.sel{background:var(--bg3-hover)}
+.cmditem>svg{width:20px;height:20px;flex:none;color:var(--fg2)}
+.cmditem .path{color:var(--fg3);font-size:var(--text-2xxs)}
+.cmditem .ck{margin-left:auto;width:14px;height:14px;color:var(--fg2)}
+
+/* ══════════════════════════════════════════════════════════════
+   THE STAGE — a dimmed app behind a scrim, popup centered on top
+   ══════════════════════════════════════════════════════════════ */
+.stage{position:relative;border:1px solid var(--border1);border-radius:var(--radius-lg);overflow:hidden;
+  background:var(--bg1);min-height:420px}
+.stage.tall{min-height:560px}
+.stage.short{min-height:300px}
+/* faux app ghost behind the scrim */
+.ghost{position:absolute;inset:0;display:flex;flex-direction:column;opacity:.9}
+.ghost .gbar{height:34px;display:flex;align-items:center;gap:8px;padding:0 12px;background:var(--sidebar-bg);border-bottom:1px solid var(--border1)}
+.ghost .dot{width:11px;height:11px;border-radius:50%}
+.ghost .gtab{height:20px;border-radius:5px;background:var(--bg2);padding:0 10px;display:flex;align-items:center;font-size:11px;color:var(--fg3)}
+.ghost .gcols{flex:1;display:flex;min-height:0}
+.ghost .gc-chat{flex:1;padding:22px 30px;display:flex;flex-direction:column;gap:12px}
+.ghost .gc-side{width:300px;border-left:1px solid var(--border1);background:var(--bg1);padding:14px}
+.ghost .gline{height:9px;border-radius:4px;background:var(--bg2)}
+.ghost .gprompt{align-self:center;width:60%;height:32px;border-radius:8px;background:var(--bg2);margin-bottom:8px}
+.ghost .gfile{display:flex;align-items:center;gap:8px;padding:5px 6px;color:var(--fg3);font-size:12px}
+.ghost .gfile .gi{width:13px;height:13px;color:var(--fg3);opacity:.7}
+.ghost .gsidehead{display:flex;gap:14px;font-size:11.5px;color:var(--fg3);padding:2px 4px 12px}
+.ghost .gsearch{height:26px;border-radius:5px;background:var(--bg2);margin-bottom:10px}
+.ghost .gcomposer{height:52px;border-top:1px solid var(--border1);display:flex;align-items:center;padding:0 20px;gap:10px;color:var(--fg3);font-size:12px}
+/* the scrim + centering */
+.scrim{position:absolute;inset:0;background:var(--scrim);display:flex;align-items:center;justify-content:center;padding:24px}
+.scrim.top{align-items:flex-start;padding-top:60px}
+.scrim.blur{-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px)}
+.scrim.light{background:color-mix(in srgb,var(--scrim) 30%,transparent)}
+
+/* ── MODAL DIALOG ── bg-bg1 + border1 + rounded-lg + shadow + p-6, centered, max-w-lg ── */
+.dialog{position:relative;background:var(--bg1);border:1px solid var(--border1);border-radius:var(--radius-lg);
+  box-shadow:var(--shadow-dropdown);padding:24px;width:100%;max-width:440px;display:flex;flex-direction:column;gap:16px}
+.dialog.wide{max-width:512px}
+.dhead{display:flex;flex-direction:column;gap:6px}
+.dtitle{font-size:14px;font-weight:500;color:var(--fg1);line-height:1.2;margin:0}
+.ddesc{font-size:13px;color:var(--fg2);line-height:1.5;margin:0}
+.dbody{display:flex;flex-direction:column;gap:14px}
+.dfooter{display:flex;justify-content:flex-end;gap:8px;align-items:center}
+.dclose{position:absolute;top:14px;right:14px;width:22px;height:22px;border:0;background:transparent;color:var(--fg2);
+  opacity:.7;cursor:pointer;border-radius:var(--radius-sm);display:inline-flex;align-items:center;justify-content:center}
+.dclose:hover{opacity:1;background:var(--bg2-hover)}
+.dclose svg{width:16px;height:16px}
+.callout{display:flex;gap:10px;align-items:flex-start;background:var(--bg2);border:1px solid var(--border2);border-radius:var(--radius-md);padding:10px 12px;font-size:12.5px;color:var(--fg2)}
+.callout svg{width:15px;height:15px;color:var(--fg2);flex:none;margin-top:1px}
+.callout .b{color:var(--fg1);font-weight:500}
+
+/* ══════════════════════════════════════════════════════════════
+   HERO — the "Create a workspace" dispatcher composer
+   bg-bg2 panel, 640px, p-0, no X, click-away closes
+   ══════════════════════════════════════════════════════════════ */
+.composer{width:640px;max-width:100%;background:var(--bg2);border:1px solid var(--border1);border-radius:var(--radius-lg);
+  box-shadow:var(--shadow-dropdown);overflow:visible}
+.cw-head{display:flex;align-items:center;gap:6px;padding:12px 16px 4px}
+.cw-proj{display:inline-flex;align-items:center;gap:6px;background:transparent;border:0;border-radius:var(--radius-sm);
+  color:var(--fg1);font:500 14px "Geist Variable",system-ui;padding:4px 8px;cursor:pointer}
+.cw-proj:hover{background:var(--bg2-hover)}
+.cw-avatar{display:inline-flex;width:16px;height:16px;align-items:center;justify-content:center;border-radius:var(--radius-sm);
+  background:var(--bg2-hover);font-size:11px;color:var(--fg1)}
+.cw-proj .chev{width:12px;height:12px;color:var(--fg2);opacity:.7}
+.cw-iconbtn{display:inline-flex;width:28px;height:28px;align-items:center;justify-content:center;border:0;background:transparent;
+  color:var(--fg2);border-radius:var(--radius-sm);cursor:pointer}
+.cw-iconbtn:hover{background:var(--bg2-hover);color:var(--fg1)}
+.cw-iconbtn svg{width:15px;height:15px}
+.cw-spacer{flex:1}
+.cw-from{display:inline-flex;align-items:center;gap:6px;background:transparent;border:0;border-radius:var(--radius-sm);
+  color:var(--fg2);font:14px "Geist Variable",system-ui;padding:4px 8px;cursor:pointer}
+.cw-from:hover{background:var(--bg2-hover);color:var(--fg1)}
+.cw-from .chev{width:12px;height:12px;color:var(--fg2);opacity:.7}
+.cw-editor{min-height:96px;padding:12px 16px 0;color:var(--muted-fg);font-size:15px;line-height:1.5}
+.cw-tools{display:flex;align-items:center;gap:6px;padding:6px 16px 12px}
+.cw-plus{display:inline-flex;width:24px;height:24px;align-items:center;justify-content:center;border:0;background:transparent;
+  color:var(--fg2);border-radius:var(--radius-sm);cursor:pointer}
+.cw-plus:hover{background:var(--bg2-hover);color:var(--fg1)}
+.cw-plus svg{width:14px;height:14px}
+/* TOOLBAR_PILL — model / fast / effort / permission */
+.pill{display:inline-flex;align-items:center;gap:4px;border:0;border-radius:var(--radius-md);background:transparent;
+  padding:4px 8px;font:500 var(--text-xs) "Geist Variable",system-ui;color:var(--fg2);cursor:pointer}
+.pill:hover{background:var(--bg2-hover);color:var(--fg1)}
+.pill svg{width:16px;height:16px}
+.pill .spark{width:12px;height:12px}
+.pill.active{background:var(--bg2-hover);color:var(--yellow-fg)}
+.cw-grow{flex:1}
+.cw-create{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border:0;border-radius:var(--radius-sm);
+  background:var(--primary-button-bg);color:var(--primary-button-fg);font:500 13px "Geist Variable",system-ui;
+  cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.3)}
+.cw-create:hover{background:var(--primary-button-hover)}
+.cw-create svg{width:12px;height:12px}
+
+/* two-pane model popover (P-1) */
+.mm{display:flex;width:320px;overflow:hidden}
+.mm-rail{width:44px;background:transparent;border-right:1px solid var(--border2);display:flex;flex-direction:column;align-items:center;gap:2px;padding:6px 0}
+.mm-rail .ic{width:30px;height:30px;border-radius:var(--radius-sm);display:flex;align-items:center;justify-content:center;color:var(--fg2);position:relative}
+.mm-rail .ic svg{width:16px;height:16px}
+.mm-rail .ic.on{background:var(--bg3-hover);color:var(--fg1)}
+.mm-rail .ic.on::after{content:"";position:absolute;right:-6px;top:50%;transform:translateY(-50%);height:16px;width:2px;border-radius:999px;background:var(--highlighted-bright)}
+.mm-pane{flex:1;min-width:0}
+/* favorite star — muted fg2, filled when active (NO gold; matches agent-model-menu.tsx) */
+.mm-star{width:14px;height:14px;color:var(--fg2)}
+.mm-star.on{color:var(--fg2)}
+
+/* tabs (create-from) — active is fg1 + medium on transparent, NO underline (create-from-source.tsx) */
+.tabs{display:flex;gap:0;align-items:center;height:36px;border-bottom:1px solid var(--border1);padding:0 8px}
+.tab{background:transparent;border:0;border-radius:var(--radius-md);color:var(--fg2);font:13px "Geist Variable",system-ui;
+  padding:5px 10px;cursor:pointer}
+.tab.on{color:var(--fg1);font-weight:500}
+.tab.dis{opacity:.5;cursor:not-allowed}
+
+/* create-from list rows — full-width with border1 dividers (create-from-source.tsx) */
+.cfrow{display:flex;align-items:center;gap:8px;padding:8px 12px;color:var(--fg1);font-size:var(--text-xs);border-bottom:1px solid var(--border1)}
+.cfrow:last-child{border-bottom:0}
+.cfrow:hover{background:var(--bg3-hover)}
+.cfrow>svg{width:14px;height:14px;flex:none;color:var(--fg2)}
+
+/* shortcuts palette — glass (bg2/30 + blur 28px; centered both axes; FIXED height
+   h = min(72vh,344px) — sized to exactly EIGHT shortcut rows (app: input 36 + tabs 44
+   + list pad 8 + 8×32; 660px wide keeps the proportion) so the panel never jumps
+   between tabs / search — the list scrolls inside. (max-height:100% only fits the
+   demo stage; the app is h-[…].) */
+.glasspanel{width:660px;max-width:100%;height:min(72vh,344px);max-height:100%;display:flex;flex-direction:column;
+  border:1px solid color-mix(in srgb,var(--border2) 60%,transparent);
+  border-radius:var(--radius-lg);box-shadow:var(--shadow-dropdown);overflow:hidden;
+  background:color-mix(in srgb,var(--bg2) 30%,transparent);
+  -webkit-backdrop-filter:blur(28px) saturate(1.2);backdrop-filter:blur(28px) saturate(1.2)}
+.sc-tabs{display:flex;flex-wrap:wrap;gap:4px;padding:8px;flex:none}
+/* the app-wide tab pill (chat / terminal / column-3 strips) — no border; fill + fg1 when
+   active/hovered, but the fill is the translucent --selected-glass token so it stays glassy. */
+.sc-tab{display:flex;align-items:center;height:28px;border:0;border-radius:var(--radius-md);padding:0 10px;
+  font:500 var(--text-xs) "Geist Variable",system-ui;color:var(--fg2);background:transparent;cursor:pointer}
+.sc-tab.on{background:var(--selected-glass);color:var(--fg1)}
+.sc-tab:hover:not(.on){background:var(--selected-glass);color:var(--fg1)}
+.sc-list{padding:4px;min-height:0;flex:1;overflow:auto}
+.sc-row{display:flex;align-items:center;gap:10px;padding:8px 8px;border-radius:var(--radius-sm)}
+.sc-row .l{min-width:0;flex:1;color:var(--fg1);font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sc-row .cat{flex:none;border-radius:var(--radius-sm);background:var(--selected-glass);padding:1px 6px;font:500 var(--text-3xxs) "Geist Variable",system-ui;color:var(--fg2)}
+/* palette Kbd chips: same --selected-glass wash, and — THIS PALETTE ONLY — no border
+   (app: <Kbd className="border-transparent bg-[var(--selected-glass)]">); everywhere
+   else Kbd keeps border1. */
+.glasspanel .kbd{background:var(--selected-glass);border-color:transparent}
+.sc-row .keys{display:flex;gap:4px;flex:none;align-items:center}
+
+/* lightbox */
+.lightbox-img{width:340px;height:220px;border-radius:8px;background:
+  linear-gradient(135deg,var(--violet-primary),var(--blue-primary));display:flex;align-items:center;justify-content:center;
+  color:rgba(255,255,255,.85);font:500 13px "Geist Variable",system-ui;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.lightbox-close{position:absolute;top:16px;right:16px;width:32px;height:32px;border-radius:var(--radius-sm);border:0;
+  background:color-mix(in srgb,var(--bg2) 60%,transparent);color:var(--fg1);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;
+  -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
+.lightbox-close svg{width:16px;height:16px}
+
+/* small helper rows */
+.rowfields{display:flex;gap:10px;align-items:flex-end}
+.previewline{font:11.5px "Geist Mono Variable",ui-monospace,Menlo,monospace;color:var(--fg3)}
+.badgeline{display:inline-flex;align-items:center;gap:6px;background:var(--bg2);border:1px solid var(--border2);border-radius:var(--radius-sm);padding:3px 8px;font-size:11.5px;color:var(--fg2)}
+.badgeline .cw-avatar{background:var(--bg3-hover)}
+.gridcards{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.gcard{border:1px solid var(--border2);border-radius:var(--radius-md);padding:10px;font-size:12px;color:var(--fg2);cursor:pointer}
+.gcard.on{border-color:var(--highlighted-bright);background:var(--bg2)}
+.gcard .t{color:var(--fg1);font-weight:500;display:flex;align-items:center;gap:6px}
+.mininote{display:inline-block;font:600 9px "Geist Mono";background:var(--green-bg);color:var(--green-fg);border-radius:3px;padding:1px 4px;letter-spacing:.03em}
+
+/* legend chips */
+.legend{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}
+.legend .lg{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;color:var(--fg2);background:var(--bg1-highlight);border:1px solid var(--border1);border-radius:999px;padding:4px 11px}
+.legend .sw{width:12px;height:12px;border-radius:3px;border:1px solid var(--border2)}
+
+.anatomy{display:flex;flex-wrap:wrap;gap:8px}
+.anatomy .pin{display:flex;gap:8px;align-items:baseline;font-size:12px;color:var(--fg2);width:100%;max-width:520px}
+.anatomy .pin b{color:var(--fg1);font-weight:600;flex:none;width:118px}
+</style>
+</head>
+<body>
+<button class="themetoggle" id="themeToggle" type="button" aria-pressed="false">☾ Dark</button>
+<script>
+(function(){
+  var btn=document.getElementById('themeToggle'),root=document.documentElement;
+  function render(){var light=root.getAttribute('data-theme')==='light';
+    btn.textContent=light?'☀ Light':'☾ Dark';btn.setAttribute('aria-pressed',String(light));}
+  btn.addEventListener('click',function(){
+    if(root.getAttribute('data-theme')==='light'){root.removeAttribute('data-theme');}
+    else{root.setAttribute('data-theme','light');}
+    render();});
+  render();
+})();
+</script>
+
+<!-- ═══════════ reusable lucide-style icon defs ═══════════ -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol viewBox="0 0 24 24" id="i-x" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-chev-down" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-chev-right" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-chevs" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 15 5 5 5-5M7 9l5-5 5 5"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-check" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-plus" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-folder" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-folder-plus" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><path d="M12 10v6M9 13h6"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-folder-open" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-folder-input" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H2"/><path d="M2 13h10M9 10l3 3-3 3"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-folder-search" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M10.7 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v3"/><circle cx="17" cy="17" r="3"/><path d="m21 21-1.5-1.5"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-github" fill="currentColor"><path d="M12 1.5A10.5 10.5 0 0 0 8.68 22c.53.1.72-.23.72-.5v-1.8c-2.92.64-3.54-1.25-3.54-1.25-.48-1.2-1.17-1.53-1.17-1.53-.95-.65.07-.64.07-.64 1.06.08 1.61 1.09 1.61 1.09.94 1.6 2.46 1.14 3.06.87.1-.68.37-1.14.67-1.4-2.33-.27-4.78-1.17-4.78-5.18 0-1.15.41-2.08 1.09-2.82-.11-.27-.47-1.34.1-2.78 0 0 .88-.28 2.88 1.07a10 10 0 0 1 5.24 0c2-1.35 2.88-1.07 2.88-1.07.57 1.44.21 2.51.1 2.78.68.74 1.09 1.67 1.09 2.82 0 4.02-2.46 4.9-4.8 5.16.38.33.71.97.71 1.96v2.9c0 .28.19.61.73.5A10.5 10.5 0 0 0 12 1.5"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-sparkles" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9.94 4.66 11 8.5l3.84 1.06L11 10.62 9.94 14.5 8.88 10.62 5.04 9.56 8.88 8.5z"/><path d="M18 3v3M19.5 4.5h-3M17 17.5v2M18 18.5h-2"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-spark" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6 5.6 18.4"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-git-branch" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-git-pr" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" y1="9" x2="6" y2="21"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-git-pr-draft" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M18 6v.01M18 12v.01"/><line x1="6" y1="9" x2="6" y2="21"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-search" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-paperclip" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-zap" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-zap-fill" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-shield" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-shield-q" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M9.1 9a3 3 0 0 1 5.82 1c0 2-3 3-3 3M12 17h.01"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-shield-half" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 2v20"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-map" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21"/><line x1="9" y1="3" x2="9" y2="18"/><line x1="15" y1="6" x2="15" y2="21"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-corner-dl" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-more" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-msg" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-msgs" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9a2 2 0 0 1-2 2H6l-4 3V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-3h-6a2 2 0 0 1-2-2v-1"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-terminal" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-rows" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="12" x2="21" y2="12"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-cols" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-copy" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-help" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-settings" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-settings2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-image" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-pencil" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/><path d="m15 5 4 4"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-rotate" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2v6h6"/><path d="M3 13a9 9 0 1 0 3-7.7L3 8"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-archive" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="5" rx="1"/><path d="M4 9v9a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9"/><line x1="10" y1="13" x2="14" y2="13"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-star" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-star-o" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-arrow-ur" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-arrow-r" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-dollar" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 6v2M12 16v2"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-file" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-file-text" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-globe" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-ext" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-trash" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-warn" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12" y2="17"/></symbol>
+  <symbol viewBox="0 0 24 24" id="i-status" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l2.5 2.5"/></symbol>
+</defs></svg>
+
+<header>
+  <p class="crumbs"><a href="../design-system-preview.html">← Design System</a> &nbsp;/&nbsp; Components &nbsp;/&nbsp; Popups &amp; Overlays</p>
+  <h1>Popups &amp; Overlays</h1>
+  <p class="lede">Every UI in the Zeros Mac app that opens in a <em>floating layer</em> — modal dialogs on a dimmed scrim,
+  the create-workspace composer, the command &amp; keyboard-shortcut palettes, the image lightbox, and every anchored
+  <em>dropdown</em>, <em>context menu</em>, <em>select</em>, <em>popover</em> and <em>hover card</em>. All are built from
+  the Radix / cmdk primitives in <code>src/zeros/ui/primitives/</code>. Two layers make an overlay: a full-screen
+  <em>scrim</em> (dialogs only) and a floating <em>panel</em>. Demos are static reproductions of the shipped components —
+  flip dark / light with the toggle (top-right).</p>
+</header>
+
+<nav>
+  <a href="#foundations">Foundations</a>
+  <a href="#anatomy">Dialog anatomy</a>
+  <a href="#create">Create workspace</a>
+  <a href="#confirm">Confirmations</a>
+  <a href="#dialogs">Form dialogs</a>
+  <a href="#command">Command palette</a>
+  <a href="#shortcuts">Shortcuts</a>
+  <a href="#lightbox">Lightbox</a>
+  <a href="#popover">Popover</a>
+  <a href="#dropdown">Dropdown</a>
+  <a href="#context">Context menu</a>
+  <a href="#select">Select</a>
+  <a href="#hovercard">Hover card</a>
+  <a href="#not">Not overlays</a>
+</nav>
+
+<main>
+
+<!-- ═══════════════════════ FOUNDATIONS ═══════════════════════ -->
+<section id="foundations">
+  <div class="h2">Foundations <small>the two-layer model every overlay shares</small></div>
+  <p class="secintro">An overlay is a <em>scrim</em> (a full-screen veil that traps focus) plus a floating <em>panel</em>.
+  Only <b>modal dialogs</b> (and, in theory, sheets) draw a scrim; anchored overlays — dropdown, context menu, select,
+  popover, hover card — have <em>no</em> scrim and simply float beside their trigger. Everything is <code>z-50</code>,
+  <code>rounded-lg</code> (8px), and lifts on <code>--shadow-dropdown</code>.</p>
+
+  <div class="legend">
+    <span class="lg"><span class="sw" style="background:var(--bg1)"></span> Dialog / Sheet panel &middot; <code>--bg1</code></span>
+    <span class="lg"><span class="sw" style="background:var(--bg2)"></span> Create composer &amp; Hover card &middot; <code>--bg2</code></span>
+    <span class="lg"><span class="sw" style="background:var(--bg3)"></span> Menu / Popover / Select / Command &middot; <code>--bg3</code></span>
+    <span class="lg"><span class="sw" style="background:var(--scrim);border-color:var(--border3)"></span> Scrim &middot; <code>--scrim</code></span>
+  </div>
+
+  <div class="demo">
+    <table>
+      <tr><th style="width:150px">Property</th><th>Value</th><th>Where</th></tr>
+      <tr><td><b>Scrim</b></td><td class="mono">--scrim — dark 80% / light 40% black, fade only, NO blur</td><td>Dialogs &amp; Sheets only</td></tr>
+      <tr><td><b>Panel surface</b></td><td class="mono">bg1 = dialog/sheet · bg2 = create composer + hover card · bg3 = menu/popover/select/command</td><td>the “surface exception”: dialogs are <code>bg1</code>, everything else floating is <code>bg3</code></td></tr>
+      <tr><td><b>Border</b></td><td class="mono">border1 (dialog) · border2 (all floating panels)</td><td>1px hairline</td></tr>
+      <tr><td><b>Radius</b></td><td class="mono">rounded-lg = 8px</td><td>every panel (sheet is the exception — no radius, edge-flush)</td></tr>
+      <tr><td><b>Shadow</b></td><td class="mono">--shadow-dropdown = 0 8px 24px rgba(0,0,0,.35)</td><td>the single elevation for all overlays</td></tr>
+      <tr><td><b>Enter / exit</b></td><td class="mono">fade + zoom-95 + directional slide</td><td>anchored slide 8px · dialog −50%/−48% · sheet 100%</td></tr>
+      <tr><td><b>Duration</b></td><td class="mono">150ms default · dialog 200ms · sheet open 500 / close 300</td><td><code>tw-animate-css</code></td></tr>
+      <tr><td><b>Backdrop blur</b></td><td class="mono">NONE — except the Shortcuts palette <em>panel</em> and the Image lightbox <em>scrim</em></td><td>2 exceptions app-wide</td></tr>
+      <tr><td><b>Close-focus</b></td><td class="mono">mouse-close → focus drops to body (no ring on trigger); keyboard-close → ring restored</td><td><code>overlay-focus.ts</code> · <code>suppressPointerRefocus</code></td></tr>
+    </table>
+  </div>
+  <p class="cap">Primitives: <code>dialog.tsx · popover.tsx · dropdown-menu.tsx · context-menu.tsx · select.tsx · hover-card.tsx · sheet.tsx · command.tsx · kbd.tsx</code>. Tooltips live in their <a href="tooltips.html">own artifact</a> (the one glass surface).</p>
+</section>
+
+<!-- ═══════════════════════ DIALOG ANATOMY ═══════════════════════ -->
+<section id="anatomy">
+  <div class="h2">Modal dialog <small>the <code>Dialog</code> primitive — anatomy</small></div>
+  <p class="secintro">A centered panel on a scrim. <code>bg-bg1</code> + 1px <code>border1</code> + <code>rounded-lg</code> + <code>--shadow-dropdown</code>,
+  <code>p-6</code> (24px), <code>max-w-lg</code> (512px), internal <code>grid gap-4</code>. Header (title + optional description),
+  a body, and a right-aligned footer. An optional close <code>×</code> sits top-right. <em>Dialogs are non-dismissable by default</em> —
+  clicking the scrim will <b>not</b> close them (so an accidental click can't discard a half-typed form); callers opt in with <code>dismissable</code>.</p>
+
+  <div class="demo pad0">
+    <div class="stage short">
+      <div class="ghost" aria-hidden="true">
+        <div class="gbar"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span></div>
+        <div class="gcols"><div class="gc-chat"><div class="gline" style="width:70%"></div><div class="gline" style="width:52%"></div><div class="gline" style="width:63%"></div></div></div>
+      </div>
+      <div class="scrim">
+        <div class="dialog">
+          <button class="dclose" aria-label="Close"><svg><use href="#i-x"/></svg></button>
+          <div class="dhead">
+            <p class="dtitle">Dialog title</p>
+            <p class="ddesc">One line of description in <code>--fg2</code> that says what this dialog does.</p>
+          </div>
+          <div class="dbody">
+            <div class="field"><label>A field</label><input class="inp" placeholder="Placeholder text…"></div>
+          </div>
+          <div class="dfooter">
+            <button class="btn ghost sm">Cancel</button>
+            <button class="btn primary sm">Confirm</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="anatomy">
+    <div class="pin"><b>Overlay</b> <span><code>fixed inset-0 z-50 bg-scrim</code> — fade in/out, no blur.</span></div>
+    <div class="pin"><b>Content</b> <span><code>bg-bg1 border rounded-lg p-6 max-w-lg</code>, centered via <code>translate -50%</code>, <code>zoom-in-95</code> entrance (200ms).</span></div>
+    <div class="pin"><b>Title</b> <span><code>text-sm font-medium</code> (14px), <b>Description</b> <code>text-sm text-fg2</code>.</span></div>
+    <div class="pin"><b>Footer</b> <span><code>flex justify-end gap-2</code> — primary on the right, ghost/secondary “Cancel” to its left.</span></div>
+    <div class="pin"><b>Close ×</b> <span><code>absolute right-4 top-4</code>, opacity 70→100; gated by <code>showCloseButton</code> (default on).</span></div>
+  </div>
+  <p class="cap">Source <code>src/zeros/ui/primitives/dialog.tsx</code>. No separate <code>AlertDialog</code> exists — destructive confirms are just a Dialog with a red button (see <a href="#confirm">Confirmations</a>).</p>
+</section>
+
+<!-- ═══════════════════════ CREATE WORKSPACE (HERO) ═══════════════════════ -->
+<section id="create">
+  <div class="h2">Create a workspace <small>the dispatcher composer — <code>dispatcher-modal.tsx</code></small></div>
+  <p class="secintro">The unified <em>“+ Create”</em> launcher: pick a project (optionally a PR / branch base), type a prompt, and
+  spin up a git worktree + a bound agent chat that auto-sends the first turn. It is a <code>Dialog</code> with a
+  <code>bg-bg2</code> panel (<b>640px</b>, <code>p-0</code>, no <code>×</code>, click-away closes). One continuous surface: a header row,
+  the prompt editor, and a bottom toolbar of pills. This is the popup from the reference screenshot.</p>
+
+  <div class="demo pad0">
+    <div class="stage tall">
+      <!-- dimmed app behind, echoing the screenshot -->
+      <div class="ghost" aria-hidden="true">
+        <div class="gbar">
+          <span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span>
+          <span class="gtab" style="margin-left:14px"><svg style="width:11px;height:11px;margin-right:6px"><use href="#i-spark"/></svg>Orbit ▾</span>
+          <span class="gtab"><svg style="width:11px;height:11px;margin-right:6px"><use href="#i-git-branch"/></svg>lewisia-f696</span>
+        </div>
+        <div class="gcols">
+          <div class="gc-chat">
+            <div class="gprompt"></div>
+            <div class="gline" style="width:34%"></div>
+            <div class="gline" style="width:66%"></div>
+            <div class="gline" style="width:60%"></div>
+            <div class="gline" style="width:70%"></div>
+            <div class="gline" style="width:56%"></div>
+          </div>
+          <div class="gc-side">
+            <div class="gsidehead"><span>Open file</span><span>Changes 6</span><span>Review</span></div>
+            <div class="gsearch"></div>
+            <div class="gfile"><svg class="gi"><use href="#i-folder"/></svg>.vscode</div>
+            <div class="gfile"><svg class="gi"><use href="#i-folder"/></svg>.zeros / acp</div>
+            <div class="gfile"><svg class="gi"><use href="#i-folder"/></svg>dist</div>
+            <div class="gfile"><svg class="gi"><use href="#i-folder"/></svg>guidelines</div>
+            <div class="gfile"><svg class="gi"><use href="#i-folder"/></svg>src</div>
+            <div class="gfile"><svg class="gi"><use href="#i-file"/></svg>.env.local</div>
+            <div class="gfile"><svg class="gi"><use href="#i-file"/></svg>.gitignore</div>
+            <div class="gfile"><svg class="gi"><use href="#i-file-text"/></svg>ATTRIBUTIONS.md</div>
+          </div>
+        </div>
+        <div class="gcomposer"><svg style="width:13px;height:13px"><use href="#i-spark"/></svg>Haiku 4.5</div>
+      </div>
+
+      <!-- the popup -->
+      <div class="scrim">
+        <div class="composer">
+          <div class="cw-head">
+            <button class="cw-proj"><span class="cw-avatar">O</span>Orbit<svg class="chev"><use href="#i-chev-down"/></svg></button>
+            <button class="cw-iconbtn" aria-label="Add a project"><svg><use href="#i-folder-plus"/></svg></button>
+            <span class="cw-spacer"></span>
+            <button class="cw-from">Create from…<svg class="chev"><use href="#i-chev-down"/></svg></button>
+          </div>
+          <div class="cw-editor">What do you want to work on?</div>
+          <div class="cw-tools">
+            <button class="cw-plus" aria-label="Add attachment or link a workspace"><svg><use href="#i-plus"/></svg></button>
+            <button class="pill"><svg class="spark"><use href="#i-spark"/></svg>Opus 4.8 1M</button>
+            <button class="pill" aria-label="Enable fast mode"><svg><use href="#i-zap"/></svg></button>
+            <button class="pill">High</button>
+            <button class="pill" aria-label="Auto"><svg><use href="#i-shield"/></svg></button>
+            <span class="cw-grow"></span>
+            <button class="cw-create">Create<svg><use href="#i-corner-dl"/></svg></button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="cap"><b>Header:</b> project selector (letter-avatar + name + <code>▾</code>, dropdown D-11) &middot; <code>FolderPlus</code> “Add a project” (D-12) &middot; “Create from…” source popover (P-6). <b>Editor:</b> <code>min-h-96px</code>, placeholder “What do you want to work on?”. <b>Toolbar:</b> <code>+</code> attach menu (D-7) &middot; model pill <code>AgentIcon + “Opus 4.8 1M”</code> (opens the model popover P-1) &middot; <code>Zap</code> Fast pill &middot; “High” effort &middot; <code>Shield</code> permission &middot; primary <b>Create ↵</b>. Files <code>dispatcher-modal.tsx · dispatcher-composer.tsx · composer-pills.tsx</code>.</p>
+
+  <h3>The pill row up close</h3>
+  <p class="secintro"><code>TOOLBAR_PILL</code> = <code>rounded-md · px-2 py-1 · text-xs (13px) · text-fg2 · hover:bg-bg2-hover</code>. Only the <em>model</em> pill opens a panel (a Popover, P-1); Fast / Effort / Permission are <b>click-to-cycle</b> toggles that open nothing (see <a href="#not">Not overlays</a>).</p>
+  <div class="demo raised">
+    <div class="cluster">
+      <div class="grp"><span class="lbl">model (→ popover)</span><button class="pill"><svg class="spark"><use href="#i-spark"/></svg>Opus 4.8</button></div>
+      <div class="grp"><span class="lbl">fast · off</span><button class="pill"><svg><use href="#i-zap"/></svg></button></div>
+      <div class="grp"><span class="lbl">fast · on</span><button class="pill active"><svg><use href="#i-zap-fill"/></svg>Fast</button></div>
+      <div class="grp"><span class="lbl">effort · cycles</span><button class="pill">High</button></div>
+      <div class="grp"><span class="lbl">permission · cycles</span><button class="pill"><svg><use href="#i-shield"/></svg></button></div>
+      <div class="grp"><span class="lbl">create ↵ (primary)</span><button class="cw-create">Create<svg><use href="#i-corner-dl"/></svg></button></div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════ CONFIRMATIONS ═══════════════════════ -->
+<section id="confirm">
+  <div class="h2">Confirmation dialogs <small>destructive — a Dialog + a red button</small></div>
+  <p class="secintro">There is <em>no</em> <code>AlertDialog</code> primitive. A destructive confirmation is an ordinary
+  <code>Dialog</code> whose confirm button is <code>variant="destructive"</code> (solid red). No <code>×</code>, focus defaults to
+  <b>Cancel</b>, and it can’t be dismissed mid-action. Many confirm on <code>⌘↵</code>.</p>
+
+  <div class="demo pad0">
+    <div class="stage short">
+      <div class="ghost" aria-hidden="true">
+        <div class="gbar"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span></div>
+        <div class="gcols"><div class="gc-chat"><div class="gline" style="width:48%"></div><div class="gline" style="width:70%"></div><div class="gline" style="width:40%"></div></div></div>
+      </div>
+      <div class="scrim">
+        <div class="dialog">
+          <div class="dhead">
+            <p class="dtitle">Discard file changes?</p>
+            <p class="ddesc">Discard all changes to <code>cities/tokyo.md</code>? This action cannot be undone.</p>
+          </div>
+          <div class="dfooter">
+            <button class="btn secondary sm focusring">Cancel</button>
+            <button class="btn destructive sm">Discard&nbsp;<span class="kbd" style="border-color:rgba(255,255,255,.35);color:#fff">⌘↵</span></button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="demo">
+    <table>
+      <tr><th style="width:190px">Dialog</th><th>Body</th><th>Cancel</th><th>Confirm</th><th>File</th></tr>
+      <tr><td><b>Discard file changes?</b></td><td>“Discard all changes to <span class="mono">{file}</span>?” / new file → “Delete <span class="mono">{file}</span>? It isn’t tracked by Git…”</td><td class="mono">Cancel</td><td><span class="tag x">Discard ⌘↵</span></td><td class="mono">discard-file.tsx</td></tr>
+      <tr><td><b>Reset to this point?</b></td><td>Truncates the conversation &amp; unwinds file changes from each turn’s checkpoint; yellow warning if a checkpoint is gone; “You can undo the reset afterward.”</td><td class="mono">Cancel</td><td><span class="tag x">Reset</span></td><td class="mono">turn-footer.tsx</td></tr>
+      <tr><td><b>Remove {project}?</b></td><td>“All your workspaces will be permanently deleted.” + “The source directory <span class="mono">{repoRoot}</span> will not be modified.”</td><td class="mono">Cancel</td><td><span class="tag x">Remove</span></td><td class="mono">repositories-panel.tsx</td></tr>
+    </table>
+  </div>
+  <p class="cap">Buttons from <a href="buttons.html">buttons.html</a>: destructive-primary = solid <code>--red-secondary</code> + white text; the Cancel is <code>secondary</code> (or <code>ghost</code>) and takes default focus. <b>Archive</b> is <em>not</em> confirmed — it fires immediately from the workspace menu.</p>
+</section>
+
+<!-- ═══════════════════════ FORM / CREATE DIALOGS ═══════════════════════ -->
+<section id="dialogs">
+  <div class="h2">Form &amp; create dialogs <small>13 modal dialogs across the app</small></div>
+  <p class="secintro">Everything the app opens as a centered form. Some carry a close <code>×</code>; a few submit on <code>⌘↵</code>.
+  Two shown live, the rest tabulated with their real fields.</p>
+
+  <div class="cluster" style="gap:16px">
+    <!-- Send feedback -->
+    <div class="demo raised" style="flex:1;min-width:360px">
+      <div class="dialog" style="max-width:100%;box-shadow:none">
+        <button class="dclose" aria-label="Close"><svg><use href="#i-x"/></svg></button>
+        <div class="dhead">
+          <p class="dtitle">Send feedback</p>
+          <p class="ddesc">Report a bug, request a feature, or tell us how it’s going.</p>
+        </div>
+        <div class="dbody">
+          <div class="field"><label>Type</label>
+            <div class="seltrig" style="width:100%">Bug<svg><use href="#i-chev-down"/></svg></div>
+          </div>
+          <div class="field"><label>Message</label><textarea class="ta" placeholder="What’s on your mind?"></textarea></div>
+          <div class="field"><label>Email <span class="hint">(optional)</span></label><input class="inp" placeholder="you@example.com"></div>
+          <div class="callout"><svg><use href="#i-shield"/></svg><span>Only what you write here is sent — never your code, files, or keys.</span></div>
+        </div>
+        <div class="dfooter"><button class="btn ghost sm">Cancel</button><button class="btn primary sm">Send feedback</button></div>
+      </div>
+      <p class="cap"><code>feedback-dialog.tsx</code> · Help menu → Feedback.</p>
+    </div>
+
+    <!-- Open GitHub project -->
+    <div class="demo raised" style="flex:1;min-width:360px">
+      <div class="dialog" style="max-width:100%;box-shadow:none">
+        <button class="dclose" aria-label="Close"><svg><use href="#i-x"/></svg></button>
+        <div class="dhead">
+          <p class="dtitle" style="display:flex;align-items:center;gap:8px"><svg style="width:15px;height:15px"><use href="#i-github"/></svg>Open GitHub project</p>
+          <p class="ddesc">Clone a repository with a local <code>git clone</code>.</p>
+        </div>
+        <div class="dbody">
+          <div class="field"><label>Repository URL</label><input class="inp mono" placeholder="https://github.com/owner/repo"></div>
+          <div class="field"><label>Parent folder</label>
+            <div class="rowfields"><input class="inp mono" value="~/Documents" style="flex:1"><button class="btn secondary sm">Browse</button></div>
+          </div>
+          <p class="previewline">Will create ~/Documents/repo</p>
+        </div>
+        <div class="dfooter"><button class="btn ghost sm">Cancel</button><button class="btn primary sm">Clone&nbsp;<span class="kbd" style="border-color:color-mix(in srgb,var(--primary-button-fg) 30%,transparent);color:var(--primary-button-fg)">⌘↵</span></button></div>
+      </div>
+      <p class="cap"><code>open-github-project.tsx</code> · <code>⌘↩</code> submits.</p>
+    </div>
+  </div>
+
+  <div class="demo">
+    <table>
+      <tr><th style="width:180px">Dialog</th><th>Purpose</th><th>Fields</th><th style="width:150px">Footer</th><th style="width:44px">×</th></tr>
+      <tr><td><b>Create a workspace</b></td><td>Dispatcher — project + prompt → worktree + chat</td><td>project / add-project / “Create from…” + prompt + pills</td><td class="mono">Create ↵</td><td>—</td></tr>
+      <tr><td><b>Send feedback</b></td><td>Bug / feature / feedback → Intercom</td><td>Type select · Message · Email</td><td class="mono">Cancel · Send</td><td>✓</td></tr>
+      <tr><td><b>Open GitHub project</b></td><td>Clone a remote repo → project</td><td>Repository URL · Parent folder + Browse</td><td class="mono">Cancel · Clone ⌘↵</td><td>✓</td></tr>
+      <tr><td><b>Create project</b> (Quick Start)</td><td>git init a fresh repo + first workspace</td><td>Name · Parent + Browse · Template cards · “Private repo” switch</td><td class="mono">Cancel · Create ⌘↵</td><td>—</td></tr>
+      <tr><td><b>Create a private GitHub repo?</b></td><td>Publish local project — create repo, add origin, push</td><td>Owner select · Repo name (live check) · Private switch</td><td class="mono">Cancel · Create &amp; publish</td><td>—</td></tr>
+      <tr><td><b>Add local project</b></td><td>Adopt another tool’s worktree folder</td><td>info card (branch · owner/repo · path)</td><td class="mono">Cancel · Add project</td><td>—</td></tr>
+      <tr><td><b>Change icon for {project}</b></td><td>Pick a repo icon — Lucide/emoji or upload</td><td>Tabs Icons / Upload · search + 9-col grid · file picker</td><td class="mono">(inline)</td><td>✓</td></tr>
+      <tr><td><b>Add secrets / Edit secret</b></td><td>Env secrets for agents (user or repo scope)</td><td>Name · Value textarea · bulk <span class="mono">KEY=VALUE</span> paste</td><td class="mono">Cancel · Save N</td><td>—</td></tr>
+      <tr><td><b>Import MCP servers</b></td><td>Import servers from other tools’ configs</td><td>per-source selectable rows (checkbox + transport pill)</td><td class="mono">Cancel · Import N</td><td>✓</td></tr>
+      <tr><td><b>Add / Edit MCP server</b></td><td>Define an MCP server</td><td>Name · Transport select · (stdio: cmd/args/env · HTTP: URL/auth)</td><td class="mono">Cancel · Add / Save</td><td>✓</td></tr>
+      <tr><td><b>Sign in to {server}</b></td><td>Headless OAuth — paste back code / redirect URL</td><td>Auth URL (read-only + Copy) · Code input</td><td class="mono">Cancel · Finish sign-in</td><td>✓</td></tr>
+      <tr><td><b>Link a workspace or directory</b></td><td>Grant this chat access to another worktree / folder</td><td>command-palette (see below)</td><td class="mono">(acts on select)</td><td>✓</td></tr>
+      <tr><td class="mono" style="color:var(--fg3)">CreateFromPicker</td><td style="color:var(--fg3)">defined but <b style="color:var(--fg3)">never mounted</b> — dispatcher uses the “Create from…” popover instead</td><td style="color:var(--fg3)">—</td><td class="mono" style="color:var(--fg3)">—</td><td style="color:var(--fg3)">—</td></tr>
+    </table>
+  </div>
+  <p class="cap">All in <code>src/shell/dialogs/</code>, <code>src/zeros/panels/</code>, and <code>repository-icon-dialog.tsx</code>. Save/loading states swap the primary label for a spinner; <code>⌘↩</code> submits the ones marked <code>⌘↵</code>.</p>
+</section>
+
+<!-- ═══════════════════════ COMMAND PALETTE ═══════════════════════ -->
+<section id="command">
+  <div class="h2">Command palette <small><code>CommandDialog</code> — cmdk on a scrim</small></div>
+  <p class="secintro">A searchable list mounted inside a <code>Dialog</code> (scrim, top-right <code>×</code>, click-away closes). The
+  visible surface is <code>bg-bg3</code>; a 48px search row (leading magnifier) sits above grouped, selectable rows.
+  <b>Note:</b> there is no global <code>⌘K</code> palette — <code>⌘K</code> focuses the message box. The one centered instance is the
+  <em>directory picker</em> below; the <code>⌘K</code>-style action lists elsewhere are <em>popovers</em> (no scrim).</p>
+
+  <div class="demo pad0">
+    <div class="stage">
+      <div class="ghost" aria-hidden="true">
+        <div class="gbar"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span></div>
+        <div class="gcols"><div class="gc-chat"><div class="gline" style="width:60%"></div><div class="gline" style="width:44%"></div></div></div>
+      </div>
+      <div class="scrim">
+        <div class="menu" style="width:560px;padding:0;overflow:hidden">
+          <div class="cmdinput"><svg><use href="#i-search"/></svg><input placeholder="Search workspaces…" disabled></div>
+          <div class="cmdlist">
+            <div class="cmdgroup">
+              <div class="gh">Directories</div>
+              <div class="cmditem"><svg><use href="#i-folder-search"/></svg>Browse…</div>
+              <div class="cmditem"><svg><use href="#i-folder"/></svg>vendored-assets<span class="path" style="margin-left:2px">~/dev/assets</span><span class="ck"><svg><use href="#i-check"/></svg></span></div>
+            </div>
+            <div class="msep"></div>
+            <div class="cmdgroup">
+              <div class="gh">Orbit</div>
+              <div class="cmditem sel"><svg><use href="#i-folder"/></svg><b style="color:var(--fg1);font-weight:600">lewisia-f696</b><span style="color:var(--fg3)">orbit-lewisia</span></div>
+              <div class="cmditem"><svg><use href="#i-folder"/></svg><b style="color:var(--fg1);font-weight:600">battery-pill</b><span style="color:var(--fg3)">orbit-battery</span><span class="ck"><svg><use href="#i-check"/></svg></span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="cap"><b>WorkspaceDirectoryPicker</b> (<code>workspace-directory-picker.tsx</code>) — title “Link a workspace or directory”, 560px. Group “Directories” (Browse… + linked dirs with Unlink), then one group per repo (branch label bold + worktree basename, <code>✓</code> = linked). Opened from the composer <code>+</code> menu / <code>/add-dir</code>. The <code>CommandDialog</code> shell (<code>command.tsx</code>) defaults to title “Command Palette”; in-dialog rows are roomier (<code>py-3</code>, 20px icons) and expose an <code>⌘…</code> shortcut slot on the right.</p>
+
+  <div class="cap" style="margin-top:12px">Also cmdk-powered but <b>anchored popovers</b> (no scrim), covered under <a href="#popover">Popover</a>: Column-3 new-tab menu (“Open any file or URL…”, P-8), archived-workspaces search (P-9), model menu (P-1), branch / remote / target pickers (P-7, P-10, P-11), icon picker (P-5).</p>
+</section>
+
+<!-- ═══════════════════════ SHORTCUTS PALETTE ═══════════════════════ -->
+<section id="shortcuts">
+  <div class="h2">Keyboard shortcuts <small><code>ShortcutsPalette</code> — the glass one</small></div>
+  <p class="secintro">The only overlay with a <em>frosted-glass panel</em> — the base recipe for overlays. A light <code>bg-scrim/30</code> veil, then a
+  <code>bg-bg2/30 · backdrop-blur-[28px] · saturate-[1.2]</code> panel dead-centered on both axes at a <b>fixed height</b> (660px wide,
+  <code>h-[min(72vh,344px)]</code> — sized to exactly <b>eight</b> shortcut rows, the same on every tab / search state, responsive
+  to small windows via the vh term; the list scrolls inside).
+  Search box, category tabs (browse mode — the app-wide tab pill, no border, the translucent <code>--selected-glass</code> fill when active), and
+  view-only rows — each a 14px label + optional category tag + borderless <code>Kbd</code> chips, both chips on the same <code>--selected-glass</code> wash.
+  Open with <code>⌘/</code> (toggles; Esc / click-away closes).</p>
+
+  <div class="demo pad0">
+    <div class="stage tall">
+      <div class="ghost" aria-hidden="true">
+        <div class="gbar"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span></div>
+        <div class="gcols"><div class="gc-chat"><div class="gprompt"></div><div class="gline" style="width:60%"></div><div class="gline" style="width:48%"></div><div class="gline" style="width:66%"></div></div>
+          <div class="gc-side"><div class="gsidehead"><span>Open file</span><span>Changes</span></div><div class="gsearch"></div><div class="gfile"><svg class="gi"><use href="#i-folder"/></svg>src</div><div class="gfile"><svg class="gi"><use href="#i-file"/></svg>index.ts</div></div>
+        </div>
+      </div>
+      <div class="scrim light">
+        <div class="glasspanel">
+          <div class="cmdinput" style="border-color:color-mix(in srgb,var(--border2) 60%,transparent)"><svg><use href="#i-search"/></svg><input placeholder="Search shortcuts…" disabled></div>
+          <div class="sc-tabs">
+            <button class="sc-tab on">General</button>
+            <button class="sc-tab">View</button>
+            <button class="sc-tab">Chats</button>
+            <button class="sc-tab">Workspace</button>
+          </div>
+          <div class="sc-list">
+            <div class="sc-row"><span class="l">Show all shortcuts</span><span class="keys"><span class="kbd">⌘/</span></span></div>
+            <div class="sc-row"><span class="l">Open folder…</span><span class="keys"><span class="kbd">⇧⌘O</span></span></div>
+            <div class="sc-row"><span class="l">Close window</span><span class="keys"><span class="kbd">⌘W</span></span></div>
+            <div class="sc-row"><span class="l">Quit Zeros</span><span class="keys"><span class="kbd">⌘Q</span></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="cap"><code>shortcuts-palette.tsx</code> composes raw <code>DialogPrimitive</code> + <code>cmdk</code> so it can frost the panel instead of the scrim. Search mode hides the tabs, lists every shortcut flat, and tags each row with its category (<code>bg-[var(--selected-glass)] · text-3xxs (12px)</code>). Rows are non-actionable (selection disabled); labels are 14px (<code>text-sm</code>). <b>Kbd</b> chip here swaps the primitive's <code>border-border1</code> for <code>border-transparent + bg-[var(--selected-glass)]</code> (palette only — everywhere else Kbd keeps its border); base stays <code>rounded-sm · text-2xxs (11px) · text-fg2 · tabular-nums</code>. <code>--selected-glass</code> lives in <code>styles/semantic-tokens.css</code>: Shade = <code>bg5</code> 25%, Light = <code>bg3</code> 30% — reuse it for any selected/raised state on glass.</p>
+
+  <h3>Full catalog</h3>
+  <div class="demo">
+    <table>
+      <tr><th style="width:110px">Category</th><th>Action</th><th style="width:120px">Keys</th></tr>
+      <tr><td rowspan="4"><b>General</b></td><td>Show all shortcuts</td><td><span class="kbd">⌘/</span></td></tr>
+      <tr><td>Open folder…</td><td><span class="kbd">⇧⌘O</span></td></tr>
+      <tr><td>Close window</td><td><span class="kbd">⌘W</span></td></tr>
+      <tr><td>Quit Zeros</td><td><span class="kbd">⌘Q</span></td></tr>
+      <tr><td rowspan="6"><b>View</b></td><td>Toggle right panel</td><td><span class="kbd">⌥⌘B</span></td></tr>
+      <tr><td>Toggle theme</td><td><span class="kbd">⌥⌘T</span></td></tr>
+      <tr><td>Toggle full screen</td><td><span class="kbd">⌃⌘F</span></td></tr>
+      <tr><td>Zoom in</td><td><span class="kbd">⌘=</span></td></tr>
+      <tr><td>Zoom out</td><td><span class="kbd">⌘-</span></td></tr>
+      <tr><td>Reset zoom</td><td><span class="kbd">⌘0</span></td></tr>
+      <tr><td rowspan="10"><b>Chats</b></td><td>New chat</td><td><span class="kbd">⌘T</span></td></tr>
+      <tr><td>New terminal agent</td><td><span class="kbd">⇧⌘T</span></td></tr>
+      <tr><td>Focus message box</td><td><span class="kbd">⌘K</span></td></tr>
+      <tr><td>Previous message</td><td><span class="kbd">⌘↑</span></td></tr>
+      <tr><td>Next message</td><td><span class="kbd">⌘↓</span></td></tr>
+      <tr><td>First message</td><td><span class="kbd">⌘↖</span></td></tr>
+      <tr><td>Last message</td><td><span class="kbd">⌘↘</span></td></tr>
+      <tr><td>Send message</td><td><span class="kbd">↵</span></td></tr>
+      <tr><td>Send now</td><td><span class="kbd">⌘↵</span></td></tr>
+      <tr><td>Insert line break</td><td><span class="kbd">⇧↵</span></td></tr>
+      <tr><td rowspan="3"><b>Workspace</b></td><td>Run</td><td><span class="kbd">⌘R</span></td></tr>
+      <tr><td>Open workspace in default app</td><td><span class="kbd">⌘O</span></td></tr>
+      <tr><td>Copy workspace path</td><td><span class="kbd">⌘C</span></td></tr>
+    </table>
+  </div>
+  <p class="cap">Data in <code>shortcuts-catalog.ts</code>; hotkey in <code>use-shortcuts-hotkey.ts</code>. A chord with multiple keys renders one <code>Kbd</code> per chord (all entries here are single-chord).</p>
+</section>
+
+<!-- ═══════════════════════ LIGHTBOX ═══════════════════════ -->
+<section id="lightbox">
+  <div class="h2">Image lightbox <small>the one blurred scrim</small></div>
+  <p class="secintro">A full-screen preview of an image attachment — a portal with <code>role="dialog" aria-modal</code>, <code>bg-scrim</code>
+  <b>plus a backdrop blur</b> (the only scrim in the app that blurs), the enlarged image centered, and a floating close <code>×</code>.
+  Click-outside or <code>×</code> closes (cursor becomes zoom-out).</p>
+  <div class="demo pad0">
+    <div class="stage short">
+      <div class="ghost" aria-hidden="true">
+        <div class="gbar"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span></div>
+        <div class="gcols"><div class="gc-chat"><div class="gline" style="width:52%"></div><div class="gline" style="width:70%"></div></div></div>
+      </div>
+      <div class="scrim blur">
+        <button class="lightbox-close" aria-label="Close"><svg><use href="#i-x"/></svg></button>
+        <div class="lightbox-img">attachment.png</div>
+      </div>
+    </div>
+  </div>
+  <p class="cap"><code>use-composer-editor.tsx</code> — opened by clicking an image thumbnail in the composer.</p>
+</section>
+
+<!-- ═══════════════════════ POPOVER ═══════════════════════ -->
+<section id="popover">
+  <div class="h2">Popover <small>anchored rich panel — 11 instances</small></div>
+  <p class="secintro"><code>bg-bg3</code> + <code>border2</code> + <code>rounded-lg</code> + <code>p-4</code> + <code>w-72</code> (288px), no scrim, <code>sideOffset 4</code>.
+  Holds richer content than a menu — search boxes, gauges, tab strips, two-pane pickers.</p>
+
+  <div class="cluster">
+    <!-- P-1 model menu -->
+    <div class="grp"><span class="lbl">P-1 · agent + model menu</span>
+      <div class="popover p0" style="width:320px">
+        <div class="mm">
+          <div class="mm-rail" role="tablist">
+            <span class="ic on"><svg><use href="#i-spark"/></svg></span>
+            <span class="ic"><svg><use href="#i-sparkles"/></svg></span>
+            <span class="ic"><svg><use href="#i-terminal"/></svg></span>
+          </div>
+          <div class="mm-pane">
+            <div class="cmdinput" style="height:38px"><svg><use href="#i-search"/></svg><input placeholder="Search models…" disabled></div>
+            <div class="cmdlist" style="padding:4px;max-height:none">
+              <div class="mitem sel">Opus 4.8<span style="margin-left:auto;display:inline-flex;gap:8px;align-items:center"><svg class="ck" style="margin:0;position:static;color:var(--fg1)"><use href="#i-check"/></svg><svg class="mm-star on"><use href="#i-star"/></svg><span class="kbd">⌘1</span></span></div>
+              <div class="mitem">Sonnet 4.6<span style="margin-left:auto;display:inline-flex;gap:8px;align-items:center"><svg class="mm-star"><use href="#i-star-o"/></svg><span class="kbd">⌘2</span></span></div>
+              <div class="mitem">Haiku 4.5<span style="margin-left:auto;display:inline-flex;gap:8px;align-items:center"><svg class="mm-star"><use href="#i-star-o"/></svg><span class="kbd">⌘3</span></span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- P-2 context gauge -->
+    <div class="grp"><span class="lbl">P-2 · context gauge</span>
+      <div class="popover" style="width:260px;padding:14px">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px"><span class="ptitle" style="margin:0;font-size:14px">Context</span><span class="mono" style="color:var(--fg2)">82k / 200k</span></div>
+        <div style="height:6px;border-radius:999px;background:var(--bg4);overflow:hidden;margin-bottom:12px"><div style="height:100%;width:41%;background:var(--fg1);border-radius:999px"></div></div>
+        <div style="display:flex;padding:4px 2px;color:var(--fg2);font-size:var(--text-xs)"><span>Free space</span><span class="mono" style="margin-left:auto;color:var(--fg1)">59%</span></div>
+        <div style="display:flex;padding:4px 2px;color:var(--fg2);font-size:var(--text-xs)"><span>System prompt</span><span class="mono" style="margin-left:auto">18%</span></div>
+        <div style="display:flex;padding:4px 2px;color:var(--fg2);font-size:var(--text-xs)"><span>Messages</span><span class="mono" style="margin-left:auto">23%</span></div>
+        <div style="border-top:1px solid var(--border2);margin-top:8px;padding-top:8px"><button style="display:block;width:100%;text-align:left;background:transparent;border:0;color:var(--fg2);border-radius:var(--radius-md);padding:4px 8px;font:500 var(--text-xs) 'Geist Variable',system-ui;cursor:pointer">Compact now</button></div>
+      </div>
+    </div>
+
+    <!-- P-6 create from -->
+    <div class="grp"><span class="lbl">P-6 · create from…</span>
+      <div class="popover p0" style="width:340px">
+        <div class="cmdinput" style="height:44px;border-color:var(--border1)"><svg><use href="#i-search"/></svg><input placeholder="Search by name" disabled><span style="display:inline-flex;align-items:center;gap:6px;color:var(--fg2);font-size:var(--text-xs);flex:none"><span class="cw-avatar" style="background:var(--bg3-hover)">O</span>Orbit</span></div>
+        <div class="tabs"><button class="tab">Pull requests</button><button class="tab on">Branches</button><button class="tab dis">Issues</button></div>
+        <div style="max-height:180px;overflow:auto">
+          <div class="cfrow"><svg><use href="#i-git-branch"/></svg>main</div>
+          <div class="cfrow"><svg><use href="#i-git-branch"/></svg>acme/battery-pill</div>
+          <div class="cfrow"><svg><use href="#i-git-branch"/></svg>lewisia-f696</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="demo" style="margin-top:16px">
+    <table>
+      <tr><th style="width:44px">#</th><th style="width:220px">Popover</th><th>Trigger</th><th>Content</th></tr>
+      <tr><td class="mono">P-1</td><td><b>Agent + model menu</b></td><td>composer model pill (spark + label)</td><td>left agent rail + <code>Command</code> “Search models…”, rows with <code>✓</code> · ★ favorite · <code>⌘1–9</code></td></tr>
+      <tr><td class="mono">P-2</td><td><b>Context gauge</b></td><td>context ring beside Send</td><td>“Context” used/size, bar, per-category %, “Compact now”</td></tr>
+      <tr><td class="mono">P-3</td><td><b>Turn usage / cost</b></td><td><code>CircleDollarSign</code> in turn footer</td><td>per-model in/out/cost, Total row, “Copy breakdown”</td></tr>
+      <tr><td class="mono">P-4</td><td><b>Project-context files</b></td><td>“{n} context files” chip in chat header</td><td>file rows: name + scope badge + size + Copy path + preview</td></tr>
+      <tr><td class="mono">P-5</td><td><b>Icon picker</b></td><td>current-icon ghost button</td><td><code>Command</code> “Search icons” over a 6-col Lucide grid</td></tr>
+      <tr><td class="mono">P-6</td><td><b>“Create from…” source</b></td><td>dispatcher pill</td><td>search + repo badge · Tabs PRs / Branches / Issues(soon) · rows</td></tr>
+      <tr><td class="mono">P-7</td><td><b>Target / base branch</b></td><td>PR row branch button (<code>ChevronsUpDown</code>)</td><td><code>Command</code> “Select target branch…”, <code>✓</code> on current</td></tr>
+      <tr><td class="mono">P-8</td><td><b>New-tab quick-open</b> (Col 3)</td><td><code>+</code> “New tab”</td><td><code>Command</code> “Open any file or URL…” — File / Browser / recents / files</td></tr>
+      <tr><td class="mono">P-9</td><td><b>Archived workspaces</b></td><td><code>Archive</code> icon in top bar</td><td><code>Command</code> “Search archived workspaces…”, display-only rows</td></tr>
+      <tr><td class="mono">P-10</td><td><b>Repo branch source</b></td><td>“Branch new workspaces from” button</td><td><code>Command</code> “Search branches…”, <code>✓</code> + “default” badge</td></tr>
+      <tr><td class="mono">P-11</td><td><b>Remote origin</b></td><td>“Remote origin” button</td><td>remote rows: <code>✓</code> + GitHub/Globe icon + URL</td></tr>
+    </table>
+  </div>
+  <p class="cap">Most of the pickers embed a <code>Command</code> (cmdk) inside the popover for search — same rows as the palette, but anchored and scrim-less.</p>
+</section>
+
+<!-- ═══════════════════════ DROPDOWN MENU ═══════════════════════ -->
+<section id="dropdown">
+  <div class="h2">Dropdown menu <small>click-triggered action menu — 20 instances</small></div>
+  <p class="secintro"><code>bg-bg3</code> + <code>border2</code> + <code>rounded-lg</code> + <code>p-1</code>, <code>min-w 8rem</code>. Items <code>text-xs · px-2 py-1.5 · rounded-sm</code>,
+  16px leading icons in <code>--fg2</code>, highlight <code>bg-bg3-hover</code>. Trailing slots: a <code>Kbd</code> chip or an inline shortcut
+  (<code>ml-auto · tracking-widest · opacity-60</code>), a <code>✓</code>, a radio dot, or a <code>›</code> submarker. Labels are
+  <code>font-semibold</code>; separators are a full-bleed <code>border2</code> hairline.</p>
+
+  <div class="cluster">
+    <div class="grp"><span class="lbl">D-1 · new tab (⌘ shortcuts)</span>
+      <div class="menu" style="width:176px">
+        <div class="mitem"><svg><use href="#i-msg"/></svg>Chat<span class="kbd" style="margin-left:auto">⌘T</span></div>
+        <div class="mitem"><svg><use href="#i-terminal"/></svg>Terminal<span class="kbd" style="margin-left:auto">⌘⇧T</span></div>
+      </div>
+    </div>
+
+    <div class="grp"><span class="lbl">D-9 · project picker (✓)</span>
+      <div class="menu" style="width:220px">
+        <div class="mitem"><svg><use href="#i-plus"/></svg>Create</div>
+        <div class="msep"></div>
+        <div class="mitem"><span class="cw-avatar" style="width:16px;height:16px">O</span>Orbit<span class="ck"><svg><use href="#i-check"/></svg></span></div>
+        <div class="mitem"><span class="cw-avatar" style="width:16px;height:16px">Z</span>Zeros</div>
+      </div>
+    </div>
+
+    <div class="grp"><span class="lbl">D-14 · merge method (radio)</span>
+      <div class="menu" style="width:210px">
+        <div class="mitem"><span class="mradio"><i></i></span>Squash &amp; merge</div>
+        <div class="mitem"><span class="mradio"></span>Create a merge commit</div>
+        <div class="mitem"><span class="mradio"></span>Rebase &amp; merge</div>
+      </div>
+    </div>
+
+    <div class="grp"><span class="lbl">D-2 · open in… (submenu + sep)</span>
+      <div class="menu" style="width:210px">
+        <div class="mitem"><svg><use href="#i-folder"/></svg>Finder<span class="kbd" style="margin-left:auto">⌘O</span></div>
+        <div class="mitem"><svg><use href="#i-file"/></svg>Visual Studio Code</div>
+        <div class="mitem"><svg><use href="#i-terminal"/></svg>Terminal</div>
+        <div class="msep"></div>
+        <div class="mitem"><svg><use href="#i-copy"/></svg>Copy path<span class="kbd" style="margin-left:auto">⌘C</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="demo" style="margin-top:16px">
+    <table>
+      <tr><th style="width:44px">#</th><th style="width:210px">Menu</th><th>Trigger</th><th>Items</th></tr>
+      <tr><td class="mono">D-1</td><td><b>New-tab (Chat/Terminal)</b></td><td>Col-2 “+”</td><td>Chat <span class="kbd">⌘T</span> · Terminal <span class="kbd">⌘⇧T</span></td></tr>
+      <tr><td class="mono">D-2</td><td><b>“Open in…”</b></td><td>Col-2 split-button caret</td><td>Finder · {IDEs} · Terminal · sep · Copy path <span class="kbd">⌘C</span></td></tr>
+      <tr><td class="mono">D-3</td><td><b>Help menu</b></td><td>“?” icon</td><td>Documentation · Send feedback · <span class="mono">Zeros v{version}</span></td></tr>
+      <tr><td class="mono">D-4</td><td><b>Pane options</b></td><td>“⋯” pane</td><td>Split Down · Split Right · sep · Open in (submenu)</td></tr>
+      <tr><td class="mono">D-5</td><td><b>Changes-scope</b></td><td>scope pill</td><td>All / Uncommitted / Staged / Unstaged + per-commit rows</td></tr>
+      <tr><td class="mono">D-6</td><td><b>Turn selector</b></td><td>turn pill</td><td>No turns + per-turn rows (“{n} files · {time}”)</td></tr>
+      <tr><td class="mono">D-7</td><td><b>Dispatcher “+”</b></td><td>composer <code>+</code></td><td>Add attachment · Link workspaces</td></tr>
+      <tr><td class="mono">D-8</td><td><b>Terminal run-actions</b></td><td>Run split-button caret</td><td>per-action rows (green/red state, <span class="kbd">⌘R</span>) · Configure…</td></tr>
+      <tr><td class="mono">D-9</td><td><b>Project picker</b></td><td>top-bar repo button</td><td>Create · per-project rows (<code>✓</code> current)</td></tr>
+      <tr><td class="mono">D-10</td><td><b>Browser “More”</b></td><td>browser <code>⋯</code></td><td>Hard Reload · sep · Clear Cache · Clear Cookies</td></tr>
+      <tr><td class="mono">D-11</td><td><b>Dispatcher project</b></td><td>“Orbit ▾” pill</td><td>per-project rows (initial chip + name)</td></tr>
+      <tr><td class="mono">D-12</td><td><b>Dispatcher “Add a project”</b></td><td><code>FolderPlus</code></td><td>Open project · Open GitHub project · sep · Quick start</td></tr>
+      <tr><td class="mono">D-13</td><td><b>Create-PR “More”</b></td><td>Create-PR caret</td><td>Create draft PR · Create PR manually</td></tr>
+      <tr><td class="mono">D-14</td><td><b>Merge method</b></td><td>Merge caret</td><td>radio: Squash / Merge commit / Rebase</td></tr>
+      <tr><td class="mono">D-15</td><td><b>Turn-footer actions</b></td><td>turn “…”</td><td>Reset to this point</td></tr>
+      <tr><td class="mono">D-16</td><td><b>Chat composer “+”</b></td><td>chat <code>+</code></td><td>Add attachment · Link workspaces</td></tr>
+      <tr><td class="mono">D-17</td><td><b>Provider “Open in”</b></td><td>config-file card</td><td>Finder · Copy path</td></tr>
+      <tr><td class="mono">D-18</td><td><b>Closed-chat history</b></td><td><code>MessagesSquare</code></td><td>closed-chat rows (icon + title + time + restore)</td></tr>
+      <tr><td class="mono">D-19</td><td><b>Home “Add repo”</b></td><td>“Add repo” entry</td><td>Open folder… · Open GitHub project… · Quick start…</td></tr>
+      <tr><td class="mono">D-20</td><td><b>Default model + effort</b></td><td>Settings default-agent row</td><td>model rows (<code>✓</code>) · sep · <b>Effort</b> label + effort rows (<code>✓</code>)</td></tr>
+    </table>
+  </div>
+  <p class="cap">Checkbox / radio items reserve a 32px left gutter with the indicator at <code>left-2</code>. Submenus add a trailing <code>ChevronRight</code>; open state fills <code>bg-bg3-hover</code>.</p>
+</section>
+
+<!-- ═══════════════════════ CONTEXT MENU ═══════════════════════ -->
+<section id="context">
+  <div class="h2">Context menu <small>right-click — 4 instances</small></div>
+  <p class="secintro">Same surface as the dropdown but a touch wider (<code>min-w 9rem</code>) and anchored at the cursor. Its label is
+  <em>muted</em> (<code>text-fg2</code>, not semibold). The shared one is the workspace menu (with a “Set status” submenu).</p>
+
+  <div class="cluster">
+    <div class="grp"><span class="lbl">A-1 · workspace (submenu + ✓)</span>
+      <div class="menu" style="width:200px">
+        <div class="mitem"><svg><use href="#i-status"/></svg>Set status<svg class="chev"><use href="#i-chev-right"/></svg></div>
+        <div class="msep"></div>
+        <div class="mitem"><svg><use href="#i-archive"/></svg>Archive</div>
+      </div>
+    </div>
+    <div class="grp"><span class="lbl">A-1 · “Set status” submenu</span>
+      <div class="menu" style="width:170px">
+        <div class="mitem">Backlog</div>
+        <div class="mitem sel">In progress<span class="ck"><svg><use href="#i-check"/></svg></span></div>
+        <div class="mitem">In review</div>
+        <div class="mitem">Done</div>
+        <div class="mitem">Cancelled</div>
+      </div>
+    </div>
+    <div class="grp"><span class="lbl">A-3 · chat tab (sep + Close)</span>
+      <div class="menu" style="width:160px">
+        <div class="mitem"><svg><use href="#i-pencil"/></svg>Rename</div>
+        <div class="msep b3"></div>
+        <div class="mitem"><svg><use href="#i-x"/></svg>Close Tab</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="demo" style="margin-top:16px">
+    <table>
+      <tr><th style="width:44px">#</th><th style="width:220px">Menu</th><th>Trigger</th><th>Items</th></tr>
+      <tr><td class="mono">A-1</td><td><b>Workspace</b> (shared)</td><td>right-click a workspace tab / card / row</td><td>Set status → (Backlog · In progress · In review · Done · Cancelled, <code>✓</code>) · sep · Archive</td></tr>
+      <tr><td class="mono">A-2</td><td><b>Project (repo) — right-click</b></td><td>right-click top-bar repo button</td><td>Change icon · Repository Settings</td></tr>
+      <tr><td class="mono">A-3</td><td><b>Chat tab</b></td><td>right-click a Col-2 tab</td><td>Rename · sep · Close Tab</td></tr>
+      <tr><td class="mono">A-4</td><td><b>File-tree row</b> <span class="tag">custom</span></td><td>right-click a file / folder</td><td>Open in new tab · Copy path · Reveal in Finder</td></tr>
+    </table>
+  </div>
+  <p class="cap">A-4 is <em>not</em> Radix — it’s a hand-styled <code>&lt;div&gt;</code> (<code>bg-bg2</code> + <code>--shadow-dropdown</code>, <code>minWidth 180</code>) because it renders inside the file-tree library’s shadow root. On the workspace tabs, the menu opens <code>below-trigger</code> instead of at the pointer.</p>
+</section>
+
+<!-- ═══════════════════════ SELECT ═══════════════════════ -->
+<section id="select">
+  <div class="h2">Select <small>choose-one dropdown — 13 instances</small></div>
+  <p class="secintro">A trigger (<code>h-8 · border-border3 · rounded-sm</code>, chevron, hover → <code>border4 + bg2</code>) that opens a
+  <code>bg-bg3</code> panel <em>below</em> it. Distinctive: the <code>✓</code> sits on the <b>right</b> of the selected row (menus put it on the left).</p>
+
+  <div class="cluster">
+    <div class="grp"><span class="lbl">trigger (closed)</span>
+      <div class="seltrig" style="min-width:160px">Dark<svg><use href="#i-chev-down"/></svg></div>
+    </div>
+    <div class="grp"><span class="lbl">S-4 · Theme (open, ✓ right)</span>
+      <div class="menu" style="width:160px">
+        <div class="mitem selopt">System</div>
+        <div class="mitem selopt sel">Light<span class="ck"><svg><use href="#i-check"/></svg></span></div>
+        <div class="mitem selopt">Dark</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="demo" style="margin-top:16px">
+    <table>
+      <tr><th style="width:44px">#</th><th style="width:190px">Select</th><th>Where</th><th>Options</th></tr>
+      <tr><td class="mono">S-1</td><td><b>Default agent</b></td><td>Settings → Models</td><td>brand-icon + agent name per row</td></tr>
+      <tr><td class="mono">S-2</td><td><b>Custom (title) models</b></td><td>Settings → Models</td><td>Haiku · Luna · Composer 2.5 (disabled if family not connected)</td></tr>
+      <tr><td class="mono">S-3</td><td><b>Fallback model</b></td><td>Settings → Models (Claude)</td><td>Claude labels + “None (fail fast)”</td></tr>
+      <tr><td class="mono">S-4</td><td><b>Theme</b></td><td>Settings → Appearance</td><td>System · Light · Dark</td></tr>
+      <tr><td class="mono">S-5</td><td><b>Code theme</b></td><td>Settings → Appearance</td><td>syntax themes for the current variant</td></tr>
+      <tr><td class="mono">S-6</td><td><b>Default terminal agent</b></td><td>Settings → Terminal agents</td><td>None + terminal agents</td></tr>
+      <tr><td class="mono">S-7</td><td><b>Organization</b></td><td>Settings → Organization</td><td>one per org (if &gt;1)</td></tr>
+      <tr><td class="mono">S-8</td><td><b>Invite role</b></td><td>org invite form</td><td>Member · Admin</td></tr>
+      <tr><td class="mono">S-9</td><td><b>Member role</b></td><td>org members list</td><td>Member · Admin · Owner (owners only)</td></tr>
+      <tr><td class="mono">S-10</td><td><b>Publish owner</b></td><td>Publish-to-GitHub dialog</td><td>GitHub owners (“ (org)” suffix)</td></tr>
+      <tr><td class="mono">S-11</td><td><b>MCP transport</b></td><td>MCP server dialog</td><td>stdio · HTTP</td></tr>
+      <tr><td class="mono">S-12</td><td><b>MCP authentication</b></td><td>MCP server dialog (HTTP)</td><td>None/static · API key · OAuth (via gateway)</td></tr>
+      <tr><td class="mono">S-13</td><td><b>Feedback type</b></td><td>Feedback dialog</td><td>Bug · Feature request · Issue · Feedback</td></tr>
+    </table>
+  </div>
+  <p class="cap">All from <code>select.tsx</code> — forced <code>position="popper" side="bottom"</code>, so it always drops below (never the item-aligned native overlay).</p>
+</section>
+
+<!-- ═══════════════════════ HOVER CARD ═══════════════════════ -->
+<section id="hovercard">
+  <div class="h2">Hover card <small>hover-triggered preview — 1 instance</small></div>
+  <p class="secintro">The odd floating surface: <code>bg-bg2</code> (not bg3), <code>w-64</code>, <code>p-4</code>, opens on hover after 150ms. The only
+  one is the checkpoint rail popup.</p>
+  <div class="demo raised">
+    <div class="cluster" style="align-items:center">
+      <div class="grp"><span class="lbl">H-1 · checkpoint rail</span>
+        <div class="hovercard" style="padding:6px">
+          <div class="mitem" style="padding:6px 8px"><span style="width:3px;height:14px;border-radius:2px;background:var(--fg1);flex:none"></span><span style="color:var(--fg1)">create 5 cities .md about…</span></div>
+          <div class="mitem sel" style="padding:6px 8px;background:var(--highlighted-bg)"><span style="width:3px;height:14px;border-radius:2px;background:var(--fg1);flex:none"></span><span style="color:var(--fg1)">make them shorter</span></div>
+          <div class="mitem" style="padding:6px 8px"><span style="width:3px;height:14px;border-radius:2px;background:var(--border4);flex:none"></span><span style="color:var(--fg2)">(attachment)</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="cap"><code>checkpoint-rail.tsx</code> — the tick strip on the left edge of the transcript; hovering shows one row per user message (prompt preview, active row <code>bg-highlighted-bg</code>). Opens flush over the strip (<code>side="right"</code>, negative <code>sideOffset</code>). Shown once there are ≥2 checkpoints.</p>
+</section>
+
+<!-- ═══════════════════════ NOT OVERLAYS / RULES ═══════════════════════ -->
+<section id="not">
+  <div class="h2">Not overlays <small>look adjacent, but don’t float on a layer</small></div>
+  <p class="secintro">A few things read like popups but aren’t — catalogued so nobody re-implements them as one.</p>
+  <div class="demo">
+    <table>
+      <tr><th style="width:200px">Thing</th><th>What it actually is</th></tr>
+      <tr><td><b>Sheet / Drawer</b></td><td>The <code>sheet.tsx</code> primitive exists (edge-anchored, <code>bg-bg1</code>, open 500ms) but its only consumer — the shadcn <code>Sidebar</code> mobile sheet — is <b>never mounted</b>. There are no active sheets/drawers in the app.</td></tr>
+      <tr><td><b>Alert</b></td><td>An inline callout box (<code>alert.tsx</code>) — no scrim, no portal, no shadow. Default = <code>bg-bg1</code>; destructive = 50% red border + red text. Lives in the page flow.</td></tr>
+      <tr><td><b>Toast</b></td><td>Update notifications (“New update available” / “You’re up to date!”) are toasts — a neutral <code>bg-bg1</code> card, only the status icon carries color.</td></tr>
+      <tr><td><b>Permission request</b></td><td>An inline <b>card</b> in the chat transcript (<code>permission-card.tsx</code>), not a modal.</td></tr>
+      <tr><td><b>Effort / Permission / Fast pills</b></td><td>Composer pills that <b>cycle</b> on click (each advances the value, tooltip names it) — they open no panel. Only the <em>model</em> pill is an overlay.</td></tr>
+      <tr><td><b>Full-screen views</b></td><td>Login, auth gate, “Worktree missing”, and the no-projects welcome paint an <em>opaque</em> <code>bg-bg1</code> over <code>inset-0</code> — they replace the app, they don’t float over a dimmed scrim.</td></tr>
+    </table>
+  </div>
+
+  <h3>Inline alert (for contrast)</h3>
+  <div class="demo raised">
+    <div class="cluster">
+      <div style="border:1px solid var(--border1);background:var(--bg1);border-radius:var(--radius-lg);padding:12px 16px;padding-left:38px;position:relative;max-width:420px;color:var(--fg2);font-size:13px">
+        <svg style="position:absolute;left:16px;top:14px;width:15px;height:15px;color:var(--fg1)"><use href="#i-warn"/></svg>
+        <div style="color:var(--fg1);font-weight:500;margin-bottom:2px">Heads up</div>
+        A default alert — inline, no scrim, no shadow.
+      </div>
+      <div style="border:1px solid color-mix(in srgb,var(--red-primary) 50%,transparent);border-radius:var(--radius-lg);padding:12px 16px;padding-left:38px;position:relative;max-width:420px;color:var(--red-primary);font-size:13px">
+        <svg style="position:absolute;left:16px;top:14px;width:15px;height:15px;color:var(--red-primary)"><use href="#i-warn"/></svg>
+        <div style="font-weight:500;margin-bottom:2px">Something went wrong</div>
+        Destructive variant — red border &amp; text.
+      </div>
+    </div>
+  </div>
+
+  <hr class="rule">
+
+  <div class="h2">Rules</div>
+  <div class="anti">
+    <div class="x yes"><i>✓</i> <b>Scrim only on modals.</b> Dialogs (and sheets) get a full-screen <code>bg-scrim</code>. Anchored overlays — menu, popover, select, hover card — never do; they float beside the trigger.</div>
+    <div class="x yes"><i>✓</i> <b>Mind the surface.</b> Dialog &amp; sheet panels are <code>bg-bg1</code>; the create composer &amp; hover card are <code>bg-bg2</code>; every menu / popover / select / command panel is <code>bg-bg3</code>. All <code>rounded-lg</code>, all <code>--shadow-dropdown</code>.</div>
+    <div class="x no"><i>✗</i> <b>Don’t add backdrop blur.</b> Only two surfaces blur app-wide: the Shortcuts palette <em>panel</em> and the Image lightbox <em>scrim</em>. Every other scrim is a flat wash.</div>
+    <div class="x no"><i>✗</i> <b>Don’t reach for an <code>AlertDialog</code>.</b> There isn’t one — a destructive confirm is a <code>Dialog</code> + a <code>variant="destructive"</code> button, with focus defaulted to Cancel.</div>
+    <div class="x yes"><i>✓</i> <b>Guard work-holding dialogs.</b> Dialogs are <em>non-dismissable by default</em> — a stray scrim click won’t discard a half-typed form. Opt in to click-away (<code>dismissable</code>) only for pickers/palettes.</div>
+    <div class="x no"><i>✗</i> <b><code>⌘K</code> is not a command palette.</b> It focuses the message box. The one centered command palette is the workspace/directory picker; other action lists are anchored popovers.</div>
+    <div class="x yes"><i>✓</i> <b>Use <code>Kbd</code> for shortcut chips</b> (<code>border1</code>, 11px, <code>fg2</code>) and the inline <code>tracking-widest opacity-60</code> variant only where a menu row needs a lighter hint.</div>
+    <div class="x yes"><i>✓</i> <b>Trust <code>overlay-focus</code>.</b> Closing an anchored overlay with the mouse drops the focus ring; closing with the keyboard restores it. Don’t hand-manage trigger focus.</div>
+  </div>
+  <p class="cap">Primitives: <code>src/zeros/ui/primitives/{dialog,popover,dropdown-menu,context-menu,select,hover-card,sheet,command,alert,kbd}.tsx</code> · overlay focus <code>src/zeros/ui/overlay-focus.ts</code>.</p>
+</section>
+
+</main>
+</body>
+</html>

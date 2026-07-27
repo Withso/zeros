@@ -1,0 +1,1752 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-Zeros-root>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Zeros — §3.9 Tool-content visibility &amp; streaming · Design catalog</title>
+    <style>
+      /* ============================================================
+         Tokens — lifted verbatim from styles/zeros-tokens.css so the
+         mockups render on the real Zeros Shade (dark) + Light palettes.
+         Toggle themes with the switch in the header.
+         ============================================================ */
+      :root {
+        color-scheme: dark;
+        --bg1: hsl(25 5% 7%);
+        --bg1-hover: hsl(8 5% 12%);
+        --bg1-highlight: hsl(25 5% 10%);
+        --bg2: hsl(25 4% 12%);
+        --bg2-hover: hsl(25 3% 15%);
+        --bg3: hsl(15 4% 16%);
+        --bg3-hover: hsl(15 3% 20%);
+        --sidebar-bg: hsl(25 5% 9%);
+        --fg1: hsl(0 2% 92%);
+        --fg2: hsl(20 4% 66%);
+        --fg3: hsl(15 1% 44%);
+        --muted-fg: hsl(15 4% 44%);
+        --border1: hsl(8 3% 14%);
+        --border2: hsl(25 1% 18%);
+        --border3: hsl(15 0% 24%);
+        --border4: hsl(15 0% 30%);
+        --highlighted-bright: hsl(25 5% 65%);
+        --inverted-bg: hsl(0 2% 92%);
+        --inverted-fg: hsl(5 7% 5%);
+        --green-primary: hsl(142 69% 58%);
+        --green-bg: hsl(120 23% 17%);
+        --green-fg: hsl(142 75% 73%);
+        --red-primary: hsl(0 91% 71%);
+        --red-bg: hsl(13 81% 14%);
+        --red-fg: hsl(20 97% 72%);
+        --yellow-primary: hsl(37 75% 60%);
+        --yellow-bg: hsl(38 68% 17%);
+        --yellow-fg: hsl(44 100% 50%);
+        --blue-primary: hsl(205 80% 73%);
+        --blue-bg: hsl(205 45% 17%);
+        --blue-fg: hsl(205 85% 78%);
+        --violet-primary: hsl(271 80% 73%);
+        --brown-primary: hsl(9 46% 72%);
+        --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+        --radius-sm: 4px;
+        --radius-md: 6px;
+        --radius-lg: 8px;
+        --sans:
+          "Geist Variable", Inter, ui-sans-serif, -apple-system,
+          BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --mono: "Geist Mono Variable", "SFMono-Regular", Consolas, monospace;
+      }
+
+      [data-theme="light"] {
+        color-scheme: light;
+        --bg1: hsl(0 0% 100%);
+        --bg1-hover: hsl(0 4% 95%);
+        --bg1-highlight: hsl(0 0% 97%);
+        --bg2: hsl(60 4% 95%);
+        --bg2-hover: hsl(60 4% 91%);
+        --bg3: hsl(0 0% 100%);
+        --bg3-hover: hsl(0 0% 95%);
+        --sidebar-bg: hsl(60 9% 98%);
+        --fg1: hsl(20 7% 16%);
+        --fg2: hsl(20 4% 37%);
+        --fg3: hsl(20 4% 56%);
+        --muted-fg: hsl(20 4% 68%);
+        --border1: hsl(30 9% 91%);
+        --border2: hsl(30 9% 91%);
+        --border3: hsl(60 3% 85%);
+        --border4: hsl(0 1% 83%);
+        --highlighted-bright: hsl(25 5% 45%);
+        --inverted-bg: hsl(20 7% 16%);
+        --inverted-fg: hsl(0 0% 100%);
+        --green-primary: hsl(142 75% 36%);
+        --green-bg: hsl(134 38% 89%);
+        --green-fg: hsl(142 70% 30%);
+        --red-primary: hsl(0 72% 51%);
+        --red-bg: hsl(18 87% 91%);
+        --red-fg: hsl(18 89% 40%);
+        --yellow-primary: hsl(37 90% 60%);
+        --yellow-bg: hsl(48 97% 89%);
+        --yellow-fg: hsl(37 100% 51%);
+        --blue-primary: hsl(221 83% 53%);
+        --blue-bg: hsl(210 60% 93%);
+        --blue-fg: hsl(221 70% 42%);
+        --violet-primary: hsl(271 80% 51%);
+        --brown-primary: hsl(5 35% 50%);
+        --shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+      }
+
+      * { box-sizing: border-box; }
+      html { scroll-behavior: smooth; }
+      body {
+        margin: 0;
+        min-width: 320px;
+        min-height: 100vh;
+        background:
+          radial-gradient(
+            circle at 50% -8%,
+            color-mix(in srgb, var(--fg1) 5%, transparent),
+            transparent 30rem
+          ),
+          var(--bg1);
+        color: var(--fg1);
+        font: 14px/1.5 var(--sans);
+        -webkit-font-smoothing: antialiased;
+      }
+      button { font: inherit; color: inherit; cursor: pointer; }
+      svg { display: block; }
+      code { font-family: var(--mono); }
+
+      .page {
+        width: min(1180px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 48px 0 96px;
+      }
+
+      /* ── Hero ── */
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 28px;
+        align-items: end;
+        padding-bottom: 28px;
+        border-bottom: 1px solid var(--border1);
+      }
+      .eyebrow {
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        color: var(--yellow-primary);
+      }
+      h1 {
+        max-width: 800px;
+        margin: 9px 0 10px;
+        font-size: clamp(26px, 3.4vw, 40px);
+        line-height: 1.05;
+        letter-spacing: -0.035em;
+      }
+      .lede { max-width: 780px; margin: 0; color: var(--fg2); font-size: 15px; }
+      .lede code { padding: 1px 5px; border-radius: var(--radius-sm); background: var(--bg2); color: var(--fg1); font-size: 12.5px; }
+      .hero-aside { display: flex; flex-direction: column; gap: 12px; align-items: flex-end; }
+      .summary-chip {
+        min-width: 240px;
+        max-width: 280px;
+        padding: 14px 16px;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 90%, transparent);
+      }
+      .summary-chip strong { display: block; margin-bottom: 3px; font-size: 13px; }
+      .summary-chip span { display: block; color: var(--fg2); font-size: 12px; }
+      .theme-toggle {
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 6px 11px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: var(--bg2); color: var(--fg1); font-size: 12px;
+      }
+      .theme-toggle:hover { background: var(--bg2-hover); }
+
+      /* ── Thesis cards ── */
+      .thesis {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        margin: 24px 0 12px;
+      }
+      .thesis-card {
+        min-width: 0;
+        padding: 16px 18px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 86%, transparent);
+      }
+      .thesis-card.primary {
+        border-color: color-mix(in srgb, var(--green-primary) 26%, var(--border1));
+        background: color-mix(in srgb, var(--green-primary) 5%, var(--sidebar-bg));
+      }
+      .thesis-card h3 { margin: 0 0 5px; font-size: 13px; }
+      .thesis-card p { margin: 0; color: var(--fg2); font-size: 12px; line-height: 1.5; }
+
+      /* ── Legend ── */
+      .legend {
+        display: flex; flex-wrap: wrap; gap: 8px 18px;
+        margin: 16px 0 2px; padding: 12px 14px;
+        border: 1px solid var(--border1); border-radius: var(--radius-md);
+        background: color-mix(in srgb, var(--sidebar-bg) 70%, transparent);
+        font-size: 11.5px; color: var(--fg2);
+      }
+      .legend b { color: var(--fg1); font-weight: 600; }
+      .legend .k { color: var(--fg3); }
+
+      /* ── Sticky nav ── */
+      nav {
+        position: sticky; top: 0; z-index: 20;
+        display: flex; flex-wrap: wrap; gap: 5px;
+        margin: 26px -12px 40px;
+        padding: 10px 12px;
+        border-bottom: 1px solid color-mix(in srgb, var(--border1) 80%, transparent);
+        background: color-mix(in srgb, var(--bg1) 82%, transparent);
+        backdrop-filter: blur(14px);
+      }
+      nav a {
+        flex: none; padding: 5px 9px;
+        border-radius: var(--radius-sm);
+        color: var(--fg2); font-size: 12px; text-decoration: none;
+      }
+      nav a:hover { background: var(--bg2); color: var(--fg1); }
+      .nav-sep { width: 1px; margin: 3px 4px; background: var(--border2); }
+
+      /* ── Section headers / case scaffold ── */
+      .band {
+        margin: 0 0 26px;
+        font-size: 12px; font-weight: 650;
+        letter-spacing: 0.08em; text-transform: uppercase;
+        color: var(--fg3);
+      }
+      .catalog { display: grid; gap: 56px; }
+      .catalog + .band { margin-top: 64px; }
+      .case { scroll-margin-top: 68px; }
+      .case-head {
+        display: flex; justify-content: space-between; gap: 24px;
+        align-items: flex-start; margin-bottom: 16px;
+      }
+      .case-title-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px; }
+      .case-number { font-size: 11px; font-weight: 650; letter-spacing: 0.06em; color: var(--fg3); }
+      .tag {
+        padding: 3px 8px; border-radius: 999px;
+        background: var(--bg2); color: var(--fg2);
+        font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+      }
+      .tag.ui { background: color-mix(in srgb, var(--green-primary) 13%, transparent); color: var(--green-fg); }
+      .tag.verify { background: color-mix(in srgb, var(--blue-primary) 14%, transparent); color: var(--blue-primary); }
+      .tag.noui { background: var(--bg2); color: var(--fg3); }
+      .tag.p1 { background: color-mix(in srgb, var(--red-primary) 12%, transparent); color: var(--red-primary); }
+      .tag.p2 { background: color-mix(in srgb, var(--yellow-primary) 13%, transparent); color: var(--yellow-primary); }
+      .tag.p3 { background: var(--bg2); color: var(--fg2); }
+      .tag.gap { background: color-mix(in srgb, var(--yellow-primary) 12%, transparent); color: var(--yellow-primary); }
+      .tag.miss { background: color-mix(in srgb, var(--red-primary) 12%, transparent); color: var(--red-primary); }
+      .tag.done { background: color-mix(in srgb, var(--green-primary) 13%, transparent); color: var(--green-fg); }
+      .case h2 { margin: 0; font-size: 19px; line-height: 1.22; letter-spacing: -0.02em; }
+      .case-copy { max-width: 730px; margin: 6px 0 0; color: var(--fg2); font-size: 13px; line-height: 1.55; }
+      .case-copy b { color: var(--fg1); }
+      .case-copy code { padding: 1px 4px; border-radius: var(--radius-sm); background: var(--bg2); color: var(--fg1); font-size: 11.5px; }
+      .meta {
+        flex: none; max-width: 280px; padding-top: 2px;
+        color: var(--fg3); font-size: 11px; line-height: 1.5; text-align: right;
+      }
+      .meta code { color: var(--fg2); }
+
+      /* ── Frames ── */
+      .dual { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+      .frame-wrap { min-width: 0; }
+      .frame-label {
+        display: flex; align-items: center; gap: 7px;
+        margin-bottom: 8px;
+        font-size: 11px; font-weight: 600; letter-spacing: 0.04em; color: var(--fg3);
+      }
+      .frame-label .dot-lg { width: 7px; height: 7px; border-radius: 999px; background: var(--fg3); }
+      .frame-label.before .dot-lg { background: var(--red-primary); }
+      .frame-label.after .dot-lg { background: var(--green-primary); }
+      .frame-label.shipped .dot-lg { background: var(--green-primary); }
+      .frame {
+        overflow: hidden;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: var(--bg1);
+        box-shadow: var(--shadow);
+      }
+      .frame-note { margin-top: 8px; color: var(--fg3); font-size: 11px; line-height: 1.5; }
+      .frame-note b { color: var(--fg2); }
+      .frame-note code { font-size: 10.5px; }
+      .single { max-width: 720px; }
+
+      /* ============================================================
+         Chat mock kit — chat head, transcript, event rows, footer
+         ============================================================ */
+      .chat-head {
+        display: flex; height: 40px; align-items: center; gap: 8px;
+        padding: 0 14px;
+        border-bottom: 1px solid var(--border1);
+        color: var(--fg2); font-size: 12px;
+      }
+      .chat-head .agent-glyph { color: var(--fg2); }
+      .chat-head .agent-glyph svg { width: 13px; height: 13px; }
+      .chat-head b { color: var(--fg1); font-weight: 600; }
+      .chat-head .head-status { display: inline-flex; align-items: center; gap: 5px; margin-left: 2px; }
+      .authdot { width: 7px; height: 7px; border-radius: 999px; flex: none; background: var(--fg3); }
+      .authdot.ok { background: var(--green-primary); }
+      .chat-body { position: relative; display: flex; flex-direction: column; }
+      .transcript {
+        flex: 1; overflow: hidden;
+        display: flex; flex-direction: column; gap: 10px;
+        padding: 14px 16px 14px;
+        font-size: 13px;
+      }
+      .u-msg {
+        align-self: flex-end; max-width: 80%;
+        padding: 7px 11px;
+        border-radius: 10px;
+        background: var(--bg2); color: var(--fg1);
+      }
+      .a-msg { max-width: 92%; color: var(--fg1); line-height: 1.55; }
+      .a-msg .dim { color: var(--fg3); }
+      .work-chip {
+        display: inline-flex; width: fit-content; align-items: center; gap: 7px;
+        padding: 4px 9px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-md);
+        color: var(--fg2); font-size: 12px;
+      }
+      .work-chip svg { width: 12px; height: 12px; color: var(--fg3); }
+
+      /* EventRow — icon 12px + name fg1 (14px real / 13px in mock) + target pill */
+      .erow-wrap { display: flex; flex-direction: column; }
+      .erow {
+        display: flex; width: fit-content; max-width: 100%;
+        align-items: center; gap: 8px;
+        padding: 4px 8px; margin-left: -8px;
+        border-radius: var(--radius-md);
+        font-size: 13px;
+      }
+      .erow .eicon { flex: none; width: 12px; height: 12px; color: var(--fg2); }
+      .erow .eicon svg { width: 12px; height: 12px; }
+      .erow .ename { flex: none; max-width: 60ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg1); }
+      .erow .etarget {
+        min-width: 0; max-width: 340px;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        padding: 2px 6px; border-radius: var(--radius-sm);
+        background: var(--bg1-hover); color: var(--fg2); font-size: 11.5px;
+      }
+      .erow .etrail { flex: none; font-size: 11.5px; color: var(--fg2); font-variant-numeric: tabular-nums; }
+      .erow.fail .eicon, .erow.fail .ename { color: var(--red-primary); }
+      .erow.run .eicon { color: var(--fg1); }
+      .erow.pending { opacity: 0.6; }
+
+      /* small mono status pill (matches the real tc-pill) */
+      .mpill {
+        display: inline-flex; flex-shrink: 0; align-items: center; gap: 4px;
+        padding: 1px 6px;
+        border: 1px solid var(--border1); border-radius: var(--radius-sm);
+        color: var(--fg2); font: 500 10px/1.7 var(--mono);
+        letter-spacing: 0.05em; text-transform: uppercase; white-space: nowrap;
+      }
+      .mpill.warn { border-color: color-mix(in srgb, var(--yellow-primary) 40%, var(--border1)); color: var(--yellow-fg); }
+      .mpill.err { border-color: color-mix(in srgb, var(--red-primary) 40%, var(--border1)); color: var(--red-fg); }
+
+      /* expanded detail body (rounded bg2/60 mono surface) */
+      .edetail {
+        margin: 2px 0 4px;
+        padding: 8px 10px;
+        border-radius: var(--radius-md);
+        background: color-mix(in srgb, var(--bg2) 60%, transparent);
+        font-family: var(--mono); font-size: 11.5px; line-height: 1.65;
+        color: var(--fg1);
+        overflow-wrap: anywhere;
+      }
+      .edetail .dim { color: var(--fg3); }
+      .edetail .ok { color: var(--green-fg); }
+      .edetail .err { color: var(--red-fg); }
+      .edetail.capped { position: relative; max-height: 132px; overflow: hidden; }
+      .edetail.capped::after {
+        content: ""; position: absolute; inset: auto 0 0 0; height: 26px;
+        background: linear-gradient(transparent, var(--bg1));
+      }
+      .edetail-note { margin: 0 0 4px; color: var(--fg3); font-size: 10.5px; font-style: italic; }
+
+      /* error notice bubble (the red "⚠ Codex error" recipe) */
+      .err-bubble {
+        margin: 2px 0;
+        padding: 10px 12px; max-width: 440px;
+        border-radius: var(--radius-md);
+        background: var(--red-bg); color: var(--red-fg);
+        font-family: var(--mono); font-size: 12px; line-height: 1.55;
+      }
+
+      /* activity shimmer (working tail) */
+      @keyframes shim { to { background-position: -200% 0; } }
+      .shimmer {
+        background: linear-gradient(90deg, var(--fg3) 25%, var(--fg1) 50%, var(--fg3) 75%);
+        background-size: 200% 100%;
+        -webkit-background-clip: text; background-clip: text;
+        color: transparent;
+        animation: shim 1.8s linear infinite;
+      }
+      .working-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+      .working-row .wtime { color: var(--fg3); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+      @keyframes rot { to { transform: rotate(360deg); } }
+      .spin { animation: rot 1.1s linear infinite; transform-origin: center; }
+
+      /* typewriter caret */
+      @keyframes blink { 50% { opacity: 0; } }
+      .caret {
+        display: inline-block; width: 7px; height: 13px; margin-left: 2px;
+        vertical-align: -2px; background: var(--fg1);
+        animation: blink 1s steps(1) infinite;
+      }
+
+      /* progress bar (MCP tool progress) */
+      .pbar { height: 4px; margin: 6px 0 4px; border-radius: 999px; background: var(--bg2-hover); overflow: hidden; }
+      .pbar i { display: block; height: 100%; width: 34%; border-radius: 999px; background: var(--blue-primary); }
+
+      /* mock screenshot (a tool-returned image) */
+      .shot {
+        width: 300px; max-width: 100%;
+        margin: 2px 0 6px;
+        border: 1px solid var(--border1); border-radius: var(--radius-md);
+        overflow: hidden; background: var(--bg3);
+      }
+      .shot-bar { display: flex; gap: 4px; align-items: center; padding: 6px 8px; border-bottom: 1px solid var(--border1); background: var(--bg2); }
+      .shot-bar i { width: 7px; height: 7px; border-radius: 999px; background: var(--fg3); opacity: 0.45; }
+      .shot-bar span { margin-left: 6px; color: var(--fg3); font-size: 9.5px; font-family: var(--mono); }
+      .shot-body { padding: 12px; display: flex; flex-direction: column; gap: 7px; }
+      .sk { height: 8px; border-radius: 4px; background: var(--bg2-hover); }
+      .sk.hero { height: 30px; background: color-mix(in srgb, var(--blue-primary) 22%, var(--bg2)); }
+      .sk.w80 { width: 80%; } .sk.w60 { width: 60%; } .sk.w40 { width: 40%; }
+      .sk-row { display: flex; gap: 7px; }
+      .sk-row .sk { flex: 1; height: 22px; }
+
+      /* turn footer */
+      .tf { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 2px; font-size: 12px; color: var(--fg2); }
+      .tf-line { flex-basis: 100%; }
+      .tf-pill {
+        display: inline-flex; width: fit-content; align-items: center; gap: 6px;
+        padding: 2px 8px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: var(--bg1); color: var(--fg1);
+        font-size: 11px; letter-spacing: 0.05em;
+      }
+      .tf-time { font-variant-numeric: tabular-nums; }
+      .tf-icon {
+        display: inline-grid; width: 20px; height: 20px; place-items: center;
+        border-radius: var(--radius-sm); color: var(--fg2); background: transparent; border: 0; padding: 0;
+      }
+      .tf-icon svg { width: 13px; height: 13px; }
+      .tf .missing { color: var(--fg3); font-size: 11px; font-style: italic; }
+
+      /* usage popover (the itemized bill) */
+      .upop {
+        position: absolute; z-index: 6;
+        width: 250px; padding: 10px 12px;
+        border: 1px solid var(--border2); border-radius: 10px;
+        background: var(--bg3); box-shadow: var(--shadow);
+        font-size: 11.5px;
+      }
+      .upop b { display: block; margin-bottom: 6px; font-size: 11px; color: var(--fg1); }
+      .upop .urow { display: flex; justify-content: space-between; gap: 10px; color: var(--fg2); padding: 2px 0; }
+      .upop .urow span:last-child { font-variant-numeric: tabular-nums; color: var(--fg1); }
+      .upop .urow.total { margin-top: 4px; padding-top: 6px; border-top: 1px solid var(--border1); font-weight: 600; }
+
+      /* live usage ticker chip (the new surface in B4) */
+      .usage-live {
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 2px 8px;
+        border: 1px solid var(--border1); border-radius: 999px;
+        color: var(--fg2); font-size: 11px; font-variant-numeric: tabular-nums;
+      }
+      .usage-live svg { width: 11px; height: 11px; color: var(--fg3); }
+      .usage-live b { color: var(--fg1); font-weight: 600; }
+
+      /* context gauge */
+      .gauge { display: inline-flex; align-items: center; gap: 6px; color: var(--fg3); font-size: 10.5px; }
+      .gauge .bar { width: 56px; height: 4px; border-radius: 999px; background: var(--bg2-hover); overflow: hidden; }
+      .gauge .bar i { display: block; height: 100%; background: var(--fg3); }
+
+      /* composer */
+      .composer {
+        margin: 4px 12px 12px;
+        border: 1px solid var(--border2);
+        border-radius: 12px;
+        background: var(--bg1);
+      }
+      .composer-input { padding: 10px 13px 2px; font-size: 13px; color: var(--fg1); }
+      .composer-input.ph { color: var(--fg3); }
+      .composer-bar {
+        display: flex; align-items: center; justify-content: space-between; gap: 8px;
+        padding: 6px 8px 8px;
+      }
+      .composer-tools { display: flex; align-items: center; gap: 2px; min-width: 0; }
+      .tool-plus {
+        display: inline-grid; width: 26px; height: 26px; place-items: center;
+        border-radius: var(--radius-md); color: var(--fg2);
+      }
+      .tool-plus svg { width: 14px; height: 14px; }
+      .cpill {
+        display: inline-flex; align-items: center; gap: 4px;
+        padding: 4px 8px;
+        border: 0; border-radius: var(--radius-md);
+        background: transparent; color: var(--fg2);
+        font-size: 12px; font-weight: 500; white-space: nowrap;
+      }
+      .cpill svg { width: 12px; height: 12px; }
+      .composer-right { display: flex; flex: none; align-items: center; gap: 6px; }
+      .send-btn {
+        display: inline-grid; width: 32px; height: 32px; place-items: center;
+        border: 0; border-radius: 8px;
+        background: var(--inverted-bg); color: var(--inverted-fg);
+      }
+      .send-btn.disabled { background: var(--bg2-hover); color: var(--fg3); }
+      .send-btn svg { width: 15px; height: 15px; }
+      .composer.locked { border-color: var(--border2); opacity: 0.75; }
+      .lock-hint {
+        display: flex; align-items: center; gap: 7px;
+        margin: 0 12px 6px; color: var(--fg3); font-size: 11px;
+      }
+      .lock-hint svg { width: 12px; height: 12px; }
+
+      /* inline annotation arrows on frames */
+      .callout {
+        display: flex; gap: 8px; align-items: flex-start;
+        margin: 4px 0 0;
+        color: var(--fg3); font-size: 10.5px; line-height: 1.45;
+      }
+      .callout::before { content: "▸"; color: var(--fg3); }
+
+      /* inline note / callout */
+      .note {
+        display: flex; gap: 9px; align-items: flex-start;
+        margin-top: 14px; padding: 10px 12px;
+        border-radius: var(--radius-md);
+        font-size: 11.5px; line-height: 1.5;
+      }
+      .note svg { flex: none; width: 14px; height: 14px; margin-top: 1px; }
+      .note b { font-weight: 600; }
+      .note.warn { background: var(--yellow-bg); color: var(--yellow-fg); }
+      .note.warn svg { color: var(--yellow-fg); }
+      .note.warn b { color: var(--yellow-fg); }
+      .note.ok { background: var(--green-bg); color: var(--green-fg); }
+      .note.ok svg { color: var(--green-fg); }
+      .note.ok b { color: var(--green-fg); }
+      .note.info { background: color-mix(in srgb, var(--bg2) 70%, transparent); color: var(--fg2); }
+      .note.info svg { color: var(--fg3); }
+      .note.info b { color: var(--fg1); }
+
+      /* ── Tables ── */
+      table.grid { width: 100%; border-collapse: collapse; font-size: 12px; }
+      table.grid th, table.grid td {
+        padding: 9px 12px;
+        border: 1px solid var(--border1);
+        text-align: left; vertical-align: top;
+      }
+      table.grid th {
+        background: color-mix(in srgb, var(--sidebar-bg) 90%, transparent);
+        color: var(--fg2); font-weight: 600; font-size: 11px;
+        letter-spacing: 0.03em; text-transform: uppercase;
+      }
+      table.grid td { color: var(--fg2); line-height: 1.5; }
+      table.grid td b { color: var(--fg1); }
+      table.grid td code { color: var(--fg2); font-size: 11px; }
+      table.grid td:first-child { white-space: nowrap; color: var(--fg1); font-weight: 600; }
+      .st { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; font-weight: 600; }
+      .st.done { color: var(--green-fg); }
+      .st.partial { color: var(--yellow-fg); }
+      .st.miss { color: var(--red-fg); }
+      .uichip {
+        display: inline-block; padding: 1px 7px; border-radius: 999px;
+        font: 600 10px/1.7 var(--mono); letter-spacing: 0.03em; white-space: nowrap;
+      }
+      .uichip.ui { background: color-mix(in srgb, var(--green-primary) 14%, transparent); color: var(--green-fg); }
+      .uichip.verify { background: color-mix(in srgb, var(--blue-primary) 14%, transparent); color: var(--blue-primary); }
+      .uichip.noui { background: var(--bg2); color: var(--fg3); }
+
+      .footer-note {
+        margin-top: 64px; padding-top: 18px;
+        border-top: 1px solid var(--border1);
+        color: var(--fg3); font-size: 12px; line-height: 1.6;
+      }
+      .footer-note b { color: var(--fg2); }
+      .footer-note code { color: var(--fg2); }
+
+      @media (max-width: 900px) {
+        .dual, .thesis { grid-template-columns: 1fr; }
+        .hero { grid-template-columns: 1fr; }
+        .hero-aside { align-items: flex-start; }
+        .meta { display: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- ── Icon defs (lucide, matching the real components) ── -->
+    <svg aria-hidden="true" width="0" height="0" style="position: absolute">
+      <defs>
+        <symbol id="i-plus" viewBox="0 0 24 24">
+          <path d="M5 12h14M12 5v14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-send" viewBox="0 0 24 24">
+          <path d="M20 4v7a4 4 0 0 1-4 4H4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="m9 10-5 5 5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-spark" viewBox="0 0 24 24"><!-- generic agent glyph -->
+          <path d="M12 2v20M2 12h20M4.9 4.9l14.2 14.2M19.1 4.9 4.9 19.1" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-terminal" viewBox="0 0 24 24">
+          <path d="m4 17 6-5-6-5M12 19h8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-alert" viewBox="0 0 24 24"><!-- lucide triangle-alert -->
+          <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+          <path d="M12 9v4M12 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-check-big" viewBox="0 0 24 24"><!-- circle-check-big -->
+          <path d="M21.8 10A10 10 0 1 1 17 3.3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="m9 11 3 3L22 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-copy" viewBox="0 0 24 24">
+          <rect x="9" y="9" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" fill="none" stroke="currentColor" stroke-width="2" />
+        </symbol>
+        <symbol id="i-sun" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-image" viewBox="0 0 24 24"><!-- lucide image -->
+          <rect x="3" y="3" width="18" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2" />
+          <circle cx="9" cy="9" r="2" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-dollar" viewBox="0 0 24 24"><!-- circle-dollar-sign -->
+          <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8M12 18V6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-clock" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M12 6v6l4 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </symbol>
+        <symbol id="i-sparkles" viewBox="0 0 24 24"><!-- thinking glyph -->
+          <path d="M9.9 15.5a2 2 0 0 0-1.4-1.4L2.4 12.5a.5.5 0 0 1 0-1L8.5 9.9a2 2 0 0 0 1.4-1.4l1.6-6.1a.5.5 0 0 1 1 0l1.6 6.1a2 2 0 0 0 1.4 1.4l6.1 1.6a.5.5 0 0 1 0 1l-6.1 1.6a2 2 0 0 0-1.4 1.4l-1.6 6.1a.5.5 0 0 1-1 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+          <path d="M20 3v4M22 5h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+        <symbol id="i-loader" viewBox="0 0 24 24"><!-- loader-circle (spinner) -->
+          <path d="M21 12a9 9 0 1 1-6.2-8.56" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </symbol>
+      </defs>
+    </svg>
+
+    <main class="page">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">§3.9 Tool-content visibility &amp; streaming · Design catalog · 2026-07-19</div>
+          <h1>If the agent saw it, you see it — while it happens, not after</h1>
+          <p class="lede">
+            §3.9 decides whether the transcript is a <i>live window</i> into the agent's work or a
+            report that arrives late: screenshots a tool returned, the log of a long command, each
+            distinct piece of reasoning, a token bill that ticks while you watch. Fourteen rows,
+            re-audited against the live code on 2026-07-19: <b>one shipped since the doc</b>
+            (Codex <code>willRetry</code> — now a quiet retry chip), the Claude image bug turns out to
+            be <b>translator-only</b> (the renderer already draws images), and the Cursor delta channel
+            remains the keystone blocking three rows. Eight cases get a before / after below; the
+            invisible-wiring rows are tabled with exactly what to implement.
+          </p>
+        </div>
+        <div class="hero-aside">
+          <button class="theme-toggle" id="themeBtn" type="button">
+            <svg width="14" height="14"><use href="#i-sun" /></svg>
+            <span id="themeLabel">Light preview</span>
+          </button>
+          <div class="summary-chip">
+            <strong>Live window, not late report</strong>
+            <span>Nothing a tool produced is invisible, output grows while the command runs, and the app is honest about retries, failures and cost — in the moment.</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="thesis" aria-label="Design goals">
+        <div class="thesis-card primary">
+          <h3>Nothing the agent produced is invisible</h3>
+          <p>
+            A screenshot a tool returned renders as an image, not a JSON blob. Every reasoning
+            part shows as its own thought. A truncated output says so. The renderer is already
+            able to draw all of it — the translators just have to stop dropping it.
+          </p>
+        </div>
+        <div class="thesis-card">
+          <h3>Streaming means live, not at the end</h3>
+          <p>
+            A two-minute command shows its log <b>growing</b>, not a flickering last fragment or a
+            wall of text at completion. Text arrives token-by-token; the token/cost counter ticks
+            <b>during</b> the turn, not once it settles.
+          </p>
+        </div>
+        <div class="thesis-card">
+          <h3>Quiet when it self-heals, honest when it fails</h3>
+          <p>
+            A transient error the agent retries itself is a quiet "reconnecting" chip — never a red
+            bubble above a successful reply <i>(shipped)</i>. A terminal <code>systemError</code>
+            settles the turn at once — the composer never sits locked for ten minutes.
+          </p>
+        </div>
+      </section>
+
+      <div class="legend">
+        <span><b class="k">UI tags —</b>
+          <span class="uichip ui">🎨 UI work</span> new/changed surface ·
+          <span class="uichip verify">🔍 UI-verify</span> wiring, confirm in-app ·
+          <span class="uichip noui">⚙️ No UI</span> engine only</span>
+        <span><b class="k">Status (re-verified 2026-07-19) —</b>
+          <b class="st done" style="display:inline">✅ done</b> ·
+          <b class="st partial" style="display:inline">🟡 partial</b> ·
+          <b class="st miss" style="display:inline">❌ missing</b></span>
+      </div>
+
+      <nav aria-label="Cases">
+        <a href="#a1">A1 · Claude image results 🎨</a>
+        <a href="#a2">A2 · Codex live exec log</a>
+        <a href="#a3">A3 · Cursor delta channel</a>
+        <span class="nav-sep"></span>
+        <a href="#b1">B1 · Never-wedged composer</a>
+        <a href="#b2">B2 · Reasoning parts</a>
+        <a href="#b3">B3 · MCP progress</a>
+        <a href="#b4">B4 · Live token ticker</a>
+        <a href="#b5">B5 · Cursor cheap wins 🎨</a>
+        <span class="nav-sep"></span>
+        <a href="#shipped">✅ Shipped</a>
+        <a href="#no-ui">Invisible rows</a>
+        <a href="#impl">What to implement</a>
+      </nav>
+
+      <p class="band">Part A — The three P1 cases · before → after</p>
+
+      <div class="catalog">
+        <!-- A1 ───────────────────────────────────────────── -->
+        <section class="case" id="a1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">Row 1 · claude</span>
+                <span class="tag ui">🎨 UI already built</span>
+                <span class="tag p1">P1</span>
+                <span class="tag gap">🟡 Bug — translator drops images</span>
+              </div>
+              <h2>Tool-result images render — a screenshot is a picture, not a JSON blob</h2>
+              <p class="case-copy">
+                A tool that returns an image — a browser-MCP screenshot, an MCP chart — shows
+                <b>nothing useful</b> today: the Claude translator flattens every
+                <code>tool_result</code> to text (<code>toolResultText</code> maps blocks to
+                <code>c.text</code> and filters the rest, <code>translator.ts:1198-1209</code>), so an
+                image block becomes <code>""</code> and is dropped before the UI ever sees it. The
+                twist this audit confirmed: <b>the renderer is already finished</b> —
+                <code>event-row-renderer.tsx:142-187</code> handles
+                <code>{type:'image'}</code> blocks (base64 → data-URI, or plain URI) and draws a
+                bordered <code>&lt;img&gt;</code>, with a comment naming this exact use case.
+                <b>After:</b> the translator preserves image blocks and the existing UI just works —
+                a zero-pixel fix.
+              </p>
+            </div>
+            <div class="meta">
+              claude · fix is translator-only: <code>translator.ts:777-793</code> (emit site) +
+              <code>:1198-1209</code> (<code>toolResultText</code>). UI ready:
+              <code>event-row-renderer.tsx:142-154/180-187</code>; MCP tools route there via
+              <code>registry.ts:89</code>.
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — the screenshot is silently lost</div>
+              <div class="frame">
+                <div class="chat-head">
+                  <span class="agent-glyph"><svg><use href="#i-spark" /></svg></span>
+                  <b>Claude Code</b>
+                  <span class="head-status"><span class="authdot ok"></span><span>connected</span></span>
+                </div>
+                <div class="chat-body">
+                  <div class="transcript">
+                    <div class="u-msg">Take a screenshot of the dashboard and check the nav alignment</div>
+                    <div class="erow-wrap">
+                      <div class="erow">
+                        <span class="eicon"><svg><use href="#i-image" /></svg></span>
+                        <span class="ename">browser_take_screenshot</span>
+                        <span class="etarget">playwright</span>
+                      </div>
+                      <div class="edetail capped">
+                        <span class="dim">[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAABQAAAALQCAYAAADPfd1WAAAgAElEQVR4nOzdd3wUdf7H8c9m03tCEkIgQAKh9yZVUJoiRVFEURTb2c/2s3v2u/M8z3Z2sYuKCiJIkw7Sewk1CQmk97rZbJn5/RGNxiSQzW4yu5nX8/HYR5jZmc98hgzJvPf7ne8YRFEUBQAAAAAAAAADkpPSDQAAAAAAAADoPQSAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYASAAAAAAAAAwABGAAgAAAAAAAAMYP8P02/o9OM8jJIAAAAASUVORK5CYII=…"}}]  <i>(214 KB of base64 the UI can never draw)</i></span>
+                      </div>
+                      <p class="edetail-note">rawOutput fallback — the UI never receives an image content block, so it shows the raw JSON (or "(no captured output)").</p>
+                    </div>
+                    <div class="a-msg">The nav looks correctly aligned — items are evenly spaced with the logo flush left.</div>
+                    <div class="tf">
+                      <span class="tf-time">18s</span>
+                      <button class="tf-icon" type="button"><svg><use href="#i-copy" /></svg></button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p class="frame-note">The agent "verified" a screenshot the user can never see. <code>toolResultText</code> maps content blocks to <code>c.text</code> only — the image block has no <code>.text</code>, so it's filtered out; the canonical content the UI receives is text-only or <code>null</code>, and the fallback shows raw JSON. The user is asked to trust, not look.</p>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — the image block survives; the renderer already draws it</div>
+              <div class="frame">
+                <div class="chat-head">
+                  <span class="agent-glyph"><svg><use href="#i-spark" /></svg></span>
+                  <b>Claude Code</b>
+                  <span class="head-status"><span class="authdot ok"></span><span>connected</span></span>
+                </div>
+                <div class="chat-body">
+                  <div class="transcript">
+                    <div class="u-msg">Take a screenshot of the dashboard and check the nav alignment</div>
+                    <div class="erow-wrap">
+                      <div class="erow">
+                        <span class="eicon"><svg><use href="#i-image" /></svg></span>
+                        <span class="ename">browser_take_screenshot</span>
+                        <span class="etarget">playwright</span>
+                        <span class="etrail">1 image</span>
+                      </div>
+                      <div class="shot" role="img" aria-label="Rendered screenshot returned by the tool">
+                        <div class="shot-bar"><i></i><i></i><i></i><span>localhost:3000/dashboard</span></div>
+                        <div class="shot-body">
+                          <div class="sk-row"><span class="sk" style="max-width:64px"></span><span class="sk w40"></span><span class="sk w40"></span></div>
+                          <div class="sk hero"></div>
+                          <div class="sk w80"></div>
+                          <div class="sk w60"></div>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="a-msg">The nav looks correctly aligned — items are evenly spaced with the logo flush left.</div>
+                    <div class="tf">
+                      <span class="tf-time">18s</span>
+                      <button class="tf-icon" type="button"><svg><use href="#i-copy" /></svg></button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p class="frame-note"><b>What changes: nothing in the UI.</b> The translator emits <code>{type:'content', content:{type:'image', data, mimeType}}</code> alongside any text; <code>event-row-renderer.tsx:180-187</code> already renders it as a bordered <code>&lt;img&gt;</code> (max-height 320px) inside the expandable detail, above any text blocks. The row gains its normal trailing count.</p>
+            </div>
+          </div>
+
+          <div class="note ok" style="max-width: 720px">
+            <svg><use href="#i-check-big" /></svg>
+            <span><b>Cheapest P1 in the section.</b> The renderer, the MCP routing (<code>registry.ts:89</code>), the data-URI handling and the image styling all exist and are waiting. The whole fix is ~10 lines in <code>claude/translator.ts</code>: type the content union to include image blocks and stop flattening them.</span>
+          </div>
+        </section>
+
+        <!-- A2 ───────────────────────────────────────────── -->
+        <section class="case" id="a2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">Row 2 · codex</span>
+                <span class="tag verify">🔍 UI-verify</span>
+                <span class="tag p1">P1</span>
+                <span class="tag miss">❌ Missing (REPLACE semantics)</span>
+              </div>
+              <h2>Exec output APPENDs — a long command's log grows, it doesn't flicker</h2>
+              <p class="case-copy">
+                While a long Codex command streams, <code>onToolOutputDelta</code>
+                (<code>app-server-translator.ts:584-599</code>) emits <b>only the latest fragment</b>
+                as <code>rawOutput</code>, and core's <code>mergeRawOutput</code>
+                (<code>agent-messages.ts:371-393</code>) applies it wholesale — so the expanded card
+                shows one flickering line that keeps being replaced, and the full text appears only at
+                <code>item/completed</code> (via <code>aggregatedOutput</code>). The translator
+                <b>already owns an accumulator pattern</b> — <code>appendDelta</code>
+                (<code>:709-730</code>) does exactly this for message/reasoning text. <b>After:</b> the
+                same accumulation keyed per <code>itemId</code> feeds the card a <b>running total</b>
+                that follows the tail, like a terminal.
+              </p>
+            </div>
+            <div class="meta">
+              codex · <code>app-server-translator.ts:584-599</code> (delta emit),
+              <code>:514-520</code> (completion aggregate), <code>agent-messages.ts:371-393/493</code>
+              (REPLACE merge). Mirror <code>appendDelta</code> (<code>:709-730</code>).
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — one flickering fragment; full log only at the end</div>
+              <div class="frame">
+                <div class="chat-head">
+                  <span class="agent-glyph"><svg><use href="#i-spark" /></svg></span>
+                  <b>Codex</b>
+                  <span class="head-status"><span class="authdot ok"></span><span>connected</span></span>
+                </div>
+                <div class="chat-body">
+                  <div class="transcript">
+                    <div class="u-msg">Run the full test suite and fix anything that fails</div>
+                    <div class="erow-wrap">
+                      <div class="erow run">
+                        <span class="eicon"><svg class="spin"><use href="#i-loader" /></svg></span>
+                        <span class="ename">Bash</span>
+                        <span class="etarget">pnpm test --run</span>
+                      </div>
+                      <div class="edetail">
+                        <span class="dim">✓ src/engine/agents/__tests__/adapter.test.ts (49 tests) 4.2s</span>
+                      </div>
+                      <p class="edetail-note">…a moment later this single line is REPLACED by the next fragment — earlier output is gone until completion.</p>
+                    </div>
+                    <div class="working-row">
+                      <span class="shimmer">Running tests…</span>
+                      <span class="wtime">1m 41s</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p class="frame-note">Each streamed delta overwrites the last (<code>mergeRawOutput</code> returns <code>next</code> wholesale). Scanning back to see whether a test already failed is impossible mid-run; the card only becomes trustworthy after the command exits.</p>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — the running total, following the tail</div>
+              <div class="frame">
+                <div class="chat-head">
+                  <span class="agent-glyph"><svg><use href="#i-spark" /></svg></span>
+                  <b>Codex</b>
+                  <span class="head-status"><span class="authdot ok"></span><span>connected</span></span>
+                </div>
+                <div class="chat-body">
+                  <div class="transcript">
+                    <div class="u-msg">Run the full test suite and fix anything that fails</div>
+                    <div class="erow-wrap">
+                      <div class="erow run">
+                        <span class="eicon"><svg class="spin"><use href="#i-loader" /></svg></span>
+                        <span class="ename">Bash</span>
+                        <span class="etarget">pnpm test --run</span>
+                      </div>
+                      <div class="edetail">
+                        <span class="dim">✓ src/engine/agents/__tests__/adapter.test.ts (49) 4.2s</span><br />
+                        <span class="dim">✓ src/engine/agents/__tests__/translator.test.ts (61) 2.8s</span><br />
+                        <span class="err">✗ src/zeros/agent/__tests__/turn-footer.test.tsx (12) 1.9s</span><br />
+                        <span class="dim">&nbsp;&nbsp;× shows usage popover when perModel present</span><br />
+                        <span>✓ src/zeros/agent/__tests__/event-summary.test.ts (23) 0.9s</span><br />
+                        <span>Test Files&nbsp;&nbsp;3 passed | 1 failed (4)</span>
+                      </div>
+                      <p class="edetail-note">accumulated log, capped at ~8 lines and scrollable — the tail stays pinned while output streams in.</p>
+                    </div>
+                    <div class="working-row">
+                      <span class="shimmer">Running tests…</span>
+                      <span class="wtime">1m 41s</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p class="frame-note"><b>What changes:</b> a per-<code>itemId</code> output accumulator in the translator (mirroring <code>appendDelta</code>) emits the running total on each delta; the existing capped, scrollable detail body (<code>max-h-[200px]</code>) renders it. The mid-run failure above is visible the moment it prints — not 90 seconds later.</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- A3 ───────────────────────────────────────────── -->
+        <section class="case" id="a3">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">Rows 9–12 · cursor</span>
+                <span class="tag verify">🔍 keystone + ⚙️ usage</span>
+                <span class="tag p1">P1</span>
+                <span class="tag gap">🟡 Whole messages only</span>
+              </div>
+              <h2>The Cursor delta channel — one host event unlocks live text, live shell, and a real bill</h2>
+              <p class="case-copy">
+                Cursor <i>does</i> stream — but in <b>whole-message chunks</b>: the bun→Node host
+                drains <code>run.stream()</code> and forwards each complete <code>SDKMessage</code> as
+                a <code>run.msg</code> event (<code>cursor-host.cjs:165-176</code>); no
+                <code>run.delta</code> crosses the boundary. So text lands in paragraph-sized blocks,
+                a long shell command shows <b>no output until it exits</b>, and every Cursor turn
+                reports <b>zero tokens</b> (<code>PromptResponse</code> is built as
+                <code>{stopReason}</code> only, <code>adapter.ts:994</code>). The groundwork has
+                started: an <code>onDelta</code> probe already sits in the host logging
+                <code>turn-ended</code> usage to stderr, with a comment planning the real
+                <code>run.usage</code> forwarding (<code>cursor-host.cjs:204-224</code>). <b>After:</b>
+                the host registers <code>onDelta</code> for real and forwards
+                <code>text-delta</code> / <code>shell-output-delta</code> / <code>turn-ended</code> —
+                three rows light up from one event.
+              </p>
+            </div>
+            <div class="meta">
+              cursor · <code>host/cursor-host.cjs:165-176</code> (drain loop), <code>:204-224</code>
+              (usage probe), <code>adapter.ts:978</code> (whole-msg consume), <code>:994/1005-1006</code>
+              (no usage), <code>translator.ts:224-256</code> (whole-block emits). Footer is ready:
+              <code>turn-footer.tsx:431</code> gates on <code>hasTurnUsage</code>.
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — chunky text, silent shell, no bill</div>
+              <div class="frame">
+                <div class="chat-head">
+                  <span class="agent-glyph"><svg><use href="#i-spark" /></svg></span>
+                  <b>Cursor</b>
+                  <span class="head-status"><span class="authdot ok"></span><span>connected</span></span>
+                </div>
+                <div class="chat-body">
+                  <div class="transcript">
+                    <div class="u-msg">Profile the build and tell me where the time goes</div>
+                    <div class="erow-wrap">
+                      <div class="erow run">
+                        <span class="eicon"><svg class="spin"><use href="#i-loader" /></svg></span>
+                        <span class="ename">Shell</span>
+                        <span class="etarget">cargo build --release --timings</span>
+                      </div>
+                      <div class="edetail">
+                        <span class="dim">(no output until the command completes)</span>
+                      </div>
+                    </div>
+                    <div class="a-msg">I'll start by profiling the release build with timings enabled. While that runs, I'm reviewing the workspace layout to map crates to build units so the report is easier to attribute.</div>
+                    <div class="callout">this whole paragraph appeared at once — one <code>run.msg</code>, no token-by-token flow</div>
+                    <div class="tf">
+                      <span class="tf-time">2m 04s</span>
+                      <span class="missing">no usage — Cursor turns are invisible in cost analytics</span>
+                      <button class="tf-icon" type="button"><svg><use href="#i-copy" /></svg></button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p class="frame-note">Three symptoms, one cause: only whole <code>SDKMessage</code>s cross the host boundary. Text arrives in blocks (translator coalesces under a per-turn <code>messageId</code>, <code>translator.ts:237-256</code>), shell output exists only on the completed leg (<code>:311-321</code>), and <code>turn-ended.usage</code> dies in a stderr probe.</p>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — <code>run.delta</code> + <code>run.usage</code>: live everywhere</div>
+              <div class="frame">
+                <div class="chat-head">
+                  <span class="agent-glyph"><svg><use href="#i-spark" /></svg></span>
+                  <b>Cursor</b>
+                  <span class="head-status"><span class="authdot ok"></span><span>connected</span></span>
+                </div>
+                <div class="chat-body">
+                  <div class="transcript">
+                    <div class="u-msg">Profile the build and tell me where the time goes</div>
+                    <div class="erow-wrap">
+                      <div class="erow run">
+                        <span class="eicon"><svg class="spin"><use href="#i-loader" /></svg></span>
+                        <span class="ename">Shell</span>
+                        <span class="etarget">cargo build --release --timings</span>
+                      </div>
+                      <div class="edetail">
+                        <span class="dim">Compiling serde v1.0.219</span><br />
+                        <span class="dim">Compiling tokio v1.45.0</span><br />
+                        <span>Compiling zeros-engine v0.9.2</span>
+                      </div>
+                      <p class="edetail-note">shell output streams into the card while the command runs</p>
+                    </div>
+                    <div class="a-msg">I'll start by profiling the release build with timings enabled. While that runs, I'm rev<span class="caret"></span></div>
+                    <div class="callout">token-by-token text via <code>text-delta</code> — the same smooth flow Claude and Codex already have</div>
+                    <div class="tf">
+                      <span class="tf-time">2m 04s</span>
+                      <button class="tf-icon" type="button" aria-label="Turn usage"><svg><use href="#i-dollar" /></svg></button>
+                      <span style="color:var(--fg3);font-size:11px">31.2k in · 4.1k out</span>
+                      <button class="tf-icon" type="button"><svg><use href="#i-copy" /></svg></button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p class="frame-note"><b>What changes (engine-only):</b> the host registers <code>onDelta</code>/<code>onStep</code> and forwards <code>run.delta</code> + <code>run.usage</code>; the adapter/translator consume <code>text-delta</code>, <code>shell-output-delta</code>, <code>turn-ended</code> → <code>PromptResponse.usage</code>. The footer's circle-dollar button appears <b>automatically</b> — <code>hasTurnUsage</code> already gates it; Cursor simply starts having usage. (Tokens only — Cursor reports no cost.)</p>
+            </div>
+          </div>
+
+          <div class="note info" style="max-width: 720px">
+            <svg><use href="#i-terminal" /></svg>
+            <span><b>Why this is the keystone.</b> Rows 10 (live shell), 11 (token-by-token text/thinking) and 12 (usage/analytics) are all blocked on this one host event — they are consumers, not separate builds. The stderr probe in the host is the scouting party: its comment reads "if usage comes back populated, wiring #2 for real (forward it as a <code>run.usage</code> event → PromptResponse.usage) is a go."</span>
+          </div>
+        </section>
+      </div>
+
+      <p class="band" style="margin-top:64px">Part B — The P2/P3 cases · before → after</p>
+
+      <div class="catalog">
+        <!-- B1 ───────────────────────────────────────────── -->
+        <section class="case" id="b1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">Row 4 · codex</span>
+                <span class="tag verify">🔍 UI-verify</span>
+                <span class="tag p2">P2</span>
+                <span class="tag miss">❌ Missing (explicit no-op)</span>
+              </div>
+              <h2>A <code>systemError</code> settles the turn — the composer never sits locked</h2>
+              <p class="case-copy">
+                When Codex dies with a <code>systemError</code> and never sends turn-completion, the
+                composer stays locked <b>up to the 10-minute timeout</b> — the working shimmer keeps
+                shimmering over a session that is already gone. <code>thread/status/changed</code> is
+                an <b>explicit no-op</b> in the translator (<code>app-server-translator.ts:223-227</code>,
+                pinned by a test), and the <code>systemError</code> status in the generated protocol
+                (<code>ThreadStatus.ts:6</code>) is read nowhere. <b>After:</b> the translator adds a
+                case that settles the turn as <b>failed</b> on <code>systemError</code> — a red notice
+                row, an honest <b>TURN FAILED</b> pill, and a live composer, seconds after the error.
+              </p>
+            </div>
+            <div class="meta">
+              codex · <code>app-server-translator.ts:223-227</code> (no-op case),
+              <code>generated/v2/ThreadStatus.ts:6</code> (<code>systemError</code>),
+              subscription already wired at <code>app-server-adapter.ts:1632</code>.
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — wedged for up to 10 minutes</div>
+              <div class="frame">
+                <div class="chat-head">
+                  <span class="agent-glyph"><svg><use href="#i-spark" /></svg></span>
+                  <b>Codex</b>
+                  <span class="head-status"><span class="authdot ok"></span><span>connected</span></span>
+                </div>
+                <div class="chat-body">
+                  <div class="transcript">
+                    <div class="u-msg">Refactor the settings loader to async</div>
+                    <div class="erow-wrap">
+                      <div class="erow">
+                        <span class="eicon"><svg><use href="#i-terminal" /></svg></span>
+                        <span class="ename">Read</span>
+                        <span class="etarget">settings-loader.ts</span>
+                      </div>
+                    </div>
+                    <div class="working-row">
+                      <span class="shimmer">Working…</span>
+                      <span class="wtime">7m 12s</span>
+                    </div>
+                    <div class="callout">Codex hit a <code>systemError</code> six minutes ago — no turn-completion ever arrives; the shimmer and the lock persist until the 10-minute timeout</div>
+                  </div>
+                  <div class="composer locked">
+                    <div class="composer-input ph">Reply to Codex…</div>
+                    <div class="composer-bar">
+                      <div class="composer-tools">
+                        <span class="tool-plus"><svg><use href="#i-plus" /></svg></span>
+                        <span class="cpill"><svg><use href="#i-spark" /></svg>Codex</span>
+                      </div>
+                      <div class="composer-right">
+                        <button class="send-btn disabled" type="button"><svg><use href="#i-send" /></svg></button>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="lock-hint"><svg><use href="#i-clock" /></svg>Composer locked — waiting on a turn that will never complete</div>
+                </div>
+              </div>
+              <p class="frame-note">The status event that says "this thread just system-errored" arrives and is deliberately dropped. The user's only options are to wait out the timeout or restart the session.</p>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — settled as failed in seconds, composer live</div>
+              <div class="frame">
+                <div class="chat-head">
+                  <span class="agent-glyph"><svg><use href="#i-spark" /></svg></span>
+                  <b>Codex</b>
+                  <span class="head-status"><span class="authdot ok"></span><span>connected</span></span>
+                </div>
+                <div class="chat-body">
+                  <div class="transcript">
+                    <div class="u-msg">Refactor the settings loader to async</div>
+                    <div class="erow-wrap">
+                      <div class="erow">
+                        <span class="eicon"><svg><use href="#i-terminal" /></svg></span>
+                        <span class="ename">Read</span>
+                        <span class="etarget">settings-loader.ts</span>
+                      </div>
+                    </div>
+                    <div class="erow-wrap">
+                      <div class="erow fail">
+                        <span class="eicon"><svg><use href="#i-alert" /></svg></span>
+                        <span class="ename">Codex hit a system error — the turn was ended</span>
+                      </div>
+                      <div class="err-bubble">thread/status/changed → systemError: model backend unavailable</div>
+                    </div>
+                    <div class="tf">
+                      <span class="tf-line"><span class="tf-pill">TURN FAILED · SYSTEM ERROR</span></span>
+                      <span class="tf-time">1m 09s</span>
+                      <button class="tf-icon" type="button"><svg><use href="#i-copy" /></svg></button>
+                    </div>
+                  </div>
+                  <div class="composer">
+                    <div class="composer-input ph">Reply to Codex…</div>
+                    <div class="composer-bar">
+                      <div class="composer-tools">
+                        <span class="tool-plus"><svg><use href="#i-plus" /></svg></span>
+                        <span class="cpill"><svg><use href="#i-spark" /></svg>Codex</span>
+                      </div>
+                      <div class="composer-right">
+                        <button class="send-btn" type="button"><svg><use href="#i-send" /></svg></button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p class="frame-note"><b>What changes:</b> a <code>thread/status/changed</code> case reads <code>status.type === 'systemError'</code> → settle the turn as failed (existing failure path: error notice + stop-reason pill + unlock). No new components — just the wire that was dropped. Update the no-op-pinning test.</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- B2 ───────────────────────────────────────────── -->
+        <section class="case" id="b2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">Row 5 · codex</span>
+                <span class="tag verify">🔍 UI-verify</span>
+                <span class="tag p2">P2</span>
+                <span class="tag miss">❌ Missing</span>
+              </div>
+              <h2>Reasoning parts stay distinct — three thoughts are three rows, not one blob</h2>
+              <p class="case-copy">
+                Codex emits reasoning in <b>summary parts</b> — distinct passes of thought with
+                explicit boundaries (<code>item/reasoning/summaryPartAdded</code>). The translator
+                keys accumulation by <code>itemId</code> alone
+                (<code>app-server-translator.ts:578-582</code>, <code>appendDelta :727-729</code>), so
+                every part concatenates into one run-on blob — often mid-word — and
+                <code>summaryPartAdded</code> (subscribed at <code>app-server-adapter.ts:1643</code>)
+                falls through to <code>onUnknown</code>. <b>After:</b> accumulation keys on
+                <code>${itemId}:${summaryIndex}</code> and each part becomes its own thought row with
+                its own preview.
+              </p>
+            </div>
+            <div class="meta">
+              codex · <code>app-server-translator.ts:237-239/578-582/727-729</code>;
+              <code>summaryPartAdded</code> subscribed (<code>adapter:1643</code>) → currently
+              <code>onUnknown</code> (<code>:267-268</code>).
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — parts merge into one run-on blob</div>
+              <div class="frame">
+                <div class="chat-body">
+                  <div class="transcript">
+                    <div class="erow-wrap">
+                      <div class="erow">
+                        <span class="eicon"><svg><use href="#i-sparkles" /></svg></span>
+                        <span class="ename">Thinking</span>
+                        <span class="etarget">Scanning the adapter for the retry pathThe better approach is a…</span>
+                      </div>
+                      <div class="edetail" style="font-family:var(--sans)">
+                        Scanning the adapter for the retry pathThe better approach is a single-flight
+                        guard around token refreshNow checking the tests to see which contract is
+                        already pinned before proposing the change
+                      </div>
+                      <p class="edetail-note">three distinct summary parts, concatenated with no boundary — note the missing spaces where parts were glued</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p class="frame-note">New-part boundaries are ignored, so separate thoughts fuse — the preview is garbled and the expanded blob reads as one endless sentence.</p>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — one row per part, honest previews</div>
+              <div class="frame">
+                <div class="chat-body">
+                  <div class="transcript">
+                    <div class="erow-wrap">
+                      <div class="erow">
+                        <span class="eicon"><svg><use href="#i-sparkles" /></svg></span>
+                        <span class="ename">Thinking</span>
+                        <span class="etarget">Scanning the adapter for the retry path</span>
+                      </div>
+                    </div>
+                    <div class="erow-wrap">
+                      <div class="erow">
+                        <span class="eicon"><svg><use href="#i-sparkles" /></svg></span>
+                        <span class="ename">Thinking</span>
+                        <span class="etarget">The better approach is a single-flight guard around token refresh</span>
+                      </div>
+                    </div>
+                    <div class="erow-wrap">
+                      <div class="erow">
+                        <span class="eicon"><svg><use href="#i-sparkles" /></svg></span>
+                        <span class="ename">Thinking</span>
+                        <span class="etarget">Checking the tests to see which contract is already pinned</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p class="frame-note"><b>What changes (engine-only):</b> key the accumulator by <code>${itemId}:${summaryIndex|contentIndex}</code> and handle <code>summaryPartAdded</code> as a boundary → each part streams under its own <code>messageId</code>, and the existing thought row renders each one. Zero UI work.</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- B3 ───────────────────────────────────────────── -->
+        <section class="case" id="b3">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">Row 8 · codex</span>
+                <span class="tag verify">🔍 UI-verify</span>
+                <span class="tag p2">P2</span>
+                <span class="tag miss">❌ Missing (not even subscribed)</span>
+              </div>
+              <h2>MCP tool progress — a long tool shows how far along it is</h2>
+              <p class="case-copy">
+                A long-running MCP tool (a big export, a site crawl) shows start → spinner → done;
+                nothing in between. The protocol has the event —
+                <code>item/mcpToolCall/progress</code> (<code>ServerNotification.ts:77</code>) — but it
+                is <b>not in the adapter's subscription list</b>
+                (<code>app-server-adapter.ts:1630-1659</code>) and has no translator case.
+                <b>After:</b> subscribe + translate to a <code>tool_call_update</code> carrying
+                progress; the row gains a trailing <code>62/180 · 34%</code> and the expanded detail a
+                slim progress bar with the tool's own message.
+              </p>
+            </div>
+            <div class="meta">
+              codex · subscribe in <code>app-server-adapter.ts:1630-1659</code>, new translator case;
+              trailing slot already exists on <code>EventRow</code> (<code>meta.trailing</code>).
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — a 90-second spinner with no news</div>
+              <div class="frame">
+                <div class="chat-body">
+                  <div class="transcript">
+                    <div class="erow-wrap">
+                      <div class="erow run">
+                        <span class="eicon"><svg class="spin"><use href="#i-loader" /></svg></span>
+                        <span class="ename">export_issues</span>
+                        <span class="etarget">linear</span>
+                      </div>
+                      <div class="edetail">
+                        <span class="dim">(no captured output)</span>
+                      </div>
+                    </div>
+                    <div class="working-row">
+                      <span class="shimmer">Working…</span>
+                      <span class="wtime">1m 32s</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p class="frame-note">Is it 5% done or hung? The tool has been reporting progress the whole time — the notifications just never reach the translator.</p>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — trailing count + a slim bar in the detail</div>
+              <div class="frame">
+                <div class="chat-body">
+                  <div class="transcript">
+                    <div class="erow-wrap">
+                      <div class="erow run">
+                        <span class="eicon"><svg class="spin"><use href="#i-loader" /></svg></span>
+                        <span class="ename">export_issues</span>
+                        <span class="etarget">linear</span>
+                        <span class="etrail">62/180 · 34%</span>
+                      </div>
+                      <div class="edetail">
+                        <span class="dim">Exporting issues — page 7/20 (project: Zeros)</span>
+                        <div class="pbar"><i></i></div>
+                      </div>
+                    </div>
+                    <div class="working-row">
+                      <span class="shimmer">Working…</span>
+                      <span class="wtime">1m 32s</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p class="frame-note"><b>What changes:</b> subscribe <code>item/mcpToolCall/progress</code> → <code>tool_call_update</code> with <code>{progress, total, message}</code>; the row's existing trailing slot shows the count, and the detail body gains the bar + latest message. Also pairs with §4b's open "running affordance" finding.</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- B4 ───────────────────────────────────────────── -->
+        <section class="case" id="b4">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">Row 13 · claude</span>
+                <span class="tag verify">🔍 UI-verify + surface</span>
+                <span class="tag p2">P2</span>
+                <span class="tag miss">❌ Missing (turn-end only)</span>
+              </div>
+              <h2>Live in-turn token ticker — watch the bill while it runs, not after</h2>
+              <p class="case-copy">
+                Claude's token/cost data exists — but only at the finish line. The translator's single
+                <code>usage_update</code> fires in the <b>result handler</b>
+                (<code>translator.ts:1087-1149</code>, cumulative <code>result.usage</code>), the
+                adapter's <code>emitContextUsage</code> is documented as "after the turn settles"
+                (<code>adapter.ts:875-926</code>), and the turn footer deliberately renders
+                <b>nothing while streaming</b> (<code>turn-footer.tsx:395-399</code>). On a 10-minute
+                agentic turn the user has no idea if they've spent 2¢ or $2. <b>After:</b> the
+                translator consumes per-message stream usage into incremental
+                <code>usage_update</code>s; a quiet <b>live ticker</b> rides next to the working
+                shimmer and the context gauge advances during the turn. The settled footer keeps the
+                itemized bill it already has.
+              </p>
+            </div>
+            <div class="meta">
+              claude · <code>translator.ts:1087-1149</code> (turn-end emit), <code>onAssistant :799+</code>
+              (add per-message usage), <code>adapter.ts:880-926</code>; UI: shimmer tail
+              (<code>activity-hud.tsx</code>) + gauge (<code>context-gauge.tsx</code>,
+              <code>sessions-store.ts:507-510</code>).
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — silence until the turn settles</div>
+              <div class="frame">
+                <div class="chat-body">
+                  <div class="transcript">
+                    <div class="u-msg">Migrate the sessions store to the new schema and run the tests</div>
+                    <div class="erow-wrap">
+                      <div class="erow">
+                        <span class="eicon"><svg><use href="#i-terminal" /></svg></span>
+                        <span class="ename">Bash</span>
+                        <span class="etarget">pnpm vitest run sessions</span>
+                      </div>
+                    </div>
+                    <div class="working-row">
+                      <span class="shimmer">Working…</span>
+                      <span class="wtime">6m 48s</span>
+                    </div>
+                    <div class="callout">nothing else renders while streaming — tokens, cost and context fill are all unknown until the end</div>
+                  </div>
+                </div>
+              </div>
+              <p class="frame-note">The itemized bill (circle-dollar popover) is great — but it's a receipt, not a meter. Long turns burn budget invisibly.</p>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — a quiet meter next to the shimmer</div>
+              <div class="frame">
+                <div class="chat-body">
+                  <div class="transcript">
+                    <div class="u-msg">Migrate the sessions store to the new schema and run the tests</div>
+                    <div class="erow-wrap">
+                      <div class="erow">
+                        <span class="eicon"><svg><use href="#i-terminal" /></svg></span>
+                        <span class="ename">Bash</span>
+                        <span class="etarget">pnpm vitest run sessions</span>
+                      </div>
+                    </div>
+                    <div class="working-row">
+                      <span class="shimmer">Working…</span>
+                      <span class="wtime">6m 48s</span>
+                      <span class="usage-live"><svg><use href="#i-dollar" /></svg><b>$0.87</b> · 96.2k tok</span>
+                      <span class="gauge"><span class="bar"><i style="width:48%"></i></span>48% ctx</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p class="frame-note"><b>What changes:</b> the translator emits incremental <code>usage_update</code>s from per-message stream usage (the store already consumes the event — <code>sessions-store.ts:507-510</code>); the working tail gains a live ticker chip and the context gauge advances mid-turn. Ties directly into the §3.6 budget cap: watching the meter approach the cap is the point.</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- B5 ───────────────────────────────────────────── -->
+        <section class="case" id="b5">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">Row 14 · cursor</span>
+                <span class="tag ui">🎨 UI work</span>
+                <span class="tag p3">P3</span>
+                <span class="tag miss">❌ Missing (fields ignored)</span>
+              </div>
+              <h2>Cheap wins from fields already arriving — a truncation badge and a thinking timer</h2>
+              <p class="case-copy">
+                Two Cursor fields ride on messages the translator <b>already reads</b> and are simply
+                ignored: <code>SDKToolUseMessage.truncated</code> (the SDK clipped a tool's output)
+                and <code>SDKThinkingMessage.thinking_duration_ms</code>. No delta channel needed —
+                the translator's <code>SdkMsg</code> view (<code>translator.ts:50-60</code>) just
+                doesn't declare the fields. <b>After:</b> a quiet <b>OUTPUT TRUNCATED</b> pill on the
+                tool row (so the user knows the log is incomplete rather than short) and a
+                <code>12s</code> duration on the thinking row. Bonus: <code>DurationChip</code>
+                already exists unused in <code>src/loaders/live-duration.tsx</code>.
+              </p>
+            </div>
+            <div class="meta">
+              cursor · <code>translator.ts:40-60</code> (add fields to <code>SdkMsg</code>),
+              <code>:224-235</code> (thinking), <code>:258-348</code> (tool calls); UI: EventRow
+              trailing slot + unused <code>DurationChip</code>.
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — silent clipping, unmeasured thought</div>
+              <div class="frame">
+                <div class="chat-body">
+                  <div class="transcript">
+                    <div class="erow-wrap">
+                      <div class="erow">
+                        <span class="eicon"><svg><use href="#i-sparkles" /></svg></span>
+                        <span class="ename">Thinking</span>
+                        <span class="etarget">Mapping the churn across the last 200 commits…</span>
+                      </div>
+                    </div>
+                    <div class="erow-wrap">
+                      <div class="erow">
+                        <span class="eicon"><svg><use href="#i-terminal" /></svg></span>
+                        <span class="ename">Shell</span>
+                        <span class="etarget">git log --stat -n 200</span>
+                      </div>
+                      <div class="edetail capped">
+                        <span class="dim">commit 91c2f1a — feat(shell): proportional column resizing</span><br />
+                        <span class="dim">&nbsp;src/shell/columns.tsx | 84 ++++++++----</span><br />
+                        <span class="dim">commit b0416ea — persist window state</span><br />
+                        <span class="dim">&nbsp;src/shell/window-state.ts | 112 +++++++++++</span><br />
+                        <span class="dim">commit fddace0 — workspace interactions instant…</span>
+                      </div>
+                      <p class="edetail-note">the SDK clipped this output (<code>truncated: true</code>) — but the card looks complete; conclusions get drawn from half a log</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p class="frame-note">Both fields arrive on every one of these messages and are dropped at the <code>SdkMsg</code> view. The user can't tell a short output from a clipped one, or a snap judgment from a 40-second think.</p>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — the row says what happened</div>
+              <div class="frame">
+                <div class="chat-body">
+                  <div class="transcript">
+                    <div class="erow-wrap">
+                      <div class="erow">
+                        <span class="eicon"><svg><use href="#i-sparkles" /></svg></span>
+                        <span class="ename">Thinking</span>
+                        <span class="etarget">Mapping the churn across the last 200 commits…</span>
+                        <span class="etrail">12s</span>
+                      </div>
+                    </div>
+                    <div class="erow-wrap">
+                      <div class="erow">
+                        <span class="eicon"><svg><use href="#i-terminal" /></svg></span>
+                        <span class="ename">Shell</span>
+                        <span class="etarget">git log --stat -n 200</span>
+                        <span class="mpill warn">output truncated</span>
+                      </div>
+                      <div class="edetail capped">
+                        <span class="dim">commit 91c2f1a — feat(shell): proportional column resizing</span><br />
+                        <span class="dim">&nbsp;src/shell/columns.tsx | 84 ++++++++----</span><br />
+                        <span class="dim">commit b0416ea — persist window state</span><br />
+                        <span class="dim">&nbsp;src/shell/window-state.ts | 112 +++++++++++</span><br />
+                        <span class="dim">commit fddace0 — workspace interactions instant…</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p class="frame-note"><b>What changes:</b> declare the two fields on <code>SdkMsg</code>, thread <code>truncated</code> → a warning pill in the row's trailing slot, and <code>thinking_duration_ms</code> → a trailing duration (or resurrect <code>DurationChip</code>). Note: no agent shows an SDK-driven truncation badge today — this pattern generalizes.</p>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <p class="band" id="shipped" style="margin-top:64px">Part C — Already shipped in §3.9 (verified in code, 2026-07-19)</p>
+
+      <div class="single frame-wrap" style="margin-bottom:20px">
+        <div class="frame-label shipped"><span class="dot-lg"></span>✅ Shipped since the doc — Row 3: <code>willRetry</code> is a quiet chip, not a red bubble</div>
+        <div class="frame">
+          <div class="chat-body">
+            <div class="transcript">
+              <div class="u-msg">Summarize the failing CI jobs</div>
+              <div class="working-row">
+                <svg class="spin" width="14" height="14" style="color:var(--fg2)"><use href="#i-loader" /></svg>
+                <span class="shimmer">Reconnecting agent</span>
+              </div>
+              <div class="callout">one <code>api_retry</code> notice per burst — Codex retries underneath; no red "⚠ Codex error" above a reply that then succeeds</div>
+              <div class="a-msg">Two jobs failed: <code>test-linux</code> (flaky snapshot) and <code>lint</code> (one unused import in the new adapter).</div>
+            </div>
+          </div>
+        </div>
+        <p class="frame-note"><b>Verified shipped:</b> the translator emits a single "Temporary connection problem — retrying automatically…" notice per retry burst and returns before the error bubble (<code>app-server-translator.ts:617-646</code>); the app-server also skips turn-settling on <code>willRetry</code> (<code>app-server.ts:659-664</code>). Live, the row renders as the <code>ZerosSpinner</code> "Reconnecting agent" shimmer (<code>event-row-renderer.tsx:92-108</code>) and settles to a compact row. The doc's 🟡 is now ✅.</p>
+      </div>
+
+      <table class="grid">
+        <thead>
+          <tr><th style="width: 250px">Shipped item</th><th style="width: 90px">Status</th><th>What the user gets today</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>willRetry</code> bubble guard (Row 3)</td>
+            <td><span class="st done">✅ Shipped</span></td>
+            <td>Transient Codex errors that self-retry show one quiet "Reconnecting agent" chip instead of a red error above a successful reply. <i>(Newly verified — the doc still lists it 🟡.)</i> <code>app-server-translator.ts:617-646</code>, <code>app-server.ts:659-664</code></td>
+          </tr>
+          <tr>
+            <td>Tool-output image <b>renderer</b></td>
+            <td><span class="st done">✅ Shipped (UI half)</span></td>
+            <td>The chat renderer draws tool-returned images (base64 → data-URI or plain URI) as bordered inline images — it's the Claude translator that starves it (case A1). <code>event-row-renderer.tsx:142-187</code></td>
+          </tr>
+          <tr>
+            <td>Codex typed Read/Grep/List cards</td>
+            <td><span class="st done">✅ Shipped</span></td>
+            <td>Codex <code>commandActions</code> map to the same typed file/search rows as Claude — a Read shows the file tag, a Grep its match count.</td>
+          </tr>
+          <tr>
+            <td>Failing-bash error text</td>
+            <td><span class="st done">✅ Shipped (tested)</span></td>
+            <td>A failed command's stderr/exit text renders in the expandable body with the red-tinted failure ring — both agents.</td>
+          </tr>
+          <tr>
+            <td>Codex reasoning + plan + MCP-call streaming</td>
+            <td><span class="st done">✅ Shipped (tested)</span></td>
+            <td>Codex thoughts, plan updates and MCP tool calls stream into the transcript live. (Summary-part boundaries still merge — case B2.)</td>
+          </tr>
+          <tr>
+            <td>Cursor subagent transcripts + <code>CursorTaskCard</code></td>
+            <td><span class="st done">✅ Shipped</span></td>
+            <td>Cursor subagent runs read from the on-disk transcript and render as a task card with live child tools.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p class="band" id="no-ui" style="margin-top:64px">Part D — The invisible rows (wiring with no new surface)</p>
+
+      <table class="grid">
+        <thead>
+          <tr><th style="width: 230px">Row</th><th style="width: 100px">Status</th><th style="width: 84px">UI</th><th>Why no mockup — and what to do</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Row 6 · <code>tools.web_search</code> enabled</td>
+            <td><span class="st miss">❌ Missing</span></td>
+            <td><span class="uichip verify">🔍 verify</span></td>
+            <td>Codex web search rides CLI defaults — Zeros never turns it on, so it can't be counted on. <code>ToolsV2</code> (<code>web_search: WebSearchToolConfig</code>) is generated but <b>imported nowhere</b>; the translator only maps the <i>display</i> of already-emitted <code>webSearch</code> items. <b>Do:</b> set <code>tools.web_search</code> in the thread config override. The existing web-search row then appears reliably — no new pixels. <code>generated/v2/ToolsV2.ts:6</code></td>
+          </tr>
+          <tr>
+            <td>Row 7 · Per-turn diff attribution</td>
+            <td><span class="st partial">🟡 Dead wiring</span></td>
+            <td><span class="uichip verify">🔍 verify</span></td>
+            <td><code>turn/diff/updated</code> is subscribed (<code>app-server-adapter.ts:1636</code>) but has no translator case → dropped to <code>onUnknown</code>. Individual file cards still show, and the pull-based native <code>turnDiff</code> (<code>native/turns.ts:139</code>) already feeds the Changes tab. <b>Do:</b> either handle the event into a consolidated per-turn diff, or delete the subscription and document the native path as canonical — dead wiring is the only wrong state.</td>
+          </tr>
+          <tr>
+            <td>Row 12 · Cursor usage → analytics</td>
+            <td><span class="st miss">❌ Missing</span></td>
+            <td><span class="uichip noui">⚙️ No UI</span></td>
+            <td>The engine half of case A3: forward <code>turn-ended.usage</code> as <code>run.usage</code> → <code>PromptResponse.usage</code>. The host's stderr probe already confirms the field arrives (<code>cursor-host.cjs:204-224</code>). Footer + cost analytics light up automatically via the existing <code>hasTurnUsage</code> gate — no pixels of their own.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p class="band" id="impl" style="margin-top:64px">Part E — What to implement for §3.9 (all 14 rows, status re-verified 2026-07-19)</p>
+
+      <table class="grid">
+        <thead>
+          <tr><th style="width: 218px">Row</th><th style="width: 78px">Status</th><th>Build (engine + UI)</th><th style="width: 200px">Key files</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1 · Claude image results <span class="uichip ui" style="margin-left:4px">🎨</span> <b style="color:var(--red-primary)">P1</b></td>
+            <td><span class="st partial">🟡→✅</span></td>
+            <td><b>Engine only (case A1):</b> stop flattening — type <code>ClaudeToolResultBlock.content</code> to include image blocks and emit <code>{type:'content', content:{type:'image', data, mimeType}}</code> beside text. <b>UI: none</b> — the renderer already draws images and MCP routes there.</td>
+            <td><code>claude/translator.ts:777-793, 1198-1209</code><br /><code>event-row-renderer.tsx:142-187</code> ✅</td>
+          </tr>
+          <tr>
+            <td>2 · Codex exec APPEND <span class="uichip verify" style="margin-left:4px">🔍</span> <b style="color:var(--red-primary)">P1</b></td>
+            <td><span class="st miss">❌→✅</span></td>
+            <td><b>Engine (case A2):</b> per-<code>itemId</code> output accumulator in <code>onToolOutputDelta</code> (mirror <code>appendDelta</code>) emitting the running total; keep the <code>item/completed</code> aggregate as the settle. <b>UI:</b> verify the capped detail follows the tail while streaming.</td>
+            <td><code>app-server-translator.ts:584-599, 709-730</code><br /><code>agent-messages.ts:371-393</code></td>
+          </tr>
+          <tr>
+            <td>3 · <code>willRetry</code> bubble guard <span class="uichip verify" style="margin-left:4px">🔍</span></td>
+            <td><span class="st done">✅</span></td>
+            <td><b>Shipped since the doc</b> — one <code>api_retry</code> notice per burst, no red bubble, app-server skips settling. <b>Verify only:</b> confirm the live "Reconnecting agent" shimmer settles compact. Update the doc's 🟡.</td>
+            <td><code>app-server-translator.ts:617-646</code><br /><code>app-server.ts:659-664</code></td>
+          </tr>
+          <tr>
+            <td>4 · <code>systemError</code> settles turn <span class="uichip verify" style="margin-left:4px">🔍</span></td>
+            <td><span class="st miss">❌→✅</span></td>
+            <td><b>Engine (case B1):</b> replace the pinned no-op with a <code>thread/status/changed</code> case: on <code>systemError</code>, settle the turn failed → error row + <b>TURN FAILED</b> pill + composer unlock. Update the no-op test.</td>
+            <td><code>app-server-translator.ts:223-227</code><br /><code>generated/v2/ThreadStatus.ts:6</code></td>
+          </tr>
+          <tr>
+            <td>5 · Reasoning summary parts <span class="uichip verify" style="margin-left:4px">🔍</span></td>
+            <td><span class="st miss">❌→✅</span></td>
+            <td><b>Engine (case B2):</b> key reasoning accumulation by <code>${itemId}:${summaryIndex|contentIndex}</code>; handle <code>summaryPartAdded</code> as a new-part boundary → one thought row per part.</td>
+            <td><code>app-server-translator.ts:237-239, 578-582, 727-729</code></td>
+          </tr>
+          <tr>
+            <td>6 · <code>tools.web_search</code> on <span class="uichip verify" style="margin-left:4px">🔍</span></td>
+            <td><span class="st miss">❌→✅</span></td>
+            <td><b>Engine (Part D):</b> set <code>tools.web_search</code> via thread-config override so search is deterministic, not a CLI default. Existing web-search rows then just appear.</td>
+            <td><code>generated/v2/ToolsV2.ts:6</code><br /><code>app-server-adapter.ts</code> (config build)</td>
+          </tr>
+          <tr>
+            <td>7 · Per-turn diff attribution <span class="uichip verify" style="margin-left:4px">🔍</span></td>
+            <td><span class="st partial">🟡</span></td>
+            <td><b>Decide (Part D):</b> handle <code>turn/diff/updated</code> into a consolidated per-turn diff, or drop the subscription and document the native pull-based <code>turnDiff</code> as canonical.</td>
+            <td><code>app-server-adapter.ts:1636</code><br /><code>native/turns.ts:139</code></td>
+          </tr>
+          <tr>
+            <td>8 · MCP tool progress <span class="uichip verify" style="margin-left:4px">🔍</span></td>
+            <td><span class="st miss">❌→✅</span></td>
+            <td><b>Engine (case B3):</b> subscribe <code>item/mcpToolCall/progress</code> + translator case → <code>tool_call_update</code> with <code>{progress, total, message}</code>. <b>UI:</b> trailing <code>62/180 · 34%</code> + slim bar in the detail.</td>
+            <td><code>app-server-adapter.ts:1630-1659</code><br /><code>app-server-translator.ts</code>, <code>event-row.tsx</code></td>
+          </tr>
+          <tr>
+            <td>9 · Cursor delta channel <span class="uichip verify" style="margin-left:4px">🔍</span> <b style="color:var(--red-primary)">P1</b></td>
+            <td><span class="st partial">🟡→✅</span></td>
+            <td><b>Engine keystone (case A3):</b> host registers <code>onDelta</code>/<code>onStep</code> and forwards <code>run.delta</code> + <code>run.usage</code> frames; adapter/translator consume <code>text-delta</code> / <code>shell-output-delta</code> / <code>turn-ended</code>. Rows 10–12 are its consumers.</td>
+            <td><code>host/cursor-host.cjs:165-176, 204-224</code><br /><code>adapter.ts:978</code></td>
+          </tr>
+          <tr>
+            <td>10 · ↳ Live shell output <span class="uichip verify" style="margin-left:4px">🔍</span></td>
+            <td><span class="st miss">❌→✅</span></td>
+            <td>Consume <code>shell-output-delta</code> → accumulate → <code>tool_call_update</code> running total (same card behavior as Row 2's after-state).</td>
+            <td><code>cursor-sdk/translator.ts:271-321</code></td>
+          </tr>
+          <tr>
+            <td>11 · ↳ Token-by-token text <span class="uichip verify" style="margin-left:4px">🔍</span></td>
+            <td><span class="st miss">❌→✅</span></td>
+            <td>Consume <code>text-delta</code> under the existing per-turn <code>messageId</code> coalescing — the chat already re-renders per chunk; chunks just get small.</td>
+            <td><code>cursor-sdk/translator.ts:237-256</code></td>
+          </tr>
+          <tr>
+            <td>12 · ↳ Usage / analytics <span class="uichip noui" style="margin-left:4px">⚙️</span></td>
+            <td><span class="st miss">❌→✅</span></td>
+            <td>Map <code>turn-ended.usage</code> → <code>PromptResponse.usage</code>. Footer's circle-dollar + cost analytics light up via the existing <code>hasTurnUsage</code> gate (tokens only; Cursor has no cost).</td>
+            <td><code>cursor-sdk/adapter.ts:994, 1005-1006</code><br /><code>turn-footer.tsx:431</code> ✅</td>
+          </tr>
+          <tr>
+            <td>13 · Claude live usage <span class="uichip verify" style="margin-left:4px">🔍</span></td>
+            <td><span class="st miss">❌→✅</span></td>
+            <td><b>Engine (case B4):</b> emit incremental <code>usage_update</code>s from per-message stream usage in <code>onAssistant</code>. <b>UI:</b> live ticker chip next to the working shimmer + advancing context gauge; keep the settled footer bill as-is.</td>
+            <td><code>claude/translator.ts:799+, 1087-1149</code><br /><code>activity-hud.tsx</code>, <code>context-gauge.tsx</code></td>
+          </tr>
+          <tr>
+            <td>14 · Cursor cheap wins <span class="uichip ui" style="margin-left:4px">🎨</span></td>
+            <td><span class="st miss">❌→✅</span></td>
+            <td><b>Both (case B5):</b> declare <code>truncated</code> + <code>thinking_duration_ms</code> on <code>SdkMsg</code>; render an <b>OUTPUT TRUNCATED</b> pill in the tool row's trailing slot and a duration on the thinking row (resurrect the unused <code>DurationChip</code>).</td>
+            <td><code>cursor-sdk/translator.ts:40-60, 224-235</code><br /><code>src/loaders/live-duration.tsx</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p class="footer-note">
+        <b>Scope.</b> §3.9 has 14 rows across three agents. Two are tagged 🎨 (Row 1 — whose UI turned
+        out to be already built, and Row 14); the rest are 🔍 wiring with existing surfaces to verify,
+        plus one ⚙️ (Row 12). Suggested order: the three P1 cases first — <b>A1</b> (a ~10-line
+        translator fix), <b>A2</b> (the accumulator pattern already exists in the same file), and
+        <b>A3</b> (the keystone that unblocks Rows 10–12) — then B1 (a wedged composer is the worst
+        of the P2 symptoms), then B2/B3/B4/B5. All statuses were <b>re-verified against the live code
+        on 2026-07-19</b>; the one drift from the doc is Row 3 (<code>willRetry</code>), which has
+        shipped. All mockups render on the verbatim Zeros tokens (toggle the theme in the header);
+        event rows, detail bodies, shimmer, footer and composer mirror the real components
+        (<code>event-row.tsx</code>, <code>event-row-renderer.tsx</code>, <code>activity-hud.tsx</code>,
+        <code>turn-footer.tsx</code>). <b>Sources:</b> §3.9 table of
+        <code>docs/agent-capabilities-parity-and-ui-consolidated-2026-07-01.md</code>; design language
+        from <code>design-3.8-auth-and-providers</code> / <code>design-3.6-models-effort-budget</code>.
+      </p>
+    </main>
+
+    <script>
+      (function () {
+        var root = document.documentElement;
+        var btn = document.getElementById("themeBtn");
+        var label = document.getElementById("themeLabel");
+        btn.addEventListener("click", function () {
+          var toLight = root.getAttribute("data-theme") !== "light";
+          root.setAttribute("data-theme", toLight ? "light" : "dark");
+          label.textContent = toLight ? "Dark preview" : "Light preview";
+        });
+      })();
+    </script>
+  </body>
+</html>

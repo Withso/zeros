@@ -1,0 +1,83 @@
+// ──────────────────────────────────────────────────────────
+// useCachedRead — mount a KeyedAsyncCache key as server state
+// ──────────────────────────────────────────────────────────
+//
+// The standard cure for the "clear-then-fetch" dropdown: a surface that opens
+// (or mounts) reads its key's snapshot synchronously — previously loaded rows
+// paint immediately — and a background load runs only when the snapshot is
+// older than `maxAgeMs` (or absent). `loading` is true only before the FIRST
+// value for a key; revalidation reports `refreshing` while the stale rows stay
+// on screen. See docs/ui-interaction-performance.md.
+// ──────────────────────────────────────────────────────────
+
+import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
+
+import {
+  type AsyncCacheSnapshot,
+  type KeyedAsyncCache,
+} from "../lib/keyed-async-cache";
+
+/** Snapshot served while `key` is null (surface closed / not applicable). */
+const IDLE_SNAPSHOT: AsyncCacheSnapshot<never> = Object.freeze({
+  data: undefined,
+  loading: false,
+  refreshing: false,
+  error: null,
+  updatedAt: 0,
+  invalidationVersion: 0,
+});
+
+export interface CachedRead<T> extends AsyncCacheSnapshot<T> {
+  /** Force a bypass-freshness reload; current data stays visible meanwhile. */
+  refresh: () => void;
+}
+
+/** Subscribe to `cache[key]`, loading it when stale. Pass `key: null` to make
+ *  the read inert (e.g. while a popover is closed) — the last snapshot is
+ *  still served instantly on the next open. The fetcher is captured in a ref,
+ *  so an inline closure is fine; it is only invoked for genuine loads. */
+export function useCachedRead<T>(
+  cache: KeyedAsyncCache<T>,
+  key: string | null,
+  fetcher: () => Promise<T>,
+  options: { maxAgeMs?: number } = {},
+): CachedRead<T> {
+  const { maxAgeMs } = options;
+  const fetcherRef = useRef(fetcher);
+  fetcherRef.current = fetcher;
+
+  const subscribe = useCallback(
+    (listener: () => void) =>
+      key === null ? () => {} : cache.subscribe(key, listener),
+    [cache, key],
+  );
+  const getSnapshot = useCallback(
+    () =>
+      key === null
+        ? (IDLE_SNAPSHOT as AsyncCacheSnapshot<T>)
+        : cache.getSnapshot(key),
+    [cache, key],
+  );
+  const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+
+  useEffect(() => {
+    if (key === null) return;
+    void cache
+      .load(key, () => fetcherRef.current(), { maxAgeMs })
+      .catch(() => {
+        // The snapshot carries the error; cached data stays available.
+      });
+    // Invalidations keep confirmed data intact and advance only this version,
+    // making an OPEN surface revalidate immediately. Load/error snapshots do
+    // not retrigger the effect, so an offline fetch cannot spin in a retry loop.
+  }, [cache, key, maxAgeMs, snapshot.invalidationVersion]);
+
+  const refresh = useCallback(() => {
+    if (key === null) return;
+    void cache
+      .load(key, () => fetcherRef.current(), { force: true })
+      .catch(() => {});
+  }, [cache, key]);
+
+  return { ...snapshot, refresh };
+}

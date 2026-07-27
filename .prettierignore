@@ -1,0 +1,50 @@
+# Prettier walks the FILESYSTEM, not the git index, so a path being gitignored
+# is not enough — anything that stays on disk but must not be reformatted has to
+# be listed here too. (Prettier 3 does read .gitignore by default, but relying
+# on that couples formatting to publication decisions; keep this list explicit.)
+
+# ──────────────────────────────────────────────────────────
+# Generated / vendored code — reformatting it is churn at best
+# ──────────────────────────────────────────────────────────
+# 1,001 files exported from openai/codex by scripts/codegen-codex.mjs, every one
+# stamped "GENERATED CODE! DO NOT MODIFY BY HAND!". Formatting them produces a
+# diff that the next codegen run reverts.
+src/engine/agents/adapters/codex/generated/
+
+# Upstream d3 UMD bundle + machine-generated globe geometry (see
+# THIRD-PARTY-NOTICES.md). Vendored verbatim; keep it byte-identical to upstream.
+styles/Artifacts/run-globe/run-globe-d3.min.js
+styles/Artifacts/run-globe/run-globe-geo.js
+
+# ──────────────────────────────────────────────────────────
+# Lockfiles
+# ──────────────────────────────────────────────────────────
+pnpm-lock.yaml
+backend/pnpm-lock.yaml
+website/marketing/pnpm-lock.yaml
+website/web-app/package-lock.json
+
+# ──────────────────────────────────────────────────────────
+# Build output and installed trees
+# ──────────────────────────────────────────────────────────
+node_modules/
+dist*/
+out/
+release/
+binaries/
+coverage/
+.codex-protocol-cache/
+
+# ──────────────────────────────────────────────────────────
+# Hand-formatted HTML/Markdown — the layout is the content
+# ──────────────────────────────────────────────────────────
+# The design labs are single-file HTML documents that open straight off
+# file://; their indentation encodes the structure of the mock, and Prettier's
+# HTML printer rewraps it into something no one can read as a design.
+# `styles/Artifacts/` and `shape shimmer/` are TRACKED — they are the design
+# record — so this list is the only thing keeping `format:check` off them.
+# `docs/` and `.context/` are local-only trees that merely stay on disk.
+docs/
+styles/Artifacts/
+shape shimmer/
+.context/

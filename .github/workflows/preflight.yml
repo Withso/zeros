@@ -1,0 +1,516 @@
+name: Preflight
+
+# The per-PR merge gate. A PR cannot merge to main until every job here is green
+# (once these are marked Required in branch protection — Settings ▸ Branches).
+# No job here needs a secret, and the top-level `permissions:` block below keeps
+# the token read-only, which is what actually makes it safe to run a stranger's
+# fork PR. Parallel jobs keep failures attributable while putting source-sync
+# behavior on the app's actual platform:
+#
+#   quality — type safety (renderer + engine + Electron main + packages), lint,
+#             and Prettier on the PR's own changed files.
+#   test    — the vitest suite + the repo's correctness guards (preload allowlist,
+#             model catalog, Cursor asar closure, migration forward-only, secret
+#             scan, settings-schema drift).
+#   build   — the app must actually BUILD: renderer, engine bundle, Electron main,
+#             and the bun-compiled engine sidecar binary that ships in the DMG.
+#   source-sync — workspace create/archive/restore concurrency, the external
+#             file/Git watcher, exact change scopes, selection recovery, bridge
+#             error contracts, and the compiled sidecar runtime on macOS.
+#   secret-scan — gitleaks over every commit the PR adds, not just its net diff,
+#             so a credential added and then removed within the PR is still caught.
+#
+# Heavier/secret macOS work (live-agent smoke, full electron-builder pack, native
+# ABI rebuild) remains in the scheduled workflow, not on the per-PR path. The pnpm
+# + Node setup mirrors release.yml so the two stay consistent (pnpm via
+# packageManager, Node 22, pnpm cache).
+
+on:
+  pull_request:
+  # Required checks must also run for GitHub's synthetic merge-queue commit.
+  merge_group:
+  push:
+    branches: [main]
+
+# ── Least privilege ──────────────────────────────────────
+#
+# This is the one workflow that executes UNTRUSTED input: a `pull_request` from
+# any fork runs `pnpm install` (arbitrary lifecycle scripts), a Playwright browser
+# install and a Postgres service on our runners. "These steps need no secrets" is
+# NOT the same as "the token can do nothing" — without this block every job
+# inherits the repository default, which is read/write on many repos. Nothing here
+# writes back: checkout and `git fetch` are the only token consumers, so read is
+# the entire requirement.
+#
+# The two companion settings live outside this file — Actions ▸ General ▸ "Require
+# approval for all external contributors", and Workflow permissions ▸ read-only
+# with "Allow GitHub Actions to create and approve pull requests" unchecked.
+permissions:
+  contents: read
+
+concurrency:
+  group: preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Full history so the changed-files Prettier check can diff the PR
+          # against its merge base.
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Separate typecheck steps (not the &&-chained `pnpm typecheck`) so a red
+      # run tells you exactly which surface broke. Vite + tsup esbuild-strip types
+      # without checking them, so this is the only real type gate for the app.
+      - name: Typecheck — app (src/, renderer + engine)
+        run: pnpm typecheck:app
+      - name: Typecheck — Electron main + preload
+        run: pnpm typecheck:electron
+      - name: Typecheck — packages + marketing
+        run: pnpm typecheck:packages
+
+      - name: Lint (eslint src + electron)
+        run: pnpm lint
+
+      - name: Design-token consistency
+        # RULES.md token guardrail (no raw hex/rgba/off-scale/z-index/Tailwind
+        # color classes in src). The baseline is clean, so this is a merge gate.
+        run: pnpm check:ui
+
+      - name: Prettier — changed files only (advisory)
+        # ADVISORY (continue-on-error) until a one-time `prettier --write .`
+        # baseline lands: the tree has a large legacy unformatted backlog and
+        # `prettier --check` is per-FILE, so editing a legacy-dirty file would
+        # otherwise fail the gate for unrelated reasons. This still surfaces "new
+        # unformatted code" as a signal; promote to blocking after the baseline.
+        # PR-only: on a push to main there's no meaningful diff base.
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          changed=$(git diff --name-only --diff-filter=ACMR "$BASE_SHA"...HEAD \
+            -- 'src/' 'electron/' 'packages/' 'scripts/' '*.json' '*.mjs' '*.mts' '*.ts' || true)
+          if [ -n "$changed" ]; then
+            echo "Changed files to format-check:"
+            printf '%s\n' "$changed"
+            # --ignore-unknown skips any extension Prettier can't parse (e.g. .jsonc).
+            printf '%s\n' "$changed" | xargs pnpm exec prettier --check --ignore-unknown
+          else
+            echo "No changed files to format-check."
+          fi
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Full history + an explicit fetch of main below so the migration
+          # forward-only guard can diff the ladder against origin/main.
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Fetch origin/main (for the migration forward-only guard)
+        run: git fetch --no-tags origin main || echo "origin/main unavailable — guard runs HEAD-only"
+
+      - name: Check preload allowlist is in sync
+        # Fails if the renderer invokes a command missing from ALLOWED_COMMANDS
+        # (silent feature break), or if an unused permission widens the bridge's
+        # XSS-reachable surface. Fast, so it runs before the suite.
+        run: pnpm check:preload
+
+      - name: Run vitest suite
+        run: pnpm test:git
+
+      - name: Verify model catalog (strict)
+        # Structural validation + the CLI-version gate: a curated model whose
+        # minCliVersion exceeds the bundled SDK fails here (it would silently
+        # downgrade at runtime).
+        run: pnpm models:verify --strict
+
+      - name: Cursor asarUnpack closure is covered
+        # A @cursor/sdk require() not in electron-builder.yml's asarUnpack list is
+        # MODULE_NOT_FOUND in the packaged DMG (Cursor dead, no dev signal). Drift
+        # comes from the weekly @cursor/sdk Renovate bump.
+        run: pnpm check:cursor-asar
+
+      - name: Migration ladder is forward-only
+        # The shipped zeros.db is each user's only copy of their data; editing a
+        # released migration never re-runs → silent divergence/loss. This enforces
+        # append-only vs origin/main.
+        run: pnpm check:migrations
+
+      - name: Secret scan (tracked files)
+        run: pnpm check:secrets
+
+      - name: Prod VITE_* env-set is wired into release.yml
+        # A VITE_ var the app uses but release.yml doesn't inject ships a DMG
+        # without it (analytics/feedback go dark). Names only, never values.
+        run: pnpm check:vite-env
+
+      - name: Electron security posture intact
+        # contextIsolation + sandbox + nav guards + CSP + contextBridge-only
+        # preload — a regression here is renderer-XSS → RCE on the user's machine.
+        run: pnpm check:electron-hardening
+
+      - name: Codex protocol pin in lockstep
+        run: pnpm check:codex-pin
+
+      - name: electron-builder source paths resolve
+        run: pnpm check:packaging-paths
+
+      - name: Control-plane migrations naming + forward-only
+        # backend/migrations/ is the third ladder and was the only unguarded
+        # one. runMigrations records applied files by FILENAME with no
+        # checksum, so editing a released migration never re-runs — the file
+        # just stops describing the deployed schema.
+        run: pnpm check:backend-migrations
+
+      - name: Agent stream-translator contract (offline fixtures)
+        # Replays committed fixtures through the Claude translator and diffs the
+        # emitted sessionUpdate sequence — catches vendor-event drift, fully offline.
+        run: pnpm test:adapters
+
+      - name: Wire-protocol version-bump reminder (advisory)
+        # Flags a @zeros/core wire-message change without a PROTOCOL_VERSION bump.
+        # Coarse file-touch heuristic → advisory.
+        continue-on-error: true
+        run: pnpm check:protocol
+
+      - name: Settings schemas regenerate cleanly
+        # Proves the zod settings source + generator are valid (schema.ts compiles
+        # and z.toJSONSchema succeeds). Deliberately does NOT byte-compare to the
+        # committed output: zod v4's z.toJSONSchema is environment-non-deterministic
+        # (Node version / platform produce different serializations — verified:
+        # macOS Node 25, Linux Node 20 amd64/arm64 all differ), so a byte-exact
+        # cross-environment match can't be a reliable gate. Schema VALIDITY is
+        # covered deterministically by the static-configs-validity vitest test
+        # (valid JSON + catalogs validate); genuine source↔published drift is caught
+        # in PR diff review (regenerate under Node 20 when changing schema.ts).
+        run: pnpm schemas:build
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Setup Bun (for the engine sidecar compile)
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build renderer (vite)
+        # A renderer that doesn't build = a blank window for every user. No VITE_*
+        # secrets injected — this is a pure compile check (absent vars resolve to
+        # "" and the build still succeeds), so it stays fork-safe.
+        run: pnpm build:ui
+
+      - name: Build engine bundle (tsup)
+        # codegen-codex early-exits when generated/.version matches the pin and
+        # degrades without cargo, so no Rust is needed in CI.
+        run: pnpm build:engine
+
+      - name: Compile Electron main + preload (tsup)
+        run: pnpm electron:compile
+
+      - name: Compile engine sidecar binary (bun cross-compile → macOS arm64)
+        # `pnpm build:sidecar` hard-exits off macOS, so invoke bun directly: it
+        # cross-compiles the shipped single-file engine binary from ubuntu. This
+        # is a LINK check (the arm64 binary can't run here) proving it bundles —
+        # the exact artifact electron-builder drops into the DMG.
+        run: bun build src/cli.ts --compile --target=bun-darwin-arm64 --outfile binaries/zeros-engine-aarch64-apple-darwin
+
+      - name: Build marketing site
+        # website/marketing deploys continuously from main via Cloudflare Pages, so
+        # this is the gate that keeps a build break off the public homepage. `tsc -b`
+        # here also type-checks it (the one build gate that catches type errors).
+        run: pnpm --filter @zeros/marketing build
+
+  source-sync:
+    name: source-sync (macOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Packaged engine health + workspace lifecycle
+        # Source-mode tests do not reproduce Bun --compile runtime failures.
+        # Build the actual macOS sidecar, require sustained external /health,
+        # then drive create → archive → restore over its WebSocket bridge.
+        run: |
+          pnpm build:sidecar
+          pnpm smoke:engine
+
+      - name: Workspace lifecycle contracts
+        # A named, locally reproducible merge gate for create/archive/restore/
+        # delete concurrency, base-branch changes, WIP recovery, process/session
+        # teardown, confirmed UI transitions, and the target-OS FSEvents watcher.
+        run: pnpm test:workspace-lifecycle
+
+      - name: Changes / Review contracts
+        # Runs exact AD/index semantics, selection recovery,
+        # stale-while-revalidate races, and the real socket error envelope.
+        run: >-
+          pnpm exec vitest run --config vitest.config.ts
+          src/engine/git/__tests__/diff.test.ts
+          src/engine/git/__tests__/ops.test.ts
+          src/zeros/bridge/__tests__/ws-client-errors.test.ts
+          src/shell/column3-tabs/__tests__/changes-selection.test.ts
+          src/shell/column3-tabs/__tests__/changes-scope-files.test.ts
+          src/shell/column3-tabs/__tests__/changes-snapshot-cache.test.ts
+          src/shell/column3-tabs/__tests__/file-lifecycle.test.ts
+          src/shell/column3-tabs/__tests__/review-data-race.test.ts
+          src/shell/pr/__tests__/pr-status-refresh.test.ts
+          src/shell/pr/__tests__/use-workspace-pr-sync.test.ts
+          src/shell/__tests__/use-git-refresh-key.test.ts
+          src/shell/__tests__/workspace-file-data-cache.test.ts
+          src/zeros/store/__tests__/read-caches.test.ts
+
+  backend:
+    name: backend (control plane)
+    runs-on: ubuntu-latest
+    # A real Postgres, because the DB suite self-skips without one and that
+    # silence reads as "green" — a destructive migration can reach review having
+    # executed nowhere but a laptop. runMigrations() also runs at service BOOT,
+    # so a migration that throws isn't a failed deploy, it's a crash-loop with no
+    # control plane. Ephemeral per job, so the tests are free to DROP SCHEMA.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        # Without a health gate the steps start before Postgres accepts
+        # connections and the suite fails on a race, not a real defect.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Install backend dependencies
+        # backend/ is its own pnpm workspace with its own lockfile, and the control
+        # plane deploys continuously from main, so this job is where a type or
+        # contract break has to be caught.
+        working-directory: backend
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck backend
+        working-directory: backend
+        run: pnpm typecheck
+      - name: Backend test suite (migrations + auth / invites contracts)
+        working-directory: backend
+        env:
+          # Presence of this is what un-skips the DB suites. If it is ever
+          # unset here, the migration tests go quiet rather than red — so the
+          # guard step below asserts they actually ran.
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: pnpm test
+      - name: Assert the DB suites actually ran (skip-guard)
+        # The failure mode this exists for: TEST_DATABASE_URL goes missing and
+        # `pnpm test` still exits 0 with everything skipped — a green check
+        # that proves nothing. Re-run just the migration file and require a
+        # non-zero pass count.
+        working-directory: backend
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: |
+          set -euo pipefail
+          npx vitest run src/migrations.test.ts --reporter=json --outputFile=/tmp/mig.json
+          # readFileSync, not require(): backend/ is "type": "module", and a
+          # missing file must read as 0 rather than throwing past the check.
+          passed=$(node -e '
+            const fs = require("node:fs");
+            let n = 0;
+            try { n = JSON.parse(fs.readFileSync("/tmp/mig.json", "utf8")).numPassedTests ?? 0; } catch {}
+            process.stdout.write(String(n));
+          ')
+          echo "migration tests passed: $passed"
+          if [ "$passed" -lt 1 ]; then
+            echo "::error::migration tests did not run — TEST_DATABASE_URL is not reaching the suite, so the DB suites skipped and this job was green without testing anything"
+            exit 1
+          fi
+
+  ui-smoke:
+    name: ui-smoke (composer)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Composer model-menu interaction contract
+        # Real-browser event-timing coverage the unit suite structurally cannot
+        # provide: the 2026-07-24 "model dropdown flashes open and instantly
+        # closes" regression came from a document-capture click listener racing
+        # Radix's open/focus sequence — invisible to pure-helper tests, fatal in
+        # the app. Drives the actual ModelPill/AgentModelMenu tree headlessly.
+        run: pnpm test:ui-smoke
+
+  secret-scan:
+    name: secret scan (PR commit range)
+    runs-on: ubuntu-latest
+    # ── Why the PR's COMMIT RANGE, not the tree and not all history ──
+    #
+    # `pnpm check:secrets` (in the `test` job) scans the TRACKED WORKING TREE — it
+    # can only ever see what HEAD looks like right now. A credential that a PR
+    # commits and then "removes" in a later commit of the SAME PR is invisible to
+    # it, and stays perfectly readable to anyone who clones a public repo because
+    # the blob is still in the object store. Closing that gap is why this job
+    # exists, and why `fetch-depth: 0` is load-bearing — gitleaks needs the real
+    # commit graph to walk `base..HEAD`.
+    #
+    # It deliberately does NOT re-scan all history on every PR. That was measured
+    # and it is unshippable: a full walk of this repo reports ~189 findings, of
+    # which only a handful are real — pre-publication blobs from retired sibling
+    # projects and an old build-flag file, all addressed by the one-time history
+    # rewrite. The rest are historical REVISIONS of files whose CURRENT version
+    # is annotated `gitleaks:allow`: localStorage key names, the RFC 6455 §1.3
+    # example nonce, and redaction-test fixtures. An inline allow comment applies
+    # to the line it sits on, so it can never retroactively clear an old blob —
+    # meaning a full-history gate would be red on every PR forever, and a gate
+    # that is always red is one everybody learns to click past.
+    #
+    # FULL HISTORY IS AUDITED ONCE, out of band, as part of publication:
+    #     gitleaks git . --redact --no-banner --verbose
+    # Re-run that after the history rewrite and before flipping the repo public.
+    #
+    # Non-zero exit on a finding fails the job — no `continue-on-error`. A secret
+    # scanner that reports and passes trains everyone to ignore it.
+    steps:
+      - name: Checkout (full depth — gitleaks needs the commit graph)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the PR commit range
+        id: range
+        # Routed through `env:` rather than interpolated directly into the script:
+        # a `${{ github.event.* }}` value spliced into `run:` is a shell-injection
+        # sink. On a push (no pull_request payload) there is no base, so fall back
+        # to the single pushed commit.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${BASE_SHA:-}" ]; then
+            echo "log_opts=--no-merges ${BASE_SHA}..HEAD" >> "$GITHUB_OUTPUT"
+          else
+            echo "log_opts=--no-merges -1 HEAD" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: gitleaks
+        # Upstream gitleaks CONTAINER pinned by digest, deliberately not
+        # `gitleaks/gitleaks-action`: since v2 that JS wrapper is non-MIT and
+        # refuses to run on organization-owned repositories without a
+        # GITLEAKS_LICENSE secret, which would make this job fail for a licensing
+        # reason rather than a security one. The container is the same scanner with
+        # no such gate, and a digest is the container-registry equivalent of the
+        # commit-SHA pins used for every `uses:` above.
+        #
+        # WHY `docker run` AND NOT `uses: docker://…`
+        #
+        # `--log-opts` takes ONE value that contains a space ("--no-merges
+        # <base>..HEAD"). The `uses: docker://` form hands `with.args` to the
+        # container as a whitespace-split argv, so that single value arrived as
+        # two arguments and gitleaks refused the run before scanning anything:
+        #     Error: accepts at most 1 arg(s), received 2
+        # A gate that exits non-zero for an argv reason looks exactly like a gate
+        # that found a secret, so this had to become unambiguous rather than
+        # merely quoted — `with.args` has no documented quoting semantics, while
+        # the shell's are exact. Both branches of the range step emit a space, so
+        # the push/merge_group path was equally broken.
+        #
+        # `git .` walks history from the checked-out repo (mounted at
+        # /github/workspace); `--log-opts` narrows that walk to the commits this
+        # PR actually adds. `--redact` keeps a matched credential out of the
+        # public build log — the alert is the finding, not the value.
+        #
+        # The container runs as root while the checkout is owned by the runner
+        # user — normally git's dubious-ownership guard territory. The image
+        # already ships `git config --global --add safe.directory '*'`; the
+        # GIT_CONFIG_* trio restates that for this one path so the job can't
+        # silently start failing if upstream ever drops that line.
+        #
+        # No `--config`: the default ruleset is used, so there is no allowlist file
+        # that could silently mute a rule.
+        #
+        # `LOG_OPTS` is routed through `env:` for the same reason the range step
+        # routes `BASE_SHA`: a `${{ }}` value spliced straight into `run:` is a
+        # shell-injection sink.
+        env:
+          GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+          LOG_OPTS: ${{ steps.range.outputs.log_opts }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/github/workspace" \
+            --workdir /github/workspace \
+            -e GIT_CONFIG_COUNT=1 \
+            -e GIT_CONFIG_KEY_0=safe.directory \
+            -e GIT_CONFIG_VALUE_0=/github/workspace \
+            "$GITLEAKS_IMAGE" \
+            git . --redact --no-banner --verbose --log-opts="$LOG_OPTS"
