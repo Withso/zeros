@@ -996,14 +996,22 @@ function createMainWindow(): BrowserWindow {
 setupDeepLink();
 
 // ──────────────────────────────────────────────────────────
-// Dock icon — force the .icns onto the running app's dock tile
+// Dock icon — force the .icns onto the running app's dock tile (DEV ONLY)
 // ──────────────────────────────────────────────────────────
-// The icon lives ONLY as an .icns (build/icons/icon-dev.icns for dev — patched
-// into each bundle's electron.icns by scripts/dev-electron-bundle.cjs — and
-// icon.icns baked in for packaged builds). But macOS caches Dock icons per bundle
-// PATH, and a dev bundle path is reused across runs — so the Dock can keep showing
-// a STALE icon even after electron.icns is replaced. app.dock.setIcon() at runtime
-// is the only thing that reliably overrides that cache.
+// A packaged build must NOT touch its own Dock tile. macOS 26 (Tahoe) draws a
+// bundle icon it resolved ITSELF with the full Liquid Glass treatment — the
+// specular rim + bevel that every other app in the Dock has. An image pushed in at
+// runtime via app.dock.setIcon() is blitted as raw pixels instead, with none of
+// that, so the tile reads visibly flat next to its neighbours. Verified on 26.3.1
+// against a live app: same bundle, same .icns, rim before the call, no rim after.
+//
+// Dev is the exception, and only because its bundle PATH is reused across runs
+// (~/.zeros-dev/dev-instances/*.app, plus node_modules' Electron.app for the
+// primary checkout). macOS caches Dock icons per bundle path, so a re-stamped
+// electron.icns can keep showing the old pixels. A packaged bundle doesn't have
+// that problem — and setIcon was in fact a silent no-op there for months (it
+// joined a "../../Resources" path that has never existed) with nobody ever
+// reporting a stale packaged icon.
 //
 // The snag: nativeImage.createFromPath() can't decode .icns (returns empty). So we
 // read the .icns ourselves and pull out its largest embedded PNG representation
@@ -1042,20 +1050,18 @@ function largestPngFromIcns(icnsPath: string): Buffer | null {
   return best;
 }
 
-/** Force the Dock tile to the current Zeros .icns, overriding macOS's per-bundle
- *  icon cache. Best-effort — a missing/odd icon is purely cosmetic. */
+/** Force the Dock tile to icon-dev.icns, overriding macOS's per-bundle icon cache.
+ *  Dev only — see above: doing this in a packaged build costs us the OS's Liquid
+ *  Glass rim. Best-effort — a missing/odd icon is purely cosmetic. */
 function setupDockBrand(): void {
-  if (process.platform !== "darwin") return;
-  // `process.resourcesPath` IS <App>.app/Contents/Resources, which is where
-  // electron-builder writes mac.icon. The old form joined "../../Resources" onto
-  // it and landed on <App>.app/Resources/icon.icns — a path that has never
-  // existed, so largestPngFromIcns returned null and this whole function was a
-  // silent no-op in BOTH Beta and Production while dev (a different branch) was
-  // fine. A packaged-only failure that no test could see, because the dev branch
-  // is the only one dev/vitest ever takes.
-  const icnsPath = IS_PACKAGED
-    ? path.join(process.resourcesPath, "icon.icns")
-    : path.join(__dirname, "..", "build", "icons", "icon-dev.icns");
+  if (process.platform !== "darwin" || IS_PACKAGED) return;
+  const icnsPath = path.join(
+    __dirname,
+    "..",
+    "build",
+    "icons",
+    "icon-dev.icns",
+  );
   try {
     const png = largestPngFromIcns(icnsPath);
     if (!png) return;
