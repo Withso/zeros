@@ -28,11 +28,36 @@
 # has to live at the repo root of the main clone. A .env created inside a
 # worktree is local to that worktree and is never propagated anywhere.
 #
+# KEEP THE MATCH SET SMALL — and not for local reasons. A CLOUD workspace has no
+# local checkout to copy from, so the whole match set is uploaded inline in the
+# create request (POST /workspaces), which is size-capped server-side. Carrying
+# `docs/` here made that request 2.3 MiB and every cloud create failed with
+# `413 FST_ERR_CTP_BODY_TOO_LARGE`, surfaced in the UI as the unrelated-looking
+# "Cloud workspace isn't reachable right now (it may be starting)". Bulk content
+# belongs in `scripts.setup` instead, where it can be gated on CONDUCTOR_IS_LOCAL.
+#
 # This file is safe to commit: it lists patterns, never values. Everything it
 # names is gitignored, so a seeded copy cannot be accidentally committed from
 # the worktree either.
 #
 # Deliberately NOT seeded (each verified, not assumed):
+#   docs/                       the local-only engineering journal. 64 files /
+#                               2.27 MiB — 99.6% of everything this file used to
+#                               match, and ~2.3x the cloud create request's size
+#                               cap (measured 2026-07-27, not estimated). Trimming
+#                               does not rescue it: dropping the single biggest
+#                               subtree still leaves 0.98 MiB, i.e. the cap. It is
+#                               seeded by the `scripts.setup` copy step instead,
+#                               gated on CONDUCTOR_IS_LOCAL=1, so local worktrees
+#                               are unchanged and the whole match set drops to
+#                               4 files / ~3 KB.
+#                               AGENTS.md already reads it as "when it is present
+#                               locally", so a cloud workspace without it degrades
+#                               the way the instructions already describe.
+#   styles/Artifacts/           the design lab is TRACKED, so `git worktree add`
+#                               already materialises it. Seeding a tracked path
+#                               would copy the main checkout's working-tree
+#                               version over the branch's own.
 #   node_modules/               installed by the workspace setup script; copying
 #                               a dependency tree is slower and less correct
 #                               than running the install.
@@ -69,15 +94,6 @@
 # reads `<repo>/.mcp.json` per repo root — so without this a new workspace
 # silently loses every project-level MCP server.
 /.mcp.json
-
-# Local-only working notes: `docs/` is the engineering journal. Gitignored and
-# absent from a public clone, but it must exist in every worktree because
-# AGENTS.md and RULES.md send agents into `docs/`.
-#
-# `styles/Artifacts/` is deliberately absent from this list: the design lab is
-# TRACKED, so `git worktree add` already materialises it. Seeding a tracked path
-# would copy the main checkout's working-tree version over the branch's own.
-/docs/
 
 # External worktree-tool config, gitignored for the same reason: it is tool
 # config, not repo content. Seeded so the per-workspace setup command survives
