@@ -79,6 +79,35 @@ jobs:
       ZEROS_CHANNEL: beta
 
     steps:
+      - name: Require signing credentials
+        # Runs FIRST, before checkout, so a missing cert costs seconds instead of
+        # failing ~8 minutes later inside electron-builder with an opaque
+        # "<workspace> not a file" (eb resolves an empty CSC_LINK as a certificate
+        # PATH, lands on the working directory, and dies) — exactly how the first
+        # beta build on the migrated repo failed.
+        #
+        # This replaces the old `SIGNED: ${{ secrets.CSC_LINK != '' }}` fallback,
+        # which read like a supported unsigned path but could never execute.
+        # Beta must be signed for a different reason than stable: electron-updater's
+        # macOS in-place update REQUIRES a valid signature, so an unsigned beta
+        # would publish fine and silently break auto-update. No APPLE_* here —
+        # beta is signed but deliberately NOT notarized.
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: |
+          set -uo pipefail
+          MISSING=""
+          [ -n "$CSC_LINK" ] || MISSING="$MISSING CSC_LINK"
+          [ -n "$CSC_KEY_PASSWORD" ] || MISSING="$MISSING CSC_KEY_PASSWORD"
+          if [ -n "$MISSING" ]; then
+            echo "::error::Missing required signing secrets:$MISSING"
+            echo "Beta is Developer-ID signed; electron-updater needs a valid signature to update in place."
+            echo "Add them under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          echo "✓ signing credentials present"
+
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -253,8 +282,6 @@ jobs:
         # signed but NOT notarized by design (see the packaging step above), so
         # those would fail on a correct build. Everything up to notarization IS
         # asserted.
-        env:
-          SIGNED: ${{ secrets.CSC_LINK != '' }}
         run: |
           set -euo pipefail
           DMG=""
@@ -275,20 +302,16 @@ jobs:
             exit 1
           fi
           echo "Verifying: $APP"
-          # Signature valid + sealed (true for ad-hoc AND Developer ID).
+          # Signature valid + sealed.
           codesign --verify --deep --strict --verbose=2 "$APP"
-          if [ "$SIGNED" = "true" ]; then
-            # Hardened runtime flag proves the entitlements were actually applied.
-            # Without this the four entitlements are inert and library validation /
-            # JIT / keychain-ACL behavior silently differs from what users get.
-            if ! codesign --display --verbose=4 "$APP" 2>&1 | grep -qE 'flags=.*runtime'; then
-              echo "::error::Hardened runtime not applied — signing/entitlements misconfigured"
-              exit 1
-            fi
-            echo "✓ Developer ID signed · hardened runtime applied (notarization intentionally skipped for beta)"
-          else
-            echo "✓ ad-hoc signature valid (no CSC_LINK — users run 'xattr -cr')"
+          # Hardened runtime flag proves the entitlements were actually applied.
+          # Without this the four entitlements are inert and library validation /
+          # JIT / keychain-ACL behavior silently differs from what users get.
+          if ! codesign --display --verbose=4 "$APP" 2>&1 | grep -qE 'flags=.*runtime'; then
+            echo "::error::Hardened runtime not applied — signing/entitlements misconfigured"
+            exit 1
           fi
+          echo "✓ Developer ID signed · hardened runtime applied (notarization intentionally skipped for beta)"
 
       - name: Publish rolling "beta" prerelease
         env:
