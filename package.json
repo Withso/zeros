@@ -64,6 +64,8 @@
     "check:backend-migrations": "node scripts/check-backend-migrations.mjs",
     "check:protocol": "node scripts/check-protocol-version.mjs",
     "check:actions": "node scripts/check-actions.mjs",
+    "check:web-deploy": "node scripts/check-web-deploy.mjs",
+    "check:deep-link-schemes": "node scripts/check-deep-link-schemes.mjs",
     "snap:ui": "node scripts/visual-harness.mjs",
     "test:adapters": "node scripts/test-adapters.mjs",
     "agents:smoke": "node scripts/agent-smoke.mjs",

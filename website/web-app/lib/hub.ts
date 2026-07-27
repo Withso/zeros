@@ -14,8 +14,8 @@
 //                                    (→ /auth/start on THIS host — the separate
 //                                    auth.zeros.build sign-in page is retired)
 //   • signed in + handoff context → "Launch Zeros" (mint a ticket, deep-link it,
-//                                    opening zeros:// / zeros-beta:// / zeros-dev://
-//                                    per the desktop-supplied `scheme`)
+//                                    opening the desktop-supplied `scheme` — one of
+//                                    the per-channel schemes in lib/schemes.mjs)
 //   • signed in, no context       → "open the desktop app"
 //
 // scheme/nonce/challenge are validated (scheme allow-list + base64url/uuid
@@ -25,13 +25,10 @@ import { getVerifiedSession, type Env } from "./session";
 import { TOKENISH } from "./util";
 import { html, shell } from "./page";
 import { appOrigin } from "./hosts";
+// Per-channel deep-link allow-list — see lib/schemes.mjs. Imported, never
+// re-declared: a local copy here is what dropped Alpha's sign-in handoff.
+import { SCHEMES } from "./schemes.mjs";
 
-// Per-channel desktop deep-link schemes (src/engine/runtime.ts schemeForChannel):
-// stable → zeros, beta → zeros-beta, dev → zeros-dev. The desktop passes its own
-// channel's scheme in ?scheme=; we validate against this allow-list, then echo it
-// back as `<scheme>://auth/callback#…` so the OS reopens the EXACT app that
-// started the sign-in — not whichever sibling also registered bare zeros://.
-const SCHEMES = new Set(["zeros", "zeros-beta", "zeros-dev"]);
 const HANDOFF_COOKIE = "zeros_handoff";
 const HANDOFF_TTL_S = 600; // 10 min — matches the desktop's pending-nonce window.
 
@@ -56,8 +53,14 @@ function readHandoffCookie(request: Request): Handoff | null {
     const seg = part.trim();
     if (!seg.startsWith(`${HANDOFF_COOKIE}=`)) continue;
     try {
-      const v = JSON.parse(decodeURIComponent(seg.slice(HANDOFF_COOKIE.length + 1)));
-      const h: Handoff = { scheme: v?.scheme, nonce: v?.nonce, challenge: v?.challenge };
+      const v = JSON.parse(
+        decodeURIComponent(seg.slice(HANDOFF_COOKIE.length + 1)),
+      );
+      const h: Handoff = {
+        scheme: v?.scheme,
+        nonce: v?.nonce,
+        challenge: v?.challenge,
+      };
       return valid(h) ? h : null;
     } catch {
       return null;
