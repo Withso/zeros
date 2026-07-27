@@ -192,6 +192,19 @@ jobs:
         # just stops describing the deployed schema.
         run: pnpm check:backend-migrations
 
+      - name: Desktop ↔ web deep-link schemes in lockstep
+        # The desktop sends its channel's scheme to app.zeros.build; the hub only
+        # echoes allow-listed ones. The two sides ship separately and drifted —
+        # zeros-alpha existed in the app but not the web list, so Alpha had no
+        # "Launch Zeros" button and Alpha invites opened Production. Fails closed
+        # and silently, so it needs a guard rather than a reviewer.
+        run: pnpm check:deep-link-schemes
+
+      - name: Web-app hub unit tests (schemes + host routing)
+        # Standalone npm package outside the pnpm workspace — its own runner.
+        working-directory: website/web-app
+        run: npm test
+
       - name: Agent stream-translator contract (offline fixtures)
         # Replays committed fixtures through the Claude translator and diffs the
         # emitted sessionUpdate sequence — catches vendor-event drift, fully offline.

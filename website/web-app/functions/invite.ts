@@ -10,15 +10,17 @@
 // server-side). The token is charset-validated before being echoed, and only
 // ever emitted via JSON.stringify / encodeURIComponent — no markup injection.
 //
-// `?scheme=zeros-dev` / `?scheme=zeros-beta` (allow-listed) targets a dev-instance
-// or Beta app for testing; real emails omit it and get the packaged app's zeros://
-// scheme. The three values mirror the desktop's per-channel deep-link schemes
+// `?scheme=zeros-alpha` / `zeros-beta` / `zeros-dev` (allow-listed) targets that
+// channel's app; real emails omit it and get the packaged app's zeros:// scheme.
+// The values mirror the desktop's per-channel deep-link schemes
 // (src/engine/runtime.ts schemeForChannel) so an invite opens the intended app.
 
 import { marketingOrigin } from "../lib/hosts";
 import type { Env } from "../lib/session";
+// Allow-list lives in lib/schemes.mjs — imported, never re-declared. A local copy
+// here silently sent every Alpha invite to the Production app.
+import { schemeOrDefault } from "../lib/schemes.mjs";
 
-const SCHEMES = new Set(["zeros", "zeros-beta", "zeros-dev"]);
 // 32-byte base64url tokens are 43 chars; bounds guard against abuse.
 const INVITE_TOKEN = /^[A-Za-z0-9_-]{20,200}$/;
 
@@ -107,8 +109,7 @@ function inviteInner(scheme: string, token: string, mkt: string): string {
 export const onRequestGet: PagesFunction<Env> = ({ request, env }) => {
   const url = new URL(request.url);
   const token = url.searchParams.get("token") ?? "";
-  const schemeParam = url.searchParams.get("scheme") ?? "zeros";
-  const scheme = SCHEMES.has(schemeParam) ? schemeParam : "zeros";
+  const scheme = schemeOrDefault(url.searchParams.get("scheme") ?? "");
   const mkt = marketingOrigin(env);
   if (!INVITE_TOKEN.test(token)) {
     return html(shell("Zeros — invitation", invalidInner(mkt)));
