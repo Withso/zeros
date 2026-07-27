@@ -28,11 +28,11 @@ name: Release
 # drop, `version:set 1.0.0` for a milestone). The workflow reads the committed
 # config + the existing release tags, so the version can never silently desync.
 #
-# Signing: Developer-ID signed + notarized when the CSC_*/APPLE_* repo secrets
-# are present (the "Verify code signature" step fails the run loudly if
-# notarization didn't take). With the secrets ABSENT it falls back to an ad-hoc
-# unsigned build (users run `xattr -cr`); electron-builder.yml + the afterPack
-# hook handle both states. See the doc §5.
+# Signing: Developer-ID signed + notarized, ALWAYS. The CSC_*/APPLE_* repo
+# secrets are mandatory and asserted up front ("Require signing credentials"),
+# and the "Verify code signature" step fails the run loudly if notarization
+# didn't take. There is deliberately no unsigned fallback on the stable channel
+# — see that step's comment for why the old one was unreachable. See the doc §5.
 
 on:
   workflow_dispatch:
@@ -147,6 +147,40 @@ jobs:
       version: ${{ steps.version.outputs.version }}
 
     steps:
+      - name: Require signing credentials
+        # Runs FIRST, before checkout, so a missing cert costs seconds instead of
+        # failing ~8 minutes later inside electron-builder with an opaque
+        # "<workspace> not a file" (eb resolves an empty CSC_LINK as a certificate
+        # PATH, lands on the working directory, and dies).
+        #
+        # This replaces the old `SIGNED: ${{ secrets.CSC_LINK != '' }}` fallback,
+        # which read like a supported unsigned path but could never execute —
+        # electron-builder hard-failed on the empty string long before any
+        # `if [ "$SIGNED" = "true" ]` branch was consulted. Asserting the secrets
+        # explicitly turns "stable is always signed" into an enforced invariant
+        # rather than a side effect of an upstream implementation detail.
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -uo pipefail
+          MISSING=""
+          [ -n "$CSC_LINK" ] || MISSING="$MISSING CSC_LINK"
+          [ -n "$CSC_KEY_PASSWORD" ] || MISSING="$MISSING CSC_KEY_PASSWORD"
+          [ -n "$APPLE_ID" ] || MISSING="$MISSING APPLE_ID"
+          [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] || MISSING="$MISSING APPLE_APP_SPECIFIC_PASSWORD"
+          [ -n "$APPLE_TEAM_ID" ] || MISSING="$MISSING APPLE_TEAM_ID"
+          if [ -n "$MISSING" ]; then
+            echo "::error::Missing required signing/notarization secrets:$MISSING"
+            echo "Stable releases are always Developer-ID signed and notarized."
+            echo "Add them under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          echo "✓ signing + notarization credentials present"
+
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -260,11 +294,11 @@ jobs:
         # Electron's V8 ABI; node-pty keeps its N-API Darwin prebuild and ships a
         # runtime-safe copy outside app.asar.unpacked.
         #
-        # With CSC_LINK set, eb SIGNS with the Developer ID cert (the afterPack
-        # hook self-skips). Notarization is `false` in electron-builder.yml and is
-        # done manually (--no-wait submit here, poll in the notarize job). With the
-        # secrets absent it falls back to an ad-hoc unsigned build. Signing is fast
-        # + reliable, so no retry harness here.
+        # CSC_LINK is asserted non-empty by "Require signing credentials", so eb
+        # always SIGNS with the Developer ID cert (the afterPack hook self-skips).
+        # Notarization is `false` in electron-builder.yml and is done manually
+        # (--no-wait submit here, poll in the notarize job). Signing is fast +
+        # reliable, so no retry harness here.
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
@@ -297,15 +331,12 @@ jobs:
         # record into the artifact so the `notarize` job (and any cheap re-run of
         # it) can poll for the result without re-uploading or rebuilding. The
         # UPLOAD itself is reliable; it's Apple's server-side processing that drags.
-        # Skips for the unsigned fallback.
         env:
-          SIGNED: ${{ secrets.CSC_LINK != '' }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -uo pipefail
-          if [ "$SIGNED" != "true" ]; then echo "unsigned build — skipping notarization submit"; exit 0; fi
           DMG=""
           for CANDIDATE in release/Zeros-*-arm64.dmg; do
             [ -f "$CANDIDATE" ] || continue
@@ -365,10 +396,9 @@ jobs:
         # instead of killing the whole wait. MAX_POLLS×POLL_SLEEP sets the budget
         # (default ~2h); if Apple is slower than that the build artifact is still
         # saved, so re-running THIS job picks up where it left off with no rebuild.
-        # Staples the DMG on success. Skips for the unsigned fallback.
+        # Staples the DMG on success.
         timeout-minutes: 130
         env:
-          SIGNED: ${{ secrets.CSC_LINK != '' }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -378,7 +408,6 @@ jobs:
           POLL_SLEEP: "60"
         run: |
           set -uo pipefail
-          if [ "$SIGNED" != "true" ]; then echo "unsigned build — skipping notarization"; exit 0; fi
           DMG=""
           for CANDIDATE in release/Zeros-*-arm64.dmg; do
             [ -f "$CANDIDATE" ] || continue
@@ -423,11 +452,8 @@ jobs:
         # otherwise we'd ship a build Gatekeeper blocks with no error here. The app
         # bundle lives inside the DMG (we don't upload the .app — that would break
         # its symlinks), so mount the DMG read-only and assert against the app
-        # inside. Always checks the signature is valid + sealed; when signed
-        # (CSC_LINK set) it additionally enforces hardened runtime, a stapled DMG
-        # notarization ticket, and Gatekeeper acceptance.
-        env:
-          SIGNED: ${{ secrets.CSC_LINK != '' }}
+        # inside. Checks the signature is valid + sealed, then enforces hardened
+        # runtime, a stapled DMG notarization ticket, and Gatekeeper acceptance.
         run: |
           set -euo pipefail
           DMG=""
@@ -447,32 +473,25 @@ jobs:
             exit 1
           fi
           echo "Verifying: $APP"
-          # Signature valid + sealed (true for both ad-hoc and Developer ID).
+          # Signature valid + sealed.
           codesign --verify --deep --strict --verbose=2 "$APP"
-          if [ "$SIGNED" = "true" ]; then
-            # Hardened runtime flag must be present (proves entitlements applied).
-            if ! codesign --display --verbose=4 "$APP" 2>&1 | grep -qE 'flags=.*runtime'; then
-              echo "::error::Hardened runtime not applied — signing/entitlements misconfigured"
-              exit 1
-            fi
-            # Assert the DMG staple is present and Gatekeeper accepts the app
-            # (-t exec; -t install is for .pkg and would falsely reject an app).
-            # The app passes via the cloud notarization recorded by the DMG
-            # submission.
-            xcrun stapler validate "$DMG"
-            spctl -a -vvv -t exec "$APP"
-            echo "✓ Developer ID signed · hardened · notarized · stapled DMG · Gatekeeper-accepted"
-          else
-            echo "✓ ad-hoc signature valid (unsigned beta path — users run 'xattr -cr')"
+          # Hardened runtime flag must be present (proves entitlements applied).
+          if ! codesign --display --verbose=4 "$APP" 2>&1 | grep -qE 'flags=.*runtime'; then
+            echo "::error::Hardened runtime not applied — signing/entitlements misconfigured"
+            exit 1
           fi
+          # Assert the DMG staple is present and Gatekeeper accepts the app
+          # (-t exec; -t install is for .pkg and would falsely reject an app).
+          # The app passes via the cloud notarization recorded by the DMG
+          # submission.
+          xcrun stapler validate "$DMG"
+          spctl -a -vvv -t exec "$APP"
+          echo "✓ Developer ID signed · hardened · notarized · stapled DMG · Gatekeeper-accepted"
 
       - name: Publish GitHub release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.build.outputs.version }}
-          # "true" when a signing cert is configured — drives the install copy
-          # (signed builds don't need the xattr step).
-          SIGNED: ${{ secrets.CSC_LINK != '' }}
         run: |
           set -euo pipefail
           TAG="v${VERSION}"
@@ -498,10 +517,10 @@ jobs:
               | sed -E '/^#+ New Contributors[[:space:]]*$/d')
           fi
 
-          # Install header — signed builds are notarized (clean launch); unsigned
-          # falls back to xattr. Quoted heredoc keeps markdown literal; VERSION after.
-          if [ "$SIGNED" = "true" ]; then
-            INSTALL=$(cat <<'EOF'
+          # Install header. Stable is always notarized (see "Require signing
+          # credentials"), so there is no quarantine step to explain — Gatekeeper
+          # launches it clean. Quoted heredoc keeps markdown literal; VERSION after.
+          INSTALL=$(cat <<'EOF'
           ## Install
 
           1. Download `Zeros-__V__-arm64.dmg` below.
@@ -511,22 +530,6 @@ jobs:
           Installed apps update in place via the built-in auto-updater.
           EOF
           )
-          else
-            INSTALL=$(cat <<'EOF'
-          ## Install (unsigned beta)
-
-          1. Download `Zeros-__V__-arm64.dmg` below.
-          2. Drag **Zeros.app** into `/Applications`.
-          3. Strip the quarantine flag (this build is not yet Apple-signed):
-             ```bash
-             xattr -cr /Applications/Zeros.app
-             ```
-          4. Launch from Spotlight / Finder.
-
-          Installed apps detect new versions on launch and open the latest DMG to download.
-          EOF
-          )
-          fi
           INSTALL="${INSTALL//__V__/$VERSION}"
 
           # These are the per-release, auto-generated technical notes. The

@@ -135,6 +135,14 @@ website/**/tmp/
 # Claude Code runtime artifacts (locks, scheduled-task state)
 .claude/
 
+# Codex + Cursor harness config. Same class as .claude/ above: machine-local
+# agent state, never product source. Unlike .claude/ these were never listed,
+# so they surfaced as untracked and a single `git add -A` would have committed
+# local agent config into a public repo. (Distinct from .codex-protocol-cache/
+# at the bottom, which is generated build input rather than user config.)
+.codex/
+.cursor/
+
 # External worktree-tool config. Machine/tool-local: its whole content is a
 # third-party schema URL plus a setup command, so it is neither product source
 # nor documentation and has no place in a public clone. Listed in

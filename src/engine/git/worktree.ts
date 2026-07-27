@@ -2314,14 +2314,17 @@ async function archiveWorkspaceInner(
 
 /** The worktree paths git currently has registered for `repoRoot` (porcelain).
  *  Restore consults this so it never picks a target path that belongs to a LIVE
- *  worktree. Best-effort: returns [] if the listing fails. */
+ *  worktree. Best-effort: returns [] if the listing fails.
+ *
+ *  Retried (see `readWorktreeListPorcelain`) because the empty fallback is the
+ *  DANGEROUS direction here: this feeds `worktreePathOccupied()` and
+ *  `firstFreeWorktreePath()`, so a transient read failure reads as "no path is
+ *  occupied" and restore can target a path belonging to a LIVE worktree — a
+ *  silent collision, strictly worse than the loud error the `strict: true`
+ *  caller raises from the same race. */
 async function listWorktreePaths(repoRoot: string): Promise<string[]> {
   try {
-    const { stdout } = await runGit(repoRoot, [
-      "worktree",
-      "list",
-      "--porcelain",
-    ]);
+    const stdout = await readWorktreeListPorcelain(repoRoot);
     const paths: string[] = [];
     for (const line of stdout.split("\n")) {
       if (line.startsWith("worktree "))
@@ -2330,6 +2333,41 @@ async function listWorktreePaths(repoRoot: string): Promise<string[]> {
     return paths;
   } catch {
     return [];
+  }
+}
+
+/** `git worktree list --porcelain` reads `.git/worktrees/<name>/` for every
+ *  registration in the repo. A CONCURRENT `git worktree add` writes that admin
+ *  directory in stages, so an overlapping read can hit a half-written entry and
+ *  exit non-zero — a race inside Git itself, not in this code. Lifecycle
+ *  operations on different workspaces legitimately overlap in one repo, so the
+ *  window is reachable in normal use (and reliably in tests that drive
+ *  create/archive through `Promise.all`).
+ *
+ *  `runGit` already retries transient `.git` LOCK contention, but no lock file
+ *  is involved here, so `isGitLockContention` never matches and the blip
+ *  reaches `strict: true` callers as a hard GitError.
+ *
+ *  Retrying is unconditionally safe: the command is read-only, so a failed
+ *  attempt mutated nothing. The backoff is short because the admin directory is
+ *  written in one burst — the window closes in milliseconds. */
+const WORKTREE_LIST_RETRY_BACKOFF_MS = [15, 50, 150];
+
+async function readWorktreeListPorcelain(repoRoot: string): Promise<string> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const { stdout } = await runGit(repoRoot, [
+        "worktree",
+        "list",
+        "--porcelain",
+      ]);
+      return stdout;
+    } catch (error) {
+      if (attempt >= WORKTREE_LIST_RETRY_BACKOFF_MS.length) throw error;
+      await new Promise((resolve) =>
+        setTimeout(resolve, WORKTREE_LIST_RETRY_BACKOFF_MS[attempt]),
+      );
+    }
   }
 }
 
@@ -2342,11 +2380,7 @@ async function listWorktreeRegistrations(
 ): Promise<Map<string, string | null>> {
   const registrations = new Map<string, string | null>();
   try {
-    const { stdout } = await runGit(repoRoot, [
-      "worktree",
-      "list",
-      "--porcelain",
-    ]);
+    const stdout = await readWorktreeListPorcelain(repoRoot);
     let currentPath: string | null = null;
     for (const raw of `${stdout}\n`.split("\n")) {
       if (raw.startsWith("worktree ")) {
