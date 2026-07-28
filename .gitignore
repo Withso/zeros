@@ -108,7 +108,9 @@ snapshots/diff/
 # audits and plans that are superseded as fast as they are written, so a public
 # clone would only ever read a stale snapshot. Listed in `.worktreeinclude` so
 # it still follows you into every new worktree — AGENTS.md and RULES.md send
-# agents in there, and an empty `docs/` breaks them.
+# agents in there, and an empty `docs/` breaks them. That listing is what
+# currently breaks cloud workspace creation; `.worktreeinclude` documents the
+# trade and how to undo it.
 #
 # `styles/Artifacts/` is deliberately NOT here: the design lab is tracked. It
 # is a build-free tree of hand-written HTML served only by the vite dev

@@ -88,7 +88,7 @@
 :root {
   color-scheme: dark;
 
-  --bg0:           hsl(5 5% 5%);    /* #0D0C0C — inactive chat pane */
+  --bg0:           hsl(5 10% 5%);   /* #0E0C0B — inactive chat pane */
   --bg1:           hsl(25 5% 7%);   /* #0E0C0C — canvas / active pane */
   --bg1-hover:     hsl(8 5% 12%);  /* #201D1D */
   --bg1-highlight: hsl(25 5% 9%);  /* #181716 */

@@ -339,7 +339,7 @@
    2. PRIMITIVE TOKENS — Zeros Shade (the default dark theme)
    ──────────────────────────────────────────────────────────
    `:root` is Zeros Shade — a muted warm-gray palette (hues
-   5-25°, chroma 0-7%) with a cool blue accent, promoted from
+   5-25°, chroma 0-10%) with a cool blue accent, promoted from
    its former `[data-theme="zeros-shade"]` variant block on
    2026-07-07 when all other variants were retired. The light
    theme overrides these values in the `[data-theme="light"]`
@@ -351,7 +351,7 @@
   color-scheme: dark;
 
   /* ── BACKGROUNDS ── */
-  --bg0:           hsl(5 5% 5%);    /* #0D0C0C — INACTIVE chat window fill (below bg1) */
+  --bg0:           hsl(5 10% 5%);   /* #0E0C0B — INACTIVE chat window fill (below bg1) */
   --bg1:           hsl(5 5% 7%);    /* #0E0C0C — default canvas / app backdrop + active chat window */
   /* Contextual chat-window surface. Defaults to bg1 so the ACTIVE window (and
    * any chat chrome rendered outside a pane) looks exactly like the plain app
