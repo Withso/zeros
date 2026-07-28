@@ -28,32 +28,30 @@
 # has to live at the repo root of the main clone. A .env created inside a
 # worktree is local to that worktree and is never propagated anywhere.
 #
-# KEEP THE MATCH SET SMALL — and not for local reasons. A CLOUD workspace has no
+# MIND THE MATCH SET SIZE — and not for local reasons. A CLOUD workspace has no
 # local checkout to copy from, so the whole match set is uploaded inline in the
-# create request (POST /workspaces), which is size-capped server-side. Carrying
-# `docs/` here made that request 2.3 MiB and every cloud create failed with
+# create request (POST /workspaces), which is size-capped server-side. `/docs/`
+# alone is 64 files / 2.27 MiB and takes that request to ~2.3x the cap (measured
+# 2026-07-27, not estimated). WHILE IT IS LISTED, EVERY CLOUD CREATE FAILS with
 # `413 FST_ERR_CTP_BODY_TOO_LARGE`, surfaced in the UI as the unrelated-looking
-# "Cloud workspace isn't reachable right now (it may be starting)". Bulk content
-# belongs in `scripts.setup` instead, where it can be gated on CONDUCTOR_IS_LOCAL.
+# "Cloud workspace isn't reachable right now (it may be starting)". Trimming does
+# not rescue it: `/docs/` and `/docs/*` expand to the same 64 files through
+# toPathspecs(), and dropping even the largest subtree still leaves 0.98 MiB —
+# i.e. still at the cap.
+#
+# It is listed anyway, by explicit decision (2026-07-28): local worktrees seed
+# docs/ from this file, and cloud workspace creation is knowingly traded away.
+#
+# TO GET CLOUD CREATES WORKING AGAIN, delete the `/docs/` entry at the bottom of
+# this file. That costs local worktrees nothing — the `scripts.setup` copy step
+# gated on CONDUCTOR_IS_LOCAL=1 seeds docs/ on its own — and drops the match set
+# back to 4 files / ~3 KB. Bulk content generally belongs there instead.
 #
 # This file is safe to commit: it lists patterns, never values. Everything it
 # names is gitignored, so a seeded copy cannot be accidentally committed from
 # the worktree either.
 #
 # Deliberately NOT seeded (each verified, not assumed):
-#   docs/                       the local-only engineering journal. 64 files /
-#                               2.27 MiB — 99.6% of everything this file used to
-#                               match, and ~2.3x the cloud create request's size
-#                               cap (measured 2026-07-27, not estimated). Trimming
-#                               does not rescue it: dropping the single biggest
-#                               subtree still leaves 0.98 MiB, i.e. the cap. It is
-#                               seeded by the `scripts.setup` copy step instead,
-#                               gated on CONDUCTOR_IS_LOCAL=1, so local worktrees
-#                               are unchanged and the whole match set drops to
-#                               4 files / ~3 KB.
-#                               AGENTS.md already reads it as "when it is present
-#                               locally", so a cloud workspace without it degrades
-#                               the way the instructions already describe.
 #   styles/Artifacts/           the design lab is TRACKED, so `git worktree add`
 #                               already materialises it. Seeding a tracked path
 #                               would copy the main checkout's working-tree
@@ -99,3 +97,13 @@
 # config, not repo content. Seeded so the per-workspace setup command survives
 # into new worktrees instead of silently reverting to the tool's defaults.
 /.conductor/
+
+# The local-only engineering journal. AGENTS.md and RULES.md send agents in here,
+# so a worktree without it starts blind. Anchored deliberately: `/docs/` matches
+# the 64 files at the repo root, where a bare `docs/` would also drag in the 95
+# `docs/` directories inside node_modules.
+#
+# THIS ENTRY BREAKS CLOUD WORKSPACE CREATION (413) — see the size note in the
+# header above, which explains the trade and how to undo it. Read that before
+# adding anything else of this magnitude.
+/docs/
