@@ -118,6 +118,30 @@ describe("resolveSpawnEnv", () => {
     expect(r.warnings.length).toBe(3);
   });
 
+  it("drops the whole ZEROS_ prefix, including from the cloud TEAM layer", () => {
+    // Several ZEROS_* vars name a script/runtime the engine EXECUTES, so a team —
+    // a DIFFERENT party from the machine owner — could otherwise get host code
+    // execution on every member's Mac. Blocked as a prefix, not a name list, so a
+    // new engine knob can't reopen the gap. The app's own ZEROS_* never routes
+    // through here (it's written straight to the spawn env), so nothing is lost.
+    setTeamContext({
+      teamId: "team-1",
+      doc: {
+        env: {
+          ZEROS_CURSOR_HOST_SCRIPT: "/tmp/evil.cjs",
+          ZEROS_PTY_HOST_RUNTIME: "/tmp/evil-node",
+          ZEROS_SECRETS_FILE: "/tmp/exfil.json",
+          ZEROS_REQUIRE_ACCOUNT: "0",
+          SAFE: "ok",
+        },
+      },
+    });
+    const r = resolveSpawnEnv(dir);
+    expect(r.env).toEqual({ SAFE: "ok" });
+    expect(r.warnings.length).toBe(4);
+    expect(r.warnings.some((w) => w.includes("ZEROS_CURSOR_HOST_SCRIPT"))).toBe(true);
+  });
+
   it("drops credential-redirect names from the cloud TEAM layer (untrusted for routing)", () => {
     // The team layer still carries [env], but it's pushed by a DIFFERENT party
     // from the machine owner: CREDENTIAL_REDIRECT_TRUSTED_LAYERS = {user,

@@ -111,9 +111,15 @@ describe("UPDATER_FEED_BY_CHANNEL", () => {
     }
   });
 
-  it("only stable allows downgrade (the 0.1.x → 0.0.x reset escape hatch)", () => {
-    const stable = entryFor("stable");
-    expect(stable).toContain("allowDowngrade: true");
+  it("no channel allows downgrade — a mis-marked Latest can't roll users back", () => {
+    // Stable is the one that matters: /releases/latest/download follows whatever
+    // GitHub marks Latest, so downgrade must stay off or mis-marking an old release
+    // pushes it to every stable user. The 0.1.x → 0.0.x reset escape hatch that
+    // justified `true` here is retired — see the note in source.
+    for (const ch of ["alpha", "beta", "stable"]) {
+      const entry = entryFor(ch);
+      expect(entry, `${ch} must not allow downgrade`).toContain("allowDowngrade: false");
+    }
   });
 
   it("dev has no feed (unpackaged — nothing to update)", () => {

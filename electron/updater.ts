@@ -89,18 +89,23 @@ const ALPHA_FEED_METADATA_URL = `${RELEASES}/download/alpha/alpha-mac.yml`;
  *  key instead of missing it every time. Free on GitHub rather than billable as it was
  *  on R2, but still the polite default at a 5-minute interval.
  *
- *  `allowDowngrade` differs per channel on purpose:
- *   • stable → true. Legacy of the 0.1.x → 0.0.x version RESET: the 0.0.x line sorts
- *     BELOW the retired 0.1.x tags, so without it anyone still on an old 0.1.x build
- *     reads the feed as "older", gets update-not-available, and is stranded. Harmless
- *     on a monotonic line. Flip to false once the version climbs above 0.1.179 — note
- *     that the 0.1.0 baseline does NOT clear that bar, so this stays for now. It is
- *     load-bearing in one more way here: `/releases/latest/download` follows whatever
- *     GitHub marks Latest, so mis-marking an old release would push it to everyone.
- *   • alpha / beta → false. Both were born AFTER the reset, each feed is pinned to its
- *     own channel file, and `<base>-<ch>.<run_number>` only moves forward. With
- *     downgrade off, a feed mishap can never silently replace the build with something
- *     older. */
+ *  `allowDowngrade` is false on EVERY channel. Each feed is pinned to its own channel
+ *  file and only moves forward, so a feed mishap can never silently replace an install
+ *  with an older build. This matters most on stable, where
+ *  `/releases/latest/download` follows whatever GitHub marks Latest: with downgrade
+ *  off, mis-marking an old release can no longer push it to every stable user.
+ *
+ *  Stable carried `true` until 2026-07-28 as an escape hatch for the 0.1.x → 0.0.x
+ *  version RESET — the retired 0.1.x tags (up to 0.1.179) sort ABOVE the reset line,
+ *  so a user stranded on one would read the feed as "older" and get
+ *  update-not-available forever. That rationale is retired because it could never
+ *  have worked: `allowDowngrade` is read from the config baked into the INSTALLED
+ *  app, and every 0.1.x build predates the repo going public, so it was served by
+ *  Cloudflare R2 (above) and polls an origin that no longer exists. Those installs
+ *  can't reach a live feed at all, let alone honour this flag; only builds from
+ *  v0.1.0 forward read it, and that line is monotonic. Channels are separate installs
+ *  (own bundle id, feed and ports), so no in-app channel switch needs a downgrade
+ *  either. */
 const UPDATER_FEED_BY_CHANNEL: Record<
   Channel,
   {
@@ -130,7 +135,7 @@ const UPDATER_FEED_BY_CHANNEL: Record<
     // explicit setFeedURL; `url` here is only for the metadata preflight.
     url: `${RELEASES}/latest/download?static=1`,
     channel: "latest",
-    allowDowngrade: true,
+    allowDowngrade: false,
   },
 };
 
