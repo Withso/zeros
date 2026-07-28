@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>01 · Cloud Workspaces, Explained — Zeros Cloud Workspaces Report</title>
+<style>
+  :root{
+    --bg:#FAF9F7; --ink:#1B1B22; --muted:#6B7280; --card:#FFFFFF; --line:#E7E5E0;
+    --indigo:#4F46E5; --teal:#0F9D8F; --amber:#D97706; --red:#DC2626;
+    --hero-bg:#16161D; --hero-ink:#FAFAF8;
+    --radius:14px; --shadow:0 1px 2px rgba(0,0,0,.04);
+    --sans:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono:ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html{scroll-behavior:smooth;}
+  body{background:var(--bg); color:var(--ink); font-family:var(--sans); line-height:1.6; font-size:16px;}
+  a{color:var(--indigo); text-decoration:none;}
+  a:hover{text-decoration:underline;}
+
+  /* ---------- Sticky nav ---------- */
+  .topnav{position:sticky; top:0; z-index:100; background:#FFFFFF; border-bottom:1px solid var(--line);}
+  .topnav-inner{max-width:1060px; margin:0 auto; padding:0 24px; display:flex; align-items:center; gap:4px; overflow-x:auto; -webkit-overflow-scrolling:touch;}
+  .topnav a{display:inline-block; padding:14px 12px; font-size:13px; font-weight:500; color:var(--muted); white-space:nowrap; border-bottom:2px solid transparent;}
+  .topnav a:hover{color:var(--ink); text-decoration:none;}
+  .topnav a.current{color:var(--indigo); border-bottom-color:var(--indigo); background:#EEF2FF; border-radius:8px 8px 0 0; font-weight:600;}
+  .topnav .brand{font-weight:700; color:var(--ink); padding-right:16px; font-size:13px; letter-spacing:.02em;}
+
+  /* ---------- Hero ---------- */
+  .hero{background:var(--hero-bg); color:var(--hero-ink); padding:64px 24px 72px;}
+  .hero-inner{max-width:1060px; margin:0 auto;}
+  .hero .pagenum{display:inline-flex; align-items:center; gap:10px; font-family:var(--mono); font-size:13px; letter-spacing:.14em; text-transform:uppercase; color:#A5B4FC; margin-bottom:18px;}
+  .hero .pagenum .dot{width:6px; height:6px; border-radius:50%; background:#4F46E5; display:inline-block;}
+  .hero h1{font-size:44px; line-height:1.12; font-weight:800; letter-spacing:-.02em; max-width:760px;}
+  .hero .promise{margin-top:16px; font-size:19px; color:#C9C9D4; max-width:720px;}
+  .hero .promise strong{color:var(--hero-ink);}
+
+  /* ---------- Layout ---------- */
+  .wrap{max-width:1060px; margin:0 auto; padding:0 24px 72px;}
+  section{margin-top:48px;}
+  .kicker{font-family:var(--mono); font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:var(--indigo); font-weight:600; margin-bottom:8px;}
+  h2{font-size:28px; font-weight:800; letter-spacing:-.01em; line-height:1.2;}
+  h3{font-size:19px; font-weight:700; letter-spacing:-.01em;}
+  .lede{color:var(--muted); font-size:16.5px; margin-top:8px; max-width:760px;}
+  .card{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:28px; margin-top:20px;}
+  .muted{color:var(--muted);}
+  .small{font-size:13.5px;}
+  code{font-family:var(--mono); font-size:.88em; background:#F2F1EE; border:1px solid var(--line); border-radius:6px; padding:1px 6px;}
+
+  /* ---------- Pills / chips ---------- */
+  .pill{display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:700; letter-spacing:.03em; padding:2px 10px; border-radius:999px; white-space:nowrap; vertical-align:middle;}
+  .pill.teal{background:#E6F7F4; color:var(--teal);}
+  .pill.amber{background:#FEF3E2; color:var(--amber);}
+  .pill.red{background:#FDECEC; color:var(--red);}
+  .pill.indigo{background:#EEF2FF; color:var(--indigo);}
+  .pill.gray{background:#F1F0ED; color:var(--muted);}
+
+  /* ---------- Stat cards ---------- */
+  .statgrid{display:grid; grid-template-columns:repeat(auto-fit, minmax(220px,1fr)); gap:16px; margin-top:20px;}
+  .stat{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:22px 24px;}
+  .stat .num{font-size:32px; font-weight:800; letter-spacing:-.02em; line-height:1.1;}
+  .stat .num.teal{color:var(--teal);} .stat .num.indigo{color:var(--indigo);} .stat .num.amber{color:var(--amber);}
+  .stat .label{margin-top:6px; font-size:13.5px; color:var(--muted); line-height:1.45;}
+
+  /* ---------- Callouts ---------- */
+  .callout{border:1px solid var(--line); border-left:4px solid var(--indigo); background:#FFFFFF; border-radius:12px; padding:16px 20px; margin-top:16px; box-shadow:var(--shadow);}
+  .callout .co-title{font-weight:700; font-size:14px; margin-bottom:4px; display:flex; align-items:center; gap:8px;}
+  .callout p{font-size:14.5px;}
+  .callout.plain{border-left-color:var(--indigo);} .callout.plain .co-title{color:var(--indigo);}
+  .callout.watch{border-left-color:var(--amber); background:#FFFDF8;} .callout.watch .co-title{color:var(--amber);}
+  .callout.decide{border-left-color:var(--teal); background:#FAFFFE;} .callout.decide .co-title{color:var(--teal);}
+  .callout.myth{border-left-color:var(--red); background:#FFFBFB;} .callout.myth .co-title{color:var(--red);}
+
+  /* ---------- Diagrams (flexbox boxes + arrows) ---------- */
+  .diagram{background:#FCFBF9; border:1px dashed #D9D6CF; border-radius:12px; padding:24px; margin-top:18px; overflow-x:auto;}
+  .diagram .dg-title{font-family:var(--mono); font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); margin-bottom:16px; text-align:center;}
+  .flow{display:flex; align-items:stretch; justify-content:center; gap:0; flex-wrap:wrap;}
+  .node{background:#FFFFFF; border:1.5px solid var(--line); border-radius:12px; padding:14px 16px; min-width:150px; max-width:250px; text-align:center; box-shadow:var(--shadow); flex:0 1 auto;}
+  .node .nt{font-weight:700; font-size:14px; line-height:1.3;}
+  .node .ns{font-size:12px; color:var(--muted); margin-top:4px; line-height:1.4;}
+  .node.indigo{border-color:#C7D2FE; background:#F5F6FF;}
+  .node.teal{border-color:#B5E3DC; background:#F2FBF9;}
+  .node.dark{background:var(--hero-bg); border-color:var(--hero-bg); color:var(--hero-ink);}
+  .node.dark .ns{color:#B9B9C6;}
+  .node.amber{border-color:#F5D9AE; background:#FFFBF2;}
+  .arrow{display:flex; flex-direction:column; align-items:center; justify-content:center; padding:0 10px; min-width:80px;}
+  .arrow .ar{font-size:20px; color:#9CA3AF; line-height:1;}
+  .arrow .al{font-size:11px; color:var(--muted); text-align:center; line-height:1.35; margin-top:2px; max-width:130px;}
+  .arrow.teal .ar{color:var(--teal);} .arrow.indigo .ar{color:var(--indigo);} .arrow.red .ar{color:var(--red);}
+  .stacknodes{display:flex; flex-direction:column; gap:8px;}
+  .innerbox{background:#FFFFFF; border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:12px; text-align:left; line-height:1.4;}
+  .innerbox b{font-size:12.5px;}
+  .dg-note{font-size:12.5px; color:var(--muted); text-align:center; margin-top:14px; line-height:1.5;}
+  @media (max-width:720px){
+    .flow{flex-direction:column; align-items:center;}
+    .arrow{transform:rotate(90deg); min-width:60px; padding:6px 0;}
+    .arrow .al{transform:rotate(-90deg) translateX(-4px); max-width:none; white-space:nowrap;}
+    .hero h1{font-size:32px;}
+  }
+
+  /* ---------- Story panels (day in the life) ---------- */
+  .story{margin-top:20px; position:relative;}
+  .story::before{content:""; position:absolute; left:23px; top:14px; bottom:14px; width:2px; background:#E3E1DB;}
+  .panel{position:relative; padding-left:68px; margin-bottom:22px;}
+  .panel .stepnum{position:absolute; left:0; top:0; width:48px; height:48px; border-radius:50%; background:var(--indigo); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:18px; box-shadow:0 2px 6px rgba(79,70,229,.3); z-index:1;}
+  .panel .pcard{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:20px 24px;}
+  .panel .ptime{font-family:var(--mono); font-size:12px; font-weight:700; color:var(--indigo); letter-spacing:.06em; text-transform:uppercase;}
+  .panel h3{margin-top:4px;}
+  .panel p{margin-top:8px; font-size:15px;}
+  details.bts{margin-top:12px; border:1px solid var(--line); border-radius:10px; background:#FBFAF8;}
+  details.bts summary{cursor:pointer; padding:10px 16px; font-size:13.5px; font-weight:600; color:var(--indigo); list-style:none; display:flex; align-items:center; gap:8px;}
+  details.bts summary::-webkit-details-marker{display:none;}
+  details.bts summary::before{content:"▸"; transition:transform .15s ease; font-size:12px;}
+  details.bts[open] summary::before{transform:rotate(90deg);}
+  details.bts .btsbody{padding:2px 18px 14px; font-size:14px; color:#3C3C46;}
+  details.bts .btsbody p{margin-top:8px;}
+
+  /* ---------- Tables ---------- */
+  .tablewrap{margin-top:18px; border:1px solid var(--line); border-radius:var(--radius); background:var(--card); box-shadow:var(--shadow); overflow:hidden;}
+  table{width:100%; border-collapse:collapse; font-size:14.5px;}
+  thead th{position:sticky; top:52px; background:#F7F6F3; text-align:left; padding:12px 18px; font-size:12.5px; letter-spacing:.05em; text-transform:uppercase; color:var(--muted); border-bottom:1px solid var(--line); z-index:5;}
+  tbody td{padding:13px 18px; border-bottom:1px solid #F0EEE9; vertical-align:top;}
+  tbody tr:last-child td{border-bottom:none;}
+  tbody tr:hover{background:#FAF9F5;}
+  td.rowlabel{font-weight:600; width:26%;}
+  .chip{display:inline-flex; align-items:center; gap:6px; font-size:12.5px; font-weight:700; padding:3px 10px; border-radius:999px;}
+  .chip.good{background:#E6F7F4; color:var(--teal);}
+  .chip.bad{background:#FDECEC; color:var(--red);}
+  .chip.meh{background:#FEF3E2; color:var(--amber);}
+
+  /* ---------- Concept cards ---------- */
+  .concept{margin-top:20px;}
+  .concept .analogy{display:inline-flex; align-items:center; gap:6px; background:#EEF2FF; color:var(--indigo); font-size:12.5px; font-weight:700; padding:3px 12px; border-radius:999px; margin-left:8px; vertical-align:middle;}
+  .concept p{margin-top:10px; font-size:15px;}
+
+  /* ---------- Payoff cards ---------- */
+  .payoffs{display:grid; grid-template-columns:repeat(auto-fit, minmax(240px,1fr)); gap:16px; margin-top:20px;}
+  .payoff{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:24px;}
+  .payoff .pnum{width:34px; height:34px; border-radius:10px; background:#EEF2FF; color:var(--indigo); font-weight:800; font-size:16px; display:flex; align-items:center; justify-content:center; margin-bottom:12px;}
+  .payoff h3{font-size:16.5px;}
+  .payoff p{margin-top:8px; font-size:14px; color:#3C3C46;}
+
+  /* ---------- Glossary ---------- */
+  .glossgrid{display:grid; grid-template-columns:repeat(auto-fill, minmax(300px,1fr)); gap:12px; margin-top:18px;}
+  .gloss{background:var(--card); border:1px solid var(--line); border-radius:12px; box-shadow:var(--shadow); padding:14px 16px;}
+  .gloss .gt{display:inline-block; font-family:var(--mono); font-size:12.5px; font-weight:700; background:#F1F0ED; border:1px solid var(--line); border-radius:999px; padding:2px 11px; color:var(--ink);}
+  .gloss p{font-size:13.5px; color:#44444E; margin-top:8px; line-height:1.5;}
+
+  /* ---------- Sources / footer ---------- */
+  .sources ul{list-style:none; margin-top:8px;}
+  .sources li{padding:7px 0; border-bottom:1px dashed #EEECE7; font-size:13.5px; line-height:1.5;}
+  .sources li:last-child{border-bottom:none;}
+  .sources .src-group{font-size:12px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); margin-top:18px;}
+  .sources a{word-break:break-all;}
+  footer{border-top:1px solid var(--line); margin-top:56px; padding:28px 24px 48px;}
+  .footer-inner{max-width:1060px; margin:0 auto; display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap;}
+  .footer-inner .fmark{font-size:13.5px; color:var(--muted);}
+  .pagelinks{display:flex; gap:12px;}
+  .pagelinks a{display:inline-flex; align-items:center; gap:8px; padding:9px 18px; border:1px solid var(--line); border-radius:999px; background:#fff; font-size:13.5px; font-weight:600; color:var(--ink); box-shadow:var(--shadow);}
+  .pagelinks a:hover{border-color:var(--indigo); color:var(--indigo); text-decoration:none;}
+
+  /* ---------- Cost bars ---------- */
+  .costbars{margin-top:18px;}
+  .costrow{display:flex; align-items:center; gap:14px; margin-top:12px;}
+  .costrow .cl{width:220px; font-size:13.5px; font-weight:600; text-align:right; flex-shrink:0;}
+  .costrow .bartrack{flex:1; height:30px; background:#F2F1EE; border-radius:8px; overflow:hidden; position:relative;}
+  .costrow .bar{height:100%; border-radius:8px; display:flex; align-items:center; padding-left:12px; color:#fff; font-size:12.5px; font-weight:700; white-space:nowrap;}
+  .bar.red{background:var(--red); width:100%;}
+  .bar.teal{background:var(--teal); width:12.5%; min-width:110px;}
+  @media (max-width:640px){ .costrow{flex-direction:column; align-items:stretch;} .costrow .cl{width:auto; text-align:left;} }
+
+  /* ---------- Sleep cycle states ---------- */
+  .cycle{display:flex; align-items:stretch; justify-content:center; gap:0; flex-wrap:wrap; margin-top:6px;}
+  .state{border-radius:12px; padding:16px 18px; min-width:180px; max-width:230px; text-align:center;}
+  .state .st{font-weight:800; font-size:15px;}
+  .state .ss{font-size:12.5px; margin-top:6px; line-height:1.45;}
+  .state.awake{background:#F5F6FF; border:1.5px solid #C7D2FE;}
+  .state.asleep{background:#F2FBF9; border:1.5px solid #B5E3DC;}
+  .state.boot{background:#FFFBF2; border:1.5px solid #F5D9AE;}
+</style>
+</head>
+<body>
+
+<!-- ================= NAV ================= -->
+<nav class="topnav">
+  <div class="topnav-inner">
+    <span class="brand">Zeros · Cloud Report</span>
+    <a href="index.html">Overview</a>
+    <a href="01-cloud-workspaces-explained.html" class="current">Cloud Workspaces, Explained</a>
+    <a href="02-how-conductor-does-it.html">How Conductor Does It</a>
+    <a href="03-cursor-and-claude-code-cloud.html">Cursor &amp; Claude Code</a>
+    <a href="04-platform-comparison.html">Platform Comparison</a>
+    <a href="05-sync-teams-and-collaboration.html">Sync, Teams &amp; Collab</a>
+    <a href="06-enterprise-self-hosting.html">Enterprise Self-Hosting</a>
+    <a href="07-execution-plan.html">Execution Plan</a>
+    <a href="08-engineering-reference.html">Engineering Reference</a>
+  </div>
+</nav>
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <div class="hero-inner">
+    <div class="pagenum"><span class="dot"></span> Page 01 · Zeros Cloud Workspaces Report · July 2026</div>
+    <h1>Cloud Workspaces, Explained</h1>
+    <p class="promise">Same app, same chat, same files, same agents — <strong>the computer just moved to a data center</strong>, and it never sleeps when you do.</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- ================= THE SHORT VERSION ================= -->
+  <section id="short-version">
+    <div class="kicker">The short version</div>
+    <h2>Eight things to know, in 90 seconds</h2>
+    <p class="lede">A cloud workspace is a normal Zeros workspace whose computer lives in a data center instead of under your keyboard. Everything else on this page unpacks that one sentence.</p>
+
+    <div class="statgrid">
+      <div class="stat"><div class="num indigo">$0.17/hr</div><div class="label">A running cloud workspace on Daytona (2 CPUs, 4&nbsp;GB — verified pricing, mid-2026)</div></div>
+      <div class="stat"><div class="num teal">$0.001/hr</div><div class="label">The same workspace asleep — disk kept, computer released. Well under $1/month</div></div>
+      <div class="stat"><div class="num teal">~8×</div><div class="label">Cost lever from sleep-when-idle: ~$1.5k/mo vs ~$12k/mo at 100 workspaces</div></div>
+      <div class="stat"><div class="num indigo">~80%</div><div class="label">Of the existing Zeros engine code runs in the cloud unchanged (verified in our engineering audit)</div></div>
+    </div>
+
+    <div class="card">
+      <ul style="list-style:none; display:grid; gap:14px;">
+        <li>🖥️ <strong>Same app, different computer.</strong> A cloud workspace is a normal Zeros workspace whose machine lives in a data center — same chat, same files, same agents.</li>
+        <li>🧠 <strong>The whole Zeros “brain” moves into that rented machine.</strong> Roughly 80% of our code runs there unchanged, so this is an extension of the product, not a rewrite.</li>
+        <li>📞 <strong>Your Mac talks to it over one secure, always-open connection</strong> — a phone line the app keeps off the hook — and keeps a live local copy of the files, so editing feels instant even when the machine is 130 milliseconds away.</li>
+        <li>💤 <strong>Close the laptop; the agents keep going.</strong> Open Zeros on any Mac later and the workspace, the chat, and the code are exactly where you left them.</li>
+        <li>💸 <strong>A sleeping workspace costs almost nothing</strong> — ~$0.001/hour stopped vs ~$0.17/hour running (Daytona, mid-2026). Sleep-when-idle is the difference between ~$1.5k/month and ~$12k/month at 100 workspaces.</li>
+        <li>🗂️ <strong>Nothing irreplaceable lives only in the rented machine.</strong> Code goes to GitHub (the vault); chats, sessions, and workspace history stream to <strong>the cloud record</strong> — our cloud database that permanently stores them in your account <span class="pill teal">✓ Decided 2026-07-02</span>. A periodic export to cheap storage remains as a backup safety net. The machine itself is disposable by design — it can even be deleted outright with zero data loss.</li>
+        <li>🏁 <strong>This is the same architecture our reference competitor shipped.</strong> Conductor.build’s Cloud Workspaces (announced May 2026, still invite-only) run the same shape — hosted sandbox, direct connection from the Mac app, local file mirror. Their CEO’s pitch: users “can’t tell the difference between local and cloud” (verified via Vercel’s own case study).</li>
+        <li>🎯 <strong>Where we differ, we differ on purpose:</strong> the connection is direct (no broker of ours on the data path), and the <em>live</em> chat stays with the engine in the cloud — which makes teammates-in-one-workspace a natural next step instead of a bolt-on. On the database itself we now go Conductor’s way: <strong>the cloud record is chat’s permanent home</strong>.</li>
+      </ul>
+    </div>
+
+    <!-- Big-picture architecture diagram -->
+    <div class="diagram">
+      <div class="dg-title">The whole system on one napkin</div>
+      <div class="flow">
+        <div class="node indigo">
+          <div class="nt">Your Mac</div>
+          <div class="ns">The Zeros app — just a window</div>
+          <div class="stacknodes" style="margin-top:10px;">
+            <div class="innerbox"><b>Zeros app UI</b><br>chat, diffs, terminal view</div>
+            <div class="innerbox"><b>File mirror</b><br>a live local copy of the code</div>
+          </div>
+        </div>
+        <div class="arrow indigo"><span class="ar">⇄</span><span class="al">One encrypted, always-open connection (WSS) — direct, nothing in the middle</span></div>
+        <div class="node dark">
+          <div class="nt">The sandbox</div>
+          <div class="ns">A rented computer at Daytona (US/EU data center)</div>
+          <div class="stacknodes" style="margin-top:10px;">
+            <div class="innerbox" style="color:var(--ink);"><b>Zeros engine</b> — the brain: runs agents, git, terminals</div>
+            <div class="innerbox" style="color:var(--ink);"><b>zeros.db</b> — the working copy of chat &amp; state; every event streams to the cloud record</div>
+            <div class="innerbox" style="color:var(--ink);"><b>Working files</b> — synced to your Mac both ways</div>
+            <div class="innerbox" style="color:var(--ink);"><b>Agents</b> — Claude Code, Codex &amp; friends</div>
+          </div>
+        </div>
+        <div class="arrow teal"><span class="ar">→</span><span class="al">Code continuously pushed to GitHub; chat &amp; sessions written through to the cloud record as they happen</span></div>
+        <div class="node teal">
+          <div class="nt">Durable homes</div>
+          <div class="ns">Nothing irreplaceable stays in the sandbox</div>
+          <div class="stacknodes" style="margin-top:10px;">
+            <div class="innerbox"><b>GitHub</b> — the vault for code</div>
+            <div class="innerbox"><b>🗂️ The cloud record</b> — chats, sessions &amp; history, permanently in your account (decided 2026-07-02)</div>
+            <div class="innerbox"><b>Object storage</b> — backup exports, a safety net behind the record</div>
+          </div>
+        </div>
+      </div>
+      <div class="dg-note">Off to the side (never in your data path): a small <strong>control plane</strong> — the “reception desk” that logs you in and creates sandboxes. More on it below.</div>
+    </div>
+  </section>
+
+  <!-- ================= LOCAL VS CLOUD ================= -->
+  <section id="local-vs-cloud">
+    <div class="kicker">Local vs cloud</div>
+    <h2>What stays the same, what changes</h2>
+    <p class="lede">Today, when you create a workspace in Zeros, everything — the code checkout, the agents, the terminal, the chat history — runs and lives on your Mac. A cloud workspace keeps the exact same experience but moves the computer.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th style="width:26%;"></th><th>Local workspace (today)</th><th>Cloud workspace</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="rowlabel">Where the code runs</td><td>Your Mac</td><td>A rented computer in a US or EU data center</td></tr>
+          <tr><td class="rowlabel">Where the agents run</td><td>Your Mac <span class="chip meh">~ eats battery &amp; RAM</span></td><td>The rented computer <span class="chip good">✓</span></td></tr>
+          <tr><td class="rowlabel">Where the chat lives</td><td>On your Mac</td><td>Working copy with the engine; permanent copy in <strong>the cloud record</strong> (your account)</td></tr>
+          <tr><td class="rowlabel">Close the laptop…</td><td>Everything stops <span class="chip bad">✗</span></td><td>Agents keep working <span class="chip good">✓</span></td></tr>
+          <tr><td class="rowlabel">Opening from a second Mac</td><td>Not possible <span class="chip bad">✗</span></td><td>Same workspace, same state <span class="chip good">✓</span></td></tr>
+          <tr><td class="rowlabel">Sharing with a teammate</td><td>Not possible <span class="chip bad">✗</span></td><td>Designed-in — a later phase <span class="chip good">✓</span></td></tr>
+          <tr><td class="rowlabel">How editing files feels</td><td>Instant (they’re local) <span class="chip good">✓</span></td><td>Still instant — a synced local copy <span class="chip good">✓</span></td></tr>
+          <tr><td class="rowlabel">The app you use</td><td>Zeros</td><td>Zeros — same window, same UI</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout plain">
+      <div class="co-title">💡 In plain words — the design goal</div>
+      <p><strong>You should not be able to tell where a workspace lives except by the badge on it.</strong> That’s not just our ambition — it’s the exact claim Conductor’s CEO makes about their cloud product, and it’s achievable because of two tricks explained below: the file mirror and the persistent connection.</p>
+    </div>
+  </section>
+
+  <!-- ================= DAY IN THE LIFE ================= -->
+  <section id="day-in-the-life">
+    <div class="kicker">A day in the life</div>
+    <h2>The whole product in one story</h2>
+    <p class="lede">What you see comes first; what actually happened follows in plain words — click any “Behind the scenes” to expand.</p>
+
+    <div class="story">
+
+      <div class="panel">
+        <div class="stepnum">1</div>
+        <div class="pcard">
+          <div class="ptime">9:04 AM</div>
+          <h3>You open Zeros and hit “New Workspace” — but pick Cloud</h3>
+          <p>You choose the repo. A few seconds later the workspace is open and ready — file tree on the left, chat in the middle, terminal at the bottom. It looks identical to every local workspace you’ve ever made.</p>
+          <details class="bts"><summary>Behind the scenes</summary><div class="btsbody">
+            <p>Zeros asked our small backend (“the reception desk” — more on it later) to create a <strong>sandbox</strong> — a rented computer in a data center that can be created and thrown away in seconds. The sandbox didn’t start from a blank disk: it started from a <strong>pre-baked image</strong> with everything Zeros needs already installed, which is why it took seconds and not the ten minutes a fresh laptop setup would. The Zeros engine booted inside it, cloned your repo from GitHub, and your Mac dialed a <strong>secure WebSocket</strong> — a phone line between two computers that stays open so either side can speak instantly — straight to the sandbox.</p>
+          </div></details>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="stepnum">2</div>
+        <div class="pcard">
+          <div class="ptime">9:10 AM</div>
+          <h3>You kick off three agents</h3>
+          <p>Claude Code takes a gnarly refactor, Codex picks up a bug from yesterday, a third agent starts writing tests. You watch tokens stream into three chats at once. <strong>Your Mac’s fan never spins up</strong>, because your Mac isn’t doing the work — it’s just displaying it.</p>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="stepnum">3</div>
+        <div class="pcard">
+          <div class="ptime">11:30 AM</div>
+          <h3>You open a file the refactor agent just touched</h3>
+          <p>It opens instantly, like any local file. You skim the diff, leave the agent a follow-up message.</p>
+          <details class="bts"><summary>Behind the scenes</summary><div class="btsbody">
+            <p>The file genuinely <em>was</em> local. Zeros keeps a <strong>mirror</strong> — a continuously synced copy of the workspace’s files in a folder on your Mac, kept in step both ways by a sync tool called <strong>Mutagen</strong>. When the agent edits a file in the cloud, the change lands in your local copy within about a second; when you edit locally, it flows back up. Your editor never waits on the network.</p>
+          </div></details>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="stepnum">4</div>
+        <div class="pcard">
+          <div class="ptime">12:30 PM</div>
+          <h3>You close the laptop and go to lunch</h3>
+          <p>No “are you sure?” dialog. Nothing to save.</p>
+          <details class="bts"><summary>Behind the scenes</summary><div class="btsbody">
+            <p>The phone line from your Mac hung up, and nothing else changed. The engine and the agents live in the sandbox, not in the app — the app is just a window onto them. The refactor agent keeps chewing through files with nobody watching.</p>
+          </div></details>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="stepnum">5</div>
+        <div class="pcard">
+          <div class="ptime">3:00 PM</div>
+          <h3>At the studio, you open Zeros on a different Mac</h3>
+          <p>The cloud workspace is right there in your sidebar. You click it: the full morning’s chat history, the agents’ progress, the new diffs — everything present, mid-sentence. You steer the refactor in a new direction and head into a meeting.</p>
+          <details class="bts"><summary>Behind the scenes</summary><div class="btsbody">
+            <p>Your account’s workspace list lives in the reception-desk database, so any Mac you sign into sees the same list. Clicking the workspace opened a fresh phone line to the same sandbox, and because <strong>the chat database lives with the engine in the sandbox</strong> (not on your first Mac), there was nothing to transfer — the second Mac just subscribed to the same source of truth. This is the deliberate difference from Conductor, whose chat still lands in a database on each individual Mac (verified by inspecting a live install).</p>
+          </div></details>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="stepnum">6</div>
+        <div class="pcard">
+          <div class="ptime">7:00 PM</div>
+          <h3>You review, merge a PR, and stop for the day</h3>
+          <p>An hour after the last agent finishes and you go quiet, the workspace <strong>goes to sleep on its own</strong>.</p>
+          <details class="bts"><summary>Behind the scenes</summary><div class="btsbody">
+            <p>The engine noticed both conditions were true — no agent running, no user active for 60 minutes — and told the sandbox to stop. Its disk is kept; its billing drops from ~$0.17/hour to ~$0.001/hour (Daytona rates, mid-2026). Crucially, the <em>engine</em> decides when to sleep, never the hosting provider’s own idle timer — because that timer can’t see a running agent and would kill it mid-task. (This is a documented Daytona behavior and the #1 correctness trap we’ve designed around.)</p>
+          </div></details>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="stepnum">7</div>
+        <div class="pcard">
+          <div class="ptime">8:56 AM — next day</div>
+          <h3>You open the workspace again</h3>
+          <p>It takes a breath — a cold start we still need to measure, our budget is a few seconds — and everything is back: chat, files, branches. <span class="pill amber">⚠ Needs testing</span></p>
+          <details class="bts"><summary>Behind the scenes</summary><div class="btsbody">
+            <p>The sandbox restarted from its kept disk, the engine booted and rehydrated from its database and git, your Mac re-dialed, and the file mirror re-checked itself so no overnight edits get lost or resurrected. Wake-up latency is one of the top items on our hands-on test checklist — <strong>needs-testing</strong>, not yet measured. (And had the sandbox been deleted outright instead of stopped, Zeros would simply create a fresh one and rehydrate code from git and chat from the cloud record.)</p>
+          </div></details>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="stepnum">8</div>
+        <div class="pcard">
+          <div class="ptime">Three months later</div>
+          <h3>The project shipped, the workspace archived, the sandbox deleted</h3>
+          <p>You want to reread how the refactor agent solved that migration. You search your history in Zeros and the whole conversation is right there — every workspace, every session, <strong>still in your account</strong>.</p>
+          <details class="bts"><summary>Behind the scenes</summary><div class="btsbody">
+            <p>All along, the engine was <strong>writing every chat and session event through to the cloud record</strong> as it happened (decided 2026-07-02). The sandbox’s own database was only the working copy; the record is the permanent one. The workbench is long cleared; the filing cabinet keeps the files.</p>
+          </div></details>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ================= CONCEPTS ================= -->
+  <section id="concepts">
+    <div class="kicker">The concepts, one at a time</div>
+    <h2>Every term anchored to something you’d actually notice</h2>
+
+    <!-- Sandbox -->
+    <div class="card concept">
+      <h3>The sandbox — the rented computer <span class="analogy">🏨 the hotel room</span></h3>
+      <p>A <strong>sandbox</strong> is a computer in a data center that can be created in seconds, used like any Linux machine, stopped, restarted, or thrown away. Think of it as a hotel room for your project: furnished, ready on arrival, cleaned up when you check out, and you only pay while you’re actually in it.</p>
+      <p>Our current provider is <strong>Daytona</strong>, a company that rents exactly these — a typical Zeros box is <strong>2 CPUs, 4&nbsp;GB memory ≈ $0.167/hour running</strong> <span class="pill teal">✓ Verified pricing, mid-2026</span>. The provider is deliberately swappable behind an interface; <strong>Fly.io is the researched fallback</strong> (see the <a href="04-platform-comparison.html">platform comparison</a> in this pack).</p>
+    </div>
+
+    <!-- Image / snapshot -->
+    <div class="card concept">
+      <h3>Image / snapshot — the pre-baked setup <span class="analogy">🎂 the cake mix</span></h3>
+      <p>An <strong>image</strong> is a saved template of a fully set-up computer — a cake mix instead of raw ingredients. We bake one image containing everything a Zeros workspace needs (the engine runtime, the three agent CLIs, git, the sync agent), and every new sandbox starts from it. A <strong>snapshot</strong> is the same idea applied to a machine that’s already been used: a saved copy of its disk. This is why creating a workspace takes seconds, not minutes.</p>
+      <p>Related term you’ll hear: a <strong>warm pool</strong> — providers keep a few pre-started machines matching your image idling at the curb, like a valet who already brought the car around. On an exact match Daytona quotes creation as fast as <strong>~90 milliseconds</strong> <span class="pill amber">~ Likely — provider claim + third-party benchmarks; our own numbers pending the spike</span>.</p>
+      <div class="diagram">
+        <div class="dg-title">Why “New workspace” takes seconds, not minutes</div>
+        <div class="flow">
+          <div class="node"><div class="nt">Baked image</div><div class="ns">Engine + 3 agent CLIs + git + sync agent, pre-installed</div></div>
+          <div class="arrow"><span class="ar">→</span><span class="al">stamped out on demand</span></div>
+          <div class="node indigo"><div class="nt">Fresh sandbox</div><div class="ns">Ready in seconds</div></div>
+          <div class="arrow"><span class="ar">→</span><span class="al">or, with a warm pool</span></div>
+          <div class="node teal"><div class="nt">Pre-warmed machine</div><div class="ns">~90 ms on an exact match (provider claim)</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Engine -->
+    <div class="card concept">
+      <h3>The Zeros engine — the brain that moves <span class="analogy">🧠 the brain</span></h3>
+      <p>The <strong>engine</strong> is the part of Zeros that does the actual work: runs agents, manages git, executes terminal commands, owns the chat. Today it runs invisibly inside the app on your Mac. For a cloud workspace, <strong>the same engine runs inside the sandbox instead</strong> — audited at roughly <strong>80% code reuse</strong> <span class="pill teal">✓ Verified, file-by-file</span>. The Mac app becomes a thin window onto a brain that lives elsewhere. This is why closing the laptop changes nothing: <em>you closed the window, not the brain</em>.</p>
+      <div class="diagram">
+        <div class="dg-title">The same brain, two homes</div>
+        <div class="flow">
+          <div class="node"><div class="nt">Today (local)</div><div class="ns">App window <b>and</b> engine both live on your Mac</div></div>
+          <div class="arrow"><span class="ar">→</span><span class="al">the engine moves; ~80% of code unchanged</span></div>
+          <div class="node dark"><div class="nt">Cloud workspace</div><div class="ns">Engine lives in the sandbox; your Mac is just the window</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- WebSocket bridge -->
+    <div class="card concept">
+      <h3>The WebSocket bridge (CloudTransport) — the phone line <span class="analogy">📞 off the hook</span></h3>
+      <p>A <strong>WebSocket</strong> is a network connection that opens once and then stays open, so both sides can send messages instantly at any time — a phone line off the hook, versus mailing letters (ordinary web requests). Our implementation is called <strong>CloudTransport</strong>: the Mac app dials the sandbox’s <strong>preview URL</strong> (a public web address every Daytona sandbox gets) over <strong>WSS</strong> (the encrypted version of WebSocket), presenting a <strong>per-user token</strong> — a signed digital pass proving who you are — before anything flows. Elsewhere in this pack this direct connection is also called <strong>“the live wire”</strong> — worth keeping distinct from the cloud record: the live wire carries a running workspace’s traffic; the record permanently keeps its history.</p>
+      <div class="diagram">
+        <div class="dg-title">One deliberate choice: the connection is direct</div>
+        <div class="flow" style="margin-bottom:18px;">
+          <div class="node indigo"><div class="nt">Zeros</div><div class="ns">Your Mac</div></div>
+          <div class="arrow teal"><span class="ar">⇄</span><span class="al">one encrypted line, straight to your sandbox</span></div>
+          <div class="node teal"><div class="nt">Your sandbox</div><div class="ns">Nothing of ours in the middle</div></div>
+        </div>
+        <div class="flow">
+          <div class="node"><div class="nt">Conductor</div><div class="ns">Their Mac app</div></div>
+          <div class="arrow"><span class="ar">→</span><span class="al">extra hop</span></div>
+          <div class="node amber"><div class="nt">Their broker server</div><div class="ns">Their infra on your data path</div></div>
+          <div class="arrow"><span class="ar">→</span><span class="al"></span></div>
+          <div class="node"><div class="nt">Sandbox</div><div class="ns"></div></div>
+        </div>
+        <div class="dg-note">Direct means less latency, less infrastructure for us to keep up at 3&nbsp;AM, and less of your data passing through us.</div>
+      </div>
+      <p>Daytona explicitly documents WebSocket support through its preview URLs <span class="pill teal">✓ Verified in their docs</span> — though a long-running soak test is the first thing our Phase 1 spike will confirm <span class="pill amber">⚠ Needs testing</span>.</p>
+    </div>
+
+    <!-- Two-plane -->
+    <div class="card concept">
+      <h3>The two-plane architecture — files and chat travel differently <span class="analogy">🛣️ two lanes</span></h3>
+      <p><strong>This is the heart of the design.</strong> A workspace’s data splits into two “planes” that move by different rules, because they have opposite needs.</p>
+      <div class="diagram">
+        <div class="dg-title">Plane 1 · Files — a local mirror, for speed</div>
+        <div class="flow">
+          <div class="node indigo"><div class="nt">Files on your Mac</div><div class="ns">The mirror — your editor reads these; zero network wait</div></div>
+          <div class="arrow teal"><span class="ar">⇄</span><span class="al">Mutagen keeps both sides in step, ~1 second, both directions</span></div>
+          <div class="node dark"><div class="nt">Files in the sandbox</div><div class="ns">Where agents, builds, terminals and tests actually run</div></div>
+        </div>
+        <div class="dg-note">Like a shared Dropbox folder — but for one project and near-instant.</div>
+      </div>
+      <p>Code files are big, touched constantly, and you feel every millisecond of lag when scrolling or diffing them. So we don’t read them over the network at all. Why it matters: our sandboxes run in <strong>US/EU data centers only</strong> (as of mid-2026), and a user in India is <strong>~130 milliseconds away — round-trip — from the EU</strong>. Reading every file over that hop would make the editor feel like typing through molasses. The mirror hides the distance entirely; only the agent, terminal, builds, and tests run remotely, where the latency never reaches your fingers. (Conductor proved this trick in production with a homegrown version; we adopt it with an off-the-shelf tool. Mutagen-inside-Daytona is on our test checklist — <span class="pill amber">⚠ Needs testing</span>.)</p>
+      <div class="diagram">
+        <div class="dg-title">Plane 2 · Chat &amp; workspace state — the engine is the live hub; the cloud record is the permanent home</div>
+        <div class="flow">
+          <div class="node"><div class="nt">Your screen</div><div class="ns">Just a live view of the chat</div></div>
+          <div class="arrow indigo"><span class="ar">⇄</span><span class="al">live updates over the phone line</span></div>
+          <div class="node dark"><div class="nt">zeros.db in the sandbox</div><div class="ns">The one <em>live</em> copy of chat, sessions &amp; state — the working copy, owned by the engine</div></div>
+          <div class="arrow indigo"><span class="ar">⇄</span><span class="al">a teammate is just a second phone line</span></div>
+          <div class="node"><div class="nt">Teammate’s screen</div><div class="ns">Same brain, same chat, live</div></div>
+        </div>
+        <div class="flow" style="margin-top:14px;">
+          <div class="node dark"><div class="nt">The engine</div><div class="ns">…and as it works, it streams every chat &amp; session event upward</div></div>
+          <div class="arrow teal"><span class="ar">→</span><span class="al">written through as it happens, near-real-time (decided 2026-07-02)</span></div>
+          <div class="node teal"><div class="nt">🗂️ The cloud record</div><div class="ns">The permanent copy, in your account — read it directly when the workspace is asleep, or the sandbox is gone</div></div>
+        </div>
+        <div class="dg-note">Like a shared Google Doc: the document has exactly one live home, and everyone’s screen is a view of it. No merge conflicts to resolve — and the filing cabinet keeps every page.</div>
+      </div>
+      <p>The chat history, agent sessions, and workspace metadata live in <strong>zeros.db</strong> — a small database file — <em>inside the sandbox, owned by the engine</em>. And as of the 2026-07-02 decision, the engine <strong>writes every chat and session event through to the cloud record</strong> in near-real-time — so the sandbox’s copy is the working copy, and the record is the permanent one. Chat is tiny and doesn’t mind 130&nbsp;ms, so there’s no speed reason to copy it locally. Keeping the one <em>live</em> copy with the engine buys us something big later: when two people open the same workspace, they’re just <strong>two phone lines into the same brain</strong>. Conductor made the opposite choice on the live path (chat lands in a local database on each Mac) and is now retrofitting collaboration through their servers; ours falls out of the architecture. Industry research backs this pattern — <strong>Figma runs one server process per document for the same reason</strong> (see the <a href="05-sync-teams-and-collaboration.html">sync-and-collaboration</a> page in this pack). And when you’re <em>not</em> connected to a live engine — the workspace is asleep, or deleted — you read the same history straight from the cloud record.</p>
+    </div>
+
+    <!-- Control plane -->
+    <div class="card concept">
+      <h3>The control plane — the reception desk <span class="analogy">🛎️ checks you in, stays out of your room</span></h3>
+      <p>The <strong>control plane</strong> is a small, boring backend whose only jobs are: know who you are (login), know which workspaces exist and who may enter them (the registry), and hold the master key that creates sandboxes (the provider API key, which must never live in the app on your Mac). It checks you in and hands you the room key, but it does not stand in your room while you work.</p>
+      <div class="diagram">
+        <div class="dg-title">Never on the data path</div>
+        <div class="flow">
+          <div class="node amber"><div class="nt">Control plane</div><div class="ns">Supabase (login + registry) + a thin worker holding the Daytona key</div></div>
+          <div class="arrow"><span class="ar">→</span><span class="al">only at check-in: creates the sandbox, hands you the key</span></div>
+          <div class="node indigo"><div class="nt">Your Mac</div><div class="ns"></div></div>
+          <div class="arrow teal"><span class="ar">⇄</span><span class="al">all your actual work flows here, direct</span></div>
+          <div class="node dark"><div class="nt">Your sandbox</div><div class="ns"></div></div>
+        </div>
+        <div class="dg-note">If the reception desk goes down, existing workspaces keep working — you just can’t create new ones for a while.</div>
+      </div>
+      <p>Current plan: <strong>Supabase</strong> (a hosted login-plus-database service) for auth and the registry, plus a thin worker holding the Daytona key. The founder question of Supabase vs Railway vs Fly for this piece is exactly the subject of the <a href="04-platform-comparison.html">platform comparison</a> page — short preview: the research favors keeping Supabase for auth/registry and treating Railway as, at most, a home for the thin worker. One addition since the 2026-07-02 decision: the same Supabase Postgres also hosts <strong>the cloud record</strong> — that part <em>is</em> a durable home for your data (chat and history), but it still sits off the live path between your Mac and your sandbox.</p>
+    </div>
+
+    <!-- Idle / sleep / wake -->
+    <div class="card concept">
+      <h3>Idle / sleep / wake — why a parked workspace costs ~nothing <span class="analogy">🚗 the disciplined parking valet</span></h3>
+      <p>A running 2-CPU sandbox costs ~$0.167/hour — about <strong>$120/month if left on 24/7</strong>. A <strong>stopped</strong> one keeps its disk but releases the computer: ~$0.001/hour, well under $1/month <span class="pill teal">✓ Verified Daytona pricing, mid-2026</span>. So the engine plays a disciplined parking valet: awake while an agent is running <em>or</em> you’ve been active in the last 60 minutes; asleep otherwise; <strong>never, ever asleep mid-agent-run</strong>.</p>
+
+      <div class="diagram">
+        <div class="dg-title">The sleep/wake cycle</div>
+        <div class="cycle">
+          <div class="state awake"><div class="st">😃 Awake</div><div class="ss">~$0.17/hr<br>Agent running, or you were active in the last 60 min</div></div>
+          <div class="arrow"><span class="ar">→</span><span class="al">no agent + 60 quiet minutes — the <b>engine</b> decides, never the provider’s timer</span></div>
+          <div class="state asleep"><div class="st">😴 Asleep</div><div class="ss">~$0.001/hr<br>Disk kept, computer released</div></div>
+          <div class="arrow"><span class="ar">→</span><span class="al">you open the workspace</span></div>
+          <div class="state boot"><div class="st">🔌 Cold boot</div><div class="ss">Full restart from disk — engine rehydrates from its database and git. Budget: a few seconds. Unmeasured.</div></div>
+          <div class="arrow"><span class="ar">→</span><span class="al">back to</span></div>
+          <div class="state awake"><div class="st">😃 Awake</div><div class="ss">Chat, files, branches — all back</div></div>
+        </div>
+      </div>
+
+      <div class="costbars">
+        <div class="dg-title" style="text-align:left;">At fleet scale, the math is the entire business model — 100 workspaces, ~3 active hours/day</div>
+        <div class="costrow"><div class="cl">Always-on, no sleep</div><div class="bartrack"><div class="bar red">~$12,000 / month</div></div></div>
+        <div class="costrow"><div class="cl">With sleep-when-idle</div><div class="bartrack"><div class="bar teal">~$1,500 / month — roughly 8× cheaper</div></div></div>
+      </div>
+
+      <p style="margin-top:16px;">Every serious competitor implements some version of this — Fly’s Sprites “cost practically nothing while asleep”; Factory’s Droid machines auto-pause; Devin auto-sleeps — because at these prices nothing else works.</p>
+      <div class="callout watch">
+        <div class="co-title">⚠️ Watch out — two honest caveats</div>
+        <p><strong>1. Never let the provider decide.</strong> The hosting provider’s own idle timer can’t see a running agent and would kill it mid-task — a documented Daytona behavior and the #1 correctness trap we’ve designed around. The engine owns the decision.</p>
+        <p style="margin-top:8px;"><strong>2. Waking is a cold boot.</strong> Daytona’s stop is a full power-off, not a memory freeze — so the engine restarts and rehydrates from disk on every wake. Our engine already knows how to do that (it’s how the app launches today), but wake latency is unpublished by Daytona and unmeasured by us <span class="pill amber">⚠ Needs testing — gates our Phase 5</span>.</p>
+      </div>
+    </div>
+
+    <!-- Durability -->
+    <div class="card concept">
+      <h3>Durability — the sandbox is disposable on purpose <span class="analogy">🗂️ the filing cabinet</span></h3>
+      <div class="callout decide">
+        <div class="co-title">✅ Decision update — 2026-07-02</div>
+        <p>An earlier version of this section made periodic export blobs to object storage the permanent home of chat — and explicitly rejected a permanently-running cloud database as over-engineering. The founder has decided otherwise: we adopt <strong>the cloud record</strong> (Conductor’s direction) — our cloud database that permanently stores your chats, sessions, and workspace history in your account. Why: sandboxes are disposable by design and can’t be the long-term home of your data; cross-device sync and shared team workspaces need a server-side record anyway; and an always-on database is cheap at our scale (free tier → ~$25/month early on, ~$100–600/month at a thousand users — negligible next to sandbox compute). The honest cost is engineering: the write-through sync layer adds roughly 2–4 weeks to the plan. Exports remain as a backup safety net only. The text below reflects the new decision.</p>
+      </div>
+      <p>Rule: <strong>nothing irreplaceable lives only in the sandbox.</strong> Picture three homes. The sandbox is the <strong>workbench</strong> — disposable on purpose; it can be stopped, wiped, or now even deleted outright. <strong>GitHub is the vault</strong>: code is continuously pushed to your <strong>git remote</strong>, as before. And <strong>the cloud record is the filing cabinet</strong>: as you work, the engine streams every chat message, agent session, and state change into it, near-real-time, so your history stays permanently in your account — retrievable anytime, even years later, even if every sandbox is gone. Workbenches get cleared; the filing cabinet doesn’t.</p>
+      <div class="diagram">
+        <div class="dg-title">Three homes — if the sandbox vanished tomorrow, you’d lose ~nothing</div>
+        <div class="flow">
+          <div class="node dark"><div class="nt">Sandbox — the workbench</div><div class="ns">Disposable by design — can be stopped, wiped, or deleted outright</div></div>
+          <div class="arrow teal"><span class="ar">→</span><span class="al">code: continuously pushed</span></div>
+          <div class="node teal"><div class="nt">GitHub — the vault</div><div class="ns">The durable, canonical copy of the code</div></div>
+        </div>
+        <div class="flow" style="margin-top:14px;">
+          <div class="node dark"><div class="nt">Chat, sessions &amp; state</div><div class="ns">Every event, streamed by the engine as it happens</div></div>
+          <div class="arrow teal"><span class="ar">→</span><span class="al">written through, near-real-time</span></div>
+          <div class="node teal"><div class="nt">🗂️ The cloud record — the filing cabinet</div><div class="ns">Permanently in your account — retrievable anytime, even years later</div></div>
+        </div>
+        <div class="flow" style="margin-top:14px;">
+          <div class="node"><div class="nt">Backup safety net</div><div class="ns">Behind the record, not the primary home</div></div>
+          <div class="arrow"><span class="ar">→</span><span class="al">periodic <b>export blob</b>, cheap &amp; compressed</span></div>
+          <div class="node"><div class="nt">Object storage — the storage unit</div><div class="ns">Pennies per gigabyte; readable anywhere</div></div>
+        </div>
+        <div class="dg-note">A fresh sandbox rehydrates code from git and chat from the record. The export stays readable anywhere, so switching vendors is a migration, not a hostage negotiation.</div>
+      </div>
+      <p>If a sandbox is deleted, corrupted, or the provider has a bad day, a fresh one rehydrates code from git and chat from the record — you lose ~nothing. (This also makes the sleep economics <em>stronger</em>: sandboxes can be deleted aggressively, not just stopped.) A periodic <strong>export blob</strong> — a cheap compressed copy dropped into object storage (think a storage unit for files: pennies per gigabyte, boring, reliable) — remains as a backup safety net, and it keeps us provider-independent: the export is readable anywhere, so switching vendors is a migration, not a hostage negotiation.</p>
+      <div class="callout plain">
+        <div class="co-title">💡 One thing said openly</div>
+        <p>Unlike Conductor’s public “none of it is stored on our servers” claim, Zeros <em>does</em> store your chat and history in your account in our cloud — that is the feature (“your work is always in your account”). It’s encrypted at rest, exportable, and deletable on demand; and for companies that can’t allow it, the enterprise plan runs the record on <em>their</em> servers instead (see <a href="06-enterprise-self-hosting.html">Enterprise Self-Hosting</a> in this pack).</p>
+      </div>
+    </div>
+
+    <!-- Warm pools -->
+    <div class="card concept">
+      <h3>Warm pools — near-instant creation, when we want it <span class="analogy">🚙 the valet with the car out front</span></h3>
+      <p>Covered above under images, but worth its own line because it shapes first impressions: because every workspace starts from the same baked image, providers can keep pre-warmed machines ready, making “New cloud workspace” feel closer to opening a tab than provisioning a server. Sub-second creation is a provider claim we’ll validate in the spike <span class="pill amber">~ Likely · needs testing</span>.</p>
+    </div>
+  </section>
+
+  <!-- ================= WHY THIS MATTERS ================= -->
+  <section id="payoffs">
+    <div class="kicker">Why this matters</div>
+    <h2>The four payoffs</h2>
+    <div class="payoffs">
+      <div class="payoff">
+        <div class="pnum">1</div>
+        <h3>Agents keep working with the laptop closed</h3>
+        <p>The single most requested behavior in this category, and the one thing local execution can never do. Every major AI-coding vendor shipped a version in the last year (Anthropic, OpenAI, Cursor, Google) — but almost all ship <em>throwaway task boxes</em> that produce a PR and vanish. Zeros (like Conductor, Devin, and Factory) is in the rarer <strong>persistent workspace</strong> camp: a place you return to, not a task you fire off.</p>
+      </div>
+      <div class="payoff">
+        <div class="pnum">2</div>
+        <h3>Run 10 agents without melting your Mac</h3>
+        <p>Agents are hungry — parallel local agents mean fans, heat, and a swap-thrashed laptop. In the cloud each workspace has its own dedicated machine, and your Mac only renders text.</p>
+      </div>
+      <div class="payoff">
+        <div class="pnum">3</div>
+        <h3>Same work from any device</h3>
+        <p>Because the workspace’s brain and memory live in the cloud, any signed-in Mac is an equal window onto it. Longer-term this is also the path to a phone check-in experience — the 2026 table stakes across the industry are “monitor and nudge from mobile,” not a full IDE.</p>
+      </div>
+      <div class="payoff">
+        <div class="pnum">4</div>
+        <h3>Teammates in one workspace</h3>
+        <p>The engine-owned chat database makes shared workspaces a natural extension: N people are N authenticated connections to one engine that already broadcasts every update to every connected client. Notably, <em>nobody</em> in the market has real-time collaborative agent chat yet — Conductor’s is quiet plumbing plus share links, Claude’s session sharing is read-only snapshots. This is genuinely open ground (see the <a href="05-sync-teams-and-collaboration.html">landscape survey</a> in this pack).</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= WHAT THIS MEANS FOR ZEROS ================= -->
+  <section id="takeaways">
+    <div class="kicker">What this means for Zeros</div>
+    <h2>Concrete takeaways, in decision language</h2>
+
+    <div class="callout decide">
+      <div class="co-title">✅ Decision — the architecture is sound and market-validated</div>
+      <p>Conductor shipped the same shape (hosted sandbox + direct Mac-to-sandbox WebSocket + local file mirror) on Vercel Sandbox and users reportedly can’t tell cloud from local. We are not inventing an unproven pattern; we’re executing a proven one with two deliberate improvements: a direct connection with no broker on the data path, and engine-owned chat for native collaboration.</p>
+    </div>
+
+    <div class="callout decide">
+      <div class="co-title">✅ Decision — sleep-when-idle is the business</div>
+      <p>~8× cost difference at fleet scale. The engine-owned idle controller (never sleep mid-agent-run, <code>autoStopInterval: 0</code> on the provider side) is a <strong>correctness requirement, not an optimization</strong> — treat Phase 5 as launch-blocking.</p>
+    </div>
+
+    <div class="callout decide">
+      <div class="co-title">✅ Decision — durability discipline makes the disposable-sandbox model safe</div>
+      <p>Git remote plus <strong>the cloud record write-through and restore path</strong> must ship (Phase 7 — re-scoped on 2026-07-02 from “durability export” to “cloud record write-through &amp; restore”, with a nightly export backup as the safety net) before we invite users to trust cloud workspaces with months of chat history.</p>
+    </div>
+
+    <div class="callout watch">
+      <div class="co-title">⚠️ The immediate blocker is trivial and administrative</div>
+      <p>Phase 0 is done <span class="pill teal">✓ Verified — 1,429 tests green</span>. Phase 1’s spike harness is built and <strong>waiting on a Daytona API key</strong>. Getting that key and running the 11-item load-test checklist (WebSocket soak, wake latency, Mutagen-in-sandbox, egress) converts every “needs-testing” on this page into a number.</p>
+    </div>
+
+    <div class="callout plain">
+      <div class="co-title">💡 Money on the table</div>
+      <p>Daytona’s <strong>$200 no-card credit</strong> covers roughly six months of a solo-dev workspace (~$33/month), and their <strong>Startup Grid program offers $10k–$50k in credits</strong> — worth applying before beta to subsidize early COGS.</p>
+    </div>
+
+    <div class="callout decide">
+      <div class="co-title">✅ Decision — keep the provider swappable</div>
+      <p>Daytona went closed-source in June 2026, and Conductor already switched sandbox vendors once mid-beta (from a provider codenamed “sprite” to Vercel) — proof that the pluggable-provider seam we’ve designed is not paranoia, it’s table stakes.</p>
+    </div>
+
+    <!-- Phase status track -->
+    <div class="card">
+      <h3>Where the plan stands</h3>
+      <div class="diagram" style="margin-top:14px;">
+        <div class="dg-title">Roadmap checkpoints mentioned on this page</div>
+        <div class="flow">
+          <div class="node teal"><div class="nt">Phase 0</div><div class="ns">Groundwork<br><span class="pill teal">✓ Done — 1,429 tests green</span></div></div>
+          <div class="arrow"><span class="ar">→</span><span class="al"></span></div>
+          <div class="node amber"><div class="nt">Phase 1</div><div class="ns">Daytona spike — harness built<br><span class="pill amber">In progress — blocked on API key</span></div></div>
+          <div class="arrow"><span class="ar">→</span><span class="al"></span></div>
+          <div class="node"><div class="nt">Phase 5</div><div class="ns">Idle controller + wake latency<br><span class="pill gray">Planned — launch-blocking</span></div></div>
+          <div class="arrow"><span class="ar">→</span><span class="al"></span></div>
+          <div class="node"><div class="nt">Phase 7</div><div class="ns">Cloud record write-through &amp; restore (re-scoped 2026-07-02)<br><span class="pill gray">Planned — pre-beta requirement</span></div></div>
+        </div>
+        <div class="dg-note">Full phase-by-phase detail lives in the <a href="07-execution-plan.html">Execution Plan</a> page of this pack.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= GLOSSARY ================= -->
+  <section id="glossary">
+    <div class="kicker">Glossary</div>
+    <h2>Every term, in plain language</h2>
+    <div class="glossgrid">
+      <div class="gloss"><span class="gt">Cloud workspace</span><p>A Zeros workspace whose computer is rented in a data center instead of being your Mac. Same app, same experience.</p></div>
+      <div class="gloss"><span class="gt">Sandbox</span><p>The rented computer itself — created in seconds, disposable, isolated to one workspace. The hotel room.</p></div>
+      <div class="gloss"><span class="gt">Daytona</span><p>The company we currently rent sandboxes from (US/EU data centers, ~$0.17/hr for a typical box as of mid-2026).</p></div>
+      <div class="gloss"><span class="gt">Image</span><p>A saved template of a fully-installed computer, so new sandboxes start pre-set-up in seconds. The cake mix.</p></div>
+      <div class="gloss"><span class="gt">Snapshot</span><p>A saved copy of a specific machine’s disk at a moment in time — how a stopped workspace remembers everything.</p></div>
+      <div class="gloss"><span class="gt">Warm pool</span><p>Pre-started machines kept idling so “create workspace” feels instant. The valet with the car already out front.</p></div>
+      <div class="gloss"><span class="gt">Zeros engine</span><p>The brain of Zeros — runs agents, git, terminals, and owns the chat. Moves into the sandbox for cloud workspaces.</p></div>
+      <div class="gloss"><span class="gt">WebSocket / WSS</span><p>A network connection that opens once and stays open so both sides can talk instantly; WSS is the encrypted kind. The phone line.</p></div>
+      <div class="gloss"><span class="gt">CloudTransport</span><p>Our name for the Mac app’s WebSocket connection to a cloud workspace — also called “the live wire” in this pack. It carries the running workspace; the cloud record keeps the permanent history.</p></div>
+      <div class="gloss"><span class="gt">Preview URL</span><p>The public web address every Daytona sandbox gets, which our WebSocket dials.</p></div>
+      <div class="gloss"><span class="gt">Token</span><p>A signed digital pass sent when connecting, proving which user you are. The room key.</p></div>
+      <div class="gloss"><span class="gt">Mutagen</span><p>An open-source file synchronizer that keeps a local copy of the workspace’s files in step with the sandbox, both directions.</p></div>
+      <div class="gloss"><span class="gt">File mirror</span><p>That synced local copy — why opening and editing files feels instant despite the distance.</p></div>
+      <div class="gloss"><span class="gt">zeros.db</span><p>The small database holding chat, sessions, and workspace state; lives with the engine inside the sandbox as the working copy — every event streams on to the cloud record.</p></div>
+      <div class="gloss"><span class="gt">The cloud record</span><p>Our cloud database that permanently stores your chats, sessions, and workspace history in your account, synced to every device you sign into. The filing cabinet. (Decided 2026-07-02.)</p></div>
+      <div class="gloss"><span class="gt">Two-plane architecture</span><p>Files travel one way (mirrored locally for speed); chat/state travel another (engine-owned live hub, written through to the cloud record for permanence).</p></div>
+      <div class="gloss"><span class="gt">Control plane</span><p>The small backend that handles login, the workspace registry, and sandbox creation. The reception desk — never in your data path.</p></div>
+      <div class="gloss"><span class="gt">Supabase</span><p>The hosted login+database service currently pencilled in as our control plane.</p></div>
+      <div class="gloss"><span class="gt">Worker</span><p>A tiny server-side program holding the Daytona master key, so it never ships inside the Mac app.</p></div>
+      <div class="gloss"><span class="gt">Idle / sleep / wake</span><p>Workspaces stop after 60 quiet minutes (never mid-agent-run) and cost ~$0.001/hr asleep; they cold-boot back on demand.</p></div>
+      <div class="gloss"><span class="gt">Cold boot</span><p>Waking is a full restart from disk, not resuming a frozen machine — the engine rehydrates from its database and git.</p></div>
+      <div class="gloss"><span class="gt">Durability</span><p>The guarantee that nothing irreplaceable lives only in the sandbox: code → GitHub, chat &amp; history → the cloud record (plus a backup export).</p></div>
+      <div class="gloss"><span class="gt">Export blob</span><p>A cheap compressed backup copy of chat/artifacts dropped into object storage — a safety net behind the cloud record, no longer the primary home. The storage unit.</p></div>
+      <div class="gloss"><span class="gt">Git remote</span><p>Your repo’s home on GitHub — the durable, canonical copy of the code. The vault.</p></div>
+      <div class="gloss"><span class="gt">Latency / RTT</span><p>Round-trip travel time for a message; India→EU is ~130 ms, which the file mirror makes irrelevant for editing.</p></div>
+      <div class="gloss"><span class="gt">Egress</span><p>Outbound internet access from the sandbox — restricted by allowlist on cheap Daytona tiers (why Cursor agents need Tier 3).</p></div>
+    </div>
+  </section>
+
+  <!-- ================= SOURCES ================= -->
+  <section id="sources">
+    <div class="kicker">Sources</div>
+    <h2>Where every claim comes from</h2>
+    <div class="card sources">
+      <div class="src-group" style="margin-top:0;">Internal</div>
+      <ul>
+        <li>Zeros engineering plan (canonical): <a href="08-engineering-reference.html">08-engineering-reference</a> — the v3 consolidation (2026-07-03) of the June plan (v2, 2026-06-24; Phase 0 shipped 2026-06-25); the original file was removed. The June v2 predated the 2026-07-02 cloud-record decision; the v3 applies it (see the <a href="07-execution-plan.html">Execution Plan</a> page in this pack)</li>
+      </ul>
+      <div class="src-group">Conductor.build (reference competitor)</div>
+      <ul>
+        <li><a href="https://vercel.com/blog/how-conductor-moved-parallel-coding-agents-from-the-laptop-to-the-cloud-with-vercel-sandbox">vercel.com/blog/how-conductor-moved-parallel-coding-agents-from-the-laptop-to-the-cloud-with-vercel-sandbox</a> — May 27, 2026 · confirms Vercel Sandbox, “can’t tell the difference” quote</li>
+        <li><a href="https://thenewstack.io/conductor-cloud-ai-coding-agents/">thenewstack.io/conductor-cloud-ai-coding-agents</a> — May 14, 2026 · announcement, no published pricing</li>
+        <li><a href="https://www.conductor.build/cloud">conductor.build/cloud</a> — early-access waitlist, fetched 2026-07-02</li>
+        <li><a href="https://www.conductor.build/changelog">conductor.build/changelog</a> — cloud beta features, May–July 2026</li>
+        <li><a href="https://www.conductor.build/docs/reference/privacy">conductor.build/docs/reference/privacy</a> — local-chat storage claims</li>
+      </ul>
+      <div class="src-group">Providers &amp; pricing</div>
+      <ul>
+        <li><a href="https://www.daytona.io/pricing">daytona.io/pricing</a> — vCPU/RAM/disk rates, $200 credit · verified mid-2026</li>
+        <li><a href="https://vercel.com/docs/sandbox/pricing">vercel.com/docs/sandbox/pricing</a> and <a href="https://vercel.com/docs/sandbox/concepts/persistent-sandboxes">vercel.com/docs/sandbox/concepts/persistent-sandboxes</a> — Conductor’s provider, sleep/snapshot model</li>
+        <li><a href="https://fly.io/blog/design-and-implementation/">fly.io/blog/design-and-implementation</a> and <a href="https://simonwillison.net/2026/Jan/9/sprites-dev/">simonwillison.net/2026/Jan/9/sprites-dev</a> — Fly Sprites: fallback provider, sleep economics</li>
+        <li><a href="https://northflank.com/blog/ai-sandbox-pricing">northflank.com/blog/ai-sandbox-pricing</a> — cross-provider pricing comparison</li>
+      </ul>
+      <div class="src-group">Industry patterns (persistent vs ephemeral, sleep-when-idle, mobile, portability)</div>
+      <ul>
+        <li><a href="https://code.claude.com/docs/en/claude-code-on-the-web">code.claude.com/docs/en/claude-code-on-the-web</a> — Anthropic’s cloud sessions: ephemeral-sandbox contrast</li>
+        <li><a href="https://developers.openai.com/codex/cloud">developers.openai.com/codex/cloud</a> — Codex cloud tasks</li>
+        <li><a href="https://cursor.com/docs/cloud-agent">cursor.com/docs/cloud-agent</a> — Cursor cloud agents</li>
+        <li><a href="https://docs.factory.ai/cli/features/droid-computers">docs.factory.ai/cli/features/droid-computers</a> — persistent, sleep-when-idle Droid Computers</li>
+        <li><a href="https://devin.ai/pricing/">devin.ai/pricing</a> and <a href="https://docs.devin.ai/onboard-devin/repo-setup">docs.devin.ai/onboard-devin/repo-setup</a> — machine snapshots, idle sleep</li>
+        <li><a href="https://ampcode.com/manual">ampcode.com/manual</a> — thread sharing: team-collab state of the art</li>
+      </ul>
+    </div>
+  </section>
+
+</div>
+
+<!-- ================= FOOTER ================= -->
+<footer>
+  <div class="footer-inner">
+    <span class="fmark">Zeros — Cloud Workspaces Report · July 2026</span>
+    <div class="pagelinks">
+      <a href="index.html">← Overview</a>
+      <a href="02-how-conductor-does-it.html">How Conductor Does It →</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

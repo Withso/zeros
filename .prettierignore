@@ -41,9 +41,12 @@ coverage/
 # The design labs are single-file HTML documents that open straight off
 # file://; their indentation encodes the structure of the mock, and Prettier's
 # HTML printer rewraps it into something no one can read as a design.
-# `styles/Artifacts/` and `shape shimmer/` are TRACKED — they are the design
-# record — so this list is the only thing keeping `format:check` off them.
-# `docs/` and `.context/` are local-only trees that merely stay on disk.
+# `styles/Artifacts/`, `shape shimmer/` and `docs/` are TRACKED — the first two
+# are the design record, `docs/` the engineering journal — so this list is the
+# only thing keeping the changed-file `prettier --check` off them. `docs/` earns
+# it on the same ground: 13 of its files are hand-laid-out HTML reports whose
+# indentation is the document. (`docs/` was gitignored until 2026-07-28, when it
+# became tracked; only `.context/` is still a local-only tree on disk.)
 docs/
 styles/Artifacts/
 shape shimmer/

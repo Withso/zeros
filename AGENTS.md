@@ -2,11 +2,12 @@
 
 These instructions apply to the entire repository.
 
-> **On `docs/`:** everything under `docs/` is local-only working notes. It is
-> gitignored and is **not** present in a public clone, so the `docs/…`
-> references below resolve only inside a maintainer's working tree. Each rule
-> here is written to stand on its own without them — if a doc is missing, the
-> rule still applies as stated.
+> **On `docs/`:** everything under `docs/` is working notes — scratch analyses,
+> audits and plans, often superseded as fast as they are written. It is tracked
+> (so the `docs/…` references below resolve in any clone), but treat it as a
+> record of what was thought at the time, not as spec. Each rule here is
+> written to stand on its own — if a doc is missing or stale, the rule still
+> applies as stated.
 
 - Read and follow [RULES.md](RULES.md) for every change.
 - For renderer state, navigation, data fetching, tabs, panels, lists, or loading UI, also read and follow `docs/ui-interaction-performance.md` when it is present locally; the performance rules below are the binding summary either way.

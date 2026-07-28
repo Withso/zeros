@@ -1,0 +1,1004 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>04 · Platform Comparison — Zeros Cloud Workspaces Report</title>
+<style>
+  :root{
+    --bg:#FAF9F7; --ink:#1B1B22; --muted:#6B7280;
+    --card:#FFFFFF; --line:#E7E5E0;
+    --indigo:#4F46E5; --teal:#0F9D8F; --amber:#D97706; --red:#DC2626;
+    --hero-bg:#16161D; --hero-ink:#FAFAF8;
+    --radius:14px; --shadow:0 1px 2px rgba(0,0,0,.04);
+    --mono:ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html{scroll-behavior:smooth;}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size:16px; line-height:1.6; -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--indigo); text-decoration:none;}
+  a:hover{text-decoration:underline;}
+  code{font-family:var(--mono); font-size:.86em; background:#F1F0EC; border:1px solid var(--line); border-radius:6px; padding:1px 6px; white-space:nowrap;}
+
+  /* ---------- Sticky nav ---------- */
+  .nav{
+    position:sticky; top:0; z-index:50; background:#FFFFFF;
+    border-bottom:1px solid var(--line);
+  }
+  .nav-inner{
+    max-width:1060px; margin:0 auto; padding:10px 24px;
+    display:flex; flex-wrap:wrap; gap:6px; align-items:center;
+  }
+  .nav-brand{font-weight:700; font-size:13px; letter-spacing:.04em; margin-right:10px; color:var(--ink);}
+  .nav a.navlink{
+    font-size:12.5px; color:var(--muted); padding:5px 10px; border-radius:999px; white-space:nowrap;
+  }
+  .nav a.navlink:hover{background:#F4F3F0; text-decoration:none; color:var(--ink);}
+  .nav a.navlink.current{
+    background:var(--indigo); color:#fff; font-weight:600;
+  }
+
+  /* ---------- Hero ---------- */
+  .hero{background:var(--hero-bg); color:var(--hero-ink); padding:64px 24px 72px;}
+  .hero-inner{max-width:1060px; margin:0 auto;}
+  .hero-kicker{
+    display:inline-flex; align-items:center; gap:10px;
+    font-family:var(--mono); font-size:13px; letter-spacing:.14em; text-transform:uppercase;
+    color:#A5B4FC; margin-bottom:18px;
+  }
+  .hero-kicker .pagechip{
+    background:var(--indigo); color:#fff; border-radius:8px; padding:2px 10px; font-weight:700; letter-spacing:.05em;
+  }
+  .hero h1{font-size:clamp(30px, 4.6vw, 46px); line-height:1.12; letter-spacing:-0.02em; font-weight:800; max-width:22ch;}
+  .hero p.promise{margin-top:16px; font-size:18px; color:#C9C9D2; max-width:62ch;}
+  .hero p.promise strong{color:#FAFAF8;}
+
+  /* ---------- Layout ---------- */
+  .wrap{max-width:1060px; margin:0 auto; padding:0 24px 40px;}
+  section{margin-top:56px;}
+  .sec-kicker{
+    font-family:var(--mono); font-size:12px; letter-spacing:.16em; text-transform:uppercase;
+    color:var(--indigo); font-weight:700; margin-bottom:8px;
+  }
+  h2{font-size:28px; letter-spacing:-0.015em; line-height:1.2; margin-bottom:6px;}
+  h3{font-size:19px; margin-bottom:6px; letter-spacing:-0.01em;}
+  .sec-sub{color:var(--muted); max-width:72ch; margin-bottom:22px;}
+  .card{
+    background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+    box-shadow:var(--shadow); padding:24px;
+  }
+  .muted{color:var(--muted);}
+  .small{font-size:13.5px;}
+
+  /* ---------- Chips & pills ---------- */
+  .chip{
+    display:inline-block; font-size:11.5px; font-weight:700; letter-spacing:.02em;
+    border-radius:999px; padding:2px 10px; white-space:nowrap; vertical-align:middle;
+  }
+  .chip.good{background:#E6F5F2; color:var(--teal);}
+  .chip.bad{background:#FDECEC; color:var(--red);}
+  .chip.mid{background:#FBF0DE; color:var(--amber);}
+  .chip.info{background:#EEEDFB; color:var(--indigo);}
+  .chip.neutral{background:#F1F0EC; color:var(--muted);}
+
+  /* ---------- Stat cards ---------- */
+  .stat-row{display:grid; grid-template-columns:repeat(auto-fit, minmax(190px,1fr)); gap:14px; margin:22px 0;}
+  .stat{
+    background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+    box-shadow:var(--shadow); padding:18px 18px 16px;
+  }
+  .stat .big{font-size:27px; font-weight:800; letter-spacing:-0.02em; line-height:1.1;}
+  .stat .big.teal{color:var(--teal);} .stat .big.indigo{color:var(--indigo);}
+  .stat .big.amber{color:var(--amber);} .stat .big.red{color:var(--red);}
+  .stat .cap{font-size:13px; color:var(--muted); margin-top:6px; line-height:1.45;}
+
+  /* ---------- Callouts ---------- */
+  .callout{
+    background:var(--card); border:1px solid var(--line); border-left-width:4px;
+    border-radius:var(--radius); box-shadow:var(--shadow); padding:16px 20px; margin:18px 0;
+  }
+  .callout .co-title{font-weight:700; font-size:14px; margin-bottom:4px; display:flex; align-items:center; gap:8px;}
+  .callout.plain{border-left-color:var(--indigo);} .callout.plain .co-title{color:var(--indigo);}
+  .callout.watch{border-left-color:var(--amber);} .callout.watch .co-title{color:var(--amber);}
+  .callout.decision{border-left-color:var(--teal);} .callout.decision .co-title{color:var(--teal);}
+  .callout.myth{border-left-color:var(--red);} .callout.myth .co-title{color:var(--red);}
+  .callout p{font-size:14.5px;}
+  .callout p + p{margin-top:8px;}
+
+  /* ---------- Tables ---------- */
+  .table-scroll{overflow-x:auto; border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); background:var(--card);}
+  table{border-collapse:separate; border-spacing:0; width:100%; min-width:720px; font-size:14px;}
+  thead th{
+    position:sticky; top:0; background:#FBFBFA; z-index:2;
+    text-align:left; font-size:12.5px; letter-spacing:.03em; color:var(--muted);
+    padding:12px 14px; border-bottom:1px solid var(--line); font-weight:700;
+  }
+  tbody td{padding:12px 14px; border-bottom:1px solid #F0EFEA; vertical-align:top;}
+  tbody tr:last-child td{border-bottom:none;}
+  tbody tr:hover td{background:#FAFAF6;}
+  td.rowhead{font-weight:700; font-size:13.5px; min-width:150px;}
+  td .sub{display:block; font-size:12px; color:var(--muted); font-weight:400; margin-top:3px;}
+  .tick{color:var(--teal); font-weight:800;} .cross{color:var(--red); font-weight:800;} .tilde{color:var(--amber); font-weight:800;}
+
+  /* ---------- Diagrams ---------- */
+  .diagram{
+    background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+    box-shadow:var(--shadow); padding:26px; margin:20px 0;
+  }
+  .diagram .dg-title{font-size:13px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); margin-bottom:18px; text-align:center;}
+  .dbox{
+    border:1.5px solid var(--line); border-radius:12px; background:#FDFDFC;
+    padding:14px 16px; text-align:center;
+  }
+  .dbox .db-name{font-weight:700; font-size:14.5px;}
+  .dbox .db-sub{font-size:12.5px; color:var(--muted); margin-top:4px; line-height:1.45;}
+  .dbox.indigo{border-color:#C7C4F4; background:#F7F7FE;}
+  .dbox.teal{border-color:#BCE3DD; background:#F3FBF9;}
+  .dbox.amber{border-color:#F0D9B8; background:#FDF8F0;}
+  .dbox.dark{border-color:#3A3A45; background:#1F1F27; color:#FAFAF8;}
+  .dbox.dark .db-sub{color:#B9B9C4;}
+  .arrow-down{
+    display:flex; flex-direction:column; align-items:center; gap:2px; margin:8px auto;
+    color:var(--muted); font-size:12px;
+  }
+  .arrow-down::after{content:"↓"; font-size:20px; line-height:1; color:#B9B7B0;}
+  .split{display:grid; grid-template-columns:1fr 1fr; gap:20px;}
+  @media(max-width:720px){.split{grid-template-columns:1fr;}}
+  .hflow{display:flex; align-items:stretch; gap:0; flex-wrap:wrap; justify-content:center;}
+  .hflow .dbox{flex:1 1 170px; min-width:160px; display:flex; flex-direction:column; justify-content:center;}
+  .harrow{
+    display:flex; flex-direction:column; justify-content:center; align-items:center;
+    min-width:74px; padding:0 6px; color:var(--muted); font-size:11px; text-align:center; line-height:1.3;
+  }
+  .harrow::before{content:"⟶"; font-size:22px; color:#B9B7B0; line-height:1;}
+  .harrow.dual::before{content:"⟷";}
+  .harrow span{margin-top:3px; max-width:110px;}
+
+  /* ---------- Story panels ---------- */
+  .steps{display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:14px; margin:20px 0;}
+  .step{
+    background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+    box-shadow:var(--shadow); padding:18px; position:relative;
+  }
+  .step .num{
+    width:28px; height:28px; border-radius:999px; background:var(--indigo); color:#fff;
+    display:flex; align-items:center; justify-content:center; font-weight:800; font-size:14px; margin-bottom:10px;
+  }
+  .step h4{font-size:14.5px; margin-bottom:4px;}
+  .step p{font-size:13px; color:var(--muted); line-height:1.5;}
+
+  /* ---------- Contender / metaphor cards ---------- */
+  .cards3{display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:16px; margin:20px 0;}
+  .pcard{
+    background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+    box-shadow:var(--shadow); padding:20px;
+  }
+  .pcard .pc-head{display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px;}
+  .pcard h4{font-size:16.5px; letter-spacing:-0.01em;}
+  .pcard p{font-size:13.5px; color:var(--muted);}
+  .pcard ul{margin:10px 0 0 18px; font-size:13.5px; color:var(--ink);}
+  .pcard li{margin-bottom:5px;}
+  .pcard li::marker{color:#B9B7B0;}
+  .pcard.top{border-top:3px solid var(--teal);}
+  .pcard.top-amber{border-top:3px solid var(--amber);}
+  .pcard.top-indigo{border-top:3px solid var(--indigo);}
+  .pcard.top-red{border-top:3px solid var(--red);}
+
+  /* ---------- Timeline ---------- */
+  .timeline{margin:20px 0; padding:6px 0 6px 0;}
+  .tl-item{display:grid; grid-template-columns:110px 22px 1fr; gap:0 14px; position:relative;}
+  .tl-date{font-family:var(--mono); font-size:12px; color:var(--muted); text-align:right; padding-top:3px; font-weight:600;}
+  .tl-rail{position:relative; display:flex; justify-content:center;}
+  .tl-rail::before{content:""; position:absolute; top:0; bottom:0; width:2px; background:#EAE8E2;}
+  .tl-dot{width:12px; height:12px; border-radius:999px; margin-top:6px; position:relative; z-index:1; border:2px solid #fff; box-shadow:0 0 0 1px var(--line);}
+  .tl-dot.red{background:var(--red);} .tl-dot.amber{background:var(--amber);} .tl-dot.teal{background:var(--teal);}
+  .tl-body{padding-bottom:22px;}
+  .tl-body h4{font-size:14.5px;}
+  .tl-body p{font-size:13px; color:var(--muted);}
+  @media(max-width:560px){.tl-item{grid-template-columns:78px 22px 1fr;} .tl-date{font-size:11px;}}
+
+  /* ---------- Action list ---------- */
+  .action{display:flex; gap:16px; padding:18px 0; border-bottom:1px solid #F0EFEA; align-items:flex-start;}
+  .action:last-child{border-bottom:none;}
+  .action .num{
+    flex:0 0 30px; width:30px; height:30px; border-radius:999px; background:#EEEDFB; color:var(--indigo);
+    display:flex; align-items:center; justify-content:center; font-weight:800; font-size:14px; margin-top:2px;
+  }
+  .action h4{font-size:15.5px; margin-bottom:3px;}
+  .action h4 .chip{margin-left:8px;}
+  .action p{font-size:13.5px; color:var(--muted);}
+
+  /* ---------- Details / glossary ---------- */
+  details{
+    background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+    box-shadow:var(--shadow); margin:14px 0; overflow:hidden;
+  }
+  details summary{
+    cursor:pointer; padding:14px 20px; font-weight:700; font-size:14.5px; list-style:none;
+    display:flex; align-items:center; gap:10px; user-select:none;
+  }
+  details summary::-webkit-details-marker{display:none;}
+  details summary::before{content:"+"; font-weight:800; color:var(--indigo); font-size:17px; width:16px;}
+  details[open] summary::before{content:"–";}
+  details .d-body{padding:0 20px 18px; font-size:14px;}
+  .gloss{display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:10px 24px;}
+  .gloss div{font-size:13.5px;}
+  .gloss b{color:var(--ink);}
+  .gloss div{color:var(--muted);}
+
+  /* ---------- Sources / footer ---------- */
+  .sources ul{columns:2; column-gap:36px; margin-left:18px; font-size:13px;}
+  .sources li{margin-bottom:7px; break-inside:avoid; color:var(--muted);}
+  @media(max-width:720px){.sources ul{columns:1;}}
+  footer{
+    border-top:1px solid var(--line); margin-top:60px; padding:26px 24px 48px; background:#FFFFFF;
+  }
+  .foot-inner{max-width:1060px; margin:0 auto; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:14px;}
+  .foot-inner .brand{font-size:13px; color:var(--muted);}
+  .foot-nav a{font-size:13.5px; font-weight:600; margin-left:18px;}
+
+  /* ---------- Misc ---------- */
+  .tag-verified{font-size:10.5px; font-weight:700; color:var(--teal); letter-spacing:.04em; text-transform:uppercase;}
+  .tag-likely{font-size:10.5px; font-weight:700; color:var(--amber); letter-spacing:.04em; text-transform:uppercase;}
+  .tag-spike{font-size:10.5px; font-weight:700; color:var(--red); letter-spacing:.04em; text-transform:uppercase;}
+  .keypoints{display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:14px; margin-top:18px;}
+  .kp{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:16px 18px;}
+  .kp h4{font-size:14px; margin-bottom:4px; display:flex; gap:8px; align-items:baseline;}
+  .kp p{font-size:13px; color:var(--muted);}
+  .ladder{display:flex; gap:0; flex-wrap:wrap; justify-content:center; margin-top:14px;}
+  .ladder .dbox{flex:1 1 200px; min-width:190px;}
+</style>
+</head>
+<body>
+
+<!-- ================= NAV ================= -->
+<nav class="nav">
+  <div class="nav-inner">
+    <span class="nav-brand">ZEROS · CLOUD WORKSPACES</span>
+    <a class="navlink" href="index.html">Overview</a>
+    <a class="navlink" href="01-cloud-workspaces-explained.html">Cloud Workspaces, Explained</a>
+    <a class="navlink" href="02-how-conductor-does-it.html">How Conductor Does It</a>
+    <a class="navlink" href="03-cursor-and-claude-code-cloud.html">Cursor &amp; Claude Code</a>
+    <a class="navlink current" href="04-platform-comparison.html">Platform Comparison</a>
+    <a class="navlink" href="05-sync-teams-and-collaboration.html">Sync, Teams &amp; Collab</a>
+    <a class="navlink" href="06-enterprise-self-hosting.html">Enterprise Self-Hosting</a>
+    <a class="navlink" href="07-execution-plan.html">Execution Plan</a>
+    <a class="navlink" href="08-engineering-reference.html">Engineering Reference</a>
+  </div>
+</nav>
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <div class="hero-inner">
+    <div class="hero-kicker"><span class="pagechip">04</span> PLATFORM COMPARISON · JULY 2026</div>
+    <h1>Daytona + Railway vs Vercel + Fly.io — the actual call</h1>
+    <p class="promise">It's <strong>two decisions, not one</strong>: who rents us the computers the agents run on, and who runs the front desk (login, records, pings). Here's the verdict on both — with the receipts. <strong>Updated 2026-07-02:</strong> the front desk now also keeps <strong>the cloud record</strong> — the always-on database that permanently stores your chats and history. Same winners; stronger case.</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ================= SHORT VERSION ================= -->
+<section id="short-version">
+  <div class="sec-kicker">The short version</div>
+  <h2>Two verdicts, sixty seconds</h2>
+  <p class="sec-sub">Conductor, our reference competitor, made these two choices separately too: Vercel for the computers, Fly.io for the front desk. We should keep them separate as well — and here's where each lands.</p>
+
+  <div class="callout decision">
+    <div class="co-title">🗓️ Decision update — 2026-07-02</div>
+    <p>The founder decided to adopt <strong>the cloud record</strong> — our cloud database that permanently stores your chats, sessions, and workspace history in your account. For this page that changes the <em>weight</em> of Decision B, not its winner: the backend is no longer just a login desk plus a small registry; it now hosts an always-on Postgres (the record) and a sync engine as first-class requirements. Decision A (Daytona) is untouched. Sections below carry dated notes where the analysis moved.</p>
+  </div>
+
+  <div class="split">
+    <div class="callout decision" style="margin:0;">
+      <div class="co-title">✅ Decision A — the computers: stay on Daytona</div>
+      <p>Run the Phase 1 spike, keep the escape hatch warm. Daytona is the <strong>only contender with a documented WebSocket-over-preview-URL path</strong> (our direct Mac-to-sandbox connection), has two regions (US + EU vs Vercel's US-only), the cheapest per-vCPU rate, and $200 free credit with a path to $10k–$50k startup credits. Its risks — closed-source move in June 2026, experimental fork/snapshot — don't touch anything v1 depends on.</p>
+    </div>
+    <div class="callout decision" style="margin:0;">
+      <div class="co-title">✅ Decision B — the front desk: Supabase, not Railway — now stronger</div>
+      <p>Supabase for auth + <strong>the cloud record</strong> + realtime — the same pick as before, and the record makes the case <em>stronger</em>, because Supabase's managed Postgres becomes the record itself. A tiny worker on Cloudflare or Railway for provisioning, R2/Railway Buckets for backup blobs, and <strong>ElectricSQL</strong> as the named sync-engine spike (Conductor-proven; runs on any Postgres, so it doesn't lock the database host). <strong>Railway's honest best roles: the thin worker now, or plain-Postgres record host later — not replacing Supabase today.</strong></p>
+    </div>
+  </div>
+
+  <div class="stat-row">
+    <div class="stat"><div class="big indigo">2 decisions</div><div class="cap">Not one. A: the sandbox provider. B: the backend + the cloud record. Conductor split them exactly this way.</div></div>
+    <div class="stat"><div class="big teal">~$0 → $600/mo</div><div class="cap">The front desk — now including the always-on cloud record — from solo to 1,000 users. Still noise: the money is all in Decision A, not B.</div></div>
+    <div class="stat"><div class="big amber">$30 → $15k/mo</div><div class="cap">Sandbox compute: solo → 100 users (~$1.5k) → 1,000 users, with sleep-when-idle. Optimize this, not the backend bill.</div></div>
+    <div class="stat"><div class="big red">~8 hours</div><div class="cap">Railway's full-platform outage in May 2026 (Google Cloud auto-suspended their account). A hard argument against putting login on it.</div></div>
+  </div>
+
+  <div class="keypoints">
+    <div class="kp"><h4><span class="chip mid">~</span> Vercel: proven, but caged</h4><p>Conductor runs on it in production; its snapshot/fork is GA while Daytona's is experimental; "Active CPU" billing is genuinely cheaper for agents that mostly wait on the model. But: one US region, a 24-hour session cap, and whether our engine's WebSocket works on its exposed ports is unconfirmed — needs a spike.</p></div>
+    <div class="kp"><h4><span class="chip mid">~</span> Fly Sprites: right shape, too young</h4><p>The closest philosophical match to our design — but six months old, with no named customers and no region selection.</p></div>
+    <div class="kp"><h4><span class="chip bad">✗</span> Railway's landlord problem</h4><p>"Railway is a great landlord, but the office comes unfurnished." Zeros now needs five things from this layer — login, <strong>the cloud record</strong> (an always-on Postgres holding the registry <em>and</em> every chat and session), a sync engine to feed it, a realtime channel, and object storage for backups. Supabase bundles four of the five for $25/month; the fifth (the sync engine) runs on top of its Postgres. Railway and Fly give you compute + a Postgres database and <strong>none of the rest</strong>.</p></div>
+    <div class="kp"><h4><span class="chip bad">✗</span> Railway's 2026 record</h4><p>An ~8-hour full-platform outage (May), a 52-minute incident serving cached authenticated data to the wrong users (March), and 309 community data-loss threads about its Postgres. All verified from Railway's own postmortems.</p></div>
+    <div class="kp"><h4><span class="chip good">✓</span> Lock-in: manageable on A…</h4><p>Swapping sandbox providers behind our <code>CloudSandboxProvider</code> interface is weeks of work, because nothing irreplaceable lives in the box (code goes to git; chats and history go to the cloud record).</p></div>
+    <div class="kp"><h4><span class="chip bad">✗</span> …real on B</h4><p>Migrating thousands of user logins off an auth provider later is the genuinely painful move — another reason to pick the auth layer deliberately now. The record adds data gravity too, but ElectricSQL runs on any Postgres, so the <em>sync</em> choice never locks the <em>database host</em>.</p></div>
+  </div>
+</section>
+
+<!-- ================= TWO DECISIONS ================= -->
+<section id="two-decisions">
+  <div class="sec-kicker">Framing</div>
+  <h2>Two decisions, kept separate</h2>
+  <p class="sec-sub">When you launch a cloud workspace, two very different companies get involved. Keep them apart in your head and every choice below gets easier.</p>
+
+  <div class="diagram">
+    <div class="dg-title">Who's involved when you launch a cloud workspace</div>
+    <div style="max-width:420px; margin:0 auto;">
+      <div class="dbox dark"><div class="db-name">You press "New cloud workspace"</div><div class="db-sub">in the Zeros Mac app</div></div>
+      <div class="arrow-down"><span>two different companies answer</span></div>
+    </div>
+    <div class="split">
+      <div>
+        <div class="dbox indigo">
+          <div class="db-name">Decision A · The sandbox provider — "the hotel room" 🏨</div>
+          <div class="db-sub">Rents us the actual computer the agent works on. A <b>sandbox</b> is a rented computer in a data center, created and thrown away in seconds. Your agent checks in, works, and the room can be put to sleep cheaply when nobody's in it.</div>
+        </div>
+        <div style="text-align:center; margin-top:10px;">
+          <span class="chip neutral">Conductor picked: Vercel Sandbox</span>
+          <span class="chip info">Zeros plan: Daytona</span>
+        </div>
+      </div>
+      <div>
+        <div class="dbox teal">
+          <div class="db-name">Decision B · Backend + cloud DB — "the front desk + filing cabinet" 🛎️🗂️</div>
+          <div class="db-sub">Checks your ID when you open the app (<b>auth</b>), keeps <b>the cloud record</b> (an always-on Postgres holding the guest ledger <i>and</i>, permanently, your chats, sessions, and history — added 2026-07-02), pings your other devices when something changes (<b>realtime</b>), and keeps a storage locker for periodic backup exports (<b>object storage</b> — now a safety net behind the record). Hotel rooms get cleared; the filing cabinet doesn't.</div>
+        </div>
+        <div style="text-align:center; margin-top:10px;">
+          <span class="chip neutral">Conductor picked: Fly.io + Postgres + ElectricSQL</span>
+          <span class="chip info">Zeros: Supabase — its Postgres = the record</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout plain">
+    <div class="co-title">💡 In plain words</div>
+    <p>Conductor.build split these exactly this way: <strong>Vercel Sandbox</strong> for the rooms, a <strong>Fly.io-hosted backend with Postgres</strong> for the front desk — first-hand verified in our teardown (their API returns Fly headers, and their privacy docs say account data lives in "an encrypted Postgres database served by Fly") — with <strong>ElectricSQL</strong> syncing that Postgres out to devices. Our current plan (v2, 2026-06-24 — written before the 2026-07-02 cloud-record decision; the v3 revision shipped 2026-07-03 as <a href="08-engineering-reference.html">part 08</a>) is <strong>Daytona</strong> for the rooms and <strong>Supabase</strong> pencilled in for the front desk. The founder question on the table: should <strong>Railway</strong> take some or all of the front-desk job? The cloud record makes that question <em>more</em> pointed — this layer now holds the permanent copy of every chat. We take the two decisions in order.</p>
+  </div>
+</section>
+
+<!-- ================= DECISION A ================= -->
+<section id="decision-a">
+  <div class="sec-kicker">Decision A</div>
+  <h2>Who rents us the computers?</h2>
+  <p class="sec-sub">Three contenders, as of mid-2026. Every claim is tagged: <span class="tag-verified">verified</span> means we checked official docs or pricing; <span class="tag-likely">likely</span> means plausible but not fully confirmed; <span class="tag-spike">needs spike</span> means only a hands-on test can answer it.</p>
+
+  <div class="cards3">
+    <div class="pcard top">
+      <div class="pc-head"><h4>Daytona</h4><span class="chip good">Our current pick</span></div>
+      <p>A venture-backed sandbox specialist (~$31M raised, Series A Feb 2026). Went <strong>closed-source June 11, 2026</strong>; SDKs stay open (Apache-2.0). <span class="tag-verified">Verified</span></p>
+    </div>
+    <div class="pcard top-indigo">
+      <div class="pc-head"><h4>Vercel Sandbox</h4><span class="chip info">Conductor's pick</span></div>
+      <p>Vercel's "computer per agent" API, GA since Jan 30, 2026. Each sandbox is a <strong>microVM</strong> — a tiny virtual machine with its own kernel, a stronger wall between tenants than a shared-kernel container. <span class="tag-verified">Verified</span></p>
+    </div>
+    <div class="pcard top-amber">
+      <div class="pc-head"><h4>Fly Sprites / Machines</h4><span class="chip mid">Named fallback</span></div>
+      <p>Fly.io's persistent AI-agent computers, launched Jan 2026. Firecracker microVMs, 100 GB durable disk, sleeps ~30s after idle, wakes in under a second. <span class="tag-verified">Verified mechanics</span> — but the product is very young.</p>
+    </div>
+  </div>
+
+  <h3 style="margin-top:34px;">Capability, side by side <span class="muted small">(as of mid-2026)</span></h3>
+  <div class="table-scroll" style="margin-top:12px;">
+    <table>
+      <thead>
+        <tr><th style="min-width:180px;">Capability</th><th>Daytona</th><th>Vercel Sandbox</th><th>Fly Sprites</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="rowhead">Direct Mac→sandbox WebSocket<span class="sub">our whole connection design</span></td>
+          <td><span class="chip good">✓ Documented</span><span class="sub">Preview proxy explicitly forwards WebSocket upgrades. <span class="tag-verified">Verified</span></span></td>
+          <td><span class="chip mid">~ Unconfirmed</span><span class="sub">Works for Vercel's own infra, but undocumented for user-run servers on exposed ports. <span class="tag-spike">Needs a spike test</span></span></td>
+          <td><span class="chip mid">~ Likely</span><span class="sub">Per-sprite HTTPS URL with token auth; should front a WSS endpoint. <span class="tag-likely">Likely, untested</span></span></td>
+        </tr>
+        <tr>
+          <td class="rowhead">Runtime caps</td>
+          <td><span class="chip good">✓ No hard cap</span><span class="sub">Auto-stop configurable to 0. <span class="tag-verified">Verified</span></span></td>
+          <td><span class="chip bad">✗ 24-hour max session</span><span class="sub">"Not suitable for permanent hosting" per Vercel. <span class="tag-verified">Verified</span></span></td>
+          <td><span class="chip good">✓ No documented cap</span><span class="sub">Sleeps after ~30s idle, wakes &lt;1s. <span class="tag-verified">Verified</span></span></td>
+        </tr>
+        <tr>
+          <td class="rowhead">Sleep / resume model</td>
+          <td>Stop = full halt, disk persists; wake = cold engine boot<span class="sub">Our engine already handles this.</span></td>
+          <td>Auto filesystem snapshot on stop, auto-resume on next call<span class="sub"><span class="cross">✗</span> But snapshots <strong>expire 30 days after last use</strong> by default — a data-loss footgun unless disabled. <span class="tag-verified">Verified</span></span></td>
+          <td>Sleep keeps state; wake &lt;1s<span class="sub">~300ms checkpoints, last 5 browsable. <span class="tag-verified">Verified</span></span></td>
+        </tr>
+        <tr>
+          <td class="rowhead">Fork / snapshot maturity</td>
+          <td><span class="chip mid">~ Experimental</span><span class="sub">Shipped April 2026 but explicitly <code>_experimental_</code>. <span class="tag-verified">Verified</span></span></td>
+          <td><span class="chip good">✓ GA</span><span class="sub">Since Jan/May 2026 — fork, rollback, named sandboxes. <span class="tag-verified">Verified</span></span></td>
+          <td><span class="chip good">✓ At launch</span><span class="sub">Checkpoint/restore/fork shipped at launch. <span class="tag-verified">Verified</span></span></td>
+        </tr>
+        <tr>
+          <td class="rowhead">Regions</td>
+          <td><span class="chip good">✓ US + EU</span><span class="sub">Mumbai announced May 2025, absent from current docs. <span class="tag-verified">Verified</span></span></td>
+          <td><span class="chip bad">✗ US East (iad1) only</span><span class="sub"><span class="tag-verified">Verified</span></span></td>
+          <td><span class="chip bad">✗ Not selectable, not documented</span><span class="sub">Assume US. <span class="tag-verified">Verified absence</span></span></td>
+        </tr>
+        <tr>
+          <td class="rowhead">Asia latency</td>
+          <td>~130 ms India→EU<span class="sub">Our Mutagen file mirror exists precisely to hide this.</span></td>
+          <td>Worse: everything crosses to US East<span class="sub">~200–250 ms from India.</span></td>
+          <td>Unknown<span class="sub">The region opacity is the gap.</span></td>
+        </tr>
+        <tr>
+          <td class="rowhead">Isolation</td>
+          <td><span class="chip mid">~ Shared kernel</span><span class="sub">Sysbox containers, user-namespaced — fine for one-team-per-sandbox, weaker than a microVM. <span class="tag-verified">Verified</span></span></td>
+          <td><span class="chip good">✓ Firecracker microVM</span><span class="sub">Dedicated kernel. <span class="tag-verified">Verified</span></span></td>
+          <td><span class="chip good">✓ Firecracker microVM</span><span class="sub"><span class="tag-verified">Verified</span></span></td>
+        </tr>
+        <tr>
+          <td class="rowhead">Per-box size limits</td>
+          <td><span class="chip mid">~ 4 vCPU / 8 GB / 10 GB default max</span><span class="sub">Bigger = sales. Tight for engine + agent + builds. <span class="tag-verified">Verified</span></span></td>
+          <td>Up to 8 vCPU / 16 GB (Pro), 32 / 64 (Enterprise)<span class="sub">Fixed 32 GB disk. <span class="tag-verified">Verified</span></span></td>
+          <td>Up to 8 CPU / 16 GB, 100 GB disk<span class="sub"><span class="tag-verified">Verified</span></span></td>
+        </tr>
+        <tr>
+          <td class="rowhead">Egress control<span class="sub">what the box may call out to</span></td>
+          <td><span class="chip mid">~ Tier-gated</span><span class="sub">T1/T2 allowlist-only — <strong>Cursor agents effectively require Tier 3 ($500 top-up)</strong>. <span class="tag-verified">Verified</span></span></td>
+          <td><span class="chip good">✓ Excellent</span><span class="sub">Live firewall + credentials brokering (secrets never enter the VM). <span class="tag-verified">Verified</span></span></td>
+          <td><span class="chip good">✓ DNS-based</span><span class="sub">Allow/deny per sprite. <span class="tag-verified">Verified</span></span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout watch">
+    <div class="co-title">⚠️ Watch out — two Daytona details to keep in your head</div>
+    <p><strong>1. The auto-stop timer is not reset by a working agent</strong> — only by API/SSH/preview traffic. So we must disable it and let our engine own sleep. This is the #1 correctness trap, and it's already a locked decision in the plan.</p>
+    <p><strong>2. Preview tokens reset when a sandbox restarts</strong>, so the app re-fetches on reconnect — plumbing, not a blocker.</p>
+  </div>
+
+  <h3 style="margin-top:34px;">Price</h3>
+  <p class="muted small" style="margin-bottom:12px;">All prices as of mid-2026, from official pricing pages.</p>
+
+  <div class="stat-row">
+    <div class="stat"><div class="big">$0.17/hr</div><div class="cap"><strong>Daytona:</strong> a running 2 vCPU / 4 GB cloud workspace, flat wall-clock rate.</div></div>
+    <div class="stat"><div class="big indigo">$0.09–0.13/hr</div><div class="cap"><strong>Vercel:</strong> same box — "Active CPU" billing means waiting on the model is free. Computed from official rates.</div></div>
+    <div class="stat"><div class="big amber">~$0.11/hr</div><div class="cap"><strong>Sprites:</strong> same box — Fly's own worked example: a 4-hr Claude Code session ≈ $0.44. Verified example.</div></div>
+    <div class="stat"><div class="big teal">$200 → $50k</div><div class="cap"><strong>Daytona credits:</strong> $200 free, no card, plus Startup Grid $10k → $50k on acceptance.</div></div>
+  </div>
+
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr><th style="min-width:200px;"></th><th>Daytona</th><th>Vercel Sandbox</th><th>Fly Sprites</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="rowhead">Billing model</td>
+          <td>Wall-clock while running</td>
+          <td><strong>Active CPU only</strong> ($0.128/CPU-hr; waiting on the model is free) + memory while awake ($0.0212/GB-hr)</td>
+          <td>Actual usage ($0.07/CPU-hr, $0.04375/GB-hr)</td>
+        </tr>
+        <tr>
+          <td class="rowhead">2 vCPU / 4 GB box, awake<span class="sub">agent mostly waiting on the LLM</span></td>
+          <td><strong>~$0.17/hr</strong> (flat)</td>
+          <td>~$0.09–0.13/hr <span class="sub">computed from official rates</span></td>
+          <td>~$0.11/hr <span class="sub">Fly's worked example: 4-hr Claude Code session ≈ $0.44 — verified</span></td>
+        </tr>
+        <tr>
+          <td class="rowhead">Same box, asleep</td>
+          <td>~$0.40–0.80/month <span class="sub">disk only; archive is cheaper still</span></td>
+          <td>~$0.40/month <span class="sub">5 GB snapshot storage</span></td>
+          <td>≈ $0.20/month <span class="sub">10 GB cold storage</span></td>
+        </tr>
+        <tr>
+          <td class="rowhead">Free credit</td>
+          <td><strong>$200, no card</strong> + Startup Grid <strong>$10k → $50k</strong> on acceptance <span class="sub"><span class="tag-verified">Verified</span></span></td>
+          <td>Hobby allowances; $20/mo Pro plan</td>
+          <td>$30 trial credit</td>
+        </tr>
+        <tr>
+          <td class="rowhead">Scale gates</td>
+          <td>Prepaid tiers: T2 $25 → T3 $500 → T4 $2,000/30 days <span class="sub">these are <em>top-ups you spend</em>, not fees</span></td>
+          <td>2,000 concurrent sandboxes; 200 vCPU/min allocation on Pro</td>
+          <td>Subscription tiers ~$20/mo (20 concurrent) → $2,000/mo (2,000) <span class="sub"><span class="tag-likely">Likely — tier ladder not fully verified</span></span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout plain">
+    <div class="co-title">💡 In plain words — read that middle row carefully</div>
+    <p>For agent workloads that spend most of their time waiting on Claude, <strong>Vercel's Active-CPU billing and Sprites' usage billing are actually somewhat cheaper per awake-hour than Daytona's wall-clock rate</strong>. Daytona wins on idle economics, free credit, and the raw vCPU rate. All three land in the same magnitude; <strong>the real cost lever is sleep-when-idle, not the provider</strong> — always-on is ~8× more expensive than slept (see the cost tables below). And the cloud record sharpens that lever: once chats and history live permanently in the record, an idle sandbox can be <em>deleted</em> outright — not just slept — and rebuilt on demand from git plus the record.</p>
+  </div>
+
+  <h3 style="margin-top:34px;">Maturity and company risk</h3>
+  <div class="cards3">
+    <div class="pcard top">
+      <div class="pc-head"><h4>Daytona</h4><span class="chip mid">Series-A risk</span></div>
+      <ul>
+        <li>Series A stage, ~$31M raised, $1M forward run rate claimed</li>
+        <li>Customers include LangChain and Writer; 99.98%+ measured uptime in 2026</li>
+        <li>June 2026 <strong>closed-source move removed the fork-and-self-host escape hatch</strong> — the old AGPL repo is frozen and unmaintained</li>
+        <li>Mitigations Daytona itself sells: BYOC (run their runner nodes in our own cloud — sales-gated, early) and dedicated regions</li>
+      </ul>
+      <p style="margin-top:8px;"><span class="tag-verified">Verified</span></p>
+    </div>
+    <div class="pcard top-indigo">
+      <div class="pc-head"><h4>Vercel</h4><span class="chip good">Safest company bet</span></div>
+      <ul>
+        <li>Large, profitable-scale platform</li>
+        <li>SOC 2 Type II / ISO 27001</li>
+        <li><strong>Conductor has already proven this exact product shape on it</strong></li>
+      </ul>
+      <p style="margin-top:8px;"><span class="tag-verified">Verified</span></p>
+    </div>
+    <div class="pcard top-amber">
+      <div class="pc-head"><h4>Fly.io</h4><span class="chip mid">Young product</span></div>
+      <ul>
+        <li>~60 people, $110M raised, betting the company on agent compute</li>
+        <li>Candid about incidents but has a lot of them — ~13/month average since 2022 per third-party status tracking <span class="tag-likely">(likely, hostile source)</span></li>
+        <li>Sprites has <strong>no named production customers</strong> we could find <span class="tag-verified">(verified absence)</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 style="margin-top:34px;">Lock-in and the escape hatch</h3>
+  <p class="sec-sub" style="margin-bottom:10px;">Our plan already contains the right insurance: one thin layer of code that speaks "create / start / stop / connect a sandbox" — so the provider behind it can be swapped, like a universal power adapter — plus a durability rule that nothing irreplaceable lives only in the box.</p>
+
+  <div class="diagram">
+    <div class="dg-title">Why switching sandbox vendors is weeks, not a rewrite</div>
+    <div class="hflow">
+      <div class="dbox dark"><div class="db-name">Zeros app + engine</div><div class="db-sub">everything above the line never mentions Daytona by name</div></div>
+      <div class="harrow"><span>talks only to</span></div>
+      <div class="dbox indigo"><div class="db-name"><code style="background:#fff;">CloudSandboxProvider</code></div><div class="db-sub">the "universal power adapter" — create / start / stop / connect</div></div>
+      <div class="harrow"><span>plugs into any of</span></div>
+      <div class="dbox"><div class="db-name">Daytona · Sprites · Vercel</div><div class="db-sub">swap = re-implement one interface, re-bake a machine image, re-test the WebSocket path</div></div>
+    </div>
+    <div style="display:flex; gap:14px; flex-wrap:wrap; margin-top:20px; justify-content:center;">
+      <div class="dbox teal" style="flex:1 1 240px;"><div class="db-name">Durability rule 1: code → git</div><div class="db-sub">the repo never exists only in the box</div></div>
+      <div class="dbox teal" style="flex:1 1 240px;"><div class="db-name">Durability rule 2: chats &amp; history → the cloud record</div><div class="db-sub">streamed to our always-on database (updated 2026-07-02 — export blobs stay as a backup safety net)</div></div>
+      <div class="dbox teal" style="flex:1 1 240px;"><div class="db-name">Result: nothing irreplaceable lives in the box</div><div class="db-sub">so leaving a vendor is <strong>a few weeks, not a rewrite</strong></div></div>
+    </div>
+  </div>
+
+  <div class="callout plain">
+    <div class="co-title">💡 In plain words</div>
+    <p>That insurance is what makes choosing a Series-A vendor acceptable in the first place.</p>
+  </div>
+
+  <div class="callout decision">
+    <div class="co-title">✅ Verdict A — keep Daytona</div>
+    <p>It's the only provider where our load-bearing requirement — <strong>the Mac dialing the sandbox directly over a WebSocket, no broker in the middle</strong> — is documented rather than hoped for. Its weaknesses (experimental fork, closed source, 4-vCPU default cap) don't intersect with v1.</p>
+    <p><strong>But make the Phase 1 spike the actual decision point:</strong> it's built &amp; merged (2026-06-25) and its exit run waits only on an API key — and that exit test (engine boots, WSS handshake, survives stop/start) is precisely the thing no amount of reading can verify.</p>
+  </div>
+
+  <div class="diagram">
+    <div class="dg-title">The fallback ladder — in order, if the spike fails</div>
+    <div class="ladder">
+      <div class="dbox teal"><div class="db-name">1 · Daytona</div><div class="db-sub"><span class="chip good">Primary</span><br>Documented WebSocket path, US + EU, cheapest vCPU, $200 → $50k credits</div></div>
+      <div class="harrow"><span>if spike fails</span></div>
+      <div class="dbox amber"><div class="db-name">2 · Fly Sprites</div><div class="db-sub"><span class="chip mid">Fallback #1</span><br>Closest model match; best Asia story <em>if</em> they ever expose regions</div></div>
+      <div class="harrow"><span>then</span></div>
+      <div class="dbox"><div class="db-name">3 · Vercel Sandbox</div><div class="db-sub"><span class="chip neutral">Fallback #2</span><br>Proven, but likely forces a Conductor-style broker if the WSS spike fails — and it's US-only</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= DECISION B ================= -->
+<section id="decision-b">
+  <div class="sec-kicker">Decision B</div>
+  <h2>Who runs the front desk?</h2>
+  <p class="sec-sub">This section originally argued the front desk could stay deliberately small, because the heavy stuff (chat, files, the agent) lived only with the engine in the sandbox. <strong>Updated 2026-07-02:</strong> the live experience still runs in the sandbox, but the permanent copy of chats and history now lives here too. Six jobs, two of them new or upgraded.</p>
+
+  <div class="callout decision">
+    <div class="co-title">🗓️ Decision update — 2026-07-02</div>
+    <p>The founder decided that all durable workspace data — chats, agent sessions, workspace metadata, memberships — lives in <strong>the cloud record</strong>: an always-on Postgres in the user's account, synced live to every signed-in device (part 05 covers the how). Decision B therefore now includes hosting the record and its sync engine as first-class requirements — this layer is no longer just a login desk with a small ledger. The verdict below was re-checked against the heavier job: <strong>it doesn't change, it gets stronger.</strong></p>
+  </div>
+
+  <div class="steps">
+    <div class="step"><div class="num">1</div><h4>Auth</h4><p>Users sign in; the Mac app and the sandbox both need to verify "this is really Arun."</p></div>
+    <div class="step"><div class="num">2</div><h4>The cloud record <span class="chip info">upgraded</span></h4><p>An always-on Postgres keeping the workspace registry <em>and</em> permanently storing every chat, session, and piece of history in your account. The sandbox is the workbench; this is the filing cabinet — workbenches get cleared, the filing cabinet doesn't.</p></div>
+    <div class="step"><div class="num">3</div><h4>Sync engine <span class="chip info">new</span></h4><p>Streams every chat/session event from a running engine into the record in near-real-time, and syncs it back out to every signed-in device. Named spike: <strong>ElectricSQL</strong> — Conductor-proven, runs on any Postgres. Supabase Realtime is the simpler starter.</p></div>
+    <div class="step"><div class="num">4</div><h4>Realtime fan-out</h4><p>A lightweight "something changed, refresh" ping to your other devices. The <em>live</em> chat stream still does <em>not</em> go through here — it stays on the direct Mac↔sandbox WebSocket (the live wire); the record gets its copy via the engine's write-through.</p></div>
+    <div class="step"><div class="num">5</div><h4>Object storage</h4><p>Cheap durable blobs — now demoted to a <em>backup safety net</em> (periodic exports of the record), not the primary home of chat history.</p></div>
+    <div class="step"><div class="num">6</div><h4>Provisioning worker</h4><p>A tiny server-side program that holds the Daytona API key and creates sandboxes on request — so the secret key never ships inside the Mac app.</p></div>
+  </div>
+
+  <h3 style="margin-top:30px;">The gentle-but-critical nuance</h3>
+  <p class="sec-sub" style="margin-bottom:10px;">Here's the thing to hold onto when comparing these three:</p>
+
+  <div class="cards3">
+    <div class="pcard top">
+      <div class="pc-head"><h4>Supabase</h4><span class="chip good">Serviced office</span></div>
+      <p>$25/month gets you:</p>
+      <ul>
+        <li>The receptionist — auth, 100k monthly users included</li>
+        <li>The filing system — managed Postgres with row-level security (database-enforced rules like "users can only read their own rows")</li>
+        <li>The intercom — Realtime, 500 concurrent connections included</li>
+        <li>100 GB of storage</li>
+      </ul>
+      <p style="margin-top:8px;">One vendor, four of the six needs met — and since 2026-07-02 its Postgres is <strong>load-bearing: it becomes the cloud record</strong>, the permanent home of every user's chats and history, with ElectricSQL able to run on top of it. <span class="tag-verified">Verified pricing</span></p>
+    </div>
+    <div class="pcard top-amber">
+      <div class="pc-head"><h4>Railway</h4><span class="chip mid">Excellent empty office space</span></div>
+      <ul>
+        <li>Best-in-class developer experience; cheap usage-based compute (a small always-on API ≈ $5/month)</li>
+        <li>Genuinely great object storage — Buckets: $0.015/GB-month with <strong>free egress</strong></li>
+        <li><span class="cross">✗</span> But <strong>no auth, no realtime service, no row-level security</strong> — Railway's own guides point you at Clerk or self-hosted Supabase for login</li>
+        <li><span class="cross">✗</span> Its Postgres is officially an <em>unmanaged template</em> ("you have total control over their configuration and maintenance"); high-availability shipped March 2026 explicitly experimental; point-in-time recovery is weeks old</li>
+        <li><span class="tilde">~</span> New nuance since 2026-07-02: ElectricSQL runs on any Postgres, so Railway <em>is</em> a technically viable host for the cloud record — a legitimate scale-out or preference option later. But handing the permanent copy of every user's chats to an unmanaged template with this reliability history is a deliberate future choice, not the default</li>
+      </ul>
+      <p style="margin-top:8px;"><span class="tag-verified">Verified</span></p>
+    </div>
+    <div class="pcard top-indigo">
+      <div class="pc-head"><h4>Fly.io</h4><span class="chip neutral">Same shape as Railway</span></div>
+      <ul>
+        <li>Compute + a database, nothing above it</li>
+        <li>More regions — 18, including Mumbai and Singapore</li>
+        <li>Cheaper machines (~$2/month)</li>
+        <li>A genuinely <strong>managed</strong> Postgres (HA, backups, pooling on all plans) starting at $38/month</li>
+        <li><span class="cross">✗</span> You still build auth and realtime yourself</li>
+      </ul>
+      <p style="margin-top:8px;"><span class="tag-verified">Verified</span></p>
+    </div>
+  </div>
+
+  <div class="callout myth">
+    <div class="co-title">❌ Myth — "Railway vs Supabase" is apples to apples</div>
+    <p>It isn't. If we chose Railway for the whole front desk, we would be signing up to <strong>assemble and operate the pieces Supabase hands us on day one</strong> — for a layer that costs ~$25/month at beta scale and roughly $100–600/month at 1,000 users either way, noise next to the sandbox bill.</p>
+  </div>
+
+  <h3 style="margin-top:34px;">Reliability check <span class="muted small">(this matters for a login path)</span></h3>
+
+  <div class="card" style="margin-top:12px;">
+    <h4 style="font-size:15px; margin-bottom:14px;">Railway's run, Nov 2025 – May 2026 <span class="chip neutral">All verified from Railway's own postmortems and status page</span></h4>
+    <div class="timeline">
+      <div class="tl-item">
+        <div class="tl-date">Dec 2025</div>
+        <div class="tl-rail"><div class="tl-dot amber"></div></div>
+        <div class="tl-body"><h4>Cryptominer fleet outage</h4><p>Abusive workloads knocked the platform over.</p></div>
+      </div>
+      <div class="tl-item">
+        <div class="tl-date">Feb 2026</div>
+        <div class="tl-rail"><div class="tl-dot amber"></div></div>
+        <div class="tl-body"><h4>4-day DDoS disruption</h4><p>Multi-day degradation under attack.</p></div>
+      </div>
+      <div class="tl-item">
+        <div class="tl-date">Mar 2026</div>
+        <div class="tl-rail"><div class="tl-dot red"></div></div>
+        <div class="tl-body"><h4>52 minutes of wrong-user data</h4><p><strong>Cached authenticated data was served to the wrong users.</strong> Exactly the failure you cannot have on a login path.</p></div>
+      </div>
+      <div class="tl-item">
+        <div class="tl-date">May 19, 2026</div>
+        <div class="tl-rail"><div class="tl-dot red"></div></div>
+        <div class="tl-body"><h4>~8 hours of full-platform downtime</h4><p>Google Cloud auto-suspended Railway's production account. May 2026 uptime: <strong>99.26%</strong>. No self-serve SLA (a contractual uptime promise).</p></div>
+      </div>
+    </div>
+    <p class="small muted">Plus: 309 community data-loss threads about Railway's Postgres (community audit, Feb 2026).</p>
+  </div>
+
+  <div class="split" style="margin-top:16px;">
+    <div class="pcard">
+      <div class="pc-head"><h4>Fly.io reliability</h4><span class="chip mid">Chronic frequency</span></div>
+      <p>Fewer catastrophic single events but ~13 incidents/month since 2022, and incidents on 20 of 31 days in May 2026 <span class="tag-likely">(likely — competitor-sourced but consistent with Fly's own infra-log)</span>. No standard SLA.</p>
+    </div>
+    <div class="pcard">
+      <div class="pc-head"><h4>Supabase reliability</h4><span class="chip good">Generally solid</span></div>
+      <p>Solid reputation, occasional incidents, enterprise SLAs exist. <span class="tag-likely">(Likely — we did not audit it as deeply as the other two.)</span></p>
+    </div>
+  </div>
+
+  <div class="callout watch">
+    <div class="co-title">⚠️ Watch out</div>
+    <p>If the front desk is down, <strong>nobody can open a cloud workspace</strong> — and now that this layer also holds the cloud record, it's the permanent home of every chat, not just the login path. That's a hard argument against putting login <em>or the record</em> on the platform with the freshest 8-hour total outage.</p>
+  </div>
+
+  <h3 style="margin-top:34px;">The decision table</h3>
+  <div class="table-scroll" style="margin-top:12px;">
+    <table>
+      <thead>
+        <tr><th>Need</th><th>Best provider</th><th>Why</th><th>Runner-up / later</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="rowhead">Auth</td>
+          <td><span class="chip good">✓ Supabase Auth</span></td>
+          <td>Free to 50k MAU, doubles as the record's database vendor; the sync-architecture doc reaches the same conclusion</td>
+          <td>WorkOS bolt-on when enterprise SSO deals appear (~$125/connection/mo)</td>
+        </tr>
+        <tr>
+          <td class="rowhead">The cloud record<span class="sub">upgraded 2026-07-02 from "Registry DB" — now also every chat, session, and history</span></td>
+          <td><span class="chip good">✓ Supabase Postgres</span></td>
+          <td>Managed, row-level security built in, included in the $25 Pro plan — and it now carries the permanent copy of every chat, which makes "managed" non-negotiable</td>
+          <td><strong>Railway Postgres</strong> as a plain-Postgres record host at scale-out or by preference (ElectricSQL doesn't care where the database lives), or <strong>Fly Managed Postgres ($38/mo)</strong> — Railway's unmanaged template + data-loss history says: deliberately, later, not by default</td>
+        </tr>
+        <tr>
+          <td class="rowhead">Sync engine<span class="sub">new 2026-07-02 — streams engine events into the record, syncs devices from it</span></td>
+          <td><span class="chip info">⚡ ElectricSQL</span><span class="sub">the named spike candidate</span></td>
+          <td>Conductor-proven in production; runs on any Postgres — Supabase or Railway — so it never locks the DB host</td>
+          <td><strong>Supabase Realtime</strong> as the simpler starter; decide after the spike</td>
+        </tr>
+        <tr>
+          <td class="rowhead">Realtime fan-out</td>
+          <td><span class="chip good">✓ Supabase Realtime</span></td>
+          <td>Included; adequate as a "hint" channel (DB-as-record, broadcast-as-hint)</td>
+          <td>Ably ($29/mo) if delivery guarantees start to matter</td>
+        </tr>
+        <tr>
+          <td class="rowhead">Object storage<span class="sub">backup exports</span></td>
+          <td><span class="chip good">✓ Cloudflare R2 or Supabase Storage</span><span class="sub">per current plan</span></td>
+          <td>Cheap, zero/low egress — now a safety net behind the record, not the primary durability story</td>
+          <td><strong>Railway Buckets</strong> ($0.015/GB-mo, free egress) or Tigris on Fly — all fine, pick whichever sits next to the worker</td>
+        </tr>
+        <tr>
+          <td class="rowhead">Provisioning worker</td>
+          <td><span class="chip good">✓ Cloudflare Worker</span><span class="sub">per current plan</span></td>
+          <td>Effectively free at our scale, holds <code>DAYTONA_API_KEY</code>, minimal ops</td>
+          <td><strong>Railway</strong> (~$5/mo) — this is Railway's genuinely good role, and its best-in-class DX makes iteration pleasant</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout decision">
+    <div class="co-title">✅ Decision — the hybrid is the answer, and the record strengthens it</div>
+    <p>Supabase for auth + the cloud record + realtime, <strong>ElectricSQL</strong> spiked on top as the sync engine, a thin worker on Cloudflare (or Railway if we prefer its DX), R2/Buckets for backup blobs. This is ~95% what the June engineering plan already pencils in — the difference is that Supabase's Postgres graduates from convenience registry to load-bearing record (the June plan predated the 2026-07-02 decision; its v3 revision — <a href="08-engineering-reference.html">part 08</a>, 2026-07-03 — makes this explicit). <strong>Railway is not wrong — it's just the answer to a different question</strong> ("where do I host a backend I wrote?" — and, since ElectricSQL is host-agnostic, "where could the record's plain Postgres live at scale-out?"). A strong candidate for those jobs the day we have a real backend to host, or outgrow Supabase's Postgres.</p>
+  </div>
+
+  <div class="diagram">
+    <div class="dg-title">The recommended front desk, drawn out (updated 2026-07-02 — the cloud record added)</div>
+    <div class="hflow" style="margin-bottom:6px;">
+      <div class="dbox dark"><div class="db-name">Zeros Mac app</div><div class="db-sub">on your laptop</div></div>
+      <div class="harrow"><span>sign in · who owns what · "refresh" pings · history sync</span></div>
+      <div class="dbox teal"><div class="db-name">Supabase — $25/mo</div><div class="db-sub">Auth · <b>the cloud record</b> (Postgres) · Realtime fan-out</div></div>
+    </div>
+    <div class="hflow" style="margin-bottom:6px;">
+      <div class="dbox dark"><div class="db-name">Zeros Mac app</div><div class="db-sub">"create my workspace"</div></div>
+      <div class="harrow"><span>request</span></div>
+      <div class="dbox indigo"><div class="db-name">Tiny provisioning worker</div><div class="db-sub">Cloudflare (or Railway) — holds <code style="background:#fff;">DAYTONA_API_KEY</code>, never the Mac app</div></div>
+      <div class="harrow"><span>create / start / stop</span></div>
+      <div class="dbox amber"><div class="db-name">Daytona sandbox</div><div class="db-sub">the hotel room: engine + agent + your code</div></div>
+    </div>
+    <div class="hflow" style="margin-bottom:6px;">
+      <div class="dbox dark"><div class="db-name">Zeros Mac app</div><div class="db-sub">chat &amp; files, live</div></div>
+      <div class="harrow dual"><span>direct WebSocket (the live wire) — no broker in the middle</span></div>
+      <div class="dbox amber"><div class="db-name">Daytona sandbox</div><div class="db-sub">the engine writes every chat/session event through →</div></div>
+      <div class="harrow"><span>write-through, near-real-time (ElectricSQL spike)</span></div>
+      <div class="dbox teal"><div class="db-name">The cloud record</div><div class="db-sub">Supabase Postgres — permanent home of chats &amp; history, in your account</div></div>
+    </div>
+    <div class="hflow">
+      <div class="dbox teal"><div class="db-name">The cloud record</div><div class="db-sub">already durable on its own</div></div>
+      <div class="harrow"><span>periodic export — safety net</span></div>
+      <div class="dbox"><div class="db-name">Object storage</div><div class="db-sub">Cloudflare R2 / Supabase Storage (Railway Buckets also fine) — backup blobs</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= COST ================= -->
+<section id="cost">
+  <div class="sec-kicker">The money</div>
+  <h2>Cost at three scales</h2>
+  <p class="sec-sub">Monthly, as of mid-2026, computed from official rates. Assumes 2 vCPU / 4 GB workspaces, ~3 hours/day active, and <strong>sleep-when-idle working</strong> (Phase 5). <em>Arithmetic is ours — treat as planning numbers, not quotes.</em></p>
+
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr><th style="min-width:230px;"></th><th>Solo beta<br><span style="font-weight:400;">(founder + friends)</span></th><th>100 users</th><th>1,000 users</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="rowhead">Sandbox compute — Daytona <span class="chip good">recommended</span></td>
+          <td><strong>~$33/mo</strong><span class="sub">→ ~6 months free on the $200 credit; $0 cash</span></td>
+          <td><strong>~$1.5k/mo</strong> + ~$77 idle disk<span class="sub">vs ~$12k always-on — sleep is the whole ballgame</span></td>
+          <td><strong>~$15k/mo</strong> <span class="sub">extrapolated; T4 pool (500 vCPU) should fit ~125 concurrent boxes but expect an enterprise conversation</span></td>
+        </tr>
+        <tr>
+          <td class="rowhead">Sandbox compute — Vercel<span class="sub">for comparison</span></td>
+          <td>~$20–30/mo</td>
+          <td>~$800–1,100/mo<span class="sub">Active-CPU billing favors LLM-wait workloads; + $0.15/GB transfer on file sync</span></td>
+          <td>~$8–11k/mo <span class="sub">extrapolated</span></td>
+        </tr>
+        <tr>
+          <td class="rowhead">Sandbox compute — Sprites<span class="sub">for comparison</span></td>
+          <td>~$25/mo</td>
+          <td>~$1k/mo + concurrency subscription tier</td>
+          <td>~$10k/mo + tier <span class="sub">tier ladder unverified</span></td>
+        </tr>
+        <tr>
+          <td class="rowhead">Control plane — Supabase + CF worker <span class="chip good">recommended</span></td>
+          <td><strong>$0</strong><span class="sub">free tiers</span></td>
+          <td><strong>~$25–30</strong><span class="sub">Supabase Pro</span></td>
+          <td><strong>~$35–75</strong><span class="sub">Pro + realtime/storage overages</span></td>
+        </tr>
+        <tr>
+          <td class="rowhead">The cloud record — always-on Postgres + sync <span class="chip info">added 2026-07-02</span><span class="sub">on the recommended path this IS Supabase's Postgres — at solo and 100-user scale it overlaps the row above rather than adding to it</span></td>
+          <td><strong>~$0</strong><span class="sub">rides the free tier</span></td>
+          <td><strong>~$25</strong><span class="sub">inside the Supabase Pro plan</span></td>
+          <td><strong>~$100–600</strong><span class="sub">larger database + sync/realtime egress as history accumulates</span></td>
+        </tr>
+        <tr>
+          <td class="rowhead">Control plane — Railway path</td>
+          <td>~$5, but auth vendor needed on top</td>
+          <td>~$25–50 + Clerk/WorkOS bill + your own auth code</td>
+          <td>~$50–100 + auth vendor + DB ops discipline</td>
+        </tr>
+        <tr>
+          <td class="rowhead">Control plane — Fly path</td>
+          <td>~$40<span class="sub">machines + $38 managed Postgres</span></td>
+          <td>~$50–55</td>
+          <td>~$60–100</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="stat-row">
+    <div class="stat"><div class="big teal">~$33/mo</div><div class="cap">Solo beta on Daytona — roughly 6 months free on the $200 credit. $0 cash out the door.</div></div>
+    <div class="stat"><div class="big red">~8×</div><div class="cap">How much more always-on costs vs slept (~$12k vs ~$1.5k at 100 users). Sleep-when-idle is the whole ballgame — and with the record, idle sandboxes can even be deleted, not just slept.</div></div>
+    <div class="stat"><div class="big indigo">~$0 → $600</div><div class="cap">The cloud record's bill: free tier solo → ~$25 inside Supabase Pro at 100 users → worst case a few hundred at 1,000 users. Noise against a ~$15k sandbox bill.</div></div>
+    <div class="stat"><div class="big amber">$500</div><div class="cap">Daytona Tier 3 prepaid top-up (spendable on compute) — effectively required to ship Cursor agents, whose SDK dials hosts outside lower tiers' egress allowlist. Verified.</div></div>
+  </div>
+
+  <div class="callout plain">
+    <div class="co-title">💡 Three takeaways</div>
+    <p><strong>First</strong>, the control plane is noise even after it absorbs the cloud record — worst case at 1,000 users the record is a few hundred dollars against a ~$15k sandbox bill; the sandbox bill is the business model. (The record also sharpens the sleep lever: a sandbox whose history is safely in the record can be <em>deleted</em>, not just slept.) <strong>Second</strong>, Daytona's $200 + Startup Grid ($10k, path to $50k — we should apply this month) plausibly covers the entire beta's COGS. <strong>Third</strong>, one hidden line item: shipping <strong>Cursor agents requires Daytona Tier 3</strong> (a $500 prepaid top-up, spendable on compute), because Cursor's SDK dials hosts outside the lower tiers' egress allowlist.</p>
+  </div>
+</section>
+
+<!-- ================= WHAT THIS MEANS ================= -->
+<section id="actions">
+  <div class="sec-kicker">So what</div>
+  <h2>What this means for Zeros</h2>
+  <p class="sec-sub">Eight moves, in priority order. Most are "the pencil becomes ink" — only one needs anything from you this week.</p>
+
+  <div class="card">
+    <div class="action">
+      <div class="num">1</div>
+      <div>
+        <h4>Sandbox: Daytona, confirmed — pending the spike <span class="chip mid">This week</span></h4>
+        <p>Get a <code>DAYTONA_API_KEY</code> this week and run the Phase 1 harness; its exit test (WSS handshake + stop/start survival) is the real decision gate. If it fails, spike Fly Sprites <em>before</em> Vercel — Sprites preserves our direct-connection, no-broker architecture and Vercel likely doesn't.</p>
+      </div>
+    </div>
+    <div class="action">
+      <div class="num">2</div>
+      <div>
+        <h4>Backend: Supabase + thin Cloudflare worker — now also the record's host <span class="chip good">Decided 2026-07-02</span></h4>
+        <p>Supabase's Postgres is also <strong>the cloud record</strong>. Don't move the front desk to Railway: that would mean assembling auth + realtime + DB safety ourselves, on the platform with 2026's worst single outage, to save roughly nothing — and it would hand the permanent home of every chat to an unmanaged database template. Decision needed from you: <strong>none</strong> — the plan's pencil becomes ink, and "confirm Supabase" now means "confirm Supabase as auth + the record's host."</p>
+      </div>
+    </div>
+    <div class="action">
+      <div class="num">3</div>
+      <div>
+        <h4>Spike ElectricSQL as the sync engine <span class="chip info">New · rides the record</span></h4>
+        <p>It's what Conductor runs in production, and it works on any Postgres — Supabase today, Railway later if ever — so trying it costs nothing in lock-in. Supabase Realtime stays the simpler fallback if the spike disappoints.</p>
+      </div>
+    </div>
+    <div class="action">
+      <div class="num">4</div>
+      <div>
+        <h4>Give Railway its real job <span class="chip neutral">Optional · revisit at Phase 7</span></h4>
+        <p>If the provisioning worker outgrows a Cloudflare Worker, or we build a fuller backend service, Railway is a great home for it — Railway Buckets is a legitimate contender for backup blobs, and its plain Postgres is a viable <em>later</em> home for the cloud record itself (ElectricSQL moves with the database) if we outgrow Supabase or prefer Railway's DX. Its reliability caveats stand.</p>
+      </div>
+    </div>
+    <div class="action">
+      <div class="num">5</div>
+      <div>
+        <h4>Buy the insurance that's free <span class="chip info">Ongoing discipline</span></h4>
+        <p>Keep <code>CloudSandboxProvider</code> honest (no Daytona-specific types leaking above it), keep durability outside the box (git + the cloud record, with export blobs as the backup safety net), and pin the SDK. That's what converts "Series-A vendor risk" into "a few weeks of migration if it ever goes wrong."</p>
+      </div>
+    </div>
+    <div class="action">
+      <div class="num">6</div>
+      <div>
+        <h4>Apply to Daytona's Startup Grid now <span class="chip mid">This month · 5 minutes</span></h4>
+        <p>$10k credits on acceptance, path to $50k, a 5-minute application. It directly subsidizes beta COGS.</p>
+      </div>
+    </div>
+    <div class="action">
+      <div class="num">7</div>
+      <div>
+        <h4>Book two enterprise conversations before 1,000 users <span class="chip neutral">Later</span></h4>
+        <p>Daytona (custom limits beyond the 4 vCPU / 8 GB per-box default, T4+ pools, maybe BYOC) and — only if Asia demand materializes — Fly (Mumbai/Singapore).</p>
+      </div>
+    </div>
+    <div class="action">
+      <div class="num">8</div>
+      <div>
+        <h4>Watch three tripwires that would reopen Decision A <span class="chip info">Standing watch</span></h4>
+        <p>Any one of these fires → re-run this comparison.</p>
+        <div class="cards3" style="margin:12px 0 0;">
+          <div class="pcard top-red" style="padding:14px 16px;"><h4 style="font-size:14px;">Tripwire 1</h4><p>Daytona drops its EU region, or has a serious isolation incident.</p></div>
+          <div class="pcard top-red" style="padding:14px 16px;"><h4 style="font-size:14px;">Tripwire 2</h4><p>Sprites ships region selection + named customers.</p></div>
+          <div class="pcard top-red" style="padding:14px 16px;"><h4 style="font-size:14px;">Tripwire 3</h4><p>"Fork a dirty workspace into N parallel tries" becomes a marquee feature — Vercel's GA fork would then matter.</p></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= GLOSSARY ================= -->
+<section id="glossary">
+  <details>
+    <summary>Plain-words glossary — every term used on this page</summary>
+    <div class="d-body">
+      <div class="gloss">
+        <div><b>Sandbox</b> — a rented computer in a data center that can be created and thrown away in seconds; the "hotel room" the agent works in.</div>
+        <div><b>Auth</b> — the login system; proves "this is really you" to our app and servers.</div>
+        <div><b>The cloud record</b> — our cloud database (an always-on Postgres) that permanently stores your chats, sessions, and workspace history in your account; the filing cabinet (added 2026-07-02).</div>
+        <div><b>Registry DB</b> — the old name for the small guest-ledger part of the database (which workspaces exist, who may enter); upgraded into the cloud record on 2026-07-02.</div>
+        <div><b>Sync engine</b> — the layer that streams engine events into the cloud record and syncs it out to your devices; <b>ElectricSQL</b> (Conductor-proven, runs on any Postgres) is our named spike candidate.</div>
+        <div><b>The live wire</b> — the direct Mac↔sandbox WebSocket carrying live chat and files; no broker in the middle, unchanged by the record.</div>
+        <div><b>Realtime</b> — a "push notification" channel between our servers and your apps: "something changed, refresh."</div>
+        <div><b>Object storage</b> — cheap cloud space for files/blobs; since 2026-07-02 a backup safety net behind the cloud record, not chat's primary home.</div>
+        <div><b>Postgres</b> — the industry-standard relational database; the filing system behind most web apps.</div>
+        <div><b>Row-level security (RLS)</b> — database-enforced rules like "users can only read their own rows."</div>
+        <div><b>MicroVM</b> — a tiny virtual machine with its own kernel; a stronger wall between tenants than a shared-kernel container.</div>
+        <div><b>WebSocket (WSS)</b> — a persistent two-way connection; how the Mac talks to the sandbox directly, no middleman.</div>
+        <div><b>Egress allowlist</b> — a list of outside addresses a sandbox is allowed to call; anything else is blocked.</div>
+        <div><b>SLA</b> — a contractual uptime promise, with penalties if the provider misses it.</div>
+        <div><b>BYOC</b> — "bring your own cloud": running the vendor's software on computers we rent directly.</div>
+        <div><b><code>CloudSandboxProvider</code></b> — our one thin code layer that speaks "create/start/stop/connect a sandbox," so the vendor behind it can be swapped; a universal power adapter.</div>
+        <div><b>Mutagen file mirror</b> — the piece of our design that keeps a local copy of files in sync, hiding network distance.</div>
+        <div><b>COGS</b> — cost of goods sold; here, what we pay providers per user we serve.</div>
+        <div><b>MAU</b> — monthly active users.</div>
+      </div>
+    </div>
+  </details>
+</section>
+
+<!-- ================= SOURCES ================= -->
+<section id="sources">
+  <div class="sec-kicker">Receipts</div>
+  <h2>Sources</h2>
+  <div class="card sources" style="margin-top:14px;">
+    <ul>
+      <li>Zeros internal plan: <a href="08-engineering-reference.html">08-engineering-reference</a> — the v3 consolidation (2026-07-03) of the June v2 (2026-06-24); original removed</li>
+      <li>Zeros founder decision brief (2026-07-02): the cloud record + enterprise self-hosting — internal</li>
+      <li><a href="https://electric-sql.com">electric-sql.com</a> — ElectricSQL sync engine (runs on any Postgres; used by Conductor)</li>
+      <li><a href="https://www.daytona.io/pricing">daytona.io/pricing</a> — compute rates, $200 credit</li>
+      <li><a href="https://www.daytona.io/docs/en/limits/">daytona.io/docs/en/limits</a> — T1–T4 tier pools</li>
+      <li><a href="https://www.daytona.io/docs/en/network-limits/">daytona.io/docs/en/network-limits</a> — egress allowlist tiers</li>
+      <li><a href="https://www.daytona.io/docs/en/regions/">daytona.io/docs/en/regions</a> — US/EU shared regions</li>
+      <li><a href="https://www.daytona.io/docs/en/custom-preview-proxy/">daytona.io/docs/en/custom-preview-proxy</a> and <a href="https://www.daytona.io/docs/en/architecture">daytona.io/docs/en/architecture</a> — WebSocket proxying</li>
+      <li><a href="https://www.daytona.io/dotfiles/daytona-is-going-closed-source">daytona.io — closed-source announcement (2026-06-11)</a></li>
+      <li><a href="https://www.daytona.io/startups">daytona.io/startups</a> — Startup Grid credits</li>
+      <li><a href="https://www.daytona.io/dotfiles/daytona-raises-24m-series-a-to-give-every-agent-a-computer">daytona.io — Series A (2026-02-05)</a></li>
+      <li><a href="https://vercel.com/docs/sandbox/pricing">vercel.com/docs/sandbox/pricing</a> — Vercel Sandbox rates and limits</li>
+      <li><a href="https://vercel.com/docs/sandbox/concepts/persistent-sandboxes">vercel.com — persistent sandboxes</a> and <a href="https://vercel.com/docs/sandbox/concepts/snapshots">snapshots</a> — persistence, 30-day expiry</li>
+      <li><a href="https://vercel.com/changelog/vercel-sandbox-can-now-run-for-up-to-24-hours">vercel.com — 24h session cap (2026-06-16)</a></li>
+      <li><a href="https://vercel.com/blog/how-conductor-moved-parallel-coding-agents-from-the-laptop-to-the-cloud-with-vercel-sandbox">vercel.com — Conductor on Vercel Sandbox (2026-05-27)</a></li>
+      <li><a href="https://vercel.com/kb/guide/running-opencode-securely-with-the-vercel-sandbox">vercel.com — direct-connection pattern</a></li>
+      <li><a href="https://fly.io/docs/about/pricing/">fly.io/docs/about/pricing</a> and <a href="https://fly.io/docs/reference/regions/">regions</a> — Fly Machines pricing, 18 regions</li>
+      <li><a href="https://fly.io/mpg/">fly.io/mpg</a> and <a href="https://fly.io/docs/mpg/">fly.io/docs/mpg</a> — Fly Managed Postgres plans</li>
+      <li><a href="https://sprites.dev/">sprites.dev</a> and <a href="https://fly.io/blog/code-and-let-live/">fly.io — Sprites launch (Jan 2026)</a> — specs, pricing</li>
+      <li><a href="https://simonwillison.net/2026/Jan/9/sprites-dev/">simonwillison.net — independent Sprites analysis</a></li>
+      <li><a href="https://docs.railway.com/pricing/plans">docs.railway.com/pricing/plans</a> and <a href="https://docs.railway.com/pricing">pricing</a> — Railway plans and rates</li>
+      <li><a href="https://docs.railway.com/databases/postgresql">docs.railway.com — "unmanaged" Postgres template</a></li>
+      <li><a href="https://railway.com/changelog/2026-03-13-highly-available-postgres">railway.com — experimental HA Postgres</a></li>
+      <li><a href="https://docs.railway.com/volumes/point-in-time-recovery">docs.railway.com — PITR (2026-05)</a></li>
+      <li><a href="https://docs.railway.com/storage-buckets">docs.railway.com — Railway Buckets pricing</a></li>
+      <li><a href="https://blog.railway.com/p/incident-report-may-19-2026-gcp-account-outage">blog.railway.com — 8-hour outage postmortem</a></li>
+      <li><a href="https://www.infoq.com/news/2026/05/railway-gcp-account-outage/">infoq.com — independent outage coverage</a></li>
+      <li><a href="https://stackandsails.substack.com/p/is-railway-production-ready-in-2026">stackandsails.substack.com — community data-loss audit (Feb 2026)</a></li>
+      <li><a href="https://status.railway.com/historical">status.railway.com/historical</a> and <a href="https://status.flyio.net/history">status.flyio.net/history</a> — uptime records</li>
+      <li><a href="https://kuberns.com/blogs/is-fly-io-good-for-production/">kuberns.com — Fly incident statistics (competitor source, bias flagged)</a></li>
+      <li><a href="https://supabase.com/pricing">supabase.com/pricing</a> — Supabase Pro bundle</li>
+      <li><a href="https://www.superagent.sh/blog/ai-code-sandbox-benchmark-2026">superagent.sh — cold-start comparisons (informal)</a></li>
+    </ul>
+  </div>
+</section>
+
+</div><!-- /wrap -->
+
+<!-- ================= FOOTER ================= -->
+<footer>
+  <div class="foot-inner">
+    <div class="brand">Zeros — Cloud Workspaces Report · July 2026</div>
+    <div class="foot-nav">
+      <a href="03-cursor-and-claude-code-cloud.html">← Prev: Cursor &amp; Claude Code</a>
+      <a href="05-sync-teams-and-collaboration.html">Next: Sync, Teams &amp; Collab →</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

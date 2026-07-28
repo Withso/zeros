@@ -90,7 +90,21 @@ export function isDangerousEnvName(name: string): boolean {
     // GIT_CONFIG / _GLOBAL / _SYSTEM redirect git at an attacker config file,
     // and GIT_CONFIG_COUNT/_KEY_n/_VALUE_n inject config inline — either can set
     // core.sshCommand / core.pager / core.editor to an arbitrary command (exec).
-    name.startsWith("GIT_CONFIG")
+    name.startsWith("GIT_CONFIG") ||
+    // Our OWN control surface, and the whole prefix is blocked rather than the
+    // exec-shaped members. Several ZEROS_* vars name a script or runtime the
+    // engine then EXECUTES — ZEROS_CURSOR_HOST_SCRIPT, ZEROS_PTY_HOST_SCRIPT,
+    // ZEROS_PTY_HOST_RUNTIME, ZEROS_CURSOR_SDK_ENTRY, ZEROS_{CLAUDE,CODEX}_CLI_PATH
+    // — so a settings `env` table that sets one gets host code execution, the same
+    // class as GIT_SSH_COMMAND. Others (ZEROS_DATA_DIR, ZEROS_SECRETS_FILE,
+    // ZEROS_LOCAL_WS_TOKEN, ZEROS_REQUIRE_ACCOUNT…) relocate state, hand over a
+    // token, or turn off an auth gate. This is deliberately a PREFIX and not an
+    // exact-name list: the set grows with every new engine knob, and a knob added
+    // without remembering this file is exactly how the gap reappears. Nothing
+    // legitimate is lost — the app builds its own ZEROS_* for a spawn directly,
+    // and this filter only ever sees names from the settings `env` table and
+    // `env_files`, where a repo, team or paired device is the author.
+    name.startsWith("ZEROS_")
   );
 }
 

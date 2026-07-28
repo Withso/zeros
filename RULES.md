@@ -111,7 +111,7 @@ Animation `@keyframes` translation offsets and timing values (e.g., 2s pulse, 1.
 | Engine sidecar (agents, git, pty, transport) | `/src/engine/` |
 | Electron main + preload + IPC | `/electron/` |
 | Native IPC façade for renderer | `/src/native/` |
-| Documentation (local-only working notes; gitignored, absent from a public clone) | `/docs/` |
+| Documentation (working notes; tracked, but superseded fast — a record, not spec) | `/docs/` |
 | Scripts | `/scripts/` |
 
 > Removed (do not recreate): `/src/zeros/inspector/`, `/src/zeros/canvas/`, `/src/zeros/editors/`, `/src/zeros/themes/`, `/src/zeros/db/`, `/src/demo/` (all deleted), `/src/zeros/format/` (the `.0c` file format — removed in favor of the `artifacts/` folder model), and `/src/zeros/acp/` (the ACP bridge — the entire ACP fabric was removed when the fleet was cut to Claude/Codex/Cursor).

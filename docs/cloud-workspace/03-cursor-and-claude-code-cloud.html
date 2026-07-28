@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>03 · Cursor &amp; Claude Code — Zeros Cloud Workspaces Report</title>
+<style>
+  :root{
+    --bg:#FAF9F7; --ink:#1B1B22; --muted:#6B7280;
+    --card:#FFFFFF; --line:#E7E5E0;
+    --indigo:#4F46E5; --teal:#0F9D8F; --amber:#D97706; --red:#DC2626;
+    --hero-bg:#16161D; --hero-ink:#FAFAF8;
+    --panel:#F6F5F1;
+    --radius:14px;
+    --shadow:0 1px 2px rgba(0,0,0,.04);
+    --sans:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono:ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html{scroll-behavior:smooth;}
+  body{background:var(--bg); color:var(--ink); font-family:var(--sans); font-size:16px; line-height:1.6;}
+  a{color:var(--indigo); text-decoration:none;}
+  a:hover{text-decoration:underline;}
+  code{font-family:var(--mono); font-size:.86em; background:#F1F0EC; border:1px solid var(--line); border-radius:6px; padding:1px 6px; white-space:nowrap;}
+
+  /* ---------- Nav ---------- */
+  nav.topnav{position:sticky; top:0; z-index:50; background:#FFFFFF; border-bottom:1px solid var(--line);}
+  nav.topnav .navinner{max-width:1060px; margin:0 auto; padding:10px 24px; display:flex; flex-wrap:wrap; gap:6px; align-items:center;}
+  nav.topnav .brand{font-weight:700; font-size:13px; letter-spacing:.04em; color:var(--ink); margin-right:10px; white-space:nowrap;}
+  nav.topnav a.navlink{font-size:12.5px; color:var(--muted); padding:5px 10px; border-radius:999px; white-space:nowrap;}
+  nav.topnav a.navlink:hover{background:#F3F2EE; color:var(--ink); text-decoration:none;}
+  nav.topnav a.navlink.current{background:var(--indigo); color:#fff; font-weight:600;}
+
+  /* ---------- Hero ---------- */
+  header.hero{background:var(--hero-bg); color:var(--hero-ink); padding:64px 0 56px;}
+  header.hero .wrap{max-width:1060px; margin:0 auto; padding:0 24px;}
+  .pagenum{display:inline-flex; align-items:center; gap:10px; font-family:var(--mono); font-size:13px; letter-spacing:.14em; color:#A5A3B8; text-transform:uppercase; margin-bottom:18px;}
+  .pagenum .dot{width:8px; height:8px; border-radius:50%; background:var(--indigo); display:inline-block;}
+  header.hero h1{font-size:clamp(30px, 5vw, 46px); line-height:1.12; font-weight:750; letter-spacing:-.02em; max-width:820px;}
+  header.hero p.promise{margin-top:16px; font-size:clamp(16px,2.2vw,19px); color:#C9C7D4; max-width:760px;}
+  header.hero .heroChips{margin-top:26px; display:flex; flex-wrap:wrap; gap:8px;}
+  header.hero .heroChips span{font-size:12.5px; font-family:var(--mono); border:1px solid #34333F; color:#B9B7C7; border-radius:999px; padding:4px 12px;}
+
+  /* ---------- Layout ---------- */
+  main{max-width:1060px; margin:0 auto; padding:40px 24px 24px;}
+  section.card{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:32px; margin-bottom:30px;}
+  .kicker{font-family:var(--mono); font-size:11.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--indigo); font-weight:600; margin-bottom:8px;}
+  section.card>h2{font-size:26px; letter-spacing:-.015em; line-height:1.2; margin-bottom:8px;}
+  section.card>p.lede{color:var(--muted); font-size:16px; max-width:820px; margin-bottom:18px;}
+  h3.sub{font-size:17px; margin:28px 0 12px; letter-spacing:-.01em;}
+  h3.sub:first-of-type{margin-top:22px;}
+  p+p{margin-top:10px;}
+  .mutedtxt{color:var(--muted);}
+
+  /* ---------- Verification chips ---------- */
+  .vchip{display:inline-block; font-family:var(--mono); font-size:10.5px; letter-spacing:.03em; border-radius:999px; padding:1px 9px; vertical-align:2px; white-space:nowrap;}
+  .vchip.verified{color:var(--teal); background:#E7F5F2; border:1px solid #BFE5DF;}
+  .vchip.likely{color:var(--amber); background:#FCF3E6; border:1px solid #F1DDBB;}
+  .vchip.testing{color:#6B7280; background:#F1F0EC; border:1px solid var(--line);}
+
+  /* ---------- Callouts ---------- */
+  .callout{border-radius:12px; padding:16px 20px; margin:18px 0; background:#FBFAF8; border:1px solid var(--line); border-left:4px solid var(--indigo); font-size:15px;}
+  .callout .ctitle{font-weight:700; font-size:13.5px; display:block; margin-bottom:4px; letter-spacing:.01em;}
+  .callout.plain{border-left-color:var(--indigo);}   .callout.plain .ctitle{color:var(--indigo);}
+  .callout.warn{border-left-color:var(--amber); background:#FCF8F1;} .callout.warn .ctitle{color:var(--amber);}
+  .callout.decision{border-left-color:var(--teal); background:#F2FAF8;} .callout.decision .ctitle{color:var(--teal);}
+  .callout.myth{border-left-color:var(--red); background:#FCF4F3;} .callout.myth .ctitle{color:var(--red);}
+
+  /* ---------- Takeaway grid ---------- */
+  .takeaways{display:grid; grid-template-columns:repeat(auto-fit, minmax(300px,1fr)); gap:14px; margin-top:20px;}
+  .takeaway{border:1px solid var(--line); border-radius:12px; padding:16px 18px; background:#FDFCFB;}
+  .takeaway .tk{font-size:12px; font-family:var(--mono); letter-spacing:.1em; text-transform:uppercase; font-weight:600; margin-bottom:6px; display:block;}
+  .takeaway .tk.ind{color:var(--indigo);} .takeaway .tk.teal{color:var(--teal);} .takeaway .tk.amb{color:var(--amber);} .takeaway .tk.red{color:var(--red);}
+  .takeaway p{font-size:14px; color:#3F3F46;}
+
+  /* ---------- Story panels (numbered steps) ---------- */
+  .steps{display:grid; grid-template-columns:repeat(auto-fit, minmax(280px,1fr)); gap:14px; margin:16px 0 6px; counter-reset:step;}
+  .step{position:relative; border:1px solid var(--line); border-radius:12px; background:#FDFCFB; padding:18px 18px 16px 18px;}
+  .step .n{display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; border-radius:50%; background:var(--indigo); color:#fff; font-weight:700; font-size:14px; margin-bottom:10px;}
+  .step h4{font-size:14.5px; margin-bottom:6px; letter-spacing:-.005em;}
+  .step p{font-size:13.5px; color:#4B4B55;}
+  .step.tealstep .n{background:var(--teal);}
+
+  /* ---------- Big stat cards ---------- */
+  .statgrid{display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:14px; margin:18px 0;}
+  .stat{border:1px solid var(--line); border-radius:12px; background:#FDFCFB; padding:18px; text-align:left;}
+  .stat .big{font-size:30px; font-weight:750; letter-spacing:-.02em; line-height:1.05;}
+  .stat .big.teal{color:var(--teal);} .stat .big.ind{color:var(--indigo);} .stat .big.amb{color:var(--amber);} .stat .big.red{color:var(--red);}
+  .stat .lbl{font-size:12.5px; color:var(--muted); margin-top:6px; line-height:1.45;}
+
+  /* ---------- Diagrams ---------- */
+  .diagram{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:22px; margin:18px 0;}
+  .diagram .dtitle{font-size:12px; font-family:var(--mono); letter-spacing:.12em; text-transform:uppercase; color:var(--muted); font-weight:600; margin-bottom:16px;}
+  .flow{display:flex; align-items:stretch; gap:0; flex-wrap:nowrap;}
+  .fbox{flex:1; background:#fff; border:1px solid var(--line); border-radius:10px; padding:14px 14px; min-width:0;}
+  .fbox h5{font-size:13.5px; margin-bottom:4px;}
+  .fbox p{font-size:12.5px; color:var(--muted); line-height:1.45;}
+  .fbox.ind{border-top:3px solid var(--indigo);} .fbox.teal{border-top:3px solid var(--teal);}
+  .fbox.amb{border-top:3px solid var(--amber);} .fbox.red{border-top:3px solid var(--red);}
+  .fbox.dark{background:var(--hero-bg); border-color:#2C2B36;}
+  .fbox.dark h5{color:var(--hero-ink);} .fbox.dark p{color:#A5A3B8;}
+  .farrow{display:flex; align-items:center; justify-content:center; padding:0 10px; color:#9CA3AF; font-size:22px; flex:0 0 auto;}
+  .farrow small{display:block; font-size:10px; font-family:var(--mono); color:var(--muted); text-align:center; line-height:1.3;}
+  .fnote{font-size:12.5px; color:var(--muted); margin-top:14px; line-height:1.5;}
+  .fnote strong{color:var(--ink);}
+  @media (max-width:760px){
+    .flow{flex-direction:column;}
+    .farrow{transform:rotate(90deg); padding:6px 0;}
+  }
+  .diagram .lane{display:flex; gap:14px; flex-wrap:wrap;}
+  .badge{display:inline-block; font-size:10.5px; font-family:var(--mono); border-radius:999px; padding:1px 8px; margin-left:6px; vertical-align:2px;}
+  .badge.teal{background:#E7F5F2; color:var(--teal); border:1px solid #BFE5DF;}
+  .badge.amb{background:#FCF3E6; color:var(--amber); border:1px solid #F1DDBB;}
+  .badge.red{background:#FCEBEA; color:var(--red); border:1px solid #F3C9C6;}
+  .badge.ind{background:#EEEDFC; color:var(--indigo); border:1px solid #D6D3F8;}
+
+  /* ---------- Tables ---------- */
+  .tablewrap{overflow-x:auto; border:1px solid var(--line); border-radius:12px; margin:18px 0; background:#fff;}
+  table.cmp{border-collapse:collapse; width:100%; min-width:860px; font-size:13.5px;}
+  table.cmp thead th{position:sticky; top:0; background:#F6F5F1; color:var(--ink); font-size:12px; text-transform:uppercase; letter-spacing:.06em; text-align:left; padding:12px 14px; border-bottom:1px solid var(--line); z-index:2; white-space:nowrap;}
+  table.cmp td{padding:12px 14px; border-bottom:1px solid #F0EFEA; vertical-align:top; color:#3F3F46;}
+  table.cmp tbody tr:last-child td{border-bottom:none;}
+  table.cmp tbody tr:hover{background:#FBFAF7;}
+  table.cmp td:first-child{font-weight:650; color:var(--ink); white-space:nowrap;}
+  .pill{display:inline-block; font-size:11.5px; font-weight:650; border-radius:999px; padding:2px 10px; white-space:nowrap;}
+  .pill.ok{background:#E7F5F2; color:var(--teal);}
+  .pill.no{background:#FCEBEA; color:var(--red);}
+  .pill.mid{background:#FCF3E6; color:var(--amber);}
+  .pill.info{background:#EEEDFC; color:var(--indigo);}
+
+  /* ---------- Copy / Avoid lists ---------- */
+  .twocol{display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:16px; margin-top:16px;}
+  .listcard{border:1px solid var(--line); border-radius:12px; padding:20px; background:#FDFCFB;}
+  .listcard.copy{border-top:4px solid var(--teal);}
+  .listcard.avoid{border-top:4px solid var(--red);}
+  .listcard h4{font-size:16px; margin-bottom:12px;}
+  .listcard ol{margin-left:20px; display:flex; flex-direction:column; gap:10px;}
+  .listcard ol li{font-size:14px; color:#3F3F46;}
+  .listcard ol li strong{color:var(--ink);}
+
+  /* ---------- Roadmap ---------- */
+  .roadmap{display:flex; flex-direction:column; gap:10px; margin-top:14px;}
+  .rmrow{display:flex; gap:14px; align-items:flex-start; border:1px solid var(--line); border-radius:12px; background:#FDFCFB; padding:14px 16px;}
+  .rmrow .rmnum{flex:0 0 auto; width:26px; height:26px; border-radius:50%; background:var(--teal); color:#fff; font-weight:700; font-size:13px; display:flex; align-items:center; justify-content:center; margin-top:2px;}
+  .rmrow .rmbody{flex:1;}
+  .rmrow .rmbody h5{font-size:14.5px; margin-bottom:2px;}
+  .rmrow .rmbody p{font-size:13px; color:var(--muted);}
+  .statuspill{flex:0 0 auto; font-size:11px; font-weight:650; border-radius:999px; padding:3px 11px; margin-top:4px; white-space:nowrap;}
+  .statuspill.now{background:#EEEDFC; color:var(--indigo);}
+  .statuspill.v2{background:#FCF3E6; color:var(--amber);}
+  .statuspill.done{background:#E7F5F2; color:var(--teal);}
+
+  /* ---------- Glossary chips + details ---------- */
+  .glossary{display:flex; flex-wrap:wrap; gap:8px; margin:14px 0 4px;}
+  .gchip{font-size:12.5px; border:1px solid var(--line); border-radius:999px; padding:4px 12px; background:#fff; color:#3F3F46;}
+  .gchip b{color:var(--indigo);}
+  details{border:1px solid var(--line); border-radius:12px; background:#FDFCFB; margin:14px 0; overflow:hidden;}
+  details summary{cursor:pointer; padding:14px 18px; font-weight:650; font-size:14.5px; list-style:none; display:flex; align-items:center; gap:10px;}
+  details summary::-webkit-details-marker{display:none;}
+  details summary::before{content:"+"; font-family:var(--mono); color:var(--indigo); font-weight:700; font-size:16px; width:18px;}
+  details[open] summary::before{content:"–";}
+  details .dbody{padding:0 18px 18px; font-size:14px; color:#3F3F46;}
+  details .dbody p+p{margin-top:8px;}
+  details .dbody ul{margin:8px 0 0 20px;}
+  details .dbody ul li{margin-bottom:6px;}
+
+  /* ---------- Split panels (courier vs office) ---------- */
+  .splitgrid{display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:16px; margin-top:18px;}
+  .splitpanel{border-radius:12px; padding:22px; border:1px solid var(--line);}
+  .splitpanel.courier{background:#FBF7F0; border-top:4px solid var(--amber);}
+  .splitpanel.office{background:#F1FAF7; border-top:4px solid var(--teal);}
+  .splitpanel h4{font-size:17px; margin-bottom:4px;}
+  .splitpanel .who{font-size:12.5px; font-family:var(--mono); color:var(--muted); margin-bottom:12px;}
+  .splitpanel ul{margin-left:18px; font-size:13.5px; color:#3F3F46; display:flex; flex-direction:column; gap:6px;}
+
+  /* ---------- Sources / footer ---------- */
+  .srcgrid{display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:20px; margin-top:14px;}
+  .srccol h4{font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin-bottom:8px;}
+  .srccol ul{list-style:none;}
+  .srccol li{font-size:12.5px; margin-bottom:6px; line-height:1.45; overflow-wrap:anywhere;}
+  footer.pagefoot{border-top:1px solid var(--line); margin-top:44px; padding:26px 24px 44px; background:#FFFFFF;}
+  footer.pagefoot .finner{max-width:1060px; margin:0 auto; display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap;}
+  footer.pagefoot .fbrand{font-size:13px; color:var(--muted);}
+  footer.pagefoot .fnav a{font-size:13.5px; font-weight:600; margin-left:18px;}
+</style>
+</head>
+<body>
+
+<!-- ============ STICKY NAV ============ -->
+<nav class="topnav">
+  <div class="navinner">
+    <span class="brand">ZEROS · CLOUD REPORT</span>
+    <a class="navlink" href="index.html">Overview</a>
+    <a class="navlink" href="01-cloud-workspaces-explained.html">Cloud Workspaces, Explained</a>
+    <a class="navlink" href="02-how-conductor-does-it.html">How Conductor Does It</a>
+    <a class="navlink current" href="03-cursor-and-claude-code-cloud.html">Cursor &amp; Claude Code</a>
+    <a class="navlink" href="04-platform-comparison.html">Platform Comparison</a>
+    <a class="navlink" href="05-sync-teams-and-collaboration.html">Sync, Teams &amp; Collab</a>
+    <a class="navlink" href="06-enterprise-self-hosting.html">Enterprise Self-Hosting</a>
+    <a class="navlink" href="07-execution-plan.html">Execution Plan</a>
+    <a class="navlink" href="08-engineering-reference.html">Engineering Reference</a>
+  </div>
+</nav>
+
+<!-- ============ HERO ============ -->
+<header class="hero">
+  <div class="wrap">
+    <div class="pagenum"><span class="dot"></span> Page 03 of 09 · Zeros Cloud Workspaces Report · July 2026</div>
+    <h1>How Cursor &amp; Claude Code Do Cloud</h1>
+    <p class="promise">The two biggest agent vendors built disposable task machines — couriers, not offices. Here's exactly how they work, what to steal, and where they left the door open for Zeros.</p>
+    <div class="heroChips">
+      <span>Cursor Cloud Agents</span>
+      <span>Claude Code on the web</span>
+      <span>Codex · Copilot · Jules · Devin</span>
+      <span>Copy / Avoid verdicts</span>
+    </div>
+  </div>
+</header>
+
+<main>
+
+<!-- ============ THE SHORT VERSION ============ -->
+<section class="card" id="short-version">
+  <div class="kicker">The short version</div>
+  <h2>Eight things to remember from this page</h2>
+  <p class="lede">If you read nothing else, read these cards. Everything below is the evidence behind them.</p>
+  <div class="takeaways">
+    <div class="takeaway"><span class="tk ind">Same shape, different product</span>
+      <p>Cursor and Anthropic both ship cloud coding agents, and both chose <strong>disposable, task-sized cloud computers</strong>: send a task, a fresh machine spins up, the result comes back as a pull request, the machine is thrown away. That is a <em>different product</em> from Zeros — a persistent workspace you live in.</p></div>
+    <div class="takeaway"><span class="tk ind">Sync = server-side session</span>
+      <p>Both solved cross-device sync the same way: <strong>the conversation lives on their servers</strong>, and every device (Mac, browser, phone) is just a window onto it. Code reaches your laptop through git, not file sync. Neither has anything like Zeros' planned Mutagen file mirror. <span class="vchip verified">verified</span> <strong>Zeros now adopts the same principle (decided 2026-07-02)</strong> via <strong>the cloud record</strong> — our cloud database that permanently stores your chats, sessions, and workspace history in your account — while the live engine in the sandbox stays the realtime hub.</p></div>
+    <div class="takeaway"><span class="tk teal">Cursor's cleverest move</span>
+      <p>Architectural: the agent's "brain" <strong>doesn't run on the cloud machine at all</strong> — it runs in Cursor's own infrastructure, so machines can be hibernated, swapped, and upgraded mid-task without killing the session. That's how they went from ~90% to 99%+ reliability at 50M+ actions/day (their June 2, 2026 engineering blog).</p></div>
+    <div class="takeaway"><span class="tk teal">Anthropic's cleverest move</span>
+      <p>Security: <strong>real GitHub credentials never enter the sandbox</strong>. The agent gets a fake scoped credential; a proxy outside the sandbox swaps it for the real token and only allows pushes to the agent's own branch. The whole industry is copying this pattern — and Zeros should too.</p></div>
+    <div class="takeaway"><span class="tk amb">The subsidy we can't copy</span>
+      <p><strong>Neither charges separately for cloud compute.</strong> Cursor bills raw model-token prices; Anthropic bundles the VM into the subscription ("no separate compute charge"). Zeros pays Daytona for every sandbox-hour — so sleep-when-idle economics are <em>existential</em> for us in a way they aren't for them.</p></div>
+    <div class="takeaway"><span class="tk teal">Features worth stealing outright</span>
+      <p>PR-first output with proof-of-work artifacts · "teleport" (pull a cloud session down to your Mac in one command) · mobile check-ins with push notifications · environment snapshots after setup so you never pay cold-start twice · repo-committed environment config.</p></div>
+    <div class="takeaway"><span class="tk ind">The gap worth exploiting</span>
+      <p>Both vendors' team features are shallow — view-only sharing, no live collaboration on an agent conversation. Zeros' engine-owned chat database makes real-time shared workspaces natural. <strong>Nobody big has shipped that yet</strong> (as of mid-2026).</p></div>
+    <div class="takeaway"><span class="tk red">Walled gardens</span>
+      <p>Anthropic bans third-party products (including anything on the Claude Agent SDK — what Zeros uses) from claude.ai login or subscription rate limits. Their cross-device fabric can't be piggybacked; Zeros must build its own — exactly what the Daytona plan does.</p></div>
+  </div>
+</section>
+
+<!-- ============ WHY THESE TWO MATTER ============ -->
+<section class="card" id="why">
+  <div class="kicker">Why these two matter</div>
+  <h2>The vendors your users already run inside Zeros</h2>
+  <p>Cursor and Claude Code are the two biggest agent vendors Zeros users already run <em>inside</em> Zeros, and both spent 2025–2026 building cloud versions of their agents — instructive partly as patterns to copy, partly as a warning about what Zeros should <em>not</em> become.</p>
+  <div class="callout plain"><span class="ctitle">💡 How to read the evidence tags</span>
+    Everything on this page is dated mid-2026 and tagged
+    <span class="vchip verified">verified</span> (official docs, or two independent sources) ·
+    <span class="vchip likely">likely</span> (one credible source) ·
+    <span class="vchip testing">needs-testing</span> (flagged where noted).
+  </div>
+</section>
+
+<!-- ============ CURSOR ============ -->
+<section class="card" id="cursor">
+  <div class="kicker">Vendor deep-dive 1 of 2</div>
+  <h2>Cursor Cloud Agents</h2>
+  <p class="lede">Started as "Background Agents" (preview May 2025, GA June 2025), renamed <strong>Cloud Agents</strong> in Cursor 2.0 on October 29, 2025. <span class="vchip verified">verified</span></p>
+
+  <h3 class="sub">What you experience, step by step</h3>
+  <div class="steps">
+    <div class="step"><span class="n">1</span><h4>Kick off a task from almost anywhere</h4>
+      <p>Pick "Cloud" in the Cursor editor's agent dropdown. Or open cursor.com/agents in a browser. Or use the Cursor iOS app (public beta since June 29, 2026). Or type <code>@Cursor fix the login bug</code> in Slack, comment <code>@cursor</code> on a GitHub PR, assign an issue to @cursor in Linear, hit their API, or schedule it as a recurring Automation. <span class="vchip verified">verified</span></p></div>
+    <div class="step"><span class="n">2</span><h4>Close your laptop — the agent keeps working</h4>
+      <p>Each agent gets its own rented computer in Cursor's cloud — a <strong>VM</strong> (a full computer simulated in a data center, created and destroyed in seconds). It clones your repo from GitHub/GitLab/Bitbucket, works on its own branch, and since February 2026 even has its own desktop and web browser (<strong>Computer Use</strong>) so it can click around the app it's building. <span class="vchip verified">verified</span></p></div>
+    <div class="step"><span class="n">3</span><h4>Watch from your phone</h4>
+      <p>The chat streams live; you can send follow-ups mid-run. The iOS app pushes a notification when the agent finishes a turn, and Live Activities on the lock screen track up to <strong>eight agents at once</strong>. <span class="vchip verified">verified</span></p></div>
+    <div class="step"><span class="n">4</span><h4>Review a finished package</h4>
+      <p>The agent delivers a <strong>merge-ready pull request</strong> — GitHub's standard "here are my proposed changes, please review" bundle — with <strong>artifacts</strong>: screenshots, screen recordings, and logs proving the change works. Merge, request changes, or hand a failing check back to the agent — from web or phone. Cloud agents also <strong>auto-fix CI failures</strong> (CI — the automated test suite that runs on every PR) on PRs they created. <span class="vchip verified">verified</span></p></div>
+    <div class="step"><span class="n">5</span><h4>Take over locally when you want your hands on the code</h4>
+      <p>"Open in Cursor" pulls the agent's work into your editor. Since Cursor 3.x the handoff is <strong>bidirectional</strong>: local sessions can move to the cloud to keep working while you're offline, and cloud sessions can be pulled back down. There's also an inverse mode, <code>/remote-control</code>: the agent's brain moves to the cloud so your phone can drive it, while its tools keep running on your desk-bound Mac. <span class="vchip verified">verified</span></p></div>
+  </div>
+
+  <div class="statgrid">
+    <div class="stat"><div class="big teal">40%+</div><div class="lbl">of Cursor's own merged PRs come from cloud agents as of June 2026 — up from 30% in February. <span class="vchip verified">verified</span> (their engineering blog)</div></div>
+    <div class="stat"><div class="big ind">50M+</div><div class="lbl">agent actions per day, run at "past two 9s" (99%+) reliability — up from "one 9" (~90%) in early beta.</div></div>
+    <div class="stat"><div class="big ind">8</div><div class="lbl">agents trackable at once from an iPhone lock screen via Live Activities.</div></div>
+  </div>
+
+  <h3 class="sub">Under the hood, in plain words</h3>
+  <p>The headline design: <strong>the agent loop does NOT run on the cloud VM.</strong> The "loop" — the think-act-observe cycle that <em>is</em> the agent — runs in <strong>Temporal</strong> (a workflow system: think of it as air-traffic control that guarantees a job lands even if the plane carrying it has to be swapped mid-flight) inside Cursor's own cloud. The VM is just the workbench.</p>
+
+  <div class="diagram">
+    <div class="dtitle">Diagram · Cursor's split: the brain never lives on the machine it's using</div>
+    <div class="flow">
+      <div class="fbox ind"><h5>You</h5><p>Mac editor · browser · iPhone · Slack · GitHub · Linear · API — any of these can start or steer a task.</p></div>
+      <div class="farrow">→</div>
+      <div class="fbox dark"><h5>The agent's brain 🧠</h5><p>Runs in Cursor's own infrastructure on <strong>Temporal</strong>. It never dies with a machine — it survives crashes, swaps, and upgrades mid-task.</p></div>
+      <div class="farrow">⇄<small>drives</small></div>
+      <div class="fbox amb"><h5>Disposable VM workbench 🔧</h5><p>A fresh Ubuntu machine on Cursor's AWS. Holds the cloned repo, terminal, and (since Feb 2026) its own desktop + browser. Thrown away after the task.</p></div>
+      <div class="farrow">→</div>
+      <div class="fbox teal"><h5>Pull request 📦</h5><p>Merge-ready branch on GitHub with screenshots, recordings, and logs as proof-of-work.</p></div>
+    </div>
+    <p class="fnote"><strong>Why the split matters:</strong> because brain and workbench are separate, Cursor can hibernate VMs between messages, keep pre-warmed ones ready, checkpoint / restore / fork machine images, and upgrade software without killing sessions. Result: from "one 9" of reliability in early beta to "past two 9s," at 50M+ actions per day. <span class="vchip verified">verified</span> — June 2, 2026 engineering blog</p>
+  </div>
+
+  <div class="callout warn"><span class="ctitle">⚠️ Watch out — the security track record</span>
+    Isolated Ubuntu VMs on Cursor's AWS; exact size unpublished. In <strong>July 2025 security researchers escaped the sandbox to the underlying host</strong> — one of several incidents worth remembering (repeated prompt-injection CVEs followed in 2025–2026). The agent has <strong>internet access by default and auto-runs every terminal command</strong> — Cursor's own docs acknowledge the data-exfiltration risk. <span class="vchip verified">verified</span>
+  </div>
+
+  <h3 class="sub">Environment setup: pay the cold-start cost once, never again</h3>
+  <p>A file committed to your repo, <code>.cursor/environment.json</code>, defines how to build the agent's workbench: a saved <strong>snapshot</strong> (a frozen copy of a fully set-up machine's disk), a Dockerfile, or agent-led setup where the agent installs everything itself while you watch.</p>
+
+  <div class="diagram">
+    <div class="dtitle">Diagram · The snapshot pipeline</div>
+    <div class="flow">
+      <div class="fbox ind"><h5>First run: setup</h5><p><code>.cursor/environment.json</code> in your repo says how to build the machine — snapshot, Dockerfile, or agent-led install while you watch.</p></div>
+      <div class="farrow">→</div>
+      <div class="fbox amb"><h5>Auto-checkpoint 📸</h5><p>After the install step, Cursor freezes the machine's disk into an encrypted snapshot automatically.</p></div>
+      <div class="farrow">→</div>
+      <div class="fbox teal"><h5>Every later run starts warm</h5><p>Future agents boot from the snapshot — you pay the setup cost once, not every run. Snapshots kept up to 90 days of inactivity.</p></div>
+    </div>
+    <p class="fnote"><strong>Cursor's stated lesson:</strong> <em>"the single biggest factor in cloud agent output quality is ensuring it has a full development environment"</em> — rebuilding a dev environment in the cloud was their hardest problem. <span class="vchip verified">verified</span></p>
+  </div>
+
+  <p><strong>Secrets:</strong> stored via cursor.com and injected as environment variables; runtime secrets show up as <code>[REDACTED]</code> in transcripts; commits are signed with a hardware-backed key so they show "Verified" on GitHub. <span class="vchip verified">verified</span></p>
+
+  <h3 class="sub">What syncs across devices</h3>
+  <p>The trick is that there's almost nothing <em>to</em> sync: <strong>the session — conversation, state, diffs, artifacts — lives server-side</strong>, streamed to every device from an <strong>append-only store</strong> (a log you can only add to, never rewrite — so every device can replay it identically). Devices are pure renderers.</p>
+
+  <div class="diagram">
+    <div class="dtitle">Diagram · How "sync" actually works (Cursor and Claude Code alike)</div>
+    <div class="flow">
+      <div class="fbox ind"><h5>Your devices 🖥️📱🌐</h5><p>Mac editor, browser, phone — <strong>pure windows</strong>. They render the session; they don't own it.</p></div>
+      <div class="farrow">⇄<small>stream</small></div>
+      <div class="fbox dark"><h5>Server-side session store</h5><p>The conversation, state, diffs, and artifacts live here as an append-only log every device replays identically.</p></div>
+      <div class="farrow">⇄<small>works in</small></div>
+      <div class="fbox amb"><h5>Cloud VM</h5><p>Where the code is edited — on its own branch.</p></div>
+    </div>
+    <div class="flow" style="margin-top:14px;">
+      <div class="fbox amb"><h5>Cloud VM's branch</h5><p>Agent commits its work…</p></div>
+      <div class="farrow">→<small>git push</small></div>
+      <div class="fbox"><h5>GitHub / GitLab / Bitbucket</h5><p>…to a normal branch on your git host…</p></div>
+      <div class="farrow">→<small>git checkout</small></div>
+      <div class="fbox teal"><h5>Your laptop</h5><p>…which is the <strong>only</strong> way code reaches your Mac.</p></div>
+    </div>
+    <p class="fnote"><strong>Code travels by git, never by file sync.</strong> There is no continuous file mirror to the laptop — verified by absence across all of Cursor's docs. Nothing like Zeros' planned Mutagen mirror exists here. <span class="vchip verified">verified</span></p>
+  </div>
+
+  <h3 class="sub">Team features</h3>
+  <p>Shallow, honestly. Teammates with repo access can <em>view</em> each other's agents at cursor.com/agents; replying to someone else's agent is an <strong>opt-in setting</strong>; team-scoped service accounts are Enterprise-only. The one real shared team asset is <strong>saved environments</strong> (with version history and an audit log). <span class="vchip verified">verified</span></p>
+
+  <h3 class="sub">Pricing</h3>
+  <div class="statgrid">
+    <div class="stat"><div class="big ind">$20/mo</div><div class="lbl"><strong>Pro</strong> — includes $20 of model usage.</div></div>
+    <div class="stat"><div class="big ind">$60/mo</div><div class="lbl"><strong>Pro+</strong> — includes $70 of model usage.</div></div>
+    <div class="stat"><div class="big ind">$200/mo</div><div class="lbl"><strong>Ultra</strong> — includes $400 of model usage.</div></div>
+    <div class="stat"><div class="big ind">$40–120</div><div class="lbl"><strong>Team seats</strong> — $40/user/mo Standard, $120 Premium, plus a $0.25-per-million-token surcharge on non-Auto requests.</div></div>
+  </div>
+  <p>Cloud agents always run in Max Mode, <strong>billed at the model's raw API token price</strong> — included usage first, then metered on-demand billing with a mandatory spend limit. <strong>No separate charge for VM time is disclosed</strong> — compute appears bundled. <span class="vchip verified">verified pricing</span> (the VM-time question is officially unanswered)</p>
+  <div class="callout warn"><span class="ctitle">⚠️ Watch out — the loudest criticism is cost unpredictability</span>
+    Hacker News reports of <strong>$2k/week</strong> bills and subscriptions drained in a day. <span class="vchip likely">likely</span> This is the trust liability Zeros should design against: show the meter.
+  </div>
+</section>
+
+<!-- ============ CLAUDE CODE ============ -->
+<section class="card" id="claude">
+  <div class="kicker">Vendor deep-dive 2 of 2</div>
+  <h2>Claude Code on the web</h2>
+  <p class="lede">Launched October 20, 2025 — and <em>still labeled a research preview as of July 2026</em>. It runs full Claude Code sessions on Anthropic-managed cloud VMs at claude.ai/code. <span class="vchip verified">verified</span></p>
+
+  <h3 class="sub">What you experience, step by step</h3>
+  <div class="steps">
+    <div class="step"><span class="n">1</span><h4>Sign in &amp; connect GitHub</h4>
+      <p>At claude.ai/code, install the Claude GitHub App and grant repo access.</p></div>
+    <div class="step"><span class="n">2</span><h4>Create an "environment"</h4>
+      <p>A named recipe: network access level, environment variables, and a setup script that installs your project's dependencies.</p></div>
+    <div class="step"><span class="n">3</span><h4>Pick a repo + branch, type a task, press Enter</h4>
+      <p>Each task gets <strong>its own session, its own fresh VM, its own branch</strong>. The VM is roughly 4 vCPUs, 16 GB RAM, 30 GB disk, Ubuntu 24.04, with Docker, Postgres, and Redis pre-installed. Watch and steer in real time, or walk away. <span class="vchip verified">verified</span></p></div>
+    <div class="step"><span class="n">4</span><h4>Close the laptop; the session lives on claude.ai's servers</h4>
+      <p>Check it from the Claude iPhone/Android app, get push notifications when Claude finishes or needs a decision, and reply from the beach.</p></div>
+    <div class="step"><span class="n">5</span><h4>Review a diff, not a machine</h4>
+      <p>Sessions show a <code>+42 −18</code> change indicator; clicking opens a diff view. Leave <strong>inline comments on specific lines</strong>, bundled into your next message ("at src/auth.ts:47, don't catch the error here"). Then <strong>Create PR</strong> — full, draft, or GitHub compose page. A per-PR <strong>Auto-fix</strong> toggle subscribes Claude to that PR's webhooks so it automatically fixes CI failures and responds to review comments. <span class="vchip verified">verified</span></p></div>
+    <div class="step tealstep"><span class="n">6</span><h4>"Teleport" the session down to your Mac</h4>
+      <p><code>claude --teleport</code> fetches the cloud session's branch AND downloads the full conversation history into your local terminal — you continue exactly where the cloud left off. Requirements: same claude.ai account, same repo, clean working tree. <span class="vchip verified">verified</span></p></div>
+  </div>
+
+  <div class="diagram">
+    <div class="dtitle">Diagram · Teleport is a one-way superpower — the reverse trip is faked</div>
+    <div class="flow">
+      <div class="fbox dark"><h5>Cloud session ☁️</h5><p>Branch + full conversation, living on claude.ai's servers.</p></div>
+      <div class="farrow">→<small>strong</small></div>
+      <div class="fbox teal"><h5>Your Mac <span class="badge teal">works great</span></h5><p><code>claude --teleport</code> pulls the branch <em>and</em> the whole conversation into your terminal. You continue exactly where the cloud left off.</p></div>
+    </div>
+    <div class="flow" style="margin-top:14px;">
+      <div class="fbox"><h5>Your Mac 💻</h5><p>A live local session you want to send to the cloud…</p></div>
+      <div class="farrow">⇢<small>weak</small></div>
+      <div class="fbox amb"><h5>Cloud <span class="badge amb">faked with a summary</span></h5><p>The CLI can only create <em>new</em> cloud sessions (<code>--remote</code> clones from GitHub, or uploads a &lt;100 MB bundle if there's no GitHub). The Desktop app's "Continue in" menu pushes your branch, writes a <strong>summary</strong> of the conversation, and starts a fresh session.</p></div>
+    </div>
+    <p class="fnote"><strong>The tell:</strong> lifting a live session into the cloud is hard enough that even Anthropic cheats with a summary. Zeros' persistent-workspace model sidesteps this entirely — there's no session to lift, you just reconnect. <span class="vchip verified">verified</span></p>
+  </div>
+
+  <h3 class="sub">Under the hood, in plain words</h3>
+  <p><strong>Ephemeral task sandboxes, not persistent workspaces.</strong> Idle environments expire and are reclaimed; reopening provisions a fresh VM with the conversation restored but the old machine's working state gone. What survives is the <strong>branch on GitHub plus the server-side transcript</strong>. The VM is explicitly disposable. <span class="vchip verified">verified</span></p>
+
+  <div class="diagram">
+    <div class="dtitle">Diagram · The credential proxy — the flagship security pattern</div>
+    <div class="flow">
+      <div class="fbox red"><h5>Inside the sandbox 🔒</h5><p>The agent's git holds only a <strong>fake, scoped credential</strong> — a valet key that can start the car but not open the trunk. Real tokens and signing keys <strong>never</strong> touch this machine.</p></div>
+      <div class="farrow">→<small>valet key</small></div>
+      <div class="fbox ind"><h5>Credential proxy 🛂 (outside the sandbox)</h5><p>Verifies the valet key, swaps it for your <em>real</em> GitHub token, and <strong>restricts <code>git push</code> to the current working branch only</strong>.</p></div>
+      <div class="farrow">→<small>real token</small></div>
+      <div class="fbox teal"><h5>GitHub ✅</h5><p>Only the agent's own branch can be pushed to. Even a fully compromised sandbox can't push to <code>main</code> or steal the token.</p></div>
+    </div>
+    <p class="fnote"><strong>This is the pattern the whole industry is copying</strong> — and the one Zeros should adopt (see "Copy" below). <span class="vchip verified">verified</span></p>
+  </div>
+
+  <p><strong>All network traffic goes through a security proxy</strong> with per-environment levels — <strong>None</strong> / <strong>Trusted</strong> (default — an allowlist of ~150 package registries and developer services) / <strong>Full</strong> / <strong>Custom</strong>. The proxy keeps a DNS-level audit trail of every hostname requested. The docs honestly admit that even at "None," data can still exit via the Anthropic API channel itself. <span class="vchip verified">verified</span></p>
+
+  <p><strong>Environment caching:</strong> after your setup script succeeds once, Anthropic <strong>snapshots the filesystem</strong> and starts later sessions from it; the cache expires after ~7 days or on config change. Config committed to the repo (CLAUDE.md, <code>.claude/</code>, <code>.mcp.json</code>) carries into cloud sessions; your personal <code>~/.claude</code> setup does not. <span class="vchip verified">verified</span></p>
+
+  <div class="callout warn"><span class="ctitle">⚠️ Watch out — rough edges of a research preview</span>
+    There is <strong>no secrets store yet</strong> — environment variables are plaintext-visible to anyone who can edit the environment. No custom base images either. <span class="vchip verified">verified</span>
+  </div>
+
+  <h3 class="sub">What syncs across devices</h3>
+  <p>Same answer as Cursor, same mechanism: <strong>the session lives server-side on claude.ai; every surface — web, iOS, Android, Desktop, terminal-via-teleport — is a client.</strong> Commits from web sessions even carry a <code>Claude-Session: &lt;url&gt;</code> trailer so any PR traces back to the exact agent run. Local CLI sessions do <em>not</em> sync unless you use <strong>Remote Control</strong> — the mirror mode where the session keeps running on <em>your</em> Mac and web/phone are just synced windows onto it (outbound-only connections, no open ports). <span class="vchip verified">verified</span></p>
+  <div class="callout decision"><span class="ctitle">✅ Decision update (2026-07-02) — Zeros adopts this principle</span>
+    Both vendors keep the conversation on their servers; every device is a window. Zeros now does the same via <strong>the cloud record</strong> — chat and session history live permanently server-side in your account — while the live engine in the sandbox remains the realtime hub for a running workspace.
+  </div>
+
+  <h3 class="sub">Team features</h3>
+  <p>Also shallow: <strong>view-only session sharing</strong> (Private/Team on Team–Enterprise plans; Private/Public on Pro/Max), no real-time co-driving, no shared ownership of sessions. Enterprise gets server-side org toggles, audit logs, SCIM. <span class="vchip verified">verified</span></p>
+  <div class="callout warn"><span class="ctitle">⚠️ Watch out — a footgun for teams</span>
+    A connected GitHub account gives cloud sessions reach into <strong>every repo that account can see</strong> — access control has to happen on GitHub's side. <span class="vchip verified">verified</span>
+  </div>
+
+  <h3 class="sub">Pricing — and the rule that binds Zeros</h3>
+  <div class="statgrid">
+    <div class="stat"><div class="big teal">$0</div><div class="lbl">Separate compute charge for the cloud VM — the headline. Cloud sessions just draw from your plan's shared rate limits. Anthropic eats the sandbox bill as a subscription perk. <span class="vchip verified">verified</span></div></div>
+    <div class="stat"><div class="big ind">$20/mo</div><div class="lbl"><strong>Pro</strong> plan.</div></div>
+    <div class="stat"><div class="big ind">$100/$200</div><div class="lbl"><strong>Max</strong> tiers, monthly.</div></div>
+    <div class="stat"><div class="big ind">~$125</div><div class="lbl"><strong>Team Premium</strong> per seat, monthly.</div></div>
+  </div>
+  <div class="callout decision"><span class="ctitle">✅ Two facts here matter enormously for Zeros</span>
+    <strong>1. We can't replicate the subsidy.</strong> Zeros pays Daytona per sandbox-hour. Anthropic and Cursor amortize compute into subscriptions at a scale we don't have.<br><br>
+    <strong>2. We can't piggyback their subscriptions.</strong> Anthropic explicitly bans third-party products — including anything built on the Claude Agent SDK, which is what Zeros uses — from offering claude.ai login or subscription rate limits. API-key auth only. And teleport / Remote Control / cloud sessions are claude.ai-subscription perks unavailable over API keys. Their cross-device fabric is a walled garden; Zeros must build its own — which is exactly what the Daytona plan does. <span class="vchip verified">verified — Agent SDK docs</span>
+  </div>
+</section>
+
+<!-- ============ COURIER VS OFFICE ============ -->
+<section class="card" id="difference">
+  <div class="kicker">The one big difference</div>
+  <h2>Task runners vs. a workspace you live in</h2>
+  <p class="lede">Here is the sentence to keep: <strong>Cursor and Claude Code built couriers; Zeros is building an office.</strong></p>
+
+  <div class="splitgrid">
+    <div class="splitpanel courier">
+      <h4>📦 The courier model — task-shaped machines</h4>
+      <div class="who">Codex · Copilot · Jules · Claude web · Cursor Cloud Agents</div>
+      <ul>
+        <li>A fresh computer is <strong>created for one job</strong>; the deliverable (a PR) is mailed out; the computer is demolished.</li>
+        <li>Nothing about <em>you</em> lives there — no running services, no accumulated state, no "the way I left things yesterday."</li>
+        <li>It's a <strong>hotel room with aggressive housekeeping</strong>: identical every check-in, nothing personal survives checkout.</li>
+        <li>Gets durability and cheap idle time <strong>for free</strong> — by throwing the machine away.</li>
+      </ul>
+    </div>
+    <div class="splitpanel office">
+      <h4>🏢 The office model — persistent workspaces</h4>
+      <div class="who">Devin · Factory · Conductor · <strong>Zeros</strong></div>
+      <ul>
+        <li>A <strong>rented studio with your name on the door</strong>. You return to it; teammates can walk into it.</li>
+        <li>The full Zeros engine, your chat history, your running dev server, your half-finished experiments — all stay in the sandbox <strong>across days and weeks</strong>.</li>
+        <li>This camp is <strong>rarer and differentiating</strong>, per the landscape survey in this pack. (See the Conductor teardown doc for the closest comparable.)</li>
+        <li>Must <em>earn</em> what couriers get for free — see the two make-or-break requirements below.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="sub">The persistent model's two make-or-break requirements</h3>
+  <div class="statgrid">
+    <div class="stat"><div class="big red">~$240/mo</div><div class="lbl">An always-on 4-vCPU Daytona sandbox. <strong>Slept properly, it's dollars.</strong> Aggressive sleep-when-idle economics are requirement #1 (per the landscape survey).</div></div>
+    <div class="stat"><div class="big teal">git + record</div><div class="lbl">Requirement #2: <strong>durable results that live outside the workspace</strong> — git remote for code + the cloud record for chats and history (decided 2026-07-02, upgrading the earlier export-blob plan; a periodic export stays as a backup).</div></div>
+  </div>
+  <div class="callout plain"><span class="ctitle">💡 In plain words</span>
+    The ephemeral vendors get both requirements for free because they throw the machine away. Zeros keeps the machine — so Zeros has to make idle machines nearly free (sleep) and make the work survive the machine anyway (git + the cloud record).
+  </div>
+</section>
+
+<!-- ============ LANDSCAPE ============ -->
+<section class="card" id="landscape">
+  <div class="kicker">The broader landscape at a glance</div>
+  <h2>The fifty-cent version of the whole market</h2>
+  <p class="lede">Fuller detail lives in the landscape survey; here's how the other big cloud agents compare on the axes that matter.</p>
+
+  <div class="tablewrap">
+    <table class="cmp">
+      <thead>
+        <tr><th>Product</th><th>Cloud model</th><th>Output</th><th>Environment memory</th><th>Mobile</th><th>Pricing axis</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>OpenAI Codex cloud</td>
+          <td><span class="pill mid">~ ephemeral</span> Fresh container per task; internet ON during setup, OFF by default while the agent works; secrets stripped before the agent phase</td>
+          <td>Diff → PR, or apply locally</td>
+          <td>Container state cached up to 12h</td>
+          <td>ChatGPT app (May 2026) + turn-completion pushes</td>
+          <td>Token metering vs plan limits (since Apr 2, 2026); compute bundled</td>
+        </tr>
+        <tr>
+          <td>GitHub Copilot agent</td>
+          <td><span class="pill no">✗ fully ephemeral</span> GitHub Actions runner; 59-min cap, one PR per task</td>
+          <td>Draft PR, every step a commit</td>
+          <td>None (fully ephemeral)</td>
+          <td>"Mission control" across web / VS Code / mobile / CLI</td>
+          <td>AI Credits at API rates (June 1, 2026) <strong>plus Actions minutes — the only vendor that bills agent compute explicitly</strong></td>
+        </tr>
+        <tr>
+          <td>Google Jules</td>
+          <td><span class="pill mid">~ ephemeral</span> Fresh Google Cloud VM per task; plan-approval step before any code changes</td>
+          <td>Branch → PR</td>
+          <td>Setup scripts, AGENTS.md</td>
+          <td>Web only</td>
+          <td>Simplest model: <strong>tasks/day + concurrency</strong> (15/3 free, 100/15 at $19.99, 300/60 Ultra)</td>
+        </tr>
+        <tr>
+          <td>Devin (Cognition)</td>
+          <td><span class="pill ok">✓ persistent</span> "Cloud laptop" — the closest to Zeros</td>
+          <td>PR <strong>with a screen recording</strong> as proof</td>
+          <td><strong>Machine Snapshots</strong> persist the whole machine incl. auth tokens; auto-sleeps after ~0.1 ACU idle</td>
+          <td>Web, Slack, Linear, Jira</td>
+          <td>$500/mo (2024) → $20/mo (Apr 2025) — a <strong>25x price-floor collapse</strong> in one year; enterprise metered in ACUs (~15 min of work)</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="sub">Cross-cutting patterns <span class="vchip verified">all verified in the survey</span></h3>
+  <div class="glossary">
+    <span class="gchip"><b>1.</b> PR-first output is universal</span>
+    <span class="gchip"><b>2.</b> Environment snapshotting after setup is standard</span>
+    <span class="gchip"><b>3.</b> H1 2026: industry-wide repricing to token pass-through</span>
+    <span class="gchip"><b>4.</b> Mobile check-in became table stakes — as <em>monitor / steer / approve</em>, never a full IDE</span>
+  </div>
+</section>
+
+<!-- ============ COPY / AVOID ============ -->
+<section class="card" id="copy-avoid">
+  <div class="kicker">Verdicts</div>
+  <h2>What Zeros should copy — and what to avoid</h2>
+  <div class="twocol">
+    <div class="listcard copy">
+      <h4>✅ Copy</h4>
+      <ol>
+        <li><strong>PR-first as an output <em>option</em>, with proof-of-work artifacts.</strong> Even in a persistent workspace, the durable deliverable is a branch/PR — and the leaders attach evidence (Cursor's videos/screenshots/logs, Devin's recordings, Claude's session-URL trailer in every commit). Zeros should offer "wrap this up as a PR" with artifacts, without making it the <em>only</em> exit.</li>
+        <li><strong>Teleport / cloud-local handoff.</strong> Claude's <code>--teleport</code> (branch + full conversation down to the laptop) is the single most-loved portability feature in the market. Zeros is structurally <em>better</em> positioned: with the Mutagen file mirror, the files are already on the Mac, and with the engine-owned chat DB (now backed by the cloud record), the conversation is already synced — Zeros' "teleport" is nearly free. Also note what's hard: even Anthropic fakes local→cloud handoff with a summary. Zeros' persistent-workspace model sidesteps this — there's no session to lift, you just reconnect. <span class="vchip testing">needs-testing</span> once Phase 1 has an API key: measure reconnect/resume feel.</li>
+        <li><strong>Mobile check-ins, scoped tightly.</strong> Push notification when a turn finishes or the agent is blocked, plus one-message unblocking. Not an IDE on a phone.</li>
+        <li><strong>Environment snapshots after setup.</strong> Everyone learned the same lesson: never pay cold-start twice, invalidate on config change. Map this onto Daytona snapshots + a repo-committed environment file (the "repo-as-config" pattern: <code>.cursor/environment.json</code>, CLAUDE.md — Zeros should have its own).</li>
+        <li><strong>Credentials never in the sandbox.</strong> Anthropic's scoped-credential git proxy, push restricted to the working branch. Assume the agent's box is compromised by design — Cursor's container-escape and prompt-injection CVE history is the cautionary tale.</li>
+        <li><strong>Usage-based compute, priced honestly.</strong> The 2026 norm is model tokens at pass-through and compute either absorbed or a small metered line. Zeros can't absorb compute like Anthropic — so meter it transparently, and make sleep-when-idle the default so the number stays small (see <a href="04-platform-comparison.html">Platform Comparison</a> for the Daytona math).</li>
+      </ol>
+    </div>
+    <div class="listcard avoid">
+      <h4>❌ Avoid</h4>
+      <ol>
+        <li><strong>Task-shaped-only agents.</strong> Don't chase Cursor/Claude into the courier business — they've won it, they subsidize the compute, and Zeros users already get those products' cloud features <em>through</em> those products. Zeros' wedge is the thing they structurally can't do: a persistent, multi-agent, multi-day workspace with live shared chat.</li>
+        <li><strong>Their sync architecture, wholesale.</strong> <em>Updated 2026-07-02: this item previously argued that "everything lives on our servers, devices render it" contradicts Zeros' engine-owned zeros.db design — the founder has since decided Zeros adopts that very principle via the cloud record.</em> Both vendors keep the conversation on their servers; every device is a window — Zeros now does the same: the cloud record permanently stores chats and history in your account, the in-sandbox zeros.db becomes the working copy, and the live engine stays the realtime hub (the <a href="05-sync-teams-and-collaboration.html">sync &amp; collaboration doc</a>'s verdict is now "live engine + cloud record"). What Zeros still does <em>not</em> copy is their live-path topology: the app keeps its direct WSS connection to the engine — no vendor server brokering the live conversation. The <em>primitive</em> advice stands: an append-only, resumable conversation stream with "give me everything after offset X" — it now doubles as the write-through + catch-up mechanism that feeds the cloud record.</li>
+        <li><strong>Cost opacity.</strong> Cursor's loudest criticism is surprise bills. Show the meter.</li>
+        <li><strong>Indefinite-by-default retention and public-URL artifacts.</strong> Cursor keeps conversation history indefinitely by default and serves artifacts from unguessable-but-unauthenticated URLs. Both are documented; both are trust liabilities Zeros shouldn't inherit.</li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<!-- ============ WHAT THIS MEANS FOR ZEROS ============ -->
+<section class="card" id="zeros">
+  <div class="kicker">Bottom line</div>
+  <h2>What this means for Zeros</h2>
+
+  <div class="callout decision"><span class="ctitle">✅ Decision — stay the course on persistent workspaces</span>
+    Both giants validated the demand for cloud agents and <em>neither</em> built what Zeros is building. The Daytona plan (full engine in the sandbox, direct WSS, Mutagen mirror, engine-owned chat DB) targets the rarer, differentiated camp. <strong>No architectural rethink required</strong> — the one addition (decided 2026-07-02) is <strong>the cloud record</strong>: the engine stays the live hub and now also writes history through to your account, adopting the one principle both giants got right about sync.
+  </div>
+
+  <h3 class="sub">Adopt four features into the roadmap now</h3>
+  <div class="roadmap">
+    <div class="rmrow"><span class="rmnum">1</span><div class="rmbody"><h5>A Zeros credential proxy</h5><p>So real tokens never enter sandboxes — Anthropic's valet-key pattern, push restricted to the working branch.</p></div><span class="statuspill now">Adopt now</span></div>
+    <div class="rmrow"><span class="rmnum">2</span><div class="rmbody"><h5>Environment snapshot-after-setup on Daytona</h5><p>With a repo-committed config file — never pay cold-start twice, invalidate on config change.</p></div><span class="statuspill now">Adopt now</span></div>
+    <div class="rmrow"><span class="rmnum">3</span><div class="rmbody"><h5>A "finish as PR" action with artifacts</h5><p>Screenshots, recordings, logs — proof-of-work attached to the durable deliverable.</p></div><span class="statuspill now">Adopt now</span></div>
+    <div class="rmrow"><span class="rmnum">4</span><div class="rmbody"><h5>Subscribe-after-offset resumable chat streams in the WSS protocol</h5><p>One primitive buys reconnect, cross-device catch-up, and teammate live-tail all at once.</p></div><span class="statuspill now">Adopt now</span></div>
+    <div class="rmrow"><span class="rmnum">5</span><div class="rmbody"><h5>Mobile as a check-in surface</h5><p>Push notifications plus one-message steering. Table stakes by mid-2026, but genuinely small in scope.</p></div><span class="statuspill v2">Plan for v2</span></div>
+  </div>
+
+  <div class="callout warn"><span class="ctitle">⚠️ Budget reality</span>
+    Zeros pays for compute that Cursor and Anthropic give away inside subscriptions. <strong>Sleep-when-idle isn't an optimization, it's the business model</strong> (the internal plan's autoStopInterval-0 + engine-owned-sleep design is exactly right). Daytona's $200 free credit and Startup Grid credits soften the beta period.
+  </div>
+
+  <div class="callout plain"><span class="ctitle">💡 The open ground is collaboration</span>
+    Cursor: opt-in follow-ups on someone else's agent. Anthropic: view-only share links. <strong>Nobody has live, multiplayer agent chat.</strong> Zeros' engine-owned DB makes it native. That — plus persistence — is the pitch.
+  </div>
+
+  <details>
+    <summary>Deep-dive: the glossary from this page, in one place</summary>
+    <div class="dbody">
+      <ul>
+        <li><strong>VM (virtual machine)</strong> — a full computer simulated in a data center, created and destroyed in seconds.</li>
+        <li><strong>PR (pull request)</strong> — GitHub's standard "here are my proposed changes, please review" bundle.</li>
+        <li><strong>CI</strong> — the automated test suite that runs on every PR.</li>
+        <li><strong>Temporal</strong> — a workflow system: air-traffic control that guarantees a job lands even if the plane carrying it has to be swapped mid-flight.</li>
+        <li><strong>Snapshot</strong> — a frozen copy of a fully set-up machine's disk, used to start future machines instantly.</li>
+        <li><strong>Append-only store</strong> — a log you can only add to, never rewrite, so every device can replay it identically.</li>
+        <li><strong>Scoped credential ("valet key")</strong> — a fake credential that can only do one narrow thing; a proxy outside the sandbox swaps it for the real token.</li>
+        <li><strong>The cloud record</strong> — our cloud database that permanently stores your chats, sessions, and workspace history in your account (adopted by decision on 2026-07-02; the full story is in the sync &amp; collaboration doc).</li>
+        <li><strong>ACU</strong> — Devin's billing unit, roughly 15 minutes of agent work.</li>
+      </ul>
+    </div>
+  </details>
+</section>
+
+<!-- ============ SOURCES ============ -->
+<section class="card" id="sources">
+  <div class="kicker">Sources</div>
+  <h2>Where every claim on this page comes from</h2>
+  <div class="srcgrid">
+    <div class="srccol">
+      <h4>Cursor</h4>
+      <ul>
+        <li><a href="https://cursor.com/docs/cloud-agent">cursor.com/docs/cloud-agent</a> — Cloud Agents overview (fetched 2026-07-02)</li>
+        <li><a href="https://cursor.com/docs/cloud-agent/setup">cursor.com/docs/cloud-agent/setup</a> — environment.json, snapshots, secrets</li>
+        <li><a href="https://cursor.com/docs/cloud-agent/security-network">cursor.com/docs/cloud-agent/security-network</a> — AWS VMs, privacy mode, network modes, commit signing</li>
+        <li><a href="https://cursor.com/docs/cloud-agent/capabilities">cursor.com/docs/cloud-agent/capabilities</a> — Computer Use, artifacts, CI auto-fix</li>
+        <li><a href="https://cursor.com/docs/cloud-agent/web-and-mobile">cursor.com/docs/cloud-agent/web-and-mobile</a> — cross-device inbox, /remote-control</li>
+        <li><a href="https://cursor.com/docs/models-and-pricing">cursor.com/docs/models-and-pricing</a> — plans, token prices, Max Mode billing</li>
+        <li><a href="https://cursor.com/blog/cloud-agent-lessons">cursor.com/blog/cloud-agent-lessons</a> — "What we've learned building cloud agents" (2026-06-02)</li>
+        <li><a href="https://cursor.com/blog/agent-computer-use">cursor.com/blog/agent-computer-use</a> — Computer Use (2026-02-24)</li>
+        <li><a href="https://cursor.com/changelog/2-0">cursor.com/changelog/2-0</a> — rename to Cloud Agents (2025-10-29)</li>
+        <li><a href="https://cursor.com/changelog/ios-mobile-app">cursor.com/changelog/ios-mobile-app</a> — iOS public beta (2026-06-29)</li>
+        <li><a href="https://forum.cursor.com/t/what-is-the-pricing-structure-for-using-cloud-agents/156843">forum.cursor.com — cloud agent pricing thread</a> — staff billing answers</li>
+        <li><a href="https://www.reco.ai/blog/hijacking-cursors-agent-how-we-took-over-an-ec2-instance">reco.ai — hijacking Cursor's agent</a> — EC2/Docker architecture research (2025-07-16)</li>
+        <li><a href="https://thehackernews.com/2026/07/critical-cursor-flaws-could-let-prompt.html">thehackernews.com — critical Cursor flaws</a> — CVE-2026-50548/50549</li>
+        <li><a href="https://www.infoq.com/news/2026/04/cursor-3-agent-first-interface/">infoq.com — Cursor 3 agent-first interface</a> — coverage + community reaction</li>
+      </ul>
+    </div>
+    <div class="srccol">
+      <h4>Claude Code</h4>
+      <ul>
+        <li><a href="https://code.claude.com/docs/en/claude-code-on-the-web">code.claude.com/docs/en/claude-code-on-the-web</a> — cloud sessions reference (fetched 2026-07-02)</li>
+        <li><a href="https://code.claude.com/docs/en/web-quickstart">code.claude.com/docs/en/web-quickstart</a> — onboarding flow</li>
+        <li><a href="https://code.claude.com/docs/en/remote-control">code.claude.com/docs/en/remote-control</a> — Remote Control, Trusted Devices</li>
+        <li><a href="https://code.claude.com/docs/en/desktop">code.claude.com/docs/en/desktop</a> — Local/Remote/SSH sessions, "Continue in"</li>
+        <li><a href="https://code.claude.com/docs/en/agent-sdk/overview">code.claude.com/docs/en/agent-sdk/overview</a> — third-party auth restriction (the rule that binds Zeros)</li>
+        <li><a href="https://claude.com/blog/claude-code-on-the-web">claude.com/blog/claude-code-on-the-web</a> — launch announcement (2025-10-20)</li>
+        <li><a href="https://www.anthropic.com/engineering/claude-code-sandboxing">anthropic.com/engineering/claude-code-sandboxing</a> — sandboxing + credential proxy</li>
+        <li><a href="https://www.anthropic.com/engineering/how-we-contain-claude">anthropic.com/engineering/how-we-contain-claude</a> — containment architecture (2026-05-25)</li>
+        <li><a href="https://techcrunch.com/2025/10/20/anthropic-brings-claude-code-to-the-web/">techcrunch.com — Claude Code to the web</a> — launch coverage</li>
+        <li><a href="https://simonwillison.net/2025/Oct/20/claude-code-for-web/">simonwillison.net — Claude Code for web</a> — independent security assessment</li>
+        <li><a href="https://claude.com/pricing">claude.com/pricing</a> — plan prices (fetched 2026-07-02)</li>
+      </ul>
+    </div>
+    <div class="srccol">
+      <h4>Landscape</h4>
+      <ul>
+        <li><a href="https://developers.openai.com/codex/cloud">developers.openai.com/codex/cloud</a> — Codex cloud mechanics</li>
+        <li><a href="https://developers.openai.com/codex/pricing">developers.openai.com/codex/pricing</a> — Codex token metering (2026-04-02 change)</li>
+        <li><a href="https://docs.github.com/copilot/concepts/agents/coding-agent/about-coding-agent">docs.github.com — Copilot coding agent</a></li>
+        <li><a href="https://github.blog/news-insights/company-news/github-copilot-is-moving-to-usage-based-billing/">github.blog — Copilot usage-based billing</a> — AI Credits (2026-06-01)</li>
+        <li><a href="https://jules.google/docs/usage-limits/">jules.google/docs/usage-limits</a> — Jules task/concurrency tiers</li>
+        <li><a href="https://devin.ai/pricing/">devin.ai/pricing</a> and <a href="https://docs.devin.ai/onboard-devin/repo-setup">docs.devin.ai — repo setup</a> — Devin plans + Machine Snapshots</li>
+        <li><a href="https://venturebeat.com/programming-development/devin-2-0-is-here-cognition-slashes-price-of-ai-software-engineer-to-20-per-month-from-500">venturebeat.com — Devin 2.0 price cut</a> — Devin price collapse</li>
+        <li><a href="https://vercel.com/blog/how-conductor-moved-parallel-coding-agents-from-the-laptop-to-the-cloud-with-vercel-sandbox">vercel.com/blog — Conductor on Vercel Sandbox</a></li>
+        <li><a href="https://fly.io/blog/design-and-implementation/">fly.io/blog — Fly Sprites</a> — sleep-when-idle reference</li>
+        <li><a href="https://www.daytona.io/pricing">daytona.io/pricing</a> — Daytona rates</li>
+      </ul>
+    </div>
+    <div class="srccol">
+      <h4>Internal</h4>
+      <ul>
+        <li><a href="08-engineering-reference.html">08-engineering-reference</a> — Zeros Daytona execution plan (v3, consolidated 2026-07-03 from the June v2, 2026-06-24; original removed)</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<!-- ============ FOOTER ============ -->
+<footer class="pagefoot">
+  <div class="finner">
+    <div class="fbrand">Zeros — Cloud Workspaces Report · July 2026</div>
+    <div class="fnav">
+      <a href="02-how-conductor-does-it.html">← Prev: How Conductor Does It</a>
+      <a href="04-platform-comparison.html">Next: Platform Comparison →</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

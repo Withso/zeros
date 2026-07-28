@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auth &amp; Onboarding Audit — 2026-07-07</title>
+<style>
+  :root{
+    --bg:#0d0d0f; --panel:#161619; --panel2:#1d1d21; --border:#2a2a30;
+    --fg:#e9e9e9; --muted:#9b9ba3; --dim:#6b6b73;
+    --green:#4ade80; --red:#f87171; --amber:#fbbf24; --blue:#7dd3fc;
+    --mono:"SF Mono",ui-monospace,Menlo,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--fg);font:15px/1.65 -apple-system,"SF Pro Text",Inter,sans-serif;padding:48px 20px 96px}
+  .wrap{max-width:880px;margin:0 auto}
+  h1{font-size:28px;letter-spacing:-.02em;margin-bottom:6px}
+  .sub{color:var(--muted);margin-bottom:36px}
+  h2{font-size:19px;letter-spacing:-.01em;margin:44px 0 14px;display:flex;align-items:center;gap:10px}
+  h2 .n{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:8px;background:var(--panel2);border:1px solid var(--border);font-size:13px;color:var(--muted);flex:none}
+  p{margin:10px 0;color:#cfcfd4}
+  strong{color:var(--fg)}
+  .tldr{background:var(--panel);border:1px solid var(--border);border-left:3px solid var(--red);border-radius:12px;padding:18px 20px;margin:24px 0}
+  .tldr b{color:var(--red)}
+  .superseded{background:var(--panel);border:1px solid var(--border);border-left:3px solid var(--amber);border-radius:12px;padding:16px 20px;margin:22px 0;font-size:13.5px;color:var(--muted)}
+  .superseded b{color:var(--amber)}
+  .superseded a{color:var(--blue)}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px 20px;margin:14px 0}
+  code{font-family:var(--mono);font-size:12.5px;background:var(--panel2);border:1px solid var(--border);border-radius:5px;padding:1px 6px;color:var(--blue)}
+  pre{font-family:var(--mono);font-size:12.5px;background:#0a0a0c;border:1px solid var(--border);border-radius:10px;padding:14px 16px;overflow-x:auto;margin:12px 0;line-height:1.7}
+  pre code{background:none;border:none;padding:0}
+  .flow{display:flex;flex-direction:column;gap:0;margin:18px 0}
+  .step{display:flex;gap:14px;align-items:flex-start}
+  .rail{display:flex;flex-direction:column;align-items:center;flex:none;width:28px}
+  .dot{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;flex:none;background:var(--panel2);border:1px solid var(--border)}
+  .dot.ok{color:var(--green);border-color:rgba(74,222,128,.35)}
+  .dot.bad{color:var(--red);border-color:rgba(248,113,113,.5);background:rgba(248,113,113,.08)}
+  .line{width:1px;flex:1;min-height:18px;background:var(--border)}
+  .step .body{padding:2px 0 20px}
+  .step .t{font-weight:600}
+  .step .d{color:var(--muted);font-size:13.5px}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{color:var(--muted);font-weight:500;font-size:12.5px;text-transform:uppercase;letter-spacing:.04em}
+  .pill{display:inline-block;font-size:11.5px;font-weight:600;border-radius:999px;padding:2px 10px;letter-spacing:.02em}
+  .pill.ok{color:var(--green);background:rgba(74,222,128,.1)}
+  .pill.bad{color:var(--red);background:rgba(248,113,113,.12)}
+  .pill.warn{color:var(--amber);background:rgba(251,191,36,.1)}
+  .g{color:var(--dim);font-size:13px}
+  ul{margin:8px 0 8px 22px;color:#cfcfd4}
+  li{margin:6px 0}
+  .fix{display:flex;gap:12px;align-items:flex-start;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:13px 16px;margin:8px 0}
+  .fix .k{flex:none;width:22px;height:22px;border-radius:6px;background:var(--panel2);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);margin-top:2px}
+  .foot{margin-top:52px;color:var(--dim);font-size:12.5px;border-top:1px solid var(--border);padding-top:16px}
+</style>
+</head>
+<body><div class="wrap">
+
+<h1>Auth &amp; Onboarding Audit</h1>
+<div class="sub">2026-07-07 · why <code>jordan@example.com</code> is in Auth0 but not in Railway · consent pages · sign-in vs sign-up</div>
+
+<div class="superseded">
+  <b>Superseded in part (2026-07-25):</b> "Organization" was renamed to <b>Team</b> and the nested sub-team concept was retired — one flat level now. Identifiers below (<code>organizations</code>, <code>teams</code> as a sub-table, <code>org_id</code>, <code>org-sync.ts</code>, <code>/v1/orgs</code>, "personal org + Personal team") reflect the schema as of this document's date; the auth findings themselves still stand. See <a href="teams.html">teams.html</a>.
+</div>
+
+<div class="tldr">
+  <b>TL;DR —</b> Sign-in works. The broken link is <strong>app&nbsp;→&nbsp;Railway control plane</strong>: every API call to <code>api.zeros.build</code> since the Auth0 migration has been rejected with <strong>401&nbsp;Unauthorized</strong> — including 11+ calls during your 8:19–8:35&nbsp;AM test session — and the app hides the error. Railway creates a user only on that first successful call, so no call = no user row. Consent behavior is normal; nothing to configure in GitHub or Auth0 for it. One sign-in flow (no separate sign-up) is correct by design.
+</div>
+
+<h2><span class="n">1</span>The two “user lists” — and where the chain breaks</h2>
+<p><strong>Auth0</strong> is the identity phonebook: a user appears there instantly at first login. <strong>Railway</strong> is the product record (user + personal org + “Personal” team): it's created <em>just-in-time</em> by the Mac app's first authenticated API call after sign-in.</p>
+<div class="flow">
+  <div class="step"><div class="rail"><div class="dot ok">✓</div><div class="line"></div></div><div class="body"><div class="t">Sign in on app.zeros.build</div><div class="d">“Continue with GitHub” → GitHub confirms who you are</div></div></div>
+  <div class="step"><div class="rail"><div class="dot ok">✓</div><div class="line"></div></div><div class="body"><div class="t">Auth0 records the identity</div><div class="d">This is why all 3 users show in the Auth0 dashboard</div></div></div>
+  <div class="step"><div class="rail"><div class="dot ok">✓</div><div class="line"></div></div><div class="body"><div class="t">“Launch Zeros” hands tokens to the Mac app</div><div class="d">Browser → desktop handoff; the Account page shows you signed in</div></div></div>
+  <div class="step"><div class="rail"><div class="dot bad">✕</div></div><div class="body"><div class="t">App calls <code>GET /v1/me</code> → Railway creates user + org + team</div><div class="d" style="color:var(--red)">Rejected: 401 Unauthorized — every single call since the migration. No call succeeds ⇒ no user row, no org, no team.</div></div></div>
+</div>
+
+<h2><span class="n">2</span>The evidence</h2>
+<pre><code>Railway HTTP log (entire retained window)
+  19× GET /v1/me → <span style="color:var(--red)">401</span>     ← incl. 02:49–03:05 UTC today = your 8:19–8:35 AM session
+   0× any /v1/* → <span style="color:var(--green)">2xx</span>     ← not one successful authenticated call
+
+Railway DB (frozen at the Supabase era)
+  users:           2 rows, both created 2026-07-04 (pre-migration)
+  audit_log:       last entry 2026-07-04 13:09
+  user_identities: EMPTY  ← second bug, see §4</code></pre>
+<p class="g">You never saw an error because org-sync swallows control-plane failures (an empty <code>catch {}</code> meant for network blips also hides a permanent 401), and silently retries every 15 minutes.</p>
+
+<h2><span class="n">3</span>Root cause: the token is missing its email stamp</h2>
+<p>Verified good: Railway runs current <code>main</code> (deployed 06 Jul 17:59 UTC) · issuer/audience env correct · signing keys live · desktop→backend wiring works (the 401s prove calls arrive).</p>
+<p>Auth0 access tokens don't carry <code>email</code> by default — a <strong>Post-Login Action</strong> must stamp <code>https://zeros.build/email</code> + <code>email_verified</code> onto each token, and the backend <em>requires</em> them (fail-closed, an anti-account-takeover control). The website works regardless because it reads the <em>id_token</em>, which carries email natively — exactly why sign-in “looks fine” while the backend rejects everyone.</p>
+<div class="card"><strong>Prime suspect:</strong> the Post-Login Action isn't running in the live tenant — detached from the login flow, un-deployed, or deployed to a different tenant during the custom-domain shuffle. A token decoded on 06 Jul had the claims, yet this morning's fresh sign-in still 401s.<br><br>
+<strong>2-minute check:</strong> Auth0 dashboard → Actions → Triggers → <code>post-login</code>: is the Action in the flow and Deployed? Then sign in fresh and paste the access token into jwt.ms — does it contain <code>https://zeros.build/email</code>?</div>
+
+<h2><span class="n">4</span>Second bug: your two existing accounts will lock out <em>after</em> the fix</h2>
+<p>The <code>user_identities</code> table (links <code>github|000000000</code> → user row) is empty — both existing users predate it. The backend treats “unknown identity + email already exists” as a takeover attempt → <span class="pill bad">409 rejected</span> on every call. So post-fix: <code>hi@</code> provisions fine (new email), but <code>sam@example.com</code> and <code>sam.rivera@example.net</code> get locked out of the control plane. One-time backfill:</p>
+<pre><code>INSERT INTO user_identities (user_id, provider, provider_sub) VALUES
+  ('00000000-…00000', 'auth0', 'github|000000000'),                       -- sam@example.com
+  ('11111111-…11111', 'auth0', 'google-oauth2|111111111');    -- sam.rivera@example.net</code></pre>
+
+<h2><span class="n">5</span>Consent pages — normal, nothing to configure</h2>
+<ul>
+  <li>The consent screens are <strong>GitHub's and Google's own pages</strong> — Auth0's extra “Authorize App” interstitial is deliberately suppressed (PR #140). That's the standard first-party UX.</li>
+  <li>Providers ask consent <strong>once per (account × app), ever</strong> — then silently approve forever.</li>
+  <li>Your <code>hi@</code> GitHub identity shows <strong>6 logins</strong> in Auth0 — today wasn't its first authorization. Consent appeared at its true first login (earlier testing) and never again; with an active GitHub browser session the redirect completes in under a second.</li>
+  <li><strong>Google will ask consent</strong> the first time a brand-new Google account signs in — account picker + “wants access to your email &amp; profile” — then never again.</li>
+  <li>Traced the live redirect chain: both connections use <strong>your own OAuth apps</strong> (GitHub <code>Ov000000000000000000</code>, Google <code>000000000000-…</code>) — <em>not</em> Auth0 dev keys. The Google page brands as your app, not “auth0.com”. The 06-Jul dev-keys concern is resolved.</li>
+</ul>
+
+<h2><span class="n">6</span>Sign in vs sign up</h2>
+<p>The current single flow is correct and industry-standard (Linear, Vercel, Notion do the same): first-timers are auto-created (Auth0 instantly; Railway user + personal org + Personal team on the app's first API call), returning users just sign in. The landing page already says <em>“New here? Signing in creates your account.”</em> No separate sign-up screen should be added. It will work end-to-end once §3 + §4 are fixed.</p>
+
+<h2><span class="n">7</span>Is the orgs/teams DB working with the new auth flow?</h2>
+<p><strong>No — for anyone, since 05 Jul.</strong> Everything behind the control plane is silently non-functional: user provisioning, orgs, teams, invitations, org-settings, org-secrets sync. Still working: web sign-in, desktop handoff, session refresh, everything local to the app.</p>
+
+<h2><span class="n">8</span>Fix list</h2>
+<div class="fix"><div class="k">1</div><div><strong>Auth0 dashboard:</strong> verify the Post-Login Action is deployed and attached to <code>post-login</code> in the tenant behind <code>login.zeros.build</code>; confirm with a fresh jwt.ms decode; re-login afterwards.</div></div>
+<div class="fix"><div class="k">2</div><div><strong>Railway DB:</strong> run the two-row <code>user_identities</code> backfill (§4).</div></div>
+<div class="fix"><div class="k">3</div><div><strong>Backend (small PR):</strong> log each 401's reason so Railway logs diagnose this class of failure instantly.</div></div>
+<div class="fix"><div class="k">4</div><div><strong>App (small PR):</strong> surface control-plane failure instead of the silent <code>catch {}</code> — e.g. “couldn't sync your organization” in Settings → Organization.</div></div>
+<div class="fix"><div class="k">5</div><div><strong>Optional:</strong> alert on a sustained 100% 401 rate on <code>/v1/*</code>.</div></div>
+
+<div class="foot">Method: live Railway DB + HTTP-log inspection · deploy/env verification · JWKS &amp; issuer probes · live OAuth redirect-chain trace · two parallel code audits (backend provisioning path; web-app sign-in flow). Companion file: <code>docs/auth-audit-2026-07-07.md</code></div>
+
+</div></body>
+</html>
