@@ -48,6 +48,20 @@ const preWindowBuffer: ZerosEventEnvelope[] = [];
 const MAX_PRE_WINDOW_EVENTS = 50;
 const PRE_WINDOW_FLUSH_DELAY_MS = 800;
 
+/** The live main window, or null when none is open (macOS keeps the app running
+ *  with every window closed).
+ *
+ *  The app only ever owns ONE window, and this module already tracks it for
+ *  event delivery — so this is the authoritative handle for anything outside
+ *  main.ts that needs to act on "the app window". Prefer it over
+ *  `BrowserWindow.getFocusedWindow()`, which can hand back a window we did not
+ *  create: a DETACHED DevTools window holds focus the whole time the user is
+ *  typing in the console, and toggling DevTools on THAT opens
+ *  DevTools-on-DevTools instead of closing the panel. */
+export function getMainWindow(): BrowserWindow | null {
+  return mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+}
+
 /** Called once from main.ts after BrowserWindow creation. */
 export function setMainWindow(win: BrowserWindow): void {
   mainWindow = win;
