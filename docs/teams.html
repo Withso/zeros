@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Teams — Zeros Design Doc</title>
+<style>
+  :root{
+    --bg:#FAF9F7; --ink:#1B1B22; --muted:#6B7280; --card:#FFFFFF; --line:#E7E5E0;
+    --indigo:#4F46E5; --teal:#0F9D8F; --amber:#D97706; --red:#DC2626;
+    --hero-bg:#16161D; --hero-ink:#FAFAF8;
+    --radius:14px; --shadow:0 1px 2px rgba(0,0,0,.04);
+    --sans:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono:ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.55;font-size:16px}
+  .wrap{max-width:980px;margin:0 auto;padding:32px 24px 80px}
+  .hero{background:var(--hero-bg);color:var(--hero-ink);border-radius:var(--radius);padding:40px 36px;margin-bottom:28px}
+  .hero .kicker{font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:#A5B4FC;margin-bottom:10px}
+  .hero h1{margin:0 0 12px;font-size:32px;line-height:1.15}
+  .hero p{margin:0;color:#D4D4D8;max-width:64ch}
+  .grid{display:grid;gap:14px}
+  .grid.cols3{grid-template-columns:repeat(3,1fr)}
+  .grid.cols2{grid-template-columns:repeat(2,1fr)}
+  @media(max-width:760px){.grid.cols3,.grid.cols2{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:20px 22px;box-shadow:var(--shadow)}
+  .card h3{margin:0 0 8px;font-size:16px}
+  .card p{margin:0;font-size:14px;color:var(--muted)}
+  h2{font-size:22px;margin:44px 0 14px}
+  .tag{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;border-radius:999px;padding:3px 10px;margin-bottom:10px}
+  .tag.indigo{background:#EEF2FF;color:var(--indigo)} .tag.teal{background:#ECFDF8;color:var(--teal)}
+  .tag.amber{background:#FEF3E2;color:var(--amber)} .tag.red{background:#FEE2E2;color:var(--red)}
+  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;font-size:13.5px}
+  th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:#F4F3F0;font-size:12px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}
+  tr:last-child td{border-bottom:none}
+  .verdict{border-left:4px solid var(--teal);background:#ECFDF8;border-radius:0 var(--radius) var(--radius) 0;padding:16px 20px;margin:14px 0}
+  .warn{border-left:4px solid var(--amber);background:#FEF3E2;border-radius:0 var(--radius) var(--radius) 0;padding:16px 20px;margin:14px 0}
+  .verdict b,.warn b{display:block;margin-bottom:4px}
+  .flow{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch;margin:16px 0}
+  .flow .step{flex:1 1 150px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;font-size:13px;position:relative}
+  .flow .step .n{font-size:11px;font-weight:700;color:var(--indigo);letter-spacing:.08em}
+  .schema{background:#16161D;color:#E4E4E7;border-radius:var(--radius);padding:22px 24px;font-family:var(--mono);font-size:12.5px;line-height:1.7;overflow-x:auto}
+  .schema .t{color:#A5B4FC} .schema .c{color:#71717A} .schema .k{color:#5EEAD4}
+  .phase{display:flex;gap:14px;margin:10px 0;align-items:flex-start}
+  .phase .pn{flex:0 0 44px;height:44px;border-radius:12px;background:#EEF2FF;color:var(--indigo);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px}
+  .phase .pb{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 16px;flex:1;font-size:14px}
+  .phase .pb b{display:block} .phase .pb span{color:var(--muted);font-size:13px}
+  .foot{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
+  a{color:var(--indigo)}
+  code{font-family:var(--mono);font-size:.9em;background:#F4F3F0;border-radius:6px;padding:1px 5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hero">
+    <div class="kicker">Zeros · Teams · Implementation Track · 2026-07-04, rev. 2026-07-25</div>
+    <h1>Teams — how the best do it, and Zeros' plan</h1>
+    <p>Linear, Figma, OpenAI, and Anthropic all converge on the same shape: <b>organization → team</b>, billing on the org, and a <b>default container auto-created for everyone — including individuals</b>. Zeros studied that, then went <b>simpler</b>: one flat level called a <b>Team</b>, created only when asked for. This page distills the study, the schema, the security rules, and the build plan. Full detail with sources: <a href="teams.md" style="color:#A5B4FC">teams.md</a>.</p>
+  </div>
+
+  <div class="grid cols3">
+    <div class="card"><h3>↩︎ Auto-created container: NO <span style="font-size:12px;color:#6B7280">(reversed 2026-07-22)</span></h3><p>The study said yes; the product said no. Nothing is created at sign-in — a user makes a Team when they want one, and <b>zero teams is a supported state</b>.</p></div>
+    <div class="card"><h3>↩︎ Two levels: NO <span style="font-size:12px;color:#6B7280">(reversed 2026-07-25)</span></h3><p>"Organization" is retired from the vocabulary. The old nested sub-team — and its undeletable "Personal" default — was dropped. <b>A Team contains members. That is the whole hierarchy.</b></p></div>
+    <div class="card"><h3>✅ Supabase auth-only + Railway PG</h3><p>Sound and portable — with guard-rails: Railway Pro, PITR on, pinned image, nightly off-platform dumps.</p></div>
+  </div>
+
+  <h2>The pattern, across four products</h2>
+  <table>
+    <tr><th></th><th>Linear</th><th>Figma</th><th>OpenAI</th><th>Anthropic</th><th>→ Zeros</th></tr>
+    <tr><td><b>Tenant / billing</b></td><td>Workspace</td><td>Organization</td><td>Organization</td><td>Organization</td><td><b>Team</b></td></tr>
+    <tr><td><b>Sub-container</b></td><td>Team</td><td>Team</td><td>Project</td><td>Workspace</td><td><b>Team</b></td></tr>
+    <tr><td><b>Auto default</b></td><td>Team named after workspace</td><td>—</td><td>"Default project", undeletable</td><td>"Default Workspace", undeletable</td><td><b>Team "Personal", undeletable</b></td></tr>
+    <tr><td><b>Org roles</b></td><td>Owner / Admin / Member / Guest</td><td>Org admin / member</td><td>Owner / Reader</td><td>6 roles incl. Billing</td><td><b>owner / admin / member</b></td></tr>
+    <tr><td><b>Individuals</b></td><td>Same model</td><td>Drafts + teams</td><td>Default "Personal" org</td><td>Org + Default Workspace</td><td><b>No container at all</b></td></tr>
+  </table>
+
+  <h2>Auth: Supabase signs, Railway decides</h2>
+  <div class="flow">
+    <div class="step"><span class="n">1 · LOGIN</span><br>Mac app signs in via Supabase (email OTP / GitHub / Google) → gets a JWT signed with Supabase's <b>private</b> key.</div>
+    <div class="step"><span class="n">2 · VERIFY</span><br>Zeros backend on Railway verifies the JWT <b>locally</b> against Supabase's public <b>JWKS</b> — no round-trip, no shared secret.</div>
+    <div class="step"><span class="n">3 · MIRROR</span><br>First request auto-creates the <code>users</code> row (JIT provisioning). No webhooks, no sync drift.</div>
+    <div class="step"><span class="n">4 · AUTHORIZE</span><br>Role looked up in <b>Postgres on every request</b> — JWT proves <i>who</i>, the database decides <i>what</i>.</div>
+  </div>
+  <div class="verdict"><b>Lock-in check: passes.</b> The only Supabase surface is "it signs tokens." Swap later to self-hosted GoTrue or another issuer = change two URLs. Schema, backend, record: untouched. Auth is free to 50k monthly-active users ($25/mo Pro recommended so the auth project never pauses).</div>
+
+  <h2>The schema (12 tables, Railway Postgres)</h2>
+  <div class="schema">
+<span class="t">users</span> <span class="c">(id = Supabase sub, email, soft-delete)</span>
+<span class="t">teams</span> <span class="c">(slug, name, logo, created_by)  — the tenant root</span>
+<span class="t">team_members</span> <span class="c">(team_id + user_id PK, role: owner|admin|member)</span>
+<span class="t">invitations</span> <span class="c">(email, role, <span class="k">token_hash</span> — never the raw token, 7-day expiry)</span>
+<span class="t">team_settings</span> <span class="c">(team-wide + per-repo docs → engine resolve chain)</span>
+<span class="t">org_secrets</span> <span class="c">(<span class="k">ciphertext only</span> — envelope encryption, key_version)</span>
+<span class="t">audit_log</span> <span class="c">(append-only: member.invited, secret.updated, …)</span>
+<span class="t">billing_customers / billing_subscriptions</span> <span class="c">(Stripe mirror = entitlements)</span>
+<span class="t">cloud_workspaces</span> <span class="c">(+ team_id — the pointer Conductor's DB revealed)</span>
+<span class="c">— every tenant table carries team_id · RLS on as the second lock —</span>
+  </div>
+
+  <h2>Security rules that prevent the classic breaches</h2>
+  <div class="grid cols2">
+    <div class="card"><span class="tag indigo">Invitations</span><p>32-byte random token, <b>stored hashed</b>, single-use, 7-day expiry; accept binds to the signed-in account (wrong-account interstitial); identical responses whether an email exists or not.</p></div>
+    <div class="card"><span class="tag teal">Secrets vault</span><p>Envelope encryption (per-secret data key, master key only in the backend env). Write-only UI. Decrypted <b>once per spawn</b>, injected as env — never in TOML, never in git, never in chat records.</p></div>
+    <div class="card"><span class="tag amber">Invariants in SQL</span><p>Never zero owners (transaction-checked). Seat limits enforced at invite-accept. All membership changes audited.</p></div>
+    <div class="card"><span class="tag red">Identity on the wire</span><p>Message authorship stamped server-side from the verified JWT — never client-supplied. Same JWKS check on backend and engines. Stripe webhooks signature-verified; webhooks are the billing truth.</p></div>
+  </div>
+
+  <h2>Railway as the record — approved, with guard-rails</h2>
+  <div class="warn"><b>Decision delta (formalized here).</b> The 2026-07-02 note leaned Supabase-as-record with Railway as fallback. This part flips it — allowed by that note's own "any Postgres" escape hatch. Parts 04/07/08 get a dated update. Guard-rails, because Railway Postgres is an <i>unmanaged template</i> (corruption threads on auto-upgrades; HA experimental 2026-03; PITR 2026-05): <b>Pro plan · PITR on day one · pinned image · nightly dump to R2 · re-evaluate at ~1k teams</b>. Plain Postgres = a <code>pg_dump</code> away from any VPS / Fly / RDS — which is also the enterprise self-host story.</div>
+
+  <h2>Execution plan — ~6–8 weeks, each phase shippable</h2>
+  <div class="phase"><div class="pn">O0</div><div class="pb"><b>Control-plane skeleton (~1 wk)</b><span>Railway service + Postgres (Pro, PITR, pinned), migrations, JWKS verify + JIT mirror, nightly off-platform dump.</span></div></div>
+  <div class="phase"><div class="pn">O1</div><div class="pb"><b>Teams + membership (~1–1.5 wk)</b><span>Full DDL + RLS, explicit team creation (no signup transaction), member endpoints, last-owner invariant.</span></div></div>
+  <div class="phase"><div class="pn">O2</div><div class="pb"><b>Settings UI: Administration (~1 wk)</b><span>Two tabs — <b>Team</b> (logo · name · ID · role · delete) and <b>Members</b> (invites, roles, pending, join).</span></div></div>
+  <div class="phase"><div class="pn">O3</div><div class="pb"><b>Invitations (~1 wk)</b><span>Hashed tokens, email send, zeros:// accept deep link + wrong-account interstitial, pending list, rate limits.</span></div></div>
+  <div class="phase"><div class="pn">O4</div><div class="pb"><b>Team settings layer (~1.5–2 wk)</b><span>Engine resolve chain gains the team layer (user &lt; <b>team</b> &lt; repo &lt; local &lt; managed), couriered in memory-only. <i>The secrets-vault half was removed 2026-07-22.</i></span></div></div>
+  <div class="phase"><div class="pn">O5</div><div class="pb"><b>Billing (~1–1.5 wk)</b><span>Stripe customer per team, one seat-quantity subscription, Checkout + Portal, webhook mirror, seat enforcement.</span></div></div>
+  <div class="phase"><div class="pn">O6</div><div class="pb"><b>Later</b><span>Billing/guest roles, SSO/SAML, SCIM, audit UI, per-team repo access, admin policy → managed layer.</span></div></div>
+
+  <div class="foot">
+    Zeros Teams design doc (implementation track — local &amp; cloud) · researched 2026-07-04 · ~25 sources, labels <b>verified / likely / our analysis</b> throughout the <a href="teams.md">markdown version</a> · raw notes in <a href="cloud-workspace/research/">research/</a>.
+  </div>
+
+</div>
+</body>
+</html>

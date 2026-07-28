@@ -1,0 +1,945 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>06 · Enterprise: Their Servers, Their Data — Zeros Cloud Workspaces Report</title>
+<style>
+  :root{
+    --bg:#FAF9F7; --ink:#1B1B22; --muted:#6B7280;
+    --card:#FFFFFF; --line:#E7E5E0;
+    --indigo:#4F46E5; --teal:#0F9D8F; --amber:#D97706; --red:#DC2626;
+    --hero-bg:#16161D; --hero-ink:#FAFAF8;
+    --radius:14px; --shadow:0 1px 2px rgba(0,0,0,.04);
+    --mono:ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size:16px; line-height:1.6;
+  }
+  a{color:var(--indigo); text-decoration:none;}
+  a:hover{text-decoration:underline;}
+
+  /* ---------- Sticky nav ---------- */
+  .nav{
+    position:sticky; top:0; z-index:50; background:#FFFFFF;
+    border-bottom:1px solid var(--line);
+  }
+  .nav-inner{
+    max-width:1060px; margin:0 auto; padding:10px 24px;
+    display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+  }
+  .nav-brand{font-weight:700; font-size:14px; letter-spacing:.02em; color:var(--ink); white-space:nowrap;}
+  .nav-brand span{color:var(--muted); font-weight:500;}
+  .nav-links{display:flex; gap:4px; flex-wrap:wrap; align-items:center;}
+  .nav-link{
+    font-size:12.5px; color:var(--muted); padding:5px 10px; border-radius:999px;
+    white-space:nowrap; border:1px solid transparent;
+  }
+  .nav-link:hover{color:var(--ink); background:#F3F2EF; text-decoration:none;}
+  .nav-link.current{
+    color:#FFFFFF; background:var(--indigo); border-color:var(--indigo); font-weight:600;
+  }
+  .nav-link.current:hover{background:var(--indigo);}
+
+  /* ---------- Hero ---------- */
+  .hero{background:var(--hero-bg); color:var(--hero-ink); padding:64px 24px 60px;}
+  .hero-inner{max-width:1060px; margin:0 auto;}
+  .hero .page-tag{
+    display:inline-flex; align-items:center; gap:8px;
+    font-family:var(--mono); font-size:12.5px; letter-spacing:.14em; text-transform:uppercase;
+    color:#A5B4FC; border:1px solid rgba(165,180,252,.35); border-radius:999px; padding:5px 14px;
+  }
+  .hero h1{font-size:clamp(30px,4.6vw,46px); line-height:1.12; margin:20px 0 14px; letter-spacing:-.015em;}
+  .hero .promise{font-size:clamp(16px,2vw,19px); color:#C9C9D2; max-width:820px; margin:0;}
+  .hero .promise strong{color:#FAFAF8;}
+
+  /* ---------- Layout ---------- */
+  .wrap{max-width:1060px; margin:0 auto; padding:36px 24px 12px;}
+  .section{
+    background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+    box-shadow:var(--shadow); padding:30px 30px 26px; margin:0 0 28px;
+  }
+  .sec-head{display:flex; align-items:baseline; gap:14px; margin-bottom:6px;}
+  .sec-num{
+    font-family:var(--mono); font-size:12px; color:var(--indigo);
+    border:1px solid #DDDBFB; background:#F5F4FE; border-radius:8px; padding:2px 9px; white-space:nowrap;
+  }
+  .section h2{font-size:24px; margin:0 0 4px; letter-spacing:-.01em;}
+  .section h3{font-size:17px; margin:28px 0 10px;}
+  .lede{color:var(--muted); font-size:15.5px; margin:2px 0 18px; max-width:840px;}
+  .small{font-size:13px; color:var(--muted);}
+  .mono{font-family:var(--mono); font-size:.92em; background:#F4F3F0; border:1px solid var(--line); border-radius:6px; padding:1px 6px;}
+
+  /* ---------- Callouts ---------- */
+  .callout{
+    border:1px solid var(--line); border-left:4px solid var(--indigo);
+    background:#FBFBFA; border-radius:10px; padding:14px 18px; margin:18px 0; font-size:15px;
+  }
+  .callout .co-title{font-weight:700; font-size:13px; letter-spacing:.05em; text-transform:uppercase; display:block; margin-bottom:4px;}
+  .co-plain{border-left-color:var(--indigo);} .co-plain .co-title{color:var(--indigo);}
+  .co-warn{border-left-color:var(--amber); background:#FFFCF5;} .co-warn .co-title{color:var(--amber);}
+  .co-decision{border-left-color:var(--teal); background:#F4FBFA;} .co-decision .co-title{color:var(--teal);}
+  .co-myth{border-left-color:var(--red); background:#FEF7F7;} .co-myth .co-title{color:var(--red);}
+
+  /* ---------- Pills / chips ---------- */
+  .pill{
+    display:inline-block; font-size:11.5px; font-weight:700; letter-spacing:.03em;
+    border-radius:999px; padding:2px 10px; white-space:nowrap; vertical-align:middle;
+  }
+  .pill-teal{background:#E4F5F2; color:#0B7568;}
+  .pill-red{background:#FCE9E9; color:#B31D1D;}
+  .pill-amber{background:#FCF1E0; color:#A85B04;}
+  .pill-indigo{background:#EAE8FC; color:#4038B8;}
+  .pill-gray{background:#EFEEEA; color:#565B66;}
+  .chip{
+    display:inline-block; font-size:12px; color:#4B5563; background:#F4F3F0;
+    border:1px solid var(--line); border-radius:999px; padding:2px 10px; margin:2px 4px 2px 0;
+  }
+
+  /* ---------- Stat cards ---------- */
+  .stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:14px; margin:18px 0;}
+  .stat{
+    background:#FBFBFA; border:1px solid var(--line); border-radius:12px; padding:16px 18px;
+  }
+  .stat .big{font-size:26px; font-weight:800; letter-spacing:-.02em; line-height:1.15;}
+  .stat .big.teal{color:var(--teal);} .stat .big.indigo{color:var(--indigo);}
+  .stat .big.amber{color:var(--amber);} .stat .big.red{color:var(--red);}
+  .stat .cap{font-size:13px; color:var(--muted); margin-top:5px;}
+
+  /* ---------- Tables ---------- */
+  .tbl-scroll{overflow-x:auto; margin:16px 0; border:1px solid var(--line); border-radius:12px;}
+  table{border-collapse:separate; border-spacing:0; width:100%; font-size:14px; min-width:640px;}
+  thead th{
+    position:sticky; top:0; background:#F5F4F1; text-align:left; font-size:12px;
+    text-transform:uppercase; letter-spacing:.06em; color:#565B66;
+    padding:10px 14px; border-bottom:1px solid var(--line); z-index:1;
+  }
+  tbody td{padding:11px 14px; border-bottom:1px solid #F0EFEA; vertical-align:top;}
+  tbody tr:last-child td{border-bottom:none;}
+  tbody tr:hover{background:#FAFAF6;}
+  td .td-title{font-weight:700;}
+  td .td-sub{font-size:12.5px; color:var(--muted); margin-top:2px;}
+
+  /* ---------- Story panels ---------- */
+  .story{display:flex; gap:12px; align-items:stretch; flex-wrap:wrap; margin:18px 0;}
+  .story-step{
+    flex:1 1 200px; background:#FBFBFA; border:1px solid var(--line); border-radius:12px;
+    padding:16px 16px 14px; position:relative;
+  }
+  .story-step .n{
+    width:26px; height:26px; border-radius:999px; background:var(--indigo); color:#fff;
+    font-size:13px; font-weight:700; display:flex; align-items:center; justify-content:center; margin-bottom:10px;
+  }
+  .story-step .t{font-weight:700; font-size:14.5px; margin-bottom:4px;}
+  .story-step .c{font-size:13.5px; color:var(--muted);}
+  .story-arrow{align-self:center; color:#B9B6AE; font-size:22px; flex:0 0 auto;}
+
+  /* ---------- Ladder ---------- */
+  .ladder{margin:20px 0 6px;}
+  .rung{display:flex; gap:14px; align-items:stretch; margin-bottom:12px;}
+  .rung .badge{
+    flex:0 0 54px; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    background:var(--hero-bg); color:#FAFAF8; border-radius:12px; font-weight:800; font-size:17px; line-height:1.1;
+    padding:8px 4px;
+  }
+  .rung .badge small{font-size:9.5px; font-weight:600; letter-spacing:.08em; color:#9CA3AF; text-transform:uppercase; margin-top:3px; text-align:center;}
+  .rung .body{
+    flex:1; background:#FBFBFA; border:1px solid var(--line); border-radius:12px; padding:13px 16px;
+  }
+  .rung .body .t{font-weight:700; font-size:15px;}
+  .rung .body .d{font-size:13.5px; color:#4B5563; margin:3px 0 6px;}
+  .rung.r1 .body{margin-right:0;} .rung.r15 .body{margin-right:0;}
+  @media(min-width:760px){
+    .rung.r1{margin-left:0;} .rung.r15{margin-left:56px;} .rung.r2{margin-left:112px;}
+    .rung.r3{margin-left:168px;} .rung.r4{margin-left:224px;}
+  }
+  .ladder-note{
+    display:flex; align-items:center; gap:8px; color:var(--muted); font-size:12.5px;
+    margin:2px 0 14px; font-style:italic;
+  }
+
+  /* ---------- Diagrams ---------- */
+  .diagram{
+    background:#FBFBFA; border:1px dashed #D8D5CE; border-radius:12px;
+    padding:22px 18px; margin:18px 0;
+  }
+  .diagram .dg-title{
+    font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.08em;
+    color:var(--muted); margin-bottom:16px; text-align:center;
+  }
+  .dg-row{display:flex; align-items:center; justify-content:center; gap:10px; flex-wrap:wrap;}
+  .dg-col{display:flex; flex-direction:column; align-items:center; gap:8px;}
+  .node{
+    background:#FFFFFF; border:1px solid var(--line); border-radius:10px; box-shadow:var(--shadow);
+    padding:12px 16px; text-align:center; min-width:150px;
+  }
+  .node .nt{font-weight:700; font-size:14px;}
+  .node .ns{font-size:12px; color:var(--muted); margin-top:3px;}
+  .node.n-indigo{border-color:#C9C5F7; background:#F7F6FE;}
+  .node.n-teal{border-color:#B9E4DE; background:#F2FBF9;}
+  .node.n-dark{background:var(--hero-bg); border-color:var(--hero-bg);}
+  .node.n-dark .nt{color:#FAFAF8;} .node.n-dark .ns{color:#A3A3AE;}
+  .node.n-red{border-color:#F3C4C4; background:#FDF6F6;}
+  .node ul{margin:6px 0 0; padding:0; list-style:none; font-size:12px; color:#4B5563; text-align:left;}
+  .node ul li{padding:2px 0 2px 16px; position:relative;}
+  .node ul li::before{content:"·"; position:absolute; left:5px; color:var(--muted); font-weight:700;}
+  .arrow-h{font-size:22px; color:#9BA0A8; line-height:1; padding:0 2px; flex:0 0 auto;}
+  .arrow-lbl{font-size:11px; color:var(--muted); text-align:center; max-width:150px; line-height:1.35;}
+  .link-solid, .link-dashed{
+    display:flex; flex-direction:column; align-items:center; gap:3px; flex:0 0 auto; padding:0 4px;
+  }
+  .link-solid .bar{width:86px; border-top:3px solid var(--teal); border-radius:2px; position:relative;}
+  .link-dashed .bar{width:86px; border-top:2px dashed #B4B0A7; position:relative;}
+  .dg-vgap{height:14px; border-left:2px dashed #C9C5BD;}
+  .dg-caption{font-size:12.5px; color:var(--muted); text-align:center; margin-top:14px;}
+  .dg-split{display:flex; gap:16px; flex-wrap:wrap; align-items:stretch;}
+  .dg-split > div{flex:1 1 320px;}
+  .verdict-line{display:flex; align-items:center; justify-content:center; gap:8px; margin-top:12px; font-size:13px; font-weight:600;}
+
+  /* ---------- Company grid ---------- */
+  .co-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:14px; margin:18px 0;}
+  .co-card{background:#FBFBFA; border:1px solid var(--line); border-radius:12px; padding:16px 18px;}
+  .co-card .co-name{font-weight:800; font-size:15.5px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
+  .co-card .co-what{font-size:13.5px; color:#4B5563; margin:7px 0 8px;}
+  .co-card .co-lesson{
+    font-size:13px; border-top:1px solid #EDEBE5; padding-top:8px; margin-top:4px; color:var(--ink);
+  }
+  .co-card .co-lesson b{color:var(--teal);}
+
+  /* ---------- Checklist ---------- */
+  .checklist{list-style:none; margin:14px 0; padding:0; counter-reset:ck;}
+  .checklist li{
+    counter-increment:ck; position:relative; padding:12px 14px 12px 52px; margin-bottom:10px;
+    background:#FBFBFA; border:1px solid var(--line); border-radius:12px; font-size:14.5px;
+  }
+  .checklist li::before{
+    content:counter(ck); position:absolute; left:14px; top:13px;
+    width:26px; height:26px; border-radius:999px; background:var(--indigo); color:#fff;
+    font-size:13px; font-weight:700; display:flex; align-items:center; justify-content:center;
+  }
+  .checklist li b{display:inline;}
+  .checklist.teal li::before{background:var(--teal);}
+
+  /* ---------- Risk cards ---------- */
+  .risk-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:14px; margin:18px 0;}
+  .risk-card{border:1px solid #F0D9D9; border-left:4px solid var(--red); background:#FEFBFB; border-radius:12px; padding:15px 17px;}
+  .risk-card.amber{border-color:#F2E3CB; border-left-color:var(--amber); background:#FFFDF8;}
+  .risk-card .rk-t{font-weight:700; font-size:14.5px; margin-bottom:5px;}
+  .risk-card .rk-b{font-size:13.5px; color:#4B5563;}
+
+  /* ---------- Roadmap / phases ---------- */
+  .phase{display:flex; gap:16px; margin-bottom:18px;}
+  .phase .ph-rail{flex:0 0 auto; display:flex; flex-direction:column; align-items:center;}
+  .phase .ph-dot{
+    width:14px; height:14px; border-radius:999px; background:var(--teal); margin-top:6px;
+    box-shadow:0 0 0 4px #E4F5F2;
+  }
+  .phase.p-indigo .ph-dot{background:var(--indigo); box-shadow:0 0 0 4px #EAE8FC;}
+  .phase.p-gray .ph-dot{background:#9CA3AF; box-shadow:0 0 0 4px #EFEEEA;}
+  .phase .ph-line{flex:1; width:2px; background:#E5E3DC; margin-top:6px;}
+  .phase:last-child .ph-line{display:none;}
+  .phase .ph-body{flex:1; padding-bottom:6px;}
+  .phase .ph-title{font-weight:800; font-size:16px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;}
+  .phase .ph-sub{font-size:13px; color:var(--muted); margin:2px 0 8px;}
+  .phase ul{margin:8px 0 0; padding-left:20px; font-size:14px;}
+  .phase ul li{margin-bottom:6px;}
+
+  /* ---------- Details ---------- */
+  details{
+    border:1px solid var(--line); border-radius:12px; background:#FBFBFA;
+    padding:0; margin:12px 0; overflow:hidden;
+  }
+  details summary{
+    cursor:pointer; padding:13px 18px; font-weight:600; font-size:14.5px; list-style:none;
+    display:flex; align-items:center; gap:10px;
+  }
+  details summary::-webkit-details-marker{display:none;}
+  details summary::before{content:"›"; font-size:18px; color:var(--indigo); transition:transform .15s; display:inline-block;}
+  details[open] summary::before{transform:rotate(90deg);}
+  details .dt-body{padding:2px 18px 16px; font-size:14px; color:#374151; border-top:1px solid #EFEDE7;}
+  details .dt-body p{margin:10px 0;}
+
+  blockquote{
+    margin:16px 0; padding:14px 20px; border-left:4px solid var(--teal);
+    background:#F4FBFA; border-radius:10px; font-size:15.5px; font-style:italic; color:#1F2937;
+  }
+  blockquote .attr{display:block; font-size:12.5px; font-style:normal; color:var(--muted); margin-top:6px;}
+
+  .pitch{
+    background:var(--hero-bg); color:#FAFAF8; border-radius:14px; padding:26px 28px;
+    text-align:center; margin:22px 0 8px;
+  }
+  .pitch .p-kick{font-family:var(--mono); font-size:11px; letter-spacing:.16em; text-transform:uppercase; color:#8B8B98;}
+  .pitch .p-line{font-size:clamp(18px,2.6vw,24px); font-weight:800; margin:10px 0 8px; letter-spacing:-.01em;}
+  .pitch .p-sub{font-size:13.5px; color:#B4B4BE; max-width:640px; margin:0 auto;}
+
+  /* ---------- Sources & footer ---------- */
+  .sources ul{margin:10px 0 0; padding-left:20px; font-size:13.5px;}
+  .sources li{margin-bottom:7px; word-break:break-word;}
+  .sources .src-note{color:var(--muted); font-size:12.5px;}
+  footer{
+    border-top:1px solid var(--line); margin-top:30px; padding:28px 24px 44px; background:#FFFFFF;
+  }
+  .foot-inner{max-width:1060px; margin:0 auto; display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap;}
+  .foot-brand{font-size:13px; color:var(--muted);}
+  .foot-nav{display:flex; gap:12px;}
+  .foot-nav a{
+    font-size:13.5px; font-weight:600; border:1px solid var(--line); border-radius:999px;
+    padding:8px 16px; background:#FBFBFA;
+  }
+  .foot-nav a:hover{border-color:var(--indigo); text-decoration:none;}
+</style>
+</head>
+<body>
+
+<!-- ===================== NAV ===================== -->
+<nav class="nav">
+  <div class="nav-inner">
+    <div class="nav-brand">Zeros <span>· Cloud Workspaces Report</span></div>
+    <div class="nav-links">
+      <a class="nav-link" href="index.html">Overview</a>
+      <a class="nav-link" href="01-cloud-workspaces-explained.html">Cloud Workspaces, Explained</a>
+      <a class="nav-link" href="02-how-conductor-does-it.html">How Conductor Does It</a>
+      <a class="nav-link" href="03-cursor-and-claude-code-cloud.html">Cursor &amp; Claude Code</a>
+      <a class="nav-link" href="04-platform-comparison.html">Platform Comparison</a>
+      <a class="nav-link" href="05-sync-teams-and-collaboration.html">Sync, Teams &amp; Collab</a>
+      <a class="nav-link current" href="06-enterprise-self-hosting.html">Enterprise Self-Hosting</a>
+      <a class="nav-link" href="07-execution-plan.html">Execution Plan</a>
+      <a class="nav-link" href="08-engineering-reference.html">Engineering Reference</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ===================== HERO ===================== -->
+<header class="hero">
+  <div class="hero-inner">
+    <span class="page-tag">Page 06 · of 09</span>
+    <h1>Enterprise: Their Servers, Their Data</h1>
+    <p class="promise">One day a big customer will ask <strong>"where does our code go?"</strong> — this page shows the four standard answers, what they cost, and the answer Zeros committed to on <strong>2026-07-02</strong>: "your data never lives in our cloud — it lives in yours." Because all durable Zeros data is one Postgres schema, <strong>self-hosting = pointing Zeros at their database</strong>.</p>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- ===================== SHORT VERSION ===================== -->
+  <section class="section">
+    <div class="sec-head"><span class="sec-num">TL;DR</span><h2>The short version</h2></div>
+    <p class="lede">The decision first, then the handful of things to hold in your head. Everything below just unpacks these.</p>
+
+    <div class="callout co-decision"><span class="co-title">✅ Decision (2026-07-02)</span>
+      Enterprise self-hosting is now a <b>committed product direction</b> — "your data never lives in our cloud; it lives in yours" — still phased <b>after v1 GA</b>. It rides on the same day's data decision: all durable Zeros data now lives in <b>the cloud record</b> (our cloud database that permanently stores your chats, sessions, and workspace history in your account) plus one storage bucket plus git. <b>Because all durable data = one Postgres schema, self-hosting = pointing Zeros at THEIR database.</b>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><div class="big indigo">4 rungs</div><div class="cap">The standard ladder of answers: our cloud → their cloud (BYOC) → they run everything → no internet at all. Since 2026-07-02, every rung has a precise answer to <b>"where does the record live?"</b></div></div>
+      <div class="stat"><div class="big teal">$20k–$100k+/yr</div><div class="cap">Where self-host / BYOC deals typically start — a custom enterprise tier, not a checkbox.</div></div>
+      <div class="stat"><div class="big teal">~$125/mo</div><div class="cap">Per SSO connection (WorkOS-style). Enterprise auth is a <b>purchase, not a project</b>: ~$1–3k/mo covers your first ~10 enterprise customers.</div></div>
+      <div class="stat"><div class="big red">3.5%</div><div class="cap">Share of PostHog users on self-hosted — enough to overwhelm a small infra team. They killed the product in 2023. Don't build this before v1 GA.</div></div>
+    </div>
+
+    <ul>
+      <li><b>Decided 2026-07-02: enterprise self-hosting is committed, not hypothetical.</b> The star rung: <b>their Postgres (the record) + their object storage + optionally their sandbox runners</b>, delivered as Docker Compose/Helm + a license key. Both enterprise rungs — BYOC and full self-host — anchor on the record; timing stays "after v1 GA."</li>
+      <li><b>Every dev-tool company eventually gets the same email</b>: "We love the product, but our code and data can never leave our infrastructure." Sourcegraph hit this wall in 2017, pivoted to on-prem, and unlocked Lyft, Uber, and Plaid. AI-agent workspaces holding customer code sit in exactly that category.</li>
+      <li>The industry-standard trick is the <b>control plane / data plane split</b>: a small "reception desk" you host (logins, the list of workspaces, the button that creates one) and "hotel rooms" that can live anywhere (the sandboxes where code and chat actually sit — plus, since 2026-07-02, the <b>filing cabinet</b>: the cloud record that keeps chats and history permanently). The acid test, per Northflank: <i>can the vendor see the payload?</i> In real BYOC, the answer is no.</li>
+      <li><b>Zeros is now shaped for this by design, not accident.</b> The Mac still connects straight to the sandbox over "the live wire" (the direct WebSocket) with no Zeros server in the middle; the control plane stays a thin reception desk (auth + registry + a provisioning worker); the sandbox vendor sits behind a swappable <span class="mono">CloudSandboxProvider</span> interface; and — updated 2026-07-02 — chat's permanent home moved from the sandbox to the cloud record, ONE well-defined Postgres schema. Enterprise = point that schema at <i>their</i> database and, optionally, the provider interface at <i>their</i> machines. — live-path and control-plane claims verified against the internal plan (June v2); the record is the 2026-07-02 decision update.</li>
+      <li><b>Pricing norms are friendly</b>: GitHub charges the same $21/user/mo whether you use their cloud or run their server; most dev tools gate self-host/BYOC to a custom enterprise tier; BYOC vendors charge no markup on the customer's own compute (as of mid-2026).</li>
+    </ul>
+
+    <div class="callout co-decision"><span class="co-title">✅ Committed ≠ built now</span>
+      <b>Do not build any of this before v1 GA.</b> PostHog killed its self-hosted product in 2023 because 3.5% of users consumed a disproportionate share of a small infra team. The right move now is to <i>design the seams</i> — starting with the upgraded <b>seam #1: a configurable record endpoint</b> (the record's database URL is config, never hard-coded). And the auth checklist (SAML SSO, SCIM, audit logs) stays a purchase, not a project: <b>buy SSO/SCIM, don't build.</b>
+    </div>
+  </section>
+
+  <!-- ===================== WHY THIS SHOWS UP ===================== -->
+  <section class="section">
+    <div class="sec-head"><span class="sec-num">01</span><h2>Why this question will show up in your inbox</h2></div>
+    <p class="lede">Picture the workflow eighteen months from now.</p>
+
+    <div class="story">
+      <div class="story-step">
+        <div class="n">1</div>
+        <div class="t">A platform lead tries Zeros</div>
+        <div class="c">At a 2,000-person fintech. They love running five agents in parallel and take it to their security team.</div>
+      </div>
+      <div class="story-arrow">→</div>
+      <div class="story-step">
+        <div class="n">2</div>
+        <div class="t">Security asks one question</div>
+        <div class="c"><b>"Where does our code go?"</b></div>
+      </div>
+      <div class="story-arrow">→</div>
+      <div class="story-step">
+        <div class="n">3</div>
+        <div class="t">The honest answer (updated 2026-07-02)</div>
+        <div class="c">"Code runs in a Daytona sandbox — a rented computer in Daytona's US or EU data centers — and your chats and workspace history live permanently in <b>the cloud record</b>: our cloud Postgres, in your Zeros account, encrypted, exportable, deletable."</div>
+      </div>
+      <div class="story-arrow">→</div>
+      <div class="story-step">
+        <div class="n">4</div>
+        <div class="t">Two possible endings</div>
+        <div class="c">For most startups and mid-size teams: that answer + a SOC&nbsp;2 report is fine — "your work is always in your account" is the feature, not a confession. For banks, healthcare, defense — any company whose crown jewels are the code itself — it's a dealbreaker. That case is exactly what the enterprise rungs are for: the same software, with the record and the rest of the data plane moved onto <b>their</b> servers.</div>
+      </div>
+    </div>
+
+    <h3>The pivot story: Sourcegraph, 2017</h3>
+    <p>Sourcegraph lived this exact story: through 2017, enterprises loved the demo but refused to "push their private code base to an external software provider." They shipped an on-prem version in December 2017 and the enterprise business took off (verified — Sourcegraph's own blog).</p>
+    <blockquote>"Trust is great. Control is better."<span class="attr">— Sourcegraph, on why enterprises demanded on-prem</span></blockquote>
+
+    <div class="callout co-myth"><span class="co-title">❌ Myth: "self-hosting is the only answer"</span>
+      There's a modern counter-example worth holding in mind: <b>Cursor</b>, at a reported 64%-of-Fortune-500 penetration, offers <i>no</i> self-host option at all. They sell enforced Privacy Mode plus zero-data-retention agreements ("ZDR" — a contract where the AI model providers promise to process code in memory and never store it) plus enterprise controls like SCIM and audit logs. <b>Lesson:</b> for AI dev tools in 2025–2026, many enterprises accept "strong tenancy + ZDR + audit" <i>instead of</i> self-hosting. Self-host is one answer to "our data stays on our servers" — not the only one, and not the first one to build.
+    </div>
+  </section>
+
+  <!-- ===================== THE LADDER ===================== -->
+  <section class="section">
+    <div class="sec-head"><span class="sec-num">02</span><h2>The ladder: four ways to run Zeros for an enterprise</h2></div>
+    <p class="lede">Think of it as a ladder you climb only when a customer with a signed check pulls you up a rung. Each rung costs you more to build and support than the last.</p>
+
+    <div class="ladder">
+      <div class="rung r1">
+        <div class="badge">1<small>SaaS</small></div>
+        <div class="body">
+          <div class="t">Our cloud <span class="pill pill-teal">Default</span></div>
+          <div class="d">Everything on infrastructure we rent.</div>
+          <span class="chip">Who runs what: we run control plane + sandboxes</span>
+          <span class="chip">Example: Zeros today (Daytona + Supabase)</span>
+          <span class="chip">🗂️ The record lives: in our cloud, in your account</span>
+        </div>
+      </div>
+      <div class="rung r15">
+        <div class="badge">1.5<small>Single-tenant</small></div>
+        <div class="body">
+          <div class="t">Single-tenant SaaS</div>
+          <div class="d">We still run it, but on a <i>private, isolated</i> instance just for them, in their chosen region.</div>
+          <span class="chip">Who runs what: we run everything, separately per customer</span>
+          <span class="chip">Example: GitLab Dedicated — reportedly ~$26k/month floor (likely, via pricing benchmarks)</span>
+          <span class="chip">🗂️ The record lives: in a private instance we run just for them</span>
+        </div>
+      </div>
+      <div class="rung r2">
+        <div class="badge">2<small>BYOC</small></div>
+        <div class="body">
+          <div class="t">BYOC — "bring your own cloud" <span class="pill pill-indigo">The sweet spot</span></div>
+          <div class="d">The sandboxes — and therefore all code and chat — run inside the <i>customer's</i> AWS/GCP account. We keep a hosted control plane that orchestrates from outside.</div>
+          <span class="chip">Who runs what: they own the data boundary; we own the software and ops</span>
+          <span class="chip">Examples: Depot, E2B, Northflank; Daytona's "custom regions"</span>
+          <span class="chip">🗂️ The record lives: on THEIR Postgres (seam #1 — a config change)</span>
+        </div>
+      </div>
+      <div class="rung r3">
+        <div class="badge">3<small>Self-host</small></div>
+        <div class="body">
+          <div class="t">Full self-host</div>
+          <div class="d">We ship installable software (a Docker image, a Helm chart — a recipe for running our services on their machines) plus a license key. They run <i>everything</i>, including the reception desk.</div>
+          <span class="chip">Who runs what: they run it all; we ship packages and support</span>
+          <span class="chip">Examples: Coder, Sourcegraph, GitLab self-managed, Retool</span>
+          <span class="chip">🗂️ The record lives: on their servers, next to their reception desk</span>
+        </div>
+      </div>
+      <div class="rung r4">
+        <div class="badge">4<small>Air-gapped</small></div>
+        <div class="body">
+          <div class="t">Air-gapped <span class="pill pill-red">A different business</span></div>
+          <div class="d">Self-host with <b>no internet at all</b>: offline install bundles, offline license files, updates carried in on a drive.</div>
+          <span class="chip">Who runs what: they run it all, disconnected</span>
+          <span class="chip">Example: defense/gov deployments via Replicated tooling</span>
+          <span class="chip">🗂️ The record lives: inside the air gap, like everything else</span>
+        </div>
+      </div>
+    </div>
+    <div class="ladder-note">↑ Each rung to the right costs more to build and support than the last.</div>
+
+    <div class="callout co-plain"><span class="co-title">💡 In plain words</span>
+      Two things every experienced vendor will tell you about this ladder (verified across the research notes): <b>BYOC demand exploded in 2024–2026</b> — driven by regulated industries, GDPR fines (reportedly over €3 billion in the first half of 2025), and AI workloads pinned to reserved GPU capacity.
+    </div>
+    <div class="callout co-warn"><span class="co-title">⚠️ Watch out</span>
+      <b>Air-gap is a different business entirely</b>, where "every exchange — logs, screenshots, config files — can take hours or days" (Replicated). Rung 4 is for a later, bigger company.
+    </div>
+  </section>
+
+  <!-- ===================== CONTROL PLANE / DATA PLANE ===================== -->
+  <section class="section">
+    <div class="sec-head"><span class="sec-num">03</span><h2>Reception desk vs hotel rooms: the control plane / data plane split</h2></div>
+    <p class="lede">Here's the one piece of architecture jargon worth learning, because it decides whether enterprise is easy or a rewrite. Every serious platform splits into two planes.</p>
+
+    <div class="diagram">
+      <div class="dg-title">The hotel model</div>
+      <div class="dg-row">
+        <div class="dg-col">
+          <div class="node n-indigo">
+            <div class="nt">🛎️ Control plane — the reception desk</div>
+            <div class="ns">Small, and you host it</div>
+            <ul>
+              <li>Checks you in (auth / logins)</li>
+              <li>Knows which room is yours (the workspace registry)</li>
+              <li>Hands out keys (tokens)</li>
+              <li><b>Metadata only</b> — names, membership, health status. Never the contents of your suitcase.</li>
+            </ul>
+          </div>
+        </div>
+        <div class="dg-col">
+          <div class="link-dashed"><span class="arrow-lbl">check-in only</span><span class="bar"></span></div>
+        </div>
+        <div class="dg-col">
+          <div class="node n-teal">
+            <div class="nt">🚪 Data plane — the hotel rooms</div>
+            <div class="ns">Where you actually live; can be anywhere</div>
+            <ul>
+              <li>One Zeros unit = one sandbox</li>
+              <li>The engine</li>
+              <li>The git checkout (your code)</li>
+              <li>zeros.db — the <i>live working copy</i> of chat &amp; sessions</li>
+              <li>🗂️ …which writes through to <b>the cloud record</b> — the filing cabinet that keeps chats and history permanently (since 2026-07-02)</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="verdict-line"><span class="pill pill-teal">Data path rule</span> Your traffic goes straight to your room — never through the reception desk.</div>
+      <div class="verdict-line"><span class="pill pill-indigo">Since 2026-07-02</span> The data plane has one more piece: the filing cabinet (the cloud record). On the enterprise rungs it moves onto <b>their</b> Postgres — that single move is most of what "self-hosting Zeros" means.</div>
+    </div>
+
+    <h3>The acid test: real BYOC vs fake BYOC</h3>
+    <div class="diagram">
+      <div class="dg-title">Northflank's "real vs fake BYOC" test (verified): "Can the vendor see the payload of a request to your application?"</div>
+      <div class="dg-split">
+        <div>
+          <div class="dg-row">
+            <div class="node"><div class="nt">You</div><div class="ns">your Mac</div></div>
+            <div class="dg-col"><div class="link-solid"><span class="arrow-lbl">direct, encrypted</span><span class="bar"></span></div><div class="arrow-h">→</div></div>
+            <div class="node n-teal"><div class="nt">Your workspace</div><div class="ns">in your cloud account</div></div>
+          </div>
+          <div class="verdict-line"><span class="pill pill-teal">✓ Real BYOC</span> vendor never sees the payload</div>
+        </div>
+        <div>
+          <div class="dg-row">
+            <div class="node"><div class="nt">You</div><div class="ns">your Mac</div></div>
+            <div class="arrow-h">→</div>
+            <div class="node n-red"><div class="nt">Vendor's servers</div><div class="ns">terminate your traffic first</div></div>
+            <div class="arrow-h">→</div>
+            <div class="node"><div class="nt">Your workspace</div></div>
+          </div>
+          <div class="verdict-line"><span class="pill pill-red">✗ Fake BYOC</span> "single-tenant SaaS wearing a costume"</div>
+        </div>
+      </div>
+    </div>
+
+    <h3>Two more patterns auditors love</h3>
+    <p class="small">Verified — Nuon, Redpanda, Depot docs.</p>
+    <div class="co-grid">
+      <div class="co-card">
+        <div class="co-name">Outbound-only agents</div>
+        <div class="co-what">A small vendor-supplied program inside the customer's account <i>calls out</i> to the control plane for instructions. The vendor never holds standing inbound access or stored credentials.</div>
+        <div class="co-lesson"><b>Analogy:</b> a valet who comes when paged rather than keeping a copy of your house keys.</div>
+      </div>
+      <div class="co-card">
+        <div class="co-name">Data-plane atomicity <span class="pill pill-gray">Redpanda's term</span></div>
+        <div class="co-what">The workspace must keep working even if the vendor's control plane is down.</div>
+        <div class="co-lesson"><b>Analogy:</b> reception desk on fire; hotel rooms unaffected.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== HOW THE GROWN-UPS DO IT ===================== -->
+  <section class="section">
+    <div class="sec-head"><span class="sec-num">04</span><h2>How the grown-ups do it</h2></div>
+    <p class="lede">A quick tour of the companies whose playbooks Zeros should crib from (all verified on official sources unless marked).</p>
+
+    <div class="co-grid">
+      <div class="co-card">
+        <div class="co-name">Coder <span class="pill pill-indigo">Closest analog</span></div>
+        <div class="co-what">Cloud dev environments, now pitched as "run AI coding agents on YOUR infrastructure." Full self-host, open core: customers run the entire control plane themselves. Basic OIDC SSO is <i>free</i>; Coder monetizes <b>governance</b> — audit logs, RBAC, multi-org, HA — in a custom-priced Premium tier.</div>
+        <div class="co-lesson"><b>Lesson:</b> for security-sensitive orgs running agents, <i>self-hosting is the product</i>, and governance features are the paywall.</div>
+      </div>
+      <div class="co-card">
+        <div class="co-name">Sourcegraph <span class="pill pill-gray">The pivot story</span></div>
+        <div class="co-what">Mechanics: Docker packaging, Kubernetes for big customers, a monthly release cadence, heavy upgrade documentation. In 2022 they added single-tenant <i>vendor-hosted</i> Cloud too.</div>
+        <div class="co-lesson"><b>Lesson:</b> mature vendors end up offering the whole ladder.</div>
+      </div>
+      <div class="co-card">
+        <div class="co-name">GitLab self-managed <span class="pill pill-teal">Pricing benchmark</span></div>
+        <div class="co-what"><b>The same $29/user/mo whether SaaS or self-managed.</b></div>
+        <div class="co-lesson"><b>Lesson:</b> self-hosting saves the customer nothing on license; they pay for control, not a discount.</div>
+      </div>
+      <div class="co-card">
+        <div class="co-name">Retool <span class="pill pill-teal">Best small-team playbook</span></div>
+        <div class="co-what">One Docker image + docker-compose; first customer deployed on an EC2 instance "three days later"; a simple license check-in endpoint; and the killer decision — <b>100% code reuse</b>: the same on-prem image runs their multi-tenant cloud. Result: security reviews shrank from ~30 days to ~5, and they scaled "a few million in ARR with 4 people."</div>
+        <div class="co-lesson"><b>Admitted costs:</b> permanent version fragmentation and debugging inside other people's infrastructure.</div>
+      </div>
+      <div class="co-card">
+        <div class="co-name">Temporal</div>
+        <div class="co-what">Control/data split by <i>design</i>: even on their SaaS, customer code runs on customer-operated "Workers," so application data can stay home. Notably, their self-hosted OSS ships <i>without</i> RBAC and audit logs — governance stays in the paid cloud.</div>
+        <div class="co-lesson"><b>Lesson:</b> enterprise features are the business, not the core function.</div>
+      </div>
+      <div class="co-card">
+        <div class="co-name">Northflank <span class="pill pill-indigo">BYOC as the product</span></div>
+        <div class="co-what">Self-serve into AWS/GCP/Azure/on-prem, control plane stays hosted, <b>no markup on the customer's compute</b>, full feature parity; enterprise tier adds SSO/RBAC/audit/SLA.</div>
+        <div class="co-lesson"><b>Lesson:</b> monetize the control plane and support, not the customer's cloud bill.</div>
+      </div>
+      <div class="co-card">
+        <div class="co-name">Depot <span class="pill pill-teal">Seed-stage pattern</span></div>
+        <div class="co-what">The minimal-viable BYOC for a tiny team: an open-source agent running in the customer's AWS account with an IAM role that can only touch resources tagged <span class="mono">depot-connection</span>, Terraform to set it up, and the client talking <b>directly over mTLS</b> to the customer-side machines so "build data never passes through Depot infrastructure." No Kubernetes required.</div>
+        <div class="co-lesson"><b>Lesson:</b> this is the pattern a seed-stage Zeros could actually ship.</div>
+      </div>
+      <div class="co-card">
+        <div class="co-name">E2B <span class="pill pill-gray">Direct sandbox comp</span></div>
+        <div class="co-what">Enterprise-only BYOC via Terraform into a dedicated customer AWS/GCP account; templates, snapshots, logs, and all sandbox traffic stay in the customer VPC; only "anonymized system metrics" go home.</div>
+        <div class="co-lesson"><b>Lesson:</b> the documented template for what a sandbox vendor's BYOC should look like.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== THE LUCKY PART ===================== -->
+  <section class="section">
+    <div class="sec-head"><span class="sec-num">05</span><h2>The lucky part: Zeros is already shaped like this</h2></div>
+    <p class="lede">Here's the section that should make you smile. Grade the current engineering plan (v2, 2026-06-24) against the "real BYOC" test.</p>
+
+    <div class="diagram">
+      <div class="dg-title">Zeros today — already passes the payload test</div>
+      <div class="dg-row">
+        <div class="node n-dark">
+          <div class="nt">💻 Your Mac</div>
+          <div class="ns">the Zeros app</div>
+        </div>
+        <div class="dg-col">
+          <div class="link-solid"><span class="arrow-lbl">direct secure WebSocket (persistent encrypted connection), per-user token</span><span class="bar"></span></div>
+          <div class="arrow-h">→</div>
+        </div>
+        <div class="node n-teal">
+          <div class="nt">📦 The sandbox (data plane)</div>
+          <div class="ns">one self-contained hotel room</div>
+          <ul>
+            <li>The engine</li>
+            <li>Code checkout (git)</li>
+            <li>Chat + sessions (zeros.db — the live working copy)</li>
+            <li>Durability: git remote + <b>write-through to the cloud record</b> (updated 2026-07-02; exports = backup safety net)</li>
+          </ul>
+        </div>
+      </div>
+      <div style="display:flex; justify-content:center;"><div class="dg-vgap"></div></div>
+      <div class="dg-row">
+        <div class="node n-indigo">
+          <div class="nt">🛎️ Thin control plane</div>
+          <div class="ns">the desk itself: metadata only — no code</div>
+          <ul>
+            <li>Supabase auth</li>
+            <li><span class="mono">cloud_workspaces</span> registry</li>
+            <li>Small worker holding the Daytona API key (provisioning)</li>
+            <li>🗂️ Beside the desk (2026-07-02): <b>the cloud record</b> — its own Postgres schema holding chats &amp; history, behind <b>seam #1</b> (its address is config, so enterprises point it at their own database)</li>
+          </ul>
+        </div>
+        <div class="dg-col">
+          <div class="link-dashed"><span class="arrow-lbl">check-in only — never in the data path</span><span class="bar"></span></div>
+        </div>
+        <div class="node">
+          <div class="nt">🔌 <span class="mono">CloudSandboxProvider</span> seam</div>
+          <div class="ns">the swappable "where do sandboxes run?" interface</div>
+          <ul>
+            <li>Daytona (today)</li>
+            <li>Fly.io (named fallback)</li>
+            <li><b>Customer's cloud (the enterprise door)</b></li>
+          </ul>
+        </div>
+      </div>
+      <div class="dg-caption">No Zeros broker in the middle — a deliberate divergence from Conductor, which routes everything through api.conductor.build.</div>
+    </div>
+
+    <ol class="checklist teal">
+      <li><b>All durable data now lives in ONE well-defined place.</b> The engine and the working copy — code checkout, chat, sessions, zeros.db — live inside the sandbox. <b>Updated 2026-07-02:</b> the June plan said durability = git remote + export blobs, with deliberately <i>no</i> always-live cloud database holding customer content; the founder has since decided the opposite — the permanent home of chats and history is now <b>the cloud record</b> (one Postgres schema), plus one storage bucket, plus git (exports remain only as a cheap backup safety net). For enterprise this is <i>better</i>, not worse: <b>because all durable data = one Postgres schema, self-hosting = pointing Zeros at their database.</b> <span class="pill pill-indigo">Decision update</span></li>
+      <li><b>The vendor is already out of the data path.</b> The Mac dials the sandbox <i>directly</i> over a secure WebSocket with a per-user token. No Zeros broker sits in the middle. Zeros passes Northflank's payload test <b>today, by accident</b>. <span class="pill pill-teal">Verified</span></li>
+      <li><b>The reception desk is thin and metadata-only — and stays that way.</b> Supabase auth + a <span class="mono">cloud_workspaces</span> registry + a small worker that holds the Daytona API key for provisioning. No code, and the desk itself holds no chat. <b>Updated 2026-07-02:</b> our cloud as a whole is no longer content-free — sitting next to the desk is <b>the record</b>, a separate, well-defined Postgres schema that <i>does</i> permanently hold chats and history for SaaS customers. That is the feature, stated openly; enterprise is the escape hatch. The discipline changes shape: keep the desk thin, and keep the record behind the upgraded <b>seam #1 — a configurable record endpoint</b> (the record's database URL is config, never hard-coded, so pointing it at a customer's Postgres is a config change, not a rewrite). <span class="pill pill-indigo">Decision update</span></li>
+      <li><b>The sandbox vendor is behind a seam.</b> The <span class="mono">CloudSandboxProvider</span> interface exists precisely because Daytona went closed-source on 2026-06-11; Fly.io is the named fallback. The same seam is the enterprise door: "provision into the customer's infrastructure" is just another implementation.</li>
+      <li><b>The engine runs on plain Linux.</b> No proprietary cloud primitives (no Lambda, no BigQuery) in the data plane — SQLite, git, containers. Replicated calls cloud-primitive lock-in <i>the one unforgivable early mistake</i> because it later blocks regulated, government, and Fortune-500 deals. Zeros doesn't have it.</li>
+    </ol>
+
+    <h3>So what does "enterprise Zeros" concretely look like?</h3>
+    <p class="lede">Three flavors, in order of likelihood.</p>
+    <div class="co-grid">
+      <div class="co-card">
+        <div class="co-name">A · BYOC via Daytona custom regions <span class="pill pill-indigo">Nearest-term</span></div>
+        <div class="co-what">Daytona already supports customers running "runner" machines in their own VPC or on-prem, connected to Daytona's SaaS control plane, deployed via Helm on Kubernetes, with <i>no concurrency limits</i>. Plus, via seam #1: <b>the record on their Postgres</b>.</div>
+        <div class="co-lesson"><b style="color:var(--amber);">Caveats:</b> sales-gated, early, and the Daytona control plane itself is never self-hosted — so the truly paranoid buyer still sees a Daytona dependency. (Verified docs exist; GA status unverified — ask Daytona sales directly before leaning on it.)</div>
+      </div>
+      <div class="co-card">
+        <div class="co-name">B · BYOC via our own provider <span class="pill pill-teal">The Depot pattern</span></div>
+        <div class="co-what">A <span class="mono">CloudSandboxProvider</span> that provisions plain VMs or containers in the customer's AWS account through a tag-scoped IAM role, with the Mac still connecting directly over WSS — and <b>the record on their Postgres</b> (seam #1).</div>
+        <div class="co-lesson"><b>Trade:</b> more work, zero third-party dependency in the customer's boundary.</div>
+      </div>
+      <div class="co-card">
+        <div class="co-name">C · Full self-host <span class="pill pill-gray">Later, contract-funded</span></div>
+        <div class="co-what">Ship the engine image + a registry/auth package the customer runs themselves.</div>
+        <div class="co-lesson"><b>Realistic</b> only because the engine already runs on plain Linux — but a real support commitment (see risks).</div>
+      </div>
+    </div>
+
+    <div class="pitch">
+      <div class="p-kick">The one-sentence enterprise pitch this architecture earns</div>
+      <div class="p-line">"Your agents, your code, your chat run in your cloud; we only orchestrate."</div>
+      <div class="p-sub">Cursor structurally cannot say that sentence. Conductor, whose backend brokers all cloud-workspace traffic through their Fly-hosted API, currently can't either. (On our SaaS, chats live in the cloud record in <i>your account</i>, stated openly — the enterprise rungs move that record onto <i>your servers</i>.)</div>
+    </div>
+  </section>
+
+  <!-- ===================== EXISTS VS BUILD ===================== -->
+  <section class="section">
+    <div class="sec-head"><span class="sec-num">06</span><h2>What exists today vs what must be built</h2></div>
+    <p class="lede">Status as of July 2026. The green rows are the architecture doing the work for you; the rest is a shopping list, not a rewrite.</p>
+
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th style="width:44%;">Capability</th><th>Status</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><span class="td-title">Self-contained engine + data in the sandbox</span></td>
+            <td><span class="pill pill-teal">✓ Exists</span></td>
+            <td>Verified in code — engine honors <span class="mono">ZEROS_DATA_DIR</span></td>
+          </tr>
+          <tr>
+            <td><span class="td-title">Direct client↔sandbox connection, vendor out of data path</span></td>
+            <td><span class="pill pill-indigo">Designed &amp; partially built</span></td>
+            <td>Phase 1 built &amp; merged (2026-06-25); exit run awaiting a Daytona API key (needs-testing)</td>
+          </tr>
+          <tr>
+            <td><span class="td-title">Swappable sandbox provider interface</span></td>
+            <td><span class="pill pill-teal">✓ Exists as a seam</span></td>
+            <td>Only the Daytona implementation is underway</td>
+          </tr>
+          <tr>
+            <td><span class="td-title">Metadata-only control plane (auth + registry + worker)</span></td>
+            <td><span class="pill pill-indigo">Designed</span></td>
+            <td>Phase 4, not yet built</td>
+          </tr>
+          <tr>
+            <td><span class="td-title">Configurable record endpoint — seam #1: the record's DB URL is config, never hard-coded</span></td>
+            <td><span class="pill pill-amber">~ Must be designed in now</span></td>
+            <td>Upgraded 2026-07-02 (costs ~nothing) — it is what makes "self-hosting = pointing Zeros at their database" literally true</td>
+          </tr>
+          <tr>
+            <td><span class="td-title">Teams as first-class in the data model</span></td>
+            <td><span class="pill pill-amber">~ Must be designed in now</span></td>
+            <td>WorkOS: retrofitting a tenant layer later is "a months-long migration that touches every table"</td>
+          </tr>
+          <tr>
+            <td><span class="td-title">SAML SSO / SCIM / audit logs</span></td>
+            <td><span class="pill pill-amber">~ Must be bought</span></td>
+            <td>WorkOS-style, ~$125/connection/mo, when the first enterprise appears</td>
+          </tr>
+          <tr>
+            <td><span class="td-title">Audit logging of <i>agent</i> actions</span></td>
+            <td><span class="pill pill-red">✗ Must be built</span></td>
+            <td>WorkOS's 2026 checklist now calls out agent/MCP auth and per-call audit; uniquely relevant to an agent product</td>
+          </tr>
+          <tr>
+            <td><span class="td-title">SOC 2 Type II</span></td>
+            <td><span class="pill pill-red">✗ Must be done</span></td>
+            <td>A quarter-scale project with Vanta/Drata tooling; PostHog did it small</td>
+          </tr>
+          <tr>
+            <td><span class="td-title">Terraform/Helm packaging for customer accounts</span></td>
+            <td><span class="pill pill-red">✗ Must be built</span></td>
+            <td>Phase-2-of-enterprise work, or bought via Replicated/Nuon/Distr</td>
+          </tr>
+          <tr>
+            <td><span class="td-title">License keys, support bundles, telemetry switch</span></td>
+            <td><span class="pill pill-red">✗ Must be built</span></td>
+            <td>Small pieces; the telemetry switch and a one-line data-flow statement cost nothing now</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ===================== PRICING ===================== -->
+  <section class="section">
+    <div class="sec-head"><span class="sec-num">07</span><h2>What people charge (so you don't undercharge)</h2></div>
+    <p class="lede">Anchors from the notes, all as of mid-2026.</p>
+
+    <div class="stats">
+      <div class="stat"><div class="big indigo">$21/user/mo</div><div class="cap">GitHub Enterprise — the <b>same</b> price for Cloud <i>and</i> self-hosted Server. (Verified)</div></div>
+      <div class="stat"><div class="big indigo">$29/user/mo</div><div class="cap">GitLab Premium — same price either way. Self-host is a deployment option, not a discount. (Verified)</div></div>
+      <div class="stat"><div class="big teal">$20k–$100k+/yr</div><div class="cap">Typical starting range for self-host/BYOC deals in a custom enterprise tier (Retool, Coder, Airbyte). (Verified pattern; figures likely)</div></div>
+      <div class="stat"><div class="big amber">≈ $26k/mo floor</div><div class="cap">GitLab Dedicated, single-tenant hosted — a 20–35% premium over SaaS. The expensive rung. (Likely — benchmark data)</div></div>
+      <div class="stat"><div class="big teal">0% markup</div><div class="cap">Northflank charges the same rates in your VPC as in theirs — the customer's cloud bill absorbs compute; the vendor monetizes the control plane and support. (Verified)</div></div>
+    </div>
+
+    <div class="callout co-plain"><span class="co-title">💡 Governance is the paywall</span>
+      Coder and Temporal both give away the core and charge for audit/RBAC/HA. For Zeros, the analog is: cloud workspaces broadly available; SAML+SCIM+audit+BYOC in a Business/Enterprise tier.
+    </div>
+    <div class="callout co-warn"><span class="co-title">⚠️ One nuance — the "SSO tax" backlash</span>
+      Consider keeping basic OIDC SSO cheap (Coder does; CISA recommends it), and paywall SAML+SCIM+audit instead.
+    </div>
+  </section>
+
+  <!-- ===================== TABLE STAKES ===================== -->
+  <section class="section">
+    <div class="sec-head"><span class="sec-num">08</span><h2>Table stakes: the checklist buyers grade you on</h2></div>
+    <p class="lede">From the WorkOS 2026 enterprise-readiness checklist + EnterpriseReady (verified), in priority order.</p>
+
+    <ol class="checklist">
+      <li><b>SSO</b> — SAML 2.0 + OIDC, per-organization config. "SSO is the chokepoint that makes governance possible" for AI tools.</li>
+      <li><b>Team-first data model</b> — the single most important <i>early</i> design decision on the list.</li>
+      <li><b>SCIM / directory sync</b> — with <i>real-time deprovisioning</i> (offboarding is the buyer's actual fear).</li>
+      <li><b>RBAC</b> — and for agents, the safe default: an agent inherits exactly its user's permissions, no more.</li>
+      <li><b>Audit logs</b> — append-only, 1+ year retention, streamable to the customer's security tools. "Procurement will ask for your audit log before they ask about your pricing." Must capture <b>agent actions</b>, not just human ones.</li>
+      <li><b>MFA + a self-serve admin portal</b> (domain verification, SAML-cert health).</li>
+      <li><b>SOC 2 Type II</b> (the entry ticket), then ISO 27001; DPAs and a ZDR posture with model providers on request.</li>
+      <li><b>Private networking options</b> (PrivateLink/VPC peering) — often the concession that <i>avoids</i> self-hosting.</li>
+      <li><b>MCP/agent auth</b> — new for 2026; likely in security questionnaires for agent products within a year.</li>
+    </ol>
+
+    <details>
+      <summary>Glossary — the jargon on this checklist, in plain words</summary>
+      <div class="dt-body">
+        <p><span class="chip">SSO</span> Single sign-on — employees log in with the company's existing identity system instead of a new password.</p>
+        <p><span class="chip">SAML / OIDC</span> The two standard "languages" SSO systems speak. OIDC is the simpler, modern one; SAML is the one big enterprises demand.</p>
+        <p><span class="chip">SCIM</span> Automatic syncing of the employee directory — when someone is fired, their access disappears everywhere instantly.</p>
+        <p><span class="chip">RBAC</span> Role-based access control — who is allowed to do what, by role.</p>
+        <p><span class="chip">SOC 2 Type II</span> An independent audit report saying "this company actually follows its own security rules over time." The entry ticket to enterprise sales.</p>
+        <p><span class="chip">ZDR</span> Zero-data-retention — a contract where AI model providers promise to process code in memory and never store it.</p>
+        <p><span class="chip">DPA</span> Data processing agreement — the legal paperwork about how customer data is handled.</p>
+        <p><span class="chip">PrivateLink / VPC peering</span> Private network wiring between the customer's cloud and yours, so traffic never crosses the public internet.</p>
+        <p><span class="chip">MCP</span> The protocol agents use to call external tools — new enough that auditing it is a 2026-fresh requirement.</p>
+      </div>
+    </details>
+  </section>
+
+  <!-- ===================== RISKS ===================== -->
+  <section class="section">
+    <div class="sec-head"><span class="sec-num">09</span><h2>The risks (why not to rush)</h2></div>
+
+    <div class="risk-grid">
+      <div class="risk-card">
+        <div class="rk-t">🔥 Support burden — the PostHog cautionary tale</div>
+        <div class="rk-b">PostHog killed its Kubernetes self-hosted product in May 2023 — only <b>3.5% of users</b> ran it, yet it overwhelmed a small infra team with failures across Kafka/ClickHouse/Postgres/Redis; a full disk could down a customer "for hours or days." (Verified — their own post-mortem.) The strongest single argument against building self-host before paying demand exists.</div>
+      </div>
+      <div class="risk-card">
+        <div class="rk-t">🧩 Version skew</div>
+        <div class="rk-b">Retool admits "many versions of Retool in use at any given time" — you can't force upgrades on customer-run software, so every old version is a support liability forever.</div>
+      </div>
+      <div class="risk-card amber">
+        <div class="rk-t">📦 Over-packaging</div>
+        <div class="rk-b">Replicated's #1 mistake list — shipping your SaaS topology (service meshes, GitOps stacks) as the customer package. Ship one Docker image first; Helm only when a customer's platform team demands it.</div>
+      </div>
+      <div class="risk-card">
+        <div class="rk-t">🕳️ Air-gap gravity</div>
+        <div class="rk-b">Offline bundles, in-cluster registries, file-drop updates, and support loops measured in days. Defense/gov only. <b>Defer indefinitely.</b></div>
+      </div>
+      <div class="risk-card amber">
+        <div class="rk-t">⛓️ Daytona dependency in the BYOC story</div>
+        <div class="rk-b">Their custom regions keep the control plane as Daytona SaaS, and the whole feature is sales-gated and early. Don't let the enterprise roadmap assume it exists at GA quality — verify with Daytona directly (needs-testing).</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== PHASED PLAN ===================== -->
+  <section class="section">
+    <div class="sec-head"><span class="sec-num">10</span><h2>The phased plan</h2></div>
+    <p class="lede">Climb the ladder only when someone with a signed check pulls you up.</p>
+
+    <div class="phase p-indigo">
+      <div class="ph-rail"><div class="ph-dot"></div><div class="ph-line"></div></div>
+      <div class="ph-body">
+        <div class="ph-title">Phase 0 — now, during v1 <span class="pill pill-indigo">In progress</span> <span class="pill pill-gray">Costs ~nothing</span></div>
+        <div class="ph-sub">Design the seams, build no enterprise features.</div>
+        <ul>
+          <li><b>Seam #1 (upgraded 2026-07-02): make the record endpoint configurable.</b> The cloud record's database URL — and the backup bucket's — is config, never hard-coded. This one rule is what keeps "self-hosting = pointing Zeros at their database" true.</li>
+          <li>Make <b>teams first-class</b> in the Supabase schema when Phase 4 (control plane) is built — memberships and workspaces hang off a team from day one.</li>
+          <li>Keep the reception desk <b>metadata-only</b> — no code, no chat at the desk itself; the record lives beside it as its own well-defined schema, behind seam #1.</li>
+          <li>Keep the <b>engine image portable</b> (Retool's 100%-reuse rule): the image that runs in Daytona is the image a customer could someday run in their VPC. No hard-coded vendor URLs (the plan already warns: never hardcode the preview-proxy apex).</li>
+          <li>Preserve <b>direct client↔sandbox connections</b> as features land — resist any convenience broker.</li>
+          <li>Add a <b>telemetry on/off switch</b> and write the one-line data-flow statement ("what leaves the workspace, to whom"). It's the first security-questionnaire answer later.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="phase p-gray">
+      <div class="ph-rail"><div class="ph-dot"></div><div class="ph-line"></div></div>
+      <div class="ph-body">
+        <div class="ph-title">Phase 1 — first enterprise interest <span class="pill pill-gray">Planned</span></div>
+        <div class="ph-sub">Roughly the first 5–20 team customers. Buy, don't build.</div>
+        <ul>
+          <li>WorkOS-style SAML SSO + SCIM + audit streaming (~$1–3k/mo total).</li>
+          <li>SOC 2 Type II.</li>
+          <li>DPA template + subprocessor list + ZDR posture with model providers — the Cursor playbook. For many buyers this <i>substitutes</i> for self-hosting entirely.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="phase p-gray">
+      <div class="ph-rail"><div class="ph-dot"></div><div class="ph-line"></div></div>
+      <div class="ph-body">
+        <div class="ph-title">Phase 2 — real "our servers" demand with money attached <span class="pill pill-gray">Planned</span></div>
+        <div class="ph-sub">Ship <b>BYOC before self-host</b>.</div>
+        <ul>
+          <li>Depot's pattern (Terraform + scoped IAM/outbound agent + direct WSS from the Mac to customer-side sandboxes), or Daytona custom regions if they've matured.</li>
+          <li>Gate to enterprise tier at <b>$30–100k+/yr</b>.</li>
+          <li>Or buy the machinery — Replicated, Nuon, Distr exist precisely so startups don't build this.</li>
+          <li>Full self-host of the control plane only when a specific contract pays for it.</li>
+          <li>Air-gap: <b>not this company, not this decade of the company.</b></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== WHAT THIS MEANS ===================== -->
+  <section class="section">
+    <div class="sec-head"><span class="sec-num">11</span><h2>What this means for Zeros</h2></div>
+
+    <ol class="checklist teal">
+      <li><b>Build nothing enterprise-specific before v1 GA.</b> Every credible source — PostHog's shutdown, Replicated's mistakes list, Railway's "one-sentence justification" test — says the same thing. Ship the single-user cloud workspace first.</li>
+      <li><b>But lock in the four enterprise seams now (updated 2026-07-02):</b> a <b>configurable record endpoint</b> (seam #1 — the record's DB URL is config, never hard-coded; upgraded from the June plan's softer "keep the data exportable" idea); the swappable <span class="mono">CloudSandboxProvider</span>; no hard-coded vendor URLs in one portable engine image; an engine that runs on plain Linux. Keep the older disciplines alongside: team-first schema in Phase 4, a reception desk that stays metadata-only, direct connections with Zeros off the live path. Together these are the difference between "enterprise is a config change plus a provider implementation" and "enterprise is a rewrite."</li>
+      <li><b>Treat the auth stack as a line item, not a roadmap item.</b> SAML/SCIM/audit ≈ $125/connection/month from WorkOS-class vendors. Budget it into enterprise pricing; never hand-build it.</li>
+      <li><b>Ask Daytona sales two questions before GA</b> (an email, not a project): what does customer-managed compute concretely look like today, and what's the GA timeline for custom regions? Their answer determines whether the first enterprise deal is "Daytona BYOC" or "our own provider on plain VMs."</li>
+      <li><b>Sell the sentence.</b> "Your agents, your code, your chat run in your cloud; we only orchestrate" is a real differentiator: Cursor offers no self-host at all, and Conductor brokers cloud traffic through its own backend. Zeros' architecture earns the claim — the job is to not break it.</li>
+      <li><b>Price the ladder the standard way:</b> same product everywhere; SAML+SCIM+audit+BYOC in a custom enterprise tier starting ~$30k/yr; no markup on customer compute in BYOC; single-tenant hosted only if someone begs (and then at a GitLab-Dedicated-style premium).</li>
+    </ol>
+  </section>
+
+  <!-- ===================== SOURCES ===================== -->
+  <section class="section sources">
+    <div class="sec-head"><span class="sec-num">SRC</span><h2>Sources</h2></div>
+    <ul>
+      <li><a href="https://www.enterpriseready.io/features/deployment-options/">enterpriseready.io — deployment options</a> <span class="src-note">— the canonical deployment-spectrum guide (packaging, licensing, private instances)</span></li>
+      <li><a href="https://northflank.com/blog/what-is-byoc-in-cloud-computing">northflank.com — what is BYOC</a> <span class="src-note">— BYOC definition, three-layer architecture, real-vs-fake test</span></li>
+      <li><a href="https://blog.railway.com/p/what-is-byoc-developer-guide-2026">blog.railway.com — BYOC developer guide 2026</a> <span class="src-note">— Railway's "one-sentence justification" test; Railway is not a BYOC platform</span></li>
+      <li><a href="https://nuon.co/blog/byoc-control-plane-data-plane-architectures">nuon.co — BYOC control plane / data plane architectures</a> <span class="src-note">— agent-based/outbound-only BYOC mechanics</span></li>
+      <li><a href="https://coder.com/pricing">coder.com/pricing</a> and <a href="https://coder.com/docs/about">coder.com/docs/about</a> <span class="src-note">— Coder's open-core self-host model, free OIDC SSO, paid governance</span></li>
+      <li><a href="https://webflow.sourcegraph.com/blog/from-saas-to-on-premises">sourcegraph.com — from SaaS to on-premises</a> <span class="src-note">— Sourcegraph's 2017 SaaS→on-prem pivot</span></li>
+      <li><a href="https://about.gitlab.com/pricing/">about.gitlab.com/pricing</a> and <a href="https://about.gitlab.com/dedicated/">about.gitlab.com/dedicated</a> <span class="src-note">— GitLab same-price self-managed; Dedicated single-tenant SaaS</span></li>
+      <li><a href="https://docs.github.com/en/enterprise-server@3.15/get-started/learning-about-github/githubs-plans">docs.github.com — GitHub's plans</a> <span class="src-note">— GitHub Enterprise unified $21/user licensing</span></li>
+      <li><a href="https://retool.com/blog/building-a-modern-on-prem-software-business">retool.com — building a modern on-prem software business</a> <span class="src-note">— Retool's on-prem playbook (100% code reuse, license check-in, 30→5-day security reviews)</span></li>
+      <li><a href="https://docs.temporal.io/evaluate/development-production-features/cloud-vs-self-hosted-features">docs.temporal.io — cloud vs self-hosted features</a> <span class="src-note">— Temporal's cloud-vs-self-host governance split</span></li>
+      <li><a href="https://northflank.com/pricing">northflank.com/pricing</a> <span class="src-note">— BYOC with no compute markup, enterprise feature gating</span></li>
+      <li><a href="https://depot.dev/docs/self-hosted/architecture">depot.dev — self-hosted architecture</a> <span class="src-note">— Depot's minimal small-team BYOC (tag-scoped IAM, direct mTLS)</span></li>
+      <li><a href="https://e2b.dev/docs/byoc">e2b.dev/docs/byoc</a> <span class="src-note">— E2B's enterprise BYOC into customer AWS/GCP</span></li>
+      <li><a href="https://cursor.com/enterprise">cursor.com/enterprise</a> and <a href="https://cursor.com/docs/enterprise/privacy-and-data-governance">cursor.com — privacy and data governance</a> <span class="src-note">— Cursor's no-self-host, ZDR-instead posture</span></li>
+      <li><a href="https://workos.com/blog/enterprise-readiness-checklist-2026">workos.com — enterprise readiness checklist 2026</a> <span class="src-note">— the enterprise table-stakes checklist (incl. agent/MCP auth)</span></li>
+      <li><a href="https://workos.com/pricing">workos.com/pricing</a> <span class="src-note">— SSO/SCIM/audit-streaming pricing (~$125/connection/mo)</span></li>
+      <li><a href="https://sso.tax/">sso.tax</a> <span class="src-note">— the SSO-tax debate (context for tiering decisions)</span></li>
+      <li><a href="https://posthog.com/blog/sunsetting-helm-support-posthog">posthog.com — sunsetting Helm support</a> <span class="src-note">— PostHog's self-host shutdown post-mortem (the key cautionary tale)</span></li>
+      <li><a href="https://www.replicated.com/blog/avoiding-the-biggest-mistakes-in-on-prem-software-delivery">replicated.com — avoiding the biggest mistakes in on-prem software delivery</a> <span class="src-note">— top on-prem delivery mistakes (cloud-primitive lock-in warning)</span></li>
+      <li><a href="https://docs.replicated.com/enterprise/installing-embedded-air-gap">docs.replicated.com — installing embedded air-gap</a> <span class="src-note">— air-gap bundle mechanics</span></li>
+      <li><a href="https://www.daytona.io/docs/en/bring-your-own-compute">daytona.io — bring your own compute</a> and <a href="https://www.daytona.io/docs/en/regions/">daytona.io — regions</a> <span class="src-note">— Daytona custom regions / BYOC runners, dedicated regions</span></li>
+      <li><a href="https://www.daytona.io/dotfiles/daytona-is-going-closed-source">daytona.io — Daytona is going closed source</a> <span class="src-note">— Daytona's 2026-06-11 closed-source announcement (why the provider seam matters)</span></li>
+      <li><a href="08-engineering-reference.html"><span class="mono">08-engineering-reference</span></a> <span class="src-note">(internal — the v3 consolidation, 2026-07-03, of the June plan v2 2026-06-24; original removed) — Zeros two-plane architecture, thin control plane, <span class="mono">CloudSandboxProvider</span> seam, phase status. <b>The v3 applies the 2026-07-02 cloud-record decision</b> (part 07 lists what changed)</span></li>
+      <li><span class="mono">research/decision-update-2026-07-02.md</span> <span class="src-note">(internal) — the founder decision update: the cloud record + enterprise-hosts-the-record</span></li>
+    </ul>
+  </section>
+
+</main>
+
+<!-- ===================== FOOTER ===================== -->
+<footer>
+  <div class="foot-inner">
+    <div class="foot-brand">Zeros — Cloud Workspaces Report · July 2026</div>
+    <div class="foot-nav">
+      <a href="05-sync-teams-and-collaboration.html">← Prev · Sync, Teams &amp; Collab</a>
+      <a href="07-execution-plan.html">Next · Execution Plan →</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

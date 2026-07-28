@@ -12,10 +12,10 @@
 # Three things about the syntax are worth knowing before you edit this:
 #
 #   1. ANCHOR YOUR PATTERNS. A pattern with no leading `/` is matched by
-#      BASENAME AT ANY DEPTH. `docs/` expands to `**/docs/**` and matches 159
-#      paths here — 95 of them inside node_modules (measured, not guessed).
-#      A bare `.env` likewise matches any nested app's `.env` and copies that
-#      app's secrets into every workspace. Anchor with `/`, and only step
+#      BASENAME AT ANY DEPTH. A bare `.env` matches any nested app's `.env` and
+#      copies that app's secrets into every workspace; a bare `docs/` expands to
+#      `**/docs/**`, which is 159 paths in this tree — 95 of them inside
+#      node_modules (measured, not guessed). Anchor with `/`, and only step
 #      outside that rule deliberately (there is exactly one exception below,
 #      and it is called out).
 #   2. Negation (`!`) is NOT supported. Such lines are skipped with a warning,
@@ -30,22 +30,19 @@
 #
 # MIND THE MATCH SET SIZE — and not for local reasons. A CLOUD workspace has no
 # local checkout to copy from, so the whole match set is uploaded inline in the
-# create request (POST /workspaces), which is size-capped server-side. `/docs/`
-# alone is 64 files / 2.27 MiB and takes that request to ~2.3x the cap (measured
-# 2026-07-27, not estimated). WHILE IT IS LISTED, EVERY CLOUD CREATE FAILS with
-# `413 FST_ERR_CTP_BODY_TOO_LARGE`, surfaced in the UI as the unrelated-looking
-# "Cloud workspace isn't reachable right now (it may be starting)". Trimming does
-# not rescue it: `/docs/` and `/docs/*` expand to the same 64 files through
-# toPathspecs(), and dropping even the largest subtree still leaves 0.98 MiB —
-# i.e. still at the cap.
+# create request (POST /workspaces), which is size-capped server-side. Blow past
+# that cap and EVERY CLOUD CREATE FAILS with `413 FST_ERR_CTP_BODY_TOO_LARGE`,
+# surfaced in the UI as the unrelated-looking "Cloud workspace isn't reachable
+# right now (it may be starting)" — a symptom that points nowhere near this file.
 #
-# It is listed anyway, by explicit decision (2026-07-28): local worktrees seed
-# docs/ from this file, and cloud workspace creation is knowingly traded away.
-#
-# TO GET CLOUD CREATES WORKING AGAIN, delete the `/docs/` entry at the bottom of
-# this file. That costs local worktrees nothing — the `scripts.setup` copy step
-# gated on CONDUCTOR_IS_LOCAL=1 seeds docs/ on its own — and drops the match set
-# back to 4 files / ~3 KB. Bulk content generally belongs there instead.
+# `/docs/` is the cautionary precedent: 64 files / 2.27 MiB, which took the
+# request to ~2.3x the cap (measured 2026-07-27, not estimated). Trimming could
+# not rescue it — `/docs/` and `/docs/*` expand to the same 64 files through
+# toPathspecs(), and dropping even the largest subtree still left 0.98 MiB. What
+# fixed it was TRACKING docs/ instead (2026-07-28), which is the right answer for
+# bulk content generally: `git worktree add` materialises tracked files for free
+# and they never enter the create request at all. The list below is back to
+# 4 files / ~3 KB. Keep it there.
 #
 # This file is safe to commit: it lists patterns, never values. Everything it
 # names is gitignored, so a seeded copy cannot be accidentally committed from
@@ -56,6 +53,9 @@
 #                               already materialises it. Seeding a tracked path
 #                               would copy the main checkout's working-tree
 #                               version over the branch's own.
+#   docs/                       same reason — TRACKED as of 2026-07-28. It used
+#                               to be seeded from here, and that is exactly what
+#                               pushed the create request past the cap (above).
 #   node_modules/               installed by the workspace setup script; copying
 #                               a dependency tree is slower and less correct
 #                               than running the install.
@@ -97,13 +97,3 @@
 # config, not repo content. Seeded so the per-workspace setup command survives
 # into new worktrees instead of silently reverting to the tool's defaults.
 /.conductor/
-
-# The local-only engineering journal. AGENTS.md and RULES.md send agents in here,
-# so a worktree without it starts blind. Anchored deliberately: `/docs/` matches
-# the 64 files at the repo root, where a bare `docs/` would also drag in the 95
-# `docs/` directories inside node_modules.
-#
-# THIS ENTRY BREAKS CLOUD WORKSPACE CREATION (413) — see the size note in the
-# header above, which explains the trade and how to undo it. Read that before
-# adding anything else of this magnitude.
-/docs/

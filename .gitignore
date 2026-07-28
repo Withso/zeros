@@ -104,20 +104,18 @@ testing/
 snapshots/current/
 snapshots/diff/
 
-# Working notes. `docs/` is a local-only engineering journal: scratch analyses,
-# audits and plans that are superseded as fast as they are written, so a public
-# clone would only ever read a stale snapshot. Listed in `.worktreeinclude` so
-# it still follows you into every new worktree — AGENTS.md and RULES.md send
-# agents in there, and an empty `docs/` breaks them. That listing is what
-# currently breaks cloud workspace creation; `.worktreeinclude` documents the
-# trade and how to undo it.
+# `docs/` is deliberately NOT here: the engineering journal is TRACKED as of
+# 2026-07-28. It reads as local-only scratch — analyses, audits and plans that
+# are superseded as fast as they are written — but AGENTS.md and RULES.md send
+# agents into it, so it has to reach every worktree, and tracking is the only
+# way to do that without seeding it through `.worktreeinclude` (a 2.3 MiB copy
+# set that 413'd every cloud workspace create; see that file's header).
 #
-# `styles/Artifacts/` is deliberately NOT here: the design lab is tracked. It
-# is a build-free tree of hand-written HTML served only by the vite dev
-# middleware (vite.config.ts) and scripts/serve-loaders.mjs, never bundled into
-# a production build, but it IS the design record and two of its files carry
-# third-party licences (THIRD-PARTY-NOTICES.md).
-/docs/
+# `styles/Artifacts/` is deliberately NOT here either: the design lab is
+# tracked. It is a build-free tree of hand-written HTML served only by the vite
+# dev middleware (vite.config.ts) and scripts/serve-loaders.mjs, never bundled
+# into a production build, but it IS the design record and two of its files
+# carry third-party licences (THIRD-PARTY-NOTICES.md).
 
 # website/ — sibling frontends vendored for Cloudflare Pages deploy (marketing + web-app)
 # Same pattern: node_modules + dist + build + logs never tracked. (Env files are
