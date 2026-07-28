@@ -32,25 +32,19 @@ import {
   Settings,
 } from "lucide-react";
 
-import {
-  isGitErrorShape,
-  isWorkspaceOpStillRunning,
-  workspaceCreate,
-  workspacePrepareCreate,
-  type Workspace,
-} from "../native/git";
+import { type Workspace } from "../native/git";
 import { usePrIslandKind } from "./pr/pr-island-state-store";
 import { getSetting, setSetting } from "../native/settings";
 import { useNativeRuntime } from "../native/runtime";
 import { trackWorkspaceOpened } from "../zeros/analytics/agent-events";
 import { useAgentSessions } from "../zeros/agent/sessions-hooks";
-import { dbDeleteChat } from "../zeros/agent/agent-history-client";
 import {
   useAnyChatAwaitingKind,
   useAnyChatStreaming,
 } from "../zeros/agent/sessions-store";
 import {
   isLocalMainWorkspace,
+  LOCAL_MAIN_LABEL,
   withLocalMainWorkspace,
 } from "../zeros/store/local-main-workspace";
 import {
@@ -73,14 +67,10 @@ import {
   useArchiveWorkspace,
 } from "../zeros/store/archive-actions";
 import { useOpenWorkspace } from "../zeros/store/use-open-workspace";
-import { spawnPreparedDefaultChat } from "../zeros/store/spawn-default-chat";
 import {
   notifyProjectsChanged,
-  notifyWorkspacesChanged,
   peekWorkspacesFor,
   prefetchWorkspacesFor,
-  reloadWorkspacesFor,
-  watchTimedOutWorkspaceCreate,
   useArchivedWorkspaces,
   useProjects,
   useSyncProjectsToEngine,
@@ -121,6 +111,11 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "../zeros/ui/primitives/popover";
+import {
+  isExperimentalEnabled,
+  useExperimentalFeature,
+} from "../zeros/settings/experimental-features";
+import { createWorkspaceForProject } from "./create-workspace";
 import { toast } from "../zeros/ui/primitives/elements";
 import { Tooltip } from "../zeros/ui/primitives/tooltip";
 import { RepositoryIcon } from "../zeros/ui/repository-icon";
@@ -129,10 +124,6 @@ import { formatCompactAge } from "../zeros/agent/format-age";
 import { ZerosSpinner } from "../loaders";
 import { useAddProject } from "./add-project-provider";
 import {
-  beginPendingCreate,
-  clearWorkspaceSettling,
-  finishPendingCreate,
-  markWorkspaceSettling,
   usePendingCreatesAll,
   usePendingCreatesFor,
   useWorkspaceArchiving,
@@ -172,12 +163,20 @@ function prefetchProjectWorkspaceDestination(project: Project): void {
         project.repoRoot,
       ),
       cachedWorkspaces: peekWorkspacesFor(project.repoSlug),
+      // Synchronous read: this warms the cache from a plain event handler, and
+      // it must agree with the destination handleSelectProject will pick.
+      allowLocalMain: isExperimentalEnabled("workInLocalMain"),
     }),
   );
 }
 
 const ICON_BUTTON_CLS =
   "shrink-0 text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1 data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1";
+// Main carries a visible "main" label so it reads as a named tab beside the
+// branch tabs rather than a bare glyph. Same chip metrics as WORKSPACE_TAB_CLS
+// (h-7, px-2, gap-2, text-xs, 3.5 icon) but width follows the content — the
+// label is a fixed short string, so the fixed tab clamp would only add slack.
+const MAIN_TAB_CLS = `${ICON_BUTTON_CLS} h-7 justify-start gap-2 px-2 text-xs transition-none [&_svg]:size-3.5`;
 // The app window bottoms out at 800px. Interpolate through the constrained
 // 800–1200px band, then hold the requested default/max widths above it.
 const PROJECT_TRIGGER_CLS =
@@ -894,6 +893,13 @@ export function TopBar() {
     selectedProject?.repoSlug ?? null,
   );
 
+  // "Work in local main" (Settings → Experimental, off by default). This gates
+  // the main TAB and where a repo switch lands — never the synthetic row
+  // itself: `mainWorkspace` still backs active-tab resolution for repo-root
+  // chats, the bounce-to-main safety net, and the delete/remove escape hatches.
+  // Dropping it from `visibleWorkspaces` would strand those paths instead.
+  const [workInLocalMain] = useExperimentalFeature("workInLocalMain");
+
   const visibleWorkspaces = useMemo(
     () =>
       selectedProject
@@ -978,6 +984,7 @@ export function TopBar() {
         project: selectedProject,
         rememberedFolder: activeFolder,
         cachedWorkspaces: workspaces,
+        allowLocalMain: workInLocalMain,
       }),
     );
   }, [
@@ -992,6 +999,7 @@ export function TopBar() {
     openWorkspace,
     refreshing,
     selectedProject,
+    workInLocalMain,
     workspaces,
   ]);
 
@@ -1274,6 +1282,7 @@ export function TopBar() {
             project.repoRoot,
           ),
           cachedWorkspaces: peekWorkspacesFor(project.repoSlug),
+          allowLocalMain: workInLocalMain,
         }),
       );
     },
@@ -1284,6 +1293,7 @@ export function TopBar() {
       dispatch,
       openWorkspace,
       persistSelectedProject,
+      workInLocalMain,
     ],
   );
 
@@ -1315,157 +1325,11 @@ export function TopBar() {
 
   /** Create directly in the selected repository, then move into the new
    * workspace. The global plus remains the richer Dispatcher entry point.
-   * Optimistic: prepareCreate reserves identity + final path (milliseconds),
-   * the strip gets a "Setting up workspace…" tab and the app NAVIGATES to the
-   * announced path with a provisional Untitled chat in the same beat; the heavy
-   * create then runs in the background and enables its queued session once the
-   * authoritative workspace row lands. */
+   * The optimistic flow itself lives in ./create-workspace, shared with the
+   * repo-add paths that now open a workspace instead of the trunk. */
   const handleCreateWorkspace = useCallback(async () => {
-    const project = selectedProject;
-    // Every click is an independent exact reservation. Do not serialize even
-    // the cheap prepare phase: users intentionally fan out several workspaces
-    // while prior creates and archives continue in parallel.
-    if (!project) return;
-    let prepared: Awaited<ReturnType<typeof workspacePrepareCreate>>;
-    try {
-      prepared = await workspacePrepareCreate({
-        repoRoot: project.repoRoot,
-        repoSlug: project.repoSlug,
-      });
-    } catch (error: unknown) {
-      if (isGitErrorShape(error)) {
-        toast.error(`Couldn't create workspace: ${error.message}`, {
-          description: error.remediation ?? error.causeMessage ?? undefined,
-        });
-      } else {
-        const message = error instanceof Error ? error.message : String(error);
-        toast.error(`Couldn't create workspace: ${message}`);
-      }
-      return;
-    }
-    const pendingToken = beginPendingCreate({
-      repoRoot: project.repoRoot,
-      repoSlug: project.repoSlug,
-      path: prepared.path,
-      branch: prepared.branch,
-    });
-    // Column 3 shows its "Setting up workspace" loading rows from the first
-    // frame; the flag clears once the row lands and its surface data is in.
-    // Marked BEFORE navigation so the workspace-list validation effect below
-    // knows not to bounce the not-yet-listed folder back to main.
-    markWorkspaceSettling(prepared.path);
-    // Publish the exact folder destination AND its first Untitled chat in one
-    // transition. The composer is usable now; its session remains gated on the
-    // create lifecycle and any early Send is queued by exact chat id.
-    const chat = spawnPreparedDefaultChat({
-      folder: prepared.path,
-      repoRoot: project.repoRoot,
-      dispatch,
-    });
-    const rollbackOptimisticChat = () => {
-      clearWorkspaceSettling(prepared.path);
-      dispatch({ type: "CONSUME_AUTO_SEND", chatId: chat.id });
-      dispatch({ type: "DELETE_CHAT", id: chat.id });
-      void dbDeleteChat(chat.id).catch(() => {});
-      finishPendingCreate(pendingToken);
-    };
-    const settleArchivedOptimisticChat = () => {
-      // Archive keeps this chat/draft for a later restore; only its queued
-      // first turn is no longer runnable because the worktree was removed.
-      clearWorkspaceSettling(prepared.path);
-      dispatch({ type: "CONSUME_AUTO_SEND", chatId: chat.id });
-      finishPendingCreate(pendingToken);
-    };
-    try {
-      const created = await workspaceCreate({
-        repoRoot: project.repoRoot,
-        repoSlug: project.repoSlug,
-        ...(chat.agentId ? { agentId: chat.agentId } : {}),
-        preparedId: prepared.workspaceId,
-        preparedBranch: prepared.branch,
-        optimisticChatId: chat.id,
-      });
-      trackWorkspaceOpened({ isWorktree: true, status: created.status });
-      notifyWorkspacesChanged(project.repoSlug);
-      // Await an authoritative refresh so the real row is committed to the
-      // single source BEFORE the pending placeholder drops — otherwise the
-      // strip briefly shows NO tab for the workspace the user is sitting in.
-      // If ingestion is momentarily disconnected, retain the placeholder and
-      // follow the exact lifecycle/row until the complete key can be committed.
-      if (
-        (await reloadWorkspacesFor(project.repoSlug)) &&
-        peekWorkspacesFor(project.repoSlug)?.some(
-          (workspace) => workspace.id === prepared.workspaceId,
-        )
-      ) {
-        finishPendingCreate(pendingToken);
-      } else {
-        watchTimedOutWorkspaceCreate({
-          repoSlug: project.repoSlug,
-          workspaceId: prepared.workspaceId,
-          onReady: () => finishPendingCreate(pendingToken),
-          onUnavailable: (reason) => {
-            if (reason === "archived") {
-              settleArchivedOptimisticChat();
-              return;
-            }
-            rollbackOptimisticChat();
-            toast.error("Workspace became unavailable after creation", {
-              description:
-                reason === "interrupted"
-                  ? "Creation stopped in a recoverable phase. Restart Zeros to finish recovery."
-                  : "The workspace was removed before its list row could be loaded.",
-            });
-          },
-        });
-      }
-    } catch (error: unknown) {
-      if (isWorkspaceOpStillRunning(error)) {
-        // The engine keeps working past the client budget — retain the announced
-        // destination + settling state until exact lifecycle observation settles it.
-        toast.info("Workspace creation is taking longer than usual", {
-          description: "It's still being created in the background.",
-        });
-        watchTimedOutWorkspaceCreate({
-          repoSlug: project.repoSlug,
-          workspaceId: prepared.workspaceId,
-          onReady: (workspace) => {
-            trackWorkspaceOpened({
-              isWorktree: true,
-              status: workspace.status,
-            });
-            finishPendingCreate(pendingToken);
-          },
-          onUnavailable: (reason) => {
-            if (reason === "archived") {
-              settleArchivedOptimisticChat();
-              return;
-            }
-            rollbackOptimisticChat();
-            toast.error("Couldn't finish creating workspace", {
-              description:
-                reason === "interrupted"
-                  ? "Creation stopped in a recoverable phase. Restart Zeros to finish recovery, then try again."
-                  : "The engine rolled the incomplete checkout back safely. Create it again to retry.",
-            });
-          },
-        });
-      } else {
-        // Hard failure: roll back only this exact provisional chat/path. The
-        // validation effect sees the absent row and chooses a valid destination.
-        rollbackOptimisticChat();
-        notifyWorkspacesChanged(project.repoSlug);
-        if (isGitErrorShape(error)) {
-          toast.error(`Couldn't create workspace: ${error.message}`, {
-            description: error.remediation ?? error.causeMessage ?? undefined,
-          });
-        } else {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          toast.error(`Couldn't create workspace: ${message}`);
-        }
-      }
-    }
+    if (!selectedProject) return;
+    await createWorkspaceForProject({ project: selectedProject, dispatch });
   }, [dispatch, selectedProject]);
 
   // Pending creates for the visible repository — one "Setting up workspace…"
@@ -1550,26 +1414,30 @@ export function TopBar() {
           directly after the final tab. Once the row fills, only the workspace
           nav shrinks and scrolls; the plus remains pinned without a divider. */}
       <div className="flex h-full min-w-0 flex-1 items-stretch">
-        {mainWorkspace && (
+        {workInLocalMain && mainWorkspace && (
           <div className="border-border1 flex h-full shrink-0 items-center border-r px-1">
-            <Tooltip label="main" side="bottom">
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className={ICON_BUTTON_CLS}
-                aria-current={
-                  activeWorkspaceId === mainWorkspace.id ? "page" : undefined
-                }
-                aria-label="Open main checkout"
-                data-active={activeWorkspaceId === mainWorkspace.id}
-                onPointerEnter={() => handlePrefetchWorkspace(mainWorkspace)}
-                onFocus={() => handlePrefetchWorkspace(mainWorkspace)}
-                onClick={() => handleSelectWorkspace(mainWorkspace)}
+            <Button
+              type="button"
+              variant="ghost"
+              size="default"
+              className={MAIN_TAB_CLS}
+              aria-current={
+                activeWorkspaceId === mainWorkspace.id ? "page" : undefined
+              }
+              aria-label="Open main checkout"
+              data-active={activeWorkspaceId === mainWorkspace.id}
+              onPointerEnter={() => handlePrefetchWorkspace(mainWorkspace)}
+              onFocus={() => handlePrefetchWorkspace(mainWorkspace)}
+              onClick={() => handleSelectWorkspace(mainWorkspace)}
+            >
+              <span
+                className="inline-flex size-4 shrink-0 items-center justify-center"
+                aria-hidden="true"
               >
-                <LaptopMinimal className="size-4" strokeWidth={1.25} />
-              </Button>
-            </Tooltip>
+                <LaptopMinimal className="size-3.5" strokeWidth={1.25} />
+              </span>
+              {LOCAL_MAIN_LABEL}
+            </Button>
           </div>
         )}
 
