@@ -23,14 +23,25 @@ import React, {
 } from "react";
 
 import { spawnDefaultChatForWorkspace } from "../zeros/store/spawn-default-chat";
+import {
+  createWorkspaceForProject,
+  repoNeedsFirstWorkspace,
+} from "./create-workspace";
+import { leftmostLiveWorkspace } from "./top-bar-helpers";
 import { useWorkspaceDispatch } from "../zeros/store/store";
+import { useOpenWorkspace } from "../zeros/store/use-open-workspace";
 import { useAgentSessions } from "../zeros/agent/sessions-hooks";
+import { isExperimentalEnabled } from "../zeros/settings/experimental-features";
 import {
   deriveProjectName,
+  loadProjects,
+  normalizeProjectRoot,
   upsertProject,
+  type Project,
 } from "../zeros/store/projects-store";
 import {
   notifyProjectsChanged,
+  peekWorkspacesFor,
   useProjects,
 } from "../zeros/store/use-projects";
 import {
@@ -40,9 +51,11 @@ import {
 import {
   onMenuOpenProject,
   onProjectChanged,
+  onProjectOpenFailed,
   onProjectOpening,
   pickProjectFolder,
 } from "../native/native";
+import { toast } from "../zeros/ui/primitives/elements";
 import { useNativeRuntime } from "../native/runtime";
 import { QuickStartDialog } from "./dialogs/quick-start";
 import { OpenGithubProjectDialog } from "./dialogs/open-github-project";
@@ -112,6 +125,7 @@ export function AddProjectProvider({
 }) {
   const dispatch = useWorkspaceDispatch();
   const sessions = useAgentSessions();
+  const openWorkspace = useOpenWorkspace();
   const { projects, refresh: refreshProjects } = useProjects();
   const nativeRuntime = useNativeRuntime();
 
@@ -170,15 +184,168 @@ export function AddProjectProvider({
     return () => unlisten?.();
   }, []);
 
+  /** Adding a repo lands the user in a real WORKSPACE instead of the trunk.
+   *  Open project / Open GitHub project / Quick start all route through here;
+   *  the adopt-a-worktree dialog does not, because adopting already produced a
+   *  workspace, and neither does bind-folder, which is a recovery flow that
+   *  binds an EXISTING chat to a folder (forking a worktree under it would move
+   *  that chat somewhere the user didn't ask for).
+   *
+   *  Guarded to the add itself. A repo that already has a live workspace — a
+   *  re-add, or a root whose worktrees are still on disk — opens the way it
+   *  always did. Archiving the last workspace deliberately leaves the repo with
+   *  none: auto-create is an add-time affordance, not an invariant.
+   *
+   *  Whenever a worktree can't be forked it falls back to landing the user
+   *  somewhere that has a tab: the leftmost live worktree while "Work in local
+   *  main" is off, else an Untitled chat at the repo root (what the app did
+   *  before). Landing on the root unconditionally was wrong once that flag
+   *  shipped off by default — the primary checkout has no tab then, so the
+   *  commonest fallback (re-adding a repo that already has worktrees) dropped
+   *  the user into an untabbed trunk chat with nothing selected in the strip.
+   *
+   *  `autoCreate: false` registers the repo and stops there. That is the
+   *  `zeros://open` deep-link path: it is the one add trigger that is NOT a
+   *  deliberate in-app action — any web page can fire one with a single click —
+   *  and forking a worktree writes to the user's repo (a new branch plus a
+   *  worktree registration). Re-rooting the engine is already guarded upstream
+   *  by isSystemDir/isPlausibleProject; this keeps an untrusted trigger from
+   *  also mutating git unattended. The repo still lands in the list, and "+" is
+   *  right there when the user actually wants to start work. */
+  const openFirstWorkspace = useCallback(
+    async (
+      repoRoot: string,
+      opts: {
+        inspect?: InspectFolderResult | null;
+        autoCreate?: boolean;
+      } = {},
+    ) => {
+      const { inspect: knownInspect, autoCreate = true } = opts;
+      const landOnRepoRoot = () => {
+        void spawnDefaultChatForWorkspace({
+          folder: repoRoot,
+          sessions,
+          dispatch,
+        });
+      };
+      // Where to put the user when no worktree gets forked. The repo root is
+      // only a coherent destination while "Work in local main" is ON — with it
+      // off the primary checkout has no tab, so landing there leaves the strip
+      // with nothing selected. Prefer the same leftmost live worktree a repo
+      // switch picks (resolveRepoWorkspaceDestination), and keep the root as
+      // the terminal fallback for a repo that has nowhere else to go. Read the
+      // flag synchronously rather than through the hook: this runs from an
+      // async callback, and re-rendering the whole provider on a settings
+      // toggle would buy nothing.
+      const land = (registered: Project) => {
+        if (!isExperimentalEnabled("workInLocalMain")) {
+          const alternative = leftmostLiveWorkspace(
+            peekWorkspacesFor(registered.repoSlug),
+          );
+          if (alternative) {
+            openWorkspace(alternative);
+            return;
+          }
+        }
+        landOnRepoRoot();
+      };
+      try {
+        // Probed BEFORE the upsert so the registration below can carry the
+        // repo's remote. Not an extra round-trip: the commit check further
+        // down needs the same answer, and the dialog paths hand theirs in.
+        const inspect =
+          knownInspect ??
+          (await workspaceInspectFolder(repoRoot).catch(() => null));
+        // Idempotent for the dialog paths, which have already upserted — this
+        // reads back the canonical record (normalized root, resolved slug). For
+        // the deep-link path it IS the registration, so it has to carry
+        // `originUrl` too: a project stored remote-less leaves the dispatcher's
+        // open-PR source picker inert and the automatic repository icon
+        // unresolved until some later in-app open self-heals it (the same trap
+        // openProject below calls out). Publish the new list here rather than
+        // relying on the caller: without this the repo sits in localStorage
+        // while the UI stays on the welcome screen, worktree and all.
+        // Re-notifying an already-published add is a cheap no-op.
+        const project = upsertProject({
+          repoRoot,
+          originUrl: inspect?.originUrl ?? undefined,
+        });
+        notifyProjectsChanged();
+        if (!autoCreate) {
+          land(project);
+          return;
+        }
+        if (!(await repoNeedsFirstWorkspace(project.repoSlug))) {
+          land(project);
+          return;
+        }
+        // A worktree needs a repo with at least one commit. An opened folder
+        // that isn't a repo yet and a clone of an EMPTY remote both fail that
+        // (clone succeeds against a commitless remote), and attempting anyway
+        // would greet a just-added repo with an error toast. Quick start always
+        // passes — initRepoInPlace commits, --allow-empty included.
+        if (!inspect?.isRepo || !inspect.hasCommits) {
+          land(project);
+          return;
+        }
+        const navigated = await createWorkspaceForProject({
+          project,
+          dispatch,
+        });
+        // Only a failed prepare leaves the user unplaced; later failures roll
+        // back their own optimistic state and have already toasted.
+        if (!navigated) land(project);
+      } catch (err) {
+        console.warn("[Zeros] first workspace failed:", err);
+        landOnRepoRoot();
+      }
+    },
+    [dispatch, openWorkspace, sessions],
+  );
+
   // Clear the per-row opening shimmer the moment the engine reports it has
   // respawned and re-rooted (`project-changed` carries the new root). This is
   // the real "done loading" signal for the row — pendingProject clears earlier
   // (when its registered row lands), but openingRoot must wait for the engine
   // so an already-registered repo's cue lasts the whole respawn.
+  //
+  // A root arriving here UNREGISTERED means the engine re-rooted at a folder
+  // the project list has never seen — in practice a `zeros://open?path=` deep
+  // link, which re-rooted the engine but never called upsertProject, so the
+  // repo ran invisibly with no sidebar row and no tab. Register it on the spot,
+  // through the same add path everything else uses. The registered case (the
+  // recent-projects re-open) is left exactly as it was: matching on the live
+  // list, not a closure snapshot, is what keeps a re-open from being treated as
+  // an add and yanking the user to a new workspace.
+  const openFirstWorkspaceRef = useRef(openFirstWorkspace);
+  openFirstWorkspaceRef.current = openFirstWorkspace;
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     void onProjectChanged(({ root }) => {
       setOpeningRoot((prev) => (prev === root ? null : prev));
+      const normalized = normalizeProjectRoot(root);
+      const known = loadProjects().some((p) => p.repoRoot === normalized);
+      // Register only — see the autoCreate note on openFirstWorkspace. A deep
+      // link is the one add trigger a web page can pull, so it must not fork a
+      // worktree unattended.
+      if (!known) {
+        void openFirstWorkspaceRef.current(root, { autoCreate: false });
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, []);
+
+  // A deep link that never resolved to a project used to die in a main-process
+  // console.error — the renderer's only `deep-link` subscriber is the invite
+  // handler, which drops non-invite URLs. Surface it.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    void onProjectOpenFailed(({ root, reason }) => {
+      toast.error("Couldn't open that project", {
+        description: root ? `${root} — ${reason}` : reason,
+      });
     }).then((fn) => {
       unlisten = fn;
     });
@@ -260,15 +427,12 @@ export function AddProjectProvider({
       });
       notifyProjectsChanged();
       refreshProjects();
-      void spawnDefaultChatForWorkspace({
-        folder: root,
-        sessions,
-        dispatch,
-      });
+      // Reuse the inspect from above rather than re-probing the same folder.
+      void openFirstWorkspace(root, { inspect });
     } catch (err) {
       console.warn("[Zeros] open project failed:", err);
     }
-  }, [dispatch, refreshProjects, sessions, nativeRuntime]);
+  }, [openFirstWorkspace, refreshProjects, nativeRuntime]);
 
   // File → Open Folder / Cmd+Shift+O (native menu) routes here so it shares ONE
   // open-project path with the Dispatcher and the welcome screen. Subscribe
@@ -338,11 +502,7 @@ export function AddProjectProvider({
         open={quickStartOpen}
         onOpenChange={setQuickStartOpen}
         onCreated={({ repoRoot }) => {
-          void spawnDefaultChatForWorkspace({
-            folder: repoRoot,
-            sessions,
-            dispatch,
-          });
+          void openFirstWorkspace(repoRoot);
           refreshProjects();
         }}
         onRequestPublish={(repoRoot, name) =>
@@ -353,11 +513,7 @@ export function AddProjectProvider({
         open={openGithubOpen}
         onOpenChange={setOpenGithubOpen}
         onCloned={({ repoRoot }) => {
-          void spawnDefaultChatForWorkspace({
-            folder: repoRoot,
-            sessions,
-            dispatch,
-          });
+          void openFirstWorkspace(repoRoot);
           refreshProjects();
         }}
       />

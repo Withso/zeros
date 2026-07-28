@@ -85,6 +85,7 @@ import {
 import { installAppMenu } from "./menu";
 import { appendLogRecord, flushLogStore, initLogStore } from "./log-store";
 import { setupContextMenu } from "./context-menu";
+import { installDevToolsGuard } from "./devtools";
 import { setupDeepLink } from "./deep-link";
 import { setupUpdater } from "./updater";
 import { IS_DEV, IS_PACKAGED } from "./runtime-mode";
@@ -824,15 +825,13 @@ function createMainWindow(): BrowserWindow {
     );
   }
 
-  // Hardening: in packaged builds, slam DevTools shut if anything opens it
-  // (keyboard shortcut, app menu, or a stray openDevTools). The renderer holds
-  // the live session in memory — an open console is trivial token /
-  // secret extraction by anyone at the machine. Dev keeps DevTools.
-  if (IS_PACKAGED) {
-    win.webContents.on("devtools-opened", () => {
-      win.webContents.closeDevTools();
-    });
-  }
+  // DevTools policy. Packaged builds USED to force-close DevTools on the same
+  // tick it opened, which is why ⌥⌘I flickered and did nothing in Alpha, Beta
+  // and Production. That block is gone — DevTools now works on every channel,
+  // opens detached, and Production prints a self-XSS console banner instead.
+  // electron/devtools.ts states the security trade in full, including what the
+  // old block did buy and how to re-gate Production deliberately if wanted.
+  installDevToolsGuard(win);
 
   // 2026-05-28: swallow Cmd+R / Cmd+Shift+R / F5 at the BrowserWindow
   // level. Removing the menu items in electron/menu.ts blocks the

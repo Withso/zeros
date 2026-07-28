@@ -19,7 +19,14 @@
 //
 // Action routing:
 //   zeros://open?path=/abs/project  → spawn engine at path, emit
-//                                     project-changed
+//                                     project-changed (the renderer then
+//                                     REGISTERS the root if it's unknown —
+//                                     see AddProjectProvider). Registration
+//                                     only: unlike the in-app add flows this
+//                                     does NOT fork a first worktree, because
+//                                     a web page can fire this link.
+//   zeros://open that can't resolve → emit project-open-failed so the
+//                                     renderer can toast a reason
 //   anything else                   → forward verbatim to renderer
 //                                     as `deep-link` event so JS can
 //                                     handle it without a rebuild
@@ -81,8 +88,10 @@ export function registerProtocol(): void {
 
 /** Parse a zeros:// URL and dispatch. Safe to call before the main
  *  window exists — emitEvent no-ops if mainWindow isn't set yet; the
- *  URL is re-emitted once the window binds (see enqueueBeforeWindow). */
-async function handleUrl(rawUrl: string): Promise<void> {
+ *  URL is re-emitted once the window binds (see enqueueBeforeWindow).
+ *
+ *  Exported for tests; production callers go through setupDeepLink(). */
+export async function handleUrl(rawUrl: string): Promise<void> {
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
@@ -155,7 +164,14 @@ async function handleUrl(rawUrl: string): Promise<void> {
     const pathParam = parsed.searchParams.get("path");
     if (!pathParam) {
       console.warn("[Zeros] deep-link: zeros://open missing path=");
-      emitEvent("deep-link", rawUrl);
+      // `project-open-failed`, not `deep-link`: the only `deep-link` subscriber
+      // is the team-invite handler, which drops every non-invite URL — so this
+      // used to fail completely silently despite the comment below claiming a
+      // toast. Emitting a typed reason gives the renderer something to show.
+      emitEvent("project-open-failed", {
+        root: null,
+        reason: "The link didn't include a folder to open.",
+      });
       return;
     }
     try {
@@ -175,14 +191,12 @@ async function handleUrl(rawUrl: string): Promise<void> {
       emitEvent("project-changed", { root: pathParam, port });
       console.log(`[Zeros] deep-link open: spawned engine on port ${port}`);
     } catch (err) {
-      console.error(
-        `[Zeros] deep-link open failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-      // Let the renderer see the URL so it can show an error toast
-      // (better UX than a silent failure).
-      emitEvent("deep-link", rawUrl);
+      const reason = err instanceof Error ? err.message : String(err);
+      console.error(`[Zeros] deep-link open failed: ${reason}`);
+      // Typed failure so the renderer can actually toast this. The raw URL is
+      // deliberately NOT forwarded: `deep-link` has exactly one subscriber (the
+      // invite handler) which ignores non-invite URLs, so this was silent.
+      emitEvent("project-open-failed", { root: pathParam, reason });
     }
     return;
   }

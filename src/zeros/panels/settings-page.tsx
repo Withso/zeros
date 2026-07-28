@@ -1456,6 +1456,8 @@ function TerminalAgentsPanel() {
 function ExperimentalPanel() {
   const [terminalAgents, setTerminalAgents] =
     useExperimentalFeature("terminalAgents");
+  const [workInLocalMain, setWorkInLocalMain] =
+    useExperimentalFeature("workInLocalMain");
   return (
     <div className="flex flex-col gap-6">
       <p className={HINT_CLS}>
@@ -1471,6 +1473,16 @@ function ExperimentalPanel() {
             checked={terminalAgents}
             onCheckedChange={setTerminalAgents}
             aria-label="Show the Terminal Agents tab"
+          />
+        </SettingsRow>
+        <SettingsRow
+          label="Work in local main"
+          hint="Adds a main tab for each repo's primary checkout, so agents can run against it instead of a worktree."
+        >
+          <Switch
+            checked={workInLocalMain}
+            onCheckedChange={setWorkInLocalMain}
+            aria-label="Show the main workspace in the top bar"
           />
         </SettingsRow>
       </SettingsList>

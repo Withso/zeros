@@ -6,10 +6,15 @@
 // `workspace_init_repo` and `workspace_clone` IPC commands.
 //
 // We deliberately do NOT auto-create a Zeros workspace (worktree) on
-// top of the new repo here. The IPC simply produces the repoRoot;
-// the renderer registers it as a project, and the user clicks "+" to
-// create their first worktree. Keeps the responsibilities split:
-// init/clone is "make a repo", workspace_create is "make a worktree".
+// top of the new repo HERE. The IPC simply produces the repoRoot.
+// Keeps the responsibilities split: init/clone is "make a repo",
+// workspace_create is "make a worktree".
+//
+// 2026-07-28: the renderer now forks that first worktree itself, right
+// after registering the project — see openFirstWorkspace in
+// src/shell/add-project-provider.tsx. So adding a repo DOES land the
+// user in a workspace; it just isn't this layer's job to arrange, and
+// this layer stays usable for a repo that should not get one.
 
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";

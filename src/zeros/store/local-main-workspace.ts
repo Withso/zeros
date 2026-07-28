@@ -19,6 +19,14 @@
 // engine workspace id (no `ws_` prefix). Any IPC call that receives
 // this id will fail — callers should branch on `isLocalMainWorkspace()`
 // first and fall back to "no engine workspace exists for this row".
+//
+// 2026-07-28: the row is now OFFERED only behind the "Work in local
+// main" experimental flag (Settings → Experimental, off by default),
+// which gates the top bar's main tab and stops a repo switch from
+// landing on the trunk. It is still SYNTHESIZED unconditionally: the
+// resolution paths below back repo-root chats, the active-tab lookup,
+// and the delete/remove escape hatches, all of which must keep working
+// with the flag off. Gate the affordance, never the row.
 
 import type { Workspace } from "../../native/git";
 import type { Project } from "./projects-store";
