@@ -172,9 +172,29 @@ const IDENTITY_RULES = [
   // match the bare lowercase directory token used as a path glob for an
   // external worktree tool's scratch dir — tooling (the Vite watcher ignore
   // list, .gitignore) still has to name that directory to skip it. What must
-  // not appear is the product NAME in prose, comments or docs.
-  { name: "other product", src: "XGJDb25kdWN0b3JcYnxcYmNvbmR1Y3RvclwuYnVpbGRcYg==", flags: "" },
-].map((r) => ({ name: r.name, re: new RegExp(decodePattern(r.src), r.flags) }));
+  // not appear is the product NAME in prose or comments.
+  //
+  // `skip` — NOT APPLIED UNDER docs/. This is the only scoped hole in the
+  // ratchet, and this is the only rule that has one. docs/ became TRACKED on
+  // 2026-07-28; it was gitignored when this rule was written, so the original
+  // "or docs" wording meant markdown that shipped in the repo, not this journal.
+  // Part of the journal is a comparative study of the external worktree tool —
+  // the numbered pack under docs/cloud-workspace/ plus scattered prior-art notes,
+  // 480 lines that NAME it because naming it IS the content. No fixture
+  // substitution works: a euphemism still leaves files titled
+  // `…-how-conductor-does-it.md` and prose unmistakably about one product, so it
+  // would defeat the check while appearing to satisfy it — worse than a declared
+  // exception. The line-level ALLOW_IDENTITY hatch is the intended tool for
+  // "can't be fixed", but 480 markers is not a reviewable diff.
+  //
+  // Every OTHER identity rule still scans docs/ and is enforced there — handles,
+  // real name, internal email domain, machine paths, side projects. (Publishing
+  // scrubbed 61 such identifiers out of docs/, including production user UUIDs,
+  // provider subjects and OAuth client IDs.) Every SECRET rule still scans docs/
+  // and always will: secret shapes can never be suppressed. To undo this, drop
+  // the `skip` and untrack docs/cloud-workspace/ — that pack is 387 of the 480.
+  { name: "other product", src: "XGJDb25kdWN0b3JcYnxcYmNvbmR1Y3RvclwuYnVpbGRcYg==", flags: "", skip: (p) => p.startsWith("docs/") },
+].map((r) => ({ name: r.name, re: new RegExp(decodePattern(r.src), r.flags), skip: r.skip }));
 
 // ── 3. Exclusions ─────────────────────────────────────────
 //
@@ -239,6 +259,9 @@ for (const file of tracked) {
     // line is what a human actually needs to go fix it.
     if (line.includes(ALLOW_IDENTITY)) return;
     for (const rule of IDENTITY_RULES) {
+      // A path-scoped rule skips WITHOUT consuming the line, so the rules after
+      // it still get their shot at it (see the "other product" note above).
+      if (rule.skip?.(file)) continue;
       if (rule.re.test(line)) {
         identityFindings.push({ file, line: i + 1, rule: rule.name });
         break;

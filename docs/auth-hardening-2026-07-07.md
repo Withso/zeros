@@ -12,9 +12,9 @@ Three deep audits were run (one per surface), then **every "critical" finding wa
 
 After you fixed the Post-Login Action, I checked the live system:
 
-- Your token now carries `https://zeros.build/email = hi@arunrajkumar.com` + `email_verified: true` + `name` ✅
+- Your token now carries `https://zeros.build/email = jordan@example.com` + `email_verified: true` + `name` ✅
 - Railway logs flipped from **401 → 200**: `GET /v1/me 200`, `GET …/settings 200`, `POST …/secrets/resolve 200` ✅
-- The DB provisioned correctly: `hi@arunrajkumar.com` now has a user row, a personal org (`arun-raj-kumar-b3e6a8cb`), owner membership, and a "Personal" team ✅
+- The DB provisioned correctly: `jordan@example.com` now has a user row, a personal org (`jordan-lee-0a1b2c3d`), owner membership, and a "Personal" team ✅
 - The two legacy accounts are backfilled into `user_identities`, so they won't lock out ✅
 
 The single sign-in flow (no separate sign-up) is working as designed: sign in with a new provider → account + org + team created automatically.

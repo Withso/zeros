@@ -24,7 +24,7 @@ enumerable by a non-internal client.
 ## Who is internal
 
 `INTERNAL_USER_EMAILS` in `src/zeros/settings/internal-features.ts` — currently
-`arunrajkumar@withso.com`. Adding a teammate = adding one email to that array.
+`sam@example.com`. Adding a teammate = adding one email to that array.
 
 The gate compares against `useAuth().email`, which is trustworthy for this
 purpose: it is set by the **server's** handoff-redeem response after the Auth0

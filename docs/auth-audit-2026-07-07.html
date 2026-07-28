@@ -57,7 +57,7 @@
 <body><div class="wrap">
 
 <h1>Auth &amp; Onboarding Audit</h1>
-<div class="sub">2026-07-07 · why <code>hi@arunrajkumar.com</code> is in Auth0 but not in Railway · consent pages · sign-in vs sign-up</div>
+<div class="sub">2026-07-07 · why <code>jordan@example.com</code> is in Auth0 but not in Railway · consent pages · sign-in vs sign-up</div>
 
 <div class="superseded">
   <b>Superseded in part (2026-07-25):</b> "Organization" was renamed to <b>Team</b> and the nested sub-team concept was retired — one flat level now. Identifiers below (<code>organizations</code>, <code>teams</code> as a sub-table, <code>org_id</code>, <code>org-sync.ts</code>, <code>/v1/orgs</code>, "personal org + Personal team") reflect the schema as of this document's date; the auth findings themselves still stand. See <a href="teams.html">teams.html</a>.
@@ -94,10 +94,10 @@ Railway DB (frozen at the Supabase era)
 <strong>2-minute check:</strong> Auth0 dashboard → Actions → Triggers → <code>post-login</code>: is the Action in the flow and Deployed? Then sign in fresh and paste the access token into jwt.ms — does it contain <code>https://zeros.build/email</code>?</div>
 
 <h2><span class="n">4</span>Second bug: your two existing accounts will lock out <em>after</em> the fix</h2>
-<p>The <code>user_identities</code> table (links <code>github|248166764</code> → user row) is empty — both existing users predate it. The backend treats “unknown identity + email already exists” as a takeover attempt → <span class="pill bad">409 rejected</span> on every call. So post-fix: <code>hi@</code> provisions fine (new email), but <code>arunrajkumar@withso.com</code> and <code>work.arunrk@gmail.com</code> get locked out of the control plane. One-time backfill:</p>
+<p>The <code>user_identities</code> table (links <code>github|000000000</code> → user row) is empty — both existing users predate it. The backend treats “unknown identity + email already exists” as a takeover attempt → <span class="pill bad">409 rejected</span> on every call. So post-fix: <code>hi@</code> provisions fine (new email), but <code>sam@example.com</code> and <code>sam.rivera@example.net</code> get locked out of the control plane. One-time backfill:</p>
 <pre><code>INSERT INTO user_identities (user_id, provider, provider_sub) VALUES
-  ('ba944492-…24df1', 'auth0', 'github|248166764'),                       -- arunrajkumar@withso.com
-  ('bffc86ae-…05caa', 'auth0', 'google-oauth2|103217141964723060902');    -- work.arunrk@gmail.com</code></pre>
+  ('00000000-…00000', 'auth0', 'github|000000000'),                       -- sam@example.com
+  ('11111111-…11111', 'auth0', 'google-oauth2|111111111');    -- sam.rivera@example.net</code></pre>
 
 <h2><span class="n">5</span>Consent pages — normal, nothing to configure</h2>
 <ul>
@@ -105,7 +105,7 @@ Railway DB (frozen at the Supabase era)
   <li>Providers ask consent <strong>once per (account × app), ever</strong> — then silently approve forever.</li>
   <li>Your <code>hi@</code> GitHub identity shows <strong>6 logins</strong> in Auth0 — today wasn't its first authorization. Consent appeared at its true first login (earlier testing) and never again; with an active GitHub browser session the redirect completes in under a second.</li>
   <li><strong>Google will ask consent</strong> the first time a brand-new Google account signs in — account picker + “wants access to your email &amp; profile” — then never again.</li>
-  <li>Traced the live redirect chain: both connections use <strong>your own OAuth apps</strong> (GitHub <code>Ov23lifL4xGz0htMLzzG</code>, Google <code>919452609237-…</code>) — <em>not</em> Auth0 dev keys. The Google page brands as your app, not “auth0.com”. The 06-Jul dev-keys concern is resolved.</li>
+  <li>Traced the live redirect chain: both connections use <strong>your own OAuth apps</strong> (GitHub <code>Ov000000000000000000</code>, Google <code>000000000000-…</code>) — <em>not</em> Auth0 dev keys. The Google page brands as your app, not “auth0.com”. The 06-Jul dev-keys concern is resolved.</li>
 </ul>
 
 <h2><span class="n">6</span>Sign in vs sign up</h2>

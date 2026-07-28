@@ -2,7 +2,7 @@
 
 > **Superseded in part (2026-07-25):** "Organization" was renamed to **Team** and the nested sub-team concept was retired — one flat level now. Identifiers below (`organizations`, `teams` as a sub-table, `org_id`, `org-sync.ts`, `/v1/orgs`, "personal org + Personal team") reflect the schema as of this document's date; the auth findings themselves still stand. See [teams.md](teams.md).
 
-**Trigger:** `hi@arunrajkumar.com` signed in with GitHub, appears in Auth0's user list, but never appeared in the Railway database. Also: no GitHub consent page on what looked like a first sign-in.
+**Trigger:** `jordan@example.com` signed in with GitHub, appears in Auth0's user list, but never appeared in the Railway database. Also: no GitHub consent page on what looked like a first sign-in.
 
 **TL;DR:** Sign-in itself works. The broken link is **app → Railway control plane**: every single API call from the Mac app to `api.zeros.build` since the Auth0 migration has been rejected with **401 Unauthorized** — including 11+ calls during this morning's test session — and the app silently swallows the error. Users are created in the Railway DB *by that first API call*, so no rejected call = no user row. Consent-page behavior is normal and needs no configuration. The single sign-in flow (no separate sign-up) is correct by design.
 
@@ -19,7 +19,7 @@ There are two different records of a user, created at different moments:
 
 The full journey: **Sign in on app.zeros.build → Auth0 confirms identity (user appears in Auth0) → "Launch Zeros" hands tokens to the Mac app → the app immediately calls `/v1/me` → Railway backend verifies the token and creates user + personal org + Personal team in one transaction.**
 
-`hi@arunrajkumar.com` completed every step except the last one — the backend rejected the token.
+`jordan@example.com` completed every step except the last one — the backend rejected the token.
 
 ## 2. The evidence
 
@@ -33,7 +33,7 @@ Railway HTTP logs for the `zeros` service (entire retained window):
 
 The database confirms it — frozen at the Supabase era:
 
-- `users`: only `arunrajkumar@withso.com` + `work.arunrk@gmail.com`, both created **2026-07-04** (pre-Auth0-migration)
+- `users`: only `sam@example.com` + `sam.rivera@example.net`, both created **2026-07-04** (pre-Auth0-migration)
 - `audit_log`: last entry **2026-07-04 13:09** — nothing since
 - `user_identities`: **completely empty** (this matters — see §4)
 
@@ -59,19 +59,19 @@ A token WAS verified as correct in jwt.ms on 2026-07-06 — but a fresh sign-in 
 
 ## 4. Second bug found: the two existing accounts will lock out AFTER the fix
 
-The backend links logins to users via the `user_identities` table (`github|248166764` → user row). That table is **empty** — the two existing users predate it.
+The backend links logins to users via the `user_identities` table (`github|000000000` → user row). That table is **empty** — the two existing users predate it.
 
 Current logic (`backend/src/auth.ts` `ensureUser`): unknown identity + email already exists → **409 "account exists from a different sign-in method"** (a deliberate anti-takeover guard). So once tokens verify again:
 
-- `hi@arunrajkumar.com` → fine (new email, gets user + org + team)
-- `arunrajkumar@withso.com` and `work.arunrk@gmail.com` → **rejected on every call**
+- `jordan@example.com` → fine (new email, gets user + org + team)
+- `sam@example.com` and `sam.rivera@example.net` → **rejected on every call**
 
 One-time backfill fix (subs taken from the Auth0 Users screen):
 
 ```sql
 INSERT INTO user_identities (user_id, provider, provider_sub) VALUES
-  ('ba944492-5599-4f2f-8aa0-6ece76a24df1', 'auth0', 'github|248166764'),          -- arunrajkumar@withso.com
-  ('bffc86ae-e852-4294-b954-2f396d205caa', 'auth0', 'google-oauth2|103217141964723060902'); -- work.arunrk@gmail.com
+  ('00000000-0000-0000-0000-000000000000', 'auth0', 'github|000000000'),          -- sam@example.com
+  ('11111111-1111-1111-1111-111111111111', 'auth0', 'google-oauth2|111111111'); -- sam.rivera@example.net
 ```
 
 ## 5. Consent pages — nothing is wrong, nothing to configure
@@ -80,7 +80,7 @@ INSERT INTO user_identities (user_id, provider, provider_sub) VALUES
 - Providers show consent **once per (account × OAuth app), ever** — the first-ever authorization — then silently approve forever.
 - Why you saw none for `hi@`: that GitHub identity shows **6 logins** in Auth0 — today was not its first authorization. Consent appeared at its true first login (earlier testing) and never again. If the browser is already logged into GitHub, the redirect completes in under a second — it feels like "nothing happened."
 - **Google will show consent** (account picker + "wants access to your email & profile") the first time a *new* Google account signs in — then never again.
-- Verified live by tracing the real sign-in redirect chain: both connections use **your own OAuth apps** (GitHub client `Ov23lifL4xGz0htMLzzG`, Google client `919452609237-….apps.googleusercontent.com`) — **not** Auth0 developer keys. So the Google page brands as your app, not "auth0.com". The earlier dev-keys concern from the 07-06 audit is resolved.
+- Verified live by tracing the real sign-in redirect chain: both connections use **your own OAuth apps** (GitHub client `Ov000000000000000000`, Google client `000000000000-….apps.googleusercontent.com`) — **not** Auth0 developer keys. So the Google page brands as your app, not "auth0.com". The earlier dev-keys concern from the 07-06 audit is resolved.
 
 ## 6. Sign in vs sign up
 

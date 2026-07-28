@@ -193,7 +193,7 @@ Status-today values used below: **already-in-CI**, **script-exists-unwired** (a 
   1. Fold `packages/**` and `website/marketing/**` into the **changed-files Prettier gate** (`format-check-changed`, via its `packages/**` glob) — already covers style/format drift.
   2. For type safety, rely on `typecheck-packages` (each package's own `tsc`), which catches far more than lint.
 - **Covers:** Style/format drift in shared protocol/crypto and the marketing site (no check touches them today). The prettier half is **already subsumed** by `format-check-changed`; the genuinely valuable adjacent check is the per-package typecheck above.
-- **Note:** `website/web-app` is an empty scaffold (README + static HTML, no `package.json`) — nothing to lint; do not gate it. Excludes `apps/0colors` per instruction.
+- **Note:** `website/web-app` is an empty scaffold (README + static HTML, no `package.json`) — nothing to lint; do not gate it. Excludes `apps/example` per instruction.
 
 ---
 
@@ -223,7 +223,7 @@ Status-today values used below: **already-in-CI**, **script-exists-unwired** (a 
 
 #### `format-check` — whole-tree Prettier (deferred)
 - **Tier:** 🟡 ADVISORY (until baselined) · **Priority:** P2 · **Status:** missing
-- **Command:** New `"format:check": "prettier --check ."` (+ `"format": "prettier --write ."` + a new `.prettierignore` containing `dist*`, `binaries`, `node_modules`, `dist-engine`, `*.0c`, `pnpm-lock.yaml`, `apps/0colors`).
+- **Command:** New `"format:check": "prettier --check ."` (+ `"format": "prettier --write ."` + a new `.prettierignore` containing `dist*`, `binaries`, `node_modules`, `dist-engine`, `*.0c`, `pnpm-lock.yaml`, `apps/example`).
 - **Should do:** Verify every committed file matches Prettier's canonical formatting.
 - **Does / will do:** Same coverage as `format-check-changed` but whole-tree.
 - **Covers:** All formatting drift at once.
@@ -283,9 +283,9 @@ Status-today values used below: **already-in-CI**, **script-exists-unwired** (a 
 - **Command:** **BLOCKED until an auth test-mode exists.** Sequence: (1) add a guarded test-only bypass to `src/zeros/auth/auth-gate.tsx` (e.g. an injected `ZEROS_E2E`/main-process flag rendering the shell with a stub session) — none exists today (grep for `ZEROS_E2E`/`SKIP_AUTH`/`TEST_MODE` = zero hits); (2) then `e2e/app-launch.spec.ts` using `@playwright/test` `_electron.launch` against `dist-electron/main.cjs` (after `build:sidecar` + `electron:compile` + `build:ui`); (3) on a SEPARATE scheduled `macos-latest` job. `pnpm exec playwright test e2e/` once harness + bypass exist.
 - **Should do:** Boot the real app once; assert the window renders and the engine comes online.
 - **Does / will do:** Catches the blank-renderer / "Waiting for engine" / preload-bridge-broken total-launch failures unit tests can never see (hooks-order crash, `exposeInMainWorld` break, engine respawn loop).
-- **Covers:** "Does it open" — the floor for a desktop app, currently unguarded (`@playwright/test` is a devDep but every e2e spec lives under the excluded `apps/0colors`).
+- **Covers:** "Does it open" — the floor for a desktop app, currently unguarded (`@playwright/test` is a devDep but every e2e spec lives under the excluded `apps/example`).
 - **Runtime:** ~1–2 min on macOS. · **Secrets:** none for a no-auth boot, but the mandatory-login wall blocks reaching the main window without the bypass.
-- **Caveats:** Electron E2E is the flakiest tier; needs macOS runners (CI is ubuntu) + the heaviest build path. `feasible = false` until the auth bypass product code is written; revisit as P2 after. Never per-PR; never touch `apps/0colors`.
+- **Caveats:** Electron E2E is the flakiest tier; needs macOS runners (CI is ubuntu) + the heaviest build path. `feasible = false` until the auth bypass product code is written; revisit as P2 after. Never per-PR; never touch `apps/example`.
 - **conductor.build:** `vercel-sandbox-smoke`.
 
 #### `renderer-emit-no-pii-contract` — analytics scrub call-site guard
@@ -465,7 +465,7 @@ Status-today values used below: **already-in-CI**, **script-exists-unwired** (a 
 - **Does / will do:** Catches a malformed `providers-v1.json` (only `models-v1` is strictly verified today), a settings default TOML the engine fails to parse at boot, a corrupt published settings JSON-schema, or an invalid `electron-builder.yml`/`wrangler.jsonc` — each hand-edited with no compiler, several loaded at startup so a break is a launch failure.
 - **Covers:** The hand-maintained (not codegen) files; a trailing comma in one is a silent runtime break.
 - **Runtime:** <2s (inside the existing suite). · **Secrets:** none.
-- **Caveat:** `providers-v1` validates clean today, so the gate goes green now and only fails on future regressions. Use the correct parser per format (JSONC for wrangler, YAML for builder, TOML for settings). Overlaps slightly with `check-settings-schema-drift` (that checks DRIFT; this checks VALIDITY). Do NOT touch `apps/0colors`.
+- **Caveat:** `providers-v1` validates clean today, so the gate goes green now and only fails on future regressions. Use the correct parser per format (JSONC for wrangler, YAML for builder, TOML for settings). Overlaps slightly with `check-settings-schema-drift` (that checks DRIFT; this checks VALIDITY). Do NOT touch `apps/example`.
 - **conductor.build:** `check-catalog`.
 
 #### `wire-protocol-compat-guard` — PROTOCOL_VERSION bump reminder
@@ -486,12 +486,12 @@ Status-today values used below: **already-in-CI**, **script-exists-unwired** (a 
 
 #### `secret-scan-gitleaks` — source secret scan (PR diff)
 - **Tier:** 🔴 BLOCKING · **Priority:** P1 · **Status:** missing
-- **Command:** `gitleaks/gitleaks-action@v2` (pinned) in a new `.github/workflows/security.yml` (PR + push), with a committed `.gitleaks.toml` whose `[allowlist]` **EXCLUDES `apps/0colors`** (and `node_modules`, `*.example`, `pnpm-lock.yaml`). Custom rules tuned for this repo: `phx_`/`phc_` (PostHog), `sb_secret_` (Supabase service key), `sk-ant-`/`sk-` (Anthropic/OpenAI), `ghp_`/`gho_`/`github_pat_` (GitHub PAT), `AKIA` (AWS).
+- **Command:** `gitleaks/gitleaks-action@v2` (pinned) in a new `.github/workflows/security.yml` (PR + push), with a committed `.gitleaks.toml` whose `[allowlist]` **EXCLUDES `apps/example`** (and `node_modules`, `*.example`, `pnpm-lock.yaml`). Custom rules tuned for this repo: `phx_`/`phc_` (PostHog), `sb_secret_` (Supabase service key), `sk-ant-`/`sk-` (Anthropic/OpenAI), `ghp_`/`gho_`/`github_pat_` (GitHub PAT), `AKIA` (AWS).
 - **Should do:** Scan the PR diff for committed secrets.
 - **Does / will do:** Stops a real, present risk: `POSTHOG_PERSONAL_API_KEY` (`phx_` read/write) or any `sb_secret_`/provider key getting git-committed. `.env` is gitignored, but a dev/agent can `git add -f .env`, paste a key into a tracked file, or hardcode one.
 - **Covers:** A desktop bundle ships to every user's machine; a leaked read/write PostHog or Supabase key in git history is account-takeover-grade and permanent.
 - **Runtime:** 10–20s. · **Secrets:** none (`GITHUB_TOKEN` only; free; fork-safe).
-- **Caveat (medium confidence — get the allowlist right):** A repo-wide scan is RED/noisy on **`apps/0colors`** (the one surface the user said to skip) — `git grep` for `sk-*`/JWT/`PRIVATE KEY` matched ONLY `apps/0colors/.../supabase/info.tsx` + a 0colors doc. The `.gitleaks.toml` MUST allowlist `apps/0colors` or first run fails on excluded code. `.env.example` placeholders + a `ghp_xxxx` placeholder in `github-section.tsx` must be allowlisted too. Use the pinned Action (gitleaks is NOT installed locally; the `dir`/`detect` subcommand form is version-dependent — the Action abstracts it).
+- **Caveat (medium confidence — get the allowlist right):** A repo-wide scan is RED/noisy on **`apps/example`** (the one surface the user said to skip) — `git grep` for `sk-*`/JWT/`PRIVATE KEY` matched ONLY `apps/example/.../supabase/info.tsx` + a example doc. The `.gitleaks.toml` MUST allowlist `apps/example` or first run fails on excluded code. `.env.example` placeholders + a `ghp_xxxx` placeholder in `github-section.tsx` must be allowlisted too. Use the pinned Action (gitleaks is NOT installed locally; the `dir`/`detect` subcommand form is version-dependent — the Action abstracts it).
 - **conductor.build:** none (closest is their AI reviews).
 
 #### `secret-scan-history-scheduled` — full git-history scan
@@ -629,7 +629,7 @@ Status-today values used below: **already-in-CI**, **script-exists-unwired** (a 
 - **Does / will do:** Catches a broken migration (bad SQL, dropped-object reference, RLS/policy mistake) before `supabase db push` touches the live auth DB.
 - **Covers:** A failed push could lock users out of sign-in.
 - **Runtime:** ~60–120s (boots a Postgres container; only on supabase/** changes). · **Secrets:** none for the local dry-run.
-- **Caveat:** Real prerequisites — NO `supabase/config.toml` committed (`supabase init` required first), the CLI is not on the runner, and `supabase db start` needs Docker-in-CI. A lot of infra for 2 rarely-touched files; the 80% value (naming + forward-only + ordering) is delivered by the guard above with zero Docker. The `.temp/project-ref` pointing at the old project (`qvayepdjxvkdeiczjzfj`) is irrelevant to a LOCAL ephemeral dry-run (no push/credentials). Advisory + changed-paths-gated; revisit as blocking only if the Supabase schema starts changing frequently.
+- **Caveat:** Real prerequisites — NO `supabase/config.toml` committed (`supabase init` required first), the CLI is not on the runner, and `supabase db start` needs Docker-in-CI. A lot of infra for 2 rarely-touched files; the 80% value (naming + forward-only + ordering) is delivered by the guard above with zero Docker. The `.temp/project-ref` pointing at the old project (`examplerefexampleref`) is irrelevant to a LOCAL ephemeral dry-run (no push/credentials). Advisory + changed-paths-gated; revisit as blocking only if the Supabase schema starts changing frequently.
 - **conductor.build:** `postgres-migration-guard`.
 
 ---
@@ -638,7 +638,7 @@ Status-today values used below: **already-in-CI**, **script-exists-unwired** (a 
 
 #### `branch-protection-required-checks` — the keystone
 - **Tier:** 🔴 BLOCKING (config, not a job) · **Priority:** P0 · **Status:** missing
-- **Command:** GitHub Settings → Branches → ruleset on `main` (or `gh api -X PUT repos/iamarunrk/zeros/branches/main/protection ...`). Mark Required: **`Vitest suite`** (test.yml job `test`) **today**, and add each new check (`typecheck`, `lint`, `build-main`, `build-sidecar`, `check:ui`, `check:cursor-asar`) as it is wired green. Enable "Require a pull request before merging", "Require status checks to pass", "Require branches to be up to date".
+- **Command:** GitHub Settings → Branches → ruleset on `main` (or `gh api -X PUT repos/acme/zeros/branches/main/protection ...`). Mark Required: **`Vitest suite`** (test.yml job `test`) **today**, and add each new check (`typecheck`, `lint`, `build-main`, `build-sidecar`, `check:ui`, `check:cursor-asar`) as it is wired green. Enable "Require a pull request before merging", "Require status checks to pass", "Require branches to be up to date".
 - **Should do:** Turn the green workflows from advisory annotations into hard merge gates; activate `CODEOWNERS` for the closed-contract paths.
 - **Does / will do:** Without this, **every other check in this audit is purely advisory** — a red CI run or an unreviewed change to a closed wire-contract can still merge. The single highest-leverage, zero-code change here.
 - **Covers:** A red suite or a contract-breaking change reaching `main` (= shipped).
@@ -751,7 +751,7 @@ A short checklist you can execute next, in order:
 4. **Run `pnpm schemas:build` and commit the regenerated `website/marketing/public/schemas/*.json`** (they are drifted today), then add `check-settings-schema-drift`.
 5. **Add the migration safety tests** — `sqlite-migration-upgrade-path-test` + `sqlite-migration-fresh-to-head-test` assertions into `db.test.ts`, and the `sqlite-migration-forward-only-guard` script.
 6. **Wire `check:cursor-asar` into the per-PR gate** (passes today; closes a silent DMG-bricking regression).
-7. **Add the new jobs to `preflight.yml`/`test.yml`:** `typecheck` (3 steps), `lint`, `format-check-changed`, `build-renderer`, `build-engine-bundle`, `build-electron-main`, `build-sidecar-binary`, `secret-scan-gitleaks` (+ `.gitleaks.toml` allowlisting `apps/0colors`).
+7. **Add the new jobs to `preflight.yml`/`test.yml`:** `typecheck` (3 steps), `lint`, `format-check-changed`, `build-renderer`, `build-engine-bundle`, `build-electron-main`, `build-sidecar-binary`, `secret-scan-gitleaks` (+ `.gitleaks.toml` allowlisting `apps/example`).
 8. **Add the `LICENSE` file** + `check-license-present` (defect that exists right now).
 9. **Turn on branch protection** (`branch-protection-required-checks`) requiring only `Vitest suite` at first, then add each P0 check as it goes green. Allow admin bypass.
 
@@ -783,7 +783,7 @@ On `main`, mark these as **Required status checks** (add each only after it is w
 - `sqlite-migration-forward-only-guard`, `supabase-migration-naming-monotonic-guard`
 - `actionlint` (workflow-path PRs)
 
-**Other settings:** Require a pull request before merging · Require branches to be up to date · **allow admin bypass** (solo dev needs an escape hatch for flakes/hotfixes) · **do NOT** enable "Require review from Code Owners" globally (single-person `CODEOWNERS` would block your own PRs). Scope CODEOWNERS review (if any) to the closed-contract paths only: `src/zeros/bridge/agent-events.ts`, the adapter registry, `catalogs/`. `CODEOWNERS` already exists (catch-all `@iamarunrk` + closed paths); its own header notes it is inert until "Require review from Code Owners" is on.
+**Other settings:** Require a pull request before merging · Require branches to be up to date · **allow admin bypass** (solo dev needs an escape hatch for flakes/hotfixes) · **do NOT** enable "Require review from Code Owners" globally (single-person `CODEOWNERS` would block your own PRs). Scope CODEOWNERS review (if any) to the closed-contract paths only: `src/zeros/bridge/agent-events.ts`, the adapter registry, `catalogs/`. `CODEOWNERS` already exists (catch-all `@jordan` + closed paths); its own header notes it is inert until "Require review from Code Owners" is on.
 
 ---
 
@@ -826,7 +826,7 @@ On `main`, mark these as **Required status checks** (add each only after it is w
 | **`lint-strict-no-warnings`**, **whole-tree `format-check`**, **`check-ui-tokens` blocking** | Deferred to P2 — each requires baselining the tree (fix warnings / `prettier --write .` / allowlist 7 token files) before it can block without failing every PR. |
 | **`dep-audit-high`** | Likely redundant once Dependabot is enabled; keep advisory or drop to avoid ignore-list maintenance. |
 | **`pinned-action-shas`**, **bespoke `ci-job-template` grep guard** | Net-negative for a 2-workflow repo using only first-party actions; record conventions in a doc, enforce via actionlint. |
-| **`apps/0colors`** | **Excluded from ALL checks** per explicit instruction (own npm-workspaces setup, pending retirement, outside `pnpm-workspace.yaml`). Every guard/scan/build/lint above scopes it out (notably the `.gitleaks.toml` allowlist — it is the one surface with placeholder secrets). |
+| **`apps/example`** | **Excluded from ALL checks** per explicit instruction (own npm-workspaces setup, pending retirement, outside `pnpm-workspace.yaml`). Every guard/scan/build/lint above scopes it out (notably the `.gitleaks.toml` allowlist — it is the one surface with placeholder secrets). |
 
 ---
 

@@ -10,7 +10,7 @@
 > **🎨⚙️ UI + Backend** = needs both layers.
 > The fastest way to see all UI work is the **"UI" column in §10** and the consolidated **§10.1 UI work index**. Tags also appear inline on the §1 headline recommendations, the §12 roadmap, and the "Fix:" callouts in §3–§9.
 >
-> All line numbers were captured against the current working tree on `iamarunrk/electron-rebuild-abi-fix` **after** the commit-bar removal. The Source panel gained an **"All Files"** sub-tab as its new default since the original survey, so a few cited lines in `changes-tab.tsx` drift by ~10–60 lines from earlier notes — the *code paths* are unchanged. Where this matters, the current line is given.
+> All line numbers were captured against the current working tree on `jordan/electron-rebuild-abi-fix` **after** the commit-bar removal. The Source panel gained an **"All Files"** sub-tab as its new default since the original survey, so a few cited lines in `changes-tab.tsx` drift by ~10–60 lines from earlier notes — the *code paths* are unchanged. Where this matters, the current line is given.
 
 ---
 
@@ -664,7 +664,7 @@ The Source tab's backend is genuinely strong — hardened `runGit`, a complete g
 
 ## 13. REDESIGN DIRECTION (2026-06-19, evening) — list-only Changes · row-1 diff viewer · agent-driven PR
 
-> **Authoritative plan.** Captures three user-requested changes that re-shape the Changes and Review views. It **redesigns** the inline-diff-pane *location* (§4 → diffs move to row 1) and **re-sequences** the Review PR surface (§5 → a pre-PR create form + a redesigned post-PR review view), and re-presents several §10 gaps (map in §13.8). §1–§12 stay as the current-state *why*; §13 is the *what to build*. Tags: 🎨 UI · ⚙️ backend · 🎨⚙️ both. All line refs verified against the working tree on `iamarunrk/austin`.
+> **Authoritative plan.** Captures three user-requested changes that re-shape the Changes and Review views. It **redesigns** the inline-diff-pane *location* (§4 → diffs move to row 1) and **re-sequences** the Review PR surface (§5 → a pre-PR create form + a redesigned post-PR review view), and re-presents several §10 gaps (map in §13.8). §1–§12 stay as the current-state *why*; §13 is the *what to build*. Tags: 🎨 UI · ⚙️ backend · 🎨⚙️ both. All line refs verified against the working tree on `jordan/austin`.
 >
 > **🔒 Nothing is cut.** This redesign changes the Source tab's **UI/UX approach and sequencing** — it **preserves every capability** in §1–§12. Features that look "removed" in the screenshots are **relocated or re-sequenced**, never dropped: the diff viewer **moves to row 1** (§13.3); the full PR review surface (checks/CI, commits, reviews, merge) **re-appears after the PR is created** (§13.4 **Phase B**). §10 items are **preserved and re-presented** (§13.8). Implementation is **step-by-step and non-destructive** — each existing feature gets its new presentation before any old surface is retired.
 

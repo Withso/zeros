@@ -18,7 +18,7 @@
 
 ## Why this exists
 
-`iamarunrk/zeros` is a **private** repo. GitHub serves private release assets only
+`acme/zeros` is a **private** repo. GitHub serves private release assets only
 to authenticated clients, so the installed app's auto-updater (anonymous) got
 HTTP 404 on `latest-mac.yml` and every check failed with "Couldn't check for
 updates" — for **every** user, on **every** version. The website Download
@@ -148,7 +148,7 @@ main would fail its Alpha release job. Do it in this order:
    immediately (from a machine with `gh` + repo access):
 
    ```bash
-   gh release download v0.0.9 --repo iamarunrk/zeros -D /tmp/zeros-v0.0.9
+   gh release download v0.0.9 --repo acme/zeros -D /tmp/zeros-v0.0.9
    cd /tmp/zeros-v0.0.9
    export AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… AWS_DEFAULT_REGION=auto
    export AWS_REQUEST_CHECKSUM_CALCULATION=when_required

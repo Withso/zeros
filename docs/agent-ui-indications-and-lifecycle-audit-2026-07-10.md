@@ -130,7 +130,7 @@ All flows below were re-verified this session; each has automated coverage (819+
 
 ---
 
-## 7. Fixes shipped in this pass (2026-07-10, branch `iamarunrk/bern`)
+## 7. Fixes shipped in this pass (2026-07-10, branch `jordan/bern`)
 
 1. Prompt-stage failures no longer toast — Type 2 pill owns them (no double indication). `agent-chat.tsx`
 2. Toast copy simplified: `"<Agent>: <short label>"`, no technical description (except actionable auth). Detail → `console.warn`. `agent-chat.tsx`
@@ -151,7 +151,7 @@ All flows below were re-verified this session; each has automated coverage (819+
 Prerequisite for every scenario: run the dev app from this workspace's Mac mirror (the only checkout with today's code):
 
 ```bash
-cd /Users/arunrajkumar/conductor/remote-workspace-sync/Zeros/78e09b32-94d0-4c8b-bdc7-f7e6e27e3cf1
+cd /Users/dev/conductor/remote-workspace-sync/Zeros/00000000-0000-0000-0000-000000000000
 pnpm electron:dev
 ```
 

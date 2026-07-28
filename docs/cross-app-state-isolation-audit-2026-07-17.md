@@ -28,12 +28,12 @@ First hypothesis was localStorage/IndexedDB. **That was not the mechanism.**
 The actions were found on disk in the target repo itself:
 
 ```
-/Users/arunrajkumar/Documents/0kit/.zeros/settings.local.toml
+/Users/dev/Projects/example/.zeros/settings.local.toml
   [scripts]
   run_actions = [{ id=…, name="Run", … }, { id=…, name="Testing", … }]
 ```
 
-Every Zeros install on the machine that opens `0kit` reads that same file, so
+Every Zeros install on the machine that opens `example` reads that same file, so
 "personal" repo settings were effectively machine-global. Final resolution:
 that sharing is intended for repo settings, and scripts now live in the
 COMMITTED `settings.toml` (see the decision update above). Everything else

@@ -1,6 +1,6 @@
 # Turns + “Reset to this point” — Research, Analysis & Implementation Plan
 
-_2026-06-24. Author: research pass over the Zeros codebase + comparable tools (Cline, Cursor, Aider, jujutsu). Began as a design/plan; the feature was then **built and hardened** on branch `iamarunrk/active-tab-file-open`. See “Implementation status” (below), plus **§11 UI changes shipped** and **§12 Test plan** for the as-built state. Last updated 2026-06-25._
+_2026-06-24. Author: research pass over the Zeros codebase + comparable tools (Cline, Cursor, Aider, jujutsu). Began as a design/plan; the feature was then **built and hardened** on branch `jordan/active-tab-file-open`. See “Implementation status” (below), plus **§11 UI changes shipped** and **§12 Test plan** for the as-built state. Last updated 2026-06-25._
 
 ---
 
@@ -285,7 +285,7 @@ Live behavior: footer appears once the turn settles; while streaming, the timer 
 
 ## 11. UI changes shipped (renderer) — what the user sees
 
-Everything below is live on `iamarunrk/active-tab-file-open` (file map in parentheses).
+Everything below is live on `jordan/active-tab-file-open` (file map in parentheses).
 
 ### 11.1 Per-turn footer
 Rendered under every **settled** answer, INSIDE `TurnEventList`'s 768px lane so it hugs the answer (`src/zeros/agent/turn-footer.tsx`, mounted via `turn-event-list.tsx` ← `agent-chat.tsx`). Left→right:
@@ -320,7 +320,7 @@ A new `diffScope:"turn"` (+ `turnChatId`/`turnId`) threaded through `column3-tab
 Manual acceptance from the user's seat + the automated coverage backing it. A "git workspace" = a normal worktree chat; a "non-git folder" = a chat whose cwd isn't a work tree.
 
 ### 12.0 Setup
-- App built from `iamarunrk/active-tab-file-open`; a repo with a worktree workspace; at least one chat each on **Claude**, **Codex**, and **Cursor** (attribution differs per adapter).
+- App built from `jordan/active-tab-file-open`; a repo with a worktree workspace; at least one chat each on **Claude**, **Codex**, and **Cursor** (attribution differs per adapter).
 - Handy: `git -C <worktree> for-each-ref refs/zeros/` to watch snapshot refs; inspect `zeros.db` `turns` / `chat_messages` / `reset_undo` tables.
 
 ### 12.1 Footer basics — "what did this turn do?"
