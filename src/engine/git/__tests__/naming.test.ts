@@ -1,8 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
-  generateBranchName,
+  branchDisplayName,
+  colourDictionary,
   generateWorkspaceId,
   isValidBranchName,
+  pickFreeColourName,
 } from "../naming";
 
 describe("naming", () => {
@@ -24,9 +26,9 @@ describe("naming", () => {
       expect(id.length).toBeLessThanOrEqual(60);
     });
 
-    it("falls back to a flower name for empty hints (follow-up D)", () => {
+    it("falls back to a colour name for empty hints", () => {
       const id = generateWorkspaceId("");
-      // Single flower word, no adjective+noun pair.
+      // Lowercased: the workspace id is a path component, not a display name.
       expect(id).toMatch(/^ws_[0-9a-f]{6}-[a-z]+$/);
     });
 
@@ -45,44 +47,105 @@ describe("naming", () => {
     });
   });
 
-  describe("generateBranchName", () => {
-    it("matches zeros/<flower>-<hex> (follow-up D)", () => {
-      const name = generateBranchName();
-      expect(name).toMatch(/^zeros\/[a-z]+-[0-9a-f]{4}$/);
+  describe("pickFreeColourName", () => {
+    it("returns a bare capitalized colour when nothing is used", () => {
+      const name = pickFreeColourName([]);
+      expect(name).toMatch(/^[A-Z][a-z]{2,15}$/);
+      expect(new Set(colourDictionary()).has(name!)).toBe(true);
     });
 
-    it("only picks names from the curated flower dictionary", async () => {
-      const { flowerDictionary } = await import("../naming");
-      const flowers = new Set(flowerDictionary());
-      for (let i = 0; i < 200; i++) {
-        const name = generateBranchName();
-        const m = name.match(/^zeros\/([a-z]+)-[0-9a-f]{4}$/);
-        expect(m).not.toBeNull();
-        expect(flowers.has(m![1])).toBe(true);
+    it("never returns a name already in use", () => {
+      const all = colourDictionary();
+      const used = all.slice(0, 349);
+      // Exactly one name left: it must pick that one, every time.
+      for (let i = 0; i < 50; i++) {
+        expect(pickFreeColourName(used)).toBe(all[349]);
       }
     });
 
-    it("produces low collision rate over 1000 calls", () => {
-      const seen = new Set<string>();
-      for (let i = 0; i < 1000; i++) {
-        seen.add(generateBranchName());
-      }
-      // ~250 flowers × 65k hex tails = ~16M unique combinations.
-      // 1000 samples should collide essentially never. 0.1% slack for
-      // flake-resistance on small dictionaries.
-      expect(seen.size).toBeGreaterThanOrEqual(999);
+    it("treats used names case-insensitively", () => {
+      // macOS folds case and git loose refs are files, so "cream" claims
+      // "Cream". Feed the whole dictionary lowercased: nothing is free, so it
+      // must fall through to the -v1 round rather than re-hand out a base name.
+      const lowered = colourDictionary().map((c) => c.toLowerCase());
+      const name = pickFreeColourName(lowered);
+      expect(name).toMatch(/^[A-Z][a-z]{2,15}-v1$/);
     });
 
-    it("flower dictionary has at least 200 entries and is alphabetized", async () => {
-      const { flowerDictionary } = await import("../naming");
-      const flowers = flowerDictionary();
-      expect(flowers.length).toBeGreaterThanOrEqual(200);
-      // All entries are valid branch slugs (a-z, 3-12 chars).
-      for (const f of flowers) {
-        expect(f).toMatch(/^[a-z]{3,12}$/);
+    it("only falls back to -vN once every base colour is taken", () => {
+      const all = colourDictionary();
+      // One base name free → no suffix, even though 349 are gone.
+      expect(pickFreeColourName(all.slice(0, 349))).toBe(all[349]);
+      // All gone → -v1.
+      expect(pickFreeColourName(all)).toMatch(/-v1$/);
+      // -v1 round also gone → -v2.
+      const withV1 = [...all, ...all.map((c) => `${c}-v1`)];
+      expect(pickFreeColourName(withV1)).toMatch(/-v2$/);
+    });
+
+    it("returns null only when the suffix rounds are exhausted", () => {
+      const all = colourDictionary();
+      const used = [...all];
+      for (let round = 1; round <= 100; round++) {
+        for (const c of all) used.push(`${c}-v${round}`);
       }
-      // No duplicates.
-      expect(new Set(flowers).size).toBe(flowers.length);
+      expect(pickFreeColourName(used)).toBeNull();
+    });
+
+    it("does not hand out names in alphabetical order", () => {
+      // Successive workspaces marching "Absinthe, Alabaster, Alizarin" would
+      // read as a counter and make two workspaces easy to confuse.
+      const picks = Array.from({ length: 40 }, () => pickFreeColourName([]));
+      const sorted = [...picks].sort();
+      expect(picks).not.toEqual(sorted);
+    });
+
+    it("every allocated name is a valid branch name", () => {
+      for (const c of colourDictionary()) {
+        expect(isValidBranchName(c)).toBe(true);
+        expect(isValidBranchName(`${c}-v3`)).toBe(true);
+      }
+    });
+  });
+
+  describe("colour dictionary", () => {
+    it("has exactly 350 entries", () => {
+      expect(colourDictionary().length).toBe(350);
+    });
+
+    it("is single capitalized words, alphabetized, no duplicates", () => {
+      const colours = colourDictionary();
+      for (const c of colours) {
+        // No spaces or hyphens: the name becomes a branch AND a directory.
+        expect(c).toMatch(/^[A-Z][a-z]{2,15}$/);
+      }
+      expect(new Set(colours).size).toBe(colours.length);
+      expect([...colours].sort()).toEqual([...colours]);
+    });
+
+    it("is unique under case folding", () => {
+      // Two names differing only in case would be ONE file on macOS, both as
+      // a worktree directory and as a git loose ref.
+      const folded = colourDictionary().map((c) => c.toLowerCase());
+      expect(new Set(folded).size).toBe(folded.length);
+    });
+
+    it("collides with no reserved branch name", () => {
+      for (const c of colourDictionary()) {
+        expect(isValidBranchName(c)).toBe(true);
+      }
+      expect(isValidBranchName("Main")).toBe(false);
+    });
+  });
+
+  describe("branchDisplayName", () => {
+    it("strips the ownership prefix", () => {
+      expect(branchDisplayName("zeros/Cream")).toBe("Cream");
+      expect(branchDisplayName("zeros/Cream-v2")).toBe("Cream-v2");
+    });
+
+    it("passes through a branch that is not workspace-owned", () => {
+      expect(branchDisplayName("main")).toBe("main");
     });
   });
 
@@ -106,16 +169,27 @@ describe("naming", () => {
       expect(isValidBranchName("a".repeat(50))).toBe(false);
     });
 
-    it("rejects uppercase / underscores / slashes", () => {
-      expect(isValidBranchName("Add-Zoom")).toBe(false);
-      expect(isValidBranchName("add_zoom")).toBe(false);
-      expect(isValidBranchName("zeros/foo")).toBe(false);
+    it("accepts uppercase (colour names, since 2026-07-29)", () => {
+      // Was rejected until workspace names became capitalized colours.
+      expect(isValidBranchName("Add-Zoom")).toBe(true);
+      expect(isValidBranchName("Cream")).toBe(true);
+      expect(isValidBranchName("Cream-v2")).toBe(true);
     });
 
-    it("rejects reserved names", () => {
+    it("still rejects underscores / slashes", () => {
+      expect(isValidBranchName("add_zoom")).toBe(false);
+      expect(isValidBranchName("zeros/foo")).toBe(false);
+      expect(isValidBranchName("zeros/Cream")).toBe(false);
+    });
+
+    it("rejects reserved names in any casing", () => {
       expect(isValidBranchName("main")).toBe(false);
       expect(isValidBranchName("master")).toBe(false);
       expect(isValidBranchName("head")).toBe(false);
+      // Case folding matters: git would resolve "Main" to "main" on a
+      // case-insensitive filesystem.
+      expect(isValidBranchName("Main")).toBe(false);
+      expect(isValidBranchName("MASTER")).toBe(false);
     });
   });
 });

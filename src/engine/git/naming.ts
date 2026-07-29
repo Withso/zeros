@@ -1,97 +1,119 @@
-// Workspace + branch naming. Two generators here:
+// Workspace + branch naming.
 //
 //   1. workspaceId — short hex + kebab slug (`ws_8f3a2c-add-canvas-zoom`).
 //      Short hex gives a stable DB key; the kebab slug makes the folder
 //      legible in `pwd`/`ls`. Pure UUIDs are hostile in shells; pure names
-//      collide. When no prompt hint is supplied, we fall back to a
-//      flower name (`ws_8f3a2c-rose`) — see FLOWERS dictionary below.
+//      collide. When no prompt hint is supplied, we fall back to a colour
+//      name (`ws_8f3a2c-cream`) — see COLOURS dictionary below.
 //
-//   2. branchName — flower + 4-char hex (`zeros/orchid-9a2f`). Each
-//      workspace gets a fresh, easy-to-remember flower name. ~250
-//      single-word species × 65k hex tails = ~16M unique combinations,
-//      which is more than enough for any single-user install.
+//   2. branch name — a colour, no random tail (`zeros/Cream`). Adopted
+//      2026-07-29, replacing `zeros/<flower>-<4 hex>`. The hex tail existed
+//      only to make collisions improbable; it made every workspace read as
+//      `digitalis-02d3`. Uniqueness is now *allocated* rather than gambled
+//      on: pickFreeColourName() is handed the set of names already used in
+//      THIS repo and returns one that isn't. See allocation notes there.
+//
+//      Losing the tail means the name is no longer self-uniquifying, so the
+//      DB carries a UNIQUE index on (repo_slug, branch) (migration 24) and
+//      every caller retries on violation. Do not reintroduce a caller that
+//      generates a name without consulting the used-set.
+//
 //      The agent / the renderer may later replace this auto name via
 //      `workspace_propose_branch_name` (see rename-hook.ts).
 
 import { randomBytes } from "node:crypto";
 
-/** Curated list of ~250 single-word flower names. All lowercase a-z,
- *  3-12 chars, recognisable to anyone with a passing interest in
- *  flowers. Sorted alphabetically for ease of editing. Don't include
- *  multi-word species ("morning-glory") or those that overlap with
- *  reserved branch names. */
-const FLOWERS = [
-  "acacia", "achillea", "aconite", "agapanthus", "ageratum", "alchemilla",
-  "allium", "almond", "aloe", "alstroemeria", "althea", "alyssum",
-  "amaranth", "amaryllis", "anemone", "angelica", "anise", "anthurium",
-  "arabis", "arnica", "arum", "aster", "astilbe", "astrantia",
-  "aubrieta", "azalea",
-  "balsam", "baneberry", "begonia", "bellflower", "bergamot", "betony",
-  "bittersweet", "bluebell", "bluebonnet", "bluet", "borage",
-  "bottlebrush", "bouvardia", "broom", "bryony", "buddleia", "bugloss",
-  "buttercup",
-  "caladium", "calendula", "calla", "camas", "camellia", "campanula",
-  "candytuft", "canna", "canterbury", "capsicum", "caraway", "cardinal",
-  "carnation", "catkin", "catmint", "cattleya", "ceanothus", "celosia",
-  "centaurea", "chamomile", "chicory", "chionodoxa", "chive", "cineraria",
-  "cinquefoil", "clarkia", "clematis", "cleome", "clivia", "clover",
-  "cobaea", "coleus", "columbine", "coneflower", "convolvulus", "coreopsis",
-  "coriander", "cornflower", "corydalis", "cosmos", "cowslip", "crocus",
-  "crinum", "crocosmia", "cyclamen", "cymbidium",
-  "daffodil", "dahlia", "daisy", "daphne", "datura", "delphinium",
-  "dendrobium", "dianthus", "diascia", "didiscus", "digitalis", "dogwood",
-  "echinacea", "echinops", "echium", "edelweiss", "elderflower", "endymion",
-  "erica", "erigeron", "eryngium", "eschscholzia", "eucharis", "euphorbia",
-  "evergreen",
-  "fennel", "feverfew", "filaree", "flax", "fleabane", "forsythia",
-  "frangipani", "freesia", "fritillary", "fuchsia",
-  "gaillardia", "galanthus", "gardenia", "gaura", "gazania", "gentian",
-  "geranium", "gerbera", "gladiolus", "godetia", "goldenrod", "gomphrena",
-  "gorse", "guelder", "gypsophila",
-  "harebell", "hawthorn", "heather", "hebe", "helenium", "helianthus",
-  "heliotrope", "hellebore", "hesperis", "heuchera", "hibiscus",
-  "hollyhock", "honesty", "honeysuckle", "hosta", "hyacinth", "hydrangea",
-  "hypericum", "hyssop",
-  "iberis", "impatiens", "iris", "ixora",
-  "jacaranda", "jasmine", "jonquil", "juniper",
-  "kalmia", "kerria", "knapweed", "kniphofia", "kolkwitzia",
-  "laburnum", "lamium", "lantana", "larkspur", "lavatera", "lavender",
-  "leucanthemum", "lewisia", "liatris", "lilac", "lily", "linaria",
-  "lobelia", "lotus", "lunaria", "lungwort", "lupine",
-  "magnolia", "mahonia", "mallow", "malva", "marguerite", "marigold",
-  "mayflower", "mertensia", "mignonette", "milkweed", "mimosa", "monarda",
-  "monkshood", "montbretia", "moonflower", "moss", "mullein", "myosotis",
-  "myrtle",
-  "nandina", "narcissus", "nasturtium", "nemesia", "nemophila", "nepeta",
-  "nettle", "nicotiana", "nigella",
-  "oleander", "orchid", "oregano", "osmanthus", "osteospermum", "oxalis",
-  "pansy", "papaver", "parsley", "peony", "periwinkle",
-  "petunia", "phacelia", "phalaenopsis", "philadelphus", "phlox", "pieris",
-  "pimpernel", "pinks", "platycodon", "plumbago", "plumeria", "polemonium",
-  "polyanthus", "poppy", "portulaca", "primrose", "primula", "privet",
-  "protea", "pulmonaria", "pulsatilla",
-  "quaking", "quince",
-  "ranunculus", "raphiolepis", "redbud", "rhododendron", "rose", "rosemary",
-  "rudbeckia",
-  "saffron", "sage", "salvia", "saxifrage", "scabiosa", "scilla",
-  "sedum", "senecio", "shasta", "silene", "skimmia", "skullcap",
-  "snapdragon", "snowdrop", "solanum", "solidago", "sorrel", "speedwell",
-  "spiderwort", "spirea", "stachys", "statice", "stephanotis", "stock",
-  "stocks", "sunflower", "sweetpea", "syringa",
-  "tansy", "thistle", "thyme", "tigerlily", "tigridia", "tithonia",
-  "tradescantia", "trillium", "tritoma", "tulip", "turtlehead",
-  "verbena", "veronica", "vetch", "viburnum", "vinca", "viola", "violet",
-  "wallflower", "weigela", "wisteria", "woodbine", "woodruff",
-  "xeranthemum",
-  "yarrow", "ylang", "yucca",
-  "zauschneria", "zenobia", "zinnia",
+/** 350 single-word colour names, drawn from historic pigments and dyes,
+ *  heraldic tinctures, traditional Japanese/Chinese colours, minerals, and a
+ *  few modern paint coinages. See docs/color-names.md for the family + hex of
+ *  each; this file only needs the names.
+ *
+ *  Invariants (enforced by naming.test.ts, and relied on elsewhere):
+ *    - One capitalized word, 3-13 letters, `/^[A-Z][a-z]{2,15}$/`. No spaces
+ *      or hyphens: the name becomes a branch AND a directory, and single
+ *      words survive shell completion.
+ *    - Unique under case folding. macOS filesystems are case-insensitive and
+ *      git stores loose refs as files, so "Cream" and "cream" would collide
+ *      on disk even though git treats them as distinct refs.
+ *    - None collide with RESERVED_BRANCHES, case-insensitively.
+ *  Sorted alphabetically for ease of editing. */
+// The dense grid is deliberate: 350 names one-per-line is 350 lines of noise,
+// and packing them lets you scan the alphabet visually when checking whether a
+// name is already present. The directive must stay the LAST comment line before
+// the declaration or prettier ignores it.
+// prettier-ignore
+const COLOURS = [
+  "Absinthe", "Alabaster", "Alizarin", "Alloy", "Amaranth", "Amazonite",
+  "Amber", "Amethyst", "Anthracite", "Apricot", "Aquamarine", "Argent",
+  "Artichoke", "Asagi", "Ash", "Asparagus", "Aubergine", "Auburn",
+  "Aureolin", "Australien", "Avocado", "Azure", "Battleship", "Beaver",
+  "Beryl", "Bice", "Bisque", "Bistre", "Bittersweet", "Bitumen", "Blush",
+  "Bole", "Bondi", "Bone", "Bottle", "Bronze", "Buff", "Burgundy",
+  "Byzantine", "Byzantium", "Cadet", "Cadmium", "Cambridge", "Cameo",
+  "Canary", "Capri", "Cardinal", "Carmine", "Carnation", "Carnelian",
+  "Carolina", "Carrot", "Celadon", "Celadonite", "Celeste", "Cerise",
+  "Cerulean", "Chalk", "Chamoisee", "Charcoal", "Charm", "Chartreuse",
+  "Chestnut", "Chocolate", "Chrome", "Cinereous", "Cinnabar", "Cinnamon",
+  "Citrine", "Citron", "Claret", "Cobalt", "Cochineal", "Coffee",
+  "Copper", "Coquelicot", "Coral", "Coralline", "Corbeau", "Cordovan",
+  "Cornflower", "Cramoisy", "Cream", "Crimson", "Cyanine", "Cyclamen",
+  "Davy", "Delft", "Denim", "Drab", "Dun", "Ebony", "Eburnean", "Ecru",
+  "Eggshell", "Egyptian", "Eigengrau", "Elephant", "Emerald", "Eminence",
+  "Fallow", "Falu", "Fandango", "Fawn", "Feldgrau", "Fern",
+  "Feuillemorte", "Filemot", "Flame", "Flamingo", "Flax", "Folly",
+  "Forest", "Frostbite", "Fuchsine", "Fulvous", "Fuscous", "Gainsboro",
+  "Gamboge", "Garnet", "Gentian", "Ginger", "Gingerline", "Glaucous",
+  "Gofun", "Goldenrod", "Graphite", "Grenadine", "Gridelin", "Gunmetal",
+  "Harlequin", "Heliotrope", "Hooker", "Humorous", "Hunter", "Icterine",
+  "Imperial", "Impulsive", "Incarnadine", "Indanthrone", "Independence",
+  "Indigo", "Iris", "Isabelline", "Ivory", "Jade", "Jaffa", "Jasmine",
+  "Jasper", "Jet", "Jonquil", "Kachi", "Kariyasu", "Kelly", "Kermes",
+  "Khaki", "Kihada", "Kingfisher", "Kohaku", "Kurotsurubami", "Lapis",
+  "Laurel", "Lemon", "Liberty", "Licorice", "Lilac", "Linen", "Liver",
+  "Loden", "Lust", "Madder", "Magnolia", "Maize", "Majorelle",
+  "Malachite", "Mandarin", "Mantis", "Marengo", "Marigold", "Massicot",
+  "Matcha", "Mauve", "Mauveine", "Maya", "Mikado", "Minium", "Mizu",
+  "Mizuasagi", "Moegi", "Mole", "Momo", "Moonstone", "Mountbatten",
+  "Mulberry", "Mummy", "Murrey", "Mustard", "Myrtle", "Mystic", "Nacarat",
+  "Nadeshiko", "Naples", "Nattier", "Nero", "Nickel", "Obsidian", "Ochre",
+  "Olive", "Olivine", "Onyx", "Opal", "Orchid", "Orpiment", "Otter",
+  "Outerspace", "Oxblood", "Oxford", "Palatinate", "Parchment", "Payne",
+  "Peachblow", "Peacock", "Pearl", "Periwinkle", "Perse", "Persian",
+  "Persimmon", "Pervenche", "Pewter", "Phlox", "Piggy", "Pistachio",
+  "Platinum", "Plum", "Ponceau", "Popinjay", "Poppy", "Powder",
+  "Primrose", "Princeton", "Prussian", "Puce", "Pumpkin", "Purpureus",
+  "Qinglian", "Quartz", "Quinacridone", "Raisin", "Razzmatazz", "Realgar",
+  "Redwood", "Reseda", "Rhodamine", "Rose", "Rosewood", "Rubine", "Ruby",
+  "Ruddle", "Rufous", "Ruri", "Rurikon", "Russet", "Russian", "Rust",
+  "Sable", "Saffron", "Sakura", "Salmon", "Sanguine", "Sap", "Sapphire",
+  "Sapphirine", "Sarcoline", "Scarlet", "Seal", "Seasalt", "Seiji",
+  "Sepia", "Shamrock", "Shinbashi", "Shocking", "Sienna", "Silver",
+  "Sinopia", "Sinople", "Skobeloff", "Slate", "Smalt", "Smaragdine",
+  "Smoke", "Snow", "Snugglepuss", "Solferino", "Soot", "Sorairo", "Steel",
+  "Straw", "Sulfur", "Sumi", "Tangelo", "Tangerine", "Taupe", "Tawny",
+  "Tekhelet", "Thistle", "Thulian", "Tianqing", "Tiffany", "Timberwolf",
+  "Titanium", "Titian", "Tokiwa", "Trout", "Turquoise", "Tuscan",
+  "Tyrian", "Ube", "Uguisu", "Ultramarine", "Umber", "Vandyke",
+  "Vantablack", "Vegas", "Vellum", "Verdigris", "Verditer", "Vermilion",
+  "Veronica", "Viridian", "Walnut", "Wasabi", "Watchet", "Watermelon",
+  "Wedgwood", "Weld", "Wenge", "Wheat", "Wine", "Wisteria", "Xanadu",
+  "Xanthic", "Xanthous", "Yale", "Yamabuki", "Yinmn", "Zaffre",
+  "Zibeline", "Zinc", "Zinnwaldite", "Zomp",
 ];
 
 const SLUG_CLEAN_RE = /[^a-z0-9]+/g;
 const SLUG_EDGE_RE = /^-+|-+$/g;
-const BRANCH_RE = /^[a-z][a-z0-9-]{2,48}$/;
+/** Accepts BOTH shapes that reach a branch: an allocated colour name
+ *  ("Cream", "Cream-v2") and a prompt-derived slug ("add-canvas-zoom").
+ *  Uppercase became legal on 2026-07-29 with the colour scheme — before
+ *  that this was `/^[a-z][a-z0-9-]{2,48}$/`. Still deliberately stricter
+ *  than git's own ref rules: no slashes, dots, or leading "-", so a branch
+ *  name can never read as a path or a flag. */
+const BRANCH_RE = /^[A-Za-z][A-Za-z0-9-]{2,48}$/;
 /** Branch refs reserved by tooling — never accept these as user-proposed
- *  names. Lower-case only since validate() normalizes input. */
+ *  names. Compared case-insensitively (see isValidBranchName): "Main" must
+ *  be rejected as firmly as "main". */
+// prettier-ignore
 const RESERVED_BRANCHES = new Set([
   "main", "master", "head", "trunk", "develop", "release", "staging",
   "production", "prod", "dev", "default",
@@ -113,47 +135,103 @@ function slugifyHint(hint: string | undefined): string {
     .replace(SLUG_EDGE_RE, "")
     .slice(0, 40);
   if (cleaned.length >= 3) return cleaned;
-  // Fall back to a flower name so the folder name never looks like
-  // "ws_8f3a2c-" with a trailing dash from an empty slug. Picks the
-  // same flower the branch generator uses (same dictionary).
-  return pickFlower();
+  // Fall back to a colour so the folder name never looks like
+  // "ws_8f3a2c-" with a trailing dash from an empty slug. Lowercased: the
+  // workspace id is a shell path component, not a display name.
+  return randomColour().toLowerCase();
 }
 
-function pickFlower(): string {
-  return FLOWERS[Math.floor(Math.random() * FLOWERS.length)];
+function randomColour(): string {
+  return COLOURS[Math.floor(Math.random() * COLOURS.length)];
 }
 
-/** Generate an auto-branch name like "zeros/orchid-9a2f". 4-char hex
- *  gives 65,536 unique tails per flower (~250 flowers in the
- *  dictionary), so the total search space is ~16M — large enough that
- *  collisions on a single dev machine are effectively impossible.
+/** The `zeros/` prefix marks a ref as workspace-owned (see
+ *  pruneOrphanWorkspaceBranchOwnershipRefs). Branch = prefix + colour. */
+export const BRANCH_PREFIX = "zeros/";
+
+/** Strip the ownership prefix to get the display name: `zeros/Cream` →
+ *  `Cream`. Non-prefixed refs (a user's own branch) pass through. */
+export function branchDisplayName(branch: string): string {
+  return branch.startsWith(BRANCH_PREFIX)
+    ? branch.slice(BRANCH_PREFIX.length)
+    : branch;
+}
+
+/** How many `-vN` rounds to try once all 350 base colours are taken. Each
+ *  round is another full 350 names, so this ceiling is 35,350 workspaces in
+ *  ONE repo — far past the point where a human would still be using it. */
+const MAX_SUFFIX_ROUNDS = 100;
+
+/** Pick a colour name not already used in this repo.
  *
- *  Pattern adopted 2026-05-20 (roadmap 03a follow-up D): replaces the
- *  prior `zeros/<adj>-<noun>-<hex>` scheme. Flowers are more
- *  pronounceable and easier to remember at a glance than an adjective-noun
- *  pair, while staying a single word so they survive shell completion. */
-export function generateBranchName(): string {
-  const flower = pickFlower();
-  const hex = randomBytes(2).toString("hex"); // 4 chars
-  return `zeros/${flower}-${hex}`;
+ *  `usedNames` must be every name already claimed in the target repo, from
+ *  ALL THREE authorities — DB rows (including archived ones; an archived
+ *  "Cream" still owns the name), git refs under `zeros/`, and directory
+ *  entries in the repo's workspace folder. Callers gather it in bulk; see
+ *  collectUsedWorkspaceNames in worktree.ts. Names are compared
+ *  case-insensitively, so pass whatever casing you have.
+ *
+ *  Allocation order, and why:
+ *    1. A never-used colour, chosen at RANDOM from the free set. Random,
+ *       not first-free, so successive workspaces don't march alphabetically
+ *       ("Absinthe", "Alabaster", "Alizarin", …) — that reads like a counter
+ *       and makes two workspaces easy to mix up.
+ *    2. Only when all 350 are gone: `<Colour>-v1`, again from the free set,
+ *       then `-v2`, and so on. Suffixing is a last resort — the whole point
+ *       is that a workspace is called "Cream", not "Cream-v3". Sweeping N
+ *       across the WHOLE dictionary before incrementing keeps suffixes as
+ *       low and as evenly spread as possible.
+ *
+ *  Returns null only if the caller's repo somehow holds every name through
+ *  MAX_SUFFIX_ROUNDS; callers surface that as a retryable error.
+ *
+ *  NOTE: this is a pure function over a snapshot. It cannot prevent two
+ *  concurrent creates from being handed the same free set and picking the
+ *  same name — that's what the UNIQUE index on (repo_slug, branch) is for.
+ *  Callers MUST retry on constraint violation rather than trusting this. */
+export function pickFreeColourName(usedNames: Iterable<string>): string | null {
+  const used = new Set<string>();
+  for (const n of usedNames) used.add(n.toLowerCase());
+  const free = COLOURS.filter((c) => !used.has(c.toLowerCase()));
+  if (free.length > 0) return free[randomIndex(free.length)];
+  for (let round = 1; round <= MAX_SUFFIX_ROUNDS; round++) {
+    const candidates = COLOURS.map((c) => `${c}-v${round}`).filter(
+      (c) => !used.has(c.toLowerCase()),
+    );
+    if (candidates.length > 0)
+      return candidates[randomIndex(candidates.length)];
+  }
+  return null;
+}
+
+/** Unbiased index in [0, n). Uses crypto rather than Math.random purely for
+ *  uniformity — nothing here is security-sensitive. */
+function randomIndex(n: number): number {
+  const limit = Math.floor(0x100000000 / n) * n;
+  for (;;) {
+    const v = randomBytes(4).readUInt32BE(0);
+    if (v < limit) return v % n;
+  }
 }
 
 /** Test seam — exposes the underlying dictionary so test assertions
- *  can verify the generator only picks from approved names. Production
+ *  can verify the allocator only picks from approved names. Production
  *  callers should never need this. */
-export function flowerDictionary(): readonly string[] {
-  return FLOWERS;
+export function colourDictionary(): readonly string[] {
+  return COLOURS;
 }
 
-/** Validate a user-proposed (or agent-proposed) semantic branch name. We
- *  intentionally keep this stricter than git's own ref rules — only
- *  lowercase a-z, digits, and hyphens, must start with a letter, length
- *  3-49. This avoids the entire class of "looks like a flag" or
- *  "looks like a path" branch ambiguities, and matches the regex in
- *  roadmap 03a. */
+/** Validate a branch name (allocated, user-proposed, or agent-proposed).
+ *  Stricter than git's own ref rules: letters, digits and hyphens only,
+ *  must start with a letter, length 3-49. That rules out the entire class
+ *  of "looks like a flag" / "looks like a path" ambiguities.
+ *
+ *  Letters are case-INSENSITIVE for acceptance but the reserved check folds
+ *  case: "Main" and "MAIN" are rejected exactly like "main", because git
+ *  would resolve them to the same ref on a case-insensitive filesystem. */
 export function isValidBranchName(name: string): boolean {
   if (!BRANCH_RE.test(name)) return false;
-  if (RESERVED_BRANCHES.has(name)) return false;
+  if (RESERVED_BRANCHES.has(name.toLowerCase())) return false;
   return true;
 }
 
@@ -164,6 +242,7 @@ export function isValidBranchName(name: string): boolean {
  *  "add-the-canvas-zoom" instead of "add-canvas-zoom". Verbs are
  *  preserved because "fix" / "add" / "implement" carry semantic
  *  weight ("fix-auth" vs. just "auth"). */
+// prettier-ignore
 const STOP_WORDS = new Set([
   "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
   "of", "to", "for", "in", "on", "at", "by", "as", "from", "with",

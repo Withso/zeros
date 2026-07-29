@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import type { Workspace } from "../../native/git";
 import type { Project } from "../../zeros/store/projects-store";
 import {
+  CHANGE_COUNT_OVERFLOW_LABEL,
   filterArchivedWorkspaces,
+  formatChangeCount,
   horizontalOverflow,
   orderWorkspaceTabs,
   resolveRepoWorkspaceDestination,
@@ -11,6 +13,7 @@ import {
   workspaceLabel,
   workspacePinSide,
   workspaceScrollLeftForTab,
+  workspaceTabDescription,
 } from "../top-bar-helpers";
 
 const project: Project = {
@@ -394,5 +397,87 @@ describe("archived workspace filtering", () => {
     const before = rows.map((row) => row.id);
     filterArchivedWorkspaces(rows, "zeros", "");
     expect(rows.map((row) => row.id)).toEqual(before);
+  });
+});
+
+describe("top-bar change-count formatting", () => {
+  it("prints totals below a thousand exactly", () => {
+    expect(formatChangeCount(0)).toBe("0");
+    expect(formatChangeCount(1)).toBe("1");
+    expect(formatChangeCount(240)).toBe("240");
+    expect(formatChangeCount(999)).toBe("999");
+  });
+
+  it("compacts thousands to one decimal and drops a bare .0", () => {
+    expect(formatChangeCount(1_000)).toBe("1k");
+    expect(formatChangeCount(1_500)).toBe("1.5k");
+    expect(formatChangeCount(12_345)).toBe("12.3k");
+    expect(formatChangeCount(99_000)).toBe("99k");
+  });
+
+  it("rounds at each unit boundary rather than truncating", () => {
+    expect(formatChangeCount(999.6)).toBe("1k");
+    expect(formatChangeCount(1_050)).toBe("1.1k");
+    expect(formatChangeCount(9_999)).toBe("10k");
+  });
+
+  it("holds the two-digit budget right up to the ceiling", () => {
+    // 99_949 still rounds to 99.9k; 99_950 would print "100.0k" — three
+    // integer digits — so the label takes over exactly there.
+    expect(formatChangeCount(99_949)).toBe("99.9k");
+    expect(formatChangeCount(99_950)).toBe(CHANGE_COUNT_OVERFLOW_LABEL);
+    expect(formatChangeCount(100_000)).toBe(CHANGE_COUNT_OVERFLOW_LABEL);
+    expect(formatChangeCount(4_200_000)).toBe(CHANGE_COUNT_OVERFLOW_LABEL);
+  });
+
+  it("never renders NaN or a negative from a malformed total", () => {
+    expect(formatChangeCount(Number.NaN)).toBe("0");
+    expect(formatChangeCount(Number.POSITIVE_INFINITY)).toBe("0");
+    expect(formatChangeCount(-12)).toBe("0");
+  });
+});
+
+describe("workspace tab accessible name", () => {
+  const label = "viola-6157";
+
+  it("is just the workspace when there is nothing else to report", () => {
+    expect(
+      workspaceTabDescription({
+        label,
+        runActionRunning: false,
+        changeLines: { additions: 0, deletions: 0 },
+      }),
+    ).toBe("Open workspace viola-6157");
+  });
+
+  it("spells out the exact totals a screen reader cannot see", () => {
+    // Exact, not compacted — "+1.5k" is a width concession, not the truth.
+    expect(
+      workspaceTabDescription({
+        label,
+        runActionRunning: false,
+        changeLines: { additions: 1_500, deletions: 240 },
+      }),
+    ).toBe("Open workspace viola-6157, 1500 lines added, 240 lines removed");
+  });
+
+  it("names a running action alongside the totals it visually replaces", () => {
+    expect(
+      workspaceTabDescription({
+        label,
+        runActionRunning: true,
+        changeLines: { additions: 12, deletions: 0 },
+      }),
+    ).toBe("Open workspace viola-6157, run action running, 12 lines added");
+  });
+
+  it("does not read a single line back as plural", () => {
+    expect(
+      workspaceTabDescription({
+        label,
+        runActionRunning: false,
+        changeLines: { additions: 1, deletions: 1 },
+      }),
+    ).toBe("Open workspace viola-6157, 1 line added, 1 line removed");
   });
 });

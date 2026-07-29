@@ -49,21 +49,9 @@ website/marketing/public/schemas/*.json linguist-generated=true
 # ──────────────────────────────────────────────────────────
 # Vendored / non-source trees — keep the language bar honest
 # ──────────────────────────────────────────────────────────
-# This is a TypeScript project. Left unmarked, a handful of large hand-written
-# HTML labs and one vendored JS bundle push HTML to ~20% of GitHub's language
-# bar and misrepresent what the repo is.
-
-# Upstream d3-array + d3-geo UMD builds, concatenated unmodified (ISC, Mike
-# Bostock — see THIRD-PARTY-NOTICES.md). Not our code. The surrounding design
-# lab is gitignored, but the marks stay so a future re-add can't quietly slip
-# vendored/generated files back into the stats.
-styles/Artifacts/run-globe/run-globe-d3.min.js linguist-vendored=true
-styles/Artifacts/run-globe/run-globe-geo.js linguist-generated=true
+# This is a TypeScript project. Left unmarked, large hand-written HTML labs can
+# distort GitHub's language bar and misrepresent what the repo is.
 styles/Artifacts/** linguist-documentation=true
-
-# Standalone shimmer study: one 120 KB HTML page plus its scripts. A design
-# exploration kept for reference; not part of the app build.
-"shape shimmer/**" linguist-documentation=true
 
 # Local dev harness page (paired with src/harness-model-menu.tsx), not app
 # source and not part of the production bundle.

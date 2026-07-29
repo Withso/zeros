@@ -26,8 +26,12 @@ async function initRepo(repoRoot: string, remoteRoot: string): Promise<void> {
   await mkdir(remoteRoot, { recursive: true });
   await execFileAsync("git", ["init", "-q", "--bare"], { cwd: remoteRoot });
   await execFileAsync("git", ["init", "-q", "-b", "main"], { cwd: repoRoot });
-  await execFileAsync("git", ["remote", "add", "origin", remoteRoot], { cwd: repoRoot });
-  await execFileAsync("git", ["config", "user.email", "t@t"], { cwd: repoRoot });
+  await execFileAsync("git", ["remote", "add", "origin", remoteRoot], {
+    cwd: repoRoot,
+  });
+  await execFileAsync("git", ["config", "user.email", "t@t"], {
+    cwd: repoRoot,
+  });
   await execFileAsync("git", ["config", "user.name", "t"], { cwd: repoRoot });
   await writeFile(path.join(repoRoot, "README.md"), "# init\n");
   await execFileAsync("git", ["add", "."], { cwd: repoRoot });
@@ -83,13 +87,21 @@ describe("branch ops", () => {
   it("listRemoteBranches lists origin/* by plain name, skipping HEAD + local branches", async () => {
     // The fixture has an 'origin' remote but nothing fetched — synthesize the
     // remote-tracking refs the target picker reads (refs/remotes/origin/*).
-    const { stdout: headSha } = await execFileAsync("git", ["rev-parse", "HEAD"], {
-      cwd: repoRoot,
-    });
+    const { stdout: headSha } = await execFileAsync(
+      "git",
+      ["rev-parse", "HEAD"],
+      {
+        cwd: repoRoot,
+      },
+    );
     const sha = headSha.trim();
-    await execFileAsync("git", ["update-ref", "refs/remotes/origin/main", sha], {
-      cwd: repoRoot,
-    });
+    await execFileAsync(
+      "git",
+      ["update-ref", "refs/remotes/origin/main", sha],
+      {
+        cwd: repoRoot,
+      },
+    );
     await execFileAsync(
       "git",
       ["update-ref", "refs/remotes/origin/feature-x", sha],
@@ -120,7 +132,9 @@ describe("branch ops", () => {
     expect(refreshed.branch).toBe("zeros/add-canvas-zoom");
     // Listed branches should now include the new name and NOT the old.
     const branches = await listBranches(workspaceId);
-    expect(branches.find((b) => b.name === "zeros/add-canvas-zoom")).toBeDefined();
+    expect(
+      branches.find((b) => b.name === "zeros/add-canvas-zoom"),
+    ).toBeDefined();
   });
 
   it("renameBranch rejects invalid names", async () => {
@@ -130,8 +144,9 @@ describe("branch ops", () => {
     await expect(
       renameBranch({ workspaceId, newName: "1-bad" }),
     ).rejects.toThrow();
+    // Uppercase became legal on 2026-07-29 (colour names) — underscores did not.
     await expect(
-      renameBranch({ workspaceId, newName: "UPPER" }),
+      renameBranch({ workspaceId, newName: "has_underscore" }),
     ).rejects.toThrow();
   });
 

@@ -22,13 +22,17 @@ import type { Workspace } from "../types";
 
 function sampleWorkspace(overrides: Partial<Workspace> = {}): Workspace {
   const now = Date.now();
+  const id = overrides.id ?? "ws_aaa111-foo";
   return {
-    id: "ws_aaa111-foo",
+    id,
     repoSlug: "test-repo",
     repoRoot: "/tmp/test-repo",
-    branch: "zeros/foo-bar-1234",
+    // Derived from the id, not a constant: (repo_slug, lower(branch)) is
+    // UNIQUE since migration 24, so fixtures in one repo that differ only by
+    // id must still differ by branch.
+    branch: `zeros/${id}`,
     baseBranch: "main",
-    path: "/tmp/worktrees/test-repo/ws_aaa111-foo",
+    path: `/tmp/worktrees/test-repo/${id}`,
     status: "in-progress",
     createdAt: now,
     archivedAt: null,
@@ -68,6 +72,118 @@ describe("state", () => {
     insertWorkspace(ws);
     const got = getWorkspaceById(ws.id);
     expect(got).toEqual(ws);
+  });
+
+  // Workspace names are allocated colours with no random tail (2026-07-29),
+  // so the DB — not the improbability of a hex collision — is what keeps them
+  // unique. See migration 24.
+  describe("workspace name uniqueness", () => {
+    it("rejects a duplicate branch within one repo", () => {
+      insertWorkspace(
+        sampleWorkspace({
+          id: "ws_1",
+          repoSlug: "alpha",
+          branch: "zeros/Cream",
+        }),
+      );
+      expect(() =>
+        insertWorkspace(
+          sampleWorkspace({
+            id: "ws_2",
+            repoSlug: "alpha",
+            branch: "zeros/Cream",
+          }),
+        ),
+      ).toThrow(/UNIQUE/i);
+    });
+
+    it("allows the SAME name in a different repo", () => {
+      // The whole point of scoping to repo_slug: "Cream" in two projects is
+      // two unrelated workspaces, with separate refs and separate folders.
+      insertWorkspace(
+        sampleWorkspace({
+          id: "ws_1",
+          repoSlug: "alpha",
+          branch: "zeros/Cream",
+        }),
+      );
+      insertWorkspace(
+        sampleWorkspace({
+          id: "ws_2",
+          repoSlug: "beta",
+          branch: "zeros/Cream",
+        }),
+      );
+      expect(
+        listWorkspaces({ repoSlug: "alpha" }).map((w) => w.branch),
+      ).toEqual(["zeros/Cream"]);
+      expect(listWorkspaces({ repoSlug: "beta" }).map((w) => w.branch)).toEqual(
+        ["zeros/Cream"],
+      );
+    });
+
+    it("treats names differing only by case as the same name", () => {
+      // macOS folds case and git loose refs are files, so zeros/Cream and
+      // zeros/cream are ONE ref on the machines this ships to.
+      insertWorkspace(
+        sampleWorkspace({
+          id: "ws_1",
+          repoSlug: "alpha",
+          branch: "zeros/Cream",
+        }),
+      );
+      expect(() =>
+        insertWorkspace(
+          sampleWorkspace({
+            id: "ws_2",
+            repoSlug: "alpha",
+            branch: "zeros/cream",
+          }),
+        ),
+      ).toThrow(/UNIQUE/i);
+    });
+
+    it("frees the name once the row is deleted", () => {
+      insertWorkspace(
+        sampleWorkspace({
+          id: "ws_1",
+          repoSlug: "alpha",
+          branch: "zeros/Cream",
+        }),
+      );
+      deleteWorkspaceRow("ws_1");
+      expect(() =>
+        insertWorkspace(
+          sampleWorkspace({
+            id: "ws_2",
+            repoSlug: "alpha",
+            branch: "zeros/Cream",
+          }),
+        ),
+      ).not.toThrow();
+    });
+
+    it("keeps the name reserved while the workspace is merely ARCHIVED", () => {
+      // An archived workspace still owns its name: its branch and folder
+      // usually still exist, and restoring it must not find a squatter.
+      insertWorkspace(
+        sampleWorkspace({
+          id: "ws_1",
+          repoSlug: "alpha",
+          branch: "zeros/Cream",
+          archivedAt: Date.now(),
+        }),
+      );
+      expect(() =>
+        insertWorkspace(
+          sampleWorkspace({
+            id: "ws_2",
+            repoSlug: "alpha",
+            branch: "zeros/Cream",
+          }),
+        ),
+      ).toThrow(/UNIQUE/i);
+    });
   });
 
   it("listWorkspaces filters by repoSlug", () => {

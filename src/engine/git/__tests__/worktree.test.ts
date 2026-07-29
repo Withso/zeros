@@ -260,7 +260,9 @@ describe("worktree lifecycle (integration)", () => {
   it("prepareWorkspaceCreate reserves identity without leaking a folder; create completes at the same path", async () => {
     const prepared = await prepareWorkspaceCreate({ repoRoot });
     expect(prepared.workspaceId).toMatch(/^ws_[0-9a-f]{6}-/);
-    expect(prepared.branch).toMatch(/^zeros\/[a-z]+-[0-9a-f]{4}$/);
+    expect(prepared.branch).toMatch(
+      /^zeros\/[A-Z][a-z]{2,15}(?:-v[1-9][0-9]{0,2})?$/,
+    );
     expect(prepared.path.startsWith(worktreesRoot())).toBe(true);
     // Prepare is metadata-only. A timed-out/disconnected caller cannot leak an
     // empty directory; the renderer may still use this final path while settling.
@@ -281,6 +283,40 @@ describe("worktree lifecycle (integration)", () => {
     expect(dotGit.isFile()).toBe(true); // linked worktree checkout landed
     expect(getWorkspace(created.workspaceId).path).toBe(prepared.path);
     expect(getWorkspace(created.workspaceId).branch).toBe(prepared.branch);
+  });
+
+  // Workspace names are allocated colours with no random tail (2026-07-29).
+  // prepare writes no row, so nothing in the DB/git/filesystem records that a
+  // prepared name is spoken for — an in-process reservation covers the gap.
+  it("two prepares before either create pick DIFFERENT names", async () => {
+    const a = await prepareWorkspaceCreate({ repoRoot });
+    const b = await prepareWorkspaceCreate({ repoRoot });
+    expect(a.branch).not.toBe(b.branch);
+    expect(a.path).not.toBe(b.path);
+    // Both are still usable: the second is not a degraded "-v1" fallback,
+    // because 348 base colours are still free.
+    expect(b.branch).toMatch(/^zeros\/[A-Z][a-z]{2,15}$/);
+  });
+
+  it("never re-uses a name across many prepares in one repo", async () => {
+    const seen = new Set<string>();
+    for (let i = 0; i < 30; i++) {
+      seen.add((await prepareWorkspaceCreate({ repoRoot })).branch);
+    }
+    expect(seen.size).toBe(30);
+  });
+
+  it("does not reuse the name of an ARCHIVED workspace", async () => {
+    const created = await createWorkspace({ repoRoot });
+    await archiveWorkspace({
+      workspaceId: created.workspaceId,
+      stashUncommitted: false,
+    });
+    // The row survives archiving, so the name stays claimed.
+    for (let i = 0; i < 10; i++) {
+      const prepared = await prepareWorkspaceCreate({ repoRoot });
+      expect(prepared.branch).not.toBe(created.branch);
+    }
   });
 
   it("single-flights duplicate prepared creates and exposes the rowless active phase", async () => {
@@ -799,7 +835,9 @@ describe("worktree lifecycle (integration)", () => {
     const result = await createWorkspace({ repoRoot });
     expect(result.workspaceId).toMatch(/^ws_[0-9a-f]{6}-/);
     // Follow-up D: branch is zeros/<flower>-<hex> (e.g. zeros/orchid-9a2f).
-    expect(result.branch).toMatch(/^zeros\/[a-z]+-[0-9a-f]{4}$/);
+    expect(result.branch).toMatch(
+      /^zeros\/[A-Z][a-z]{2,15}(?:-v[1-9][0-9]{0,2})?$/,
+    );
     expect(result.status).toBe("in-progress");
 
     // Folder should exist and be a git worktree.

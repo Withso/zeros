@@ -34,6 +34,17 @@
 // same frame, forever — no drift. Orbit keeps its original setInterval
 // cadence, fully unchanged.
 //
+// PER-INSTANCE PHASE JITTER — every mount picks one random offset into the
+// lap (see phaseOffsetMs) and shifts BOTH of its loops by it. A turn
+// starting lights up three shimmers on the same frame (top bar, chat tab,
+// activity row); they'd otherwise share a CSS-animation start time and
+// march in exact lockstep, reading as one cloned element stamped three
+// times. The offset is applied to the grid-fade's animation-delay AND to
+// the synced shape loop's elapsed time — the SAME amount to both — so
+// each instance enters the lap at its own point while staying internally
+// phase-locked. Design is identical everywhere; only the entry point
+// differs. offset = 0 reproduces the old lockstep behavior exactly.
+//
 // prefers-reduced-motion: the shape loop and the fade stop; the piece
 // rests on the variant's rest pose (orbit: the Z tetromino — the brand
 // shape; agent: the mid-descent square) and the grid holds at 40%.
@@ -74,6 +85,32 @@ const GRID_FADE_PERIOD_MS = LAP_MS;
 const GRID_FADE_STEP_MS = 100;
 /** Trough the resting dots dissolve to (0 = fully out). */
 const GRID_FADE_TROUGH = 0;
+
+// ── Per-instance phase jitter ──────────────────────────────
+// These two helpers are the ONLY places the jitter enters, and they must
+// stay in step: the fade is shifted by a CSS animation-delay, the shape
+// loop by adding to its elapsed time, and the synced (agent) variant is
+// only drift-free while both land on the same phase. Exported so the
+// phase-lock test can assert exactly that (zeros-spinner-phase.test.ts).
+
+/** CSS `animation-delay` for the resting dot at (x, y). Negative, so the
+ *  fade is already mid-cycle at mount (no intro); the (x + y) term walks
+ *  the sweep down the TL→BR diagonal, and `offsetMs` slides this whole
+ *  instance to its own entry point in the lap. */
+export function gridFadeDelayMs(x: number, y: number, offsetMs: number) {
+  return (x + y) * GRID_FADE_STEP_MS - GRID_FADE_PERIOD_MS - offsetMs;
+}
+
+/** Phase (0 → 1) through the shared lap, `elapsedMs` after the
+ *  sweep-origin dot's CSS animation started, for an instance jittered by
+ *  `offsetMs`. Drives the synced shape loop. */
+export function lapPhase(elapsedMs: number, offsetMs: number) {
+  const t = elapsedMs + offsetMs;
+  return (
+    (((t % GRID_FADE_PERIOD_MS) + GRID_FADE_PERIOD_MS) % GRID_FADE_PERIOD_MS) /
+    GRID_FADE_PERIOD_MS
+  );
+}
 
 /** Uniform proportions — every size is a pure scale of the 24px look, so
  *  dot size, gaps and frame padding read identically at every size. */
@@ -244,7 +281,18 @@ export function ZerosSpinner({
   const dotPx = Math.max(cellPx * dotRatio, minDotPx);
 
   const reducedMotion = usePrefersReducedMotion();
-  const [shapeIndex, setShapeIndex] = React.useState(restIndex);
+  // One random entry point into the lap, picked ONCE per mount so it holds
+  // steady across re-renders (see PER-INSTANCE PHASE JITTER up top). Every
+  // simultaneously-mounted spinner gets its own, so they never march in
+  // lockstep even though the design is identical.
+  const [phaseOffsetMs] = React.useState(() => Math.random() * LAP_MS);
+  // Boot pose follows the jitter, so the piece is already mid-lap on the
+  // first painted frame rather than snapping there once the loop starts.
+  // (Reduced motion ignores this and pins restIndex — see `shape` below.)
+  const [shapeIndex, setShapeIndex] = React.useState(
+    () =>
+      Math.floor(lapPhase(0, phaseOffsetMs) * shapes.length) % shapes.length,
+  );
   // (0,0) resting dot — the fade sweep's origin. Its CSS-animation clock
   // drives the synced (agent) shape loop.
   const restOriginRef = React.useRef<HTMLSpanElement | null>(null);
@@ -277,11 +325,10 @@ export function ZerosSpinner({
         const now = document.timeline.currentTime;
         const start = refAnim?.startTime;
         if (typeof now === "number" && typeof start === "number") {
-          const elapsed = now - start;
-          const phase =
-            (((elapsed % GRID_FADE_PERIOD_MS) + GRID_FADE_PERIOD_MS) %
-              GRID_FADE_PERIOD_MS) /
-            GRID_FADE_PERIOD_MS;
+          // Same offset the grid fade carries in its animation-delay, so
+          // the two loops stay locked to each other while this instance
+          // sits at its own point in the lap.
+          const phase = lapPhase(now - start, phaseOffsetMs);
           const idx = Math.floor(phase * shapes.length) % shapes.length;
           if (idx !== lastIdx) {
             lastIdx = idx;
@@ -300,7 +347,7 @@ export function ZerosSpinner({
       setShapeIndex((i) => (i + 1) % shapes.length);
     }, stepMs);
     return () => window.clearInterval(id);
-  }, [reducedMotion, shapes, sync]);
+  }, [reducedMotion, shapes, sync, phaseOffsetMs]);
 
   const shape =
     shapes[reducedMotion ? restIndex : shapeIndex % shapes.length];
@@ -330,10 +377,10 @@ export function ZerosSpinner({
         const lit = shape.has(key);
         // A lit active dot is solid --fg2 (no gradient, no wave).
         const shapeOpacity = lit ? LIT : 0;
-        // Resting-grid fade: staggered along the TL→BR diagonal.
-        // Negative delay = already mid-cycle at mount (no intro).
-        const gridFadeDelay =
-          (x + y) * GRID_FADE_STEP_MS - GRID_FADE_PERIOD_MS;
+        // Resting-grid fade: staggered along the TL→BR diagonal, shifted by
+        // this instance's jitter so it doesn't sweep in lockstep with the
+        // other shimmers on screen.
+        const gridFadeDelay = gridFadeDelayMs(x, y, phaseOffsetMs);
         return (
           <span
             key={key}

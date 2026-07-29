@@ -30,8 +30,7 @@ export type {
 
 export {
   deriveBranchNameFromPrompt,
-  flowerDictionary,
-  generateBranchName,
+  colourDictionary,
   generateWorkspaceId,
   isValidBranchName,
 } from "./naming";
@@ -159,6 +158,7 @@ export { listWorkspaceFiles } from "./workspace-files";
 
 export {
   changeCounts,
+  changeLineCounts,
   diff,
   hasWorkspaceChanges,
   log,
@@ -168,6 +168,7 @@ export {
 } from "./diff";
 export type {
   ChangeCounts,
+  ChangeLineCounts,
   ChangePathFilter,
   ConflictState,
   DiffMode,

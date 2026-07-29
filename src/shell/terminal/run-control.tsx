@@ -4,7 +4,7 @@
 //
 // Replaces the old single stateless "▷ Run" button. The FACE is the repo's
 // default run action: its icon + name when idle (click = start + jump to its
-// Run sub-tab), or the dotted horse loop + "Stop" while it runs (click = stop).
+// Run sub-tab), or a static square + "Stop" while it runs (click = stop).
 // With more than one action a caret opens a menu of every action — a running
 // one wears the horse loop (click focuses it), a finished/failed one tints its
 // icon green/red (click reruns) — plus "Configure…" (Settings → Scripts).
@@ -69,7 +69,14 @@ export function RunControl({
     folderKey,
     chatCwd,
   );
-  const runStatuses = useRunStatuses(workspace, folderKey, actions);
+  // Readiness is irrelevant here: this surface only reacts to a POSITIVE
+  // (a running/finished/failed action tints its face), and an unread map
+  // renders the same idle face as a genuinely idle one.
+  const { statuses: runStatuses } = useRunStatuses(
+    workspace,
+    folderKey,
+    actions,
+  );
   const setActiveTerminalTab = useTerminalStore((s) => s.setActiveTerminalTab);
   const openScripts = useOpenScriptsSettings("run-actions");
 
@@ -125,7 +132,6 @@ export function RunControl({
         aria-label={`Stop ${defaultAction.name}`}
         className={FACE_BTN_CLS}
       >
-        <RunHorseShimmer />
         <Square className="size-3 shrink-0" aria-hidden="true" />
         <span>Stop</span>
       </button>
@@ -151,8 +157,7 @@ export function RunControl({
   );
 
   // Single action → a lone secondary button (bordered, same face as Create PR).
-  if (actions.length === 1)
-    return <div className={CONTAINER_CLS}>{face}</div>;
+  if (actions.length === 1) return <div className={CONTAINER_CLS}>{face}</div>;
 
   // Multi action → a secondary SPLIT button: the run FACE + a caret separated by
   // a `border-l` divider, both inside one bordered container — the Create PR shape.

@@ -23,6 +23,17 @@ import { useBridge } from "../../zeros/bridge/use-bridge";
 
 export type RunStatusMap = Record<string, WorkspaceRunActionStatus>;
 
+export interface RunStatusesSnapshot {
+  statuses: RunStatusMap;
+  /** Whether `statuses` is an ANSWER rather than a not-read-yet placeholder.
+   *  The map reads `{}` in both cases — an action that has never run has no
+   *  durable row, so an empty map is a perfectly ordinary "nothing running" —
+   *  which makes the two indistinguishable to a caller. Anything that acts on
+   *  the NEGATIVE ("no run is live here") must wait for this; a caller that
+   *  only reacts to a positive can ignore it. */
+  ready: boolean;
+}
+
 const EMPTY_RUN_STATUSES: RunStatusMap = {};
 const runStatusCache = new Map<string, RunStatusMap>();
 const MAX_RUN_STATUS_SNAPSHOTS = 64;
@@ -41,7 +52,7 @@ export function useRunStatuses(
   workspace: Workspace | null,
   folderKey: string,
   actions: RunAction[],
-): RunStatusMap {
+): RunStatusesSnapshot {
   const workspaceId = workspace?.id ?? null;
   const repoRoot =
     workspace && isLocalMainWorkspace(workspace)
@@ -108,8 +119,22 @@ export function useRunStatuses(
       off?.();
     };
   }, [workspaceId, repoRoot, folderKey, actionIdsKey, cacheKey, bridge]);
-  if (!workspaceId || !folderKey || !actionIdsKey) return EMPTY_RUN_STATUSES;
-  return snapshot.key === cacheKey
-    ? snapshot.statuses
-    : (runStatusCache.get(cacheKey) ?? EMPTY_RUN_STATUSES);
+  if (!workspaceId || !folderKey) {
+    return { statuses: EMPTY_RUN_STATUSES, ready: false };
+  }
+  // A repo that defines NO run actions is an answer, not a pending read — the
+  // effect above never pulls, and nothing can be running.
+  if (!actionIdsKey) return { statuses: EMPTY_RUN_STATUSES, ready: true };
+  // The cache is written only by a resolved pull (cacheRunStatuses, called
+  // immediately before setSnapshot), so its membership IS the readiness bit —
+  // including for a remount that inherits a previous mount's answer. Eviction
+  // at the retention bound can flip it back to false, which only ever
+  // suppresses a negative until the next pull.
+  return {
+    statuses:
+      snapshot.key === cacheKey
+        ? snapshot.statuses
+        : (runStatusCache.get(cacheKey) ?? EMPTY_RUN_STATUSES),
+    ready: runStatusCache.has(cacheKey),
+  };
 }

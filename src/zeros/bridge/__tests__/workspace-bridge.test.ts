@@ -4,6 +4,7 @@ import {
   bridgeFileTree,
   bridgeGitStatus,
   bridgeGitChangeCounts,
+  bridgeGitChangeLineCounts,
   bridgeGitDiff,
   bridgeGitFetch,
   bridgeGitLog,
@@ -139,6 +140,37 @@ describe("workspace-bridge read ops", () => {
     );
     expect(seen.op).toBe("git.changeCounts");
     expect(out).toEqual(counts);
+  });
+
+  it("bridgeGitChangeLineCounts sends git.changeLineCounts and returns the pair", async () => {
+    const seen: { op?: string } = {};
+    const out = await bridgeGitChangeLineCounts(
+      fakeBridge(
+        {
+          type: "WORKSPACE_RESPONSE",
+          op: "git.changeLineCounts",
+          result: { additions: 1500, deletions: 240 },
+        },
+        seen,
+      ),
+      "ws1",
+    );
+    expect(seen.op).toBe("git.changeLineCounts");
+    expect(out).toEqual({ additions: 1500, deletions: 240 });
+  });
+
+  it("reads an engine that predates git.changeLineCounts as no changes", async () => {
+    // An older engine answers the unknown op with an empty result rather than
+    // an error; that must not reach a tab as "+NaN".
+    const out = await bridgeGitChangeLineCounts(
+      fakeBridge({
+        type: "WORKSPACE_RESPONSE",
+        op: "git.changeLineCounts",
+        result: {},
+      }),
+      "ws1",
+    );
+    expect(out).toEqual({ additions: 0, deletions: 0 });
   });
 
   it("bridgeGitDiff sends git.diff and returns hunks", async () => {
