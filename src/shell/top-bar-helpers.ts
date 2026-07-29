@@ -25,15 +25,37 @@ export interface WorkspaceFadeVisibility {
   beforePinnedRight: boolean;
 }
 
+/** The workspace to land on when the primary checkout is not an offered
+ * destination — the leftmost tab, so "somewhere sensible" matches what the
+ * strip shows. Returns null for a cold or worktree-less repo. Shared with the
+ * repo-add paths (AddProjectProvider) so a switch and an add agree on where
+ * "not the trunk" means. */
+export function leftmostLiveWorkspace(
+  cachedWorkspaces: readonly Workspace[] | undefined,
+): Workspace | null {
+  if (!cachedWorkspaces) return null;
+  const live = cachedWorkspaces.filter((w) => w.archivedAt == null);
+  return orderWorkspaceTabs(live)[0] ?? null;
+}
+
 /** Resolve a repository switch without conflating “cache cold” with “there is
  * no remembered workspace”. A confirmed list may invalidate a deleted target;
- * an unresolved list preserves the complete remembered identity immediately. */
+ * an unresolved list preserves the complete remembered identity immediately.
+ *
+ * `allowLocalMain` mirrors the "Work in local main" experimental flag. With it
+ * off the primary checkout stops being an offered destination: a switch prefers
+ * a real worktree instead, so the flag's whole point — never silently putting
+ * an agent in the trunk — holds for navigation and not just for the tab strip.
+ * Main stays the terminal fallback for a repo with no worktree at all, because
+ * there is nowhere else to go; the top bar then shows "+" and no tabs. */
 export function resolveRepoWorkspaceDestination(args: {
   project: Project;
   rememberedFolder: string | null | undefined;
   cachedWorkspaces: readonly Workspace[] | undefined;
+  allowLocalMain?: boolean;
 }): WorkspaceNavigationTarget {
   const { project, cachedWorkspaces } = args;
+  const allowLocalMain = args.allowLocalMain !== false;
   const rememberedFolder = args.rememberedFolder || project.repoRoot;
   const main = buildLocalMainWorkspace(project);
   const matched = cachedWorkspaces
@@ -45,6 +67,13 @@ export function resolveRepoWorkspaceDestination(args: {
       : { ...matched, path: rememberedFolder };
   }
   if (findWorkspaceForFolder(rememberedFolder, [main])) {
+    // The remembered folder is the primary checkout (or a directory below it).
+    // A cold list can't prove a worktree exists, so it keeps the remembered
+    // identity rather than guessing — the warm case is the one that redirects.
+    if (!allowLocalMain) {
+      const alternative = leftmostLiveWorkspace(cachedWorkspaces);
+      if (alternative) return alternative;
+    }
     return rememberedFolder === project.repoRoot
       ? main
       : { path: rememberedFolder, repoRoot: project.repoRoot };
@@ -57,6 +86,10 @@ export function resolveRepoWorkspaceDestination(args: {
       ...(workspaceId ? { id: workspaceId } : {}),
       validationPending: true,
     };
+  }
+  if (!allowLocalMain) {
+    const alternative = leftmostLiveWorkspace(cachedWorkspaces);
+    if (alternative) return alternative;
   }
   return main;
 }

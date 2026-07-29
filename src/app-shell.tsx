@@ -756,10 +756,16 @@ function ShellRouter() {
 
   // ⌥⌘B anywhere toggles Column 3. Skipped inside editable surfaces so
   // we don't steal from native text-input bindings (if any use ⌥⌘B).
+  //
+  // Match on `e.code === "KeyB"`, not `e.key`: on macOS, holding Option
+  // remaps `e.key` to the glyph (Option+B → "∫"), so a letter check can
+  // never match and the shortcut is simply dead — even though the palette
+  // advertises it (src/shell/shortcuts-catalog.ts). Same fix the ⌥⌘T and
+  // ⌥⌘F handlers below already carry; this one was missed.
   React.useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || !e.altKey || e.shiftKey) return;
-      if (e.key.toLowerCase() !== "b") return;
+      if (e.code !== "KeyB") return;
       // Skipped inside editable surfaces — but NOT inside a focused
       // terminal (xterm's hidden textarea would otherwise swallow this
       // global chord). See src/shell/editable-target.ts.

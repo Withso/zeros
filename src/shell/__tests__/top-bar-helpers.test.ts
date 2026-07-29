@@ -7,6 +7,7 @@ import {
   filterArchivedWorkspaces,
   formatChangeCount,
   horizontalOverflow,
+  leftmostLiveWorkspace,
   orderWorkspaceTabs,
   resolveRepoWorkspaceDestination,
   workspaceFadeVisibility,
@@ -159,6 +160,142 @@ describe("repository workspace restoration", () => {
       path: "/repo",
       repoRoot: "/repo",
     });
+  });
+});
+
+// The shared "not the trunk" destination. Exported because BOTH a repo switch
+// (resolveRepoWorkspaceDestination) and a repo add (AddProjectProvider's
+// openFirstWorkspace fallback) have to agree on where the user lands when the
+// primary checkout has no tab — the two drifting is what put an add into an
+// untabbed trunk chat.
+describe("leftmostLiveWorkspace", () => {
+  it("returns the oldest live worktree, matching the tab strip's order", () => {
+    // Engine order is newest-first; the strip is creation-ordered.
+    const older = workspace("older", { archivedAt: null, createdAt: 100 });
+    const newer = workspace("newer", { archivedAt: null, createdAt: 300 });
+    expect(leftmostLiveWorkspace([newer, older])).toBe(older);
+  });
+
+  it("skips archived rows", () => {
+    const archived = workspace("archived", { createdAt: 1 });
+    const live = workspace("live", { archivedAt: null, createdAt: 100 });
+    expect(leftmostLiveWorkspace([archived, live])).toBe(live);
+  });
+
+  it("returns null for an all-archived repo", () => {
+    expect(leftmostLiveWorkspace([workspace("archived")])).toBeNull();
+  });
+
+  it("returns null for a worktree-less repo", () => {
+    expect(leftmostLiveWorkspace([])).toBeNull();
+  });
+
+  it("returns null for a cold cache rather than guessing", () => {
+    // `undefined` is "not loaded yet", not "no worktrees" — callers fall back
+    // to the repo root, which is recoverable; guessing a tab is not.
+    expect(leftmostLiveWorkspace(undefined)).toBeNull();
+  });
+});
+
+// "Work in local main" off — the primary checkout stops being an offered
+// destination, so a repo switch has to land on a worktree wherever one exists.
+describe("repository workspace restoration without local main", () => {
+  const older = workspace("older", {
+    path: "/worktrees/older",
+    archivedAt: null,
+    createdAt: 100,
+  });
+  const newer = workspace("newer", {
+    path: "/worktrees/newer",
+    archivedAt: null,
+    createdAt: 300,
+  });
+
+  it("redirects a remembered main checkout to the leftmost live worktree", () => {
+    // Engine order is newest-first; the destination must match the tab strip's
+    // creation order so "where the switch lands" is the tab the user sees first.
+    expect(
+      resolveRepoWorkspaceDestination({
+        project,
+        rememberedFolder: "/repo",
+        cachedWorkspaces: [newer, older],
+        allowLocalMain: false,
+      }),
+    ).toBe(older);
+  });
+
+  it("redirects a chat rooted in a main-checkout subdirectory too", () => {
+    expect(
+      resolveRepoWorkspaceDestination({
+        project,
+        rememberedFolder: "/repo/packages/app",
+        cachedWorkspaces: [older],
+        allowLocalMain: false,
+      }),
+    ).toBe(older);
+  });
+
+  it("redirects a deleted worktree to a live one instead of to main", () => {
+    expect(
+      resolveRepoWorkspaceDestination({
+        project,
+        rememberedFolder: "/worktrees/deleted",
+        cachedWorkspaces: [older],
+        allowLocalMain: false,
+      }),
+    ).toBe(older);
+  });
+
+  it("skips archived rows when choosing the redirect target", () => {
+    const archived = workspace("archived", {
+      path: "/worktrees/archived",
+      createdAt: 1,
+    });
+    expect(
+      resolveRepoWorkspaceDestination({
+        project,
+        rememberedFolder: "/repo",
+        cachedWorkspaces: [archived, older],
+        allowLocalMain: false,
+      }),
+    ).toBe(older);
+  });
+
+  it("still lands on main when the repo has no worktree to offer", () => {
+    // Nowhere else to go — a repo whose only checkout is the trunk has to
+    // resolve somewhere, and "+" is the top bar's call to action from there.
+    expect(
+      resolveRepoWorkspaceDestination({
+        project,
+        rememberedFolder: "/repo",
+        cachedWorkspaces: [],
+        allowLocalMain: false,
+      }),
+    ).toMatchObject({ id: "local:zeros", path: "/repo" });
+  });
+
+  it("does not guess a redirect while the repository cache is cold", () => {
+    // A cold list cannot prove a worktree exists; guessing here would bounce
+    // the user twice on a cold repo switch.
+    expect(
+      resolveRepoWorkspaceDestination({
+        project,
+        rememberedFolder: "/repo",
+        cachedWorkspaces: undefined,
+        allowLocalMain: false,
+      }),
+    ).toMatchObject({ id: "local:zeros", path: "/repo" });
+  });
+
+  it("leaves a confirmed worktree memory untouched", () => {
+    expect(
+      resolveRepoWorkspaceDestination({
+        project,
+        rememberedFolder: newer.path,
+        cachedWorkspaces: [newer, older],
+        allowLocalMain: false,
+      }),
+    ).toBe(newer);
   });
 });
 

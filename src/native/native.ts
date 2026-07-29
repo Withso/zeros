@@ -36,6 +36,14 @@ export type ProjectOpeningPayload = {
   root: string;
 };
 
+/** A `zeros://open?path=…` deep link that never became an open project —
+ *  a missing/blocked/non-project path, or a failed engine respawn. `root` is
+ *  null when the link carried no path at all. */
+export type ProjectOpenFailedPayload = {
+  root: string | null;
+  reason: string;
+};
+
 // ── Agent project-context discovery — Stage 9 §2.9.5 ──
 
 export type AgentContextFile = {
@@ -154,6 +162,15 @@ export async function onProjectOpening(
 ): Promise<() => void> {
   if (!isNativeRuntime()) return () => {};
   return nativeListen<ProjectOpeningPayload>("project-opening", handler);
+}
+
+/** Subscribe to a failed `zeros://open` deep link so the renderer can tell the
+ *  user why nothing happened, instead of leaving the click silently dead. */
+export async function onProjectOpenFailed(
+  handler: (payload: ProjectOpenFailedPayload) => void,
+): Promise<() => void> {
+  if (!isNativeRuntime()) return () => {};
+  return nativeListen<ProjectOpenFailedPayload>("project-open-failed", handler);
 }
 
 /**

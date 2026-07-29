@@ -15,7 +15,8 @@
 // ──────────────────────────────────────────────────────────
 
 import { BrowserWindow, Menu, type MenuItemConstructorOptions } from "electron";
-import { emitEvent } from "./ipc/events";
+import { devToolsAccelerator, toggleDevTools } from "./devtools";
+import { emitEvent, getMainWindow } from "./ipc/events";
 import { IS_DEV } from "./runtime-mode";
 
 export function installAppMenu(): void {
@@ -147,10 +148,20 @@ export function installAppMenu(): void {
     // ── View ──────────────────────────────────────────────
     //
     // Standard Electron role accelerators — these work in both dev
-    // and packaged builds. The DevTools accelerator is effectively
-    // dev-only: packaged builds force-close DevTools (see
-    // main.ts:363-367), so Inspect Element is a debugging affordance
-    // for the dev build.
+    // and packaged builds.
+    //
+    // DevTools works on EVERY channel (dev, Alpha, Beta, Production).
+    // It used to be dev-only in practice: packaged builds force-closed
+    // DevTools the frame after it opened, which read as a flicker and
+    // left shipped builds undebuggable. See electron/devtools.ts for
+    // why that block is gone and what replaced it.
+    //
+    // NOT `role: "toggleDevTools"` — the role toggles the FOCUSED
+    // window and gives no control over dock mode. Both matter here:
+    // DevTools must open detached (a docked panel breaks the
+    // three-column minimum-width layout), and when the detached
+    // DevTools window itself has focus the role would open
+    // DevTools-on-DevTools instead of closing the panel.
     //
     // 2026-05-28: `reload` and `forceReload` are intentionally
     // OMITTED from the View menu. A renderer reload tears down
@@ -169,7 +180,16 @@ export function installAppMenu(): void {
     {
       label: "View",
       submenu: [
-        { role: "toggleDevTools" },      // Cmd+Alt+I (Cmd+Opt+I)
+        {
+          label: "Toggle Developer Tools",
+          accelerator: devToolsAccelerator(process.platform),
+          // Always the app window, never `browserWindow` / getFocusedWindow():
+          // the detached DevTools window holds focus while you're typing in the
+          // console, and ⌥⌘I from there must close the panel, not inspect it.
+          click: () => {
+            toggleDevTools(getMainWindow());
+          },
+        },
         { type: "separator" },
         { role: "resetZoom" },           // Cmd+0
         { role: "zoomIn" },              // Cmd+=
