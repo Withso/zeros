@@ -9,6 +9,7 @@ import {
   mkdir,
   readFile,
   rm,
+  symlink,
   writeFile,
   appendFile,
 } from "node:fs/promises";
@@ -252,6 +253,25 @@ describe("diff / status / log", () => {
       // count has to be the one we were already reporting.
       await stagePaths({ workspaceId, paths: ["late-nul.txt"] });
       await expect(changeLineCounts(workspaceId)).resolves.toEqual(untracked);
+    });
+
+    it("counts an untracked symlink as the one line Git stores for it", async () => {
+      // Git stores a symlink's TARGET PATH as its blob content — one line —
+      // never the bytes of whatever it points at. The scan opens untracked
+      // paths with O_NOFOLLOW precisely so a link cannot redirect the read;
+      // the ELOOP that refuses it is what this case is counted from. Without
+      // that branch the link silently scores 0, and pointing one at a large
+      // file inside the worktree would otherwise bill its whole contents here.
+      const cwd = await worktreePath();
+      const body = Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n");
+      await writeFile(path.join(cwd, "target.txt"), `${body}\n`);
+      await symlink("target.txt", path.join(cwd, "link.txt"));
+
+      // 40 for the real file, 1 for the link — not 80.
+      await expect(changeLineCounts(workspaceId)).resolves.toEqual({
+        additions: 41,
+        deletions: 0,
+      });
     });
 
     it("counts a deleted tracked file's removed lines", async () => {

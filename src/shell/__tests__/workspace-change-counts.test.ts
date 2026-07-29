@@ -1,4 +1,4 @@
-import { createElement } from "react";
+import { createElement, isValidElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
@@ -10,9 +10,28 @@ function render(additions: number, deletions: number, active = false): string {
   );
 }
 
-/** The rendered ± text with markup stripped — what the tab actually reads as. */
+/** Concatenate the text a node renders to, by walking the element tree.
+ *
+ *  Deliberately NOT a regex over the markup string. Stripping `<[^>]*>` in one
+ *  pass is the incomplete-multi-character-sanitization shape CodeQL flags, and
+ *  the objection holds even here: it is lossy the moment any rendered text
+ *  contains an angle bracket, which is exactly the sort of thing these
+ *  assertions exist to catch. The tree has the text already — no parsing of
+ *  HTML with a regex required, and no DOM either (this suite runs on `node`). */
+function textOf(node: ReactNode): string {
+  if (node == null || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textOf).join("");
+  if (isValidElement(node)) {
+    return textOf((node.props as { children?: ReactNode }).children);
+  }
+  return "";
+}
+
+/** The ± text the tab actually reads as. Calls the component directly — it is
+ *  pure and hookless, so its return value IS the tree. */
 function text(additions: number, deletions: number): string {
-  return render(additions, deletions).replace(/<[^>]*>/g, "");
+  return textOf(WorkspaceChangeCounts({ additions, deletions, active: false }));
 }
 
 describe("workspace tab change counts", () => {

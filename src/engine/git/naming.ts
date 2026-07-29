@@ -141,8 +141,12 @@ function slugifyHint(hint: string | undefined): string {
   return randomColour().toLowerCase();
 }
 
+/** Same crypto-backed picker the branch allocator uses (randomIndex below).
+ *  Not Math.random: this value is a component of the workspace ID, and that ID
+ *  is what setupSessionId builds a PTY session identifier out of — so it is a
+ *  name other parts of the engine treat as unguessable, not just cosmetic. */
 function randomColour(): string {
-  return COLOURS[Math.floor(Math.random() * COLOURS.length)];
+  return COLOURS[randomIndex(COLOURS.length)];
 }
 
 /** The `zeros/` prefix marks a ref as workspace-owned (see
@@ -204,8 +208,11 @@ export function pickFreeColourName(usedNames: Iterable<string>): string | null {
   return null;
 }
 
-/** Unbiased index in [0, n). Uses crypto rather than Math.random purely for
- *  uniformity — nothing here is security-sensitive. */
+/** Unbiased index in [0, n). Crypto-backed on two grounds: rejection sampling
+ *  gives a genuinely uniform pick (the modulo of a 32-bit draw does not), and
+ *  one caller — randomColour, via generateWorkspaceId — feeds a workspace ID
+ *  that setupSessionId turns into a session identifier. Branch selection alone
+ *  would not need it; that path does. */
 function randomIndex(n: number): number {
   const limit = Math.floor(0x100000000 / n) * n;
   for (;;) {

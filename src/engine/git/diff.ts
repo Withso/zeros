@@ -346,19 +346,44 @@ async function untrackedAdditions(
     const counted = await Promise.all(
       batch.map(async (relativePath) => {
         const absolutePath = path.join(worktreePath, relativePath);
+        let handle: nodeFs.promises.FileHandle | undefined;
         try {
-          // lstat, not stat: Git stores a symlink's TARGET PATH as its content
-          // (one line), so following the link would measure the wrong file.
-          const info = await fs.promises.lstat(absolutePath);
-          if (info.isSymbolicLink()) return { lines: 1, bytes: 0 };
+          // One HANDLE for both the size check and the read, rather than a
+          // stat-then-readFile pair on the path. Between those two the path can
+          // be swapped — for a file past the cap, or for a symlink pointing
+          // outside the worktree — and the second call would resolve the NEW
+          // target, so the cap that is supposed to bound this scan would not
+          // actually bound the bytes read. Against one fd both refer to the
+          // same inode no matter what happens to the name.
+          //
+          // O_NOFOLLOW is the other half of that: it refuses to open a symlink
+          // (final component only) instead of following it, which both keeps
+          // the read inside the worktree and gives us the symlink case to
+          // handle below. Git stores a symlink's TARGET PATH as its content —
+          // one line — so following the link would measure the wrong file.
+          handle = await fs.promises.open(
+            absolutePath,
+            fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+          );
+          const info = await handle.stat();
           if (!info.isFile() || info.size > UNTRACKED_STAT_MAX_FILE_BYTES) {
             return { lines: 0, bytes: 0 };
           }
-          const buffer = await fs.promises.readFile(absolutePath);
-          return { lines: countBufferLines(buffer), bytes: buffer.length };
-        } catch {
-          // The path can be removed between `git status` and this read.
+          // Bounded by the size we just validated ON THIS HANDLE, so a file
+          // that grows mid-scan still costs at most the capped allocation.
+          const buffer = Buffer.alloc(info.size);
+          const { bytesRead } = await handle.read(buffer, 0, info.size, 0);
+          const content = buffer.subarray(0, bytesRead);
+          return { lines: countBufferLines(content), bytes: content.length };
+        } catch (error) {
+          // ELOOP is O_NOFOLLOW refusing a symlink — count it the way Git does,
+          // as the single line holding its target path. Everything else is the
+          // path being removed between `git status` and this read.
+          const code = (error as NodeJS.ErrnoException | null)?.code;
+          if (code === "ELOOP") return { lines: 1, bytes: 0 };
           return { lines: 0, bytes: 0 };
+        } finally {
+          await handle?.close().catch(() => {});
         }
       }),
     );
