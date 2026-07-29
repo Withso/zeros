@@ -21,6 +21,7 @@ import {
   bridgeFileTree,
   bridgeGitStatus,
   bridgeGitChangeCounts,
+  bridgeGitChangeLineCounts,
   bridgeGitHasChanges,
   bridgeGitDiff,
   bridgeGitShow,
@@ -716,6 +717,13 @@ export interface ChangeCounts {
   unstaged: number;
 }
 
+/** ± line totals for the same All Changes comparison `ChangeCounts.all`
+ *  counts files for. Binary and conflicted paths contribute nothing. */
+export interface ChangeLineCounts {
+  additions: number;
+  deletions: number;
+}
+
 export async function gitStatus(workspaceId: string): Promise<StatusResult> {
   return bridgeGitStatus(requireBridge("read Git status"), workspaceId);
 }
@@ -725,6 +733,16 @@ export async function gitChangeCounts(
 ): Promise<ChangeCounts> {
   return bridgeGitChangeCounts(
     requireBridge("read Git change counts"),
+    workspaceId,
+  );
+}
+
+/** ± line totals for the All Changes net comparison — the workspace tabs' pair. */
+export async function gitChangeLineCounts(
+  workspaceId: string,
+): Promise<ChangeLineCounts> {
+  return bridgeGitChangeLineCounts(
+    requireBridge("read Git change line counts"),
     workspaceId,
   );
 }

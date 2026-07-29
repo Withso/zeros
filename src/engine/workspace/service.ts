@@ -33,6 +33,7 @@ import {
   createPr,
   checkRepoNameAvailable,
   changeCounts,
+  changeLineCounts,
   listGithubOwners,
   publishRepoToGithub,
   initRepoInPlace,
@@ -508,6 +509,7 @@ const REMOTE_READABLE = new Set<string>([
   // Git reads
   "git.status",
   "git.changeCounts",
+  "git.changeLineCounts",
   "git.diff",
   "git.show",
   "git.log",
@@ -2128,6 +2130,18 @@ export class WorkspaceService {
         // the remote secret filtering before counting inside the engine; never
         // return the underlying path sets over the bridge.
         return changeCounts(
+          reqStr(params, "workspaceId"),
+          remote
+            ? (path, oldPath) =>
+                !isSensitiveRepoPath(path) &&
+                !(oldPath && isSensitiveRepoPath(oldPath))
+            : undefined,
+        );
+      case "git.changeLineCounts":
+        // Read: the ± line pair for the same All Changes comparison. Same
+        // boundary as git.changeCounts — filter inside the engine so a remote
+        // client's totals never measure a file its own lists hide.
+        return changeLineCounts(
           reqStr(params, "workspaceId"),
           remote
             ? (path, oldPath) =>

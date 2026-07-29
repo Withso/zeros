@@ -4,13 +4,23 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, rm, writeFile, appendFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+  appendFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { parseUnifiedDiffFiles } from "../../../shell/column3-tabs/changes-parse";
 import {
   closeState,
   changeCounts,
+  changeLineCounts,
   createWorkspace,
   diff,
   log,
@@ -21,6 +31,14 @@ import {
 import { upsertRepoByRoot } from "../../db/projects";
 
 const execFileAsync = promisify(execFile);
+
+/** Mirrors the Changes tab's own untracked "+N" rule (changes-tab.tsx), which
+ *  is what the list on screen adds up. */
+function countLines(content: string): number {
+  if (content.length === 0) return 0;
+  const body = content.endsWith("\n") ? content.slice(0, -1) : content;
+  return body.length === 0 ? 0 : body.split("\n").length;
+}
 
 async function initRepo(repoRoot: string): Promise<void> {
   await mkdir(repoRoot, { recursive: true });
@@ -147,6 +165,253 @@ describe("diff / status / log", () => {
       expect(net.patch).toBe("");
       expect(staged.patch).toContain("new file mode");
       expect(unstaged.patch).toContain("deleted file mode");
+    });
+  });
+
+  describe("changeLineCounts", () => {
+    async function worktreePath(): Promise<string> {
+      const ws = (await import("..")).getWorkspace(workspaceId);
+      await execFileAsync("git", ["config", "user.email", "t@t"], {
+        cwd: ws.path,
+      });
+      await execFileAsync("git", ["config", "user.name", "t"], {
+        cwd: ws.path,
+      });
+      return ws.path;
+    }
+
+    it("is zero on a clean worktree", async () => {
+      await expect(changeLineCounts(workspaceId)).resolves.toEqual({
+        additions: 0,
+        deletions: 0,
+      });
+    });
+
+    it("sums committed and uncommitted tracked work in one net total", async () => {
+      const cwd = await worktreePath();
+      await writeFile(path.join(cwd, "feature.txt"), "a\nb\nc\n");
+      await execFileAsync("git", ["add", "feature.txt"], { cwd });
+      await execFileAsync("git", ["commit", "-q", "-m", "add feature"], {
+        cwd,
+      });
+      // README.md starts as the single line "# initial".
+      await writeFile(path.join(cwd, "README.md"), "# changed\nextra\n");
+
+      await expect(changeLineCounts(workspaceId)).resolves.toEqual({
+        additions: 5,
+        deletions: 1,
+      });
+    });
+
+    it("counts an untracked file's own lines, which no diff reports", async () => {
+      const cwd = await worktreePath();
+      // No trailing newline — the final partial line still counts, as Git counts it.
+      await writeFile(path.join(cwd, "fresh.txt"), "one\ntwo\nthree");
+
+      await expect(changeLineCounts(workspaceId)).resolves.toEqual({
+        additions: 3,
+        deletions: 0,
+      });
+    });
+
+    it("ignores untracked binary content, matching Git's numstat '-'", async () => {
+      const cwd = await worktreePath();
+      await writeFile(
+        path.join(cwd, "blob.bin"),
+        Buffer.from([0x01, 0x00, 0x0a, 0x02]),
+      );
+
+      await expect(changeLineCounts(workspaceId)).resolves.toEqual({
+        additions: 0,
+        deletions: 0,
+      });
+    });
+
+    it("counts a file whose first NUL is past Git's 8000-byte sniff", async () => {
+      // Git's buffer_is_binary only inspects FIRST_FEW_BYTES (8000), so a file
+      // whose first NUL lands after that is TEXT to Git and gets a real "+N".
+      // Sniffing the WHOLE buffer instead scores it 0 while untracked and then
+      // jumps to the true total the moment it is staged and the numstat path
+      // takes over — the tab and the Changes list disagreeing in between.
+      const cwd = await worktreePath();
+      const text = Buffer.from(
+        Array.from({ length: 2_000 }, (_, i) => `line ${i}`).join("\n") + "\n",
+      );
+      expect(text.length).toBeGreaterThan(10_000);
+      await writeFile(
+        path.join(cwd, "late-nul.txt"),
+        Buffer.concat([
+          text.subarray(0, 10_000),
+          Buffer.from([0x00]),
+          text.subarray(10_000),
+        ]),
+      );
+
+      const untracked = await changeLineCounts(workspaceId);
+      expect(untracked).toEqual({ additions: 2_000, deletions: 0 });
+      // Staging routes the same file through `--numstat` instead. Git's own
+      // count has to be the one we were already reporting.
+      await stagePaths({ workspaceId, paths: ["late-nul.txt"] });
+      await expect(changeLineCounts(workspaceId)).resolves.toEqual(untracked);
+    });
+
+    it("counts an untracked symlink as the one line Git stores for it", async () => {
+      // Git stores a symlink's TARGET PATH as its blob content — one line —
+      // never the bytes of whatever it points at. The scan opens untracked
+      // paths with O_NOFOLLOW precisely so a link cannot redirect the read;
+      // the ELOOP that refuses it is what this case is counted from. Without
+      // that branch the link silently scores 0, and pointing one at a large
+      // file inside the worktree would otherwise bill its whole contents here.
+      const cwd = await worktreePath();
+      const body = Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n");
+      await writeFile(path.join(cwd, "target.txt"), `${body}\n`);
+      await symlink("target.txt", path.join(cwd, "link.txt"));
+
+      // 40 for the real file, 1 for the link — not 80.
+      await expect(changeLineCounts(workspaceId)).resolves.toEqual({
+        additions: 41,
+        deletions: 0,
+      });
+    });
+
+    it("counts a deleted tracked file's removed lines", async () => {
+      const cwd = await worktreePath();
+      await rm(path.join(cwd, "README.md"));
+
+      await expect(changeLineCounts(workspaceId)).resolves.toEqual({
+        additions: 0,
+        deletions: 1,
+      });
+    });
+
+    it("reads a rename as its real edit, not a whole-file delete plus add", async () => {
+      // `--numstat -z` writes a rename as an EMPTY path field followed by two
+      // more NUL-terminated tokens. Mis-parsing that record is what turns one
+      // appended line into a 13-add/12-delete pair, so the renamed file has to
+      // exist at the FORK POINT for the record to appear at all.
+      const body = Array.from({ length: 12 }, (_, i) => `line ${i}`).join("\n");
+      await writeFile(path.join(repoRoot, "original.txt"), `${body}\n`);
+      await execFileAsync("git", ["add", "original.txt"], { cwd: repoRoot });
+      await execFileAsync("git", ["commit", "-q", "-m", "add original"], {
+        cwd: repoRoot,
+      });
+      const renaming = await createWorkspace({ repoRoot });
+      const cwd = (await import("..")).getWorkspace(renaming.workspaceId).path;
+      await execFileAsync("git", ["mv", "original.txt", "renamed.txt"], {
+        cwd,
+      });
+      await appendFile(path.join(cwd, "renamed.txt"), "line 12\n");
+
+      await expect(changeLineCounts(renaming.workspaceId)).resolves.toEqual({
+        additions: 1,
+        deletions: 0,
+      });
+    });
+
+    it("excludes filtered paths from BOTH the tracked and untracked totals", async () => {
+      const cwd = await worktreePath();
+      await writeFile(path.join(cwd, "README.md"), "# changed\n");
+      await writeFile(path.join(cwd, ".env"), "SECRET=1\nOTHER=2\n");
+
+      await expect(
+        changeLineCounts(workspaceId, (filePath) => filePath !== ".env"),
+      ).resolves.toEqual({ additions: 1, deletions: 1 });
+      await expect(changeLineCounts(workspaceId, () => false)).resolves.toEqual(
+        { additions: 0, deletions: 0 },
+      );
+    });
+
+    it("never counts the internal .zeros/ seed", async () => {
+      const cwd = await worktreePath();
+      await mkdir(path.join(cwd, ".zeros"), { recursive: true });
+      await writeFile(path.join(cwd, ".zeros", "seed.json"), "{}\nmore\n");
+
+      await expect(changeLineCounts(workspaceId)).resolves.toEqual({
+        additions: 0,
+        deletions: 0,
+      });
+    });
+
+    it("treats a staged-then-deleted add as net zero, like the All Changes count", async () => {
+      const cwd = await worktreePath();
+      await writeFile(path.join(cwd, "test1.md"), "staged then removed\n");
+      await stagePaths({ workspaceId, paths: ["test1.md"] });
+      await rm(path.join(cwd, "test1.md"));
+
+      await expect(changeLineCounts(workspaceId)).resolves.toEqual({
+        additions: 0,
+        deletions: 0,
+      });
+    });
+
+    it("does not measure a conflicted file's markers as changed lines", async () => {
+      // An unmerged path DOES appear in `git diff --numstat`, and its diff is
+      // the whole `<<<<<<< / ======= / >>>>>>>` block — five additions for a
+      // one-line conflict here. The Changes list renders conflicts with no ±
+      // (they need resolving, not measuring); the tab has to agree.
+      const cwd = await worktreePath();
+      await writeFile(path.join(cwd, "shared.txt"), "l1\nl2\nl3\n");
+      await execFileAsync("git", ["add", "shared.txt"], { cwd });
+      await execFileAsync("git", ["commit", "-q", "-m", "shared"], { cwd });
+      await execFileAsync("git", ["checkout", "-q", "-b", "other"], { cwd });
+      await writeFile(path.join(cwd, "shared.txt"), "l1\nOTHER\nl3\n");
+      await execFileAsync("git", ["commit", "-q", "-am", "other"], { cwd });
+      await execFileAsync("git", ["checkout", "-q", "-"], { cwd });
+      await writeFile(path.join(cwd, "shared.txt"), "l1\nMINE\nl3\n");
+      await execFileAsync("git", ["commit", "-q", "-am", "mine"], { cwd });
+      await execFileAsync("git", ["merge", "-q", "other"], { cwd }).catch(
+        () => {
+          /* the conflict is the point */
+        },
+      );
+
+      const tree = await status(workspaceId);
+      expect(tree.conflicted.map((file) => file.path)).toEqual(["shared.txt"]);
+      // shared.txt is the branch's only content, and all of it is conflicted.
+      await expect(changeLineCounts(workspaceId)).resolves.toEqual({
+        additions: 0,
+        deletions: 0,
+      });
+    });
+
+    it("agrees with the Changes list's own ± totals for the same scope", async () => {
+      // The tab's pair and the Changes list are two different computations of
+      // one number: a cheap `--numstat` here, a parsed whole-tree patch plus
+      // per-file reads there. This is the test that keeps them honest.
+      const cwd = await worktreePath();
+      await writeFile(path.join(cwd, "committed.txt"), "a\nb\nc\nd\n");
+      await execFileAsync("git", ["add", "committed.txt"], { cwd });
+      await execFileAsync("git", ["commit", "-q", "-m", "committed work"], {
+        cwd,
+      });
+      // …then every other shape the scope can contain, left uncommitted.
+      await appendFile(path.join(cwd, "committed.txt"), "e\nf\n");
+      await writeFile(path.join(cwd, "staged.txt"), "one\ntwo\n");
+      await stagePaths({ workspaceId, paths: ["staged.txt"] });
+      await writeFile(path.join(cwd, "untracked.txt"), "x\ny\nz\n");
+      await rm(path.join(cwd, "README.md"));
+
+      const [pair, patch, tree] = await Promise.all([
+        changeLineCounts(workspaceId),
+        diff({ workspaceId, mode: "worktree-vs-base", rawPatch: true }),
+        status(workspaceId),
+      ]);
+      const listed = parseUnifiedDiffFiles(patch.patch ?? "");
+      const untrackedAdditions = await Promise.all(
+        tree.untracked.map(async (relativePath) =>
+          countLines(await readFile(path.join(cwd, relativePath), "utf-8")),
+        ),
+      );
+
+      expect(pair).toEqual({
+        additions:
+          listed.reduce((total, file) => total + file.additions, 0) +
+          untrackedAdditions.reduce((total, lines) => total + lines, 0),
+        deletions: listed.reduce((total, file) => total + file.deletions, 0),
+      });
+      // Guard the guard: a scope that measured nothing would pass vacuously.
+      expect(pair.additions).toBeGreaterThan(0);
+      expect(pair.deletions).toBeGreaterThan(0);
     });
   });
 

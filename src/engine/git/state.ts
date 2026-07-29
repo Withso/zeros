@@ -279,6 +279,26 @@ export function getWorkspaceByBranch(
   return row ? rowToWorkspace(row) : null;
 }
 
+/** Every branch name claimed in a repo, archived rows included.
+ *
+ *  Deliberately unfiltered: an archived workspace still OWNS its name. Its
+ *  branch ref and worktree folder usually still exist, and restoring it must
+ *  not find a second workspace squatting the name. Deleted workspaces are the
+ *  other case — deleteWorkspaceRow removes the row, so the name returns to the
+ *  pool, which is intended.
+ *
+ *  One query rather than 350 point lookups: the name allocator tests the whole
+ *  dictionary at once. */
+export function listWorkspaceBranches(repoSlug: string): string[] {
+  const handle = open();
+  return handle
+    .prepare<[string], { branch: string }>(
+      `SELECT branch FROM workspaces WHERE repo_slug = ?`,
+    )
+    .all(repoSlug)
+    .map((r) => r.branch);
+}
+
 export function listWorkspaces(filter?: {
   repoSlug?: string;
   status?: WorkspaceStatus;

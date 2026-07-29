@@ -121,8 +121,12 @@ import { Tooltip } from "../zeros/ui/primitives/tooltip";
 import { RepositoryIcon } from "../zeros/ui/repository-icon";
 import { WorkspaceContextMenu } from "../zeros/ui/workspace-context-menu";
 import { formatCompactAge } from "../zeros/agent/format-age";
-import { ZerosSpinner } from "../loaders";
+import { RunWave, ZerosSpinner } from "../loaders";
 import { useAddProject } from "./add-project-provider";
+import {
+  useAnyRunActionRunning,
+  useWorkspaceRunActivitySync,
+} from "./terminal/run-activity-store";
 import {
   usePendingCreatesAll,
   usePendingCreatesFor,
@@ -142,8 +146,11 @@ import {
   workspaceLabel,
   workspacePinSide,
   workspaceScrollLeftForTab,
+  workspaceTabDescription,
 } from "./top-bar-helpers";
 import { useCustomWindowDrag } from "./use-custom-window-drag";
+import { useWorkspaceChangeLines } from "./use-workspace-change-lines";
+import { WorkspaceChangeCounts } from "./workspace-change-counts";
 
 // --- CONSTANTS ---
 
@@ -170,34 +177,149 @@ function prefetchProjectWorkspaceDestination(project: Project): void {
   );
 }
 
+// Fills its cell edge to edge: the hover/selected wash spans the full 40px row
+// rather than sitting inside it as a rounded chip. `h-full` beats size="icon"'s
+// h-7, `rounded-none` beats the Button base's rounded-sm, and w-9 reproduces the
+// 36px the cell used to occupy as a 28px button inside 4px of wrapper padding —
+// so the fill grows without the bar's horizontal rhythm moving. The cell
+// wrappers drop that px-1 to match; keep the two in step.
+//
+// Home and main answer the same question a selected workspace tab answers —
+// "which surface is this window showing?" — so their selected state is the
+// --bg1 canvas, and hovering an already-selected one repaints that same --bg1
+// rather than lifting it. Identical rule, and identical reasoning, to
+// WORKSPACE_TAB_CLS; the compound hover variant carries an extra attribute
+// selector, so it outranks the plain hover rule whatever order Tailwind emits
+// them in.
 const ICON_BUTTON_CLS =
-  "shrink-0 text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1 data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1";
+  "h-full w-9 shrink-0 rounded-none text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1 data-[active=true]:bg-bg1 data-[active=true]:text-fg1 data-[active=true]:hover:bg-bg1";
+// Same cell geometry, different meaning: the archived picker's `data-active` is
+// "my dropdown is open", a transient press, not a selection. It keeps the
+// sidebar hover wash — painting it --bg1 would read as a permanently selected
+// surface on a control that never owns one.
+const MENU_ICON_BUTTON_CLS =
+  "h-full w-9 shrink-0 rounded-none text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1 data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1";
+// The plus keeps the ORIGINAL inset chip: size="icon"'s 28px square with the
+// Button base's rounded-sm, centred in 4px of wrapper padding. It is the one
+// control here that is never "selected" — there is no state for a full-bleed
+// wash to represent — so filling its cell would read as a permanently lit tab.
+const INSET_ICON_BUTTON_CLS =
+  "shrink-0 text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1";
 // Main carries a visible "main" label so it reads as a named tab beside the
-// branch tabs rather than a bare glyph. Same chip metrics as WORKSPACE_TAB_CLS
-// (h-7, px-2, gap-2, text-xs, 3.5 icon) but width follows the content — the
-// label is a fixed short string, so the fixed tab clamp would only add slack.
-const MAIN_TAB_CLS = `${ICON_BUTTON_CLS} h-7 justify-start gap-2 px-2 text-xs transition-none [&_svg]:size-3.5`;
+// branch tabs rather than a bare glyph. It is a full-bleed cell like the icon
+// buttons above — same h-full, same rounded-none, same --bg1 selected wash,
+// because it answers the same "which surface is this window showing?" question
+// a selected workspace tab does. Its metrics follow WORKSPACE_TAB_CLS (px-3,
+// gap-2.5, text-xs, 3.5 icon) so "main" sits on the branch names' rhythm.
+//
+// Spelled out rather than interpolating ICON_BUTTON_CLS: that class now carries
+// a fixed `w-9`, and the label needs the width to follow the content. Overriding
+// it would put `w-9` and `w-auto` at equal specificity and let stylesheet order
+// decide — the same race the pin borders go inline to avoid. With no `w-*` here
+// at all, the Button base's own `w-fit` sizes the cell to the label.
+const MAIN_TAB_CLS =
+  "h-full shrink-0 justify-start gap-2.5 rounded-none px-3 text-xs text-fg2 transition-none hover:bg-sidebar-bg-hover hover:text-fg1 data-[active=true]:bg-bg1 data-[active=true]:text-fg1 data-[active=true]:hover:bg-bg1 [&_svg]:size-3.5";
 // The app window bottoms out at 800px. Interpolate through the constrained
 // 800–1200px band, then hold the requested default/max widths above it.
 const PROJECT_TRIGGER_CLS =
   "w-[clamp(100px,calc(10vw_+_20px),140px)] min-w-[100px] max-w-[140px] shrink-0 justify-start gap-2 border-0 bg-transparent px-2 text-xs text-fg2 shadow-none hover:bg-sidebar-bg-hover hover:text-fg1 data-[state=open]:bg-sidebar-bg-hover data-[state=open]:text-fg1";
 const PROJECT_CHIP_CLS =
   "inline-flex size-4 shrink-0 items-center justify-center rounded-sm bg-bg2-hover text-xxs font-medium text-fg2";
+// Content-sized, not a fixed ramp: the tab is as wide as its icon + name +
+// whatever trailing indicators it happens to carry, floored at 100px and capped
+// at 180px. NO `w-*` — a width would defeat the intrinsic sizing, and every
+// child except the name is shrink-0, so the cap spends itself truncating the
+// branch name and never the ± pair or the wave.
+// Full-bleed selection: h-full + no radius means the hover/selected wash covers
+// the whole 40px cell, matching the icon cells either side of the strip. The
+// tabs sit flush (the lane has no gap or padding) and a left hairline separates
+// them, which is the divider convention the rest of this bar already uses.
+// The SELECTED tab paints --bg1 — the app canvas, not a sidebar hover wash — so
+// it reads as continuous with the content below it, and hover/focus repaint the
+// same --bg1 rather than lifting it. Those two compound variants carry an extra
+// attribute selector, so they outrank the plain hover rule on specificity and
+// win no matter what order Tailwind emits them in.
+// Sticky insets are 0 to match the lane's zero padding: a pinned tab sits flush
+// against the main cell's border on one side and the plus cell's on the other,
+// which is what lets measureWorkspaceStrip give it a single hairline per edge
+// instead of stacking one against a neighbour's.
+// The label weight lives HERE, on the container both tab variants share, not
+// on the inner Button — `buttonVariants` bakes in `font-medium`, so a real tab
+// got 500 while the pending placeholder (a bare div, no Button) inherited the
+// body's 400 and visibly thickened the moment the create landed. Declaring it
+// once on the shared class is what the chat strip does (TAB_BASE_CLS in
+// column2-chat-tabs.tsx) and is why that strip has never had the same snap.
 const WORKSPACE_TAB_CLS =
-  "group/workspace relative flex h-7 w-[clamp(120px,calc(10vw_+_40px),160px)] min-w-[120px] max-w-[160px] shrink-0 select-none items-center overflow-hidden rounded-sm px-2 text-left text-xs text-fg2 transition-none focus-within:bg-sidebar-bg-hover focus-within:text-fg2 data-[hovered=true]:bg-sidebar-bg-hover data-[hovered=true]:text-fg2 data-[active=true]:sticky data-[active=true]:left-1 data-[active=true]:right-1 data-[active=true]:z-20 data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1 data-[active=true]:focus-within:text-fg1 data-[active=true]:data-[hovered=true]:text-fg1";
+  "group/workspace border-border1 relative flex h-full min-w-[100px] max-w-[180px] shrink-0 select-none items-center overflow-hidden border-l px-3 text-left text-xs font-medium text-fg2 transition-none first:border-l-0 focus-within:bg-sidebar-bg-hover focus-within:text-fg2 data-[hovered=true]:bg-sidebar-bg-hover data-[hovered=true]:text-fg2 data-[active=true]:sticky data-[active=true]:left-0 data-[active=true]:right-0 data-[active=true]:z-20 data-[active=true]:bg-bg1 data-[active=true]:text-fg1 data-[active=true]:focus-within:bg-bg1 data-[active=true]:focus-within:text-fg1 data-[active=true]:data-[hovered=true]:bg-bg1 data-[active=true]:data-[hovered=true]:text-fg1";
+// `flex-auto`, never `flex-1`: flex-1 pins the basis at 0, which would erase
+// this button's contents from the tab's intrinsic width and collapse every tab
+// onto the 100px floor. `w-auto` undoes the Button base's `w-fit` for the same
+// reason. Keep this free of any `font-*` — the weight is inherited.
 const WORKSPACE_OPEN_BUTTON_CLS =
-  "h-full min-w-0 flex-1 justify-start gap-2 border-0 bg-transparent p-0 text-left text-xs text-inherit shadow-none transition-none hover:bg-transparent hover:text-inherit [&_svg]:size-3.5";
+  "h-full w-auto min-w-0 flex-auto justify-start gap-2.5 border-0 bg-transparent p-0 text-left text-xs text-inherit shadow-none transition-none hover:bg-transparent hover:text-inherit [&_svg]:size-3.5";
+// The gradient has to start in whatever colour the tab underneath it is, or the
+// archive affordance reads as a coloured band. A hovered tab is sidebar-bg-hover
+// EXCEPT when it is also the selected one, which now paints --bg1 — hence the
+// group-scoped override.
 const WORKSPACE_ACTION_OVERLAY_CLS =
-  "pointer-events-none absolute inset-y-0 right-0 flex w-10 items-center justify-end bg-gradient-to-l from-sidebar-bg-hover from-50% to-transparent pr-1 opacity-0 transition-none group-data-[hovered=true]/workspace:opacity-100 focus-within:opacity-100";
+  "pointer-events-none absolute inset-y-0 right-0 flex w-10 items-center justify-end bg-gradient-to-l from-sidebar-bg-hover from-50% to-transparent pr-1 opacity-0 transition-none group-data-[hovered=true]/workspace:opacity-100 group-data-[active=true]/workspace:from-bg1 focus-within:opacity-100";
 const WORKSPACE_ACTION_CLS =
   "pointer-events-auto inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-fg2 transition-[background-color,color] duration-120 ease-out hover:bg-bg2-hover hover:text-fg1";
-// Normal-flow and sticky tabs retain the requested 4px edge spacing. Fixed,
-// opaque gutters cover those four pixels so scrolling labels never leak into
-// the visual gap beside the main/plus controls.
-const WORKSPACE_CONTENT_INSET_PX = 4;
-const WORKSPACE_STICKY_EDGE_INSET_PX = 4;
-const WORKSPACE_TAB_GAP_PX = 4;
+// The strip runs flush into the controls on either side: no lane padding, so a
+// tab's edge meets the main cell's border-r on the left and the plus cell's
+// border-l on the right with nothing between them. Both insets are therefore 0
+// — the first tab starts at x=0, and a pinned tab pins to the very edge, which
+// is what puts its border exactly against the neighbouring cell's. (These used
+// to be 4, guarded by opaque gutters that covered the padding so scrolling
+// labels could not leak into it; with no padding there is nothing to cover and
+// the gutters are gone.) They stay named and separate from the tab gap because
+// the edge inset and the space between tabs are still distinct decisions.
+const WORKSPACE_CONTENT_INSET_PX = 0;
+const WORKSPACE_STICKY_EDGE_INSET_PX = 0;
+// MUST mirror the `gap-*` on the tab strip below (gap-0 → 0). A sticky tab's
+// own offsetLeft is clamped, so workspaceTabNaturalOffsetLeft rebuilds its
+// true flow position from the previous tab plus this gap; a value that drifts
+// from the class silently offsets the pin and fade placement by the delta.
+// Zero because the tabs now sit flush and a border-l on each one draws the
+// divider. That border is INSIDE offsetWidth (border-box), so the walk still
+// lands exactly on the next tab — which is precisely why the separator has to
+// stay a border and never become an element between tabs.
+// Deliberately NOT the edge inset above — the strip's outer padding and the
+// space between tabs are separate decisions.
+const WORKSPACE_TAB_GAP_PX = 0;
 const WORKSPACE_FADE_WIDTH_PX = 24;
+
+/** A pinned tab has to read as bordered on BOTH edges without any seam ever
+ *  doubling up. At the edge it is pinned to it sits flush against a cell that
+ *  already draws a line there — the main checkout's border-r on the left, the
+ *  plus cell's border-l on the right — so the tab drops its OWN border on that
+ *  side and draws the opposite one, which it otherwise lacks (tabs carry only a
+ *  border-l). One hairline per edge, from whichever element owns it.
+ *
+ *  Inline widths rather than classes, for two reasons: pin state is recomputed
+ *  on every scroll frame with no React render (same reason the fades are placed
+ *  imperatively), and an inline width cannot lose a specificity race with
+ *  `first:border-l-0` when the first tab is the pinned one. */
+function applyWorkspacePinBorders(
+  tab: HTMLDivElement | null,
+  pinSide: "left" | "right" | null,
+): void {
+  if (!tab) return;
+  // The border COLOUR comes from the tab's own `border-border1`; only width and
+  // style are set here. Style matters: an unset side defaults to `none`, so a
+  // width alone would draw nothing.
+  const drawLeft = pinSide === "right";
+  const drawRight = pinSide === "left";
+  const style = tab.style;
+  const leftWidth = pinSide === null ? "" : drawLeft ? "1px" : "0px";
+  const rightWidth = pinSide === null ? "" : drawRight ? "1px" : "0px";
+  const sideStyle = pinSide === null ? "" : "solid";
+  if (style.borderLeftWidth !== leftWidth) style.borderLeftWidth = leftWidth;
+  if (style.borderRightWidth !== rightWidth)
+    style.borderRightWidth = rightWidth;
+  if (style.borderLeftStyle !== sideStyle) style.borderLeftStyle = sideStyle;
+  if (style.borderRightStyle !== sideStyle) style.borderRightStyle = sideStyle;
+}
 
 function setWorkspaceFadeVisible(
   fade: HTMLDivElement | null,
@@ -401,6 +523,8 @@ function WorkspaceTab({
   const streaming = useAnyChatStreaming(chatIds);
   const awaitingKind = useAnyChatAwaitingKind(chatIds);
   const islandKind = usePrIslandKind(workspace.id, workspace.prNumber);
+  const runActionRunning = useAnyRunActionRunning(workspace.path);
+  const changeLines = useWorkspaceChangeLines(workspace);
   const label = workspaceLabel(workspace);
   const archiving = useWorkspaceArchiving(workspace.id);
 
@@ -419,7 +543,11 @@ function WorkspaceTab({
         size="default"
         className={WORKSPACE_OPEN_BUTTON_CLS}
         aria-current={active ? "page" : undefined}
-        aria-label={`Open workspace ${label}`}
+        aria-label={workspaceTabDescription({
+          label,
+          runActionRunning,
+          changeLines,
+        })}
         disabled={archiving}
         onPointerEnter={() => onPrefetch(workspace)}
         onFocus={() => onPrefetch(workspace)}
@@ -446,7 +574,22 @@ function WorkspaceTab({
             ))
           )}
         </span>
-        <span className="min-w-0 flex-1 truncate text-left">{label}</span>
+        {/* The ONLY elastic child. Everything after it is shrink-0, so the tab's
+            180px cap is spent truncating the branch name and never the numbers
+            or the wave. `flex-auto` (basis auto) is what lets the name's real
+            width reach the tab's intrinsic size — see WORKSPACE_OPEN_BUTTON_CLS. */}
+        <span className="min-w-0 flex-auto truncate text-left">{label}</span>
+        {/* Both indicators, counts then wave, so a running workspace still
+            reports what it changed. Each is independently optional and the tab
+            is content-sized, so it only pays for the ones actually present.
+            Archiving hides the counts — that tab is already a spinner row —
+            but a run genuinely still running keeps saying so. */}
+        {!archiving && (
+          <WorkspaceChangeCounts {...changeLines} active={active} />
+        )}
+        {runActionRunning && (
+          <RunWave size={12} className="text-blue-primary" />
+        )}
       </Button>
       {!archiving && (
         <div className={WORKSPACE_ACTION_OVERLAY_CLS}>
@@ -485,6 +628,17 @@ function WorkspaceTab({
  *  branch name is reserved at prepare time, so the tab shows the REAL git
  *  icon + workspace name from the first frame — identical to the real
  *  WorkspaceTab that replaces it (no spinner, no shimmer, no reflow).
+ *  Typography included: the label inherits its weight from WORKSPACE_TAB_CLS,
+ *  the same container class the real tab uses, so the name does not thicken
+ *  when the placeholder is swapped out. Keep this span free of any `font-*`
+ *  utility — that is what keeps the two in lockstep.
+ *  WIDTH is the other half of that promise now that tabs are content-sized.
+ *  This span must stay `flex-auto` (a `flex-1` basis of 0 would collapse the
+ *  placeholder onto the 100px floor while the real tab sizes to its name), and
+ *  the `ml-2.5` here is exactly the `gap-2.5` the real tab's Button applies
+ *  between icon and label — so both measure icon + 10px + name and the swap
+ *  moves nothing. A brand-new workspace has no diff and no run, so it has no
+ *  trailing indicators to account for either.
  *  Non-interactive — there is nothing to open yet. */
 function PendingWorkspaceTab({
   label,
@@ -507,7 +661,9 @@ function PendingWorkspaceTab({
       >
         <GitBranch className="size-3.5" strokeWidth={1.25} />
       </span>
-      <span className="ml-2 min-w-0 flex-1 truncate text-left">{label}</span>
+      <span className="ml-2.5 min-w-0 flex-auto truncate text-left">
+        {label}
+      </span>
     </div>
   );
 }
@@ -707,7 +863,7 @@ function ArchivedWorkspacePicker({ project }: { project: Project }) {
             type="button"
             variant="ghost"
             size="icon"
-            className={ICON_BUTTON_CLS}
+            className={MENU_ICON_BUTTON_CLS}
             data-active={open}
             aria-label={`Archived workspaces for ${project.name}`}
             aria-expanded={open}
@@ -938,6 +1094,7 @@ export function TopBar() {
       ),
     [visibleWorkspaces],
   );
+  useWorkspaceRunActivitySync(realWorkspaces);
 
   // A cold repository switch is allowed to publish its remembered folder
   // before the workspace list settles. Only a completed exact-key snapshot may
@@ -1048,6 +1205,9 @@ export function TopBar() {
 
   const workspaceNavRef = useRef<HTMLElement | null>(null);
   const workspaceTabRefs = useRef(new Map<string, HTMLDivElement>());
+  /** The tab currently carrying inline pinned borders, so it can be cleared
+   *  when the pin moves off it. See applyWorkspacePinBorders. */
+  const workspacePinnedTabRef = useRef<HTMLDivElement | null>(null);
   const workspaceOuterLeftFadeRef = useRef<HTMLDivElement | null>(null);
   const workspaceOuterRightFadeRef = useRef<HTMLDivElement | null>(null);
   const workspaceAfterPinnedLeftFadeRef = useRef<HTMLDivElement | null>(null);
@@ -1172,6 +1332,21 @@ export function TopBar() {
         : null;
     const fades = workspaceFadeVisibility(overflow, pinSide);
 
+    // Retire the previous carrier before styling the new one. The tab that owns
+    // the pinned borders changes when the selection moves, when the strip stops
+    // overflowing, and when a pinned workspace is archived out from under us —
+    // each of which would otherwise strand inline borders on a tab that is no
+    // longer pinned, giving it a permanent extra hairline.
+    const pinnedTab = pinSide ? (activeTab ?? null) : null;
+    if (
+      workspacePinnedTabRef.current &&
+      workspacePinnedTabRef.current !== pinnedTab
+    ) {
+      applyWorkspacePinBorders(workspacePinnedTabRef.current, null);
+    }
+    workspacePinnedTabRef.current = pinnedTab;
+    applyWorkspacePinBorders(pinnedTab, pinSide);
+
     // Scroll events can outpace React renders. Update only the lightweight
     // overlay styles here so the browser-owned sticky tab and its masks stay
     // on the same frame even during a fast trackpad fling.
@@ -1209,9 +1384,26 @@ export function TopBar() {
     if (workspaceNavRef.current) workspaceNavRef.current.scrollLeft = 0;
   }, [selectedProject?.id]);
 
+  // Identity, not just count: archiving one workspace while another is created
+  // in the same commit swaps a tab element without moving the length, and the
+  // replacement would otherwise never get a resize subscription.
+  const workspaceTabIdentity = useMemo(
+    () => realWorkspaces.map((workspace) => workspace.id).join(","),
+    [realWorkspaces],
+  );
+
   // Recalculate masks when the window or tab content changes. Observing both
   // boxes covers responsive widths, async workspace loads, and icon changes.
   // The active tab itself is always CSS-sticky, so it never waits for this JS.
+  //
+  // Each TAB is observed too, not just the lane. Tabs are content-sized, so a
+  // ± pair landing on one workspace while another's clears can leave the lane's
+  // total width identical — the lane's own box never resizes and a lane-only
+  // observer would sleep through it, leaving the pin decision and the pinned
+  // fades placed against stale offsets. Per-tab boxes cannot cancel out.
+  // Re-running on the tab COUNT is enough to keep the observed set current:
+  // React keys tabs by workspace id / create token, so a tab that merely
+  // changes its contents keeps its element, and its subscription with it.
   useLayoutEffect(() => {
     const nav = workspaceNavRef.current;
     if (!nav) return;
@@ -1222,14 +1414,18 @@ export function TopBar() {
         ? null
         : new ResizeObserver(syncWorkspaceStrip);
     observer?.observe(nav);
-    if (nav.firstElementChild) observer?.observe(nav.firstElementChild);
+    const lane = nav.firstElementChild;
+    if (lane) {
+      observer?.observe(lane);
+      for (const tab of lane.children) observer?.observe(tab);
+    }
     window.addEventListener("resize", syncWorkspaceStrip);
     return () => {
       window.cancelAnimationFrame(frame);
       observer?.disconnect();
       window.removeEventListener("resize", syncWorkspaceStrip);
     };
-  }, [loading, realWorkspaces.length, syncWorkspaceStrip]);
+  }, [loading, workspaceTabIdentity, syncWorkspaceStrip]);
 
   // Dashboard cards and newly-created chats can activate a workspace without
   // focusing its top-bar button. Reveal its natural slot before paint; native
@@ -1337,6 +1533,11 @@ export function TopBar() {
   const pendingCreates = usePendingCreatesFor(
     selectedProject?.repoSlug ?? null,
   );
+  // Whether the strip renders anything at all — a real tab or an optimistic
+  // placeholder. Drives the plus cell's divider; see its comment at that cell.
+  const stripHasTabs =
+    realWorkspaces.length > 0 ||
+    dedupePendingCreates(pendingCreates, realWorkspaces).length > 0;
   const pendingOnly =
     pendingProject &&
     !projects.some((project) => project.repoRoot === pendingProject.root)
@@ -1356,7 +1557,7 @@ export function TopBar() {
         className="border-border1 h-full w-[85px] shrink-0 border-r"
         aria-hidden="true"
       />
-      <div className="border-border1 flex h-full shrink-0 items-center border-r px-1">
+      <div className="border-border1 flex h-full shrink-0 items-center border-r">
         {/* Home tab — entry to the Home surface (Dashboard / repo pages /
             Settings, switched via the HomeSidebar). Stays lit across every
             sub-page; returning from a workspace restores the last one. */}
@@ -1415,7 +1616,7 @@ export function TopBar() {
           nav shrinks and scrolls; the plus remains pinned without a divider. */}
       <div className="flex h-full min-w-0 flex-1 items-stretch">
         {workInLocalMain && mainWorkspace && (
-          <div className="border-border1 flex h-full shrink-0 items-center border-r px-1">
+          <div className="border-border1 flex h-full shrink-0 items-center border-r">
             <Button
               type="button"
               variant="ghost"
@@ -1458,7 +1659,9 @@ export function TopBar() {
             onPointerCancel={clearWorkspacePointer}
             onWheelCapture={handleWorkspaceWheel}
           >
-            <div className="relative flex h-full w-max items-center gap-1 px-1">
+            {/* gap-0 is paired with WORKSPACE_TAB_GAP_PX — change both. Tabs
+                are flush; their border-l draws the divider. */}
+            <div className="relative flex h-full w-max items-center gap-0 px-0">
               {realWorkspaces.map((workspace) => (
                 <WorkspaceTab
                   key={workspace.id}
@@ -1496,9 +1699,10 @@ export function TopBar() {
           </nav>
 
           {/* The active tab is above every fade. At its pinned edge the normal
-              outer fade relocates immediately after/before the tab. The solid
-              four-pixel gutters sit above all scrolling content, preserving
-              edge spacing without allowing labels to show through it. */}
+              outer fade relocates immediately after/before the tab. There are
+              no opaque edge gutters any more: they existed only to keep
+              scrolling labels out of the lane's 4px padding, and the lane is
+              now flush against the controls either side. */}
           <div
             ref={workspaceOuterLeftFadeRef}
             className="from-sidebar-bg pointer-events-none absolute inset-y-0 left-0 z-10 w-6 bg-gradient-to-r to-transparent opacity-0"
@@ -1519,18 +1723,20 @@ export function TopBar() {
             className="from-sidebar-bg pointer-events-none absolute inset-y-0 left-0 z-10 w-6 bg-gradient-to-l to-transparent opacity-0 will-change-transform"
             aria-hidden="true"
           />
-          <div
-            className="bg-sidebar-bg pointer-events-none absolute inset-y-0 left-0 z-30 w-1"
-            aria-hidden="true"
-          />
-          <div
-            className="bg-sidebar-bg pointer-events-none absolute inset-y-0 right-0 z-30 w-1"
-            aria-hidden="true"
-          />
         </div>
 
+        {/* The divider belongs to the strip/plus seam, so it only exists when
+            there is a strip to divide from. With no tabs at all the lane
+            collapses to zero width and this border would land flush against
+            the main cell's border-r — one visual seam drawn twice. */}
         {selectedProject && (
-          <div className="flex h-full shrink-0 items-center px-1">
+          <div
+            className={
+              stripHasTabs
+                ? "border-border1 flex h-full shrink-0 items-center border-l px-1"
+                : "flex h-full shrink-0 items-center px-1"
+            }
+          >
             {/* Always the plain plus — never a spinner/disabled swap. Every
                 click reserves an independent workspace, while the optimistic
                 tab + navigation provide immediate per-click feedback. */}
@@ -1539,7 +1745,7 @@ export function TopBar() {
                 type="button"
                 variant="ghost"
                 size="icon"
-                className={ICON_BUTTON_CLS}
+                className={INSET_ICON_BUTTON_CLS}
                 aria-label="New workspace"
                 onClick={() => void handleCreateWorkspace()}
               >
@@ -1552,7 +1758,7 @@ export function TopBar() {
         <div className="min-w-0 flex-1" aria-hidden="true" />
       </div>
 
-      <div className="border-border1 flex h-full shrink-0 items-center border-l px-1">
+      <div className="border-border1 flex h-full shrink-0 items-center border-l">
         {selectedProject ? (
           <ArchivedWorkspacePicker
             key={selectedProject.id}
@@ -1567,7 +1773,7 @@ export function TopBar() {
               type="button"
               variant="ghost"
               size="icon"
-              className={ICON_BUTTON_CLS}
+              className={MENU_ICON_BUTTON_CLS}
               aria-label="Archived workspaces"
               disabled
             >

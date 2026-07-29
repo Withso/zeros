@@ -139,11 +139,15 @@ describe("Zeros DB — migration ladder data safety (forward-only)", () => {
       );
 
       expect(() => runMigrations(db)).not.toThrow();
-      expect(appliedVersions(db).at(-1)).toBe(23);
+      expect(appliedVersions(db).at(-1)).toBe(24);
 
       const columns = db
         .prepare("PRAGMA table_info(workspace_lifecycle_journal)")
-        .all() as { name: string; notnull: number; dflt_value: string | null }[];
+        .all() as {
+        name: string;
+        notnull: number;
+        dflt_value: string | null;
+      }[];
       const payload = columns.find((column) => column.name === "payload_json");
       expect(payload).toMatchObject({
         name: "payload_json",
@@ -252,6 +256,87 @@ describe("Zeros DB — migration ladder data safety (forward-only)", () => {
         ).n,
       ).toBe(1);
       expect(tables.has("workspaces")).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+
+  // Migration 24 adds the UNIQUE index that makes allocated colour names safe.
+  // CREATE UNIQUE INDEX aborts the whole migration if the table already holds a
+  // duplicate, which would leave the user unable to launch — so 24 renames
+  // duplicates out of the way first. Duplicates cannot occur under the old
+  // random-hex scheme; this guards the "impossible" DB rather than a real one.
+  it("migration 24 survives pre-existing duplicate branches without losing rows", () => {
+    const db = new Database(":memory:");
+    try {
+      // Stop at 21: migration 22 is the conditional draft-v21 repair, which
+      // only runMigrations knows how to skip. It applies 22-24 below.
+      applyUpTo(db, 21);
+      const insert = db.prepare(
+        `INSERT INTO workspaces
+           (id, repo_slug, repo_root, branch, base_branch, path, status, created_at)
+         VALUES (?, ?, '/tmp/r', ?, 'main', ?, 'in-progress', ?)`,
+      );
+      // Same repo, same branch — what 24 has to defuse.
+      insert.run("ws_older", "alpha", "zeros/Cream", "/tmp/w1", 1);
+      insert.run("ws_newer", "alpha", "zeros/Cream", "/tmp/w2", 2);
+      // Same branch, DIFFERENT repo — must be left completely alone.
+      insert.run("ws_other", "beta", "zeros/Cream", "/tmp/w3", 3);
+
+      expect(() => runMigrations(db)).not.toThrow();
+
+      // No row is deleted: the user keeps every workspace.
+      const rows = db
+        .prepare("SELECT id, repo_slug, branch FROM workspaces ORDER BY id")
+        .all() as { id: string; repo_slug: string; branch: string }[];
+      expect(rows).toHaveLength(3);
+
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      // Oldest keeps the name; the later duplicate is renamed visibly.
+      expect(byId.get("ws_older")!.branch).toBe("zeros/Cream");
+      expect(byId.get("ws_newer")!.branch).toMatch(/^zeros\/Cream-dup-/);
+      // The other repo is untouched — uniqueness is per-repo.
+      expect(byId.get("ws_other")!.branch).toBe("zeros/Cream");
+
+      // And the index is now actually enforcing.
+      expect(() =>
+        insert.run("ws_late", "alpha", "zeros/Cream", "/tmp/w4", 4),
+      ).toThrow(/UNIQUE/i);
+    } finally {
+      db.close();
+    }
+  });
+
+  // The rename has to be unique across the LOSERS too, not just against the
+  // winner. Real ids are `ws_<6hex>-<prompt slug>`, so any id TAIL comes from
+  // the prompt and two workspaces made from similar prompts share it — three
+  // rows on one branch would then rename two of them to the same value and
+  // abort the very migration the rename exists to keep running.
+  it("migration 24 defuses three rows on one branch with look-alike ids", () => {
+    const db = new Database(":memory:");
+    try {
+      applyUpTo(db, 21);
+      const insert = db.prepare(
+        `INSERT INTO workspaces
+           (id, repo_slug, repo_root, branch, base_branch, path, status, created_at)
+         VALUES (?, ?, '/tmp/r', ?, 'main', ?, 'in-progress', ?)`,
+      );
+      // The last six characters of all three ids are identical ("s-zoom").
+      insert.run("ws_111111-add-canvas-zoom", "alpha", "zeros/Cream", "/a", 1);
+      insert.run("ws_222222-add-canvas-zoom", "alpha", "zeros/Cream", "/b", 2);
+      insert.run("ws_333333-fix-canvas-zoom", "alpha", "zeros/Cream", "/c", 3);
+
+      expect(() => runMigrations(db)).not.toThrow();
+
+      const branches = (
+        db.prepare("SELECT branch FROM workspaces ORDER BY id").all() as {
+          branch: string;
+        }[]
+      ).map((row) => row.branch);
+      expect(branches).toHaveLength(3);
+      // Oldest keeps the name; both losers get DISTINCT renames.
+      expect(branches).toContain("zeros/Cream");
+      expect(new Set(branches).size).toBe(3);
     } finally {
       db.close();
     }

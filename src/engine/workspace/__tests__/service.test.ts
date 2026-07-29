@@ -670,6 +670,19 @@ describe("WorkspaceService", () => {
       workspaceId: ws.workspaceId,
     })) as { all: number };
     expect(localCounts.all).toBe(2);
+
+    // The ± pair has to describe the same rows: a remote client counts
+    // note.txt's one line only, never the secret's.
+    const remoteLines = (await svc.handle(
+      "git.changeLineCounts",
+      { workspaceId: ws.workspaceId },
+      { remote: true },
+    )) as { additions: number; deletions: number };
+    expect(remoteLines).toEqual({ additions: 1, deletions: 0 });
+    const localLines = (await svc.handle("git.changeLineCounts", {
+      workspaceId: ws.workspaceId,
+    })) as { additions: number; deletions: number };
+    expect(localLines).toEqual({ additions: 2, deletions: 0 });
   });
 
   it("git.discard (a restriction-gated WRITE op) restores a modified tracked file", async () => {
@@ -815,6 +828,7 @@ describe("WorkspaceService", () => {
       "file.read",
       "git.status",
       "git.changeCounts",
+      "git.changeLineCounts",
       "git.diff",
       "git.show",
       "git.log",

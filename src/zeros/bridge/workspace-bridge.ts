@@ -21,6 +21,7 @@ import type {
   Workspace,
   StatusResult,
   ChangeCounts,
+  ChangeLineCounts,
   Hunk,
   Commit,
   Branch,
@@ -661,6 +662,24 @@ export async function bridgeGitChangeCounts(
   return (await workspaceOp(bridge, "git.changeCounts", {
     workspaceId,
   })) as ChangeCounts;
+}
+
+/** ± line totals for the All Changes comparison — what the workspace tabs
+ * render. Path-free like the file totals above, and filtered engine-side for a
+ * remote client before summing. */
+export async function bridgeGitChangeLineCounts(
+  bridge: RuntimeClient,
+  workspaceId: string,
+): Promise<ChangeLineCounts> {
+  const result = (await workspaceOp(bridge, "git.changeLineCounts", {
+    workspaceId,
+  })) as Partial<ChangeLineCounts> | undefined;
+  // An engine predating this op answers with no totals rather than an error;
+  // read that as "nothing to show" instead of NaN reaching the tab.
+  return {
+    additions: Number(result?.additions) || 0,
+    deletions: Number(result?.deletions) || 0,
+  };
 }
 
 /** Exact "anything worth a PR?" boolean using the All Changes net comparison.

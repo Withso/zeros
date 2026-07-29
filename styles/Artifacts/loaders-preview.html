@@ -334,19 +334,7 @@
       color: var(--fg2);
     }
 
-    /* ── Canvas shimmers + composed activity row ── */
-    .story-shimmer {
-      display: block;
-      flex-shrink: 0;
-      width: 24px;
-      height: 24px;
-    }
-
-    .story-shimmer.story-shimmer-lg {
-      width: 32px;
-      height: 32px;
-    }
-
+    /* ── Composed active-turn row ── */
     .activity-shimmer {
       display: flex;
       align-items: center;
@@ -356,20 +344,24 @@
       color: var(--fg2);
     }
 
-    /* ── Run loader study — a pure-vector rotating globe ── */
-    .run-globe-stage {
+    .activity-agent-spinner {
+      display: inline-flex;
+      flex: 0 0 auto;
+    }
+
+    /* ── Run loader study — a pure-vector audio wave ── */
+    .run-wave-stage {
       min-height: 132px;
       gap: 32px;
       flex-wrap: wrap;
     }
 
-    /* Each vector globe sizes itself to the <svg> the renderer injects
-       (width/height = data-globe-size); the host only carries the colour the
-       land, graticule, and rim inherit through currentColor. */
-    .run-globe-loader {
+    /* Each wave sizes itself to the <svg> the renderer injects
+       (width/height = data-wave-size); --fg2 keeps it visually quiet. */
+    .run-wave-loader {
       display: inline-flex;
       flex: 0 0 auto;
-      color: var(--blue-primary);
+      color: var(--fg2);
     }
 
     .run-control-preview {
@@ -429,64 +421,49 @@
       </p>
     </header>
 
-    <!-- ── 1. StoryShimmer + ActivityShimmer ── -->
+    <!-- ── 1. ActivityShimmer ── -->
     <section>
-      <h2>StoryShimmer &amp; ActivityShimmer</h2>
-      <p class="source">src/loaders/story-shimmer.tsx · src/loaders/story-shimmer-motion.ts</p>
-      <p class="source">src/loaders/activity-shimmer.tsx · src/loaders/live-duration.tsx</p>
+      <h2>ActivityShimmer — active agent turn</h2>
+      <p class="source">src/loaders/activity-shimmer.tsx · src/loaders/zeros-spinner.tsx · src/loaders/live-duration.tsx</p>
       <div class="demo-grid">
-        <div class="demo-card">
-          <h3>StoryShimmer — 24px production size</h3>
-          <div class="demo-stage">
-            <canvas id="story-shimmer-24" class="story-shimmer" role="img" aria-label="Agent working"></canvas>
-          </div>
-          <p class="demo-note">Five-story dot-matrix loop: cat and mouse, rolling eyes, rower, train, sunrise.</p>
-        </div>
-        <div class="demo-card">
-          <h3>StoryShimmer — 32px scale check</h3>
-          <div class="demo-stage">
-            <canvas id="story-shimmer-32" class="story-shimmer story-shimmer-lg" role="img" aria-label="Agent working"></canvas>
-          </div>
-          <p class="demo-note"><code>&lt;StoryShimmer size={32} /&gt;</code>; the app uses the authored 24px default.</p>
-        </div>
         <div class="demo-card wide">
           <h3>ActivityShimmer — active agent turn tail</h3>
           <div class="demo-stage left">
             <div class="activity-shimmer" role="status" aria-live="polite">
-              <canvas id="activity-story-shimmer" class="story-shimmer" aria-hidden="true"></canvas>
+              <span class="activity-agent-spinner" id="activity-agent-spinner"></span>
               <span class="live-duration zeros-agent-live-duration" id="activity-duration">0s</span>
             </div>
           </div>
-          <p class="demo-note">StoryShimmer (24px) + LiveDuration. This is the only production mount for the five-story animation.</p>
+          <p class="demo-note"><code>&lt;ZerosSpinner size={16} variant="agent" /&gt;</code> + LiveDuration.</p>
         </div>
       </div>
     </section>
 
-    <!-- ── 2. Run loader replacement study — pure-vector rotating globe ── -->
+    <!-- ── 2. Run loader replacement study — animated audio wave ── -->
     <section>
-      <h2>Run loader — Vector Globe</h2>
-      <p class="source">Exploration only · pure-vector SVG · d3-geo orthographic · Natural Earth 1:110m continent outlines · one uniform stroke</p>
-      <p class="source">styles/Artifacts/run-globe/run-globe.js · run-globe-geo.js · run-globe-d3.min.js</p>
+      <h2>Run loader — Audio Wave</h2>
+      <p class="source">Exploration only · pure-vector SVG · five rounded strokes · rolling audio-wave motion · 1.5s seamless pass · <code>--fg2</code></p>
+      <p class="source">styles/Artifacts/run-wave/run-wave.js</p>
       <div class="demo-grid">
         <div class="demo-card">
           <h3>14px — inline run rows</h3>
-          <div class="demo-stage run-globe-stage">
-            <span class="run-globe-loader" data-run-globe data-globe-size="96" role="img" aria-label="Rotating globe, Run loader"></span>
-            <span class="run-globe-loader" data-run-globe data-globe-size="14" aria-hidden="true"></span>
+          <div class="demo-stage run-wave-stage">
+            <span class="run-wave-loader" data-run-wave data-wave-size="96" role="img" aria-label="Animated audio wave, Run loader"></span>
+            <span class="run-wave-loader" data-run-wave data-wave-size="14" aria-hidden="true"></span>
           </div>
-          <p class="demo-note">Crisp at any size or DPI — continent coastlines in one uniform stroke, re-projected each frame with a d3-geo orthographic globe. Renders at the true 14px for compact "Running…" rows.</p>
+          <p class="demo-note">The five lower endpoints stay fixed while one rounded crest rolls across five distinct top phases. At 14px, each round-capped stroke remains exactly 1px.</p>
         </div>
         <div class="demo-card">
-          <h3>16px — run control &amp; buttons</h3>
-          <div class="demo-stage run-globe-stage">
-            <span class="run-globe-loader" data-run-globe data-globe-size="96" role="img" aria-label="Rotating globe, Run loader"></span>
+          <h3>16px — live signal &amp; static Stop</h3>
+          <div class="demo-stage run-wave-stage">
+            <span class="run-wave-loader" data-run-wave data-wave-size="96" role="img" aria-label="Animated audio wave, Run loader"></span>
+            <span class="run-wave-loader" data-run-wave data-wave-size="16" aria-hidden="true"></span>
             <div class="run-control-preview">
-              <span class="run-globe-loader" data-run-globe data-globe-size="16" aria-hidden="true"></span>
               <svg class="run-stop-icon" viewBox="0 0 12 12" aria-hidden="true"><rect x="2.5" y="2.5" width="7" height="7"></rect></svg>
               <span>Stop</span>
             </div>
           </div>
-          <p class="demo-note">The true 16px globe in the real Stop control. A clean rim holds while the continents turn behind it — one uniform stroke, no fill, no shimmer.</p>
+          <p class="demo-note">Periodic splines keep every height change and the final loop seam smooth. The live signal remains 1.2px at 16px; Stop itself is a static square and label.</p>
         </div>
       </div>
     </section>
@@ -651,16 +628,8 @@
 
   </div>
 
-  <!-- Preview-only motion fixtures; the application implementations and data
-       are canonical under src/loaders. These local scripts keep file:// and
-       Vite previews visually identical without a React build. -->
-  <script src="../../shape%20shimmer/story-poses.js"></script>
-  <script src="../../shape%20shimmer/story-shimmer.js"></script>
-  <!-- Vector globe (Run-loader study): vendored d3-geo + precomputed Natural
-       Earth geometry + the SVG renderer. Load order matters: d3 → geo → globe. -->
-  <script src="./run-globe/run-globe-d3.min.js"></script>
-  <script src="./run-globe/run-globe-geo.js"></script>
-  <script src="./run-globe/run-globe.js"></script>
+  <!-- Audio-wave Run-loader study: one dependency-free SVG renderer. -->
+  <script src="./run-wave/run-wave.js"></script>
   <script>
 (function () {
   // Polyfill for browsers without Element.replaceChildren (Safari < 14, etc.)
@@ -679,35 +648,6 @@
   try {
     const reducedMotion = window.matchMedia
       && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-    // ── StoryShimmer — mirrors src/loaders/story-shimmer.tsx ──
-    if (!window.StoryShimmer || !window.StoryShimmerLibrary) {
-      throw new Error("StoryShimmer preview motion data did not load.");
-    }
-
-    // StoryShimmer reads its colors once at construction, so we keep the
-    // instances and refresh them from the live tokens on every theme change.
-    const storyShimmers = [];
-    const readStoryColors = () => {
-      const t = getComputedStyle(document.documentElement);
-      return {
-        base: t.getPropertyValue("--fg2").trim(),
-        shimmer: t.getPropertyValue("--fg1").trim(),
-      };
-    };
-    {
-      const { base, shimmer } = readStoryColors();
-      ["story-shimmer-24", "story-shimmer-32", "activity-story-shimmer"].forEach((id) => {
-        const canvas = document.getElementById(id);
-        if (!(canvas instanceof HTMLCanvasElement)) return;
-        storyShimmers.push(new window.StoryShimmer(canvas, {
-          baseColor: base,
-          shimmerColor: shimmer,
-          shimmerIntensity: 0.9,
-          speed: 1,
-        }));
-      });
-    }
 
     // ── ZerosSpinner — mirrors src/loaders/zeros-spinner.tsx ──
     //
@@ -836,6 +776,13 @@
       // 1320ms — both loops synced, in every variant.
       const stepMs = LAP_MS / SHAPES.length;
       const gridFadePeriod = LAP_MS;
+      // Per-instance phase jitter — mirrors phaseOffsetMs in
+      // src/loaders/zeros-spinner.tsx. One random entry point into the lap per
+      // spinner, applied to the grid-fade delay AND the synced shape loop's
+      // elapsed time (the same amount to both, so they stay phase-locked).
+      // Spinners mounted on the same frame would otherwise march in lockstep.
+      const phaseOffsetMs = Math.random() * LAP_MS;
+      const startIndex = Math.floor((phaseOffsetMs / LAP_MS) * SHAPES.length) % SHAPES.length;
       const { innerRatio, dotRatio, minDotPx } = tuningFor();
       const innerPx = size * innerRatio;
       const padPx = (size - innerPx) / 2;
@@ -876,7 +823,7 @@
           // bottom-right. The active shape layer above is a separate sibling and
           // is left untouched, so the orbit's animation stays fully visible
           // right through the sweep.
-          const gridFadeDelay = (x + y) * GRID_FADE_STEP_MS - gridFadePeriod;
+          const gridFadeDelay = (x + y) * GRID_FADE_STEP_MS - gridFadePeriod - phaseOffsetMs;
           const restDot = document.createElement("span");
           restDot.className = "dot";
           restDot.style.cssText = `
@@ -937,7 +884,8 @@
         });
       }
 
-      applyShape(Z_SHAPE_INDEX);
+      // Boot pose rides the jitter too (reduced motion still pins the Z / rest pose).
+      applyShape(reducedMotion ? Z_SHAPE_INDEX : startIndex);
 
       // The synced variant (agent) locks its shape loop to the grid-fade's OWN
       // clock. It reads the phase straight off the sweep-origin resting dot's CSS
@@ -953,7 +901,7 @@
         const tick = () => {
           if (!refAnim) refAnim = refRestDot.getAnimations()[0] || null;
           if (refAnim && refAnim.startTime != null) {
-            const elapsed = document.timeline.currentTime - refAnim.startTime;
+            const elapsed = document.timeline.currentTime - refAnim.startTime + phaseOffsetMs;
             const phase = (((elapsed % gridFadePeriod) + gridFadePeriod) % gridFadePeriod) / gridFadePeriod;
             const idx = Math.floor(phase * SHAPES.length) % SHAPES.length;
             if (idx !== lastIdx) { applyShape(idx); lastIdx = idx; }
@@ -962,7 +910,7 @@
         };
         window.requestAnimationFrame(tick);
       } else if (!reducedMotion) {
-        let i = Z_SHAPE_INDEX;
+        let i = startIndex;
         window.setInterval(() => {
           i = (i + 1) % SHAPES.length;
           applyShape(i);
@@ -993,6 +941,12 @@
         : 24;
       el.appendChild(createZerosSpinner(size, "Loading", "agent"));
     });
+    {
+      const el = document.getElementById("activity-agent-spinner");
+      if (el) {
+        el.appendChild(createZerosSpinner(16, "Agent working", "agent"));
+      }
+    }
 
     // Mount the tone demos — Orbit inside button recipes (mirrors the
     // production `tone` prop: inverted on primary fills, inherit on
@@ -1036,14 +990,11 @@
     }, 1000);
 
     // ── Light / dark theme toggle ──
-    // CSS-driven loaders and demo buttons re-theme for free — the vector globe
-    // included: its marks ride currentColor + --bg1, so a flip needs no JS here.
-    // Only the StoryShimmer canvases need their colours pushed explicitly.
+    // CSS-driven loaders and demo buttons re-theme for free — the spinning disc
+    // included: its marks ride currentColor, so a flip needs no JS here.
     const themeToggle = document.getElementById("theme-toggle");
     function applyTheme(theme) {
       document.documentElement.dataset.theme = theme;
-      const { base, shimmer } = readStoryColors();
-      storyShimmers.forEach((s) => s.setColors(base, shimmer));
       if (themeToggle) {
         const isLight = theme === "light";
         themeToggle.textContent = isLight ? "☀ Light" : "☾ Dark";

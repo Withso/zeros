@@ -1,4 +1,4 @@
-import type { Workspace } from "../native/git";
+import type { ChangeLineCounts, Workspace } from "../native/git";
 import { buildLocalMainWorkspace } from "../zeros/store/local-main-workspace";
 import type { Project } from "../zeros/store/projects-store";
 import {
@@ -92,6 +92,51 @@ export function resolveRepoWorkspaceDestination(args: {
     if (alternative) return alternative;
   }
   return main;
+}
+
+/** Shown instead of a number once a total no longer fits the two-digit budget
+ * below — "there is more of this than the tab can say". */
+export const CHANGE_COUNT_OVERFLOW_LABEL = "N";
+/** A tab caps at 180px and the branch name has to survive beside the ± pair
+ * (and the run wave, when both are showing), so a total gets at most two
+ * integer digits and one decimal. 99,950 already rounds to "100.0k" at that
+ * precision, which is where the label takes over. */
+const CHANGE_COUNT_OVERFLOW_AT = 99_950;
+
+/** Compact a workspace's added/removed line total for a tab.
+ *
+ *   0…999      → exact ("240")
+ *   1_000…     → one decimal, trailing ".0" dropped ("1.5k", "12k", "99.9k")
+ *   ≥ 99_950   → CHANGE_COUNT_OVERFLOW_LABEL
+ *
+ * Non-finite or negative input reads as zero: a tab must never render "NaN"
+ * because one engine response arrived malformed. */
+export function formatChangeCount(total: number): string {
+  if (!Number.isFinite(total) || total <= 0) return "0";
+  const rounded = Math.round(total);
+  if (rounded < 1_000) return String(rounded);
+  // The ceiling is judged on what would be PRINTED, not on the raw total: at
+  // one decimal, 99_950 already reads "100.0k" and busts the digit budget.
+  if (rounded >= CHANGE_COUNT_OVERFLOW_AT) return CHANGE_COUNT_OVERFLOW_LABEL;
+  const thousands = Math.round(rounded / 100) / 10;
+  return `${Number.isInteger(thousands) ? thousands : thousands.toFixed(1)}k`;
+}
+
+/** Spell a workspace tab's state out for a screen reader, which can see
+ * neither the running-run glyph nor the ± pair beside the branch name. Uses
+ * the EXACT totals — the compaction above exists only to fit a 180px tab. */
+export function workspaceTabDescription(args: {
+  label: string;
+  runActionRunning: boolean;
+  changeLines: ChangeLineCounts;
+}): string {
+  const { additions, deletions } = args.changeLines;
+  const lines = (count: number) => `${count} line${count === 1 ? "" : "s"}`;
+  const parts = [`Open workspace ${args.label}`];
+  if (args.runActionRunning) parts.push("run action running");
+  if (additions > 0) parts.push(`${lines(additions)} added`);
+  if (deletions > 0) parts.push(`${lines(deletions)} removed`);
+  return parts.join(", ");
 }
 
 const SCROLL_TOLERANCE_PX = 1;

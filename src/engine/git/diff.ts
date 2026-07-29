@@ -84,6 +84,17 @@ export interface ChangeCounts {
   unstaged: number;
 }
 
+/** Net LINE totals for the SAME All Changes comparison `ChangeCounts.all`
+ * describes: everything this branch contributed versus its fork point,
+ * committed and uncommitted together, plus untracked content. Binary files
+ * contribute nothing (Git reports them as "-" in `--numstat`), and conflicted
+ * paths are excluded because they need resolving rather than measuring — the
+ * same rule the Changes list renders by. */
+export interface ChangeLineCounts {
+  additions: number;
+  deletions: number;
+}
+
 export type ChangePathFilter = (path: string, oldPath?: string) => boolean;
 
 const letterToStatus = (letter: string): FileChangeStatus | null => {
@@ -280,6 +291,189 @@ export async function changeCounts(
     uncommitted: uncommitted.size,
     staged: staged.size,
     unstaged: unstaged.size,
+  };
+}
+
+// ── change line counts ───────────────────────────────────
+
+/** Untracked content appears in no diff, so its "+N" has to be read off disk.
+ *  These caps bound ONE probe on a worktree with a large untracked tree — the
+ *  workspace tabs re-probe every visible workspace on each Git refresh, so an
+ *  unbounded read here would be paid over and over. Files past the caps
+ *  contribute nothing, matching how the Changes list already treats a file too
+ *  large to read. */
+const UNTRACKED_STAT_MAX_FILES = 256;
+const UNTRACKED_STAT_MAX_FILE_BYTES = 1024 * 1024;
+const UNTRACKED_STAT_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
+/** macOS defaults to a 256-descriptor limit; read in small batches so a probe
+ *  can never be the thing that exhausts it. */
+const UNTRACKED_STAT_BATCH = 8;
+
+/** How much of a file decides whether it is binary. Git's own `buffer_is_binary`
+ *  looks for a NUL in the first 8000 bytes (FIRST_FEW_BYTES) and no further, so
+ *  a mostly-text file whose first NUL lands past that IS text to Git and gets a
+ *  real "+N" in `--numstat`. Sniffing the whole buffer instead would score it 0
+ *  here and disagree with the very number this mirrors. */
+const BINARY_SNIFF_BYTES = 8000;
+
+/** Added lines for one untracked file's bytes. Binary content contributes
+ *  nothing, mirroring the "-" Git reports for it in `--numstat` — including
+ *  Git's bounded definition of "binary". A final line without a trailing
+ *  newline still counts, exactly as Git counts it. */
+function countBufferLines(buffer: Buffer): number {
+  if (buffer.subarray(0, BINARY_SNIFF_BYTES).includes(0)) return 0;
+  let lines = 0;
+  let index = buffer.indexOf(0x0a);
+  while (index !== -1) {
+    lines += 1;
+    index = buffer.indexOf(0x0a, index + 1);
+  }
+  if (buffer.length > 0 && buffer[buffer.length - 1] !== 0x0a) lines += 1;
+  return lines;
+}
+
+/** Total added lines across untracked paths, bounded by the caps above. */
+async function untrackedAdditions(
+  worktreePath: string,
+  paths: readonly string[],
+): Promise<number> {
+  const targets = paths.slice(0, UNTRACKED_STAT_MAX_FILES);
+  let additions = 0;
+  let scannedBytes = 0;
+  for (let start = 0; start < targets.length; start += UNTRACKED_STAT_BATCH) {
+    if (scannedBytes >= UNTRACKED_STAT_MAX_TOTAL_BYTES) break;
+    const batch = targets.slice(start, start + UNTRACKED_STAT_BATCH);
+    const counted = await Promise.all(
+      batch.map(async (relativePath) => {
+        const absolutePath = path.join(worktreePath, relativePath);
+        let handle: nodeFs.promises.FileHandle | undefined;
+        try {
+          // One HANDLE for both the size check and the read, rather than a
+          // stat-then-readFile pair on the path. Between those two the path can
+          // be swapped — for a file past the cap, or for a symlink pointing
+          // outside the worktree — and the second call would resolve the NEW
+          // target, so the cap that is supposed to bound this scan would not
+          // actually bound the bytes read. Against one fd both refer to the
+          // same inode no matter what happens to the name.
+          //
+          // O_NOFOLLOW is the other half of that: it refuses to open a symlink
+          // (final component only) instead of following it, which both keeps
+          // the read inside the worktree and gives us the symlink case to
+          // handle below. Git stores a symlink's TARGET PATH as its content —
+          // one line — so following the link would measure the wrong file.
+          handle = await fs.promises.open(
+            absolutePath,
+            fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+          );
+          const info = await handle.stat();
+          if (!info.isFile() || info.size > UNTRACKED_STAT_MAX_FILE_BYTES) {
+            return { lines: 0, bytes: 0 };
+          }
+          // Bounded by the size we just validated ON THIS HANDLE, so a file
+          // that grows mid-scan still costs at most the capped allocation.
+          const buffer = Buffer.alloc(info.size);
+          const { bytesRead } = await handle.read(buffer, 0, info.size, 0);
+          const content = buffer.subarray(0, bytesRead);
+          return { lines: countBufferLines(content), bytes: content.length };
+        } catch (error) {
+          // ELOOP is O_NOFOLLOW refusing a symlink — count it the way Git does,
+          // as the single line holding its target path. Everything else is the
+          // path being removed between `git status` and this read.
+          const code = (error as NodeJS.ErrnoException | null)?.code;
+          if (code === "ELOOP") return { lines: 1, bytes: 0 };
+          return { lines: 0, bytes: 0 };
+        } finally {
+          await handle?.close().catch(() => {});
+        }
+      }),
+    );
+    for (const entry of counted) {
+      additions += entry.lines;
+      scannedBytes += entry.bytes;
+    }
+  }
+  return additions;
+}
+
+const NUMSTAT_RECORD_RE = /^(\d+|-)\t(\d+|-)\t([\s\S]*)$/;
+
+/** Sum `git diff --numstat` over one range.
+ *
+ *  `-z` emits `adds\tdels\tpath\0` per file — except for a rename/copy, where
+ *  the path field is EMPTY and the preimage and postimage follow as their own
+ *  NUL-terminated tokens. Parsing that three-token form is what keeps a rename
+ *  reported as its real edit instead of a whole-file delete plus add. */
+async function numstatTotals(
+  worktreePath: string,
+  rangeArgs: readonly string[],
+  includePath: ChangePathFilter,
+  skipPaths: ReadonlySet<string>,
+): Promise<ChangeLineCounts> {
+  const { stdout } = await runGit(worktreePath, [
+    "-c",
+    "core.quotePath=false",
+    "diff",
+    "--no-color",
+    "--numstat",
+    "-z",
+    ...rangeArgs,
+  ]);
+  const tokens = stdout.split("\0");
+  let additions = 0;
+  let deletions = 0;
+  for (let index = 0; index < tokens.length; ) {
+    const match = NUMSTAT_RECORD_RE.exec(tokens[index] ?? "");
+    if (!match) {
+      index += 1;
+      continue;
+    }
+    let filePath = match[3];
+    let oldPath: string | undefined;
+    if (filePath === "") {
+      oldPath = tokens[index + 1] ?? "";
+      filePath = tokens[index + 2] ?? "";
+      index += 3;
+    } else {
+      index += 1;
+    }
+    if (!filePath || skipPaths.has(filePath)) continue;
+    if (isInternal(filePath) || !includePath(filePath, oldPath)) continue;
+    // "-" is Git's binary marker; it contributes no measurable lines.
+    if (match[1] !== "-") additions += Number.parseInt(match[1], 10);
+    if (match[2] !== "-") deletions += Number.parseInt(match[2], 10);
+  }
+  return { additions, deletions };
+}
+
+/** ± line totals for the All Changes scope — the pair the workspace tabs show.
+ *
+ * Deliberately a SEPARATE op from `changeCounts`: the file totals feed probes
+ * that run for every workspace on the board (`hasWorkspaceChanges`), and they
+ * must not start paying for a numstat plus untracked reads they never render.
+ * The optional filter is applied inside the engine before summing, so a remote
+ * client's totals describe exactly the files its own lists can show. */
+export async function changeLineCounts(
+  workspaceId: string,
+  includePath: ChangePathFilter = () => true,
+): Promise<ChangeLineCounts> {
+  const ws = await resolveRepoForGitOp(workspaceId);
+  const { remote } = resolveRepoGit(ws.repoRoot);
+  const [{ stdout }, resolvedFloor] = await Promise.all([
+    runGit(ws.path, ["status", "--porcelain=v1", "-z", "-uall"]),
+    forkPoint(ws.path, ws.baseBranch, remote),
+  ]);
+  const parsed = parsePorcelain(stdout);
+  const conflicted = new Set(parsed.conflicted.map((entry) => entry.path));
+  const untracked = parsed.untracked.filter(
+    (untrackedPath) => !isInternal(untrackedPath) && includePath(untrackedPath),
+  );
+  const [tracked, untrackedLines] = await Promise.all([
+    numstatTotals(ws.path, [resolvedFloor ?? "HEAD"], includePath, conflicted),
+    untrackedAdditions(ws.path, untracked),
+  ]);
+  return {
+    additions: tracked.additions + untrackedLines,
+    deletions: tracked.deletions,
   };
 }
 

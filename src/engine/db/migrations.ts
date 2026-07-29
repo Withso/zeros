@@ -701,6 +701,48 @@ CREATE INDEX idx_workspace_lifecycle_operation
   ON workspace_lifecycle_journal(operation);
 `;
 
+/** 2026-07-29: workspace names became allocated colours (`zeros/Cream`) with
+ *  no random tail. The old `zeros/<flower>-<4 hex>` scheme was self-uniquifying
+ *  — two concurrent creates collided at ~1-in-16M — so a plain index sufficed.
+ *  A deterministic allocator has no such luck: two creates that read the same
+ *  free-name snapshot pick the SAME name, and the check-then-insert in
+ *  prepareWorkspaceCreate is a TOCTOU window. This index is what actually
+ *  enforces uniqueness; callers retry on violation.
+ *
+ *  Keyed on lower(branch), not branch: macOS filesystems are case-insensitive
+ *  and git stores loose refs as files, so `zeros/Cream` and `zeros/cream`
+ *  are ONE ref on the machines this ships to. Treating them as distinct in
+ *  the DB would let a row exist that git cannot represent.
+ *
+ *  The UPDATE ahead of it is defensive. Duplicates cannot exist under the old
+ *  random-hex scheme, but CREATE UNIQUE INDEX aborts the whole migration if
+ *  one somehow does. Rather than fail to launch — or silently delete a
+ *  workspace — a duplicate is renamed to a visibly-broken `-dup-<id>` so the
+ *  user still has the row and can see what happened.
+ *
+ *  The suffix is the WHOLE id, deliberately: it is the table's primary key, so
+ *  it is the only per-row value guaranteed to make every rename distinct. An
+ *  id TAIL does not — ids are `ws_<6hex>-<prompt slug>` (generateWorkspaceId),
+ *  so their last characters come from the prompt, and two workspaces created
+ *  from similar prompts share them. Three rows on one branch with two matching
+ *  tails would both rename to the same value and abort the migration this
+ *  UPDATE exists to keep running. Ugly beats unlaunchable. */
+const MIGRATION_24_WORKSPACE_BRANCH_UNIQUE = `
+UPDATE workspaces
+SET branch = branch || '-dup-' || id
+WHERE id IN (
+  SELECT id FROM (
+    SELECT id, ROW_NUMBER() OVER (
+      PARTITION BY repo_slug, lower(branch) ORDER BY created_at, id
+    ) AS rn
+    FROM workspaces
+  ) WHERE rn > 1
+);
+
+CREATE UNIQUE INDEX idx_workspaces_branch_unique
+  ON workspaces(repo_slug, lower(branch));
+`;
+
 /** The ordered migration list. Append only — NEVER edit or reorder a shipped
  *  entry; add a new one. */
 export const MIGRATIONS: Migration[] = [
@@ -814,6 +856,11 @@ export const MIGRATIONS: Migration[] = [
     version: 23,
     name: "workspace lifecycle journal: allow create operation",
     up: MIGRATION_23_LIFECYCLE_JOURNAL_CREATE_OPERATION,
+  },
+  {
+    version: 24,
+    name: "workspaces: unique (repo_slug, lower(branch))",
+    up: MIGRATION_24_WORKSPACE_BRANCH_UNIQUE,
   },
 ];
 

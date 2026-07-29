@@ -9,9 +9,8 @@ authoritative licence and any NOTICE file live. For the exact resolved version
 of every transitive dependency, read `pnpm-lock.yaml` — it is the machine
 -readable source of truth and it is committed.
 
-Two categories need naming explicitly because they are *in the tree*, not just
-in `node_modules`: the generated Codex protocol bindings, and the vendored d3
-bundle in the design lab. Both are called out below.
+One category needs naming explicitly because it is *in the tree*, not just in
+`node_modules`: the generated Codex protocol bindings, called out below.
 
 ---
 
@@ -34,30 +33,6 @@ bundle in the design lab. Both are called out below.
 These files are marked `linguist-generated` in `.gitattributes`. That mark is
 about diff noise and GitHub's language bar, not about provenance — provenance
 is this entry.
-
-### Vendored d3 (design lab only)
-
-- **Path:** `styles/Artifacts/run-globe/run-globe-d3.min.js`
-- **What:** [d3-array](https://github.com/d3/d3-array) v3 +
-  [d3-geo](https://github.com/d3/d3-geo) v3.1.1 UMD builds, concatenated
-  unmodified. Copyright Mike Bostock. **ISC**.
-- **Why vendored:** the design lab under `styles/Artifacts/` is a build-free
-  set of HTML mockups that must open straight off `file://`, so it loads d3
-  with a plain `<script>` tag rather than through the bundler.
-- **Note:** `styles/Artifacts/` is a *development-only* tree. It is served
-  exclusively by a Vite `configureServer` middleware (`vite.config.ts`) and by
-  `scripts/serve-loaders.mjs`; it never enters a production build, and it is
-  not tracked in git (see `.gitignore`).
-
-### Precomputed globe geometry (design lab only)
-
-- **Path:** `styles/Artifacts/run-globe/run-globe-geo.js`
-- **Derived from:** [world-atlas](https://github.com/topojson/world-atlas)
-  `countries-110m` (**ISC**), itself built from
-  [Natural Earth](https://github.com/nvkelso/natural-earth-vector) 1:110m
-  vector data, which Natural Earth releases into the **public domain**.
-- **How:** `styles/Artifacts/run-globe/build-geo.mjs` (simplify → land feature
-  → round). See `styles/Artifacts/run-globe/README.md`.
 
 ---
 

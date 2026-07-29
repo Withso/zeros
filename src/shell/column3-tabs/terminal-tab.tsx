@@ -77,6 +77,7 @@ import { TerminalSessionView } from "../terminal/terminal-session-view";
 import { RunControl } from "../terminal/run-control";
 import { useRunControl } from "../terminal/use-run-control";
 import { useRunStatuses } from "../terminal/use-run-status";
+import { publishRunActivity } from "../terminal/run-activity-store";
 import { SETUP_SUBTAB } from "../terminal/use-setup-control";
 import { useRetainedViewKeys } from "../use-retained-view-keys";
 import { useInstantViewSwitch } from "../../zeros/ui/use-instant-view-switch";
@@ -103,7 +104,7 @@ import {
   StickyTabStripFades,
   useStickyTabStrip,
 } from "../use-sticky-tab-strip";
-import { ZerosSpinner } from "@/loaders";
+import { RunWave, ZerosSpinner } from "@/loaders";
 
 /** Sync the engine's SHARED terminal registry into a folder's tab strip (Paseo
  *  multiplayer): fetch the terminals the engine knows about, ADD those whose cwd
@@ -257,7 +258,27 @@ export function TerminalPanel({
     folderKey,
     chatCwd,
   );
-  const runStatuses = useRunStatuses(activeWs, folderKey, actions);
+  const { statuses: runStatuses, ready: runStatusesReady } = useRunStatuses(
+    activeWs,
+    folderKey,
+    actions,
+  );
+  const anyRunActionRunning = actions.some(
+    (action) => runStatuses[action.id]?.state === "running",
+  );
+  useEffect(() => {
+    // Both guards exist for one reason: this publication is AUTHORITATIVE — it
+    // supersedes the top bar's own poll for this exact folder — so it must
+    // never be made from a placeholder.
+    //   • actionsReady: a settings revalidation must not clear a usable signal
+    //     merely because its action list is temporarily empty.
+    //   • runStatusesReady: the status map reads {} both before the first
+    //     workspace.runInfo lands and when nothing is running. Publishing the
+    //     first as if it were the second blanks the live wave on this
+    //     workspace's own top-bar tab for a round-trip, every cold open.
+    if (!actionsReady || !runStatusesReady) return;
+    publishRunActivity(folderKey, anyRunActionRunning);
+  }, [actionsReady, runStatusesReady, anyRunActionRunning, folderKey]);
   // The Run sub-tab shows its "Add run script" state when the repo (verifiably)
   // defines no actions — the affordance must never fully disappear (A1).
   const showRunAdd = actionsReady && actions.length === 0;
@@ -941,14 +962,11 @@ function RunAddEmpty() {
   );
 }
 
-/** An action tab's trailing status dot (icon-free tabs, same visual language
- *  as Setup's dot): amber pulsing while its run is live, green finished, red
- *  failed. A stopped/never-run action shows a plain label — matching the old
- *  glyph's "normal tint" case. No "(exited)" text (the catalog's B4 rule). */
+/** A completed action tab keeps the compact outcome dot. A live action instead
+ *  gets the six-stroke wave before its name; stopped/never-run stays plain. */
 function runTabDot(
   status: WorkspaceRunActionStatus | null,
-): "running" | SetupOutcome | null {
-  if (status?.state === "running") return "running";
+): SetupOutcome | null {
   if (status?.state === "finished") return "passed";
   if (status?.state === "failed") return "failed";
   return null;
@@ -1037,20 +1055,30 @@ function TerminalSubTabStrip({
                 onActivate={onActivateSetup}
                 registerRef={(node) => strip.registerTab(SETUP_SUBTAB, node)}
               />
-              {actions.map((action) => (
-                <SubTab
-                  key={action.id}
-                  label={action.name}
-                  // Selected before its terminal exists too: the body is its
-                  // Start state until the explicit Run action begins.
-                  active={showSelection && activeSubTab === runIdFor(action.id)}
-                  dot={runTabDot(runStatuses[action.id] ?? null)}
-                  onActivate={() => onActivateRun(action.id)}
-                  registerRef={(node) =>
-                    strip.registerTab(runIdFor(action.id), node)
-                  }
-                />
-              ))}
+              {actions.map((action) => {
+                const status = runStatuses[action.id] ?? null;
+                return (
+                  <SubTab
+                    key={action.id}
+                    label={action.name}
+                    leading={
+                      status?.state === "running" ? (
+                        <RunWave size={12} className="text-fg2 mr-1.5" />
+                      ) : undefined
+                    }
+                    // Selected before its terminal exists too: the body is its
+                    // Start state until the explicit Run action begins.
+                    active={
+                      showSelection && activeSubTab === runIdFor(action.id)
+                    }
+                    dot={runTabDot(status)}
+                    onActivate={() => onActivateRun(action.id)}
+                    registerRef={(node) =>
+                      strip.registerTab(runIdFor(action.id), node)
+                    }
+                  />
+                );
+              })}
               {showRunAdd && (
                 <SubTab
                   label="Run"
@@ -1107,6 +1135,7 @@ function TerminalSubTabStrip({
  *  preserving terminal-only status, exited, and close behaviors. */
 function SubTab({
   label,
+  leading,
   active,
   exited,
   dot,
@@ -1115,6 +1144,7 @@ function SubTab({
   registerRef,
 }: {
   label: string;
+  leading?: ReactNode;
   active: boolean;
   exited?: boolean;
   dot?: "running" | SetupOutcome | null;
@@ -1144,6 +1174,7 @@ function SubTab({
         active ? COLUMN3_TAB_PILL_ACTIVE_CLS : COLUMN3_TAB_PILL_INACTIVE_CLS,
       )}
     >
+      {leading}
       <span className="max-w-[140px] truncate">
         {label}
         {exited && <span className="ml-1 opacity-70">(exited)</span>}

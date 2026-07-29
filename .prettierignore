@@ -11,11 +11,6 @@
 # diff that the next codegen run reverts.
 src/engine/agents/adapters/codex/generated/
 
-# Upstream d3 UMD bundle + machine-generated globe geometry (see
-# THIRD-PARTY-NOTICES.md). Vendored verbatim; keep it byte-identical to upstream.
-styles/Artifacts/run-globe/run-globe-d3.min.js
-styles/Artifacts/run-globe/run-globe-geo.js
-
 # ──────────────────────────────────────────────────────────
 # Lockfiles
 # ──────────────────────────────────────────────────────────
@@ -41,13 +36,12 @@ coverage/
 # The design labs are single-file HTML documents that open straight off
 # file://; their indentation encodes the structure of the mock, and Prettier's
 # HTML printer rewraps it into something no one can read as a design.
-# `styles/Artifacts/`, `shape shimmer/` and `docs/` are TRACKED — the first two
-# are the design record, `docs/` the engineering journal — so this list is the
-# only thing keeping the changed-file `prettier --check` off them. `docs/` earns
-# it on the same ground: 13 of its files are hand-laid-out HTML reports whose
-# indentation is the document. (`docs/` was gitignored until 2026-07-28, when it
-# became tracked; only `.context/` is still a local-only tree on disk.)
+# `styles/Artifacts/` and `docs/` are TRACKED — the former is the design record,
+# `docs/` the engineering journal — so this list is the only thing keeping the
+# changed-file `prettier --check` off them. `docs/` earns it on the same ground:
+# 13 of its files are hand-laid-out HTML reports whose indentation is the
+# document. (`docs/` was gitignored until 2026-07-28, when it became tracked;
+# only `.context/` is still a local-only tree on disk.)
 docs/
 styles/Artifacts/
-shape shimmer/
 .context/

@@ -1,6 +1,6 @@
 // ============================================
 // COMPONENT: ActivityShimmer
-// PURPOSE: Show the agent-thinking story loop with a live elapsed timer.
+// PURPOSE: Show the agent-working shimmer with a live elapsed timer.
 // USED IN: The active agent turn's trailing activity row.
 // ============================================
 
@@ -10,7 +10,7 @@ import { memo } from "react";
 import { cn } from "@/zeros/ui/cn";
 
 import { LiveDuration } from "./live-duration";
-import { StoryShimmer } from "./story-shimmer";
+import { ZerosSpinner } from "./zeros-spinner";
 
 // --- TYPES ---
 export interface ActivityShimmerProps {
@@ -35,7 +35,12 @@ export const ActivityShimmer = memo(function ActivityShimmer({
       role="status"
       aria-live="polite"
     >
-      <StoryShimmer label="Agent working" className="shrink-0" />
+      <ZerosSpinner
+        size={16}
+        variant="agent"
+        label="Agent working"
+        className="shrink-0"
+      />
       <LiveDuration startedAt={startedAt} className="text-fg2 tabular-nums" />
     </div>
   );

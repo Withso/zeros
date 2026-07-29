@@ -6,7 +6,7 @@
 // This makes the engine module trivial to unit-test against a tmpdir repo.
 
 import { existsSync } from "node:fs";
-import { mkdir, realpath } from "node:fs/promises";
+import { mkdir, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 
 import { GitError } from "./errors";
@@ -16,7 +16,12 @@ import {
   type RunGitOptions,
 } from "./git-exec";
 import { isConflictEntry, parsePorcelainZ } from "./porcelain";
-import { generateBranchName, generateWorkspaceId } from "./naming";
+import {
+  BRANCH_PREFIX,
+  branchDisplayName,
+  generateWorkspaceId,
+  pickFreeColourName,
+} from "./naming";
 import { isRepo, readOriginUrl, repoSlugFromOriginUrl } from "./repo";
 import {
   beginWorkspaceLifecycle,
@@ -25,6 +30,7 @@ import {
   finishWorkspaceLifecycle,
   getWorkspaceById,
   getWorkspaceByBranch,
+  listWorkspaceBranches,
   getWorkspaceByPath,
   getWorkspaceLifecycle,
   getWorkspaceMeta,
@@ -476,9 +482,11 @@ export interface CreateWorkspaceInput extends CreateWorkspaceOptions {
  *  of generateWorkspaceId. Anything else is rejected before it can reach a
  *  path join (H7). */
 const WORKSPACE_ID_RE = /^ws_[a-z0-9]{6}-[a-z0-9-]+$/;
-/** The exact output shape of generateBranchName — the only branch a caller
- *  may pass back as prepared (never an arbitrary ref). */
-const PREPARED_BRANCH_RE = /^zeros\/[a-z]+-[0-9a-f]{4}$/;
+/** The exact output shape of the name allocator — the only branch a caller
+ *  may pass back as prepared (never an arbitrary ref). Matches a colour
+ *  ("zeros/Cream") and the exhaustion fallback ("zeros/Cream-v2"). Was
+ *  `/^zeros\/[a-z]+-[0-9a-f]{4}$/` before the 2026-07-29 colour scheme. */
+const PREPARED_BRANCH_RE = /^zeros\/[A-Z][a-z]{2,15}(?:-v[1-9][0-9]{0,2})?$/;
 
 /** Filesystem-safe, human-readable directory component. Git branch names may
  * contain slashes and repository folders may contain spaces; neither should
@@ -579,6 +587,144 @@ export function managedWorkspacePath(
     });
   }
   return target;
+}
+
+/** Names handed out by prepareWorkspaceCreate that have no DB row yet.
+ *
+ *  prepare and create are SEPARATE engine operations: the renderer prepares
+ *  (to show the name and navigate), then creates. prepare is metadata-only by
+ *  design — it writes no row — so between the two, nothing in the DB, git, or
+ *  the filesystem records that the name is spoken for. Two "New Workspace"
+ *  clicks in quick succession therefore both allocated the same name under the
+ *  old code, and the second create died on the pre-insert revalidation with
+ *  "create again for a fresh name". The random hex tail hid this; colour names
+ *  do not.
+ *
+ *  The engine is the single writer for zeros.db (see migrations.ts), so an
+ *  in-process map is sufficient — there is no second process to coordinate
+ *  with. Entries expire: an abandoned prepare (user closes the dialog, create
+ *  never arrives) must not hold a name out of the pool forever. The TTL is far
+ *  longer than any real prepare→create gap, so it only ever collects garbage.
+ *
+ *  Keyed `<repoSlug> <lowercased display name>` — reservations are per-repo,
+ *  exactly like the DB constraint. A space is an unambiguous separator here
+ *  because repoSlug is validated as /^[a-z0-9][a-z0-9-]*$/ before it reaches
+ *  this module, so it can never contain one. */
+const preparedNameReservations = new Map<string, number>();
+const PREPARED_NAME_TTL_MS = 10 * 60_000;
+
+function reservationKey(repoSlug: string, name: string): string {
+  return `${repoSlug} ${name.toLowerCase()}`;
+}
+
+function reservePreparedName(repoSlug: string, branch: string): void {
+  preparedNameReservations.set(
+    reservationKey(repoSlug, branchDisplayName(branch)),
+    Date.now() + PREPARED_NAME_TTL_MS,
+  );
+}
+
+/** Called once a DB row owns the name — the row is now the reservation. */
+function releasePreparedName(repoSlug: string, branch: string): void {
+  preparedNameReservations.delete(
+    reservationKey(repoSlug, branchDisplayName(branch)),
+  );
+}
+
+function activePreparedNames(repoSlug: string): string[] {
+  const now = Date.now();
+  const prefix = `${repoSlug} `;
+  const out: string[] = [];
+  for (const [key, expiresAt] of preparedNameReservations) {
+    if (expiresAt <= now) {
+      preparedNameReservations.delete(key);
+      continue;
+    }
+    if (key.startsWith(prefix)) out.push(key.slice(prefix.length));
+  }
+  return out;
+}
+
+/** Every workspace name already claimed in this repo, from all three
+ *  authorities that can hold one. A name is unavailable if ANY of them has it:
+ *
+ *    - a DB row (archived included — an archived "Cream" keeps its name);
+ *    - a git ref under `zeros/` (a row can be deleted while its branch lives);
+ *    - a directory in the repo's workspace folder (renameBranch moves the ref
+ *      and the row but NOT the folder, so a stale "Cream" folder can outlive
+ *      both — populating it would silently adopt someone else's files).
+ *
+ *  Gathered in bulk — one query, one git call, one readdir — because the
+ *  allocator tests all 350 names at once. Doing it per-candidate would mean up
+ *  to 350 `git rev-parse` spawns per workspace create.
+ *
+ *  Returned lowercased: callers compare case-insensitively (macOS filesystems
+ *  fold case, and git loose refs are files). */
+async function collectUsedWorkspaceNames(
+  repoRoot: string,
+  repoSlug: string,
+): Promise<Set<string>> {
+  const used = new Set<string>();
+  for (const branch of listWorkspaceBranches(repoSlug)) {
+    used.add(branchDisplayName(branch).toLowerCase());
+  }
+  for (const name of activePreparedNames(repoSlug)) used.add(name);
+  // Refs. A failure here (corrupt repo, git missing) must not block creation:
+  // the DB and filesystem checks still apply, and `git worktree add -b` is the
+  // final authority — it refuses to clobber an existing branch.
+  try {
+    const { stdout } = await runGitCommand(repoRoot, [
+      "for-each-ref",
+      "--format=%(refname)",
+      `refs/heads/${BRANCH_PREFIX}`,
+    ]);
+    const prefix = `refs/heads/${BRANCH_PREFIX}`;
+    for (const line of stdout.split("\n")) {
+      if (!line.startsWith(prefix)) continue;
+      const name = line.slice(prefix.length).trim();
+      if (name) used.add(name.toLowerCase());
+    }
+  } catch {
+    /* best effort; worktree add remains authoritative */
+  }
+  // Directory entries under this repo's workspace container.
+  try {
+    const container = path.join(
+      worktreesRoot(),
+      managedRepositoryDirectory(repoRoot, repoSlug),
+    );
+    for (const entry of await readdir(container)) {
+      used.add(entry.toLowerCase());
+    }
+  } catch {
+    /* container doesn't exist yet — nothing claimed on disk */
+  }
+  return used;
+}
+
+/** Allocate a free workspace branch (`zeros/Cream`) for this repo.
+ *
+ *  Snapshot-based, so it cannot by itself prevent two concurrent creates from
+ *  picking the same name — the UNIQUE index on (repo_slug, lower(branch))
+ *  does that, and callers retry. Calling this in the retry loop is what makes
+ *  the retry converge: each attempt re-reads the used-set, so the loser of a
+ *  race sees the winner's name and picks a different one. */
+export async function allocateWorkspaceBranch(
+  repoRoot: string,
+  repoSlug: string,
+): Promise<string> {
+  const used = await collectUsedWorkspaceNames(repoRoot, repoSlug);
+  const name = pickFreeColourName(used);
+  if (!name) {
+    throw new GitError({
+      code: "WORKSPACE_ALREADY_EXISTS",
+      message:
+        "Could not allocate a workspace name: every colour name is in use in this repository.",
+      remediation:
+        "Delete or archive-and-remove some workspaces in this repository, then retry.",
+    });
+  }
+  return `${BRANCH_PREFIX}${name}`;
 }
 
 export interface PreparedWorkspaceCreate {
@@ -808,7 +954,9 @@ export async function prepareWorkspaceCreate(input: {
   let branch = "";
   let workspacePath = "";
   for (let attempt = 0; attempt < 20; attempt++) {
-    const candidate = generateBranchName();
+    // Re-reads the used-set each attempt, so a name that lost a race to a
+    // concurrent create is seen as taken on the next pass.
+    const candidate = await allocateWorkspaceBranch(input.repoRoot, repoSlug);
     const candidatePath = managedWorkspacePath(
       input.repoRoot,
       repoSlug,
@@ -821,6 +969,9 @@ export async function prepareWorkspaceCreate(input: {
     ) {
       branch = candidate;
       workspacePath = candidatePath;
+      // Hold the name until create inserts a row for it, so a second prepare
+      // arriving before that create picks something else.
+      reservePreparedName(repoSlug, branch);
       break;
     }
   }
@@ -921,7 +1072,7 @@ async function createWorkspaceInner(
     }
     branch = input.preparedBranch;
   } else {
-    branch = generateBranchName();
+    branch = await allocateWorkspaceBranch(input.repoRoot, repoSlug);
   }
   // A prepared id (prepareWorkspaceCreate) is reused verbatim — the renderer
   // already navigated to its path. Validate the SHAPE and re-derive the path
@@ -1068,6 +1219,10 @@ async function createWorkspaceInner(
       ? { [PROVISION_PATHS_META_KEY]: JSON.stringify(provisionPaths) }
       : {},
   );
+  // The row now owns the name; the in-memory hold is redundant. Released here
+  // rather than in a finally: if this create fails later, rollback deletes the
+  // row, and the TTL returns the name to the pool on its own.
+  releasePreparedName(repoSlug, branch);
 
   // Create the branch as its own atomic Git step. This proves ownership before
   // rollback is ever allowed to delete it: `worktree add -b` can fail because

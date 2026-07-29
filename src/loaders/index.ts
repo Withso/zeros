@@ -20,4 +20,4 @@ export {
   RunHorseShimmer,
   type RunHorseShimmerProps,
 } from "./run-horse-shimmer";
-export { StoryShimmer, type StoryShimmerProps } from "./story-shimmer";
+export { RunWave, type RunWaveProps } from "./run-wave";

@@ -9,11 +9,11 @@
 import * as git from "isomorphic-git";
 import nodeFs from "node:fs";
 import path from "node:path";
-import { getWorkspace } from "./worktree";
+import { allocateWorkspaceBranch, getWorkspace } from "./worktree";
 import { assertSafeGitRef, runGit } from "./git-exec";
 import { resolveRepoGit } from "../settings/repo-git";
 import { GitError } from "./errors";
-import { generateBranchName, isValidBranchName } from "./naming";
+import { isValidBranchName } from "./naming";
 import { updateWorkspace } from "./state";
 import type { Branch } from "./types";
 
@@ -137,10 +137,12 @@ export async function renameBranch(opts: RenameBranchOptions): Promise<void> {
       code: "VALIDATION_FAILED",
       message: `Branch name "${opts.newName}" does not pass validation`,
       remediation:
-        "Use 3-49 characters: lowercase letters, digits, and hyphens. Must start with a letter.",
+        "Use 3-49 characters: letters, digits, and hyphens. Must start with a letter.",
     });
   }
-  const target = opts.newName.startsWith("zeros/") ? opts.newName : `zeros/${slug}`;
+  const target = opts.newName.startsWith("zeros/")
+    ? opts.newName
+    : `zeros/${slug}`;
   if (target === ws.branch) {
     return; // No-op rename.
   }
@@ -284,12 +286,17 @@ export async function continueOnNewBranch(
     });
   }
 
-  const branch = generateBranchName();
-  // `checkout -b` (not -B): the generated name is collision-checked by its
-  // 4-hex tail; if the impossible happens git fails loudly instead of
-  // resetting an existing branch. Git carries compatible index/worktree
-  // changes across the switch and aborts before switching if target changes
-  // would overwrite them.
+  // Allocated against the repo's used-set, not generated blind. Until
+  // 2026-07-29 this called generateBranchName() and leaned entirely on the
+  // 4-hex tail for uniqueness ("if the impossible happens git fails loudly").
+  // Colour names have no tail, so an unchecked pick here would collide with an
+  // existing workspace as soon as the dictionary got crowded.
+  const branch = await allocateWorkspaceBranch(ws.repoRoot, ws.repoSlug);
+  // `checkout -b` (not -B): never reset an existing branch. The allocator can
+  // still lose a race with a concurrent create, and -b makes git refuse rather
+  // than silently move someone else's ref. Git carries compatible index/
+  // worktree changes across the switch and aborts before switching if target
+  // changes would overwrite them.
   await runGit(ws.path, ["checkout", "-b", branch, startRef]);
   updateWorkspace(opts.workspaceId, {
     branch,
@@ -330,6 +337,8 @@ export async function deleteBranch(opts: DeleteBranchOptions): Promise<void> {
   }
   await runGit(ws.path, ["branch", opts.force ? "-D" : "-d", opts.branchName], {
     mapErrorCode: (stderr) =>
-      /not fully merged/i.test(stderr) ? "VALIDATION_FAILED" : "GIT_COMMAND_FAILED",
+      /not fully merged/i.test(stderr)
+        ? "VALIDATION_FAILED"
+        : "GIT_COMMAND_FAILED",
   });
 }
