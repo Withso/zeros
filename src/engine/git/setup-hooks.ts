@@ -29,6 +29,14 @@ import { runFile } from "./git-exec";
 // like `pnpm install` finds the user's tools (the Electron-spawned engine's
 // own PATH is often minimal). path-resolver has no engine imports → no cycle.
 import { getLoginShellPath } from "../agents/adapters/shared/login-shell-path";
+// The PATH probe runs a login shell with OUR env, so it inherits any
+// node_modules/.bin the `pnpm run` that launched Zeros prepended — strip those
+// before handing the PATH to a script in a DIFFERENT project's worktree.
+import {
+  sanitizeProbedPath,
+  stripLauncherBinFromPath,
+  TOOLCHAIN_ENV_NAMES,
+} from "../env/launcher-env";
 
 export interface SetupHookOptions {
   workspaceId: string;
@@ -101,7 +109,7 @@ export async function runInlineScript(
     ZEROS_BASE_BRANCH: args.baseBranch,
   });
   try {
-    const loginPath = await getLoginShellPath();
+    const loginPath = sanitizeProbedPath(await getLoginShellPath());
     if (loginPath) env.PATH = loginPath;
   } catch {
     /* keep the allowlisted PATH */
@@ -143,19 +151,67 @@ export async function runInlineScript(
 /** Allowlist of environment variables a setup script may see. H6: the engine's
  *  full env carries provider API keys, the GitHub OAuth token, AWS/SSH creds,
  *  etc. A repo-resident script must not be able to read those, so we pass only
- *  these locale/shell basics plus the ZEROS_* context vars added by the caller. */
+ *  these locale/shell basics plus the ZEROS_* context vars added by the caller.
+ *
+ *  The list is deliberately wider than "shell basics", because a setup script is
+ *  almost always a dependency install and the 11-var version made it fail in
+ *  ways the Terminal tab never did — the tab inherits the full desktop env:
+ *
+ *    • proxy + CA vars — behind a corporate proxy or a TLS-inspecting
+ *      middlebox, `pnpm install` hung or died on a cert error here while the
+ *      same command in the terminal worked,
+ *    • XDG_* + toolchain roots — where npm/pnpm/cargo/go keep their config,
+ *      caches and package stores. Missing, they silently re-resolved to
+ *      defaults, so an install could re-download the world or miss a registry.
+ *
+ *  Every entry is a path, a locale, or a proxy/CA endpoint — never a token. The
+ *  one judgement call is the proxy URLs, which CAN embed `user:password@`: they
+ *  are in because without them an ordinary install cannot reach the network at
+ *  all, and a proxy credential is a far narrower grant than the class H6 exists
+ *  for (provider API keys, the GitHub OAuth token, cloud creds, DSNs).
+ *
+ *  SSH_AUTH_SOCK is deliberately NOT here, though it would make `git+ssh://`
+ *  dependencies work. "The script runs as the user and owns ~/.ssh anyway" is
+ *  false exactly where it matters: a passphrase-protected key is useless
+ *  without the passphrase, and a hardware-backed key (Secure Enclave, YubiKey,
+ *  1Password agent) can never be read from disk at all — so forwarding the
+ *  socket would hand a branch-supplied script the ability to sign as the user
+ *  with keys the user believes are hardware-locked. A failing `git+ssh` install
+ *  is a loud, fixable error; that is the better trade. */
 const SETUP_ENV_ALLOWLIST = [
+  // Core shell + locale.
   "PATH",
   "HOME",
   "USER",
   "LOGNAME",
   "SHELL",
   "LANG",
+  "LANGUAGE",
   "LC_ALL",
   "LC_CTYPE",
   "TERM",
   "TMPDIR",
   "TZ",
+  // Network reachability: proxies and the CA bundles a TLS-inspecting proxy
+  // needs. Lower-case forms are the ones curl/git actually read.
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "all_proxy",
+  "no_proxy",
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "CURL_CA_BUNDLE",
+  "REQUESTS_CA_BUNDLE",
+  "GIT_SSL_CAINFO",
+  // Config/cache roots + toolchain locations — the shared list, so a newly
+  // supported version manager lands here and in the remote-shell allowlist at
+  // once instead of only wherever it was first noticed.
+  ...TOOLCHAIN_ENV_NAMES,
 ];
 
 function buildSetupEnv(extra: Record<string, string>): Record<string, string> {
@@ -163,6 +219,15 @@ function buildSetupEnv(extra: Record<string, string>): Record<string, string> {
   for (const key of SETUP_ENV_ALLOWLIST) {
     const v = process.env[key];
     if (typeof v === "string") env[key] = v;
+  }
+  // The allowlist rebuild already excludes npm_config_*/INIT_CWD/NODE_OPTIONS, so
+  // PATH is the only launcher state that can reach a setup script — and it does,
+  // because it is copied verbatim above. Both callers then usually overwrite it
+  // with the sanitized probe result, but not on the `catch` paths (a probe that
+  // rejects, or returns something not PATH-shaped), and a repo-resident script
+  // must not get Zeros' node_modules/.bin first on PATH on a fallback either.
+  if (typeof env.PATH === "string") {
+    env.PATH = stripLauncherBinFromPath(env.PATH);
   }
   return { ...env, ...extra };
 }
@@ -195,7 +260,7 @@ export async function buildSetupCommandEnv(ctx: {
   // isatty — set it so the Setup tab shows the same colors a real terminal does.
   env.FORCE_COLOR = "1";
   try {
-    const loginPath = await getLoginShellPath();
+    const loginPath = sanitizeProbedPath(await getLoginShellPath());
     if (loginPath) env.PATH = loginPath;
   } catch {
     /* keep the allowlisted PATH */

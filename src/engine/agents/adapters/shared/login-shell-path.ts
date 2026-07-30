@@ -29,14 +29,35 @@
 import { spawn } from "node:child_process";
 
 import { preserveAmbientConfigRoots } from "./config-isolation";
+import {
+  pruneLauncherScriptEnv,
+  sanitizeProbedPath,
+} from "../../../env/launcher-env";
 
 const RESOLVE_TIMEOUT_MS = 3_000;
 
+/** How many times a FAILED probe may be retried by a later caller before we give
+ *  up and cache the fallback for good. Small, because each retry costs up to
+ *  RESOLVE_TIMEOUT_MS on the path of whatever asked. */
+const MAX_PROBE_ATTEMPTS = 3;
+
 let cached: string | null = null;
 let resolving: Promise<string> | null = null;
+let failedAttempts = 0;
 
 /** Get the user's login-shell PATH, with caching. Returns the
- *  inherited PATH on Windows or on resolution failure. */
+ *  inherited PATH on Windows or on resolution failure.
+ *
+ *  A FAILED probe is NOT cached until we've retried a couple of times. The result
+ *  is cached for the whole process lifetime, and the engine now warms it at boot
+ *  — the single most contended moment of process start, with cold dotfiles. A
+ *  packaged app launched from Finder with a heavy ~/.zshrc (omz + nvm + p10k) can
+ *  exceed the 3s cap there, and caching that outcome froze launchd's bare
+ *  `/usr/bin:/bin:/usr/sbin:/sbin` in for the session: every later agent spawn,
+ *  Setup script and Run action lost the user's toolchain until they restarted the
+ *  app. Retrying gives the next caller — by then on a warm machine — a real
+ *  chance, while the attempt cap stops a genuinely wedged rc from charging 3s to
+ *  every spawn forever. */
 export async function getLoginShellPath(): Promise<string> {
   if (cached !== null) return cached;
   if (resolving) return resolving;
@@ -47,8 +68,9 @@ export async function getLoginShellPath(): Promise<string> {
   }
 
   resolving = resolveOnce()
-    .then((value) => {
-      cached = value;
+    .then(({ value, ok }) => {
+      if (ok || failedAttempts + 1 >= MAX_PROBE_ATTEMPTS) cached = value;
+      if (!ok) failedAttempts += 1;
       return value;
     })
     .finally(() => {
@@ -57,7 +79,20 @@ export async function getLoginShellPath(): Promise<string> {
   return resolving;
 }
 
-function resolveOnce(): Promise<string> {
+/** Reset the cache. Tests only — the probe is process-wide state. */
+export function resetLoginShellPathForTests(): void {
+  cached = null;
+  resolving = null;
+  failedAttempts = 0;
+}
+
+interface ProbeResult {
+  value: string;
+  /** False when we fell back to the inherited PATH instead of the shell's. */
+  ok: boolean;
+}
+
+function resolveOnce(): Promise<ProbeResult> {
   const shell = process.env.SHELL || "/bin/zsh";
   return new Promise((resolve) => {
     const fallback = process.env.PATH ?? "";
@@ -75,7 +110,7 @@ function resolveOnce(): Promise<string> {
       stdout += chunk;
     });
 
-    const settle = (value: string) => {
+    const settle = (value: string, ok: boolean) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -84,7 +119,7 @@ function resolveOnce(): Promise<string> {
       } catch {
         /* already dead */
       }
-      resolve(value);
+      resolve({ value, ok });
     };
 
     const timer = setTimeout(() => {
@@ -93,15 +128,15 @@ function resolveOnce(): Promise<string> {
       console.warn(
         `[login-shell-path] ${shell} -ilc 'echo $PATH' timed out after ${RESOLVE_TIMEOUT_MS}ms; using inherited PATH`,
       );
-      settle(fallback);
+      settle(fallback, false);
     }, RESOLVE_TIMEOUT_MS);
 
-    child.on("error", () => settle(fallback));
+    child.on("error", () => settle(fallback, false));
     child.on("close", () => {
       const trimmed = stdout.trim();
       // Extra defensive: ensure we got *something* PATH-shaped.
-      if (trimmed && trimmed.includes("/")) settle(trimmed);
-      else settle(fallback);
+      if (trimmed && trimmed.includes("/")) settle(trimmed, true);
+      else settle(fallback, false);
     });
   });
 }
@@ -111,11 +146,21 @@ function resolveOnce(): Promise<string> {
 export async function buildSpawnEnvWithLoginPath(
   extraEnv: Record<string, string> = {},
 ): Promise<Record<string, string>> {
-  const path = await getLoginShellPath();
+  // sanitizeProbedPath: the probe runs a login shell with OUR env, so when a
+  // `pnpm run` script launched Zeros the result still leads with that repo's
+  // node_modules/.bin — and an agent working in a DIFFERENT worktree would
+  // resolve `tsc`/`vite`/`eslint` to Zeros' copies. Same reason the pruning
+  // below drops the launcher's npm_config_*/INIT_CWD before the agent runs a
+  // package manager. See src/engine/env/launcher-env.ts.
+  const path = sanitizeProbedPath(await getLoginShellPath());
+  const env: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+  };
+  pruneLauncherScriptEnv(env);
   // Guard config roots last so neither process.env nor extraEnv can point
   // the agent at an isolated config dir (breaks MCP/rules pass-through).
   return preserveAmbientConfigRoots({
-    ...(process.env as Record<string, string>),
+    ...env,
     PATH: path,
     ...extraEnv,
   });

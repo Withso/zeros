@@ -5,11 +5,13 @@
 // Owns the lifecycle + verdict of every run-action PTY (`pty-run-…` ids):
 //
 //   • start()      — spawns the action's command as the PTY's FOREGROUND
-//                    process (one-shot `zsh -l -c`, like Setup) so the PTY's
-//                    exit code IS the command's. The renderer then ATTACHES to
-//                    the session with its normal TerminalSessionView (reattach
-//                    + mirror replay), so the log lives in the terminal itself
-//                    — no separate buffer here, unlike SetupManager.
+//                    process (a one-shot command shell, like Setup — see
+//                    buildOneShotArgs) so the PTY's exit code IS the command's,
+//                    under the terminal-parity env buildRunCommandEnv resolves.
+//                    The renderer then ATTACHES to the session with its normal
+//                    TerminalSessionView (reattach + mirror replay), so the log
+//                    lives in the terminal itself — no separate buffer here,
+//                    unlike SetupManager.
 //   • stop()       — kills the PTY, recording "stopped" (not "failed").
 //   • handleExit() — flips the state machine on the real exit code:
 //                    one-shot  → finished (0) | failed (≠0)
@@ -32,6 +34,7 @@
 // ──────────────────────────────────────────────────────────
 
 import type { PtyService } from "../pty/service";
+import { buildRunCommandEnv } from "../pty/shell-setup";
 import { isRunSessionId } from "@zeros/core/run-actions";
 import {
   getWorkspaceById,
@@ -40,6 +43,26 @@ import {
 } from "../git/state";
 
 export type RunState = "running" | "finished" | "failed" | "stopped";
+
+/** The outcome of a start attempt.
+ *
+ *  `cancelled` exists because the other two shapes both mean "there is a tab to
+ *  show": the renderer creates (or focuses) the run terminal unconditionally on a
+ *  non-error reply. A cancelled start has no PTY and no entry, so that tab
+ *  attached to nothing, found no buffered log to replay, and rendered as an
+ *  instantly-"(exited)" blank pane with no explanation — right after the user
+ *  pressed Stop. */
+export interface RunStartResult {
+  alreadyRunning: boolean;
+  cancelled?: boolean;
+}
+
+/** What a run's env builder is told about the run it's building for. */
+export interface RunEnvContext {
+  cwd: string;
+  workspaceId: string | null;
+  repoRoot?: string | null;
+}
 
 /** One action's status, as the Run tab consumes it. */
 export interface RunActionStatus {
@@ -61,6 +84,10 @@ export interface RunStartArgs {
   oneShot: boolean;
   /** Already-resolved working directory (worktree path / repo root). */
   cwd: string;
+  /** The workspace's repo root, surfaced to the command as ZEROS_REPO_ROOT
+   *  (parity with the setup script's context env). Optional — a rowless trunk
+   *  run's cwd already IS the repo root. */
+  repoRoot?: string | null;
 }
 
 /** The durable per-workspace map persisted in workspace_meta. */
@@ -113,6 +140,15 @@ const RUN_TRUNCATION_MARKER = "\r\n[2m…[earlier run output truncated]…[0m\r\
 export class RunManager {
   /** sessionId → the CURRENT run's entry. */
   private readonly entries = new Map<string, RunEntry>();
+  /** Starts that are past the "no live PTY" check but have not spawned yet —
+   *  the window the awaits in spawnRun open. Held here (not in `entries`, which
+   *  must not publish "running" for a shell that doesn't exist yet) so stop()
+   *  and the archive reaper can still CANCEL a run in that window instead of
+   *  silently missing it and letting the PTY appear afterwards. */
+  private readonly starting = new Map<
+    string,
+    { workspaceId: string | null; cancelled: boolean }
+  >();
 
   constructor(
     private readonly pty: PtyService,
@@ -122,11 +158,36 @@ export class RunManager {
      *  (so every device's tab strip discovers it, like a renderer-spawned
      *  terminal). Wired by the engine; optional for unit tests. */
     private readonly registerTerminal?: (sessionId: string, cwd: string) => void,
+    /** The child env for a run's shell. Injectable so unit tests don't pay (or
+     *  depend on) the real `$SHELL -ilc` PATH probe buildRunCommandEnv runs. */
+    private readonly envBuilder: (
+      ctx: RunEnvContext,
+    ) => Promise<Record<string, string> | undefined> = buildRunCommandEnv,
   ) {}
 
+  /** The run's child env, never fatal: an env-builder failure must not block
+   *  the run — the spawn layer then falls back to the standard terminal env,
+   *  which is still strictly better than not running at all. */
+  private async buildEnv(
+    args: RunStartArgs,
+  ): Promise<Record<string, string> | undefined> {
+    try {
+      return await this.envBuilder({
+        cwd: args.cwd,
+        workspaceId: args.workspaceId,
+        repoRoot: args.repoRoot ?? null,
+      });
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Start (or focus) a run. Returns alreadyRunning=true — without spawning —
-   *  when the action's PTY is still alive; the caller just focuses its tab. */
-  async start(args: RunStartArgs): Promise<{ alreadyRunning: boolean }> {
+   *  when the action's PTY is still alive (or one is mid-spawn); the caller
+   *  just focuses its tab. Returns cancelled=true when a Stop (or the archive
+   *  reaper) landed while the env was still resolving, so nothing was spawned
+   *  and the caller must NOT open a tab for it. */
+  async start(args: RunStartArgs): Promise<RunStartResult> {
     if (!isRunSessionId(args.sessionId)) {
       throw new Error(`not a run session id: ${args.sessionId}`);
     }
@@ -141,6 +202,39 @@ export class RunManager {
       }
       return { alreadyRunning: true };
     }
+    // In-flight guard. There are awaits (the exit-settle wait, the env build)
+    // between "no live PTY" and the spawn, so a second Rerun click can arrive
+    // while the first is still in that window — where `pty.has` is still false
+    // and there is no entry to find. Without this, the loser would register a
+    // SECOND entry over the winner's and call create() again.
+    //
+    // A CANCELLED flight is not "already running" — it is a corpse. Stop and
+    // Rerun share the same bottom-right cluster, and ⌘R re-launches whenever the
+    // state isn't "running", so Stop-then-Rerun inside the env window is an
+    // ordinary thing to do: the first flight aborts (correctly) and the second
+    // used to be told "already running" and drop on the floor. Nothing ran, no
+    // error, no toast — the user had to click Rerun twice. `stop()` now retires
+    // the slot so a later start takes a fresh one.
+    if (this.starting.has(args.sessionId)) return { alreadyRunning: true };
+    const flight = { workspaceId: args.workspaceId, cancelled: false };
+    this.starting.set(args.sessionId, flight);
+    try {
+      return await this.spawnRun(args, prev, flight);
+    } finally {
+      // Only if it is still OURS — stop() may have retired it and a newer start
+      // may already own the slot.
+      if (this.starting.get(args.sessionId) === flight) {
+        this.starting.delete(args.sessionId);
+      }
+    }
+  }
+
+  /** start()'s body, once it owns the in-flight slot for this session id. */
+  private async spawnRun(
+    args: RunStartArgs,
+    prev: RunEntry | undefined,
+    flight: { cancelled: boolean },
+  ): Promise<RunStartResult> {
     if (prev && !prev.settled) {
       // PTY gone but its exit not yet processed (a stop's kill in flight, or
       // a crash landing) — wait for it so the stale exit can't clobber the
@@ -151,6 +245,16 @@ export class RunManager {
         new Promise<void>((r) => setTimeout(r, EXIT_SETTLE_TIMEOUT_MS)),
       ]);
     }
+    // Resolve the child env BEFORE the entry is registered: it awaits the
+    // login-shell PATH probe, and an await between "running" is published and
+    // the PTY exists would leave a window where stop() settles an entry whose
+    // shell is still about to spawn (an unkillable orphan run).
+    const env = await this.buildEnv(args);
+    // Stop / archive during either await above cancels the start. Without this
+    // the spawn would land AFTER the user asked for it to go away — a dev
+    // server appearing post-Stop, or worse, holding open a worktree the
+    // archive reaper is about to `git worktree remove`.
+    if (flight.cancelled) return { alreadyRunning: false, cancelled: true };
     let resolveExit = () => {};
     const exitSettled = new Promise<void>((resolve) => {
       resolveExit = resolve;
@@ -186,6 +290,15 @@ export class RunManager {
         sessionId: args.sessionId,
         resolvedCwd: args.cwd,
         command: args.command,
+        env,
+        // Behave exactly as if the command had been typed into the Terminal tab,
+        // which means the user's ~/.zshrc toolchain — nvm/fnm/mise/volta all put
+        // their PATH setup there and a login-but-not-interactive shell skips it.
+        // Safe here because a run PTY already carries the full desktop env, so
+        // the rc grants it nothing new; the SETUP script, whose whole point is a
+        // narrow allowlist, deliberately does not opt in. Both are equally
+        // repo-resident — see buildOneShotArgs for why that is not the reason.
+        interactive: true,
         cols: 120,
         rows: 30,
       });
@@ -238,6 +351,16 @@ export class RunManager {
    *  just settles a stale "running" marker (engine restarted mid-run). */
   stop(sessionId: string): void {
     if (!isRunSessionId(sessionId)) return;
+    // A start still resolving its env has no entry and no PTY yet — mark it so
+    // it aborts instead of spawning behind the user's Stop, and RETIRE the slot
+    // so an immediate Rerun isn't told "already running" by a flight that is
+    // only going to abort. The aborting start's `finally` checks identity, so
+    // handing the slot over here is safe.
+    const flight = this.starting.get(sessionId);
+    if (flight) {
+      flight.cancelled = true;
+      this.starting.delete(sessionId);
+    }
     const entry = this.entries.get(sessionId);
     if (this.pty.has(sessionId)) {
       if (entry) {
@@ -263,22 +386,37 @@ export class RunManager {
         this.stop(sessionId);
       }
     }
+    // Runs still mid-spawn have no entry yet, but their PTY is seconds from
+    // existing — inside the folder this reaper is about to delete. Snapshot
+    // first: stop() retires the slot it cancels.
+    for (const [sessionId, flight] of [...this.starting]) {
+      if (flight.workspaceId === workspaceId) this.stop(sessionId);
+    }
   }
 
   /** Flip the state machine on the run PTY's exit (no-op for other sessions).
    *  A run stop()/start()ed in between has already settled its state — the
-   *  late exit only releases the respawn guard. */
-  handleExit(sessionId: string, exitCode: number | null): void {
+   *  late exit only releases the respawn guard.
+   *
+   *  `signal` is checked alongside `exitCode` because node-pty reports a killed
+   *  PTY as `exitCode 0, signal N` — so a one-shot action killed by the OOM
+   *  reaper (or anything else external) would otherwise show a green "finished". */
+  handleExit(
+    sessionId: string,
+    exitCode: number | null,
+    signal?: number | null,
+  ): void {
     if (!isRunSessionId(sessionId)) return;
     const entry = this.entries.get(sessionId);
     if (!entry) return;
+    const killed = typeof signal === "number" && signal > 0;
     if (entry.state === "running") {
       this.setState(
         entry,
         entry.stopRequested
           ? "stopped"
           : entry.oneShot
-            ? exitCode === 0
+            ? exitCode === 0 && !killed
               ? "finished"
               : "failed"
             : "stopped",

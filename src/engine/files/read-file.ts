@@ -135,7 +135,11 @@ export function isSensitiveRepoPath(relPath: string): boolean {
   return false;
 }
 
-function isInside(target: string, root: string): boolean {
+/** Containment test for two ALREADY-RESOLVED absolute paths. Exported so every
+ *  workspace-scoped filesystem reader enforces the boundary identically — the
+ *  ignored-entry listing in git/workspace-files.ts reuses it rather than
+ *  writing a third copy of `startsWith(root + sep)`. */
+export function isInside(target: string, root: string): boolean {
   return target === root || target.startsWith(root + path.sep);
 }
 
