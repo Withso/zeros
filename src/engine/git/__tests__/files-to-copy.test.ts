@@ -134,14 +134,164 @@ describe("resolveFilesToCopy", () => {
     expect(r.paths).toEqual(["debug.log"]); // .env NOT seeded — pattern is *.log
   });
 
-  it("skips negation lines in .worktreeinclude with a warning", async () => {
+  it("honors negation lines in .worktreeinclude", async () => {
+    // `!` used to be skipped with a warning, so a .worktreeinclude written for
+    // any other tool silently seeded MORE than it asked for.
     await initRepo(repoRoot, ".env*\n");
     await write(".env");
     await write(".env.local");
     await write(".worktreeinclude", ".env*\n!.env.local\n");
     const r = await resolveFilesToCopy(repoRoot);
-    expect(r.paths.sort()).toEqual([".env", ".env.local"]); // negation ignored in v1
-    expect(r.warnings.some((w) => w.toLowerCase().includes("negation"))).toBe(true);
+    expect(r.paths).toEqual([".env"]);
+    expect(r.warnings).toEqual([]);
+  });
+
+  it("applies negation in gitignore ORDER — a later line wins", async () => {
+    // `!x` BEFORE the broad pattern does NOT exclude: gitignore is last-match.
+    // Anything that models `!` as a set-subtraction gets this backwards.
+    await initRepo(repoRoot, ".env*\n");
+    await write(".env");
+    await write(".env.local");
+    await write(".worktreeinclude", "!.env.local\n.env*\n");
+    const r = await resolveFilesToCopy(repoRoot);
+    expect(r.paths.sort()).toEqual([".env", ".env.local"]);
+  });
+
+  it("honors negation in file_include_globs too", async () => {
+    await initRepo(repoRoot, ".env*\n");
+    await write(".env");
+    await write(".env.production");
+    await writeFile(
+      path.join(userDir, "settings.toml"),
+      `file_include_globs = [".env*", "!.env.production"]\n`,
+    );
+    const r = await resolveFilesToCopy(repoRoot);
+    expect(r.source).toBe("file_include_globs");
+    expect(r.paths).toEqual([".env"]);
+  });
+
+  it("negation-only patterns seed nothing (never 'everything'), and SAY so", async () => {
+    // Two failure modes in one. A pathspec list that ends up EMPTY means
+    // "match everything" to git, so this must not become "copy the whole
+    // repo". And because `!` used to be rejected outright, people learned it
+    // subtracts from the built-in default — so "just `!.env.local`" is exactly
+    // what someone writes expecting ".env* minus .env.local", and getting a
+    // silent "nothing to seed" is the worst possible answer.
+    await initRepo(repoRoot, ".env*\n");
+    await write(".env");
+    await write(".env.local");
+    await write(".worktreeinclude", "!.env.local\n");
+    const r = await resolveFilesToCopy(repoRoot);
+    expect(r.paths).toEqual([]);
+    expect(r.complete).toBe(true);
+    expect(r.warnings.some((w) => w.includes("no pattern that INCLUDES"))).toBe(
+      true,
+    );
+  });
+
+  it("a pattern ending in a TAB still matches (git strips only trailing spaces)", async () => {
+    // JS trimEnd() eats tabs; git's gitignore parser strips only 0x20. The
+    // prune must not be narrower than the matcher, or the named file is
+    // silently never seeded.
+    await initRepo(repoRoot, "*.txt\n");
+    await write("tabend\t");
+    await write(".worktreeinclude", "tabend\t\n");
+    const r = await resolveFilesToCopy(repoRoot);
+    expect(r.paths).toEqual(["tabend\t"]);
+  });
+
+  it("trims whitespace around a file_include_globs entry", async () => {
+    // A `.worktreeinclude` LINE keeps leading whitespace (gitignore says so),
+    // but a TOML array entry is a discrete value — `" .env"` is a typo, and
+    // honouring it would match nothing with the space invisible in the UI.
+    await initRepo(repoRoot, ".env*\n");
+    await write(".env");
+    await writeFile(
+      path.join(userDir, "settings.toml"),
+      `file_include_globs = [" .env "]\n`,
+    );
+    const r = await resolveFilesToCopy(repoRoot);
+    expect(r.source).toBe("file_include_globs");
+    expect(r.paths).toEqual([".env"]);
+  });
+
+  it("a pattern pointing outside the repo warns instead of killing the scan", async () => {
+    // `:(glob)../x` is FATAL to git ls-files, which failed the whole call — one
+    // typo'd line stopped every file from being seeded, in every workspace.
+    await initRepo(repoRoot, ".env*\n");
+    await write(".env");
+    await write(".worktreeinclude", "../outside\n.env\n");
+    const r = await resolveFilesToCopy(repoRoot);
+    expect(r.complete).toBe(true);
+    expect(r.paths).toEqual([".env"]); // the VALID line still seeds
+    expect(r.warnings.some((w) => w.includes("outside the project"))).toBe(true);
+  });
+
+  it("an unreadable .worktreeinclude falls back instead of seeding nothing", async () => {
+    // A DIRECTORY named .worktreeinclude passes existsSync; readFileSync threw,
+    // the pattern list came back empty, and the workspace silently got NO .env.
+    await initRepo(repoRoot, ".env*\n");
+    await write(".env");
+    await mkdir(path.join(repoRoot, ".worktreeinclude"), { recursive: true });
+    const r = await resolveFilesToCopy(repoRoot);
+    expect(r.source).toBe("default");
+    expect(r.paths).toEqual([".env"]);
+    expect(r.warnings.some((w) => w.includes("could not be read"))).toBe(true);
+  });
+
+  it("NO .worktreeinclude is silent — absence is not an unreadable file", async () => {
+    // The pair to the test above. Both land here through one failed open(), and
+    // only the errno separates them: ENOENT is the ordinary "this repo has no
+    // .worktreeinclude" and must fall through WITHOUT a warning, while anything
+    // else is genuinely unreadable and must warn. Collapse the two — drop the
+    // errno check while removing the check-then-use race — and every repo in
+    // the common case starts reporting a file it never had.
+    await initRepo(repoRoot, ".env*\n");
+    await write(".env");
+    const r = await resolveFilesToCopy(repoRoot);
+    expect(r.source).toBe("default");
+    expect(r.paths).toEqual([".env"]);
+    expect(r.warnings.filter((w) => w.includes("could not be read"))).toEqual(
+      [],
+    );
+  });
+
+  it("an EMPTY .worktreeinclude seeds nothing, and says so", async () => {
+    // Distinct from unreadable: the file parsed fine and asks for nothing. The
+    // file replaces the default, so this really is "copy nothing" — but it is
+    // surprising enough to warrant a warning.
+    await initRepo(repoRoot, ".env*\n");
+    await write(".env");
+    await write(".worktreeinclude", "# nothing here\n\n");
+    const r = await resolveFilesToCopy(repoRoot);
+    expect(r.source).toBe("worktreeinclude");
+    expect(r.paths).toEqual([]);
+    expect(r.warnings.some((w) => w.includes("no patterns"))).toBe(true);
+  });
+
+  it("matches case-insensitively when the filesystem does (core.ignorecase)", async () => {
+    // macOS/Windows default. Git's EXCLUDE engine honors core.ignorecase; the
+    // PATHSPEC engine does not unless told to — so the pathspec prune, which is
+    // only ever meant to speed the scan up, silently dropped files git itself
+    // said matched. Reproducible on Linux by setting the flag by hand.
+    await initRepo(repoRoot, ".env*\n");
+    await execFileAsync("git", ["config", "core.ignorecase", "true"], {
+      cwd: repoRoot,
+    });
+    await write(".env");
+    await write(".worktreeinclude", ".ENV\n");
+    const r = await resolveFilesToCopy(repoRoot);
+    expect(r.paths).toEqual([".env"]);
+  });
+
+  it("leading whitespace in a pattern still matches (prune must not trim it)", async () => {
+    // gitignore strips only TRAILING space; a leading space is part of the
+    // pattern. Trimming it in the prune pruned away the file it named.
+    await initRepo(repoRoot, "*.txt\n");
+    await write("  lead.txt");
+    await write(".worktreeinclude", "  lead.txt\n");
+    const r = await resolveFilesToCopy(repoRoot);
+    expect(r.paths).toEqual(["  lead.txt"]);
   });
 
   it("uses file_include_globs from USER settings when no .worktreeinclude", async () => {
@@ -201,10 +351,11 @@ describe("resolveFilesToCopy", () => {
     expect(r.paths).toEqual([".env"]);
   });
 
-  it("IGNORES file_include_globs from a repo settings file (repo-file slimming 2026-07-17)", async () => {
-    // Repo-scoped settings files carry scripts config only — the sanitizer
-    // drops file_include_globs from repo layers, so the DEFAULT (.env*)
-    // applies; the per-repo way to configure seeding is .worktreeinclude.
+  it("IGNORES file_include_globs from the COMMITTED repo settings file", async () => {
+    // The committed `.zeros/settings.toml` carries scripts config; a
+    // clone-borne file naming host paths to copy buys nothing over
+    // `.worktreeinclude`, which is the committed mechanism and outranks the
+    // key anyway. The sanitizer drops it, so the DEFAULT (.env*) applies.
     await initRepo(repoRoot, "secret.key\n.env*\n");
     await write("secret.key");
     await write(".env");
@@ -216,5 +367,89 @@ describe("resolveFilesToCopy", () => {
     const r = await resolveFilesToCopy(repoRoot);
     expect(r.source).toBe("default");
     expect(r.paths).toEqual([".env"]); // secret.key NOT seeded — repo glob is inert
+  });
+
+  it("READS file_include_globs from the personal repo-local file (per-project scope)", async () => {
+    // `.zeros/settings.local.toml` is gitignored and per-machine — the same
+    // trust as the user file, scoped to one repo. This is what the settings
+    // pane's "This project" scope writes.
+    await initRepo(repoRoot, "secret.key\n.env*\n");
+    await write("secret.key");
+    await write(".env");
+    await mkdir(path.join(repoRoot, ".zeros"), { recursive: true });
+    await writeFile(
+      path.join(repoRoot, ".zeros", "settings.local.toml"),
+      `file_include_globs = ["secret.key"]\n`,
+    );
+    const r = await resolveFilesToCopy(repoRoot);
+    expect(r.source).toBe("file_include_globs");
+    expect(r.paths).toEqual(["secret.key"]);
+  });
+
+  it("an EXPLICITLY EMPTY list copies nothing — it is not 'use the default'", async () => {
+    // "I unticked everything" has to be expressible. Treating an empty list as
+    // "unset" brought the built-in `.env*` back, so the file the user had just
+    // said no to was seeded anyway — the exact opposite of the instruction.
+    await initRepo(repoRoot, ".env*\n");
+    await write(".env");
+    await mkdir(path.join(repoRoot, ".zeros"), { recursive: true });
+    await writeFile(
+      path.join(repoRoot, ".zeros", "settings.local.toml"),
+      `file_include_globs = []\n`,
+    );
+    const r = await resolveFilesToCopy(repoRoot);
+    expect(r.source).toBe("file_include_globs");
+    expect(r.paths).toEqual([]);
+    expect(r.warnings.some((w) => w.includes("list is empty"))).toBe(true);
+  });
+
+  it("an ABSENT key still means the default", async () => {
+    await initRepo(repoRoot, ".env*\n");
+    await write(".env");
+    await mkdir(path.join(repoRoot, ".zeros"), { recursive: true });
+    await writeFile(
+      path.join(repoRoot, ".zeros", "settings.local.toml"),
+      `[git]\nbase_branch = "main"\n`,
+    );
+    const r = await resolveFilesToCopy(repoRoot);
+    expect(r.source).toBe("default");
+    expect(r.paths).toEqual([".env"]);
+  });
+
+  it("this project REPLACES all projects — the lists never merge", async () => {
+    await initRepo(repoRoot, "secret.key\n.env*\n");
+    await write("secret.key");
+    await write(".env");
+    await writeFile(
+      path.join(userDir, "settings.toml"),
+      `file_include_globs = [".env*"]\n`,
+    );
+    await mkdir(path.join(repoRoot, ".zeros"), { recursive: true });
+    await writeFile(
+      path.join(repoRoot, ".zeros", "settings.local.toml"),
+      `file_include_globs = ["secret.key"]\n`,
+    );
+    const r = await resolveFilesToCopy(repoRoot);
+    expect(r.paths).toEqual(["secret.key"]); // .env NOT seeded
+  });
+
+  it(".worktreeinclude outranks BOTH settings layers", async () => {
+    await initRepo(repoRoot, "secret.key\n.env*\n*.log\n");
+    await write("secret.key");
+    await write(".env");
+    await write("debug.log");
+    await writeFile(
+      path.join(userDir, "settings.toml"),
+      `file_include_globs = [".env*"]\n`,
+    );
+    await mkdir(path.join(repoRoot, ".zeros"), { recursive: true });
+    await writeFile(
+      path.join(repoRoot, ".zeros", "settings.local.toml"),
+      `file_include_globs = ["secret.key"]\n`,
+    );
+    await write(".worktreeinclude", "*.log\n");
+    const r = await resolveFilesToCopy(repoRoot);
+    expect(r.source).toBe("worktreeinclude");
+    expect(r.paths).toEqual(["debug.log"]);
   });
 });

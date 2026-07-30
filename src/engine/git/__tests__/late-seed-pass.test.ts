@@ -8,7 +8,7 @@
 //   • a deleted worktree ends the pass without error,
 //   • whenSeedingSettled resolves (immediately when nothing is pending).
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, mkdir, rm, writeFile, readFile } from "node:fs/promises";
@@ -28,7 +28,9 @@ let userDir: string;
 async function initRepo(gitignore: string): Promise<void> {
   await mkdir(repoRoot, { recursive: true });
   await execFileAsync("git", ["init", "-q", "-b", "main"], { cwd: repoRoot });
-  await execFileAsync("git", ["config", "user.email", "t@t"], { cwd: repoRoot });
+  await execFileAsync("git", ["config", "user.email", "t@t"], {
+    cwd: repoRoot,
+  });
   await execFileAsync("git", ["config", "user.name", "t"], { cwd: repoRoot });
   await writeFile(path.join(repoRoot, ".gitignore"), gitignore);
   await writeFile(path.join(repoRoot, "README.md"), "# init\n");
@@ -129,11 +131,64 @@ describe("scheduleLateSeedPass", () => {
       deferred: [],
       explicit: new Set(),
     });
-    await expect(whenSeedingSettled("ws_test_deleted")).resolves.toBeUndefined();
+    await expect(
+      whenSeedingSettled("ws_test_deleted"),
+    ).resolves.toBeUndefined();
   });
 
   it("whenSeedingSettled resolves immediately when nothing is pending", async () => {
     await expect(whenSeedingSettled("ws_never_seen")).resolves.toBeUndefined();
+  });
+
+  it("a rescan that ALSO comes up short is logged at error level, not as a no-op", async () => {
+    // The one case where seeding genuinely did not happen used to log
+    // "copied 0 file(s)" — indistinguishable from a healthy workspace whose
+    // patterns matched nothing. `repoRoot` is not a git repo, so the rescan's
+    // `git ls-files` fails and complete comes back false.
+    await mkdir(repoRoot, { recursive: true });
+    const errors: string[] = [];
+    const spy = vi
+      .spyOn(console, "error")
+      .mockImplementation((...a: unknown[]) => void errors.push(String(a[0])));
+    try {
+      scheduleLateSeedPass({
+        workspaceId: "ws_test_rescan_failed",
+        repoRoot,
+        worktreePath,
+        rescan: true,
+        deferred: [],
+        explicit: new Set(),
+      });
+      await whenSeedingSettled("ws_test_rescan_failed");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(errors.some((e) => e.includes("rescan did not complete"))).toBe(
+      true,
+    );
+  });
+
+  it("the rescan is BOUNDED — an unbounded one would hang whenSeedingSettled forever", async () => {
+    // whenSeedingSettled gates the setup command and every run-on-create
+    // action, so a `git ls-files` that never returns (a wedged network mount)
+    // is a workspace that silently never starts. The pass must always settle.
+    await initRepo(".env*\n");
+    await writeFile(path.join(repoRoot, ".env"), "root\n");
+    scheduleLateSeedPass({
+      workspaceId: "ws_test_bounded",
+      repoRoot,
+      worktreePath,
+      rescan: true,
+      deferred: [],
+      explicit: new Set(),
+    });
+    await expect(
+      Promise.race([
+        whenSeedingSettled("ws_test_bounded").then(() => "settled"),
+        new Promise((r) => setTimeout(() => r("hung"), 15_000)),
+      ]),
+    ).resolves.toBe("settled");
+    expect(existsSync(path.join(worktreePath, ".env"))).toBe(true);
   });
 
   it("a missing seed source file is skipped without failing the pass", async () => {

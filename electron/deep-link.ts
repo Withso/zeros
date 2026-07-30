@@ -39,7 +39,7 @@ import {
   isSystemDir,
   spawnEngine,
 } from "./sidecar";
-import { emitEvent } from "./ipc/events";
+import { emitEvent, whenRendererReady } from "./ipc/events";
 import { channel, schemeForChannel } from "../src/engine/runtime";
 
 // Each release channel registers its OWN URL scheme so macOS LaunchServices
@@ -157,6 +157,45 @@ export async function handleUrl(rawUrl: string): Promise<void> {
       return;
     }
     emitEvent("auth-handoff", { ticket, nonce });
+    return;
+  }
+
+  if (action === "github") {
+    // GitHub's web callback carries only the main-generated, single-use nonce.
+    // Complete the exchange inside Electron main so neither the raw deep link
+    // nor the returned token pair ever reaches renderer JavaScript.
+    const subPath = parsed.pathname.replace(/^\/+/, "");
+    if (subPath !== "connected") {
+      console.warn(`[Zeros] deep-link: unknown github sub-action ${subPath}`);
+      return;
+    }
+    const fragment = parsed.hash.startsWith("#")
+      ? parsed.hash.slice(1)
+      : parsed.hash;
+    const fragmentParams = new URLSearchParams(fragment);
+    const nonce =
+      fragmentParams.get("nonce") ?? parsed.searchParams.get("nonce");
+    const error =
+      fragmentParams.get("error") ?? parsed.searchParams.get("error");
+    try {
+      // macOS can deliver open-url before ready; safeStorage and the
+      // main-process Auth0 session are not safe to touch until then.
+      await app.whenReady();
+      // main.ts creates the window inside that same whenReady turn, so by the
+      // time we resume `emitEvent` no longer buffers. Without this the connected
+      // / error events of a cold-launch callback are sent to a document that
+      // cannot receive them: credential stored, but no toast, no analytics, and
+      // no auth-cache invalidation.
+      await whenRendererReady();
+      const { completeGithubAppConnection } = await import(
+        "./github-app-flow"
+      );
+      await completeGithubAppConnection({ nonce, error });
+    } catch {
+      // Raw URLs and caught errors may contain OAuth material. Emit only a
+      // fixed, secret-free reason through the normal bottom-right toast path.
+      emitEvent("github-app-error", { reason: "github_unavailable" });
+    }
     return;
   }
 

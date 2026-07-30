@@ -22,6 +22,7 @@
 // ──────────────────────────────────────────────────────────
 
 import React, {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -43,6 +44,13 @@ import { isNativeRuntime, nativeInvoke } from "@/native/runtime";
 import { cn } from "@/zeros/ui/cn";
 import { ancestorDirPrefixes, treeSelectionMirrorIntent } from "./tree-paths";
 import { useScrollMemory } from "../scroll-memory";
+import { ignoredPathDelta, useIgnoredEntries } from "./ignored-entries";
+
+/** Horizontal inset of every tree row AND of the search row (the library uses
+ *  one `--trees-padding-inline` for both). Shared with the search-row overlay
+ *  below, so the accessory's right edge lands on the same inset as the
+ *  input's left border. */
+const TREE_PADDING_INLINE = 10;
 
 /** Bridge the tree's Shadow-DOM theme knobs to live Zeros tokens. CSS
  *  variables inherit across the shadow boundary, so these track theme
@@ -59,12 +67,18 @@ const TREE_THEME_VARS = {
   // gutter again on the right, so the default (16 − 2 = 14px left, −6px gutter
   // = 8px right) reads lopsided. Drop the gutter reservation to 0 and set
   // padding-inline to 10px → both sides resolve to 10 − 2 = 8px.
-  "--trees-padding-inline-override": "10px",
+  "--trees-padding-inline-override": `${TREE_PADDING_INLINE}px`,
   "--trees-scrollbar-gutter-override": "0px",
   // Text: muted default so the selected row (bright) stands out.
   "--trees-fg-override": "var(--fg2)",
   "--trees-fg-muted-override": "var(--fg3)",
   "--trees-selected-fg-override": "var(--fg1)",
+  // .gitignore'd rows (node_modules/, dist/, .env …) read one step back from
+  // the tracked files around them. NOTE this is --fg3, not --fg2: --fg2 is
+  // already every ordinary row's colour above, so "ignored = fg2" would render
+  // identically to tracked and the distinction would be invisible. --fg3 is
+  // the tree's existing muted step.
+  "--trees-git-ignored-color-override": "var(--fg3)",
   // Filter matches (the `search` surfaces only): matched substrings render
   // brighter + bolder than the muted row text. Inert without a search bar.
   "--trees-search-fg-override": "var(--fg1)",
@@ -84,6 +98,24 @@ const TREE_THEME_VARS = {
 // shipped stylesheet: [data-item-type='folder'] > [data-item-section='icon'].
 const FOLDER_MASK =
   "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z'/%3E%3C/svg%3E\") center / contain no-repeat";
+
+// ── Search-row geometry ────────────────────────────────────
+// The filter input lives in the tree's SHADOW ROOT, so a React control can't
+// be a sibling of it. A `searchRowAccessory` is therefore rendered in the light
+// DOM and positioned into a gutter that the shadow CSS reserves at the END of
+// the search row: the input is `flex: 1` inside the row container, so padding
+// on the container's trailing edge shortens the input by exactly that much and
+// the accessory sits BESIDE it, not over it. That only lines up if both sides
+// agree on the numbers, so they live here once and are consumed twice: by
+// TREE_SHADOW_CSS (inside the shadow root) and by the overlay (outside it).
+const SEARCH_ROW_TOP_PAD = 8;
+/** The library's default item height, pinned so the overlay can rely on it. */
+const SEARCH_ROW_INPUT_HEIGHT = 30;
+/** The input's own `margin-block`, from the shipped stylesheet. */
+const SEARCH_ROW_INPUT_MARGIN = 1;
+const SEARCH_ROW_ACCESSORY_SIZE = 24;
+/** Gap between the input's right border and the accessory beside it. */
+const SEARCH_ROW_ACCESSORY_GAP = 4;
 const TREE_SHADOW_CSS = `
   /* The lib's base layer sets \`color-scheme: light dark\` on :host, which
      makes its light-dark() colors (file-type icon palette, git-status tints)
@@ -112,12 +144,63 @@ const TREE_SHADOW_CSS = `
     -webkit-mask: ${FOLDER_MASK};
     mask: ${FOLDER_MASK};
   }
+  /* An ignored folder's glyph is painted by the mask above, whose colour is a
+     LITERAL — the library's git-status rule sets \`color\`, which a mask ignores,
+     so without this the row's name dims to --fg3 and its folder icon stays
+     --fg2. The opacity reset matters too: the library already applies
+     \`opacity: .5\` to an ignored row's icon section, and --fg3 at half opacity is
+     a second dimming step on top of the one we asked for. One step, here. */
+  [data-item-git-status='ignored'] > [data-item-section='icon'] {
+    opacity: 1;
+  }
+  [data-item-git-status='ignored'] > [data-item-section='icon']::after {
+    background-color: var(--fg3);
+  }
+  /* We pass \`gitStatus\` for ONE reason: to mark ignored entries. Supplying it
+     at all switches on the library's git lane, which (a) reserves
+     --trees-git-lane-width on EVERY row, indenting the whole tree, and (b)
+     paints a "contains changes" dot on every ancestor of every entry — so a
+     package folder holding a nested node_modules/ would sprout a change dot it
+     never had. The lane carries nothing we want (an ignored row has no status
+     letter by design, and Changes is where git state lives in this app).
+     Switching it off recovers the indent and the dot; it does NOT restore the
+     pre-change DOM — passing gitStatus also enables the library's decoration
+     lane, so every row now carries an extra empty \`[data-item-section=
+     'decoration']\` div. That one is harmless (\`flex: 1 1 0; min-width: 0\`
+     against a \`flex: 0 1 auto\` content box) and is left alone. */
+  [data-item-section='git'] {
+    display: none;
+  }
   /* Filter input (the \`search\` surfaces only) = the tree column's header —
      breathing room so it doesn't sit cramped against the chrome above.
      Inert when the search bar is disabled. */
   [data-file-tree-search-container] {
-    padding-top: 8px;
+    padding-top: ${SEARCH_ROW_TOP_PAD}px;
     padding-bottom: 4px;
+  }
+  /* Pin the input's height rather than inheriting --trees-row-height. A
+     \`searchRowAccessory\` is a LIGHT-DOM control positioned beside this box from
+     outside the shadow root, and a shadow-scoped custom property can't be read
+     from out there — so both sides derive from the same constants instead, and
+     a change to the library's density default can't silently drift the control
+     off the row. 30px is the library's own default item height. */
+  [data-file-tree-search-input] {
+    box-sizing: border-box;
+    height: ${SEARCH_ROW_INPUT_HEIGHT}px;
+    line-height: ${SEARCH_ROW_INPUT_HEIGHT - 2}px;
+    /* The input is \`flex: 1\`, but a flex item won't shrink past its intrinsic
+       min-content width — for an <input> that's its \`size\` default (~214px),
+       so it overflowed the row on any sidebar under ~234px (the drag floor is
+       140px). Harmless-looking until the row has to reserve a gutter: the
+       overflowing input would slide straight back under the accessory. */
+    min-width: 0;
+  }
+  /* Reserve the accessory's gutter at the END of the row. The container is the
+     library's flex row and the input is its only \`flex: 1\` child, so trailing
+     padding here shortens the INPUT — which is what puts the control outside
+     it. The left inset stays on --trees-padding-inline. */
+  :host([data-search-accessory='true']) [data-file-tree-search-container] {
+    padding-inline-end: ${TREE_PADDING_INLINE + SEARCH_ROW_ACCESSORY_GAP + SEARCH_ROW_ACCESSORY_SIZE}px;
   }
 `;
 
@@ -162,6 +245,14 @@ interface WorkspaceFileTreeProps {
   /** Show the tree's built-in filter ("search") bar as the column header
    *  (the row-1 sidebar). Captured once at mount. Default off (launcher). */
   search?: boolean;
+  /** A control to sit at the RIGHT END OF THE SEARCH ROW, OUTSIDE the filter
+   *  input (the Working-folders picker). That input is inside the library's
+   *  shadow root, so this can't be a real sibling of it: the row reserves a
+   *  trailing gutter — which shortens the input — and this is rendered in the
+   *  light DOM into that gutter, both sides using the shared geometry
+   *  constants above. Ignored without `search`, the only surface with a row
+   *  for it to sit in. */
+  searchRowAccessory?: React.ReactNode;
   /** A FILE row was activated (selected). Folders are filtered out before
    *  this fires. Read through a ref so the selection effect only runs on a
    *  real selection change — not when this callback's identity churns. */
@@ -192,6 +283,7 @@ export function WorkspaceFileTree({
   initialSelectedPath,
   selectedPath,
   search,
+  searchRowAccessory,
   onOpenFile,
   onOpenInNewTab,
   onCopyPath,
@@ -213,7 +305,7 @@ export function WorkspaceFileTree({
   // A reused tree fiber can receive another workspace before its load effect
   // runs. Associate rows with their cwd and synchronously use that cwd's warm
   // snapshot; never expose the prior workspace's paths under the new chrome.
-  const paths = useMemo(
+  const trackedPaths = useMemo(
     () =>
       pathsSnapshot.cwd === cwd
         ? pathsSnapshot.paths
@@ -250,6 +342,60 @@ export function WorkspaceFileTree({
     ),
   );
 
+  // The .gitignore'd side of the worktree — node_modules/, dist/, .env — which
+  // `git ls-files` deliberately omits and which the user's setup script and
+  // agents are exactly what creates. Lazy: roots now, a directory's children
+  // when it's opened. Feeds the model directly for the incremental adds and
+  // the ignored colouring; we merge its paths into `paths` below so a reset
+  // (a git refresh) rebuilds the tree WITH them.
+  const { paths: ignoredPaths, expandedDirs } = useIgnoredEntries(
+    cwd,
+    reloadKey,
+    model,
+  );
+  // The two lists come from different git queries against a worktree that is
+  // being written to, so they can disagree — and EVERY form of disagreement is a
+  // throw from the tree store, inside a layout effect, which unwinds to the ROOT
+  // error boundary and blanks the whole window (not just this tab). Three shapes,
+  // all reconciled here rather than caught downstream:
+  //
+  //   • the same path twice          → "Duplicate path"
+  //   • ignored `x/` + tracked `x`   → "Path collides with an existing entry"
+  //   • ignored `x`  + tracked `x/…` → "…collides with an existing file while
+  //                                     creating directory"
+  //
+  // The last two are reachable the moment a path changes KIND between the two
+  // queries: `src/generated` is a tracked file, the dev turns it into a
+  // gitignored directory, and the ~6ms ignored query reports `src/generated/`
+  // while the cached tracked snapshot still says `src/generated`. Tracked always
+  // wins — it is the listing the tab existed for, and the ignored side
+  // self-corrects on the next refresh.
+  //
+  // `appliedIgnored` is the SAME filtered list, returned alongside so the
+  // incremental delta below describes exactly the rows the ignored branch owns.
+  // Diffing unfiltered `ignoredPaths` made it claim rows the tracked listing had
+  // put in the store, which then produced an `add` for a path already there
+  // (throw → full rebuild) or, worse, a silent `remove` of a tracked row.
+  const { paths, appliedIgnored } = useMemo(() => {
+    if (ignoredPaths.length === 0) {
+      return { paths: trackedPaths, appliedIgnored: EMPTY_FILE_PATHS };
+    }
+    const trackedKinds = new Set<string>();
+    for (const p of trackedPaths) {
+      trackedKinds.add(p);
+      for (const dir of ancestorDirPrefixes(p)) trackedKinds.add(`${dir}/`);
+    }
+    const keep = ignoredPaths.filter(
+      (p) =>
+        !trackedKinds.has(p) &&
+        !trackedKinds.has(p.endsWith("/") ? p.slice(0, -1) : `${p}/`),
+    );
+    return {
+      paths: keep.length > 0 ? [...trackedPaths, ...keep] : trackedPaths,
+      appliedIgnored: keep,
+    };
+  }, [trackedPaths, ignoredPaths]);
+
   // @pierre/trees owns the actual virtual scroller inside an open ShadowRoot.
   // Observe the host because the library creates that node from its own child
   // layout effect; a parent callback ref alone can run one commit too early.
@@ -278,6 +424,17 @@ export function WorkspaceFileTree({
     return () => observer.disconnect();
   }, [model]);
   useScrollMemory(treeScrollEl, scrollMemoryKey ?? null);
+
+  // Tell the shadow stylesheet an accessory is present, so it reserves the
+  // trailing padding for it. An attribute on the HOST (rather than a class on
+  // our root) is what `:host([data-search-accessory])` can see from inside.
+  const hasSearchAccessory = searchRef.current && searchRowAccessory != null;
+  useLayoutEffect(() => {
+    const host = treeRootRef.current?.querySelector("file-tree-container");
+    if (!host) return;
+    if (hasSearchAccessory) host.setAttribute("data-search-accessory", "true");
+    else host.removeAttribute("data-search-accessory");
+  }, [hasSearchAccessory, model]);
 
   // Load (and reload) the workspace file list for this cwd. `reloadKey`
   // lets a parent (the Source Refresh button) force a re-list.
@@ -309,12 +466,76 @@ export function WorkspaceFileTree({
     };
   }, [cwd, reloadKey]);
 
-  // Feed paths into the tree imperatively — resetPaths swaps the set
-  // without recreating the tree (keeps selection/focus where possible).
+  // Feed paths into the tree imperatively. TWO paths, because resetPaths
+  // rebuilds the store from `initialExpansion: "closed"` and therefore
+  // COLLAPSES every open directory:
+  //
+  //   • tracked listing changed → resetPaths, as before. Ignored branches are
+  //     replayed via initialExpandedPaths so a lazily-loaded `node_modules/…`
+  //     doesn't shut every time an unrelated file is saved.
+  //   • only the IGNORED side changed → an incremental add/remove batch. This
+  //     is the common case now (a build writing into an open `dist/`, a new
+  //     ignored root appearing), and routing it through resetPaths would
+  //     collapse the user's `src/` browsing as collateral for a node_modules
+  //     update — a regression the tracked-only listing never had.
+  const expandedDirsRef = useRef(expandedDirs);
+  expandedDirsRef.current = expandedDirs;
+  const appliedRef = useRef<{ tracked: string[]; ignored: Set<string> } | null>(
+    null,
+  );
+  const trackedPathsRef = useRef(trackedPaths);
+  trackedPathsRef.current = trackedPaths;
+  // resetPaths, but never able to take the window down with it. The store throws
+  // on any duplicate or file/directory collision in its input; `paths` reconciles
+  // the shapes we know about, and this is the backstop for the ones we don't —
+  // degrade to "ignored files hidden", which is the pre-feature behaviour, rather
+  // than to a blank app from the root error boundary (the only one in the app is
+  // at src/main.tsx, and it replaces the entire window).
+  const resetPathsSafely = useCallback(
+    (next: string[], restore: readonly string[]) => {
+      const opts =
+        restore.length > 0 ? { initialExpandedPaths: [...restore] } : undefined;
+      try {
+        model.resetPaths(next, opts);
+      } catch (err) {
+        console.error("[files] tree rejected the merged path list:", err);
+        try {
+          model.resetPaths(trackedPathsRef.current, opts);
+        } catch {
+          model.resetPaths(EMPTY_FILE_PATHS);
+        }
+      }
+    },
+    [model],
+  );
   useLayoutEffect(() => {
-    model.resetPaths(paths);
+    const applied = appliedRef.current;
+    const ignoredSet = new Set(appliedIgnored);
+    if (applied && applied.tracked === trackedPaths) {
+      const ops = ignoredPathDelta(applied.ignored, ignoredSet);
+      appliedRef.current = { tracked: trackedPaths, ignored: ignoredSet };
+      if (ops.length > 0) {
+        try {
+          model.batch(ops);
+        } catch (err) {
+          // batch does NOT roll back — an op that throws leaves the store
+          // half-mutated and emits no notification, so the store and `paths`
+          // would silently disagree. The rebuild is the only way back.
+          console.error("[files] incremental ignored update failed:", err);
+          resetPathsSafely(paths, expandedDirsRef.current);
+        }
+      }
+      return;
+    }
+    resetPathsSafely(paths, expandedDirsRef.current);
+    appliedRef.current = { tracked: trackedPaths, ignored: ignoredSet };
     const initial = initialPathRef.current;
-    if (paths.length && initial) {
+    // Gate on the TRACKED listing, not the merged one: the ignored roots come
+    // from a single ~6 ms git call and routinely land first, and a `paths`
+    // that is only `node_modules/` + `.env` would consume this one-shot with
+    // nothing to reveal — so the tab would never scroll to the file it was
+    // opened on.
+    if (trackedPaths.length && initial) {
       // ONE-shot: cleared after the first populated listing so a later
       // reload (reloadKey / git refresh) can't yank the tree back to the
       // mount-time file after the user browsed or navigated elsewhere.
@@ -333,7 +554,7 @@ export function WorkspaceFileTree({
         /* path may not exist in this workspace */
       }
     }
-  }, [model, paths]);
+  }, [model, paths, trackedPaths, appliedIgnored, resetPathsSafely]);
 
   // Selection → open. Folders are skipped (the tree owns expand/collapse).
   // The latest onOpenFile is read through a ref so this effect fires ONLY
@@ -432,9 +653,28 @@ export function WorkspaceFileTree({
   return (
     <div
       ref={treeRootRef}
-      className={cn("bg-bg1 h-full min-h-0 overflow-hidden", className)}
+      className={cn(
+        "bg-bg1 relative h-full min-h-0 overflow-hidden",
+        className,
+      )}
       style={TREE_THEME_VARS}
     >
+      {hasSearchAccessory && (
+        // Dropped into the gutter the shadow CSS reserves past the input's
+        // right border, vertically centred on it (see the geometry constants).
+        // It overlaps nothing, so it needs no pointer-events escape hatch.
+        <div
+          className="absolute z-10 flex items-center justify-end"
+          style={{
+            top: SEARCH_ROW_TOP_PAD + SEARCH_ROW_INPUT_MARGIN,
+            height: SEARCH_ROW_INPUT_HEIGHT,
+            right: TREE_PADDING_INLINE,
+            width: SEARCH_ROW_ACCESSORY_SIZE,
+          }}
+        >
+          {searchRowAccessory}
+        </div>
+      )}
       <FileTree
         model={model}
         style={{ height: "100%" }}

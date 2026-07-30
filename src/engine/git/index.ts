@@ -69,6 +69,16 @@ export { SetupManager, setupSessionId, isSetupSession } from "./setup-runner";
 export type { SetupInfo, SetupTarget } from "./setup-runner";
 export { resolveSetupCommand, buildSetupCommandEnv } from "./setup-hooks";
 
+export { previewFilesToCopy, resolveFilesToCopy } from "./files-to-copy";
+export type {
+  FilesToCopyPattern,
+  FilesToCopyPatternStat,
+  FilesToCopyPreview,
+  FilesToCopyPreviewFile,
+  FilesToCopyResult,
+  FilesToCopySource,
+} from "./files-to-copy";
+
 export {
   archiveWorkspace,
   createWorkspace,
@@ -154,7 +164,16 @@ export type {
   RenameBranchOptions,
 } from "./branch";
 
-export { listWorkspaceFiles } from "./workspace-files";
+export { listWorkspaceFiles, listIgnoredEntries } from "./workspace-files";
+
+export {
+  getWorkingDirectories,
+  setWorkingDirectories,
+} from "./sparse-checkout";
+export type {
+  SetWorkingDirectoriesResult,
+  WorkingDirectoriesState,
+} from "./sparse-checkout";
 
 export {
   changeCounts,
@@ -265,22 +284,20 @@ export {
   mergePr,
   parseGitHubRemote,
   publishRepoToGithub,
+  readGhCliCredential,
   resetBehindByCacheForTesting,
-  setClientIdForTesting,
   setOctokitFactoryForTesting,
   setPushForTesting,
-  setToken,
+  setRunFileForTesting,
   setTokenStoreForTesting,
-  signOut,
-  startDeviceFlow,
   syncWorkspacePr,
   updatePr,
+  verifyGithubToken,
 } from "./github";
 export type {
   AuthStatusResult,
   CreatePrOptions,
   InitRepoInPlaceResult,
-  DeviceVerification,
   GetPrOptions,
   GhCliResult,
   GithubRepositoryOwnerAvatar,
@@ -293,6 +310,5 @@ export type {
   PrCommitSummary,
   PrDeployment,
   PrTimelineItem,
-  StartDeviceFlowOptions,
   UpdatePrOptions,
 } from "./github";

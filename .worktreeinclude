@@ -18,11 +18,15 @@
 #      node_modules (measured, not guessed). Anchor with `/`, and only step
 #      outside that rule deliberately (there is exactly one exception below,
 #      and it is called out).
-#   2. Negation (`!`) is NOT supported. Such lines are skipped with a warning,
-#      so you cannot subtract from a broad pattern — narrow it instead.
+#   2. It is plain gitignore syntax, matched by git itself (`git ls-files -o -i
+#      --exclude-from`), so `!` negation works and behaves exactly as it does in
+#      .gitignore: LAST MATCH WINS. `!x` before a broad pattern that re-covers
+#      `x` does NOT exclude it. Narrowing the positive pattern is still clearer
+#      than subtracting from a broad one.
 #   3. This file REPLACES the built-in default (`.env*`); it is not merged with
 #      it. Anything the default used to cover has to be spelled out here, which
-#      is why `/.env*` leads the list.
+#      is why `/.env*` leads the list. An EMPTY file therefore means "copy
+#      nothing" — delete the file instead if you want the default back.
 #
 # Copies are read from the MAIN checkout's working tree, so the canonical .env
 # has to live at the repo root of the main clone. A .env created inside a

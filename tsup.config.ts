@@ -28,7 +28,6 @@ export default defineConfig([
       "ws",
       "tinyglobby",
       "@octokit/rest",
-      "@octokit/auth-oauth-device",
       // Native modules — bundling fails because tsup can't statically
       // resolve the .node binary. Stays external so the engine cli
       // imports the prebuilt native bindings at runtime.

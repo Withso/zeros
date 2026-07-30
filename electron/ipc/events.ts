@@ -88,6 +88,39 @@ export function setMainWindow(win: BrowserWindow): void {
   }
 }
 
+/** Resolve once the renderer can actually receive events.
+ *
+ *  The cold-launch buffer above only covers emitters that run BEFORE the first
+ *  window binds. A deep-link handler that awaits anything (`app.whenReady()`,
+ *  safeStorage, a network call) resumes AFTER main.ts created the window in the
+ *  same whenReady turn, so `emitEvent` takes the direct-send path into a
+ *  document whose JS has not run yet and the event is dropped. Awaiting this
+ *  first restores the buffer's guarantee — same `did-finish-load` + subscriber
+ *  grace, so it holds for a mid-session window too. */
+export async function whenRendererReady(): Promise<void> {
+  const win = getMainWindow();
+  if (!win) return; // No window yet → emitEvent still buffers.
+  if (win.webContents.isLoadingMainFrame()) {
+    await new Promise<void>((resolve) => {
+      // Settle on any terminal outcome, and detach all three so repeated calls
+      // cannot accumulate listeners on a long-lived window.
+      const done = () => {
+        win.webContents.off("did-finish-load", done);
+        win.webContents.off("did-fail-load", done);
+        win.off("closed", done);
+        resolve();
+      };
+      win.webContents.once("did-finish-load", done);
+      win.webContents.once("did-fail-load", done);
+      win.once("closed", done);
+    });
+    if (win.isDestroyed()) return;
+    await new Promise<void>((resolve) =>
+      setTimeout(resolve, PRE_WINDOW_FLUSH_DELAY_MS),
+    );
+  }
+}
+
 /** Emit a named event to the renderer. Safe to call before the window exists or
  *  after it's closed. Before the FIRST window it buffers (cold-launch deep
  *  links); otherwise it drops silently. */

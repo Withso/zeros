@@ -35,11 +35,18 @@ export interface CachedRead<T> extends AsyncCacheSnapshot<T> {
 /** Subscribe to `cache[key]`, loading it when stale. Pass `key: null` to make
  *  the read inert (e.g. while a popover is closed) — the last snapshot is
  *  still served instantly on the next open. The fetcher is captured in a ref,
- *  so an inline closure is fine; it is only invoked for genuine loads. */
+ *  so an inline closure is fine; it is only invoked for genuine loads.
+ *
+ *  It is handed the KEY it is loading. Most callers ignore it — their request
+ *  is fixed for the component's lifetime — but the cache can invoke a fetcher
+ *  well after it was handed over (a queued follow-up runs only once the
+ *  in-flight request settles), and by then the ref holds the LATEST render's
+ *  closure. A caller whose request parameters vary with the key must derive
+ *  them from this argument, or one key's data lands under another's. */
 export function useCachedRead<T>(
   cache: KeyedAsyncCache<T>,
   key: string | null,
-  fetcher: () => Promise<T>,
+  fetcher: (key: string) => Promise<T>,
   options: { maxAgeMs?: number } = {},
 ): CachedRead<T> {
   const { maxAgeMs } = options;
@@ -63,7 +70,7 @@ export function useCachedRead<T>(
   useEffect(() => {
     if (key === null) return;
     void cache
-      .load(key, () => fetcherRef.current(), { maxAgeMs })
+      .load(key, () => fetcherRef.current(key), { maxAgeMs })
       .catch(() => {
         // The snapshot carries the error; cached data stays available.
       });
@@ -75,7 +82,7 @@ export function useCachedRead<T>(
   const refresh = useCallback(() => {
     if (key === null) return;
     void cache
-      .load(key, () => fetcherRef.current(), { force: true })
+      .load(key, () => fetcherRef.current(key), { force: true })
       .catch(() => {});
   }, [cache, key]);
 

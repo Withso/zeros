@@ -146,11 +146,35 @@ export class SetupManager {
     const cwd = ws?.path ?? args.target!.cwd;
     const repoRoot = ws?.repoRoot ?? args.target!.repoRoot;
     const baseBranch = ws?.baseBranch ?? args.target!.baseBranch;
-    // Kill the previous run's PTY (if any). Its late async exit carries the OLD
-    // session id, which appendData/handleExit ignore (entry.sessionId moved on),
-    // so it can't mislabel this new run.
+    // Orphan the previous run BEFORE killing it, then kill.
+    //
+    // The ordering is the whole point. appendData/handleExit ignore an exit whose
+    // session id no longer matches the workspace's entry — that is the only guard
+    // against a superseded run mislabelling this one — and the env build below
+    // AWAITS, so leaving the old entry in place across that await left it
+    // matching its own id when the kill's exit landed. node-pty reports a kill()
+    // as `exitCode 0, signal 1`, and handleExit read exitCode 0 as "passed": the
+    // killed install scored a PASS and fired `onPassed`, which is what starts the
+    // workspace's `run_on_create` actions — a dev server booted against a
+    // half-deleted node_modules. Dropping the entry first makes the dying PTY
+    // unambiguously an orphan. Nothing is lost: the new entry replaces its log
+    // and state either way.
     const prev = this.entries.get(args.workspaceId);
-    if (prev && this.pty.has(prev.sessionId)) this.pty.kill(prev.sessionId);
+    if (prev) {
+      this.entries.delete(args.workspaceId);
+      if (this.pty.has(prev.sessionId)) this.pty.kill(prev.sessionId);
+    }
+    // Resolve the env BEFORE publishing "running". It awaits the login-shell
+    // PATH probe (up to 3s cold), and with the entry already registered a Stop
+    // in that window found no live PTY to kill: it flipped the row to "stopped"
+    // and returned, then create() spawned the install anyway — an unkillable
+    // script running in a worktree the UI says is idle.
+    const env = await buildSetupCommandEnv({
+      workspaceId: args.workspaceId,
+      worktreePath: cwd,
+      repoRoot,
+      baseBranch,
+    });
     const sessionId = setupSessionId(args.workspaceId, ++this.gen);
     this.entries.set(args.workspaceId, {
       sessionId,
@@ -162,12 +186,6 @@ export class SetupManager {
       onPassed: args.onPassed,
     });
     this.setState(args.workspaceId, "running");
-    const env = await buildSetupCommandEnv({
-      workspaceId: args.workspaceId,
-      worktreePath: cwd,
-      repoRoot,
-      baseBranch,
-    });
     this.pty.create({
       sessionId,
       resolvedCwd: cwd,
@@ -212,15 +230,26 @@ export class SetupManager {
   /** Flip the run's state on the CURRENT setup PTY's exit. A superseded run's
    *  exit (e.g. the one a Rerun just killed) no longer matches the workspace's
    *  entry session id, so it's ignored and can't mislabel the new run. A
-   *  stop()-killed run records "stopped", not "failed". */
-  handleExit(sessionId: string, exitCode: number | null): void {
+   *  stop()-killed run records "stopped", not "failed".
+   *
+   *  `signal` is load-bearing, not decoration: node-pty reports a killed PTY as
+   *  `exitCode 0, signal N`, so reading the code alone scored ANY killed install
+   *  as "passed" — and "passed" is what fires `onPassed`, i.e. what starts the
+   *  workspace's `run_on_create` actions. An OOM-killed `pnpm install` would hand
+   *  a dev server a half-written node_modules and call it success. */
+  handleExit(
+    sessionId: string,
+    exitCode: number | null,
+    signal?: number | null,
+  ): void {
     if (!isSetupSession(sessionId)) return;
     const workspaceId = workspaceIdFromSetupSession(sessionId);
     const entry = this.entries.get(workspaceId);
     if (!entry || entry.sessionId !== sessionId) return; // superseded — ignore
+    const killed = typeof signal === "number" && signal > 0;
     const state: SetupState = entry.stopRequested
       ? "stopped"
-      : exitCode === 0
+      : exitCode === 0 && !killed
         ? "passed"
         : "failed";
     this.setState(workspaceId, state);

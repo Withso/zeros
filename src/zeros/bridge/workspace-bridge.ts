@@ -327,6 +327,127 @@ export async function bridgeSetRemoteRestricted(
   });
 }
 
+// ── Working directories (per-worktree sparse-checkout) ────────
+// LOCAL-ONLY ops, like the restriction list above. Deselecting a folder removes
+// it from the checkout, so the agent, the terminal and the Files tab all stop
+// seeing it at once. Nothing is destroyed — reselecting restores it from the
+// object store.
+
+/** Why the picker can't operate on this worktree. Mirrors the engine's union
+ *  (`src/engine/git/sparse-checkout.ts`); duplicated rather than imported so
+ *  the renderer bundle never pulls in engine code. */
+export type WorkingDirectoriesUnsupportedReason =
+  | "no-commits"
+  | "non-cone"
+  | "unrepresentable-name";
+
+const UNSUPPORTED_REASONS = new Set<string>([
+  "no-commits",
+  "non-cone",
+  "unrepresentable-name",
+]);
+
+/** The one line the picker shows for each obstacle. All three used to render
+ *  "Needs a git repository with at least one commit", which is false for the
+ *  other two and gives the user nothing to act on. */
+export const WORKING_DIRECTORIES_UNSUPPORTED_COPY: Record<
+  WorkingDirectoriesUnsupportedReason,
+  string
+> = {
+  "no-commits": "Needs a git repository with at least one commit.",
+  "non-cone":
+    "This worktree uses hand-written sparse-checkout patterns. Zeros won't overwrite them.",
+  "unrepresentable-name":
+    "A tracked folder has a name git can't express as a sparse pattern, so hiding folders here isn't safe.",
+};
+
+export interface WorkingDirectoriesWire {
+  /** Every top-level tracked directory — the full candidate set. */
+  all: string[];
+  /** The subset currently materialized on disk. */
+  included: string[];
+  /** Whether sparse-checkout is active right now. */
+  sparse: boolean;
+  /** False when the checkout can't support this (no commits / not a repo). */
+  supported: boolean;
+  /** Present exactly when `supported` is false — which of the three obstacles
+   *  it is, so the empty state can name the real one. */
+  unsupportedReason?: WorkingDirectoriesUnsupportedReason;
+  /** Paths git declined to remove because they had local edits. Only ever
+   *  populated by a `set` call; non-empty means the worktree does not match
+   *  the selection and the user has to deal with those files first. */
+  leftBehind?: string[];
+}
+
+const EMPTY_WORKING_DIRS: WorkingDirectoriesWire = {
+  all: [],
+  included: [],
+  sparse: false,
+  supported: false,
+  unsupportedReason: "no-commits",
+};
+
+function toWorkingDirs(r: unknown): WorkingDirectoriesWire {
+  const v = r as Partial<WorkingDirectoriesWire> | null;
+  if (!v || !Array.isArray(v.all) || !Array.isArray(v.included)) {
+    return EMPTY_WORKING_DIRS;
+  }
+  const reason =
+    typeof v.unsupportedReason === "string" &&
+    UNSUPPORTED_REASONS.has(v.unsupportedReason)
+      ? (v.unsupportedReason as WorkingDirectoriesUnsupportedReason)
+      : undefined;
+  return {
+    all: v.all.filter((d): d is string => typeof d === "string"),
+    included: v.included.filter((d): d is string => typeof d === "string"),
+    sparse: v.sparse === true,
+    supported: v.supported === true,
+    // Unsupported always carries a reason, even from an engine that predates
+    // the field — otherwise the empty state would render blank.
+    ...(v.supported === true
+      ? {}
+      : { unsupportedReason: reason ?? "no-commits" }),
+    ...(Array.isArray(v.leftBehind)
+      ? {
+          leftBehind: v.leftBehind.filter(
+            (d): d is string => typeof d === "string",
+          ),
+        }
+      : {}),
+  };
+}
+
+export async function bridgeListWorkingDirectories(
+  bridge: RuntimeClient,
+  workspaceId: string,
+): Promise<WorkingDirectoriesWire> {
+  return toWorkingDirs(
+    await workspaceOp(bridge, "workspace.listWorkingDirectories", {
+      workspaceId,
+    }),
+  );
+}
+
+export async function bridgeSetWorkingDirectories(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  directories: string[],
+): Promise<WorkingDirectoriesWire> {
+  return toWorkingDirs(
+    await workspaceOp(
+      bridge,
+      "workspace.setWorkingDirectories",
+      { workspaceId, directories },
+      // 60s, not the 10s default: this unlinks or materializes every file in
+      // the affected folders, which on a large monorepo runs well past 10s.
+      // A timeout here is worse than slow — the engine finishes and broadcasts
+      // DB_CHANGED to everyone EXCEPT the originator, so the client that made
+      // the change is the one left showing a stale tree.
+      60_000,
+    ),
+  );
+}
+
 // ── Host folder picker (browse to open a project remotely) ──
 
 export interface HostDirListing {
@@ -635,6 +756,30 @@ export async function bridgeFileTree(
     | { files?: string[] }
     | undefined;
   return r?.files ?? [];
+}
+
+/** The .gitignore'd entries under a workspace, which bridgeFileTree omits:
+ *  without `dir`, the collapsed ignored roots (`node_modules/`, `dist/`,
+ *  `.env`); with `dir`, one level inside one of them. Directories come back
+ *  with a trailing "/".
+ *
+ *  DESKTOP ONLY — unlike `file.tree`, this op is neither remote-readable nor
+ *  per-path filtered: a relay client is refused outright (absent from the remote
+ *  allowlist AND an explicit REMOTE_RESTRICTED throw). With `dir` it is a
+ *  directory enumerator whose only boundary was .gitignore, which is exactly
+ *  what it stops honouring — see the handler in workspace/service.ts. The
+ *  renderer's `listIgnoredEntries` short-circuits before reaching here, so a web
+ *  client never spends a round-trip on a guaranteed refusal. */
+export async function bridgeIgnoredEntries(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  dir?: string,
+): Promise<string[]> {
+  const r = (await workspaceOp(bridge, "file.ignored", {
+    workspaceId,
+    ...(dir ? { dir } : {}),
+  })) as { entries?: string[] } | undefined;
+  return r?.entries ?? [];
 }
 
 /** Read one file's content under a workspace (bounded; secret paths refused
@@ -1688,6 +1833,16 @@ export async function bridgeWorkspaceRunInfo(
   })) as { actions: Record<string, RunActionStatusWire> };
 }
 
+/** What `workspace.startRun` replies. `cancelled` means no PTY was spawned
+ *  because a Stop (or the archive reaper) landed while the engine was still
+ *  resolving the run's env — the caller must not open a tab for it. */
+export interface RunStartReply {
+  ok: boolean;
+  hasCommand: boolean;
+  alreadyRunning: boolean;
+  cancelled?: boolean;
+}
+
 /** Start (or focus) a run action. The engine resolves the COMMAND from the
  *  repo settings by actionId and spawns it as the PTY's foreground process —
  *  the client never supplies a command string. */
@@ -1699,10 +1854,10 @@ export async function bridgeWorkspaceStartRun(
     actionId: string;
     sessionId: string;
   },
-): Promise<{ ok: boolean; hasCommand: boolean; alreadyRunning: boolean }> {
+): Promise<RunStartReply> {
   return (await workspaceOp(bridge, "workspace.startRun", {
     ...args,
-  })) as { ok: boolean; hasCommand: boolean; alreadyRunning: boolean };
+  })) as RunStartReply;
 }
 
 /** Stop a live run action — records "stopped", not "failed". */
@@ -1854,6 +2009,94 @@ export async function bridgeSettingsRead(
     layer,
     ...(repoRoot ? { repoRoot } : {}),
   })) as SettingsReadWire;
+}
+
+// ── Files to copy (Settings → Files to copy) ───────────────────────────────
+
+/** One include-list line plus how many files it matches on its own. A
+ *  `matchCount` of 0 on a positive line is the typo signal the UI surfaces;
+ *  `null` means attribution was skipped or the scan failed. */
+export interface FilesToCopyPatternWire {
+  raw: string;
+  pattern: string;
+  negate: boolean;
+  line: number;
+  matchCount: number | null;
+}
+
+export interface FilesToCopyFileWire {
+  path: string;
+  bytes: number;
+  /** False → untracked but NOT gitignored: it is still copied (the user named
+   *  it), but it lands in the new workspace's Changes tab. */
+  ignored: boolean;
+}
+
+/** One tick-box row: something git ignores here, whether or not the current
+ *  patterns select it. Directory-collapsed, so `node_modules/` is ONE row. */
+export interface FilesToCopyCandidateWire {
+  path: string;
+  isDir: boolean;
+  /** `-1` for a directory — its size is deliberately not walked. */
+  bytes: number;
+}
+
+export interface FilesToCopyPreviewWire {
+  source: "worktreeinclude" | "file_include_globs" | "default";
+  /** Settings layer the patterns resolved from — `repo-local` (this project)
+   *  vs `user` (all projects) is what the scope control reflects. Widened
+   *  beyond SettingsLayer because provenance can also name the non-file
+   *  layers (`team`, `default`). */
+  sourceLayer?: SettingsLayer | "team" | "default";
+  /** Absolute path of the repo's `.worktreeinclude`, when that source won. */
+  sourcePath?: string;
+  /** Its raw text, shown read-only instead of an empty editable box. */
+  sourceText?: string;
+  /** The folder files are copied FROM. */
+  rootPath: string;
+  patterns: FilesToCopyPatternWire[];
+  files: FilesToCopyFileWire[];
+  totalCount: number;
+  /** Bytes across `files` only — a lower bound once `truncated`. */
+  totalBytes: number;
+  /** True when `files` was cut to the display cap; `totalCount` is the real
+   *  number. */
+  truncated: boolean;
+  /** Matched but already tracked — `git worktree add` puts these in the
+   *  workspace anyway, so copying is a no-op. */
+  trackedMatches: string[];
+  /** The tick-box universe: every ignored entry in the checkout, independent of
+   *  the current patterns. Without it the pane could only ever show what is
+   *  already selected, so nothing new would be discoverable. */
+  candidates: FilesToCopyCandidateWire[];
+  warnings: string[];
+  /** False → the scan was cut short. Say "couldn't check", never "0 files":
+   *  zero and unknown are different answers. */
+  complete: boolean;
+}
+
+/** What a new workspace of `repoRoot` would have copied into it. Pass
+ *  `patterns` to preview an UNSAVED draft — including an empty array, which
+ *  means "the box is cleared", not "use the saved list". */
+export async function bridgeFilesToCopyPreview(
+  bridge: RuntimeClient,
+  repoRoot: string,
+  opts: { mainRepoRoot?: string; patterns?: string[] } = {},
+): Promise<FilesToCopyPreviewWire> {
+  return (await workspaceOp(
+    bridge,
+    "filesToCopy.preview",
+    {
+      repoRoot,
+      ...(opts.mainRepoRoot ? { mainRepoRoot: opts.mainRepoRoot } : {}),
+      ...(opts.patterns ? { patterns: opts.patterns } : {}),
+    },
+    // The engine budgets the scan itself at 15s, and the stats + serialization
+    // sit on top of that. The 10s default would have the renderer give up
+    // BEFORE the engine does, turning a slow-but-successful preview into
+    // "Request timeout" while git kept running.
+    LOCAL_GIT_TIMEOUT_MS,
+  )) as FilesToCopyPreviewWire;
 }
 
 // ── MCP adopt-scan (Customize → MCP "Import from other tools") ─────────────

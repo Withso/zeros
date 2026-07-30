@@ -50,10 +50,11 @@ function writeCacheEntry(key: string, entry: Entry): void {
   }
 }
 
-function cacheKey(cwd: string): string {
-  // Async operations can capture `/repo/` while the active chat resolves to
-  // `/repo`. Treat them as one workspace without mangling POSIX `/` or a
-  // Windows drive root (`C:\\`).
+/** Canonical cache identity for a workspace folder. Async operations can capture
+ * `/repo/` while the active chat resolves to `/repo`. Treat them as one
+ * workspace without mangling POSIX `/` or a Windows drive root (`C:\\`).
+ * Exported so the sibling per-workspace listing caches key one folder one way. */
+export function workspaceCacheKey(cwd: string): string {
   if (cwd === "/" || /^[A-Za-z]:[\\/]$/.test(cwd)) return cwd;
   return cwd.replace(/[\\/]+$/, "");
 }
@@ -75,7 +76,7 @@ function pruneGenerations(): void {
  * a cold failure rejects so no consumer can mistake transport absence for an
  * authoritative empty workspace. */
 export async function loadWorkspaceFiles(cwd: string): Promise<string[]> {
-  const key = cacheKey(cwd);
+  const key = workspaceCacheKey(cwd);
   const hit = cache.get(key);
   if (hit && !hit.stale && Date.now() - hit.at < FRESH_MS) {
     touchCacheEntry(key, hit);
@@ -124,7 +125,7 @@ export async function loadWorkspaceFiles(cwd: string): Promise<string[]> {
  * before consumers render with their new refresh key. */
 export function invalidateWorkspaceFiles(cwd: string | undefined): void {
   if (!cwd) return;
-  const key = cacheKey(cwd);
+  const key = workspaceCacheKey(cwd);
   generations.set(key, (generations.get(key) ?? 0) + 1);
   const retained = cache.get(key);
   if (retained) retained.stale = true;
@@ -158,7 +159,7 @@ export function resetWorkspaceFilesCacheForTests(): void {
 /** Synchronous best-effort peek — the cached list (even if slightly stale) or
  *  null if this cwd was never loaded. Lets a click resolve without waiting. */
 export function peekWorkspaceFiles(cwd: string): string[] | null {
-  const key = cacheKey(cwd);
+  const key = workspaceCacheKey(cwd);
   const entry = cache.get(key);
   if (!entry) return null;
   touchCacheEntry(key, entry);

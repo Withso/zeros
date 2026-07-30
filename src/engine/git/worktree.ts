@@ -39,6 +39,7 @@ import {
   getWorkspaceByPath,
   getWorkspaceLifecycle,
   getWorkspaceMeta,
+  setWorkspaceMeta,
   insertWorkspaceWithLifecycle,
   listWorkspaceLifecycles,
   writeWorktreeSeed,
@@ -61,8 +62,9 @@ import {
   runInlineScript,
   resolveSetupCommand,
   copyFromRepo,
+  pathExists,
 } from "./setup-hooks";
-import { resolveFilesToCopy } from "./files-to-copy";
+import { resolveFilesToCopy, resolvePatternSource } from "./files-to-copy";
 import { resolveRepoScript } from "../settings/repo-scripts";
 import { resolveRepoGit } from "../settings/repo-git";
 import { isKnownRepoRoot, listKnownRepoRoots } from "../db/projects";
@@ -114,6 +116,34 @@ function isAdoptedWorkspace(workspaceId: string): boolean {
   return (
     getWorkspaceMeta(workspaceId, WORKSPACE_OWNERSHIP_META_KEY) === "adopted"
   );
+}
+
+/** Record paths that were actually PROVISIONED into a workspace (explicit
+ *  copy/symlink paths at create, plus every files-to-copy seed that landed),
+ *  merged into the durable per-workspace list archive force-adds.
+ *
+ *  Archive can't re-derive this from today's patterns: `.worktreeinclude` is
+ *  committed and editable, so a pattern removed a week after the workspace was
+ *  created leaves a real, agent-edited file that no current pattern matches —
+ *  `git add -A` skips it (it's gitignored), it never enters the checkpoint,
+ *  and `git worktree remove` destroys it. What we seeded is a fact about this
+ *  workspace, so it is stored as one. */
+function addProvisionPaths(workspaceId: string, rels: string[]): void {
+  if (rels.length === 0) return;
+  try {
+    const merged = [...new Set([...readProvisionPaths(workspaceId), ...rels])];
+    setWorkspaceMeta(
+      workspaceId,
+      PROVISION_PATHS_META_KEY,
+      JSON.stringify(merged),
+    );
+  } catch (err) {
+    // Optional metadata: failing to record it must never fail a create. The
+    // pattern-based archive scan still covers the normal case.
+    console.warn(
+      `[worktree] could not record provisioned paths for ${workspaceId}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 function readProvisionPaths(workspaceId: string): string[] {
@@ -332,6 +362,11 @@ async function resolveWorktreeBase(
 
 const lateSeedPasses = new Map<string, Promise<void>>();
 
+/** Ceiling for the background rescan. Not unbounded: `whenSeedingSettled`
+ *  gates the setup command and run-on-create actions, so a scan that never
+ *  returns is a workspace that never starts, with nothing in the log. */
+const LATE_SEED_SCAN_TIMEOUT_MS = 5 * 60 * 1000;
+
 /** Resolves when any pending late seed pass for the workspace has finished
  *  (immediately when none is pending — the normal case). Never rejects. */
 export function whenSeedingSettled(workspaceId: string): Promise<void> {
@@ -361,21 +396,25 @@ export async function seedWorktreeFiles(args: {
     return;
   }
   for (const w of ftc.warnings) console.warn(`[worktree] ${w}`);
-  let copied = 0;
+  const seeded: string[] = [];
   for (const rel of ftc.paths) {
-    if (existsSync(path.join(args.worktreePath, rel))) continue;
+    // pathExists, not existsSync: existsSync follows symlinks, so a DANGLING
+    // one committed on the base branch reads as "nothing here" and the copy
+    // then writes through it, outside the worktree.
+    if (pathExists(path.join(args.worktreePath, rel))) continue;
     try {
       await copyFromRepo(args.repoRoot, args.worktreePath, rel);
-      copied++;
+      seeded.push(rel);
     } catch (err) {
       console.warn(
         `[worktree] files-to-copy: skipped "${rel}": ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
-  if (copied > 0) {
+  addProvisionPaths(args.workspaceId, seeded);
+  if (seeded.length > 0) {
     console.log(
-      `[worktree] seeded ${copied} gitignored file(s) into ${args.workspaceId}`,
+      `[worktree] seeded ${seeded.length} gitignored file(s) into ${args.workspaceId}`,
     );
   }
   if (!ftc.complete || ftc.deferredPaths.length > 0) {
@@ -416,34 +455,51 @@ export function scheduleLateSeedPass(args: LateSeedPassArgs): void {
     try {
       let rels: string[];
       if (args.rescan) {
-        const ftc = await resolveFilesToCopy(args.repoRoot, { timeoutMs: 0 });
+        // Not `timeoutMs: 0`. A truly unbounded `git ls-files` on a wedged
+        // network mount never returns, and `whenSeedingSettled` gates the
+        // setup command and every run-on-create action — so the workspace
+        // would sit silently doing nothing, forever. A ceiling turns that into
+        // a logged failure. Generous enough that no real scan reaches it.
+        const ftc = await resolveFilesToCopy(args.repoRoot, {
+          timeoutMs: LATE_SEED_SCAN_TIMEOUT_MS,
+          noSecondChance: true,
+        });
         for (const w of ftc.warnings)
           console.warn(`[worktree] late seed pass: ${w}`);
+        // A rescan that ALSO came back short would otherwise log
+        // "copied 0 file(s)" — indistinguishable from a healthy no-op, for the
+        // one case where seeding genuinely did not happen.
+        if (!ftc.complete) {
+          console.error(
+            `[worktree] late seed pass for ${args.workspaceId}: rescan did not complete — configured files may be missing from the workspace. Check the warnings above.`,
+          );
+        }
         rels = [...ftc.paths, ...ftc.deferredPaths];
       } else {
         rels = args.deferred;
       }
       rels = rels.filter((p) => !args.explicit.has(p));
-      let copied = 0;
+      const seeded: string[] = [];
       let skipped = 0;
       for (const rel of rels) {
         // Workspace deleted while we worked — nothing left to seed.
         if (!existsSync(args.worktreePath)) return;
-        if (existsSync(path.join(args.worktreePath, rel))) {
+        if (pathExists(path.join(args.worktreePath, rel))) {
           skipped++;
           continue;
         }
         try {
           await copyFromRepo(args.repoRoot, args.worktreePath, rel);
-          copied++;
+          seeded.push(rel);
         } catch (err) {
           console.warn(
             `[worktree] late seed pass: skipped "${rel}": ${err instanceof Error ? err.message : String(err)}`,
           );
         }
       }
+      addProvisionPaths(args.workspaceId, seeded);
       console.log(
-        `[worktree] late seed pass for ${args.workspaceId}: copied ${copied} file(s)` +
+        `[worktree] late seed pass for ${args.workspaceId}: copied ${seeded.length} file(s)` +
           (skipped ? ` (${skipped} already present)` : ""),
       );
     } catch (err) {
@@ -1490,6 +1546,12 @@ async function createWorkspaceInner(
       seedPaths,
       symlinkPaths: input.symlinkPaths,
     });
+    // Durably record what we seeded, so archive force-adds these even if the
+    // patterns that chose them are edited away before the workspace is
+    // archived. Superset-safe: a path the hooks skipped (already present from
+    // the branch checkout, or a vanished source) is simply one more entry for
+    // `git add -f`, which no-ops when the file isn't there.
+    addProvisionPaths(workspaceId, seedPaths);
     updateWorkspaceLifecyclePhase(workspaceId, "work-applied");
   } catch (err) {
     const rolledBack = await safeRollback(
@@ -2399,14 +2461,48 @@ async function archiveWorkspaceInner(
     // create a configured ignored file (for example `.env.workspace`) only in
     // this worktree after creation; scanning main would omit it from the forced
     // snapshot paths and silently lose it on archive.
-    const filesToCopy = await resolveFilesToCopy(ws.path, {
-      timeoutMs: 0,
-      mainRepoRoot: ws.repoRoot,
-    });
-    for (const warning of filesToCopy.warnings) {
+    //
+    // Both PATTERN SETS apply, unioned. `.worktreeinclude` is a committed,
+    // per-branch file, so a workspace branched before a pattern was added
+    // (or one whose branch narrows the list) carries a different list from the
+    // main checkout that SEEDED it. Scanning with the worktree's patterns
+    // alone left every file seeded under a main-only pattern out of the
+    // checkpoint — and `git worktree remove` then destroyed it with no way
+    // back.
+    //
+    // The second scan is skipped when both checkouts resolve to the same
+    // pattern list, which is the overwhelmingly common case (nobody edits
+    // `.worktreeinclude` on a feature branch); the comparison is two file
+    // reads against one more tree walk.
+    const patternsDiffer =
+      path.resolve(ws.repoRoot) !== path.resolve(ws.path) &&
+      JSON.stringify(
+        resolvePatternSource(ws.path, ws.repoRoot).patterns.map((p) => p.raw),
+      ) !==
+        JSON.stringify(
+          resolvePatternSource(ws.repoRoot).patterns.map((p) => p.raw),
+        );
+    const scans = await Promise.all([
+      resolveFilesToCopy(ws.path, {
+        timeoutMs: 0,
+        mainRepoRoot: ws.repoRoot,
+        noSecondChance: true,
+      }),
+      ...(patternsDiffer
+        ? [
+            resolveFilesToCopy(ws.path, {
+              timeoutMs: 0,
+              mainRepoRoot: ws.repoRoot,
+              patternRoot: ws.repoRoot,
+              noSecondChance: true,
+            }),
+          ]
+        : []),
+    ]);
+    for (const warning of scans.flatMap((s) => s.warnings)) {
       console.warn(`[archive] ${warning}`);
     }
-    if (!filesToCopy.complete) {
+    if (scans.some((s) => !s.complete)) {
       throw new GitError({
         code: "STASH_FAILED",
         message: `Couldn't enumerate configured files-to-copy for ${ws.path}`,
@@ -2416,8 +2512,7 @@ async function archiveWorkspaceInner(
     }
     const archiveIncludePaths = [
       ...new Set([
-        ...filesToCopy.paths,
-        ...filesToCopy.deferredPaths,
+        ...scans.flatMap((s) => [...s.paths, ...s.deferredPaths]),
         // Explicit create-time copy/symlink paths can be outside today's repo
         // settings. Keep them durable for the workspace's whole lifetime so a
         // later archive never drops an ignored provisioned file.

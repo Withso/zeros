@@ -56,8 +56,11 @@ import {
   listBranches,
   listRemoteBranches,
   listWorkspaceFiles,
+  listIgnoredEntries,
   listWorkspaces,
   listRemoteRestrictedWorkspaceIds,
+  getWorkingDirectories,
+  setWorkingDirectories,
   setWorkspaceRemoteRestricted,
   setWorkspaceStatus,
   log,
@@ -87,7 +90,11 @@ import {
 } from "../git";
 import { resolveRepoScript, resolveRunActions } from "../settings/repo-scripts";
 import { isRunSessionId, runActionOneShot } from "@zeros/core/run-actions";
-import type { RunActionStatus, RunStartArgs } from "../run/run-manager";
+import type {
+  RunActionStatus,
+  RunStartArgs,
+  RunStartResult,
+} from "../run/run-manager";
 // Phase 2 (single-writer): the remaining DB-touching git/workspace/PR ops the
 // desktop drove via in-process Electron IPC, now exposed on the bridge so the
 // engine is the sole zeros.db writer. Thin pass-throughs, same as above — the
@@ -126,6 +133,7 @@ import {
   detachStart,
   detachStop,
   detachStatus,
+  previewFilesToCopy,
   type ResetMode,
   type DetectedTool,
 } from "../git";
@@ -430,6 +438,12 @@ const WRITE_OPS = new Set<string>([
  * expose local-only Git controls to relay clients. */
 const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "file.write",
+  // Rewrites the checkout AND the index (sparse patterns + skip-worktree
+  // bits), so it belongs on the barrier for the same reason checkoutBranch
+  // does: archive/delete drains in-flight work before snapshotting or removing
+  // a worktree, and an unregistered sparse-checkout would still be
+  // materializing or deleting folders underneath it.
+  "workspace.setWorkingDirectories",
   "git.stage",
   "git.unstage",
   "git.discard",
@@ -501,7 +515,7 @@ const REMOTE_READABLE = new Set<string>([
   "messages.window",
   "messages.windowOlder",
   "messages.search",
-  // Files
+  // Files. `file.ignored` is deliberately NOT here — see its handler.
   "file.tree",
   "file.read",
   // Host folder picker (browse to open a project remotely)
@@ -731,10 +745,10 @@ export class WorkspaceService {
   /** Starts a run-action PTY (RunManager). Wired by the engine; driven by the
    *  LOCAL-ONLY workspace.startRun op. */
   private runStarter:
-    | ((args: RunStartArgs) => Promise<{ alreadyRunning: boolean }>)
+    | ((args: RunStartArgs) => Promise<RunStartResult>)
     | null = null;
   setRunStarter(
-    fn: (args: RunStartArgs) => Promise<{ alreadyRunning: boolean }>,
+    fn: (args: RunStartArgs) => Promise<RunStartResult>,
   ): void {
     this.runStarter = fn;
   }
@@ -1221,6 +1235,72 @@ export class WorkspaceService {
         );
         return { ok: true };
       }
+      // ── Working directories (per-worktree sparse-checkout) ──
+      // LOCAL-ONLY for the same reason as the restriction list above: applying
+      // a selection REMOVES folders from the checkout, and a paired device is
+      // not the place to do that blind. Both ops are off the remote allowlist
+      // so the deny-by-default gate rejects them together — a remote client
+      // never sees a picker it could not save.
+      //
+      // No Zeros-side persistence on purpose: git already stores the cone in
+      // the worktree's own `.git` config and it survives restarts. A second
+      // copy in settings could only drift from the real thing.
+      case "workspace.listWorkingDirectories": {
+        return getWorkingDirectories(
+          this.resolveReadCwd(reqStr(params, "workspaceId"), remote),
+        );
+      }
+      case "workspace.setWorkingDirectories": {
+        const raw = params.directories;
+        if (!Array.isArray(raw)) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "directories must be an array of directory names.",
+          });
+        }
+        const workspaceId = reqStr(params, "workspaceId");
+        const cwd = this.resolveReadCwd(workspaceId, remote);
+        const directories = raw.filter(
+          (d): d is string => typeof d === "string",
+        );
+        // Deafen the worktree watcher for the duration — the single most
+        // expensive part of this operation, and the reason a save on a real
+        // monorepo timed out.
+        //
+        // Chokidar subscribes PER DIRECTORY (v4 has no recursive mode), so
+        // unlinking a folder makes it re-read every surviving parent directory
+        // once per batch of events while tearing down one subscription per
+        // removed subdirectory — all on the engine's single Bun thread. Measured
+        // on Linux against a synthetic repo, watcher attached vs. not:
+        //
+        //     8k files   149ms → 630ms    (263ms of event-loop lag)
+        //    30k files   387ms → 1766ms   (563ms)
+        //    60k files   795ms → 3403ms   (1075ms)
+        //
+        // macOS is worse: each subscription is its own FSEvents stream and every
+        // ancestor stream sees the same subtree events. Past ~15s of blocked
+        // loop the host watchdog stops getting /health back, SIGKILLs the engine
+        // MID-`git sparse-checkout` (the child shares the engine's process
+        // group), and the renderer's in-flight request rejects with "Request
+        // timeout: engine disconnected" — a scary error for work that was
+        // succeeding. The same hazard is already handled this way for
+        // archive/delete; this is the same rewrite with the same cure.
+        //
+        // Nothing is lost by going deaf: the op broadcasts its own DB_CHANGED,
+        // which is the invalidation the watcher would have produced anyway.
+        const suspension = await this.workspaceCheckoutWatchSuspender?.(
+          workspaceId,
+          cwd,
+        );
+        try {
+          return await setWorkingDirectories(cwd, directories);
+        } finally {
+          // Always resume, including after a throw: the checkout is still live
+          // (unlike archive/delete, nothing moved it), so leaving it unwatched
+          // would silently stop reporting terminal/agent edits until restart.
+          suspension?.resume();
+        }
+      }
       // ── Write: create a workspace (worktree) ──
       // A WRITE op, so remotely it runs through the same trust gate as other
       // writes (allowed for a trusted device; the repo isn't a restricted
@@ -1472,11 +1552,16 @@ export class WorkspaceService {
           command: action.command,
           oneShot: runActionOneShot(action),
           cwd: ws?.path ?? repoRoot,
+          repoRoot,
         });
         return {
           ok: true,
           hasCommand: true,
           alreadyRunning: res.alreadyRunning,
+          // A Stop (or the archive reaper) landed while the env was still
+          // resolving, so nothing spawned. Passed through so the renderer does
+          // not open a run tab that would attach to nothing — see RunStartResult.
+          cancelled: res.cancelled === true,
         };
       }
       // ── Run tab: stop a live run (records "stopped", not "failed").
@@ -1615,6 +1700,40 @@ export class WorkspaceService {
           opSettingsResolve(repoRoot, mainRepoRoot),
         );
         return remote ? redactResolvedForRemote(resolved) : resolved;
+      }
+      // Files to copy — everything the settings pane renders in one read:
+      // which source won (.worktreeinclude / file_include_globs / the default),
+      // what those patterns resolve to ON DISK right now, per-pattern match
+      // counts, and which rows need a warning. `patterns` previews an UNSAVED
+      // draft from the textarea.
+      //
+      // LOCAL-ONLY (absent from every remote allowlist). It expands patterns
+      // into the actual on-disk set of GITIGNORED paths — exactly what
+      // `file.tree` filters out for remote clients and `file.read` refuses to
+      // open — plus their sizes and the verbatim text of `.worktreeinclude`.
+      // A caller-supplied `patterns: ["*"]` turns it into a directory listing
+      // of every ignored file in any repo the owner has opened, and an
+      // attacker-chosen list also drives up to MAX_ATTRIBUTED_PATTERNS extra
+      // tree walks per request. The settings pane is a desktop surface; when a
+      // remote one needs this, it needs its own filtered shape, not this one.
+      case "filesToCopy.preview": {
+        if (remote) {
+          throw new GitError({
+            code: "REMOTE_PATH_DENIED",
+            message: "Files-to-copy preview is only available on the desktop.",
+          });
+        }
+        const repoRoot = reqStr(params, "repoRoot");
+        const mainRepoRoot = optStr(params, "mainRepoRoot");
+        return await previewFilesToCopy(repoRoot, {
+          ...(mainRepoRoot ? { mainRepoRoot } : {}),
+          // Not optStrArr: an EMPTY draft array is meaningful ("I cleared the
+          // box"), and optStrArr collapses it to undefined ("use the saved
+          // patterns") — the preview would then contradict the box.
+          ...(Array.isArray(params.patterns)
+            ? { patterns: strArr(params, "patterns") }
+            : {}),
+        });
       }
       case "settings.read": {
         const layer = reqStr(params, "layer");
@@ -2082,6 +2201,32 @@ export class WorkspaceService {
         return {
           files: remote ? files.filter((f) => !isSensitiveRepoPath(f)) : files,
         };
+      }
+      // ── Files tab: the .gitignore'd entries file.tree deliberately omits.
+      // A separate op rather than a flag on file.tree, because that list also
+      // feeds the @-mention picker and quick-open — neither of which should
+      // start offering node_modules paths. LAZY: no `dir` returns the collapsed
+      // ignored roots (~8 rows), `dir` returns one level inside one of them.
+      //
+      // LOCAL-ONLY, and not by omission — by an explicit refusal, because the
+      // reasoning is easy to lose. With `dir` this is a one-level directory
+      // enumerator over the worktree, and .gitignore is exactly the boundary it
+      // stops honouring. That boundary was load-bearing for remote clients in a
+      // way a path denylist cannot replace: `.conductor/` is gitignored and
+      // holds SIBLING WORKTREES, so a remote client authorised for one
+      // workspace could walk into another one's checkout — around the
+      // remote-restriction list entirely — and no per-entry name filter would
+      // notice, because none of those paths look sensitive. The desktop app is
+      // the operator's own machine and already reads these files freely. ──
+      case "file.ignored": {
+        if (remote) {
+          throw new GitError({
+            code: "REMOTE_RESTRICTED",
+            message: "Ignored files can only be listed from the desktop app.",
+          });
+        }
+        const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
+        return { entries: await listIgnoredEntries(cwd, optStr(params, "dir")) };
       }
       case "file.read": {
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);

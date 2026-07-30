@@ -28,7 +28,12 @@ import {
   shellOpenUrl,
 } from "./shell";
 import { detectOpenApps, openInApp } from "./open-apps";
-import { keychainDelete, keychainGet, keychainHas, keychainSet } from "./secrets";
+import {
+  keychainDelete,
+  keychainGet,
+  keychainHas,
+  keychainSet,
+} from "./secrets";
 import {
   authBeginHandoff,
   authPeekHandoff,
@@ -70,12 +75,15 @@ import {
 // GitHub PR ops moved onto the engine bridge (single-writer). Only the AUTH ops
 // (safeStorage-only, never the DB) + the token courier stay in Electron main.
 import {
-  ghAuthSignin,
-  ghAuthStatus,
-  ghDetectCli,
-  ghSetToken,
-  ghSignOut,
-  ghTokenClear,
+  ghAppCancel,
+  ghAppConnect,
+  ghAuthSnapshot,
+  ghCredentialClear,
+  ghMethodDisconnect,
+  ghMethodSelect,
+  ghPatConnect,
+  ghPatRestore,
+  withNativeErrors,
 } from "./github";
 // Detach-mode IPC removed (dead — zero renderer callers; its detach_state access
 // was the last DB-touching path in main). Engine impl stays for a future re-wire.
@@ -214,19 +222,18 @@ export function registerAllCommands(): void {
   // `git ls-files`, no workspace lookup).
   setCommand("git_list_files", gitListFiles);
 
-  // Roadmap 03a — phase 3: GitHub. Auth via @octokit/auth-oauth-device;
-  // PR ops via @octokit/rest. The device flow emits a `gh:device-code`
-  // event to the renderer with the user_code + verification_uri.
-  setCommand("gh_auth_status", ghAuthStatus);
-  setCommand("gh_auth_signin", ghAuthSignin);
-  setCommand("gh_detect_cli", ghDetectCli);
-  setCommand("gh_set_token", ghSetToken);
-  setCommand("gh_sign_out", ghSignOut);
-  // Token-courier writeback (single-writer, H4): main couriers the decrypted
-  // token straight to the engine, so the renderer only ever needs to CLEAR it
-  // (mirroring an engine-originated 401 invalidation into safeStorage).
-  // gh_token_get (the old renderer fetch) was a dead no-op and was removed.
-  setCommand("gh_token_clear", ghTokenClear);
+  // GitHub auth is method-addressed and main-owned. Every response is
+  // secret-free; selected credentials reach the engine over private stdin.
+  // withNativeErrors keeps each failure's code + remediation intact across IPC,
+  // which Electron would otherwise flatten into one prefixed string.
+  setCommand("gh_auth_snapshot", withNativeErrors(ghAuthSnapshot));
+  setCommand("gh_app_cancel", ghAppCancel);
+  setCommand("gh_app_connect", withNativeErrors(ghAppConnect));
+  setCommand("gh_method_select", withNativeErrors(ghMethodSelect));
+  setCommand("gh_pat_connect", withNativeErrors(ghPatConnect));
+  setCommand("gh_pat_restore", withNativeErrors(ghPatRestore));
+  setCommand("gh_method_disconnect", withNativeErrors(ghMethodDisconnect));
+  setCommand("gh_credential_clear", withNativeErrors(ghCredentialClear));
   // GitHub PR ops (create/update/markReady/get/list/merge/checks/commits/
   // reviews/comment), cross-tool interop (git_list_all_branches,
   // workspace_create_from_branch), the background-rename hook

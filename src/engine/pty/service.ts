@@ -62,6 +62,12 @@ export interface PtySpawnRequest {
    *  env). Used by one-shot setup so the command runs with the scrubbed setup
    *  allowlist + TERM/COLORTERM, not the interactive-terminal env. */
   env?: Record<string, string>;
+  /** One-shot only: run `command` in an INTERACTIVE login shell, so it reads
+   *  ~/.zshrc (nvm/fnm/mise/pnpm PATH setup, aliases) exactly like the Terminal
+   *  tab. Opt-in because that also imports whatever the user's rc exports —
+   *  fine for a user-authored run action, NOT for the repo-resident setup
+   *  script, whose whole point is a narrow allowlist. See buildOneShotArgs. */
+  interactive?: boolean;
 }
 export type PtySpawnFn = (req: PtySpawnRequest) => PtyHandle;
 
@@ -80,6 +86,8 @@ export interface PtyCreateOptions {
   command?: string;
   /** Verbatim child env (see PtySpawnRequest.env). */
   env?: Record<string, string>;
+  /** Interactive one-shot shell (see PtySpawnRequest.interactive). */
+  interactive?: boolean;
 }
 export interface PtyInfo {
   sessionId: string;
@@ -329,6 +337,7 @@ export class PtyService {
       scrubEnv: opts.scrubEnv === true,
       command: opts.command,
       env: opts.env,
+      interactive: opts.interactive === true,
     });
     const mirror = this.mirrorFactory?.(cols, rows);
     const session: Session = { proc, cwd, cols, rows, mirror };

@@ -42,6 +42,8 @@
 
 import { useEffect, useState } from "react";
 
+import { parseNativeErrorMessage } from "@zeros/core/native-error";
+
 interface ZerosNativeBridge {
   invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T>;
   on<T = unknown>(eventName: string, handler: (payload: T) => void): () => void;
@@ -91,20 +93,56 @@ export function runtimeName(): "electron" | "browser" {
   return isElectron() ? "electron" : "browser";
 }
 
+/** A rejection from a main-process command handler, with Electron's transport
+ *  wrapper removed and the handler's `code` restored when it threw a
+ *  `NativeCommandError`. See packages/core/src/native-error.ts. */
+export interface NativeInvokeError extends Error {
+  /** Handler-supplied reason code, when the handler supplied one. */
+  code?: string;
+  /** The untouched `Error invoking remote method …` text, for logs. */
+  rawMessage: string;
+}
+
 /** Call a native command. Errors from the underlying bridge
  *  surface via the promise rejection — callers handle them the
- *  same way they did under the old native invoke bridge. */
+ *  same way they did under the old native invoke bridge, except that the
+ *  message is the handler's own sentence rather than Electron's
+ *  `Error invoking remote method 'zeros:invoke': SomeError: …` wrapper. Toasts
+ *  render these messages directly, so the wrapper must never reach them. */
 export async function nativeInvoke<T>(
   cmd: string,
   args?: Record<string, unknown>,
 ): Promise<T> {
-  if (isElectron()) {
-    return window.__ZEROS_NATIVE__!.invoke<T>(cmd, args);
+  if (!isElectron()) {
+    throw new Error(
+      `[Zeros] nativeInvoke("${cmd}") called without a native runtime — ` +
+        `this feature requires the Mac app`,
+    );
   }
-  throw new Error(
-    `[Zeros] nativeInvoke("${cmd}") called without a native runtime — ` +
-      `this feature requires the Mac app`,
-  );
+  try {
+    return await window.__ZEROS_NATIVE__!.invoke<T>(cmd, args);
+  } catch (error) {
+    throw normalizeNativeInvokeError(error, cmd);
+  }
+}
+
+/** Exported for tests: rebuild a renderer-facing error from a bridge rejection.
+ *  Non-Error rejections and already-clean messages pass through unharmed. */
+export function normalizeNativeInvokeError(
+  error: unknown,
+  cmd: string,
+): NativeInvokeError {
+  const rawMessage =
+    error instanceof Error ? error.message : String(error ?? "");
+  const parsed = parseNativeErrorMessage(rawMessage);
+  const normalized = new Error(
+    parsed.message || `[Zeros] native command "${cmd}" failed`,
+    // Keep the original reachable for debugging without printing it.
+    { cause: error },
+  ) as NativeInvokeError;
+  if (parsed.code) normalized.code = parsed.code;
+  normalized.rawMessage = rawMessage;
+  return normalized;
 }
 
 /** Subscribe to a named event emitted from the main process.

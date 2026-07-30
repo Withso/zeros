@@ -15,6 +15,8 @@
     "./system-instructions": "./src/system-instructions/index.ts",
     "./version": "./src/version.ts",
     "./schemas": "./src/schemas.ts",
+    "./github-auth": "./src/github-auth.ts",
+    "./native-error": "./src/native-error.ts",
     "./run-actions": "./src/run-actions.ts",
     "./scrub": "./src/scrub.ts",
     "./crypto": "./src/crypto/index.ts",

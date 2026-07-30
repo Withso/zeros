@@ -70,5 +70,4 @@ export const SECRET_ACCOUNTS = {
   OPENAI_API_KEY: "openai-api-key",
   ANTHROPIC_API_KEY: "anthropic-api-key",
   CURSOR_API_KEY: "cursor-api-key",
-  GITHUB_PAT: "github-pat",
 } as const;

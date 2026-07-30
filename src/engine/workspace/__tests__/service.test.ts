@@ -1381,4 +1381,104 @@ describe("WorkspaceService", () => {
       ),
     ).rejects.toThrow();
   });
+
+  // ── Working directories: the watcher must go deaf for the rewrite ──
+  //
+  // The whole reason a save timed out. Chokidar subscribes per DIRECTORY, so
+  // unlinking a folder makes it re-read every surviving parent and tear down
+  // one subscription per removed subdirectory, on the engine's single thread.
+  // Measured on a synthetic 60k-file repo: 795ms unwatched → 3403ms watched,
+  // with 1075ms of event-loop lag. Past ~15s of that the host watchdog stops
+  // getting /health back and SIGKILLs the engine's process group — taking the
+  // in-flight `git sparse-checkout` with it.
+  describe("workspace.setWorkingDirectories", () => {
+    const gitIn = (cwd: string, ...args: string[]): void => {
+      execFileSync("git", args, { cwd, stdio: "ignore" });
+    };
+
+    const seedRepo = (): void => {
+      fs.mkdirSync(path.join(dir, "keep"), { recursive: true });
+      fs.mkdirSync(path.join(dir, "drop"), { recursive: true });
+      fs.writeFileSync(path.join(dir, "keep", "a.txt"), "a\n");
+      fs.writeFileSync(path.join(dir, "drop", "b.txt"), "b\n");
+      gitIn(dir, "config", "user.email", "t@t");
+      gitIn(dir, "config", "user.name", "t");
+      gitIn(dir, "add", "-A");
+      gitIn(dir, "commit", "-q", "-m", "init");
+    };
+
+    const trackSuspender = (): {
+      calls: string[];
+      resumed: number;
+      retired: number;
+    } => {
+      const seen = { calls: [] as string[], resumed: 0, retired: 0 };
+      svc.setWorkspaceCheckoutWatchSuspender(async (_id, worktreePath) => {
+        seen.calls.push(worktreePath);
+        return {
+          resume() {
+            seen.resumed++;
+          },
+          retire() {
+            seen.retired++;
+          },
+        };
+      });
+      return seen;
+    };
+
+    it("suspends the worktree watcher for the rewrite and resumes after", async () => {
+      seedRepo();
+      const seen = trackSuspender();
+      const result = (await svc.handle("workspace.setWorkingDirectories", {
+        workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+        directories: ["keep"],
+      })) as { included: string[] };
+
+      expect(result.included).toEqual(["keep"]);
+      expect(seen.calls).toEqual([dir]);
+      expect(seen.resumed).toBe(1);
+      // The checkout stayed exactly where it is, so it must NOT be retired —
+      // retiring keeps the root's callbacks inert for 60s, which would blind
+      // the tree to terminal/agent edits long after the save finished.
+      expect(seen.retired).toBe(0);
+      expect(fs.existsSync(path.join(dir, "drop"))).toBe(false);
+    });
+
+    it("resumes the watcher even when the rewrite fails", async () => {
+      seedRepo();
+      const seen = trackSuspender();
+      await expect(
+        svc.handle("workspace.setWorkingDirectories", {
+          workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+          directories: ["nope"],
+        }),
+      ).rejects.toThrow(/not a top-level tracked directory/i);
+      // Without the finally, a rejected save would leave this worktree
+      // permanently unwatched — no file-tree or Changes refresh until restart.
+      expect(seen.calls).toEqual([dir]);
+      expect(seen.resumed).toBe(1);
+    });
+
+    it("still applies the selection when no watcher is wired", async () => {
+      seedRepo();
+      // The suspender is injected by the engine; the service must not depend
+      // on it (tests, and any host that never starts a git watcher).
+      const result = (await svc.handle("workspace.setWorkingDirectories", {
+        workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+        directories: ["keep"],
+      })) as { included: string[] };
+      expect(result.included).toEqual(["keep"]);
+    });
+
+    it("rejects a non-array directories payload", async () => {
+      seedRepo();
+      await expect(
+        svc.handle("workspace.setWorkingDirectories", {
+          workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+          directories: "keep",
+        }),
+      ).rejects.toThrow(/array/i);
+    });
+  });
 });

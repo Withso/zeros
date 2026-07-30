@@ -57,6 +57,7 @@ import {
   disposePtyHost,
 } from "./pty/node-pty-spawn";
 import { disposeCursorHost } from "./agents/adapters/cursor-sdk/host/host-client";
+import { getLoginShellPath } from "./agents/adapters/shared/login-shell-path";
 import { TerminalRegistry } from "./pty/registry";
 import {
   GitError,
@@ -76,13 +77,19 @@ import {
   runActionOneShot,
   runSessionId,
 } from "@zeros/core/run-actions";
-import { detectGhCli, getAuthStatus, setTokenStore } from "./git/github";
+import { getAuthStatus, setTokenStore } from "./git/github";
+import {
+  closeGitCredentialBroker,
+  prepareGitCredentialShellEnvironment,
+} from "./git/credential-broker";
 import {
   engineGithubTokenStore,
+  seedGithubCredential,
   seedGithubToken,
-  setGithubTokenChangeNotifier,
+  setGithubCredentialChangeNotifier,
 } from "./git/engine-token-store";
 import { AgentGateway } from "./agents/gateway";
+import { buildPtyEnv } from "./pty/shell-setup";
 import { resolveMcpServers } from "./agents/mcp-registry";
 import { McpGateway } from "./agents/gateway/server";
 import { OAuthVault } from "./agents/gateway/oauth-provider";
@@ -181,6 +188,13 @@ const VERSION = "0.0.5";
  *  to true alongside re-enabling the MCP to restore the index. */
 const DESIGN_SURFACE_ENABLED = false;
 
+/** A workspace op slower than this gets one log line naming it and its
+ *  duration. Set above every ordinary read (a `git.status` fan-out on a large
+ *  repo lands in the low hundreds of ms) so the log stays readable, and well
+ *  below the host watchdog's ~15s kill window so anything that could plausibly
+ *  cost the engine its life is on the record before it does. */
+const SLOW_WORKSPACE_OP_MS = 2_000;
+
 /** How long a session whose LOCAL owner just disconnected stays reserved for
  *  the desktop. A relay client may not ADOPT it during this window — it covers
  *  a renderer reload, where the agent keeps running but ownership is briefly
@@ -223,6 +237,11 @@ const EXPECTED_ENGINE_ERROR_CODES = new Set<string>([
   "VALIDATION_FAILED",
   "BRANCH_IN_USE",
   "NOT_AUTHENTICATED",
+  "GITHUB_RATE_LIMITED",
+  "GITHUB_SSO_REQUIRED",
+  "GITHUB_FORBIDDEN_SCOPE",
+  "GITHUB_REPO_NOT_INSTALLED",
+  "GITHUB_INSTALLATION_SUSPENDED",
   "NOT_A_REPO",
   "WORKTREE_NOT_FOUND",
   // The worktree FOLDER is gone from disk — an expected, user-correctable
@@ -418,6 +437,14 @@ export class ZerosEngine {
       createNodePtyShell,
       createTerminalMirror,
     );
+    // Warm the login-shell PATH probe (`$SHELL -ilc 'echo $PATH'`) now, off the
+    // critical path. It's cached process-wide and every one-shot command shell
+    // — Setup script, Run action — awaits it before spawning; resolving it here
+    // keeps that from showing up as a stall on the FIRST Run of a session.
+    // Fire-and-forget: the resolver already falls back to the inherited PATH.
+    void getLoginShellPath().catch(() => {
+      /* probe failures are handled inside the resolver */
+    });
     // Background setup runner (Setup tab): owns the worktree setup PTY, buffers
     // its output, and flips workspaces.setup_state on exit. It rides the same
     // pty.onData/onExit callbacks below (setup sessions are id-prefixed "setup:").
@@ -478,10 +505,13 @@ export class ZerosEngine {
       this.runs.appendData(sessionId, data);
     });
     this.pty.onExit((sessionId, exitCode, signal, reason) => {
+      // `signal` matters as much as `exitCode`: node-pty reports a killed PTY as
+      // `exitCode 0, signal N`, so a verdict read off the code alone scores an
+      // OOM-killed or externally-killed install as a PASS.
       // Flip setup_state on a setup PTY's exit (no-op for normal terminals).
-      this.setup.handleExit(sessionId, exitCode);
+      this.setup.handleExit(sessionId, exitCode, signal);
       // Flip a run action's state on its PTY's exit (no-op otherwise).
-      this.runs.handleExit(sessionId, exitCode);
+      this.runs.handleExit(sessionId, exitCode, signal);
       this.broadcast(
         createMessage({
           type: "PTY_EXIT",
@@ -1102,65 +1132,23 @@ export class ZerosEngine {
       }
     })();
 
-    // GitHub token (option B). The engine can't read Electron safeStorage (where
-    // the OAuth token is encrypted at rest), so it reads an in-memory working
-    // copy the host pushes over the bridge (GITHUB_TOKEN_SET). Wire that store +
-    // a notifier that mirrors an engine-originated change (today only the 401
-    // auto-clear inside a PR op) back to the host so safeStorage stays in sync —
-    // via broadcastLocal, so a relay device never receives the token value.
+    // The host owns durable GitHub credentials. The engine holds only the
+    // selected in-memory working copy and reports invalidation as method +
+    // reason — never the credential value.
     setTokenStore(engineGithubTokenStore);
-    setGithubTokenChangeNotifier((token) =>
+    setGithubCredentialChangeNotifier((change) =>
       this.router.broadcastLocal(
         createMessage({
-          type: "GITHUB_TOKEN_CHANGED",
+          type: "GITHUB_CREDENTIAL_CHANGED",
           source: "engine",
-          token,
+          ...change,
         }),
       ),
     );
 
-    // H4: the host couriers the GitHub OAuth token DIRECTLY to the engine —
-    // never through the renderer, where an XSS could read it. It arrives two
-    // ways: ZEROS_GITHUB_TOKEN in the spawn env (token present at launch) and a
-    // newline-delimited control line on stdin (a mid-session sign-in/out). Both
-    // seed the in-memory copy only. The legacy renderer GITHUB_TOKEN_SET path
-    // still works for non-Electron hosts but the Mac app no longer uses it.
-    if (process.env.ZEROS_GITHUB_TOKEN !== undefined) {
-      seedGithubToken(process.env.ZEROS_GITHUB_TOKEN || null);
-    }
-    // Zero-config GitHub auth: when the host couriered NO token (fresh
-    // install / the user never opened Settings → GitHub), adopt the gh CLI's
-    // login — the same "primary auth path" the Settings GitHub section runs
-    // on mount. Without this, gh.prSync silently no-ops (NOT_AUTHENTICATED
-    // is swallowed) while the AGENT's own `gh` works fine — so a PR the
-    // agent creates never surfaces in the app: no PR-status island, no
-    // "PR #N" pill, and the topbar keeps showing "Create PR". Fire-and-
-    // forget + best-effort: no gh binary / not logged in leaves the engine
-    // unauthenticated exactly as before.
-    void (async () => {
-      try {
-        if ((await engineGithubTokenStore.get()) === null) {
-          const r = await detectGhCli();
-          if (r.authenticated)
-            console.log(
-              `[Zeros] adopted gh CLI GitHub auth (${r.login ?? "unknown"})`,
-            );
-          return;
-        }
-        // A token is already stored, so there is nothing to adopt — but the
-        // LOGIN behind it is process-local (cachedGithubLogin) and starts null
-        // on every engine boot. Workspace creation reads it to build a
-        // `branch_prefix_type = "github"` branch name, and it must not block on
-        // the network, so it takes whatever is cached. Without this prime, the
-        // first workspace created after a relaunch silently fell back to the
-        // default `zeros/` prefix while Settings still showed "GitHub username
-        // (…)" — and nothing said why. Fire-and-forget: offline just leaves the
-        // fallback in place, exactly as before.
-        await getAuthStatus();
-      } catch {
-        /* best-effort */
-      }
-    })();
+    // Electron couriers the selected credential over private stdin. The engine
+    // never auto-adopts gh on its own: that implicit writer made an explicit
+    // disconnect re-connect on the next refresh/restart.
     this.setupHostControlChannel();
     this.setupParentDeathWatchdog();
 
@@ -1491,6 +1479,7 @@ export class ZerosEngine {
     this.settingsWatcher = null;
     await this.gitWatcher?.stop();
     this.gitWatcher = null;
+    await closeGitCredentialBroker();
     for (const t of this.transports) await t.stop();
     this.removePortFile();
     this.clearBusy();
@@ -1675,6 +1664,7 @@ export class ZerosEngine {
             command: action.command,
             oneShot: runActionOneShot(action),
             cwd: ws.path,
+            repoRoot: ws.repoRoot,
           }),
         ).catch((err) =>
           console.error(
@@ -1992,7 +1982,11 @@ export class ZerosEngine {
           return;
         }
         case "AGENT_NEW_SESSION": {
-          const spawnOpts = this.agentSpawnOpts(msg, client, "newSession");
+          const spawnOpts = await this.agentSpawnOpts(
+            msg,
+            client,
+            "newSession",
+          );
           const lifecycleWorkspaceId = this.workspaceIdForProcess(
             spawnOpts.workspaceId,
             spawnOpts.cwd,
@@ -2437,7 +2431,11 @@ export class ZerosEngine {
             this.refuseSessionAccess(msg.id, msg.agentId, client);
             return;
           }
-          const loadOpts = this.agentSpawnOpts(msg, client, "loadSession");
+          const loadOpts = await this.agentSpawnOpts(
+            msg,
+            client,
+            "loadSession",
+          );
           const lifecycleWorkspaceId = this.workspaceIdForProcess(
             loadOpts.workspaceId,
             loadOpts.cwd,
@@ -2530,7 +2528,7 @@ export class ZerosEngine {
    *  own tool calls remain gated by the per-action permission flow (routed to
    *  the owning client), so within the workspace the remote operator keeps the
    *  intended "control your agent from your phone" parity. */
-  private agentSpawnOpts(
+  private async agentSpawnOpts(
     msg: {
       cwd?: string;
       env?: Record<string, string>;
@@ -2539,16 +2537,28 @@ export class ZerosEngine {
     },
     client: TransportClient,
     stage: "newSession" | "loadSession",
-  ): {
+  ): Promise<{
     cwd?: string;
     env?: Record<string, string>;
     workspaceId?: string;
     cliBinary?: string;
-  } {
+  }> {
     if (client.kind === "local") {
+      const pathValue = msg.env?.PATH ?? process.env.PATH ?? "";
+      const contextId = msg.workspaceId
+        ? `workspace:${msg.workspaceId}`
+        : msg.cwd
+          ? `folder:${path.resolve(msg.cwd)}`
+          : "folder:unresolved";
+      const credentialEnv = await prepareGitCredentialShellEnvironment(
+        contextId,
+        pathValue,
+      );
       return {
         cwd: msg.cwd,
-        env: msg.env,
+        env: credentialEnv
+          ? { ...(msg.env ?? {}), ...credentialEnv.env }
+          : msg.env,
         workspaceId: msg.workspaceId,
         cliBinary: msg.cliBinary,
       };
@@ -3176,6 +3186,7 @@ export class ZerosEngine {
       // begins. This closes the cross-window stage/write/rebase-vs-archive gap.
       const lifecycleMutationWorkspaceId =
         this.workspace.lifecycleMutationWorkspaceId(op, params);
+      const startedAt = Date.now();
       const operation = this.workspace.handle(op, params, {
         remote: client.kind !== "local",
       });
@@ -3185,6 +3196,17 @@ export class ZerosEngine {
             operation,
           )
         : await operation;
+      // Leave evidence for the slow ones. Workspace ops log NOTHING today (the
+      // error line below is gated on isWriteOp), so a save that outlived its
+      // RPC budget left main.log with no trace it was ever dispatched — the
+      // only visible artifacts were the watchdog respawning the engine and an
+      // ambiguous "Request timeout" in the renderer, neither naming the op.
+      // One line per genuinely slow op, so this can be diagnosed from a log
+      // next time without turning every `git.status` into noise.
+      const elapsedMs = Date.now() - startedAt;
+      if (elapsedMs >= SLOW_WORKSPACE_OP_MS) {
+        console.warn(`[workspace] ${op} took ${elapsedMs}ms`);
+      }
       client.send(
         createMessage({
           type: "WORKSPACE_RESPONSE",
@@ -3315,7 +3337,15 @@ export class ZerosEngine {
       // excluded from error tracking). Keep a privacy-scrubbed breadcrumb in
       // main.log so a failed target change, rebase, stage, or GitHub action is
       // diagnosable from a support bundle instead of existing only as a toast.
-      if (this.workspace.isWriteOp(op)) {
+      // `isWriteOp` is the REMOTE-security allowlist, so it misses the
+      // local-only checkout mutations (working directories, and any future
+      // sibling) — exactly the ops whose failure most needs a breadcrumb.
+      // Widen to "anything that can rewrite a managed checkout", which is what
+      // the sentence above actually means by "mutation".
+      if (
+        this.workspace.isWriteOp(op) ||
+        this.workspace.lifecycleMutationWorkspaceId(op, params) !== null
+      ) {
         const scrubbed = scrubError(err);
         console.error(
           `[workspace] ${op} failed (${code}): ${scrubbed.message}`,
@@ -3752,6 +3782,18 @@ export class ZerosEngine {
       ptyExit();
       return;
     }
+    let env: Record<string, string> | undefined;
+    if (!reattach && client.kind === "local") {
+      const baseEnv = buildPtyEnv({
+        cwd: resolvedCwd,
+        workspaceId: canonicalWsId,
+      });
+      const credentialEnv = await prepareGitCredentialShellEnvironment(
+        canonicalWsId ? `workspace:${canonicalWsId}` : `folder:${resolvedCwd}`,
+        baseEnv.PATH ?? "",
+      );
+      env = credentialEnv ? { ...baseEnv, ...credentialEnv.env } : baseEnv;
+    }
     const info = this.pty.create({
       sessionId: msg.sessionId,
       resolvedCwd,
@@ -3760,6 +3802,7 @@ export class ZerosEngine {
       // (#5) Scrub host secrets from the shell env for remote clients; local
       // shells keep the full env for desktop parity.
       scrubEnv: client.kind !== "local",
+      ...(env ? { env } : {}),
     });
     // Register a freshly-spawned terminal in the SHARED registry so every device
     // can discover + attach to it (PTY_LIST) and the restriction gate can scope
@@ -4055,8 +4098,34 @@ export class ZerosEngine {
     stdin.resume();
   }
 
+  /** Learn the login behind the credential the host just seeded.
+   *
+   *  `cachedGithubLogin()` is process-local and starts null on every engine
+   *  boot. Workspace creation reads it to build a `branch_prefix_type =
+   *  "github"` branch name and must not block on the network, so it takes
+   *  whatever is cached. Without this prime the first workspace created after
+   *  a relaunch silently fell back to the default `zeros/` prefix while
+   *  Settings still showed "GitHub username (…)", and nothing said why.
+   *
+   *  It hangs off the SEED rather than off startup because the credential
+   *  arrives asynchronously over stdin — a probe fired at boot would run
+   *  before there is anything to probe. This is not auto-adoption: it reads
+   *  the credential the host explicitly selected and writes no token.
+   *  Fire-and-forget, so offline just leaves the fallback in place. */
+  private primeGithubLogin(): void {
+    void getAuthStatus().catch(() => {
+      /* best-effort — a failed probe just leaves the prefix fallback */
+    });
+  }
+
   private handleHostControlLine(line: string): void {
-    let msg: { type?: string; token?: string | null; data?: unknown };
+    let msg: {
+      type?: string;
+      token?: string | null;
+      method?: unknown;
+      credential?: unknown;
+      data?: unknown;
+    };
     try {
       msg = JSON.parse(line);
     } catch {
@@ -4064,6 +4133,21 @@ export class ZerosEngine {
     }
     if (msg.type === "host.githubToken") {
       seedGithubToken(typeof msg.token === "string" ? msg.token : null);
+      this.primeGithubLogin();
+      return;
+    }
+    if (msg.type === "host.githubCredential") {
+      seedGithubCredential(
+        msg.credential && typeof msg.credential === "object"
+          ? (msg.credential as never)
+          : null,
+        msg.method === "gh-cli" ||
+          msg.method === "github-app" ||
+          msg.method === "pat"
+          ? msg.method
+          : null,
+      );
+      this.primeGithubLogin();
       return;
     }
     if (msg.type === MCP_VAULT_SEED_TYPE) {

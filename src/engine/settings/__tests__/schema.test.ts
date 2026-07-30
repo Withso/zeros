@@ -22,14 +22,15 @@ describe("sanitizeLayer", () => {
 
   it("drops unsupported keys from repo-scoped layers with a warning, keeping git/prompts (+ scripts committed-only, mcp repo-local-only)", () => {
     // 2026-07-17 repo-file slimming: repo-scoped files carry scripts config
-    // (+ git / prompts); env vars live in the Keychain vault,
-    // file_include_globs in a repo-root .worktreeinclude. Each stale key is
+    // (+ git / prompts); env vars live in the Keychain vault. Each stale key is
     // IGNORED with a warning — never silently. Scripts are additionally
     // COMMITTED-file-only: the personal local files drop them too, so a stale
     // [scripts] can't shadow the repo's settings.toml. 2026-07-22: `mcp`
     // returned to the REPO-LOCAL layer only (the Customize tab's per-repo
     // servers) — the committed file and workspace-local still drop it (the
-    // clone-borne-file gate).
+    // clone-borne-file gate). 2026-07-29: `file_include_globs` returned on the
+    // same terms — "Files to copy" is per-project, and repo-local is the
+    // personal, gitignored file the settings pane already writes.
     const doc = {
       scripts: { setup: "pnpm install" },
       git: { base_branch: "main" },
@@ -42,26 +43,28 @@ describe("sanitizeLayer", () => {
     for (const layer of ["repo", "repo-local", "workspace-local"] as const) {
       const r = sanitizeLayer(doc, layer);
       const scriptsKept = layer === "repo";
-      const mcpKept = layer === "repo-local";
+      const repoLocalOnly = layer === "repo-local";
       expect(r.doc).toEqual({
         ...(scriptsKept ? { scripts: { setup: "pnpm install" } } : {}),
         git: { base_branch: "main" },
         prompts: { general: "be brief" },
-        ...(mcpKept
+        ...(repoLocalOnly
           ? {
               mcp: {
                 servers: [{ name: "ctx", transport: "stdio", command: "npx" }],
               },
+              file_include_globs: [".env*"],
             }
           : {}),
       });
       expect(r.warnings).toHaveLength(
         REPO_FILE_UNSUPPORTED_KEYS.length -
-          (mcpKept ? 1 : 0) +
+          (repoLocalOnly ? 2 : 0) +
           (scriptsKept ? 0 : 1),
       );
       for (const key of REPO_FILE_UNSUPPORTED_KEYS) {
-        if (key === "mcp" && mcpKept) continue;
+        if (repoLocalOnly && (key === "mcp" || key === "file_include_globs"))
+          continue;
         expect(
           r.warnings.some((w) => w.startsWith(`${key}:`) && w.includes(layer)),
         ).toBe(true);
@@ -105,6 +108,10 @@ describe("sanitizeLayer", () => {
       models: { default: "fable-5" },
       workspaces: { path: "/x" },
       tool_approvals_enabled: true,
+      github: {
+        auth_method: "github-app",
+        disconnected_at: "2026-07-29T20:00:00.000Z",
+      },
       providers: {
         claude: { auth: "api-key", executable_path: "/usr/local/bin/claude" },
       },
@@ -115,7 +122,24 @@ describe("sanitizeLayer", () => {
 
     const repo = sanitizeLayer(doc, "repo");
     expect(repo.doc).toEqual({});
-    expect(repo.warnings).toHaveLength(4);
+    expect(repo.warnings).toHaveLength(5);
+  });
+
+  it("drops an invalid GitHub method without dropping its valid siblings", () => {
+    const r = sanitizeLayer(
+      {
+        github: {
+          auth_method: "oauth",
+          disconnected_at: "2026-07-29T20:00:00.000Z",
+        },
+      },
+      "user",
+    );
+    expect(r.doc).toEqual({
+      github: { disconnected_at: "2026-07-29T20:00:00.000Z" },
+    });
+    expect(r.warnings).toHaveLength(1);
+    expect(r.warnings[0]).toContain("github.auth_method");
   });
 
   it("repo-local layer allows workspaces (machine-specific override) but not models/approvals/providers", () => {

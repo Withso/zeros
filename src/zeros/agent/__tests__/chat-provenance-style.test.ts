@@ -177,9 +177,15 @@ describe("Settings → Git prefix pane", () => {
     const handle = Buffer.from("aWFtYXJ1bnJr", "base64").toString("utf8");
     expect(src).not.toMatch(new RegExp(handle, "i"));
     // The hook itself must keep asking git, not memoize a build-time constant.
-    expect(source("src/zeros/panels/use-github-login.ts")).toContain(
-      "await ghAuthStatus()",
-    );
+    // The call is `ghAuthSnapshot()` since the three-way auth split replaced
+    // the flat `ghAuthStatus()` read — same requirement, current API, and it
+    // is the exact fetcher GitHubSection uses so the two panes share one read.
+    const hook = source("src/zeros/panels/use-github-login.ts");
+    expect(hook).toContain("ghAuthSnapshot()");
+    // …and it must read the SELECTED method's login. Any-method-with-a-login
+    // would label the branch prefix with an account the user switched away
+    // from.
+    expect(hook).toContain("snapshot.methods[snapshot.selectedMethod]");
   });
 
   it("renders the login as a chip, not a parenthetical", () => {

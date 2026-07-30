@@ -1,67 +1,209 @@
-// ──────────────────────────────────────────────────────────
-// Engine-side GitHub TokenStore — in-memory, bridge-fed (option B)
-// ──────────────────────────────────────────────────────────
+// Engine-side, in-memory GitHub credential working copy.
 //
-// The bun engine can't call Electron `safeStorage` (where the GitHub OAuth
-// token is encrypted at rest), so it can't read the durable token directly.
-// Instead the HOST (Electron-main, the safeStorage owner) hands the decrypted
-// token to the engine over the loopback bridge as a `GITHUB_TOKEN_SET` control
-// message; the engine caches it HERE and reads it for `gh.*` Octokit calls.
-//
-//   host safeStorage ──(renderer courier, GITHUB_TOKEN_SET)──▶ this module
-//   this module ──(GITHUB_TOKEN_CHANGED, 401 auto-clear)──▶ host safeStorage
-//
-// Electron safeStorage stays the ONLY durable store; this is a working copy
-// that lives only as long as the engine process. On engine restart the host
-// re-pushes on (re)connect (Phase 3), so a lost cache self-heals.
-//
-// Security: the GITHUB_TOKEN_SET handler (index.ts) accepts the seed from LOCAL
-// clients only, and the change notifier is delivered via broadcastLocal — a
-// relay device never sets nor receives the host's token.
+// Electron main owns durable credentials. It seeds only the selected working
+// credential over private stdin; the engine exposes its access token through
+// the legacy TokenStore adapter used by the GitHub API and Git broker. Any
+// engine-originated invalidation broadcasts method + reason only, never secret
+// material.
 
+import {
+  GITHUB_GIT_HOST,
+  isGithubAuthMethod,
+  sanitizeGithubCredential,
+  type GithubAuthMethod,
+  type GithubCredential,
+} from "@zeros/core/github-auth";
 import { forgetGithubLogin, type TokenStore } from "./github";
 
-let token: string | null = null;
-let onChange: ((token: string | null) => void) | null = null;
+export interface GithubCredentialChange {
+  method: GithubAuthMethod;
+  reason: "credential-invalid";
+}
 
-/** Wire the callback the engine uses to mirror an engine-originated token change
- *  back to the host (so it can update safeStorage). Pass `null` to unwire. */
-export function setGithubTokenChangeNotifier(
-  fn: ((token: string | null) => void) | null,
+let credential: GithubCredential | null = null;
+let selectedMethod: GithubAuthMethod | null = null;
+let selectedGitHost: string | null = null;
+let onChange: ((change: GithubCredentialChange) => void) | null = null;
+const REFRESH_HANDOFF_TIMEOUT_MS = 20_000;
+
+interface PendingRefresh {
+  rejectedToken: string;
+  promise: Promise<string | null>;
+  resolve(value: string | null): void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+let pendingRefresh: PendingRefresh | null = null;
+
+export function setGithubCredentialChangeNotifier(
+  fn: ((change: GithubCredentialChange) => void) | null,
 ): void {
   onChange = fn;
 }
 
-/** Seed the working copy from a host push (GITHUB_TOKEN_SET). Does NOT notify —
- *  the host is the origin, so echoing the change back would be redundant (and
- *  risk a loop). Empty string normalises to null. */
-export function seedGithubToken(t: string | null): void {
-  const next = t && t.length > 0 ? t : null;
-  // A different token means a different (or no) account, so the remembered
-  // login is no longer evidence of anything. This is the desktop's PRIMARY
-  // sign-in/sign-out route, and without the drop a sign-out left
-  // `branch_prefix_type = "github"` still stamping the old login onto every
-  // new branch — for an account that is no longer connected. Dropping rather
-  // than re-probing keeps this synchronous and network-free; the next
+/** Host-originated seed. Method identity travels separately so a temporarily
+ * absent credential still blocks fallthrough to a different ambient helper.
+ * Refresh tokens deliberately remain in Electron main. */
+export function seedGithubCredential(
+  value: GithubCredential | null,
+  method?: GithubAuthMethod | null,
+): void {
+  const parsed = sanitizeGithubCredential(value);
+  // A different access token means a possibly different (or no) account, so
+  // the remembered login stops being evidence of anything. This is the
+  // desktop's PRIMARY sign-in/sign-out route, and without the drop a sign-out
+  // left `branch_prefix_type = "github"` still stamping the old login onto
+  // every new branch — for an account that is no longer connected. Dropping
+  // rather than re-probing keeps this synchronous and network-free; the next
   // getAuthStatus re-learns it.
-  if (next !== token) forgetGithubLogin();
-  token = next;
+  //
+  // A github-app ROTATION also lands here with a new token for the same
+  // account, and this drops the login it did not have to. That is the cheap
+  // direction on purpose: the cost is one workspace prefixed `zeros/` until
+  // the next probe, whereas keeping a stale login risks stamping a
+  // disconnected account onto a branch name, which is permanent.
+  if ((parsed?.accessToken ?? null) !== (credential?.accessToken ?? null)) {
+    forgetGithubLogin();
+  }
+  selectedMethod =
+    parsed?.method ?? (isGithubAuthMethod(method) ? method : null);
+  selectedGitHost =
+    parsed?.gitHost ?? (selectedMethod ? GITHUB_GIT_HOST : null);
+  if (!parsed) {
+    credential = null;
+    if (pendingRefresh) {
+      const pending = pendingRefresh;
+      pendingRefresh = null;
+      clearTimeout(pending.timer);
+      pending.resolve(null);
+    }
+    return;
+  }
+  // A shared-store watcher may briefly re-send the exact rejected working
+  // token while Electron is rotating its main-only refresh pair. Ignore that
+  // stale seed so API/git retries cannot accidentally reuse it.
+  if (pendingRefresh && parsed.accessToken === pendingRefresh.rejectedToken) {
+    credential = null;
+    return;
+  }
+  credential =
+    parsed.method === "github-app"
+      ? {
+          method: parsed.method,
+          accessToken: parsed.accessToken,
+          gitHost: parsed.gitHost,
+          gitHttpUsername: parsed.gitHttpUsername,
+          ...(parsed.login ? { login: parsed.login } : {}),
+          ...(parsed.expiresAtMs ? { expiresAtMs: parsed.expiresAtMs } : {}),
+          ...(parsed.variantKey ? { variantKey: parsed.variantKey } : {}),
+        }
+      : parsed;
+  if (pendingRefresh) {
+    const pending = pendingRefresh;
+    pendingRefresh = null;
+    clearTimeout(pending.timer);
+    pending.resolve(parsed.accessToken);
+  }
 }
 
-/** The engine's GitHub TokenStore. `get()` returns the host-pushed working copy.
- *  `set()`/`clear()` are ENGINE-originated mutations (today only the 401 auto-
- *  clear inside withAuthRetry) and notify the host so safeStorage stays in sync.
- *  The engine never persists — it has no safeStorage. */
+/** Compatibility seed for an older local host bridge. */
+export function seedGithubToken(token: string | null): void {
+  seedGithubCredential(
+    token
+      ? {
+          method: "pat",
+          accessToken: token,
+          gitHost: "github.com",
+          gitHttpUsername: "x-access-token",
+        }
+      : null,
+    token ? "pat" : null,
+  );
+}
+
+export function getSeededGithubCredential(): GithubCredential | null {
+  return credential ? { ...credential } : null;
+}
+
 export const engineGithubTokenStore: TokenStore = {
   async get() {
-    return token;
+    return credential?.accessToken ?? null;
   },
-  async set(t: string) {
-    token = t && t.length > 0 ? t : null;
-    onChange?.(token);
+  async getCredential() {
+    return getSeededGithubCredential();
+  },
+  async ownsGitHost(host) {
+    return selectedGitHost === host;
+  },
+  async refreshAfterRejection(rejectedToken) {
+    if (pendingRefresh && pendingRefresh.rejectedToken === rejectedToken) {
+      return pendingRefresh.promise;
+    }
+    if (!credential) return null;
+    if (credential.accessToken !== rejectedToken) {
+      return credential.accessToken;
+    }
+    if (credential.method !== "github-app") return undefined;
+
+    const method = credential.method;
+    credential = null;
+    let resolvePending!: (value: string | null) => void;
+    const promise = new Promise<string | null>((resolve) => {
+      resolvePending = resolve;
+    });
+    const timer = setTimeout(() => {
+      if (pendingRefresh?.promise !== promise) return;
+      pendingRefresh = null;
+      resolvePending(null);
+    }, REFRESH_HANDOFF_TIMEOUT_MS);
+    timer.unref?.();
+    pendingRefresh = {
+      rejectedToken,
+      promise,
+      resolve: resolvePending,
+      timer,
+    };
+    onChange?.({ method, reason: "credential-invalid" });
+    return promise;
+  },
+  async clearAfterRejection(rejectedToken) {
+    if (!credential || credential.accessToken !== rejectedToken) {
+      return false;
+    }
+    const method = credential.method;
+    credential = null;
+    if (pendingRefresh) {
+      const pending = pendingRefresh;
+      pendingRefresh = null;
+      clearTimeout(pending.timer);
+      pending.resolve(null);
+    }
+    onChange?.({ method, reason: "credential-invalid" });
+    return true;
+  },
+  async set(token: string) {
+    if (!credential) {
+      credential = token
+        ? {
+            method: "pat",
+            accessToken: token,
+            gitHost: "github.com",
+            gitHttpUsername: "x-access-token",
+          }
+        : null;
+      return;
+    }
+    credential = { ...credential, accessToken: token };
   },
   async clear() {
-    token = null;
-    onChange?.(null);
+    const method = credential?.method;
+    credential = null;
+    if (pendingRefresh) {
+      const pending = pendingRefresh;
+      pendingRefresh = null;
+      clearTimeout(pending.timer);
+      pending.resolve(null);
+    }
+    if (method) onChange?.({ method, reason: "credential-invalid" });
   },
 };

@@ -2,11 +2,10 @@
 // pr-instructions — build the auto-generated "Create a PR" prompt
 // ──────────────────────────────────────────────────────────
 //
-// Clicking the header "Create PR" button doesn't call the GitHub API directly —
-// it hands the agent a fully-formed, step-by-step brief and lets it do the work
-// (review the diff, commit, push, `gh pr create`). This keeps a human-readable
-// paper trail in the chat and reuses whatever PR skills / commit conventions the
-// agent already knows.
+// The Create PR split-button's explicit "Ask agent to create PR" path hands the
+// agent a fully-formed, step-by-step brief (review the diff, commit, push,
+// `gh pr create`). The primary action uses the engine's authenticated operation;
+// this path remains useful when uncommitted work needs review and a commit.
 //
 // The brief is generated from the live workspace state (branch, target, dirty
 // count, whether the branch is already pushed) so the agent doesn't have to

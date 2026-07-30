@@ -177,6 +177,32 @@ describe("loadPersistedUiState — scoped navigation", () => {
     });
   });
 
+  it("round-trips every repo view the tab strip can select", () => {
+    // The read-back allowlist is a separate list from the RepoPageView union,
+    // so a new tab that compiles can still be dropped here — and the symptom
+    // is only visible after an app restart, when it silently reverts to
+    // Workspaces.
+    const views = [
+      "workspaces",
+      "environment",
+      "git",
+      "actions",
+      "files",
+      "paths",
+    ] as const;
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({
+        repoPageViewByProject: Object.fromEntries(
+          views.map((v, i) => [`project-${i}`, v]),
+        ),
+      }),
+    );
+    expect(loadPersistedUiState().repoPageViewByProject).toEqual(
+      Object.fromEntries(views.map((v, i) => [`project-${i}`, v])),
+    );
+  });
+
   it("drops malformed scoped entries and invalid repo views", () => {
     localStorage.setItem(
       KEY,

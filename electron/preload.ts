@@ -48,12 +48,14 @@ const ALLOWED_COMMANDS = new Set<string>([
   "get_engine_port",
   "get_engine_root",
   "get_engine_token",
-  "gh_auth_signin",
-  "gh_auth_status",
-  "gh_detect_cli",
-  "gh_set_token",
-  "gh_sign_out",
-  "gh_token_clear",
+  "gh_auth_snapshot",
+  "gh_app_cancel",
+  "gh_app_connect",
+  "gh_method_select",
+  "gh_pat_connect",
+  "gh_pat_restore",
+  "gh_method_disconnect",
+  "gh_credential_clear",
   "git_list_files",
   "keychain_delete",
   "keychain_get",
@@ -106,19 +108,25 @@ const subscribers = new Map<string, Set<(payload: unknown) => void>>();
 // ONE ipcRenderer listener fans out to name-specific subscribers. We
 // never remove this (lifetime = preload), so no leaks; individual
 // handlers are removed from the Sets when callers unsubscribe.
-ipcRenderer.on(EVENT_CHANNEL, (_event: IpcRendererEvent, envelope: ZerosEventEnvelope) => {
-  if (!envelope || typeof envelope.name !== "string") return;
-  const set = subscribers.get(envelope.name);
-  if (!set) return;
-  for (const handler of set) {
-    try {
-      handler(envelope.payload);
-    } catch (err) {
-      // A bad subscriber shouldn't kill the fan-out.
-      console.error(`[Zeros] event handler threw for "${envelope.name}":`, err);
+ipcRenderer.on(
+  EVENT_CHANNEL,
+  (_event: IpcRendererEvent, envelope: ZerosEventEnvelope) => {
+    if (!envelope || typeof envelope.name !== "string") return;
+    const set = subscribers.get(envelope.name);
+    if (!set) return;
+    for (const handler of set) {
+      try {
+        handler(envelope.payload);
+      } catch (err) {
+        // A bad subscriber shouldn't kill the fan-out.
+        console.error(
+          `[Zeros] event handler threw for "${envelope.name}":`,
+          err,
+        );
+      }
     }
-  }
-});
+  },
+);
 
 const bridge = {
   /** Call a main-process command. Args is passed through as the single
@@ -127,13 +135,18 @@ const bridge = {
    *  here so a renderer XSS can't reach the full privileged command table. */
   invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     if (typeof cmd !== "string" || !ALLOWED_COMMANDS.has(cmd)) {
-      return Promise.reject(new Error(`[Zeros] command not permitted: "${cmd}"`));
+      return Promise.reject(
+        new Error(`[Zeros] command not permitted: "${cmd}"`),
+      );
     }
     return ipcRenderer.invoke(INVOKE_CHANNEL, { cmd, args });
   },
 
   /** Subscribe to a named event. Returns an unsubscribe function. */
-  on<T = unknown>(eventName: string, handler: (payload: T) => void): () => void {
+  on<T = unknown>(
+    eventName: string,
+    handler: (payload: T) => void,
+  ): () => void {
     let set = subscribers.get(eventName);
     if (!set) {
       set = new Set();

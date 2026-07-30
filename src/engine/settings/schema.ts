@@ -18,6 +18,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { z } from "zod";
+import { GITHUB_AUTH_METHODS } from "@zeros/core/github-auth";
 
 export const RUN_MODES = ["concurrent", "nonconcurrent"] as const;
 export const PROVIDER_AUTH_METHODS = ["cli", "api-key"] as const;
@@ -144,6 +145,19 @@ const providerSchema = z
   })
   .partial();
 
+const githubSchema = z
+  .object({
+    auth_method: z
+      .enum(GITHUB_AUTH_METHODS)
+      .describe("The GitHub credential method Zeros actively uses."),
+    disconnected_at: z
+      .string()
+      .describe(
+        "ISO timestamp of the last explicit disconnect; prevents implicit credential adoption.",
+      ),
+  })
+  .partial();
+
 const promptsSchema = z
   .object({
     general: z.string().describe("Appended to every agent session."),
@@ -260,9 +274,11 @@ export type McpSettingsServer = z.infer<typeof mcpServerSchema>;
  *  `prompts` for the Actions tab). Everything else left the repo files:
  *  `env` / `env_files` (env vars are Keychain-only now — env-vault.ts),
  *  `mcp` (user-level only until the settings consolidation), and
- *  `file_include_globs` (use a repo-root `.worktreeinclude` file instead).
- *  Those keys remain valid at the USER layer only; in a repo-scoped file
- *  they are ignored with a warning (see REPO_FILE_UNSUPPORTED_KEYS).
+ *  `file_include_globs` (a repo-root `.worktreeinclude` file, or the personal
+ *  repo-local file, configures per-project seeding).
+ *  Those keys are ignored with a warning in the COMMITTED repo file (see
+ *  REPO_FILE_UNSUPPORTED_KEYS); `mcp` and `file_include_globs` are read from
+ *  the personal repo-local file, and all four from the user layer.
  *
  *  NOTE: `providers` is intentionally USER-ONLY (see userSettingsSchema +
  *  USER_ONLY_KEYS) — NOT a repo key. Per-repo provider overrides
@@ -344,12 +360,13 @@ export const userSettingsSchema = repoSettingsSchema.extend({
     .array(z.string())
     .optional()
     .describe(
-      'Gitignored files matching these globs are seeded into each new worktree (e.g. ".env*"). A repo-root .worktreeinclude file, if present, takes precedence.',
+      'Gitignored files matching these patterns are seeded into each new worktree (e.g. ".env*"). Gitignore syntax, including "!" to exclude. Set here for every project, or in a repo\'s .zeros/settings.local.toml for one project; a repo-root .worktreeinclude file, if present, takes precedence over both.',
     ),
   mcp: mcpSchema.optional(),
   models: modelsSchema.optional(),
   workspaces: workspacesSchema.optional(),
   tool_approvals_enabled: z.boolean().optional(),
+  github: githubSchema.optional(),
   providers: z.record(z.string(), providerSchema).optional(),
 });
 
@@ -383,6 +400,7 @@ export const USER_ONLY_KEYS = [
   "models",
   "workspaces",
   "tool_approvals_enabled",
+  "github",
   "providers",
 ] as const;
 const USER_ONLY_BY_LAYER: Record<string, readonly string[]> = {
@@ -394,11 +412,12 @@ const USER_ONLY_BY_LAYER: Record<string, readonly string[]> = {
   "workspace-local": ["models", "tool_approvals_enabled", "providers"],
 };
 
-/** Keys NO repo-scoped settings file reads anymore (2026-07-17 slimming):
+/** Keys the COMMITTED repo settings file doesn't read (2026-07-17 slimming):
  *  repo files carry scripts (+ the git / prompts tables the repo-page tabs
  *  edit, and repo-local's `workspaces.path`) — nothing else. `env` and
- *  `env_files` moved to the Keychain env vault; `file_include_globs` is
- *  superseded by a repo-root `.worktreeinclude`.
+ *  `env_files` moved to the Keychain env vault; `mcp` and
+ *  `file_include_globs` came back to the personal repo-local file only
+ *  (see REPO_UNSUPPORTED_BY_LAYER).
  *  Ignored with a warning, never stripped from the file (no migration —
  *  stale keys stay inert on disk and survive read-modify-write).
  *
@@ -416,11 +435,38 @@ export const REPO_FILE_UNSUPPORTED_KEYS = [
 ] as const;
 
 /** The subset of REPO_FILE_UNSUPPORTED_KEYS each repo-scoped layer ignores.
- *  repo-local reads `mcp` (per-repo MCP servers, personal file); the committed
- *  repo file and workspace-local ignore the full set. */
+ *  repo-local reads `mcp` (per-repo MCP servers, personal file) and
+ *  `file_include_globs`; the committed repo file and workspace-local ignore
+ *  the full set.
+ *
+ *  2026-07-29: `file_include_globs` returned to the REPO-LOCAL layer only,
+ *  the same way `mcp` did on 2026-07-22. "Files to copy" is a PER-PROJECT
+ *  question — one repo needs `.env` + certs, another needs nothing — and the
+ *  user layer could only express one global answer. repo-local is the personal,
+ *  gitignored `.zeros/settings.local.toml`: same trust as the user file, just
+ *  scoped to one repo, which is exactly what the settings pane's "This project"
+ *  scope writes.
+ *
+ *  Still refused by the COMMITTED repo file: `.worktreeinclude` is the
+ *  committed, team-shared mechanism (and outranks this key anyway), so a
+ *  second clone-borne way to name host files for copying buys nothing.
+ *
+ *  On the clone-borne question generally: nothing stops a repo COMMITTING a
+ *  `.zeros/settings.local.toml` (ensureLocalSettingsIgnored only runs on our
+ *  own writes), so the repo-local layer is not categorically un-clone-borne.
+ *  That matters for `mcp` — a stdio server is host RCE — and is why the
+ *  committed file still refuses it. It does NOT add reach for this key: a
+ *  hostile `file_include_globs` can only name paths INSIDE the repo (git
+ *  enumerates them; setup-hooks' resolveContainedPaths rejects absolute and
+ *  `..`), and copies them into that repo's own worktree — strictly less than
+ *  a committed `.worktreeinclude`, which is designed to do exactly this and
+ *  outranks the key anyway.
+ *  Still refused by workspace-local: seeding is resolved against the MAIN
+ *  checkout at create time, so a worktree's own file could never take effect
+ *  and accepting it would be a silent no-op. */
 const REPO_UNSUPPORTED_BY_LAYER: Record<string, readonly string[]> = {
   repo: REPO_FILE_UNSUPPORTED_KEYS,
-  "repo-local": ["env", "env_files", "file_include_globs"],
+  "repo-local": ["env", "env_files"],
   "workspace-local": REPO_FILE_UNSUPPORTED_KEYS,
 };
 
@@ -548,6 +594,7 @@ const TABLE_SHAPES: Record<string, Record<string, z.ZodType>> = {
   prompts: promptsSchema.shape,
   models: modelsSchema.shape,
   workspaces: workspacesSchema.shape,
+  github: githubSchema.shape,
 };
 
 /** Per-leaf sanitize of one raw layer document. Layer-aware: user-only keys
@@ -617,6 +664,26 @@ export function sanitizeLayer(
         return false;
       });
       doc.env_files = files;
+      continue;
+    }
+    if (key === "file_include_globs") {
+      // Written by the "Files to copy" settings pane (user layer = all
+      // projects, repo-local = this project). Validated here rather than left
+      // to the "unknown key → preserve verbatim" fallthrough: a hand-edited
+      // `file_include_globs = ".env*"` (a string, not an array) would
+      // otherwise sit in the file looking correct while seeding silently fell
+      // back to the default.
+      if (!Array.isArray(value)) {
+        warnings.push(
+          `file_include_globs: expected an array of patterns — ignored`,
+        );
+        continue;
+      }
+      doc.file_include_globs = value.filter((g) => {
+        if (typeof g === "string") return true;
+        warnings.push(`file_include_globs: non-string entry — ignored`);
+        return false;
+      });
       continue;
     }
     if (key === "providers") {

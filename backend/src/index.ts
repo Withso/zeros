@@ -15,6 +15,12 @@ import { rateLimit } from "./ratelimit.js";
 import { createRoutes } from "./routes.js";
 import { HttpError } from "./authz.js";
 import { loadEmailConfig } from "./email.js";
+import {
+  createGithubPublicRoutes,
+  createGithubRoutes,
+  createGithubUnconfiguredRoutes,
+  startGithubOauthCleanup,
+} from "./github.js";
 
 const config = loadConfig();
 const pool = createPool(config.databaseUrl);
@@ -31,6 +37,19 @@ app.get("/healthz", async (c) => {
     return c.json({ ok: false }, 503);
   }
 });
+
+// GitHub calls this route from the system browser, so it cannot carry the
+// desktop user's Auth0 bearer token. Its one-time state is the authorization.
+// Register it before the /v1 middleware chain; every other GitHub route stays
+// behind the normal Auth0, body-limit, CORS, and per-user rate limits.
+if (config.github) {
+  app.route("/", createGithubPublicRoutes(pool, config.github));
+} else {
+  console.warn(
+    "[control-plane] GitHub App sign-in is not configured — " +
+      "/v1/github/* answers 503 github_not_configured.",
+  );
+}
 
 // CORS: the callers are the Electron renderer (localhost dev origin /
 // packaged origin) and later app.zeros.build. Auth is a bearer token —
@@ -63,10 +82,19 @@ app.use("/v1/*", createAuthMiddleware(config, pool));
 app.use("/v1/*", rateLimit("global", 240, 60_000));
 
 app.route("/", createRoutes(pool, emailConfig));
+app.route(
+  "/",
+  config.github
+    ? createGithubRoutes(pool, config.github)
+    : createGithubUnconfiguredRoutes(),
+);
 
 app.onError((err, c) => {
   if (err instanceof HttpError) {
-    return c.json({ error: { code: err.code, message: err.message } }, err.status);
+    return c.json(
+      { error: { code: err.code, message: err.message } },
+      err.status,
+    );
   }
   console.error("[error]", err);
   return c.json(
@@ -80,9 +108,12 @@ app.onError((err, c) => {
   );
 });
 
-app.notFound((c) => c.json({ error: { code: "not_found", message: "Not found" } }, 404));
+app.notFound((c) =>
+  c.json({ error: { code: "not_found", message: "Not found" } }, 404),
+);
 
 await runMigrations(pool);
+if (config.github) startGithubOauthCleanup(pool);
 serve({ fetch: app.fetch, port: config.port }, (info) => {
   console.log(`[control-plane] listening on :${info.port}`);
 });

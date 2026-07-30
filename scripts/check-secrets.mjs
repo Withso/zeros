@@ -58,6 +58,10 @@ const RULES = [
   { name: "OpenAI API key (sk-…)", re: /\bsk-(?:proj-)?[A-Za-z0-9]{40,}/ },
   { name: "GitHub PAT (ghp_/gho_)", re: /\bgh[po]_[A-Za-z0-9]{36,}/ },
   {
+    name: "GitHub App/user token (ghs_/ghu_/ghr_)",
+    re: /\b(?:ghs_\d+_[A-Za-z0-9._-]{40,}|ghs_[A-Za-z0-9_-]{4,}(?:\.[A-Za-z0-9_-]{8,})+|gh[sur]_[A-Za-z0-9]{36,})\b/,
+  },
+  {
     name: "GitHub fine-grained PAT (github_pat_)",
     re: /\bgithub_pat_[A-Za-z0-9_]{50,}/,
   },
@@ -124,7 +128,7 @@ function supabaseJwtRole(line) {
  *  as real. Rules whose match is a whole URL have no prefix to strip, so the
  *  full match is scored and they never qualify. */
 const SECRET_PREFIX_RE =
-  /^(?:AKIA|github_pat_|gh[po]_|sk-ant-(?:api\d\d-)?|sk-proj-|sk-|phx_|sb_secret_)/;
+  /^(?:AKIA|github_pat_|gh[pousr]_|sk-ant-(?:api\d\d-)?|sk-proj-|sk-|phx_|sb_secret_)/;
 
 function looksLikePlaceholder(match) {
   const body = match.replace(SECRET_PREFIX_RE, "").replace(/[^A-Za-z0-9]/g, "");
