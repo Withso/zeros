@@ -126,6 +126,7 @@ import {
   detachStart,
   detachStop,
   detachStatus,
+  previewFilesToCopy,
   type ResetMode,
   type DetectedTool,
 } from "../git";
@@ -1599,6 +1600,40 @@ export class WorkspaceService {
           opSettingsResolve(repoRoot, mainRepoRoot),
         );
         return remote ? redactResolvedForRemote(resolved) : resolved;
+      }
+      // Files to copy — everything the settings pane renders in one read:
+      // which source won (.worktreeinclude / file_include_globs / the default),
+      // what those patterns resolve to ON DISK right now, per-pattern match
+      // counts, and which rows need a warning. `patterns` previews an UNSAVED
+      // draft from the textarea.
+      //
+      // LOCAL-ONLY (absent from every remote allowlist). It expands patterns
+      // into the actual on-disk set of GITIGNORED paths — exactly what
+      // `file.tree` filters out for remote clients and `file.read` refuses to
+      // open — plus their sizes and the verbatim text of `.worktreeinclude`.
+      // A caller-supplied `patterns: ["*"]` turns it into a directory listing
+      // of every ignored file in any repo the owner has opened, and an
+      // attacker-chosen list also drives up to MAX_ATTRIBUTED_PATTERNS extra
+      // tree walks per request. The settings pane is a desktop surface; when a
+      // remote one needs this, it needs its own filtered shape, not this one.
+      case "filesToCopy.preview": {
+        if (remote) {
+          throw new GitError({
+            code: "REMOTE_PATH_DENIED",
+            message: "Files-to-copy preview is only available on the desktop.",
+          });
+        }
+        const repoRoot = reqStr(params, "repoRoot");
+        const mainRepoRoot = optStr(params, "mainRepoRoot");
+        return await previewFilesToCopy(repoRoot, {
+          ...(mainRepoRoot ? { mainRepoRoot } : {}),
+          // Not optStrArr: an EMPTY draft array is meaningful ("I cleared the
+          // box"), and optStrArr collapses it to undefined ("use the saved
+          // patterns") — the preview would then contradict the box.
+          ...(Array.isArray(params.patterns)
+            ? { patterns: strArr(params, "patterns") }
+            : {}),
+        });
       }
       case "settings.read": {
         const layer = reqStr(params, "layer");

@@ -34,6 +34,7 @@ import React, {
 import {
   Check,
   ChevronsUpDown,
+  Copy,
   Eye,
   EyeOff,
   Folder,
@@ -154,6 +155,7 @@ import {
   type SettingsSource,
 } from "../settings/settings-ui";
 import { RunActionsSection } from "./run-actions-section";
+import { FilesToCopySection } from "./files-to-copy-section";
 import { AddEnvVariableDialog } from "./add-env-variable-dialog";
 import { MCP_SECRET_SENTINEL } from "./mcp-panel-helpers";
 import {
@@ -169,7 +171,12 @@ import { ZerosSpinner } from "@/loaders";
 
 // ── Section model ────────────────────────────────────────
 
-export type RepoSectionId = "environment" | "git" | "actions" | "paths";
+export type RepoSectionId =
+  | "environment"
+  | "git"
+  | "actions"
+  | "files"
+  | "paths";
 
 export const REPO_SECTIONS: {
   id: RepoSectionId;
@@ -179,6 +186,10 @@ export const REPO_SECTIONS: {
   { id: "environment", label: "Environment", icon: KeyRound },
   { id: "git", label: "Git", icon: GitBranch },
   { id: "actions", label: "Actions", icon: Wand2 },
+  // "What does a new workspace of this repo contain?" — sits next to Paths,
+  // which answers "where does it live", and before it, because this is the one
+  // people hit on day one when a fresh workspace won't boot without its .env.
+  { id: "files", label: "Files", icon: Copy },
   { id: "paths", label: "Paths", icon: Folder },
 ];
 
@@ -398,6 +409,19 @@ export function RepoDetail({
   switch (section) {
     case "paths":
       return <PathsSection project={project} />;
+    case "files":
+      // Per-repo by design: saving writes THIS project's
+      // `.zeros/settings.local.toml`, never a global list (see the section
+      // header). Gated on surfaceActive so a retained-but-hidden copy of this
+      // pane never scans the repo.
+      return (
+        <FilesToCopySection
+          project={project}
+          layer={layer}
+          root={root}
+          surfaceActive={surfaceActive}
+        />
+      );
     case "environment":
       // Secrets and every workspace command belong to the same Environment
       // view. Keep the three modules independent so each retains its own save

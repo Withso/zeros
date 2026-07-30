@@ -162,7 +162,7 @@
       }
     },
     "file_include_globs": {
-      "description": "Gitignored files matching these globs are seeded into each new worktree (e.g. \".env*\"). A repo-root .worktreeinclude file, if present, takes precedence.",
+      "description": "Gitignored files matching these patterns are seeded into each new worktree (e.g. \".env*\"). Gitignore syntax, including \"!\" to exclude. Set here for every project, or in a repo's .zeros/settings.local.toml for one project; a repo-root .worktreeinclude file, if present, takes precedence over both.",
       "type": "array",
       "items": {
         "type": "string"

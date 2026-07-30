@@ -1506,6 +1506,53 @@ describe("worktree lifecycle (integration)", () => {
     );
   });
 
+  it("checkpoints a file seeded by MAIN's patterns even when the workspace's differ", async () => {
+    // `.worktreeinclude` is COMMITTED, so it is per-branch: a workspace whose
+    // branch predates a pattern (or narrows the list) carries a different
+    // list from the main checkout that SEEDED it. Archive scanned only the
+    // worktree's patterns, so anything seeded under a main-only pattern was
+    // left out of the snapshot — and `git worktree remove` then destroyed it
+    // with no way back.
+    await writeFile(path.join(repoRoot, ".gitignore"), ".env*\ncerts/\n");
+    await writeFile(path.join(repoRoot, ".worktreeinclude"), ".env*\ncerts/\n");
+    await execFileAsync("git", ["-C", repoRoot, "add", "-A"]);
+    await execFileAsync("git", [
+      "-C",
+      repoRoot,
+      "commit",
+      "-q",
+      "-m",
+      "seed certs",
+    ]);
+    await execFileAsync("git", ["-C", repoRoot, "push", "-q"]);
+    await mkdir(path.join(repoRoot, "certs"), { recursive: true });
+    await writeFile(path.join(repoRoot, "certs", "server.pem"), "MAIN-KEY\n");
+
+    const created = await createWorkspace({ repoRoot });
+    // Seeded from main's patterns.
+    expect(
+      await readFile(path.join(created.path, "certs", "server.pem"), "utf8"),
+    ).toBe("MAIN-KEY\n");
+
+    // The workspace's own list no longer mentions certs/ …
+    await writeFile(path.join(created.path, ".worktreeinclude"), ".env*\n");
+    // … and an agent edits the seeded file.
+    await writeFile(
+      path.join(created.path, "certs", "server.pem"),
+      "AGENT-EDITED-KEY\n",
+    );
+
+    await archiveWorkspace({
+      workspaceId: created.workspaceId,
+      stashUncommitted: true,
+    });
+    await restoreWorkspace(created.workspaceId);
+
+    expect(
+      await readFile(path.join(created.path, "certs", "server.pem"), "utf8"),
+    ).toBe("AGENT-EDITED-KEY\n");
+  });
+
   it("round-trips an ignored include file created only inside the workspace", async () => {
     await writeFile(path.join(repoRoot, ".gitignore"), ".env*\n");
     await execFileAsync("git", ["-C", repoRoot, "add", ".gitignore"]);

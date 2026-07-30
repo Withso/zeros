@@ -69,6 +69,16 @@ export { SetupManager, setupSessionId, isSetupSession } from "./setup-runner";
 export type { SetupInfo, SetupTarget } from "./setup-runner";
 export { resolveSetupCommand, buildSetupCommandEnv } from "./setup-hooks";
 
+export { previewFilesToCopy, resolveFilesToCopy } from "./files-to-copy";
+export type {
+  FilesToCopyPattern,
+  FilesToCopyPatternStat,
+  FilesToCopyPreview,
+  FilesToCopyPreviewFile,
+  FilesToCopyResult,
+  FilesToCopySource,
+} from "./files-to-copy";
+
 export {
   archiveWorkspace,
   createWorkspace,

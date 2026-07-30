@@ -12,6 +12,7 @@
 // ──────────────────────────────────────────────────────────
 
 import type { Branch, GithubOwner, PR, Workspace } from "../../native/git";
+import type { FilesToCopyPreviewWire } from "../bridge/workspace-bridge";
 import { KeyedAsyncCache } from "../lib/keyed-async-cache";
 
 /** Resolved GitHub connection for the settings section: the auth probe plus
@@ -50,6 +51,57 @@ export const ghAuthStatusCache = new KeyedAsyncCache<GithubConnection>(1);
 
 /** Single-key ("owners") — authed user + orgs for the publish dialog. */
 export const ghOwnersCache = new KeyedAsyncCache<GithubOwner[]>(1);
+
+/** Files-to-copy preview, keyed by `filesToCopyPreviewKey(repoRoot, patterns)`.
+ *
+ *  Keys accumulate FAST: a repo has one saved-patterns key plus one per edit
+ *  the user pauses on, and every checkbox toggle is an edit. The bound is
+ *  therefore generous — an editing session can mint dozens, and evicting the
+ *  saved-state entry (which is listener-free while a draft is on screen, so it
+ *  is the first LRU candidate) just costs one extra scan on the way back. The
+ *  pane itself never blanks on a cache miss; it holds the last result it got. */
+export const filesToCopyPreviewCache =
+  new KeyedAsyncCache<FilesToCopyPreviewWire>(96);
+
+/** Preview of the SAVED patterns (`patterns: null`) vs an unsaved draft. The
+ *  draft is part of the key so switching back to the saved list repaints from
+ *  cache instead of re-running git. */
+export function filesToCopyPreviewKey(
+  repoRoot: string,
+  patterns: readonly string[] | null,
+): string {
+  return JSON.stringify([repoRoot, patterns]);
+}
+
+/** Read a preview key back into the request that produced it.
+ *
+ *  The pane fetches THROUGH this rather than straight from render state: the
+ *  cache can invoke a fetcher long after it was handed over (a queued
+ *  follow-up once an invalidation lands mid-request), by which point the live
+ *  draft has moved on while the key it will store under has not — so the newer
+ *  draft's preview ended up cached, error-free, under the older draft's key. */
+export function filesToCopyPreviewRequest(key: string): {
+  repoRoot: string;
+  patterns: string[] | null;
+} {
+  const [repoRoot, patterns] = JSON.parse(key) as [string, string[] | null];
+  return { repoRoot, patterns };
+}
+
+/** A settings write or a `.worktreeinclude` edit changes what a preview would
+ *  return, for the saved key AND every draft key of that repo. Mounted panes
+ *  revalidate behind their current rows; closed ones pay nothing. */
+export function invalidateFilesToCopyForRepo(repoRoot: string): void {
+  for (const key of filesToCopyPreviewCache.keys()) {
+    let root: unknown;
+    try {
+      root = (JSON.parse(key) as unknown[])[0];
+    } catch {
+      continue; // not ours to interpret; leave it alone
+    }
+    if (root === repoRoot) filesToCopyPreviewCache.invalidate(key);
+  }
+}
 
 /** Workspace mutations (create/archive/branch ops) move branches and
  *  checkouts. Mark the affected picker rows stale — mounted pickers refresh in
@@ -103,4 +155,5 @@ export function invalidateAllEngineReadCaches(): void {
   pickerWorkspacesCache.invalidateAll();
   ghAuthStatusCache.invalidateAll();
   ghOwnersCache.invalidateAll();
+  filesToCopyPreviewCache.invalidateAll();
 }

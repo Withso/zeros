@@ -104,6 +104,7 @@ export type RepoPageView =
   | "environment"
   | "git"
   | "actions"
+  | "files"
   | "paths";
 
 // Phase 4 introduces the CLI-subprocess backends. Legacy values
