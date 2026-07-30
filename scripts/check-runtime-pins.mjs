@@ -343,8 +343,13 @@ async function reportDrift(resolved) {
     const current = resolved[name];
     if (!current) continue;
     try {
+      // The scope separator must be percent-encoded or the registry reads
+      // `@scope/name` as two path segments. replaceAll, not replace: a plain
+      // string pattern substitutes only the FIRST match, which is correct for
+      // every valid npm name (at most one slash) but is the kind of latent
+      // half-escape that CodeQL's js/incomplete-sanitization rightly rejects.
       const res = await fetch(
-        `https://registry.npmjs.org/${name.replace("/", "%2F")}/latest`,
+        `https://registry.npmjs.org/${name.replaceAll("/", "%2F")}/latest`,
         {
           headers: { accept: "application/json" },
           signal: AbortSignal.timeout(15_000),
