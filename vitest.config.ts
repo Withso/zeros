@@ -4,9 +4,9 @@
 // src/zeros/* pure-helper suites, src/shell, electron/ipc command handlers, and
 // packages/core crypto).
 //
-// The renderer's React tree and Electron-only runtime modules stay out of
-// scope — only files exporting plain TS helpers (and node-env handlers) are
-// testable here.
+// The renderer's full React tree and Electron-only runtime modules stay out of
+// scope. Plain TS helpers, node-env handlers, and small server-renderable
+// primitive contracts are testable here.
 
 import { defineConfig } from "vitest/config";
 import path from "node:path";
@@ -66,6 +66,9 @@ export default defineConfig({
       "src/engine/settings/__tests__/**/*.test.ts",
       // Settings → MCP panel: pure data helpers (raw round-trip, validation).
       "src/zeros/panels/__tests__/**/*.test.ts",
+      // Small renderer primitives whose static markup carries accessibility
+      // contracts (for example, visible keyboard-focus forwarding).
+      "src/zeros/ui/primitives/__tests__/**/*.test.ts",
       // Renderer settings stores: internal-features allowlist + flag gate.
       "src/zeros/settings/__tests__/**/*.test.ts",
       // Shared renderer lib helpers (e.g. Dashboard card-action state machine).

@@ -16,20 +16,27 @@ import {
   applyDraftOverlay,
   baseFor,
   canMaterialize,
+  hasConfirmedEmptyCandidates,
   sameList,
   buildCandidateRows,
-  formatBytes,
+  buildCandidateTree,
+  flattenTree,
   formatPatternText,
-  groupCandidates,
-  groupIdFor,
+  isCommentPattern,
   isLiteralPattern,
   literalPatternPath,
   materializePatterns,
+  nodeCheck,
+  nodeLocked,
   normalizePattern,
   parsePatternText,
-  summarize,
-  summaryText,
+  patternStatsForBox,
+  patternsDescribeBox,
+  summaryLead,
+  toggleManyPatterns,
   togglePattern,
+  toggleablePaths,
+  type CandidateTreeNode,
 } from "../files-to-copy-model";
 
 const file = (
@@ -111,6 +118,20 @@ describe("normalizePattern / isLiteralPattern", () => {
     // `\\` is an escaped BACKSLASH, so the `*` after it is live.
     expect(isLiteralPattern("/a\\\\*")).toBe(false);
     expect(literalPatternPath("/a\\\\b")).toBe("a\\b");
+  });
+});
+
+describe("isCommentPattern", () => {
+  it("recognises a note the user wrote to themselves", () => {
+    // The engine scores a comment `matchCount: 0`, which the per-line stats
+    // rendered as a red 0 and the words "matches nothing" — the pane calling
+    // the user's own note a typo, in a box that is now open by default.
+    expect(isCommentPattern("# secrets for the api")).toBe(true);
+    expect(isCommentPattern("   # indented")).toBe(true);
+    expect(isCommentPattern(".env*")).toBe(false);
+    expect(isCommentPattern("!.env.production")).toBe(false);
+    // `#` is only a comment at the START of a line, as in .gitignore.
+    expect(isCommentPattern("build/#tmp")).toBe(false);
   });
 });
 
@@ -341,6 +362,24 @@ describe("applyDraftOverlay", () => {
     expect(live.find((r) => r.path === ".env")?.selected).toBe(false);
     expect(live.find((r) => r.path === ".env.local")?.selected).toBe(true);
   });
+
+  it("does not turn untouched defaults into draft deletions", () => {
+    // With no repo-local list and no draft, the pane used `[]` as the live
+    // side of the overlay. That reinterpreted every default-selected row as an
+    // explicit deletion even though the preview and summary still selected it.
+    const fresh = preview({
+      source: "default",
+      candidates: [cand(".env"), cand(".env.local")],
+      files: [file(".env"), file(".env.local")],
+      totalCount: 2,
+    });
+    const rows = buildCandidateRows(fresh, []);
+    const base = baseFor(fresh, null);
+    const live = applyDraftOverlay(rows, base, null);
+
+    expect(live).toBe(rows);
+    expect(live.map((row) => row.selected)).toEqual([true, true]);
+  });
 });
 
 describe("togglePattern", () => {
@@ -369,6 +408,56 @@ describe("togglePattern", () => {
     expect(
       togglePattern(["# keep", "!.env.production", "/.env"], ".env", false),
     ).toEqual(["# keep", "!.env.production"]);
+  });
+});
+
+describe("toggleManyPatterns", () => {
+  // A folder checkbox moves every path under it at once. The contract is
+  // "togglePattern applied in sequence", in one pass instead of k passes.
+  const fold = (list: string[], paths: string[], on: boolean) =>
+    paths.reduce((acc, p) => togglePattern(acc, p, on), list);
+
+  it("agrees with folding togglePattern when ticking", () => {
+    const paths = ["lib/a", "lib/b", "lib/c"];
+    expect(toggleManyPatterns([], paths, true)).toEqual(fold([], paths, true));
+    expect(toggleManyPatterns([], paths, true)).toEqual([
+      "/lib/a",
+      "/lib/b",
+      "/lib/c",
+    ]);
+  });
+
+  it("agrees with folding togglePattern when unticking", () => {
+    const base = ["/lib/a", "/lib/b/x.pem", "/.env", "*.log"];
+    const paths = ["lib/a", "lib/b"];
+    expect(toggleManyPatterns(base, paths, false)).toEqual(
+      fold(base, paths, false),
+    );
+    // The glob and the untouched literal both survive.
+    expect(toggleManyPatterns(base, paths, false)).toEqual(["/.env", "*.log"]);
+  });
+
+  it("does not duplicate a path already in the list, or one repeated in the batch", () => {
+    expect(toggleManyPatterns(["/lib/a"], ["lib/a", "lib/a"], true)).toEqual([
+      "/lib/a",
+    ]);
+  });
+
+  it("escapes glob metacharacters, like the single-path form", () => {
+    expect(toggleManyPatterns([], ["dist/[id].js"], true)).toEqual([
+      "/dist/\\[id\\].js",
+    ]);
+  });
+
+  it("does not mistake a sibling directory for a child", () => {
+    expect(toggleManyPatterns(["/certs-old/a.pem"], ["certs"], false)).toEqual([
+      "/certs-old/a.pem",
+    ]);
+  });
+
+  it("is a no-op copy for an empty batch", () => {
+    expect(toggleManyPatterns(["/.env"], [], true)).toEqual(["/.env"]);
+    expect(toggleManyPatterns(["/.env"], [], false)).toEqual(["/.env"]);
   });
 });
 
@@ -416,45 +505,211 @@ describe("materializePatterns / baseFor", () => {
   });
 });
 
-describe("groupCandidates", () => {
-  it("buckets by path and drops empty groups, env first", () => {
-    const rows = buildCandidateRows(
-      preview({
-        candidates: [
-          cand("debug.log"),
-          cand(".env"),
-          cand("backend/.env.local"),
-          cand(".mcp.json"),
-        ],
-        files: [],
-      }),
-      [],
-    );
-    expect(groupCandidates(rows).map((g) => [g.id, g.rows.length])).toEqual([
-      ["env", 2],
-      ["config", 1],
-      ["other", 1],
+describe("buildCandidateTree", () => {
+  // The shape this exists for: 10 flat rows that are really 4 directories.
+  const REAL = [
+    cand(".DS_Store"),
+    cand("artifacts/.DS_Store"),
+    cand("artifacts/api-server/dist", true),
+    cand("artifacts/api-server/node_modules", true),
+    cand("lib/api-spec/node_modules", true),
+    cand("node_modules", true),
+    cand("scripts/node_modules", true),
+    cand("site/dist", true),
+    cand("site/node_modules", true),
+    cand("site/tsconfig.tsbuildinfo"),
+  ];
+  const rowsOf = (
+    candidates: FilesToCopyCandidateWire[],
+    files: FilesToCopyFileWire[] = [],
+    patterns: string[] = [],
+  ) => buildCandidateRows(preview({ candidates, files }), patterns);
+
+  it("folds a flat list into the handful of folders it actually is", () => {
+    const tree = buildCandidateTree(rowsOf(REAL));
+    // Folders first, then files, alphabetical within each.
+    expect(tree.map((n) => n.name)).toEqual([
+      "artifacts",
+      "lib/api-spec/node_modules",
+      "node_modules",
+      "scripts/node_modules",
+      "site",
+      ".DS_Store",
     ]);
   });
 
-  it("classifies the paths that actually show up in real repos", () => {
-    expect(groupIdFor(".env")).toBe("env");
-    expect(groupIdFor("packages/api/.env.production")).toBe("env");
-    expect(groupIdFor("apps/w/.dev.vars")).toBe("env");
-    expect(groupIdFor(".mcp.json")).toBe("config");
-    expect(groupIdFor(".conductor/settings.toml")).toBe("config");
-    expect(groupIdFor("config/local.json")).toBe("other");
-    expect(groupIdFor("node_modules")).toBe("other");
-    // `.environment.md` is not an env file — the boundary must be the dot.
-    expect(groupIdFor(".environment.md")).toBe("other");
+  it("merges a folder that holds exactly one thing into a single row", () => {
+    // `scripts` → `node_modules/` is a disclosure triangle hiding nothing.
+    const tree = buildCandidateTree(rowsOf(REAL));
+    const scripts = tree.find((n) => n.name === "scripts/node_modules");
+    expect(scripts?.path).toBe("scripts/node_modules");
+    expect(scripts?.children).toEqual([]);
   });
 
-  it("returns one group when that is all there is", () => {
-    const rows = buildCandidateRows(
-      preview({ candidates: [cand(".env")], files: [] }),
-      [],
+  it("drops a candidate under a directory git already collapsed", () => {
+    // Otherwise the same selection is drawn twice, in two places, behind two
+    // checkboxes that disagree the moment one is clicked.
+    const tree = buildCandidateTree(
+      rowsOf([cand("node_modules", true), cand("node_modules/pkg/index.js")]),
     );
-    expect(groupCandidates(rows)).toHaveLength(1);
+    expect(tree.map((n) => n.path)).toEqual(["node_modules"]);
+    expect(tree[0].leafCount).toBe(1);
+  });
+
+  it("drops a nested candidate even when a sibling sorts between them", () => {
+    // `-` and `.` precede `/` in ASCII, so `a-b` and `a.txt` both sort BETWEEN
+    // the directory candidate `a` and its descendant `a/b`. A running
+    // "last directory seen" prefix is cleared by those siblings and `a/b` gets
+    // in after all — producing a SECOND node at path `a`, one row drawn twice,
+    // two checkboxes disagreeing, and a duplicate React key.
+    const tree = buildCandidateTree(
+      rowsOf([cand("a", true), cand("a-b"), cand("a.txt"), cand("a/b")]),
+    );
+    expect(tree.map((n) => n.path)).toEqual(["a", "a-b", "a.txt"]);
+    const flat = flattenTree(tree, new Set());
+    const paths = flat.map((r) => r.node.path);
+    expect(new Set(paths).size).toBe(paths.length);
+  });
+
+  it("counts leaves, selection and what a checkbox can move", () => {
+    const rows = rowsOf(
+      [
+        cand("site/dist", true),
+        cand("site/node_modules", true),
+        cand("site/x.log"),
+      ],
+      [file("site/dist/bundle.js")],
+      ["/site/dist"],
+    );
+    const site = buildCandidateTree(rows)[0];
+    expect(site.name).toBe("site");
+    expect([site.leafCount, site.selectedCount, site.toggleableCount]).toEqual([
+      3, 1, 3,
+    ]);
+    expect(nodeCheck(site)).toBe("mixed");
+  });
+
+  it("a folder is ticked only when everything under it is", () => {
+    const all = buildCandidateTree(
+      rowsOf(
+        [cand("a/x.log"), cand("a/y.log")],
+        [file("a/x.log"), file("a/y.log")],
+        ["/a/x.log", "/a/y.log"],
+      ),
+    )[0];
+    expect(nodeCheck(all)).toBe("on");
+    const none = buildCandidateTree(
+      rowsOf([cand("a/x.log"), cand("a/y.log")]),
+    )[0];
+    expect(nodeCheck(none)).toBe("off");
+  });
+
+  it("a folder holding nothing but glob-locked rows is itself locked", () => {
+    // Every row under it is held by `*.log`, which no checkbox can take back.
+    const rows = buildCandidateRows(
+      preview({
+        candidates: [cand("a/x.log"), cand("a/y.log")],
+        files: [file("a/x.log"), file("a/y.log")],
+      }),
+      ["*.log"],
+    );
+    const a = buildCandidateTree(rows)[0];
+    expect(nodeLocked(a)).toBe(true);
+    expect(toggleablePaths(a)).toEqual([]);
+  });
+
+  it("offers only the unlocked rows when a folder is ticked", () => {
+    const rows = buildCandidateRows(
+      preview({
+        candidates: [cand("a/x.log"), cand("a/keep.txt")],
+        files: [file("a/x.log")],
+      }),
+      ["*.log"],
+    );
+    const a = buildCandidateTree(rows)[0];
+    expect(toggleablePaths(a)).toEqual(["a/keep.txt"]);
+  });
+});
+
+describe("flattenTree", () => {
+  const CANDS = [
+    cand("lib/a.log"),
+    cand("lib/deep/b.log"),
+    cand("lib/c.log"),
+    cand(".env"),
+  ];
+  const tree = (selected: string[] = []): CandidateTreeNode[] =>
+    buildCandidateTree(
+      buildCandidateRows(
+        preview({ candidates: CANDS, files: selected.map((p) => file(p)) }),
+        selected.map((p) => `/${p}`),
+      ),
+    );
+
+  it("shows a closed folder as one row", () => {
+    const flat = flattenTree(tree(), new Set());
+    expect(flat.map((r) => r.label)).toEqual(["lib", ".env"]);
+    expect(flat[0].branch).toBe(true);
+    expect(flat[0].expanded).toBe(false);
+  });
+
+  it("walks into a folder that is open", () => {
+    const flat = flattenTree(tree(), new Set(["lib"]));
+    // `deep` held one file, so it merged into it and reads as one row.
+    expect(flat.map((r) => [r.label, r.depth])).toEqual([
+      ["lib", 0],
+      ["a.log", 1],
+      ["c.log", 1],
+      ["deep/b.log", 1],
+      [".env", 0],
+    ]);
+  });
+
+  it("keeps a SELECTED row visible even when its folder is closed", () => {
+    // The rule that makes closing safe: the row you ticked is the row you have
+    // to find again to untick, so collapsing hides only what is unselected.
+    const flat = flattenTree(tree(["lib/deep/b.log"]), new Set());
+    expect(flat.map((r) => [r.label, r.pinned])).toEqual([
+      ["lib", false],
+      // Labelled relative to the folder that surfaced it, so the row still
+      // says where it lives without re-opening anything.
+      ["deep/b.log", true],
+      [".env", false],
+    ]);
+  });
+
+  it("does NOT burst a fully-ticked folder open", () => {
+    // Its own box already says "all of this". Surfacing every child as well
+    // meant one click on a closed folder replaced it with a wall of rows.
+    const all = ["lib/a.log", "lib/c.log", "lib/deep/b.log"];
+    const flat = flattenTree(tree(all), new Set());
+    expect(flat.map((r) => r.label)).toEqual(["lib", ".env"]);
+    expect(nodeCheck(flat[0].node)).toBe("on");
+  });
+
+  it("surfaces a wholly-ticked subfolder as one row, not as its files", () => {
+    const rows = buildCandidateRows(
+      preview({
+        candidates: [
+          cand("p/db/x.log"),
+          cand("p/db/y.log"),
+          cand("p/keep.txt"),
+        ],
+        files: [file("p/db/x.log"), file("p/db/y.log")],
+      }),
+      ["/p/db/x.log", "/p/db/y.log"],
+    );
+    const flat = flattenTree(buildCandidateTree(rows), new Set());
+    expect(flat.map((r) => [r.label, r.folder, r.pinned])).toEqual([
+      ["p", true, false],
+      ["db", true, true],
+    ]);
+  });
+
+  it("emits every node at most once, so paths are usable as keys", () => {
+    const flat = flattenTree(tree(["lib/a.log", "lib/deep/b.log"]), new Set());
+    const paths = flat.map((r) => r.node.path);
+    expect(new Set(paths).size).toBe(paths.length);
   });
 });
 
@@ -554,50 +809,105 @@ describe("regressions the pane shipped with", () => {
   });
 });
 
-describe("formatBytes", () => {
-  it("renders an UNMEASURED size as a dash, not as zero", () => {
-    // -1 is "a collapsed directory we deliberately didn't walk". Showing 0 B
-    // would assert something false about a 2 GB node_modules.
-    expect(formatBytes(-1)).toBe("—");
-    expect(formatBytes(0)).toBe("0 B");
+describe("patternsDescribeBox", () => {
+  it("refuses to attribute counts to lines that are not in the box", () => {
+    // With nothing saved the box is empty and the inherited `.env*` is what
+    // ran — which printed a red "0 · .env* matches nothing" under an empty
+    // editor, blaming the user for a pattern they never wrote.
+    expect(patternsDescribeBox([], [{ raw: ".env*" }])).toBe(false);
   });
 
-  it("scales and rounds", () => {
-    expect(formatBytes(512)).toBe("512 B");
-    expect(formatBytes(1536)).toBe("1.5 KB");
-    expect(formatBytes(20 * 1024)).toBe("20 KB");
-    expect(formatBytes(2.5 * 1024 * 1024)).toBe("2.5 MB");
-    expect(formatBytes(3 * 1024 * 1024 * 1024)).toBe("3.0 GB");
+  it("attributes when the box is what the engine measured", () => {
+    expect(patternsDescribeBox([".env*"], [{ raw: ".env*" }])).toBe(true);
+    expect(patternsDescribeBox([], [])).toBe(true);
+  });
+
+  it("compares the way the engine normalizes a settings array", () => {
+    // Entries are trimmed and blanks dropped before they ever reach git.
+    expect(patternsDescribeBox(["  .env*  ", ""], [{ raw: ".env*" }])).toBe(
+      true,
+    );
+  });
+
+  it("stays quiet while a draft is still inside its debounce", () => {
+    expect(patternsDescribeBox([".env*", "certs/"], [{ raw: ".env*" }])).toBe(
+      false,
+    );
   });
 });
 
-describe("summaryText", () => {
+describe("patternStatsForBox", () => {
+  const measured = {
+    raw: ".env*",
+    pattern: ".env*",
+    negate: false,
+    line: 1,
+    matchCount: 0,
+  };
+
+  it("hides counts inherited from the user-level list", () => {
+    const inherited = preview({
+      source: "file_include_globs",
+      sourceLayer: "user",
+      patterns: [measured],
+    });
+
+    expect(patternStatsForBox([], inherited)).toEqual([]);
+  });
+
+  it("shows counts only when the measured lines are in the editor", () => {
+    const own = preview({
+      source: "file_include_globs",
+      sourceLayer: "repo-local",
+      patterns: [measured],
+    });
+
+    expect(patternStatsForBox([".env*"], own)).toEqual([measured]);
+    expect(patternStatsForBox(["certs/**"], own)).toEqual([]);
+  });
+
+  it("never scores comment lines as broken patterns", () => {
+    const comment = {
+      raw: "# local secrets",
+      pattern: "# local secrets",
+      negate: false,
+      line: 1,
+      matchCount: 0,
+    };
+    const own = preview({
+      source: "file_include_globs",
+      sourceLayer: "repo-local",
+      patterns: [comment],
+    });
+
+    expect(patternStatsForBox(["# local secrets"], own)).toEqual([]);
+  });
+});
+
+describe("hasConfirmedEmptyCandidates", () => {
+  it("distinguishes a confirmed zero from an incomplete scan", () => {
+    expect(hasConfirmedEmptyCandidates(preview({ complete: true }), 0)).toBe(
+      true,
+    );
+    expect(hasConfirmedEmptyCandidates(preview({ complete: false }), 0)).toBe(
+      false,
+    );
+    expect(hasConfirmedEmptyCandidates(preview({ complete: true }), 1)).toBe(
+      false,
+    );
+  });
+});
+
+describe("summaryLead", () => {
   it("says nothing rather than '0 files'", () => {
-    expect(summaryText(summarize(preview()))).toBe("Nothing will be copied");
+    expect(summaryLead(0)).toBe("Nothing");
   });
 
-  it("agrees with itself on singular/plural", () => {
-    expect(
-      summaryText(summarize(preview({ totalCount: 1, totalBytes: 1400 }))),
-    ).toBe("1 file · 1.4 KB");
-    expect(
-      summaryText(summarize(preview({ totalCount: 3, totalBytes: 1400 }))),
-    ).toBe("3 files · 1.4 KB");
-  });
-
-  it("hedges the size once the display cap was hit", () => {
-    // totalBytes only covers the rows we sized, so it is a floor. Reporting it
-    // flat would understate exactly the oversized selections that matter.
-    expect(
-      summaryText(
-        summarize(
-          preview({
-            totalCount: 5000,
-            totalBytes: 1024 * 1024,
-            truncated: true,
-          }),
-        ),
-      ),
-    ).toBe("5000 files · over 1.0 MB");
+  it("stays a noun phrase in both branches", () => {
+    // The pane completes it with "will be copied from …". A lead that was
+    // itself a sentence printed "Nothing will be copied will be copied from".
+    expect(summaryLead(1)).toBe("1 file");
+    expect(summaryLead(3)).toBe("3 files");
+    expect(summaryLead(5000)).toBe("5000 files");
   });
 });
