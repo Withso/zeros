@@ -44,6 +44,12 @@ import { cn } from "@/zeros/ui/cn";
 import { ancestorDirPrefixes, treeSelectionMirrorIntent } from "./tree-paths";
 import { useScrollMemory } from "../scroll-memory";
 
+/** Horizontal inset of every tree row AND of the search row (the library uses
+ *  one `--trees-padding-inline` for both). Shared with the search-row overlay
+ *  below, so the accessory's right edge lands on the same inset as the
+ *  input's left border. */
+const TREE_PADDING_INLINE = 10;
+
 /** Bridge the tree's Shadow-DOM theme knobs to live Zeros tokens. CSS
  *  variables inherit across the shadow boundary, so these track theme
  *  switches with no re-computation. Set on the component root so they
@@ -59,7 +65,7 @@ const TREE_THEME_VARS = {
   // gutter again on the right, so the default (16 − 2 = 14px left, −6px gutter
   // = 8px right) reads lopsided. Drop the gutter reservation to 0 and set
   // padding-inline to 10px → both sides resolve to 10 − 2 = 8px.
-  "--trees-padding-inline-override": "10px",
+  "--trees-padding-inline-override": `${TREE_PADDING_INLINE}px`,
   "--trees-scrollbar-gutter-override": "0px",
   // Text: muted default so the selected row (bright) stands out.
   "--trees-fg-override": "var(--fg2)",
@@ -84,6 +90,24 @@ const TREE_THEME_VARS = {
 // shipped stylesheet: [data-item-type='folder'] > [data-item-section='icon'].
 const FOLDER_MASK =
   "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z'/%3E%3C/svg%3E\") center / contain no-repeat";
+
+// ── Search-row geometry ────────────────────────────────────
+// The filter input lives in the tree's SHADOW ROOT, so a React control can't
+// be a sibling of it. A `searchRowAccessory` is therefore rendered in the light
+// DOM and positioned into a gutter that the shadow CSS reserves at the END of
+// the search row: the input is `flex: 1` inside the row container, so padding
+// on the container's trailing edge shortens the input by exactly that much and
+// the accessory sits BESIDE it, not over it. That only lines up if both sides
+// agree on the numbers, so they live here once and are consumed twice: by
+// TREE_SHADOW_CSS (inside the shadow root) and by the overlay (outside it).
+const SEARCH_ROW_TOP_PAD = 8;
+/** The library's default item height, pinned so the overlay can rely on it. */
+const SEARCH_ROW_INPUT_HEIGHT = 30;
+/** The input's own `margin-block`, from the shipped stylesheet. */
+const SEARCH_ROW_INPUT_MARGIN = 1;
+const SEARCH_ROW_ACCESSORY_SIZE = 24;
+/** Gap between the input's right border and the accessory beside it. */
+const SEARCH_ROW_ACCESSORY_GAP = 4;
 const TREE_SHADOW_CSS = `
   /* The lib's base layer sets \`color-scheme: light dark\` on :host, which
      makes its light-dark() colors (file-type icon palette, git-status tints)
@@ -116,8 +140,32 @@ const TREE_SHADOW_CSS = `
      breathing room so it doesn't sit cramped against the chrome above.
      Inert when the search bar is disabled. */
   [data-file-tree-search-container] {
-    padding-top: 8px;
+    padding-top: ${SEARCH_ROW_TOP_PAD}px;
     padding-bottom: 4px;
+  }
+  /* Pin the input's height rather than inheriting --trees-row-height. A
+     \`searchRowAccessory\` is a LIGHT-DOM control positioned beside this box from
+     outside the shadow root, and a shadow-scoped custom property can't be read
+     from out there — so both sides derive from the same constants instead, and
+     a change to the library's density default can't silently drift the control
+     off the row. 30px is the library's own default item height. */
+  [data-file-tree-search-input] {
+    box-sizing: border-box;
+    height: ${SEARCH_ROW_INPUT_HEIGHT}px;
+    line-height: ${SEARCH_ROW_INPUT_HEIGHT - 2}px;
+    /* The input is \`flex: 1\`, but a flex item won't shrink past its intrinsic
+       min-content width — for an <input> that's its \`size\` default (~214px),
+       so it overflowed the row on any sidebar under ~234px (the drag floor is
+       140px). Harmless-looking until the row has to reserve a gutter: the
+       overflowing input would slide straight back under the accessory. */
+    min-width: 0;
+  }
+  /* Reserve the accessory's gutter at the END of the row. The container is the
+     library's flex row and the input is its only \`flex: 1\` child, so trailing
+     padding here shortens the INPUT — which is what puts the control outside
+     it. The left inset stays on --trees-padding-inline. */
+  :host([data-search-accessory='true']) [data-file-tree-search-container] {
+    padding-inline-end: ${TREE_PADDING_INLINE + SEARCH_ROW_ACCESSORY_GAP + SEARCH_ROW_ACCESSORY_SIZE}px;
   }
 `;
 
@@ -162,6 +210,14 @@ interface WorkspaceFileTreeProps {
   /** Show the tree's built-in filter ("search") bar as the column header
    *  (the row-1 sidebar). Captured once at mount. Default off (launcher). */
   search?: boolean;
+  /** A control to sit at the RIGHT END OF THE SEARCH ROW, OUTSIDE the filter
+   *  input (the Working-folders picker). That input is inside the library's
+   *  shadow root, so this can't be a real sibling of it: the row reserves a
+   *  trailing gutter — which shortens the input — and this is rendered in the
+   *  light DOM into that gutter, both sides using the shared geometry
+   *  constants above. Ignored without `search`, the only surface with a row
+   *  for it to sit in. */
+  searchRowAccessory?: React.ReactNode;
   /** A FILE row was activated (selected). Folders are filtered out before
    *  this fires. Read through a ref so the selection effect only runs on a
    *  real selection change — not when this callback's identity churns. */
@@ -192,6 +248,7 @@ export function WorkspaceFileTree({
   initialSelectedPath,
   selectedPath,
   search,
+  searchRowAccessory,
   onOpenFile,
   onOpenInNewTab,
   onCopyPath,
@@ -278,6 +335,17 @@ export function WorkspaceFileTree({
     return () => observer.disconnect();
   }, [model]);
   useScrollMemory(treeScrollEl, scrollMemoryKey ?? null);
+
+  // Tell the shadow stylesheet an accessory is present, so it reserves the
+  // trailing padding for it. An attribute on the HOST (rather than a class on
+  // our root) is what `:host([data-search-accessory])` can see from inside.
+  const hasSearchAccessory = searchRef.current && searchRowAccessory != null;
+  useLayoutEffect(() => {
+    const host = treeRootRef.current?.querySelector("file-tree-container");
+    if (!host) return;
+    if (hasSearchAccessory) host.setAttribute("data-search-accessory", "true");
+    else host.removeAttribute("data-search-accessory");
+  }, [hasSearchAccessory, model]);
 
   // Load (and reload) the workspace file list for this cwd. `reloadKey`
   // lets a parent (the Source Refresh button) force a re-list.
@@ -432,9 +500,28 @@ export function WorkspaceFileTree({
   return (
     <div
       ref={treeRootRef}
-      className={cn("bg-bg1 h-full min-h-0 overflow-hidden", className)}
+      className={cn(
+        "bg-bg1 relative h-full min-h-0 overflow-hidden",
+        className,
+      )}
       style={TREE_THEME_VARS}
     >
+      {hasSearchAccessory && (
+        // Dropped into the gutter the shadow CSS reserves past the input's
+        // right border, vertically centred on it (see the geometry constants).
+        // It overlaps nothing, so it needs no pointer-events escape hatch.
+        <div
+          className="absolute z-10 flex items-center justify-end"
+          style={{
+            top: SEARCH_ROW_TOP_PAD + SEARCH_ROW_INPUT_MARGIN,
+            height: SEARCH_ROW_INPUT_HEIGHT,
+            right: TREE_PADDING_INLINE,
+            width: SEARCH_ROW_ACCESSORY_SIZE,
+          }}
+        >
+          {searchRowAccessory}
+        </div>
+      )}
       <FileTree
         model={model}
         style={{ height: "100%" }}

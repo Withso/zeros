@@ -17,8 +17,11 @@
 import { isNativeRuntime, nativeInvoke } from "./runtime";
 import { refreshDetectedOpenApps } from "./open-apps";
 import { getActiveBridge } from "../zeros/bridge/active-bridge";
+import type { WorkingDirectoriesWire } from "../zeros/bridge/workspace-bridge";
 import {
   bridgeFileTree,
+  bridgeListWorkingDirectories,
+  bridgeSetWorkingDirectories,
   bridgeGitStatus,
   bridgeGitChangeCounts,
   bridgeGitChangeLineCounts,
@@ -90,7 +93,10 @@ export type {
   GithubRepositoryOwnerAvatar,
   InitRepoInPlaceResult,
   PublishRepoResult,
+  WorkingDirectoriesWire,
+  WorkingDirectoriesUnsupportedReason,
 } from "../zeros/bridge/workspace-bridge";
+export { WORKING_DIRECTORIES_UNSUPPORTED_COPY } from "../zeros/bridge/workspace-bridge";
 
 // ── Types ────────────────────────────────────────────────
 
@@ -750,6 +756,45 @@ export async function gitChangeLineCounts(
 /** Exact "anything worth a PR?" boolean from the All Changes net comparison. */
 export async function gitHasChanges(workspaceId: string): Promise<boolean> {
   return bridgeGitHasChanges(requireBridge("read Git changes"), workspaceId);
+}
+
+/** Resolve `cwd` to the opaque workspace id the engine expects, falling back to
+ *  the raw path (which the engine accepts from a local client addressing a repo
+ *  root it already knows). Shared by the working-directory ops below. */
+async function bridgeWorkspaceIdFor(
+  bridge: ReturnType<typeof requireBridge>,
+  cwd: string,
+): Promise<string> {
+  try {
+    return (await resolveBridgeWorkspaceIdForCwd(bridge, cwd)) ?? cwd;
+  } catch {
+    return cwd;
+  }
+}
+
+/** Which top-level tracked folders are materialized in this worktree.
+ *  Engine-only (no native IPC fast path) — an on-demand popover read. */
+export async function listWorkingDirectories(
+  cwd: string,
+): Promise<WorkingDirectoriesWire> {
+  const bridge = requireBridge("read working folders");
+  return bridgeListWorkingDirectories(
+    bridge,
+    await bridgeWorkspaceIdFor(bridge, cwd),
+  );
+}
+
+/** Apply a folder selection, rewriting the worktree via sparse-checkout. */
+export async function setWorkingDirectories(
+  cwd: string,
+  directories: string[],
+): Promise<WorkingDirectoriesWire> {
+  const bridge = requireBridge("update working folders");
+  return bridgeSetWorkingDirectories(
+    bridge,
+    await bridgeWorkspaceIdFor(bridge, cwd),
+    directories,
+  );
 }
 
 /** Repo-relative file paths under `cwd`, for Files and the composer @ picker.

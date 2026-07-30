@@ -327,6 +327,127 @@ export async function bridgeSetRemoteRestricted(
   });
 }
 
+// ── Working directories (per-worktree sparse-checkout) ────────
+// LOCAL-ONLY ops, like the restriction list above. Deselecting a folder removes
+// it from the checkout, so the agent, the terminal and the Files tab all stop
+// seeing it at once. Nothing is destroyed — reselecting restores it from the
+// object store.
+
+/** Why the picker can't operate on this worktree. Mirrors the engine's union
+ *  (`src/engine/git/sparse-checkout.ts`); duplicated rather than imported so
+ *  the renderer bundle never pulls in engine code. */
+export type WorkingDirectoriesUnsupportedReason =
+  | "no-commits"
+  | "non-cone"
+  | "unrepresentable-name";
+
+const UNSUPPORTED_REASONS = new Set<string>([
+  "no-commits",
+  "non-cone",
+  "unrepresentable-name",
+]);
+
+/** The one line the picker shows for each obstacle. All three used to render
+ *  "Needs a git repository with at least one commit", which is false for the
+ *  other two and gives the user nothing to act on. */
+export const WORKING_DIRECTORIES_UNSUPPORTED_COPY: Record<
+  WorkingDirectoriesUnsupportedReason,
+  string
+> = {
+  "no-commits": "Needs a git repository with at least one commit.",
+  "non-cone":
+    "This worktree uses hand-written sparse-checkout patterns. Zeros won't overwrite them.",
+  "unrepresentable-name":
+    "A tracked folder has a name git can't express as a sparse pattern, so hiding folders here isn't safe.",
+};
+
+export interface WorkingDirectoriesWire {
+  /** Every top-level tracked directory — the full candidate set. */
+  all: string[];
+  /** The subset currently materialized on disk. */
+  included: string[];
+  /** Whether sparse-checkout is active right now. */
+  sparse: boolean;
+  /** False when the checkout can't support this (no commits / not a repo). */
+  supported: boolean;
+  /** Present exactly when `supported` is false — which of the three obstacles
+   *  it is, so the empty state can name the real one. */
+  unsupportedReason?: WorkingDirectoriesUnsupportedReason;
+  /** Paths git declined to remove because they had local edits. Only ever
+   *  populated by a `set` call; non-empty means the worktree does not match
+   *  the selection and the user has to deal with those files first. */
+  leftBehind?: string[];
+}
+
+const EMPTY_WORKING_DIRS: WorkingDirectoriesWire = {
+  all: [],
+  included: [],
+  sparse: false,
+  supported: false,
+  unsupportedReason: "no-commits",
+};
+
+function toWorkingDirs(r: unknown): WorkingDirectoriesWire {
+  const v = r as Partial<WorkingDirectoriesWire> | null;
+  if (!v || !Array.isArray(v.all) || !Array.isArray(v.included)) {
+    return EMPTY_WORKING_DIRS;
+  }
+  const reason =
+    typeof v.unsupportedReason === "string" &&
+    UNSUPPORTED_REASONS.has(v.unsupportedReason)
+      ? (v.unsupportedReason as WorkingDirectoriesUnsupportedReason)
+      : undefined;
+  return {
+    all: v.all.filter((d): d is string => typeof d === "string"),
+    included: v.included.filter((d): d is string => typeof d === "string"),
+    sparse: v.sparse === true,
+    supported: v.supported === true,
+    // Unsupported always carries a reason, even from an engine that predates
+    // the field — otherwise the empty state would render blank.
+    ...(v.supported === true
+      ? {}
+      : { unsupportedReason: reason ?? "no-commits" }),
+    ...(Array.isArray(v.leftBehind)
+      ? {
+          leftBehind: v.leftBehind.filter(
+            (d): d is string => typeof d === "string",
+          ),
+        }
+      : {}),
+  };
+}
+
+export async function bridgeListWorkingDirectories(
+  bridge: RuntimeClient,
+  workspaceId: string,
+): Promise<WorkingDirectoriesWire> {
+  return toWorkingDirs(
+    await workspaceOp(bridge, "workspace.listWorkingDirectories", {
+      workspaceId,
+    }),
+  );
+}
+
+export async function bridgeSetWorkingDirectories(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  directories: string[],
+): Promise<WorkingDirectoriesWire> {
+  return toWorkingDirs(
+    await workspaceOp(
+      bridge,
+      "workspace.setWorkingDirectories",
+      { workspaceId, directories },
+      // 60s, not the 10s default: this unlinks or materializes every file in
+      // the affected folders, which on a large monorepo runs well past 10s.
+      // A timeout here is worse than slow — the engine finishes and broadcasts
+      // DB_CHANGED to everyone EXCEPT the originator, so the client that made
+      // the change is the one left showing a stale tree.
+      60_000,
+    ),
+  );
+}
+
 // ── Host folder picker (browse to open a project remotely) ──
 
 export interface HostDirListing {

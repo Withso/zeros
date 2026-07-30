@@ -33,6 +33,9 @@ const WORKSPACE_MUTATIONS = new Set([
   "workspace.create",
   "workspace.setStatus",
   "workspace.setRemoteRestricted",
+  // Rewrites the worktree — folders appear/disappear on disk — so every
+  // file-list and git-status consumer has to re-read.
+  "workspace.setWorkingDirectories",
   "workspace.archive",
   "workspace.restore",
   "workspace.delete",
@@ -106,6 +109,11 @@ const WORKSPACE_MUTATIONS = new Set([
  *  a stale card even though GitHub merged it. */
 export const LONG_LIFECYCLE_OPS = new Set([
   // Worktree lifecycle.
+  // Unlinks or materializes every file in the affected folders, so it can run
+  // for many seconds. Listed here so the DB_CHANGED goes to the ORIGINATOR
+  // too: if its request times out, that client is otherwise the only one left
+  // with a stale tree for a change it made itself.
+  "workspace.setWorkingDirectories",
   "workspace.create",
   "workspace.createFromBranch",
   "workspace.restore",
