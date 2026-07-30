@@ -54,6 +54,7 @@ import {
   disposePtyHost,
 } from "./pty/node-pty-spawn";
 import { disposeCursorHost } from "./agents/adapters/cursor-sdk/host/host-client";
+import { getLoginShellPath } from "./agents/adapters/shared/login-shell-path";
 import { TerminalRegistry } from "./pty/registry";
 import {
   GitError,
@@ -426,6 +427,14 @@ export class ZerosEngine {
       createNodePtyShell,
       createTerminalMirror,
     );
+    // Warm the login-shell PATH probe (`$SHELL -ilc 'echo $PATH'`) now, off the
+    // critical path. It's cached process-wide and every one-shot command shell
+    // — Setup script, Run action — awaits it before spawning; resolving it here
+    // keeps that from showing up as a stall on the FIRST Run of a session.
+    // Fire-and-forget: the resolver already falls back to the inherited PATH.
+    void getLoginShellPath().catch(() => {
+      /* probe failures are handled inside the resolver */
+    });
     // Background setup runner (Setup tab): owns the worktree setup PTY, buffers
     // its output, and flips workspaces.setup_state on exit. It rides the same
     // pty.onData/onExit callbacks below (setup sessions are id-prefixed "setup:").
@@ -486,10 +495,13 @@ export class ZerosEngine {
       this.runs.appendData(sessionId, data);
     });
     this.pty.onExit((sessionId, exitCode, signal, reason) => {
+      // `signal` matters as much as `exitCode`: node-pty reports a killed PTY as
+      // `exitCode 0, signal N`, so a verdict read off the code alone scores an
+      // OOM-killed or externally-killed install as a PASS.
       // Flip setup_state on a setup PTY's exit (no-op for normal terminals).
-      this.setup.handleExit(sessionId, exitCode);
+      this.setup.handleExit(sessionId, exitCode, signal);
       // Flip a run action's state on its PTY's exit (no-op otherwise).
-      this.runs.handleExit(sessionId, exitCode);
+      this.runs.handleExit(sessionId, exitCode, signal);
       this.broadcast(
         createMessage({
           type: "PTY_EXIT",
@@ -1642,6 +1654,7 @@ export class ZerosEngine {
             command: action.command,
             oneShot: runActionOneShot(action),
             cwd: ws.path,
+            repoRoot: ws.repoRoot,
           }),
         ).catch((err) =>
           console.error(

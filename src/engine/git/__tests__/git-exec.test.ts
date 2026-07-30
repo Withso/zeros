@@ -666,6 +666,83 @@ describe("runGit — transient lock retry", () => {
   });
 });
 
+// The env git receives is composed of three layers and the ORDER is load-bearing:
+// a launcher-PRUNED copy of process.env, then the caller's `opts.env`, then the
+// engine's own auth vars last so nothing can redirect the credential helper.
+// Those first two arrived from different branches — the prune from the terminal
+// work, the auth vars from the credential broker — and nothing else in the suite
+// pinned them TOGETHER. Collapsing back to either single layer would be silent:
+// git would re-inherit the launching `pnpm run` context (so a repo's pre-commit
+// hook resolves the user's linters to Zeros' pinned copies), or lose opts.env.
+describe("runGit — child env composition", () => {
+  let dir: string;
+  let repo: string;
+  const LAUNCHER = {
+    npm_execpath: "/usr/local/lib/pnpm.cjs",
+    npm_lifecycle_event: "electron:dev",
+    npm_config_verify_deps_before_run: "install",
+  };
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "zeros-gitenv-test-"));
+    repo = path.join(dir, "repo");
+    await mkdir(repo, { recursive: true });
+    await execFileAsync("git", ["init", "-q", "-b", "main"], { cwd: repo });
+  });
+
+  afterEach(async () => {
+    for (const key of Object.keys(LAUNCHER)) delete process.env[key];
+    delete process.env.ZEROS_GITENV_PROBE;
+    try {
+      await rm(dir, { recursive: true, force: true });
+    } catch {
+      /* best effort */
+    }
+  });
+
+  /** git's OWN child env, read back through a `!`-prefixed alias — the same
+   *  shell git hands a hook, so this observes what actually escapes. */
+  async function childEnv(
+    callerEnv?: Record<string, string | undefined>,
+  ): Promise<Record<string, string>> {
+    const res = await runGit(
+      repo,
+      ["-c", "alias.dumpenv=!env", "dumpenv"],
+      callerEnv ? { env: callerEnv } : {},
+    );
+    const out: Record<string, string> = {};
+    for (const line of res.stdout.split("\n")) {
+      const eq = line.indexOf("=");
+      if (eq > 0) out[line.slice(0, eq)] = line.slice(eq + 1);
+    }
+    return out;
+  }
+
+  it("prunes the launching script's context out of git's own children", async () => {
+    Object.assign(process.env, LAUNCHER);
+    const env = await childEnv();
+    for (const key of Object.keys(LAUNCHER)) {
+      expect(env[key], `${key} must not reach a git hook`).toBeUndefined();
+    }
+  });
+
+  it("merges opts.env OVER the pruned base, and still prunes", async () => {
+    Object.assign(process.env, LAUNCHER);
+    process.env.ZEROS_GITENV_PROBE = "from-process";
+    const env = await childEnv({ ZEROS_GITENV_PROBE: "from-opts" });
+    expect(env.ZEROS_GITENV_PROBE).toBe("from-opts");
+    // The prune has to survive a caller-supplied env too. The pre-merge shape
+    // only built an env object when there WAS one, so this is the case a
+    // conditional would skip.
+    for (const key of Object.keys(LAUNCHER)) {
+      expect(
+        env[key],
+        `${key} must not survive an opts.env merge`,
+      ).toBeUndefined();
+    }
+  });
+});
+
 describe("workspace git/gh credential shims", () => {
   let dir: string;
 

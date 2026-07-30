@@ -24,6 +24,7 @@ import { RunManager } from "../run-manager";
 function fakePty() {
   const live = new Set<string>();
   const created: Array<{ sessionId: string; command?: string; cwd?: string }> = [];
+  const envs: Array<Record<string, string> | undefined> = [];
   const killed: string[] = [];
   const svc = {
     has: (id: string) => live.has(id),
@@ -31,13 +32,19 @@ function fakePty() {
       live.delete(id);
       killed.push(id);
     },
-    create: (opts: { sessionId: string; resolvedCwd?: string; command?: string }) => {
+    create: (opts: {
+      sessionId: string;
+      resolvedCwd?: string;
+      command?: string;
+      env?: Record<string, string>;
+    }) => {
       live.add(opts.sessionId);
       created.push({
         sessionId: opts.sessionId,
         command: opts.command,
         cwd: opts.resolvedCwd,
       });
+      envs.push(opts.env);
       return {
         sessionId: opts.sessionId,
         pid: 1,
@@ -47,7 +54,7 @@ function fakePty() {
       };
     },
   };
-  return { svc: svc as unknown as PtyService, live, created, killed };
+  return { svc: svc as unknown as PtyService, live, created, envs, killed };
 }
 
 function sampleWorkspace(id: string): Workspace {
@@ -99,6 +106,7 @@ describe("RunManager", () => {
     insertWorkspace(sampleWorkspace(WS));
     changes = 0;
     changedWorkspaceIds = [];
+    envCalls = [];
   });
 
   afterEach(async () => {
@@ -111,7 +119,20 @@ describe("RunManager", () => {
     }
   });
 
-  const make = (pty: PtyService, registered: string[] = []) =>
+  // The env builder is stubbed: the real one probes `$SHELL -ilc 'echo $PATH'`,
+  // which would make this suite spawn a login shell (slow, and dependent on
+  // whatever dotfiles the machine running CI has). envCalls records what the
+  // manager asked for so the wiring is still asserted.
+  let envCalls: Array<{ cwd: string; workspaceId: string | null; repoRoot?: string | null }>;
+  const make = (
+    pty: PtyService,
+    registered: string[] = [],
+    envBuilder?: (ctx: {
+      cwd: string;
+      workspaceId: string | null;
+      repoRoot?: string | null;
+    }) => Promise<Record<string, string> | undefined>,
+  ) =>
     new RunManager(
       pty,
       (workspaceId) => {
@@ -119,6 +140,11 @@ describe("RunManager", () => {
         changedWorkspaceIds.push(workspaceId);
       },
       (sessionId) => registered.push(sessionId),
+      envBuilder ??
+        (async (ctx) => {
+          envCalls.push(ctx);
+          return { PATH: "/login/bin", FORCE_COLOR: "1" };
+        }),
     );
 
   it("start spawns the command as the PTY's foreground process + registers it", async () => {
@@ -132,6 +158,153 @@ describe("RunManager", () => {
     expect(mgr.info([SID], WS).dev).toMatchObject({ state: "running", live: true });
     expect(changes).toBeGreaterThan(0);
     expect(changedWorkspaceIds).toContain(WS);
+  });
+
+  it("spawns with the resolved run env (login PATH), not the engine's raw env", async () => {
+    const { svc, envs } = fakePty();
+    const mgr = make(svc);
+    await mgr.start(startArgs({ repoRoot: "/tmp/test-repo" }));
+    // The Run tab used to inherit whatever PATH the engine happened to have —
+    // launchd's bare /usr/bin:/bin in a packaged app — so `pnpm dev` could be
+    // "command not found" here while working in the Terminal tab.
+    expect(envs[0]).toMatchObject({ PATH: "/login/bin", FORCE_COLOR: "1" });
+    expect(envCalls).toEqual([
+      { cwd: FOLDER, workspaceId: WS, repoRoot: "/tmp/test-repo" },
+    ]);
+  });
+
+  it("an env-builder failure still runs the action (spawn-layer env fallback)", async () => {
+    const { svc, created, envs } = fakePty();
+    const mgr = make(svc, [], async () => {
+      throw new Error("login shell wedged");
+    });
+    await mgr.start(startArgs());
+    expect(created).toHaveLength(1);
+    expect(envs[0]).toBeUndefined(); // → node-pty-spawn computes the default
+    expect(mgr.info([SID], WS).dev).toMatchObject({ state: "running" });
+  });
+
+  it("resolves the env BEFORE publishing 'running' — no phantom entry mid-spawn", async () => {
+    const { svc, created } = fakePty();
+    let release = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const mgr = make(svc, [], async () => {
+      await gate;
+      return { PATH: "/login/bin" };
+    });
+    const started = mgr.start(startArgs());
+    // Mid-build there is no entry yet, so nothing can be marked "stopped" while
+    // its shell is still about to spawn (which would orphan an unkillable run).
+    expect(mgr.info([SID], WS).dev).toBeUndefined();
+    release();
+    await started;
+    expect(created).toHaveLength(1);
+    expect(mgr.info([SID], WS).dev).toMatchObject({ state: "running" });
+  });
+
+  it("Stop during the env build CANCELS the start — the PTY never spawns", async () => {
+    const { svc, created } = fakePty();
+    let release = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const mgr = make(svc, [], async () => {
+      await gate;
+      return { PATH: "/login/bin" };
+    });
+    const started = mgr.start(startArgs());
+    // The window is real: the login-shell PATH probe is bounded at 3s, and the
+    // first Run of a session pays it cold. Stop here used to hit neither branch
+    // (no entry, no live PTY) and do nothing — then the run spawned anyway.
+    mgr.stop(SID);
+    release();
+    // …and the caller is TOLD nothing spawned. Reporting the same shape as a
+    // successful start made the renderer create a run tab that attached to no
+    // PTY, found no buffered log, and rendered an instantly-"(exited)" blank
+    // pane — right after the user pressed Stop.
+    expect(await started).toEqual({ alreadyRunning: false, cancelled: true });
+    expect(created).toHaveLength(0);
+    expect(mgr.info([SID], WS).dev).toBeUndefined();
+  });
+
+  it("Stop then RERUN inside the env window actually runs", async () => {
+    // Stop and Rerun share the same bottom-right cluster, and ⌘R re-launches
+    // whenever the state isn't "running", so this is an ordinary thing to do. The
+    // in-flight guard treated the aborting flight as "already running", so the
+    // Rerun was swallowed: nothing ran, no error, no toast — the user had to
+    // click Rerun a second time.
+    const { svc, created } = fakePty();
+    const gates: Array<() => void> = [];
+    const mgr = make(svc, [], async () => {
+      await new Promise<void>((r) => gates.push(r));
+      return { PATH: "/login/bin" };
+    });
+    const first = mgr.start(startArgs());
+    mgr.stop(SID);
+    const second = mgr.start(startArgs());
+    expect(second).toBeInstanceOf(Promise);
+    gates.forEach((release) => release());
+    expect(await first).toMatchObject({ cancelled: true });
+    expect(await second).toEqual({ alreadyRunning: false });
+    expect(created).toHaveLength(1);
+    expect(mgr.info([SID], WS).dev).toMatchObject({ state: "running" });
+  });
+
+  it("a one-shot KILLED by a signal reads failed, not finished", async () => {
+    // node-pty reports a killed PTY as `exitCode 0, signal N`, so a verdict read
+    // off the code alone showed a green "finished" for an OOM-killed build.
+    const { svc } = fakePty();
+    const mgr = make(svc);
+    await mgr.start(startArgs({ oneShot: true }));
+    mgr.handleExit(SID, 0, 9);
+    expect(mgr.info([SID], WS).dev).toMatchObject({ state: "failed" });
+  });
+
+  it("a clean one-shot exit still reads finished", async () => {
+    const { svc } = fakePty();
+    const mgr = make(svc);
+    await mgr.start(startArgs({ oneShot: true }));
+    mgr.handleExit(SID, 0, 0);
+    expect(mgr.info([SID], WS).dev).toMatchObject({ state: "finished" });
+  });
+
+  it("archiving a workspace cancels a run still mid-spawn", async () => {
+    const { svc, created } = fakePty();
+    let release = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const mgr = make(svc, [], async () => {
+      await gate;
+      return { PATH: "/login/bin" };
+    });
+    const started = mgr.start(startArgs());
+    // Otherwise the PTY lands inside a worktree the reaper is about to remove.
+    mgr.stopAllForWorkspace(WS);
+    release();
+    await started;
+    expect(created).toHaveLength(0);
+  });
+
+  it("a second Rerun during the spawn window is focused, not double-spawned", async () => {
+    const { svc, created } = fakePty();
+    let release = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const mgr = make(svc, [], async () => {
+      await gate;
+      return { PATH: "/login/bin" };
+    });
+    // Both clicks land while `pty.has()` is still false and no entry exists.
+    const first = mgr.start(startArgs());
+    const second = mgr.start(startArgs());
+    expect(await second).toEqual({ alreadyRunning: true });
+    release();
+    expect(await first).toEqual({ alreadyRunning: false });
+    expect(created).toHaveLength(1);
   });
 
   it("a live action is focused, not respawned (alreadyRunning)", async () => {

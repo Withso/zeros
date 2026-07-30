@@ -60,6 +60,8 @@ export default defineConfig({
       "src/engine/db/__tests__/**/*.test.ts",
       // Engine runtime mode + loopback port range (dev/prod isolation).
       "src/engine/__tests__/**/*.test.ts",
+      // Spawn env: undoing the `npm/pnpm run` that launched the app.
+      "src/engine/env/__tests__/**/*.test.ts",
       // Settings foundation: TOML layers, per-leaf sanitize, provenance resolve.
       "src/engine/settings/__tests__/**/*.test.ts",
       // Settings → MCP panel: pure data helpers (raw round-trip, validation).

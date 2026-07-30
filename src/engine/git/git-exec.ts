@@ -12,6 +12,8 @@ import {
   refreshGitCredentialAfterAuthenticationFailure,
   type GitCredentialRequest,
 } from "./credential-broker";
+// Pure leaf module (node:path only) — no cycle back into git/.
+import { pruneLauncherScriptEnv } from "../env/launcher-env";
 
 const execFileAsync = promisify(execFile);
 
@@ -195,6 +197,28 @@ export interface RunGitOptions {
    *  scratch index (so a whole-tree snapshot never disturbs the user's real
    *  staging area) and to stamp a fixed author/committer for commit-tree. */
   env?: Record<string, string | undefined>;
+}
+
+/** The env for a `git` child, with the launching `pnpm/npm run`'s context pruned.
+ *
+ *  git itself doesn't care, but git RUNS HOOKS: a repo's husky/lefthook
+ *  `pre-commit` is a shell script executing `pnpm lint-staged` (nothing in this
+ *  codebase passes `--no-verify`), and it inherited Zeros' `node_modules/.bin`
+ *  first on PATH plus Zeros' `npm_config_*`. In the user's worktree that resolves
+ *  their linters to Zeros' pinned copies. This fires on every commit Zeros makes,
+ *  which makes it the most reachable of the engine's spawn paths.
+ *
+ *  Note the shape: `opts.env` is merged over the PRUNED base, never the other way
+ *  round. Spreading a pruned env over `process.env` would undo the prune, because
+ *  a deleted key is simply absent and process.env's value would win. */
+function gitChildEnv(
+  extra?: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+  const env: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+  };
+  pruneLauncherScriptEnv(env, process.env);
+  return extra ? { ...env, ...extra } : env;
 }
 
 export type ExpectedCategory =
@@ -571,7 +595,6 @@ export async function runGit(
     ...(networkTarget.network ? { GIT_TERMINAL_PROMPT: "0" } : {}),
     ...credentialInvocation?.env,
   };
-  const hasControlledEnv = Object.keys(controlledEnv).length > 0;
   let lockAttempt = 0;
   let retriedAuthentication = false;
   for (;;) {
@@ -580,17 +603,14 @@ export async function runGit(
         cwd,
         maxBufferBytes: opts.maxBufferBytes,
         timeoutMs: opts.timeoutMs,
-        ...(opts.env || hasControlledEnv
-          ? {
-              env: {
-                ...process.env,
-                ...opts.env,
-                // Engine-owned auth variables win over any caller-supplied
-                // value. Repository/settings env can never redirect the helper.
-                ...controlledEnv,
-              },
-            }
-          : {}),
+        // Both layers matter, and the order is the whole point. gitChildEnv
+        // merges its argument over a launcher-PRUNED copy of process.env, so
+        // the prune survives (spreading a pruned env over process.env would
+        // undo it — a deleted key is merely absent). Within the argument,
+        // engine-owned auth variables are spread LAST so they win over any
+        // caller-supplied value: repository/settings env can never redirect
+        // the credential helper.
+        env: gitChildEnv({ ...opts.env, ...controlledEnv }),
         input: opts.input,
       });
       // Some remote helpers have returned exit 0 after their child transport

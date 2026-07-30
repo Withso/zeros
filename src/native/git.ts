@@ -23,6 +23,7 @@ import { refreshDetectedOpenApps } from "./open-apps";
 import { getActiveBridge } from "../zeros/bridge/active-bridge";
 import {
   bridgeFileTree,
+  bridgeIgnoredEntries,
   bridgeGitStatus,
   bridgeGitChangeCounts,
   bridgeGitChangeLineCounts,
@@ -81,6 +82,7 @@ import {
   bridgeWorkspaceStopRun,
   bridgeWorkspaceRunLog,
   type RunActionStatusWire,
+  type RunStartReply,
   bridgeGitListAllBranches,
   bridgeGitRepoBranchCatalog,
   bridgeGitLog,
@@ -585,7 +587,7 @@ export async function workspaceStartRun(args: {
   repoRoot?: string;
   actionId: string;
   sessionId: string;
-}): Promise<{ ok: boolean; hasCommand: boolean; alreadyRunning: boolean }> {
+}): Promise<RunStartReply> {
   return bridgeWorkspaceStartRun(requireBridge("start run"), args);
 }
 
@@ -784,6 +786,35 @@ export async function listWorkspaceFiles(
   } catch {
     return listViaBridge();
   }
+}
+
+/** The .gitignore'd entries listWorkspaceFiles omits — what the Files tab needs
+ *  to show `node_modules/`, `dist/`, `.env`. Without `dir`: the collapsed
+ *  ignored roots. With `dir`: one level inside one of them. Directories carry a
+ *  trailing "/". Bridge-only (no native fast path): it is called once per
+ *  workspace plus once per directory the user actually opens, so the extra
+ *  round-trip is invisible and there is no second code path to keep in sync.
+ *
+ *  DESKTOP ONLY, and short-circuited here rather than left to fail at the
+ *  engine: `file.ignored` is refused for relay clients (it is a one-level
+ *  directory enumerator, and .gitignore is the boundary it stops honouring —
+ *  see its handler). Without this check a web client would fire a
+ *  guaranteed-REMOTE_OP_NOT_ALLOWED round-trip on every workspace open and
+ *  every refresh signal. Returning [] is the same thing the caller does with
+ *  the rejection, minus the traffic. */
+export async function listIgnoredEntries(
+  cwd: string,
+  dir?: string,
+): Promise<string[]> {
+  if (!cwd || !isNativeRuntime()) return [];
+  const bridge = requireBridge("list ignored files");
+  let workspaceId = cwd;
+  try {
+    workspaceId = (await resolveBridgeWorkspaceIdForCwd(bridge, cwd)) ?? cwd;
+  } catch {
+    /* not a managed workspace — the engine resolves a known repo root too */
+  }
+  return bridgeIgnoredEntries(bridge, workspaceId, dir);
 }
 
 export type DiffMode =

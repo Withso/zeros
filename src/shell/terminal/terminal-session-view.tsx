@@ -66,6 +66,7 @@ import {
 } from "../../native/pty";
 import { resolveTokenValue } from "../../zeros/appearance/resolve-tokens";
 import { terminalExitPolicy } from "./terminal-exit-policy";
+import { WheelLineAccumulator } from "./wheel-scroll";
 import { useAppearance } from "../../zeros/appearance/provider";
 import { useThemeVariant } from "../../zeros/appearance/use-theme-variant";
 import { resolveCodeTheme } from "../../zeros/appearance/code-themes";
@@ -319,12 +320,44 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     // before xterm gets to scroll its viewport — so the user can't
     // scrollback while an agent is running. Intercepting at capture
     // ensures we scroll the buffer regardless of mouse-tracking state.
-    // We DON'T preventDefault unless the wheel is actually scrolling
-    // xterm content so OS-level pinch-zoom / horizontal pad gestures
-    // pass through.
+    // We DON'T preventDefault at the scrollback boundaries, so an
+    // outer scroller can take over there.
+    //
+    // Everywhere else we take the WHOLE gesture — including the events that are
+    // still sub-line. Releasing those would hand them straight back to the
+    // listener this handler exists to pre-empt: xterm's viewport, which under
+    // mouse tracking forwards them to the TUI as scroll escapes, and otherwise
+    // runs its OWN accumulator on top of ours for a jittery ~2× scroll. One
+    // accumulator owns the gesture, and it carries the remainder between events
+    // instead of rounding it away — which is what made slow trackpad scrolling
+    // do nothing at all (see wheel-scroll.ts).
+    const wheelLines = new WheelLineAccumulator();
     const onWheelCapture = (evt: WheelEvent) => {
       if (!term.element) return;
+      // NOT a scrollback gesture — release it untouched (no preventDefault), or
+      // we'd both eat the gesture and scroll on its incidental vertical noise.
+      // Both cases became reachable when the accumulator started banking
+      // sub-line deltas that the old `Math.round(deltaY / 20)` discarded:
+      //   • ctrl/⌘+wheel is zoom (Chromium synthesizes trackpad pinch as
+      //     ctrlKey wheel with a few px of deltaY, so a pinch used to be
+      //     rounded to nothing and now scrolls a row per pinch), and
+      //   • a mostly-HORIZONTAL two-finger swipe carries a couple of px of
+      //     vertical jitter, which accumulated into real rows of drift. xterm's
+      //     own viewport zeroes the non-dominant axis for the same reason
+      //     (scrollPredominantAxis).
+      if (evt.ctrlKey || evt.metaKey) return;
+      if (Math.abs(evt.deltaY) < Math.abs(evt.deltaX)) return;
       const buffer = term.buffer.active;
+      // The ALTERNATE screen has no scrollback (its line buffer is capped at
+      // `rows`), so scrollLines is a no-op there and the wheel belongs to the
+      // full-screen TUI — xterm turns it into an SGR mouse escape or ESC[A/B.
+      // The boundary check below already lets it through, because both atTop and
+      // atBottom hold; this says so once, explicitly, so a transient ydisp of 1
+      // during a resize can't consume a wheel-up that would go nowhere.
+      if (buffer.type === "alternate") {
+        wheelLines.reset();
+        return;
+      }
       const atTop = buffer.viewportY === 0;
       const atBottom = buffer.viewportY >= buffer.baseY;
       // Only consume when we can actually scroll in this direction.
@@ -332,9 +365,11 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       const goingDown = evt.deltaY > 0;
       if ((goingUp && atTop) || (goingDown && atBottom)) {
         // Let it bubble — outer scrollback (panel chrome) or no-op.
+        wheelLines.reset();
         return;
       }
-      term.scrollLines(Math.round(evt.deltaY / 20));
+      const lines = wheelLines.lines(evt, term.rows);
+      if (lines !== 0) term.scrollLines(lines);
       evt.preventDefault();
       evt.stopPropagation();
     };
