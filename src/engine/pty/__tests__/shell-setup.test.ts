@@ -67,6 +67,51 @@ describe("buildPtyEnv env scrubbing (remote = allowlist)", () => {
   });
 });
 
+// scripts/dev-instance.mjs makes each worktree's `pnpm electron:dev` its OWN app
+// by exporting an instance identity (slug → ports, data dir, single-instance
+// lock) into the app's env. A local terminal inherits the full env, so unless
+// these are stripped the identity leaks into the shell — and the regression this
+// guards is real: a nested `pnpm electron:dev` read the inherited ZEROS_INSTANCE,
+// hit resolveInstance()'s "caller owns uniqueness" branch, and came up as a
+// second copy of the PARENT — same Vite port (fatal under strictPort, which took
+// the whole instance down with it), same SQLite DB, same single-instance lock,
+// same orphan-engine match key.
+describe("buildPtyEnv sheds the dev-instance identity", () => {
+  // The shape from the failure: the parent was launched by a worktree runner that
+  // passes an opaque per-workspace UUID, so its slug is that UUID + a realpath hash.
+  const INSTANCE = {
+    ZEROS_INSTANCE: "00000000-0000-0000-0000-000000000000-82d",
+    ZEROS_INSTANCE_NAME: "zeros-coralline",
+    ZEROS_VITE_PORT: "5261",
+    ZEROS_ENGINE_BASE_PORT: "25293",
+    ELECTRON_RENDERER_URL: "http://localhost:5261",
+  };
+
+  afterEach(() => {
+    for (const key of Object.keys(INSTANCE)) delete process.env[key];
+  });
+
+  it("drops every instance-scoped var, local and remote", () => {
+    Object.assign(process.env, INSTANCE);
+    for (const env of [buildPtyEnv(), buildPtyEnv({ scrub: true })]) {
+      for (const key of Object.keys(INSTANCE)) {
+        expect(
+          env[key],
+          `${key} describes the APP — it must not follow it into a shell`,
+        ).toBeUndefined();
+      }
+    }
+  });
+
+  it("keeps the WORKTREE context, which is the whole point of the distinction", () => {
+    Object.assign(process.env, INSTANCE);
+    const env = buildPtyEnv({ cwd: "/repo/wt", workspaceId: "ws-1" });
+    expect(env.ZEROS_WORKTREE_PATH).toBe("/repo/wt");
+    expect(env.ZEROS_WORKSPACE_ID).toBe("ws-1");
+    expect(env.ZEROS_TERMINAL).toBe("1");
+  });
+});
+
 // A one-shot shell runs a command and exits. `interactive` is what makes it
 // read the SAME startup files the Terminal tab's shell does — where
 // nvm/fnm/mise/pnpm put their PATH setup — without re-enabling the job control

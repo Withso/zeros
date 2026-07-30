@@ -3,7 +3,7 @@
 // "no duplicate rows", "one status entry per subtree, not per file", and
 // "never re-request a directory we already have".
 
-import { describe, it, expect } from "vitest";
+import { beforeEach, describe, it, expect } from "vitest";
 import {
   dirKey,
   emptyState,
@@ -13,12 +13,17 @@ import {
   knownIgnoredDirs,
   mergeIgnoredPaths,
   pendingIgnoredDirs,
+  warmState,
   withCollapsed,
   withLoadedDir,
   withRefreshedDir,
   withRoots,
   withoutVanishedDirs,
 } from "../ignored-entries";
+import {
+  rememberIgnoredRoots,
+  resetIgnoredRootsCacheForTests,
+} from "../ignored-entries-cache";
 
 const map = (entries: Array<[string, string[]]>) => new Map(entries);
 
@@ -254,6 +259,56 @@ describe("state transitions — a workspace switch must not mix worktrees", () =
     const withEmpty = withLoadedDir(opened, A, "dist", []);
     expect(withEmpty.loaded.has("dist")).toBe(true);
     expect(pendingIgnoredDirs(["dist/"], withEmpty.loaded)).not.toContain("dist");
+  });
+});
+
+describe("warmState — a workspace switch must not re-lay-out the tree", () => {
+  const A = "/w/alpha";
+
+  beforeEach(() => {
+    resetIgnoredRootsCacheForTests();
+  });
+
+  it("is empty for a workspace this session has never listed", () => {
+    expect(warmState(A)).toEqual(emptyState(A));
+    expect(warmState(undefined).cwd).toBeUndefined();
+  });
+
+  it("starts a re-mount on the previous visit's roots", () => {
+    // The glitch this exists for: without a seed the tab painted tracked files
+    // only, then spliced `.env`/`node_modules/` into the middle of the sorted
+    // list two round-trips later and shoved every row below them down.
+    rememberIgnoredRoots(A, ["node_modules/", ".env"]);
+    expect(mergeIgnoredPaths(warmState(A).roots, warmState(A).loaded)).toEqual([
+      "node_modules/",
+      ".env",
+    ]);
+  });
+
+  it("starts collapsed even so — a fresh tree has nothing open to restore", () => {
+    rememberIgnoredRoots(A, ["node_modules/"]);
+    const seeded = warmState(A);
+    expect([...seeded.expanded]).toEqual([]);
+    expect([...seeded.loaded.keys()]).toEqual([]);
+    // So the branch is still pending, and expanding it fetches as it always did.
+    expect(pendingIgnoredDirs(seeded.roots, seeded.loaded)).toEqual([
+      "node_modules",
+    ]);
+  });
+
+  it("absorbs the revalidation that follows without a new identity", () => {
+    // The seed is immediately re-listed. When the workspace is unchanged that
+    // response must land as a no-op, or the tree resetPaths right after the
+    // paint the seed existed to make clean.
+    rememberIgnoredRoots(A, ["node_modules/", ".env"]);
+    const seeded = warmState(A);
+    expect(withRoots(seeded, A, ["node_modules/", ".env"])).toBe(seeded);
+  });
+
+  it("yields to the listing when the workspace moved on while parked", () => {
+    rememberIgnoredRoots(A, ["node_modules/", "dist/"]);
+    const next = withRoots(warmState(A), A, ["node_modules/"]);
+    expect(next.roots).toEqual(["node_modules/"]);
   });
 });
 

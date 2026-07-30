@@ -42,12 +42,29 @@
 // MEMORY: `loaded` is pruned when a branch is collapsed (see withCollapsed), so
 // everything above is bounded by what is actually on screen rather than by the
 // deepest the user ever browsed.
+//
+// SWITCHING WORKSPACES: a mount starts from ignored-entries-cache's warm roots
+// (warmState) rather than from nothing, because the tracked listing is seeded
+// the same way — and half a seeded tree is worse than none. See that module's
+// header for why an unseeded mount made the whole tab look like it reloaded.
 // ──────────────────────────────────────────────────────────
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { GitStatusEntry } from "@pierre/trees";
 
 import { listIgnoredEntries } from "@/native/git";
+
+import {
+  peekIgnoredRoots,
+  rememberIgnoredRoots,
+} from "./ignored-entries-cache";
 
 /** @pierre/trees marks directories with a trailing slash. */
 export function isDirEntry(entryPath: string): boolean {
@@ -198,9 +215,18 @@ export function useIgnoredEntries(
   reloadKey: number | undefined,
   model: IgnoredTreeModel | null,
 ): IgnoredEntriesState {
-  const [state, setState] = useState<IgnoredState>(() => emptyState(cwd));
+  const [state, setState] = useState<IgnoredState>(() => warmState(cwd));
   const active = state.cwd === cwd ? state : null;
-  const activeRoots = active?.roots ?? EMPTY;
+  // A reused tree fiber can receive another workspace before the effect below
+  // re-lists. Fall back to the NEW cwd's warm roots rather than to nothing — and
+  // never to the previous workspace's — mirroring what the tracked listing does
+  // with peekWorkspaceFiles. Pairing warm roots with an empty `loaded` is safe:
+  // `loaded` only ever holds children of the roots it was listed alongside.
+  const warmRoots = useMemo(
+    () => (active ? null : peekIgnoredRoots(cwd)),
+    [active, cwd],
+  );
+  const activeRoots = active?.roots ?? warmRoots ?? EMPTY;
   const loaded = active?.loaded ?? EMPTY_LOADED;
   // Read by the refresh effect below (which must not re-subscribe when the set
   // changes) and by the expansion watcher.
@@ -233,6 +259,11 @@ export function useIgnoredEntries(
       try {
         const roots = await listIgnoredEntries(cwd);
         if (cancelled) return;
+        // Publish for the NEXT mount on this workspace, from the one place that
+        // holds an authoritative answer. Seeding from the hook's own state
+        // instead would also publish the empty starting value, and a workspace
+        // whose first listing failed would be cached as "ignores nothing".
+        rememberIgnoredRoots(cwd, roots);
         setState((prev) => withRoots(prev, cwd, roots));
       } catch {
         // No bridge / not a repo — the tree simply shows what git tracks,
@@ -367,7 +398,11 @@ export function useIgnoredEntries(
     () => ignoredGitStatus(activeRoots, loaded),
     [activeRoots, loaded],
   );
-  useEffect(() => {
+  // A LAYOUT effect, so a seeded mount dims its ignored rows in the SAME commit
+  // that puts them on screen. As a passive effect this landed one frame after
+  // the rows did, which the warm snapshot made visible: `.env` and
+  // `node_modules/` painted like tracked code and then greyed out.
+  useLayoutEffect(() => {
     if (!model) return;
     model.setGitStatus(status.length > 0 ? status : undefined);
   }, [model, status]);
@@ -409,6 +444,16 @@ export interface IgnoredState {
 
 export function emptyState(cwd: string | undefined): IgnoredState {
   return { cwd, roots: [], expanded: new Set(), loaded: new Map() };
+}
+
+/** A mount's starting state: the previous visit's roots when this workspace is
+ *  warm, so a workspace switch paints its ignored rows in the same frame as the
+ *  tracked ones instead of splicing them in a couple of round-trips later.
+ *  `expanded`/`loaded` still start clean — a fresh tree is fully collapsed, so
+ *  there is nothing for them to do until the user opens a branch. */
+export function warmState(cwd: string | undefined): IgnoredState {
+  const roots = peekIgnoredRoots(cwd);
+  return roots ? { ...emptyState(cwd), roots } : emptyState(cwd);
 }
 
 /** A roots listing came back. Same workspace → keep open branches and their

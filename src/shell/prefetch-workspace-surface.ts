@@ -15,6 +15,7 @@ import {
   prefetchWorkspaceFileRead,
 } from "./workspace-file-data-cache";
 import { prefetchReviewLiveData } from "./column3-tabs/review-data";
+import { warmIgnoredRoots } from "./column3-tabs/ignored-entries-cache";
 import { resolveReviewProvider } from "./pr/review-provider";
 
 /** Complete identity needed to navigate before an authoritative workspace list
@@ -31,6 +32,10 @@ export function prefetchWorkspaceSurface(
   const folder = workspace.path;
   if (!folder) return;
   warmWorkspaceFiles(folder);
+  // Both halves of the Files tree or neither: an ignored listing that lands
+  // after the tracked one splices `.env`/`node_modules/` into the middle of the
+  // list and shoves every row below it down.
+  warmIgnoredRoots(folder);
 
   const state = useWorkspaceStore.getState();
   const scopeKey = column3ScopeForFolder(folder);
