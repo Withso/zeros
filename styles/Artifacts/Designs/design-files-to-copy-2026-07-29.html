@@ -1,0 +1,2324 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-Zeros-root>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Zeros — Files to copy · Design</title>
+    <style>
+      /* ============================================================
+         Tokens — lifted verbatim from styles/zeros-tokens.css so the
+         mockups render on the real Zeros Shade (dark) + Light palettes.
+         Toggle themes with the switch in the header.
+         ============================================================ */
+      :root {
+        color-scheme: dark;
+        --bg1: hsl(25 5% 7%);
+        --bg1-hover: hsl(8 5% 12%);
+        --bg1-highlight: hsl(25 5% 10%);
+        --bg2: hsl(25 4% 12%);
+        --bg2-hover: hsl(25 3% 15%);
+        --bg3: hsl(15 4% 16%);
+        --bg3-hover: hsl(15 3% 20%);
+        --sidebar-bg: hsl(25 5% 9%);
+        --fg1: hsl(0 2% 92%);
+        --fg2: hsl(20 4% 66%);
+        --fg3: hsl(15 1% 44%);
+        --muted-fg: hsl(15 4% 44%);
+        --border1: hsl(8 3% 14%);
+        --border2: hsl(25 1% 18%);
+        --border3: hsl(15 0% 24%);
+        --border4: hsl(15 0% 30%);
+        --highlighted-bright: hsl(25 5% 65%);
+        --inverted-bg: hsl(0 2% 92%);
+        --inverted-fg: hsl(5 7% 5%);
+        --green-primary: hsl(142 69% 58%);
+        --green-bg: hsl(120 23% 17%);
+        --green-fg: hsl(142 75% 73%);
+        --red-primary: hsl(0 91% 71%);
+        --red-bg: hsl(13 81% 14%);
+        --red-fg: hsl(20 97% 72%);
+        --yellow-primary: hsl(37 75% 60%);
+        --yellow-bg: hsl(38 68% 17%);
+        --yellow-fg: hsl(44 100% 50%);
+        --blue-primary: hsl(205 80% 73%);
+        --blue-bg: hsl(226 57% 18%);
+        --blue-fg: hsl(211 96% 78%);
+        --violet-primary: hsl(271 80% 73%);
+        --brown-primary: hsl(9 46% 72%);
+        --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+        --radius-sm: 4px;
+        --radius-md: 6px;
+        --radius-lg: 8px;
+        --sans:
+          "Geist Variable", Inter, ui-sans-serif, -apple-system,
+          BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --mono: "Geist Mono Variable", "SFMono-Regular", Consolas, monospace;
+      }
+
+      [data-theme="light"] {
+        color-scheme: light;
+        --bg1: hsl(0 0% 100%);
+        --bg1-hover: hsl(0 4% 95%);
+        --bg1-highlight: hsl(0 0% 97%);
+        --bg2: hsl(60 4% 95%);
+        --bg2-hover: hsl(60 4% 91%);
+        --bg3: hsl(0 0% 100%);
+        --bg3-hover: hsl(0 0% 95%);
+        --sidebar-bg: hsl(60 9% 98%);
+        --fg1: hsl(20 7% 16%);
+        --fg2: hsl(20 4% 37%);
+        --fg3: hsl(20 4% 56%);
+        --muted-fg: hsl(20 4% 68%);
+        --border1: hsl(30 9% 91%);
+        --border2: hsl(30 9% 91%);
+        --border3: hsl(60 3% 85%);
+        --border4: hsl(0 1% 83%);
+        --highlighted-bright: hsl(25 5% 45%);
+        --inverted-bg: hsl(20 7% 16%);
+        --inverted-fg: hsl(0 0% 100%);
+        --green-primary: hsl(142 75% 36%);
+        --green-bg: hsl(134 38% 89%);
+        --green-fg: hsl(142 70% 30%);
+        --red-primary: hsl(0 72% 51%);
+        --red-bg: hsl(18 87% 91%);
+        --red-fg: hsl(18 89% 40%);
+        --yellow-primary: hsl(37 90% 60%);
+        --yellow-bg: hsl(48 97% 89%);
+        --yellow-fg: hsl(37 100% 51%);
+        --blue-primary: hsl(221 83% 53%);
+        --blue-bg: hsl(214 95% 93%);
+        --blue-fg: hsl(224 76% 39%);
+        --violet-primary: hsl(271 80% 51%);
+        --brown-primary: hsl(5 35% 50%);
+        --shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        margin: 0;
+        min-width: 320px;
+        min-height: 100vh;
+        background:
+          radial-gradient(
+            circle at 50% -8%,
+            color-mix(in srgb, var(--fg1) 5%, transparent),
+            transparent 30rem
+          ),
+          var(--bg1);
+        color: var(--fg1);
+        font: 14px/1.5 var(--sans);
+        -webkit-font-smoothing: antialiased;
+      }
+      button {
+        font: inherit;
+        color: inherit;
+        cursor: pointer;
+      }
+      svg {
+        display: block;
+      }
+      code {
+        font-family: var(--mono);
+      }
+
+      .page {
+        width: min(1180px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 48px 0 96px;
+      }
+
+      /* ── Hero ── */
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 28px;
+        align-items: end;
+        padding-bottom: 28px;
+        border-bottom: 1px solid var(--border1);
+      }
+      .eyebrow {
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        color: var(--yellow-primary);
+      }
+      h1 {
+        max-width: 760px;
+        margin: 9px 0 10px;
+        font-size: clamp(26px, 3.4vw, 40px);
+        line-height: 1.05;
+        letter-spacing: -0.035em;
+      }
+      .lede {
+        max-width: 720px;
+        margin: 0;
+        color: var(--fg2);
+        font-size: 15px;
+      }
+      .hero-aside {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        align-items: flex-end;
+      }
+      .summary-chip {
+        min-width: 240px;
+        padding: 14px 16px;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 90%, transparent);
+      }
+      .summary-chip strong {
+        display: block;
+        margin-bottom: 3px;
+        font-size: 13px;
+      }
+      .summary-chip span {
+        display: block;
+        color: var(--fg2);
+        font-size: 12px;
+      }
+      .theme-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 11px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: var(--bg2);
+        color: var(--fg1);
+        font-size: 12px;
+      }
+      .theme-toggle:hover {
+        background: var(--bg2-hover);
+      }
+
+      /* ── Thesis cards ── */
+      .thesis {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        margin: 24px 0 12px;
+      }
+      .thesis-card {
+        min-width: 0;
+        padding: 16px 18px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 86%, transparent);
+      }
+      .thesis-card.primary {
+        border-color: color-mix(in srgb, var(--green-primary) 26%, var(--border1));
+        background: color-mix(in srgb, var(--green-primary) 5%, var(--sidebar-bg));
+      }
+      .thesis-card h3 {
+        margin: 0 0 5px;
+        font-size: 13px;
+      }
+      .thesis-card p {
+        margin: 0;
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      /* ── Sticky nav ── */
+      nav {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+        margin: 26px -12px 40px;
+        padding: 10px 12px;
+        border-bottom: 1px solid color-mix(in srgb, var(--border1) 80%, transparent);
+        background: color-mix(in srgb, var(--bg1) 82%, transparent);
+        backdrop-filter: blur(14px);
+      }
+      nav a {
+        flex: none;
+        padding: 5px 9px;
+        border-radius: var(--radius-sm);
+        color: var(--fg2);
+        font-size: 12px;
+        text-decoration: none;
+      }
+      nav a:hover {
+        background: var(--bg2);
+        color: var(--fg1);
+      }
+      .nav-sep {
+        width: 1px;
+        margin: 3px 4px;
+        background: var(--border2);
+      }
+
+      /* ── Section headers ── */
+      .band {
+        margin: 0 0 26px;
+        font-size: 12px;
+        font-weight: 650;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--fg3);
+      }
+      .catalog {
+        display: grid;
+        gap: 56px;
+      }
+      .catalog + .band {
+        margin-top: 64px;
+      }
+      .case {
+        scroll-margin-top: 68px;
+      }
+      .case-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 24px;
+        align-items: flex-start;
+        margin-bottom: 16px;
+      }
+      .case-title-row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        margin-bottom: 6px;
+      }
+      .case-number {
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.06em;
+        color: var(--fg3);
+      }
+      .tag {
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: var(--bg2);
+        color: var(--fg2);
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+      }
+      .tag.ship {
+        background: color-mix(in srgb, var(--green-primary) 12%, transparent);
+        color: var(--green-primary);
+      }
+      .tag.gap {
+        background: color-mix(in srgb, var(--yellow-primary) 12%, transparent);
+        color: var(--yellow-primary);
+      }
+      .tag.context {
+        background: color-mix(in srgb, var(--blue-primary) 12%, transparent);
+        color: var(--blue-primary);
+      }
+      .tag.new {
+        background: color-mix(in srgb, var(--violet-primary) 14%, transparent);
+        color: var(--violet-primary);
+      }
+      .case h2 {
+        margin: 0;
+        font-size: 19px;
+        line-height: 1.22;
+        letter-spacing: -0.02em;
+      }
+      .case-copy {
+        max-width: 720px;
+        margin: 6px 0 0;
+        color: var(--fg2);
+        font-size: 13px;
+      }
+      .meta {
+        flex: none;
+        max-width: 280px;
+        padding-top: 2px;
+        color: var(--fg3);
+        font-size: 11px;
+        line-height: 1.5;
+        text-align: right;
+      }
+
+      /* ── App frame (the project settings pane) ── */
+      .dual {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+      }
+      .frame-wrap {
+        min-width: 0;
+      }
+      .frame-label {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin-bottom: 8px;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        color: var(--fg3);
+      }
+      .frame-label .dot-lg {
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+        background: var(--fg3);
+      }
+      .frame-label.before .dot-lg {
+        background: var(--red-primary);
+      }
+      .frame-label.after .dot-lg {
+        background: var(--green-primary);
+      }
+      .frame {
+        overflow: hidden;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: var(--bg1);
+        box-shadow: var(--shadow);
+      }
+      .single {
+        max-width: 660px;
+      }
+
+      /* project header + tab strip */
+      .rail {
+        display: flex;
+        height: 42px;
+        align-items: center;
+        gap: 9px;
+        padding: 0 13px;
+        border-bottom: 1px solid var(--border1);
+      }
+      .rail-icon {
+        display: inline-grid;
+        width: 22px;
+        height: 22px;
+        place-items: center;
+        border-radius: var(--radius-sm);
+        background: var(--bg2);
+        color: var(--fg2);
+      }
+      .rail-title {
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .rail-path {
+        color: var(--fg3);
+        font: 11px var(--mono);
+      }
+      .rail-spacer {
+        flex: 1;
+      }
+      .subtabs {
+        display: flex;
+        height: 34px;
+        align-items: center;
+        gap: 2px;
+        padding: 0 9px;
+        border-bottom: 1px solid var(--border1);
+      }
+      .subtab {
+        position: relative;
+        display: inline-flex;
+        height: 34px;
+        align-items: center;
+        padding: 0 10px;
+        border: 0;
+        background: transparent;
+        color: var(--fg2);
+        font-size: 12px;
+        font-weight: 500;
+      }
+      .subtab.active {
+        color: var(--fg1);
+      }
+      .subtab.active::after {
+        content: "";
+        position: absolute;
+        left: 8px;
+        right: 8px;
+        bottom: 0;
+        height: 2px;
+        border-radius: 999px;
+        background: var(--fg1);
+      }
+      .body {
+        padding: 16px 18px 18px;
+      }
+      .body.pad-sm {
+        padding: 14px 16px 16px;
+      }
+
+      /* ── Pane header ── */
+      .pane-title {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0 0 5px;
+        font-size: 14px;
+        font-weight: 600;
+      }
+      .pane-title svg {
+        width: 15px;
+        height: 15px;
+        color: var(--fg2);
+      }
+      .pane-desc {
+        max-width: 62ch;
+        margin: 0 0 14px;
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      .pane-desc a {
+        color: var(--blue-primary);
+        text-decoration: none;
+      }
+
+      /* ── Discovered-file groups ── */
+      .grp {
+        overflow: hidden;
+        margin-bottom: 9px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-lg);
+      }
+      .ghead {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--border1);
+        background: var(--bg1-highlight);
+      }
+      .gicon {
+        display: inline-grid;
+        width: 19px;
+        height: 19px;
+        flex: none;
+        place-items: center;
+        border-radius: var(--radius-sm);
+      }
+      .gicon svg {
+        width: 11px;
+        height: 11px;
+      }
+      .gicon.env {
+        background: var(--green-bg);
+        color: var(--green-fg);
+      }
+      .gicon.cfg {
+        background: var(--blue-bg);
+        color: var(--blue-fg);
+      }
+      .gicon.other {
+        background: var(--bg2);
+        color: var(--fg3);
+      }
+      .gname {
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .gmeta {
+        margin-left: auto;
+        color: var(--fg3);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+      }
+      .grow {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 7px 12px;
+        border-bottom: 1px solid var(--border1);
+      }
+      .grow:last-child {
+        border-bottom: 0;
+      }
+      .grow:hover {
+        background: var(--bg1-hover);
+      }
+      .grow.off .fp {
+        color: var(--fg3);
+      }
+      .grow.dis {
+        opacity: 0.55;
+      }
+      .grow.dis:hover {
+        background: transparent;
+      }
+      .fp {
+        overflow: hidden;
+        color: var(--fg1);
+        font: 11.5px var(--mono);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .fsz {
+        flex: none;
+        margin-left: auto;
+        color: var(--fg3);
+        font-size: 10.5px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* checkbox */
+      .cb {
+        display: grid;
+        width: 14px;
+        height: 14px;
+        flex: none;
+        place-items: center;
+        border: 1px solid var(--border4);
+        border-radius: var(--radius-sm);
+      }
+      .cb svg {
+        display: none;
+        width: 9px;
+        height: 9px;
+      }
+      .cb.on {
+        border-color: var(--inverted-bg);
+        background: var(--inverted-bg);
+        color: var(--inverted-fg);
+      }
+      .cb.on svg {
+        display: block;
+      }
+      .cb.dis {
+        border-color: var(--border2);
+      }
+
+      /* status pills on a row */
+      .rpill {
+        flex: none;
+        padding: 1px 7px;
+        border-radius: 999px;
+        font-size: 10px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .rpill.warn {
+        background: var(--yellow-bg);
+        color: var(--yellow-fg);
+      }
+      .rpill.info {
+        background: var(--bg2);
+        color: var(--fg3);
+      }
+      .rpill.err {
+        background: var(--red-bg);
+        color: var(--red-fg);
+      }
+      .rpill.ok {
+        background: var(--green-bg);
+        color: var(--green-fg);
+      }
+
+      /* ── Summary bar ── */
+      .sum {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-top: 13px;
+        padding-top: 12px;
+        border-top: 1px solid var(--border1);
+      }
+      .sum-txt {
+        color: var(--fg2);
+        font-size: 12px;
+      }
+      .sum-txt b {
+        color: var(--fg1);
+        font-weight: 600;
+      }
+      .sum-path {
+        color: var(--brown-primary);
+        font: 11px var(--mono);
+      }
+
+      /* ── Buttons ── */
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 5px 10px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--fg2);
+        font-size: 11.5px;
+      }
+      .btn:hover {
+        background: var(--bg2);
+        color: var(--fg1);
+      }
+      .btn.right {
+        margin-left: auto;
+      }
+      .btn.primary {
+        border-color: transparent;
+        background: var(--inverted-bg);
+        color: var(--inverted-fg);
+        font-weight: 600;
+      }
+      .btn svg {
+        width: 12px;
+        height: 12px;
+      }
+
+      /* ── Advanced disclosure + pattern editor ── */
+      .adv {
+        margin-top: 13px;
+        padding-top: 12px;
+        border-top: 1px solid var(--border1);
+      }
+      .adv-head {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--fg2);
+        font-size: 12px;
+        user-select: none;
+      }
+      .adv-head svg {
+        width: 11px;
+        height: 11px;
+      }
+      .adv-head.open {
+        color: var(--fg1);
+      }
+      .adv-head.open svg {
+        transform: rotate(90deg);
+      }
+      .ta {
+        width: 100%;
+        margin-top: 10px;
+        padding: 9px 11px;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-md);
+        background: var(--bg2);
+        color: var(--fg1);
+        font: 11.5px/1.75 var(--mono);
+        white-space: pre;
+      }
+      .ta.focus {
+        border-color: var(--highlighted-bright);
+      }
+      .patlist {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        margin-top: 9px;
+      }
+      .patrow {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        font-size: 11.5px;
+      }
+      .pcount {
+        display: inline-grid;
+        min-width: 20px;
+        height: 17px;
+        place-items: center;
+        padding: 0 5px;
+        border-radius: 999px;
+        font-size: 10px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+      .pcount.ok {
+        background: var(--green-bg);
+        color: var(--green-fg);
+      }
+      .pcount.err {
+        background: var(--red-bg);
+        color: var(--red-fg);
+      }
+      .pcount.dim {
+        background: var(--bg2);
+        color: var(--fg3);
+      }
+      .patrow .pt {
+        color: var(--fg1);
+        font-family: var(--mono);
+      }
+      .patrow .pm {
+        color: var(--fg3);
+        font-size: 11px;
+      }
+      .patrow .pm code {
+        color: var(--fg2);
+      }
+
+      /* ── Banners ── */
+      .ban {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+        margin-bottom: 13px;
+        padding: 10px 12px;
+        border-radius: var(--radius-md);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      .ban svg.bi {
+        width: 14px;
+        height: 14px;
+        flex: none;
+        margin-top: 1px;
+      }
+      .ban b {
+        font-weight: 650;
+      }
+      .ban code {
+        font-size: 11px;
+      }
+      .ban.info {
+        background: color-mix(in srgb, var(--blue-primary) 10%, transparent);
+        color: var(--blue-fg);
+      }
+      .ban.warn {
+        background: color-mix(in srgb, var(--yellow-primary) 12%, transparent);
+        color: var(--yellow-fg);
+      }
+      .ban .lnk {
+        flex: none;
+        align-self: center;
+        margin-left: auto;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        font: 600 11.5px var(--sans);
+        text-decoration: underline;
+        text-underline-offset: 3px;
+      }
+      /* Bottom-anchored inline toast: sits under the list it is talking about,
+         at the edge of the pane, so it never pushes the content the user came
+         to read. */
+      .ban.toast {
+        margin-top: 12px;
+        margin-bottom: 0;
+      }
+      .stale {
+        opacity: 0.5;
+      }
+
+      /* ── Empty / loading states ── */
+      .empty {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+        padding: 26px 20px;
+        border: 1px dashed var(--border2);
+        border-radius: var(--radius-lg);
+        background: var(--bg1-highlight);
+        text-align: center;
+      }
+      .empty-title {
+        color: var(--fg1);
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .empty-desc {
+        max-width: 44ch;
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      .empty-glyph {
+        color: var(--muted-fg);
+      }
+      .sk-line {
+        height: 9px;
+        border-radius: 999px;
+        background: linear-gradient(
+          90deg,
+          var(--bg2) 0%,
+          var(--bg2-hover) 50%,
+          var(--bg2) 100%
+        );
+        background-size: 200% 100%;
+        animation: shimmer 1.3s linear infinite;
+      }
+      .scanning {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--fg3);
+        font-size: 12px;
+      }
+      .scanning svg {
+        width: 13px;
+        height: 13px;
+        animation: spin 0.9s linear infinite;
+      }
+
+      /* ── The "why" diagram ── */
+      .diag {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+        gap: 18px;
+        align-items: center;
+        padding: 16px 18px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 86%, transparent);
+      }
+      .dlbl {
+        margin-bottom: 7px;
+        color: var(--fg3);
+        font-size: 10.5px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+      .dfile {
+        color: var(--fg2);
+        font: 11.5px/1.9 var(--mono);
+      }
+      .dfile .ok {
+        color: var(--green-fg);
+      }
+      .dfile .no {
+        color: var(--fg3);
+        text-decoration: line-through;
+      }
+      .darr {
+        color: var(--fg3);
+      }
+
+      /* ── Behavior / rationale notes ── */
+      .notes {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 14px;
+      }
+      .notes.one {
+        grid-template-columns: 1fr;
+      }
+      .note {
+        padding: 12px 14px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-md);
+        background: color-mix(in srgb, var(--sidebar-bg) 88%, transparent);
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      .note b {
+        color: var(--fg1);
+      }
+      .note code {
+        font-size: 11px;
+      }
+      .note.fix {
+        border-color: color-mix(in srgb, var(--green-primary) 24%, var(--border1));
+        background: color-mix(in srgb, var(--green-primary) 5%, var(--sidebar-bg));
+      }
+
+      /* ── Tables (precedence + API) ── */
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12.5px;
+      }
+      th {
+        padding: 0 12px 8px 0;
+        border-bottom: 1px solid var(--border2);
+        color: var(--fg3);
+        font-size: 10.5px;
+        font-weight: 650;
+        letter-spacing: 0.05em;
+        text-align: left;
+        text-transform: uppercase;
+      }
+      td {
+        padding: 9px 12px 9px 0;
+        border-bottom: 1px solid var(--border1);
+        color: var(--fg2);
+        vertical-align: top;
+      }
+      td:first-child {
+        color: var(--fg1);
+        white-space: nowrap;
+      }
+      td code {
+        font-size: 11.5px;
+      }
+      .toml {
+        margin: 0;
+        overflow: hidden;
+        padding: 13px 15px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-lg);
+        background: var(--bg1-highlight);
+        color: var(--fg2);
+        font: 11.5px/1.75 var(--mono);
+        white-space: pre;
+      }
+      .toml .tk {
+        color: var(--blue-primary);
+      }
+      .toml .ts {
+        color: var(--green-fg);
+      }
+      .toml .tc {
+        color: var(--fg3);
+        font-style: italic;
+      }
+
+      /* ── Open questions ── */
+      .qlist {
+        display: grid;
+        gap: 10px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        counter-reset: q;
+      }
+      .qlist li {
+        position: relative;
+        padding: 13px 15px 13px 44px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-md);
+        background: color-mix(in srgb, var(--sidebar-bg) 88%, transparent);
+        color: var(--fg2);
+        counter-increment: q;
+        font-size: 12.5px;
+        line-height: 1.55;
+      }
+      .qlist li::before {
+        content: "Q" counter(q);
+        position: absolute;
+        top: 13px;
+        left: 15px;
+        color: var(--fg3);
+        font: 650 10.5px var(--sans);
+        letter-spacing: 0.05em;
+      }
+      .qlist li b {
+        color: var(--fg1);
+      }
+
+      .footer-note {
+        margin-top: 64px;
+        padding-top: 22px;
+        border-top: 1px solid var(--border1);
+        color: var(--fg3);
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @keyframes shimmer {
+        to {
+          background-position: -200% 0;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .sk-line,
+        .scanning svg {
+          animation: none;
+        }
+      }
+
+      @media (max-width: 900px) {
+        .hero,
+        .thesis,
+        .dual,
+        .diag {
+          grid-template-columns: 1fr;
+        }
+        .hero-aside {
+          align-items: flex-start;
+        }
+        .case-head {
+          flex-direction: column;
+          gap: 8px;
+        }
+        .meta {
+          max-width: none;
+          text-align: left;
+        }
+        .notes {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- ── Icon defs (lucide, matching the real components) ── -->
+    <svg aria-hidden="true" width="0" height="0" style="position: absolute">
+      <defs>
+        <symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="8" y="8" width="14" height="14" rx="2" />
+          <path d="M4 16a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2" />
+        </symbol>
+        <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="m5 13 4 4L19 7" />
+        </symbol>
+        <symbol id="i-key" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="7.5" cy="15.5" r="4.5" />
+          <path d="m10.7 12.3 8.3-8.3M17 6l2.5 2.5M14.5 8.5 17 11" />
+        </symbol>
+        <symbol id="i-sliders" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h10M18 18h2" />
+          <circle cx="16" cy="6" r="2" />
+          <circle cx="10" cy="12" r="2" />
+          <circle cx="16" cy="18" r="2" />
+        </symbol>
+        <symbol id="i-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <path d="M14 2v6h6" />
+        </symbol>
+        <symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+        </symbol>
+        <symbol id="i-folder-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+          <path d="m10 12 5 5m0-5-5 5" />
+        </symbol>
+        <symbol id="i-rotate" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12a9 9 0 1 1-3-6.7L21 8" />
+          <path d="M21 3v5h-5" />
+        </symbol>
+        <symbol id="i-loader" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+          <path d="M12 3v4M12 17v4M5.6 5.6l2.9 2.9M15.5 15.5l2.9 2.9M3 12h4M17 12h4M5.6 18.4l2.9-2.9M15.5 8.5l2.9-2.9" />
+        </symbol>
+        <symbol id="i-warning" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" />
+          <path d="M12 9v4m0 4h.01" />
+        </symbol>
+        <symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10" />
+          <path d="M12 16v-4M12 8h.01" />
+        </symbol>
+        <symbol id="i-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="m9 18 6-6-6-6" />
+        </symbol>
+        <symbol id="i-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 12h14M13 6l6 6-6 6" />
+        </symbol>
+        <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="4" />
+          <path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+        </symbol>
+      </defs>
+    </svg>
+
+    <main class="page">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">Project settings · Files to copy · Design</div>
+          <h1>Choosing which ignored files ride along — without knowing what a glob is</h1>
+          <p class="lede">
+            A new workspace branches from <code>origin/main</code>, so it contains
+            only what Git tracks. Every gitignored file the project needs to run —
+            <code>.env</code>, local config, certificates — is missing. This is the
+            surface that decides what gets carried over, designed so someone who has
+            never written a <code>.gitignore</code> can get it right on the first
+            try.
+          </p>
+        </div>
+        <div class="hero-aside">
+          <button class="theme-toggle" id="themeBtn" type="button">
+            <svg width="14" height="14"><use href="#i-sun" /></svg>
+            <span id="themeLabel">Light preview</span>
+          </button>
+          <div class="summary-chip">
+            <strong>Show the files, not the syntax</strong>
+            <span>Patterns stay — one click away, for people who want them.</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="thesis" aria-label="Design goals">
+        <div class="thesis-card primary">
+          <h3>The answer is already on screen</h3>
+          <p>
+            The pane opens having already scanned the project. You tick real files
+            you can see, with their sizes — you never type a pattern and hope.
+          </p>
+        </div>
+        <div class="thesis-card">
+          <h3>Every risky row says so</h3>
+          <p>
+            “Only pick gitignored, untracked files” stops being a rule to remember.
+            Not-ignored, already-tracked and matches-nothing are labels on the row.
+          </p>
+        </div>
+        <div class="thesis-card">
+          <h3>Always show the outcome</h3>
+          <p>
+            Committed file, app setting or built-in default — the resolved list is
+            rendered the same way, because that answer is what the user came for.
+          </p>
+        </div>
+      </section>
+
+      <nav aria-label="Cases">
+        <a href="#a0">A0 · Why it exists</a>
+        <a href="#a1">A1 · The pane</a>
+        <a href="#a2">A2 · Rows that warn</a>
+        <a href="#a3">A3 · Advanced patterns</a>
+        <span class="nav-sep"></span>
+        <a href="#b1">B1 · Textarea → checklist</a>
+        <a href="#b2">B2 · .worktreeinclude</a>
+        <a href="#b3">B3 · Silent typo</a>
+        <span class="nav-sep"></span>
+        <a href="#c1">C1 · Nothing to copy</a>
+        <a href="#c2">C2 · Too much</a>
+        <a href="#c3">C3 · Scanning</a>
+        <a href="#c4">C4 · Can’t read</a>
+        <span class="nav-sep"></span>
+        <a href="#d1">D1 · Where it’s stored</a>
+        <a href="#d2">D2 · Backend shape</a>
+        <a href="#d3">D3 · Open questions</a>
+      </nav>
+
+      <p class="band">Part A — The proposed surface</p>
+
+      <div class="catalog">
+        <!-- A0 ───────────────────────────────────────────── -->
+        <section class="case" id="a0">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A0</span>
+                <span class="tag context">Context</span>
+              </div>
+              <h2>The problem, in one picture</h2>
+              <p class="case-copy">
+                Not shipped UI — this is the mental model the pane has to teach
+                without ever saying it. A workspace is a fresh checkout of the
+                branch, so it holds tracked files and nothing else. The project
+                won’t build until the ignored ones follow it across.
+              </p>
+            </div>
+            <div class="meta">
+              Everything below exists to answer one question: which of the missing
+              files should come along.
+            </div>
+          </div>
+
+          <div class="diag">
+            <div>
+              <div class="dlbl">Your project on this Mac</div>
+              <div class="dfile">
+                src/app.ts<br />package.json<br /><span class="ok">.env</span
+                ><br /><span class="ok">.env.local</span><br /><span class="ok"
+                  >.mcp.json</span
+                ><br /><span style="color: var(--fg3)">node_modules/</span>
+              </div>
+            </div>
+            <div class="darr"><svg width="22" height="22"><use href="#i-arrow" /></svg></div>
+            <div>
+              <div class="dlbl">A brand-new workspace</div>
+              <div class="dfile">
+                src/app.ts<br />package.json<br /><span class="no">.env</span
+                ><br /><span class="no">.env.local</span><br /><span class="no"
+                  >.mcp.json</span
+                ><br /><span class="no">node_modules/</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes">
+            <div class="note">
+              <b>Why it’s missing:</b> <code>git worktree add</code> materialises
+              tracked files only. Nothing gitignored is in the branch, so nothing
+              gitignored arrives.
+            </div>
+            <div class="note">
+              <b>Why not just copy everything:</b>
+              <code>node_modules/</code> is 2&nbsp;GB and machine-specific. Bulk
+              content belongs to the setup command, not to this list.
+            </div>
+          </div>
+        </section>
+
+        <!-- A1 ───────────────────────────────────────────── -->
+        <section class="case" id="a1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A1</span>
+                <span class="tag new">Proposed</span>
+              </div>
+              <h2>The default state — nothing configured yet</h2>
+              <p class="case-copy">
+                The pane has already scanned the project and lists the ignored files
+                it found, grouped, with sizes. Environment and tool config are
+                pre-ticked and marked <b>Recommended</b>; the big, regenerable stuff
+                is listed but off. Most people will read this once and never touch
+                it.
+              </p>
+            </div>
+            <div class="meta">
+              Sizes are load-bearing — they are what stops someone ticking a 2.1 MB
+              coverage report.
+            </div>
+          </div>
+
+          <div class="frame single">
+            <div class="rail">
+              <span class="rail-icon"><svg width="13" height="13"><use href="#i-folder" /></svg></span>
+              <span class="rail-title">Zeros</span>
+              <span class="rail-path">~/Documents/Zeros</span>
+            </div>
+            <div class="subtabs">
+              <span class="subtab">Workspaces</span>
+              <span class="subtab">Environment</span>
+              <span class="subtab">Git</span>
+              <span class="subtab">Actions</span>
+              <span class="subtab active">Files</span>
+            </div>
+            <div class="body">
+              <h3 class="pane-title">
+                <svg><use href="#i-copy" /></svg>Files to copy
+              </h3>
+              <p class="pane-desc">
+                New workspaces only contain files Git tracks. Tick the ignored files
+                Zeros should copy in from your main folder so the project runs
+                straight away.
+              </p>
+
+              <div class="grp">
+                <div class="ghead">
+                  <span class="gicon env"><svg><use href="#i-key" /></svg></span>
+                  <span class="gname">Environment &amp; secrets</span>
+                  <span class="rpill ok">Recommended</span>
+                  <span class="gmeta">2 files · 1.5 KB</span>
+                </div>
+                <div class="grow">
+                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
+                  <span class="fp">.env</span><span class="fsz">1.4 KB</span>
+                </div>
+                <div class="grow">
+                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
+                  <span class="fp">backend/.env</span><span class="fsz">122 B</span>
+                </div>
+              </div>
+
+              <div class="grp">
+                <div class="ghead">
+                  <span class="gicon cfg"><svg><use href="#i-sliders" /></svg></span>
+                  <span class="gname">Tool &amp; editor config</span>
+                  <span class="rpill ok">Recommended</span>
+                  <span class="gmeta">1 file · 110 B</span>
+                </div>
+                <div class="grow">
+                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
+                  <span class="fp">.mcp.json</span><span class="fsz">110 B</span>
+                </div>
+              </div>
+
+              <div class="grp">
+                <div class="ghead">
+                  <span class="gicon other"><svg><use href="#i-file" /></svg></span>
+                  <span class="gname">Other ignored files</span>
+                  <span class="gmeta">3 files · 2.1 MB</span>
+                </div>
+                <div class="grow off">
+                  <span class="cb"></span>
+                  <span class="fp">.conductor/settings.local.toml</span
+                  ><span class="fsz">340 B</span>
+                </div>
+                <div class="grow off">
+                  <span class="cb"></span>
+                  <span class="fp">coverage/lcov.info</span
+                  ><span class="fsz">2.1 MB</span>
+                </div>
+                <div class="grow off">
+                  <span class="cb"></span>
+                  <span class="fp">debug.log</span><span class="fsz">18 KB</span>
+                </div>
+              </div>
+
+              <div class="sum">
+                <span class="sum-txt"
+                  ><b>3 files · 1.6 KB</b> will be copied from
+                  <span class="sum-path">~/Documents/Zeros</span></span
+                >
+                <button class="btn right" type="button">
+                  <svg><use href="#i-rotate" /></svg>Rescan
+                </button>
+              </div>
+
+              <div class="adv">
+                <div class="adv-head">
+                  <svg><use href="#i-chevron" /></svg>Advanced — use file patterns
+                  instead
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes">
+            <div class="note fix">
+              <b>Pre-ticked, not silently defaulted.</b> The built-in default is
+              <code>.env*</code>, and any saved list <i>replaces</i> it. Turning that
+              default into visible ticked rows is what stops someone losing their
+              <code>.env</code> the first time they touch this screen.
+            </div>
+            <div class="note">
+              <b>Grouping is derived, not configured.</b> Env / tool-config / other
+              comes from the resolved paths — no taxonomy for the user to learn, and
+              a project with only <code>.env</code> shows one group.
+            </div>
+          </div>
+        </section>
+
+        <!-- A2 ───────────────────────────────────────────── -->
+        <section class="case" id="a2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A2</span>
+                <span class="tag new">Proposed</span>
+              </div>
+              <h2>Rows that need a warning</h2>
+              <p class="case-copy">
+                Three states the backend can detect and a plain textarea can never
+                surface. This is where “only enter gitignored, untracked files”
+                stops being a rule the user has to hold in their head.
+              </p>
+            </div>
+            <div class="meta">
+              Each pill maps to one field on the preview response — no heuristics in
+              the renderer.
+            </div>
+          </div>
+
+          <div class="frame single">
+            <div class="body pad-sm">
+              <div class="grp" style="margin-bottom: 0">
+                <div class="ghead">
+                  <span class="gicon other"><svg><use href="#i-file" /></svg></span>
+                  <span class="gname">Matched files</span>
+                </div>
+                <div class="grow">
+                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
+                  <span class="fp">.env</span><span class="fsz">1.4 KB</span>
+                </div>
+                <div class="grow">
+                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
+                  <span class="fp">config/local.json</span>
+                  <span class="rpill warn">Git isn’t ignoring this</span>
+                  <span class="fsz">2 KB</span>
+                </div>
+                <div class="grow dis">
+                  <span class="cb dis"></span>
+                  <span class="fp">.env.example</span>
+                  <span class="rpill info">Already in every workspace</span>
+                  <span class="fsz">4.6 KB</span>
+                </div>
+                <div class="grow dis">
+                  <span class="cb dis"></span>
+                  <span class="fp">certs/*.pem</span>
+                  <span class="rpill err">Nothing matches this</span>
+                  <span class="fsz">—</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes">
+            <div class="note">
+              <b>Git isn’t ignoring this</b> — untracked but absent from
+              <code>.gitignore</code>. Zeros still copies it (you named it), but it
+              lands in the workspace’s Changes tab where an agent could commit it.
+              The row expands to offer <b>Add to .gitignore</b>.
+            </div>
+            <div class="note">
+              <b>Already in every workspace</b> — Git tracks it, so
+              <code>git worktree add</code> puts it there anyway. Disabled, never
+              hidden: hiding it makes the pattern look broken.
+            </div>
+            <div class="note" style="grid-column: 1 / -1">
+              <b>Nothing matches this</b> — the single most common failure. A
+              typo’d pattern copies nothing, silently, and you find out when the
+              workspace won’t boot. Shown in Advanced, where patterns are authored.
+            </div>
+          </div>
+        </section>
+
+        <!-- A3 ───────────────────────────────────────────── -->
+        <section class="case" id="a3">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A3</span>
+                <span class="tag new">Proposed</span>
+              </div>
+              <h2>Advanced — patterns, expanded</h2>
+              <p class="case-copy">
+                The escape hatch for anyone who wants <code>.env*</code> or
+                <code>certs/**</code>. The same box other tools ship, plus a
+                per-line match count so a wrong pattern is obvious the moment you
+                stop typing.
+              </p>
+            </div>
+            <div class="meta">
+              Ticking boxes in simple mode writes into this same list. One setting,
+              two editors — never two sources of truth.
+            </div>
+          </div>
+
+          <div class="frame single">
+            <div class="body">
+              <h3 class="pane-title">
+                <svg><use href="#i-copy" /></svg>Files to copy
+              </h3>
+              <div class="adv" style="margin-top: 0; padding-top: 0; border-top: 0">
+                <div class="adv-head open">
+                  <svg><use href="#i-chevron" /></svg>Advanced — use file patterns
+                  instead
+                </div>
+                <div class="ta focus">.env*
+backend/.env*
+.mcp.json
+certs/*.pem
+!.env.production</div>
+                <div class="patlist">
+                  <div class="patrow">
+                    <span class="pcount ok">2</span><span class="pt">.env*</span
+                    ><span class="pm">.env, .env.local</span>
+                  </div>
+                  <div class="patrow">
+                    <span class="pcount ok">1</span
+                    ><span class="pt">backend/.env*</span
+                    ><span class="pm">backend/.env</span>
+                  </div>
+                  <div class="patrow">
+                    <span class="pcount ok">1</span><span class="pt">.mcp.json</span
+                    ><span class="pm">.mcp.json</span>
+                  </div>
+                  <div class="patrow">
+                    <span class="pcount err">0</span
+                    ><span class="pt">certs/*.pem</span
+                    ><span class="pm"
+                      >nothing matches — did you mean <code>certs/**</code>?</span
+                    >
+                  </div>
+                  <div class="patrow">
+                    <span class="pcount dim">−1</span
+                    ><span class="pt">!.env.production</span
+                    ><span class="pm">removes .env.production</span>
+                  </div>
+                </div>
+                <div class="sum">
+                  <span class="sum-txt"
+                    ><b>4 files · 1.6 KB</b> will be copied from
+                    <span class="sum-path">~/Documents/Zeros</span></span
+                  >
+                  <button class="btn right" type="button">
+                    <svg><use href="#i-rotate" /></svg>Rescan
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes">
+            <div class="note">
+              <b>Plain <code>.gitignore</code> syntax</b> — <code>#</code> comments,
+              <code>*</code> wildcards, <code>**</code> for any depth, a leading
+              <code>/</code> to pin to the project root, <code>!</code> to take
+              something back out. Matched by git itself, so it behaves exactly as
+              it does in a <code>.gitignore</code>: last match wins.
+            </div>
+            <div class="note fix">
+              <b>The counts are the feature.</b> A count of <code>0</code> is the
+              typo signal; a negation shows how many files it actually removed, so
+              a dead <code>!</code> line reads as dead instead of looking
+              load-bearing.
+            </div>
+          </div>
+        </section>
+
+      </div>
+
+      <p class="band">Part B — What other tools do, and where we diverge</p>
+
+      <div class="catalog">
+        <!-- B1 ───────────────────────────────────────────── -->
+        <section class="case" id="b1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">B1</span>
+                <span class="tag gap">Divergence</span>
+              </div>
+              <h2>An empty box that asks for syntax</h2>
+              <p class="case-copy">
+                The reference implementation opens on an empty textarea and asks a
+                non-technical user to type <code>.env.local</code> — then tells
+                them, underneath, what it matched. <b>After:</b> the match is the
+                interface. You tick files you can see.
+              </p>
+            </div>
+            <div class="meta">
+              Same data on screen either way. The difference is which half you have
+              to produce yourself.
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — type a pattern, then find out</div>
+              <div class="frame">
+                <div class="body pad-sm">
+                  <h3 class="pane-title">Files to copy</h3>
+                  <p class="pane-desc">
+                    Zeros will automatically copy these file paths in each new
+                    workspace. <a href="#b1">Learn more ↗</a>
+                  </p>
+                  <div class="ta" style="min-height: 74px">.env.local</div>
+                  <div class="sum">
+                    <span class="sum-txt"
+                      >1 file will be copied from
+                      <span class="sum-path">~/Documents/Zeros</span></span
+                    >
+                    <button class="btn right" type="button">
+                      <svg><use href="#i-rotate" /></svg>
+                    </button>
+                  </div>
+                  <div class="ta" style="margin-top: 8px">.env.local</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — the files are the interface</div>
+              <div class="frame">
+                <div class="body pad-sm">
+                  <h3 class="pane-title">Files to copy</h3>
+                  <p class="pane-desc">
+                    New workspaces only contain files Git tracks. Tick the ignored
+                    files Zeros should copy in from your main folder.
+                  </p>
+                  <div class="grp">
+                    <div class="ghead">
+                      <span class="gicon env"><svg><use href="#i-key" /></svg></span>
+                      <span class="gname">Environment &amp; secrets</span>
+                      <span class="gmeta">2 files · 1.5 KB</span>
+                    </div>
+                    <div class="grow">
+                      <span class="cb on"><svg><use href="#i-check" /></svg></span>
+                      <span class="fp">.env</span><span class="fsz">1.4 KB</span>
+                    </div>
+                    <div class="grow">
+                      <span class="cb on"><svg><use href="#i-check" /></svg></span>
+                      <span class="fp">.env.local</span><span class="fsz">122 B</span>
+                    </div>
+                  </div>
+                  <div class="sum">
+                    <span class="sum-txt"
+                      ><b>2 files · 1.5 KB</b> from
+                      <span class="sum-path">~/Documents/Zeros</span></span
+                    >
+                    <button class="btn right" type="button">
+                      <svg><use href="#i-rotate" /></svg>Rescan
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes">
+            <div class="note">
+              <b>Before:</b> the user supplies the pattern and the app supplies the
+              result. If you don’t know the syntax, you can’t start — and the
+              preview below the box is the only feedback you get.
+            </div>
+            <div class="note fix">
+              <b>After:</b> the app supplies both, pre-ticked. The pattern box still
+              exists under <b>Advanced</b> (A3) for people who prefer it, and the
+              two write to the same setting.
+            </div>
+          </div>
+        </section>
+
+        <!-- B2 ───────────────────────────────────────────── -->
+        <section class="case" id="b2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">B2</span>
+                <span class="tag gap">Divergence</span>
+              </div>
+              <h2>When the project ships a <code>.worktreeinclude</code></h2>
+              <p class="case-copy">
+                A committed <code>.worktreeinclude</code> at the project root wins
+                over anything set in the app — that’s how a whole team gets the same
+                list. The reference implementation dims the textarea to ~16% and
+                floats a sentence over the text you can no longer read, hiding the
+                one thing you opened the pane to learn.
+              </p>
+            </div>
+            <div class="meta">
+              The rule is unchanged: repo file wins, read-only in the app. Only the
+              presentation differs.
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — dimmed and overlaid</div>
+              <div class="frame">
+                <div class="body pad-sm">
+                  <h3 class="pane-title">Files to copy</h3>
+                  <p class="pane-desc">
+                    Zeros will automatically copy these file paths in each new
+                    workspace. <a href="#b2">Learn more ↗</a>
+                  </p>
+                  <div style="position: relative">
+                    <div class="ta" style="opacity: 0.16; user-select: none">
+# Zeros — files to seed into every new worktree
+# ──────────────────────────────────────────────
+#
+# `git worktree add` gives you TRACKED files only.
+# A fresh workspace therefore starts with no .env,</div>
+                    <div
+                      style="
+                        position: absolute;
+                        inset: 0;
+                        display: grid;
+                        place-items: center;
+                        padding: 0 20px;
+                        color: var(--fg2);
+                        font-size: 12px;
+                        text-align: center;
+                      "
+                    >
+                      Using .worktreeinclude from this repository. Remove that file
+                      to edit these patterns here.
+                    </div>
+                  </div>
+                  <div class="sum">
+                    <span class="sum-txt"
+                      >4 files will be copied from
+                      <span class="sum-path">~/Documents/Zeros</span></span
+                    >
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — explain, then show the result</div>
+              <div class="frame">
+                <div class="body pad-sm">
+                  <h3 class="pane-title">Files to copy</h3>
+                  <div class="ban info">
+                    <svg class="bi"><use href="#i-info" /></svg>
+                    <div>
+                      <code>.worktreeinclude</code> is committed to the repo — it
+                      decides this list.
+                    </div>
+                    <button class="lnk" type="button">Open file</button>
+                  </div>
+                  <div class="grp" style="margin-bottom: 0">
+                    <div class="ghead">
+                      <span class="gname">What it copies</span>
+                      <span class="gmeta">4 files · 3.0 KB</span>
+                    </div>
+                    <div class="grow dis">
+                      <span class="cb on"><svg><use href="#i-check" /></svg></span>
+                      <span class="fp">.env</span><span class="fsz">1.4 KB</span>
+                    </div>
+                    <div class="grow dis">
+                      <span class="cb on"><svg><use href="#i-check" /></svg></span>
+                      <span class="fp">.mcp.json</span><span class="fsz">110 B</span>
+                    </div>
+                    <div class="grow dis">
+                      <span class="cb on"><svg><use href="#i-check" /></svg></span>
+                      <span class="fp">.conductor/settings.local.toml</span
+                      ><span class="fsz">340 B</span>
+                    </div>
+                    <div class="grow dis">
+                      <span class="cb on"><svg><use href="#i-check" /></svg></span>
+                      <span class="fp">.conductor/settings.toml</span
+                      ><span class="fsz">1.1 KB</span>
+                    </div>
+                  </div>
+                  <div class="adv">
+                    <div class="adv-head">
+                      <svg><use href="#i-chevron" /></svg>Show patterns
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes">
+            <div class="note">
+              <b>Before:</b> a read-only textarea rendered unreadable, with the
+              resolved file list pushed off-screen. The user learns they can’t edit
+              it, and nothing else.
+            </div>
+            <div class="note fix">
+              <b>After:</b> one sentence a non-engineer can parse, <b>Open file</b>
+              for the person who does want to edit it, and the same resolved list as
+              every other state. The patterns live one click away under
+              <b>Show patterns</b> — not smeared at 16% opacity behind a paragraph.
+            </div>
+          </div>
+        </section>
+
+        <!-- B3 ───────────────────────────────────────────── -->
+        <section class="case" id="b3">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">B3</span>
+                <span class="tag gap">Divergence</span>
+              </div>
+              <h2>A pattern that matches nothing looks identical to one that works</h2>
+              <p class="case-copy">
+                With only a total count, <code>certs/*.pem</code> matching zero
+                files is invisible — the total just reads lower than you expected,
+                if you were counting at all. The failure surfaces days later, when a
+                workspace won’t start.
+              </p>
+            </div>
+            <div class="meta">
+              Per-line counts come from the same preview call; no extra user action.
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — one number for the whole list</div>
+              <div class="frame">
+                <div class="body pad-sm">
+                  <div class="ta">.env*
+certs/*.pem</div>
+                  <div class="sum">
+                    <span class="sum-txt"
+                      >2 files will be copied from
+                      <span class="sum-path">~/Documents/Zeros</span></span
+                    >
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — attributed per line</div>
+              <div class="frame">
+                <div class="body pad-sm">
+                  <div class="ta">.env*
+certs/*.pem</div>
+                  <div class="patlist">
+                    <div class="patrow">
+                      <span class="pcount ok">2</span><span class="pt">.env*</span
+                      ><span class="pm">.env, .env.local</span>
+                    </div>
+                    <div class="patrow">
+                      <span class="pcount err">0</span
+                      ><span class="pt">certs/*.pem</span
+                      ><span class="pm"
+                        >nothing matches — did you mean <code>certs/**</code>?</span
+                      >
+                    </div>
+                  </div>
+                  <div class="sum">
+                    <span class="sum-txt"
+                      ><b>2 files · 1.5 KB</b> from
+                      <span class="sum-path">~/Documents/Zeros</span></span
+                    >
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes one">
+            <div class="note fix">
+              <b>Why <code>certs/*.pem</code> fails:</b> <code>*</code> never crosses
+              a <code>/</code>, so it matches <code>certs/a.pem</code> but not
+              <code>certs/local/a.pem</code>. The hint names the fix rather than
+              leaving the user to re-read the gitignore spec.
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <p class="band">Part C — Edge states</p>
+
+      <div class="catalog">
+        <!-- C1 ───────────────────────────────────────────── -->
+        <section class="case" id="c1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">C1</span>
+                <span class="tag new">Proposed</span>
+              </div>
+              <h2>Nothing to copy</h2>
+              <p class="case-copy">
+                A fresh repo, or one where everything is committed. Say so plainly
+                and confirm the good news — new workspaces will already be complete
+                — rather than rendering an empty box that reads like a bug.
+              </p>
+            </div>
+            <div class="meta">Distinct from “couldn’t check” (C4).</div>
+          </div>
+
+          <div class="frame single">
+            <div class="body">
+              <h3 class="pane-title">
+                <svg><use href="#i-copy" /></svg>Files to copy
+              </h3>
+              <div class="empty">
+                <span class="empty-glyph"
+                  ><svg width="26" height="26"><use href="#i-check" /></svg
+                ></span>
+                <div class="empty-title">Nothing needs copying</div>
+                <div class="empty-desc">
+                  Zeros found no ignored files in this project. New workspaces will
+                  already be complete.
+                </div>
+                <button class="btn" type="button">Add a pattern anyway</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- C2 ───────────────────────────────────────────── -->
+        <section class="case" id="c2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">C2</span>
+                <span class="tag new">Proposed</span>
+              </div>
+              <h2>Too much selected</h2>
+              <p class="case-copy">
+                Fires on total <b>size</b>, not file count. The failure everyone
+                actually hits is one big directory, not many small files — a
+                64-file <code>docs/</code> at 2.3 MB sails under any count cap.
+              </p>
+            </div>
+            <div class="meta">
+              Names the largest match, because that is the one to remove.
+            </div>
+          </div>
+
+          <div class="frame single">
+            <div class="body">
+              <h3 class="pane-title">
+                <svg><use href="#i-copy" /></svg>Files to copy
+              </h3>
+              <div class="grp">
+                <div class="ghead">
+                  <span class="gicon other"><svg><use href="#i-file" /></svg></span>
+                  <span class="gname">Other ignored files</span>
+                  <span class="gmeta">1,240 files · 2.3 GB</span>
+                </div>
+                <div class="grow">
+                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
+                  <span class="fp">node_modules/…</span
+                  ><span class="fsz">2.2 GB</span>
+                </div>
+                <div class="grow">
+                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
+                  <span class="fp">dist/…</span><span class="fsz">96 MB</span>
+                </div>
+                <div class="grow">
+                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
+                  <span class="fp">coverage/lcov.info</span
+                  ><span class="fsz">2.1 MB</span>
+                </div>
+              </div>
+              <div class="sum">
+                <span class="sum-txt"
+                  ><b>1,240 files · 2.3 GB</b> will be copied from
+                  <span class="sum-path">~/Documents/Zeros</span></span
+                >
+                <button class="btn right" type="button">
+                  <svg><use href="#i-rotate" /></svg>Rescan
+                </button>
+              </div>
+              <div class="ban warn toast">
+                <svg class="bi"><use href="#i-warning" /></svg>
+                <div>
+                  <b>That’s a lot to copy.</b> Every new workspace will be slow to
+                  start. Largest match: <code>node_modules/</code> — 1,190 files,
+                  2.2 GB, usually better rebuilt by your setup command.
+                </div>
+                <button class="lnk" type="button">Exclude it</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes">
+            <div class="note fix">
+              <b>Bottom-anchored.</b> The toast sits under the list it is talking
+              about, at the edge of the pane. A banner at the top would push the
+              file rows — the thing the user opened this pane to read — down the
+              screen every time it appears.
+            </div>
+            <div class="note">
+              <b>Advisory, never a block.</b> A user with a genuine reason to copy a
+              large tree can. The warning exists so nobody does it by accident and
+              then wonders why workspace creation got slow.
+            </div>
+          </div>
+        </section>
+
+        <!-- C3 ───────────────────────────────────────────── -->
+        <section class="case" id="c3">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">C3</span>
+                <span class="tag new">Proposed</span>
+              </div>
+              <h2>Scanning</h2>
+              <p class="case-copy">
+                Appears only after ~400&nbsp;ms, and never blanks the list — the
+                previous result stays on screen and dims. A warm scan is
+                milliseconds, so most users will never see this at all.
+              </p>
+            </div>
+            <div class="meta">
+              No skeleton over a result we already have. Retain, don’t replace.
+            </div>
+          </div>
+
+          <div class="frame single">
+            <div class="body pad-sm">
+              <div class="grp" style="opacity: 0.45">
+                <div class="ghead">
+                  <span class="gicon env"><svg><use href="#i-key" /></svg></span>
+                  <span class="gname">Environment &amp; secrets</span>
+                  <span class="gmeta">2 files · 1.5 KB</span>
+                </div>
+                <div class="grow">
+                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
+                  <span class="fp">.env</span><span class="fsz">1.4 KB</span>
+                </div>
+                <div class="grow">
+                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
+                  <span class="fp">backend/.env</span><span class="fsz">122 B</span>
+                </div>
+              </div>
+              <div class="sum">
+                <span class="scanning"
+                  ><svg><use href="#i-loader" /></svg>Scanning
+                  <span class="sum-path" style="color: var(--fg3)"
+                    >~/Documents/Zeros</span
+                  >…</span
+                >
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- C4 ───────────────────────────────────────────── -->
+        <section class="case" id="c4">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">C4</span>
+                <span class="tag new">Proposed</span>
+              </div>
+              <h2>Can’t read the folder</h2>
+              <p class="case-copy">
+                The main checkout moved, was deleted, or sits on an unmounted
+                volume. Never silently show zero files: <b>zero and unknown are
+                different answers</b>, and confusing them tells the user their
+                config is broken when it isn’t.
+              </p>
+            </div>
+            <div class="meta">
+              Backed by <code>complete: false</code> on the preview response.
+            </div>
+          </div>
+
+          <div class="frame single">
+            <div class="body">
+              <h3 class="pane-title">
+                <svg><use href="#i-copy" /></svg>Files to copy
+              </h3>
+              <div class="grp stale">
+                <div class="ghead">
+                  <span class="gicon env"><svg><use href="#i-key" /></svg></span>
+                  <span class="gname">Environment &amp; secrets</span>
+                  <span class="gmeta">2 files · 1.5 KB</span>
+                </div>
+                <div class="grow">
+                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
+                  <span class="fp">.env</span><span class="fsz">1.4 KB</span>
+                </div>
+                <div class="grow">
+                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
+                  <span class="fp">backend/.env</span><span class="fsz">122 B</span>
+                </div>
+              </div>
+              <div class="ban warn toast">
+                <svg class="bi"><use href="#i-folder-x" /></svg>
+                <div>
+                  <b>Couldn’t check this project.</b>
+                  <code>~/Documents/Zeros</code> isn’t readable right now, so this
+                  list may be out of date. Your selection is saved and will still be
+                  used.
+                </div>
+                <button class="lnk" type="button">Try again</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes">
+            <div class="note fix">
+              <b>The saved list is untouched.</b> A failed scan is a display
+              problem, not a config problem — nothing is cleared, and the next
+              workspace create still seeds from it.
+            </div>
+            <div class="note">
+              <b>Retain, don’t clear.</b> The last confirmed list stays on screen,
+              dimmed, with the toast underneath saying it might be stale. Blanking
+              it would turn “we couldn’t look” into “there is nothing”.
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <p class="band">Part D — Behind the pane</p>
+
+      <div class="catalog">
+        <!-- D1 ───────────────────────────────────────────── -->
+        <section class="case" id="d1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">D1</span>
+                <span class="tag ship">Backend landed</span>
+              </div>
+              <h2>Where the value lives</h2>
+              <p class="case-copy">
+                <b>The pane is per-repo.</b> It edits exactly one thing: this
+                project’s own list. There is no global/per-project scope switch —
+                “which files does this project need” has no sensible cross-project
+                answer, and a toggle would only make people wonder which side they
+                were looking at.
+              </p>
+            </div>
+            <div class="meta">
+              Precedence is resolved in the engine; the pane reports which source
+              won and edits only its own.
+            </div>
+          </div>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Priority</th>
+                <th>Source</th>
+                <th>Scope</th>
+                <th>Editable here?</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>1 — highest</td>
+                <td><code>.worktreeinclude</code> at the project root</td>
+                <td>Committed. Whole team, every machine.</td>
+                <td>Read-only + <b>Open file</b> (B2)</td>
+              </tr>
+              <tr>
+                <td>2 — what this pane writes</td>
+                <td>
+                  <code>file_include_globs</code> in
+                  <code>.zeros/settings.local.toml</code>
+                </td>
+                <td>This project, this Mac. Gitignored.</td>
+                <td><b>Yes — the only editable source</b></td>
+              </tr>
+              <tr>
+                <td>3</td>
+                <td>
+                  <code>file_include_globs</code> in
+                  <code>~/.zeros/settings.toml</code>
+                </td>
+                <td>Every project, this Mac.</td>
+                <td>No — hand-edited TOML only</td>
+              </tr>
+              <tr>
+                <td>4 — fallback</td>
+                <td>Built-in default <code>.env*</code></td>
+                <td>Everywhere, until you change something.</td>
+                <td>—</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="notes" style="margin-top: 18px">
+            <div class="note">
+              <b>Set anything and <code>.env*</code> stops applying.</b> That is why
+              A1 pre-ticks the env files it finds: turning the invisible default into
+              visible, explicit rows is what stops someone losing their
+              <code>.env</code> the first time they open this pane.
+            </div>
+            <div class="note">
+              <b>Row 3 stays readable, not writable.</b> The engine still resolves a
+              hand-edited global list, and the pane labels it as inherited when it
+              wins — but saving here always writes this project’s file, so a
+              per-project edit can never silently change every other repo.
+            </div>
+            <div class="note" style="grid-column: 1 / -1">
+              <b>Writes go through the existing settings path.</b>
+              <code>settings.write</code> with
+              <code>{ file_include_globs: [...] }</code> against the
+              <code>repo-local</code> layer; <code>null</code> clears this
+              project’s list and falls back to whatever is below it. No new write
+              path, no new file format.
+            </div>
+          </div>
+        </section>
+
+        <!-- D2 ───────────────────────────────────────────── -->
+        <section class="case" id="d2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">D2</span>
+                <span class="tag ship">Backend landed</span>
+              </div>
+              <h2>What the UI needs from the engine</h2>
+              <p class="case-copy">
+                One read call. Every state in Parts A–C is a render of this one
+                response — including the warning pills, the per-line counts and the
+                “couldn’t check” case.
+              </p>
+            </div>
+            <div class="meta">
+              <code>filesToCopy.preview</code> — desktop-only; it expands patterns
+              into real gitignored paths.
+            </div>
+          </div>
+
+          <pre class="toml"><span class="tc">// engine op — one call renders the whole pane</span>
+<span class="tk">filesToCopy.preview</span> { repoRoot, patterns? } →
+
+  <span class="tk">source</span>         <span class="ts">"worktreeinclude" | "file_include_globs" | "default"</span>
+  <span class="tk">sourceLayer</span>    <span class="ts">"repo-local" | "user" | "team" | …</span>   <span class="tc">// labels an inherited list</span>
+  <span class="tk">sourcePath</span>     <span class="tc">// absolute path of .worktreeinclude, when it won</span>
+  <span class="tk">sourceText</span>     <span class="tc">// its raw text, for "Show patterns" (B2)</span>
+  <span class="tk">rootPath</span>       <span class="tc">// the folder files are copied FROM</span>
+  <span class="tk">patterns</span>       [{ raw, negate, line, <span class="ts">matchCount</span> }]  <span class="tc">// A3 · B3</span>
+  <span class="tk">files</span>          [{ path, bytes, <span class="ts">ignored</span> }]           <span class="tc">// A1 · A2</span>
+  <span class="tk">trackedMatches</span> [ path ]                            <span class="tc">// "Already in every workspace"</span>
+  <span class="tk">totalCount</span> / <span class="tk">totalBytes</span> / <span class="tk">truncated</span>              <span class="tc">// C2</span>
+  <span class="tk">warnings</span>       [ string ]
+  <span class="tk">complete</span>       <span class="ts">true | false</span>                        <span class="tc">// false → C4, never "0 files"</span></pre>
+
+          <div class="notes" style="margin-top: 18px">
+            <div class="note">
+              <b>Drafts are previewable.</b> Pass <code>patterns</code> to preview
+              the unsaved textarea — including an empty array, which means “the box
+              is cleared”, not “use the saved list”. A committed
+              <code>.worktreeinclude</code> ignores the draft, because previewing
+              something create won’t use would be a lie.
+            </div>
+            <div class="note">
+              <b>Desktop-only, deliberately.</b> The op expands patterns into the
+              real on-disk set of gitignored paths plus sizes — exactly what the file
+              tree filters out for paired devices. A remote pane would need its own
+              filtered shape, not this one.
+            </div>
+          </div>
+        </section>
+
+        <!-- D3 ───────────────────────────────────────────── -->
+        <section class="case" id="d3">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">D3</span>
+                <span class="tag context">Needs a decision</span>
+              </div>
+              <h2>Open questions</h2>
+              <p class="case-copy">
+                Four calls I’d rather make with you than for you. Each one changes
+                the markup above, so they’re cheap now and expensive later.
+                (<i>Scope</i> is settled: the pane is per-repo, no global toggle.)
+              </p>
+            </div>
+            <div class="meta">Answers here unblock the React implementation.</div>
+          </div>
+
+          <ul class="qlist">
+            <li>
+              <b>Does simple mode write filenames or patterns?</b> Ticking
+              <code>.env</code> and <code>.env.local</code> could store the two exact
+              names, or collapse to <code>.env*</code>. Exact names are honest and
+              predictable; <code>.env*</code> keeps working when you add
+              <code>.env.staging</code> next week. Proposal: store exact names, plus
+              a one-click <i>“copy every .env file, including new ones”</i> chip that
+              swaps in the pattern.
+            </li>
+            <li>
+              <b>Auto-tick on first open, or ship the built-in default until
+              touched?</b> Auto-ticking means the rows shown are the rows used. Not
+              auto-ticking means the pane can be opened and closed with zero risk.
+              A1 auto-ticks and marks them <b>Recommended</b>.
+            </li>
+            <li>
+              <b>Is <code>.worktreeinclude</code> creatable from the app?</b> A
+              <i>“Share this list with the team”</i> button that writes the file
+              would be genuinely useful — and would immediately make the setting
+              read-only, which needs saying out loud <i>before</i> the click.
+            </li>
+            <li>
+              <b>Where does this pane live?</b> Rendered above as its own
+              <b>Files</b> tab on the project page. The alternative is folding it
+              into <b>Paths</b>, which already edits per-project, this-Mac settings —
+              at the cost of burying it.
+            </li>
+          </ul>
+        </section>
+      </div>
+
+      <p class="footer-note">
+        Visual design reference for “Files to copy”. Checkboxes, pills and buttons
+        demonstrate placement, hierarchy and the shared warning language; nothing in
+        this artifact copies a file. Colors, radii and type are pulled from Zeros
+        Foundation (Zeros Shade dark + Light) — toggle the theme in the header to
+        check both. The engine work behind Part D has landed; Parts A–C are the
+        renderer, still to build.
+      </p>
+    </main>
+
+    <script>
+      (function () {
+        var root = document.documentElement;
+        var btn = document.getElementById("themeBtn");
+        var label = document.getElementById("themeLabel");
+        btn.addEventListener("click", function () {
+          var toLight = root.getAttribute("data-theme") !== "light";
+          root.setAttribute("data-theme", toLight ? "light" : "dark");
+          label.textContent = toLight ? "Dark preview" : "Light preview";
+        });
+      })();
+    </script>
+  </body>
+</html>

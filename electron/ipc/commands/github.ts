@@ -22,6 +22,7 @@ import {
   verifyGithubToken,
 } from "../../../src/engine/git";
 import { githubCredentialStore } from "../../github-auth-runtime";
+import { GithubAppClientError } from "../../github-app-client";
 import { GithubAppFlowError } from "../../github-app-controller";
 import {
   beginGithubAppConnection,
@@ -357,6 +358,29 @@ export const ghPatConnect: CommandHandler = async (args) => {
   return { login, snapshot: await getGithubAuthSnapshot() };
 };
 
+/** Compact, secret-free account of what the control plane actually answered,
+ * plus the remediation that differs between two states the user-facing copy
+ * deliberately merges. Renders only our own error envelope — the bounded
+ * operator `message`, `code`, and `status` — never headers, tokens, or nonces. */
+function describeFlowCause(cause: unknown): string {
+  if (!(cause instanceof GithubAppClientError)) {
+    return cause instanceof Error ? `(${cause.name}: ${cause.message})` : "";
+  }
+  const remedy =
+    cause.status === 404 && cause.code === "not_found"
+      ? " — this control plane serves no /v1/github/* routes at all; the " +
+        "backend is behind main, redeploy it"
+      : cause.code === "github_not_configured"
+        ? " — the control plane is current but no GitHub App is registered " +
+          "for it; set GITHUB_APP_ID / _CLIENT_ID / _CLIENT_SECRET / _SLUG " +
+          "and GITHUB_OAUTH_CALLBACK_URL"
+        : cause.status === 404
+          ? " — a 404 that did not come from our router; check the " +
+            "control-plane origin and any proxy in front of it"
+          : "";
+  return `(control plane: HTTP ${cause.status} ${cause.code}${remedy})`;
+}
+
 /** Electron drops custom error properties and prefixes the renderer's rejection
  * with `Error invoking remote method …`, so a GitHub App failure is re-thrown as
  * a `NativeCommandError`: its reason travels in the error name (the one field
@@ -367,6 +391,16 @@ function throwGithubAppCommandError(
   fallback?: string,
 ): never {
   if (error instanceof GithubAppFlowError) {
+    // The user-facing sentence is deliberately vague about the control plane;
+    // the log must not be. Without this the ONLY record of a failed connect was
+    // Electron's own "Error occurred in handler for 'zeros:invoke'" line, which
+    // repeats the already-mapped message — so "isn't available yet" read
+    // identically whether the backend was undeployed (404), deployed without a
+    // registration (503), or behind a proxy answering someone else's 404.
+    console.error(
+      `[Zeros] ${context} failed: ${error.reason}`,
+      describeFlowCause(error.cause),
+    );
     throw new NativeCommandError(error.message, error.reason);
   }
   // Not a flow failure. Handlers that own their whole error surface pass a
