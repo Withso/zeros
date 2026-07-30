@@ -3,6 +3,8 @@ import { describe, it, expect } from "vitest";
 import { previewFor } from "../git-defaults-section";
 import { BRANCH_PREFIX_TYPES } from "../../../engine/settings/schema";
 import { normalizeBranchPrefix } from "../../lib/branch-name";
+import { cn } from "../../ui/cn";
+import { badgeVariants } from "../../ui/primitives/badge";
 
 // The Git pane's preview line is the only place the UI states what a setting
 // will DO. If it disagrees with the engine, it is worse than no preview — the
@@ -146,6 +148,37 @@ describe("previewFor", () => {
     expect(previewFor("custom", "", null)).toBe("Enter a prefix.");
     expect(previewFor("custom", "   ", null)).toBe("Enter a prefix.");
     expect(previewFor("custom", "", null)).not.toContain("separated by");
+  });
+});
+
+// The "GitHub username <login>" row renders the login as a `neutral` badge.
+// That variant overrides the cva base's type scale, and cva CONCATENATES — so
+// the override only lands if the result goes through tailwind-merge. Without
+// it both classes reach the DOM, and at equal specificity the later RULE wins:
+// Tailwind emits `.text-xs` after `.text-sm`, so the chip silently paints at
+// the base 13px semibold the variant exists to avoid. None of that shows up in
+// the class attribute's ORDER, which is why this asserts on the resolved set.
+describe("the neutral badge chip", () => {
+  const sizes = (cls: string) =>
+    cls.split(/\s+/).filter((c) => /^text-(xs|sm|base|lg)$/.test(c));
+  const weights = (cls: string) =>
+    cls
+      .split(/\s+/)
+      .filter((c) => /^font-(normal|medium|semibold|bold)$/.test(c));
+
+  it("resolves to exactly one type size and weight once merged", () => {
+    const merged = cn(badgeVariants({ variant: "neutral" }));
+    expect(sizes(merged)).toEqual(["text-sm"]);
+    expect(weights(merged)).toEqual(["font-normal"]);
+  });
+
+  it("is why the raw cva call cannot be used at a call site", () => {
+    // Pins the hazard itself. If a future base/variant change ever made the
+    // raw call unambiguous, this failing is the signal to revisit the note at
+    // the call site — not a bug.
+    const raw = badgeVariants({ variant: "neutral" });
+    expect(sizes(raw).length).toBeGreaterThan(1);
+    expect(weights(raw).length).toBeGreaterThan(1);
   });
 });
 

@@ -33,6 +33,7 @@ import {
   useSettingsLayer,
   useSyncedDraft,
 } from "../settings/use-settings";
+import { cn } from "../ui/cn";
 import { badgeVariants } from "../ui/primitives/badge";
 import { toast } from "../ui/primitives/elements";
 import { Input } from "../ui/primitives/input";
@@ -283,10 +284,21 @@ function labelFor(
     // rather than <Badge> because Badge renders a <div> and this sits inside
     // Radix's radio <button> — phrasing content only, so a div there is invalid
     // nesting. The styling is still the primitive's, which is what Rule 5 asks.
+    //
+    // Through `cn`, exactly as <Badge> itself does it, and that is load-bearing
+    // rather than habit: cva CONCATENATES, so the base's `text-xs font-semibold`
+    // and the neutral variant's `text-sm font-normal` both reach the class
+    // attribute. Order within the attribute decides nothing — at equal
+    // specificity the later RULE in the stylesheet wins, and Tailwind emits
+    // `.text-xs` after `.text-sm`, so the raw call painted this chip at exactly
+    // the 13px semibold the variant exists to avoid. tailwind-merge is what
+    // resolves the pair.
     return login ? (
       <span className="inline-flex items-center gap-1.5">
         GitHub username
-        <span className={badgeVariants({ variant: "neutral" })}>{login}</span>
+        <span className={cn(badgeVariants({ variant: "neutral" }))}>
+          {login}
+        </span>
       </span>
     ) : (
       "GitHub username"
