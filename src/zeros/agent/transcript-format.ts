@@ -147,8 +147,11 @@ function fenceFor(body: string): string {
 
 /** Prefix of `s` at most `max` code units long, never splitting a surrogate
  *  pair — a lone surrogate is ill-formed and the clipboard rewrites it to
- *  U+FFFD. */
-function sliceSafe(s: string, max: number): string {
+ *  U+FFFD (in the DOM it paints as a tofu box).
+ *
+ *  Exported because the pill label truncates too (transcriptPillLabel), and it
+ *  had this exact bug: one definition beats a second copy that drifts. */
+export function sliceSafe(s: string, max: number): string {
   if (s.length <= max) return s;
   const c = s.charCodeAt(max - 1);
   return s.slice(0, c >= 0xd800 && c <= 0xdbff ? max - 1 : max);
@@ -482,6 +485,28 @@ function safeRender(m: AgentMessage, ctx: Ctx, depth: Depth = 0): string {
   }
 }
 
+/** The same guarantee, for the CONCISE path.
+ *
+ *  Concise assembles its sections by hand instead of going through
+ *  renderMessage, so it did not inherit safeRender's protection: one legacy
+ *  row with a missing `text` threw out of formatTranscript entirely — losing
+ *  the whole transcript, not one message — while the same chat rendered fine
+ *  in full mode. That asymmetry is what made it worth fixing rather than
+ *  leaving: concise is the DEFAULT click path (chat-transcript-pills passes
+ *  "concise" from a plain click), so the failure landed on the gesture users
+ *  actually make, and "Couldn't read that transcript" for a chat whose full
+ *  transcript copies fine is an unexplainable state to be in.
+ *
+ *  Per PART rather than per turn, matching full mode: a bad answer must not
+ *  also swallow the prompt that asked for it. */
+function safeSection(render: () => string, what: string): string {
+  try {
+    return render();
+  } catch {
+    return `_(unreadable ${what} skipped)_`;
+  }
+}
+
 /** One top-level message → a Markdown section, or "" to skip it. */
 function renderMessage(m: AgentMessage, ctx: Ctx, depth: Depth): string {
   switch (m.kind) {
@@ -607,7 +632,8 @@ export function formatTranscript(
     const sections: string[] = [];
     for (const turn of groupMessagesIntoTurns(top)) {
       const parts: string[] = [];
-      if (turn.userPrompt) parts.push(renderUser(turn.userPrompt));
+      const prompt = turn.userPrompt;
+      if (prompt) parts.push(safeSection(() => renderUser(prompt), "prompt"));
       // Settled semantics on purpose: even the streaming turn should
       // contribute whatever answer it has already produced. Each message
       // renders through renderText so a role:"system" row keeps its own
@@ -620,7 +646,7 @@ export function formatTranscript(
             typeof m.text === "string" &&
             m.text.trim().length > 0,
         )
-        .map((m) => renderText(m, 0))
+        .map((m) => safeSection(() => renderText(m, 0), "message"))
         .join("\n\n");
       if (answer) parts.push(answer);
       if (parts.length === 0) continue;

@@ -76,8 +76,14 @@ export const AttachmentNode = Node.create({
       mimeType: { default: "" },
       kind: { default: "image" },
       // Caller-owned identity for a SYNTHESIZED attachment — today only chat
-      // transcripts, as `transcript:<chatId>:<mode>`. Empty for anything the
-      // user pasted, dropped or picked.
+      // transcripts, as `transcript:<chatId>` (transcriptSourceKey). Empty for
+      // anything the user pasted, dropped or picked.
+      //
+      // The mode is deliberately NOT in the key: one chat contributes at most
+      // one attachment, so choosing "Attach full" for a chat whose concise
+      // transcript is already staged REPLACES that chip rather than adding a
+      // rival. Putting `:<mode>` here would give the two modes distinct keys
+      // and quietly turn the swap into a second chip.
       //
       // It lives on the node rather than beside it because the doc is the only
       // source of truth for what is staged: the transcript pill reads this to

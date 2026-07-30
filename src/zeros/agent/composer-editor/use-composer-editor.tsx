@@ -196,22 +196,33 @@ export interface ComposerEditorApi {
   };
 }
 
-/** Delete the attachment node carrying `sourceKey` (and drop its bytes).
- *  Returns whether anything was removed. The search + ordering it depends on
- *  live in attachment-keys.ts, where they are unit-testable without a DOM. */
-function removeBySourceKey(
-  ed: Editor,
-  sourceKey: string,
-  store: Map<string, ComposerAttachment>,
-): boolean {
+/** Delete the attachment node carrying `sourceKey`. Returns whether anything
+ *  was removed. The search + ordering it depends on live in
+ *  attachment-keys.ts, where they are unit-testable without a DOM.
+ *
+ *  The NODE goes; the bytes deliberately stay in the side store. Deleting them
+ *  here made the removal half-undoable: the node deletion rides the UndoRedo
+ *  plugin and ⌘Z brings the chip back, but a Map eviction does not, so the
+ *  restored chip resolved to nothing. `serializeComposer` drops an attachment
+ *  it cannot look up while still emitting its segment, so the send omitted the
+ *  file with the sent bubble still drawing the chip — and because the
+ *  attachment never reached `encodeAttachments`, not even its `skipped`
+ *  channel could report it.
+ *
+ *  This is also what the chip's own × already does (pills.tsx calls
+ *  `deleteNode()` alone), so the two removal routes now agree. Orphans are
+ *  bounded and reaped wholesale by `clear()` (every send) and `setContent()`
+ *  (every draft/edit seed), which is the same lifetime they have always had.
+ *
+ *  Exported for the test, which drives it against a real (DOM-free)
+ *  EditorState + history plugin — the undo round trip is the whole point and
+ *  it cannot be observed from the position helpers alone. */
+export function removeBySourceKey(ed: Editor, sourceKey: string): boolean {
   const hits = findAttachmentsBySourceKey(ed.state.doc, sourceKey);
   if (hits.length === 0) return false;
   const tr = ed.state.tr;
   // Already sorted highest-position-first — see findAttachmentsBySourceKey.
-  for (const hit of hits) {
-    tr.delete(hit.from, hit.to);
-    store.delete(hit.attachmentId);
-  }
+  for (const hit of hits) tr.delete(hit.from, hit.to);
   ed.view.dispatch(tr);
   return true;
 }
@@ -706,7 +717,7 @@ export function useComposerEditor(
       if (!ed || ed.isDestroyed) return null;
       // Replace-in-place: attaching the full transcript of a chat whose
       // concise one is already staged must swap the chip, not add a rival.
-      removeBySourceKey(ed, input.sourceKey, attachmentMapRef.current);
+      removeBySourceKey(ed, input.sourceKey);
       const v = optsRef.current;
       const id = `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const mimeType = "text/plain";
@@ -759,7 +770,7 @@ export function useComposerEditor(
     (sourceKey: string) => {
       const ed = editorRef.current;
       if (!ed || ed.isDestroyed) return;
-      if (!removeBySourceKey(ed, sourceKey, attachmentMapRef.current)) return;
+      if (!removeBySourceKey(ed, sourceKey)) return;
       setIsEmpty(ed.isEmpty);
       syncSourceKeys(ed);
     },

@@ -18,6 +18,7 @@
 import { loadFullTranscript } from "./agent-history-client";
 import {
   formatTranscript,
+  sliceSafe,
   type TranscriptMeta,
   type TranscriptMode,
 } from "./transcript-format";
@@ -65,8 +66,11 @@ export function transcriptPillLabel(
   if (title && title !== UNTITLED_TITLE) return title;
   const prompt = (summary.summary ?? "").trim().replace(/\s+/g, " ");
   if (!prompt) return "Untitled chat";
+  // sliceSafe, not slice: a first prompt that opens with an emoji is ordinary,
+  // and cutting at a raw code-unit boundary leaves a lone high surrogate that
+  // paints as a tofu box right before the ellipsis.
   return prompt.length > LABEL_FALLBACK_MAX
-    ? `${prompt.slice(0, LABEL_FALLBACK_MAX).trimEnd()}…`
+    ? `${sliceSafe(prompt, LABEL_FALLBACK_MAX).trimEnd()}…`
     : prompt;
 }
 
@@ -223,9 +227,20 @@ export function clearTranscriptCache(): void {
   cache.length = 0;
 }
 
-/** Whether a snapshot is already resolved and in hand — lets the click path
- *  skip its "pending" state entirely when the hover already warmed it. */
-export function hasWarmTranscript(
+/** Whether this exact revision has an entry in the cache — IN FLIGHT OR
+ *  RESOLVED. The cache deliberately holds promises (see `cache`), so this
+ *  cannot answer "is it in hand"; it answers "will the next read hit the
+ *  engine".
+ *
+ *  A TEST SEAM, hence the name. Cache policy — MRU touch, the two-entry cap,
+ *  the superseded-revision eviction, and not caching a rejection — is
+ *  otherwise only observable as an absence of engine calls, and asserting on
+ *  a mock's call count describes the mock rather than the policy. There is
+ *  deliberately no production caller: an earlier draft had the click path skip
+ *  its pending state on a warm hit, which was wrong for exactly the reason
+ *  above (a shared in-flight promise reads as warm), and the race is now
+ *  closed properly by handleSend awaiting `transcriptAttachesRef`. */
+export function hasCachedTranscriptForTesting(
   chatId: string,
   mode: TranscriptMode,
   lastMessageAt: number,

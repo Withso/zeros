@@ -15,6 +15,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { loadPersistedDrafts, schedulePersistDrafts } from "../persist-composer-drafts";
+import { editSeedSource } from "../../agent/edit-seed";
 import type { WorkspaceState } from "../store";
 
 const KEY = "zeros:composer-drafts:v1";
@@ -223,5 +224,66 @@ describe("persist-composer-drafts", () => {
     const loaded = loadPersistedDrafts();
     expect(loaded.chats["chat-1"].text).toBe("prompt");
     expect(loaded.chats["chat-1"].attachments).toEqual([]);
+  });
+
+  // Closing the loop between the two halves. Degrading is only non-destructive
+  // if the READER honours what the write kept — and the edit path did not: it
+  // consulted `json` alone and, finding it nulled, re-seeded the composer from
+  // the ORIGINAL message. The user's rewrite was not merely stripped of its
+  // chips, it was replaced by the words they were editing away from.
+  it("leaves a degraded EDIT stash restorable from its text", async () => {
+    installStorage({ maxBytes: 2_000 });
+    schedulePersistDrafts({
+      chatComposerDrafts: {},
+      editComposerDrafts: {
+        "chat-1:msg-1": {
+          text: "my careful rewrite",
+          newAttachments: [],
+          keptOriginals: [
+            {
+              name: "shot.png",
+              mimeType: "image/png",
+              kind: "image",
+              thumbnailUri: `data:image/png;base64,${"A".repeat(60_000)}`,
+            },
+          ],
+          json: { type: "doc" },
+        },
+      },
+    } as unknown as WorkspaceState);
+    await flush();
+
+    const stash = loadPersistedDrafts().edits["chat-1:msg-1"];
+    // The write dropped the document along with the bytes, as it must — the
+    // attachment nodes in it would restore chips nothing can resolve.
+    expect(stash.json).toBeNull();
+    expect(stash.text).toBe("my careful rewrite");
+    // …so the reader has to fall to the text, not through to the original.
+    expect(editSeedSource(stash)).toBe("stash-text");
+  });
+
+  it("still prefers the document when the write was not degraded", async () => {
+    installStorage();
+    schedulePersistDrafts({
+      chatComposerDrafts: {},
+      editComposerDrafts: {
+        "chat-1:msg-1": {
+          text: "my careful rewrite",
+          newAttachments: [],
+          keptOriginals: [],
+          json: { type: "doc", content: [] },
+        },
+      },
+    } as unknown as WorkspaceState);
+    await flush();
+
+    expect(editSeedSource(loadPersistedDrafts().edits["chat-1:msg-1"])).toBe(
+      "stash-json",
+    );
+  });
+
+  it("falls to the original message only when there is nothing to restore", () => {
+    expect(editSeedSource(null)).toBe("original");
+    expect(editSeedSource({ text: "", json: null })).toBe("original");
   });
 });

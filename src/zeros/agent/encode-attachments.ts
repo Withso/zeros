@@ -68,6 +68,25 @@ export function textAttachmentBlock(name: string, body: string): string {
   return `<file name="${name.replace(/"/g, "'")}">\n${body}\n</file>`;
 }
 
+/** Hand `skipped` to the user, one warning per attachment.
+ *
+ *  Lives beside the producer, and takes the notifier rather than importing
+ *  one, so the wording is defined once and stays testable without a toast
+ *  host. `skipped` is only worth returning if EVERY send path reports it, and
+ *  for a while only `handleSend` did: edit-resubmit and the queued-edit save
+ *  both destructured around it, so re-sending a message whose transcript chip
+ *  could not be reconstructed dropped the attachment AND said nothing — the
+ *  exact silent drop this module was extracted to end.
+ *
+ *  Callers pass `toast.warning`. Not `toast.error`: the prompt itself did
+ *  send, and everything else on it arrived. */
+export function reportSkippedAttachments(
+  skipped: EncodedAttachments["skipped"],
+  warn: (message: string) => void,
+): void {
+  for (const s of skipped) warn(`"${s.name}" wasn't sent — ${s.reason}.`);
+}
+
 /** Materialize staged attachments into ContentBlocks + sent-bubble metadata.
  *
  *  Invalid attachments are skipped. `agent-attachments.ts` documents that

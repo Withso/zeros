@@ -14,13 +14,18 @@ const formatTranscript = vi.fn();
 vi.mock("../agent-history-client", () => ({
   loadFullTranscript: (...a: unknown[]) => loadFullTranscript(...a),
 }));
-vi.mock("../transcript-format", () => ({
+// Only formatTranscript is stubbed — the cache tests need to count engine
+// walks without formatting anything. `sliceSafe` stays REAL: the pill label
+// truncates through it, and a stub there would let a surrogate-splitting
+// regression pass unnoticed, which is the bug it was shared to fix.
+vi.mock("../transcript-format", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../transcript-format")>()),
   formatTranscript: (...a: unknown[]) => formatTranscript(...a),
 }));
 
 import {
   clearTranscriptCache,
-  hasWarmTranscript,
+  hasCachedTranscriptForTesting,
   loadTranscriptSnapshot,
   splitTranscriptPills,
   transcriptFileName,
@@ -65,6 +70,27 @@ describe("transcriptPillLabel", () => {
       summary: "abcdefghij abcdefghij abcdefghij abcdefg hij",
     });
     expect(clipped.endsWith(" …")).toBe(false);
+  });
+
+  it("does not cut an emoji in half at the clip boundary", () => {
+    // An emoji is two code units, so a raw slice at the 40-char boundary can
+    // land between them and leave a lone high surrogate — ill-formed, and the
+    // DOM paints it as a tofu box immediately before the ellipsis. Opening a
+    // prompt with an emoji is ordinary, so this is reachable, not exotic.
+    const label = transcriptPillLabel({
+      title: "",
+      summary: `${"x".repeat(39)}😀 and then some more words`,
+    });
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(label)).toBe(false);
+    expect(label).toBe(`${"x".repeat(39)}…`);
+  });
+
+  it("keeps a whole emoji when the pair fits inside the budget", () => {
+    const label = transcriptPillLabel({
+      title: "",
+      summary: `${"x".repeat(38)}😀 and then some more words`,
+    });
+    expect(label).toBe(`${"x".repeat(38)}😀…`);
   });
 
   it("never returns an empty label", () => {
@@ -202,7 +228,7 @@ describe("loadTranscriptSnapshot", () => {
 
   it("serves a warm entry without touching the engine", async () => {
     await loadTranscriptSnapshot(input());
-    expect(hasWarmTranscript("c1", "concise", 100)).toBe(true);
+    expect(hasCachedTranscriptForTesting("c1", "concise", 100)).toBe(true);
     await loadTranscriptSnapshot(input());
     expect(loadFullTranscript).toHaveBeenCalledTimes(1);
   });
@@ -213,7 +239,7 @@ describe("loadTranscriptSnapshot", () => {
     await loadTranscriptSnapshot(input({ lastMessageAt: 100 }));
     await loadTranscriptSnapshot(input({ lastMessageAt: 200 }));
     expect(loadFullTranscript).toHaveBeenCalledTimes(2);
-    expect(hasWarmTranscript("c1", "concise", 100)).toBe(false);
+    expect(hasCachedTranscriptForTesting("c1", "concise", 100)).toBe(false);
   });
 
   it("caches the two modes separately", async () => {
@@ -228,9 +254,9 @@ describe("loadTranscriptSnapshot", () => {
     await loadTranscriptSnapshot(input({ chatId: "a" }));
     await loadTranscriptSnapshot(input({ chatId: "b" }));
     await loadTranscriptSnapshot(input({ chatId: "c" }));
-    expect(hasWarmTranscript("a", "concise", 100)).toBe(false);
-    expect(hasWarmTranscript("b", "concise", 100)).toBe(true);
-    expect(hasWarmTranscript("c", "concise", 100)).toBe(true);
+    expect(hasCachedTranscriptForTesting("a", "concise", 100)).toBe(false);
+    expect(hasCachedTranscriptForTesting("b", "concise", 100)).toBe(true);
+    expect(hasCachedTranscriptForTesting("c", "concise", 100)).toBe(true);
   });
 
   it("keeps the actively-hovered chat warm when its neighbour is touched", async () => {
@@ -239,8 +265,8 @@ describe("loadTranscriptSnapshot", () => {
     await loadTranscriptSnapshot(input({ chatId: "a" })); // re-hover a
     await loadTranscriptSnapshot(input({ chatId: "c" }));
     // 'b' is the least recently used, so it goes — not 'a'.
-    expect(hasWarmTranscript("a", "concise", 100)).toBe(true);
-    expect(hasWarmTranscript("b", "concise", 100)).toBe(false);
+    expect(hasCachedTranscriptForTesting("a", "concise", 100)).toBe(true);
+    expect(hasCachedTranscriptForTesting("b", "concise", 100)).toBe(false);
   });
 
   it("a streaming chat's churn does not evict the chat beside it", async () => {
@@ -257,15 +283,15 @@ describe("loadTranscriptSnapshot", () => {
       ...input({ chatId: "live" }),
       lastMessageAt: 20,
     });
-    expect(hasWarmTranscript("stable", "concise", 1)).toBe(true);
-    expect(hasWarmTranscript("live", "concise", 10)).toBe(false);
-    expect(hasWarmTranscript("live", "concise", 20)).toBe(true);
+    expect(hasCachedTranscriptForTesting("stable", "concise", 1)).toBe(true);
+    expect(hasCachedTranscriptForTesting("live", "concise", 10)).toBe(false);
+    expect(hasCachedTranscriptForTesting("live", "concise", 20)).toBe(true);
   });
 
   it("does not cache a failed read, so retry can actually retry", async () => {
     loadFullTranscript.mockRejectedValueOnce(new Error("engine down"));
     await expect(loadTranscriptSnapshot(input())).rejects.toThrow("engine down");
-    expect(hasWarmTranscript("c1", "concise", 100)).toBe(false);
+    expect(hasCachedTranscriptForTesting("c1", "concise", 100)).toBe(false);
     await expect(loadTranscriptSnapshot(input())).resolves.toMatchObject({
       text: "TEXT",
     });

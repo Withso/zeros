@@ -164,8 +164,66 @@ describe("loadFullTranscript", () => {
     const { complete } = await loadFullTranscript("chat1");
 
     expect(complete).toBe(false);
-    // 200-page backstop: 1 initial window + 199 older pages.
-    expect(mocks.bridgeMessageWindowOlder).toHaveBeenCalledTimes(199);
+    // 200-page backstop: 1 initial window + 199 older pages, then the one-row
+    // probe that decides `complete`. Here it comes back non-empty, so the
+    // partial report is the true one.
+    expect(mocks.bridgeMessageWindowOlder).toHaveBeenCalledTimes(200);
+    expect(mocks.bridgeMessageWindowOlder.mock.calls.at(-1)?.[2]).toBe(1);
+  });
+
+  // A bound stopping the walk is not the same as history being left behind,
+  // and conflating them told users a whole transcript was partial. A
+  // tool-heavy chat reaches the 4 MB budget INSIDE one page — a page is up to
+  // 1000 rows and a single Read result can be 100 KB — so this is the ordinary
+  // large chat, not a corner case.
+  describe("the completeness probe", () => {
+    /** 40 rows × ~120 KB — over the 4 MB budget, in a single page. */
+    const fatPage = () =>
+      Array.from({ length: 40 }, (_, i) => ({
+        msgId: `f-${i}`,
+        kind: "text",
+        payload: JSON.stringify({
+          id: `f-${i}`,
+          kind: "text",
+          role: "agent",
+          text: "x".repeat(120_000),
+          createdAt: i,
+        }),
+        createdAt: i,
+      }));
+
+    it("reports COMPLETE when the budget trips but nothing older exists", async () => {
+      mocks.bridgeMessageWindow.mockResolvedValue(fatPage());
+      mocks.bridgeMessageWindowOlder.mockResolvedValue([]);
+
+      const { messages, complete } = await loadFullTranscript("chat1");
+
+      expect(messages).toHaveLength(40);
+      expect(complete).toBe(true);
+      // One probe, for ONE row — not another multi-megabyte page to learn a
+      // single bit.
+      expect(mocks.bridgeMessageWindowOlder).toHaveBeenCalledTimes(1);
+      expect(mocks.bridgeMessageWindowOlder.mock.calls[0][2]).toBe(1);
+    });
+
+    it("still reports incomplete when the probe finds older history", async () => {
+      mocks.bridgeMessageWindow.mockResolvedValue(fatPage());
+      mocks.bridgeMessageWindowOlder.mockResolvedValue(rows("older", 1));
+
+      expect((await loadFullTranscript("chat1")).complete).toBe(false);
+    });
+
+    it("degrades to incomplete when the probe itself fails", async () => {
+      // The safe direction: the rows already in hand are still returned, and
+      // the user is warned the copy may be partial rather than losing a read
+      // that otherwise succeeded entirely.
+      mocks.bridgeMessageWindow.mockResolvedValue(fatPage());
+      mocks.bridgeMessageWindowOlder.mockRejectedValue(new Error("timeout"));
+
+      const { messages, complete } = await loadFullTranscript("chat1");
+      expect(messages).toHaveLength(40);
+      expect(complete).toBe(false);
+    });
   });
 
   it("throws a readable error when no bridge is connected", async () => {

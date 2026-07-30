@@ -23,6 +23,7 @@ vi.mock("../agent-history-client", () => ({
 
 import {
   encodeAttachments,
+  reportSkippedAttachments,
   textAttachmentBlock,
   type EncodeAttachmentsContext,
 } from "../encode-attachments";
@@ -273,5 +274,58 @@ describe("encodeAttachments — ordering", () => {
       "IMG",
       '<file name="two.txt">\n2\n</file>',
     ]);
+  });
+});
+
+// `skipped` only prevents a silent drop if EVERY send path reports it, and for
+// a while only handleSend did — edit-resubmit and the queued-edit save both
+// destructured around it. That mattered most exactly where it was missing: a
+// text chip reconstructed from a sent bubble carries its name but never its
+// bytes, so re-sending a message that had a transcript attached hits the
+// empty-body branch EVERY time, and the attachment vanished from the bubble
+// and from the prompt with nothing said.
+describe("reportSkippedAttachments", () => {
+  it("warns once per skipped attachment, naming it and the reason", async () => {
+    const { skipped } = await encodeAttachments(
+      [textAttachment({ id: "a", name: "cream.concise.txt", text: "" })],
+      VISION,
+    );
+    expect(skipped).toHaveLength(1);
+
+    const warn = vi.fn();
+    reportSkippedAttachments(skipped, warn);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain("cream.concise.txt");
+    expect(warn.mock.calls[0][0]).toContain("attach it again");
+  });
+
+  it("says nothing when everything was encoded", async () => {
+    const { skipped } = await encodeAttachments(
+      [textAttachment({ id: "a", name: "notes.txt", text: "hello" })],
+      VISION,
+    );
+    const warn = vi.fn();
+    reportSkippedAttachments(skipped, warn);
+    expect(skipped).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  // The structural half. A unit test cannot notice a FOURTH call site that
+  // forgets to report, and forgetting is precisely how this shipped — so
+  // assert on the source, the way git-defaults.test.ts pins the shared
+  // branch-naming module.
+  it("is called by every encoder call site in agent-chat", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync("src/zeros/agent/agent-chat.tsx", "utf8");
+
+    // encodeAttachments directly, plus the encodeComposerAttachments wrapper
+    // — but not the wrapper's own definition.
+    const callSites = [
+      ...src.matchAll(/await encode(?:Composer)?Attachments\(/g),
+    ];
+    expect(callSites.length).toBeGreaterThanOrEqual(3);
+
+    const reports = [...src.matchAll(/reportSkippedAttachments\(/g)];
+    expect(reports.length).toBe(callSites.length);
   });
 });

@@ -80,7 +80,10 @@ import {
   MessageSquareText,
   Check,
 } from "lucide-react";
-import { encodeAttachments } from "./encode-attachments";
+import {
+  encodeAttachments,
+  reportSkippedAttachments,
+} from "./encode-attachments";
 import type { ComposerAttachment } from "./composer-attachments";
 // Wave 4 (2026-05-16): the composer card is now built on the canonical
 // AI Elements PromptInput recipe (form-shaped InputGroup with a
@@ -535,15 +538,26 @@ export function AgentChat({
       //
       // Same encoder as the live send path (2026-07-30) — these were two
       // copies and only this one was right.
-      const { blocks: newBlocks, bubbleAttachments: newBubbleMeta } =
-        await encodeAttachments(attachments, {
-          supportsImage:
-            session.initialize?.agentCapabilities?.promptCapabilities?.image !==
-            false,
-          cwd: session.cwd || null,
-          chatId,
-          agentId: session.agentId,
-        });
+      const {
+        blocks: newBlocks,
+        bubbleAttachments: newBubbleMeta,
+        skipped: skippedOnEdit,
+      } = await encodeAttachments(attachments, {
+        supportsImage:
+          session.initialize?.agentCapabilities?.promptCapabilities?.image !==
+          false,
+        cwd: session.cwd || null,
+        chatId,
+        agentId: session.agentId,
+      });
+      // This path drops MORE than the live one does, so it can least afford
+      // to stay quiet: a text chip reconstructed from a sent bubble carries
+      // its name but never its bytes — those are deliberately not persisted —
+      // so re-sending a message that had a transcript attached hits the
+      // encoder's empty-body branch EVERY time, not occasionally. Until now
+      // the chip simply vanished from the resubmitted bubble and the agent
+      // received nothing, with no explanation anywhere.
+      reportSkippedAttachments(skippedOnEdit, toast.warning);
       const mergedBubble = newBubbleMeta;
       // Truncate in-memory FIRST so the UI reflects the edit immediately.
       useSessionsStore
@@ -1522,6 +1536,10 @@ export function AgentChat({
   // Every in-flight attach, so handleSend can wait for the ones the user
   // asked for rather than sending without them. See the top of handleSend.
   const transcriptAttachesRef = useRef<Set<Promise<void>>>(new Set());
+  // True only while a send is parked on those reads — the one stretch of
+  // handleSend that can be re-entered with the composer still full. See the
+  // top of handleSend.
+  const sendInFlightRef = useRef(false);
 
   // "Is this chat attached" is derived from the composer DOCUMENT, never from
   // a second list: that is what makes removing a chip with its × un-add the
@@ -2862,8 +2880,29 @@ export function AgentChat({
     // hover warmed it, so the set is already empty by the time Enter lands.
     // This is not the forbidden "click handler awaits I/O": Send is the
     // commit, and a commit must include what the user staged.
+    //
+    // The guard is what makes that await safe to add. Everything that stops
+    // this composer being sent twice — clearComposer, the empty check —
+    // happens AFTER it, so awaiting here opens a window in which a second
+    // Enter re-enters, snapshots the same composer state, and sends it again.
+    // Before this the only awaits ahead of the snapshot resolved in
+    // microtasks, which two keypresses cannot interleave with; a cold
+    // transcript read is real I/O, and a composer sitting visibly untouched
+    // with a spinner on the pill is exactly when someone presses Enter again.
+    //
+    // Scoped INSIDE the `size > 0` check on purpose: the guard then exists
+    // only while this send is genuinely parked on a read, so no other caller
+    // — the EmptyComposer hand-off, the queued-submission flush, "Continue" —
+    // can ever be turned away by it. Same shape as saveQueuedEdit's
+    // queueSaveInFlightRef.
     if (transcriptAttachesRef.current.size > 0) {
-      await Promise.allSettled([...transcriptAttachesRef.current]);
+      if (sendInFlightRef.current) return;
+      sendInFlightRef.current = true;
+      try {
+        await Promise.allSettled([...transcriptAttachesRef.current]);
+      } finally {
+        sendInFlightRef.current = false;
+      }
     }
     // Normal send → snapshot the editor (text + inline pills); the hand-off
     // path (override) supplies the text + pre-built blocks directly.
@@ -3024,9 +3063,7 @@ export function AgentChat({
     // and sent under another, a body the edit path can't reconstruct, a disk
     // write that failed — all of which used to end in the agent quietly
     // getting nothing.
-    for (const s of skippedAttachments) {
-      toast.warning(`"${s.name}" wasn't sent — ${s.reason}.`);
-    }
+    reportSkippedAttachments(skippedAttachments, toast.warning);
     const extraBlocks: ContentBlock[] = [
       ...localImageBlocks,
       ...((extras?.extraAttachments as ContentBlock[] | undefined) ?? []),
@@ -3163,8 +3200,13 @@ export function AgentChat({
         displayText,
         browserPickerSelection,
       );
-      const { blocks, bubbleAttachments } =
+      const { blocks, bubbleAttachments, skipped } =
         await encodeComposerAttachments(localAttachments);
+      // Same reason as the live send: the queued row keeps rendering every
+      // segment, so an excluded attachment is indistinguishable from one that
+      // made it. The queued message has not been dispatched yet, which makes
+      // this the LAST moment the user can act on it.
+      reportSkippedAttachments(skipped, toast.warning);
       const segments = toMessageSegments(s?.segments ?? [], localAttachments);
       session.editQueued?.(id, {
         text: wireText,

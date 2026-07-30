@@ -48,6 +48,7 @@ import type { ComposerAttachment } from "./composer-attachments";
 import {
   useComposerEditor,
   messageToEditorContent,
+  textToDoc,
   toMessageSegments,
   type ComposerInitialContent,
 } from "./composer-editor";
@@ -65,6 +66,7 @@ import {
   type EditDraftStash,
 } from "../store/store";
 
+import { editSeedSource } from "./edit-seed";
 import type { Turn } from "./turn-grouping";
 
 export { groupMessagesIntoTurns, turnKey, type Turn } from "./turn-grouping";
@@ -607,18 +609,28 @@ function TurnPromptEditor({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
 
-  // Seed the editor: a prior in-progress edit (stash json) or the WHOLE
-  // original message reconstructed as inline content — text + mention pills +
-  // attachment pills (image bytes recovered from the persisted thumbnails), in
-  // place. No separate "originals" row; everything is inline + editable.
+  // Seed the editor: a prior in-progress edit (stash json), then its plain-text
+  // mirror, then the WHOLE original message reconstructed as inline content —
+  // text + mention pills + attachment pills (image bytes recovered from the
+  // persisted thumbnails), in place. No separate "originals" row; everything is
+  // inline + editable. The choice itself lives in edit-seed.ts, which explains
+  // why the middle rung is load-bearing.
   const initialContentRef = useRef<ComposerInitialContent>(
-    stash?.json
-      ? { json: stash.json, attachments: stash.newAttachments }
-      : messageToEditorContent({
-          text: originalText,
-          segments: originalSegments,
-          attachments: originalAttachments,
-        }),
+    (() => {
+      switch (editSeedSource(stash)) {
+        case "stash-json":
+          return { json: stash!.json!, attachments: stash!.newAttachments };
+        case "stash-text":
+          // Chips are gone with the bytes; the words survive.
+          return { json: textToDoc(stash!.text), attachments: [] };
+        default:
+          return messageToEditorContent({
+            text: originalText,
+            segments: originalSegments,
+            attachments: originalAttachments,
+          });
+      }
+    })(),
   );
   const originalAttachmentCount = useRef(
     initialContentRef.current.attachments.length,

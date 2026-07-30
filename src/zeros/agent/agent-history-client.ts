@@ -142,6 +142,34 @@ const TRANSCRIPT_MAX_PAGES = 200;
  *  chat pulls hundreds of MB across 200 round trips to render 2 MB. */
 const TRANSCRIPT_CHAR_BUDGET = 4_000_000;
 
+/** Is `beforeMsgId` the oldest row this chat has? One row, not one page — the
+ *  answer is a single bit and the walk only asks after it already holds
+ *  megabytes.
+ *
+ *  A failure answers "no". This runs only on the bound path, where the
+ *  alternative to a cheap wrong-in-the-safe-direction answer is failing a
+ *  transcript read that has otherwise entirely succeeded: telling the user
+ *  their copy may be partial costs them a sentence, and throwing costs them
+ *  the transcript. */
+async function noOlderThan(
+  bridge: Parameters<typeof bridgeMessageWindowOlder>[0],
+  chatId: string,
+  beforeMsgId: string,
+): Promise<boolean> {
+  try {
+    const probe = await bridgeMessageWindowOlder(
+      bridge,
+      chatId,
+      1,
+      beforeMsgId,
+      TRANSCRIPT_PAGE_TIMEOUT_MS,
+    );
+    return probe.length === 0;
+  } catch {
+    return false;
+  }
+}
+
 export interface LoadedTranscript {
   /** Chronological, oldest-first. */
   messages: AgentMessage[];
@@ -183,7 +211,21 @@ export async function loadFullTranscript(
     pages.unshift(page);
     for (const r of page) chars += r.payload.length;
     if (pages.length >= TRANSCRIPT_MAX_PAGES || chars >= TRANSCRIPT_CHAR_BUDGET) {
-      complete = false;
+      // Hitting a bound is not the same as leaving history behind, and the
+      // difference is user-visible: `complete: false` is what turns an
+      // otherwise silent success into "Attached the most recent part of X —
+      // the full history was too large to read" and into the partial-copy
+      // toast. A tool-heavy chat can blow the 4 MB budget INSIDE its first
+      // page (one page is up to 1000 rows, and a single Read result can be
+      // 100 KB), and that chat is complete — every row of it is in hand.
+      //
+      // So ask, rather than assume, with the cheapest question available: one
+      // row older than the oldest we hold. `limit: 1` is below any clamp the
+      // engine might apply, so this stays uncoupled from TRANSCRIPT_PAGE, and
+      // an empty answer is the same proof-of-end the loop already relies on.
+      // Fetching another full page to find out would cost megabytes to learn
+      // one bit.
+      complete = await noOlderThan(bridge, chatId, page[0].msgId);
       break;
     }
     page = await bridgeMessageWindowOlder(

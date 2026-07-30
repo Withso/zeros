@@ -461,6 +461,58 @@ describe("formatTranscript — concise", () => {
   });
 });
 
+// Payloads come off SQLite exactly as some older build wrote them, and
+// fromPersistedMessage only validates that they are JSON — not their shape. So
+// a row with no `text` at all is reachable, and both modes have to survive it.
+//
+// Full mode always did (every message goes through safeRender). Concise did
+// not: it assembles sections by hand, so `m.text.trimEnd()` threw straight out
+// of formatTranscript and lost the WHOLE transcript. That is the default click
+// path, so a chat whose full transcript copied fine failed on a plain pill
+// click with "Couldn't read that transcript" — the asymmetry is the bug.
+describe("formatTranscript — malformed rows", () => {
+  /** A persisted row that never got a `text` field. */
+  const noText = (role: AgentTextMessage["role"]) =>
+    ({
+      id: `bad${++seq}`,
+      kind: "text",
+      role,
+      createdAt: seq,
+    }) as unknown as AgentTextMessage;
+
+  it("does not throw in either mode", () => {
+    const messages = [noText("user"), text("agent", "the real answer")];
+    expect(() => run(messages, "full")).not.toThrow();
+    expect(() => run(messages, "concise")).not.toThrow();
+  });
+
+  it("keeps every other message when a prompt is unreadable", () => {
+    // Losing one row is the contract; losing the transcript is not.
+    const out = run([noText("user"), text("agent", "the real answer")], "concise");
+    expect(out.text).toContain("the real answer");
+    expect(out.text).toContain("unreadable");
+    expect(out.count).toBeGreaterThan(0);
+  });
+
+  it("keeps the prompt when the ANSWER is the unreadable one", () => {
+    // Guarded per part, not per turn, so a bad answer cannot also swallow the
+    // question that asked for it.
+    const out = run(
+      [text("user", "why is this failing?"), noText("agent")],
+      "concise",
+    );
+    expect(out.text).toContain("why is this failing?");
+  });
+
+  it("still reports a usable count, so the caller does not claim it is empty", () => {
+    // count === 0 is what makes attachTranscript toast "nothing to attach" and
+    // skip the send entirely — a throw-adjacent outcome for a chat that has
+    // perfectly good content in it.
+    const out = run([noText("user"), text("agent", "answer")], "concise");
+    expect(out.count).not.toBe(0);
+  });
+});
+
 describe("formatTranscript — tool heading and noise", () => {
   it("suffixes a status only when it is not 'completed'", () => {
     // "completed" is ~95% of rows and says nothing; the other statuses are
