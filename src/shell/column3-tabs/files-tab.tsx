@@ -36,6 +36,10 @@ import { useSidebarResizeDrag } from "./use-sidebar-drag";
 import { useResizeHint } from "../use-resize-hint";
 import { FileViewer } from "./file-viewer";
 import { WorkspaceFileTree } from "./workspace-file-tree";
+import {
+  canPickWorkingDirectories,
+  WorkingDirectoriesPopover,
+} from "./working-directories-popover";
 import { treeSelectionMirrorTarget } from "./tree-paths";
 
 interface TabBodyProps {
@@ -137,6 +141,15 @@ export const FilesTab = React.memo(function FilesTab({
           cwd={cwd}
           reloadKey={gitRefresh}
           search
+          // Working folders sits at the right end of the tree's own filter
+          // row rather than in a toolbar of its own — one header line instead
+          // of two, and no empty 36px band on the surfaces where the picker
+          // hides itself (a non-native client, or a tab with no workspace).
+          searchRowAccessory={
+            canPickWorkingDirectories(cwd) ? (
+              <WorkingDirectoriesPopover cwd={cwd} workspaceId={workspaceId} />
+            ) : undefined
+          }
           // Pre-focus the tab's file on mount; then MIRROR it while this tab
           // is visible. Hidden tabs (a dirty draft kept mounted) suspend the
           // mirror — it re-asserts on re-activation, healing any divergence

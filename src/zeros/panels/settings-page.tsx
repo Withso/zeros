@@ -118,6 +118,7 @@ import { setAnalyticsEnabled } from "../analytics/posthog";
 import { useAuth } from "../auth";
 import { useBridge, useBridgeStatus } from "../bridge/use-bridge";
 import { ensureSettingsTomlMigrated } from "../settings/migrate-legacy";
+import { subscribeUserSettingsSection } from "../settings/settings-navigation";
 import {
   SettingsEmpty,
   SettingsList,
@@ -464,6 +465,19 @@ export function SettingsPage() {
   };
   const selection = parseSelection(active);
   useInstantViewSwitch(`settings:${active}`, pageSurfaceRef);
+
+  // Deep links from action-error toasts must update this retained page as well
+  // as persistence; otherwise reopening an already-mounted Settings surface
+  // would show its stale prior section.
+  useEffect(
+    () =>
+      subscribeUserSettingsSection((section) => {
+        if (isStaticSection(section)) {
+          setActiveState(userSelection(section));
+        }
+      }),
+    [],
+  );
 
   // Administration dialogs — Create team (sidebar entry at zero teams,
   // team-switcher "New team") and Join team (invite deep links). Both

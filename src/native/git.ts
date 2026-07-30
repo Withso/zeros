@@ -14,12 +14,19 @@
 // React bundle.
 // ──────────────────────────────────────────────────────────
 
-import { isNativeRuntime, nativeInvoke } from "./runtime";
+import { isNativeRuntime, nativeInvoke, nativeListen } from "./runtime";
+import type {
+  GithubAuthMethod,
+  GithubAuthSnapshot,
+} from "@zeros/core/github-auth";
 import { refreshDetectedOpenApps } from "./open-apps";
 import { getActiveBridge } from "../zeros/bridge/active-bridge";
+import type { WorkingDirectoriesWire } from "../zeros/bridge/workspace-bridge";
 import {
   bridgeFileTree,
   bridgeIgnoredEntries,
+  bridgeListWorkingDirectories,
+  bridgeSetWorkingDirectories,
   bridgeGitStatus,
   bridgeGitChangeCounts,
   bridgeGitChangeLineCounts,
@@ -38,6 +45,7 @@ import {
   bridgeGitRenameBranch,
   bridgeGitChangeTargetBranch,
   bridgeGhPrGet,
+  bridgeGhAuthStatus,
   bridgeGhPrSync,
   bridgeGhPrChecks,
   bridgeGhPrCommits,
@@ -92,7 +100,10 @@ export type {
   GithubRepositoryOwnerAvatar,
   InitRepoInPlaceResult,
   PublishRepoResult,
+  WorkingDirectoriesWire,
+  WorkingDirectoriesUnsupportedReason,
 } from "../zeros/bridge/workspace-bridge";
+export { WORKING_DIRECTORIES_UNSUPPORTED_COPY } from "../zeros/bridge/workspace-bridge";
 
 // ── Types ────────────────────────────────────────────────
 
@@ -264,13 +275,6 @@ export type CreateWorkspaceArgs = {
    * engine rollback deletes it if provisioning never publishes. */
   optimisticChatId?: string;
 };
-
-export interface DeviceVerification {
-  verificationUri: string;
-  userCode: string;
-  expiresIn: number;
-  interval: number;
-}
 
 export interface AuthStatusResult {
   authenticated: boolean;
@@ -754,6 +758,45 @@ export async function gitHasChanges(workspaceId: string): Promise<boolean> {
   return bridgeGitHasChanges(requireBridge("read Git changes"), workspaceId);
 }
 
+/** Resolve `cwd` to the opaque workspace id the engine expects, falling back to
+ *  the raw path (which the engine accepts from a local client addressing a repo
+ *  root it already knows). Shared by the working-directory ops below. */
+async function bridgeWorkspaceIdFor(
+  bridge: ReturnType<typeof requireBridge>,
+  cwd: string,
+): Promise<string> {
+  try {
+    return (await resolveBridgeWorkspaceIdForCwd(bridge, cwd)) ?? cwd;
+  } catch {
+    return cwd;
+  }
+}
+
+/** Which top-level tracked folders are materialized in this worktree.
+ *  Engine-only (no native IPC fast path) — an on-demand popover read. */
+export async function listWorkingDirectories(
+  cwd: string,
+): Promise<WorkingDirectoriesWire> {
+  const bridge = requireBridge("read working folders");
+  return bridgeListWorkingDirectories(
+    bridge,
+    await bridgeWorkspaceIdFor(bridge, cwd),
+  );
+}
+
+/** Apply a folder selection, rewriting the worktree via sparse-checkout. */
+export async function setWorkingDirectories(
+  cwd: string,
+  directories: string[],
+): Promise<WorkingDirectoriesWire> {
+  const bridge = requireBridge("update working folders");
+  return bridgeSetWorkingDirectories(
+    bridge,
+    await bridgeWorkspaceIdFor(bridge, cwd),
+    directories,
+  );
+}
+
 /** Repo-relative file paths under `cwd`, for Files and the composer @ picker.
  * Gitignore-respecting (tracked + untracked-not-ignored). Native IPC remains
  * the fast path for a desktop worktree, but a missing/late preload or IPC fault
@@ -1022,8 +1065,9 @@ export async function gitClean(args: {
 // ── GitHub ───────────────────────────────────────────────
 
 export async function ghAuthStatus(): Promise<AuthStatusResult> {
-  if (!isNativeRuntime()) return { authenticated: false };
-  return nativeInvoke<AuthStatusResult>("gh_auth_status");
+  const bridge = getActiveBridge();
+  if (!bridge) return { authenticated: false };
+  return bridgeGhAuthStatus(bridge);
 }
 
 /** Load the user/organization avatar for an open repository's GitHub owner.
@@ -1041,31 +1085,129 @@ export async function ghRepositoryOwnerAvatar(
   }
 }
 
-export async function ghAuthSignin(): Promise<{ login: string }> {
-  return nativeInvoke("gh_auth_signin");
-}
-
-export interface GhCliResult {
-  available: boolean;
-  authenticated: boolean;
-  login?: string;
-}
-
-/** Auto-detect a `gh` CLI login and adopt its token (primary path). */
-export async function ghDetectCli(): Promise<GhCliResult> {
+export async function ghAuthSnapshot(options?: {
+  refreshApp?: boolean;
+}): Promise<GithubAuthSnapshot> {
   if (!isNativeRuntime()) {
-    return { available: false, authenticated: false };
+    return {
+      selectedMethod: "gh-cli",
+      methods: {
+        "gh-cli": {
+          method: "gh-cli",
+          health: "unavailable",
+          configured: false,
+          available: false,
+        },
+        "github-app": {
+          method: "github-app",
+          health: "unavailable",
+          configured: false,
+        },
+        pat: { method: "pat", health: "unavailable", configured: false },
+      },
+    };
   }
-  return nativeInvoke("gh_detect_cli");
+  return nativeInvoke<GithubAuthSnapshot>("gh_auth_snapshot", {
+    refreshApp: options?.refreshApp === true,
+  });
 }
 
-/** Adopt a pasted personal access token (paste-a-PAT fallback). */
-export async function ghSetToken(token: string): Promise<{ login: string }> {
-  return nativeInvoke("gh_set_token", { token });
+export async function ghMethodSelect(
+  method: GithubAuthMethod,
+): Promise<GithubAuthSnapshot> {
+  return nativeInvoke("gh_method_select", { method });
 }
 
-export async function ghSignOut(): Promise<void> {
-  await nativeInvoke("gh_sign_out");
+export async function ghPatConnect(token: string): Promise<{
+  login: string;
+  snapshot: GithubAuthSnapshot;
+}> {
+  return nativeInvoke("gh_pat_connect", { token });
+}
+
+export async function ghPatRestore(
+  undoId: string,
+): Promise<GithubAuthSnapshot> {
+  return nativeInvoke("gh_pat_restore", { undoId });
+}
+
+/** Begin the browser-owned GitHub App authorization/install flow. */
+export async function ghAppConnect(options?: {
+  installFlow?: boolean;
+}): Promise<void> {
+  await nativeInvoke("gh_app_connect", {
+    installFlow: options?.installFlow !== false,
+  });
+}
+
+export async function ghAppCancel(): Promise<void> {
+  await nativeInvoke("gh_app_cancel", {});
+}
+
+export async function ghMethodDisconnect(method: GithubAuthMethod): Promise<{
+  snapshot: GithubAuthSnapshot;
+  undoId?: string;
+  undoExpiresAtMs?: number;
+}> {
+  return nativeInvoke("gh_method_disconnect", { method });
+}
+
+export interface GithubAppConnectedPayload {
+  login: string;
+  installationCount: number;
+}
+
+/** Keep in sync with `GithubAppConnectionErrorReason` in
+ *  electron/github-app-controller.ts — main emits these on the
+ *  `github-app-error` event AND tags `gh_app_connect` rejections with them. */
+const GITHUB_APP_ERROR_REASONS = [
+  "access_denied",
+  "authorization_expired",
+  "github_unavailable",
+  "handoff_expired",
+  "invalid_callback",
+  "nonce_mismatch",
+  "not_configured",
+  "oauth_failed",
+  "signed_out",
+  "storage_failed",
+] as const;
+
+export type GithubAppErrorReason = (typeof GITHUB_APP_ERROR_REASONS)[number];
+
+const GITHUB_APP_ERROR_REASON_SET = new Set<string>(GITHUB_APP_ERROR_REASONS);
+
+/** Recover the reason main tagged onto a rejected GitHub App command. Returns
+ *  null for errors that carry no reason (a bug, a keychain fault), so the caller
+ *  can fall back to the error's own sentence. */
+export function githubAppErrorReason(
+  error: unknown,
+): GithubAppErrorReason | null {
+  const code =
+    error && typeof error === "object" && "code" in error
+      ? (error as { code?: unknown }).code
+      : null;
+  return typeof code === "string" && GITHUB_APP_ERROR_REASON_SET.has(code)
+    ? (code as GithubAppErrorReason)
+    : null;
+}
+
+export function onGithubAppConnected(
+  handler: (payload: GithubAppConnectedPayload) => void,
+): Promise<() => void> {
+  return nativeListen("github-app-connected", handler);
+}
+
+export function onGithubAppError(
+  handler: (payload: { reason: GithubAppErrorReason }) => void,
+): Promise<() => void> {
+  return nativeListen("github-app-error", handler);
+}
+
+export function onGithubCredentialStoreChanged(
+  handler: () => void,
+): Promise<() => void> {
+  return nativeListen("github-credential-store-changed", handler);
 }
 
 export async function ghPrCreate(args: {

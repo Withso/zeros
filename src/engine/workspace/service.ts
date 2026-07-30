@@ -59,6 +59,8 @@ import {
   listIgnoredEntries,
   listWorkspaces,
   listRemoteRestrictedWorkspaceIds,
+  getWorkingDirectories,
+  setWorkingDirectories,
   setWorkspaceRemoteRestricted,
   setWorkspaceStatus,
   log,
@@ -436,6 +438,12 @@ const WRITE_OPS = new Set<string>([
  * expose local-only Git controls to relay clients. */
 const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "file.write",
+  // Rewrites the checkout AND the index (sparse patterns + skip-worktree
+  // bits), so it belongs on the barrier for the same reason checkoutBranch
+  // does: archive/delete drains in-flight work before snapshotting or removing
+  // a worktree, and an unregistered sparse-checkout would still be
+  // materializing or deleting folders underneath it.
+  "workspace.setWorkingDirectories",
   "git.stage",
   "git.unstage",
   "git.discard",
@@ -1226,6 +1234,72 @@ export class WorkspaceService {
           params.restricted === true || params.restricted === "true",
         );
         return { ok: true };
+      }
+      // ── Working directories (per-worktree sparse-checkout) ──
+      // LOCAL-ONLY for the same reason as the restriction list above: applying
+      // a selection REMOVES folders from the checkout, and a paired device is
+      // not the place to do that blind. Both ops are off the remote allowlist
+      // so the deny-by-default gate rejects them together — a remote client
+      // never sees a picker it could not save.
+      //
+      // No Zeros-side persistence on purpose: git already stores the cone in
+      // the worktree's own `.git` config and it survives restarts. A second
+      // copy in settings could only drift from the real thing.
+      case "workspace.listWorkingDirectories": {
+        return getWorkingDirectories(
+          this.resolveReadCwd(reqStr(params, "workspaceId"), remote),
+        );
+      }
+      case "workspace.setWorkingDirectories": {
+        const raw = params.directories;
+        if (!Array.isArray(raw)) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "directories must be an array of directory names.",
+          });
+        }
+        const workspaceId = reqStr(params, "workspaceId");
+        const cwd = this.resolveReadCwd(workspaceId, remote);
+        const directories = raw.filter(
+          (d): d is string => typeof d === "string",
+        );
+        // Deafen the worktree watcher for the duration — the single most
+        // expensive part of this operation, and the reason a save on a real
+        // monorepo timed out.
+        //
+        // Chokidar subscribes PER DIRECTORY (v4 has no recursive mode), so
+        // unlinking a folder makes it re-read every surviving parent directory
+        // once per batch of events while tearing down one subscription per
+        // removed subdirectory — all on the engine's single Bun thread. Measured
+        // on Linux against a synthetic repo, watcher attached vs. not:
+        //
+        //     8k files   149ms → 630ms    (263ms of event-loop lag)
+        //    30k files   387ms → 1766ms   (563ms)
+        //    60k files   795ms → 3403ms   (1075ms)
+        //
+        // macOS is worse: each subscription is its own FSEvents stream and every
+        // ancestor stream sees the same subtree events. Past ~15s of blocked
+        // loop the host watchdog stops getting /health back, SIGKILLs the engine
+        // MID-`git sparse-checkout` (the child shares the engine's process
+        // group), and the renderer's in-flight request rejects with "Request
+        // timeout: engine disconnected" — a scary error for work that was
+        // succeeding. The same hazard is already handled this way for
+        // archive/delete; this is the same rewrite with the same cure.
+        //
+        // Nothing is lost by going deaf: the op broadcasts its own DB_CHANGED,
+        // which is the invalidation the watcher would have produced anyway.
+        const suspension = await this.workspaceCheckoutWatchSuspender?.(
+          workspaceId,
+          cwd,
+        );
+        try {
+          return await setWorkingDirectories(cwd, directories);
+        } finally {
+          // Always resume, including after a throw: the checkout is still live
+          // (unlike archive/delete, nothing moved it), so leaving it unwatched
+          // would silently stop reporting terminal/agent edits until restart.
+          suspension?.resume();
+        }
       }
       // ── Write: create a workspace (worktree) ──
       // A WRITE op, so remotely it runs through the same trust gate as other

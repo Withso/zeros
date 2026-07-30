@@ -108,6 +108,10 @@ describe("sanitizeLayer", () => {
       models: { default: "fable-5" },
       workspaces: { path: "/x" },
       tool_approvals_enabled: true,
+      github: {
+        auth_method: "github-app",
+        disconnected_at: "2026-07-29T20:00:00.000Z",
+      },
       providers: {
         claude: { auth: "api-key", executable_path: "/usr/local/bin/claude" },
       },
@@ -118,7 +122,24 @@ describe("sanitizeLayer", () => {
 
     const repo = sanitizeLayer(doc, "repo");
     expect(repo.doc).toEqual({});
-    expect(repo.warnings).toHaveLength(4);
+    expect(repo.warnings).toHaveLength(5);
+  });
+
+  it("drops an invalid GitHub method without dropping its valid siblings", () => {
+    const r = sanitizeLayer(
+      {
+        github: {
+          auth_method: "oauth",
+          disconnected_at: "2026-07-29T20:00:00.000Z",
+        },
+      },
+      "user",
+    );
+    expect(r.doc).toEqual({
+      github: { disconnected_at: "2026-07-29T20:00:00.000Z" },
+    });
+    expect(r.warnings).toHaveLength(1);
+    expect(r.warnings[0]).toContain("github.auth_method");
   });
 
   it("repo-local layer allows workspaces (machine-specific override) but not models/approvals/providers", () => {

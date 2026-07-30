@@ -38,7 +38,6 @@ import {
   RefreshCw,
   Terminal,
   Copy,
-  X,
   type LucideIcon,
 } from "lucide-react";
 import { Button, Input } from "../ui";
@@ -55,8 +54,6 @@ import { openAgentConfig } from "../../native/native";
 import { cn } from "@/zeros/ui/cn";
 import { SettingsSection, SettingsField } from "../settings/settings-ui";
 import { nativeInvoke } from "../../native/runtime";
-import { ptyKill, resolveAgentBinary } from "../../native/pty";
-import { TerminalSessionView } from "../../shell/terminal/terminal-session-view";
 import { getSetting, setSetting } from "../../native/settings";
 import {
   deleteSecret,
@@ -86,6 +83,7 @@ import {
   type ProviderAuthMethod,
   type ProviderPrefs,
 } from "./provider-prefs";
+import { InlineLoginTerminal } from "./inline-login-terminal";
 
 // ──────────────────────────────────────────────────────────
 // Per-agent vendor enrichment for the API-key path. The settings
@@ -1025,10 +1023,10 @@ function ProviderCard({
               ALSO show the subscription details above it. Opening the terminal
               replaces both. The details list is deliberately NOT a table. */}
           {loginOpen ? (
-            <ProviderLoginTerminal
-              agentId={agent.id}
+            <InlineLoginTerminal
+              ownerId={agent.id}
               binary={loginBinary}
-              loginArgs={loginArgs}
+              args={loginArgs}
               onClose={() => {
                 // Closing (or the process exiting) re-probes so the badge +
                 // details reflect whatever just happened in the terminal.
@@ -1251,115 +1249,5 @@ function StatusBadge({
     >
       {label}
     </span>
-  );
-}
-
-// ──────────────────────────────────────────────────────────
-// Embedded login terminal (CLI mode)
-// ──────────────────────────────────────────────────────────
-
-/** POSIX single-quote a path that isn't a bare, safe token (so a resolved
- *  binary path with spaces runs as one argument). Mirrors the helper in
- *  embedded-terminal-command.tsx. */
-function shellQuoteIfNeeded(p: string): string {
-  if (/^[A-Za-z0-9_./-]+$/.test(p)) return p;
-  return `'${p.replace(/'/g, "'\\''")}'`;
-}
-
-/** Collision-resistant ephemeral PTY session id for a login run. */
-function makeLoginSessionId(agentId: string): string {
-  let rand: string;
-  try {
-    rand = crypto.randomUUID();
-  } catch {
-    rand = `${Date.now().toString(36)}-${Math.floor(Math.random() * 1e9).toString(36)}`;
-  }
-  return `provider-login:${agentId}:${rand}`;
-}
-
-/** Inline ephemeral terminal that runs the agent's login command
- *  (`claude /login`, `codex login`) so the user can sign in without leaving
- *  the panel. Reuses the proven TerminalSessionView wiring from
- *  EmbeddedTerminalCommand (ephemeral PTY + initialCommand + onExit +
- *  kill-on-unmount), but auto-starts and takes literal login args (no
- *  slash-command assumption, so Codex's `login` subcommand works too). */
-function ProviderLoginTerminal({
-  agentId,
-  binary,
-  loginArgs,
-  onClose,
-}: {
-  agentId: string;
-  /** Bare CLI name for the header label, e.g. "claude". */
-  binary: string;
-  /** Literal login args, e.g. ["/login"] (claude) or ["login"] (codex). */
-  loginArgs: string[];
-  /** Fired by the × button AND when the login process exits. */
-  onClose: () => void;
-}) {
-  const [binPath, setBinPath] = useState<string | null>(null);
-  const sessionIdRef = useRef<string>(makeLoginSessionId(agentId));
-  const sessionId = sessionIdRef.current;
-
-  // Resolve the agent's real binary host-side so the line is the SAME CLI the
-  // agent uses (shares ~/.claude / ~/.codex config + auth).
-  useEffect(() => {
-    let cancelled = false;
-    void resolveAgentBinary(agentId).then((p) => {
-      if (!cancelled) setBinPath(p);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [agentId]);
-
-  // Reap the ephemeral PTY on unmount (login succeeded → the connection block
-  // re-rendered to the connected branch, or the user navigated away).
-  // TerminalSessionView never kills on unmount, so this owner must.
-  useEffect(() => {
-    return () => {
-      void ptyKill({ sessionId });
-    };
-  }, [sessionId]);
-
-  const label = `${binary} ${loginArgs.join(" ")}`.trim();
-
-  return (
-    <div className="border-border1 bg-bg1 flex flex-col overflow-hidden rounded-lg border">
-      <div className="border-border1 flex items-center gap-2 border-b px-3.5 py-2">
-        <ZerosSpinner size={14} />
-        <span className="text-fg2 min-w-0 flex-1 truncate text-sm">
-          Running <span className="text-fg1">{label}</span>.
-        </span>
-        <Tooltip label="Close terminal">
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Close terminal"
-            onClick={onClose}
-            className="shrink-0"
-          >
-            <X className="size-4" aria-hidden="true" />
-          </Button>
-        </Tooltip>
-      </div>
-      <div className="h-[300px] min-h-0 w-full">
-        {binPath ? (
-          <TerminalSessionView
-            sessionId={sessionId}
-            cwd=""
-            visible
-            ephemeral
-            initialCommand={`${shellQuoteIfNeeded(binPath)} ${loginArgs.join(" ")}`.trim()}
-            onExit={onClose}
-          />
-        ) : (
-          <div className="flex h-full items-center justify-center">
-            <ZerosSpinner size={16} />
-          </div>
-        )}
-      </div>
-    </div>
   );
 }

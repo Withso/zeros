@@ -102,6 +102,43 @@ describe("redactLogSecrets — removes credentials", () => {
     expect(out).not.toContain("AKIA");
     expect(out).toContain("[email]");
   });
+
+  it("redacts the complete dotted GitHub App installation-token shape", () => {
+    // Current installation tokens can contain multiple dot-separated sections.
+    // Redacting only the legacy alphanumeric prefix would leave credential
+    // material after the first dot in exported logs.
+    const installationToken =
+      "ghs_" + "1".repeat(8) + "." + "A".repeat(64) + "." + "B".repeat(64);
+    const out = redactLogSecrets(`credential ${installationToken} failed`);
+    expect(out).toBe("credential [api-key] failed");
+    expect(out).not.toContain("A".repeat(16));
+    expect(out).not.toContain("B".repeat(16));
+  });
+
+  it("redacts the GitHub App token shape with an app-id underscore", () => {
+    const installationToken =
+      "ghs_1234567_" +
+      "eyJhbGciOiJSUzI1NiJ9." +
+      "eyJpc3MiOiIxMjM0NTY3In0." +
+      "signature0123456789";
+    expect(redactLogSecrets(`credential ${installationToken} failed`)).toBe(
+      "credential [api-key] failed",
+    );
+  });
+
+  it("redacts a signed refresh-owner binding by shape and field name", () => {
+    const binding = `zghrb_v1.${"a".repeat(43)}.${"b".repeat(43)}`;
+    expect(redactLogSecrets(`binding ${binding} failed`)).toBe(
+      "binding [redacted] failed",
+    );
+    const line = JSON.stringify({ refreshBinding: binding, keep: true });
+    const parsed = JSON.parse(redactLogSecrets(line)) as Record<
+      string,
+      unknown
+    >;
+    expect(parsed.refreshBinding).toBe("[redacted]");
+    expect(parsed.keep).toBe(true);
+  });
 });
 
 describe("redactLogSecrets — keeps debugging signal", () => {

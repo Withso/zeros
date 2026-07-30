@@ -4,7 +4,12 @@
 // conversion) that isomorphic-git is shakier on.
 
 import { getWorkspace, resolveRepoForGitOp } from "./worktree";
-import { assertSafeGitRef, runGit, type ExpectedCategory } from "./git-exec";
+import {
+  assertSafeGitRef,
+  classifyGitTransportError,
+  runGit,
+  type ExpectedCategory,
+} from "./git-exec";
 import { refExists } from "./default-branch";
 import { withStashLock } from "./stash-lock";
 import { isConflictEntry, parsePorcelainZ } from "./porcelain";
@@ -124,19 +129,10 @@ export async function push(opts: PushOptions): Promise<PushResult> {
   if (opts.force) args.push("--force-with-lease");
   args.push(remote, ws.branch);
   await runGit(ws.path, args, {
-    mapErrorCode: (stderr) => {
-      if (/not authenticated|authentication failed|403|401/i.test(stderr)) {
-        return "NOT_AUTHENTICATED";
-      }
-      if (
-        /Could not resolve host|network is unreachable|Failed to connect/i.test(
-          stderr,
-        )
-      ) {
-        return "NETWORK_ERROR";
-      }
-      return "GIT_COMMAND_FAILED";
-    },
+    // Bound the renderer request even if a remote transport wedges.
+    timeoutMs: 60_000,
+    mapErrorCode: (stderr) =>
+      classifyGitTransportError(stderr) ?? "GIT_COMMAND_FAILED",
   });
   const ahead = await aheadBehind(ws.path, `${remote}/${ws.branch}`, ws.branch);
   return { remoteRef: `${remote}/${ws.branch}`, ...ahead };

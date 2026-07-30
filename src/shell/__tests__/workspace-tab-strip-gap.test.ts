@@ -138,14 +138,14 @@ describe("workspace tab strip gap", () => {
     expect(stripGapPx(topBar)).toBe(0);
   });
 
-  it("sizes tabs by content between a 100px floor and a 180px cap", () => {
+  it("sizes tabs by content between a 120px floor and a 180px cap", () => {
     // A `w-*` of any kind defeats intrinsic sizing and pins every tab to one
     // width — the whole point of the content fit is that a tab pays only for
     // the name and indicators it actually carries.
     const topBar = source(TOP_BAR);
     const tabCls = classConstant(topBar, "WORKSPACE_TAB_CLS");
 
-    expect(tabCls).toMatch(/(?:^|\s)min-w-\[100px\](?:\s|$)/);
+    expect(tabCls).toMatch(/(?:^|\s)min-w-\[120px\](?:\s|$)/);
     expect(tabCls).toMatch(/(?:^|\s)max-w-\[180px\](?:\s|$)/);
     expect(tabCls).not.toMatch(/(?:^|\s)w-\[/);
     expect(tabCls).not.toMatch(/(?:^|\s)w-(?:\d|full|fit|screen)\b/);

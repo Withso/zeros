@@ -108,6 +108,7 @@ import { TooltipProvider } from "./zeros/ui/primitives/tooltip";
 import { useInstantViewSwitch } from "./zeros/ui/use-instant-view-switch";
 import { useRetainedViewKeys } from "./shell/use-retained-view-keys";
 import { useGitRefreshCoordinator } from "./shell/use-git-refresh-key";
+import { GithubAppNotifications } from "./zeros/bridge/github-app-notifications";
 
 // Chat localStorage cache keys live in a shared module so the repo-removal
 // path (which bulk-deletes a repo's chats) reconciles the exact same keys this
@@ -1202,6 +1203,7 @@ export function AppShell() {
             in particular the auto-update toast — render on the login screen
             too, not just after sign-in. */}
         <Toaster />
+        <GithubAppNotifications />
         {/* Above the gate so a main-process-staged update can notify on the
             login screen too. Main owns checking/downloading even with no
             renderer; useAnyAgentRunning reads a global Zustand store, so no

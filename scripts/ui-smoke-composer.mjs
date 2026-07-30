@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // ============================================================
-// Composer UI smoke — real-browser interaction contract
+// Composer + GitHub settings UI smoke — real-browser interaction contract
 //
 // Boots the Vite dev server, opens the ModelPill harness page
 // (harness-model-menu.html + src/harness-model-menu.tsx — the real
 // ModelPill/AgentModelMenu tree with the agent-chat "always focused
-// composer" guardian wired in), and drives it with headless Chromium.
+// composer" guardian wired in), then the real GitHub settings section, and
+// drives both with headless Chromium.
 //
 // This exists because the 2026-07-24 "model dropdown flashes open and
 // instantly closes" regression was invisible to every other gate: the
@@ -21,6 +22,9 @@
 //      the menu.
 //   3. The menu can be re-opened after closing (no toggle desync).
 //   4. No uncaught page errors anywhere in the run.
+//   5. The GitHub method overflow obeys click/Escape focus semantics.
+//   6. Its disconnect dialog itemizes consequences, initially focuses Cancel,
+//      closes with Escape, and returns focus to the originating trigger.
 //
 // Usage:  node scripts/ui-smoke-composer.mjs   (pnpm test:ui-smoke)
 // ============================================================
@@ -74,7 +78,12 @@ const port = await freePort();
 const vite = spawn(
   "pnpm",
   ["exec", "vite", "--port", String(port), "--strictPort"],
-  { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"], env: process.env, detached: true },
+  {
+    cwd: ROOT,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: process.env,
+    detached: true,
+  },
 );
 vite.stderr.on("data", (d) => process.stderr.write(`[vite] ${d}`));
 
@@ -150,8 +159,99 @@ try {
     await waitFor(async () => !(await menuOpen()), "esc-close"),
   );
 
-  // 4. Whole-run invariant.
-  check("no uncaught page errors", pageErrors.length === 0, pageErrors.join("; "));
+  // 4. The GitHub settings overflow and disconnect dialog use Radix focus
+  //    scopes. Exercise the real component: unit tests cannot reproduce the
+  //    event ordering between portal mount, auto-focus, Escape, and focus
+  //    return.
+  await page.goto(`http://127.0.0.1:${port}/harness-github-settings.html`, {
+    waitUntil: "networkidle",
+  });
+  const cliRadio = page.getByRole("radio", { name: "gh CLI auth" });
+  await cliRadio.waitFor({ state: "visible", timeout: 10_000 });
+  check(
+    "GitHub cold snapshot keeps auth choices inert",
+    await cliRadio.isDisabled(),
+  );
+  check(
+    "GitHub cold snapshot does not flash sign-in",
+    (await page.getByRole("button", { name: "Run gh auth login" }).count()) ===
+      0,
+  );
+
+  const appMenuTrigger = page.getByRole("button", {
+    name: "More actions for GitHub App",
+  });
+  await appMenuTrigger.waitFor({ state: "visible", timeout: 10_000 });
+
+  const githubMenuOpen = async () =>
+    page
+      .getByRole("menu")
+      .isVisible()
+      .catch(() => false);
+  await appMenuTrigger.click();
+  check(
+    "GitHub overflow opens",
+    await waitFor(githubMenuOpen, "github-menu-open"),
+  );
+  await page.keyboard.press("Escape");
+  check(
+    "Escape closes GitHub overflow",
+    await waitFor(async () => !(await githubMenuOpen()), "github-menu-escape"),
+  );
+  check(
+    "GitHub overflow returns focus",
+    await page.evaluate(
+      () =>
+        document.activeElement?.getAttribute("aria-label") ===
+        "More actions for GitHub App",
+    ),
+  );
+
+  await appMenuTrigger.click();
+  await page.getByRole("menuitem", { name: "Disconnect" }).click();
+  const disconnectDialog = page.getByRole("dialog", {
+    name: "Disconnect GitHub App?",
+  });
+  check(
+    "GitHub disconnect dialog opens",
+    await waitFor(
+      () => disconnectDialog.isVisible().catch(() => false),
+      "github-dialog-open",
+    ),
+  );
+  check(
+    "GitHub disconnect consequences are itemized",
+    (await disconnectDialog.locator("li").count()) === 3,
+  );
+  check(
+    "Cancel owns initial dialog focus",
+    await page.evaluate(
+      () => document.activeElement?.textContent?.trim() === "Cancel",
+    ),
+  );
+  await page.keyboard.press("Escape");
+  check(
+    "Escape closes GitHub disconnect dialog",
+    await waitFor(
+      async () => !(await disconnectDialog.isVisible().catch(() => false)),
+      "github-dialog-escape",
+    ),
+  );
+  check(
+    "GitHub dialog returns focus to overflow trigger",
+    await page.evaluate(
+      () =>
+        document.activeElement?.getAttribute("aria-label") ===
+        "More actions for GitHub App",
+    ),
+  );
+
+  // 5. Whole-run invariant.
+  check(
+    "no uncaught page errors",
+    pageErrors.length === 0,
+    pageErrors.join("; "),
+  );
 } catch (err) {
   failures.push("harness run crashed");
   console.error(err);
@@ -165,7 +265,9 @@ try {
 }
 
 if (failures.length > 0) {
-  console.error(`\nui-smoke-composer: ${failures.length} failure(s): ${failures.join(", ")}`);
+  console.error(
+    `\nui-smoke-composer: ${failures.length} failure(s): ${failures.join(", ")}`,
+  );
   process.exit(1);
 }
 console.log("\nui-smoke-composer: all checks passed");

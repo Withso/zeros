@@ -36,16 +36,20 @@ export default defineConfig({
   // process.env.ZEROS_CHANNEL so the spawned engine inherits the same value.
   define: {
     __ZEROS_CHANNEL_BAKED__: JSON.stringify(process.env.ZEROS_CHANNEL || ""),
+    // Main-process GitHub App OAuth cannot read Vite's renderer-only
+    // import.meta.env at runtime. Bake the same public control-plane origin into
+    // main.cjs; an explicit ZEROS_CONTROL_PLANE_URL still overrides it in dev.
+    __ZEROS_CONTROL_PLANE_URL_BAKED__: JSON.stringify(
+      process.env.VITE_CONTROL_PLANE_URL || "",
+    ),
   },
   external: [
     "electron",
-    // ESM-only packages — Electron main is CJS, so these must stay
-    // external and be loaded via runtime dynamic `import()` (see
-    // loadOctokit / loadDeviceAuth in src/engine/git/github.ts). If
-    // tsup tries to inline them, the bundle hits ERR_REQUIRE_ESM at
-    // app boot.
+    // ESM-only package — Electron main is CJS, so this must stay external
+    // and be loaded via a runtime dynamic `import()` (see loadOctokit in
+    // src/engine/git/github.ts). If tsup tries to inline it, the bundle
+    // hits ERR_REQUIRE_ESM at app boot.
     "@octokit/rest",
-    "@octokit/auth-oauth-device",
     // Native modules — never bundle, electron-rebuild handles the
     // platform-specific binary.
     "better-sqlite3",

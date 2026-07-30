@@ -35,7 +35,9 @@ export type CommandHandler = (
  *  each table entry; it is never shown to the user. */
 function notImpl(cmd: string, _order: number): CommandHandler {
   return () => {
-    throw new Error(`[Zeros] IPC command "${cmd}" is not available in this build.`);
+    throw new Error(
+      `[Zeros] IPC command "${cmd}" is not available in this build.`,
+    );
   };
 }
 
@@ -148,17 +150,14 @@ const commandTable: Record<string, CommandHandler> = {
   // ── GitHub auth surfaces (git-integration phase 6) ────────
   // (git read/write ops + PR create/list/review all moved to the engine
   //  bridge; only the GitHub-auth commands run on this IPC channel.)
-  gh_detect_cli: notImpl("gh_detect_cli", 3.7),
-  gh_set_token: notImpl("gh_set_token", 3.7),
-  gh_sign_out: notImpl("gh_sign_out", 3.7),
-  gh_auth_status: notImpl("gh_auth_status", 3.3),
-  gh_auth_signin: notImpl("gh_auth_signin", 3.3),
-  // Token-courier writeback (single-writer, H4): main couriers the decrypted
-  // token straight to the engine (spawn env + stdin) — the renderer never holds
-  // it. gh_token_clear is the renderer's one remaining courier command: it
-  // mirrors an engine-originated invalidation into safeStorage. (gh_token_get
-  // was a dead no-op — not in the preload allowlist, no callers — and is gone.)
-  gh_token_clear: notImpl("gh_token_clear", 3.7),
+  gh_auth_snapshot: notImpl("gh_auth_snapshot", 3.7),
+  gh_app_cancel: notImpl("gh_app_cancel", 3.7),
+  gh_app_connect: notImpl("gh_app_connect", 3.7),
+  gh_method_select: notImpl("gh_method_select", 3.7),
+  gh_pat_connect: notImpl("gh_pat_connect", 3.7),
+  gh_pat_restore: notImpl("gh_pat_restore", 3.7),
+  gh_method_disconnect: notImpl("gh_method_disconnect", 3.7),
+  gh_credential_clear: notImpl("gh_credential_clear", 3.7),
 
   // ── Custom window chrome (drag + zoom via JS, not CSS drag region) ─
   // See electron/ipc/commands/window.ts for the rationale (macOS
@@ -188,7 +187,10 @@ export function registerIpcHandlers(): void {
     if (!raw || typeof raw !== "object") {
       throw new Error("[Zeros] IPC: payload must be an object");
     }
-    const { cmd, args } = raw as { cmd?: string; args?: Record<string, unknown> };
+    const { cmd, args } = raw as {
+      cmd?: string;
+      args?: Record<string, unknown>;
+    };
     if (!cmd || typeof cmd !== "string") {
       throw new Error("[Zeros] IPC: missing 'cmd' string");
     }

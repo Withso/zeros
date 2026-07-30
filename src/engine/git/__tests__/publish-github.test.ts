@@ -92,6 +92,10 @@ function makePublishOctokit(cloneUrl: string) {
             },
           };
         },
+        async delete(args: { owner: string; repo: string }) {
+          calls.push(`repos.delete:${args.owner}/${args.repo}`);
+          return { status: 204 };
+        },
       },
     },
   };
@@ -188,6 +192,87 @@ describe("publish to GitHub", () => {
     });
     expect(res.owner).toBe("acme-org");
     expect(mock.calls).toContain("repos.createInOrg:acme-org/orgproj:true");
+  });
+
+  it("honors the repository's configured remote name", async () => {
+    const folder = path.join(workdir, "custom-remote");
+    await mkdir(path.join(folder, ".zeros"), { recursive: true });
+    await writeFile(
+      path.join(folder, ".zeros", "settings.local.toml"),
+      '[git]\nremote = "github"\n',
+    );
+    await writeFile(path.join(folder, "x"), "1\n");
+
+    await publishRepoToGithub({ repoRoot: folder, name: "custom-remote" });
+
+    const configuredUrl = (
+      await execFileAsync("git", [
+        "-C",
+        folder,
+        "remote",
+        "get-url",
+        "github",
+      ])
+    ).stdout.trim();
+    expect(configuredUrl).toBe(bare);
+    expect(
+      (await execFileAsync("git", ["-C", folder, "remote"])).stdout
+        .trim()
+        .split("\n"),
+    ).not.toContain("origin");
+  });
+
+  it("deletes a just-created GitHub repo and restores local remotes when push fails", async () => {
+    const folder = path.join(workdir, "broken-publish");
+    await mkdir(folder, { recursive: true });
+    await writeFile(path.join(folder, "x"), "1\n");
+    const missingRemote = path.join(workdir, "missing", "remote.git");
+    mock = makePublishOctokit(missingRemote);
+    setOctokitFactoryForTesting(() => mock.octokit as never);
+
+    await expect(
+      publishRepoToGithub({ repoRoot: folder, name: "broken-publish" }),
+    ).rejects.toMatchObject({ code: "GIT_COMMAND_FAILED" });
+
+    expect(mock.calls).toContain(
+      "repos.delete:test-user/broken-publish",
+    );
+    expect(
+      (await execFileAsync("git", ["-C", folder, "remote"])).stdout.trim(),
+    ).toBe("");
+  });
+
+  // Deleting a repository needs delete_repo / Administration:write, which none
+  // of the selectable auth methods requests — so this DELETE commonly 403s. If
+  // the local remote were unwired anyway the user would be left with an orphan
+  // repo on GitHub, a taken name, and no remote to retry the push against.
+  it("keeps the local remote when GitHub refuses to delete the new repo", async () => {
+    const folder = path.join(workdir, "undeletable-publish");
+    await mkdir(folder, { recursive: true });
+    await writeFile(path.join(folder, "x"), "1\n");
+    const missingRemote = path.join(workdir, "missing", "remote.git");
+    mock = makePublishOctokit(missingRemote);
+    mock.octokit.repos.delete = async (args: {
+      owner: string;
+      repo: string;
+    }) => {
+      mock.calls.push(`repos.delete:${args.owner}/${args.repo}`);
+      throw Object.assign(new Error("Must have admin rights to Repository."), {
+        status: 403,
+      });
+    };
+    setOctokitFactoryForTesting(() => mock.octokit as never);
+
+    await expect(
+      publishRepoToGithub({ repoRoot: folder, name: "undeletable-publish" }),
+    ).rejects.toMatchObject({ code: "GIT_COMMAND_FAILED" });
+
+    expect(mock.calls).toContain("repos.delete:test-user/undeletable-publish");
+    // Still wired to the created repo, so a retry / manual push can recover.
+    expect(
+      (await execFileAsync("git", ["-C", folder, "remote", "get-url", "origin"]))
+        .stdout.trim(),
+    ).toBe(missingRemote);
   });
 
   it("checkRepoNameAvailable: 404 → available", async () => {

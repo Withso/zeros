@@ -6,12 +6,12 @@
 //   │ ⑃ Create PR   │ ▾ │
 //   └───────────────┴───┘
 //
-// Left segment (primary): generates the PR-creation brief from live workspace
-// state and drops it into the active chat as "Create a PR" + a `PR
-// instructions.md` pill — the agent then reviews the diff, commits, pushes, and
-// runs `gh pr create`.
+// Left segment (primary): creates the PR through the engine's authenticated
+// GitHub operation. If the worktree is dirty, it refuses to omit those files
+// and offers the explicit agent workflow as recovery.
 // Dropdown:
-//   • Create draft PR    — v1 stub (surfaces a "coming soon" toast).
+//   • Create draft PR    — same direct path, with draft=true.
+//   • Ask agent to create — the prior review/commit/push/gh workflow.
 //   • Create PR manually — opens GitHub's compare/new-PR page in the browser.
 //
 // Only rendered for a real worktree that has no PR yet (see the topbar guard).
@@ -23,6 +23,7 @@ import {
   ExternalLink,
   GitPullRequestCreate,
   GitPullRequestDraft,
+  MessageSquareText,
 } from "lucide-react";
 
 import { cn } from "../../zeros/ui/cn";
@@ -35,9 +36,13 @@ import {
 } from "../../zeros/ui/primitives/dropdown-menu";
 import { toast } from "../../zeros/ui/primitives/elements";
 import {
+  ghPrCreate,
   gitChangeCounts,
+  gitErrorDescription,
+  gitLog,
   gitRepoBranchCatalog,
   gitStatus,
+  isGitErrorShape,
   type Workspace,
 } from "../../native/git";
 import { shellOpenUrl } from "../../native/native";
@@ -50,6 +55,13 @@ import {
   useWorkspaceAgentWorking,
 } from "./use-agent-working";
 import { ZerosSpinner } from "@/loaders";
+import {
+  createPullRequestFromCommittedChanges,
+  UncommittedPullRequestError,
+} from "./create-pr-action";
+import { notifyWorkspacesChanged } from "../../zeros/store/use-projects";
+import { useWorkspaceDispatch } from "../../zeros/store/store";
+import { requestUserSettingsSection } from "../../zeros/settings/settings-navigation";
 
 // 24px (`h-6`) split control on the design-system "secondary" tokens
 // (TRANSPARENT fill so it blends with the row's surface + border2, hover
@@ -82,6 +94,7 @@ export function CreatePrButton({
   disabledReason,
 }: CreatePrButtonProps) {
   const sendToChat = useSendToActiveChat();
+  const dispatch = useWorkspaceDispatch();
   const [busy, setBusy] = useState(false);
   // The repo's configured push/PR remote — the brief must name the same
   // remote the engine's own git ops use.
@@ -92,7 +105,7 @@ export function CreatePrButton({
   const agentWorking = useWorkspaceAgentWorking(workspace);
   const inert = busy || disabled === true || agentWorking;
 
-  const sendCreatePrompt = useCallback(
+  const askAgentToCreate = useCallback(
     async (draft: boolean) => {
       if (busy || disabled || agentWorking) return;
       setBusy(true);
@@ -142,6 +155,89 @@ export function CreatePrButton({
       workspace.baseBranch,
       remote,
       sendToChat,
+    ],
+  );
+
+  const openGithubSettings = useCallback(() => {
+    requestUserSettingsSection("integrations");
+    dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
+  }, [dispatch]);
+
+  const createDirect = useCallback(
+    async (draft: boolean) => {
+      if (busy || disabled || agentWorking) return;
+      setBusy(true);
+      try {
+        await createPullRequestFromCommittedChanges(
+          {
+            changeCounts: async (workspaceId) =>
+              gitChangeCounts(workspaceId),
+            log: (args) => gitLog(args),
+            create: (args) => ghPrCreate(args),
+          },
+          {
+            workspaceId: workspace.id,
+            branch: workspace.branch,
+            baseBranch: workspace.baseBranch,
+            draft,
+          },
+        );
+        // The workspace row is the durable source for the PR status island.
+        // Refresh it instead of showing a redundant success toast.
+        notifyWorkspacesChanged(workspace.repoSlug);
+      } catch (err) {
+        if (err instanceof UncommittedPullRequestError) {
+          toast.error("Commit changes before creating this pull request", {
+            description:
+              "A pull request only includes committed work. Ask the agent to review, commit, and create it.",
+            action: {
+              label: "Ask agent",
+              onClick: () => void askAgentToCreate(draft),
+            },
+          });
+          return;
+        }
+        const code = isGitErrorShape(err) ? err.code : "";
+        const needsGithubSettings = [
+          "NOT_AUTHENTICATED",
+          "GITHUB_SSO_REQUIRED",
+          "GITHUB_FORBIDDEN_SCOPE",
+          "GITHUB_REPO_NOT_INSTALLED",
+          "GITHUB_INSTALLATION_SUSPENDED",
+        ].includes(code);
+        toast.error(
+          code === "NOT_AUTHENTICATED"
+            ? "Connect GitHub to create this pull request"
+            : "Couldn't create pull request",
+          {
+            description:
+              code === "NOT_AUTHENTICATED"
+                ? "Choose an authentication method in Settings → Integrations to continue."
+                : gitErrorDescription(err),
+            ...(needsGithubSettings
+              ? {
+                  action: {
+                    label: "Open GitHub settings",
+                    onClick: openGithubSettings,
+                  },
+                }
+              : {}),
+          },
+        );
+      } finally {
+        setBusy(false);
+      }
+    },
+    [
+      busy,
+      disabled,
+      agentWorking,
+      workspace.id,
+      workspace.branch,
+      workspace.baseBranch,
+      workspace.repoSlug,
+      askAgentToCreate,
+      openGithubSettings,
     ],
   );
 
@@ -195,7 +291,7 @@ export function CreatePrButton({
             type="button"
             className={MAIN_BTN_CLS}
             disabled={inert}
-            onClick={() => void sendCreatePrompt(false)}
+            onClick={() => void createDirect(false)}
           >
             {busy ? (
               <ZerosSpinner size={14} />
@@ -225,14 +321,14 @@ export function CreatePrButton({
           className="min-w-[190px]"
         >
           <DropdownMenuItem
-            onSelect={() =>
-              toast("Draft PRs are coming soon", {
-                description: "For now, use Create PR or Create PR manually.",
-              })
-            }
+            onSelect={() => void createDirect(true)}
           >
             <GitPullRequestDraft className={cn("text-fg2 size-3.5")} />
             <span>Create draft PR</span>
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => void askAgentToCreate(false)}>
+            <MessageSquareText className="text-fg2 size-3.5" />
+            <span>Ask agent to create PR</span>
           </DropdownMenuItem>
           <DropdownMenuItem onSelect={() => void handleManual()}>
             <ExternalLink className="text-fg2 size-3.5" />

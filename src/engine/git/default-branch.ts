@@ -5,19 +5,19 @@
 // Small, best-effort git probes used when basing a new worktree on the remote
 // (createWorkspace) and when resolving a Local-main "changes vs origin" diff.
 // Every probe is non-fatal: a failure (offline, no remote, unset symref) returns
-// false/null so the caller can fall back to a local ref. They shell out via
-// `git -C <repoRoot> …` directly (like repo.ts), so each call is naturally
-// try/catch-able without GitError wrapping.
+// false/null so the caller can fall back to a local ref. Network probes go
+// through runGit so HTTPS remotes use the same scoped credential broker as
+// push/clone instead of falling through to an ambient system helper.
 // ──────────────────────────────────────────────────────────
 
-import { assertSafeGitRef, runFile } from "./git-exec";
+import { assertSafeGitRef, runGit } from "./git-exec";
 
 async function git(
   cwd: string,
   args: string[],
   timeoutMs?: number,
 ): Promise<string> {
-  const { stdout } = await runFile("git", ["-C", cwd, ...args], {
+  const { stdout } = await runGit(cwd, args, {
     maxBufferBytes: 4 * 1024 * 1024,
     // Network probes (ls-remote) must be bounded — they sit on the
     // create-workspace reply path. A local probe (symbolic-ref) passes no
@@ -120,16 +120,12 @@ export async function fetchRemote(
   }
   let flight = inFlightFetches.get(key);
   if (!flight) {
-    const started: Promise<boolean> = runFile(
-      "git",
-      ["-C", repoRoot, "fetch", remote],
-      {
-        maxBufferBytes: 16 * 1024 * 1024,
-        // Hard bound so a hung network can't pin the process — the fetch is
-        // best-effort and callers fall back to the local base on failure.
-        timeoutMs: 8_000,
-      },
-    )
+    const started: Promise<boolean> = runGit(repoRoot, ["fetch", remote], {
+      maxBufferBytes: 16 * 1024 * 1024,
+      // Hard bound so a hung network can't pin the process — the fetch is
+      // best-effort and callers fall back to the local base on failure.
+      timeoutMs: 8_000,
+    })
       .then(() => {
         lastFetchAt.set(key, Date.now());
         return true;

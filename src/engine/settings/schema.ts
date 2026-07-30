@@ -18,6 +18,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { z } from "zod";
+import { GITHUB_AUTH_METHODS } from "@zeros/core/github-auth";
 
 export const RUN_MODES = ["concurrent", "nonconcurrent"] as const;
 export const PROVIDER_AUTH_METHODS = ["cli", "api-key"] as const;
@@ -118,6 +119,19 @@ const providerSchema = z
       .describe("How this agent authenticates."),
     executable_path: z.string().describe("Override the agent executable path."),
     base_url: z.string().describe("Gateway/base-URL override (non-secret)."),
+  })
+  .partial();
+
+const githubSchema = z
+  .object({
+    auth_method: z
+      .enum(GITHUB_AUTH_METHODS)
+      .describe("The GitHub credential method Zeros actively uses."),
+    disconnected_at: z
+      .string()
+      .describe(
+        "ISO timestamp of the last explicit disconnect; prevents implicit credential adoption.",
+      ),
   })
   .partial();
 
@@ -329,6 +343,7 @@ export const userSettingsSchema = repoSettingsSchema.extend({
   models: modelsSchema.optional(),
   workspaces: workspacesSchema.optional(),
   tool_approvals_enabled: z.boolean().optional(),
+  github: githubSchema.optional(),
   providers: z.record(z.string(), providerSchema).optional(),
 });
 
@@ -362,6 +377,7 @@ export const USER_ONLY_KEYS = [
   "models",
   "workspaces",
   "tool_approvals_enabled",
+  "github",
   "providers",
 ] as const;
 const USER_ONLY_BY_LAYER: Record<string, readonly string[]> = {
@@ -555,6 +571,7 @@ const TABLE_SHAPES: Record<string, Record<string, z.ZodType>> = {
   prompts: promptsSchema.shape,
   models: modelsSchema.shape,
   workspaces: workspacesSchema.shape,
+  github: githubSchema.shape,
 };
 
 /** Per-leaf sanitize of one raw layer document. Layer-aware: user-only keys
