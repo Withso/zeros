@@ -23,6 +23,10 @@
 //
 // Chats with a transcript get a different treatment (per-chat summaries) — not
 // this block. See the caller's gate in agent-chat.tsx.
+//
+// 2026-07-30 founder direction: the three rows STEP ASIDE the moment this
+// folder has even one prior chat to offer. They are not additive with the
+// transcript row — see provenanceBlockShape.
 
 import { useMemo } from "react";
 import { FolderClosed, GitBranch, Terminal } from "lucide-react";
@@ -158,6 +162,40 @@ function SetupRow({ workspace }: { workspace: Workspace }) {
   }
 }
 
+/** What the empty state draws, from the one question that decides it: does this
+ *  folder have a prior chat to offer?
+ *
+ *  2026-07-30 founder direction: when the answer is yes, "Add chat transcripts"
+ *  is the WHOLE block — the three workspace rows are not shown alongside it.
+ *  They describe a workspace the user just created and already knows about; the
+ *  transcript row is the only line on this surface they can act on, and pairing
+ *  the two buried it under three lines of trivia.
+ *
+ *  The third state is the load-bearing one, and it is the same call
+ *  `setupRowState` makes for the setup read: `null` is "haven't looked yet",
+ *  NOT "no transcripts". Collapsing it into the no-transcripts case would paint
+ *  three rows on every new chat tab and then yank them a frame later, when the
+ *  folder's chat list lands — a pop-out, which reads as a glitch in a way that
+ *  content arriving late does not. So the block waits. Every chat that renders
+ *  it has the read in flight (see the `transcriptRowLive` gate in
+ *  agent-chat.tsx), and it is one local SQLite round trip.
+ *
+ *  "waiting" guards the FIRST answer, not every answer. In a split layout two
+ *  panes on one folder are active at once, so sending the first message in
+ *  pane 2 can flip pane 1 from "workspace" to "transcripts" live, unmounting
+ *  three rows in front of the user. That is accepted: the new shape is the
+ *  correct one, the alternative is latching a stale block for the life of the
+ *  mount, and the founder's rule is about what is on screen — not about when
+ *  it got there. */
+export type ProvenanceBlockShape = "waiting" | "workspace" | "transcripts";
+
+export function provenanceBlockShape(
+  hasTranscripts: boolean | null,
+): ProvenanceBlockShape {
+  if (hasTranscripts === null) return "waiting";
+  return hasTranscripts ? "transcripts" : "workspace";
+}
+
 /** Resolve the chat's folder to its workspace and render the block. Renders
  *  nothing at all when the folder isn't a known workspace (a plain bound
  *  directory, or a workspace the store hasn't loaded yet) — there is no
@@ -171,9 +209,14 @@ function SetupRow({ workspace }: { workspace: Workspace }) {
  *  provenance to state has no transcripts worth offering either. */
 export function ChatProvenance({
   folder,
+  hasTranscripts,
   children,
 }: {
   folder: string | undefined;
+  /** Does this folder have a prior chat to offer? `null` until the read
+   *  lands. Derived by the caller from the SAME summaries array the pill row
+   *  renders, so the two cannot disagree about whether the row is there. */
+  hasTranscripts: boolean | null;
   children?: React.ReactNode;
 }) {
   const project = useProjectForFolder(folder ?? null);
@@ -186,21 +229,33 @@ export function ChatProvenance({
     [folder, workspaces],
   );
 
+  const shape = provenanceBlockShape(hasTranscripts);
+
   if (!workspace) return null;
+  // "Haven't looked yet" — say nothing at all rather than commit to a shape
+  // this frame and change it the next. See provenanceBlockShape.
+  if (shape === "waiting") return null;
 
   return (
     // gap-3 = 12px between rows (2026-07-29 founder direction). At 14px text
     // the previous 8px packed the three lines into a single visual mass.
     <div className="flex flex-col gap-3 p-3">
-      <Row icon={<FolderClosed className="size-3.5" aria-hidden="true" />}>
-        <span className="shrink-0">Created</span>
-        <OpenInBadgeMenu
-          path={workspace.path}
-          label={workspaceLabel(workspace)}
-        />
-      </Row>
-      <BranchedRow workspace={workspace} />
-      <SetupRow workspace={workspace} />
+      {/* Not rendered at all when a transcript row will take this block —
+          unmounted rather than hidden, so SetupRow's bridge read never fires
+          for a block nobody sees. */}
+      {shape === "workspace" && (
+        <>
+          <Row icon={<FolderClosed className="size-3.5" aria-hidden="true" />}>
+            <span className="shrink-0">Created</span>
+            <OpenInBadgeMenu
+              path={workspace.path}
+              label={workspaceLabel(workspace)}
+            />
+          </Row>
+          <BranchedRow workspace={workspace} />
+          <SetupRow workspace={workspace} />
+        </>
+      )}
       {children}
     </div>
   );

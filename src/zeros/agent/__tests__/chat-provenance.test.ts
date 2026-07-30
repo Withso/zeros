@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { setupRowState } from "../chat-provenance";
+import { provenanceBlockShape, setupRowState } from "../chat-provenance";
 
 // The empty chat's setup line has three shapes and one "say nothing yet".
 // Both edges below were deliberate calls, so pin them.
@@ -48,5 +48,30 @@ describe("setupRowState", () => {
     // and state:null. "Setup script is running" would be a lie (nothing is);
     // the honest reading is that there is nothing in flight.
     expect(setupRowState({ hasCommand: true, state: null })).toBe("completed");
+  });
+});
+
+// 2026-07-30 founder direction: the three workspace rows and the transcript
+// row are ALTERNATIVES, not a stack. Same three-state shape as setupRowState,
+// and for the same reason.
+
+describe("provenanceBlockShape", () => {
+  it("gives the whole block to the transcript row when there is one", () => {
+    // Not "rows plus a fourth row". The workspace lines describe something the
+    // user created seconds ago and already knows; the transcript row is the
+    // only line here they can act on, and pairing them buried it.
+    expect(provenanceBlockShape(true)).toBe("transcripts");
+  });
+
+  it("falls back to the workspace rows when there is nothing to attach", () => {
+    expect(provenanceBlockShape(false)).toBe("workspace");
+  });
+
+  it("waits rather than committing to a shape it may have to take back", () => {
+    // The load-bearing case. `null` is "the folder's chat list hasn't landed",
+    // NOT "no transcripts" — collapsing the two would paint three rows on
+    // every new chat tab and yank them a frame later, which reads as a glitch
+    // in a way that content arriving late does not.
+    expect(provenanceBlockShape(null)).toBe("waiting");
   });
 });

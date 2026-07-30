@@ -424,12 +424,25 @@ export interface ChatSummaryRow {
   summaryAt: number;
   agentId: string | null;
   agentName: string | null;
-  /** Persisted transcript rows. NOT turns — a 12-turn chat routinely has 200
-   *  of these, because tool calls and reasoning each persist a row. It is the
-   *  volume signal on a transcript pill, and it is exact and free here where a
-   *  byte figure would over-state the formatted result by 3–10× and then
-   *  disagree with the attachment it produced. */
-  messageCount: number;
+  /** Prompts the user sent to this agent — nothing else.
+   *
+   *  This was `COUNT(*)` over the persisted rows until 2026-07-30, and that
+   *  number was indefensible on a pill: tool calls and reasoning each persist
+   *  a row, so a chat the user could see was two questions long reported "55
+   *  messages". A count nobody can reproduce by looking at the chat is worse
+   *  than no count, and the founder's call was to count the one thing that IS
+   *  legible — how many times you asked.
+   *
+   *  It is also now the SAME set the `summary` subquery draws its text from,
+   *  and the same set `groupMessagesIntoTurns` opens a turn for — so the pill's
+   *  number, the pill's label and the concise transcript the pill attaches all
+   *  describe one thing.
+   *
+   *  Auto-actions (Create PR, Commit & Push — see AgentTextMessage.autoAction)
+   *  ARE counted. Zeros sent the text, but it occupies a real user turn in the
+   *  timeline and in the transcript, and excluding it would make this number
+   *  disagree with the document it advertises. */
+  userMessageCount: number;
   /** Epoch ms of the newest message, or 0 for a chat with none. Drives the
    *  "last active" line in the transcript hover preview and NOTHING else —
    *  deliberately not the sort key (see below). */
@@ -482,7 +495,8 @@ export function summariesForFolder(
                    AND json_extract(cm.payload, '$.text') IS NOT NULL
                  ORDER BY cm.ord ASC LIMIT 1) AS summary,
               (SELECT COUNT(*) FROM chat_messages cm
-                 WHERE cm.chat_id = chats.id) AS messageCount,
+                 WHERE cm.chat_id = chats.id AND cm.kind = 'text'
+                   AND json_extract(cm.payload, '$.role') = 'user') AS userMessageCount,
               (SELECT MAX(cm.created_at) FROM chat_messages cm
                  WHERE cm.chat_id = chats.id) AS lastMessageAt
          FROM chats
@@ -498,7 +512,7 @@ export function summariesForFolder(
     agentId: string | null;
     agentName: string | null;
     summary: string | null;
-    messageCount: number | null;
+    userMessageCount: number | null;
     lastMessageAt: number | null;
   }[];
   return rows.map((r) => ({
@@ -509,7 +523,9 @@ export function summariesForFolder(
     summaryAt: 0,
     agentId: r.agentId,
     agentName: r.agentName,
-    messageCount: r.messageCount ?? 0,
+    // The EXISTS gate above uses the IDENTICAL predicate, so every row that
+    // reaches here has at least one — the pill can never draw a 0.
+    userMessageCount: r.userMessageCount ?? 0,
     // MAX() over zero rows is SQL NULL. Unreachable through the EXISTS clause
     // today, but a 0 here is a falsy "unknown" the renderer can branch on,
     // where a NULL would print as "last active 1 Jan 1970".

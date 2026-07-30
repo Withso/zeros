@@ -248,8 +248,11 @@ export interface ChatSummaryWire {
    *  render its monochrome logo on the summary pill. Null when no agent bound. */
   agentId: string | null;
   agentName: string | null;
-  /** Persisted transcript rows — the number on a transcript pill. */
-  messageCount: number;
+  /** Prompts the user sent to this agent — the number on a transcript pill.
+   *  NOT the persisted row count, which counts every tool call and reasoning
+   *  block and so reported "55 messages" for a two-question chat. See the
+   *  field's doc on the engine side. */
+  userMessageCount: number;
   /** Epoch ms of the newest message; 0 when unknown. "Last active" in the
    *  transcript hover preview. Never an ordering key. */
   lastMessageAt: number;

@@ -86,6 +86,16 @@ describe("D1 — concise always, full only on right-click", () => {
     expect(pills()).not.toContain("Add chat transcripts:");
   });
 
+  it("leads the row with a conversation glyph, not a paperclip", () => {
+    // 2026-07-30 founder direction. The row sits with the folder/branch/
+    // terminal provenance rows, whose icons all name WHAT the row is about;
+    // a paperclip named the mechanism instead. The paperclip survives in the
+    // right-click menu, where "Attach full transcript" IS the mechanism.
+    const src = pills();
+    expect(src).toContain('<MessageCircleMore className="size-3.5"');
+    expect(src).not.toContain('<Paperclip className="size-3.5"');
+  });
+
   it("uses the SAME two words as the chat tab's own transcript menu", () => {
     // A second vocabulary for one existing pair of modes is how two mental
     // models start. The tab menu says "Copy concise/full transcript".
@@ -149,7 +159,9 @@ describe("D1 — the menu is reachable without a pointer", () => {
     const body =
       src.split("const openMenuFromKeyboard")[1]?.split("const pill")[0] ?? "";
     expect(body).toBeTruthy();
-    expect(body.indexOf("return;")).toBeLessThan(body.indexOf("preventDefault"));
+    expect(body.indexOf("return;")).toBeLessThan(
+      body.indexOf("preventDefault"),
+    );
   });
 });
 
@@ -172,9 +184,7 @@ describe("D3 — the added state is a Button variant, not an override", () => {
   it("does not overload the focus ring token for the pressed state", () => {
     // highlighted-bright IS the focus signal. Using it here would make a
     // focused-but-off pill and an on-but-unfocused pill look identical.
-    const variant = button()
-      .split('"secondary-on":')[1]
-      ?.split("},")[0] ?? "";
+    const variant = button().split('"secondary-on":')[1]?.split("},")[0] ?? "";
     expect(variant).not.toContain("highlighted-bright");
   });
 
@@ -192,7 +202,12 @@ describe("D3 — the added state is a Button variant, not an override", () => {
 describe("D5 — open vs closed is not a distinction this feature makes", () => {
   it("never groups, badges or sorts on archived", () => {
     const src = pills();
-    for (const banned of ["archived", "Closed", "OPEN TABS", "CommandSeparator"]) {
+    for (const banned of [
+      "archived",
+      "Closed",
+      "OPEN TABS",
+      "CommandSeparator",
+    ]) {
       expect(src).not.toContain(banned);
     }
   });
@@ -212,7 +227,7 @@ describe("D6 — no budget chrome anywhere", () => {
       expect(src).not.toContain("budget");
       expect(src).not.toContain("Progress");
     }
-    expect(pills()).toContain("{summary.messageCount}");
+    expect(pills()).toContain("{summary.userMessageCount}");
   });
 
   it("has no yellow / over-budget pill state", () => {
@@ -250,26 +265,61 @@ describe("D8 — hover shows the transcript, and says nothing else", () => {
     expect(src).not.toMatch(/hp-foot|<footer/);
   });
 
-  it("discloses the render cap INLINE when it clips, not in a footer", () => {
-    // The panel renders at most PREVIEW_LINE_CAP lines, because line-per-div
-    // over the formatter's 2M-char document cap would mount ~40,000 nodes in
-    // one commit. A silently clipped preview is the one lie this surface
-    // exists to prevent, so the marker rides at the end of the BODY, in the
-    // transcript's own voice — the same way formatTranscript marks every
-    // other elision.
+  it("scrolls the WHOLE transcript — no render cap to disclose", () => {
+    // 2026-07-30 founder direction: the hover must show the complete
+    // transcript, for full and concise alike. It used to stop dead at 400
+    // lines behind an inline "…400 lines shown" marker; now the body grows a
+    // step at a time as the reader approaches the end, so nothing is withheld
+    // and there is nothing to disclose. Same trade the transcript itself makes
+    // — agent-chat.tsx pages older history in on scroll with no affordance.
     const src = preview();
-    expect(src).toContain("PREVIEW_LINE_CAP");
-    expect(src).toContain("the attachment");
-    // …and it is inside the scroll region, not after it.
-    const scrollEnd = src.indexOf("</ScrollArea>");
-    expect(src.indexOf("carries the whole transcript")).toBeLessThan(scrollEnd);
+    expect(src).not.toContain("PREVIEW_LINE_CAP");
+    expect(src).not.toContain("lines shown");
+    expect(src).toContain("nextPreviewLimit");
+    expect(src).toContain("onScroll={onScroll}");
+  });
+
+  it("scrolls on a native overflow, NOT <ScrollArea>", () => {
+    // Radix makes its Viewport the scroller and that Viewport carries
+    // `h-full`. Its containing block here is the ScrollArea root, sized by
+    // `flex-1` in a column with a max-height and no height — and a max-height
+    // does not make a box definite for percentage resolution. So height:100%
+    // fell back to auto, the viewport grew to its full content height, and
+    // overflow-y:scroll had nothing to scroll: the wheel did nothing and the
+    // thumb never mounted. Scrolling the flex item itself needs no percentage
+    // height. Same shape as the two popper surfaces in this app that already
+    // scroll (checkpoint-rail's hover card, the command palette's list).
+    const src = preview();
+    expect(src).not.toContain("ScrollArea");
+    expect(src).toContain(
+      'className="min-h-0 flex-1 overflow-y-auto overscroll-contain"',
+    );
   });
 
   it("the header is exactly agent, count and last active", () => {
     const src = preview();
     expect(src).toContain("<AgentIcon");
-    expect(src).toContain("{messageCount}");
+    expect(src).toContain("{userMessageCount}");
     expect(src).toContain("Last active {formatCompactAge(lastMessageAt)} ago");
+  });
+
+  it("names the count 'prompts', because that is what it counts", () => {
+    // The old "55 messages" was COUNT(*) over persisted rows — tool calls and
+    // reasoning included — on a chat the user could see was two questions
+    // long. The number is now user prompts, and the word has to say so, or the
+    // same ambiguity returns the first time someone compares it to the bubbles
+    // on screen.
+    const src = preview();
+    expect(src).toContain('"prompt" : "prompts"');
+    expect(src).not.toMatch(/"message" : "messages"/);
+  });
+
+  it("draws the header rule on border2, so it is visible on bg2", () => {
+    // border1 is the divider for bg1 surfaces. This panel is a bg2 popover, so
+    // border1 rendered invisible and the header ran into the transcript.
+    const src = preview();
+    expect(src).toContain("border-border2");
+    expect(src).not.toContain("border-border1");
   });
 
   it("renders no skeleton while the body loads", () => {

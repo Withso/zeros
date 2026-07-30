@@ -1495,12 +1495,20 @@ export function AgentChat({
   // the item inside it, so the dialog opens with data rather than empty.
   const transcriptRowLive =
     session.messages.length === 0 && !session.error && !!chatThread?.folder;
-  const { summaries: transcriptSummaries } = useChatTranscriptSummaries(
-    chatThread?.folder,
-    chatId,
-    surfaceActive &&
-      (transcriptRowLive || plusMenuOpen || transcriptPickerOpen),
-  );
+  const { summaries: transcriptSummaries, loaded: transcriptsLoaded } =
+    useChatTranscriptSummaries(
+      chatThread?.folder,
+      chatId,
+      surfaceActive &&
+        (transcriptRowLive || plusMenuOpen || transcriptPickerOpen),
+    );
+  // The provenance block's shape hangs on this ONE question, and `null` for
+  // "not known yet" is the load-bearing third answer — see
+  // provenanceBlockShape. Derived from the same array the row renders, so the
+  // rows can never step aside for a row that then draws nothing.
+  const hasTranscripts = transcriptsLoaded
+    ? transcriptSummaries.length > 0
+    : null;
 
   // Source chats whose transcript read is in flight. A pill in here is still
   // clickable — the click cancels (see cancelTranscriptAttach).
@@ -1592,7 +1600,7 @@ export function AgentChat({
             preview: {
               agentId: summary.agentId,
               agentName: summary.agentName,
-              messageCount: summary.messageCount,
+              userMessageCount: summary.userMessageCount,
               lastMessageAt: summary.lastMessageAt,
             },
           });
@@ -3591,12 +3599,15 @@ export function AgentChat({
               session shows its own failure UI and provenance would read as
               reassurance the user shouldn't take. */}
             {session.messages.length === 0 && !session.error && (
-              <ChatProvenance folder={chatThread?.folder}>
-                {/* The transcript pill row rides INSIDE the provenance block
-                  as its fourth row: the block already has an action row
-                  ("Configure setup script"), so a fourth action row is
-                  idiomatic rather than novel, and the empty state keeps one
-                  left edge, one type size and one icon column.
+              <ChatProvenance
+                folder={chatThread?.folder}
+                hasTranscripts={hasTranscripts}
+              >
+                {/* The transcript pill row rides INSIDE the provenance block,
+                  keeping one left edge, one type size and one icon column.
+                  2026-07-30: it REPLACES the three workspace rows rather than
+                  following them — when there is a transcript to offer, it is
+                  the whole block (see provenanceBlockShape).
                   Gated on the same messages.length === 0 as the block, so it
                   is gone after the first send — the composer "+" menu is what
                   covers "three turns in, I realise the agent needs the other

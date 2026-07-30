@@ -462,9 +462,12 @@ describe("Zeros DB (unified engine store)", () => {
       "first B question",
     );
     // Volume + recency aggregates ride along on the same round trip.
-    expect(rows.find((r) => r.chatId === "a")!.messageCount).toBe(3);
+    // 2026-07-30: volume counts USER prompts, not persisted rows. Chat "a"
+    // holds three rows — two user, one agent — and reports 2. The old COUNT(*)
+    // is what put "55 messages" on a two-question chat.
+    expect(rows.find((r) => r.chatId === "a")!.userMessageCount).toBe(2);
     expect(rows.find((r) => r.chatId === "a")!.lastMessageAt).toBe(77);
-    expect(rows.find((r) => r.chatId === "b")!.messageCount).toBe(1);
+    expect(rows.find((r) => r.chatId === "b")!.userMessageCount).toBe(1);
     // excludeChatId drops self; cross-folder z never appears.
     expect(summariesForFolder("/proj", "b").map((r) => r.chatId)).toEqual([
       "c",

@@ -1281,6 +1281,12 @@
         <symbol id="i-clip" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M13.234 20.252 21 12.3a3.3 3.3 0 0 0-4.663-4.663l-8.485 8.486a5.5 5.5 0 0 0 7.778 7.778l6.717-6.718" />
         </symbol>
+        <symbol id="i-message-more" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719" />
+          <path d="M8 12h.01" />
+          <path d="M12 12h.01" />
+          <path d="M16 12h.01" />
+        </symbol>
         <symbol id="i-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
           <path d="M14 2v4a2 2 0 0 0 2 2h4" />
@@ -1597,7 +1603,10 @@ for (const a of localAttachments) {
               <div class="name">One order change, one aggregate</div>
               <pre><span class="c">-- add to summariesForFolder's SELECT</span>
 (SELECT COUNT(*)           FROM chat_messages cm
-   WHERE cm.chat_id = chats.id)      AS <b>messageCount</b>,
+   WHERE cm.chat_id = chats.id
+     AND cm.kind = 'text'
+     AND json_extract(cm.payload,'$.role') = 'user')
+                                     AS <b>userMessageCount</b>,
 (SELECT MAX(cm.created_at) FROM chat_messages cm
    WHERE cm.chat_id = chats.id)      AS <b>lastMessageAt</b>
 <span class="c">-- drop the archived predicate, and then</span>
@@ -1617,9 +1626,25 @@ ORDER BY <b>chats.created_at DESC, chats.rowid DESC</b></pre>
                   in a stable, sensible place instead of shuffling per query.
                 </li>
                 <li>
-                  <code>messageCount</code> is the pill's trailing number and the picker's.
+                  <code>userMessageCount</code> is the pill's trailing number and the picker's.
                   <code>lastMessageAt</code> is used <em>only</em> for the hover preview's
                   "last active" line (<a href="#c8">C8</a>) — never for ordering.
+                </li>
+                <li>
+                  <strong>It counts PROMPTS, not rows — corrected 2026-07-30.</strong> This
+                  shipped as a bare <code>COUNT(*)</code>, and the number was indefensible on a
+                  pill: tool calls and reasoning each persist a row, so a chat the user could
+                  see was two questions long reported "55 messages". A count nobody can
+                  reproduce by looking at the chat is worse than no count. The predicate is now
+                  the same one the <code>summary</code> sub-select and the row's own
+                  <code>EXISTS</code> gate already use, which buys three agreements for free:
+                  the number can never be <code>0</code> for a row that appears; it describes
+                  the same set the pill's label is drawn from; and it matches the turn count of
+                  the concise transcript the pill attaches, because
+                  <code>groupMessagesIntoTurns</code> opens exactly one turn per user text
+                  message. Auto-actions (Create&nbsp;PR, Commit&nbsp;&amp;&nbsp;Push) are
+                  counted — Zeros wrote the text, but it occupies a real user turn in the
+                  timeline and in the transcript.
                 </li>
                 <li>
                   No <code>rawBytes</code>. It was there to drive the budget readout, and
@@ -1665,7 +1690,10 @@ ORDER BY <b>chats.created_at DESC, chats.rowid DESC</b></pre>
               <p class="case-copy">
                 That restraint is right, and it is also the opening the pill row fits into: the
                 block already establishes a left-aligned, single-type, icon-plus-sentence idiom.
-                A fourth row costs nothing to read.
+                <s>A fourth row costs nothing to read.</s>
+                <strong>2026-07-30:</strong> it borrows the idiom but does not stack on top of
+                it — where there is a transcript to offer, the pill row is the whole block and
+                these three rows do not render. See <a href="#c2">C2</a>.
               </p>
             </div>
             <div class="meta">
@@ -2055,7 +2083,7 @@ ORDER BY <b>chats.created_at DESC, chats.rowid DESC</b></pre>
                 <div class="hp" style="width: 260px">
                   <div class="hp-head">
                     <svg class="glyph claude"><use href="#i-claude" /></svg>
-                    <b>Claude</b><span class="dot-sep">·</span>34 messages<span class="dot-sep">·</span>2 hours ago
+                    <b>Claude</b><span class="dot-sep">·</span>34 prompts<span class="dot-sep">·</span>2 hours ago
                   </div>
                   <div class="hp-body" style="max-height: 46px; padding-bottom: 6px">
                     <h4>User</h4>
@@ -2077,7 +2105,23 @@ ORDER BY <b>chats.created_at DESC, chats.rowid DESC</b></pre>
               </div>
               <h2>In place — a fourth provenance row, not a second block</h2>
               <p class="case-copy">
-                The provenance block already has a row that is an <em>action</em> ("Configure
+                <strong>Superseded 2026-07-30 — it is not a fourth row, it is the WHOLE
+                block.</strong> When the folder has even one prior chat to offer, the three
+                workspace rows do not render at all; "Add chat transcripts" and its pills stand
+                alone. Everything below about the left edge, the type size, the icon column and
+                the 22px indent still holds — the row is built the same way and mounts in the
+                same container. What changed is that the rows are <em>alternatives</em>, not a
+                stack: Created / Branched / setup script describe a workspace the user made
+                seconds ago and already knows about, and putting three lines of that above the
+                one line on this surface they can act on buried it. The decision is a pure
+                function, <code>provenanceBlockShape</code>, with a third
+                <code>"waiting"</code> state — because "the folder's chat list hasn't landed" is
+                not "no transcripts", and collapsing them would paint three rows on every new
+                chat tab and yank them a frame later.
+              </p>
+              <p class="case-copy">
+                The original rationale, kept because the construction it describes is unchanged:
+                the provenance block already has a row that is an <em>action</em> ("Configure
                 setup script"), so a fourth action row is idiomatic rather than novel. Folding
                 the label in gives the empty state one left edge, one type size, one icon
                 column — and drops the reference's floating label and its colon.
@@ -2108,21 +2152,11 @@ ORDER BY <b>chats.created_at DESC, chats.rowid DESC</b></pre>
             <div class="pane tall">
               <div class="transcript">
                 <div class="prov">
-                  <div class="prow">
-                    <span class="icon"><svg width="14" height="14"><use href="#i-folder" /></svg></span>
-                    <span class="words"><span>Created</span><span class="name-chip">Sarcoline</span></span>
-                  </div>
-                  <div class="prow">
-                    <span class="icon"><svg width="14" height="14"><use href="#i-branch" /></svg></span>
-                    <span class="words"><span>Branched</span><span>zeros/Sarcoline</span><span>from</span><span>main</span></span>
-                  </div>
-                  <div class="prow">
-                    <span class="icon"><svg width="14" height="14"><use href="#i-terminal" /></svg></span>
-                    <span class="words"><span class="link">Configure setup script</span></span>
-                  </div>
+                  <!-- 2026-07-30: the three workspace rows do NOT render when a
+                       transcript row does. See provenanceBlockShape. -->
                   <div class="trow">
                     <div class="prow">
-                      <span class="icon"><svg width="14" height="14"><use href="#i-clip" /></svg></span>
+                      <span class="icon"><svg width="14" height="14"><use href="#i-message-more" /></svg></span>
                       <span class="words">
                         <span>Add chat transcripts</span>
                       </span>
@@ -2536,7 +2570,7 @@ title !== "Untitled" &amp;&amp; title.trim()
               <div class="frame-label after"><span class="dot-lg"></span>Row — capped at six, count disclosed</div>
               <div class="frame" style="padding: 18px 20px">
                 <div class="prow" style="margin-bottom: 8px">
-                  <span class="icon"><svg width="14" height="14"><use href="#i-clip" /></svg></span>
+                  <span class="icon"><svg width="14" height="14"><use href="#i-message-more" /></svg></span>
                   <span class="words"><span>Add chat transcripts</span></span>
                 </div>
                 <div class="pills">
@@ -2831,7 +2865,7 @@ title !== "Untitled" &amp;&amp; title.trim()
                 <div class="hp">
                   <div class="hp-head">
                     <svg class="glyph claude"><use href="#i-claude" /></svg>
-                    <b>Claude</b><span class="dot-sep">·</span>34 messages<span class="dot-sep">·</span>Last active 2 hours ago
+                    <b>Claude</b><span class="dot-sep">·</span>34 prompts<span class="dot-sep">·</span>Last active 2 hours ago
                   </div>
                   <div class="hp-body">
                     <h4>User</h4>
@@ -2870,7 +2904,7 @@ title !== "Untitled" &amp;&amp; title.trim()
                 <div class="hp">
                   <div class="hp-head">
                     <svg class="glyph claude"><use href="#i-claude" /></svg>
-                    <b>Claude</b><span class="dot-sep">·</span>212 messages<span class="dot-sep">·</span>Last active 4 days ago
+                    <b>Claude</b><span class="dot-sep">·</span>212 prompts<span class="dot-sep">·</span>Last active 4 days ago
                   </div>
                   <div class="hp-body">
                     <h4># Audit transcript implementation</h4>
@@ -2945,11 +2979,24 @@ title !== "Untitled" &amp;&amp; title.trim()
                   <em>whole</em> formatted transcript, because a silently clipped preview is the
                   one thing worse than no preview, and there is no longer a caption to admit the
                   clip in. This is affordable: the file is plain text in a scroll container
-                  (concise is single-digit KB; a 212-message full transcript is a few hundred),
+                  (concise is single-digit KB; a 212-prompt full transcript is a few hundred),
                   and the expensive part was always the read, not the render. Cap the DOM only
                   if profiling says so, and if it ever needs one, the marker goes
                   <em>inline at the end of the body</em>, in the transcript's own voice — the
                   same way <code>formatTranscript</code> already marks every other elision.
+                  <br /><strong>2026-07-30 — the cap came, and went.</strong> The first
+                  implementation did stop at 400 lines behind that inline marker, on the
+                  reasoning that line-per-div over the formatter's 2M-char document cap mounts
+                  ~40,000 nodes in one synchronous commit. The founder's answer was the one this
+                  section already gave: the panel shows the whole transcript. It now mounts one
+                  400-line step on open and more each time the reader comes within a panel
+                  height of the end (<code>nextPreviewLimit</code>), so the open costs exactly
+                  what it did and the ceiling is gone. Growth is half-again past the first
+                  few steps and capped at five, so the tail of a 40,000-line transcript is
+                  ~20 gestures away rather than ~100, and no single commit ever mounts more
+                  than 2,000 nodes. That is the same trade the transcript
+                  itself makes — <code>agent-chat.tsx</code> pages older history in on scroll
+                  with no affordance at all.
                 </li>
               </ul>
             </div>
@@ -3069,7 +3116,7 @@ title !== "Untitled" &amp;&amp; title.trim()
               <div class="name">Live pill → fixed file</div>
               <div class="stage col" style="min-height: 110px">
                 <span class="pill"><span class="shim" aria-hidden="true"></span><span class="label">Implement workspace a…</span><span class="count">19</span></span>
-                <span style="color: var(--fg3); font-size: 12px; padding-left: 4px">↓ click, at 19 messages</span>
+                <span style="color: var(--fg3); font-size: 12px; padding-left: 4px">↓ click, at 19 prompts</span>
                 <span class="chip"><svg class="glyph"><use href="#i-file" /></svg><span class="fname">implement-workspace-an.concise.txt</span><svg class="x"><use href="#i-x" /></svg></span>
               </div>
               <ul style="margin-top: 10px">
@@ -3165,8 +3212,23 @@ title !== "Untitled" &amp;&amp; title.trim()
                 </tr>
                 <tr>
                   <td><strong>Query hasn't resolved yet</strong></td>
-                  <td>Hidden</td>
-                  <td>Renders when it lands. No skeleton — one layout step, above a composer being typed into.</td>
+                  <td>Hidden — <em>and so is the rest of the block</em></td>
+                  <td>
+                    Renders when it lands. No skeleton — one layout step, above a composer being
+                    typed into. 2026-07-30: because a transcript row now <em>replaces</em> the
+                    three workspace rows, those rows have to wait on the same answer. Painting
+                    them and yanking them a frame later reads as a glitch in a way that content
+                    arriving late does not — the same call <code>setupRowState</code> already
+                    makes for its own read.
+                  </td>
+                </tr>
+                <tr>
+                  <td><strong>At least one attachable chat</strong></td>
+                  <td>Label + pills, <em>alone</em></td>
+                  <td>
+                    2026-07-30 founder direction. Created / Branched / setup script do not
+                    render at all — see <a href="#c2">C2</a>.
+                  </td>
                 </tr>
                 <tr>
                   <td><strong>Every other chat is empty</strong></td>
@@ -3276,7 +3338,7 @@ title !== "Untitled" &amp;&amp; title.trim()
                   <code>aria-label</code> carries the preview's header line, so a screen reader
                   gets the same three facts a sighted user gets from the panel without having to
                   enter one: <em>"Attach transcript of Find chat transcript implementations —
-                  Claude, 34 messages, last active 2 hours ago"</em>.
+                  Claude, 34 prompts, last active 2 hours ago"</em>.
                 </li>
                 <li>
                   Each pill is <code>aria-haspopup="menu"</code> for the context menu. The menu
@@ -3529,7 +3591,7 @@ title !== "Untitled" &amp;&amp; title.trim()
                 <div class="hp" style="width: 320px">
                   <div class="hp-head">
                     <svg class="glyph codex"><use href="#i-codex" /></svg>
-                    <b>Codex</b><span class="dot-sep">·</span>8 messages<span class="dot-sep">·</span>Yesterday
+                    <b>Codex</b><span class="dot-sep">·</span>8 prompts<span class="dot-sep">·</span>Yesterday
                   </div>
                   <div class="hp-body" style="max-height: 120px">
                     <h4>User</h4>
@@ -3544,10 +3606,28 @@ title !== "Untitled" &amp;&amp; title.trim()
               <div class="name">Trap 3 — a 264px scroll region inside a popover</div>
               <ul>
                 <li>
-                  The body scrolls, so it needs the app's <code>&lt;ScrollArea&gt;</code> rather
-                  than raw <code>overflow-y: auto</code> — otherwise the panel ships a native
-                  scrollbar that looks nothing like the rest of Column 2 and changes width
-                  between platforms.
+                  <s>The body scrolls, so it needs the app's <code>&lt;ScrollArea&gt;</code>
+                  rather than raw <code>overflow-y: auto</code> — otherwise the panel ships a
+                  native scrollbar that looks nothing like the rest of Column 2 and changes
+                  width between platforms.</s>
+                  <br /><strong>Wrong, and it shipped — corrected 2026-07-30.</strong>
+                  <code>&lt;ScrollArea&gt;</code> here could not scroll <em>at all</em>. Radix
+                  makes its Viewport the scroller and that Viewport carries
+                  <code>height: 100%</code>; its containing block is the ScrollArea root, sized
+                  by <code>flex-1</code> inside a column with a <em>max</em>-height and no
+                  height — and a max-height does not make a box definite for percentage
+                  resolution. So <code>height: 100%</code> fell back to <code>auto</code>, the
+                  viewport grew to its full 6,870px content, and <code>overflow-y: scroll</code>
+                  had nothing to scroll. The wheel did nothing and the thumb never appeared
+                  (Radix mounts it on <code>offsetHeight &lt; scrollHeight</code>, which was
+                  false). Use native <code>overflow-y: auto</code> on the flex item itself: it
+                  needs no percentage height, so the cap stays in one place and short
+                  transcripts still shrink-wrap. It is also what the two popper surfaces in this
+                  app that already scroll do — <code>checkpoint-rail.tsx</code>'s hover card and
+                  the command palette's <code>CommandList</code>. The scrollbar caveat is real
+                  but minor, and those two already carry it: the panel portals to
+                  <code>document.body</code>, outside the <code>[data-zeros-root]</code> scope
+                  of the app's styled 6px bar.
                 </li>
                 <li>
                   Transcript text renders at <code>--fg2</code> with role headings at
@@ -3761,7 +3841,12 @@ title !== "Untitled" &amp;&amp; title.trim()
                 <li>
                   <strong>And per <a href="#d1">D6</a> the ceiling itself is model-dependent</strong>,
                   so any "of 1.0 MB" makes the row a conversation about the model pill. The
-                  message count is exact, free, and cannot contradict itself.
+                  prompt count is exact, free, and cannot contradict itself.
+                  <br /><strong>2026-07-30 — "cannot contradict itself" was doing work this
+                  number had not earned.</strong> It shipped as <code>COUNT(*)</code> over
+                  persisted rows, which contradicted the chat on screen: a two-question chat
+                  read "55 messages", because every tool call and reasoning block is a row. Now
+                  it counts user prompts, which is a number the reader can check by looking.
                 </li>
               </ul>
             </div>
@@ -3873,7 +3958,7 @@ title !== "Untitled" &amp;&amp; title.trim()
                   <td>
                     <strong>Fix <code>summariesForFolder</code></strong> (<a href="#b2">B2</a>):
                     order by <code>created_at DESC, rowid DESC</code>, add
-                    <code>messageCount</code> and <code>lastMessageAt</code>, drop the
+                    <code>userMessageCount</code> and <code>lastMessageAt</code>, drop the
                     hard-coded <code>archived = 0</code>.
                   </td>
                   <td>

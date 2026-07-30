@@ -173,7 +173,7 @@ export function AttachmentPill(props: NodeViewProps) {
           <TranscriptPreviewShell
             agentId={preview.agentId}
             agentName={preview.agentName}
-            messageCount={preview.messageCount}
+            userMessageCount={preview.userMessageCount}
             lastMessageAt={preview.lastMessageAt}
             body={att?.text ?? null}
           />

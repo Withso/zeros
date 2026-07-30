@@ -476,7 +476,19 @@ export async function bridgeChatSummaries(
     folder,
     ...(excludeChatId ? { excludeChatId } : {}),
   })) as { summaries?: ChatSummaryWire[] } | undefined;
-  return r?.summaries ?? [];
+  // The two aggregates are coerced, and nothing else is. This op can be served
+  // by an engine that is not the one this renderer shipped with (a relay
+  // client, or a stale sidecar surviving a respawn), and `userMessageCount`
+  // was `messageCount` until 2026-07-30 — a missing field would otherwise
+  // render as "undefined prompts" in the hover header and an empty span on the
+  // pill. A wrong-but-shaped 0 degrades quietly; `undefined` does not. The rest
+  // of the row is left a bare cast on purpose: a string field arriving
+  // undefined is a bug worth seeing, not one worth papering over.
+  return (r?.summaries ?? []).map((s) => ({
+    ...s,
+    userMessageCount: Number(s.userMessageCount) || 0,
+    lastMessageAt: Number(s.lastMessageAt) || 0,
+  }));
 }
 
 // ── Incremental delta sync (Phase 3, real pull) ─────────────

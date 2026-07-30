@@ -81,7 +81,7 @@ function persisted(role: "user" | "agent", text: string, createdAt: number) {
 }
 
 /** What loadFullTranscript would have returned for the rows we inserted. */
-function messages(...pairs: [("user" | "agent"), string][]): AgentMessage[] {
+function messages(...pairs: ["user" | "agent", string][]): AgentMessage[] {
   return pairs.map(([role, text], i) => ({
     id: `x${i}`,
     kind: "text",
@@ -122,7 +122,9 @@ describe("attach a chat transcript — the whole path", () => {
     upsertChatMessagesBulk("seeded", [
       persisted("user", "bump the sqlite pin to 12.4.1 please", 30),
     ]);
-    upsertChatMessagesBulk("closed", [persisted("user", "audit the tokens", 40)]);
+    upsertChatMessagesBulk("closed", [
+      persisted("user", "audit the tokens", 40),
+    ]);
 
     const summaries = summariesForFolder(FOLDER);
 
@@ -136,7 +138,10 @@ describe("attach a chat transcript — the whole path", () => {
     ]);
     // The closed chat is present and carries no marker of being closed.
     expect(summaries[2]).not.toHaveProperty("archived");
-    expect(summaries[0].messageCount).toBe(2);
+    // Two persisted rows, ONE prompt. The number on the pill and the turn
+    // count of the concise transcript it attaches (asserted below) are now the
+    // same fact — before, this said 2 and the transcript said 1.
+    expect(summaries[0].userMessageCount).toBe(1);
     expect(summaries[0].lastMessageAt).toBe(20);
 
     // ── the row ────────────────────────────────────────────
@@ -196,9 +201,9 @@ describe("attach a chat transcript — the whole path", () => {
     const block = blocks[0];
     expect(block.type).toBe("text");
     const payload = block.type === "text" ? block.text : "";
-    expect(payload.startsWith('<file name="rework-the-tab-strip.concise.txt">')).toBe(
-      true,
-    );
+    expect(
+      payload.startsWith('<file name="rework-the-tab-strip.concise.txt">'),
+    ).toBe(true);
     expect(payload.endsWith("</file>")).toBe(true);
     // The transcript's own header rides inside, which is what makes the file
     // self-describing and lets the chip's filename stay short.

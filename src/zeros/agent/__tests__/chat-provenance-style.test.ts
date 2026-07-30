@@ -26,9 +26,7 @@ describe("chat provenance block styling", () => {
   });
 
   it("puts 12px between the rows", () => {
-    expect(provenance()).toMatch(
-      /<div className="flex flex-col gap-3 p-3">/,
-    );
+    expect(provenance()).toMatch(/<div className="flex flex-col gap-3 p-3">/);
   });
 
   it("uses ONE font — no mono, and no <code> to sneak the UA's in", () => {
@@ -55,6 +53,55 @@ describe("chat provenance block styling", () => {
     expect(src).toContain("hover:text-fg1 cursor-pointer transition-colors");
     expect(src).not.toContain("hover:underline");
     expect(src).not.toContain("underline-offset");
+  });
+
+  it("unmounts the three rows when a transcript row takes the block", () => {
+    // 2026-07-30 founder direction. UNMOUNTED, not merely styled away —
+    // SetupRow opens a bridge read on mount, and a block nobody sees must not
+    // pay for one (AGENTS.md: hidden surfaces are inert). So the assertion is
+    // that all three rows sit INSIDE the conditional, not that some class is
+    // absent.
+    const src = provenance();
+    const gate = src.indexOf('{shape === "workspace" && (');
+    expect(gate).toBeGreaterThan(-1);
+    const close = src.indexOf("</>", gate);
+    const gated = src.slice(gate, close);
+    expect(gated).toContain("<OpenInBadgeMenu");
+    expect(gated).toContain("<BranchedRow");
+    expect(gated).toContain("<SetupRow");
+    // …and the block's own `{children}` — the transcript row — is OUTSIDE it,
+    // so it survives. lastIndexOf, because Row's slot is spelled the same way
+    // three hundred lines earlier.
+    expect(src.lastIndexOf("{children}")).toBeGreaterThan(close);
+  });
+
+  it("says nothing at all until it knows which shape it is", () => {
+    const src = provenance();
+    expect(src).toContain('if (shape === "waiting") return null;');
+  });
+});
+
+describe("the transcript summaries read the block waits on", () => {
+  const hook = () => source("src/zeros/agent/use-chat-transcript-summaries.ts");
+
+  it("settles on FAILURE too, so a dead read can't blank the empty state", () => {
+    // `loaded` used to track only the success path. There is no retry except
+    // the next DB_CHANGED and a down bridge doesn't send those, so a thrown
+    // read left it false forever. Harmless while nothing waited on it; not
+    // harmless now the provenance block does — a new chat tab would render
+    // nothing at all instead of falling back to the workspace rows.
+    const src = hook();
+    expect(src).toContain("} finally {");
+    expect(src).toContain("setSettledKey(key)");
+    expect(src).toContain("loaded: fresh || settledKey === key,");
+  });
+
+  it("does not carry a literal NUL byte in its source", () => {
+    // One raw NUL makes git classify the file as BINARY, which silently drops
+    // it from every diff, review and content grep in the repo — the key
+    // separator must be the two-character `\u0000` ESCAPE.
+    expect(hook()).not.toContain("\u0000"); // a real NUL, via the escape
+    expect(hook()).toContain("\\u0000");
   });
 });
 

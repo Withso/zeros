@@ -47,7 +47,8 @@ import { iconForFile, type AttachmentValidation } from "./agent-attachments";
 export interface ComposerAttachmentPreview {
   agentId: string | null;
   agentName: string | null;
-  messageCount: number;
+  /** Prompts the source chat's user sent — see ChatSummaryWire. */
+  userMessageCount: number;
   lastMessageAt: number;
 }
 

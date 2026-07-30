@@ -44,7 +44,13 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
-import { Check, ChevronDown, MessageSquareText, Paperclip } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  MessageCircleMore,
+  MessageSquareText,
+  Paperclip,
+} from "lucide-react";
 
 import {
   Button,
@@ -231,9 +237,9 @@ function TranscriptPill({
       // three facts a sighted user gets from the panel without entering one.
       aria-label={`${
         pending ? "Cancel attaching" : attached ? "Remove" : "Attach"
-      } transcript of ${label} — ${
-        summary.agentName ?? "agent"
-      }, ${summary.messageCount} messages`}
+      } transcript of ${label} — ${summary.agentName ?? "agent"}, ${
+        summary.userMessageCount
+      } ${summary.userMessageCount === 1 ? "prompt" : "prompts"}`}
       onPointerEnter={warmOnRest}
       onPointerLeave={cancelWarm}
       // Focus is always deliberate — no rest delay for the keyboard.
@@ -266,7 +272,7 @@ function TranscriptPill({
         <Check className="text-green-primary size-3" aria-hidden="true" />
       ) : (
         <span className="text-fg3 text-2xxs tabular-nums">
-          {summary.messageCount}
+          {summary.userMessageCount}
         </span>
       )}
     </Button>
@@ -318,7 +324,7 @@ function TranscriptPill({
           chatId={summary.chatId}
           agentId={summary.agentId}
           agentName={summary.agentName}
-          messageCount={summary.messageCount}
+          userMessageCount={summary.userMessageCount}
           lastMessageAt={summary.lastMessageAt}
           mode="concise"
           title={summary.title}
@@ -419,7 +425,7 @@ export function TranscriptPickerBody({
                   />
                 ) : (
                   <span className="text-fg3 text-2xxs shrink-0 tabular-nums">
-                    {s.messageCount}
+                    {s.userMessageCount}
                   </span>
                 )}
               </CommandItem>
@@ -503,8 +509,11 @@ export function ChatTranscriptPills({
   return (
     <div className="flex flex-col gap-2">
       <div className="text-fg2 flex items-center gap-2 text-sm">
+        {/* A conversation glyph, not a paperclip: like the folder/branch/
+            terminal rows it sits beside, this icon names WHAT the row is about
+            — chats — rather than the mechanism that gets them there. */}
         <span className="flex size-3.5 shrink-0 items-center justify-center">
-          <Paperclip className="size-3.5" aria-hidden="true" />
+          <MessageCircleMore className="size-3.5" aria-hidden="true" />
         </span>
         {/* No colon and no trailing control: the pills are self-evidently the
             objects of the verb, and the mode switch that used to sit here is
