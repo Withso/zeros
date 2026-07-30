@@ -45,6 +45,9 @@ import {
   zerosStateRoot,
 } from "../src/engine/db/paths";
 import { secretsFilePath, getSecret, setSecret } from "./secret-store";
+import { githubCredentialStore } from "./github-auth-runtime";
+import { getSessionUserForMain } from "./ipc/commands/auth-session";
+import { githubCredentialForEngine } from "./github-engine-credential";
 import {
   MCP_VAULT_ACCOUNT,
   parseVaultBlob,
@@ -349,7 +352,9 @@ function resolveClaudeCliPaths(): {
               `@anthropic-ai/claude-agent-sdk-linux-${process.arch}`,
               `@anthropic-ai/claude-agent-sdk-linux-${process.arch}-musl`,
             ]
-          : [`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}`];
+          : [
+              `@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}`,
+            ];
       for (const pkg of candidates) {
         try {
           const resolved = fromSdk.resolve(`${pkg}/${bin}`);
@@ -1172,7 +1177,8 @@ async function doSpawnEngine(
   // AUTH_AUDIENCE. Without it the verifier falls back to its non-empty
   // sentinel and rejects every token rather than skipping the check.
   const jwtAud =
-    process.env.ZEROS_ACCOUNT_JWT_AUD?.trim() || process.env.AUTH_AUDIENCE?.trim();
+    process.env.ZEROS_ACCOUNT_JWT_AUD?.trim() ||
+    process.env.AUTH_AUDIENCE?.trim();
   if (jwtAud) extraEnv.ZEROS_ACCOUNT_JWT_AUD = jwtAud;
   // Account-binding enforcement: REQUIRED in prod (mandatory sign-in), DEFAULT-OFF
   // in dev (the "Zeros Dev" build is often run signed-out → unseeded owner). A real
@@ -1186,16 +1192,6 @@ async function doSpawnEngine(
   // client. Stable for the app's lifetime so an in-place engine respawn keeps
   // the same token the renderer already cached.
   extraEnv.ZEROS_LOCAL_WS_TOKEN = LOCAL_WS_TOKEN;
-
-  // H4: seed the GitHub OAuth token DIRECTLY (main → engine env), never through
-  // the renderer. A fresh engine reads it from ZEROS_GITHUB_TOKEN at startup;
-  // mid-session sign-in/out is couriered over stdin (pushGithubTokenToEngine).
-  try {
-    const ghToken = getSecret(GITHUB_OAUTH_ACCOUNT);
-    if (ghToken) extraEnv.ZEROS_GITHUB_TOKEN = ghToken;
-  } catch {
-    /* keychain unavailable — engine simply holds no token until a later push */
-  }
 
   // Tell the engine that fd 3 is a private host→engine control pipe (added to
   // `stdio` below). The MCP gateway writes its OAuth token vault there for
@@ -1395,6 +1391,11 @@ async function doSpawnEngine(
   // Wrapping add; JS numbers are safe up to 2^53.
   state.spawnGeneration = (state.spawnGeneration + 1) & 0xffffffff;
 
+  // Seed GitHub credentials over the private parent→child pipe. Keeping this
+  // out of the spawn environment prevents the engine's terminal and agent
+  // subprocesses from inheriting a durable credential.
+  void pushGithubCredentialToEngine();
+
   // Seed the engine's OAuth token vault from the durable store (safeStorage) so
   // the MCP gateway restores its sign-ins without re-auth (P0-1). Pushed on stdin
   // (buffered until the engine reads it), NOT env — an env blob would be inherited
@@ -1515,28 +1516,36 @@ export function currentLocalToken(): string {
   return LOCAL_WS_TOKEN;
 }
 
-/** safeStorage account the GitHub OAuth token is encrypted under (mirror of
- *  main.ts / github.ts — a stable string). */
-const GITHUB_OAUTH_ACCOUNT = "github_oauth";
-
-/** H4: courier the current GitHub token to the running engine over its stdin —
+/** Courier the selected GitHub credential to the running engine over stdin —
  *  a trusted parent→child channel the renderer can't observe. Call after any
- *  sign-in / sign-out / token change. No-op if the engine isn't running. */
-export function pushGithubTokenToEngine(): void {
+ *  connect / disconnect / method change. Refresh tokens stay in main. */
+export async function pushGithubCredentialToEngine(): Promise<void> {
   const child = state.child;
   if (!child || child.killed || !child.stdin || !child.stdin.writable) return;
-  let token: string | null = null;
+  let credential: Awaited<
+    ReturnType<typeof githubCredentialStore.getSelectedCredential>
+  > = null;
+  let selectedMethod = "gh-cli";
   try {
-    token = getSecret(GITHUB_OAUTH_ACCOUNT);
+    selectedMethod = await githubCredentialStore.getSelectedMethod();
+    credential = await githubCredentialStore.getSelectedCredential();
   } catch {
-    token = null;
+    credential = null;
   }
+  const engineCredential = githubCredentialForEngine(
+    credential,
+    getSessionUserForMain()?.sub ?? null,
+  );
   try {
     child.stdin.write(
-      `${JSON.stringify({ type: "host.githubToken", token })}\n`,
+      `${JSON.stringify({
+        type: "host.githubCredential",
+        method: selectedMethod,
+        credential: engineCredential,
+      })}\n`,
     );
   } catch {
-    /* engine exiting — the next spawn re-seeds via env */
+    /* engine exiting — the next spawn re-seeds over stdin */
   }
 }
 

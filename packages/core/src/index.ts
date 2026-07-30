@@ -8,3 +8,4 @@ export * from "./messages";
 export * from "./model-context";
 export * from "./version";
 export * from "./schemas";
+export * from "./github-auth";

@@ -41,7 +41,7 @@
  *  Substitutions: {WORKSPACE_DIR}, {TARGET_BRANCH}. */
 export const WORKSPACE_PREAMBLE = `You are working inside Zeros, a Mac app for running coding agents in parallel.
 Your work should take place in the {WORKSPACE_DIR} directory (unless otherwise directed).
-The target branch for this workspace is {TARGET_BRANCH}. Use it for actions like diffing (\`git diff {TARGET_BRANCH}...\`) and creating PRs (\`gh pr create --base <branch>\`).
+The target branch for this workspace is {TARGET_BRANCH}. Use it for comparisons such as \`git diff {TARGET_BRANCH}...\` and as the base when creating a pull request.
 Do not rename the current branch unless the user explicitly tells you to do so.`;
 
 /** [SYS-INSTR: additional-dirs-notice]

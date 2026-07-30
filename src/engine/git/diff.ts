@@ -1034,7 +1034,9 @@ async function ensureCommitPresent(
   try {
     // Reachable-SHA fetch (GitHub enables uploadpack.allowReachableSHA1InWant);
     // brings just this commit's objects into the shared store.
-    await runGit(worktreePath, ["fetch", "--no-tags", remote, sha]);
+    await runGit(worktreePath, ["fetch", "--no-tags", remote, sha], {
+      timeoutMs: 20_000,
+    });
   } catch (err) {
     throw new GitError({
       code: "GIT_COMMAND_FAILED",

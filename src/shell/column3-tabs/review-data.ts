@@ -122,7 +122,7 @@ const cache = new Map<string, Entry>();
 const REVIEW_RESUME_MIN_AGE_MS = 2_000;
 
 // Deletion purge (pr-cache-forget): snapshot keys are
-// `provider.id#workspaceId#prNumber`, so the delimited infix match is exact.
+// `provider.cacheKey#workspaceId#reviewRef`, so the delimited infix match is exact.
 // An entry with a live subscriber or an in-flight read is skipped — deletion
 // repoints/unmounts the Review surface first, and deleting mid-flight would
 // only be undone by the settling patch() recreating the key; the bounded LRU
@@ -184,7 +184,19 @@ function reviewCacheKey(
   workspaceId: string,
   prNumber: number,
 ): string {
-  return `${provider.id}#${workspaceId}#${prNumber}`;
+  return `${provider.cacheKey}#${workspaceId}#${prNumber}`;
+}
+
+function targetForReview(
+  provider: ReviewProvider,
+  workspaceId: string,
+  prNumber: number,
+): ReviewTarget {
+  return {
+    workspaceId,
+    hostOrigin: provider.hostOrigin,
+    reviewRef: String(prNumber),
+  };
 }
 
 function entryFor(key: string): Entry {
@@ -411,7 +423,11 @@ export function prefetchReviewLiveData(
     }
   }
   invalidate(key);
-  return refreshFull(provider, { workspaceId, prNumber }, key);
+  return refreshFull(
+    provider,
+    targetForReview(provider, workspaceId, prNumber),
+    key,
+  );
 }
 
 /** Non-fetching snapshot read used by navigation/tests and future status
@@ -435,7 +451,7 @@ export function useReviewLiveData(args: {
 }): ReviewLiveData {
   const { provider, workspaceId, prNumber, refreshKey, active } = args;
   const key = reviewCacheKey(provider, workspaceId, prNumber);
-  const target: ReviewTarget = { workspaceId, prNumber };
+  const target = targetForReview(provider, workspaceId, prNumber);
 
   const snap = useSyncExternalStore(
     useCallback(

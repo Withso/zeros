@@ -27,6 +27,6 @@ export async function fetch(opts: FetchOptions): Promise<FetchResult> {
   const args = ["fetch"];
   if (opts.prune) args.push("--prune");
   args.push(remote);
-  const { stderr } = await runGit(ws.path, args);
+  const { stderr } = await runGit(ws.path, args, { timeoutMs: 60_000 });
   return { summary: stderr.trim() };
 }

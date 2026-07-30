@@ -1,7 +1,7 @@
 // Phase 3 GitHub integration. Tests use *ForTesting seams to inject
 // a fake Octokit + in-memory token store. We don't hit github.com.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
@@ -12,6 +12,7 @@ import {
   closeState,
   createPr,
   createWorkspace,
+  detectGhCli,
   getAuthStatus,
   getPr,
   getRepositoryOwnerAvatar,
@@ -20,12 +21,15 @@ import {
   markPrReady,
   mergePr,
   parseGitHubRemote,
+  readGhCliCredential,
   resetBehindByCacheForTesting,
   setOctokitFactoryForTesting,
   setPushForTesting,
+  setRunFileForTesting,
   setStateRootForTesting,
   setTokenStoreForTesting,
   updatePr,
+  verifyGithubToken,
 } from "..";
 
 const execFileAsync = promisify(execFile);
@@ -50,6 +54,28 @@ function makeMemoryTokenStore() {
       token = v;
     },
   };
+}
+
+function makeGithubError(
+  status: number,
+  message: string,
+  headers: Record<string, string> = {},
+): Error & {
+  status: number;
+  response: {
+    status: number;
+    data: { message: string };
+    headers: Record<string, string>;
+  };
+} {
+  return Object.assign(new Error(message), {
+    status,
+    response: {
+      status,
+      data: { message },
+      headers,
+    },
+  });
 }
 
 interface PrPayload {
@@ -244,17 +270,20 @@ describe("github", () => {
 
     await mkdir(repoRoot, { recursive: true });
     await execFileAsync("git", ["init", "-q", "-b", "main"], { cwd: repoRoot });
-    await execFileAsync("git", [
-      "remote",
-      "add",
-      "origin",
-      "git@github.com:Acme/example.git",
-    ], { cwd: repoRoot });
-    await execFileAsync("git", ["config", "user.email", "t@t"], { cwd: repoRoot });
+    await execFileAsync(
+      "git",
+      ["remote", "add", "origin", "git@github.com:Acme/example.git"],
+      { cwd: repoRoot },
+    );
+    await execFileAsync("git", ["config", "user.email", "t@t"], {
+      cwd: repoRoot,
+    });
     await execFileAsync("git", ["config", "user.name", "t"], { cwd: repoRoot });
     await writeFile(path.join(repoRoot, "README.md"), "# x\n");
     await execFileAsync("git", ["add", "."], { cwd: repoRoot });
-    await execFileAsync("git", ["commit", "-q", "-m", "init"], { cwd: repoRoot });
+    await execFileAsync("git", ["commit", "-q", "-m", "init"], {
+      cwd: repoRoot,
+    });
 
     const created = await createWorkspace({ repoRoot });
     workspaceId = created.workspaceId;
@@ -265,7 +294,11 @@ describe("github", () => {
     setOctokitFactoryForTesting((_token) => mock.octokit as never);
     // createPr now pushes the head branch before opening the PR — stub it so
     // tests don't make a real network push to the fake github.com origin.
-    setPushForTesting(async () => ({ remoteRef: "origin/test", ahead: 0, behind: 0 }));
+    setPushForTesting(async () => ({
+      remoteRef: "origin/test",
+      ahead: 0,
+      behind: 0,
+    }));
   });
 
   afterEach(async () => {
@@ -274,6 +307,7 @@ describe("github", () => {
     setTokenStoreForTesting(null);
     setOctokitFactoryForTesting(null);
     setPushForTesting(null);
+    setRunFileForTesting(null);
     resetBehindByCacheForTesting();
     try {
       await rm(workdir, { recursive: true, force: true });
@@ -287,6 +321,13 @@ describe("github", () => {
       const r = parseGitHubRemote("git@github.com:Acme/example.git");
       expect(r.owner).toBe("Acme");
       expect(r.repo).toBe("example");
+    });
+
+    it("parses userless scp-style remotes", () => {
+      expect(parseGitHubRemote("github.com:Acme/example.git")).toEqual({
+        owner: "Acme",
+        repo: "example",
+      });
     });
 
     it("parses https URLs", () => {
@@ -310,10 +351,125 @@ describe("github", () => {
       ).toThrow();
     });
 
+    it("never echoes an embedded remote credential in validation errors", () => {
+      const secret = "embedded-super-secret";
+      let thrown: unknown;
+      try {
+        parseGitHubRemote(
+          `https://legacy-user:${secret}@github.com/Acme/example.git`,
+        );
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toMatchObject({ code: "VALIDATION_FAILED" });
+      expect(JSON.stringify(thrown)).not.toContain(secret);
+      expect((thrown as Error).message).toMatch(/embedded credential/i);
+    });
+
     it("rejects non-github URLs", () => {
       expect(() =>
         parseGitHubRemote("https://gitlab.com/Acme/example"),
       ).toThrow();
+    });
+  });
+
+  describe("detectGhCli", () => {
+    it("is a pure probe and does not replace the active token", async () => {
+      store.setToken("existing-pat");
+      setRunFileForTesting(async () => ({
+        stdout: "borrowed-gh-token\n",
+        stderr: "",
+      }));
+      mock.setUser({ login: "cli-user" });
+
+      await expect(detectGhCli()).resolves.toEqual({
+        available: true,
+        authenticated: true,
+        configured: true,
+        health: "connected",
+        login: "cli-user",
+      });
+      expect(await store.store.get()).toBe("existing-pat");
+    });
+
+    it("distinguishes a missing binary from a signed-out CLI", async () => {
+      setRunFileForTesting(async () => {
+        throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      });
+      await expect(detectGhCli()).resolves.toEqual({
+        available: false,
+        authenticated: false,
+        configured: false,
+        health: "not-connected",
+      });
+
+      setRunFileForTesting(async () => {
+        throw Object.assign(new Error("not logged in"), { code: 1 });
+      });
+      await expect(detectGhCli()).resolves.toEqual({
+        available: true,
+        authenticated: false,
+        configured: false,
+        health: "not-connected",
+      });
+    });
+
+    it("retains a CLI-owned token when its GitHub health probe is transient", async () => {
+      setRunFileForTesting(async () => ({
+        stdout: "borrowed-gh-token\n",
+        stderr: "",
+      }));
+      mock.setUserResponse(() => {
+        throw makeGithubError(503, "Service unavailable");
+      });
+
+      await expect(detectGhCli()).resolves.toMatchObject({
+        available: true,
+        authenticated: false,
+        configured: true,
+        health: "unavailable",
+      });
+      await expect(readGhCliCredential()).resolves.toMatchObject({
+        method: "gh-cli",
+        accessToken: "borrowed-gh-token",
+      });
+    });
+
+    it("rejects a CLI-owned token only after an explicit credential failure", async () => {
+      setRunFileForTesting(async () => ({
+        stdout: "revoked-gh-token\n",
+        stderr: "",
+      }));
+      mock.setUserResponse(() => {
+        throw makeGithubError(401, "Bad credentials");
+      });
+
+      await expect(detectGhCli()).resolves.toMatchObject({
+        available: true,
+        authenticated: false,
+        configured: true,
+        health: "invalid",
+      });
+      // The private broker path does not add a `/user` request before every
+      // Git operation. A rejected token is disconnected by the operation's
+      // one-shot authentication-failure path.
+      await expect(readGhCliCredential()).resolves.toMatchObject({
+        method: "gh-cli",
+        accessToken: "revoked-gh-token",
+      });
+    });
+  });
+
+  describe("verifyGithubToken", () => {
+    it("validates a candidate without replacing the active credential", async () => {
+      store.setToken("existing-token");
+      mock.setUser({ login: "candidate-user" });
+
+      await expect(verifyGithubToken("candidate-token")).resolves.toEqual({
+        login: "candidate-user",
+      });
+      expect(await store.store.get()).toBe("existing-token");
     });
   });
 
@@ -377,6 +533,108 @@ describe("github", () => {
       expect(status.authenticated).toBe(false);
       expect(await store.store.get()).toBeNull();
     });
+
+    it("preserves the token and classifies a primary rate limit", async () => {
+      store.setToken("ghp_rate_limited");
+      mock.setUserResponse(() => {
+        throw makeGithubError(403, "API rate limit exceeded", {
+          "x-ratelimit-remaining": "0",
+          "x-ratelimit-reset": "1770000000",
+        });
+      });
+
+      await expect(getAuthStatus()).rejects.toMatchObject({
+        code: "GITHUB_RATE_LIMITED",
+        context: {
+          rateLimitRemaining: 0,
+          rateLimitResetAt: "2026-02-02T02:40:00.000Z",
+        },
+      });
+      expect(await store.store.get()).toBe("ghp_rate_limited");
+    });
+
+    it("preserves the token and carries SAML authorization details", async () => {
+      store.setToken("github_pat_sso");
+      mock.setUserResponse(() => {
+        throw makeGithubError(
+          403,
+          "Resource protected by organization SAML enforcement.",
+          {
+            "x-github-sso":
+              "required; url=https://github.com/orgs/acme/sso?authorization_request=abc",
+          },
+        );
+      });
+
+      await expect(getAuthStatus()).rejects.toMatchObject({
+        code: "GITHUB_SSO_REQUIRED",
+        context: {
+          authorizeUrl:
+            "https://github.com/orgs/acme/sso?authorization_request=abc",
+        },
+      });
+      expect(await store.store.get()).toBe("github_pat_sso");
+    });
+
+    it("preserves the token and exposes accepted GitHub permissions", async () => {
+      store.setToken("github_pat_narrow");
+      mock.setUserResponse(() => {
+        throw makeGithubError(
+          403,
+          "Resource not accessible by personal access token",
+          {
+            "x-accepted-github-permissions":
+              "pull_requests=write, contents=read",
+          },
+        );
+      });
+
+      await expect(getAuthStatus()).rejects.toMatchObject({
+        code: "GITHUB_FORBIDDEN_SCOPE",
+        context: {
+          acceptedPermissions: {
+            pull_requests: "write",
+            contents: "read",
+          },
+        },
+      });
+      expect(await store.store.get()).toBe("github_pat_narrow");
+    });
+
+    it("clears a 403 only when GitHub explicitly says the credential is bad", async () => {
+      store.setToken("ghp_bad");
+      mock.setUserResponse(() => {
+        throw makeGithubError(403, "Bad credentials");
+      });
+
+      await expect(getAuthStatus()).resolves.toEqual({
+        authenticated: false,
+      });
+      expect(await store.store.get()).toBeNull();
+    });
+
+    it("retains a successful identity when GitHub reports partial SSO results", async () => {
+      store.setToken("github_pat_partial_sso");
+      mock.setUserResponse(() => ({
+        data: { login: "Acme" },
+        headers: {
+          "x-github-sso": "partial-results; organizations=21955855,20582480",
+        },
+      }));
+
+      await expect(getAuthStatus()).resolves.toEqual({
+        authenticated: true,
+        login: "Acme",
+        warning: {
+          code: "GITHUB_SSO_REQUIRED",
+          context: {
+            partialResults: true,
+            organizationIds: ["21955855", "20582480"],
+          },
+        },
+      });
+      expect(await store.store.get()).toBe("github_pat_partial_sso");
+    });
   });
 
   describe("createPr", () => {
@@ -393,7 +651,9 @@ describe("github", () => {
       });
       expect(pr.number).toBeGreaterThan(0);
       expect(pr.state).toBe("draft");
-      expect(pr.url).toMatch(/^https:\/\/github\.com\/Acme\/example\/pull\/\d+$/);
+      expect(pr.url).toMatch(
+        /^https:\/\/github\.com\/Acme\/example\/pull\/\d+$/,
+      );
       expect(pr.baseBranch).toBe(ws.baseBranch);
       expect(pr.headBranch).toBe(ws.branch);
 
@@ -417,6 +677,50 @@ describe("github", () => {
       mock.octokit.pulls.create = original;
     });
 
+    it("does not expose repository or branch names from GitHub validation errors", async () => {
+      const original = mock.octokit.pulls.create;
+      mock.octokit.pulls.create = async () => {
+        throw Object.assign(
+          new Error(
+            "Validation Failed: No commits between main and customer-secret-branch",
+          ),
+          {
+            status: 422,
+            response: {
+              status: 422,
+              data: {
+                message: "Validation Failed",
+                errors: [
+                  {
+                    message:
+                      "No commits between Acme/private-customer-repo/main and customer-secret-branch",
+                  },
+                ],
+              },
+              headers: {},
+            },
+          },
+        );
+      };
+
+      let thrown: unknown;
+      try {
+        await createPr({ workspaceId, title: "t", body: "b" });
+      } catch (error) {
+        thrown = error;
+      } finally {
+        mock.octokit.pulls.create = original;
+      }
+
+      expect(thrown).toMatchObject({
+        code: "GITHUB_API_ERROR",
+        message: "This branch has no commits beyond its base.",
+      });
+      const rendererPayload = JSON.stringify(thrown);
+      expect(rendererPayload).not.toContain("private-customer-repo");
+      expect(rendererPayload).not.toContain("customer-secret-branch");
+    });
+
     it("pushes the head branch before opening the PR", async () => {
       // The worktree branch is local-only by default; createPr must push it to
       // origin first, else GitHub 422s ("head sha can't be found").
@@ -437,13 +741,20 @@ describe("github", () => {
         attempts += 1;
         if (args.draft) {
           throw Object.assign(
-            new Error("Draft pull requests are not supported in this repository."),
+            new Error(
+              "Draft pull requests are not supported in this repository.",
+            ),
             { status: 422 },
           );
         }
         return original(args);
       };
-      const pr = await createPr({ workspaceId, title: "t", body: "b", draft: true });
+      const pr = await createPr({
+        workspaceId,
+        title: "t",
+        body: "b",
+        draft: true,
+      });
       expect(attempts).toBe(2); // draft attempt 422'd, then retried as non-draft
       expect(pr.number).toBeGreaterThan(0);
       mock.octokit.pulls.create = original;
@@ -541,6 +852,177 @@ describe("github", () => {
       });
       expect(list.length).toBe(2);
     });
+
+    it("retries one transient 401 before clearing the credential", async () => {
+      let attempts = 0;
+      const original = mock.octokit.pulls.list;
+      mock.octokit.pulls.list = async (args) => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw makeGithubError(401, "Bad credentials");
+        }
+        return original(args);
+      };
+
+      await expect(
+        listPrs({ owner: "Acme", repo: "example", state: "open" }),
+      ).resolves.toEqual([]);
+      expect(attempts).toBe(2);
+      expect(await store.store.get()).toBe("ghp_test_token");
+      mock.octokit.pulls.list = original;
+    });
+
+    it("classifies a repository 404 without clearing the credential", async () => {
+      const original = mock.octokit.pulls.list;
+      mock.octokit.pulls.list = async () => {
+        throw makeGithubError(404, "Not Found");
+      };
+
+      await expect(
+        listPrs({ owner: "Acme", repo: "missing", state: "open" }),
+      ).rejects.toMatchObject({
+        code: "GITHUB_REPO_NOT_INSTALLED",
+        message: expect.stringContaining("not available"),
+      });
+      expect(await store.store.get()).toBe("ghp_test_token");
+      mock.octokit.pulls.list = original;
+    });
+
+    it("rotates a rejected App token before retrying the API call", async () => {
+      let token: string | null = "rejected-app-token";
+      let attempts = 0;
+      const clear = vi.fn(async () => {
+        token = null;
+      });
+      const refreshAfterRejection = vi.fn(async (rejectedToken: string) => {
+        expect(rejectedToken).toBe("rejected-app-token");
+        token = "rotated-app-token";
+        return token;
+      });
+      setTokenStoreForTesting({
+        async get() {
+          return token;
+        },
+        async set(value) {
+          token = value;
+        },
+        clear,
+        refreshAfterRejection,
+      });
+      setOctokitFactoryForTesting(
+        (factoryToken) =>
+          ({
+            ...mock.octokit,
+            pulls: {
+              ...mock.octokit.pulls,
+              async list(args: {
+                owner: string;
+                repo: string;
+                state?: string;
+              }) {
+                attempts += 1;
+                if (factoryToken === "rejected-app-token") {
+                  throw makeGithubError(401, "Bad credentials");
+                }
+                return mock.octokit.pulls.list(args);
+              },
+            },
+          }) as never,
+      );
+
+      await expect(
+        listPrs({ owner: "Acme", repo: "example", state: "open" }),
+      ).resolves.toEqual([]);
+      expect(attempts).toBe(2);
+      expect(refreshAfterRejection).toHaveBeenCalledOnce();
+      expect(clear).not.toHaveBeenCalled();
+      expect(token).toBe("rotated-app-token");
+    });
+
+    it("does not clear a newer reconnect that races with the rejected retry", async () => {
+      let token: string | null = "rejected-app-token";
+      const clearAfterRejection = vi.fn(async (rejectedToken: string) => {
+        if (token !== rejectedToken) return false;
+        token = null;
+        return true;
+      });
+      setTokenStoreForTesting({
+        async get() {
+          return token;
+        },
+        async set(value) {
+          token = value;
+        },
+        async clear() {
+          token = null;
+        },
+        async refreshAfterRejection() {
+          token = "rotated-app-token";
+          return token;
+        },
+        clearAfterRejection,
+      });
+      setOctokitFactoryForTesting(
+        (factoryToken) =>
+          ({
+            ...mock.octokit,
+            pulls: {
+              ...mock.octokit.pulls,
+              async list() {
+                if (factoryToken === "rotated-app-token") {
+                  // A user reconnect wins while this already-started retry is
+                  // still in flight.
+                  token = "newly-connected-token";
+                }
+                throw makeGithubError(401, "Bad credentials");
+              },
+            },
+          }) as never,
+      );
+
+      await expect(
+        listPrs({ owner: "Acme", repo: "example", state: "open" }),
+      ).rejects.toMatchObject({ code: "NOT_AUTHENTICATED" });
+      expect(clearAfterRejection).toHaveBeenCalledWith("rotated-app-token");
+      expect(token).toBe("newly-connected-token");
+    });
+
+    it("preserves a rotating pair when rejected-token refresh is unavailable", async () => {
+      let token: string | null = "rejected-app-token";
+      const clear = vi.fn(async () => {
+        token = null;
+      });
+      const refreshAfterRejection = vi.fn(async () => null);
+      setTokenStoreForTesting({
+        async get() {
+          return token;
+        },
+        async set(value) {
+          token = value;
+        },
+        clear,
+        refreshAfterRejection,
+      });
+      setOctokitFactoryForTesting(
+        () =>
+          ({
+            ...mock.octokit,
+            pulls: {
+              ...mock.octokit.pulls,
+              async list() {
+                throw makeGithubError(401, "Bad credentials");
+              },
+            },
+          }) as never,
+      );
+
+      await expect(
+        listPrs({ owner: "Acme", repo: "example", state: "open" }),
+      ).rejects.toMatchObject({ code: "NOT_AUTHENTICATED" });
+      expect(refreshAfterRejection).toHaveBeenCalledOnce();
+      expect(clear).not.toHaveBeenCalled();
+      expect(token).toBe("rejected-app-token");
+    });
   });
 
   describe("mergePr", () => {
@@ -574,54 +1056,6 @@ describe("github", () => {
       await expect(
         createPr({ workspaceId, title: "t", body: "b" }),
       ).rejects.toMatchObject({ code: "NOT_AUTHENTICATED" });
-    });
-  });
-
-  describe("client ID resolution", () => {
-    it("startDeviceFlow throws clearly when the client ID is still the placeholder", async () => {
-      const { setClientIdForTesting, startDeviceFlow } = await import("..");
-      setClientIdForTesting("Ov23liPLACEHOLDERPLACEHOLDER");
-      const original = process.env.ZEROS_GITHUB_CLIENT_ID;
-      delete process.env.ZEROS_GITHUB_CLIENT_ID;
-      try {
-        await expect(
-          startDeviceFlow({ onVerification: () => {} }),
-        ).rejects.toMatchObject({
-          code: "NOT_AUTHENTICATED",
-          message: expect.stringMatching(/client ID is unset/i),
-        });
-      } finally {
-        if (original !== undefined) process.env.ZEROS_GITHUB_CLIENT_ID = original;
-        setClientIdForTesting(null);
-      }
-    });
-
-    it("ZEROS_GITHUB_CLIENT_ID env var overrides the placeholder", async () => {
-      const { setClientIdForTesting, startDeviceFlow } = await import("..");
-      // Placeholder fallback would normally fail. With env override, we
-      // should fail later — on the actual network call, not on the
-      // placeholder gate.
-      setClientIdForTesting("Ov23liPLACEHOLDERPLACEHOLDER");
-      const original = process.env.ZEROS_GITHUB_CLIENT_ID;
-      process.env.ZEROS_GITHUB_CLIENT_ID = "Iv23liVALIDFAKEFAKEFAKE";
-      try {
-        // We pass an onVerification that never fires (no real GitHub
-        // server to hit). The promise will reject with a network error,
-        // NOT the placeholder error — which is what we want to assert.
-        await expect(
-          startDeviceFlow({ onVerification: () => {} }),
-        ).rejects.toMatchObject({
-          // The error code can be NOT_AUTHENTICATED (octokit wraps the
-          // network failure as auth-failed) or just GITHUB_API_ERROR.
-          // What we care about: the MESSAGE doesn't include "client ID
-          // is unset".
-          message: expect.not.stringMatching(/client ID is unset/i),
-        });
-      } finally {
-        if (original === undefined) delete process.env.ZEROS_GITHUB_CLIENT_ID;
-        else process.env.ZEROS_GITHUB_CLIENT_ID = original;
-        setClientIdForTesting(null);
-      }
     });
   });
 });

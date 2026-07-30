@@ -20,7 +20,7 @@ import { mkdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { GitError } from "./errors";
-import { runGit } from "./git-exec";
+import { classifyGitTransportError, runGit } from "./git-exec";
 
 /** Templates available in the Quick Start dialog. v1 ships only "empty"
  *  — adding Next.js / gstack later means dropping a tarball into a
@@ -200,21 +200,10 @@ export async function cloneRepo(opts: CloneRepoOptions): Promise<CloneRepoResult
   }
   await mkdir(opts.parentFolder, { recursive: true });
   await runGit(opts.parentFolder, ["clone", opts.url, dirName], {
+    timeoutMs: 120_000,
     mapErrorCode: (stderr) => {
-      if (
-        /authentication failed|could not read username|permission denied/i.test(
-          stderr,
-        )
-      ) {
-        return "NOT_AUTHENTICATED";
-      }
-      if (
-        /could not resolve host|network is unreachable|failed to connect/i.test(
-          stderr,
-        )
-      ) {
-        return "NETWORK_ERROR";
-      }
+      const transportError = classifyGitTransportError(stderr);
+      if (transportError) return transportError;
       if (/repository .* not found|not a valid repository/i.test(stderr)) {
         return "VALIDATION_FAILED";
       }

@@ -267,6 +267,10 @@ jobs:
         run: pnpm smoke:engine
 
       - name: Compile Electron main + preload
+        env:
+          # Public origin baked into main.cjs for the GitHub App handoff. The
+          # client secret remains backend-only.
+          VITE_CONTROL_PLANE_URL: ${{ secrets.VITE_CONTROL_PLANE_URL }}
         run: pnpm electron:compile
 
       - name: Build Vite renderer
@@ -571,4 +575,3 @@ jobs:
             "release/Zeros-${VERSION}-arm64-mac.zip" \
             "release/Zeros-${VERSION}-arm64-mac.zip.blockmap" \
             "release/latest-mac.yml"
-

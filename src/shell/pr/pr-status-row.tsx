@@ -27,6 +27,7 @@ import { PrStatusIsland } from "./pr-status-island";
 import { CreatePrButton } from "./create-pr-button";
 import { TargetBranchButton } from "./target-branch-select";
 import { useWorkspaceHasChanges } from "./use-workspace-has-changes";
+import { isGithubDotComRemote } from "./github-url";
 
 export function PrStatusRow({
   workspace,
@@ -64,7 +65,12 @@ export function PrStatusRow({
           {/* Left: pick the base branch (remote-only). Right: Create PR. */}
           <TargetBranchButton workspace={prWorkspace} disabled={!nativeReady} />
           <div className="flex-1" />
-          {nativeReady && (
+          {/* `originUrl` is only the project row's boot cache and is legitimately
+              blank for folders registered without one (bind-folder, quick start,
+              pre-backfill rows). Hide the button only when we positively know the
+              remote is a non-GitHub host; the engine re-resolves the real remote
+              per op, so a blank cache must not remove PR creation. */}
+          {nativeReady && (!originUrl || isGithubDotComRemote(originUrl)) && (
             <CreatePrButton
               workspace={prWorkspace}
               originUrl={originUrl}

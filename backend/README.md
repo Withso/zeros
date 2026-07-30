@@ -46,6 +46,69 @@ These guard-rails are **mandatory** because Railway Postgres is an unmanaged tem
 4. Migrations run automatically at boot (forward-only, transactional, recorded in `schema_migrations`).
 5. **Nightly off-platform dump** (the second backup layer): add a Railway cron service running `pg_dump "$DATABASE_URL" | gzip` → upload to R2/S3. TODO: the cron service definition is not in this repo yet — it lands once the destination bucket exists.
 
+## GitHub App — registration and deployment
+
+Create a separate GitHub App for development, staging, and production. Never
+share the confidential client secret across environments.
+
+In each App registration:
+
+1. Set the callback URL to the environment's public control-plane route:
+   `https://<control-plane>/v1/github/oauth/callback`.
+2. Enable **Expire user authorization tokens**. The desktop requires GitHub's
+   rotating access/refresh pair and refuses an unrefreshable response.
+3. Enable **Request user authorization (OAuth) during installation**. The
+   desktop's first connection uses the App installation URL with a one-time
+   `state`; reconnect uses direct OAuth with S256 PKCE. Do not configure a
+   separate Setup URL for this flow.
+4. Grant only the repository permissions exercised by the desktop: Metadata
+   read, Contents read/write, Pull requests read/write, Checks read, Commit
+   statuses read, and Workflows read/write (pushing workflow changes). Leave
+   Administration, Members, and Email addresses at **No access**. Repository
+   creation while this method is selected may therefore require switching to a
+   PAT or gh CLI; do not broaden every installation merely for that uncommon
+   operation.
+5. Keep webhooks disabled until a webhook consumer ships. Installation state
+   is revalidated from GitHub on Settings Refresh.
+
+Set these backend variables from the registration:
+`GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`,
+`GITHUB_APP_SLUG`, and `GITHUB_OAUTH_CALLBACK_URL`. Keep the secret only in
+Railway's backend secret store. The desktop release workflows also need the
+public `VITE_CONTROL_PLANE_URL` repository secret so Electron main can bake the
+correct control-plane origin; no GitHub credential is baked into the app.
+
+**This block is optional and deliberately not a boot requirement.** Unset, the
+service starts normally and `/v1/github/*` answers `503 github_not_configured`,
+which the desktop renders as "GitHub App sign-in isn't available on this Zeros
+control plane yet — use gh CLI or a Personal Access Token for now". A partially
+filled block logs a loud `[config]` error and disables the same single feature.
+GitHub sign-in must never be able to take teams, invitations, settings, or
+`/healthz` down with it: on Railway a boot failure is a healthcheck crash loop,
+not a degraded feature.
+
+Also set `GITHUB_REFRESH_BINDING_SECRET` (any random 32+ byte string) in every
+environment you expect to rotate the client secret in. It defaults to
+`GITHUB_APP_CLIENT_SECRET`, and while the two are shared, rotating the client
+secret invalidates every outstanding refresh binding at once — every desktop is
+then asked to reconnect.
+
+Before enabling the App row in a release:
+
+- run `pnpm check:backend-migrations`, `pnpm test:backend`, and
+  `cd backend && pnpm typecheck`;
+- test install, direct reconnect, cancel, state replay, token rotation,
+  suspension, uninstall, and local disconnect in every release channel;
+- verify each channel returns to its own scheme (`zeros`, `zeros-alpha`,
+  `zeros-beta`, or `zeros-dev`);
+- confirm the callback and Railway logs never include OAuth codes, access
+  tokens, refresh tokens, or the signed refresh binding.
+
+Rollback by disabling the endpoints or removing the desktop App option. Do
+not delete the GitHub App registration: deletion revokes every user's grant.
+The cloud installation-token route intentionally remains `501` until cloud
+workspaces ship.
+
 ## Auth0 — one-time setup
 
 1. Dashboard → Applications → create a **Regular Web App** (confidential client — this backend only verifies JWTs, it never initiates a login flow itself; the same tenant's Regular Web App used by `website/web-app` is the one minting tokens).

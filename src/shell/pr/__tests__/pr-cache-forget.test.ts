@@ -149,8 +149,14 @@ describe("forgetPrCachesForWorkspace", () => {
       pending: 0,
     };
     const provider: ReviewProvider = {
-      id: "github",
+      family: "github",
+      hostOrigin: "github.com",
+      cacheKey: "github:github.com",
       hostLabel: "GitHub",
+      capabilities: {
+        reviewNoun: "pull request",
+        mergeMethods: [{ id: "merge", label: "Merge" }],
+      },
       authStatus: async (): Promise<AuthStatusResult> => ({
         authenticated: true,
         login: "octocat",
