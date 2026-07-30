@@ -883,6 +883,22 @@ async function withAuthRetry<T>(
     } catch (retryErr) {
       if (isCredentialInvalid(retryErr)) {
         clearOctokitCache();
+        // GitHub has now rejected this credential twice, so whatever login it
+        // once proved is no longer evidence of anything — drop it here rather
+        // than only in getAuthStatus. This path is the one reachable from
+        // ordinary background traffic (gh.prSync and every other gh.* op),
+        // and without it `cachedGithubLogin()` keeps returning the
+        // signed-out account while `resolveNewBranchPrefix` stamps it onto
+        // every branch created from here on. That direction is permanent;
+        // falling back to `zeros/` until the next getAuthStatus re-learns the
+        // login is not (see forgetGithubLogin).
+        //
+        // Unconditional, and deliberately not gated on whether the CAS below
+        // actually cleared: `false` there means a concurrent reconnect won
+        // with a NEWER credential, which may well belong to a different
+        // account — the one case where the cached login is most certainly
+        // stale.
+        rememberLogin(null);
         if (retryToken && tokenStore.clearAfterRejection) {
           await tokenStore.clearAfterRejection(retryToken);
         } else if (retryToken && (await tokenStore.get()) === retryToken) {
