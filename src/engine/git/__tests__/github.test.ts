@@ -31,6 +31,9 @@ import {
   updatePr,
   verifyGithubToken,
 } from "..";
+// Not on the barrel: the process-local login cache is an internal hint for
+// branch prefixing, not part of the git layer's public surface.
+import { cachedGithubLogin } from "../github";
 
 const execFileAsync = promisify(execFile);
 
@@ -1022,6 +1025,38 @@ describe("github", () => {
       expect(refreshAfterRejection).toHaveBeenCalledOnce();
       expect(clear).not.toHaveBeenCalled();
       expect(token).toBe("rejected-app-token");
+    });
+
+    // The remembered login is what resolveNewBranchPrefix stamps onto every
+    // new workspace branch under `branch_prefix_type = "github"`. A background
+    // gh.* call is the only credential clear most users ever hit, so leaving
+    // the login behind means every workspace created after a revoked token
+    // carries a disconnected account's name — and a created branch is
+    // permanent, where falling back to `zeros/` is not.
+    it("forgets the remembered login when a background call's credential is rejected", async () => {
+      store.setToken("ghp_will_be_revoked");
+      mock.setUser({ login: "octo-user" });
+      await getAuthStatus();
+      expect(cachedGithubLogin()).toBe("octo-user");
+
+      setOctokitFactoryForTesting(
+        () =>
+          ({
+            ...mock.octokit,
+            pulls: {
+              ...mock.octokit.pulls,
+              async list() {
+                throw makeGithubError(401, "Bad credentials");
+              },
+            },
+          }) as never,
+      );
+
+      await expect(
+        listPrs({ owner: "Acme", repo: "example", state: "open" }),
+      ).rejects.toMatchObject({ code: "NOT_AUTHENTICATED" });
+      expect(await store.store.get()).toBeNull();
+      expect(cachedGithubLogin()).toBeNull();
     });
   });
 

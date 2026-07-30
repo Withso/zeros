@@ -261,17 +261,58 @@ export interface AuthStatusResult {
   };
 }
 
+/** Last login GitHub confirmed for us, remembered across calls.
+ *
+ *  Exists for ONE caller: workspace creation, which prefixes the new branch
+ *  with the login when Settings → Git says `branch_prefix_type = "github"`.
+ *  Creating a workspace must not wait on (or fail because of) a /user round
+ *  trip, so that path reads this cache and falls back to the default `zeros/`
+ *  prefix when it is empty. Every code path that LEARNS a login writes here;
+ *  a rejected credential and a credential swap clear it.
+ *
+ *  It is deliberately NOT read off the seeded credential's own `login` field:
+ *  that field is only populated for the `github-app` method, so relying on it
+ *  would make branch prefixing work for one sign-in method and silently not
+ *  for the other two. */
+let lastKnownLogin: string | null = null;
+
+/** The last confirmed GitHub login, or null if we've never seen one this
+ *  process (or the credential was since cleared). Synchronous and
+ *  network-free — a best-effort hint, never an authorization signal. */
+export function cachedGithubLogin(): string | null {
+  return lastKnownLogin;
+}
+
+function rememberLogin(login: string | null | undefined): void {
+  lastKnownLogin = login && login.trim() ? login.trim() : null;
+}
+
+/** Drop the remembered login without asserting a new one — for when the
+ *  CREDENTIAL changed underneath us and the cached login stops being evidence
+ *  of anything (see seedGithubCredential, the desktop's sign-in/sign-out
+ *  route; the boot prime only covers launch). Branch prefixing then falls back
+ *  to the default until the next getAuthStatus re-learns it, which is the safe
+ *  direction: signing out and getting `zeros/Cream` is recoverable, whereas
+ *  stamping a disconnected account's name onto a branch is permanent. */
+export function forgetGithubLogin(): void {
+  lastKnownLogin = null;
+}
+
 /** Probe whether we have a working token. Rotating App credentials get the
  * same one-shot owner refresh as normal API calls; borrowed/PAT credentials
  * retain the legacy retry-and-clear behavior after two explicit rejections. */
 export async function getAuthStatus(): Promise<AuthStatusResult> {
   const token = await tokenStore.get();
-  if (!token) return { authenticated: false };
+  if (!token) {
+    rememberLogin(null);
+    return { authenticated: false };
+  }
   try {
     const response = await withAuthRetry((octokit) =>
       octokit.users.getAuthenticated(),
     );
     const warning = partialSsoWarning(response.headers);
+    rememberLogin(response.data.login);
     return {
       authenticated: true,
       login: response.data.login,
@@ -279,8 +320,11 @@ export async function getAuthStatus(): Promise<AuthStatusResult> {
     };
   } catch (err) {
     if (err instanceof GitError && err.code === "NOT_AUTHENTICATED") {
+      rememberLogin(null);
       return { authenticated: false };
     }
+    // A transient failure (offline, 5xx) is NOT evidence the login changed —
+    // keep the cached one so branch prefixing survives a flaky network.
     throw err;
   }
 }
@@ -347,6 +391,12 @@ async function probeGhCliCredential(): Promise<{
   const octokit = await octokitFactory(token);
   try {
     const { data } = await octokit.users.getAuthenticated();
+    // Deliberately does NOT rememberLogin(): this probes the gh CLI's own
+    // credential, which since the three-way auth split is not necessarily the
+    // ACTIVE one. Caching a login from here would let a signed-out CLI account
+    // prefix branches for the App/PAT account actually in use. getAuthStatus()
+    // is the only writer, because it is the only probe of the active
+    // credential.
     return {
       available: true,
       configured: true,
@@ -442,6 +492,9 @@ export async function verifyGithubToken(
   const octokit = await octokitFactory(trimmed);
   try {
     const { data } = await octokit.users.getAuthenticated();
+    // No rememberLogin() here either: this validates a CANDIDATE token and
+    // deliberately does not mutate the selected credential, so it is not
+    // evidence about the active account.
     return { login: data.login };
   } catch (err) {
     throw wrapApiError(err, "GitHub rejected the token");
@@ -830,6 +883,22 @@ async function withAuthRetry<T>(
     } catch (retryErr) {
       if (isCredentialInvalid(retryErr)) {
         clearOctokitCache();
+        // GitHub has now rejected this credential twice, so whatever login it
+        // once proved is no longer evidence of anything — drop it here rather
+        // than only in getAuthStatus. This path is the one reachable from
+        // ordinary background traffic (gh.prSync and every other gh.* op),
+        // and without it `cachedGithubLogin()` keeps returning the
+        // signed-out account while `resolveNewBranchPrefix` stamps it onto
+        // every branch created from here on. That direction is permanent;
+        // falling back to `zeros/` until the next getAuthStatus re-learns the
+        // login is not (see forgetGithubLogin).
+        //
+        // Unconditional, and deliberately not gated on whether the CAS below
+        // actually cleared: `false` there means a concurrent reconnect won
+        // with a NEWER credential, which may well belong to a different
+        // account — the one case where the cached login is most certainly
+        // stale.
+        rememberLogin(null);
         if (retryToken && tokenStore.clearAfterRejection) {
           await tokenStore.clearAfterRejection(retryToken);
         } else if (retryToken && (await tokenStore.get()) === retryToken) {

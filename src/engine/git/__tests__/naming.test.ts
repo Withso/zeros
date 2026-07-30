@@ -2,8 +2,11 @@ import { describe, it, expect } from "vitest";
 import {
   branchDisplayName,
   colourDictionary,
+  DEFAULT_BRANCH_PREFIX,
   generateWorkspaceId,
   isValidBranchName,
+  joinBranchPrefix,
+  normalizeBranchPrefix,
   pickFreeColourName,
 } from "../naming";
 
@@ -146,6 +149,136 @@ describe("naming", () => {
 
     it("passes through a branch that is not workspace-owned", () => {
       expect(branchDisplayName("main")).toBe("main");
+    });
+
+    it("strips an unknown prefix when the tail is an allocated name", () => {
+      // The prefix stopped being a constant on 2026-07-29. A capitalized
+      // colour tail is the tell that the allocator produced this branch,
+      // whichever prefix was configured at the time.
+      expect(branchDisplayName("jordan/Cream")).toBe("Cream");
+      expect(branchDisplayName("feature/Cream-v2")).toBe("Cream-v2");
+      expect(branchDisplayName("team/squad/Cream")).toBe("Cream");
+    });
+
+    it("keeps the namespace of a branch Zeros did not name", () => {
+      // An adopted worktree or a user's own branch carries its prefix as
+      // identity — stripping it would erase which tool owns the branch, and
+      // (via managedWorkspacePath) collapse two distinct branches onto one
+      // checkout directory.
+      expect(branchDisplayName("cursor/foo")).toBe("cursor/foo");
+      expect(branchDisplayName("feature/path-name")).toBe("feature/path-name");
+    });
+
+    it("strips the legacy prefix regardless of name shape", () => {
+      // Pre-2026-07-29 workspaces are on the lowercase flower scheme. They are
+      // ours by construction, so the shape test doesn't apply under `zeros/`.
+      expect(branchDisplayName("zeros/lupine-1a2b")).toBe("lupine-1a2b");
+    });
+
+    it("leaves a non-slash prefix attached", () => {
+      // A `myname-` style prefix has no boundary to cut at — the tab shows
+      // the whole thing, which is the honest reading of the branch name.
+      expect(branchDisplayName("myname-Cream")).toBe("myname-Cream");
+    });
+  });
+
+  describe("normalizeBranchPrefix", () => {
+    it("reduces a prefix to a bare namespace", () => {
+      // The separator belongs to joinBranchPrefix, so a prefix normalizes to
+      // the namespace ALONE — that is what makes `jordan` and `jordan/` the
+      // same setting instead of `jordan/Cream` vs `jordanCream`.
+      expect(normalizeBranchPrefix("jordan")).toBe("jordan");
+      expect(normalizeBranchPrefix("feature/")).toBe("feature");
+      expect(normalizeBranchPrefix("team/squad/")).toBe("team/squad");
+      expect(normalizeBranchPrefix("  spaced/  ")).toBe("spaced");
+    });
+
+    it("tolerates leading and repeated separators", () => {
+      // Someone typing a path is describing a namespace, not a ref — repair it
+      // rather than falling back to the default behind their back.
+      expect(normalizeBranchPrefix("/leading")).toBe("leading");
+      expect(normalizeBranchPrefix("/wrapped/")).toBe("wrapped");
+      expect(normalizeBranchPrefix("//doubled//")).toBe("doubled");
+    });
+
+    it("leaves a non-slash trailing character alone", () => {
+      // Only `/` is ours to normalize. `-` is an ordinary name character, and
+      // silently trimming it would edit what the user typed; the settings
+      // preview shows the resulting `myname-/Cream` instead.
+      expect(normalizeBranchPrefix("myname-")).toBe("myname-");
+    });
+
+    it("returns null for an empty prefix so the caller falls back", () => {
+      expect(normalizeBranchPrefix("")).toBeNull();
+      expect(normalizeBranchPrefix("   ")).toBeNull();
+      expect(normalizeBranchPrefix("/")).toBeNull();
+      expect(normalizeBranchPrefix("///")).toBeNull();
+      expect(normalizeBranchPrefix(undefined)).toBeNull();
+    });
+
+    it("rejects anything git would refuse or a shell could misread", () => {
+      // This value reaches a `git update-ref` argument.
+      expect(normalizeBranchPrefix("--upload-pack=evil/")).toBeNull();
+      expect(normalizeBranchPrefix("a..b/")).toBeNull();
+      // An INNER double slash is ambiguous (empty namespace or typo?) and
+      // survives the leading/trailing strip, so it still falls back.
+      expect(normalizeBranchPrefix("a//b")).toBeNull();
+      expect(normalizeBranchPrefix("trailing.")).toBeNull();
+      expect(normalizeBranchPrefix("weird.lock")).toBeNull();
+      expect(normalizeBranchPrefix("has space/")).toBeNull();
+      expect(normalizeBranchPrefix("quote'/")).toBeNull();
+      expect(normalizeBranchPrefix("semi;colon/")).toBeNull();
+      expect(normalizeBranchPrefix("tilde~/")).toBeNull();
+      expect(normalizeBranchPrefix("caret^/")).toBeNull();
+      expect(normalizeBranchPrefix("star*/")).toBeNull();
+    });
+
+    it("rejects an over-long prefix, measured after normalization", () => {
+      expect(normalizeBranchPrefix("a".repeat(64))).toBe("a".repeat(64));
+      expect(normalizeBranchPrefix("a".repeat(65))).toBeNull();
+      // The separators don't count against the budget — they aren't stored.
+      expect(normalizeBranchPrefix(`/${"a".repeat(64)}/`)).toBe("a".repeat(64));
+    });
+
+    it("applies git's dot/.lock rules to EVERY path component", () => {
+      // Checking only the ends of the whole string let these through, and
+      // `git check-ref-format` then rejected them at create time — turning a
+      // bad setting into an opaque failure on every workspace create. The
+      // contract is that a bad prefix falls back, never breaks creation.
+      expect(normalizeBranchPrefix("foo.lock/")).toBeNull();
+      expect(normalizeBranchPrefix("a/.b/")).toBeNull();
+      expect(normalizeBranchPrefix("a/b.lock/c/")).toBeNull();
+      expect(normalizeBranchPrefix("a/b./c/")).toBeNull();
+      expect(normalizeBranchPrefix(".hidden/")).toBeNull();
+      expect(normalizeBranchPrefix("a/b/")).toBe("a/b");
+      expect(normalizeBranchPrefix("v1.2/")).toBe("v1.2");
+    });
+  });
+
+  describe("joinBranchPrefix", () => {
+    it("joins with exactly one separator", () => {
+      expect(joinBranchPrefix("jordan", "Cream")).toBe("jordan/Cream");
+      expect(joinBranchPrefix("team/squad", "Cream")).toBe("team/squad/Cream");
+      expect(joinBranchPrefix(DEFAULT_BRANCH_PREFIX, "Cream")).toBe(
+        "zeros/Cream",
+      );
+    });
+
+    it("emits the bare name when there is no prefix", () => {
+      // `branch_prefix_type = "none"`. A dangling "/Cream" is not a valid ref.
+      expect(joinBranchPrefix(null, "Cream")).toBe("Cream");
+      expect(joinBranchPrefix("", "Cream")).toBe("Cream");
+      expect(joinBranchPrefix(undefined, "Cream")).toBe("Cream");
+    });
+
+    it("round-trips through branchDisplayName", () => {
+      // The two halves of the contract: whatever the allocator joins, the
+      // labels must be able to take apart again.
+      for (const prefix of [null, "zeros", "jordan", "team/squad"]) {
+        expect(branchDisplayName(joinBranchPrefix(prefix, "Cream"))).toBe(
+          "Cream",
+        );
+      }
     });
   });
 

@@ -139,7 +139,12 @@ describe("Zeros DB — migration ladder data safety (forward-only)", () => {
       );
 
       expect(() => runMigrations(db)).not.toThrow();
-      expect(appliedVersions(db).at(-1)).toBe(24);
+      // To HEAD, not to a pinned number: this test is about the 22-23 repair
+      // surviving a draft-v21 database, and hardcoding the ladder's length
+      // made every later migration fail it for an unrelated reason. The
+      // fresh-install assertion in db.test.ts is where the exact version list
+      // is pinned. (Line 219 below already did it this way.)
+      expect(appliedVersions(db).at(-1)).toBe(latestSchemaVersion());
 
       const columns = db
         .prepare("PRAGMA table_info(workspace_lifecycle_journal)")

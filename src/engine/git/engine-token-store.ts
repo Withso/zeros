@@ -13,7 +13,7 @@ import {
   type GithubAuthMethod,
   type GithubCredential,
 } from "@zeros/core/github-auth";
-import type { TokenStore } from "./github";
+import { forgetGithubLogin, type TokenStore } from "./github";
 
 export interface GithubCredentialChange {
   method: GithubAuthMethod;
@@ -49,6 +49,22 @@ export function seedGithubCredential(
   method?: GithubAuthMethod | null,
 ): void {
   const parsed = sanitizeGithubCredential(value);
+  // A different access token means a possibly different (or no) account, so
+  // the remembered login stops being evidence of anything. This is the
+  // desktop's PRIMARY sign-in/sign-out route, and without the drop a sign-out
+  // left `branch_prefix_type = "github"` still stamping the old login onto
+  // every new branch — for an account that is no longer connected. Dropping
+  // rather than re-probing keeps this synchronous and network-free; the next
+  // getAuthStatus re-learns it.
+  //
+  // A github-app ROTATION also lands here with a new token for the same
+  // account, and this drops the login it did not have to. That is the cheap
+  // direction on purpose: the cost is one workspace prefixed `zeros/` until
+  // the next probe, whereas keeping a stale login risks stamping a
+  // disconnected account onto a branch name, which is permanent.
+  if ((parsed?.accessToken ?? null) !== (credential?.accessToken ?? null)) {
+    forgetGithubLogin();
+  }
   selectedMethod =
     parsed?.method ?? (isGithubAuthMethod(method) ? method : null);
   selectedGitHost =

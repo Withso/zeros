@@ -156,6 +156,134 @@ describe("branch ops", () => {
     expect(getWorkspace(workspaceId).branch).toBe(ws.branch);
   });
 
+  it("renameBranch keeps the workspace's OWN prefix, not the default", async () => {
+    // Settings → Git (2026-07-29) made the branch prefix a choice, so a
+    // workspace can live under any namespace. A rename must move the branch
+    // WITHIN that namespace: re-prefixing with the hardcoded `zeros/` silently
+    // re-homed the branch and orphaned it from whatever the user configured.
+    const ws = getWorkspace(workspaceId);
+    await execFileAsync("git", ["branch", "-m", ws.branch, "jordan/Cream"], {
+      cwd: ws.path,
+    });
+    updateWorkspace(workspaceId, { branch: "jordan/Cream" });
+
+    await renameBranch({ workspaceId, newName: "add-canvas-zoom" });
+
+    expect(getWorkspace(workspaceId).branch).toBe("jordan/add-canvas-zoom");
+    const branches = await listBranches(workspaceId);
+    expect(
+      branches.find((b) => b.name === "jordan/add-canvas-zoom"),
+    ).toBeDefined();
+    expect(branches.find((b) => b.name === "zeros/add-canvas-zoom")).toBe(
+      undefined,
+    );
+  });
+
+  it("renameBranch drops the prefix entirely for an unprefixed workspace", async () => {
+    // branch_prefix_type = "none" — the branch IS the bare name, and a rename
+    // must not reintroduce a namespace the user turned off.
+    const ws = getWorkspace(workspaceId);
+    await execFileAsync("git", ["branch", "-m", ws.branch, "Cream"], {
+      cwd: ws.path,
+    });
+    updateWorkspace(workspaceId, { branch: "Cream" });
+
+    await renameBranch({ workspaceId, newName: "add-canvas-zoom" });
+
+    expect(getWorkspace(workspaceId).branch).toBe("add-canvas-zoom");
+  });
+
+  it("renameBranch keeps the prefix on a SECOND rename too", async () => {
+    // The tail stops looking like an allocator colour after the first rename,
+    // so a boundary rule based on that shape found no prefix the second time
+    // and published a bare `login-fix` — silently dropping the namespace on
+    // every rename after the first.
+    const ws = getWorkspace(workspaceId);
+    await execFileAsync("git", ["branch", "-m", ws.branch, "jordan/Cream"], {
+      cwd: ws.path,
+    });
+    updateWorkspace(workspaceId, { branch: "jordan/Cream" });
+
+    await renameBranch({ workspaceId, newName: "add-canvas-zoom" });
+    await renameBranch({ workspaceId, newName: "login-fix" });
+
+    expect(getWorkspace(workspaceId).branch).toBe("jordan/login-fix");
+  });
+
+  it("renameBranch keeps an adopted branch's namespace", async () => {
+    // `cursor/foo` was never named by the allocator, so no shape rule can find
+    // its boundary — but `<namespace>/<name>` is still the shape of the ref,
+    // and a rename replaces only the name half.
+    const ws = getWorkspace(workspaceId);
+    await execFileAsync("git", ["branch", "-m", ws.branch, "cursor/foo"], {
+      cwd: ws.path,
+    });
+    updateWorkspace(workspaceId, { branch: "cursor/foo" });
+
+    await renameBranch({ workspaceId, newName: "login-fix" });
+
+    expect(getWorkspace(workspaceId).branch).toBe("cursor/login-fix");
+  });
+
+  it("renameBranch does not invent a namespace from a substring match", async () => {
+    // A namespace is a slash-delimited thing. resolveExistingBranchPrefix
+    // briefly fell back to the CONFIGURED prefix when the branch had no slash,
+    // guarded only by `startsWith` — so with the default setting an adopted
+    // branch named `zeros-experiment` "matched" `zeros` and the rename emitted
+    // the run-together `zerosadd-canvas-zoom`.
+    const ws = getWorkspace(workspaceId);
+    await execFileAsync(
+      "git",
+      ["branch", "-m", ws.branch, "zeros-experiment"],
+      { cwd: ws.path },
+    );
+    updateWorkspace(workspaceId, { branch: "zeros-experiment" });
+
+    await renameBranch({ workspaceId, newName: "add-canvas-zoom" });
+
+    expect(getWorkspace(workspaceId).branch).toBe("add-canvas-zoom");
+  });
+
+  it("renameBranch never adopts a caller-supplied prefix", async () => {
+    // `newName` is untrusted (git.renameBranch is remote-reachable) and lands
+    // as a `git branch -m` argument. Whatever prefix the caller sends is
+    // discarded; the ref is rebuilt from the workspace's own.
+    const ws = getWorkspace(workspaceId);
+    await execFileAsync("git", ["branch", "-m", ws.branch, "jordan/Cream"], {
+      cwd: ws.path,
+    });
+    updateWorkspace(workspaceId, { branch: "jordan/Cream" });
+
+    await renameBranch({ workspaceId, newName: "--force/Login" });
+    expect(getWorkspace(workspaceId).branch).toBe("jordan/Login");
+
+    await expect(
+      renameBranch({ workspaceId, newName: "jordan/--force" }),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+  });
+
+  it("renameBranch REPORTS the resulting branch, prefix included", async () => {
+    // The caller cannot derive this: the prefix comes from the existing
+    // branch, which only the engine reads. The renderer's inline rename box
+    // used to guess `zeros/<name>` and optimistically announced a branch that
+    // does not exist for every workspace on any other prefix.
+    const ws = getWorkspace(workspaceId);
+    await execFileAsync("git", ["branch", "-m", ws.branch, "jordan/Cream"], {
+      cwd: ws.path,
+    });
+    updateWorkspace(workspaceId, { branch: "jordan/Cream" });
+
+    const renamed = await renameBranch({
+      workspaceId,
+      newName: "add-canvas-zoom",
+    });
+
+    expect(renamed).toBe("jordan/add-canvas-zoom");
+    expect(renamed).toBe(getWorkspace(workspaceId).branch);
+    // A no-op rename reports the unchanged branch rather than nothing.
+    expect(await renameBranch({ workspaceId, newName: renamed })).toBe(renamed);
+  });
+
   it("createBranchFrom + checkoutBranch switch the workspace branch", async () => {
     const ws = getWorkspace(workspaceId);
     await createBranchFrom({

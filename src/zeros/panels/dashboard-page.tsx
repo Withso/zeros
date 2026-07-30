@@ -58,6 +58,7 @@ import {
   restoreWorkspaceWithFeedback,
   useArchiveWorkspace,
 } from "../store/archive-actions";
+import { branchDisplayName } from "../lib/branch-name";
 import { formatCompactAge } from "../agent/format-age";
 import { ZerosSpinner } from "@/loaders";
 import { ghPrMerge, ghPrSync, type Workspace } from "../../native/git";
@@ -90,9 +91,11 @@ function projectInitial(name: string): string {
   return (name.trim()[0] ?? "·").toUpperCase();
 }
 
-function stripZerosPrefix(branch: string): string {
-  return branch.startsWith("zeros/") ? branch.slice("zeros/".length) : branch;
-}
+// Branch → workspace name goes through the shared branchDisplayName (see
+// zeros/lib/branch-name.ts). The private `zeros/`-literal strip that used to
+// live here stopped being correct when Settings → Git made the prefix a
+// choice: a workspace on `jordan/Cream` showed its whole ref where every other
+// surface showed `Cream`.
 
 /** Stable empty list so non-Backlog columns don't allocate a new array each
  *  render (the pending placeholders only ever appear under Backlog). */
@@ -181,7 +184,7 @@ export function DashboardPage() {
         titleByFolder.set(folder, { title, updatedAt });
     }
     return (w: Workspace): BoardRow => {
-      const branch = stripZerosPrefix(w.branch);
+      const branch = branchDisplayName(w.branch);
       return {
         workspace: w,
         repoName: repoNameBySlug.get(w.repoSlug) ?? w.repoSlug,
@@ -333,7 +336,7 @@ export function DashboardPage() {
                       key={pending.token}
                       label={
                         pending.branch
-                          ? stripZerosPrefix(pending.branch)
+                          ? branchDisplayName(pending.branch)
                           : "New workspace"
                       }
                       repoName={

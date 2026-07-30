@@ -1,4 +1,5 @@
 import type { ChangeLineCounts, Workspace } from "../native/git";
+import { branchDisplayName } from "../zeros/lib/branch-name";
 import { buildLocalMainWorkspace } from "../zeros/store/local-main-workspace";
 import type { Project } from "../zeros/store/projects-store";
 import {
@@ -142,9 +143,7 @@ export function workspaceTabDescription(args: {
 const SCROLL_TOLERANCE_PX = 1;
 
 export function workspaceLabel(workspace: Workspace): string {
-  return workspace.branch.startsWith("zeros/")
-    ? workspace.branch.slice("zeros/".length)
-    : workspace.branch;
+  return branchDisplayName(workspace.branch);
 }
 
 /** Workspace tabs follow creation order: established workspaces remain on the

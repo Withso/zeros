@@ -800,6 +800,31 @@ export const FAST_MODE_ENV_VAR = "ZEROS_FAST_MODE";
  *  the pre-session choice the session-start reconcile applies. */
 export const PERMISSION_MODE_ENV_VAR = "ZEROS_PERMISSION_MODE";
 
+/** Stable key for "which composer env is this live session actually running",
+ *  used BOTH to stamp a session slot (`appliedChatEnvKey`) and to compare
+ *  against the chat's current env in sendPrompt's settings-drift reconcile.
+ *  One function so the two sites can never drift apart — a stamp computed
+ *  differently from the comparison is indistinguishable from a real change and
+ *  costs a cold respawn.
+ *
+ *  Object key order is NOT normalized on purpose: every env here is built by
+ *  envForChat, which assigns keys in a fixed order, so JSON.stringify is
+ *  already stable between the two callers.
+ *
+ *  PERMISSION_MODE_ENV_VAR is excluded. The permission posture is applied to a
+ *  live session through its own RPC (AGENT_SET_MODE — implemented by all three
+ *  adapters, not an optional hook), so a mode change can never be a reason to
+ *  rebuild. Leaving it in the key made every Plan-mode toggle look like drift,
+ *  and the reconcile then force-respawned COLD on the next send — dropping the
+ *  agent's conversation while the transcript stayed on screen. */
+export function chatEnvDriftKey(
+  env: Record<string, string> | undefined,
+): string {
+  if (!env) return JSON.stringify({});
+  const { [PERMISSION_MODE_ENV_VAR]: _mode, ...rest } = env;
+  return JSON.stringify(rest);
+}
+
 /** Env var carrying the composer's extra working directories (Claude `/add-dir`)
  *  as a JSON array of absolute paths. Zeros convention. Read by the Claude SDK
  *  adapter (→ `Options.additionalDirectories`). Only emitted when non-empty so

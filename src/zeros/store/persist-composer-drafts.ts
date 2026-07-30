@@ -25,17 +25,22 @@
 //
 // Per-field type-guards on read (helmor pattern). Debounced 500 ms
 // writes with `beforeunload` flush (t3code pattern). Best-effort —
-// quota / private-mode failures swallowed so a 20 MB attachment
-// can't crash the store. (If quota hits, the text portion still
-// gets written on the next field change because we re-serialize
-// fresh every time.)
+// quota / private-mode failures are swallowed so a 20 MB attachment
+// can't crash the store.
+//
+// 2026-07-30: that swallow used to be the whole story, with a comment
+// claiming "the text portion still gets written on the next field change
+// because we re-serialize fresh every time". It does not. Re-serializing
+// produces the SAME oversized snapshot, so ONE staged attachment past quota
+// silently stopped EVERY chat's draft from persisting for as long as it was
+// staged — and the user's only clue was their prompt vanishing on reload.
+// Attaching a chat transcript made that reachable on purpose rather than by
+// accident, so writeNow now degrades instead of giving up: it retries once
+// with attachment payloads dropped, which keeps the thing people actually
+// mind losing (their typed prompt).
 // ──────────────────────────────────────────────────────────
 
-import type {
-  ComposerDraft,
-  EditDraftStash,
-  WorkspaceState,
-} from "./store";
+import type { ComposerDraft, EditDraftStash, WorkspaceState } from "./store";
 
 const STORAGE_KEY = "zeros:composer-drafts:v1";
 const DEBOUNCE_MS = 500;
@@ -106,11 +111,63 @@ export function loadPersistedDrafts(): PersistedDrafts {
   }
 }
 
+/** The same drafts with attachment payloads dropped from the drafts that
+ *  actually carry them.
+ *
+ *  Three things this gets right that the obvious version does not:
+ *
+ *  • PER DRAFT. A draft with no attachments is passed through untouched, so a
+ *    chat holding only typed text and @-mention pills keeps its editor JSON —
+ *    it did not cause the overflow and must not pay for it. The degraded write
+ *    OVERWRITES a previously-good snapshot, so anything it strips
+ *    unnecessarily is data the old catch-and-swallow would have preserved.
+ *
+ *  • `keptOriginals` goes too. Those are the ORIGINAL attachments of a message
+ *    being edited, and their `thumbnailUri` is a full base64 data: URL up to
+ *    MAX_IMAGE_BYTES. Keeping them was the biggest payload in the snapshot, so
+ *    the "degraded" retry could still be megabytes and throw again — leaving
+ *    nothing written at all, which is the exact outcome this exists to prevent.
+ *
+ *  • `json` goes with the bytes. The attachment NODE lives in that document,
+ *    so keeping it while dropping the bytes restores a chip with nothing
+ *    behind it — and because the side store never resolves it, the send path
+ *    never even sees it to report. `text` is the pre-editor plain-text mirror
+ *    the store already maintains, so a degraded chat draft is exactly "what
+ *    you typed, no chips": lossy, but never a lie. */
+function withoutAttachments(snapshot: PersistedDrafts): PersistedDrafts {
+  const chats: PersistedDrafts["chats"] = {};
+  for (const [id, d] of Object.entries(snapshot.chats)) {
+    chats[id] =
+      d.attachments.length === 0
+        ? d
+        : { text: d.text, attachments: [], json: null };
+  }
+  const edits: PersistedDrafts["edits"] = {};
+  for (const [id, d] of Object.entries(snapshot.edits)) {
+    edits[id] =
+      d.newAttachments.length === 0 && d.keptOriginals.length === 0
+        ? d
+        : { ...d, newAttachments: [], keptOriginals: [], json: null };
+  }
+  return { chats, edits };
+}
+
 function writeNow(snapshot: PersistedDrafts): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+    return;
   } catch {
-    /* quota (large attachments) / private mode — best-effort */
+    /* fall through to the degraded write */
+  }
+  // Quota (a large attachment) or private mode. Retry without the payloads
+  // rather than losing the prompt text as well — see the header.
+  try {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify(withoutAttachments(snapshot)),
+    );
+  } catch {
+    /* private mode / storage disabled entirely — genuinely nothing to do */
   }
 }
 

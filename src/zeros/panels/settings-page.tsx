@@ -86,6 +86,7 @@ import { CodeThemePreview } from "./code-theme-preview";
 import { useProjects } from "../store/use-projects";
 import { ProvidersPanel } from "./providers-panel";
 import { TerminalAgentsSection } from "./terminal-agents-section";
+import { GitDefaultsSection } from "./git-defaults-section";
 import { useExperimentalFeature } from "../settings/experimental-features";
 import {
   useInternalFeature,
@@ -1074,14 +1075,10 @@ function IntegrationsPanel() {
   );
 }
 
-// ── Placeholder panels — built out one-by-one in later passes ──
-//
-// Left-aligned under the shell's section heading so the nav is complete and
-// honest about what's coming, without shipping a half-built control.
-
-function PlaceholderPanel({ hint }: { hint: string }) {
-  return <p className="text-fg2 max-w-prose text-sm leading-relaxed">{hint}</p>;
-}
+// PlaceholderPanel removed 2026-07-29 — Git was the last pane using it, and
+// every section in SECTIONS now renders a real control. Reintroducing a
+// "coming soon" panel is a step backwards: register the section only once it
+// has something to show.
 
 // ── Models — the default agent + effort + plan/fast for new chats ──
 //
@@ -1454,9 +1451,14 @@ function ModelsPanel() {
   );
 }
 
+/** Global git defaults. Branch naming lives here (a personal preference —
+ *  see git-defaults-section.tsx); remote + base branch stay per-repo on each
+ *  repo's own Git pane, because those ARE properties of the repo. */
 function GitDefaultsPanel() {
   return (
-    <PlaceholderPanel hint="Global git defaults — remote, base branch, and branch naming — applied to every repo will live here." />
+    <div className="flex flex-col gap-9">
+      <GitDefaultsSection />
+    </div>
   );
 }
 

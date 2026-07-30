@@ -29,12 +29,28 @@ const buttonVariants = cva(
         ghost: "hover:bg-bg2-hover hover:text-fg1",
         // DESTRUCTIVE (primary) — solid red fill (--red-secondary); text is the
         // static --red-secondary-fg (white in both themes — fg1 would flip dark in light).
-        destructive: "bg-red-secondary text-red-secondary-fg shadow hover:bg-red-secondary/90",
+        destructive:
+          "bg-red-secondary text-red-secondary-fg shadow hover:bg-red-secondary/90",
         // DESTRUCTIVE (secondary) — same neutral surface as Secondary
         // (transparent fill + border2 → hover bg2-hover/border3); red-primary
         // text carries the danger cue.
         "destructive-secondary":
           "border border-border2 bg-transparent text-red-primary hover:border-border3 hover:bg-bg2-hover",
+        // SECONDARY-ON — a Secondary button in a latched/selected state, for a
+        // toggle that stays on screen after you press it (the empty chat's
+        // transcript pills). Deliberately NOT Primary: N white fills is N main
+        // CTAs stacked above the view's real one, which is what the Primary
+        // reservation above exists to prevent.
+        //
+        // It lifts one step in BOTH fill and border rather than relying on
+        // colour, so it survives the light theme and colour-blind readers; the
+        // caller adds the brand-coloured mark and the check that carry the
+        // rest of the signal. border4 (not highlighted-bright) because
+        // highlighted-bright is the app's focus ring — overloading it would
+        // make a focused-but-off control and an on-but-unfocused control look
+        // identical.
+        "secondary-on":
+          "border border-border4 bg-bg2-hover text-fg1 hover:bg-bg2-hover",
       },
       // Height only — 28px default; 24px (denser) / 32px (roomier) per layout.
       // Icon-only squares sit on the SAME 24/28/32 scale so mixed rows line
@@ -59,7 +75,8 @@ const buttonVariants = cva(
 );
 
 export interface ButtonProps
-  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
+  extends
+    React.ButtonHTMLAttributes<HTMLButtonElement>,
     VariantProps<typeof buttonVariants> {
   asChild?: boolean;
 }

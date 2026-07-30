@@ -231,7 +231,9 @@ export function coerceChatRow(o: unknown): ChatRow | null {
     // Wire form is already a string[] (renderer threadToRow), but a remote
     // client is untrusted — keep only the string entries, drop the rest.
     additionalDirectories: Array.isArray(r.additionalDirectories)
-      ? r.additionalDirectories.filter((d): d is string => typeof d === "string")
+      ? r.additionalDirectories.filter(
+          (d): d is string => typeof d === "string",
+        )
       : [],
     title: str(r.title),
     createdAt: num(r.createdAt),
@@ -286,7 +288,9 @@ export function getChatLocation(
   if (!id) return null;
   const row = openZerosDb()
     .prepare("SELECT folder, workspace_id FROM chats WHERE id = ? LIMIT 1")
-    .get(id) as { folder: string | null; workspace_id: string | null } | undefined;
+    .get(id) as
+    | { folder: string | null; workspace_id: string | null }
+    | undefined;
   return row ? { folder: row.folder, workspaceId: row.workspace_id } : null;
 }
 
@@ -420,33 +424,101 @@ export interface ChatSummaryRow {
   summaryAt: number;
   agentId: string | null;
   agentName: string | null;
+  /** Prompts the user sent to this agent — nothing else.
+   *
+   *  This was `COUNT(*)` over the persisted rows until 2026-07-30, and that
+   *  number was indefensible on a pill: tool calls and reasoning each persist
+   *  a row, so a chat the user could see was two questions long reported "55
+   *  messages". A count nobody can reproduce by looking at the chat is worse
+   *  than no count, and the founder's call was to count the one thing that IS
+   *  legible — how many times you asked.
+   *
+   *  It is also now the SAME set the `summary` subquery draws its text from,
+   *  and the same set `groupMessagesIntoTurns` opens a turn for — so the pill's
+   *  number, the pill's label and the concise transcript the pill attaches all
+   *  describe one thing.
+   *
+   *  Auto-actions (Create PR, Commit & Push — see AgentTextMessage.autoAction)
+   *  ARE counted. Zeros sent the text, but it occupies a real user turn in the
+   *  timeline and in the transcript, and excluding it would make this number
+   *  disagree with the document it advertises. */
+  userMessageCount: number;
+  /** Epoch ms of the newest message, or 0 for a chat with none. Drives the
+   *  "last active" line in the transcript hover preview and NOTHING else —
+   *  deliberately not the sort key (see below). */
+  lastMessageAt: number;
 }
 
 /** Prior chats in a folder that have ≥1 user message, each carrying its FIRST
- *  user message as the "summary" — the empty-composer handoff picker (Phase D2).
- *  Reproduces the old electron/db.ts query over the engine's chats + chat_messages
- *  (so it works on web too). Explicit summaries were never written (the Summarize
- *  button is unwired), so the value is always the first user message; summaryAt 0. */
+ *  user message as the "summary" — feeds the empty chat's transcript pill row.
+ *  Explicit summaries were never written (the Summarize button is unwired), so
+ *  the value is always the first user message; summaryAt 0.
+ *
+ *  ORDERING (2026-07-30). This used to be `ORDER BY chats.updated_at DESC`,
+ *  which looked like activity order and was not: `updated_at` is bumped only by
+ *  title/settings writes and the `TOUCH_CHAT` reducer, and TOUCH_CHAT has zero
+ *  dispatch sites. The persist-on-emit path writes `chat_messages` and never
+ *  touches the parent row, so the key was effectively "when the AI title
+ *  landed" — near-creation order with jitter from later renames.
+ *
+ *  It is now creation order, newest first, for two reasons:
+ *
+ *   • `created_at` is the one column here that cannot drift. It is
+ *     deliberately excluded from the upsert's ON CONFLICT DO UPDATE set (see
+ *     the note on CHAT_UPSERT_SQL) precisely so a coerced remote write can't
+ *     corrupt sort/age.
+ *   • It holds still. `MAX(created_at)` activity order re-sorts the row under
+ *     the user's cursor every time a background agent finishes a turn — you
+ *     reach for the second pill and click the third.
+ *
+ *  The `rowid` tiebreak is load-bearing, not decoration: `created_at` is
+ *  INTEGER with no NOT NULL and no default, and `coerceChatRow` defaults a
+ *  missing createdAt to 0, so legacy and coerced rows collapse into one tie
+ *  that would otherwise order arbitrarily per query. rowid is insertion order.
+ *
+ *  ARCHIVED chats are included. A chat's transcript does not become less
+ *  useful when its tab is closed — it is usually MORE useful, because you
+ *  closed the tab when the work finished. Open-vs-closed is not a distinction
+ *  this list makes anywhere.
+ *
+ *  The SQL is a named constant, and exported, ONLY so db.test.ts can run
+ *  EXPLAIN QUERY PLAN over the exact text that ships: the user-prompt count's
+ *  cost hangs on a partial index whose use SQLite decides syntactically, and
+ *  the query returns identical rows with or without it — just two orders of
+ *  magnitude slower. A behavioural test cannot see that; the plan can. */
+export const CHAT_SUMMARIES_SQL = `SELECT chats.id AS chatId, chats.title AS title, chats.folder AS folder,
+              chats.agent_id AS agentId, chats.agent_name AS agentName,
+              (SELECT json_extract(cm.payload, '$.text') FROM chat_messages cm
+                 WHERE cm.chat_id = chats.id AND cm.kind = 'text'
+                   AND json_extract(cm.payload, '$.role') = 'user'
+                   AND json_extract(cm.payload, '$.text') IS NOT NULL
+                 ORDER BY cm.ord ASC LIMIT 1) AS summary,
+              -- The one term here that cannot short-circuit, so it is the one
+              -- that needs an index: idx_chat_messages_user_text (migration
+              -- 25) is PARTIAL on exactly this predicate. SQLite only uses a
+              -- partial index when it can syntactically prove the query
+              -- implies the index's WHERE, so keep these two terms in this
+              -- order and in this spelling — a rewrite silently falls back to
+              -- a full scan of every message in the folder with no error.
+              -- db.test.ts pins the plan.
+              (SELECT COUNT(*) FROM chat_messages cm
+                 WHERE cm.chat_id = chats.id AND cm.kind = 'text'
+                   AND json_extract(cm.payload, '$.role') = 'user') AS userMessageCount,
+              (SELECT MAX(cm.created_at) FROM chat_messages cm
+                 WHERE cm.chat_id = chats.id) AS lastMessageAt
+         FROM chats
+        WHERE chats.folder = ? AND chats.id != ?
+          AND EXISTS (SELECT 1 FROM chat_messages cm WHERE cm.chat_id = chats.id
+                        AND cm.kind = 'text' AND json_extract(cm.payload, '$.role') = 'user')
+        ORDER BY chats.created_at DESC, chats.rowid DESC`;
+
 export function summariesForFolder(
   folder: string,
   excludeChatId?: string,
 ): ChatSummaryRow[] {
   if (!folder) return [];
   const rows = openZerosDb()
-    .prepare(
-      `SELECT chats.id AS chatId, chats.title AS title, chats.folder AS folder,
-              chats.agent_id AS agentId, chats.agent_name AS agentName,
-              (SELECT json_extract(cm.payload, '$.text') FROM chat_messages cm
-                 WHERE cm.chat_id = chats.id AND cm.kind = 'text'
-                   AND json_extract(cm.payload, '$.role') = 'user'
-                   AND json_extract(cm.payload, '$.text') IS NOT NULL
-                 ORDER BY cm.ord ASC LIMIT 1) AS summary
-         FROM chats
-        WHERE chats.folder = ? AND chats.id != ? AND chats.archived = 0
-          AND EXISTS (SELECT 1 FROM chat_messages cm WHERE cm.chat_id = chats.id
-                        AND cm.kind = 'text' AND json_extract(cm.payload, '$.role') = 'user')
-        ORDER BY chats.updated_at DESC`,
-    )
+    .prepare(CHAT_SUMMARIES_SQL)
     .all(folder, excludeChatId ?? "") as {
     chatId: string;
     title: string | null;
@@ -454,6 +526,8 @@ export function summariesForFolder(
     agentId: string | null;
     agentName: string | null;
     summary: string | null;
+    userMessageCount: number | null;
+    lastMessageAt: number | null;
   }[];
   return rows.map((r) => ({
     chatId: r.chatId,
@@ -463,6 +537,13 @@ export function summariesForFolder(
     summaryAt: 0,
     agentId: r.agentId,
     agentName: r.agentName,
+    // The EXISTS gate above uses the IDENTICAL predicate, so every row that
+    // reaches here has at least one — the pill can never draw a 0.
+    userMessageCount: r.userMessageCount ?? 0,
+    // MAX() over zero rows is SQL NULL. Unreachable through the EXISTS clause
+    // today, but a 0 here is a falsy "unknown" the renderer can branch on,
+    // where a NULL would print as "last active 1 Jan 1970".
+    lastMessageAt: r.lastMessageAt ?? 0,
   }));
 }
 

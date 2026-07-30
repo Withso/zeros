@@ -52,7 +52,8 @@ import {
 import { Button } from "../zeros/ui";
 import { cn } from "../zeros/ui/cn";
 import { toast } from "../zeros/ui/primitives/elements";
-import { Kbd, Tooltip } from "@/zeros/ui/primitives";
+import { Badge, Kbd, Tooltip } from "@/zeros/ui/primitives";
+import { branchDisplayName } from "../zeros/lib/branch-name";
 import { Col3ToggleButton } from "./column-toggle-buttons";
 import { useCustomWindowDrag } from "./use-custom-window-drag";
 import {
@@ -144,10 +145,6 @@ function projectInitial(name: string): string {
   return (name.trim()[0] ?? "·").toUpperCase();
 }
 
-function stripZerosPrefix(branch: string): string {
-  return branch.startsWith("zeros/") ? branch.slice("zeros/".length) : branch;
-}
-
 interface ResolvedContext {
   project: Project | null;
   workspace: Workspace | null;
@@ -182,26 +179,68 @@ interface InlineRenameProps {
   onCancel: () => void;
 }
 
+/** Swap the name half of a ref, keeping its namespace: `jordan/Cream` +
+ *  `login-fix` → `jordan/login-fix`. Mirrors resolveExistingBranchPrefix in
+ *  engine/git/branch.ts — the last slash is the boundary, whatever the tail
+ *  looks like. Exported for the test; it is only ever the fallback for an
+ *  engine too old to report the resulting branch itself. */
+export function replaceBranchName(branch: string, name: string): string {
+  const cut = branch.lastIndexOf("/");
+  return cut === -1 ? name : `${branch.slice(0, cut + 1)}${name}`;
+}
+
+/** Which branch the breadcrumb should name while a rename's workspace refetch
+ *  is still in flight: the one the engine just confirmed, but ONLY while the
+ *  store still reports the branch we renamed away from.
+ *
+ *  Pure so the one piece of state that can go stale here is pinned by a test
+ *  rather than by reading a component. Returning null means "no override" —
+ *  the store row is current (or belongs to a different workspace) and is the
+ *  better answer. */
+export function optimisticRenamedBranch(
+  workspaceBranch: string | undefined,
+  renamed: { from: string; to: string } | null,
+): string | null {
+  return renamed && workspaceBranch === renamed.from ? renamed.to : null;
+}
+
 function InlineRename({
   workspaceId,
   current,
   onCommitted,
   onCancel,
 }: InlineRenameProps) {
-  const [value, setValue] = useState(stripZerosPrefix(current));
+  const [value, setValue] = useState(branchDisplayName(current));
   const [busy, setBusy] = useState(false);
 
   const commit = useCallback(async () => {
     const next = value.trim();
     if (busy) return;
-    if (!next || next === stripZerosPrefix(current)) {
+    if (!next || next === branchDisplayName(current)) {
       onCancel();
       return;
     }
     setBusy(true);
     try {
-      await gitRenameBranch({ workspaceId, newName: next });
-      onCommitted(`zeros/${next}`);
+      const renamed = await gitRenameBranch({ workspaceId, newName: next });
+      // Report what the ENGINE produced. It keeps the branch inside whatever
+      // namespace it already lives in (Settings → Git makes the prefix a
+      // choice), so this used to hardcode `zeros/${next}` — a branch that does
+      // not exist for every workspace on any other prefix, including an
+      // unprefixed one, which got a `zeros/` that was never created.
+      //
+      // That was invisible until 2026-07-30 because the caller ignored the
+      // value it was handed; it now drives the breadcrumb for the length of
+      // the workspace refetch, so being right about the namespace is the
+      // difference between a correct label and a wrong one on screen.
+      //
+      // The fallback covers an engine too old to report the branch back, and
+      // mirrors the engine's rule exactly: everything up to the LAST slash.
+      // Deriving it from branchDisplayName instead would be wrong for the two
+      // cases that matter most here — a branch already renamed once, and an
+      // adopted `cursor/foo` — because that rule concedes a prefix only when
+      // the tail is allocator-shaped, and neither of those tails is.
+      onCommitted(renamed ?? replaceBranchName(current, next));
     } catch (err: unknown) {
       if (isGitErrorShape(err)) {
         toast.error(`Couldn't rename branch: ${err.message}`, {
@@ -506,6 +545,43 @@ function OpenInDropdown({ path }: OpenInDropdownProps) {
   );
 }
 
+/** Third "Open in" surface: a bare NAME chip that opens the same app rows on
+ *  click. Used by the chat's "Created <workspace>" provenance row, where the
+ *  workspace name is already the subject of the sentence — so the name itself
+ *  is the trigger and there is no chevron, no logo, and no split half. Like
+ *  OpenInSubmenu this is a pure pointer entry point; ⌘O / ⌘C stay owned by
+ *  OpenInDropdown. */
+export function OpenInBadgeMenu({
+  path,
+  label,
+}: OpenInDropdownProps & { label: string }) {
+  const menu = useOpenInMenu(path);
+
+  return (
+    <DropdownMenu>
+      <Tooltip label="Open in…">
+        <DropdownMenuTrigger asChild>
+          <Badge
+            variant="accent"
+            role="button"
+            tabIndex={0}
+            aria-label={`Open ${label} in…`}
+            // Only the cursor: the chip's size, weight and colour live in the
+            // `accent` variant (RULES.md Rule 5 — typography and colour come
+            // from the primitive, not from a call site's className).
+            className="cursor-pointer"
+          >
+            {label}
+          </Badge>
+        </DropdownMenuTrigger>
+      </Tooltip>
+      <DropdownMenuContent align="start" sideOffset={4} className="min-w-[200px]">
+        <OpenInMenuRows menu={menu} />
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 /** Pane-menu "Open in" surface: a submenu whose trigger carries the
  *  current default app's logo ("logo represents where it will open") and
  *  reveals the same app rows on hover. Mounted inside the pane "⋯" menu
@@ -560,6 +636,28 @@ export function Column2TopBar({
   const { project, workspace } = useResolvedContext(folder);
 
   const [renaming, setRenaming] = useState(false);
+  // The branch the engine just reported for a rename, held only until the
+  // workspace row catches up. `notifyWorkspacesChanged` is a bridge round
+  // trip, so without this the breadcrumb keeps showing the OLD name for the
+  // length of that refetch — right after the user renamed it, which is the one
+  // moment they are looking at it.
+  //
+  // Reset during RENDER, keyed on the branch it was recorded against, rather
+  // than cleared by an effect: an effect only fires after commit, so the first
+  // render that sees the refetched row would still paint the optimistic name
+  // and then correct itself. Storing what we renamed FROM is what makes it
+  // self-clearing — the moment `workspace.branch` is anything else the store
+  // has landed (or the user switched workspaces), and the optimistic value is
+  // dropped on that same render. If the refetch never lands, the name shown is
+  // still the one the ENGINE confirmed it wrote, which is the correct answer to
+  // be stuck on; the stale row is the wrong one.
+  // (Same shape as the grown/body pair in chat-transcript-preview.tsx.)
+  //
+  // Declared up here with the other hooks, ahead of the no-project early
+  // return below — see the note on that return.
+  const [renamed, setRenamed] = useState<{ from: string; to: string } | null>(
+    null,
+  );
   // 2026-05-23: reactive hook so the "Open in" dropdown unhides
   // when a late-arriving preload bridge lands. Must be called
   // unconditionally before the early-return below to satisfy
@@ -588,13 +686,17 @@ export function Column2TopBar({
   // hidden (workspace is still null), which is intentional — the synthetic
   // workspace has no engine id to dispatch IPCs against.
   const isLocalMain = !workspace && folder === project.repoRoot;
+
+  const optimisticBranch = optimisticRenamedBranch(workspace?.branch, renamed);
+
   const workspaceLabel = workspace
-    ? stripZerosPrefix(workspace.branch)
+    ? branchDisplayName(optimisticBranch ?? workspace.branch)
     : isLocalMain
       ? LOCAL_MAIN_LABEL
       : "main";
 
-  const handleRenameCommitted = (_newBranch: string) => {
+  const handleRenameCommitted = (newBranch: string) => {
+    if (workspace) setRenamed({ from: workspace.branch, to: newBranch });
     setRenaming(false);
     if (workspace) notifyWorkspacesChanged(workspace.repoSlug);
   };
@@ -614,7 +716,10 @@ export function Column2TopBar({
         {workspace && renaming ? (
           <InlineRename
             workspaceId={workspace.id}
-            current={workspace.branch}
+            // The optimistic value too, so reopening the box inside the
+            // refetch window seeds it with the name the user just chose
+            // rather than the one they renamed away from.
+            current={optimisticBranch ?? workspace.branch}
             onCommitted={handleRenameCommitted}
             onCancel={() => setRenaming(false)}
           />

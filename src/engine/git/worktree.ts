@@ -17,11 +17,16 @@ import {
 } from "./git-exec";
 import { isConflictEntry, parsePorcelainZ } from "./porcelain";
 import {
-  BRANCH_PREFIX,
+  allocatedNameSuffix,
   branchDisplayName,
+  DEFAULT_BRANCH_PREFIX,
   generateWorkspaceId,
+  isValidBranchName,
+  joinBranchPrefix,
+  normalizeBranchPrefix,
   pickFreeColourName,
 } from "./naming";
+import { cachedGithubLogin } from "./github";
 import { isRepo, readOriginUrl, repoSlugFromOriginUrl } from "./repo";
 import {
   beginWorkspaceLifecycle,
@@ -538,11 +543,52 @@ export interface CreateWorkspaceInput extends CreateWorkspaceOptions {
  *  of generateWorkspaceId. Anything else is rejected before it can reach a
  *  path join (H7). */
 const WORKSPACE_ID_RE = /^ws_[a-z0-9]{6}-[a-z0-9-]+$/;
-/** The exact output shape of the name allocator — the only branch a caller
- *  may pass back as prepared (never an arbitrary ref). Matches a colour
- *  ("zeros/Cream") and the exhaustion fallback ("zeros/Cream-v2"). Was
- *  `/^zeros\/[a-z]+-[0-9a-f]{4}$/` before the 2026-07-29 colour scheme. */
-const PREPARED_BRANCH_RE = /^zeros\/[A-Z][a-z]{2,15}(?:-v[1-9][0-9]{0,2})?$/;
+/** The allocator's exact NAME output — a colour ("Cream") plus the exhaustion
+ *  fallback suffix ("Cream-v2"). Anchored at the END of the branch so the
+ *  prefix can be peeled off whatever it is. Was
+ *  `/^zeros\/[a-z]+-[0-9a-f]{4}$/` before the 2026-07-29 colour scheme, and
+ *  `/^zeros\/…/` before Settings → Git made the prefix a choice. */
+const PREPARED_NAME_RE = /[A-Z][a-z]{2,15}(?:-v[1-9][0-9]{0,2})?$/;
+
+/** Is this a branch prepareWorkspaceCreate could have produced?
+ *
+ *  `preparedBranch` arrives from the renderer, so it is untrusted input that
+ *  ends up as a `git update-ref` argument — this is the shape gate in front of
+ *  it (assertSafeGitRef is the second). Structural rather than one regex,
+ *  because the prefix is now open-ended: peel the allocator's fixed name off
+ *  the tail, then hold the namespace that remains to the SAME validator that
+ *  accepted it as a setting.
+ *
+ *  Byte-identity against normalizeBranchPrefix, not merely "normalizes to
+ *  something legal": that is what rejects ` jordan/Cream` and `jordan//Cream`,
+ *  whose namespaces would otherwise be repaired into a legal one and let a
+ *  string the allocator could never have produced through the gate.
+ *
+ *  Rejects e.g. `--upload-pack=x/Cream` (namespace fails the grammar) and
+ *  `zeros/../../etc` (no allocator name at the tail). */
+function isPreparedBranch(branch: string): boolean {
+  const match = PREPARED_NAME_RE.exec(branch);
+  if (!match) return false;
+  // The name half must ALSO clear isValidBranchName, which folds case against
+  // RESERVED_BRANCHES. PREPARED_NAME_RE on its own matches "Main" / "Master" /
+  // "Release", and now that the prefix is optional a bare "Main" would be
+  // accepted — creating `refs/heads/Main`, which is the same loose ref as
+  // `main` on a case-insensitive filesystem. The old `/^zeros\/…/` pattern
+  // excluded those only as a side effect of demanding the namespace.
+  if (!isValidBranchName(match[0])) return false;
+  const head = branch.slice(0, branch.length - match[0].length);
+  if (head === "") return true; // branch_prefix_type = "none"
+  // The allocator joins with exactly one "/" (joinBranchPrefix), so a prefixed
+  // branch it produced ALWAYS has the separator here. Demanding it is what
+  // keeps the gate at "could prepareWorkspaceCreate have emitted this": a head
+  // that merely satisfies the prefix grammar without a separator describes
+  // `mainCream` / `zeros.Cream` / `a.b-Cream`, none of which the allocator can
+  // produce. (There is no legacy shape to admit — the separator-less
+  // `myname-Cream` needed a configurable prefix, which has never shipped.)
+  if (!head.endsWith("/")) return false;
+  const namespace = head.slice(0, -1);
+  return normalizeBranchPrefix(namespace) === namespace;
+}
 
 /** Filesystem-safe, human-readable directory component. Git branch names may
  * contain slashes and repository folders may contain spaces; neither should
@@ -625,9 +671,7 @@ export function managedWorkspacePath(
   repoSlug: string,
   branch: string,
 ): string {
-  const displayBranch = branch.startsWith("zeros/")
-    ? branch.slice("zeros/".length)
-    : branch;
+  const displayBranch = branchDisplayName(branch);
   const repoDirectory = managedRepositoryDirectory(repoRoot, repoSlug);
   const workspaceDirectory = workspaceDirectorySegment(
     displayBranch,
@@ -662,15 +706,20 @@ export function managedWorkspacePath(
  *  never arrives) must not hold a name out of the pool forever. The TTL is far
  *  longer than any real prepare→create gap, so it only ever collects garbage.
  *
- *  Keyed `<repoSlug> <lowercased display name>` — reservations are per-repo,
- *  exactly like the DB constraint. A space is an unambiguous separator here
- *  because repoSlug is validated as /^[a-z0-9][a-z0-9-]*$/ before it reaches
- *  this module, so it can never contain one. */
+ *  Keyed `<repoSlug>\u0000<lowercased display name>` — reservations are
+ *  per-repo, exactly like the DB constraint. NUL is an unambiguous separator:
+ *  it cannot occur in a repo slug (validated /^[a-z0-9][a-z0-9-]*$/) or in a
+ *  branch name, so no pair of inputs can produce the same key.
+ *
+ *  Written as the ESCAPE `\u0000`, not a literal NUL byte. It was a literal
+ *  until 2026-07-29, which made this whole 3.5k-line file read as binary:
+ *  `file` reported "data", `grep` silently matched nothing without `-a`, and
+ *  git diffed it as a blob. Same character, same behaviour, greppable source. */
 const preparedNameReservations = new Map<string, number>();
 const PREPARED_NAME_TTL_MS = 10 * 60_000;
 
 function reservationKey(repoSlug: string, name: string): string {
-  return `${repoSlug} ${name.toLowerCase()}`;
+  return `${repoSlug}\u0000${name.toLowerCase()}`;
 }
 
 function reservePreparedName(repoSlug: string, branch: string): void {
@@ -689,7 +738,7 @@ function releasePreparedName(repoSlug: string, branch: string): void {
 
 function activePreparedNames(repoSlug: string): string[] {
   const now = Date.now();
-  const prefix = `${repoSlug} `;
+  const prefix = `${repoSlug}\u0000`;
   const out: string[] = [];
   for (const [key, expiresAt] of preparedNameReservations) {
     if (expiresAt <= now) {
@@ -719,8 +768,17 @@ function activePreparedNames(repoSlug: string): string[] {
 async function collectUsedWorkspaceNames(
   repoRoot: string,
   repoSlug: string,
-): Promise<Set<string>> {
+): Promise<{
+  /** Display names already claimed, lowercased. */
+  used: Set<string>;
+  /** Every local branch this repo has, lowercased and whole (not just the
+   *  display name). Only the prefix D/F check needs these — see
+   *  branchPrefixIsBlocked — but they fall out of the same `for-each-ref`, so
+   *  returning them costs nothing. Empty if the git call failed. */
+  branches: Set<string>;
+}> {
   const used = new Set<string>();
+  const branches = new Set<string>();
   for (const branch of listWorkspaceBranches(repoSlug)) {
     used.add(branchDisplayName(branch).toLowerCase());
   }
@@ -729,16 +787,43 @@ async function collectUsedWorkspaceNames(
   // the DB and filesystem checks still apply, and `git worktree add -b` is the
   // final authority — it refuses to clobber an existing branch.
   try {
+    // ALL local heads, not just `refs/heads/zeros/*`. Two reasons:
+    //   • Settings → Git makes the prefix a choice, so this repo may hold
+    //     workspace branches under several prefixes (`zeros/Cream` created
+    //     last month, `jordan/Cream` today) — globbing one prefix would
+    //     miss the others and hand out a name whose FOLDER already exists.
+    //   • The checkout folder is named after the display name alone, so any
+    //     branch ending in `/Cream` — ours or the user's — contends for the
+    //     same directory. Treating the whole ref space as the authority costs
+    //     at most a few skipped names out of 350.
     const { stdout } = await runGitCommand(repoRoot, [
       "for-each-ref",
       "--format=%(refname)",
-      `refs/heads/${BRANCH_PREFIX}`,
+      "refs/heads/",
     ]);
-    const prefix = `refs/heads/${BRANCH_PREFIX}`;
+    const refPrefix = "refs/heads/";
     for (const line of stdout.split("\n")) {
-      if (!line.startsWith(prefix)) continue;
-      const name = line.slice(prefix.length).trim();
+      const ref = line.trim();
+      if (!ref.startsWith(refPrefix)) continue;
+      const branch = ref.slice(refPrefix.length);
+      branches.add(branch.toLowerCase());
+      const name = branchDisplayName(branch);
       if (name) used.add(name.toLowerCase());
+      // Reserve an allocator name found ANYWHERE in the ref path, not just at
+      // the tail branchDisplayName looks at. Two conflicts need this, and both
+      // end in git's opaque "cannot lock ref" at create time:
+      //   • `refs/heads/jordan/Cream/wip` makes `refs/heads/jordan/Cream` a
+      //     DIRECTORY, so handing out `Cream` again under prefix `jordan`
+      //     cannot create the ref;
+      //   • with no prefix configured the branch IS the bare name, so an
+      //     unrelated `refs/heads/Bone/wip` blocks `Bone` the same way.
+      // branchDisplayName can't see either — a `wip` tail isn't allocator-
+      // shaped, so it returns the whole ref and reserves nothing useful.
+      // Over-reserving is the safe direction: it costs one colour out of 350.
+      for (const part of branch.split("/")) {
+        const allocated = allocatedNameSuffix(part);
+        if (allocated) used.add(allocated.toLowerCase());
+      }
     }
   } catch {
     /* best effort; worktree add remains authoritative */
@@ -755,21 +840,99 @@ async function collectUsedWorkspaceNames(
   } catch {
     /* container doesn't exist yet — nothing claimed on disk */
   }
-  return used;
+  return { used, branches };
 }
 
-/** Allocate a free workspace branch (`zeros/Cream`) for this repo.
+/** The NAMESPACE a new workspace branch goes under, per Settings → Git — a
+ *  bare segment with no separator, or null for "no prefix" (`none`). The
+ *  separator is added once, by joinBranchPrefix, so every type produces
+ *  `<namespace>/<Name>` and none of them can emit a doubled or missing slash.
+ *
+ *  Every failure path falls back to `zeros` rather than to null: that namespace
+ *  is what marks a ref as workspace-owned, and silently creating unprefixed
+ *  branches in a user's repo because a lookup failed would litter it with names
+ *  indistinguishable from their own. A settings problem must never block or
+ *  reshape workspace creation. */
+export async function resolveNewBranchPrefix(
+  repoRoot: string,
+  /** The connected GitHub login, for `branch_prefix_type = "github"`.
+   *  Defaults to the process-cached login — deliberately NOT a live /user
+   *  call: creating a workspace must not block on (or fail because of) the
+   *  network. Overridable so tests can pin it. */
+  githubLogin: string | null = cachedGithubLogin(),
+): Promise<string | null> {
+  let config;
+  try {
+    config = resolveRepoGit(repoRoot);
+  } catch {
+    return DEFAULT_BRANCH_PREFIX;
+  }
+  switch (config.branchPrefixType) {
+    case "none":
+      return null;
+    case "custom":
+      // Already normalized by resolveRepoGit; null when unset or unusable.
+      return config.branchPrefix ?? DEFAULT_BRANCH_PREFIX;
+    case "github": {
+      // Not signed in / login unreadable → keep the default rather than
+      // silently dropping to no prefix.
+      return (
+        normalizeBranchPrefix(githubLogin ?? undefined) ??
+        DEFAULT_BRANCH_PREFIX
+      );
+    }
+    case "zeros":
+    default:
+      return DEFAULT_BRANCH_PREFIX;
+  }
+}
+
+/** Would `<namespace>/<anything>` collide with an existing ref?
+ *
+ *  Git stores loose refs as files, so `refs/heads/main` being a FILE makes it
+ *  impossible to also create the DIRECTORY `refs/heads/main/`. Configure the
+ *  prefix as `main` (or connect a GitHub account whose login already exists as
+ *  a branch) and every single workspace create would die with git's
+ *  "cannot lock ref … 'refs/heads/main' exists" — an opaque failure from a
+ *  setting made once, somewhere else, weeks earlier.
+ *
+ *  Cheap to rule out because the caller already listed every head for the
+ *  used-name scan. Any namespace component counts: with prefix `a/b`, an
+ *  existing `refs/heads/a` blocks it just as `refs/heads/a/b` does. */
+function branchPrefixIsBlocked(
+  prefix: string,
+  existingBranches: ReadonlySet<string>,
+): boolean {
+  const parts = prefix.split("/");
+  for (let i = 1; i <= parts.length; i += 1) {
+    if (existingBranches.has(parts.slice(0, i).join("/").toLowerCase()))
+      return true;
+  }
+  return false;
+}
+
+/** Allocate a free workspace branch (`zeros/Cream`, or whatever prefix
+ *  Settings → Git configures) for this repo.
  *
  *  Snapshot-based, so it cannot by itself prevent two concurrent creates from
  *  picking the same name — the UNIQUE index on (repo_slug, lower(branch))
  *  does that, and callers retry. Calling this in the retry loop is what makes
  *  the retry converge: each attempt re-reads the used-set, so the loser of a
- *  race sees the winner's name and picks a different one. */
+ *  race sees the winner's name and picks a different one.
+ *
+ *  Note the used-set is keyed on the NAME, not the full branch: "Cream" stays
+ *  taken in this repo even if the prefix setting changed since it was created,
+ *  so flipping the setting can never hand out a second workspace whose folder
+ *  (which is named after the display name alone) would collide on disk. */
 export async function allocateWorkspaceBranch(
   repoRoot: string,
   repoSlug: string,
+  githubLogin: string | null = cachedGithubLogin(),
 ): Promise<string> {
-  const used = await collectUsedWorkspaceNames(repoRoot, repoSlug);
+  const { used, branches } = await collectUsedWorkspaceNames(
+    repoRoot,
+    repoSlug,
+  );
   const name = pickFreeColourName(used);
   if (!name) {
     throw new GitError({
@@ -780,7 +943,31 @@ export async function allocateWorkspaceBranch(
         "Delete or archive-and-remove some workspaces in this repository, then retry.",
     });
   }
-  return `${BRANCH_PREFIX}${name}`;
+  const configured = await resolveNewBranchPrefix(repoRoot, githubLogin);
+  // null is the `none` SETTING, not a failure — resolveNewBranchPrefix already
+  // substitutes the default for everything it can't resolve, so a null here is
+  // the user's answer and there is nothing to fall back from. (Folding this
+  // into the candidate walk below silently turned `none` back into `zeros/`.)
+  if (configured === null) return joinBranchPrefix(null, name);
+
+  // A namespace that already exists as a branch cannot hold one (git's loose
+  // refs are files). Rather than fail every create until the user finds the
+  // setting, degrade: to the default, and if THAT is blocked too, to no prefix
+  // at all, which needs no directory. Same principle as the fallbacks inside
+  // resolveNewBranchPrefix — a settings problem degrades the name, never the
+  // creation — and noisy, because the pane goes on previewing the namespace it
+  // was told to use and has no way to know about this repo's refs.
+  if (!branchPrefixIsBlocked(configured, branches))
+    return joinBranchPrefix(configured, name);
+  const fallback = branchPrefixIsBlocked(DEFAULT_BRANCH_PREFIX, branches)
+    ? null
+    : DEFAULT_BRANCH_PREFIX;
+  console.warn(
+    `[worktree] branch prefix "${configured}" is already a branch in this repo — ` +
+      "a ref cannot be both a file and a directory, so new workspace branches " +
+      `will use ${fallback ? `"${fallback}/"` : "no prefix"} instead.`,
+  );
+  return joinBranchPrefix(fallback, name);
 }
 
 export interface PreparedWorkspaceCreate {
@@ -1120,7 +1307,7 @@ async function createWorkspaceInner(
   // the generator's own format is accepted, never an arbitrary ref.
   let branch: string;
   if (input.preparedBranch) {
-    if (!PREPARED_BRANCH_RE.test(input.preparedBranch)) {
+    if (!isPreparedBranch(input.preparedBranch)) {
       throw new GitError({
         code: "VALIDATION_FAILED",
         message: `createWorkspace: invalid prepared branch "${input.preparedBranch}"`,

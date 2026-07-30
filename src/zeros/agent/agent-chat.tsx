@@ -77,10 +77,13 @@ import {
   Upload,
   Paperclip,
   FolderInput,
+  MessageSquareText,
   Check,
 } from "lucide-react";
-import { imageReferenceBlock } from "./agent-attachments";
-import { writeImageAttachment } from "./agent-history-client";
+import {
+  encodeAttachments,
+  reportSkippedAttachments,
+} from "./encode-attachments";
 import type { ComposerAttachment } from "./composer-attachments";
 // Wave 4 (2026-05-16): the composer card is now built on the canonical
 // AI Elements PromptInput recipe (form-shaped InputGroup with a
@@ -130,6 +133,20 @@ import {
   ComposerConcealedContext,
 } from "./composer-pills";
 import { ContextGauge } from "./context-gauge";
+import { ChatProvenance } from "./chat-provenance";
+import {
+  ChatTranscriptPills,
+  TranscriptPickerDialog,
+} from "./chat-transcript-pills";
+import {
+  loadTranscriptSnapshot,
+  transcriptFileName,
+  transcriptPillLabel,
+  transcriptSourceKey,
+} from "./chat-transcript-attach";
+import { useChatTranscriptSummaries } from "./use-chat-transcript-summaries";
+import type { ChatSummaryWire } from "./agent-history-client";
+import type { TranscriptMode } from "./transcript-format";
 import {
   agentFamily,
   agentHasPermissionMenu,
@@ -515,93 +532,32 @@ export function AgentChat({
       }
       // Materialize every staged attachment into ContentBlocks (text → file
       // XML; image → ImageContent or disk-write+path-reference by vision
-      // support) + bubble metadata. Mirrors handleSend's loop. Reconstructed
-      // original images carry their bytes (recovered from the thumbnail), so
-      // they re-send correctly; original text bodies weren't stored → empty.
-      const newBlocks: ContentBlock[] = [];
-      const newBubbleMeta: import("./use-agent-session").AgentTextMessageAttachment[] =
-        [];
-      const supportsImage =
-        session.initialize?.agentCapabilities?.promptCapabilities?.image !==
-        false;
-      const cwd = session.cwd || null;
-      for (const a of attachments) {
-        if (!a.validation.ok) continue;
-        if (a.kind === "text") {
-          newBlocks.push({
-            type: "text" as const,
-            text: `<file name="${a.name.replace(/"/g, "'")}">\n${a.text ?? ""}\n</file>`,
-          });
-          newBubbleMeta.push({
-            name: a.name,
-            mimeType: a.mimeType,
-            kind: "text",
-          });
-          continue;
-        }
-        if (supportsImage) {
-          newBlocks.push({
-            type: "image" as const,
-            mimeType: a.mimeType,
-            data: a.data,
-          });
-          newBubbleMeta.push({
-            name: a.name,
-            mimeType: a.mimeType,
-            kind: "image",
-            thumbnailUri: `data:${a.mimeType};base64,${a.data}`,
-          });
-          continue;
-        }
-        if (!cwd) {
-          // No cwd to persist under — fall back to the inline image
-          // block (adapter may drop, but at least we tried).
-          newBlocks.push({
-            type: "image" as const,
-            mimeType: a.mimeType,
-            data: a.data,
-          });
-          newBubbleMeta.push({
-            name: a.name,
-            mimeType: a.mimeType,
-            kind: "image",
-            thumbnailUri: `data:${a.mimeType};base64,${a.data}`,
-          });
-          continue;
-        }
-        try {
-          const written = await writeImageAttachment({
-            cwd,
-            chatId,
-            attachmentId: a.id,
-            base64: a.data,
-            mimeType: a.mimeType,
-            filename: a.name,
-          });
-          newBlocks.push({
-            type: "text" as const,
-            text: imageReferenceBlock({
-              agentId: session.agentId,
-              filename: a.name,
-              absolutePath: written.absolutePath,
-              relativePath: written.relativePath,
-              mimeType: a.mimeType,
-            }),
-          });
-          newBubbleMeta.push({
-            name: a.name,
-            mimeType: a.mimeType,
-            kind: "image",
-            thumbnailUri: `data:${a.mimeType};base64,${a.data}`,
-            diskPath: written.relativePath,
-          });
-        } catch (err) {
-          console.warn(
-            `[Zeros agent-chat] failed to persist edit-mode image ${a.name}:`,
-            err,
-          );
-        }
-      }
+      // support) + bubble metadata. Reconstructed original images carry their
+      // bytes (recovered from the thumbnail), so they re-send correctly;
+      // original text bodies weren't stored → empty.
+      //
+      // Same encoder as the live send path (2026-07-30) — these were two
+      // copies and only this one was right.
+      const {
+        blocks: newBlocks,
+        bubbleAttachments: newBubbleMeta,
+        skipped: skippedOnEdit,
+      } = await encodeAttachments(attachments, {
+        supportsImage:
+          session.initialize?.agentCapabilities?.promptCapabilities?.image !==
+          false,
+        cwd: session.cwd || null,
+        chatId,
+        agentId: session.agentId,
+      });
+      // This path drops MORE than the live one does, so it can least afford
+      // to stay quiet: a text chip reconstructed from a sent bubble carries
+      // its name but never its bytes — those are deliberately not persisted —
+      // so re-sending a message that had a transcript attached hits the
+      // encoder's empty-body branch EVERY time, not occasionally. Until now
+      // the chip simply vanished from the resubmitted bubble and the agent
+      // received nothing, with no explanation anywhere.
+      reportSkippedAttachments(skippedOnEdit, toast.warning);
       const mergedBubble = newBubbleMeta;
       // Truncate in-memory FIRST so the UI reflects the edit immediately.
       useSessionsStore
@@ -1184,9 +1140,15 @@ export function AgentChat({
                 ? ({ fast: false } as const)
                 : {};
             updateChatSettings({ model: v, ...effortReset, ...fastReset });
-            // Apply to the LIVE session too (Claude SDK), so the change
-            // takes effect on the next turn instead of only on a rebuild.
+            // Apply to the LIVE session too, so the change takes effect on the
+            // next turn instead of only on a rebuild.
             if (v) session.setModel?.(v);
+            // updateConfig as well, and deliberately AFTER setModel: it pushes
+            // the WHOLE composer env, so it also carries the effortReset /
+            // fastReset above (which setModel alone would strand on the live
+            // session), and it is what stamps appliedChatEnvKey so sendPrompt's
+            // drift reconcile doesn't respawn for a change already applied.
+            session.updateConfig?.();
             // §3.6 R4 — once per chat: a mid-conversation model change is a
             // cache miss on the next reply (slower + more tokens).
             if (v && v !== chatThread.model) maybeShowCostBumpToast("model");
@@ -1290,6 +1252,9 @@ export function AgentChat({
   // The composer "+" menu is CONTROLLED so it can be force-closed when the
   // permission/question card conceals the composer (see composerConcealed).
   const [plusMenuOpen, setPlusMenuOpen] = useState(false);
+  // The composer "+" → "Attach chat transcript" picker. Ephemeral: it is a
+  // transient dialog, not a durable selection.
+  const [transcriptPickerOpen, setTranscriptPickerOpen] = useState(false);
 
   // Grant access to a directory (a worktree path or a Browse… pick). Appends
   // de-duped, skipping the cwd (already accessible).
@@ -1502,6 +1467,9 @@ export function AgentChat({
     isEmpty: composerEmpty,
     serialize: serializeComposerState,
     insertFiles: addFiles,
+    insertTextAttachment: stageTextAttachment,
+    removeAttachmentBySourceKey: unstageAttachment,
+    stagedSourceKeys,
     clear: clearComposer,
     setContent: setComposerContent,
     appendText: appendComposerText,
@@ -1529,6 +1497,203 @@ export function AgentChat({
   useEffect(() => {
     composerEditor?.setEditable(true);
   }, [composerEditor]);
+
+  // ── attach another chat's transcript ──
+  //
+  // The read is gated three ways. `surfaceActive` because retained background
+  // chats keep this component mounted, and without it every hidden tab
+  // re-pulls the folder's chat list on every DB_CHANGED tick (AGENTS.md:
+  // hidden surfaces are inert). The other two are the surfaces that consume
+  // it: the row (empty chat only) and the "+" picker (any time). Opening the
+  // "+" menu is the pointer intent that warms the list before the user reaches
+  // the item inside it, so the dialog opens with data rather than empty.
+  const transcriptRowLive =
+    session.messages.length === 0 && !session.error && !!chatThread?.folder;
+  const { summaries: transcriptSummaries, loaded: transcriptsLoaded } =
+    useChatTranscriptSummaries(
+      chatThread?.folder,
+      chatId,
+      surfaceActive &&
+        (transcriptRowLive || plusMenuOpen || transcriptPickerOpen),
+    );
+  // The provenance block's shape hangs on this ONE question, and `null` for
+  // "not known yet" is the load-bearing third answer — see
+  // provenanceBlockShape. Derived from the same array the row renders, so the
+  // rows can never step aside for a row that then draws nothing.
+  const hasTranscripts = transcriptsLoaded
+    ? transcriptSummaries.length > 0
+    : null;
+
+  // Source chats whose transcript read is in flight. A pill in here is still
+  // clickable — the click cancels (see cancelTranscriptAttach).
+  const [pendingTranscriptIds, setPendingTranscriptIds] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
+  // Chats whose in-flight attach the user has called off. A ref, not state:
+  // the resolving promise must read the CURRENT answer, not the one captured
+  // when it started.
+  const transcriptCancelRef = useRef<Set<string>>(new Set());
+  // Every in-flight attach, so handleSend can wait for the ones the user
+  // asked for rather than sending without them. See the top of handleSend.
+  const transcriptAttachesRef = useRef<Set<Promise<void>>>(new Set());
+  // True only while a send is parked on those reads — the one stretch of
+  // handleSend that can be re-entered with the composer still full. See the
+  // top of handleSend.
+  const sendInFlightRef = useRef(false);
+
+  // "Is this chat attached" is derived from the composer DOCUMENT, never from
+  // a second list: that is what makes removing a chip with its × un-add the
+  // pill, in one direction of data flow instead of two that can disagree.
+  const attachedTranscriptChatIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const key of stagedSourceKeys) {
+      if (key.startsWith("transcript:"))
+        ids.add(key.slice("transcript:".length));
+    }
+    return ids;
+  }, [stagedSourceKeys]);
+
+  const attachTranscript = useCallback(
+    (summary: ChatSummaryWire, mode: TranscriptMode) => {
+      const label = transcriptPillLabel(summary);
+      const sourceId = summary.chatId;
+      // A fresh attach clears any standing cancel for this chat, so
+      // click → cancel → click actually re-attaches.
+      transcriptCancelRef.current.delete(sourceId);
+      setPendingTranscriptIds((prev) => {
+        if (prev.has(sourceId)) return prev;
+        const next = new Set(prev);
+        next.add(sourceId);
+        return next;
+      });
+      const settle = () => {
+        transcriptCancelRef.current.delete(sourceId);
+        setPendingTranscriptIds((prev) => {
+          if (!prev.has(sourceId)) return prev;
+          const next = new Set(prev);
+          next.delete(sourceId);
+          return next;
+        });
+      };
+      // Fire-and-forget: Rule 11 forbids the click handler awaiting I/O. The
+      // hover that preceded this click has almost always warmed the cache, so
+      // the await below resolves from memory on the same tick. handleSend
+      // waits on `transcriptAttachesRef` for the cold case.
+      const run = (async () => {
+        try {
+          const snap = await loadTranscriptSnapshot({
+            chatId: sourceId,
+            mode,
+            lastMessageAt: summary.lastMessageAt,
+            // Deliberately NO exportedAt. `meta` is not part of the cache key,
+            // so a wall-clock stamp here would be baked into the document by
+            // whichever caller missed the cache FIRST — meaning the same click
+            // produced a file with or without a date line depending on whether
+            // the pointer had rested on the pill. Identical bytes for the
+            // hover preview and the attachment is worth more than the stamp,
+            // and the chat's own title and folder still head the document.
+            meta: { title: summary.title, folder: summary.folder },
+          });
+          // A second click while the read was in flight means "stop", not
+          // "attach again" — without this the impatient double-click stages
+          // the very thing the user was trying to call off.
+          if (transcriptCancelRef.current.has(sourceId)) return;
+          if (snap.count === 0) {
+            // Everything was filtered out — e.g. a concise transcript of a
+            // chat whose only turn never produced an answer. Attaching an
+            // empty file would be worse than saying so.
+            toast.info(
+              mode === "concise"
+                ? "No answers in that chat yet — try the full transcript."
+                : "That chat has nothing to attach yet.",
+            );
+            return;
+          }
+          const staged = stageTextAttachment({
+            sourceKey: transcriptSourceKey(sourceId),
+            name: transcriptFileName(label, mode),
+            text: snap.text,
+            // Frozen here on purpose: the chip's hover header describes the
+            // FILE, so it must not drift when the source chat streams on.
+            preview: {
+              agentId: summary.agentId,
+              agentName: summary.agentName,
+              userMessageCount: summary.userMessageCount,
+              lastMessageAt: summary.lastMessageAt,
+            },
+          });
+          // An over-budget attachment is EXCLUDED at send (encode-attachments)
+          // — so if it isn't said here it is never said at all. The pill would
+          // otherwise show a green check for a file the agent never receives,
+          // which is the exact silent drop this feature was built to end.
+          if (staged && !staged.ok) {
+            toast.warning(
+              `Attached "${label}", but it won't be sent — ${staged.reason ?? "it exceeds this model's attachment budget"}.`,
+            );
+          } else if (snap.truncated || !snap.complete) {
+            // `truncated` = the formatter hit its document cap; `!complete` =
+            // the engine walk stopped before the start of history. Either way
+            // the user holds a partial record and must not be told otherwise —
+            // the same rule the copy action already follows.
+            toast.warning(
+              `Attached the most recent part of "${label}" — the full history was too large to read.`,
+            );
+          }
+        } catch (err) {
+          if (transcriptCancelRef.current.has(sourceId)) return;
+          // Past the not-connected case these are transport/op strings
+          // ("workspace op 'messages.windowOlder' failed"), which tell the
+          // user nothing actionable.
+          console.error("[Zeros] transcript attach failed:", err);
+          toast.error("Couldn't read that transcript — try again in a moment.");
+        } finally {
+          settle();
+        }
+      })();
+      transcriptAttachesRef.current.add(run);
+      void run.finally(() => transcriptAttachesRef.current.delete(run));
+    },
+    [stageTextAttachment],
+  );
+
+  const removeTranscript = useCallback(
+    (sourceChatId: string) => {
+      unstageAttachment(transcriptSourceKey(sourceChatId));
+    },
+    [unstageAttachment],
+  );
+
+  /** Second click on a pill whose read hasn't landed. Marks the in-flight
+   *  attach abandoned and drops the pending state immediately, so the control
+   *  answers on the same frame the user clicked it. */
+  const cancelTranscriptAttach = useCallback((sourceChatId: string) => {
+    transcriptCancelRef.current.add(sourceChatId);
+    setPendingTranscriptIds((prev) => {
+      if (!prev.has(sourceChatId)) return prev;
+      const next = new Set(prev);
+      next.delete(sourceChatId);
+      return next;
+    });
+  }, []);
+
+  /** "Open this chat" from a pill's context menu.
+   *
+   *  UNARCHIVE first, and unconditionally. This list deliberately includes
+   *  CLOSED chats (a transcript doesn't get less useful when its tab is
+   *  dismissed), and a bare SET_ACTIVE_CHAT on an archived id is worse than a
+   *  no-op: the tab strip and the chat deck both filter on `!archived`, so
+   *  there is nothing to show — and then column2-panes' selection keeper sees
+   *  an invalid selection and bounces it, or spawns a fresh default chat if
+   *  the workspace has no live ones. UNARCHIVE_CHAT returns state untouched
+   *  when the chat is already open, so this is safe for both cases; it also
+   *  carries the engine write-through for free via the chats mirror. */
+  const openTranscriptChat = useCallback(
+    (sourceChatId: string) => {
+      dispatch({ type: "UNARCHIVE_CHAT", id: sourceChatId });
+      dispatch({ type: "SET_ACTIVE_CHAT", id: sourceChatId });
+    },
+    [dispatch],
+  );
 
   // Per-chat scroll memory (Phase 1 §2.5.8, anchor-based since 2026-07-21).
   // The transcript's turns render with content-visibility:auto, so raw
@@ -2668,77 +2833,20 @@ export function AgentChat({
   // file). End of "silent drop" era. Shared by handleSend and the
   // queued-message edit save, so an edited queued send re-encodes its
   // attachments exactly like a fresh one.
-  const encodeComposerAttachments = async (
-    localAttachments: ComposerAttachment[],
-  ): Promise<{
-    blocks: ContentBlock[];
-    bubbleAttachments: import("./use-agent-session").AgentTextMessageAttachment[];
-  }> => {
-    const supportsImage =
-      session.initialize?.agentCapabilities?.promptCapabilities?.image !==
-      false;
-    const cwd = chatThread?.folder || null;
-    const blocks: ContentBlock[] = [];
-    const bubbleAttachments: import("./use-agent-session").AgentTextMessageAttachment[] =
-      [];
-    for (const a of localAttachments) {
-      if (supportsImage || !cwd || !chatId) {
-        // Inline block: the vision path, or the no-cwd fallback (which the
-        // adapter may drop — at least we tried).
-        blocks.push({
-          type: "image" as const,
-          mimeType: a.mimeType,
-          data: a.data,
-        });
-        bubbleAttachments.push({
-          name: a.name,
-          mimeType: a.mimeType,
-          kind: "image",
-          thumbnailUri: `data:${a.mimeType};base64,${a.data}`,
-        });
-        continue;
-      }
-      try {
-        const written = await writeImageAttachment({
-          cwd,
-          chatId,
-          attachmentId: a.id,
-          base64: a.data,
-          mimeType: a.mimeType,
-          filename: a.name,
-        });
-        blocks.push({
-          type: "text" as const,
-          text: imageReferenceBlock({
-            agentId: session.agentId ?? chatThread?.agentId ?? null,
-            filename: a.name,
-            absolutePath: written.absolutePath,
-            relativePath: written.relativePath,
-            mimeType: a.mimeType,
-          }),
-        });
-        bubbleAttachments.push({
-          name: a.name,
-          mimeType: a.mimeType,
-          kind: "image",
-          // Phase D2 (2026-05-07) iter 6: even on the disk-persisted path,
-          // the BUBBLE thumbnail uses the in-memory base64 as a data: URL —
-          // Electron's renderer (webSecurity: true) blocks file:// in
-          // <img src=…>. diskPath stays for a future "Reveal in Finder".
-          // Capped at 5 MB by validateAttachment so the SQLite payload row
-          // stays bounded.
-          thumbnailUri: `data:${a.mimeType};base64,${a.data}`,
-          diskPath: written.relativePath,
-        });
-      } catch (err) {
-        console.warn(
-          `[Zeros agent-chat] failed to persist image ${a.name}:`,
-          err,
-        );
-      }
-    }
-    return { blocks, bubbleAttachments };
-  };
+  //
+  // 2026-07-30: the loop moved to encode-attachments.ts, shared with
+  // editAndResubmit. It used to be a second, divergent copy with no
+  // `kind === "text"` branch and no validation.ok guard — see that module's
+  // header for what that cost.
+  const encodeComposerAttachments = (localAttachments: ComposerAttachment[]) =>
+    encodeAttachments(localAttachments, {
+      supportsImage:
+        session.initialize?.agentCapabilities?.promptCapabilities?.image !==
+        false,
+      cwd: chatThread?.folder || null,
+      chatId: chatId ?? null,
+      agentId: session.agentId ?? chatThread?.agentId ?? null,
+    });
 
   const handleSend = async (
     override?: string,
@@ -2763,6 +2871,39 @@ export function AgentChat({
       bubbleSegments?: MessageContentSegment[];
     },
   ) => {
+    // A transcript click starts an engine read and returns immediately (Rule
+    // 11), so a cold-cache click followed by a fast Enter would snapshot the
+    // composer BEFORE the chip lands: the prompt goes without the transcript,
+    // and the read then stages the chip into the freshly-cleared composer,
+    // where it silently rides the user's NEXT message. Wait for the reads the
+    // user explicitly asked for before snapshotting. Normally a no-op — the
+    // hover warmed it, so the set is already empty by the time Enter lands.
+    // This is not the forbidden "click handler awaits I/O": Send is the
+    // commit, and a commit must include what the user staged.
+    //
+    // The guard is what makes that await safe to add. Everything that stops
+    // this composer being sent twice — clearComposer, the empty check —
+    // happens AFTER it, so awaiting here opens a window in which a second
+    // Enter re-enters, snapshots the same composer state, and sends it again.
+    // Before this the only awaits ahead of the snapshot resolved in
+    // microtasks, which two keypresses cannot interleave with; a cold
+    // transcript read is real I/O, and a composer sitting visibly untouched
+    // with a spinner on the pill is exactly when someone presses Enter again.
+    //
+    // Scoped INSIDE the `size > 0` check on purpose: the guard then exists
+    // only while this send is genuinely parked on a read, so no other caller
+    // — the EmptyComposer hand-off, the queued-submission flush, "Continue" —
+    // can ever be turned away by it. Same shape as saveQueuedEdit's
+    // queueSaveInFlightRef.
+    if (transcriptAttachesRef.current.size > 0) {
+      if (sendInFlightRef.current) return;
+      sendInFlightRef.current = true;
+      try {
+        await Promise.allSettled([...transcriptAttachesRef.current]);
+      } finally {
+        sendInFlightRef.current = false;
+      }
+    }
     // Normal send → snapshot the editor (text + inline pills); the hand-off
     // path (override) supplies the text + pre-built blocks directly.
     const snapshot = override === undefined ? serializeComposerState() : null;
@@ -2913,7 +3054,16 @@ export function AgentChat({
     const {
       blocks: localImageBlocks,
       bubbleAttachments: localBubbleAttachments,
+      skipped: skippedAttachments,
     } = await encodeComposerAttachments(localAttachments);
+    // Anything the encoder excluded is about to be invisible: the sent bubble
+    // renders every staged segment regardless, so a dropped attachment looks
+    // exactly like one that arrived. Say so. This is the general guard behind
+    // several individually-narrow holes — a verdict stamped under one model
+    // and sent under another, a body the edit path can't reconstruct, a disk
+    // write that failed — all of which used to end in the agent quietly
+    // getting nothing.
+    reportSkippedAttachments(skippedAttachments, toast.warning);
     const extraBlocks: ContentBlock[] = [
       ...localImageBlocks,
       ...((extras?.extraAttachments as ContentBlock[] | undefined) ?? []),
@@ -3050,8 +3200,13 @@ export function AgentChat({
         displayText,
         browserPickerSelection,
       );
-      const { blocks, bubbleAttachments } =
+      const { blocks, bubbleAttachments, skipped } =
         await encodeComposerAttachments(localAttachments);
+      // Same reason as the live send: the queued row keeps rendering every
+      // segment, so an excluded attachment is indistinguishable from one that
+      // made it. The queued message has not been dispatched yet, which makes
+      // this the LAST moment the user can act on it.
+      reportSkippedAttachments(skipped, toast.warning);
       const segments = toMessageSegments(s?.segments ?? [], localAttachments);
       session.editQueued?.(id, {
         text: wireText,
@@ -3475,20 +3630,41 @@ export function AgentChat({
               directly above the composer (see the composer banner stack) —
               keep the message area empty so the user can still see the
               transcript area. */}
-            {session.messages.length === 0 &&
-              session.status === "ready" &&
-              !session.error && (
-                <div className="text-fg2 flex items-center gap-1.5 p-3 text-xs">
-                  Session ready. Ask the agent anything.
-                </div>
-              )}
-            {/* The "Add chat summaries:" pill row deliberately lives
-              on the EmptyComposer ("New
-              Agent" landing) — that's the surface where the user is
-              about to start a new chat in a folder, so pre-loading
-              prior summaries belongs there. Mounting them inside an
-              already-created chat was a misplaced affordance. See
-              src/shell/empty-composer.tsx. */}
+            {/* Empty transcript → state what this workspace IS (created /
+              branched from / setup script), not what the session is doing.
+              2026-07-29: replaced "Session ready. Ask the agent anything."
+              Deliberately NOT gated on session.status: the old line was, so
+              every respawn flipped it warming→ready and the text blinked out
+              and back (see the respawn fix in column2-chat-view.tsx). This
+              block describes the workspace, which a session rebuild doesn't
+              change, so it stays put. Still hidden on `error` — a failed
+              session shows its own failure UI and provenance would read as
+              reassurance the user shouldn't take. */}
+            {session.messages.length === 0 && !session.error && (
+              <ChatProvenance
+                folder={chatThread?.folder}
+                hasTranscripts={hasTranscripts}
+              >
+                {/* The transcript pill row rides INSIDE the provenance block,
+                  keeping one left edge, one type size and one icon column.
+                  2026-07-30: it REPLACES the three workspace rows rather than
+                  following them — when there is a transcript to offer, it is
+                  the whole block (see provenanceBlockShape).
+                  Gated on the same messages.length === 0 as the block, so it
+                  is gone after the first send — the composer "+" menu is what
+                  covers "three turns in, I realise the agent needs the other
+                  chat's history". */}
+                <ChatTranscriptPills
+                  summaries={transcriptSummaries}
+                  attachedChatIds={attachedTranscriptChatIds}
+                  pendingChatIds={pendingTranscriptIds}
+                  onAttach={attachTranscript}
+                  onRemove={removeTranscript}
+                  onCancel={cancelTranscriptAttach}
+                  onOpenChat={openTranscriptChat}
+                />
+              </ChatProvenance>
+            )}
             {turns.map((turn, i) => {
               const isActive = i === turns.length - 1;
               return (
@@ -4000,6 +4176,26 @@ export function AgentChat({
                             <Paperclip size={14} />
                             Add attachment
                           </DropdownMenuItem>
+                          {/* The pill row is gated on an empty transcript, so
+                            it is gone after the first send. That is right for
+                            the row and wrong as the feature's only door:
+                            "three turns in, I realise the agent needs the
+                            other chat's history" is at least as common as
+                            knowing it up front. Same picker, concise only —
+                            there is no pill to right-click from here, and a
+                            user reaching this from a menu mid-chat is not the
+                            one who wants archaeology. */}
+                          <DropdownMenuItem
+                            onSelect={() =>
+                              window.setTimeout(
+                                () => setTranscriptPickerOpen(true),
+                                0,
+                              )
+                            }
+                          >
+                            <MessageSquareText size={14} />
+                            Attach chat transcript
+                          </DropdownMenuItem>
                           <DropdownMenuItem
                             onSelect={() =>
                               window.setTimeout(
@@ -4135,6 +4331,17 @@ export function AgentChat({
           onUnlink={removeDirectory}
         />
       )}
+      {/* The always-available door to the same picker the "N more" pill opens
+          (composer "+" → Attach chat transcript). */}
+      <TranscriptPickerDialog
+        open={transcriptPickerOpen}
+        onOpenChange={setTranscriptPickerOpen}
+        summaries={transcriptSummaries}
+        attachedChatIds={attachedTranscriptChatIds}
+        onAttach={attachTranscript}
+        onRemove={removeTranscript}
+        onClose={() => setTranscriptPickerOpen(false)}
+      />
     </div>
   );
 }

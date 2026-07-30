@@ -30,6 +30,7 @@ import { forgetChangesSnapshots } from "../../shell/column3-tabs/changes-snapsho
 import { forgetPrCachesForWorkspace } from "../../shell/pr/pr-cache-forget";
 import { clearTerminalFolders } from "../../shell/terminal/terminal-store";
 import { useSessionsStore } from "../agent/sessions-store";
+import { branchDisplayName } from "../lib/branch-name";
 import { trackGitOp } from "../analytics/agent-events";
 import { toast } from "../ui/primitives/elements";
 import { clearChatPaneFolders, moveChatPaneFolder } from "./chat-panes-store";
@@ -322,10 +323,8 @@ function showCorruptedWorkspaceToast(
   workspace: Workspace,
   dispatch: Dispatch,
 ): void {
-  // Match the tab's label (strip the internal `zeros/` branch prefix).
-  const label = workspace.branch.startsWith("zeros/")
-    ? workspace.branch.slice("zeros/".length)
-    : workspace.branch;
+  // Match the tab's label (strip the branch-name prefix).
+  const label = branchDisplayName(workspace.branch);
   toast.error(
     "Archiving failed. This workspace might be corrupted. Delete permanently?",
     {

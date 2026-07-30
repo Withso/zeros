@@ -12,7 +12,7 @@
 // case.
 
 import { GitError } from "./errors";
-import { deriveBranchNameFromPrompt } from "./naming";
+import { branchDisplayName, deriveBranchNameFromPrompt } from "./naming";
 import { renameBranch } from "./branch";
 import {
   getWorkspaceById,
@@ -78,12 +78,12 @@ export async function proposeBranchRename(
     };
   }
 
-  // If the derived name happens to match the existing branch (after
-  // stripping the zeros/ prefix), there's nothing to do. Mark renamed
-  // so we don't retry.
-  const currentSlug = ws.branch.startsWith("zeros/")
-    ? ws.branch.slice("zeros/".length)
-    : ws.branch;
+  // If the derived name happens to match the existing branch (after stripping
+  // whatever prefix it carries), there's nothing to do. Mark renamed so we
+  // don't retry. branchDisplayName, not a literal "zeros/" strip: Settings →
+  // Git makes the prefix a choice, so a `jordan/Cream` workspace would
+  // otherwise never compare equal and would re-rename on every check.
+  const currentSlug = branchDisplayName(ws.branch);
   if (currentSlug === derived) {
     setWorkspaceMeta(
       opts.workspaceId,
@@ -105,6 +105,9 @@ export async function proposeBranchRename(
     throw err;
   }
   setWorkspaceMeta(opts.workspaceId, META_KEY_RENAMED_AT, String(Date.now()));
-  const newBranch = `zeros/${derived}`;
-  return { renamed: true, branch: newBranch };
+  // Read the row back rather than re-deriving `zeros/${derived}`: renameBranch
+  // preserves the workspace's OWN prefix, which is no longer guaranteed to be
+  // `zeros/`. Reporting a branch that doesn't exist would strand the caller.
+  const renamed = getWorkspaceById(opts.workspaceId);
+  return { renamed: true, branch: renamed?.branch ?? ws.branch };
 }

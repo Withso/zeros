@@ -303,11 +303,20 @@ export async function listAllBranches(
     const [name, tipSha, commitDateStr] = line.split("|");
     const lastCommitDate = (parseInt(commitDateStr, 10) || 0) * 1000;
     const knownWt = byBranch.get(name);
-    const origin = knownWt?.origin ?? detectByBranchName(name);
 
     // If this branch is checked out in one of our Zeros workspaces,
     // surface the PR URL from the DB row.
     const zerosWs = getWorkspaceByBranch(opts.repoSlug, name);
+
+    // A DB row is PROOF this branch is ours, and it outranks the name
+    // heuristic below. That matters since Settings → Git made the prefix a
+    // choice: detectByBranchName still tests `zeros/` as a literal, so a
+    // workspace on `jordan/Cream` or on no prefix at all used to fall through
+    // to "unknown" (or, worse, to the city-name guess) and get labelled as
+    // another tool's branch in the branch list. Checking the row first is
+    // exact rather than heuristic, and costs nothing — it was already read.
+    const origin =
+      knownWt?.origin ?? (zerosWs ? "zeros" : detectByBranchName(name));
 
     out.push({
       name,

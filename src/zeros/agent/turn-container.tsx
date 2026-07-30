@@ -20,6 +20,9 @@
 // part of the most recent turn's `events`. Messages that arrive
 // before any user prompt land in a "system turn" with
 // `userPrompt: null` (rare; happens during agent warm-up).
+// It lives in turn-grouping.ts (React-free, so the transcript
+// formatter and unit tests can group without this module's
+// React/composer/store imports) and is re-exported here.
 //
 // ──────────────────────────────────────────────────────────
 
@@ -33,8 +36,6 @@ import React, {
 } from "react";
 import { Plus, Pencil, Copy, Check, ChevronDown } from "lucide-react";
 import type {
-  AgentMessage,
-  AgentTextMessage,
   AgentTextMessageAttachment,
   MessageContentSegment,
 } from "./use-agent-session";
@@ -47,6 +48,7 @@ import type { ComposerAttachment } from "./composer-attachments";
 import {
   useComposerEditor,
   messageToEditorContent,
+  textToDoc,
   toMessageSegments,
   type ComposerInitialContent,
 } from "./composer-editor";
@@ -64,51 +66,10 @@ import {
   type EditDraftStash,
 } from "../store/store";
 
-export interface Turn {
-  /** The user prompt that started this turn. null only for the
-   *  rare leading "system turn" — events arriving before the
-   *  first user prompt (e.g. the agent's session-init system
-   *  message). */
-  userPrompt: AgentTextMessage | null;
-  /** All non-user-prompt messages that belong to this turn,
-   *  in their arrival order. Includes assistant text, thinking,
-   *  tool calls, and any other AgentMessage variants. */
-  events: AgentMessage[];
-}
+import { editSeedSource } from "./edit-seed";
+import type { Turn } from "./turn-grouping";
 
-/** Stable id for a turn — the user-prompt id, or a synthetic one
- *  derived from the first event when there's no prompt. Used as
- *  the React key on the container. */
-export function turnKey(turn: Turn): string {
-  if (turn.userPrompt) return `turn-${turn.userPrompt.id}`;
-  if (turn.events.length > 0) return `turn-evt-${turn.events[0].id}`;
-  return "turn-empty";
-}
-
-export function groupMessagesIntoTurns(messages: AgentMessage[]): Turn[] {
-  const turns: Turn[] = [];
-  let current: Turn | null = null;
-  for (const m of messages) {
-    if (m.kind === "text" && m.resumeBoundary) {
-      // Session-continuity notices are invisible by design (2026-07-06 user
-      // spec: no resume/continuation UI, ever). Newer sessions no longer
-      // emit them; this skip hides the ones persisted by older builds.
-      continue;
-    }
-    if (m.kind === "text" && m.role === "user") {
-      if (current) turns.push(current);
-      current = { userPrompt: m, events: [] };
-    } else {
-      if (!current) {
-        // Leading event before any user prompt — rare
-        current = { userPrompt: null, events: [] };
-      }
-      current.events.push(m);
-    }
-  }
-  if (current) turns.push(current);
-  return turns;
-}
+export { groupMessagesIntoTurns, turnKey, type Turn } from "./turn-grouping";
 
 interface TurnContainerProps {
   turn: Turn;
@@ -648,18 +609,28 @@ function TurnPromptEditor({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
 
-  // Seed the editor: a prior in-progress edit (stash json) or the WHOLE
-  // original message reconstructed as inline content — text + mention pills +
-  // attachment pills (image bytes recovered from the persisted thumbnails), in
-  // place. No separate "originals" row; everything is inline + editable.
+  // Seed the editor: a prior in-progress edit (stash json), then its plain-text
+  // mirror, then the WHOLE original message reconstructed as inline content —
+  // text + mention pills + attachment pills (image bytes recovered from the
+  // persisted thumbnails), in place. No separate "originals" row; everything is
+  // inline + editable. The choice itself lives in edit-seed.ts, which explains
+  // why the middle rung is load-bearing.
   const initialContentRef = useRef<ComposerInitialContent>(
-    stash?.json
-      ? { json: stash.json, attachments: stash.newAttachments }
-      : messageToEditorContent({
-          text: originalText,
-          segments: originalSegments,
-          attachments: originalAttachments,
-        }),
+    (() => {
+      switch (editSeedSource(stash)) {
+        case "stash-json":
+          return { json: stash!.json!, attachments: stash!.newAttachments };
+        case "stash-text":
+          // Chips are gone with the bytes; the words survive.
+          return { json: textToDoc(stash!.text), attachments: [] };
+        default:
+          return messageToEditorContent({
+            text: originalText,
+            segments: originalSegments,
+            attachments: originalAttachments,
+          });
+      }
+    })(),
   );
   const originalAttachmentCount = useRef(
     initialContentRef.current.attachments.length,
