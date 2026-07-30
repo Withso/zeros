@@ -22,10 +22,39 @@
 // with whatever you have configured. Prints a matrix + writes results.json,
 // and exits non-zero if any non-skipped check fails (so it can gate a merge).
 //
+// ── WHY `--require` EXISTS — read this before wiring it to CI ──
+// Skip-tolerance is right for a local run and a TRAP for an automated one: with
+// nothing installed or authed every agent skips, `failCount` is 0, and this
+// exits GREEN having tested nothing. A scheduled job in that state reports
+// "live agents OK" forever, which is strictly worse than no job at all.
+//
+// That is not hypothetical. NO agent here authenticates from an env var — the
+// AuthProbe union in src/engine/agents/registry.ts has no env-var kind, and
+// evaluateAuthProbe reads process.env only for ZEROS_SECRETS_FILE:
+//   • claude — macOS keychain `Claude Code-credentials`, or an UNEXPIRED
+//     ~/.claude/.credentials.json, or ~/.claude/auth.json. So
+//     ANTHROPIC_API_KEY alone ⇒ authenticated:false.
+//   • codex  — the exit code of `codex login status`, i.e. whatever that CLI
+//     decides. No codex on PATH ⇒ installed:false as well.
+//   • cursor — reads secrets.json[cursor-api-key] via ZEROS_SECRETS_FILE, which
+//     ONLY electron/sidecar.ts sets. This harness drives the gateway standalone
+//     (no Electron), so cursor is STRUCTURALLY always skipped here — never put
+//     it in --require. Use `pnpm cursor:smoke` for the Cursor host instead.
+// Net: `ANTHROPIC_API_KEY: ${{ secrets.* }}` does not make this test anything.
+// Auth here means real credential FILES on the runner.
+//
+// Hence two guards, both cheap:
+//   • zero agents tested is ALWAYS a failure — no configuration makes "I asked
+//     for a live smoke and nothing ran" a success.
+//   • `--require a,b` fails when a NAMED agent skipped, quoting the probe's own
+//     reason. This is the flag a scheduled job must pass: it turns missing auth
+//     into a red run instead of a meaningless green one.
+//
 // Usage:
 //   pnpm agents:smoke                      # core matrix, default model/agent
 //   pnpm agents:smoke --full               # + every advertised model + effort
 //   pnpm agents:smoke --agents codex,claude
+//   pnpm agents:smoke --require claude     # CI: fail unless claude really ran
 //   pnpm agents:smoke --help
 // ──────────────────────────────────────────────────────────
 
@@ -51,18 +80,28 @@ if (argv.includes("--help") || argv.includes("-h")) {
       "  pnpm agents:smoke                 core matrix, default model/agent",
       "  pnpm agents:smoke --full          + sweep every advertised model + effort",
       "  pnpm agents:smoke --agents a,b    only these agent ids",
+      "  pnpm agents:smoke --require a,b   FAIL if a named agent skipped (for CI)",
       "",
       "Skips agents that aren't installed/authed. Exit code is non-zero on any",
-      "non-skipped failure.",
+      "non-skipped failure, if NO agent ran at all, or if a --require'd agent",
+      "skipped. Env-var API keys do not satisfy any auth probe — see the header.",
     ].join("\n"),
   );
   process.exit(0);
 }
 const FULL = argv.includes("--full");
-const agentFilter = (() => {
-  const i = argv.indexOf("--agents");
-  return i >= 0 && argv[i + 1] ? new Set(argv[i + 1].split(",").map((s) => s.trim())) : null;
-})();
+/** Comma-separated agent ids following `flag`, or null when absent. */
+function idList(flag) {
+  const i = argv.indexOf(flag);
+  if (i < 0 || !argv[i + 1]) return null;
+  const ids = argv[i + 1]
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return ids.length ? new Set(ids) : null;
+}
+const agentFilter = idList("--agents");
+const required = idList("--require");
 
 // ── per-agent knobs (engine-side; mirrors catalogs/models-v1 modelEnvVars) ──
 const MODEL_ENV = {
@@ -104,6 +143,34 @@ function supportsEffort(agentId) {
 }
 
 // ── compile the engine gateway to an importable ESM bundle ──
+
+/** Externalize bare imports so the SDKs / better-sqlite3 / native deps load at
+ *  runtime from ./node_modules — but BUNDLE the `@zeros/*` workspace packages.
+ *
+ *  This replaces a plain `packages: "external"`, which externalized those too and
+ *  made this whole harness unrunnable: @zeros/core's exports map points at RAW
+ *  .ts sources, so an external `import "@zeros/core/system-instructions"`
+ *  resolved to index.ts, whose `from "./templates"` is extensionless — something
+ *  plain Node ESM cannot resolve. Every invocation died with ERR_MODULE_NOT_FOUND
+ *  before listing a single agent (gateway.ts:51 is the importer).
+ *
+ *  tsup.config.ts carries the identical carve-out for the real engine build
+ *  (`noExternal: [..., /^@zeros\/core/]`, with the same reasoning). esbuild's
+ *  `packages: "external"` has no `noExternal` escape hatch, so here it has to be
+ *  expressed as a resolver. */
+const externalizeNodeModules = {
+  name: "externalize-node-modules",
+  setup(build) {
+    // Bare specifiers only: anything not starting with "." or "/". Absolute
+    // entry points and relative imports fall through to normal resolution.
+    build.onResolve({ filter: /^[^./]/ }, (args) =>
+      args.path.startsWith("@zeros/")
+        ? null // resolve + bundle from source
+        : { path: args.path, external: true },
+    );
+  },
+};
+
 async function compileGateway() {
   fs.mkdirSync(TMP, { recursive: true });
   const out = path.join(TMP, "gateway.mjs");
@@ -114,9 +181,7 @@ async function compileGateway() {
     platform: "node",
     target: "node20",
     bundle: true,
-    // Bundle the local TS tree; leave node_modules (SDKs, better-sqlite3,
-    // native deps) external so they load at runtime from ./node_modules.
-    packages: "external",
+    plugins: [externalizeNodeModules],
     logLevel: "silent",
   });
   return import(pathToFileURL(out).href);
@@ -396,9 +461,56 @@ async function main() {
 
   const failCount = render(rows);
 
+  // ── coverage guards: a green run must mean something ──
+  // Evaluated BEFORE the artifact is written so results.json records the same
+  // verdict the exit code reports.
+  const tested = rows.filter((r) => !r.skipped).length;
+  const coverage = [];
+
+  if (tested === 0) {
+    coverage.push(
+      rows.length === 0
+        ? "no agents were even listed — the gateway returned an empty agent list, " +
+            "so this run proved nothing about any agent."
+        : `all ${rows.length} agent(s) skipped — nothing was tested, so a zero ` +
+            `failure count says nothing. Env-var API keys do NOT satisfy any auth ` +
+            `probe; real credential files are required (see the header of this file).`,
+    );
+  }
+
+  for (const id of required ?? []) {
+    const row = rows.find((r) => r.agent === id);
+    if (!row) {
+      coverage.push(
+        `--require ${id}: no such agent was listed. Known ids: ` +
+          `${rows.map((r) => r.agent).join(", ") || "(none)"}` +
+          (agentFilter && !agentFilter.has(id)
+            ? ` — note --agents excludes it, so --require can never be satisfied.`
+            : ""),
+      );
+    } else if (row.skipped) {
+      coverage.push(
+        `--require ${id}: SKIPPED (${row.reason}) — installed=${row.installed}, ` +
+          `authenticated=${row.authenticated}. Required agents must actually run.`,
+      );
+    }
+  }
+
+  if (coverage.length) {
+    console.log("\nCoverage failures:");
+    for (const c of coverage) console.log(`  ${c}`);
+  }
+
   // Machine-readable artifact for diffing over time / CI gating.
   const out = path.join(TMP, "results.json");
-  fs.writeFileSync(out, JSON.stringify({ full: FULL, rows }, null, 2));
+  fs.writeFileSync(
+    out,
+    JSON.stringify(
+      { full: FULL, required: [...(required ?? [])], tested, coverage, rows },
+      null,
+      2,
+    ),
+  );
   console.log(`\nWrote ${path.relative(ROOT, out)}`);
 
   try {
@@ -408,9 +520,11 @@ async function main() {
   }
   fs.rmSync(projectRoot, { recursive: true, force: true });
 
-  const tested = rows.filter((r) => !r.skipped).length;
-  console.log(`\n${tested} agent(s) tested, ${rows.length - tested} skipped, ${failCount} failing check(s).`);
-  process.exit(failCount > 0 ? 1 : 0);
+  console.log(
+    `\n${tested} agent(s) tested, ${rows.length - tested} skipped, ` +
+      `${failCount} failing check(s), ${coverage.length} coverage failure(s).`,
+  );
+  process.exit(failCount > 0 || coverage.length > 0 ? 1 : 0);
 }
 
 main().catch((err) => {

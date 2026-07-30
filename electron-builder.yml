@@ -57,6 +57,16 @@ files:
   # scripts/stage-claude-cli.mjs). Without this negation the app carries the blob
   # twice: ~250 MiB of dead weight in the asar plus the usable copy.
   - "!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**"
+  # EXCLUDE the Codex platform package for the same reason, with one difference:
+  # unlike Claude there is no extraResources entry staging it, so this blob was
+  # never usable at all. @openai/codex-<platform>-<arch> is ~336 MiB (a 285 MiB
+  # `codex` + a 44 MiB codex-code-mode-host + a vendored ripgrep), the auto-walk
+  # pulls it into app.asar, macOS cannot exec it there, and the packaged app
+  # resolves Codex from the user's PATH regardless (see the `fallback` tier in
+  # src/engine/agents/adapters/codex/binary-resolver.ts). It was pure shipped
+  # weight. Excluding it changes no runtime behaviour — dev is unaffected,
+  # because `files:` only governs packaging.
+  - "!**/node_modules/@openai/codex-*/**"
 
 # The bun-compiled engine binary sits outside dist-electron, so bundle
 # it as an extra resource. Renderer code at runtime reaches it via
@@ -265,10 +275,19 @@ asarUnpack:
   - "**/node_modules/@bufbuild/**/*"
   - "**/node_modules/@statsig/**/*"
   # @fastify (@fastify/busboy via undici) + undici: @cursor/sdk's fetch transport.
+  # KEPT at @cursor/sdk 1.0.26 even though check:cursor-asar now reports both as
+  # "stale". That check compares against the EAGER load closure, and 1.0.26 stopped
+  # pulling them at module top-level — but they are still production dependencies:
+  # @cursor/sdk → @connectrpc/connect-node 1.7.0 → undici 5.29.0 → @fastify/busboy
+  # 2.1.1 (`pnpm why undici`). A lazy require() on the agent-run path would be
+  # MODULE_NOT_FOUND in the packaged app, so these stay and are listed in that
+  # script's ALLOW_UNUSED with this reason.
   - "**/node_modules/@fastify/**/*"
   - "**/node_modules/undici/**/*"
-  # bindings + file-uri-to-path: how sqlite3 locates its native .node at runtime —
-  # without these the SqliteLocalAgentStore (Cursor error recovery) can't load.
+  # bindings + file-uri-to-path: how a native addon finds its .node at runtime.
+  # These were here for `sqlite3`, which @cursor/sdk 1.0.26 DROPPED — but both are
+  # still production deps of better-sqlite3 (`pnpm why bindings`), which backs the
+  # engine's own store. The globs stay; only the reason changed.
   - "**/node_modules/bindings/**/*"
   - "**/node_modules/file-uri-to-path/**/*"
   - "**/node_modules/ajv/**/*"
@@ -279,4 +298,8 @@ asarUnpack:
   - "**/node_modules/uri-js/**/*"
   - "**/node_modules/require-from-string/**/*"
   - "**/node_modules/zod/**/*"
-  - "**/node_modules/sqlite3/**/*"
+  # NOTE: `sqlite3` used to be listed here for @cursor/sdk's SqliteLocalAgentStore.
+  # 1.0.26 dropped it along with its whole node-gyp subtree, and it is now absent
+  # from the dependency graph entirely (no pnpm-lock entry, nothing depends on it),
+  # so the glob matched nothing and was removed. `bindings` / `file-uri-to-path`
+  # above SURVIVE it — they belong to better-sqlite3, not sqlite3.
