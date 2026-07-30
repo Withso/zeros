@@ -103,8 +103,14 @@ describe("Review live-data races", () => {
     const commits: ReturnType<typeof deferred<PrCommitSummary[]>>[] = [];
     const timelines: ReturnType<typeof deferred<PrTimelineItem[]>>[] = [];
     const provider: ReviewProvider = {
-      id: "github",
+      family: "github",
+      hostOrigin: "github.com",
+      cacheKey: "github:github.com",
       hostLabel: "GitHub",
+      capabilities: {
+        reviewNoun: "pull request",
+        mergeMethods: [{ id: "merge", label: "Merge" }],
+      },
       authStatus: async (): Promise<AuthStatusResult> => ({
         authenticated: true,
         login: "octocat",

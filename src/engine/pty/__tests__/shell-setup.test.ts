@@ -11,10 +11,24 @@ const PLANTED = [
   "CLOUD_API_URL", "SLACK_WEBHOOK_URL", "SSH_AUTH_SOCK", "KUBECONFIG", "MYSQL_PWD",
   "npm_config__authToken",
 ];
+const ENGINE_INTERNAL_SECRETS = [
+  "ZEROS_GITHUB_TOKEN",
+  "ZEROS_LOCAL_WS_TOKEN",
+  "ZEROS_GIT_AUTH_SOCKET",
+  "ZEROS_GIT_AUTH_CONTEXT",
+  "ZEROS_GIT_AUTH_PROTOCOL",
+  "ZEROS_GIT_AUTH_HOST",
+  "ZEROS_GIT_AUTH_HELPER",
+  "ZEROS_GIT_AUTH_ASKPASS",
+  "ZEROS_REAL_GIT_PATH",
+  "ZEROS_REAL_GH_PATH",
+];
 
 describe("buildPtyEnv env scrubbing (remote = allowlist)", () => {
   afterEach(() => {
-    for (const k of [...PLANTED, "MY_SAFE_VAR"]) delete process.env[k];
+    for (const k of [...PLANTED, ...ENGINE_INTERNAL_SECRETS, "MY_SAFE_VAR"]) {
+      delete process.env[k];
+    }
   });
 
   it("remote shells get ONLY allowlisted vars — every secret is dropped (incl. URL/agent forms)", () => {
@@ -39,5 +53,15 @@ describe("buildPtyEnv env scrubbing (remote = allowlist)", () => {
     expect(env.ANTHROPIC_API_KEY).toBe("local-key");
     expect(env.MY_SAFE_VAR).toBe("keep");
     expect(buildPtyEnv({ scrub: false }).ANTHROPIC_API_KEY).toBe("local-key");
+  });
+
+  it("never exposes engine-owned auth channels, even to a local shell", () => {
+    for (const key of ENGINE_INTERNAL_SECRETS) {
+      process.env[key] = "engine-secret";
+    }
+    const env = buildPtyEnv();
+    for (const key of ENGINE_INTERNAL_SECRETS) {
+      expect(env[key], `${key} must stay engine-private`).toBeUndefined();
+    }
   });
 });

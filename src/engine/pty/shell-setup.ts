@@ -193,6 +193,21 @@ export function buildPtyEnv(opts?: {
   delete env.ZEROS_PTY_HOST_SCRIPT;
   delete env.ZEROS_PTY_NODE_PTY;
   delete env.ELECTRON_RUN_AS_NODE;
+  // Engine-owned auth/control channels are never part of desktop parity. A
+  // legacy launch or a parent-process override must not turn them into terminal
+  // environment variables, where shell commands and coding agents can inspect
+  // them. (Git receives its scoped values only on the individual invocation.)
+  delete env.ZEROS_GITHUB_TOKEN;
+  delete env.ZEROS_LOCAL_WS_TOKEN;
+  delete env.ZEROS_GIT_AUTH_CONTEXT;
+  delete env.ZEROS_GIT_AUTH_SOCKET;
+  delete env.ZEROS_GIT_AUTH_PROTOCOL;
+  delete env.ZEROS_GIT_AUTH_HOST;
+  delete env.ZEROS_GIT_AUTH_HELPER;
+  delete env.ZEROS_GIT_AUTH_ASKPASS;
+  delete env.ZEROS_REAL_GIT_PATH;
+  delete env.ZEROS_REAL_GH_PATH;
+  delete env.ZEROS_CONTROL_FD;
   // Scope the shell's location env to THIS worktree. PWD/OLDPWD are otherwise
   // inherited from whatever dir the engine was rooted at, so `cd -` / $OLDPWD
   // would leak a DIFFERENT worktree's path into this terminal. Pin PWD to cwd,

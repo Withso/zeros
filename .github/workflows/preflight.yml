@@ -306,6 +306,25 @@ jobs:
         # teardown, confirmed UI transitions, and the target-OS FSEvents watcher.
         run: pnpm test:workspace-lifecycle
 
+      - name: GitHub credential and review-provider contracts
+        # The credential broker uses the target OS's process, socket, helper,
+        # and file-lock behavior. Keep these exact handoff/race tests on macOS
+        # rather than relying only on the broad Linux Vitest job.
+        run: >-
+          pnpm exec vitest run --config vitest.config.ts
+          electron/__tests__/cross-process-lock.test.ts
+          electron/__tests__/deep-link-github.test.ts
+          electron/__tests__/github-app-client.test.ts
+          electron/__tests__/github-app-controller.test.ts
+          electron/__tests__/github-credential-store.test.ts
+          electron/__tests__/github-engine-credential.test.ts
+          electron/__tests__/github-pat-undo.test.ts
+          packages/core/src/__tests__/github-auth.test.ts
+          src/zeros/bridge/__tests__/github-app-notifications.test.ts
+          src/zeros/panels/__tests__/github-section-helpers.test.ts
+          src/shell/pr/__tests__/create-pr-action.test.ts
+          src/shell/pr/__tests__/review-provider-routing.test.ts
+
       - name: Changes / Review contracts
         # Runs exact AD/index semantics, selection recovery,
         # stale-while-revalidate races, and the real socket error envelope.

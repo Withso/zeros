@@ -12,15 +12,8 @@
 // ──────────────────────────────────────────────────────────
 
 import type { Branch, GithubOwner, PR, Workspace } from "../../native/git";
+import type { GithubAuthSnapshot } from "@zeros/core/github-auth";
 import { KeyedAsyncCache } from "../lib/keyed-async-cache";
-
-/** Resolved GitHub connection for the settings section: the auth probe plus
- *  the gh-CLI fallback, collapsed to what the UI renders. */
-export interface GithubConnection {
-  login: string | null;
-  viaCli: boolean;
-  ghAvailable: boolean;
-}
 
 /** Local git reads (bridge round-trip, no network): branches move often, so
  *  revalidate after a short window — still instant within a browsing burst. */
@@ -46,7 +39,7 @@ export const pickerWorkspacesCache = new KeyedAsyncCache<Workspace[]>(16);
 /** Single-key ("auth") — GitHub auth probe (status + CLI detection) for the
  *  settings section. Auth changes only on explicit sign-in/out, which write
  *  through setData; the freshness window merely catches out-of-band changes. */
-export const ghAuthStatusCache = new KeyedAsyncCache<GithubConnection>(1);
+export const ghAuthStatusCache = new KeyedAsyncCache<GithubAuthSnapshot>(1);
 
 /** Single-key ("owners") — authed user + orgs for the publish dialog. */
 export const ghOwnersCache = new KeyedAsyncCache<GithubOwner[]>(1);

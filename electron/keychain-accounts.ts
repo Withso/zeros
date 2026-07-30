@@ -30,7 +30,6 @@ const VENDOR_ACCOUNTS = new Set<string>([
   "anthropic-api-key",
   "cursor-api-key",
   "factory-api-key",
-  "github-pat",
 ]);
 
 /** True if the renderer may read/write this keychain account through the

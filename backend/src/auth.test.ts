@@ -95,6 +95,22 @@ beforeAll(async () => {
     authAudience: AUDIENCE,
     port: 0,
     isProduction: false,
+    github: {
+      appId: 123,
+      clientId: "Iv1.test",
+      clientSecret: "test-client-secret",
+      appSlug: "zeros-test",
+      oauthCallbackUrl: "http://127.0.0.1/github/callback",
+      webBaseUrl: "https://github.test",
+      apiBaseUrl: "https://api.github.test",
+      variantKey: "github.com",
+      desktopSchemes: [
+        "zeros",
+        "zeros-alpha",
+        "zeros-beta",
+        "zeros-dev",
+      ],
+    },
   };
 
   app = new Hono();

@@ -338,4 +338,80 @@ d("schema + signup transaction", () => {
     );
     expect(fk.rows[0]?.referenced).toBe("teams");
   });
+
+  it("isolates personal GitHub installations while allowing one GitHub installation to be authorized by several users", async () => {
+    const { id: userA } = await signup();
+    const { id: userB } = await signup();
+    const installationId = 987654321;
+
+    await withSystemTx(pool, async (tx) => {
+      for (const [owner, login] of [
+        [userA, "account-a"],
+        [userB, "account-b"],
+      ] as const) {
+        await tx.query(
+          `INSERT INTO github_installations (
+             github_installation_id, app_variant, owner_user_id,
+             account_login, account_type, target_type, repository_count,
+             all_repositories
+           ) VALUES ($1, 'github.com', $2, $3, 'Organization',
+                     'Organization', 3, false)`,
+          [installationId, owner, login],
+        );
+      }
+    });
+
+    const visibleToA = await withUserTx(pool, userA, (tx) =>
+      tx.query<{ account_login: string }>(
+        `SELECT account_login FROM github_installations ORDER BY account_login`,
+      ),
+    );
+    const visibleToB = await withUserTx(pool, userB, (tx) =>
+      tx.query<{ account_login: string }>(
+        `SELECT account_login FROM github_installations ORDER BY account_login`,
+      ),
+    );
+    expect(visibleToA.rows).toEqual([{ account_login: "account-a" }]);
+    expect(visibleToB.rows).toEqual([{ account_login: "account-b" }]);
+  });
+
+  it("makes GitHub OAuth handoffs single-owner under RLS", async () => {
+    const { id: owner } = await signup();
+    const { id: other } = await signup();
+    const nonceHash = Buffer.alloc(32, 7);
+    await withSystemTx(pool, (tx) =>
+      tx.query(
+        `INSERT INTO github_oauth_handoffs (
+           nonce_hash, owner_user_id, app_variant, access_token_sealed,
+           access_token_expires_at, refresh_token_sealed,
+           refresh_token_expires_at, login, installations_complete,
+           expires_at
+         ) VALUES (
+           $1, $2, 'github.com', '\\x00'::bytea,
+           now() + interval '8 hours', '\\x01'::bytea,
+           now() + interval '6 months', 'octocat', true,
+           now() + interval '1 minute'
+         )`,
+        [nonceHash, owner],
+      ),
+    );
+
+    const stolen = await withUserTx(pool, other, (tx) =>
+      tx.query(
+        `DELETE FROM github_oauth_handoffs
+         WHERE nonce_hash = $1 RETURNING login`,
+        [nonceHash],
+      ),
+    );
+    expect(stolen.rowCount).toBe(0);
+
+    const redeemed = await withUserTx(pool, owner, (tx) =>
+      tx.query(
+        `DELETE FROM github_oauth_handoffs
+         WHERE nonce_hash = $1 RETURNING login`,
+        [nonceHash],
+      ),
+    );
+    expect(redeemed.rows).toEqual([{ login: "octocat" }]);
+  });
 });

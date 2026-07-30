@@ -81,6 +81,7 @@ import {
   spawnEngine,
   startEngineCodeWatcher,
   startWatchdog,
+  pushGithubCredentialToEngine,
 } from "./sidecar";
 import { installAppMenu } from "./menu";
 import { appendLogRecord, flushLogStore, initLogStore } from "./log-store";
@@ -89,8 +90,18 @@ import { installDevToolsGuard } from "./devtools";
 import { setupDeepLink } from "./deep-link";
 import { setupUpdater } from "./updater";
 import { IS_DEV, IS_PACKAGED } from "./runtime-mode";
-import { deleteSecret, getSecret, setSecret, watchSecrets } from "./secret-store";
+import { watchSecrets } from "./secret-store";
 import { setTokenStore as setGithubTokenStore } from "../src/engine/git/github";
+import {
+  githubSelectedTokenStore,
+  initializeGithubCredentialStore,
+} from "./github-auth-runtime";
+import {
+  handleSharedGithubCredentialChange,
+  initializeGithubAppFlow,
+  scheduleGithubAppRefresh,
+} from "./github-app-flow";
+import { onMainAuthSessionChanged } from "./ipc/commands/auth-session";
 import {
   appIdentity,
   zerosChannelDataDir,
@@ -1109,26 +1120,10 @@ async function hydrateShellPath(): Promise<void> {
   }
 }
 
-// GitHub OAuth token account name — same slug the renderer used
-// historically. src/engine/git/github.ts ships with a "not
-// configured" default store that throws on write, so this wire-up
-// must happen before any IPC command fires.
-const GITHUB_OAUTH_ACCOUNT = "github_oauth";
-
 app.whenReady().then(async () => {
   setupDockBrand();
 
-  setGithubTokenStore({
-    async get() {
-      return getSecret(GITHUB_OAUTH_ACCOUNT);
-    },
-    async set(token: string) {
-      setSecret(GITHUB_OAUTH_ACCOUNT, token);
-    },
-    async clear() {
-      deleteSecret(GITHUB_OAUTH_ACCOUNT);
-    },
-  });
+  setGithubTokenStore(githubSelectedTokenStore);
 
   // Install the native app menu (File > Open Folder, Edit, View, etc).
   // Safe to call before the window exists — macOS associates the
@@ -1153,7 +1148,35 @@ app.whenReady().then(async () => {
   // the repaired PATH, then start the single-flight boot before loading the UI.
   // get_engine_port awaits this same promise; no renderer ever guesses a port.
   const shellPathReady = hydrateShellPath();
-  setEngineSpawnBarrier(shellPathReady);
+  const githubAuthReady = shellPathReady.then(async () => {
+    try {
+      await initializeGithubCredentialStore();
+    } catch (err) {
+      // Non-destructive migration: the legacy read-through remains live, so a
+      // keystore/settings failure must not prevent the engine from starting.
+      console.warn(
+        `[Zeros] GitHub credential migration deferred: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    try {
+      await initializeGithubAppFlow();
+    } catch (err) {
+      console.warn(
+        `[Zeros] GitHub App refresh scheduling deferred: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  });
+  const disposeGithubSessionSync = onMainAuthSessionChanged(async () => {
+    await pushGithubCredentialToEngine();
+    await scheduleGithubAppRefresh();
+    emitEvent("github-credential-store-changed", {});
+  });
+  app.on("will-quit", disposeGithubSessionSync);
+  setEngineSpawnBarrier(githubAuthReady);
   const root = defaultProjectRoot();
   const engineBoot = spawnEngine(root);
 
@@ -1190,9 +1213,23 @@ app.whenReady().then(async () => {
   // single-instance stable/beta have no sibling to propagate from. See
   // src/zeros/auth/auth-context.tsx (auth-store-changed).
   if (process.env.ZEROS_SHARED_SECRETS_DIR) {
-    const disposeSecretsWatch = watchSecrets(() =>
-      emitEvent("auth-store-changed", {}),
-    );
+    const disposeSecretsWatch = watchSecrets((changedAccounts) => {
+      if (changedAccounts.includes("auth-session:tokens")) {
+        emitEvent("auth-store-changed", {});
+        void pushGithubCredentialToEngine();
+        void scheduleGithubAppRefresh();
+      }
+      if (
+        changedAccounts.some(
+          (account) =>
+            account === "github.app" ||
+            account === "github.pat" ||
+            account === "github_oauth",
+        )
+      ) {
+        void handleSharedGithubCredentialChange();
+      }
+    });
     app.on("will-quit", () => disposeSecretsWatch());
   }
 

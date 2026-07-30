@@ -256,6 +256,14 @@ export interface GithubTokenChangedMessage extends BaseMessage {
   token: string | null;
 }
 
+/** Engine → local host: the selected credential was invalidated. This event is
+ *  intentionally secret-free; Electron main clears the addressed durable slot. */
+export interface GithubCredentialChangedMessage extends BaseMessage {
+  type: "GITHUB_CREDENTIAL_CHANGED";
+  method: "gh-cli" | "github-app" | "pat";
+  reason: "credential-invalid";
+}
+
 /** Engine → browser: a CAUGHT engine-side error, relayed for PostHog error
  *  tracking (gap A — the engine has no PostHog client of its own). All fields
  *  are scrubbed metadata (see @zeros/core/scrub) — error class/name, a redacted
@@ -972,6 +980,7 @@ export type BridgeMessage =
   | DbChangedMessage
   | GithubTokenSetMessage
   | GithubTokenChangedMessage
+  | GithubCredentialChangedMessage
   | EngineErrorMessage
   // Agent (browser → engine)
   | AgentListAgentsMessage

@@ -16,12 +16,18 @@ interface ParsedRemote {
 
 /** Parse `git@host:owner/repo(.git)` or `https://host/owner/repo(.git)` (also
  *  `ssh://git@host/owner/repo`). Returns null for anything we can't recognise. */
-export function parseRemote(originUrl: string | null | undefined): ParsedRemote | null {
+export function parseRemote(
+  originUrl: string | null | undefined,
+): ParsedRemote | null {
   if (!originUrl) return null;
   const url = originUrl.trim();
 
-  // scp-like SSH: git@github.com:owner/repo.git
-  const scp = url.match(/^[^@]+@([^:]+):(.+)$/);
+  // scp-like SSH: git@github.com:owner/repo.git or github.com:owner/repo.git.
+  // Git accepts the userless form; requiring "user@" made valid remotes lose
+  // their forge identity throughout the renderer.
+  const scp = url.includes("://")
+    ? null
+    : url.match(/^(?:[^@/:\s]+@)?([^:/\s]+):(.+)$/);
   if (scp) {
     return buildParsed(scp[1], scp[2]);
   }
@@ -29,10 +35,25 @@ export function parseRemote(originUrl: string | null | undefined): ParsedRemote 
   // URL form: https://host/owner/repo(.git) | ssh://git@host/owner/repo
   try {
     const u = new URL(url);
-    return buildParsed(u.host, u.pathname.replace(/^\/+/, ""));
+    return buildParsed(u.hostname, u.pathname.replace(/^\/+/, ""));
   } catch {
     return null;
   }
+}
+
+/** The engine's PR API currently targets github.com (not arbitrary Git hosts or
+ * GitHub Enterprise). Use the same host gate before rendering its action. */
+export function isGithubDotComRemote(
+  originUrl: string | null | undefined,
+): boolean {
+  const parsed = parseRemote(originUrl);
+  if (!parsed) return false;
+  const host = parsed.host.toLowerCase().replace(/\.$/, "");
+  return (
+    host === "github.com" ||
+    host === "www.github.com" ||
+    host === "ssh.github.com"
+  );
 }
 
 function buildParsed(host: string, path: string): ParsedRemote | null {
@@ -56,13 +77,13 @@ export function githubCompareUrl(
   headBranch: string,
 ): string | null {
   const remote = parseRemote(originUrl);
-  if (!remote) return null;
+  if (!remote || !isGithubDotComRemote(originUrl)) return null;
   const enc = (b: string) =>
     b
       .split("/")
       .map((s) => encodeURIComponent(s))
       .join("/");
-  return `https://${remote.host}/${remote.owner}/${remote.repo}/compare/${enc(
+  return `https://github.com/${remote.owner}/${remote.repo}/compare/${enc(
     baseBranch,
   )}...${enc(headBranch)}?expand=1`;
 }

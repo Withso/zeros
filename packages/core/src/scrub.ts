@@ -13,12 +13,22 @@
 
 const MAX_MESSAGE = 300;
 const MAX_STACK = 2000;
+// GitHub's newer installation-token format is long and dot-separated. Both
+// `ghs_<app-id>_<opaque>…` and an older observed dotted form occur in logs,
+// unlike the legacy single alphanumeric body.
+// Match it as one credential so no suffix survives a redaction pass.
+const GITHUB_CREDENTIAL_RE =
+  /\b(?:ghs_\d+_[A-Za-z0-9._-]{40,}|ghs_[A-Za-z0-9_-]{4,}(?:\.[A-Za-z0-9_-]{8,})+|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{16,})\b/g;
+const GITHUB_REFRESH_BINDING_RE =
+  /\bzghrb_v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g;
 
 /** Redact absolute filesystem paths and obvious secrets from a free-form
  *  string. Conservative by design — when in doubt, redact. The output is safe
  *  to send as analytics metadata. */
 export function redactSensitive(input: string): string {
   let s = input;
+  s = s.replace(GITHUB_CREDENTIAL_RE, "[redacted]");
+  s = s.replace(GITHUB_REFRESH_BINDING_RE, "[redacted]");
   // Email addresses → [email]. Analytics is anonymous (we never identify()), so
   // an email surfacing in an error message (auth faults, "user x@y not found",
   // a path under a mail dir) would be PII. Redact before the path/token rules.
@@ -58,14 +68,14 @@ export function redactLogSecrets(input: string): string {
   // class stops at the next quote OR backslash so it never leaps a \" boundary
   // and merges adjacent fields (opaque credential values contain neither).
   s = s.replace(
-    /(\\?"(?:password|passwd|secret|token|access_token|refresh_token|id_token|api_key|apikey|authorization|client_secret|private_key|session_key)\\?"\s*:\s*\\?")[^"\\]*(\\?")/gi,
+    /(\\?"(?:password|passwd|secret|token|access_token|refresh_token|refresh_binding|refreshBinding|id_token|api_key|apikey|authorization|client_secret|private_key|session_key)\\?"\s*:\s*\\?")[^"\\]*(\\?")/gi,
     "$1[redacted]$2",
   );
   // key=value / key: value forms outside JSON (env dumps, URLs, headers). The
   // value class excludes backslash so it can't swallow a JSON escape backslash
   // (…VALUE\" → …VALUE) and leave a dangling quote that breaks JSON.parse.
   s = s.replace(
-    /\b(password|passwd|secret|token|access_token|refresh_token|api_key|apikey|client_secret)(=|:\s*)[^\s&"'\\,;]+/gi,
+    /\b(password|passwd|secret|token|access_token|refresh_token|refresh_binding|refreshBinding|api_key|apikey|client_secret)(=|:\s*)[^\s&"'\\,;]+/gi,
     "$1$2[redacted]",
   );
   // Authorization headers / bearer credentials.
@@ -77,8 +87,10 @@ export function redactLogSecrets(input: string): string {
   );
   // Known API-key shapes (OpenAI/Anthropic sk-…, GitHub gh?_/github_pat_,
   // Slack xox?-, Stripe pk_/sk_ live keys, AWS AKIA…).
+  s = s.replace(GITHUB_CREDENTIAL_RE, "[api-key]");
+  s = s.replace(GITHUB_REFRESH_BINDING_RE, "[redacted]");
   s = s.replace(
-    /\b(?:sk-[A-Za-z0-9_-]{16,}|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}|xox[a-z]-[A-Za-z0-9-]{10,}|(?:pk|sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16})\b/g,
+    /\b(?:sk-[A-Za-z0-9_-]{16,}|github_pat_[A-Za-z0-9_]{20,}|xox[a-z]-[A-Za-z0-9-]{10,}|(?:pk|sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16})\b/g,
     "[api-key]",
   );
   return s;

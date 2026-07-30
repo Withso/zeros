@@ -22,7 +22,9 @@ import { useWorkspaceDispatch } from "@/zeros/store/store";
 import { useGitRefreshKey } from "../use-git-refresh-key";
 import { useWorkspaceAgentWorking } from "../pr/use-agent-working";
 import { type Column3Tab } from "../column3-tab-manager";
+import { parseRemote } from "../pr/github-url";
 import { PrStatusRow } from "../pr/pr-status-row";
+import { resolveReviewProvider } from "../pr/review-provider";
 import { EmptyState, useSourceTarget } from "./changes-tab";
 import { ReviewView } from "./review-tab";
 
@@ -43,6 +45,13 @@ export const ReviewRow1Tab = React.memo(function ReviewRow1Tab({
   const { workspace, isLocalMain, changesTarget } = useSourceTarget();
   // The owning project supplies the origin remote for "Create PR manually".
   const { project } = useActiveWorkspace();
+  // `project.originUrl` is a boot cache that is blank for folders registered
+  // without one, so a missing host is "unknown", not "not GitHub". A workspace
+  // only carries a prNumber because a GitHub engine path stamped it, so falling
+  // back to github.com keeps that PR reviewable instead of claiming the repo
+  // lives on another forge.
+  const originHost = parseRemote(project?.originUrl)?.host ?? "github.com";
+  const provider = resolveReviewProvider(originHost);
   // Agent turn-end / git & gh writes / editor saves → re-pull the PR surface.
   const refreshKey = useGitRefreshKey(workspace?.path, changesTarget);
   // Parks the header's Merge / Mark-as-ready writes while a turn is in flight.
@@ -56,11 +65,17 @@ export const ReviewRow1Tab = React.memo(function ReviewRow1Tab({
         title="No pull request"
         subtitle="This workspace has no open pull request yet. Pick a target branch and create one above — its status and this review surface light up together."
       />
+    ) : !provider ? (
+      <EmptyState
+        title="Review unavailable"
+        subtitle="Zeros can review pull requests from github.com remotes today. This repository uses a different Git host."
+      />
     ) : (
       <ReviewView
         // Per-workspace remount — don't carry a prior workspace's PR / auth
         // state across a chat or workspace switch.
         key={workspace.id}
+        provider={provider}
         workspaceId={workspace.id}
         baseBranch={workspace.baseBranch ?? "main"}
         branch={workspace.branch}

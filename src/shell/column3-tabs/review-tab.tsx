@@ -41,8 +41,8 @@ import { parseUnifiedDiffFiles, type ChangedFile } from "./changes-parse";
 import { useScrollMemoryRef } from "../scroll-memory";
 import { AGENT_WORKING_REASON } from "../pr/use-agent-working";
 import {
-  resolveReviewProvider,
   type ReviewMergeMethod,
+  type ReviewProvider,
 } from "../pr/review-provider";
 import { humanGitError, useReviewLiveData } from "./review-data";
 import { summarizeChecks } from "./review-model";
@@ -95,26 +95,34 @@ function cacheReviewFiles(
 
 // ── merge-method memory ──────────────────────────────────────
 
-const MERGE_METHOD_KEY = "zeros.review.merge-method";
-const MERGE_LABEL: Record<ReviewMergeMethod, string> = {
-  squash: "Squash & merge",
-  merge: "Merge",
-  rebase: "Rebase & merge",
-};
+function mergeMethodKey(provider: ReviewProvider): string {
+  return `zeros.review.merge-method.${provider.cacheKey}`;
+}
 
-function loadMergeMethod(): ReviewMergeMethod {
+function loadMergeMethod(provider: ReviewProvider): ReviewMergeMethod {
+  const fallback = provider.capabilities.mergeMethods[0]?.id ?? "";
   try {
-    const v = window.localStorage.getItem(MERGE_METHOD_KEY);
-    if (v === "squash" || v === "merge" || v === "rebase") return v;
+    const value = window.localStorage.getItem(mergeMethodKey(provider));
+    if (
+      value &&
+      provider.capabilities.mergeMethods.some(
+        (method) => method.id === value,
+      )
+    ) {
+      return value;
+    }
   } catch {
     /* storage unavailable — default below */
   }
-  return "squash";
+  return fallback;
 }
 
-function saveMergeMethod(m: ReviewMergeMethod): void {
+function saveMergeMethod(
+  provider: ReviewProvider,
+  method: ReviewMergeMethod,
+): void {
   try {
-    window.localStorage.setItem(MERGE_METHOD_KEY, m);
+    window.localStorage.setItem(mergeMethodKey(provider), method);
   } catch {
     /* best-effort */
   }
@@ -123,6 +131,7 @@ function saveMergeMethod(m: ReviewMergeMethod): void {
 // ── main view ────────────────────────────────────────────────
 
 export function ReviewView({
+  provider,
   workspaceId,
   baseBranch,
   branch,
@@ -135,6 +144,7 @@ export function ReviewView({
   sub,
   onSubChange,
 }: {
+  provider: ReviewProvider;
   workspaceId: string;
   baseBranch: string;
   /** The workspace's head branch (labels + fix-check prompts). */
@@ -155,7 +165,6 @@ export function ReviewView({
   onSubChange: (sub: ReviewSubtab) => void;
 }) {
   const filesKey = reviewFilesKey(workspaceId, baseBranch);
-  const provider = useMemo(() => resolveReviewProvider(), []);
   const { snap, refresh, postComment, merge, markReady } = useReviewLiveData({
     provider,
     workspaceId,
@@ -164,7 +173,6 @@ export function ReviewView({
     active,
   });
   const [busy, setBusy] = useState(false);
-  const [actionError, setActionError] = useState<string | null>(null);
 
   // One scroller hosts every sub-tab's body (the switch below swaps children
   // in place), and ReviewView itself remounts per workspace (key=workspace.id
@@ -270,13 +278,14 @@ export function ReviewView({
   const runMerge = useCallback(
     async (method: ReviewMergeMethod) => {
       setBusy(true);
-      setActionError(null);
       try {
         await merge(method);
         notifyWorkspacesChanged(repoSlug ?? undefined);
         toast.success(`PR #${prNumber} merged`);
       } catch (e) {
-        setActionError(humanGitError(e));
+        toast.error(`Couldn’t merge PR #${prNumber}`, {
+          description: humanGitError(e),
+        });
       } finally {
         setBusy(false);
       }
@@ -286,16 +295,17 @@ export function ReviewView({
 
   const runMarkReady = useCallback(async () => {
     setBusy(true);
-    setActionError(null);
     try {
       await markReady();
       notifyWorkspacesChanged(repoSlug ?? undefined);
     } catch (e) {
-      setActionError(humanGitError(e));
+      toast.error(`Couldn’t mark PR #${prNumber} as ready`, {
+        description: humanGitError(e),
+      });
     } finally {
       setBusy(false);
     }
-  }, [markReady, repoSlug]);
+  }, [markReady, prNumber, repoSlug]);
 
   // ── top-level gates ──
   if (snap.authed === false) {
@@ -368,6 +378,7 @@ export function ReviewView({
             </Tooltip>
           )}
           <MergeControls
+            provider={provider}
             pr={pr}
             busy={busy}
             agentWorking={agentWorking}
@@ -385,11 +396,6 @@ export function ReviewView({
             #{pr.number}
           </span>
         </div>
-        {actionError && (
-          <div className="mt-2">
-            <ErrorCallout text={actionError} />
-          </div>
-        )}
       </div>
 
       {/* ── sub-nav ── */}
@@ -606,19 +612,27 @@ function DescriptionSection({ pr }: { pr: PR }) {
  *  parked while the agent has a turn in flight — merging could ship a
  *  half-pushed branch, and marking ready would invite review of one. */
 function MergeControls({
+  provider,
   pr,
   busy,
   agentWorking,
   onMarkReady,
   onMerge,
 }: {
+  provider: ReviewProvider;
   pr: PR;
   busy: boolean;
   agentWorking: boolean;
   onMarkReady: () => void;
   onMerge: (m: ReviewMergeMethod) => void;
 }) {
-  const [method, setMethod] = useState<ReviewMergeMethod>(loadMergeMethod);
+  const mergeMethods = provider.capabilities.mergeMethods;
+  const [method, setMethod] = useState<ReviewMergeMethod>(() =>
+    loadMergeMethod(provider),
+  );
+  const selectedMethod =
+    mergeMethods.find((candidate) => candidate.id === method) ??
+    mergeMethods[0];
   if (pr.state === "merged" || pr.state === "closed") return null;
   if (pr.state === "draft") {
     const ready = (
@@ -645,8 +659,9 @@ function MergeControls({
   const conflicted = pr.isMergeable === false || pr.mergeableState === "dirty";
   const pick = (m: ReviewMergeMethod) => {
     setMethod(m);
-    saveMergeMethod(m);
+    saveMergeMethod(provider, m);
   };
+  if (!selectedMethod) return null;
   const mergeButton = (
     // The one green CTA on the surface — same fill treatment as the PR
     // island's Merge action, so "merge" reads identically everywhere. The
@@ -656,11 +671,11 @@ function MergeControls({
       <button
         type="button"
         disabled={busy || conflicted || agentWorking}
-        onClick={() => onMerge(method)}
+        onClick={() => onMerge(selectedMethod.id)}
         className="bg-green-primary text-bg1 flex h-6 items-center gap-1.5 px-2.5 text-xs font-medium transition-opacity duration-120 ease-out hover:opacity-90 disabled:pointer-events-none disabled:opacity-50"
       >
         {busy && <ZerosSpinner size={12} tone="inherit" />}
-        {MERGE_LABEL[method]}
+        {selectedMethod.label}
       </button>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
@@ -675,18 +690,17 @@ function MergeControls({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
           <DropdownMenuRadioGroup
-            value={method}
-            onValueChange={(v) => pick(v as ReviewMergeMethod)}
+            value={selectedMethod.id}
+            onValueChange={pick}
           >
-            <DropdownMenuRadioItem value="squash">
-              Squash & merge
-            </DropdownMenuRadioItem>
-            <DropdownMenuRadioItem value="merge">
-              Create a merge commit
-            </DropdownMenuRadioItem>
-            <DropdownMenuRadioItem value="rebase">
-              Rebase & merge
-            </DropdownMenuRadioItem>
+            {mergeMethods.map((candidate) => (
+              <DropdownMenuRadioItem
+                key={candidate.id}
+                value={candidate.id}
+              >
+                {candidate.label}
+              </DropdownMenuRadioItem>
+            ))}
           </DropdownMenuRadioGroup>
         </DropdownMenuContent>
       </DropdownMenu>

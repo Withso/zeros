@@ -27,8 +27,7 @@ import {
 } from "./ws-client";
 import { getActiveBridge, setActiveBridge } from "./active-bridge";
 import {
-  pushGithubTokenToEngine,
-  wireGithubTokenWriteback,
+  wireGithubCredentialWriteback,
 } from "./github-token-sync";
 import { nativeListen, useNativeRuntime } from "../../native/runtime";
 import { toast } from "../ui/primitives/elements";
@@ -75,16 +74,9 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
       console.warn("[Zeros] initial connect failed:", err);
     });
 
-    // GitHub token sync (single-writer, option B / H4): the gh.* ops run in the
-    // engine, which can't read safeStorage. Electron main couriers the decrypted
-    // token directly to the engine (spawn env / stdin) — the renderer NEVER
-    // holds it. pushGithubTokenToEngine() is now a no-op kept for call-site
-    // compatibility on ENGINE_READY; the live reverse path is the writeback that
-    // mirrors an engine-originated clear (401 auto-invalidate) into safeStorage.
-    const offTokenReady = client.on("ENGINE_READY", () => {
-      void pushGithubTokenToEngine(client);
-    });
-    const offTokenWriteback = wireGithubTokenWriteback(client);
+    // Electron main couriers the selected credential over private stdin. The
+    // renderer sees only secret-free method-addressed invalidations.
+    const offCredentialWriteback = wireGithubCredentialWriteback(client);
 
     // CONNECTION_REJECTED consumer — the ONLY one. ws-client latches a terminal
     // rejection and suspends its reconnect ladder (retrying the same
@@ -151,8 +143,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
     return () => {
       restartListenerClosed = true;
       if (offRestart) offRestart();
-      offTokenReady();
-      offTokenWriteback();
+      offCredentialWriteback();
       offRejected();
       offRejectionToast();
       // React StrictMode replays passive setup immediately after cleanup. The

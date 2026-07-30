@@ -112,7 +112,12 @@ function withSecretsLock<T>(fn: () => T): T {
         }
         continue;
       }
-      if (Date.now() - start > STALE_MS) break; // proceed unlocked rather than hang
+      if (Date.now() - start > STALE_MS) {
+        // Never perform a whole-file read/modify/write without the lock. With
+        // shared dev worktrees, "best effort" here means silently deleting a
+        // sibling process's newly-written credential.
+        throw new Error("timed out waiting for the encrypted secret-store lock");
+      }
       Atomics.wait(waiter, 0, 0, 25); // sleep ~25ms with no CPU spin
     }
   }
@@ -183,6 +188,44 @@ export function deleteSecret(account: string): void {
   });
 }
 
+/** Atomically replace one decrypted value when it still equals the caller's
+ *  snapshot. GitHub refresh-token rotation uses this as a cross-process CAS:
+ *  a sibling dev worktree that already installed a rotated pair must never be
+ *  overwritten (or deleted after another caller receives a stale-token 401). */
+export function replaceSecretIfUnchanged(
+  account: string,
+  expectedValue: string,
+  nextValue: string | null,
+): boolean {
+  ensureEncryptionAvailable();
+  return withSecretsLock(() => {
+    const data = readAll();
+    const currentEncrypted = data[account];
+    if (
+      typeof currentEncrypted !== "string" ||
+      currentEncrypted.length === 0
+    ) {
+      return false;
+    }
+    let current: string;
+    try {
+      current = safeStorage.decryptString(
+        Buffer.from(currentEncrypted, "base64"),
+      );
+    } catch {
+      return false;
+    }
+    if (current !== expectedValue) return false;
+    if (nextValue === null) {
+      delete data[account];
+    } else {
+      data[account] = safeStorage.encryptString(nextValue).toString("base64");
+    }
+    writeAll(data);
+    return true;
+  });
+}
+
 /** Number of stored entries. Useful for diagnostics and tests. */
 export function entryCount(): number {
   return Object.keys(readAll()).length;
@@ -200,10 +243,13 @@ export function entryCount(): number {
  *  after the first write. We filter dir events down to "secrets.json" so the
  *  `.tmp-<pid>` and `.lock` siblings (touched on every mutation) don't fire it.
  *  Returns a disposer; never throws (a failed watch just disables live sync). */
-export function watchSecrets(onChange: () => void): () => void {
+export function watchSecrets(
+  onChange: (changedAccounts: readonly string[]) => void,
+): () => void {
   const file = filePath();
   const dir = path.dirname(file);
   const base = path.basename(file); // "secrets.json"
+  let previous = readAll();
   let timer: ReturnType<typeof setTimeout> | null = null;
   let watcher: fs.FSWatcher | null = null;
   const fire = () => {
@@ -211,7 +257,20 @@ export function watchSecrets(onChange: () => void): () => void {
     timer = setTimeout(() => {
       timer = null;
       try {
-        onChange();
+        const next = readAll();
+        const changedAccounts = new Set([
+          ...Object.keys(previous),
+          ...Object.keys(next),
+        ]);
+        for (const account of changedAccounts) {
+          if (previous[account] === next[account]) {
+            changedAccounts.delete(account);
+          }
+        }
+        previous = next;
+        if (changedAccounts.size > 0) {
+          onChange([...changedAccounts]);
+        }
       } catch (err) {
         console.warn(
           `[secret-store] watch onChange threw: ${(err as Error).message}`,

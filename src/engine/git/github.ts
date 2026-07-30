@@ -1,4 +1,4 @@
-// GitHub integration: Octokit + device-flow auth + PR ops.
+// GitHub integration: Octokit + PR ops.
 //
 // Auth strategy:
 //   - The token store is injected by the host process at boot
@@ -9,33 +9,46 @@
 //   - The migration off keytar happened on 2026-05-25 after the
 //     native keytar.node binding aborted the main process — the
 //     store interface is unchanged; only the backing layer moved.
-//   - First-time sign-in uses @octokit/auth-oauth-device. The
-//     onVerification callback fires with the user_code + verification_uri;
-//     the IPC layer relays it to the renderer as `gh:device-code` so the
-//     UI can display the code and the URL to visit.
+//   - Interactive sign-in is NOT here. The host owns it (GitHub App browser
+//     flow / PAT / borrowed gh CLI) and couriers the selected credential in;
+//     this module only consumes it.
 //   - On 401 we clear the cached token and surface NOT_AUTHENTICATED so
 //     the renderer can re-trigger the sign-in flow.
 //
 // Tests inject mock implementations via the *ForTesting seams.
 //
-// ESM-only deps (2026-05-20 fix): @octokit/rest@22 and
-// @octokit/auth-oauth-device@8 are ESM-only packages. The Electron
-// main process bundles as CommonJS, so `require()` of these modules
-// throws ERR_REQUIRE_ESM. Use type-only static imports + dynamic
-// runtime imports so the bundler emits `import()` calls (preserved as
-// dynamic by tsup) that Node resolves correctly at runtime. The
-// tsup configs also externalize these so they're never bundled.
+// ESM-only dep (2026-05-20 fix): @octokit/rest@22 is an ESM-only package.
+// The Electron main process bundles as CommonJS, so `require()` of it
+// throws ERR_REQUIRE_ESM. Use a type-only static import + a dynamic
+// runtime import so the bundler emits an `import()` call (preserved as
+// dynamic by tsup) that Node resolves correctly at runtime. The tsup
+// configs also externalize it so it's never bundled.
 
 import type { Octokit as OctokitClass } from "@octokit/rest";
-import { GitError } from "./errors";
+import { createHash } from "node:crypto";
+import { GitError, isGitError, type GitErrorCode } from "./errors";
 import { getWorkspace } from "./worktree";
 import { advanceLifecycle, updateWorkspace } from "./state";
 import { isRepo } from "./repo";
-import { assertSafeGitRef, runFile, runGit } from "./git-exec";
+import {
+  assertSafeGitRef,
+  classifyGitTransportError,
+  runFile,
+  runGit,
+} from "./git-exec";
 import { refExists } from "./default-branch";
 import { resolveRepoGit } from "../settings/repo-git";
 import { push } from "./ops";
 import type { PR, PrState } from "./types";
+import { setGitCredentialSource } from "./credential-broker";
+import {
+  GITHUB_GIT_HOST,
+  GITHUB_GIT_HTTP_USERNAME,
+  sanitizeGithubCredential,
+  type GithubCredential,
+  type GithubCredentialHealth,
+} from "@zeros/core/github-auth";
+import type { RunFileOptions, RunFileResult } from "./git-exec";
 
 /** Lazy module cache for @octokit/rest. The module is resolved once
  *  via dynamic import (CJS-compatible) and shared by every callable. */
@@ -47,59 +60,34 @@ async function loadOctokit(): Promise<typeof import("@octokit/rest")> {
   return _octokitMod;
 }
 
-/** Lazy module cache for @octokit/auth-oauth-device. Same reason as
- *  loadOctokit above. */
-let _deviceAuthMod: typeof import("@octokit/auth-oauth-device") | null = null;
-async function loadDeviceAuth(): Promise<
-  typeof import("@octokit/auth-oauth-device")
-> {
-  if (!_deviceAuthMod) {
-    _deviceAuthMod = await import("@octokit/auth-oauth-device");
-  }
-  return _deviceAuthMod;
-}
-
-// GitHub OAuth Client ID for Zeros device-flow sign-in.
-//
-// Resolution order (first non-empty wins):
-//   1. `process.env.ZEROS_GITHUB_CLIENT_ID` — env override. Set this
-//      in dev/staging so a per-environment OAuth app is used. Pass via
-//      ELECTRON_RUN_AS_NODE=0 env or the dev script's env block.
-//   2. `setClientIdForTesting()` — test-only seam.
-//   3. The compile-time fallback constant below.
-//
-// DEFAULT_CLIENT_ID below is the REAL client ID of the Zeros production
-// GitHub OAuth App — not a placeholder. That is deliberate and safe:
-// an OAuth client ID is a public identifier by design (it is sent in
-// plaintext on every device-flow and redirect request, so every user of
-// every build already sees it), and this desktop app holds no client
-// secret at all — the device flow is exactly the OAuth grant designed
-// for public clients that cannot keep one. Shipping it means a
-// build-from-source checkout can sign in to GitHub with no setup.
-//
-// If you are running a fork and want sign-ins attributed to your own
-// OAuth App, register one at
-//   https://github.com/settings/developers → "New OAuth App"
-// (any callback URL — device flow ignores it) and set
-// ZEROS_GITHUB_CLIENT_ID in the environment that runs Zeros.
-//
-// PLACEHOLDER_RE guards the other direction: a build that deliberately
-// strips the baked-in id (replacing it with something containing
-// "placeholder") gets a clear NOT_AUTHENTICATED error from
-// startDeviceFlow() instead of a confusing GitHub-side rejection.
-const DEFAULT_CLIENT_ID = "Ov23lityKSllg4mxOQCl";
-const PLACEHOLDER_RE = /placeholder/i;
-
-function resolveClientId(): string {
-  const envOverride = process.env.ZEROS_GITHUB_CLIENT_ID;
-  if (envOverride && envOverride.length > 0) return envOverride;
-  return clientId;
-}
+// NOTE: the OAuth device flow that used to live here (plus its client-id
+// resolution and the @octokit/auth-oauth-device dependency) is gone. Interactive
+// GitHub sign-in is now owned by the host: the GitHub App browser flow, a PAT, or
+// a borrowed gh CLI login, each committed to a method-addressed credential slot.
+// This module only consumes whatever credential the host selects.
 
 // ── Pluggable seams ──────────────────────────────────────
 
 export interface TokenStore {
   get(): Promise<string | null>;
+  /** Provider-aware working credential for Git-over-HTTPS. Older stores may
+   * expose only get(); those safely retain the github.com defaults. */
+  getCredential?(): Promise<GithubCredential | null>;
+  /** Whether the selected method owns Git HTTPS for this host even while its
+   * working credential is temporarily absent. This prevents an App/PAT gap
+   * from falling through to an unrelated ambient credential helper. */
+  ownsGitHost?(host: string): Promise<boolean>;
+  /** Ask the credential owner to rotate a token that GitHub explicitly
+   * rejected. A string means the replacement is already readable through
+   * get()/getCredential(); null means rotation applied but could not produce a
+   * usable replacement; undefined means this store does not support rotation. */
+  refreshAfterRejection?(
+    rejectedToken: string,
+  ): Promise<string | null | undefined>;
+  /** Clear only when the durable/working credential still equals the token
+   * rejected by the retry. Production stores implement this as a CAS so a
+   * concurrent reconnect can never be erased by an older request. */
+  clearAfterRejection?(rejectedToken: string): Promise<boolean>;
   set(token: string): Promise<void>;
   clear(): Promise<void>;
 }
@@ -132,7 +120,6 @@ let octokitFactory: (token: string) => Promise<OctokitClass> = async (
   const { Octokit } = await loadOctokit();
   return new Octokit(token ? { auth: token } : undefined);
 };
-let clientId = DEFAULT_CLIENT_ID;
 let cachedOctokit: OctokitClass | null = null;
 /** The token `cachedOctokit` was built with. The cached client is reused ONLY
  *  while the current store token still equals this — so a sign-out or token swap
@@ -141,6 +128,11 @@ let cachedOctokit: OctokitClass | null = null;
  *  `cachedOctokit` live and every gh.* op (publish, PRs) kept working after
  *  sign-out, because getOctokit() returned the cache without re-reading the store. */
 let cachedOctokitToken: string | null = null;
+let ghRunFile: (
+  command: string,
+  args: string[],
+  opts?: RunFileOptions,
+) => Promise<RunFileResult> = runFile;
 
 function cacheOctokit(oct: OctokitClass, token: string): void {
   cachedOctokit = oct;
@@ -156,6 +148,7 @@ function clearOctokitCache(): void {
  *  app.whenReady() with a safeStorage-backed implementation. */
 export function setTokenStore(s: TokenStore): void {
   tokenStore = s;
+  configureGitCredentialSource(s);
   clearOctokitCache();
 }
 
@@ -164,7 +157,63 @@ export function setTokenStore(s: TokenStore): void {
  *  routes auth through a different mechanism. */
 export function setTokenStoreForTesting(s: TokenStore | null): void {
   tokenStore = s ?? NOT_CONFIGURED_STORE;
+  configureGitCredentialSource(tokenStore);
   clearOctokitCache();
+}
+
+function configureGitCredentialSource(store: TokenStore): void {
+  const readCredential = async (): Promise<GithubCredential | null> => {
+    if (store.getCredential) {
+      return sanitizeGithubCredential(await store.getCredential());
+    }
+    const token = await store.get();
+    return token
+      ? {
+          method: "pat",
+          accessToken: token,
+          gitHost: GITHUB_GIT_HOST,
+          gitHttpUsername: GITHUB_GIT_HTTP_USERNAME,
+        }
+      : null;
+  };
+  setGitCredentialSource({
+    supports(request) {
+      return request.protocol === "https";
+    },
+    async shouldHandle(request) {
+      if (store.ownsGitHost) return store.ownsGitHost(request.host);
+      return (await readCredential())?.gitHost === request.host;
+    },
+    async getCredential(request) {
+      const credential = await readCredential();
+      return credential?.gitHost === request.host
+        ? {
+            username: credential.gitHttpUsername,
+            password: credential.accessToken,
+          }
+        : null;
+    },
+    async credentialFingerprint(request) {
+      const credential = await readCredential();
+      if (!credential || credential.gitHost !== request.host) return null;
+      return createHash("sha256").update(credential.accessToken).digest("hex");
+    },
+    async refreshAfterAuthenticationFailure(request, rejectedFingerprint) {
+      const current = await readCredential();
+      if (!current || current.gitHost !== request.host) return false;
+      const currentFingerprint = createHash("sha256")
+        .update(current.accessToken)
+        .digest("hex");
+      // A concurrent refresh or method switch already replaced the rejected
+      // token. The retry can immediately ask the broker for that newer value.
+      if (currentFingerprint !== rejectedFingerprint) return true;
+      if (!store.refreshAfterRejection) return false;
+      const replacement = await store.refreshAfterRejection(
+        current.accessToken,
+      );
+      return typeof replacement === "string" && replacement.length > 0;
+    },
+  });
 }
 
 /** Override the Octokit factory. Used by tests to inject a mock client.
@@ -184,9 +233,17 @@ export function setOctokitFactoryForTesting(
   clearOctokitCache();
 }
 
-/** Override the OAuth client ID. Used by tests + dev environments. */
-export function setClientIdForTesting(id: string | null): void {
-  clientId = id ?? DEFAULT_CLIENT_ID;
+/** Test seam for the `gh auth token` probe. */
+export function setRunFileForTesting(
+  fn:
+    | ((
+        command: string,
+        args: string[],
+        opts?: RunFileOptions,
+      ) => Promise<RunFileResult>)
+    | null,
+): void {
+  ghRunFile = fn ?? runFile;
 }
 
 // ── Auth ─────────────────────────────────────────────────
@@ -194,69 +251,187 @@ export function setClientIdForTesting(id: string | null): void {
 export interface AuthStatusResult {
   authenticated: boolean;
   login?: string;
+  /** A successful identity probe can still be incomplete. GitHub returns
+   *  `200` plus `X-GitHub-SSO: partial-results` when SAML-protected
+   *  organizations were omitted, so callers must not cache that response as
+   *  an exact capability snapshot. */
+  warning?: {
+    code: "GITHUB_SSO_REQUIRED";
+    context: Record<string, unknown>;
+  };
 }
 
-/** Probe whether we have a working token. Calls /user with the cached
- *  token; on 401 clears and reports unauthenticated. */
+/** Probe whether we have a working token. Rotating App credentials get the
+ * same one-shot owner refresh as normal API calls; borrowed/PAT credentials
+ * retain the legacy retry-and-clear behavior after two explicit rejections. */
 export async function getAuthStatus(): Promise<AuthStatusResult> {
   const token = await tokenStore.get();
   if (!token) return { authenticated: false };
-  const octokit = await octokitFactory(token);
   try {
-    const { data } = await octokit.users.getAuthenticated();
-    cacheOctokit(octokit, token);
-    return { authenticated: true, login: data.login };
+    const response = await withAuthRetry((octokit) =>
+      octokit.users.getAuthenticated(),
+    );
+    const warning = partialSsoWarning(response.headers);
+    return {
+      authenticated: true,
+      login: response.data.login,
+      ...(warning ? { warning } : {}),
+    };
   } catch (err) {
-    if (isAuthError(err)) {
-      await tokenStore.clear();
-      clearOctokitCache();
+    if (err instanceof GitError && err.code === "NOT_AUTHENTICATED") {
       return { authenticated: false };
     }
-    throw wrapApiError(err, "Failed to verify GitHub authentication");
+    throw err;
   }
 }
 
 export interface GhCliResult {
   /** Is the `gh` binary on PATH at all? */
   available: boolean;
-  /** Did it hand us a working token (and have we adopted it)? */
+  /** Did GitHub verify the CLI token during this probe? */
   authenticated: boolean;
+  /** Did `gh auth token` return a configured credential? */
+  configured: boolean;
+  health: GithubCredentialHealth;
   login?: string;
+  detail?: string;
 }
 
-/** Detect a GitHub CLI auth and adopt its token. Runs `gh auth token`;
- *  if it returns a token, verifies it via /user and persists it so every
- *  Zeros GitHub action reuses the user's existing `gh` login — zero
- *  friction, no device flow. This is the primary auth path (matches the
- *  reference "GitHub CLI is authenticated and ready" UX). */
-export async function detectGhCli(): Promise<GhCliResult> {
+async function probeGhCliCredential(): Promise<{
+  available: boolean;
+  configured: boolean;
+  credential: GithubCredential | null;
+  health: GithubCredentialHealth;
+  login?: string;
+  detail?: string;
+}> {
   let token = "";
   try {
-    const { stdout } = await runFile("gh", ["auth", "token"], {
+    const { stdout } = await ghRunFile("gh", ["auth", "token"], {
       timeoutMs: 5000,
     });
     token = stdout.trim();
   } catch (err) {
-    // ENOENT → gh not installed (unavailable). Any other failure → gh is
-    // present but not logged in.
-    const code = (err as { code?: string }).code;
-    return { available: code !== "ENOENT", authenticated: false };
+    const available = (err as { code?: string }).code !== "ENOENT";
+    const detail = `${(err as { stderr?: unknown }).stderr ?? ""} ${
+      err instanceof Error ? err.message : ""
+    }`;
+    const signedOut =
+      /not logged in|not logged into|no oauth token|authentication required/i.test(
+        detail,
+      );
+    return {
+      available,
+      configured: false,
+      credential: null,
+      health: available && !signedOut ? "unavailable" : "not-connected",
+      ...(available && !signedOut
+        ? { detail: "GitHub CLI authentication could not be checked." }
+        : {}),
+    };
   }
-  if (!token) return { available: true, authenticated: false };
+  if (!token) {
+    return {
+      available: true,
+      configured: false,
+      credential: null,
+      health: "not-connected",
+    };
+  }
+  const unverifiedCredential: GithubCredential = {
+    method: "gh-cli",
+    accessToken: token,
+    gitHost: GITHUB_GIT_HOST,
+    gitHttpUsername: GITHUB_GIT_HTTP_USERNAME,
+  };
   const octokit = await octokitFactory(token);
   try {
     const { data } = await octokit.users.getAuthenticated();
-    await tokenStore.set(token);
-    cacheOctokit(octokit, token);
-    return { available: true, authenticated: true, login: data.login };
-  } catch {
-    return { available: true, authenticated: false };
+    return {
+      available: true,
+      configured: true,
+      credential: {
+        ...unverifiedCredential,
+        login: data.login,
+      },
+      health: "connected",
+      login: data.login,
+    };
+  } catch (error) {
+    const classified = wrapApiError(
+      error,
+      "GitHub CLI authentication could not be checked",
+    );
+    if (classified.code === "NOT_AUTHENTICATED") {
+      return {
+        available: true,
+        configured: true,
+        credential: null,
+        health: "invalid",
+        detail: "GitHub rejected the GitHub CLI credential.",
+      };
+    }
+    const health: GithubCredentialHealth =
+      classified.code === "GITHUB_RATE_LIMITED"
+        ? "rate-limited"
+        : classified.code === "GITHUB_SSO_REQUIRED"
+          ? "sso-required"
+          : "unavailable";
+    return {
+      available: true,
+      configured: true,
+      // A transient health probe must not erase or withhold the CLI-owned
+      // token. Git/gh can retry it directly when connectivity recovers.
+      credential: unverifiedCredential,
+      health,
+      detail: classified.message,
+    };
   }
 }
 
-/** Adopt a user-pasted personal access token. Verifies via /user, then
- *  persists on success (the paste-a-PAT fallback). */
-export async function setToken(token: string): Promise<{ login: string }> {
+/** Read the CLI-owned credential without persisting it elsewhere.
+ *  Main uses this private-channel result to seed the active engine credential.
+ *  This path intentionally does not add a `/user` request in front of every
+ *  Git/gh operation: the remote operation is the authoritative validation and
+ *  its one-shot rejection path disconnects an invalid token. Settings health
+ *  uses detectGhCli(), which does verify the identity and returns no secret. */
+export async function readGhCliCredential(): Promise<GithubCredential | null> {
+  try {
+    const { stdout } = await ghRunFile("gh", ["auth", "token"], {
+      timeoutMs: 5000,
+    });
+    const accessToken = stdout.trim();
+    return accessToken
+      ? {
+          method: "gh-cli",
+          accessToken,
+          gitHost: GITHUB_GIT_HOST,
+          gitHttpUsername: GITHUB_GIT_HTTP_USERNAME,
+        }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Pure health probe for the primary auth method. It never adopts or replaces
+ *  the selected credential as a side effect of opening Settings or Refresh. */
+export async function detectGhCli(): Promise<GhCliResult> {
+  const probe = await probeGhCliCredential();
+  return {
+    available: probe.available,
+    authenticated: probe.health === "connected",
+    configured: probe.configured,
+    health: probe.health,
+    ...(probe.login ? { login: probe.login } : {}),
+    ...(probe.detail ? { detail: probe.detail } : {}),
+  };
+}
+
+/** Validate a candidate token without mutating the selected credential. */
+export async function verifyGithubToken(
+  token: string,
+): Promise<{ login: string }> {
   const trimmed = typeof token === "string" ? token.trim() : "";
   if (!trimmed) {
     throw new GitError({
@@ -267,84 +442,9 @@ export async function setToken(token: string): Promise<{ login: string }> {
   const octokit = await octokitFactory(trimmed);
   try {
     const { data } = await octokit.users.getAuthenticated();
-    await tokenStore.set(trimmed);
-    cacheOctokit(octokit, trimmed);
     return { login: data.login };
   } catch (err) {
     throw wrapApiError(err, "GitHub rejected the token");
-  }
-}
-
-/** Clear the persisted token (sign out). */
-export async function signOut(): Promise<void> {
-  await tokenStore.clear();
-  clearOctokitCache();
-}
-
-export interface DeviceVerification {
-  verificationUri: string;
-  userCode: string;
-  /** Octokit's device flow gives us a polling interval; we surface it
-   *  so the renderer can show a "waiting…" countdown if it wants. */
-  expiresIn: number;
-  interval: number;
-}
-
-export interface StartDeviceFlowOptions {
-  /** Called when GitHub returns the user code. The renderer should
-   *  display verification_uri + user_code so the user can authorize. */
-  onVerification: (v: DeviceVerification) => void;
-  scopes?: string[];
-}
-
-/** Run the GitHub device flow end-to-end. Resolves once the user has
- *  authorized in the browser and we've persisted the resulting token. */
-export async function startDeviceFlow(
-  opts: StartDeviceFlowOptions,
-): Promise<{ login: string }> {
-  const activeClientId = resolveClientId();
-  if (PLACEHOLDER_RE.test(activeClientId)) {
-    throw new GitError({
-      code: "NOT_AUTHENTICATED",
-      message:
-        "GitHub OAuth client ID is unset. Register an OAuth app at https://github.com/settings/developers and set ZEROS_GITHUB_CLIENT_ID, or bake the client_id into DEFAULT_CLIENT_ID in src/engine/git/github.ts.",
-      remediation:
-        "Register an OAuth app at github.com/settings/developers (use any callback URL — device flow ignores it), copy the Client ID, and set ZEROS_GITHUB_CLIENT_ID in the environment that runs Zeros.",
-    });
-  }
-  const { createOAuthDeviceAuth } = await loadDeviceAuth();
-  const auth = createOAuthDeviceAuth({
-    clientType: "oauth-app",
-    clientId: activeClientId,
-    scopes: opts.scopes ?? ["repo", "read:org"],
-    onVerification(v) {
-      opts.onVerification({
-        verificationUri: v.verification_uri,
-        userCode: v.user_code,
-        expiresIn: v.expires_in,
-        interval: v.interval,
-      });
-    },
-  });
-  let tokenAuth;
-  try {
-    tokenAuth = await auth({ type: "oauth" });
-  } catch (err) {
-    throw new GitError({
-      code: "NOT_AUTHENTICATED",
-      message: "GitHub device-flow authentication failed",
-      cause: err,
-    });
-  }
-  const token = tokenAuth.token;
-  await tokenStore.set(token);
-  const octokit = await octokitFactory(token);
-  cacheOctokit(octokit, token);
-  try {
-    const { data } = await octokit.users.getAuthenticated();
-    return { login: data.login };
-  } catch (err) {
-    throw wrapApiError(err, "Authenticated but could not load user info");
   }
 }
 
@@ -360,7 +460,7 @@ async function getOctokit(): Promise<OctokitClass> {
     throw new GitError({
       code: "NOT_AUTHENTICATED",
       message: "Not signed in to GitHub",
-      remediation: "Call gh_auth_signin to start the device-flow.",
+      remediation: "Connect GitHub in Settings → Integrations.",
     });
   }
   if (cachedOctokit && cachedOctokitToken === token) return cachedOctokit;
@@ -387,10 +487,211 @@ async function getOptionalAuthOctokit(): Promise<OctokitClass> {
   return oct;
 }
 
-function isAuthError(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false;
-  const status = (err as { status?: number }).status;
-  return status === 401 || status === 403;
+type GithubResponseHeaders = Record<
+  string,
+  string | number | string[] | undefined
+>;
+
+interface GithubErrorClassification {
+  code: GitErrorCode;
+  message: string;
+  remediation?: string;
+  context?: Record<string, unknown>;
+}
+
+function githubStatus(err: unknown): number | undefined {
+  if (!err || typeof err !== "object") return undefined;
+  const shaped = err as {
+    status?: number;
+    response?: { status?: number };
+  };
+  return shaped.status ?? shaped.response?.status;
+}
+
+function githubHeaders(err: unknown): GithubResponseHeaders {
+  if (!err || typeof err !== "object") return {};
+  const response = (err as { response?: { headers?: unknown } }).response;
+  if (!response?.headers || typeof response.headers !== "object") return {};
+  return response.headers as GithubResponseHeaders;
+}
+
+function githubHeader(
+  headers: GithubResponseHeaders | undefined,
+  name: string,
+): string | undefined {
+  if (!headers) return undefined;
+  const wanted = name.toLowerCase();
+  for (const [key, raw] of Object.entries(headers)) {
+    if (key.toLowerCase() !== wanted || raw == null) continue;
+    return Array.isArray(raw) ? raw.join(", ") : String(raw);
+  }
+  return undefined;
+}
+
+function parseAcceptedPermissions(
+  header: string | undefined,
+): Record<string, string> | undefined {
+  if (!header) return undefined;
+  const entries = header
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const separator = part.indexOf("=");
+      if (separator < 1) return null;
+      return [
+        part.slice(0, separator).trim(),
+        part.slice(separator + 1).trim(),
+      ] as const;
+    })
+    .filter((entry): entry is readonly [string, string] => entry !== null);
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+function parseSsoHeader(header: string | undefined): {
+  authorizeUrl?: string;
+  partialResults?: true;
+  organizationIds?: string[];
+} | null {
+  if (!header) return null;
+  const authorizeUrl = header.match(/(?:^|[;,]\s*)url=([^;,\s]+)/i)?.[1];
+  const organizationIds = header
+    .match(/(?:^|[;,]\s*)organizations=([0-9,\s]+)/i)?.[1]
+    ?.split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+  const partialResults = /(?:^|[;,\s])partial-results(?:[;,\s]|$)/i.test(
+    header,
+  );
+  return {
+    ...(authorizeUrl ? { authorizeUrl } : {}),
+    ...(partialResults ? { partialResults: true as const } : {}),
+    ...(organizationIds && organizationIds.length > 0
+      ? { organizationIds }
+      : {}),
+  };
+}
+
+function partialSsoWarning(
+  headers: GithubResponseHeaders | undefined,
+): AuthStatusResult["warning"] | undefined {
+  const details = parseSsoHeader(githubHeader(headers, "x-github-sso"));
+  if (!details?.partialResults) return undefined;
+  return {
+    code: "GITHUB_SSO_REQUIRED",
+    context: details,
+  };
+}
+
+/** Only an explicit credential rejection is destructive. A 403 is normally a
+ *  capability, policy, SSO, installation, or rate-limit response and must
+ *  never sign the user out. GitHub has returned "Bad credentials" as a 403 in
+ *  some edge paths, so retain that narrow message-based exception. */
+function isCredentialInvalid(err: unknown): boolean {
+  const status = githubStatus(err);
+  if (status === 401) return true;
+  if (status !== 403) return false;
+  return /bad credentials|token.{0,40}(?:expired|revoked)/i.test(
+    githubApiMessage(err) ?? "",
+  );
+}
+
+function classifyGithubError(err: unknown): GithubErrorClassification | null {
+  const status = githubStatus(err);
+  const headers = githubHeaders(err);
+  const apiMessage = githubApiMessage(err) ?? "";
+  const rateLimitRemaining = Number(
+    githubHeader(headers, "x-ratelimit-remaining"),
+  );
+  const rateLimitResetSeconds = Number(
+    githubHeader(headers, "x-ratelimit-reset"),
+  );
+  const retryAfterSeconds = Number(githubHeader(headers, "retry-after"));
+
+  if (isCredentialInvalid(err)) {
+    return {
+      code: "NOT_AUTHENTICATED",
+      message: "GitHub no longer accepts this connection.",
+      remediation: "Reconnect GitHub in Settings → Integrations.",
+    };
+  }
+
+  if (
+    status === 429 ||
+    rateLimitRemaining === 0 ||
+    Number.isFinite(retryAfterSeconds) ||
+    /(?:secondary |api )?rate limit/i.test(apiMessage)
+  ) {
+    return {
+      code: "GITHUB_RATE_LIMITED",
+      message: "GitHub is temporarily rate-limiting requests.",
+      remediation: "Wait for GitHub's limit to reset, then try again.",
+      context: {
+        ...(Number.isFinite(rateLimitRemaining) ? { rateLimitRemaining } : {}),
+        ...(Number.isFinite(rateLimitResetSeconds)
+          ? {
+              rateLimitResetAt: new Date(
+                rateLimitResetSeconds * 1000,
+              ).toISOString(),
+            }
+          : {}),
+        ...(Number.isFinite(retryAfterSeconds) ? { retryAfterSeconds } : {}),
+      },
+    };
+  }
+
+  const sso = parseSsoHeader(githubHeader(headers, "x-github-sso"));
+  if (sso || /saml|single sign-on|\bsso\b/i.test(apiMessage)) {
+    return {
+      code: "GITHUB_SSO_REQUIRED",
+      message: "GitHub requires organization sign-in for this connection.",
+      remediation: sso?.authorizeUrl
+        ? "Authorize this connection with your organization on GitHub."
+        : "Sign in to your organization on GitHub, then reconnect.",
+      context: sso ?? undefined,
+    };
+  }
+
+  if (
+    /installation.{0,40}suspend|suspend.{0,40}installation/i.test(apiMessage)
+  ) {
+    return {
+      code: "GITHUB_INSTALLATION_SUSPENDED",
+      message: "This GitHub App installation is suspended.",
+      remediation:
+        "Ask the account owner who suspended the installation to restore it on GitHub.",
+    };
+  }
+
+  if (status === 404) {
+    return {
+      code: "GITHUB_REPO_NOT_INSTALLED",
+      message:
+        "This repository or GitHub resource is not available to the selected connection.",
+      remediation:
+        "Grant the GitHub connection access to this repository, or verify that the remote still points to the right repository.",
+    };
+  }
+
+  if (
+    status === 403 &&
+    /resource not accessible|insufficient permission|permission/i.test(
+      apiMessage,
+    )
+  ) {
+    const acceptedPermissions = parseAcceptedPermissions(
+      githubHeader(headers, "x-accepted-github-permissions"),
+    );
+    return {
+      code: "GITHUB_FORBIDDEN_SCOPE",
+      message: "This GitHub connection does not have access to that action.",
+      remediation:
+        "Update the connection's repository permissions on GitHub, then try again.",
+      context: acceptedPermissions ? { acceptedPermissions } : undefined,
+    };
+  }
+
+  return null;
 }
 
 function isNetworkError(err: unknown): boolean {
@@ -403,11 +704,12 @@ function isNetworkError(err: unknown): boolean {
   return /network|fetch|getaddrinfo/i.test(msg);
 }
 
-/** Pull GitHub's own descriptive message out of an Octokit error. Octokit's
+/** Pull GitHub's descriptive message out of an Octokit error for internal
+ * classification only. Octokit's
  *  RequestError exposes the API message on `.response.data.message` plus a
  *  per-field `errors[]` array (e.g. the 422 "No commits between …" detail).
- *  We surface that instead of a static fallback so the user sees WHY the call
- *  failed. The message is GitHub's, not user content — safe to show. */
+ *  Those strings can contain repository and branch names, so they must never
+ *  be forwarded as renderer copy or analytics. */
 function githubApiMessage(err: unknown): string | undefined {
   if (!err || typeof err !== "object") return undefined;
   const e = err as {
@@ -426,12 +728,15 @@ function githubApiMessage(err: unknown): string | undefined {
 }
 
 function wrapApiError(err: unknown, fallbackMessage: string): GitError {
-  if (isAuthError(err)) {
+  if (isGitError(err)) return err;
+  const classified = classifyGithubError(err);
+  if (classified) {
     return new GitError({
-      code: "NOT_AUTHENTICATED",
-      message: "GitHub rejected the request (401/403). Re-authenticate.",
+      code: classified.code,
+      message: classified.message,
       cause: err,
-      remediation: "Call gh_auth_signin to refresh the token.",
+      remediation: classified.remediation,
+      context: classified.context,
     });
   }
   if (isNetworkError(err)) {
@@ -441,40 +746,44 @@ function wrapApiError(err: unknown, fallbackMessage: string): GitError {
       cause: err,
     });
   }
-  // 4xx (esp. 422 Unprocessable) — surface GitHub's own message + a tailored
-  // remediation instead of the opaque "GitHub API call failed". These are the
-  // common Create-PR failures (branch not pushed, no commits, PR exists, draft
-  // unsupported); without this they all collapse to one unhelpful string.
+  // 4xx (esp. 422 Unprocessable) — classify GitHub's message into fixed,
+  // metadata-only copy. The raw message can carry repository and branch names.
   const status = (err as { status?: number }).status;
   if (typeof status === "number" && status >= 400 && status < 500) {
     const ghMsg = githubApiMessage(err);
     const lower = (ghMsg ?? "").toLowerCase();
+    let message = fallbackMessage;
     let remediation: string | undefined;
+    let context: Record<string, unknown> | undefined;
     if (/no commits between/.test(lower)) {
+      message = "This branch has no commits beyond its base.";
       remediation =
         "The branch has no commits beyond its base. Commit your work, then open the PR.";
     } else if (/already exist|pull request.*exists/.test(lower)) {
+      message = "A pull request already exists for this branch.";
       remediation =
         "A pull request already exists for this branch — open it instead.";
     } else if (
       /draft/.test(lower) &&
       /(not|cannot|unsupported|isn't)/.test(lower)
     ) {
+      message = "Draft pull requests aren't available for this repository.";
       remediation =
         "This repository or plan doesn't support draft pull requests — create a normal PR instead.";
-    } else if (
-      /not found|head.*could not|no ref|sha.*can.?t be found/.test(lower)
-    ) {
+      context = { reason: "draft-unsupported" };
+    } else if (/head.*could not|no ref|sha.*can.?t be found/.test(lower)) {
+      message = "GitHub couldn't find the pushed branch.";
       remediation = "Push the branch to the remote first, then open the PR.";
     } else if (status === 422) {
+      message = "GitHub couldn't process this pull request.";
       remediation =
         "GitHub couldn't process the request — check the branch is pushed and the base/head refs are valid.";
     }
     return new GitError({
       code: "GITHUB_API_ERROR",
-      message: ghMsg ? `GitHub: ${ghMsg}` : fallbackMessage,
-      cause: err,
+      message,
       remediation,
+      context,
     });
   }
   return new GitError({
@@ -484,22 +793,51 @@ function wrapApiError(err: unknown, fallbackMessage: string): GitError {
   });
 }
 
-/** Wrap any Octokit call with a one-shot 401 retry: if the first call
- *  returns 401, we clear the cached token + Octokit instance, then run
- *  the function again. The retry is opt-in (caller chooses) — most
- *  callers prefer the explicit re-sign-in flow instead. */
+/** Wrap an Octokit call with a one-shot credential retry. A first 401 can be
+ *  transient on GitHub's side, so rebuild the client from the still-stored
+ *  token and try once more. Only a second explicit credential rejection may
+ *  clear the durable credential. */
 async function withAuthRetry<T>(
   fn: (octokit: OctokitClass) => Promise<T>,
 ): Promise<T> {
   const oct = await getOctokit();
+  const rejectedToken = cachedOctokitToken;
   try {
     return await fn(oct);
   } catch (err) {
-    if (isAuthError(err)) {
-      clearOctokitCache();
-      await tokenStore.clear();
+    if (!isCredentialInvalid(err)) {
+      throw wrapApiError(err, "GitHub API call failed");
     }
-    throw wrapApiError(err, "GitHub API call failed");
+
+    const replacement =
+      rejectedToken && tokenStore.refreshAfterRejection
+        ? await tokenStore
+            .refreshAfterRejection(rejectedToken)
+            .catch(() => null)
+        : undefined;
+    clearOctokitCache();
+    // A rotating credential owner handled this rejection but could not safely
+    // provide a replacement. Preserve its durable state and surface the
+    // original rejection instead of clearing or immediately reusing it.
+    if (replacement === null) {
+      throw wrapApiError(err, "GitHub API call failed");
+    }
+    let retryToken: string | null = null;
+    try {
+      const retryOctokit = await getOctokit();
+      retryToken = cachedOctokitToken;
+      return await fn(retryOctokit);
+    } catch (retryErr) {
+      if (isCredentialInvalid(retryErr)) {
+        clearOctokitCache();
+        if (retryToken && tokenStore.clearAfterRejection) {
+          await tokenStore.clearAfterRejection(retryToken);
+        } else if (retryToken && (await tokenStore.get()) === retryToken) {
+          await tokenStore.clear();
+        }
+      }
+      throw wrapApiError(retryErr, "GitHub API call failed");
+    }
   }
 }
 
@@ -517,25 +855,44 @@ export function parseGitHubRemote(originUrl: string): {
   let host = "";
   let rawPath = "";
 
-  // scp-like SSH: git@github.com:owner/repo.git
-  const scpMatch = input.match(/^[^@/\s]+@([^:/\s]+):(.+)$/);
+  // scp-like SSH: git@github.com:owner/repo.git or the valid userless form
+  // github.com:owner/repo.git.
+  const scpMatch = input.includes("://")
+    ? null
+    : input.match(/^(?:[^@/:\s]+@)?([^:/\s]+):(.+)$/);
   if (scpMatch) {
     host = scpMatch[1];
     rawPath = scpMatch[2];
   } else {
+    let url: URL;
     try {
-      const url = new URL(input);
-      if (!["http:", "https:", "ssh:", "git:"].includes(url.protocol)) {
-        throw new Error("unsupported protocol");
-      }
-      host = url.hostname;
-      rawPath = url.pathname;
+      url = new URL(input);
     } catch {
       throw new GitError({
         code: "VALIDATION_FAILED",
-        message: `Origin URL "${originUrl}" doesn't look like a github.com remote`,
+        message: "The configured remote is not a valid GitHub URL.",
       });
     }
+    if (!["http:", "https:", "ssh:", "git:"].includes(url.protocol)) {
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message: "The configured remote uses an unsupported Git protocol.",
+      });
+    }
+    // A password in the URL is a real bypass of the selected method. A bare
+    // username is not — `https://alice@github.com/o/r.git` is a widespread
+    // legacy remote that carries no secret, and refusing it made every GitHub
+    // API operation (including Create PR) fail on those repositories.
+    if (url.password) {
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message:
+          "The configured GitHub remote contains an embedded credential.",
+        remediation: "Remove the password from the remote URL, then try again.",
+      });
+    }
+    host = url.hostname;
+    rawPath = url.pathname;
   }
 
   const normalizedHost = host.toLowerCase().replace(/\.$/, "");
@@ -546,7 +903,7 @@ export function parseGitHubRemote(originUrl: string): {
   ) {
     throw new GitError({
       code: "VALIDATION_FAILED",
-      message: `Origin URL "${originUrl}" doesn't look like a github.com remote`,
+      message: "The configured remote does not point to github.com.",
     });
   }
 
@@ -557,7 +914,8 @@ export function parseGitHubRemote(originUrl: string): {
   if (parts.length !== 2) {
     throw new GitError({
       code: "VALIDATION_FAILED",
-      message: `Could not parse owner/repo from "${originUrl}"`,
+      message:
+        "Could not parse an owner and repository from the GitHub remote.",
     });
   }
 
@@ -569,13 +927,15 @@ export function parseGitHubRemote(originUrl: string): {
   } catch {
     throw new GitError({
       code: "VALIDATION_FAILED",
-      message: `Could not parse owner/repo from "${originUrl}"`,
+      message:
+        "Could not parse an owner and repository from the GitHub remote.",
     });
   }
   if (!owner || !repo || /[/\\]/.test(owner) || /[/\\]/.test(repo)) {
     throw new GitError({
       code: "VALIDATION_FAILED",
-      message: `Could not parse owner/repo from "${originUrl}"`,
+      message:
+        "Could not parse an owner and repository from the GitHub remote.",
     });
   }
   return { owner, repo };
@@ -713,10 +1073,16 @@ export interface CreatePrOptions {
 
 /** Does this error indicate the repo/plan rejects DRAFT pull requests? GitHub
  *  returns a 422 ("Draft pull requests are not supported …"). Matches both the
- *  raw Octokit error and our wrapped GitError (which now carries GitHub's
- *  message). Used to retry once as a normal PR rather than fail outright. */
+ *  raw Octokit error and our fixed-copy wrapped GitError. Used to retry once
+ *  as a normal PR rather than fail outright. */
 function isDraftUnsupported(err: unknown): boolean {
-  const e = err as { status?: number; code?: string; message?: string };
+  const e = err as {
+    status?: number;
+    code?: string;
+    message?: string;
+    context?: { reason?: unknown };
+  };
+  if (e?.context?.reason === "draft-unsupported") return true;
   const msg = (e?.message ?? "").toLowerCase();
   const looksLikeApi = e?.status === 422 || e?.code === "GITHUB_API_ERROR";
   return (
@@ -1063,23 +1429,75 @@ export async function publishRepoToGithub(
     name?: string;
   };
   const originUrl = data.clone_url ?? "";
+  const createdOwner = data.owner?.login ?? opts.owner ?? authedLogin;
+  const createdRepo = data.name ?? name;
 
-  // 3. Wire `origin` + push the current branch (set upstream). `remote add`
-  //    fails if origin already exists (remoteless re-publish) → fall back to
-  //    set-url. The push uses the user's git credentials (gh), like every other
-  //    push in the app.
+  // 3. Wire the repository's configured remote + push the current branch (set
+  //    upstream). Capture the old URL so this multi-system mutation can roll
+  //    back both sides if transport fails: leaving a newly-created but empty
+  //    GitHub repository (and a local remote pointing at it) makes retrying
+  //    impossible without manual cleanup.
+  const { remote } = resolveRepoGit(repoRoot);
+  assertSafeGitRef(remote, "publish.remote");
+  let previousRemoteUrl: string | null = null;
   try {
-    await runGit(repoRoot, ["remote", "add", "origin", originUrl]);
+    previousRemoteUrl = (
+      await runGit(repoRoot, ["remote", "get-url", remote])
+    ).stdout.trim();
   } catch {
-    await runGit(repoRoot, ["remote", "set-url", "origin", originUrl]);
+    /* no configured remote yet */
   }
-  await runGit(repoRoot, ["push", "-u", "origin", branch]);
+  let remoteMutated = false;
+  try {
+    if (!originUrl) {
+      throw new GitError({
+        code: "GITHUB_API_ERROR",
+        message: "GitHub did not return a clone URL for the new repository",
+      });
+    }
+    if (previousRemoteUrl !== null) {
+      await runGit(repoRoot, ["remote", "set-url", remote, originUrl]);
+    } else {
+      await runGit(repoRoot, ["remote", "add", remote, originUrl]);
+    }
+    remoteMutated = true;
+    await runGit(repoRoot, ["push", "-u", remote, branch], {
+      timeoutMs: 60_000,
+      mapErrorCode: (stderr) =>
+        classifyGitTransportError(stderr) ?? "GIT_COMMAND_FAILED",
+    });
+  } catch (error) {
+    // Best-effort compensation, ordered so a partial rollback cannot strand the
+    // user. Deleting the repository needs `delete_repo` / `Administration:
+    // write`, which none of the selectable methods requests (`gh auth login`
+    // grants repo, read:org, gist, workflow), so this DELETE commonly 403s.
+    // Unwiring the local remote anyway would leave an orphan repo on GitHub AND
+    // no remote locally — worse than doing nothing, because the name is now
+    // taken and there is no remote left to retry the push against. Roll the
+    // remote back only once the repository is confirmed gone.
+    const deleted = await withAuthRetry((oct) =>
+      oct.repos.delete({ owner: createdOwner, repo: createdRepo }),
+    ).then(
+      () => true,
+      () => false,
+    );
+    if (deleted && remoteMutated) {
+      await (
+        previousRemoteUrl === null
+          ? runGit(repoRoot, ["remote", "remove", remote])
+          : runGit(repoRoot, ["remote", "set-url", remote, previousRemoteUrl])
+      ).catch(() => {
+        // Preserve the primary push/configuration error below.
+      });
+    }
+    throw error;
+  }
 
   return {
     originUrl,
     htmlUrl: data.html_url ?? "",
-    owner: data.owner?.login ?? opts.owner ?? authedLogin,
-    repo: data.name ?? name,
+    owner: createdOwner,
+    repo: createdRepo,
   };
 }
 

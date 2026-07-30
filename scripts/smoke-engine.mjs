@@ -196,7 +196,7 @@ async function smokeWorkspaceLifecycle({ port, token, root }) {
         type: "CONNECTED",
         source: "client",
         capabilities: [],
-        protocolVersion: 2,
+        protocolVersion: 3,
       });
       readyResolve();
       return;
@@ -353,7 +353,6 @@ const child = spawn(
       ZEROS_USER_SETTINGS_DIR: join(sandbox, "settings"),
       ZEROS_LOCAL_WS_TOKEN: localToken,
       ZEROS_REQUIRE_ACCOUNT: "0",
-      ZEROS_GITHUB_TOKEN: "packaged-smoke-placeholder",
     },
   },
 );

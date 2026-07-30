@@ -30,20 +30,48 @@ import {
   type PrTimelineItem,
 } from "../../native/git";
 
-export type ReviewMergeMethod = "squash" | "merge" | "rebase";
+export type ForgeFamily =
+  | "github"
+  | "gitlab"
+  | "bitbucket-cloud"
+  | "bitbucket-server";
+
+/** Provider-defined identifier. Its vocabulary is intentionally not a shared
+ * union: GitLab exposes a project policy and Bitbucket has no rebase method. */
+export type ReviewMergeMethod = string;
+
+export interface ReviewMergeMethodOption {
+  id: ReviewMergeMethod;
+  label: string;
+}
 
 /** Identifies one reviewable unit (a PR / MR) inside a workspace. */
 export interface ReviewTarget {
   workspaceId: string;
-  prNumber: number;
+  /** Canonical provider instance host, so a target can never be silently sent
+   * through the wrong adapter. */
+  hostOrigin: string;
+  /** Number shown in the provider's web URL. For GitLab this is the project-
+   * scoped iid, never the instance-global id. */
+  reviewRef: string;
+}
+
+export interface ReviewProviderCapabilities {
+  reviewNoun: "pull request" | "merge request";
+  /** Repository-effective options; UI renders this list rather than assuming
+   * GitHub's three merge strategies. */
+  mergeMethods: readonly ReviewMergeMethodOption[];
 }
 
 export interface ReviewProvider {
-  /** Stable id — persisted nowhere yet, but lets the UI label provider-
-   *  specific affordances ("Open on GitHub") without sniffing URLs. */
-  id: "github" | "gitlab" | "bitbucket";
+  family: ForgeFamily;
+  /** Canonical hostname for this adapter instance. */
+  hostOrigin: string;
+  /** Exact-key cache partition, including the provider instance. */
+  cacheKey: string;
   /** Human label for the external host ("GitHub"). */
   hostLabel: string;
+  capabilities: ReviewProviderCapabilities;
   authStatus(): Promise<AuthStatusResult>;
   getPr(target: ReviewTarget): Promise<PR>;
   getChecks(target: ReviewTarget): Promise<PrChecksResult>;
@@ -58,23 +86,66 @@ export interface ReviewProvider {
   markReady(target: ReviewTarget): Promise<PR>;
 }
 
+function githubPrNumber(target: ReviewTarget): number {
+  if (target.hostOrigin !== "github.com" || !/^[1-9]\d*$/.test(target.reviewRef)) {
+    throw new Error("Invalid GitHub review target");
+  }
+  const prNumber = Number(target.reviewRef);
+  if (!Number.isSafeInteger(prNumber)) {
+    throw new Error("Invalid GitHub pull request number");
+  }
+  return prNumber;
+}
+
+function githubArgs(target: ReviewTarget): {
+  workspaceId: string;
+  prNumber: number;
+} {
+  return {
+    workspaceId: target.workspaceId,
+    prNumber: githubPrNumber(target),
+  };
+}
+
 const githubProvider: ReviewProvider = {
-  id: "github",
+  family: "github",
+  hostOrigin: "github.com",
+  cacheKey: "github:github.com",
   hostLabel: "GitHub",
+  capabilities: {
+    reviewNoun: "pull request",
+    mergeMethods: [
+      { id: "squash", label: "Squash & merge" },
+      { id: "merge", label: "Merge" },
+      { id: "rebase", label: "Rebase & merge" },
+    ],
+  },
   authStatus: () => ghAuthStatus(),
-  getPr: (t) => ghPrGet(t),
-  getChecks: (t) => ghPrChecks(t),
-  getCommits: (t) => ghPrCommits(t),
-  getTimeline: (t) => ghPrReviews(t),
-  addComment: (t, body) => ghPrComment({ ...t, body }),
-  merge: (t, method) => ghPrMerge({ ...t, method }),
-  markReady: (t) => ghPrMarkReady(t),
+  getPr: (target) => ghPrGet(githubArgs(target)),
+  getChecks: (target) => ghPrChecks(githubArgs(target)),
+  getCommits: (target) => ghPrCommits(githubArgs(target)),
+  getTimeline: (target) => ghPrReviews(githubArgs(target)),
+  addComment: (target, body) =>
+    ghPrComment({ ...githubArgs(target), body }),
+  merge: (target, method) => {
+    if (method !== "squash" && method !== "merge" && method !== "rebase") {
+      throw new Error(`Unsupported GitHub merge method: ${method}`);
+    }
+    return ghPrMerge({ ...githubArgs(target), method });
+  },
+  markReady: (target) => ghPrMarkReady(githubArgs(target)),
 };
 
-/** Pick the provider for a workspace. GitHub is the only host wired today;
- *  when GitLab/Bitbucket land this switches on the workspace's origin host
- *  (available via the workspace row / originUrl) — callers already pass
- *  through here, so they won't change. */
-export function resolveReviewProvider(_originHost?: string | null): ReviewProvider {
-  return githubProvider;
+/** Pick the provider for an explicit workspace origin host. Unsupported hosts
+ * return null; they must never fall through to GitHub with misleading auth UI
+ * or API traffic. */
+export function resolveReviewProvider(
+  originHost: string | null | undefined,
+): ReviewProvider | null {
+  const host = originHost?.trim().toLowerCase().replace(/\.$/, "") ?? "";
+  return host === "github.com" ||
+    host === "www.github.com" ||
+    host === "ssh.github.com"
+    ? githubProvider
+    : null;
 }

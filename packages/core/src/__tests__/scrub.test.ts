@@ -33,6 +33,32 @@ describe("redactSensitive", () => {
     expect(redactSensitive(`key ${fakeApiKey}`)).toContain("[redacted]");
   });
 
+  it("redacts a dotted GitHub App token as one credential", () => {
+    const installationToken =
+      "ghs_" + "2".repeat(8) + "." + "C".repeat(64) + "." + "D".repeat(64);
+    expect(redactSensitive(`token ${installationToken} failed`)).toBe(
+      "token [redacted] failed",
+    );
+  });
+
+  it("redacts a GitHub App token with an app-id underscore", () => {
+    const installationToken =
+      "ghs_1234567_" +
+      "eyJhbGciOiJSUzI1NiJ9." +
+      "eyJpc3MiOiIxMjM0NTY3In0." +
+      "signature0123456789";
+    expect(redactSensitive(`token ${installationToken} failed`)).toBe(
+      "token [redacted] failed",
+    );
+  });
+
+  it("redacts the signed GitHub refresh-owner binding", () => {
+    const binding = `zghrb_v1.${"a".repeat(43)}.${"b".repeat(43)}`;
+    expect(redactSensitive(`binding ${binding} failed`)).toBe(
+      "binding [redacted] failed",
+    );
+  });
+
   it("redacts email addresses (PII — analytics is anonymous)", () => {
     expect(redactSensitive("user alice@example.com not found")).toBe(
       "user [email] not found",

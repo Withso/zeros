@@ -227,6 +227,8 @@ jobs:
         run: pnpm smoke:engine
 
       - name: Compile Electron main + preload (bakes channel=beta)
+        env:
+          VITE_CONTROL_PLANE_URL: ${{ secrets.VITE_CONTROL_PLANE_URL }}
         run: pnpm electron:compile
 
       - name: Build Vite renderer

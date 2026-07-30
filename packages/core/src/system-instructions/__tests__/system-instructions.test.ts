@@ -15,6 +15,7 @@ describe("buildWorkspacePreamble", () => {
     expect(out).toContain("/ws/foo");
     expect(out).toContain("origin/dev");
     expect(out).toContain("git diff origin/dev...");
+    expect(out).not.toContain("gh pr");
     expect(out).not.toContain("{WORKSPACE_DIR}");
     expect(out).not.toContain("{TARGET_BRANCH}");
   });

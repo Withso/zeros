@@ -5,7 +5,13 @@
 
 import { execFile, type ExecFileException } from "node:child_process";
 import { promisify } from "node:util";
+import { redactSensitive } from "@zeros/core/scrub";
 import { GitError, type GitErrorCode } from "./errors";
+import {
+  prepareGitCredentialInvocation,
+  refreshGitCredentialAfterAuthenticationFailure,
+  type GitCredentialRequest,
+} from "./credential-broker";
 
 const execFileAsync = promisify(execFile);
 
@@ -237,6 +243,270 @@ export interface RunGitResult {
   expectedError?: ExpectedCategory;
 }
 
+/** Classify the transport failures emitted by Git/curl/ssh across push, fetch,
+ * pull, and clone. Keeping this in one place prevents each call site from
+ * recognizing a different subset of Git's platform-dependent wording. */
+export function classifyGitTransportError(
+  stderr: string,
+): GitErrorCode | undefined {
+  if (
+    // "told us to quit" is the broker's own fail-closed signal: Zeros owns this
+    // host but the selected method has no usable credential yet. That IS an
+    // authentication outcome — it must reach the reconnect UI and the one-shot
+    // rotation retry below, not fall through as a generic command failure.
+    //
+    // `Repository not found` belongs here too: GitHub deliberately answers a
+    // revoked token, or a repo outside the GitHub App's installation, with a
+    // 404-shaped "not found" rather than a 403, so this is the MOST common way
+    // an auth failure actually presents. Without it the reconnect affordance and
+    // the rotation retry were both lost to a bare GIT_COMMAND_FAILED.
+    //
+    // The status-code and permission alternatives are anchored to the phrasing
+    // git/curl actually emit. A bare `permission denied` matched local
+    // filesystem errors ("unable to unlink old 'x': Permission denied"), and a
+    // bare `\b403\b` matched any object path or byte count containing 403 —
+    // both then told the user to reconnect GitHub and, worse, triggered a
+    // GitHub App refresh-token rotation for a non-auth failure.
+    /not authenticated|authentication failed|invalid username or password|could not read (?:username|password)|terminal prompts disabled|told us to quit|http basic: access denied|permission denied \((?:publickey|password)|remote: (?:permission|write access) (?:denied|to repository not granted)|remote: repository not found|repository '[^']*' not found|(?:requested url returned error|the requested url returned error): (?:401|403)\b/i.test(
+      stderr,
+    )
+  ) {
+    return "NOT_AUTHENTICATED";
+  }
+  if (
+    // TLS/proxy/transport breakage is a network outcome, not a mystery command
+    // failure: "you may be offline" is the honest thing to tell the user.
+    /could not resolve host|network is unreachable|failed to connect|connection (?:refused|reset)|operation timed out|connection timed out|couldn't connect to server|server certificate verification failed|ssl (?:certificate problem|connect error)|gnutls_handshake|early eof|rpc failed|(?:requested url returned error): (?:50\d|429)\b|proxy connect aborted|unexpected disconnect while reading sideband/i.test(
+      stderr,
+    )
+  ) {
+    return "NETWORK_ERROR";
+  }
+  return undefined;
+}
+
+const NETWORK_GIT_COMMANDS = new Set([
+  "clone",
+  "fetch",
+  "ls-remote",
+  "pull",
+  "push",
+]);
+
+/** Options whose value is the next argv entry. Git accepts a large option
+ * surface for network commands; treating every non-flag as the remote mistakes
+ * values such as the `1` in `fetch --depth 1 origin` for a repository. Keep the
+ * parsing deliberately command-scoped and let `--option=value` remain one
+ * self-contained flag. */
+const NETWORK_OPTIONS_WITH_VALUE: Readonly<
+  Record<string, ReadonlySet<string>>
+> = {
+  clone: new Set([
+    "-b",
+    "--branch",
+    "-c",
+    "--config",
+    "--depth",
+    "--filter",
+    "-j",
+    "--jobs",
+    "-o",
+    "--origin",
+    "--reference",
+    "--reference-if-able",
+    "--revision",
+    "--separate-git-dir",
+    "--server-option",
+    "--shallow-exclude",
+    "--shallow-since",
+    "--template",
+    "-u",
+    "--upload-pack",
+  ]),
+  fetch: new Set([
+    "--deepen",
+    "--depth",
+    "--filter",
+    "-j",
+    "--jobs",
+    "--negotiation-tip",
+    "--refmap",
+    "--recurse-submodules",
+    "--server-option",
+    "--shallow-exclude",
+    "--shallow-since",
+    "--upload-pack",
+  ]),
+  "ls-remote": new Set(["--server-option", "--sort", "--upload-pack"]),
+  pull: new Set([
+    "--deepen",
+    "--depth",
+    "--filter",
+    "-j",
+    "--jobs",
+    "--negotiation-tip",
+    "--refmap",
+    "--recurse-submodules",
+    "-s",
+    "--server-option",
+    "--shallow-exclude",
+    "--shallow-since",
+    "--strategy",
+    "--strategy-option",
+    "--upload-pack",
+    "-X",
+  ]),
+  push: new Set(["--exec", "-o", "--push-option", "--receive-pack", "--repo"]),
+};
+
+/** Git's own global options that consume the following argv entry. Needed to
+ * find the SUBCOMMAND position, which is the only place a network command can
+ * appear. */
+const GIT_GLOBAL_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set([
+  "-C",
+  "-c",
+  "--config-env",
+  "--exec-path",
+  "--git-dir",
+  "--namespace",
+  "--work-tree",
+]);
+
+/** Index of the git SUBCOMMAND, or -1 when argv has none. Matching anywhere in
+ * argv would mistake an argument that merely happens to read like a command —
+ * `stash push`'s subcommand, or a `-m` message — for a network operation, which
+ * then resolves that value as a remote. */
+function subcommandIndex(args: string[]): number {
+  for (let i = 0; i < args.length; i += 1) {
+    const value = args[i];
+    if (!value) continue;
+    if (GIT_GLOBAL_OPTIONS_WITH_VALUE.has(value)) {
+      i += 1;
+      continue;
+    }
+    if (value.startsWith("-")) continue;
+    return i;
+  }
+  return -1;
+}
+
+function firstNetworkRemote(
+  args: string[],
+  commandIndex: number,
+  command: string,
+): string | null {
+  const optionsWithValue = NETWORK_OPTIONS_WITH_VALUE[command] ?? new Set();
+  for (let i = commandIndex + 1; i < args.length; i += 1) {
+    const value = args[i];
+    if (!value) continue;
+    if (value === "--") {
+      return args[i + 1] ?? null;
+    }
+    // `git push --repo <repository>` carries the target in an option rather
+    // than a positional. Its long `--repo=<repository>` spelling does too.
+    if (command === "push" && value.startsWith("--repo=")) {
+      return value.slice("--repo=".length) || null;
+    }
+    if (optionsWithValue.has(value)) {
+      const optionValue = args[i + 1];
+      if (command === "push" && value === "--repo") {
+        return optionValue ?? null;
+      }
+      i += 1;
+      continue;
+    }
+    if (value.startsWith("-")) continue;
+    return value;
+  }
+  return null;
+}
+
+function parseHttpRemote(value: string): URL | null {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" || parsed.protocol === "http:"
+      ? parsed
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function networkCredentialRequest(
+  cwd: string,
+  args: string[],
+): Promise<{
+  network: boolean;
+  request: GitCredentialRequest | null;
+  hasEmbeddedCredential: boolean;
+}> {
+  const candidateIndex = subcommandIndex(args);
+  const commandIndex =
+    candidateIndex >= 0 && NETWORK_GIT_COMMANDS.has(args[candidateIndex]!)
+      ? candidateIndex
+      : -1;
+  if (commandIndex < 0) {
+    return {
+      network: false,
+      request: null,
+      hasEmbeddedCredential: false,
+    };
+  }
+  const command = args[commandIndex];
+  let target = firstNetworkRemote(args, commandIndex, command);
+  if (!target) {
+    return {
+      network: true,
+      request: null,
+      hasEmbeddedCredential: false,
+    };
+  }
+
+  // clone takes a URL directly. Other network commands generally take a
+  // configured remote name; resolve it without crossing the broker seam.
+  if (command !== "clone" && !parseHttpRemote(target)) {
+    try {
+      const resolved = await runFile(
+        "git",
+        ["-C", cwd, "remote", "get-url", target],
+        { timeoutMs: 5_000 },
+      );
+      target = resolved.stdout.trim();
+    } catch {
+      return {
+        network: true,
+        request: null,
+        hasEmbeddedCredential: false,
+      };
+    }
+  }
+
+  const parsed = parseHttpRemote(target);
+  if (!parsed) {
+    return {
+      network: true,
+      request: null,
+      hasEmbeddedCredential: false,
+    };
+  }
+  const protocol = parsed.protocol.slice(0, -1) as "http" | "https";
+  return {
+    network: true,
+    // Only a PASSWORD in the URL can bypass the selected method. A bare
+    // `https://alice@github.com/o/r.git` — the common legacy form git itself
+    // handles fine — carries no secret: git asks for the password, and the
+    // broker answers with the selected credential. Rejecting it made push,
+    // fetch, ls-remote, and Create PR all fail on those repositories.
+    hasEmbeddedCredential: Boolean(parsed.password),
+    request: {
+      contextId: `cwd:${cwd}`,
+      protocol,
+      host: parsed.hostname.toLowerCase(),
+      authority: parsed.host.toLowerCase(),
+    },
+  };
+}
+
 /** Backoff (ms) before each retry when a git op fails purely because a
  *  concurrent git process holds a lock. Now that "Local main" is an editable
  *  workspace like any worktree, multiple agents can run in the SAME checkout
@@ -282,15 +552,62 @@ export async function runGit(
       message: `git ${args.join(" ")}: refusing to run with an empty cwd`,
     });
   }
-  for (let attempt = 0; ; attempt++) {
+  const networkTarget = await networkCredentialRequest(cwd, args);
+  const credentialInvocation = networkTarget.request
+    ? await prepareGitCredentialInvocation(networkTarget.request)
+    : null;
+  if (credentialInvocation && networkTarget.hasEmbeddedCredential) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message:
+        "This remote contains an embedded password that would bypass the selected authentication method.",
+      remediation: "Remove the password from the remote URL, then try again.",
+    });
+  }
+  const childArgs = credentialInvocation
+    ? [...credentialInvocation.gitConfigArgs, ...args]
+    : args;
+  const controlledEnv: Record<string, string | undefined> = {
+    ...(networkTarget.network ? { GIT_TERMINAL_PROMPT: "0" } : {}),
+    ...credentialInvocation?.env,
+  };
+  const hasControlledEnv = Object.keys(controlledEnv).length > 0;
+  let lockAttempt = 0;
+  let retriedAuthentication = false;
+  for (;;) {
     try {
-      return await runFile("git", args, {
+      const result = await runFile("git", childArgs, {
         cwd,
         maxBufferBytes: opts.maxBufferBytes,
         timeoutMs: opts.timeoutMs,
-        ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}),
+        ...(opts.env || hasControlledEnv
+          ? {
+              env: {
+                ...process.env,
+                ...opts.env,
+                // Engine-owned auth variables win over any caller-supplied
+                // value. Repository/settings env can never redirect the helper.
+                ...controlledEnv,
+              },
+            }
+          : {}),
         input: opts.input,
       });
+      // Some remote helpers have returned exit 0 after their child transport
+      // printed a fatal authentication error. Never turn that into a successful
+      // push/fetch merely because the wrapper process lost the exit status.
+      if (
+        networkTarget.network &&
+        (/^fatal:/im.test(result.stderr) ||
+          /^error: failed to (?:push|fetch) /im.test(result.stderr))
+      ) {
+        throw Object.assign(new Error("git transport failed"), {
+          code: 1,
+          stdout: result.stdout,
+          stderr: result.stderr,
+        });
+      }
+      return result;
     } catch (err) {
       const e = err as ExecFileException & { stdout?: string; stderr?: string };
       const stderr = String(e.stderr ?? "");
@@ -301,10 +618,30 @@ export async function runGit(
       // expected-error / mapErrorCode handling so a lock blip never surfaces.
       if (
         isGitLockContention(stderr) &&
-        attempt < GIT_LOCK_RETRY_BACKOFF_MS.length
+        lockAttempt < GIT_LOCK_RETRY_BACKOFF_MS.length
       ) {
-        await sleep(GIT_LOCK_RETRY_BACKOFF_MS[attempt]);
+        await sleep(GIT_LOCK_RETRY_BACKOFF_MS[lockAttempt]);
+        lockAttempt += 1;
         continue;
+      }
+      // A rejected HTTPS credential means the remote did not authorize the
+      // operation, so retrying once after a token rotation cannot duplicate a
+      // successful mutation. The broker fetches the replacement lazily; no
+      // token is placed in this process's arguments or environment.
+      if (
+        credentialInvocation &&
+        !retriedAuthentication &&
+        classifyGitTransportError(stderr) === "NOT_AUTHENTICATED"
+      ) {
+        retriedAuthentication = true;
+        if (
+          await refreshGitCredentialAfterAuthenticationFailure(
+            credentialInvocation,
+          )
+        ) {
+          lockAttempt = 0;
+          continue;
+        }
       }
       if (opts.treatAsExpected) {
         const category = classifyExpectedError(stderr, stdout);
@@ -317,7 +654,14 @@ export async function runGit(
         code,
         message: `git ${args.join(" ")} failed`,
         cause: err,
-        context: { stderr: stderr.slice(0, 4000), exitCode: e.code },
+        // Redacted: this context is logged and shipped with feedback, and git's
+        // stderr can echo an authenticated remote URL or a helper's output. The
+        // scrubbers only cover `message`/`stack`, so 4 KB of raw stderr would
+        // otherwise be the one unscrubbed field on the error.
+        context: {
+          stderr: redactSensitive(stderr.slice(0, 4000)),
+          exitCode: e.code,
+        },
       });
     }
   }
