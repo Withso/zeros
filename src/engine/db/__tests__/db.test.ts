@@ -17,6 +17,7 @@ import {
   pruneWorktreeRepos,
 } from "../projects";
 import {
+  CHAT_SUMMARIES_SQL,
   listChats,
   listChatsSince,
   summariesForFolder,
@@ -129,9 +130,9 @@ describe("Zeros DB (unified engine store)", () => {
       .all() as { version: number }[];
     expect(applied.map((r) => r.version)).toEqual([
       1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-      22, 23, 24,
+      22, 23, 24, 25,
     ]);
-    expect(latestSchemaVersion()).toBe(24);
+    expect(latestSchemaVersion()).toBe(25);
   });
 
   it("stamps + backfills chats.workspace_id from folder via the resolver (v11)", () => {
@@ -183,7 +184,7 @@ describe("Zeros DB (unified engine store)", () => {
     const count = db
       .prepare("SELECT COUNT(*) AS n FROM schema_migrations")
       .get() as { n: number };
-    expect(count.n).toBe(24);
+    expect(count.n).toBe(25);
   });
 
   it("preserves created_at on upsert (immutable after first insert)", () => {
@@ -474,6 +475,45 @@ describe("Zeros DB (unified engine store)", () => {
       "a",
     ]);
     expect(summariesForFolder("/nope")).toEqual([]);
+  });
+
+  // The user-prompt COUNT(*) is the one term in this query that cannot
+  // short-circuit — the summary subquery is ORDER BY ord LIMIT 1 and the
+  // EXISTS gate stops at the first row — so without idx_chat_messages_user_text
+  // it scans every message of every chat in the folder, running json_extract
+  // on each. That is invisible to a behavioural test (same rows, ~200× the
+  // time) and the row count only ever grows, so pin the PLAN instead.
+  //
+  // SQLite decides partial-index eligibility syntactically, which is why this
+  // can regress from an edit that looks like a pure reformat: reordering the
+  // two predicate terms or respelling the json_extract is enough to drop back
+  // to the scan, silently and with no error.
+  it("summariesForFolder: the user-prompt count uses the partial index, not a scan", () => {
+    setZerosDbPathForTesting(tmpDbFile());
+    upsertChat(makeChat("a", { folder: "/proj" }));
+    upsertChatMessagesBulk("a", [
+      {
+        msgId: "a1",
+        kind: "text",
+        payload: JSON.stringify({ id: "a1", kind: "text", role: "user", text: "q" }),
+        createdAt: 1,
+      },
+    ]);
+
+    const plan = openZerosDb()
+      .prepare(`EXPLAIN QUERY PLAN ${CHAT_SUMMARIES_SQL}`)
+      .all("/proj", "") as { detail: string }[];
+    const details = plan.map((r) => r.detail);
+
+    // The count's own subquery must ride the partial index.
+    expect(details.some((d) => d.includes("idx_chat_messages_user_text"))).toBe(
+      true,
+    );
+    // And nothing in this query may fall back to a bare table scan of
+    // chat_messages — that is the exact shape the index exists to remove.
+    expect(details.some((d) => /SCAN chat_messages\b(?! USING)/.test(d))).toBe(
+      false,
+    );
   });
 
   it("summariesForFolder: creation order wins over updated_at, and ties fall back to insertion order", () => {

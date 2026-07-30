@@ -479,21 +479,28 @@ export interface ChatSummaryRow {
  *  ARCHIVED chats are included. A chat's transcript does not become less
  *  useful when its tab is closed — it is usually MORE useful, because you
  *  closed the tab when the work finished. Open-vs-closed is not a distinction
- *  this list makes anywhere. */
-export function summariesForFolder(
-  folder: string,
-  excludeChatId?: string,
-): ChatSummaryRow[] {
-  if (!folder) return [];
-  const rows = openZerosDb()
-    .prepare(
-      `SELECT chats.id AS chatId, chats.title AS title, chats.folder AS folder,
+ *  this list makes anywhere.
+ *
+ *  The SQL is a named constant, and exported, ONLY so db.test.ts can run
+ *  EXPLAIN QUERY PLAN over the exact text that ships: the user-prompt count's
+ *  cost hangs on a partial index whose use SQLite decides syntactically, and
+ *  the query returns identical rows with or without it — just two orders of
+ *  magnitude slower. A behavioural test cannot see that; the plan can. */
+export const CHAT_SUMMARIES_SQL = `SELECT chats.id AS chatId, chats.title AS title, chats.folder AS folder,
               chats.agent_id AS agentId, chats.agent_name AS agentName,
               (SELECT json_extract(cm.payload, '$.text') FROM chat_messages cm
                  WHERE cm.chat_id = chats.id AND cm.kind = 'text'
                    AND json_extract(cm.payload, '$.role') = 'user'
                    AND json_extract(cm.payload, '$.text') IS NOT NULL
                  ORDER BY cm.ord ASC LIMIT 1) AS summary,
+              -- The one term here that cannot short-circuit, so it is the one
+              -- that needs an index: idx_chat_messages_user_text (migration
+              -- 25) is PARTIAL on exactly this predicate. SQLite only uses a
+              -- partial index when it can syntactically prove the query
+              -- implies the index's WHERE, so keep these two terms in this
+              -- order and in this spelling — a rewrite silently falls back to
+              -- a full scan of every message in the folder with no error.
+              -- db.test.ts pins the plan.
               (SELECT COUNT(*) FROM chat_messages cm
                  WHERE cm.chat_id = chats.id AND cm.kind = 'text'
                    AND json_extract(cm.payload, '$.role') = 'user') AS userMessageCount,
@@ -503,8 +510,15 @@ export function summariesForFolder(
         WHERE chats.folder = ? AND chats.id != ?
           AND EXISTS (SELECT 1 FROM chat_messages cm WHERE cm.chat_id = chats.id
                         AND cm.kind = 'text' AND json_extract(cm.payload, '$.role') = 'user')
-        ORDER BY chats.created_at DESC, chats.rowid DESC`,
-    )
+        ORDER BY chats.created_at DESC, chats.rowid DESC`;
+
+export function summariesForFolder(
+  folder: string,
+  excludeChatId?: string,
+): ChatSummaryRow[] {
+  if (!folder) return [];
+  const rows = openZerosDb()
+    .prepare(CHAT_SUMMARIES_SQL)
     .all(folder, excludeChatId ?? "") as {
     chatId: string;
     title: string | null;

@@ -743,6 +743,38 @@ CREATE UNIQUE INDEX idx_workspaces_branch_unique
   ON workspaces(repo_slug, lower(branch));
 `;
 
+/** 2026-07-30: `summariesForFolder` grew a `COUNT(*)` of a chat's USER text
+ *  messages (the number on a transcript pill). Unlike its two neighbours in
+ *  that query it cannot short-circuit — the `summary` subquery is
+ *  `ORDER BY ord LIMIT 1` and the `EXISTS` gate stops at the first row, but a
+ *  count has to visit every message of every chat in the folder and run
+ *  `json_extract` on each one. Measured on the real schema (12 chats × 3,000
+ *  messages): 0.03 ms before, 6.19 ms after, 0.07 ms with this index.
+ *
+ *  It matters because that query stopped being a picker read: the transcript
+ *  row re-pulls on every `messages`/`chats` DB_CHANGED, debounced to 400 ms,
+ *  so an empty chat tab open while a background agent streams runs it ~2.5×/s
+ *  on the engine's single connection — and the cost grows with the whole
+ *  message table, i.e. worst on the oldest installs.
+ *
+ *  PARTIAL, and that is the whole reason this is affordable. The predicate
+ *  matches ~3% of rows (a chat is mostly agent text, reasoning and tool
+ *  calls), so the index stays small and the write cost on the persist-on-emit
+ *  path is one `json_extract` per insert — measured in the noise against the
+ *  JSON serialization already happening there (~1 µs/row on 20k single-row
+ *  inserts).
+ *
+ *  The WHERE clause must stay BYTE-COMPATIBLE with the query's own predicate:
+ *  SQLite only uses a partial index when it can syntactically prove the
+ *  query implies the index's WHERE, so reordering these two terms or
+ *  rewriting `json_extract(payload, '$.role')` silently drops back to the
+ *  full scan with no error. `chats.ts` carries the matching note. */
+const MIGRATION_25_CHAT_MESSAGES_USER_TEXT = `
+CREATE INDEX idx_chat_messages_user_text
+  ON chat_messages(chat_id)
+  WHERE kind = 'text' AND json_extract(payload, '$.role') = 'user';
+`;
+
 /** The ordered migration list. Append only — NEVER edit or reorder a shipped
  *  entry; add a new one. */
 export const MIGRATIONS: Migration[] = [
@@ -861,6 +893,11 @@ export const MIGRATIONS: Migration[] = [
     version: 24,
     name: "workspaces: unique (repo_slug, lower(branch))",
     up: MIGRATION_24_WORKSPACE_BRANCH_UNIQUE,
+  },
+  {
+    version: 25,
+    name: "chat_messages: partial index for the user-prompt count",
+    up: MIGRATION_25_CHAT_MESSAGES_USER_TEXT,
   },
 ];
 
