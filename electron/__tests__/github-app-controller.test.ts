@@ -10,6 +10,8 @@ import {
   type GithubAppTokenResult,
 } from "../github-app-client";
 import {
+  GITHUB_APP_TRANSIENT_REFRESH_RETRY_MS,
+  GITHUB_APP_UNAVAILABLE_REFRESH_RETRY_MS,
   GithubAppController,
   GithubAppFlowError,
   type GithubAppControllerDependencies,
@@ -287,6 +289,121 @@ describe("GitHub App desktop controller", () => {
     await expect(h.controller.refresh()).rejects.toThrow(GithubAppFlowError);
     expect(h.credential()?.accessToken).toBe("app-access");
     expect(h.credential()?.refreshToken).toBe("app-refresh");
+  });
+
+  // Holding the credential is right; asking again in 30 s forever is not. A
+  // control plane with no GitHub routes recovers on a DEPLOY, so the quick
+  // transport retry turns one bad backend into a permanent 404 storm from
+  // every machine that ever connected.
+  it.each([
+    [
+      "a control plane with no GitHub routes",
+      new GithubAppClientError("Not found", "not_found", 404, false),
+      GITHUB_APP_UNAVAILABLE_REFRESH_RETRY_MS,
+    ],
+    [
+      "a genuine transport blip",
+      new GithubAppClientError("offline", "network", 0, false),
+      GITHUB_APP_TRANSIENT_REFRESH_RETRY_MS,
+    ],
+  ] as const)("paces the retry after %s", async (_label, failure, expected) => {
+    const h = harness({
+      credential: {
+        method: "github-app",
+        accessToken: "app-access",
+        refreshToken: "app-refresh",
+        refreshBinding: binding("a"),
+        expiresAtMs: 1_000_500,
+        refreshTokenExpiresAtMs: 30_000_000,
+        ownerSub: "auth0|one",
+        login: "octocat",
+        ...gitIdentity,
+      },
+    });
+    h.client.refresh.mockRejectedValueOnce(failure);
+
+    await expect(h.controller.refresh()).rejects.toThrow(GithubAppFlowError);
+
+    expect(h.afterTransientRefreshFailure).toHaveBeenCalledWith(expected);
+    // Either way the rotating pair survives — the state is reversible.
+    expect(h.credential()?.accessToken).toBe("app-access");
+  });
+
+  // A forced refresh exists because something ALREADY rejected the current
+  // access token (githubSelectedTokenStore.refreshAfterRejection). Joining an
+  // in-flight NON-forced pass hands back whatever that pass decided to keep —
+  // and a non-forced pass is allowed to keep the token untouched. The rejected
+  // token then comes straight back, and its caller has no second lever.
+  it("does not let a forced refresh settle for an in-flight non-forced pass", async () => {
+    const stale: AppCredential = {
+      method: "github-app",
+      accessToken: "app-access",
+      refreshToken: "app-refresh",
+      refreshBinding: binding("a"),
+      expiresAtMs: 1_030_000, // due: within 60s of the harness clock
+      refreshTokenExpiresAtMs: 30_000_000,
+      ownerSub: "auth0|one",
+      login: "octocat",
+      ...gitIdentity,
+    };
+    // Same rotating pair, later expiry — what a sibling worktree writing
+    // through the shared store looks like from in here.
+    const extended: AppCredential = { ...stale, expiresAtMs: 9_000_000 };
+
+    const h = harness({ credential: stale });
+    let rotatedByPeer = false;
+    h.deps.credentialStore.get = async () => (rotatedByPeer ? extended : stale);
+    const gate = deferred<void>();
+    h.deps.withCredentialLock = async (operation) => {
+      await gate.promise;
+      return operation();
+    };
+    const controller = new GithubAppController(h.deps);
+
+    const scheduled = controller.refresh(); // due, so it takes the lock
+    const forced = controller.refresh({ force: true });
+    rotatedByPeer = true;
+    gate.resolve();
+    const [kept, rotated] = await Promise.all([scheduled, forced]);
+
+    // The non-forced pass legitimately keeps the token: no longer due.
+    expect(kept?.accessToken).toBe("app-access");
+    // The forced pass must NOT inherit that answer.
+    expect(rotated?.accessToken).toBe("app-access-rotated");
+    expect(h.client.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets a forced refresh reuse a rotation the earlier pass already did", async () => {
+    const h = harness({
+      credential: {
+        method: "github-app",
+        accessToken: "app-access",
+        refreshToken: "app-refresh",
+        refreshBinding: binding("a"),
+        expiresAtMs: 1_030_000,
+        refreshTokenExpiresAtMs: 30_000_000,
+        ownerSub: "auth0|one",
+        login: "octocat",
+        ...gitIdentity,
+      },
+    });
+    const gate = deferred<void>();
+    h.deps.withCredentialLock = async (operation) => {
+      await gate.promise;
+      return operation();
+    };
+    const controller = new GithubAppController(h.deps);
+
+    const scheduled = controller.refresh();
+    const forced = controller.refresh({ force: true });
+    gate.resolve();
+    const [first, second] = await Promise.all([scheduled, forced]);
+
+    // The pair genuinely changed, which is all the forced caller needed —
+    // so it must not spend a second rotation on the same slot.
+    expect(first?.accessToken).toBe("app-access-rotated");
+    expect(second?.accessToken).toBe("app-access-rotated");
+    expect(h.client.refresh).toHaveBeenCalledTimes(1);
   });
 
   it("binds the exchanged credential to the current Auth0 subject", async () => {

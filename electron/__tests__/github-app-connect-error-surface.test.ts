@@ -18,7 +18,7 @@ import {
   NativeCommandError,
   parseNativeErrorMessage,
 } from "@zeros/core/native-error";
-import { GithubAppClient } from "../github-app-client";
+import { GithubAppClient, GithubAppClientError } from "../github-app-client";
 import {
   GithubAppController,
   GithubAppFlowError,
@@ -112,6 +112,52 @@ describe("GitHub App connect error surface", () => {
     // src/zeros/bridge/__tests__/github-app-notifications.test.ts).
     expect(rendererError.code).toBe("not_configured");
     expect(rendererError.message).toMatch(/gh CLI or a Personal Access Token/);
+  });
+
+  // The user-facing copy merges these two on purpose; the operator's fix does
+  // not. On 2026-07-30 a control plane three days behind main answered 404 and
+  // was indistinguishable in the log from a missing App registration — the
+  // remedies being "redeploy the backend" and "set GITHUB_APP_*".
+  it.each([
+    ["a control plane with no GitHub routes", CONTROL_PLANE_404, 404, "not_found"],
+    [
+      "a control plane with no App registered",
+      CONTROL_PLANE_503,
+      503,
+      "github_not_configured",
+    ],
+  ] as const)(
+    "carries what %s actually answered on the error's cause",
+    async (_label, response, status, code) => {
+      const failure = (await controllerAgainst(response)
+        .begin({ scheme: "zeros-dev", installFlow: true })
+        .catch((error: unknown) => error)) as GithubAppFlowError;
+
+      const cause = failure.cause as GithubAppClientError;
+      expect(cause).toBeInstanceOf(GithubAppClientError);
+      expect({ status: cause.status, code: cause.code }).toEqual({
+        status,
+        code,
+      });
+    },
+  );
+
+  // A 404 whose body is not our error envelope never reached the control
+  // plane's router — it is an edge page or a misrouted origin. Reporting that
+  // as "not configured" pinned a deployment fault on the feature and told the
+  // user to give up on App sign-in permanently.
+  it("does not call a proxy's 404 an unconfigured control plane", async () => {
+    const failure = (await controllerAgainst({
+      status: 404,
+      body: { message: "no such app" },
+    })
+      .begin({ scheme: "zeros-dev", installFlow: true })
+      .catch((error: unknown) => error)) as GithubAppFlowError;
+
+    const rendererError = asRendererSees(failure);
+    expect(rendererError.code).toBe("github_unavailable");
+    expect(rendererError.message).toMatch(/Try again/);
+    expect((failure.cause as GithubAppClientError).code).toBe("http_404");
   });
 
   it("still reports a genuine outage as retryable", async () => {

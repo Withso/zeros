@@ -19,9 +19,9 @@ import {
 } from "./github-auth-runtime";
 import { GithubAppClient } from "./github-app-client";
 import {
-  GITHUB_APP_TRANSIENT_REFRESH_RETRY_MS,
   GithubAppController,
   GithubAppFlowError,
+  refreshRetryDelayMs,
   type GithubAppConnectionErrorReason,
   type PendingConsumeResult,
 } from "./github-app-controller";
@@ -314,7 +314,17 @@ export async function scheduleGithubAppRefresh(
         .refresh()
         .then(
           () => scheduleGithubAppRefresh(),
-          () => scheduleGithubAppRefresh(GITHUB_APP_TRANSIENT_REFRESH_RETRY_MS),
+          (error: unknown) =>
+            // Re-arm on the SAME schedule the controller just asked for. This
+            // handler used to hardcode 30 s, which quietly overrode the longer
+            // backoff a durable failure earns and put the retry storm back.
+            scheduleGithubAppRefresh(
+              refreshRetryDelayMs(
+                error instanceof GithubAppFlowError
+                  ? error.reason
+                  : "github_unavailable",
+              ),
+            ),
         );
     } catch (error) {
       console.error("[Zeros] GitHub App refresh could not start:", error);
