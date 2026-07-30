@@ -43,7 +43,7 @@
         "docsUrl": "https://developers.openai.com/codex"
       },
       "loginCommand": { "binary": "codex", "args": ["login"] },
-      "minCliVersion": "0.8.0",
+      "minCliVersion": "0.131.0",
       "source": { "kind": "npm", "package": "@openai/codex" },
       "authProbe": {
         "kind": "command",

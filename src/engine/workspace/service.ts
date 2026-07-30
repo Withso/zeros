@@ -56,6 +56,7 @@ import {
   listBranches,
   listRemoteBranches,
   listWorkspaceFiles,
+  listIgnoredEntries,
   listWorkspaces,
   listRemoteRestrictedWorkspaceIds,
   getWorkingDirectories,
@@ -89,7 +90,11 @@ import {
 } from "../git";
 import { resolveRepoScript, resolveRunActions } from "../settings/repo-scripts";
 import { isRunSessionId, runActionOneShot } from "@zeros/core/run-actions";
-import type { RunActionStatus, RunStartArgs } from "../run/run-manager";
+import type {
+  RunActionStatus,
+  RunStartArgs,
+  RunStartResult,
+} from "../run/run-manager";
 // Phase 2 (single-writer): the remaining DB-touching git/workspace/PR ops the
 // desktop drove via in-process Electron IPC, now exposed on the bridge so the
 // engine is the sole zeros.db writer. Thin pass-throughs, same as above — the
@@ -509,7 +514,7 @@ const REMOTE_READABLE = new Set<string>([
   "messages.window",
   "messages.windowOlder",
   "messages.search",
-  // Files
+  // Files. `file.ignored` is deliberately NOT here — see its handler.
   "file.tree",
   "file.read",
   // Host folder picker (browse to open a project remotely)
@@ -739,10 +744,10 @@ export class WorkspaceService {
   /** Starts a run-action PTY (RunManager). Wired by the engine; driven by the
    *  LOCAL-ONLY workspace.startRun op. */
   private runStarter:
-    | ((args: RunStartArgs) => Promise<{ alreadyRunning: boolean }>)
+    | ((args: RunStartArgs) => Promise<RunStartResult>)
     | null = null;
   setRunStarter(
-    fn: (args: RunStartArgs) => Promise<{ alreadyRunning: boolean }>,
+    fn: (args: RunStartArgs) => Promise<RunStartResult>,
   ): void {
     this.runStarter = fn;
   }
@@ -1530,11 +1535,16 @@ export class WorkspaceService {
           command: action.command,
           oneShot: runActionOneShot(action),
           cwd: ws?.path ?? repoRoot,
+          repoRoot,
         });
         return {
           ok: true,
           hasCommand: true,
           alreadyRunning: res.alreadyRunning,
+          // A Stop (or the archive reaper) landed while the env was still
+          // resolving, so nothing spawned. Passed through so the renderer does
+          // not open a run tab that would attach to nothing — see RunStartResult.
+          cancelled: res.cancelled === true,
         };
       }
       // ── Run tab: stop a live run (records "stopped", not "failed").
@@ -2140,6 +2150,32 @@ export class WorkspaceService {
         return {
           files: remote ? files.filter((f) => !isSensitiveRepoPath(f)) : files,
         };
+      }
+      // ── Files tab: the .gitignore'd entries file.tree deliberately omits.
+      // A separate op rather than a flag on file.tree, because that list also
+      // feeds the @-mention picker and quick-open — neither of which should
+      // start offering node_modules paths. LAZY: no `dir` returns the collapsed
+      // ignored roots (~8 rows), `dir` returns one level inside one of them.
+      //
+      // LOCAL-ONLY, and not by omission — by an explicit refusal, because the
+      // reasoning is easy to lose. With `dir` this is a one-level directory
+      // enumerator over the worktree, and .gitignore is exactly the boundary it
+      // stops honouring. That boundary was load-bearing for remote clients in a
+      // way a path denylist cannot replace: `.conductor/` is gitignored and
+      // holds SIBLING WORKTREES, so a remote client authorised for one
+      // workspace could walk into another one's checkout — around the
+      // remote-restriction list entirely — and no per-entry name filter would
+      // notice, because none of those paths look sensitive. The desktop app is
+      // the operator's own machine and already reads these files freely. ──
+      case "file.ignored": {
+        if (remote) {
+          throw new GitError({
+            code: "REMOTE_RESTRICTED",
+            message: "Ignored files can only be listed from the desktop app.",
+          });
+        }
+        const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
+        return { entries: await listIgnoredEntries(cwd, optStr(params, "dir")) };
       }
       case "file.read": {
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);

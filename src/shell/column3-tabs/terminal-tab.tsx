@@ -105,6 +105,7 @@ import {
   useStickyTabStrip,
 } from "../use-sticky-tab-strip";
 import { RunWave, ZerosSpinner } from "@/loaders";
+import { runOverlayWrapperClass } from "./run-overlay-layout";
 
 /** Sync the engine's SHARED terminal registry into a folder's tab strip (Paseo
  *  multiplayer): fetch the terminals the engine knows about, ADD those whose cwd
@@ -605,24 +606,27 @@ export function TerminalPanel({
         {actions.map((action) => {
           const id = runIdFor(action.id);
           const session = sessions.find((s) => s.id === id) ?? null;
+          // Same three conditions every sibling layer uses. `visible` overrides
+          // the panel body's `invisible`, so gating on the sub-tab alone left the
+          // overlay painting on a collapsing (and then collapsed) panel after its
+          // terminal was already hidden — see runOverlayWrapperClass.
+          const isActive = surfaceActive && expanded && activeSubTab === id;
           return (
             <div
               key={action.id}
-              {...(activeSubTab !== id ? { inert: "" } : {})}
-              className={cn(
-                "absolute inset-0",
-                activeSubTab === id
-                  ? "pointer-events-auto visible"
-                  : "pointer-events-none invisible",
-              )}
-              aria-hidden={activeSubTab !== id}
+              {...(!isActive ? { inert: "" } : {})}
+              // pointer-events-none even when ACTIVE — this wrapper sits above
+              // the run's terminal, so an `auto` here makes the whole pane
+              // swallow wheel/click/drag-select. See run-overlay-layout.ts.
+              className={runOverlayWrapperClass(isActive)}
+              aria-hidden={!isActive}
             >
               <RunActionOverlay
                 folderKey={folderKey}
                 action={action}
                 session={session}
                 status={runStatuses[action.id] ?? null}
-                visible={surfaceActive && expanded && activeSubTab === id}
+                visible={isActive}
                 onStart={() => startRun(action.id)}
                 onStop={() => stopRun(action.id)}
               />
@@ -878,7 +882,11 @@ function RunActionOverlay({
 
   if (!session) {
     return (
-      <div className="absolute inset-0 flex min-h-0 min-w-0 flex-col overflow-hidden">
+      // Full-cover AND clickable: with no run terminal mounted there is nothing
+      // underneath to reach, and the "Start …" button is the whole point of the
+      // state. (The wrapper above is pointer-events-none, so each branch opts
+      // itself back in — see the note there.)
+      <div className="pointer-events-auto absolute inset-0 flex min-h-0 min-w-0 flex-col overflow-hidden">
         {running ? (
           <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3 px-6 text-center">
             <ZerosSpinner size={16} />
@@ -916,28 +924,29 @@ function RunActionOverlay({
     );
   }
 
-  // Session exists → the terminal renders underneath; only the bottom-right
-  // status cluster overlays it.
+  // Session exists → the terminal renders underneath. Return ONLY the
+  // bottom-right cluster: a content-sized box, not a full-cover one made
+  // click-through again. Every rect that exists is a rect that can swallow the
+  // terminal's wheel/selection events, so the safest overlay is the one that
+  // isn't there.
   return (
-    <div className="pointer-events-none absolute inset-0">
-      <div className="pointer-events-auto absolute right-3 bottom-3 flex items-center gap-2">
-        {running ? (
-          <Button variant="secondary" size="sm" onClick={onStop}>
-            <Square />
-            Stop
+    <div className="pointer-events-auto absolute right-3 bottom-3 flex items-center gap-2">
+      {running ? (
+        <Button variant="secondary" size="sm" onClick={onStop}>
+          <Square />
+          Stop
+        </Button>
+      ) : (
+        <>
+          {outcome && (outcome === "stopped" || badgeVisible) && (
+            <RunStatusBadge outcome={outcome} />
+          )}
+          <Button variant="secondary" size="sm" onClick={onStart}>
+            <RotateCw />
+            Rerun
           </Button>
-        ) : (
-          <>
-            {outcome && (outcome === "stopped" || badgeVisible) && (
-              <RunStatusBadge outcome={outcome} />
-            )}
-            <Button variant="secondary" size="sm" onClick={onStart}>
-              <RotateCw />
-              Rerun
-            </Button>
-          </>
-        )}
-      </div>
+        </>
+      )}
     </div>
   );
 }

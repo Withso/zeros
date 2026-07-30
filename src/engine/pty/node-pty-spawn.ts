@@ -6,7 +6,12 @@
 // stays the single place that computes the Zeros shell setup (login shell,
 // managed ZDOTDIR, scrubbed-or-full env) and hands it to the host.
 
-import { buildLoginArgs, buildPtyEnv, pickShell } from "./shell-setup";
+import {
+  buildLoginArgs,
+  buildOneShotArgs,
+  buildPtyEnv,
+  pickShell,
+} from "./shell-setup";
 import { TerminalMirror } from "./mirror";
 import { spawnPtyViaHost } from "./pty-host-client";
 import type { PtyHandle, PtyMirrorFactory, PtySpawnRequest } from "./service";
@@ -18,24 +23,28 @@ export { disposePtyHost } from "./pty-host-client";
  *  fully-resolved env are computed here (engine-side) and forwarded to the
  *  host, which only drives node-pty. */
 export function createNodePtyShell(req: PtySpawnRequest): PtyHandle {
-  // One-shot setup mode: run a single command in a login shell that EXITS when
-  // done, with a caller-supplied (scrubbed setup) env. Otherwise: an interactive
-  // login shell with the computed terminal env.
+  // One-shot mode (Setup script / Run action): run a single command in a shell
+  // that EXITS when done. buildOneShotArgs makes that shell read the same
+  // startup files as the interactive terminal — the whole point being that a
+  // Run action must find the same `node`/`pnpm` a user would (see its comment).
+  // Otherwise: an interactive login shell with the computed terminal env.
+  const shell = pickShell();
   const oneShot = typeof req.command === "string" && req.command.length > 0;
   const args = oneShot
-    ? process.platform === "win32"
-      ? ["/c", req.command as string]
-      : [...buildLoginArgs(), "-c", req.command as string]
+    ? buildOneShotArgs(shell, req.command as string, req.interactive === true)
     : buildLoginArgs();
   return spawnPtyViaHost({
-    shell: pickShell(),
+    shell,
     args,
     cwd: req.cwd,
     cols: req.cols,
     rows: req.rows,
-    // For one-shot setup the engine passes a fully-resolved env verbatim;
-    // otherwise compute the interactive-terminal env (scoping PWD/OLDPWD/
-    // ZEROS_WORKTREE_PATH to THIS worktree, scrubbing host secrets for remote).
+    // For one-shot the engine passes a fully-resolved env we use VERBATIM
+    // (setup's scrubbed allowlist, the run env); otherwise compute the
+    // interactive-terminal env (scoping PWD/OLDPWD/ZEROS_WORKTREE_PATH to THIS
+    // worktree, scrubbing host secrets for remote). Nothing is added here — the
+    // env a caller hands us has to be the exact set it can be reviewed against
+    // (that is what makes setup-hooks.ts's H6 allowlist auditable).
     env: req.env ?? buildPtyEnv({ scrub: req.scrubEnv === true, cwd: req.cwd }),
     name: "xterm-256color",
   });

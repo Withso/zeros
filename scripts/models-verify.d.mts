@@ -30,3 +30,27 @@ export function checkCliVersionGate(
  *  the SDK isn't installed / can't be read. Pair with {@link checkCliVersionGate}
  *  to assert every curated model is runnable on the PINNED SDK. */
 export function bundledClaudeCliVersion(): string | null;
+
+/** Distinct model-id-shaped literals in a binary, streamed. `null` when the path
+ *  can't be opened. */
+export function scanModelIds(binaryPath: string, re?: RegExp): Set<string> | null;
+
+/** The model ids the PINNED Claude CLI knows, read off the real platform binary.
+ *  `null` when that binary isn't installed for this os/cpu (it's an OPTIONAL
+ *  dependency, so `--no-optional` installs legitimately lack it). */
+export function knownClaudeModelIds(): Set<string> | null;
+
+export interface ModelIdExistenceResult {
+  /** Curated ids the bundled CLI has never heard of. Gates under `--strict`. */
+  missing: string[];
+  /** Never gates: an unresolved binary or an inconclusive scan. */
+  notes: string[];
+}
+
+/** Curated claude models whose id the bundled CLI does not know — the RETIRED
+ *  direction, which {@link checkCliVersionGate} cannot see because retiring an id
+ *  bumps no version. */
+export function checkModelIdsKnownToCli(
+  catalog: unknown,
+  knownIds: Set<string> | null,
+): ModelIdExistenceResult;

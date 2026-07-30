@@ -381,6 +381,26 @@
           ],
           "title": "InputImageDynamicToolCallOutputContentItem",
           "type": "object"
+        },
+        {
+          "properties": {
+            "audioUrl": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "inputAudio"
+              ],
+              "title": "InputAudioDynamicToolCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "audioUrl",
+            "type"
+          ],
+          "title": "InputAudioDynamicToolCallOutputContentItem",
+          "type": "object"
         }
       ]
     },
@@ -485,12 +505,6 @@
           ]
         },
         "resourceUri": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "templateId": {
           "type": [
             "string",
             "null"
@@ -844,6 +858,13 @@
             "null"
           ]
         },
+        "canAcceptDirectInput": {
+          "description": "Whether the app server accepts direct turn input for this loaded thread. `None` means the capability is unavailable, such as for an unloaded stored thread.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "cliVersion": {
           "description": "Version of the CLI that created the thread.",
           "type": "string"
@@ -906,6 +927,11 @@
         "id": {
           "description": "Identifier for this thread. Codex-generated thread IDs are UUIDv7.",
           "type": "string"
+        },
+        "isPinned": {
+          "default": false,
+          "description": "Whether the thread has been pinned by the user.",
+          "type": "boolean"
         },
         "modelProvider": {
           "description": "Model provider used for this thread (for example, 'openai').",
@@ -1239,8 +1265,24 @@
             "id": {
               "type": "string"
             },
+            "pluginId": {
+              "default": null,
+              "description": "Trusted first-party plugin id when this command resolves to one plugin script.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "processId": {
               "description": "Identifier for the underlying PTY process (when available).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "scriptPath": {
+              "default": null,
+              "description": "Safe plugin-relative path when this command resolves to one plugin script.",
               "type": [
                 "string",
                 "null"
@@ -1586,6 +1628,15 @@
             "query": {
               "type": "string"
             },
+            "results": {
+              "default": null,
+              "description": "Structured search results returned out-of-band by standalone web search.\n\nThese stay as opaque JSON at the extension/app-server boundary so new result fields and result types can pass through without a Codex release.",
+              "items": true,
+              "type": [
+                "array",
+                "null"
+              ]
+            },
             "type": {
               "enum": [
                 "webSearch"
@@ -1627,6 +1678,7 @@
           "type": "object"
         },
         {
+          "description": "Display item emitted by the interruptible `clock.sleep` tool.",
           "properties": {
             "durationMs": {
               "format": "uint64",
@@ -2064,6 +2116,46 @@
             "type"
           ],
           "title": "LocalImageUserInput",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "audio"
+              ],
+              "title": "AudioUserInputType",
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "url"
+          ],
+          "title": "AudioUserInput",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "localAudio"
+              ],
+              "title": "LocalAudioUserInputType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "type"
+          ],
+          "title": "LocalAudioUserInput",
           "type": "object"
         },
         {

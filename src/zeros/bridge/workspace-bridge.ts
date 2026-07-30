@@ -734,6 +734,30 @@ export async function bridgeFileTree(
   return r?.files ?? [];
 }
 
+/** The .gitignore'd entries under a workspace, which bridgeFileTree omits:
+ *  without `dir`, the collapsed ignored roots (`node_modules/`, `dist/`,
+ *  `.env`); with `dir`, one level inside one of them. Directories come back
+ *  with a trailing "/".
+ *
+ *  DESKTOP ONLY — unlike `file.tree`, this op is neither remote-readable nor
+ *  per-path filtered: a relay client is refused outright (absent from the remote
+ *  allowlist AND an explicit REMOTE_RESTRICTED throw). With `dir` it is a
+ *  directory enumerator whose only boundary was .gitignore, which is exactly
+ *  what it stops honouring — see the handler in workspace/service.ts. The
+ *  renderer's `listIgnoredEntries` short-circuits before reaching here, so a web
+ *  client never spends a round-trip on a guaranteed refusal. */
+export async function bridgeIgnoredEntries(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  dir?: string,
+): Promise<string[]> {
+  const r = (await workspaceOp(bridge, "file.ignored", {
+    workspaceId,
+    ...(dir ? { dir } : {}),
+  })) as { entries?: string[] } | undefined;
+  return r?.entries ?? [];
+}
+
 /** Read one file's content under a workspace (bounded; secret paths refused
  *  for remote clients). */
 export async function bridgeFileRead(
@@ -1773,6 +1797,16 @@ export async function bridgeWorkspaceRunInfo(
   })) as { actions: Record<string, RunActionStatusWire> };
 }
 
+/** What `workspace.startRun` replies. `cancelled` means no PTY was spawned
+ *  because a Stop (or the archive reaper) landed while the engine was still
+ *  resolving the run's env — the caller must not open a tab for it. */
+export interface RunStartReply {
+  ok: boolean;
+  hasCommand: boolean;
+  alreadyRunning: boolean;
+  cancelled?: boolean;
+}
+
 /** Start (or focus) a run action. The engine resolves the COMMAND from the
  *  repo settings by actionId and spawns it as the PTY's foreground process —
  *  the client never supplies a command string. */
@@ -1784,10 +1818,10 @@ export async function bridgeWorkspaceStartRun(
     actionId: string;
     sessionId: string;
   },
-): Promise<{ ok: boolean; hasCommand: boolean; alreadyRunning: boolean }> {
+): Promise<RunStartReply> {
   return (await workspaceOp(bridge, "workspace.startRun", {
     ...args,
-  })) as { ok: boolean; hasCommand: boolean; alreadyRunning: boolean };
+  })) as RunStartReply;
 }
 
 /** Stop a live run action — records "stopped", not "failed". */

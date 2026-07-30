@@ -50,6 +50,18 @@ const ALLOW_UNUSED = new Set([
   "fast-uri",
   "uri-js",
   "require-from-string",
+  // ── added at @cursor/sdk 1.0.26 ──
+  // 1.0.26 stopped loading these at module top-level, so a bare require() of the
+  // SDK no longer puts them in require.cache and they read as STALE here. They are
+  // still production dependencies, so keeping their globs is correct and dropping
+  // them would be MODULE_NOT_FOUND on a lazy require() in the packaged app:
+  "undici", // @cursor/sdk → @connectrpc/connect-node 1.7.0 → undici 5.29.0
+  "@fastify", // …→ undici 5.29.0 → @fastify/busboy 2.1.1 (multipart bodies)
+  // Native-addon .node resolution. These were listed for `sqlite3`, which 1.0.26
+  // dropped, but both are production deps of better-sqlite3 — the engine's own
+  // store — so they outlive it. Verify with `pnpm why bindings`.
+  "bindings",
+  "file-uri-to-path",
 ]);
 
 /** Top-level package key for a node_modules path segment: `@scope` for scoped

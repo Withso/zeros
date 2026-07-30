@@ -24,7 +24,7 @@
       "!**/*.db-wal"
     ]
   },
-  "codexProtocolVersion": "0.144.1",
+  "codexProtocolVersion": "0.146.0",
   "scripts": {
     "postinstall": "node scripts/fix-node-pty-helper.cjs",
     "codegen:codex": "node scripts/codegen-codex.mjs",
@@ -60,6 +60,7 @@
     "check:vite-env": "node scripts/check-vite-env-sync.mjs",
     "check:electron-hardening": "node scripts/check-electron-hardening.mjs",
     "check:codex-pin": "node scripts/check-codex-pin.mjs",
+    "check:runtime-pins": "node scripts/check-runtime-pins.mjs",
     "check:packaging-paths": "node scripts/check-packaging-paths.mjs",
     "check:backend-migrations": "node scripts/check-backend-migrations.mjs",
     "check:protocol": "node scripts/check-protocol-version.mjs",
@@ -85,7 +86,7 @@
     "test:backend": "pnpm --dir backend test"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.220",
+    "@anthropic-ai/claude-agent-sdk": "0.3.220",
     "@codemirror/autocomplete": "^6.20.3",
     "@codemirror/commands": "^6.10.3",
     "@codemirror/language": "^6.12.3",
@@ -93,7 +94,7 @@
     "@codemirror/search": "^6.7.1",
     "@codemirror/state": "^6.6.0",
     "@codemirror/view": "^6.43.1",
-    "@cursor/sdk": "1.0.18",
+    "@cursor/sdk": "1.0.26",
     "@decimalturn/toml-patch": "^2.0.0",
     "@fontsource-variable/geist": "^5.2.8",
     "@fontsource-variable/geist-mono": "^5.2.7",
@@ -101,7 +102,7 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@octokit/auth-oauth-device": "^8.0.0",
     "@octokit/rest": "^22.0.0",
-    "@openai/codex": "^0.144.1",
+    "@openai/codex": "0.146.0",
     "@pierre/diffs": "1.2.11",
     "@pierre/trees": "1.0.0-beta.4",
     "@radix-ui/react-avatar": "^1.1.11",

@@ -129,6 +129,88 @@ describe("SetupManager", () => {
     expect(getWorkspaceById(wsId)?.setupState).toBe("failed");
   });
 
+  it("a KILLED run never scores a pass — node-pty reports kill() as exitCode 0", async () => {
+    // Verified against real node-pty: `p.kill()` → { exitCode: 0, signal: 1 }. A
+    // verdict read off the code alone therefore called ANY killed install a PASS
+    // — and "passed" is what fires onPassed, i.e. what starts the workspace's
+    // run_on_create actions. An OOM-killed `pnpm install` would hand a dev server
+    // a half-written node_modules and call it success.
+    const wsId = "ws_eee555-fern";
+    insertWorkspace(sampleWorkspace(wsId));
+    const { svc } = fakePty();
+    let passed = 0;
+    const mgr = new SetupManager(svc, () => {});
+    await mgr.start({
+      workspaceId: wsId,
+      command: "pnpm install",
+      onPassed: () => passed++,
+    });
+    mgr.handleExit(setupSessionId(wsId, 1), 0, 9);
+    expect(getWorkspaceById(wsId)?.setupState).toBe("failed");
+    expect(passed).toBe(0);
+  });
+
+  it("a Rerun's kill-exit landing mid-start cannot score the OLD run", async () => {
+    // The env build (`buildSetupCommandEnv`, up to 3s on a cold PATH probe) sits
+    // between the kill and the new entry's registration. While the old entry was
+    // still registered under its own session id it was NOT "superseded", so its
+    // kill-exit reached handleExit, matched, read exitCode 0 as "passed" and fired
+    // onPassed — launching run_on_create off an install that was just killed.
+    // The fake above can't catch this because its kill() drives no exit; this one
+    // kills the way node-pty does, from inside kill(), i.e. inside the window.
+    const wsId = "ws_fff666-sage";
+    insertWorkspace(sampleWorkspace(wsId));
+    const live = new Set<string>();
+    const created: string[] = [];
+    let passed = 0;
+    // Held indirectly so the fake can reach the manager it belongs to.
+    const ref: { mgr?: SetupManager } = {};
+    const svc = {
+      has: (id: string) => live.has(id),
+      kill: (id: string) => {
+        live.delete(id);
+        ref.mgr?.handleExit(id, 0, 1); // real node-pty shape for a kill()
+      },
+      create: (opts: { sessionId: string; resolvedCwd?: string }) => {
+        live.add(opts.sessionId);
+        created.push(opts.sessionId);
+        return {
+          sessionId: opts.sessionId,
+          pid: 1,
+          cwd: opts.resolvedCwd ?? "",
+          cols: 80,
+          rows: 24,
+        };
+      },
+    } as unknown as PtyService;
+    // Record every state the row is published with, not just the final one: the
+    // old code recovered on the next line (start() sets "running" again), so the
+    // damage was a transient verdict + an onPassed that already fired.
+    const states: Array<string | null | undefined> = [];
+    const mgr = new SetupManager(svc, () => {
+      states.push(getWorkspaceById(wsId)?.setupState);
+    });
+    ref.mgr = mgr;
+
+    await mgr.start({
+      workspaceId: wsId,
+      command: "pnpm install",
+      onPassed: () => passed++,
+    });
+    await mgr.start({
+      workspaceId: wsId,
+      command: "pnpm install",
+      onPassed: () => passed++,
+    });
+
+    expect(created).toEqual([setupSessionId(wsId, 1), setupSessionId(wsId, 2)]);
+    expect(getWorkspaceById(wsId)?.setupState).toBe("running");
+    expect(passed).toBe(0); // the killed run must not have "passed"
+    // The superseded run must produce NO verdict at all — not "passed", and not
+    // "failed" either. Only the two "running" publications belong here.
+    expect(states).toEqual(["running", "running"]);
+  });
+
   it("reconcileStaleRuns marks a 'running' row orphaned by a restart as stopped", () => {
     const orphan = "ws_ccc333-lily";
     const done = "ws_ddd444-violet";
