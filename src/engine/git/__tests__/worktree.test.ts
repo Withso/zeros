@@ -36,6 +36,7 @@ import {
   listWorkspaces,
   restoreWorkspace,
   setStateRootForTesting,
+  setWorkingDirectories,
   stagePaths,
   status,
   worktreesRoot,
@@ -1324,6 +1325,60 @@ describe("worktree lifecycle (integration)", () => {
       .then(() => false)
       .catch(() => true);
     expect(refGone).toBe(true);
+  });
+
+  it("restores a workspace whose folders are hidden by Working folders, without deleting them", async () => {
+    // Regression, and the worst failure this feature could produce.
+    //
+    // A sparse-excluded folder is REMOVED from the worktree, and the archive
+    // checkpoint is `git add -A` into a scratch index — which can only stage
+    // what is on disk. With an empty seed that checkpoint therefore omitted
+    // every hidden folder. Restore replays it with `read-tree --reset -u`
+    // followed by `reset --mixed HEAD`, leaving the index at HEAD (folder
+    // present) and the worktree at the snapshot (folder absent) — so the hidden
+    // folder came back as an uncommitted DELETION of every file in it, and the
+    // next "commit all" (a human's or an agent's) erased it from the branch.
+    const created = await createWorkspace({ repoRoot });
+    await mkdir(path.join(created.path, "hideme"), { recursive: true });
+    await writeFile(
+      path.join(created.path, "hideme", "keepme.txt"),
+      "precious\n",
+    );
+    await execFileAsync("git", ["add", "-A"], { cwd: created.path });
+    await execFileAsync("git", ["commit", "-q", "-m", "add hideme"], {
+      cwd: created.path,
+    });
+
+    await setWorkingDirectories(created.path, []);
+    expect(existsSync(path.join(created.path, "hideme"))).toBe(false);
+    // Something uncommitted, so the archive genuinely has to checkpoint.
+    await writeFile(path.join(created.path, "README.md"), "# changed\n");
+
+    const archived = await archiveWorkspace({
+      workspaceId: created.workspaceId,
+      stashUncommitted: true,
+    });
+    expect(archived.archiveSnapshot).toBeTruthy();
+
+    const restored = await restoreWorkspace(created.workspaceId);
+    expect(restored.conflicts).toEqual([]);
+
+    // The uncommitted edit still round-trips.
+    expect(await readFile(path.join(created.path, "README.md"), "utf8")).toBe(
+      "# changed\n",
+    );
+    // The committed folder is neither deleted from disk nor staged for
+    // deletion. (The restored worktree is a fresh `worktree add`, so it is no
+    // longer sparse — the folder is simply back as ordinary tracked content.)
+    const { stdout: status } = await execFileAsync(
+      "git",
+      ["status", "--porcelain=v1", "--untracked-files=all"],
+      { cwd: created.path },
+    );
+    expect(status).not.toMatch(/hideme/);
+    expect(
+      await readFile(path.join(created.path, "hideme", "keepme.txt"), "utf8"),
+    ).toBe("precious\n");
   });
 
   it("restoring one workspace never prunes another missing worktree registration", async () => {

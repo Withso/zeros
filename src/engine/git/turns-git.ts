@@ -139,7 +139,10 @@ export function archiveSnapshotRef(workspaceId: string): string {
 // ── Snapshot ─────────────────────────────────────────────
 
 /** Capture the whole working tree of `cwd` as a commit pinned at `ref`. Uses a
- *  scratch index so the user's real index is untouched. `forceAddPaths` is for
+ *  scratch index so the user's real index is untouched — seeded from HEAD so a
+ *  tracked path that is legitimately absent from the worktree (sparse-excluded
+ *  by Working folders, or skip-worktree-pinned) is preserved rather than
+ *  recorded as a deletion; see the long note inside. `forceAddPaths` is for
  *  explicitly configured, normally-ignored files (for example `.env.local`)
  *  that an archive must preserve without pulling node_modules/all ignored
  *  content into the object store. Returns the commit OID, or null on any
@@ -160,6 +163,33 @@ export async function snapshotWorkingTree(
     );
     const env = { ...SNAPSHOT_ENV, GIT_INDEX_FILE: scratch };
     try {
+      // Seed the scratch index from HEAD before staging.
+      //
+      // `add -A` can only stage what is ON DISK, and an EMPTY seed made that
+      // the whole truth — so any tracked path missing from the worktree was
+      // silently absent from the snapshot. Two ways that bites:
+      //
+      //   1. SPARSE-CHECKOUT (Working folders). A deselected folder is removed
+      //      from the worktree, so archive captured a tree without it. Restore
+      //      then does `read-tree --reset -u <snapshot>` + `reset --mixed HEAD`
+      //      — index at HEAD, worktree at the snapshot — and the hidden folder
+      //      came back as an uncommitted DELETION of every file in it. Commit
+      //      that (or let an agent commit "all changes") and the work is gone
+      //      from the branch. Verified end-to-end on git 2.50.
+      //   2. A tracked file that also matches .gitignore. From an empty index
+      //      it looks untracked, so `add -A` skips it and the snapshot records
+      //      it as deleted.
+      //
+      // Seeding from HEAD fixes both without weakening the snapshot: `add -A`
+      // still stages worktree content over it, and still records a GENUINE
+      // deletion (the entry is present-in-index, absent-on-disk, and NOT
+      // skip-worktree, so git removes it). Only entries git itself considers
+      // absent-by-design — the skip-worktree bits sparse-checkout sets — are
+      // left alone, which is exactly the intent.
+      //
+      // Best-effort: an unborn HEAD (`git init`, nothing committed) has no tree
+      // to read, and a snapshot there is still valid from an empty index.
+      await runGit(cwd, ["read-tree", "HEAD"], { env }).catch(() => undefined);
       // Stage everything (tracked + untracked-not-ignored) into the scratch
       // index, then write it as a tree. `add -A` respects .gitignore, so
       // node_modules/dist/etc. are excluded for free.
