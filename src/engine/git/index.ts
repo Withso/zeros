@@ -157,6 +157,15 @@ export type {
 export { listWorkspaceFiles, listIgnoredEntries } from "./workspace-files";
 
 export {
+  getWorkingDirectories,
+  setWorkingDirectories,
+} from "./sparse-checkout";
+export type {
+  SetWorkingDirectoriesResult,
+  WorkingDirectoriesState,
+} from "./sparse-checkout";
+
+export {
   changeCounts,
   changeLineCounts,
   diff,

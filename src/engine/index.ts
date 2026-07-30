@@ -185,6 +185,13 @@ const VERSION = "0.0.5";
  *  to true alongside re-enabling the MCP to restore the index. */
 const DESIGN_SURFACE_ENABLED = false;
 
+/** A workspace op slower than this gets one log line naming it and its
+ *  duration. Set above every ordinary read (a `git.status` fan-out on a large
+ *  repo lands in the low hundreds of ms) so the log stays readable, and well
+ *  below the host watchdog's ~15s kill window so anything that could plausibly
+ *  cost the engine its life is on the record before it does. */
+const SLOW_WORKSPACE_OP_MS = 2_000;
+
 /** How long a session whose LOCAL owner just disconnected stays reserved for
  *  the desktop. A relay client may not ADOPT it during this window — it covers
  *  a renderer reload, where the agent keeps running but ownership is briefly
@@ -3176,6 +3183,7 @@ export class ZerosEngine {
       // begins. This closes the cross-window stage/write/rebase-vs-archive gap.
       const lifecycleMutationWorkspaceId =
         this.workspace.lifecycleMutationWorkspaceId(op, params);
+      const startedAt = Date.now();
       const operation = this.workspace.handle(op, params, {
         remote: client.kind !== "local",
       });
@@ -3185,6 +3193,17 @@ export class ZerosEngine {
             operation,
           )
         : await operation;
+      // Leave evidence for the slow ones. Workspace ops log NOTHING today (the
+      // error line below is gated on isWriteOp), so a save that outlived its
+      // RPC budget left main.log with no trace it was ever dispatched — the
+      // only visible artifacts were the watchdog respawning the engine and an
+      // ambiguous "Request timeout" in the renderer, neither naming the op.
+      // One line per genuinely slow op, so this can be diagnosed from a log
+      // next time without turning every `git.status` into noise.
+      const elapsedMs = Date.now() - startedAt;
+      if (elapsedMs >= SLOW_WORKSPACE_OP_MS) {
+        console.warn(`[workspace] ${op} took ${elapsedMs}ms`);
+      }
       client.send(
         createMessage({
           type: "WORKSPACE_RESPONSE",
@@ -3319,7 +3338,15 @@ export class ZerosEngine {
       // excluded from error tracking). Keep a privacy-scrubbed breadcrumb in
       // main.log so a failed target change, rebase, stage, or GitHub action is
       // diagnosable from a support bundle instead of existing only as a toast.
-      if (this.workspace.isWriteOp(op)) {
+      // `isWriteOp` is the REMOTE-security allowlist, so it misses the
+      // local-only checkout mutations (working directories, and any future
+      // sibling) — exactly the ops whose failure most needs a breadcrumb.
+      // Widen to "anything that can rewrite a managed checkout", which is what
+      // the sentence above actually means by "mutation".
+      if (
+        this.workspace.isWriteOp(op) ||
+        this.workspace.lifecycleMutationWorkspaceId(op, params) !== null
+      ) {
         const scrubbed = scrubError(err);
         console.error(
           `[workspace] ${op} failed (${code}): ${scrubbed.message}`,

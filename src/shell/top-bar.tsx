@@ -226,7 +226,7 @@ const PROJECT_TRIGGER_CLS =
 const PROJECT_CHIP_CLS =
   "inline-flex size-4 shrink-0 items-center justify-center rounded-sm bg-bg2-hover text-xxs font-medium text-fg2";
 // Content-sized, not a fixed ramp: the tab is as wide as its icon + name +
-// whatever trailing indicators it happens to carry, floored at 100px and capped
+// whatever trailing indicators it happens to carry, floored at 120px and capped
 // at 180px. NO `w-*` — a width would defeat the intrinsic sizing, and every
 // child except the name is shrink-0, so the cap spends itself truncating the
 // branch name and never the ± pair or the wave.
@@ -250,10 +250,10 @@ const PROJECT_CHIP_CLS =
 // once on the shared class is what the chat strip does (TAB_BASE_CLS in
 // column2-chat-tabs.tsx) and is why that strip has never had the same snap.
 const WORKSPACE_TAB_CLS =
-  "group/workspace border-border1 relative flex h-full min-w-[100px] max-w-[180px] shrink-0 select-none items-center overflow-hidden border-l px-3 text-left text-xs font-medium text-fg2 transition-none first:border-l-0 focus-within:bg-sidebar-bg-hover focus-within:text-fg2 data-[hovered=true]:bg-sidebar-bg-hover data-[hovered=true]:text-fg2 data-[active=true]:sticky data-[active=true]:left-0 data-[active=true]:right-0 data-[active=true]:z-20 data-[active=true]:bg-bg1 data-[active=true]:text-fg1 data-[active=true]:focus-within:bg-bg1 data-[active=true]:focus-within:text-fg1 data-[active=true]:data-[hovered=true]:bg-bg1 data-[active=true]:data-[hovered=true]:text-fg1";
+  "group/workspace border-border1 relative flex h-full min-w-[120px] max-w-[180px] shrink-0 select-none items-center overflow-hidden border-l px-3 text-left text-xs font-medium text-fg2 transition-none first:border-l-0 focus-within:bg-sidebar-bg-hover focus-within:text-fg2 data-[hovered=true]:bg-sidebar-bg-hover data-[hovered=true]:text-fg2 data-[active=true]:sticky data-[active=true]:left-0 data-[active=true]:right-0 data-[active=true]:z-20 data-[active=true]:bg-bg1 data-[active=true]:text-fg1 data-[active=true]:focus-within:bg-bg1 data-[active=true]:focus-within:text-fg1 data-[active=true]:data-[hovered=true]:bg-bg1 data-[active=true]:data-[hovered=true]:text-fg1";
 // `flex-auto`, never `flex-1`: flex-1 pins the basis at 0, which would erase
 // this button's contents from the tab's intrinsic width and collapse every tab
-// onto the 100px floor. `w-auto` undoes the Button base's `w-fit` for the same
+// onto the 120px floor. `w-auto` undoes the Button base's `w-fit` for the same
 // reason. Keep this free of any `font-*` — the weight is inherited.
 const WORKSPACE_OPEN_BUTTON_CLS =
   "h-full w-auto min-w-0 flex-auto justify-start gap-2.5 border-0 bg-transparent p-0 text-left text-xs text-inherit shadow-none transition-none hover:bg-transparent hover:text-inherit [&_svg]:size-3.5";
@@ -634,7 +634,7 @@ function WorkspaceTab({
  *  utility — that is what keeps the two in lockstep.
  *  WIDTH is the other half of that promise now that tabs are content-sized.
  *  This span must stay `flex-auto` (a `flex-1` basis of 0 would collapse the
- *  placeholder onto the 100px floor while the real tab sizes to its name), and
+ *  placeholder onto the 120px floor while the real tab sizes to its name), and
  *  the `ml-2.5` here is exactly the `gap-2.5` the real tab's Button applies
  *  between icon and label — so both measure icon + 10px + name and the swap
  *  moves nothing. A brand-new workspace has no diff and no run, so it has no
