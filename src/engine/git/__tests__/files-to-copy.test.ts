@@ -239,6 +239,23 @@ describe("resolveFilesToCopy", () => {
     expect(r.warnings.some((w) => w.includes("could not be read"))).toBe(true);
   });
 
+  it("NO .worktreeinclude is silent — absence is not an unreadable file", async () => {
+    // The pair to the test above. Both land here through one failed open(), and
+    // only the errno separates them: ENOENT is the ordinary "this repo has no
+    // .worktreeinclude" and must fall through WITHOUT a warning, while anything
+    // else is genuinely unreadable and must warn. Collapse the two — drop the
+    // errno check while removing the check-then-use race — and every repo in
+    // the common case starts reporting a file it never had.
+    await initRepo(repoRoot, ".env*\n");
+    await write(".env");
+    const r = await resolveFilesToCopy(repoRoot);
+    expect(r.source).toBe("default");
+    expect(r.paths).toEqual([".env"]);
+    expect(r.warnings.filter((w) => w.includes("could not be read"))).toEqual(
+      [],
+    );
+  });
+
   it("an EMPTY .worktreeinclude seeds nothing, and says so", async () => {
     // Distinct from unreadable: the file parsed fine and asks for nothing. The
     // file replaces the default, so this really is "copy nothing" — but it is

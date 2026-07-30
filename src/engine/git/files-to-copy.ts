@@ -47,7 +47,7 @@
 //     silently skipping is the safe default.
 // ──────────────────────────────────────────────────────────
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile, lstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -216,38 +216,55 @@ export function resolvePatternSource(
 ): PatternSourceResult {
   const warnings: string[] = [];
   const wtiPath = path.join(repoRoot, WORKTREEINCLUDE_FILE);
-  if (existsSync(wtiPath)) {
-    let text: string | undefined;
-    try {
-      // A DIRECTORY named .worktreeinclude passes existsSync. Reading it throws
-      // on Linux but yields junk on some platforms, so check the type first.
-      if (!statSync(wtiPath).isFile()) throw new Error("not a regular file");
-      text = readFileSync(wtiPath, "utf8");
-    } catch (err) {
-      // Falling THROUGH (rather than seeding nothing) is deliberate: an
-      // unreadable include file used to mean "copy nothing at all, not even
-      // .env" — a workspace that silently can't boot. Loud warning + the
-      // configured/default list is the recoverable failure.
+  // Open ONCE and work from that descriptor: fstat the fd and read the fd,
+  // never the path twice. Testing the path and then reading the path is a
+  // check-then-use race — the name can be repointed between the two calls, so
+  // the bytes that arrive need not come from the thing that was checked — and
+  // it is what CodeQL flags here (js/file-system-race). One descriptor pins the
+  // inode for both steps, which is the fix rather than a suppression.
+  let text: string | undefined;
+  let readFailure: string | undefined;
+  let fd: number | undefined;
+  try {
+    fd = openSync(wtiPath, "r");
+    // A DIRECTORY named .worktreeinclude opens cleanly on Linux and reads back
+    // as junk on some platforms, so the type check stays — against the fd now.
+    if (!fstatSync(fd).isFile()) throw new Error("not a regular file");
+    text = readFileSync(fd, "utf8");
+  } catch (err) {
+    // ENOENT is the ordinary "this repo has no .worktreeinclude" case, not a
+    // failure: it falls through to the configured patterns in silence, which is
+    // exactly what the previous existsSync gate did. Anything else — a
+    // directory, EACCES, a mid-read I/O error — IS the unreadable case below.
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      readFailure = err instanceof Error ? err.message : String(err);
+    }
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+  if (readFailure !== undefined) {
+    // Falling THROUGH (rather than seeding nothing) is deliberate: an
+    // unreadable include file used to mean "copy nothing at all, not even
+    // .env" — a workspace that silently can't boot. Loud warning + the
+    // configured/default list is the recoverable failure.
+    warnings.push(
+      `files-to-copy: ${WORKTREEINCLUDE_FILE} exists but could not be read (${readFailure}); falling back to the configured patterns`,
+    );
+  }
+  if (text !== undefined) {
+    const patterns = parsePatternLines(text);
+    if (patterns.length === 0) {
       warnings.push(
-        `files-to-copy: ${WORKTREEINCLUDE_FILE} exists but could not be read (${err instanceof Error ? err.message : String(err)}); falling back to the configured patterns`,
+        `files-to-copy: ${WORKTREEINCLUDE_FILE} has no patterns — nothing will be seeded into new workspaces (the file REPLACES the ${DEFAULT_PATTERNS.join(", ")} default)`,
       );
-      text = undefined;
     }
-    if (text !== undefined) {
-      const patterns = parsePatternLines(text);
-      if (patterns.length === 0) {
-        warnings.push(
-          `files-to-copy: ${WORKTREEINCLUDE_FILE} has no patterns — nothing will be seeded into new workspaces (the file REPLACES the ${DEFAULT_PATTERNS.join(", ")} default)`,
-        );
-      }
-      return {
-        source: "worktreeinclude",
-        patterns,
-        filePath: wtiPath,
-        text,
-        warnings,
-      };
-    }
+    return {
+      source: "worktreeinclude",
+      patterns,
+      filePath: wtiPath,
+      text,
+      warnings,
+    };
   }
   // The layer is still read from disk even for a draft: it only names WHERE a
   // saved list would live ("This project" vs "All projects"), which the draft
