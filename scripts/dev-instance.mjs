@@ -26,8 +26,9 @@ import { spawn, execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import net from "node:net";
 import path from "node:path";
+
+import { portFree } from "./dev-ports.mjs";
 
 const require = createRequire(import.meta.url);
 const bundle = require("./dev-electron-bundle.cjs");
@@ -127,31 +128,10 @@ const NAME = SLUG
 
 // ── 2. Free-port selection ─────────────────────────────────
 
-// Probe ONE loopback stack: "free" (bound + released), "busy" (EADDRINUSE), or
-// "skip" (stack unavailable, e.g. IPv6 disabled — EADDRNOTAVAIL/EAFNOSUPPORT).
-function probeBind(port, host) {
-  return new Promise((resolve) => {
-    const srv = net.createServer();
-    srv.once("error", (e) => resolve(e.code === "EADDRINUSE" ? "busy" : "skip"));
-    srv.once("listening", () => srv.close(() => resolve("free")));
-    srv.listen(port, host);
-  });
-}
-
-/** A port is free only when BOTH loopback stacks are free. Vite binds `localhost`,
- *  which macOS resolves to ::1 (IPv6) — so a naive 127.0.0.1 (IPv4-only) check
- *  reads an IPv6 listener from a SIBLING worktree as "free" and hands Vite an
- *  already-taken port. With strictPort:true that's fatal: Vite dies with
- *  EADDRINUSE and concurrently -k tears the whole instance down. Checking both
- *  stacks closes that blind spot; a stack that's merely unavailable ("skip",
- *  never bound) doesn't count against the port. Also covers the engine ports,
- *  which run through the same probe. */
-async function portFree(port) {
-  const v4 = await probeBind(port, "127.0.0.1");
-  if (v4 === "busy") return false;
-  const v6 = await probeBind(port, "::1");
-  return v6 !== "busy";
-}
+// portFree() lives in ./dev-ports.mjs so it can be unit-tested against a real
+// listener (this file spawns the dev stack at import time). It probes both
+// loopback stacks AND the wildcard — read the comment there for the two ways a
+// narrower probe hands Vite a port that is already taken.
 
 /** Deterministic non-negative hash so distinct instances start probing from
  *  different offsets — two worktrees launched at once rarely land on the same
@@ -213,6 +193,14 @@ const vitePort = await pickVitePort();
 const engineBase = await pickEngineBasePort();
 const binPath = prepareBundle();
 
+// Every var below describes THIS app instance, not the worktree it was launched
+// from — so none of it may be inherited by shells the app itself spawns.
+// buildPtyEnv (src/engine/pty/shell-setup.ts) deletes them by name for exactly
+// that reason: a terminal inside the app inherits the full env, and a nested
+// `pnpm electron:dev` that finds ZEROS_INSTANCE set takes the "caller owns
+// uniqueness" branch of resolveInstance() below and adopts the PARENT's identity
+// (ports, data dir, single-instance lock) wholesale. ADD ANY NEW INSTANCE-SCOPED
+// VAR TO THAT DROP LIST TOO.
 const env = {
   ...process.env,
   ZEROS_DEV: "1",

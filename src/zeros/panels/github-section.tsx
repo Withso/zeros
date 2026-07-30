@@ -236,9 +236,15 @@ export function GitHubSection() {
   const [disconnectAppOpen, setDisconnectAppOpen] = useState(false);
   const disconnectCancelRef = useRef<HTMLButtonElement>(null);
 
-  const connection = useCachedRead(ghAuthStatusCache, "auth", ghAuthSnapshot, {
-    maxAgeMs: GITHUB_READ_MAX_AGE_MS,
-  });
+  // The fetcher ignores the key it is handed: this read's key is the constant
+  // "auth", so the probe's options never vary with it. Passing `ghAuthSnapshot`
+  // bare would hand the key straight to its `options` parameter.
+  const connection = useCachedRead(
+    ghAuthStatusCache,
+    "auth",
+    () => ghAuthSnapshot(),
+    { maxAgeMs: GITHUB_READ_MAX_AGE_MS },
+  );
   const hasConfirmedSnapshot = connection.data !== undefined;
   const snapshot = connection.data ?? EMPTY_SNAPSHOT;
 

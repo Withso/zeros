@@ -1975,6 +1975,94 @@ export async function bridgeSettingsRead(
   })) as SettingsReadWire;
 }
 
+// ── Files to copy (Settings → Files to copy) ───────────────────────────────
+
+/** One include-list line plus how many files it matches on its own. A
+ *  `matchCount` of 0 on a positive line is the typo signal the UI surfaces;
+ *  `null` means attribution was skipped or the scan failed. */
+export interface FilesToCopyPatternWire {
+  raw: string;
+  pattern: string;
+  negate: boolean;
+  line: number;
+  matchCount: number | null;
+}
+
+export interface FilesToCopyFileWire {
+  path: string;
+  bytes: number;
+  /** False → untracked but NOT gitignored: it is still copied (the user named
+   *  it), but it lands in the new workspace's Changes tab. */
+  ignored: boolean;
+}
+
+/** One tick-box row: something git ignores here, whether or not the current
+ *  patterns select it. Directory-collapsed, so `node_modules/` is ONE row. */
+export interface FilesToCopyCandidateWire {
+  path: string;
+  isDir: boolean;
+  /** `-1` for a directory — its size is deliberately not walked. */
+  bytes: number;
+}
+
+export interface FilesToCopyPreviewWire {
+  source: "worktreeinclude" | "file_include_globs" | "default";
+  /** Settings layer the patterns resolved from — `repo-local` (this project)
+   *  vs `user` (all projects) is what the scope control reflects. Widened
+   *  beyond SettingsLayer because provenance can also name the non-file
+   *  layers (`team`, `default`). */
+  sourceLayer?: SettingsLayer | "team" | "default";
+  /** Absolute path of the repo's `.worktreeinclude`, when that source won. */
+  sourcePath?: string;
+  /** Its raw text, shown read-only instead of an empty editable box. */
+  sourceText?: string;
+  /** The folder files are copied FROM. */
+  rootPath: string;
+  patterns: FilesToCopyPatternWire[];
+  files: FilesToCopyFileWire[];
+  totalCount: number;
+  /** Bytes across `files` only — a lower bound once `truncated`. */
+  totalBytes: number;
+  /** True when `files` was cut to the display cap; `totalCount` is the real
+   *  number. */
+  truncated: boolean;
+  /** Matched but already tracked — `git worktree add` puts these in the
+   *  workspace anyway, so copying is a no-op. */
+  trackedMatches: string[];
+  /** The tick-box universe: every ignored entry in the checkout, independent of
+   *  the current patterns. Without it the pane could only ever show what is
+   *  already selected, so nothing new would be discoverable. */
+  candidates: FilesToCopyCandidateWire[];
+  warnings: string[];
+  /** False → the scan was cut short. Say "couldn't check", never "0 files":
+   *  zero and unknown are different answers. */
+  complete: boolean;
+}
+
+/** What a new workspace of `repoRoot` would have copied into it. Pass
+ *  `patterns` to preview an UNSAVED draft — including an empty array, which
+ *  means "the box is cleared", not "use the saved list". */
+export async function bridgeFilesToCopyPreview(
+  bridge: RuntimeClient,
+  repoRoot: string,
+  opts: { mainRepoRoot?: string; patterns?: string[] } = {},
+): Promise<FilesToCopyPreviewWire> {
+  return (await workspaceOp(
+    bridge,
+    "filesToCopy.preview",
+    {
+      repoRoot,
+      ...(opts.mainRepoRoot ? { mainRepoRoot: opts.mainRepoRoot } : {}),
+      ...(opts.patterns ? { patterns: opts.patterns } : {}),
+    },
+    // The engine budgets the scan itself at 15s, and the stats + serialization
+    // sit on top of that. The 10s default would have the renderer give up
+    // BEFORE the engine does, turning a slow-but-successful preview into
+    // "Request timeout" while git kept running.
+    LOCAL_GIT_TIMEOUT_MS,
+  )) as FilesToCopyPreviewWire;
+}
+
 // ── MCP adopt-scan (Customize → MCP "Import from other tools") ─────────────
 
 /** One server discovered in another tool's native MCP config. Mirrors the

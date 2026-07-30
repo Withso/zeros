@@ -15,11 +15,12 @@
 //     exactly the historical scripts/rename-electron-dev-binary.cjs behavior.
 //
 //   • prepareInstanceBundle()   — a per-worktree dev instance. HARDLINK-clones the
-//     base Electron.app to ~/.zeros-dev/dev-instances/<slug>.app and patches it →
-//     "zeros-<name>" with a DISTINCT bundle id (com.zeros.dev.<slug>), so
-//     LaunchServices treats it as its own app (own Dock slot + Cmd-Tab entry, its
-//     own name). Every dev instance shares the one Zeros dev icon; the NAME is
-//     what tells them apart. Cached by the base Electron version; re-patch
+//     base Electron.app to ~/.zeros-dev/dev-instances/<slug>/<name>.app and
+//     patches it → "zeros-<name>" with a DISTINCT bundle id (com.zeros.dev.<slug>),
+//     so LaunchServices treats it as its own app (own Dock slot + Cmd-Tab entry,
+//     its own name). Every dev instance shares the one Zeros dev icon; the NAME is
+//     what tells them apart — including the bundle's FILENAME, which the Dock reads
+//     (see instanceBundleDir). Cached by the base Electron version; re-patch
 //     (name/id) is cheap on subsequent launches.
 //
 // All operations are darwin-only, idempotent, and best-effort: any failure
@@ -166,14 +167,40 @@ function patchPathTxt(electronPkgDir, targetExec) {
   return true;
 }
 
+const LSREGISTER =
+  "/System/Library/Frameworks/CoreServices.framework/" +
+  "Frameworks/LaunchServices.framework/Support/lsregister";
+
 function refreshLaunchServices(appDir) {
   // LaunchServices caches CFBundleName/icon per bundle path; force a re-register
   // so the Dock/Cmd-Tab pick up the patched metadata. Best-effort.
-  const lsregister =
-    "/System/Library/Frameworks/CoreServices.framework/" +
-    "Frameworks/LaunchServices.framework/Support/lsregister";
   try {
-    execFileSync(lsregister, ["-f", appDir], { stdio: "ignore" });
+    execFileSync(LSREGISTER, ["-f", appDir], { stdio: "ignore" });
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** Retire a bundle we will never launch again: unregister it from
+ *  LaunchServices FIRST, then delete it (plus its version marker). The order
+ *  matters — a stale registration keeps serving the old name and icon, and every
+ *  bundle for one instance carries the SAME CFBundleIdentifier, so leaving two
+ *  registered leaves LaunchServices to pick between them. Entirely best-effort
+ *  and idempotent: a launch must never fail over cleanup. */
+function discardBundle(appDir) {
+  try {
+    fs.lstatSync(appDir);
+  } catch {
+    return; // nothing there — skip the subprocess
+  }
+  try {
+    execFileSync(LSREGISTER, ["-u", appDir], { stdio: "ignore" });
+  } catch {
+    /* best-effort (also the non-darwin path — no lsregister to run) */
+  }
+  try {
+    fs.rmSync(appDir, { recursive: true, force: true });
+    fs.rmSync(`${appDir}.version`, { force: true });
   } catch {
     /* best-effort */
   }
@@ -233,10 +260,56 @@ function prepareSharedDevBundle() {
   return patchBundleIdentity(appDir, { ...SHARED_DEV, withPathTxt: true });
 }
 
-function instanceBundleDir(slug) {
-  // Under the DEV dot-dir (~/.zeros-dev), never the production ~/.zeros — these
-  // are dev-only launcher clones and must not pollute the prod data dir.
-  return path.join(os.homedir(), ".zeros-dev", "dev-instances", `${slug}.app`);
+/** Where a named instance's cloned bundle lives:
+ *  `~/.zeros-dev/dev-instances/<slug>/<name>.app`.
+ *
+ *  THE BUNDLE'S FILENAME IS THE DISPLAY NAME, not the slug — that split is the
+ *  whole point of the extra directory level. A Dock tile is a FILE reference, so
+ *  its tooltip is the file's Finder display name, and macOS ignores
+ *  CFBundleDisplayName whenever it disagrees with the on-disk filename (its
+ *  anti-spoofing rule). The old flat `<slug>.app` therefore leaked the slug's
+ *  uniqueness hash straight into the Dock ("coralline-ebf2") even though the
+ *  patched plist said "zeros-coralline" — while Cmd-Tab, the Apple menu and
+ *  `lsappinfo`, which read the running PROCESS's CFBundleName, all showed the
+ *  right name. Two surfaces, two sources; only matching them fixes both.
+ *
+ *  Uniqueness is unaffected: the slug (branch tail + realpath hash) still keys
+ *  the PARENT directory, so worktrees whose names collide keep separate bundles.
+ *
+ *  Under the DEV dot-dir (~/.zeros-dev), never the production ~/.zeros — these
+ *  are dev-only launcher clones and must not pollute the prod data dir. */
+function instanceBundleDir(slug, name) {
+  return path.join(instancesRoot(), slug, `${name}.app`);
+}
+
+function instancesRoot() {
+  return path.join(os.homedir(), ".zeros-dev", "dev-instances");
+}
+
+/** The pre-<slug>/<name>.app layout, retired on the next launch of that
+ *  instance. It has to GO, not just be left unused: it carries the same
+ *  com.zeros.dev.<slug> id as its replacement, so a lingering registration is
+ *  precisely what would keep the Dock showing the old slug-derived name. */
+function legacyInstanceBundleDir(slug) {
+  return path.join(instancesRoot(), `${slug}.app`);
+}
+
+/** Retire every OTHER `*.app` in this instance's directory. The display name can
+ *  change while the slug stays put — an explicit $ZEROS_INSTANCE pins the slug,
+ *  but the name still follows the branch — and without this a rename would leave
+ *  two bundles sharing one CFBundleIdentifier. `keep` is the basename of the
+ *  bundle we're about to launch, so this can safely run before or after the clone. */
+function pruneStaleBundles(dir, keep) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return; // first launch — the directory isn't there yet
+  }
+  for (const entry of entries) {
+    if (entry === keep || !entry.endsWith(".app")) continue;
+    discardBundle(path.join(dir, entry));
+  }
 }
 
 /** Clone an .app bundle by HARDLINKING every file instead of copying its ~200 MB
@@ -291,9 +364,16 @@ function prepareInstanceBundle({ slug, name }) {
     );
     return { ok: false, binPath: null };
   }
-  const dest = instanceBundleDir(slug);
+  const dest = instanceBundleDir(slug, name);
   const versionMarker = `${dest}.version`;
   const baseVersion = readElectronVersion(base);
+  // Retire anything else claiming this instance's identity — the flat
+  // `<slug>.app` from the pre-<slug>/<name>.app layout, and any bundle left over
+  // from a previous display name. Unconditional (not inside the !cacheValid
+  // branch): a valid cache skips the clone entirely, and that's exactly the run
+  // where a stale sibling would otherwise survive forever.
+  discardBundle(legacyInstanceBundleDir(slug));
+  pruneStaleBundles(path.dirname(dest), path.basename(dest));
   // Read the marker directly (no existsSync guard before the later write to the
   // same marker) to avoid a check-then-use TOCTOU: a missing/unreadable marker
   // just reads as "" → treated as stale → re-clone.
@@ -335,4 +415,11 @@ module.exports = {
   findBaseElectronApp,
   prepareSharedDevBundle,
   prepareInstanceBundle,
+  // Internals, exported for scripts/__tests__/dev-electron-bundle.test.ts —
+  // prepareInstanceBundle() itself is darwin-only, so the layout + cleanup rules
+  // are what CI can actually pin.
+  instanceBundleDir,
+  legacyInstanceBundleDir,
+  pruneStaleBundles,
+  discardBundle,
 };

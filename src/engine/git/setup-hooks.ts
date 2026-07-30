@@ -21,7 +21,9 @@ import {
   symlink,
   lstat,
   readdir,
+  readlink,
 } from "node:fs/promises";
+import { lstatSync } from "node:fs";
 import path from "node:path";
 import { GitError } from "./errors";
 import { runFile } from "./git-exec";
@@ -71,6 +73,15 @@ export async function runSetupHooks(opts: SetupHookOptions): Promise<void> {
   // the whole worktree creation the way an explicit copyPaths entry does.
   for (const rel of opts.seedPaths ?? []) {
     try {
+      // NEVER clobber what the checkout already produced. A path can be
+      // gitignored in the main checkout and COMMITTED on the base branch (an
+      // `.env` someone checked in, a `config.json` a branch added); `git
+      // worktree add` materialises the branch's version, and overwriting it
+      // with the main checkout's copy both loses the branch's content and
+      // opens the workspace with a spurious modification an agent can commit.
+      // The from-branch (worktree.ts seedWorktreeFiles) and late-seed passes
+      // already skip these; this loop used to be the one that didn't.
+      if (pathExists(path.join(opts.worktreePath, rel))) continue;
       await copyFromRepo(opts.repoRoot, opts.worktreePath, rel);
     } catch (err) {
       console.warn(
@@ -296,6 +307,81 @@ export async function resolveSetupCommand(opts: {
   return null;
 }
 
+/** Does anything at all occupy `p`? `lstat`, NOT `existsSync`: existsSync
+ *  FOLLOWS symlinks, so a DANGLING one reads as "nothing here" — and then a
+ *  copy through it writes to wherever the link points, which for a link the
+ *  base branch committed is an attacker-chosen absolute path outside the
+ *  worktree. A symlink of any kind counts as already present.
+ *
+ *  This is only the cheap "already there, skip it" pre-check: `lstat` still
+ *  FOLLOWS the parent components, so a symlinked ANCESTOR (`certs` → /outside)
+ *  reads as absent here. `assertContainedDestination` is the real guard, and
+ *  it runs inside every write. */
+export function pathExists(p: string): boolean {
+  try {
+    lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Refuse to write anywhere the filesystem would redirect outside the
+ *  worktree. `resolveContainedPaths` is LEXICAL — it constrains the path we
+ *  compute, never where a symlink then sends it — so every component from
+ *  `worktreePath` down to `dst` has to be a real directory/file.
+ *
+ *  Checking the final component alone is not enough: `mkdir(dirname(dst))`
+ *  happily traverses a symlinked ancestor, and `lstat(dst)` resolves through
+ *  it too, so `certs → /outside` committed on the base branch made
+ *  `certs/server.pem` a write to `/outside/server.pem` with the MAIN
+ *  checkout's contents — reachable from plain files-to-copy seeding, not just
+ *  an explicit copyPaths entry. */
+async function assertContainedDestination(
+  worktreePath: string,
+  dst: string,
+): Promise<void> {
+  const wtAbs = path.resolve(worktreePath);
+  const rel = path.relative(wtAbs, path.resolve(dst));
+  let cur = wtAbs;
+  for (const segment of rel.split(path.sep)) {
+    if (!segment) continue;
+    cur = path.join(cur, segment);
+    // Nothing at this component yet, so nothing below it either — the rest of
+    // the path will be created by us, as real directories.
+    if (!(await assertRealPathComponent(wtAbs, cur))) return;
+  }
+}
+
+/** One component of the check above. Returns false when nothing is there yet
+ *  (so the caller can stop walking), throws when a symlink is. Split out so
+ *  copyDirRecursive can check just the entry it is about to write: `dst`'s own
+ *  chain was proved by its caller, and re-walking it per entry would cost a
+ *  depth-times-file-count pile of lstats on a `node_modules` copy. */
+async function assertRealPathComponent(
+  wtAbs: string,
+  p: string,
+): Promise<boolean> {
+  const st = await lstat(p).catch(() => null);
+  if (!st) return false;
+  if (st.isSymbolicLink()) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: `copyPaths: refusing to write through a symlink already at "${path.relative(wtAbs, p)}" in the worktree`,
+    });
+  }
+  return true;
+}
+
+/** True for a caller-supplied relative path that would resolve outside its
+ *  base — absolute, or climbing out with a `..` SEGMENT. A cheap pre-check for
+ *  the copyPaths/symlinkPaths validator; the containment assertions in
+ *  resolveContainedPaths are the lexical guard, and
+ *  assertContainedDestination is the filesystem one. */
+function escapesBase(p: string): boolean {
+  return path.isAbsolute(p) || p.split(/[/\\]/).includes("..");
+}
+
 /** Validate a copy/symlink `rel` and return the contained absolute src/dst.
  *  Rejects absolute paths and `..` traversal so a caller-supplied entry can't
  *  read outside the repo root or write outside the worktree. */
@@ -305,12 +391,13 @@ function resolveContainedPaths(
   rel: string,
   label: string,
 ): { src: string; dst: string } {
-  if (
-    typeof rel !== "string" ||
-    rel.length === 0 ||
-    path.isAbsolute(rel) ||
-    rel.includes("..")
-  ) {
+  // Same predicate the symlink guard uses, so "escapes its base" has exactly
+  // one definition in this module: absolute, or a `..` path SEGMENT.
+  // Segment, not substring — `.env..bak` and `config..json` are ordinary
+  // filenames, and rejecting them made an explicit copyPaths entry fatal,
+  // rolling back the whole workspace create. The containment assertions below
+  // are the real guard; this is the cheap pre-check.
+  if (typeof rel !== "string" || rel.length === 0 || escapesBase(rel)) {
     throw new GitError({
       code: "VALIDATION_FAILED",
       message: `${label}: "${rel}" must be a relative path within the repo (no "..", no absolute)`,
@@ -371,40 +458,91 @@ export async function copyFromRepo(
       cause: err,
     });
   }
+  // BEFORE the mkdir, not after: `copyFile` opens with O_CREAT|O_TRUNC and
+  // follows a link at the destination, and `mkdir -p` follows one at any
+  // parent — so a link the base branch committed (`.env.local →
+  // ~/.ssh/authorized_keys`, or `certs → /outside`) would turn a seed into an
+  // arbitrary-path overwrite with the main checkout's contents.
+  await assertContainedDestination(worktreePath, dst);
   await mkdir(path.dirname(dst), { recursive: true });
   if (st.isDirectory()) {
-    await copyDirRecursive(src, dst);
+    await copyDirRecursive(src, dst, worktreePath);
   } else if (st.isSymbolicLink()) {
-    // Re-create the symlink pointing at the same target — but never one that
-    // would escape the worktree (an absolute or `..` target).
-    const target = await import("node:fs/promises").then((m) =>
-      m.readlink(src),
-    );
-    if (path.isAbsolute(target) || target.split(/[/\\]/).includes("..")) {
-      throw new GitError({
-        code: "VALIDATION_FAILED",
-        message: `copyPaths: refusing to re-create an escaping symlink "${rel}" → "${target}"`,
-      });
-    }
-    await symlink(target, dst);
+    await recreateSymlink(src, dst, worktreePath, rel);
   } else {
     await copyFile(src, dst);
   }
 }
 
-async function copyDirRecursive(src: string, dst: string): Promise<void> {
+/** Re-create a symlink at `dst` pointing at the same target — but never one
+ *  that resolves outside `worktreePath`. Used for BOTH a top-level symlink and
+ *  every link found while copying a directory: the guard used to live only on
+ *  the top-level branch, so `copyPaths: ["bundle"]` re-created
+ *  `bundle/link → /etc/…` unchecked.
+ *
+ *  Throwing is right for the path the caller NAMED; for a link that merely
+ *  happens to sit inside a copied tree, copyDirRecursive catches and skips
+ *  (see there — an absolute target like `/usr/bin/python3` is ordinary).
+ *
+ *  The test is where the link RESOLVES, not whether its text contains `..`.
+ *  A relative target is relative to the link's own directory, so
+ *  `node_modules/.bin/tsc → ../typescript/bin/tsc` is entirely inside the
+ *  copied tree — a string check on `..` rejects it and, since copyPaths is
+ *  fatal, would fail the whole workspace create for anyone copying a
+ *  dependency directory.
+ *
+ *  `path.dirname(dst)` is only safe to resolve against because
+ *  assertContainedDestination has already proved no component of it is a
+ *  symlink; without that this check would be defeated by the same trick. */
+async function recreateSymlink(
+  src: string,
+  dst: string,
+  worktreePath: string,
+  label: string,
+): Promise<void> {
+  const target = await readlink(src);
+  const resolved = path.resolve(path.dirname(dst), target);
+  const wtAbs = path.resolve(worktreePath);
+  if (resolved !== wtAbs && !resolved.startsWith(wtAbs + path.sep)) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: `copyPaths: refusing to re-create an escaping symlink "${label}" → "${target}"`,
+    });
+  }
+  await symlink(target, dst);
+}
+
+async function copyDirRecursive(
+  src: string,
+  dst: string,
+  worktreePath: string,
+): Promise<void> {
   await mkdir(dst, { recursive: true });
   const entries = await readdir(src, { withFileTypes: true });
+  const wtAbs = path.resolve(worktreePath);
   for (const e of entries) {
     const s = path.join(src, e.name);
     const d = path.join(dst, e.name);
+    const label = path.relative(wtAbs, d);
+    // Same destination rule as the top-level path, per entry: naming the
+    // PARENT directory must not be a way around it. `dst`'s own chain was
+    // checked by the caller, so only this new final component can be a link —
+    // one lstat, not a re-walk.
+    await assertRealPathComponent(wtAbs, d);
     if (e.isDirectory()) {
-      await copyDirRecursive(s, d);
+      await copyDirRecursive(s, d, worktreePath);
     } else if (e.isSymbolicLink()) {
-      const target = await import("node:fs/promises").then((m) =>
-        m.readlink(s),
-      );
-      await symlink(target, d);
+      // An escaping link found INSIDE a copied tree is skipped, not fatal.
+      // A standard virtualenv ships `.venv/bin/python → /usr/bin/python3` and
+      // copyPaths failure rolls back the whole workspace create, so making
+      // incidental tree contents fatal broke copying a dependency directory
+      // outright. The explicitly named path still throws (copyFromRepo).
+      try {
+        await recreateSymlink(s, d, worktreePath, label);
+      } catch (err) {
+        if (!(err instanceof GitError)) throw err;
+        console.warn(`[setup-hooks] ${err.message}; skipped`);
+      }
     } else {
       await copyFile(s, d);
     }
@@ -431,6 +569,10 @@ async function symlinkFromRepo(
       cause: err,
     });
   }
+  // Same rule as copyFromRepo: `mkdir -p` follows a symlinked ancestor, so a
+  // link the base branch committed would have us create directories (and the
+  // link itself) outside the worktree.
+  await assertContainedDestination(worktreePath, dst);
   await mkdir(path.dirname(dst), { recursive: true });
   // Absolute symlink so the worktree can be moved without breaking refs.
   await symlink(src, dst);

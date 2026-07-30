@@ -35,7 +35,7 @@
 // ("Repository Settings"), and the legacy `repo:<id>:<section>` settings
 // deep links (settings-page redirects them here).
 
-import React, { useLayoutEffect, useMemo, useRef } from "react";
+import React, { useCallback, useLayoutEffect, useMemo, useRef } from "react";
 import { ExternalLink } from "lucide-react";
 
 import { Tooltip } from "@/zeros/ui/primitives";
@@ -69,6 +69,8 @@ import type { Workspace } from "../../native/git";
 import { useInstantViewSwitch } from "../ui/use-instant-view-switch";
 import { useScrollMemoryRef } from "../../shell/scroll-memory";
 import { OpenSettingsFileButton } from "./open-settings-file-button";
+import { getActiveBridge } from "../bridge/active-bridge";
+import { prefetchFilesToCopyForRepo } from "./files-to-copy-section";
 import {
   RepoDetail,
   REPO_SECTIONS,
@@ -86,6 +88,7 @@ const CONFIG_VIEW_IDS = [
   "environment",
   "git",
   "actions",
+  "files",
   "paths",
 ] as const satisfies readonly RepoSectionId[];
 
@@ -439,6 +442,10 @@ export function RepoPage({ project }: { project: Project }) {
     });
   };
 
+  const warmFilesToCopy = useCallback(() => {
+    prefetchFilesToCopyForRepo(getActiveBridge(), project.repoRoot);
+  }, [project.repoRoot]);
+
   return (
     <div
       ref={pageSurfaceRef}
@@ -482,7 +489,19 @@ export function RepoPage({ project }: { project: Project }) {
                   Workspaces
                 </TabsTrigger>
                 {CONFIG_VIEWS.map((s) => (
-                  <TabsTrigger key={s.id} value={s.id} className="text-xs">
+                  <TabsTrigger
+                    key={s.id}
+                    value={s.id}
+                    className="text-xs"
+                    // Warm on intent: the Files tab's scan is the only repo-page
+                    // read the boot/hover settings prefetch doesn't already
+                    // cover, so opening it would otherwise land on a spinner.
+                    // The click handler itself never awaits.
+                    onPointerEnter={
+                      s.id === "files" ? warmFilesToCopy : undefined
+                    }
+                    onFocus={s.id === "files" ? warmFilesToCopy : undefined}
+                  >
                     {s.label}
                   </TabsTrigger>
                 ))}

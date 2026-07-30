@@ -308,6 +308,30 @@ export function buildPtyEnv(opts?: {
   delete env.ZEROS_PTY_HOST_SCRIPT;
   delete env.ZEROS_PTY_NODE_PTY;
   delete env.ELECTRON_RUN_AS_NODE;
+  // Drop this dev instance's IDENTITY for the same reason: it describes THE APP,
+  // not the worktree. scripts/dev-instance.mjs derives one slug per worktree and
+  // exports these so every `pnpm electron:dev` is its own app — own Vite port, own
+  // engine port block, own com.zeros.dev.<slug> data dir, own userData +
+  // single-instance lock. Inherited by a shell, they hand all of that to the NEXT
+  // app: a nested `pnpm electron:dev` (dogfooding Zeros from a terminal inside
+  // Zeros) found ZEROS_INSTANCE already set, took the "caller owns uniqueness"
+  // branch of resolveInstance(), and adopted the PARENT's identity verbatim — only
+  // the display name came from the worktree. It then claimed the parent's Vite port
+  // (fatal under strictPort, and `concurrently -k` killed the whole block), the
+  // parent's SQLite DB (db/paths.ts), the parent's single-instance lock (so the
+  // child silently quits — deep-link.ts), and the parent's orphan-engine match key
+  // (so the two apps reap each other's engines — orphan-engines.ts). Deleting them
+  // lets the nested launcher derive a fresh identity from its own worktree.
+  //
+  // This is a denylist of what the launcher exports, so a new instance-scoped var
+  // has to be added here too — there's a pointer saying so at that export site.
+  // ZEROS_WORKTREE_PATH / ZEROS_WORKSPACE_ID stay: those ARE worktree context, and
+  // are set deliberately just below.
+  delete env.ZEROS_INSTANCE;
+  delete env.ZEROS_INSTANCE_NAME;
+  delete env.ZEROS_VITE_PORT;
+  delete env.ZEROS_ENGINE_BASE_PORT;
+  delete env.ELECTRON_RENDERER_URL;
   // Engine-owned auth/control channels are never part of desktop parity. A
   // legacy launch or a parent-process override must not turn them into terminal
   // environment variables, where shell commands and coding agents can inspect
