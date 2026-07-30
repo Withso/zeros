@@ -23,6 +23,21 @@ type GithubAppCredential = Extract<GithubCredential, { method: "github-app" }>;
 
 export const GITHUB_APP_TRANSIENT_REFRESH_RETRY_MS = 30_000;
 
+/** `not_configured` is non-terminal on purpose — a rolled-back or half-deployed
+ *  backend must never delete a credential that still works — but it is not a
+ *  blip either: it clears on a DEPLOY, not on a retry. Re-asking every 30 s
+ *  turns one misconfigured control plane into a permanent 404 storm from every
+ *  machine that ever connected, and buries the real signal in the log. Hold the
+ *  credential, slow the asking right down. */
+export const GITHUB_APP_UNAVAILABLE_REFRESH_RETRY_MS = 15 * 60_000;
+
+/** How long to wait before re-attempting a rotation that just failed. */
+export function refreshRetryDelayMs(reason: GithubAppConnectionErrorReason) {
+  return reason === "not_configured"
+    ? GITHUB_APP_UNAVAILABLE_REFRESH_RETRY_MS
+    : GITHUB_APP_TRANSIENT_REFRESH_RETRY_MS;
+}
+
 export type GithubAppConnectionErrorReason =
   | "access_denied"
   | "authorization_expired"
@@ -107,6 +122,7 @@ function mapClientError(error: unknown): GithubAppFlowError {
         "The GitHub authorization expired.",
         "authorization_expired",
         true,
+        { cause: error },
       );
     }
     // The control plane could not verify OUR refresh binding — the GitHub grant
@@ -118,6 +134,7 @@ function mapClientError(error: unknown): GithubAppFlowError {
         "This GitHub connection needs to be re-authorized.",
         "authorization_expired",
         false,
+        { cause: error },
       );
     }
     if (
@@ -127,31 +144,53 @@ function mapClientError(error: unknown): GithubAppFlowError {
       return new GithubAppFlowError(
         "The GitHub handoff expired.",
         "handoff_expired",
+        false,
+        { cause: error },
       );
     }
-    // A control plane that has no GitHub routes at all answers with its generic
-    // 404, and one deployed without a GitHub App registration answers
+    // A control plane that has no GitHub routes at all answers with ITS OWN
+    // generic 404 (`code: "not_found"` — `app.notFound` in backend/src/index.ts),
+    // and one deployed without a GitHub App registration answers
     // `github_not_configured`. Both mean the same thing to the user — this build
     // cannot do App sign-in — and neither is worth retrying. Deliberately NOT
     // terminal: a rolled-back or half-configured backend must not delete an App
     // credential that still works (see refreshUnderLock).
-    if (error.code === "github_not_configured" || error.status === 404) {
+    //
+    // The two are NOT the same thing to an operator, though, and the fix
+    // differs: "deploy the backend" versus "set GITHUB_APP_* and register an
+    // App". `cause` carries the status through so main can log which one it
+    // was — on 2026-07-30 a control plane three days behind main produced this
+    // exact message, and nothing in the log distinguished it from a missing
+    // registration.
+    if (
+      error.code === "github_not_configured" ||
+      (error.status === 404 && error.code === "not_found")
+    ) {
       return new GithubAppFlowError(
         "GitHub App sign-in isn’t available on this Zeros control plane yet. " +
           "Use gh CLI or a Personal Access Token for now.",
         "not_configured",
+        false,
+        { cause: error },
       );
     }
     // Never surface the control plane's own wording: it is written for
     // operators ("Not found"), and for an unexpected status it may be an
     // upstream proxy's text rather than ours. main logs the original.
-    const transport = error.code === "network" || error.status >= 500;
+    //
+    // A 404 that did NOT carry our own `not_found` code never reached the
+    // control plane's router — it is an edge/proxy page or a misrouted origin.
+    // Calling that "not configured" would pin a deployment fault on the
+    // feature; it belongs with the transport failures, which are retryable.
+    const transport =
+      error.code === "network" || error.status >= 500 || error.status === 404;
     return new GithubAppFlowError(
       transport
         ? "Zeros couldn’t reach the GitHub connection service. Try again."
         : "GitHub couldn’t complete this connection. Start again from Settings.",
       transport ? "github_unavailable" : "oauth_failed",
       error.terminal,
+      { cause: error },
     );
   }
   return new GithubAppFlowError(
@@ -181,6 +220,10 @@ function validNonce(value: string): boolean {
 export class GithubAppController {
   private readonly now: () => number;
   private refreshInFlight: Promise<GithubAppCredential | null> | null = null;
+  /** Whether the in-flight rotation was asked to rotate unconditionally. A
+   *  non-forced pass may legitimately decide to keep the current token, which
+   *  is the wrong answer for a caller whose token was just rejected. */
+  private refreshInFlightForced = false;
   /** Advanced by every cancel. `begin()` reaches the control plane before it has
    * anything to clear, so a cancel during those round trips has no persisted
    * state to remove — it has to be observed in memory instead. */
@@ -368,15 +411,43 @@ export class GithubAppController {
       initial.expiresAtMs - this.now() < 60_000;
     if (!input.force && !due) return initial;
 
-    if (!this.refreshInFlight) {
-      this.refreshInFlight = this.refreshUnderLock(
-        initial,
-        input.force ?? false,
-      ).finally(() => {
-        this.refreshInFlight = null;
-      });
+    const force = input.force ?? false;
+    // Single-flight, but only where joining is at least as strong as what the
+    // caller asked for. A forced refresh exists because something ALREADY
+    // rejected the current access token (refreshAfterRejection), so settling
+    // for whatever a non-forced pass decided to keep can hand that same
+    // rejected token straight back — and its caller then has no second lever.
+    // Queue behind the weaker pass instead of joining it.
+    if (this.refreshInFlight && (!force || this.refreshInFlightForced)) {
+      return this.refreshInFlight;
     }
-    return this.refreshInFlight;
+    const weakerPass = this.refreshInFlight;
+    const run = (async () => {
+      if (weakerPass) {
+        // A rejected settle still means the slot is quiet again; this pass owns
+        // its own error surface.
+        const settled = await weakerPass.catch(() => undefined);
+        // Usually the weaker pass DID rotate, which already satisfies a caller
+        // that only needed the rejected token replaced. Spend a second rotation
+        // solely on the case it decided to keep what we started with.
+        if (settled && !sameRotatingPair(settled, initial)) return settled;
+      }
+      const latest = await this.deps.credentialStore.get("github-app");
+      if (!latest) return null;
+      return this.refreshUnderLock(latest, force);
+    })();
+    this.refreshInFlight = run;
+    this.refreshInFlightForced = force;
+    const settle = () => {
+      if (this.refreshInFlight === run) {
+        this.refreshInFlight = null;
+        this.refreshInFlightForced = false;
+      }
+    };
+    // then(settle, settle) rather than finally(): the derived promise must not
+    // be left unhandled when `run` rejects.
+    void run.then(settle, settle);
+    return run;
   }
 
   private async refreshUnderLock(
@@ -429,7 +500,7 @@ export class GithubAppController {
         }
         try {
           await this.deps.afterTransientRefreshFailure?.(
-            GITHUB_APP_TRANSIENT_REFRESH_RETRY_MS,
+            refreshRetryDelayMs(mapped.reason),
           );
         } catch {
           // Scheduling is best-effort and must never displace the original

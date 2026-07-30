@@ -619,6 +619,20 @@ async function listGithubInstallations(
       (value): value is Omit<GithubInstallation, "repositoryCount"> =>
         value !== null,
     );
+  // `installationFromGithub` drops any installation belonging to a different
+  // app_id (github.ts, `appId !== config.appId`). That filter is correct, and
+  // silent — so a wrong GITHUB_APP_ID looks EXACTLY like success: the token
+  // exchange works, /user works, the list fetches, every row is discarded, and
+  // the user is told to install an App they just installed. Zod cannot catch it
+  // (any positive integer is well-formed), so the log is the only place this
+  // can ever surface.
+  if (rawInstallations.length > 0 && installations.length === 0) {
+    console.warn(
+      `[github] GitHub returned ${rawInstallations.length} installation(s) ` +
+        `but none match GITHUB_APP_ID=${config.appId} — the configured App id ` +
+        "is almost certainly wrong for this registration.",
+    );
+  }
   const result: GithubInstallation[] = installations.map((installation) => ({
     ...installation,
     repositoryCount: null,
@@ -936,10 +950,17 @@ export function createGithubPublicRoutes(
   const now = dependencies.now ?? Date.now;
 
   app.get("/v1/github/oauth/callback", async (c) => {
-    const state = c.req.query("state") ?? "";
-    if (!NonceSchema.safeParse(state).success) {
+    // Take the PARSED value, not the raw query string: NonceSchema begins with
+    // `.trim()`, so a padded `state` validates while `sha256(raw)` hashes
+    // something else entirely — the code would then check one value and look up
+    // another. It fails closed today (no lookup hit), and our own states never
+    // carry whitespace, but validating a different string than you use is the
+    // shape of a real bypass, not a style nit.
+    const parsedState = NonceSchema.safeParse(c.req.query("state") ?? "");
+    if (!parsedState.success) {
       throw new HttpError(422, "invalid_oauth_state", "Invalid OAuth state.");
     }
+    const state = parsedState.data;
     // No table-wide expiry sweep here: this route is unauthenticated, so any
     // caller with a well-formed `state` could otherwise drive one write
     // transaction plus a full-table DELETE per request against the same pool
