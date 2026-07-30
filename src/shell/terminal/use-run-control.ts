@@ -131,6 +131,12 @@ export function useRunControl(
             toast.error(`No command configured for "${action.name}".`);
             return;
           }
+          // Nothing spawned: a Stop (or the archive reaper) landed while the
+          // engine was still resolving the run's env. Creating the tab anyway
+          // would attach it to a PTY that does not exist, find no buffered log to
+          // replay, and render an instantly-"(exited)" blank pane — immediately
+          // after the user pressed Stop.
+          if (res.cancelled) return;
           // An EXITED session is force-dropped first so the recreate re-mounts
           // and reattaches to the fresh engine PTY (closeSession would refuse
           // to drop a folder's last tab); an ALIVE one is reused (focused); a

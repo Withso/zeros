@@ -6,6 +6,8 @@
 import { execFile, type ExecFileException } from "node:child_process";
 import { promisify } from "node:util";
 import { GitError, type GitErrorCode } from "./errors";
+// Pure leaf module (node:path only) — no cycle back into git/.
+import { pruneLauncherScriptEnv } from "../env/launcher-env";
 
 const execFileAsync = promisify(execFile);
 
@@ -191,6 +193,28 @@ export interface RunGitOptions {
   env?: Record<string, string | undefined>;
 }
 
+/** The env for a `git` child, with the launching `pnpm/npm run`'s context pruned.
+ *
+ *  git itself doesn't care, but git RUNS HOOKS: a repo's husky/lefthook
+ *  `pre-commit` is a shell script executing `pnpm lint-staged` (nothing in this
+ *  codebase passes `--no-verify`), and it inherited Zeros' `node_modules/.bin`
+ *  first on PATH plus Zeros' `npm_config_*`. In the user's worktree that resolves
+ *  their linters to Zeros' pinned copies. This fires on every commit Zeros makes,
+ *  which makes it the most reachable of the engine's spawn paths.
+ *
+ *  Note the shape: `opts.env` is merged over the PRUNED base, never the other way
+ *  round. Spreading a pruned env over `process.env` would undo the prune, because
+ *  a deleted key is simply absent and process.env's value would win. */
+function gitChildEnv(
+  extra?: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+  const env: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+  };
+  pruneLauncherScriptEnv(env, process.env);
+  return extra ? { ...env, ...extra } : env;
+}
+
 export type ExpectedCategory =
   | "conflict"
   | "behind"
@@ -288,7 +312,7 @@ export async function runGit(
         cwd,
         maxBufferBytes: opts.maxBufferBytes,
         timeoutMs: opts.timeoutMs,
-        ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}),
+        env: gitChildEnv(opts.env),
         input: opts.input,
       });
     } catch (err) {

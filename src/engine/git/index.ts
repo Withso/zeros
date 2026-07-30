@@ -164,7 +164,7 @@ export type {
   RenameBranchOptions,
 } from "./branch";
 
-export { listWorkspaceFiles } from "./workspace-files";
+export { listWorkspaceFiles, listIgnoredEntries } from "./workspace-files";
 
 export {
   changeCounts,
