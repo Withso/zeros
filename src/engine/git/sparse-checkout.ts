@@ -14,7 +14,8 @@
 // A per-agent permission would have to be re-expressed for every agent we
 // ship (and every one we add later), and it could never cover the terminal.
 // Sparse-checkout sits below all of that: the file simply is not on disk, so
-// enforcement is uniform and free. This is also what Conductor does.
+// enforcement is uniform and free. Prior art in this space converges on the
+// same mechanism for the same reason.
 //
 // Three properties of cone mode that shape the UI
 // ───────────────────────────────────────────────
