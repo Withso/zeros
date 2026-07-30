@@ -160,6 +160,17 @@ jobs:
         # comes from the weekly @cursor/sdk Renovate bump.
         run: pnpm check:cursor-asar
 
+      - name: Cursor SDK host actually loads (real spawn)
+        # The step above compares the asarUnpack globs to the require() closure
+        # STATICALLY; this spawns the real cursor-host.cjs and drives a protocol
+        # round-trip, so a dep that resolves in theory but not in practice fails
+        # here. It needs NO credentials — store.open and models.list only have to
+        # RESOLVE their modules (sqlite3's native chain, undici), not succeed — so
+        # unlike `agents:smoke` it can run on every PR. Worth blocking on: per
+        # renovate.json, @cursor/sdk IS the entire Cursor backend with no CLI/ACP
+        # fallback, so a host that cannot load means Cursor is dead in the DMG.
+        run: pnpm cursor:smoke
+
       - name: Migration ladder is forward-only
         # The shipped zeros.db is each user's only copy of their data; editing a
         # released migration never re-runs → silent divergence/loss. This enforces
@@ -181,6 +192,16 @@ jobs:
 
       - name: Codex protocol pin in lockstep
         run: pnpm check:codex-pin
+
+      - name: Bundled agent runtime pins are exact and provable
+        # The gate for Renovate's weekly "agent CLIs" PR. Every other check is
+        # blind to a FORWARD bump: models:verify --strict only fires when the
+        # bundled CLI is OLDER than a curated model needs, and test:adapters
+        # replays committed fixtures, so both are green by construction for the
+        # one direction Renovate moves. This resolves the Claude platform binary
+        # and execs its own --version, so a renamed or dropped platform package
+        # fails HERE instead of in release-alpha (post-merge) or the weekly cron.
+        run: pnpm check:runtime-pins
 
       - name: electron-builder source paths resolve
         run: pnpm check:packaging-paths
@@ -291,6 +312,14 @@ jobs:
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Bundled agent runtime pins (darwin artifact)
+        # The `test` job runs this too, but on ubuntu it can only prove the
+        # linux-x64 platform package. The binary that actually SHIPS is
+        # darwin-arm64, and the platform packages are os/cpu-gated optional
+        # deps — the shipped one installs on no other runner. This is the only
+        # place the real artifact is resolved and executed before merge.
+        run: pnpm check:runtime-pins
 
       - name: Packaged engine health + workspace lifecycle
         # Source-mode tests do not reproduce Bun --compile runtime failures.
