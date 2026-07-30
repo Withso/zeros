@@ -10,6 +10,8 @@ import {
   validateCatalog,
   checkCliVersionGate,
   bundledClaudeCliVersion,
+  checkModelIdsKnownToCli,
+  knownClaudeModelIds,
 } from "../../../../scripts/models-verify.mjs";
 import catalog from "../../../../catalogs/models-v1.json";
 
@@ -63,6 +65,66 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
         "@anthropic-ai/claude-agent-sdk is not installed — cannot verify the catalog against the pinned CLI",
       );
     expect(checkCliVersionGate(catalog, bundled)).toEqual([]);
+  });
+
+  describe("curated ids still EXIST in the pinned CLI (the retired-model direction)", () => {
+    // The mirror image of the gate above, and the direction a version number
+    // cannot express. `minCliVersion` catches a model too NEW for the pinned CLI;
+    // nothing caught a model the CLI has DROPPED. Both produce the same
+    // user-visible failure — the picker offers it, no runtime check hides it, and
+    // the CLI silently downgrades — but retiring an id bumps no version, so the
+    // only source of truth is the binary's own accepted-id list.
+    const ids = knownClaudeModelIds();
+
+    it("scans a plausible id set off the real binary (the gate is not inert)", () => {
+      // Asserted, not assumed. The string table of a `bun --compile` blob is
+      // stored in the clear today; if that ever changes the scan finds nothing
+      // and the gate below passes vacuously. A gate that cannot fail is the exact
+      // defect this whole check was written against — so prove it can see.
+      if (!ids)
+        throw new Error(
+          "the Claude platform binary did not resolve — cannot verify curated ids against the pinned CLI",
+        );
+      expect(ids.size).toBeGreaterThan(8);
+      // Spot-check an id that has shipped for many versions: proves the scan is
+      // reading the model list, not just matching arbitrary strings.
+      expect(ids.has("claude-haiku-4-5")).toBe(true);
+    });
+
+    it("curates no id the pinned CLI has never heard of", () => {
+      expect(checkModelIdsKnownToCli(catalog, ids).missing).toEqual([]);
+    });
+
+    it("FLAGS a retired id — the negative control", () => {
+      // Without this, "missing is empty" is unfalsifiable: it reads identically
+      // whether the check works or silently matches everything.
+      const retired = {
+        ...catalog,
+        families: {
+          ...catalog.families,
+          claude: [
+            ...catalog.families.claude,
+            { value: "claude-retired-9[1m]", label: "Retired 9" },
+          ],
+        },
+      };
+      const { missing } = checkModelIdsKnownToCli(retired, ids);
+      expect(missing).toHaveLength(1);
+      expect(missing[0]).toContain("claude-retired-9");
+    });
+
+    it("reports an INCONCLUSIVE scan rather than flagging every model as removed", () => {
+      // The safety valve. A binary whose ids can no longer be extracted must not
+      // read as "Anthropic deleted its entire model list" — five simultaneous
+      // false reds is how a check earns itself a `continue-on-error`.
+      const { missing, notes } = checkModelIdsKnownToCli(
+        catalog,
+        new Set(["claude-opus-4-8"]),
+      );
+      expect(missing).toEqual([]);
+      expect(notes).toHaveLength(1);
+      expect(notes[0]).toContain("INCONCLUSIVE");
+    });
   });
 
   it("curates the 2026-07 claude family (Fable 5 / Opus 5 / Opus 4.8 / Sonnet 5 / Haiku, all 1M except Haiku)", () => {

@@ -6,13 +6,15 @@
     "─────────────────────────────────────────────────────────",
     "WHY ONE BOT: this repo previously ran Renovate and Dependabot side by side, with .github/dependabot.yml reduced to `open-pull-requests-limit: 0` purely so the two would not fight over the same lockfile. Two bots that must be configured not to collide is a maintenance tax with no upside, and on a public repo it doubles the visible PR noise. Dependabot's config was deleted and Renovate kept, because Renovate is the one carrying real intent here: an opt-in allowlist, grouping, a schedule, and per-rule reasoning. It also natively understands SHA-pinned GitHub Actions, which is now load-bearing (see the github-actions rule below).",
     "WHAT REPLACED DEPENDABOT: the `vulnerabilityAlerts` block below. Renovate reads GitHub's own advisory data, so security fixes still arrive automatically — they just arrive from one bot instead of two. Repository setting to match: Settings ▸ Code security ▸ leave Dependabot ALERTS on (they cost nothing and feed Renovate), and turn Dependabot SECURITY UPDATES off so it stops opening a competing PR for the same advisory.",
-    "CLOSED TO CONTRIBUTION: this project is source-available and does not accept outside pull requests. Renovate's PRs are not an exception to that — they are automated maintenance opened by a bot against the maintainer's own repo, which is why every one of them is labelled `automated` (excluded from the generated release notes in .github/release.yml) and carries an explicit header saying so."
+    "CLOSED TO CONTRIBUTION: this project is source-available and does not accept outside pull requests. Renovate's PRs are not an exception to that — they are automated maintenance opened by a bot against the maintainer's own repo, which is why every one of them is labelled `automated` (excluded from the generated release notes in .github/release.yml) and carries an explicit header saying so.",
+    "WHAT ACTUALLY GATES THE AGENT-CLI PR: `pnpm check:runtime-pins` (preflight, on both ubuntu and macOS). An earlier version of this file claimed the gate was `pnpm test:git + pnpm models:verify --strict`; that was FALSE for the only direction Renovate moves. models:verify's CLI check fires only when the bundled CLI is OLDER than a curated model needs, so a forward bump satisfies it trivially — and test:adapters replays committed fixtures through unchanged translator source, so its output is bump-invariant. check:runtime-pins closes that hole by resolving the Claude platform binary and executing its own `--version`, which is why a renamed or dropped platform package now fails on the PR rather than post-merge in release-alpha. check:codex-pin remains the Codex protocol-triple gate. Staleness itself is reported weekly by the runtime-drift job in scheduled.yml."
   ],
   "extends": [
     ":dependencyDashboard",
     ":semanticCommits",
     "helpers:pinGitHubActionDigests"
   ],
+  "timezone": "Asia/Kolkata",
   "enabledManagers": ["npm", "github-actions"],
   "labels": ["dependencies", "automated"],
   "prHeader": "Automated maintenance opened by Renovate. This repository is source-available and closed to outside contribution; bot upgrade PRs are the only non-maintainer PRs that are ever merged here.",
@@ -23,7 +25,7 @@
       "enabled": false
     },
     {
-      "description": "Bundled agent runtimes. A bump to @anthropic-ai/claude-agent-sdk updates the pinned Claude Code CLI (its claudeCodeVersion); @openai/codex updates the bundled Codex binary; @cursor/sdk the cursor-sdk fallback. Grouped into one weekly PR, labeled, and gated by CI (pnpm test:git + pnpm models:verify --strict) so a bump that can't run a curated model fails the PR. NOT auto-merged: a new SDK can carry protocol/API changes the adapters must adapt to — a human reviews the green PR.",
+      "description": "Bundled agent runtimes — shipped executables, not ordinary libraries. A bump to @anthropic-ai/claude-agent-sdk swaps the actual claude-code binary the app stages (its claudeCodeVersion); @openai/codex swaps the Codex binary and desyncs the protocol triple; @cursor/sdk IS the entire Cursor backend (the sole and only Cursor runtime — there is no CLI/ACP fallback, see src/engine/agents/adapters/cursor-sdk/index.ts). All three are pinned EXACTLY, not by range: a range lets a lockfile refresh swap a shipped binary with no reviewed diff. Grouped into one weekly PR, labeled, and NOT auto-merged — a new SDK can carry protocol/API changes the adapters must adapt to, so a human reviews the green PR.",
       "matchPackageNames": [
         "@anthropic-ai/claude-agent-sdk",
         "@openai/codex",
