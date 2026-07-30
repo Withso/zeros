@@ -536,12 +536,18 @@ export async function bridgeMessageWindow(
   chatId: string,
   limit: number,
   before?: number,
+  timeoutMs?: number,
 ): Promise<PersistedMessageWire[]> {
-  const r = (await workspaceOp(bridge, "messages.window", {
-    chatId,
-    limit,
-    ...(before !== undefined ? { before } : {}),
-  })) as { messages?: PersistedMessageWire[] } | undefined;
+  const r = (await workspaceOp(
+    bridge,
+    "messages.window",
+    {
+      chatId,
+      limit,
+      ...(before !== undefined ? { before } : {}),
+    },
+    timeoutMs,
+  )) as { messages?: PersistedMessageWire[] } | undefined;
   return r?.messages ?? [];
 }
 
@@ -550,12 +556,18 @@ export async function bridgeMessageWindowOlder(
   chatId: string,
   limit: number,
   beforeMsgId: string,
+  timeoutMs?: number,
 ): Promise<PersistedMessageWire[]> {
-  const r = (await workspaceOp(bridge, "messages.windowOlder", {
-    chatId,
-    limit,
-    beforeMsgId,
-  })) as { messages?: PersistedMessageWire[] } | undefined;
+  const r = (await workspaceOp(
+    bridge,
+    "messages.windowOlder",
+    {
+      chatId,
+      limit,
+      beforeMsgId,
+    },
+    timeoutMs,
+  )) as { messages?: PersistedMessageWire[] } | undefined;
   return r?.messages ?? [];
 }
 
@@ -961,14 +973,19 @@ export async function bridgeGitCreateBranchFrom(
   });
 }
 
+/** Returns the RESULTING branch — the engine keeps the workspace's existing
+ *  prefix, so it is the only party that knows the answer. Null when an older
+ *  engine (which returned only `{ok:true}`) is on the other end of the bridge;
+ *  callers fall back to their own optimistic guess in that case. */
 export async function bridgeGitRenameBranch(
   bridge: RuntimeClient,
   args: { workspaceId: string; newName: string },
-): Promise<void> {
-  await workspaceOp(bridge, "git.renameBranch", {
+): Promise<string | null> {
+  const result = (await workspaceOp(bridge, "git.renameBranch", {
     workspaceId: args.workspaceId,
     newName: args.newName,
-  });
+  })) as { branch?: unknown } | null;
+  return typeof result?.branch === "string" ? result.branch : null;
 }
 
 export async function bridgeGitChangeTargetBranch(
@@ -1585,10 +1602,17 @@ export async function bridgeWorkspaceAdoptExisting(
  *  "main" — a synthetic `local:` workspace with no engine row — passes
  *  `repoRoot` so the engine can resolve the repo's setup command anyway.
  *  `statusOnly` skips the log payload + command resolution (the tab-dot
- *  poller); non-state fields come back as placeholders in that mode. */
+ *  poller); non-state fields come back as placeholders in that mode.
+ *  `omitLog` keeps `hasCommand`/`state` honest but drops the (up to 512 KB)
+ *  log — for callers that re-poll and never render output. */
 export async function bridgeWorkspaceSetupInfo(
   bridge: RuntimeClient,
-  args: { workspaceId: string; repoRoot?: string; statusOnly?: boolean },
+  args: {
+    workspaceId: string;
+    repoRoot?: string;
+    statusOnly?: boolean;
+    omitLog?: boolean;
+  },
 ): Promise<{
   hasCommand: boolean;
   command: string | null;

@@ -756,6 +756,40 @@ export class CodexAppServerAdapter implements AgentAdapter {
     );
   }
 
+  /** Change a live session's model without rebuilding it. runTurn reads
+   *  `session.env.OPENAI_MODEL` fresh on EVERY turn (see prompt()), so
+   *  rewriting the env is all it takes — the next turn carries the new model.
+   *  Without this the renderer had to force-respawn the whole app-server
+   *  session on every model pick just to re-seed spawn env. */
+  async setModel(opts: { sessionId: string; model: string }): Promise<void> {
+    const session = this.sessions.get(opts.sessionId);
+    const model = opts.model.trim();
+    if (!session || !model) return;
+    session.env = { ...(session.env ?? {}), OPENAI_MODEL: model };
+  }
+
+  /** Live config update (effort / fast / model / add-dirs). Same mechanism as
+   *  setModel: the per-turn knobs are read off `session.env` at turn/start, so
+   *  swapping the env in place is a complete live apply — no respawn.
+   *
+   *  `opts.env` is the composer's CURRENT snapshot (envForChat), which encodes
+   *  Fast and the extra dirs BY OMISSION (absent = off/none). A plain merge
+   *  can't delete a key, so a stale "on" value would survive a toggle-OFF —
+   *  drop those by-omission keys from the prior env first, then let the
+   *  incoming snapshot win. Creation-time keys the snapshot does not carry
+   *  (OPENAI_* / provider auth from deriveProviderEnv) are preserved. */
+  async updateConfig(opts: {
+    sessionId: string;
+    env: Record<string, string>;
+  }): Promise<void> {
+    const session = this.sessions.get(opts.sessionId);
+    if (!session) return;
+    const carried = { ...(session.env ?? {}) };
+    delete carried.ZEROS_FAST_MODE;
+    delete carried.ZEROS_ADDITIONAL_DIRS;
+    session.env = { ...carried, ...opts.env };
+  }
+
   async setMode(opts: { sessionId: string; modeId: string }): Promise<void> {
     const session = this.requireSession(opts.sessionId);
     if (

@@ -34,12 +34,22 @@ import { memo } from "react";
 import { X as XIcon } from "lucide-react";
 
 import { Tooltip } from "@/zeros/ui/primitives";
-import {
-  iconForFile,
-  type AttachmentValidation,
-} from "./agent-attachments";
+import { iconForFile, type AttachmentValidation } from "./agent-attachments";
 
 // ── Types ─────────────────────────────────────────────────
+
+/** What a synthesized attachment's hover preview says about its source, frozen
+ *  at the moment it was staged.
+ *
+ *  Snapshot values on purpose: the chip is a FILE, and its header must
+ *  describe the file, not the chat that has moved on since. That is the same
+ *  reason there is no staleness badge — see chat-transcript-pills.tsx. */
+export interface ComposerAttachmentPreview {
+  agentId: string | null;
+  agentName: string | null;
+  messageCount: number;
+  lastMessageAt: number;
+}
 
 export interface ComposerAttachment {
   id: string;
@@ -54,6 +64,13 @@ export interface ComposerAttachment {
   /** Per-attachment validation outcome under the active agent +
    *  picked model. Recomputed when the agent or model changes. */
   validation: AttachmentValidation;
+  /** Caller-owned identity for a SYNTHESIZED attachment (a chat transcript,
+   *  as `transcript:<chatId>`). Mirrors the node attr of the same name; empty
+   *  for anything the user pasted, dropped or picked. */
+  sourceKey?: string;
+  /** Present only on a synthesized attachment — turns the chip's plain tooltip
+   *  into the same hover preview the source pill has. */
+  preview?: ComposerAttachmentPreview;
 }
 
 // ── ComposerAttachmentChips ───────────────────────────────
@@ -80,7 +97,7 @@ function ChipDismissButton({
     <Tooltip label={title}>
       <button
         type="button"
-        className="ml-0.5 inline-flex h-4 w-4 cursor-pointer items-center justify-center rounded-sm border-0 bg-transparent p-0 text-fg2 hover:bg-bg2-hover hover:text-fg1"
+        className="text-fg2 hover:bg-bg2-hover hover:text-fg1 ml-0.5 inline-flex h-4 w-4 cursor-pointer items-center justify-center rounded-sm border-0 bg-transparent p-0"
         onClick={onClick}
         aria-label={ariaLabel}
       >
@@ -106,9 +123,7 @@ export const ComposerAttachmentChips = memo(function ComposerAttachmentChips({
     >
       {attachments.map((a) => {
         const isImage = a.kind === "image";
-        const dataUri = isImage
-          ? `data:${a.mimeType};base64,${a.data}`
-          : null;
+        const dataUri = isImage ? `data:${a.mimeType};base64,${a.data}` : null;
         const Icon = iconForFile(a.name, a.mimeType);
         const tooltip = a.validation.ok
           ? a.name
@@ -122,10 +137,10 @@ export const ComposerAttachmentChips = memo(function ComposerAttachmentChips({
           <Tooltip key={a.id} label={tooltip}>
             <div
               className={[
-                "inline-flex max-w-[220px] items-center gap-1.5 rounded-sm bg-bg2-hover py-[3px] pl-2 pr-1 text-xs transition-[background-color,border-color] duration-150 ease-out hover:border-highlighted-bright",
+                "bg-bg2-hover hover:border-highlighted-bright inline-flex max-w-[220px] items-center gap-1.5 rounded-sm py-[3px] pr-1 pl-2 text-xs transition-[background-color,border-color] duration-150 ease-out",
                 invalid
-                  ? "border border-yellow-primary/40 text-fg2 opacity-85 [&_img]:grayscale [&>button_span:first-child]:grayscale"
-                  : "border border-border1 text-fg2",
+                  ? "border-yellow-primary/40 text-fg2 border opacity-85 [&_img]:grayscale [&>button_span:first-child]:grayscale"
+                  : "border-border1 text-fg2 border",
                 isImage ? "cursor-pointer" : "",
               ]
                 .filter(Boolean)
@@ -149,13 +164,13 @@ export const ComposerAttachmentChips = memo(function ComposerAttachmentChips({
                   />
                 ) : (
                   <span
-                    className="inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-sm text-fg2"
+                    className="text-fg2 inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-sm"
                     aria-hidden="true"
                   >
                     <Icon size={11} />
                   </span>
                 )}
-                <span className="overflow-hidden text-ellipsis whitespace-nowrap pl-[2px]">
+                <span className="overflow-hidden pl-[2px] text-ellipsis whitespace-nowrap">
                   {a.name}
                 </span>
               </button>

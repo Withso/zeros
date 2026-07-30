@@ -75,6 +75,15 @@ export const AttachmentNode = Node.create({
       name: { default: "" },
       mimeType: { default: "" },
       kind: { default: "image" },
+      // Caller-owned identity for a SYNTHESIZED attachment — today only chat
+      // transcripts, as `transcript:<chatId>:<mode>`. Empty for anything the
+      // user pasted, dropped or picked.
+      //
+      // It lives on the node rather than beside it because the doc is the only
+      // source of truth for what is staged: the transcript pill reads this to
+      // decide whether it is "added", so removing the chip with × un-adds the
+      // pill for free, with no second list to keep in sync.
+      sourceKey: { default: "" },
     };
   },
 
@@ -91,6 +100,7 @@ export const AttachmentNode = Node.create({
         "data-name": node.attrs.name,
         "data-mime": node.attrs.mimeType,
         "data-kind": node.attrs.kind,
+        "data-source-key": node.attrs.sourceKey,
       }),
       node.attrs.name,
     ];

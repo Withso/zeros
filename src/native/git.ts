@@ -532,6 +532,10 @@ export async function workspaceSetupInfo(args: {
   workspaceId: string;
   repoRoot?: string;
   statusOnly?: boolean;
+  /** Keep `hasCommand`/`state` but drop the log payload — for pollers that
+   *  need to distinguish "no setup configured" from "setup ran" and never
+   *  render the output. */
+  omitLog?: boolean;
 }): Promise<WorkspaceSetupInfo> {
   return bridgeWorkspaceSetupInfo(
     requireBridge("read setup output"),
@@ -904,11 +908,13 @@ export async function gitRepoBranchCatalog(args: {
   );
 }
 
+/** Resolves to the RESULTING branch (prefix included), or null when the engine
+ *  didn't report one. Don't rebuild it from `newName` — see renameBranch. */
 export async function gitRenameBranch(args: {
   workspaceId: string;
   newName: string;
-}): Promise<void> {
-  await bridgeGitRenameBranch(requireBridge("rename the Git branch"), args);
+}): Promise<string | null> {
+  return bridgeGitRenameBranch(requireBridge("rename the Git branch"), args);
 }
 
 export async function gitStage(args: {

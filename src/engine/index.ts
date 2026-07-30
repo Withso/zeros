@@ -46,7 +46,10 @@ import {
 import { appendSecurityAudit } from "./auth/audit-log";
 import { MessageRouter } from "./transport/router";
 import { WorkspaceService } from "./workspace/service";
-import { dbChangedKinds, LONG_LIFECYCLE_OPS } from "./workspace/change-events";
+import {
+  dbChangedIncludesOriginator,
+  dbChangedKinds,
+} from "./workspace/change-events";
 import { PtyService } from "./pty/service";
 import {
   createNodePtyShell,
@@ -73,7 +76,7 @@ import {
   runActionOneShot,
   runSessionId,
 } from "@zeros/core/run-actions";
-import { detectGhCli, setTokenStore } from "./git/github";
+import { detectGhCli, getAuthStatus, setTokenStore } from "./git/github";
 import {
   engineGithubTokenStore,
   seedGithubToken,
@@ -1142,7 +1145,18 @@ export class ZerosEngine {
             console.log(
               `[Zeros] adopted gh CLI GitHub auth (${r.login ?? "unknown"})`,
             );
+          return;
         }
+        // A token is already stored, so there is nothing to adopt — but the
+        // LOGIN behind it is process-local (cachedGithubLogin) and starts null
+        // on every engine boot. Workspace creation reads it to build a
+        // `branch_prefix_type = "github"` branch name, and it must not block on
+        // the network, so it takes whatever is cached. Without this prime, the
+        // first workspace created after a relaunch silently fell back to the
+        // default `zeros/` prefix while Settings still showed "GitHub username
+        // (…)" — and nothing said why. Fire-and-forget: offline just leaves the
+        // fallback in place, exactly as before.
+        await getAuthStatus();
       } catch {
         /* best-effort */
       }
@@ -3223,14 +3237,10 @@ export class ZerosEngine {
         }
       }
       // Cross-device live sync (Phase 3): tell the OTHER clients a list changed
-      // so they refetch. The originator already has the change locally — EXCEPT
-      // for the long worktree lifecycle ops (create/restore/archive/…), whose
-      // RPC can outlive the renderer's request budget: the engine finishes and
-      // the row is real, but the originator's promise already rejected with
-      // "Request timeout", so it never learned about the change. Those ops
-      // broadcast to EVERYONE (a refetch is idempotent + cheap for the
-      // originator on the happy path) so a timed-out creator still sees the
-      // workspace appear instead of a phantom that only shows after a restart.
+      // so they refetch. The originator already has the change locally — except
+      // for the ops dbChangedIncludesOriginator names, which broadcast to
+      // EVERYONE (a refetch is idempotent + cheap on the happy path). See that
+      // predicate for why each family is there.
       const changed = dbChangedKinds(op, result);
       if (changed) {
         const workspaceIds = changed.includes("workspaces")
@@ -3242,7 +3252,7 @@ export class ZerosEngine {
           kinds: changed,
           ...(workspaceIds ? { workspaceIds } : {}),
         });
-        if (LONG_LIFECYCLE_OPS.has(op)) {
+        if (dbChangedIncludesOriginator(op)) {
           this.router.broadcast(dbChangedMsg);
         } else {
           this.router.broadcastExcept(client.id, dbChangedMsg);

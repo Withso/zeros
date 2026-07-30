@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { dbChangedKinds, LONG_LIFECYCLE_OPS } from "../change-events";
+import {
+  dbChangedIncludesOriginator,
+  dbChangedKinds,
+  LONG_LIFECYCLE_OPS,
+} from "../change-events";
 
 describe("dbChangedKinds", () => {
   it.each(["chats.upsert", "chats.delete", "chats.bulkUpsert"])(
@@ -112,5 +116,42 @@ describe("dbChangedKinds", () => {
     for (const op of LONG_LIFECYCLE_OPS) {
       expect(dbChangedKinds(op)).toContain("workspaces");
     }
+  });
+});
+
+describe("dbChangedIncludesOriginator", () => {
+  it.each(["settings.write", "settings.writeRaw", "settings.migrateLegacy"])(
+    "echoes %s back to the client that wrote it",
+    (op) => {
+      // The writer keeps its own LAYER document (the write result carries it)
+      // but NOT the RESOLVED tree, which the engine merges from four layers and
+      // no response describes. Without the echo, the writer's own
+      // useResolvedSettings stayed stale until the settings file-watcher's 3s
+      // poll broadcast to everyone — which is what made Settings → Git read as
+      // a frozen pane: its radio renders `checked` off that tree, so a click
+      // did nothing at all for three seconds.
+      expect(dbChangedIncludesOriginator(op)).toBe(true);
+    },
+  );
+
+  it.each([...LONG_LIFECYCLE_OPS])(
+    "echoes the long-lifecycle op %s back too",
+    (op) => {
+      // These can outlive the renderer's request budget, so the originator's
+      // promise may already have rejected while the work succeeded.
+      expect(dbChangedIncludesOriginator(op)).toBe(true);
+    },
+  );
+
+  it.each(["chats.upsert", "project.rename", "git.commit", "file.write"])(
+    "does NOT echo %s — the originator already applied it",
+    (op) => {
+      expect(dbChangedIncludesOriginator(op)).toBe(false);
+    },
+  );
+
+  it("never echoes an op that publishes nothing", () => {
+    expect(dbChangedKinds("some.read")).toBeNull();
+    expect(dbChangedIncludesOriginator("some.read")).toBe(false);
   });
 });

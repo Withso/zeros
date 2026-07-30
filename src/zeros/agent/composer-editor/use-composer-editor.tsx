@@ -50,6 +50,14 @@ import { ComposerEditorProvider } from "./composer-editor-context";
 import { serializeComposer, type ComposerSerialized } from "./serialize";
 import { filesToAttachments } from "./attachment-io";
 import {
+  collectSourceKeys,
+  findAttachmentsBySourceKey,
+} from "./attachment-keys";
+import {
+  validateAttachment,
+  type AttachmentValidation,
+} from "../agent-attachments";
+import {
   buildPathMentions,
   collectMentions,
   deriveWorkspaceEntries,
@@ -64,7 +72,10 @@ import type { AvailableCommand } from "../../bridge/agent-events";
 import { ghPrList, listWorkspaceFiles } from "../../../native/git";
 import { listSkills } from "../../../native/native";
 import { useBrowserPickerSelection } from "../../store/workspace-store";
-import type { ComposerAttachment } from "../composer-attachments";
+import type {
+  ComposerAttachment,
+  ComposerAttachmentPreview,
+} from "../composer-attachments";
 
 // The empty composer holds THREE lines of text-sm/leading-snug (3lh) — the
 // default composer height per design (2026-07-12; editor py removed the same
@@ -136,6 +147,29 @@ export interface ComposerEditorApi {
   serialize: () => ComposerSerialized | null;
   /** Stage files (paste/drop/pick) as inline attachment pills at the caret. */
   insertFiles: (files: FileList | File[] | null | undefined) => Promise<void>;
+  /** Stage a SYNTHESIZED text attachment (a chat transcript) under a
+   *  caller-owned key, replacing anything already staged under that key — so
+   *  switching a transcript from concise to full swaps the chip instead of
+   *  adding a second one. */
+  insertTextAttachment: (input: {
+    sourceKey: string;
+    name: string;
+    text: string;
+    /** Turns the chip's tooltip into the same hover preview its source pill
+     *  has. Frozen at staging time — the chip is a file, not a live view. */
+    preview?: ComposerAttachmentPreview;
+    /** The validation verdict for what was staged, or null when the editor
+     *  wasn't mounted. Returned rather than swallowed because an invalid
+     *  attachment is EXCLUDED at send: a caller that doesn't surface this
+     *  ships a chip for a file the agent never receives. */
+  }) => AttachmentValidation | null;
+  /** Remove whatever is staged under `sourceKey`. No-op when absent. */
+  removeAttachmentBySourceKey: (sourceKey: string) => void;
+  /** The sourceKeys currently in the document. Recomputed on every doc change,
+   *  so a caller that re-renders reads a live value — this is what lets the
+   *  transcript pills derive their added state from the composer rather than
+   *  keeping a second, drift-prone copy of it. */
+  stagedSourceKeys: readonly string[];
   /** Reset to an empty document and drop staged attachment bytes. */
   clear: () => void;
   /** Replace the document from a draft/edit seed. */
@@ -160,6 +194,26 @@ export interface ComposerEditorApi {
     onDragLeave: (e: React.DragEvent) => void;
     onDrop: (e: React.DragEvent) => void;
   };
+}
+
+/** Delete the attachment node carrying `sourceKey` (and drop its bytes).
+ *  Returns whether anything was removed. The search + ordering it depends on
+ *  live in attachment-keys.ts, where they are unit-testable without a DOM. */
+function removeBySourceKey(
+  ed: Editor,
+  sourceKey: string,
+  store: Map<string, ComposerAttachment>,
+): boolean {
+  const hits = findAttachmentsBySourceKey(ed.state.doc, sourceKey);
+  if (hits.length === 0) return false;
+  const tr = ed.state.tr;
+  // Already sorted highest-position-first — see findAttachmentsBySourceKey.
+  for (const hit of hits) {
+    tr.delete(hit.from, hit.to);
+    store.delete(hit.attachmentId);
+  }
+  ed.view.dispatch(tr);
+  return true;
 }
 
 function looksLikeFileDrag(e: DragEvent | React.DragEvent): boolean {
@@ -198,6 +252,20 @@ export function useComposerEditor(
       attachmentMapRef.current.set(a.id, a);
     }
   }
+
+  // Which keyed attachments are staged right now. Kept as state rather than
+  // derived on demand so a consumer (the transcript pill row) re-renders when
+  // the user removes a chip with × — the doc is the one source of truth for
+  // "is this attached", and this is its published edge.
+  const [stagedSourceKeys, setStagedSourceKeys] = useState<string[]>([]);
+  const syncSourceKeys = useCallback((ed: Editor) => {
+    const next = collectSourceKeys(ed.state.doc);
+    setStagedSourceKeys((prev) =>
+      prev.length === next.length && prev.every((k, i) => k === next[i])
+        ? prev // reference-stable when nothing moved (Rule 11)
+        : next,
+    );
+  }, []);
 
   const workspaceEntriesRef = useRef<WorkspaceEntry[]>([]);
   const prsRef = useRef<PrPickerItem[]>([]);
@@ -561,12 +629,20 @@ export function useComposerEditor(
         return !!(files && files.length > 0);
       },
     },
-    onCreate: ({ editor: e }) => setIsEmpty(e.isEmpty),
+    onCreate: ({ editor: e }) => {
+      setIsEmpty(e.isEmpty);
+      // A seeded draft can already carry keyed attachments.
+      syncSourceKeys(e);
+    },
     // Re-read the workspace file list when the composer gains focus so @-files
     // reflect mid-session creates/deletes (throttled inside loadWorkspaceFiles).
     onFocus: () => loadWorkspaceFiles(),
     onUpdate: ({ editor: e }) => {
       setIsEmpty(e.isEmpty);
+      // Covers the path no imperative method sees: the user deleting a chip
+      // with its × or with Backspace. Without this the transcript pill would
+      // stay lit after its chip was gone.
+      syncSourceKeys(e);
       optsRef.current.onChange?.();
     },
   });
@@ -602,10 +678,93 @@ export function useComposerEditor(
       }
       ed.chain().focus().insertContent(content).run();
       setIsEmpty(ed.isEmpty);
+      syncSourceKeys(ed);
     },
-    [],
+    [syncSourceKeys],
   );
   insertFilesRef.current = insertFiles;
+
+  // ── synthesized (keyed) attachments ──
+  //
+  // Transcripts don't arrive as a File the way a paste or drop does — they are
+  // built in memory from an engine read. They go through the same node + side
+  // store as everything else so the chip, the draft, the serializer and the
+  // send encoder need no special case; the only addition is `sourceKey`, which
+  // gives the caller a stable handle for replace + remove.
+  const insertTextAttachment = useCallback(
+    (input: {
+      sourceKey: string;
+      name: string;
+      text: string;
+      preview?: ComposerAttachmentPreview;
+    }): AttachmentValidation | null => {
+      const ed = editorRef.current;
+      // isDestroyed too: the ref is assigned but never nulled, so a read that
+      // lands after the surface unmounted would otherwise dispatch into a torn
+      // -down view and throw from inside the caller's try, reporting a read
+      // failure for a read that succeeded.
+      if (!ed || ed.isDestroyed) return null;
+      // Replace-in-place: attaching the full transcript of a chat whose
+      // concise one is already staged must swap the chip, not add a rival.
+      removeBySourceKey(ed, input.sourceKey, attachmentMapRef.current);
+      const v = optsRef.current;
+      const id = `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const mimeType = "text/plain";
+      // Byte length, not string length: the budget is bytes, and a transcript
+      // is full of multi-byte punctuation the em-dash-loving formatter emits.
+      const size = new TextEncoder().encode(input.text).length;
+      const validation = validateAttachment({
+        kind: "text",
+        size,
+        agentName: v.agentName,
+        agentSupportsImage: v.agentSupportsImage,
+        modelId: v.modelId,
+      });
+      attachmentMapRef.current.set(id, {
+        id,
+        name: input.name,
+        mimeType,
+        size,
+        kind: "text",
+        data: "",
+        text: input.text,
+        validation,
+        sourceKey: input.sourceKey,
+        preview: input.preview,
+      });
+      ed.chain()
+        .focus()
+        .insertContent([
+          {
+            type: "attachment",
+            attrs: {
+              attachmentId: id,
+              name: input.name,
+              mimeType,
+              kind: "text",
+              sourceKey: input.sourceKey,
+            },
+          },
+          { type: "text", text: " " },
+        ])
+        .run();
+      setIsEmpty(ed.isEmpty);
+      syncSourceKeys(ed);
+      return validation;
+    },
+    [syncSourceKeys],
+  );
+
+  const removeAttachmentBySourceKey = useCallback(
+    (sourceKey: string) => {
+      const ed = editorRef.current;
+      if (!ed || ed.isDestroyed) return;
+      if (!removeBySourceKey(ed, sourceKey, attachmentMapRef.current)) return;
+      setIsEmpty(ed.isEmpty);
+      syncSourceKeys(ed);
+    },
+    [syncSourceKeys],
+  );
 
   // ── drag overlay + document file:// guard ──
   const [dragActive, setDragActive] = useState(false);
@@ -699,34 +858,45 @@ export function useComposerEditor(
     }
   }, []);
 
-  const setContent = useCallback((content: ComposerInitialContent) => {
-    const ed = editorRef.current;
-    attachmentMapRef.current.clear();
-    for (const a of content.attachments) attachmentMapRef.current.set(a.id, a);
-    if (ed) {
-      ed.commands.setContent(content.json ?? "", { emitUpdate: false });
-      setIsEmpty(ed.isEmpty);
-    }
-  }, []);
+  const setContent = useCallback(
+    (content: ComposerInitialContent) => {
+      const ed = editorRef.current;
+      attachmentMapRef.current.clear();
+      for (const a of content.attachments)
+        attachmentMapRef.current.set(a.id, a);
+      if (ed) {
+        // emitUpdate:false, so onUpdate won't run — sync explicitly or a
+        // restored draft's transcript chips leave their pills unlit.
+        ed.commands.setContent(content.json ?? "", { emitUpdate: false });
+        setIsEmpty(ed.isEmpty);
+        syncSourceKeys(ed);
+      }
+    },
+    [syncSourceKeys],
+  );
 
-  const setText = useCallback((text: string) => {
-    const ed = editorRef.current;
-    attachmentMapRef.current.clear();
-    if (ed) {
-      ed.commands.setContent(
-        text
-          ? {
-              type: "doc",
-              content: [
-                { type: "paragraph", content: [{ type: "text", text }] },
-              ],
-            }
-          : "",
-        { emitUpdate: false },
-      );
-      setIsEmpty(ed.isEmpty);
-    }
-  }, []);
+  const setText = useCallback(
+    (text: string) => {
+      const ed = editorRef.current;
+      attachmentMapRef.current.clear();
+      if (ed) {
+        ed.commands.setContent(
+          text
+            ? {
+                type: "doc",
+                content: [
+                  { type: "paragraph", content: [{ type: "text", text }] },
+                ],
+              }
+            : "",
+          { emitUpdate: false },
+        );
+        setIsEmpty(ed.isEmpty);
+        syncSourceKeys(ed);
+      }
+    },
+    [syncSourceKeys],
+  );
 
   const appendText = useCallback((text: string) => {
     const ed = editorRef.current;
@@ -771,7 +941,7 @@ export function useComposerEditor(
       ? createPortal(
           <div data-zeros-root="">
             <div
-              className="fixed inset-0 z-[1000] flex cursor-zoom-out items-center justify-center bg-scrim p-8 backdrop-blur-[4px]"
+              className="bg-scrim fixed inset-0 z-[1000] flex cursor-zoom-out items-center justify-center p-8 backdrop-blur-[4px]"
               role="dialog"
               aria-modal="true"
               aria-label="Image preview"
@@ -811,6 +981,9 @@ export function useComposerEditor(
     isEmpty,
     serialize,
     insertFiles,
+    insertTextAttachment,
+    removeAttachmentBySourceKey,
+    stagedSourceKeys,
     clear,
     setContent,
     setText,

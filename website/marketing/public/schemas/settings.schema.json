@@ -108,7 +108,17 @@
         },
         "branch_prefix_type": {
           "type": "string",
-          "description": "How workspace branch names are generated."
+          "enum": [
+            "zeros",
+            "github",
+            "custom",
+            "none"
+          ],
+          "description": "Which namespace a new workspace branch goes under: \"github\" = the connected GitHub login, \"custom\" = the `branch_prefix` string, \"none\" = no prefix (the bare workspace name). The namespace is joined to the name with a single `/`."
+        },
+        "branch_prefix": {
+          "type": "string",
+          "description": "The namespace used when branch_prefix_type = \"custom\". Joined to the workspace name with a single `/`, so `acme` gives `acme/Cream`. A leading or trailing slash is optional and ignored."
         },
         "delete_branch_on_archive": {
           "type": "boolean",

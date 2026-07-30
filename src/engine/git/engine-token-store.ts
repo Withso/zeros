@@ -19,7 +19,7 @@
 // clients only, and the change notifier is delivered via broadcastLocal — a
 // relay device never sets nor receives the host's token.
 
-import type { TokenStore } from "./github";
+import { forgetGithubLogin, type TokenStore } from "./github";
 
 let token: string | null = null;
 let onChange: ((token: string | null) => void) | null = null;
@@ -36,7 +36,16 @@ export function setGithubTokenChangeNotifier(
  *  the host is the origin, so echoing the change back would be redundant (and
  *  risk a loop). Empty string normalises to null. */
 export function seedGithubToken(t: string | null): void {
-  token = t && t.length > 0 ? t : null;
+  const next = t && t.length > 0 ? t : null;
+  // A different token means a different (or no) account, so the remembered
+  // login is no longer evidence of anything. This is the desktop's PRIMARY
+  // sign-in/sign-out route, and without the drop a sign-out left
+  // `branch_prefix_type = "github"` still stamping the old login onto every
+  // new branch — for an account that is no longer connected. Dropping rather
+  // than re-probing keeps this synchronous and network-free; the next
+  // getAuthStatus re-learns it.
+  if (next !== token) forgetGithubLogin();
+  token = next;
 }
 
 /** The engine's GitHub TokenStore. `get()` returns the host-pushed working copy.

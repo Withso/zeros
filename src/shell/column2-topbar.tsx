@@ -52,7 +52,8 @@ import {
 import { Button } from "../zeros/ui";
 import { cn } from "../zeros/ui/cn";
 import { toast } from "../zeros/ui/primitives/elements";
-import { Kbd, Tooltip } from "@/zeros/ui/primitives";
+import { Badge, Kbd, Tooltip } from "@/zeros/ui/primitives";
+import { branchDisplayName } from "../zeros/lib/branch-name";
 import { Col3ToggleButton } from "./column-toggle-buttons";
 import { useCustomWindowDrag } from "./use-custom-window-drag";
 import {
@@ -144,10 +145,6 @@ function projectInitial(name: string): string {
   return (name.trim()[0] ?? "·").toUpperCase();
 }
 
-function stripZerosPrefix(branch: string): string {
-  return branch.startsWith("zeros/") ? branch.slice("zeros/".length) : branch;
-}
-
 interface ResolvedContext {
   project: Project | null;
   workspace: Workspace | null;
@@ -182,26 +179,48 @@ interface InlineRenameProps {
   onCancel: () => void;
 }
 
+/** Swap the name half of a ref, keeping its namespace: `jordan/Cream` +
+ *  `login-fix` → `jordan/login-fix`. Mirrors resolveExistingBranchPrefix in
+ *  engine/git/branch.ts — the last slash is the boundary, whatever the tail
+ *  looks like. */
+function replaceBranchName(branch: string, name: string): string {
+  const cut = branch.lastIndexOf("/");
+  return cut === -1 ? name : `${branch.slice(0, cut + 1)}${name}`;
+}
+
 function InlineRename({
   workspaceId,
   current,
   onCommitted,
   onCancel,
 }: InlineRenameProps) {
-  const [value, setValue] = useState(stripZerosPrefix(current));
+  const [value, setValue] = useState(branchDisplayName(current));
   const [busy, setBusy] = useState(false);
 
   const commit = useCallback(async () => {
     const next = value.trim();
     if (busy) return;
-    if (!next || next === stripZerosPrefix(current)) {
+    if (!next || next === branchDisplayName(current)) {
       onCancel();
       return;
     }
     setBusy(true);
     try {
-      await gitRenameBranch({ workspaceId, newName: next });
-      onCommitted(`zeros/${next}`);
+      const renamed = await gitRenameBranch({ workspaceId, newName: next });
+      // Report what the ENGINE produced. It keeps the branch inside whatever
+      // namespace it already lives in (Settings → Git makes the prefix a
+      // choice), so this used to hardcode `zeros/${next}` and optimistically
+      // announced a branch that does not exist for every workspace on any
+      // other prefix — including an unprefixed one, which got a `zeros/` that
+      // was never created.
+      //
+      // The fallback covers an engine too old to report the branch back, and
+      // mirrors the engine's rule exactly: everything up to the LAST slash.
+      // Deriving it from branchDisplayName instead would be wrong for the two
+      // cases that matter most here — a branch already renamed once, and an
+      // adopted `cursor/foo` — because that rule concedes a prefix only when
+      // the tail is allocator-shaped, and neither of those tails is.
+      onCommitted(renamed ?? replaceBranchName(current, next));
     } catch (err: unknown) {
       if (isGitErrorShape(err)) {
         toast.error(`Couldn't rename branch: ${err.message}`, {
@@ -506,6 +525,43 @@ function OpenInDropdown({ path }: OpenInDropdownProps) {
   );
 }
 
+/** Third "Open in" surface: a bare NAME chip that opens the same app rows on
+ *  click. Used by the chat's "Created <workspace>" provenance row, where the
+ *  workspace name is already the subject of the sentence — so the name itself
+ *  is the trigger and there is no chevron, no logo, and no split half. Like
+ *  OpenInSubmenu this is a pure pointer entry point; ⌘O / ⌘C stay owned by
+ *  OpenInDropdown. */
+export function OpenInBadgeMenu({
+  path,
+  label,
+}: OpenInDropdownProps & { label: string }) {
+  const menu = useOpenInMenu(path);
+
+  return (
+    <DropdownMenu>
+      <Tooltip label="Open in…">
+        <DropdownMenuTrigger asChild>
+          <Badge
+            variant="accent"
+            role="button"
+            tabIndex={0}
+            aria-label={`Open ${label} in…`}
+            // Only the cursor: the chip's size, weight and colour live in the
+            // `accent` variant (RULES.md Rule 5 — typography and colour come
+            // from the primitive, not from a call site's className).
+            className="cursor-pointer"
+          >
+            {label}
+          </Badge>
+        </DropdownMenuTrigger>
+      </Tooltip>
+      <DropdownMenuContent align="start" sideOffset={4} className="min-w-[200px]">
+        <OpenInMenuRows menu={menu} />
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 /** Pane-menu "Open in" surface: a submenu whose trigger carries the
  *  current default app's logo ("logo represents where it will open") and
  *  reveals the same app rows on hover. Mounted inside the pane "⋯" menu
@@ -589,7 +645,7 @@ export function Column2TopBar({
   // workspace has no engine id to dispatch IPCs against.
   const isLocalMain = !workspace && folder === project.repoRoot;
   const workspaceLabel = workspace
-    ? stripZerosPrefix(workspace.branch)
+    ? branchDisplayName(workspace.branch)
     : isLocalMain
       ? LOCAL_MAIN_LABEL
       : "main";

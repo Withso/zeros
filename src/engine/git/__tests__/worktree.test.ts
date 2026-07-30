@@ -463,6 +463,44 @@ describe("worktree lifecycle (integration)", () => {
     ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
   });
 
+  it("prepared create rejects a reserved name and a hostile prefix", async () => {
+    // Settings → Git (2026-07-29) made the branch PREFIX optional, so the
+    // shape gate can no longer lean on a mandatory `zeros/` namespace to keep
+    // these out. "Main" matters most: on a case-insensitive filesystem
+    // `refs/heads/Main` is the same loose ref as `main`.
+    for (const preparedBranch of [
+      "Main",
+      "Master",
+      "Release",
+      "--upload-pack=x/Cream",
+      "-Cream",
+      "zeros/../../Cream",
+      "a..b/Cream",
+    ]) {
+      const prepared = await prepareWorkspaceCreate({ repoRoot });
+      await expect(
+        createWorkspace({
+          repoRoot,
+          repoSlug: prepared.repoSlug,
+          preparedId: prepared.workspaceId,
+          preparedBranch,
+        }),
+      ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    }
+  });
+
+  it("prepared create accepts an allocator name under any valid prefix", async () => {
+    // The other half of the gate: a configured prefix must still round-trip.
+    const prepared = await prepareWorkspaceCreate({ repoRoot });
+    const created = await createWorkspace({
+      repoRoot,
+      repoSlug: prepared.repoSlug,
+      preparedId: prepared.workspaceId,
+      preparedBranch: "jordan/Cream",
+    });
+    expect(created.branch).toBe("jordan/Cream");
+  });
+
   it("prepared create never deletes a branch that appeared after prepare", async () => {
     const prepared = await prepareWorkspaceCreate({ repoRoot });
     await execFileAsync("git", [
@@ -2720,5 +2758,132 @@ describe("worktree lifecycle (integration)", () => {
     expect(
       listWorkspaces().find((w) => w.id === created.workspaceId)?.present,
     ).toBe(false);
+  });
+
+  // ── Settings → Git: the branch name prefix ──────────────────────────────
+  //
+  // End-to-end rather than unit, because the whole point of these is that the
+  // setting reaches `git branch` intact: the join rule, the fallbacks, and the
+  // one shape that used to break creation outright.
+  describe("branch name prefix", () => {
+    /** Write the repo layer — it outranks the user layer, so these don't
+     *  depend on whatever ~/.zeros/settings.toml the test machine has. */
+    async function setPrefix(toml: string): Promise<void> {
+      await mkdir(path.join(repoRoot, ".zeros"), { recursive: true });
+      await writeFile(
+        path.join(repoRoot, ".zeros", "settings.toml"),
+        `[git]\n${toml}\n`,
+      );
+    }
+
+    it("joins a custom prefix with exactly one slash", async () => {
+      await setPrefix('branch_prefix_type = "custom"\nbranch_prefix = "hello"');
+      const ws = await createWorkspace({ repoRoot });
+      // The bug this pins: a bare `hello` used to be spliced in verbatim and
+      // produced the flat `helloCream`, which nobody reads as a namespace.
+      expect(ws.branch).toMatch(/^hello\/[A-Z][a-z]+/);
+    });
+
+    it("treats `hello`, `hello/` and `/hello/` as the same setting", async () => {
+      for (const typed of ["hello", "hello/", "/hello/"]) {
+        await setPrefix(
+          `branch_prefix_type = "custom"\nbranch_prefix = "${typed}"`,
+        );
+        const ws = await createWorkspace({ repoRoot });
+        expect(ws.branch, `for ${typed}`).toMatch(/^hello\/[A-Z][a-z]+/);
+      }
+    });
+
+    it("supports a multi-segment namespace", async () => {
+      await setPrefix(
+        'branch_prefix_type = "custom"\nbranch_prefix = "team/squad"',
+      );
+      const ws = await createWorkspace({ repoRoot });
+      expect(ws.branch).toMatch(/^team\/squad\/[A-Z][a-z]+/);
+    });
+
+    it("creates a bare branch for `none`, with no dangling separator", async () => {
+      await setPrefix('branch_prefix_type = "none"');
+      const ws = await createWorkspace({ repoRoot });
+      expect(ws.branch).toMatch(/^[A-Z][a-z]+/);
+      expect(ws.branch).not.toContain("/");
+    });
+
+    it("falls back to the default when the prefix is unusable", async () => {
+      // A bad setting must degrade the NAME, never block creation.
+      await setPrefix(
+        'branch_prefix_type = "custom"\nbranch_prefix = "--upload-pack=evil"',
+      );
+      const ws = await createWorkspace({ repoRoot });
+      expect(ws.branch).toMatch(/^zeros\//);
+    });
+
+    it("falls back when the namespace already exists as a branch", async () => {
+      // Git stores loose refs as files, so `refs/heads/hello` being a file
+      // makes `refs/heads/hello/Cream` impossible to create. Without the D/F
+      // check this configuration failed EVERY workspace create with git's
+      // "cannot lock ref … exists", from a setting made once, elsewhere.
+      await execFileAsync("git", ["branch", "hello"], { cwd: repoRoot });
+      await setPrefix('branch_prefix_type = "custom"\nbranch_prefix = "hello"');
+      const ws = await createWorkspace({ repoRoot });
+      expect(ws.branch).toMatch(/^zeros\//);
+    });
+
+    it("falls back through a blocked namespace in a parent segment", async () => {
+      // `refs/heads/team` blocks `refs/heads/team/squad/Cream` just as surely
+      // as `refs/heads/team/squad` would.
+      await execFileAsync("git", ["branch", "team"], { cwd: repoRoot });
+      await setPrefix(
+        'branch_prefix_type = "custom"\nbranch_prefix = "team/squad"',
+      );
+      const ws = await createWorkspace({ repoRoot });
+      expect(ws.branch).toMatch(/^zeros\//);
+    });
+
+    it("drops to no prefix when even the default namespace is blocked", async () => {
+      await execFileAsync("git", ["branch", "hello"], { cwd: repoRoot });
+      await execFileAsync("git", ["branch", "zeros"], { cwd: repoRoot });
+      await setPrefix('branch_prefix_type = "custom"\nbranch_prefix = "hello"');
+      const ws = await createWorkspace({ repoRoot });
+      expect(ws.branch).toMatch(/^[A-Z][a-z]+/);
+      expect(ws.branch).not.toContain("/");
+    });
+
+    it("does not hand out a colour buried in someone else's ref path", async () => {
+      // `refs/heads/<X>/Cream/wip` makes `refs/heads/<X>/Cream` a DIRECTORY, so
+      // reusing `Cream` cannot create the ref — git fails with "cannot lock
+      // ref". branchDisplayName can't see it (a `wip` tail isn't allocator-
+      // shaped, so it returns the whole ref), which is why the used-name scan
+      // reserves an allocator name found in ANY path component.
+      await execFileAsync("git", ["branch", "hello/Cream/wip"], {
+        cwd: repoRoot,
+      });
+      await setPrefix('branch_prefix_type = "custom"\nbranch_prefix = "hello"');
+      for (let i = 0; i < 6; i += 1) {
+        const ws = await createWorkspace({ repoRoot });
+        expect(ws.branch).not.toBe("hello/Cream");
+      }
+    });
+
+    it("does not hand out a bare colour that already has children", async () => {
+      // Same conflict from the other direction: with no prefix the branch IS
+      // the bare name, so an unrelated `refs/heads/Bone/wip` blocks `Bone`.
+      await execFileAsync("git", ["branch", "Bone/wip"], { cwd: repoRoot });
+      await setPrefix('branch_prefix_type = "none"');
+      for (let i = 0; i < 6; i += 1) {
+        const ws = await createWorkspace({ repoRoot });
+        expect(ws.branch).not.toBe("Bone");
+      }
+    });
+
+    it("names the checkout folder after the workspace, not the namespace", async () => {
+      await setPrefix(
+        'branch_prefix_type = "custom"\nbranch_prefix = "team/squad"',
+      );
+      const ws = await createWorkspace({ repoRoot });
+      // A prefix must not nest the worktree or leak into its folder name —
+      // the whole namespace lives in the ref, and the directory stays flat.
+      expect(path.basename(ws.path)).toBe(ws.branch.split("/").pop());
+    });
   });
 });

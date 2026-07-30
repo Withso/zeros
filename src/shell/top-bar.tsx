@@ -148,6 +148,7 @@ import {
   workspaceScrollLeftForTab,
   workspaceTabDescription,
 } from "./top-bar-helpers";
+import { branchDisplayName } from "../zeros/lib/branch-name";
 import { useCustomWindowDrag } from "./use-custom-window-drag";
 import { useWorkspaceChangeLines } from "./use-workspace-change-lines";
 import { WorkspaceChangeCounts } from "./workspace-change-counts";
@@ -1686,9 +1687,7 @@ export function TopBar() {
                     key={pending.token}
                     label={
                       pending.branch
-                        ? pending.branch.startsWith("zeros/")
-                          ? pending.branch.slice("zeros/".length)
-                          : pending.branch
+                        ? branchDisplayName(pending.branch)
                         : "New workspace"
                     }
                     active={!!pending.path && pending.path === activeFolder}

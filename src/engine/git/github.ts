@@ -196,22 +196,61 @@ export interface AuthStatusResult {
   login?: string;
 }
 
+/** Last login GitHub confirmed for us, remembered across calls.
+ *
+ *  Exists for ONE caller: workspace creation, which prefixes the new branch
+ *  with the login when Settings → Git says `branch_prefix_type = "github"`.
+ *  Creating a workspace must not wait on (or fail because of) a /user round
+ *  trip, so that path reads this cache and falls back to the default `zeros/`
+ *  prefix when it is empty. Every code path that LEARNS a login writes here;
+ *  signOut and a 401 clear it. */
+let lastKnownLogin: string | null = null;
+
+/** The last confirmed GitHub login, or null if we've never seen one this
+ *  process (or the token was since cleared). Synchronous and network-free —
+ *  a best-effort hint, never an authorization signal. */
+export function cachedGithubLogin(): string | null {
+  return lastKnownLogin;
+}
+
+function rememberLogin(login: string | null): void {
+  lastKnownLogin = login && login.trim() ? login.trim() : null;
+}
+
+/** Drop the remembered login without asserting a new one — for when the TOKEN
+ *  changed underneath us and the cached login stops being evidence of anything
+ *  (see seedGithubToken, the desktop's sign-in/sign-out route; the boot prime
+ *  only covers launch). Branch prefixing then falls back to the default until
+ *  the next getAuthStatus re-learns it, which is the safe direction: signing
+ *  out and getting `zeros/Cream` is recoverable, whereas stamping a
+ *  disconnected account's name onto a branch is permanent. */
+export function forgetGithubLogin(): void {
+  lastKnownLogin = null;
+}
+
 /** Probe whether we have a working token. Calls /user with the cached
  *  token; on 401 clears and reports unauthenticated. */
 export async function getAuthStatus(): Promise<AuthStatusResult> {
   const token = await tokenStore.get();
-  if (!token) return { authenticated: false };
+  if (!token) {
+    rememberLogin(null);
+    return { authenticated: false };
+  }
   const octokit = await octokitFactory(token);
   try {
     const { data } = await octokit.users.getAuthenticated();
     cacheOctokit(octokit, token);
+    rememberLogin(data.login);
     return { authenticated: true, login: data.login };
   } catch (err) {
     if (isAuthError(err)) {
       await tokenStore.clear();
       clearOctokitCache();
+      rememberLogin(null);
       return { authenticated: false };
     }
+    // A transient failure (offline, 5xx) is NOT evidence the login changed —
+    // keep the cached one so branch prefixing survives a flaky network.
     throw wrapApiError(err, "Failed to verify GitHub authentication");
   }
 }
@@ -248,6 +287,7 @@ export async function detectGhCli(): Promise<GhCliResult> {
     const { data } = await octokit.users.getAuthenticated();
     await tokenStore.set(token);
     cacheOctokit(octokit, token);
+    rememberLogin(data.login);
     return { available: true, authenticated: true, login: data.login };
   } catch {
     return { available: true, authenticated: false };
@@ -269,6 +309,7 @@ export async function setToken(token: string): Promise<{ login: string }> {
     const { data } = await octokit.users.getAuthenticated();
     await tokenStore.set(trimmed);
     cacheOctokit(octokit, trimmed);
+    rememberLogin(data.login);
     return { login: data.login };
   } catch (err) {
     throw wrapApiError(err, "GitHub rejected the token");
@@ -279,6 +320,7 @@ export async function setToken(token: string): Promise<{ login: string }> {
 export async function signOut(): Promise<void> {
   await tokenStore.clear();
   clearOctokitCache();
+  rememberLogin(null);
 }
 
 export interface DeviceVerification {
