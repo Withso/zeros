@@ -122,7 +122,19 @@ const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-claude-smoke-"));
 process.env.HOME = fakeHome;
 process.env.USERPROFILE = fakeHome;
 process.env.CLAUDE_CONFIG_DIR = path.join(fakeHome, ".claude");
-process.env.ANTHROPIC_API_KEY = "sk-ant-smoke-invalid-key-do-not-use";
+// Key-shaped, and low-entropy ON PURPOSE. check:secrets matches `sk-ant-`
+// followed by a 20+ character body and clears the match only when that body has
+// <= 2 distinct characters (its looksLikePlaceholder), so a *descriptive* fake
+// key reads better and turns the gate red. Low entropy is the right lever here
+// rather than excluding this file from the scan: an exclusion would also stop a
+// REAL key pasted onto any other line in this file from being caught.
+//
+// Do NOT dress it up with the real api03 infix to look more authentic. A
+// well-formed key is sent to the API and the turn then hangs past this gate's
+// 90s budget (measured: >60s, no response); a malformed one is rejected in ~1s
+// with the "Invalid API key" this gate asserts on. Fast and deterministic is the
+// whole point — the key never has to be realistic, only rejected.
+process.env.ANTHROPIC_API_KEY = "sk-ant-xxxxxxxxxxxxxxxxxxxxxxxx";
 delete process.env.ANTHROPIC_AUTH_TOKEN;
 delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
 
