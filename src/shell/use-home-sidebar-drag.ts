@@ -33,6 +33,10 @@ export function useHomeSidebarResizeDrag(
     (e: React.PointerEvent<HTMLDivElement>) => {
       const railEl = railRef.current;
       if (!railEl) return;
+      // Primary button only. A right- or middle-click otherwise opened a
+      // capture-backed drag that kept running under the context menu, and its
+      // pointerup never arrived — leaving the body cursor locked to ew-resize.
+      if (!e.isPrimary || e.button !== 0) return;
       e.preventDefault();
       const handle = e.currentTarget;
       const pointerId = e.pointerId;

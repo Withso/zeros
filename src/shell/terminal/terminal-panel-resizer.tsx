@@ -17,18 +17,27 @@ import React, {
 import { useResizeHint } from "../use-resize-hint";
 import {
   TERMINAL_PANEL_DEFAULT_PCT,
+  TERMINAL_PANEL_HEIGHT_VAR,
   TERMINAL_PANEL_MAX_PCT,
   TERMINAL_PANEL_MIN_PCT,
+  TERMINAL_PANEL_MIN_PX,
+  TERMINAL_ROW1_MIN_PX,
+  TERMINAL_SEAM_PX,
   useTerminalPanelLayoutStore,
 } from "./terminal-panel-layout";
 
-export const TERMINAL_PANEL_HEIGHT_VAR = "--zeros-terminal-panel-height";
+// Re-exported for the existing call sites/tests that reach for the seam
+// geometry through the resizer; the constants themselves now live in the
+// leaf layout module so the panel's CSS can be built from them too.
+export {
+  TERMINAL_PANEL_HEIGHT_VAR,
+  TERMINAL_PANEL_MIN_PX,
+  TERMINAL_ROW1_MIN_PX,
+};
+
 const PANEL_SELECTOR = "[data-terminal-panel]";
 
-export const TERMINAL_PANEL_MIN_PX = 140;
-export const TERMINAL_ROW1_MIN_PX = 180;
 const COLLAPSE_THRESHOLD_PX = 56;
-const SEAM_PX = 1;
 const DRAG_THRESHOLD_PX = 3;
 export const TERMINAL_PANEL_DOUBLE_CLICK_MS = 400;
 export const TERMINAL_PANEL_DOUBLE_CLICK_SLOP_PX = 6;
@@ -50,7 +59,7 @@ export function terminalPanelPctForPointer({
   if (containerHeight <= 0) return TERMINAL_PANEL_DEFAULT_PCT;
   const maxPanelPx = Math.max(
     TERMINAL_PANEL_MIN_PX,
-    containerHeight - TERMINAL_ROW1_MIN_PX - SEAM_PX,
+    containerHeight - TERMINAL_ROW1_MIN_PX - TERMINAL_SEAM_PX,
   );
   const panelPx = clamp(
     containerBottom - clientY,
@@ -75,6 +84,22 @@ export function isTerminalPanelDoubleClick(
   );
 }
 
+/** Publish the committed height onto the PANEL element, which is also what
+ *  the drag writes per frame.
+ *
+ *  Two deliberate choices, each fixing a real defect:
+ *
+ *  • The panel, not column 3. Custom properties inherit, so setting this one
+ *    on the column invalidated style for every descendant — the diff viewer,
+ *    the file tree, the browser iframes — on every animation frame of a seam
+ *    drag. Scoping it to the panel confines that to the panel.
+ *
+ *  • A layout effect, not React's `style` prop. React only rewrites style it
+ *    owns when its own previous style object differs. Dragging the panel open
+ *    from collapsed flips `expanded`, and that re-render would rewrite a
+ *    React-owned variable with the pre-drag stored percentage — yanking the
+ *    panel off the pointer for a frame. An unchanged `heightPct` doesn't
+ *    re-run this effect, so the live drag is never clobbered. */
 function useApplyTerminalPanelHeight(
   containerRef: RefObject<HTMLDivElement | null>,
 ): void {
@@ -82,10 +107,9 @@ function useApplyTerminalPanelHeight(
     (state) => state.layout.heightPct,
   );
   useLayoutEffect(() => {
-    containerRef.current?.style.setProperty(
-      TERMINAL_PANEL_HEIGHT_VAR,
-      `${heightPct}%`,
-    );
+    containerRef.current
+      ?.querySelector<HTMLElement>(PANEL_SELECTOR)
+      ?.style.setProperty(TERMINAL_PANEL_HEIGHT_VAR, `${heightPct}%`);
   }, [containerRef, heightPct]);
 }
 
@@ -177,7 +201,10 @@ export function TerminalPanelResizer({
           clientY: lastClientY,
         });
         lastPctRef.current = pct;
-        container.style.setProperty(TERMINAL_PANEL_HEIGHT_VAR, `${pct}%`);
+        // Scoped to the PANEL, not column 3: custom properties inherit, so
+        // writing this one on the column dirtied style for the diff viewer,
+        // file tree, and browser iframes on every single drag frame.
+        panel?.style.setProperty(TERMINAL_PANEL_HEIGHT_VAR, `${pct}%`);
       };
 
       const onMove = (moveEvent: PointerEvent) => {
@@ -225,20 +252,18 @@ export function TerminalPanelResizer({
 
         const committed =
           useTerminalPanelLayoutStore.getState().layout.heightPct;
+        // Both non-commit branches rewind the panel's override to the stored
+        // value themselves: nothing else will, because the layout effect above
+        // only fires when `heightPct` actually changes — and in these branches
+        // it deliberately hasn't.
         if (expandedNow && collapseIntent) {
           setExpanded(false);
-          container.style.setProperty(
-            TERMINAL_PANEL_HEIGHT_VAR,
-            `${committed}%`,
-          );
+          panel?.style.setProperty(TERMINAL_PANEL_HEIGHT_VAR, `${committed}%`);
         } else if (expandedNow && moved) {
           setHeightPct(lastPctRef.current);
         } else if (expandedNow) {
           // A click or sub-threshold jitter must never overwrite the saved size.
-          container.style.setProperty(
-            TERMINAL_PANEL_HEIGHT_VAR,
-            `${committed}%`,
-          );
+          panel?.style.setProperty(TERMINAL_PANEL_HEIGHT_VAR, `${committed}%`);
         }
       };
 

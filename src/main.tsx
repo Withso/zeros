@@ -14,11 +14,17 @@ import "../styles/globals.css";
 import { AppShell } from "./app-shell";
 import { ErrorBoundary } from "./zeros/ui/error-boundary";
 import { initRendererLogCapture } from "./zeros/logging/renderer-log";
+import { applyBootLayoutVars } from "./shell/boot-layout-vars";
 
 // Structured log capture FIRST — everything the renderer logs from here on
 // (React warnings, bridge chatter, agent lifecycle) lands in the shared
 // app.jsonl store that feedback submissions can attach. No-op outside Electron.
 initRendererLogCapture();
+
+// Persisted panel sizes must be on <html> BEFORE the first render, or the
+// first style resolution uses the CSS fallbacks and the columns visibly
+// resize into place on launch. See src/shell/boot-layout-vars.ts.
+applyBootLayoutVars();
 
 const rootEl = document.getElementById("root");
 if (!rootEl) {
@@ -69,4 +75,3 @@ if (window.parent !== window) {
     </ErrorBoundary>,
   );
 }
-

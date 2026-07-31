@@ -1,11 +1,15 @@
 // Column 2 share-of-row math — the pure clamp/sanitize behind the
 // col-2/col-3 seam drag (proportional columns).
 
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  COLUMN_2_LEGACY_WIDTH_KEY,
+  COLUMN_2_RATIO_KEY,
   clampColumn2Ratio,
   flushPendingColumn2RatioPaint,
+  persistColumn2Ratio,
+  readPersistedColumn2Ratio,
   sanitizeColumn2Ratio,
 } from "../column2-ratio";
 
@@ -80,5 +84,60 @@ describe("clampColumn2Ratio", () => {
   it("survives a degenerate row width", () => {
     expect(clampColumn2Ratio(0.5, 0)).toBe(0.5);
     expect(clampColumn2Ratio(0.9, Number.NaN)).toBe(0.7);
+  });
+});
+
+// The persisted ratio has TWO readers: the Column2Workspace hook and the
+// pre-render boot write in main.tsx (via boot-layout-vars). They share this
+// function precisely so they can never disagree — a disagreement re-creates
+// the launch-time column animation the boot write exists to remove.
+describe("readPersistedColumn2Ratio / persistColumn2Ratio", () => {
+  // The suite runs on `environment: "node"` (no jsdom in this repo), so stand
+  // up the two browser globals these readers touch. Deterministic in-memory
+  // storage also keeps Node's own `localStorage` file out of the picture.
+  const store = new Map<string, string>();
+  const stubWindow = {
+    innerWidth: 1600,
+    localStorage: {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+      clear: () => store.clear(),
+    },
+  };
+
+  beforeEach(() => {
+    store.clear();
+    vi.stubGlobal("window", stubWindow);
+    return () => vi.unstubAllGlobals();
+  });
+
+  it("falls back to the default when nothing is stored", () => {
+    expect(readPersistedColumn2Ratio()).toBe(0.5);
+  });
+
+  it("round-trips a committed ratio", () => {
+    expect(persistColumn2Ratio(0.35)).toBe(0.35);
+    expect(readPersistedColumn2Ratio()).toBe(0.35);
+  });
+
+  it("clamps what it stores, so the stored and painted values agree", () => {
+    expect(persistColumn2Ratio(0.95)).toBe(0.7);
+    expect(readPersistedColumn2Ratio()).toBe(0.7);
+  });
+
+  it("sanitizes a corrupt stored value instead of laying out with NaN", () => {
+    window.localStorage.setItem(COLUMN_2_RATIO_KEY, "not-a-number");
+    expect(readPersistedColumn2Ratio()).toBe(0.5);
+  });
+
+  it("migrates the pixel-era width once, then reads the migrated share", () => {
+    window.localStorage.setItem(COLUMN_2_LEGACY_WIDTH_KEY, "480");
+    const migrated = readPersistedColumn2Ratio();
+    expect(migrated).toBeCloseTo(sanitizeColumn2Ratio(480 / window.innerWidth));
+    expect(window.localStorage.getItem(COLUMN_2_LEGACY_WIDTH_KEY)).toBeNull();
+    // Idempotent: the boot read and the hook read run back to back and must
+    // produce the SAME number, or the second one animates the columns.
+    expect(readPersistedColumn2Ratio()).toBe(migrated);
   });
 });
