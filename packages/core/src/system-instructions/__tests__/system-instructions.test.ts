@@ -11,7 +11,10 @@ import {
 
 describe("buildWorkspacePreamble", () => {
   it("fills workspace dir + target branch", () => {
-    const out = buildWorkspacePreamble({ workspaceDir: "/ws/foo", targetBranch: "origin/dev" });
+    const out = buildWorkspacePreamble({
+      workspaceDir: "/ws/foo",
+      targetBranch: "origin/dev",
+    });
     expect(out).toContain("/ws/foo");
     expect(out).toContain("origin/dev");
     expect(out).toContain("git diff origin/dev...");
@@ -20,12 +23,12 @@ describe("buildWorkspacePreamble", () => {
     expect(out).not.toContain("{TARGET_BRANCH}");
   });
   it("defaults branch to origin/main when absent", () => {
-    expect(buildWorkspacePreamble({ workspaceDir: "/ws", targetBranch: null })).toContain(
-      "origin/main",
-    );
-    expect(buildWorkspacePreamble({ workspaceDir: "/ws", targetBranch: "  " })).toContain(
-      "origin/main",
-    );
+    expect(
+      buildWorkspacePreamble({ workspaceDir: "/ws", targetBranch: null }),
+    ).toContain("origin/main");
+    expect(
+      buildWorkspacePreamble({ workspaceDir: "/ws", targetBranch: "  " }),
+    ).toContain("origin/main");
   });
 });
 
@@ -57,7 +60,10 @@ describe("wrapSystemInstruction", () => {
 
 describe("buildFirstTurnSystemInstruction", () => {
   it("includes preamble; omits optional parts when absent", () => {
-    const out = buildFirstTurnSystemInstruction({ workspaceDir: "/ws", targetBranch: "origin/main" });
+    const out = buildFirstTurnSystemInstruction({
+      workspaceDir: "/ws",
+      targetBranch: "origin/main",
+    });
     expect(out).toContain("working inside Zeros");
     expect(out).toContain("<system_instruction>");
     expect(out).not.toContain("additional directories");
@@ -72,8 +78,12 @@ describe("buildFirstTurnSystemInstruction", () => {
     expect(out).toContain("/x/lewisia");
     expect(out).toContain("Reply in French.");
     // preamble before dirs before custom
-    expect(out.indexOf("working inside Zeros")).toBeLessThan(out.indexOf("/x/lewisia"));
-    expect(out.indexOf("/x/lewisia")).toBeLessThan(out.indexOf("Reply in French."));
+    expect(out.indexOf("working inside Zeros")).toBeLessThan(
+      out.indexOf("/x/lewisia"),
+    );
+    expect(out.indexOf("/x/lewisia")).toBeLessThan(
+      out.indexOf("Reply in French."),
+    );
   });
   it("skips blank custom instructions", () => {
     const out = buildFirstTurnSystemInstruction({
@@ -101,7 +111,32 @@ describe("buildFirstTurnInstructionBody", () => {
     expect(body).toContain("/x/lewisia");
     expect(body).toContain("Reply in French.");
     expect(body).not.toContain("<system_instruction>");
-    expect(buildFirstTurnSystemInstruction(input)).toBe(wrapSystemInstruction(body));
+    expect(buildFirstTurnSystemInstruction(input)).toBe(
+      wrapSystemInstruction(body),
+    );
+  });
+
+  it("adds the design contract only for design chats", () => {
+    const design = buildFirstTurnInstructionBody({
+      workspaceDir: "/ws/design",
+      mode: "design",
+    });
+    expect(design).toContain("Zeros Design/");
+    expect(design).toContain("pure HTML and CSS");
+    expect(design).toContain("zeros-design");
+    expect(design).toContain("data-oid");
+    expect(design).toContain("do not put `data-oid` on `html`");
+    expect(design.match(/call `lint_design`/g)).toHaveLength(2);
+    expect(design).toContain("blocking question tool");
+    expect(design).toContain("2–3 concrete, mutually exclusive");
+
+    const code = buildFirstTurnInstructionBody({
+      workspaceDir: "/ws/code",
+      mode: "code",
+    });
+    expect(code).not.toContain("Zeros Design/");
+    expect(code).not.toContain("zeros-design");
+    expect(code).not.toContain("browser-computed checks");
   });
 });
 
@@ -116,9 +151,12 @@ describe("buildAdditionalDirsSystemInstruction", () => {
 
 describe("prependSystemInstruction", () => {
   it("prepends a non-empty block with a blank line", () => {
-    expect(prependSystemInstruction("<system_instruction>x</system_instruction>", "hi")).toBe(
-      "<system_instruction>x</system_instruction>\n\nhi",
-    );
+    expect(
+      prependSystemInstruction(
+        "<system_instruction>x</system_instruction>",
+        "hi",
+      ),
+    ).toBe("<system_instruction>x</system_instruction>\n\nhi");
   });
   it("is a no-op when the block is empty", () => {
     expect(prependSystemInstruction("", "hi")).toBe("hi");

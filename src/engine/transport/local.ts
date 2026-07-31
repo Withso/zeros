@@ -63,6 +63,17 @@ export interface EngineServerInfo {
   stats?: { selectors: number; files: number; tokens: number };
 }
 
+export interface LocalHttpRequest {
+  method: string;
+  url: URL;
+}
+
+export interface LocalHttpResponse {
+  status: number;
+  headers: Record<string, string>;
+  body: Buffer;
+}
+
 /** Early socket-ownership check.
  *
  * `listen()` resolving is insufficient when a killed engine's descendants
@@ -171,6 +182,11 @@ export class LocalTransport implements Transport {
    *  file://, null and absent Origin are always allowed; any OTHER http(s)
    *  origin (a website, an embedded-browser tab) is rejected. */
   private readonly allowedOrigins: ReadonlySet<string>;
+  /** Trusted host-only HTTP routes. The custom design protocol is the first
+   * caller; renderer documents never receive the launch token that gates it. */
+  private readonly handleHttp:
+    | ((request: LocalHttpRequest) => Promise<LocalHttpResponse | null>)
+    | null;
 
   /** Per-boot identity nonce, served as `instance` in /health. Not a secret —
    *  it lets the early ownership probe and Electron host tell THIS server's
@@ -195,6 +211,9 @@ export class LocalTransport implements Transport {
     portSpan?: number;
     token?: string;
     allowedOrigins?: string[];
+    handleHttp?: (
+      request: LocalHttpRequest,
+    ) => Promise<LocalHttpResponse | null>;
   }) {
     this.basePort = opts.port;
     const requestedSpan = opts.portSpan ?? ENGINE_PORT_SPAN;
@@ -204,7 +223,17 @@ export class LocalTransport implements Transport {
         : ENGINE_PORT_SPAN;
     this.token = opts.token ?? "";
     this.allowedOrigins = new Set(opts.allowedOrigins ?? []);
-    this.httpServer = createServer((req, res) => this.handleHTTP(req, res));
+    this.handleHttp = opts.handleHttp ?? null;
+    this.httpServer = createServer((req, res) => {
+      void this.handleHTTP(req, res).catch(() => {
+        if (res.headersSent) {
+          res.destroy();
+          return;
+        }
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "internal error" }));
+      });
+    });
     this.wss = new WebSocketServer({ noServer: true });
 
     this.httpServer.on("upgrade", (request, socket, head) => {
@@ -362,7 +391,18 @@ export class LocalTransport implements Transport {
     return tokensMatch(this.token, url.searchParams.get("token") ?? "");
   }
 
-  private handleHTTP(req: IncomingMessage, res: ServerResponse): void {
+  private isHeaderTokenValid(value: string | string[] | undefined): boolean {
+    if (!this.token) return true;
+    return tokensMatch(
+      this.token,
+      Array.isArray(value) ? (value[0] ?? "") : (value ?? ""),
+    );
+  }
+
+  private async handleHTTP(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
     const url = new URL(req.url ?? "", "http://localhost");
 
     // Same cross-origin/rebinding gate as the WS upgrade (M1). The CLI health
@@ -374,6 +414,27 @@ export class LocalTransport implements Transport {
     ) {
       res.writeHead(403, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "forbidden" }));
+      return;
+    }
+
+    if (url.pathname.startsWith("/design/")) {
+      if (
+        req.method !== "GET" ||
+        !this.handleHttp ||
+        !this.isHeaderTokenValid(req.headers["x-zeros-engine-token"])
+      ) {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "forbidden" }));
+        return;
+      }
+      const result = await this.handleHttp({ method: req.method, url });
+      if (!result) {
+        res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end("Not found.");
+        return;
+      }
+      res.writeHead(result.status, result.headers);
+      res.end(result.body);
       return;
     }
 

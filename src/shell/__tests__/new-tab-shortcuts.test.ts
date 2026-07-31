@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveNewTabShortcut } from "../use-new-chat-hotkey";
+import {
+  resolveNewTabMode,
+  resolveNewTabShortcut,
+} from "../use-new-chat-hotkey";
 
 function key(
   overrides: Partial<
@@ -36,5 +39,16 @@ describe("resolveNewTabShortcut", () => {
     ).toBeNull();
     expect(resolveNewTabShortcut(key({ altKey: true }), true)).toBeNull();
     expect(resolveNewTabShortcut(key({ code: "KeyN" }), true)).toBeNull();
+  });
+});
+
+describe("resolveNewTabMode", () => {
+  it("keeps a prepared design destination in design mode before its first chat lands", () => {
+    expect(resolveNewTabMode("code", "design", "design")).toBe("design");
+  });
+
+  it("falls back to the active chat for ordinary workspace paths", () => {
+    expect(resolveNewTabMode("design", null, "code")).toBe("design");
+    expect(resolveNewTabMode(null, null, "code")).toBe("code");
   });
 });

@@ -1,0 +1,333 @@
+import { createHash } from "node:crypto";
+import { lstat, readFile, realpath } from "node:fs/promises";
+import path from "node:path";
+
+import { DESIGN_RUNTIME_SOURCE } from "@zeros/core/design-runtime";
+import { parse, type DefaultTreeAdapterTypes } from "parse5";
+import postcss from "postcss";
+
+import {
+  DESIGN_DIRECTORY_NAME,
+  readDesignFrameRenderIdentity,
+  stripNonDesignOidsForRender,
+} from "./document";
+import { expandDesignComponents } from "./components";
+
+const MAX_TEXT_RESOURCE_BYTES = 2 * 1024 * 1024;
+const MAX_BINARY_RESOURCE_BYTES = 10 * 1024 * 1024;
+
+const MIME_TYPES = Object.freeze<Record<string, string>>({
+  ".avif": "image/avif",
+  ".css": "text/css; charset=utf-8",
+  ".gif": "image/gif",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
+  ".png": "image/png",
+  ".webp": "image/webp",
+});
+
+export interface DesignProtocolResource {
+  status: number;
+  mimeType: string;
+  headers: Record<string, string>;
+  body: Buffer;
+}
+
+interface DesignProtocolResourceInput {
+  path: string;
+  sourceVersion: string | null;
+}
+
+type ParentNode =
+  | DefaultTreeAdapterTypes.Document
+  | DefaultTreeAdapterTypes.Element;
+
+function elements(node: ParentNode): DefaultTreeAdapterTypes.Element[] {
+  const result: DefaultTreeAdapterTypes.Element[] = [];
+  const visit = (current: ParentNode) => {
+    for (const child of current.childNodes ?? []) {
+      if ("tagName" in child) {
+        result.push(child);
+        visit(child);
+      }
+    }
+  };
+  visit(node);
+  return result;
+}
+
+function response(
+  status: number,
+  body: string | Buffer,
+  mimeType = "text/plain; charset=utf-8",
+  headers: Record<string, string> = {},
+): DesignProtocolResource {
+  return {
+    status,
+    mimeType,
+    headers: {
+      "Content-Type": mimeType,
+      "X-Content-Type-Options": "nosniff",
+      // The iframe deliberately has an opaque sandbox origin. Its relative
+      // CSS/images therefore need an explicit cross-origin resource policy;
+      // CORP does not grant CORS read access, and this route remains limited
+      // to the authenticated custom-protocol proxy.
+      "Cross-Origin-Resource-Policy": "cross-origin",
+      ...headers,
+    },
+    body: Buffer.isBuffer(body) ? body : Buffer.from(body, "utf8"),
+  };
+}
+
+function cacheHeaders(sourceVersion: string | null): Record<string, string> {
+  return {
+    "Cache-Control": sourceVersion
+      ? "private, max-age=31536000, immutable"
+      : "private, no-store",
+  };
+}
+
+function safeRelativePath(value: string): string | null {
+  if (
+    !value ||
+    value.length > 512 ||
+    value.includes("\0") ||
+    value.includes("\\") ||
+    value.startsWith("/")
+  ) {
+    return null;
+  }
+  const segments = value.split("/");
+  if (
+    segments.some((segment) => !segment || segment === "." || segment === "..")
+  ) {
+    return null;
+  }
+  return segments.join("/");
+}
+
+async function safeResourceTarget(
+  workspacePath: string,
+  relativePath: string,
+): Promise<{ target: string; size: number } | null> {
+  const designRoot = path.join(workspacePath, DESIGN_DIRECTORY_NAME);
+  const canonicalRoot = await realpath(designRoot).catch(() => null);
+  if (!canonicalRoot) return null;
+  const target = path.join(designRoot, ...relativePath.split("/"));
+  let current = designRoot;
+  for (const segment of relativePath.split("/")) {
+    current = path.join(current, segment);
+    const info = await lstat(current).catch(() => null);
+    if (!info || info.isSymbolicLink()) return null;
+  }
+  const info = await lstat(target).catch(() => null);
+  if (!info?.isFile()) return null;
+  const canonical = await realpath(target).catch(() => null);
+  if (
+    !canonical ||
+    (canonical !== canonicalRoot &&
+      !canonical.startsWith(`${canonicalRoot}${path.sep}`))
+  ) {
+    return null;
+  }
+  return { target, size: info.size };
+}
+
+function sanitizeFrameMarkup(source: string): string {
+  return source
+    .replace(
+      /<meta\b[^>]*http-equiv\s*=\s*(["'])Content-Security-Policy\1[^>]*>/gi,
+      "",
+    )
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, "")
+    .replace(/<script\b[^>]*\/?>/gi, "")
+    .replace(/\s+on[a-z0-9_-]+\s*=\s*(["'])[\s\S]*?\1/gi, "")
+    .replace(/\s+on[a-z0-9_-]+\s*=\s*[^\s>]+/gi, "")
+    .replace(
+      /\s+(href|src|action|poster)\s*=\s*(["'])\s*javascript:[\s\S]*?\2/gi,
+      "",
+    );
+}
+
+function versionLocalResources(source: string, sourceVersion: string): string {
+  const document = parse(source, { sourceCodeLocationInfo: true });
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  for (const element of elements(document)) {
+    for (const attribute of element.attrs) {
+      if (!new Set(["href", "src", "poster"]).has(attribute.name)) continue;
+      const value = attribute.value.trim();
+      if (
+        !value ||
+        value.startsWith("#") ||
+        value.startsWith("/") ||
+        /^[a-z][a-z0-9+.-]*:/i.test(value)
+      ) {
+        continue;
+      }
+      const location = element.sourceCodeLocation?.attrs?.[attribute.name];
+      if (!location) continue;
+      const separator = value.includes("?") ? "&" : "?";
+      edits.push({
+        start: location.startOffset,
+        end: location.endOffset,
+        text: `${attribute.name}="${value}${separator}v=${sourceVersion}"`,
+      });
+    }
+  }
+  let result = source;
+  for (const edit of edits.sort((left, right) => right.start - left.start)) {
+    result = `${result.slice(0, edit.start)}${edit.text}${result.slice(edit.end)}`;
+  }
+  return result;
+}
+
+function versionRelativeReference(
+  value: string,
+  sourceVersion: string,
+): string {
+  const trimmed = value.trim();
+  if (
+    !trimmed ||
+    trimmed.startsWith("#") ||
+    trimmed.startsWith("/") ||
+    trimmed.startsWith("//") ||
+    /^[a-z][a-z0-9+.-]*:/i.test(trimmed)
+  ) {
+    return value;
+  }
+  const hashIndex = trimmed.indexOf("#");
+  const hash = hashIndex >= 0 ? trimmed.slice(hashIndex) : "";
+  const withoutHash = hashIndex >= 0 ? trimmed.slice(0, hashIndex) : trimmed;
+  const queryIndex = withoutHash.indexOf("?");
+  const pathname =
+    queryIndex >= 0 ? withoutHash.slice(0, queryIndex) : withoutHash;
+  const params = new URLSearchParams(
+    queryIndex >= 0 ? withoutHash.slice(queryIndex + 1) : "",
+  );
+  params.set("v", sourceVersion);
+  return `${pathname}?${params.toString()}${hash}`;
+}
+
+function versionCssResources(source: string, sourceVersion: string): string {
+  let root: postcss.Root;
+  try {
+    root = postcss.parse(source);
+  } catch {
+    return source;
+  }
+  const rewriteUrls = (value: string) =>
+    value.replace(
+      /url\(\s*(["']?)([^"')]+)\1\s*\)/gi,
+      (_match, quote: string, reference: string) =>
+        `url(${quote}${versionRelativeReference(reference, sourceVersion)}${quote})`,
+    );
+  root.walkDecls((declaration) => {
+    declaration.value = rewriteUrls(declaration.value);
+  });
+  root.walkAtRules("import", (rule) => {
+    rule.params = rewriteUrls(rule.params).replace(
+      /^\s*(["'])([^"']+)\1/,
+      (_match, quote: string, reference: string) =>
+        `${quote}${versionRelativeReference(reference, sourceVersion)}${quote}`,
+    );
+  });
+  return root.toString();
+}
+
+function injectRuntime(
+  source: string,
+  sourceVersion: string,
+): { html: string; csp: string } {
+  const nonce = createHash("sha256")
+    .update(sourceVersion)
+    .update(source)
+    .digest("base64url")
+    .slice(0, 24);
+  const csp =
+    `default-src 'none'; script-src 'nonce-${nonce}'; ` +
+    `style-src zeros-design: 'unsafe-inline'; img-src zeros-design: data: blob:; ` +
+    `font-src zeros-design: data:; media-src zeros-design: data:; connect-src 'none'; ` +
+    `worker-src 'none'; frame-src 'none'; object-src 'none'; ` +
+    `base-uri 'none'; form-action 'none'; sandbox allow-scripts`;
+  const runtime =
+    `<script nonce="${nonce}" data-zeros-design-runtime>` +
+    `window.__zerosDesignSourceVersion=${JSON.stringify(sourceVersion)};` +
+    `${DESIGN_RUNTIME_SOURCE}</script>`;
+  if (/<\/body\s*>/i.test(source)) {
+    return {
+      html: source.replace(/<\/body\s*>/i, `${runtime}</body>`),
+      csp,
+    };
+  }
+  if (/<\/html\s*>/i.test(source)) {
+    return {
+      html: source.replace(/<\/html\s*>/i, `${runtime}</html>`),
+      csp,
+    };
+  }
+  return { html: `${source}${runtime}`, csp };
+}
+
+export async function readDesignProtocolResource(
+  workspacePath: string,
+  input: DesignProtocolResourceInput,
+): Promise<DesignProtocolResource> {
+  const relativePath = safeRelativePath(input.path);
+  if (!relativePath) return response(404, "Not found.");
+  const sourceVersion =
+    input.sourceVersion && /^[a-f0-9]{24}$/.test(input.sourceVersion)
+      ? input.sourceVersion
+      : null;
+  const extension = path.extname(relativePath).toLowerCase();
+  const topLevelHtml =
+    extension === ".html" && !relativePath.includes("/") ? relativePath : null;
+  const allowedResource =
+    (extension === ".css" && !relativePath.includes("/")) ||
+    (relativePath.startsWith("assets/") && MIME_TYPES[extension]);
+  if (!topLevelHtml && !allowedResource) return response(404, "Not found.");
+  const safe = await safeResourceTarget(workspacePath, relativePath);
+  if (!safe) return response(404, "Not found.");
+
+  if (topLevelHtml) {
+    if (safe.size > MAX_TEXT_RESOURCE_BYTES) {
+      return response(413, "Design frame is too large.");
+    }
+    const identity = await readDesignFrameRenderIdentity(
+      workspacePath,
+      topLevelHtml,
+    ).catch(() => null);
+    if (!identity) return response(404, "Not found.");
+    if (sourceVersion && sourceVersion !== identity.sourceVersion) {
+      return response(409, "Design frame generation changed.", undefined, {
+        "Cache-Control": "private, no-store",
+      });
+    }
+    const authored = await readFile(safe.target, "utf8");
+    const expanded = await expandDesignComponents(workspacePath, authored);
+    const sanitized = stripNonDesignOidsForRender(
+      sanitizeFrameMarkup(expanded.html),
+    );
+    const versioned = versionLocalResources(sanitized, identity.sourceVersion);
+    const rendered = injectRuntime(versioned, identity.sourceVersion);
+    return response(200, rendered.html, "text/html; charset=utf-8", {
+      ...cacheHeaders(identity.sourceVersion),
+      "Content-Security-Policy": rendered.csp,
+    });
+  }
+
+  const byteLimit =
+    extension === ".css" ? MAX_TEXT_RESOURCE_BYTES : MAX_BINARY_RESOURCE_BYTES;
+  if (safe.size > byteLimit) return response(413, "Resource is too large.");
+  const rawBody = await readFile(safe.target);
+  const body =
+    extension === ".css" && sourceVersion
+      ? Buffer.from(
+          versionCssResources(rawBody.toString("utf8"), sourceVersion),
+          "utf8",
+        )
+      : rawBody;
+  return response(200, body, MIME_TYPES[extension]!, {
+    ...cacheHeaders(sourceVersion),
+    "Content-Security-Policy": "default-src 'none'; sandbox",
+  });
+}

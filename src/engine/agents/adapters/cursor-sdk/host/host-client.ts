@@ -13,7 +13,10 @@
 // This module is the bun-side half. It exposes `getCursorHostModule()`, which
 // returns an object shaped exactly like the slice of @cursor/sdk the adapter
 // uses (CursorSdkModule) — Agent.create/resume/list, Cursor.models.list,
-// SqliteLocalAgentStore — but every call is proxied to the host subprocess.
+// a local-store facade — but every call is proxied to the host subprocess. The
+// facade retains its historical property name for adapter compatibility; the
+// host now backs it with `JsonlLocalAgentStore`, which works on Electron's
+// Node 20 runtime (the SDK's default node:sqlite path requires Node 22.13+).
 // Because the adapter already programs against those structural interfaces, the
 // adapter's logic (model resolution, classify, translator, retry) is unchanged:
 // only the transport for the raw SDK calls moved out of process.

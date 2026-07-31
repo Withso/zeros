@@ -33,6 +33,7 @@ function sampleWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     branch: `zeros/${id}`,
     baseBranch: "main",
     path: `/tmp/worktrees/test-repo/${id}`,
+    kind: "code",
     status: "in-progress",
     createdAt: now,
     archivedAt: null,

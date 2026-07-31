@@ -12,6 +12,7 @@ import {
   type WorkspaceNavigationTarget,
 } from "../../shell/prefetch-workspace-surface";
 import { prepareColumn2ChatView } from "../../shell/column2-chat-intent";
+import { resolveWorkspacePresentationKind } from "./workspace-resolution";
 
 /** Open a workspace: switch to the workspace view and land on the chat the user
  *  last had there (else any chat at that path, else auto-spawn the starred
@@ -56,6 +57,10 @@ export function useOpenWorkspace(): (
       if (workspace.validationPending) return;
       void spawnDefaultChatForWorkspace({
         folder: workspace.path,
+        mode: resolveWorkspacePresentationKind({
+          confirmedKind: workspace.kind,
+          folder: workspace.path,
+        }),
         sessions,
         dispatch,
       });

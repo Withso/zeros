@@ -16,7 +16,7 @@ import type {
   ContentBlock,
   InitializeResponse,
   ListSessionsResponse,
-  LoadSessionResponse,
+  LoadSessionResponse as WireLoadSessionResponse,
   NewSessionResponse,
   PromptResponse,
   QuestionAnswer,
@@ -33,6 +33,14 @@ import type {
   TurnUsage,
 } from "@zeros/core/agent-events";
 import type { AccountDetails } from "@zeros/core/messages";
+
+/** Adapter/gateway-only load result. A degraded Codex resume can replace a
+ * legacy Zeros-local UUID with the canonical thread id. The engine consumes
+ * this field to rekey ownership, then sends that id through the wire message's
+ * existing top-level `sessionId`; it must not extend the nested wire response. */
+export interface LoadSessionResponse extends WireLoadSessionResponse {
+  sessionId?: string;
+}
 
 // ── Failure taxonomy ─────────────────────────────────────
 //
@@ -130,12 +138,28 @@ export interface AgentGatewayEvents {
 
 // ── MCP server registration (matches current AgentSessionManager API) ─
 
+export type McpToolApprovalMode = "auto" | "prompt" | "writes" | "approve";
+
+export interface McpApprovalConfig {
+  /** Server-wide Codex approval policy. `writes` trusts annotated reads and
+   *  asks for mutating/unknown tools. */
+  defaultMode?: McpToolApprovalMode;
+  /** Optional exact tool overrides. Keys are validated again by each adapter
+   *  before they are embedded in provider configuration. */
+  tools?: Record<string, McpToolApprovalMode>;
+}
+
 /** One MCP server Zeros registers with every agent. A discriminated union over
  *  the two transports the MCP spec defines: `stdio` (a local subprocess) and
  *  `http` (Streamable HTTP / a remote URL). Secrets never live here — `env`
  *  values + header values are non-secret or reference env-var names; real
- *  credentials stay in the keychain (Phase 1 persistence). */
-export type McpServerRegistration =
+ *  credentials stay in the keychain (Phase 1 persistence).
+ *
+ *  `trusted` and `approval` are runtime-only hints minted by Zeros for managed
+ *  first-party endpoints. Settings parsing never grants them to user-provided
+ *  servers, so a repository cannot promote itself into an auto-approved
+ *  trust boundary. */
+export type McpServerRegistration = (
   | {
       name: string;
       transport: "stdio";
@@ -148,7 +172,11 @@ export type McpServerRegistration =
       transport: "http";
       url: string;
       headers?: Record<string, string>;
-    };
+    }
+) & {
+  trusted?: boolean;
+  approval?: McpApprovalConfig;
+};
 
 // ── Gateway construction shape (drop-in with AgentSessionManager) ──
 
@@ -342,7 +370,6 @@ export type {
   ContentBlock,
   InitializeResponse,
   ListSessionsResponse,
-  LoadSessionResponse,
   NewSessionResponse,
   PromptResponse,
   QuestionAnswer,

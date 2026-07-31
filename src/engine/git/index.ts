@@ -25,6 +25,7 @@ export type {
   RestoreResult,
   SetupState,
   Workspace,
+  WorkspaceKind,
   WorkspaceStatus,
 } from "./types";
 
@@ -51,6 +52,7 @@ export {
 
 export {
   closeState,
+  designWorktreesRoot,
   detachLockPath,
   seedFromDisk,
   setStateRootForTesting,

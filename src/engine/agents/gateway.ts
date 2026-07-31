@@ -241,6 +241,45 @@ async function withTargetBranchEnv(
   return { ...env, ZEROS_TARGET_BRANCH: targetRef };
 }
 
+/** The workspace row, not renderer/local settings, is authoritative for the
+ *  backend contract. This prevents a stale code chat or spoofed env value from
+ *  enabling design instructions in the wrong checkout, while still allowing
+ *  rowless test/plain-folder sessions to carry an explicit mode. */
+function withWorkspaceModeEnv(
+  env: Record<string, string>,
+  workspaceId: string | undefined,
+): Record<string, string> {
+  if (!workspaceId) return env;
+  let isDesign = false;
+  try {
+    isDesign = getWorkspaceById(workspaceId)?.kind === "design";
+  } catch {
+    /* An unknown workspace is treated as code and will fail cwd resolution. */
+  }
+  const next = { ...env };
+  if (isDesign) next.ZEROS_CHAT_MODE = "design";
+  else delete next.ZEROS_CHAT_MODE;
+  return next;
+}
+
+/** Claude supports project-relative Edit deny rules; Codex and Cursor do not.
+ *  In a cone-mode sparse design checkout the only root entries are Git's root
+ *  files plus `Zeros Design/`. `Edit(/*)` blocks those root files while still
+ *  permitting nested frame/token edits. Bash remains cooperative in v1 (the
+ *  sparse checkout + lint contract is the uniform cross-agent boundary). */
+function withDesignAgentGuards(
+  env: Record<string, string>,
+  agentId: string,
+): Record<string, string> {
+  if (agentId !== "claude" || env.ZEROS_CHAT_MODE !== "design") return env;
+  const existing = (env.CLAUDE_DISALLOWED_TOOLS ?? "")
+    .split(",")
+    .map((rule) => rule.trim())
+    .filter(Boolean);
+  const deny = Array.from(new Set([...existing, "Edit(/*)"]));
+  return { ...env, CLAUDE_DISALLOWED_TOOLS: deny.join(",") };
+}
+
 export class AgentGateway {
   private readonly projectRoot: string;
   private readonly events: AgentGatewayEvents;
@@ -277,7 +316,12 @@ export class AgentGateway {
   private readonly sessionsInstructed = new Set<string>();
   private readonly sessionToInstructionCtx = new Map<
     string,
-    { additionalDirectories: string[]; targetBranch?: string; customInstructions?: string }
+    {
+      additionalDirectories: string[];
+      targetBranch?: string;
+      customInstructions?: string;
+      mode: "code" | "design";
+    }
   >();
   private readonly agentInitializes = new Map<string, InitializeResponse>();
   /** Dedupe concurrent listAgents calls. Without this, every render
@@ -412,6 +456,17 @@ export class AgentGateway {
   setGatewayServer(url: string | null): void {
     this.gatewayServerUrl = url;
   }
+  /** Resolve the first-party design MCP endpoint for one workspace. Kept as a
+   *  callback (rather than a boot snapshot) so archive/delete immediately
+   *  revokes the URL and every new session gets exact workspace identity. */
+  private designServerUrlForWorkspace:
+    | ((workspaceId: string) => string | null)
+    | null = null;
+  setDesignServerResolver(
+    resolve: ((workspaceId: string) => string | null) | null,
+  ): void {
+    this.designServerUrlForWorkspace = resolve;
+  }
   /** Recompute the shared, deduped adapter-facing view IN PLACE (the reference
    *  is shared with live adapter ctxs, so we mutate rather than reassign). */
   private refreshMcpView(): void {
@@ -434,16 +489,37 @@ export class AgentGateway {
     agentId: string,
     cwd: string,
     mainRepoRoot?: string,
+    workspaceId?: string,
   ): Promise<McpServerRegistration[]> {
+    const injected: McpServerRegistration[] = [];
+    // The gateway endpoint fronting the auth:"oauth"/"header" backends.
+    if (this.gatewayServerUrl) {
+      injected.push({
+        name: "zeros-gateway",
+        transport: "http",
+        url: this.gatewayServerUrl,
+      });
+    }
+    const designUrl =
+      workspaceId && this.designServerUrlForWorkspace
+        ? this.designServerUrlForWorkspace(workspaceId)
+        : null;
+    if (designUrl) {
+      injected.push({
+        name: "zeros-design",
+        transport: "http",
+        url: designUrl,
+        // This URL is minted in-process, loopback-only, workspace-scoped, and
+        // authenticated with an opaque token. Annotated reads run directly;
+        // the structured source mutations retain Codex's MCP elicitation gate.
+        trusted: true,
+        approval: { defaultMode: "writes" },
+      });
+    }
     try {
       const { servers, gatewayBackends, warnings } =
         await resolveMcpServersForRepo(mainRepoRoot ?? cwd);
       for (const w of warnings) console.warn(`[agents] ${agentId} MCP: ${w}`);
-      const injected: McpServerRegistration[] = [];
-      // The gateway endpoint fronting the auth:"oauth"/"header" backends.
-      if (this.gatewayServerUrl) {
-        injected.push({ name: "zeros-gateway", transport: "http", url: this.gatewayServerUrl });
-      }
       // Surface gateway backends that exist but have NO endpoint up yet.
       if (gatewayBackends.length > 0 && !this.gatewayServerUrl) {
         console.warn(
@@ -457,7 +533,9 @@ export class AgentGateway {
       const reserved = new Set(injected.map((s) => s.name));
       const safeServers = servers.filter((s) => {
         if (!reserved.has(s.name)) return true;
-        console.warn(`[agents] ${agentId} MCP: server "${s.name}" uses a reserved gateway name — ignored.`);
+        console.warn(
+          `[agents] ${agentId} MCP: server "${s.name}" uses a reserved gateway name — ignored.`,
+        );
         return false;
       });
       return [...injected, ...safeServers];
@@ -466,7 +544,11 @@ export class AgentGateway {
         `[agents] ${agentId} MCP resolve failed for ${cwd}; using the global registry:`,
         err instanceof Error ? err.message : String(err),
       );
-      return this.mcpServersView;
+      const reserved = new Set(injected.map((server) => server.name));
+      return [
+        ...injected,
+        ...this.mcpServersView.filter((server) => !reserved.has(server.name)),
+      ];
     }
   }
 
@@ -602,7 +684,11 @@ export class AgentGateway {
     for (const m of AGENT_MANIFEST) {
       if (!m.runtimeUnavailable) continue;
       try {
-        const { cliBinary } = applyUserProviderConfig(this.projectRoot, m.id, {});
+        const { cliBinary } = applyUserProviderConfig(
+          this.projectRoot,
+          m.id,
+          {},
+        );
         const trimmed = cliBinary?.trim();
         if (trimmed) out.set(m.id, trimmed);
       } catch {
@@ -790,10 +876,18 @@ export class AgentGateway {
     // worktree workspace-local. mainRepoRoot is the workspace's primary checkout;
     // absent (a plain-folder chat) → repo-local resolves from cwd, no
     // workspace-local — the prior behavior.
-    const mainRepoRoot = opts.workspaceId ? getWorkspaceById(opts.workspaceId)?.repoRoot : undefined;
-    const merged = await withTargetBranchEnv(
-      withWorktreeEnv(mergeSpawnEnv(cwd, opts.env, mainRepoRoot), cwd),
-      opts.workspaceId,
+    const mainRepoRoot = opts.workspaceId
+      ? getWorkspaceById(opts.workspaceId)?.repoRoot
+      : undefined;
+    const merged = withDesignAgentGuards(
+      withWorkspaceModeEnv(
+        await withTargetBranchEnv(
+          withWorktreeEnv(mergeSpawnEnv(cwd, opts.env, mainRepoRoot), cwd),
+          opts.workspaceId,
+        ),
+        opts.workspaceId,
+      ),
+      agentId,
     );
     const spawn = applyUserProviderConfig(
       cwd,
@@ -805,12 +899,21 @@ export class AgentGateway {
     // their protocol's own channel at thread creation; everyone else gets it
     // prepended in-band on the first prompt (withSystemInstruction).
     const instructionCtx = this.parseInstructionCtx(spawn.env);
-    const systemInstruction = this.nativeInstructionFor(adapter, cwd, instructionCtx);
+    const systemInstruction = this.nativeInstructionFor(
+      adapter,
+      cwd,
+      instructionCtx,
+    );
     const { session } = await adapter.newSession({
       cwd,
       env: spawn.env,
       cliBinary: spawn.cliBinary,
-      mcpServers: await this.resolveSessionMcp(agentId, cwd, mainRepoRoot),
+      mcpServers: await this.resolveSessionMcp(
+        agentId,
+        cwd,
+        mainRepoRoot,
+        opts.workspaceId,
+      ),
       ...(systemInstruction ? { systemInstruction } : {}),
     });
     console.log(
@@ -851,10 +954,18 @@ export class AgentGateway {
     // ZEROS_WORKTREE_PATH, and the user `[providers]` base_url/executable_path
     // fallback (couriered values win). The workspace-local layering applies here
     // too (see newSession).
-    const mainRepoRoot = opts.workspaceId ? getWorkspaceById(opts.workspaceId)?.repoRoot : undefined;
-    const merged = await withTargetBranchEnv(
-      withWorktreeEnv(mergeSpawnEnv(cwd, opts.env, mainRepoRoot), cwd),
-      opts.workspaceId,
+    const mainRepoRoot = opts.workspaceId
+      ? getWorkspaceById(opts.workspaceId)?.repoRoot
+      : undefined;
+    const merged = withDesignAgentGuards(
+      withWorkspaceModeEnv(
+        await withTargetBranchEnv(
+          withWorktreeEnv(mergeSpawnEnv(cwd, opts.env, mainRepoRoot), cwd),
+          opts.workspaceId,
+        ),
+        opts.workspaceId,
+      ),
+      agentId,
     );
     const spawn = applyUserProviderConfig(
       cwd,
@@ -863,31 +974,53 @@ export class AgentGateway {
       mainRepoRoot,
     );
     const instructionCtx = this.parseInstructionCtx(spawn.env);
-    const systemInstruction = this.nativeInstructionFor(adapter, cwd, instructionCtx);
+    const systemInstruction = this.nativeInstructionFor(
+      adapter,
+      cwd,
+      instructionCtx,
+    );
     const response = await adapter.loadSession({
       sessionId,
       cwd,
       env: spawn.env,
       cliBinary: spawn.cliBinary,
-      mcpServers: await this.resolveSessionMcp(agentId, cwd, mainRepoRoot),
+      mcpServers: await this.resolveSessionMcp(
+        agentId,
+        cwd,
+        mainRepoRoot,
+        opts.workspaceId,
+      ),
       ...(systemInstruction ? { systemInstruction } : {}),
     });
+    const loadedSessionId = response.sessionId ?? sessionId;
     console.log(
-      `[agents] ${agentId} loadSession: sessionId=${sessionId} cwd=${cwd}` +
+      `[agents] ${agentId} loadSession: sessionId=${loadedSessionId} cwd=${cwd}` +
+        (loadedSessionId !== sessionId
+          ? ` requestedSessionId=${sessionId}`
+          : "") +
         (opts.workspaceId ? ` workspaceId=${opts.workspaceId}` : "") +
         (systemInstruction ? " sysInstr=native" : ""),
     );
-    this.sessionToAgent.set(sessionId, agentId);
-    this.sessionToCwd.set(sessionId, cwd);
-    this.sessionToInstructionCtx.set(sessionId, instructionCtx);
+    if (loadedSessionId !== sessionId) {
+      this.sessionToAgent.delete(sessionId);
+      this.sessionToWorkspace.delete(sessionId);
+      this.sessionToCwd.delete(sessionId);
+      this.sessionToInstructionCtx.delete(sessionId);
+      this.sessionsCwdHinted.delete(sessionId);
+      this.sessionsInstructed.delete(sessionId);
+    }
+    this.sessionToAgent.set(loadedSessionId, agentId);
+    this.sessionToCwd.set(loadedSessionId, cwd);
+    this.sessionToInstructionCtx.set(loadedSessionId, instructionCtx);
     if (systemInstruction) {
       // NATIVE channel: the adapter attached the orientation on thread/resume
       // — and its degraded resume-→-fresh-thread fallback attaches it on the
       // fresh thread/start too — so BOTH resume shapes are covered. Never
       // re-inject in-band. (The cwd hint re-arm below still applies on a
       // fresh thread for non-self-aware agents.)
-      this.sessionsInstructed.add(sessionId);
-      if (response.resumedFresh) this.sessionsCwdHinted.delete(sessionId);
+      this.sessionsInstructed.add(loadedSessionId);
+      if (response.resumedFresh)
+        this.sessionsCwdHinted.delete(loadedSessionId);
     } else if (response.resumedFresh) {
       // DEGRADED RESUME → the adapter couldn't resume and started a FRESH
       // thread/agent (Codex stale rollout, Cursor "agent not found", Claude
@@ -895,16 +1028,16 @@ export class AgentGateway {
       // preamble would be lost forever; re-arm the one-shot (delete, don't
       // add) so the next prompt() re-injects the workspace orientation + cwd
       // hint.
-      this.sessionsInstructed.delete(sessionId);
-      this.sessionsCwdHinted.delete(sessionId);
+      this.sessionsInstructed.delete(loadedSessionId);
+      this.sessionsCwdHinted.delete(loadedSessionId);
     } else {
       // TRUE RESUME → the first-turn <system_instruction> already rides in
       // the resumed transcript; pre-mark instructed so prompt() never
       // re-sends it.
-      this.sessionsInstructed.add(sessionId);
+      this.sessionsInstructed.add(loadedSessionId);
     }
     if (opts.workspaceId) {
-      this.sessionToWorkspace.set(sessionId, opts.workspaceId);
+      this.sessionToWorkspace.set(loadedSessionId, opts.workspaceId);
     }
     return response;
   }
@@ -985,6 +1118,7 @@ export class AgentGateway {
     additionalDirectories: string[];
     targetBranch?: string;
     customInstructions?: string;
+    mode: "code" | "design";
   } {
     const e = env ?? {};
     let dirs: string[] = [];
@@ -993,7 +1127,9 @@ export class AgentGateway {
       try {
         const parsed: unknown = JSON.parse(raw);
         if (Array.isArray(parsed)) {
-          dirs = parsed.filter((d): d is string => typeof d === "string" && d.trim() !== "");
+          dirs = parsed.filter(
+            (d): d is string => typeof d === "string" && d.trim() !== "",
+          );
         }
       } catch {
         /* tolerate a malformed value — no extra dirs */
@@ -1003,6 +1139,7 @@ export class AgentGateway {
       additionalDirectories: dirs,
       targetBranch: e.ZEROS_TARGET_BRANCH?.trim() || undefined,
       customInstructions: e.ZEROS_PROMPTS_GENERAL || undefined,
+      mode: e.ZEROS_CHAT_MODE === "design" ? "design" : "code",
     };
   }
 
@@ -1020,6 +1157,7 @@ export class AgentGateway {
       targetBranch: ctx.targetBranch ?? null,
       additionalDirectories: ctx.additionalDirectories,
       customInstructions: ctx.customInstructions ?? null,
+      mode: ctx.mode,
     });
     return body || undefined;
   }
@@ -1033,7 +1171,10 @@ export class AgentGateway {
    *  pre-marked instructed there. First prompt per NEW session only; a resumed
    *  session is pre-marked (the block already rides in its history). The text
    *  itself lives in @zeros/core/system-instructions (one editable home). */
-  private withSystemInstruction(sessionId: string, prompt: ContentBlock[]): ContentBlock[] {
+  private withSystemInstruction(
+    sessionId: string,
+    prompt: ContentBlock[],
+  ): ContentBlock[] {
     if (this.sessionsInstructed.has(sessionId)) return prompt;
     this.sessionsInstructed.add(sessionId);
     const cwd = this.sessionToCwd.get(sessionId);
@@ -1044,6 +1185,7 @@ export class AgentGateway {
       targetBranch: ctx?.targetBranch ?? null,
       additionalDirectories: ctx?.additionalDirectories ?? [],
       customInstructions: ctx?.customInstructions ?? null,
+      mode: ctx?.mode ?? "code",
     });
     if (!block) return prompt;
     return [{ type: "text", text: block }, ...prompt];
@@ -1064,7 +1206,10 @@ export class AgentGateway {
       this.withCwdHint(sessionId, adapter.agentId, prompt),
     );
     try {
-      const { response } = await adapter.prompt({ sessionId, prompt: outgoing });
+      const { response } = await adapter.prompt({
+        sessionId,
+        prompt: outgoing,
+      });
       // A clean prompt is the strongest possible signal that auth is
       // good — clear any prior failed-auth marker so the green dot
       // re-illuminates the moment the user resolves their login.
@@ -1088,9 +1233,11 @@ export class AgentGateway {
       // cross-agent false-auth pills). Inferring auth from a generic
       // protocol-error is exactly the kind of guessing that should live in
       // the adapter (which has the stderr/stream context), not the gateway.
-      const failure = (err as {
-        failure?: { kind?: string; stage?: string };
-      }).failure;
+      const failure = (
+        err as {
+          failure?: { kind?: string; stage?: string };
+        }
+      ).failure;
       if (failure?.kind === "auth-required") {
         this.markAuthFailed(adapter.agentId);
       }
@@ -1195,7 +1342,9 @@ export class AgentGateway {
     // session rebuild).
     let handled = false;
     for (const adapter of this.adapters.values()) {
-      if (adapter.respondToQuestion?.({ questionId, response, nativeRequestId })) {
+      if (
+        adapter.respondToQuestion?.({ questionId, response, nativeRequestId })
+      ) {
         handled = true;
       }
     }
@@ -1310,5 +1459,4 @@ export class AgentGateway {
     }
     return adapter;
   }
-
 }

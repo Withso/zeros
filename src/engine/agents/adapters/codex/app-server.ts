@@ -16,7 +16,8 @@
 //     (~80 methods total).
 //   - Client → Server notifications: only `initialized` (post-init).
 //   - Server → Client requests: item/{commandExecution,fileChange,
-//     permissions}/requestApproval, account/chatgptAuthTokens/refresh,
+//     permissions}/requestApproval, item/tool/requestUserInput,
+//     mcpServer/elicitation/request, account/chatgptAuthTokens/refresh,
 //     attestation/generate.
 //   - Server → Client notifications: ~60 events including thread/started,
 //     turn/{started,completed}, item/{started,completed}, item/agentMessage/
@@ -84,6 +85,8 @@ import type { AskForApproval as GenAskForApproval } from "./generated/v2/AskForA
 import type { UserInput as GenUserInput } from "./generated/v2/UserInput";
 import type { ThreadStartParams as GenThreadStartParams } from "./generated/v2/ThreadStartParams";
 import type { TurnStartParams as GenTurnStartParams } from "./generated/v2/TurnStartParams";
+import type { McpServerElicitationRequestParams as GenMcpServerElicitationRequestParams } from "./generated/v2/McpServerElicitationRequestParams";
+import type { McpServerElicitationRequestResponse as GenMcpServerElicitationRequestResponse } from "./generated/v2/McpServerElicitationRequestResponse";
 
 /** Content blocks accepted by `turn/start.input`. */
 export type CodexUserInput = GenUserInput;
@@ -107,6 +110,18 @@ export type CodexThreadStartParams = GenThreadStartParams;
 
 /** `turn/start` params. */
 export type CodexTurnStartParams = GenTurnStartParams;
+
+/** MCP `elicitation/create` forwarded by Codex app-server. Codex uses this
+ *  path both for real MCP forms and for its MCP tool-approval envelope. */
+export type CodexMcpElicitationParams = GenMcpServerElicitationRequestParams;
+export type CodexMcpElicitationResponse =
+  GenMcpServerElicitationRequestResponse;
+
+export interface CodexMcpElicitationRequest {
+  /** Zeros-owned routing id; independent of any MCP server request id. */
+  elicitationId: string;
+  params: CodexMcpElicitationParams;
+}
 
 /** Server-initiated approval request shape passed to the adapter.
  *  The adapter stores `permissionId` for routing and eventually calls
@@ -170,6 +185,12 @@ export interface CodexAppServerBootOptions {
    *  empty. Lets the adapter evict its own pending entry and tell the
    *  renderer to drop the parked card. */
   onUserInputSettled?: (questionId: string) => void;
+  /** Server-initiated MCP elicitation. This includes Codex's
+   *  `_meta.codex_approval_kind="mcp_tool_call"` approval form. If omitted,
+   *  the runtime cancels it immediately so the MCP request cannot hang. */
+  onMcpElicitationRequest?: (request: CodexMcpElicitationRequest) => void;
+  /** A pending MCP elicitation timed out without an explicit response. */
+  onMcpElicitationSettled?: (elicitationId: string) => void;
   /** Called with each line the server writes to stderr. */
   onStderr?: (line: string) => void;
   /** Called when the server exits (gracefully or otherwise). */
@@ -262,6 +283,13 @@ export interface CodexAppServerHandle {
    *  `onUserInputRequest`. `response` MUST be a ToolRequestUserInputResponse
    *  ({ answers: { [questionId]: { answers: string[] } } }). No-op if unknown. */
   respondToUserInput(questionId: string, response: unknown): void;
+
+  /** Resolve a pending `mcpServer/elicitation/request`. Unknown/already-settled
+   *  ids are safe no-ops, matching the other blocking request channels. */
+  respondToMcpElicitation(
+    elicitationId: string,
+    response: CodexMcpElicitationResponse,
+  ): void;
 
   /** Subscribe to a server-to-client notification by method name.
    *  Returns an unsubscribe function. Multiple subscribers per method
@@ -531,6 +559,61 @@ export async function bootCodexAppServerRuntime(
   wireApproval("item/commandExecution/requestApproval");
   wireApproval("item/fileChange/requestApproval");
   wireApproval("item/permissions/requestApproval");
+
+  // ── MCP elicitation round-trip (mcpServer/elicitation/request) ──
+  // Codex forwards MCP `elicitation/create` as a server→client request. Tool
+  // approvals use the same request with `_meta.codex_approval_kind` set to
+  // `mcp_tool_call`. An unhandled JSON-RPC request is a method-not-found error;
+  // worse, older clients could leave the upstream MCP call waiting. Always
+  // settle explicitly, fail closed when no adapter is present, and use the
+  // same bounded lifetime as every other blocking decision channel.
+  interface PendingMcpElicitationEntry {
+    resolve: (response: CodexMcpElicitationResponse) => void;
+    timer: NodeJS.Timeout;
+  }
+  const pendingMcpElicitations = new Map<
+    string,
+    PendingMcpElicitationEntry
+  >();
+  client.onRequest("mcpServer/elicitation/request", (params) => {
+    return new Promise<CodexMcpElicitationResponse>((resolve) => {
+      const elicitationId = randomUUID();
+      if (!opts.onMcpElicitationRequest) {
+        console.warn(
+          `[${logTag}] MCP elicitation received but no handler is set — cancelling`,
+        );
+        resolve(cancelMcpElicitationResponse());
+        return;
+      }
+      const timer = setTimeout(() => {
+        if (!pendingMcpElicitations.delete(elicitationId)) return;
+        console.warn(
+          `[${logTag}] MCP elicitation ${elicitationId} timed out after ${APPROVAL_TIMEOUT_MS}ms — auto-cancelling`,
+        );
+        resolve(cancelMcpElicitationResponse());
+        opts.onMcpElicitationSettled?.(elicitationId);
+      }, APPROVAL_TIMEOUT_MS);
+      timer.unref?.();
+      pendingMcpElicitations.set(elicitationId, { resolve, timer });
+      touchActiveTurnActivity();
+      try {
+        opts.onMcpElicitationRequest({
+          elicitationId,
+          params: (params ?? {}) as CodexMcpElicitationParams,
+        });
+      } catch (err) {
+        // A renderer/adapter callback is outside the JSON-RPC trust boundary.
+        // Convert its failure into an explicit cancellation; otherwise the
+        // request returns -32000 and the upstream MCP call may retry or stall.
+        pendingMcpElicitations.delete(elicitationId);
+        clearTimeout(timer);
+        console.warn(
+          `[${logTag}] MCP elicitation handler threw — cancelling: ${String(err)}`,
+        );
+        resolve(cancelMcpElicitationResponse());
+      }
+    });
+  });
 
   // ── User-input round-trip (item/tool/requestUserInput) ──
   // Twin of the approval flow: a blocking question whose answer is deferred
@@ -871,6 +954,19 @@ export async function bootCodexAppServerRuntime(
       pending.resolve(response);
     },
 
+    respondToMcpElicitation(elicitationId, response) {
+      const pending = pendingMcpElicitations.get(elicitationId);
+      if (!pending) {
+        console.log(
+          `[${logTag}] respondToMcpElicitation: unknown id ${elicitationId}`,
+        );
+        return;
+      }
+      pendingMcpElicitations.delete(elicitationId);
+      clearTimeout(pending.timer);
+      pending.resolve(response);
+    },
+
     onNotification(method, handler) {
       return subscribe(method, handler);
     },
@@ -894,6 +990,11 @@ export async function bootCodexAppServerRuntime(
         clearTimeout(pending.timer);
         pending.resolve({ answers: {} });
         pendingUserInputs.delete(questionId);
+      }
+      for (const [elicitationId, pending] of pendingMcpElicitations) {
+        clearTimeout(pending.timer);
+        pending.resolve(cancelMcpElicitationResponse());
+        pendingMcpElicitations.delete(elicitationId);
       }
       for (const w of turnWaiters.values()) w.resolve("cancelled");
       turnWaiters.clear();
@@ -996,6 +1097,21 @@ export function buildMcpServerOverrides(servers: readonly McpServerRegistration[
         args.push("-c", `${base}.env=${tomlInlineTable(s.env)}`);
       }
     }
+    if (s.approval?.defaultMode) {
+      args.push(
+        "-c",
+        `${base}.default_tools_approval_mode="${s.approval.defaultMode}"`,
+      );
+    }
+    for (const [toolName, mode] of Object.entries(s.approval?.tools ?? {})) {
+      // Tool names are TOML path components too; reject rather than quote so
+      // the generated shape stays identical to Codex's documented config.
+      if (!/^[A-Za-z0-9_-]+$/.test(toolName)) continue;
+      args.push(
+        "-c",
+        `${base}.tools.${toolName}.approval_mode="${mode}"`,
+      );
+    }
   }
   return args;
 }
@@ -1066,4 +1182,11 @@ export function defaultCancelResponse(method: CodexApprovalMethod): unknown {
     case "item/permissions/requestApproval":
       return defaultDenyResponse(method);
   }
+}
+
+/** Fail-closed response for an MCP elicitation that cannot be presented or
+ *  has outlived its owner. Keep every nullable protocol field explicit: this
+ *  shape is accepted by current Codex and MCP implementations. */
+function cancelMcpElicitationResponse(): CodexMcpElicitationResponse {
+  return { action: "cancel", content: null, _meta: null };
 }

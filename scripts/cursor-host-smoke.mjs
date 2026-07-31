@@ -12,10 +12,11 @@
 //
 // What it proves:
 //   • `ready` (not `fatal`) ⇒ require(@cursor/sdk) succeeded, which eagerly
-//     pulls sqlite3 (+ bindings/file-uri-to-path native chain) and undici — the
-//     packages most likely to be missing from asarUnpack.
-//   • store.open exercises the SqliteLocalAgentStore (native sqlite3) path;
-//     models.list exercises the undici fetch path. Their responses needn't
+//     pulls the SDK and its runtime dependencies without a module error.
+//   • store.open exercises the JsonlLocalAgentStore path used by the app (the
+//     SDK's node:sqlite default requires Node >=22.13, while Electron 33 runs
+//     Node 20); models.list exercises the undici fetch path.
+//     Their responses needn't
 //     SUCCEED (a bad/empty key is fine) — only resolve their modules.
 //   • stderr is scanned for "Cannot find module" / MODULE_NOT_FOUND.
 //
@@ -73,7 +74,7 @@ function finish(passed, reason) {
   const ok = passed && !moduleErr && !fatal;
   console.log("");
   if (ok) {
-    console.log(`✓ PASS — host loaded and served (ready, store.open + models.list resolved, no module errors).`);
+    console.log(`✓ PASS — host loaded and served (ready, JSONL store.open + models.list resolved, no module errors).`);
   } else {
     console.error(`✗ FAIL — ${reason || "host did not come up cleanly"}.`);
     if (fatal) console.error(`  fatal: ${fatal}`);

@@ -56,7 +56,7 @@
 // `agent.send` returns {runId, sdkRunId}: `runId` is OUR opaque handle for the
 // run (used by run.wait/run.cancel + the stream events); `sdkRunId` is the
 // SDK's own run id, forwarded so the engine can look the run up in the local
-// SQLite store for error recovery (CursorLocalStore). The host begins draining
+// portable JSONL store for error recovery (CursorLocalStore). The host begins draining
 // `run.stream()` eagerly the moment the run is created and forwards every item
 // as a `run.msg` event, so no items are lost between `send` and the engine
 // reading the stream.
@@ -119,12 +119,17 @@ try {
 
 const Agent = sdk && sdk.Agent;
 const Cursor = sdk && sdk.Cursor;
-const SqliteLocalAgentStore = sdk && sdk.SqliteLocalAgentStore;
+const JsonlLocalAgentStore = sdk && sdk.JsonlLocalAgentStore;
+const getDefaultSdkStateRoot = sdk && sdk.getDefaultSdkStateRoot;
 
 /** runId → { run, done } ; sdk agentId → SdkAgent ; storeId → store */
 const runs = new Map();
 const agents = new Map();
 const stores = new Map();
+/** workspace/state-root key → shared JSONL store. The same instance must back
+ *  create/resume/list plus diagnostic run reads or the host can observe a
+ *  different history snapshot from the SDK agent it just started. */
+const localStores = new Map();
 let nextRunId = 1;
 let nextStoreId = 1;
 
@@ -160,6 +165,77 @@ function fail(id, e) {
   send({ k: "res", id, ok: false, error: serializeErr(e) });
 }
 
+function workspaceRefFromLocal(local) {
+  if (!local || typeof local !== "object") return null;
+  const cwd = local.cwd;
+  if (typeof cwd === "string" && cwd) return cwd;
+  if (Array.isArray(cwd)) {
+    const first = cwd.find((entry) => typeof entry === "string" && entry);
+    if (first) return first;
+  }
+  return null;
+}
+
+function localStoreFor(workspaceRef, stateRoot) {
+  if (!JsonlLocalAgentStore || !workspaceRef) return null;
+  const root =
+    typeof stateRoot === "string" && stateRoot
+      ? stateRoot
+      : typeof getDefaultSdkStateRoot === "function"
+        ? getDefaultSdkStateRoot(workspaceRef)
+        : null;
+  if (!root) return null;
+  // The root is the persistence identity. If two callers deliberately supply
+  // the same stateRoot, one store instance serializes their JSONL access.
+  const key = root;
+  let store = localStores.get(key);
+  if (!store) {
+    store = new JsonlLocalAgentStore(root);
+    localStores.set(key, store);
+  }
+  return store;
+}
+
+function withPortableLocalStore(opts) {
+  const next = { ...(opts || {}) };
+  if (!next.local || typeof next.local !== "object") return next;
+  const local = { ...next.local };
+  const workspaceRef = workspaceRefFromLocal(local);
+  if (!workspaceRef) {
+    throw new Error("Cursor local agent options require an explicit cwd");
+  }
+  const store = local.store || localStoreFor(workspaceRef, local.stateRoot);
+  if (!store) {
+    throw new Error(
+      "@cursor/sdk does not expose JsonlLocalAgentStore/getDefaultSdkStateRoot; " +
+        "upgrade to a compatible SDK before starting a local agent",
+    );
+  }
+  local.store = store;
+  next.local = local;
+  return next;
+}
+
+function withPortableListStore(opts) {
+  const next = { ...(opts || {}) };
+  if (next.runtime !== "local" || next.store) return next;
+  const workspaceRef =
+    typeof next.cwd === "string"
+      ? next.cwd
+      : Array.isArray(next.cwd)
+        ? next.cwd.find((entry) => typeof entry === "string" && entry)
+        : process.cwd();
+  const store = localStoreFor(workspaceRef, next.stateRoot);
+  if (!store) {
+    throw new Error(
+      "@cursor/sdk does not expose JsonlLocalAgentStore/getDefaultSdkStateRoot; " +
+        "upgrade to a compatible SDK before listing local agents",
+    );
+  }
+  next.store = store;
+  return next;
+}
+
 /** Eagerly drain a run's stream, forwarding every item, so nothing is lost
  *  between `agent.send` returning and the engine consuming the stream. */
 function drainRun(runId, run) {
@@ -180,19 +256,22 @@ async function handle(m) {
   const args = m.args || {};
   switch (op) {
     case "agent.create": {
-      const agent = await Agent.create(args || {});
+      const agent = await Agent.create(withPortableLocalStore(args));
       agents.set(agent.agentId, agent);
       ok(id, { agentId: agent.agentId });
       return;
     }
     case "agent.resume": {
-      const agent = await Agent.resume(args.agentId, args.opts || {});
+      const agent = await Agent.resume(
+        args.agentId,
+        withPortableLocalStore(args.opts),
+      );
       agents.set(agent.agentId, agent);
       ok(id, { agentId: agent.agentId });
       return;
     }
     case "agent.list": {
-      const res = await Agent.list(args.opts || {});
+      const res = await Agent.list(withPortableListStore(args.opts));
       // Normalize to a plain {items} shape the engine tolerates either way.
       const items = Array.isArray(res) ? res : res && res.items ? res.items : [];
       ok(id, { items });
@@ -275,14 +354,11 @@ async function handle(m) {
       return;
     }
     case "store.open": {
-      if (!SqliteLocalAgentStore || !SqliteLocalAgentStore.open) {
+      const store = localStoreFor(args.workspaceRef, args.stateRoot);
+      if (!store) {
         ok(id, { storeId: null });
         return;
       }
-      const store = await SqliteLocalAgentStore.open({
-        workspaceRef: args.workspaceRef,
-        ...(args.stateRoot ? { stateRoot: args.stateRoot } : {}),
-      });
       const storeId = String(nextStoreId++);
       stores.set(storeId, store);
       ok(id, { storeId });
@@ -305,11 +381,9 @@ async function handle(m) {
       const store = stores.get(args.storeId);
       if (store) {
         stores.delete(args.storeId);
-        try {
-          await store.dispose();
-        } catch {
-          /* ignore */
-        }
+        // This is only a diagnostic facade reference. The underlying store is
+        // shared with live Agent.create/resume/list calls and must remain open
+        // until the host itself shuts down.
       }
       ok(id, null);
       return;
@@ -379,9 +453,12 @@ async function shutdown() {
       /* ignore */
     }
   }
-  for (const store of stores.values()) {
+  const uniqueStores = new Set([...localStores.values(), ...stores.values()]);
+  for (const store of uniqueStores) {
     try {
-      pending.push(Promise.resolve(store.dispose()));
+      if (typeof store.dispose === "function") {
+        pending.push(Promise.resolve(store.dispose()));
+      }
     } catch {
       /* ignore */
     }
@@ -389,6 +466,7 @@ async function shutdown() {
   runs.clear();
   agents.clear();
   stores.clear();
+  localStores.clear();
   try {
     // Cap at 2.5s: comfortably past the SDK's 1s SIGTERM→SIGKILL timer, and well
     // under the 5s grace the parent gives before it SIGKILLs this host's group.

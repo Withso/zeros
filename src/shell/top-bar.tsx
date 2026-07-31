@@ -28,6 +28,7 @@ import {
   ImageIcon,
   LaptopMinimal,
   MessageCircleQuestionMark,
+  PenTool,
   Plus,
   Settings,
 } from "lucide-react";
@@ -525,7 +526,8 @@ function WorkspaceTab({
   const awaitingKind = useAnyChatAwaitingKind(chatIds);
   const islandKind = usePrIslandKind(workspace.id, workspace.prNumber);
   const runActionRunning = useAnyRunActionRunning(workspace.path);
-  const changeLines = useWorkspaceChangeLines(workspace);
+  const designWorkspace = workspace.kind === "design";
+  const changeLines = useWorkspaceChangeLines(workspace, !designWorkspace);
   const label = workspaceLabel(workspace);
   const archiving = useWorkspaceArchiving(workspace.id);
 
@@ -569,6 +571,8 @@ function WorkspaceTab({
             />
           ) : streaming ? (
             <ZerosSpinner size={16} variant="agent" label="Agent working" />
+          ) : designWorkspace ? (
+            <PenTool className="size-3.5" strokeWidth={1.25} />
           ) : (
             (prTabIcon(workspace, islandKind) ?? (
               <GitBranch className="size-3.5" strokeWidth={1.25} />
@@ -585,7 +589,7 @@ function WorkspaceTab({
             is content-sized, so it only pays for the ones actually present.
             Archiving hides the counts — that tab is already a spinner row —
             but a run genuinely still running keeps saying so. */}
-        {!archiving && (
+        {!archiving && !designWorkspace && (
           <WorkspaceChangeCounts {...changeLines} active={active} />
         )}
         {runActionRunning && (
@@ -643,9 +647,11 @@ function WorkspaceTab({
  *  Non-interactive — there is nothing to open yet. */
 function PendingWorkspaceTab({
   label,
+  kind = "code",
   active = false,
 }: {
   label: string;
+  kind?: "code" | "design";
   active?: boolean;
 }) {
   return (
@@ -660,7 +666,11 @@ function PendingWorkspaceTab({
         className="inline-flex size-4 shrink-0 items-center justify-center"
         aria-hidden="true"
       >
-        <GitBranch className="size-3.5" strokeWidth={1.25} />
+        {kind === "design" ? (
+          <PenTool className="size-3.5" strokeWidth={1.25} />
+        ) : (
+          <GitBranch className="size-3.5" strokeWidth={1.25} />
+        )}
       </span>
       <span className="ml-2.5 min-w-0 flex-auto truncate text-left">
         {label}
@@ -947,6 +957,12 @@ function ArchivedWorkspacePicker({ project }: { project: Project }) {
                   >
                     {restoringId === workspace.id ? (
                       <ZerosSpinner size={14} />
+                    ) : workspace.kind === "design" ? (
+                      <PenTool
+                        className="text-fg2 size-3.5 shrink-0"
+                        strokeWidth={1.25}
+                        aria-hidden="true"
+                      />
                     ) : (
                       <GitBranch
                         className="text-fg2 size-3.5 shrink-0"
@@ -1524,10 +1540,17 @@ export function TopBar() {
    * workspace. The global plus remains the richer Dispatcher entry point.
    * The optimistic flow itself lives in ./create-workspace, shared with the
    * repo-add paths that now open a workspace instead of the trunk. */
-  const handleCreateWorkspace = useCallback(async () => {
-    if (!selectedProject) return;
-    await createWorkspaceForProject({ project: selectedProject, dispatch });
-  }, [dispatch, selectedProject]);
+  const handleCreateWorkspace = useCallback(
+    async (kind: "code" | "design") => {
+      if (!selectedProject) return;
+      await createWorkspaceForProject({
+        project: selectedProject,
+        dispatch,
+        kind,
+      });
+    },
+    [dispatch, selectedProject],
+  );
 
   // Pending creates for the visible repository — one "Setting up workspace…"
   // tab each, from ANY create surface (this plus or the Dispatcher).
@@ -1685,6 +1708,7 @@ export function TopBar() {
                 (pending) => (
                   <PendingWorkspaceTab
                     key={pending.token}
+                    kind={pending.kind}
                     label={
                       pending.branch
                         ? branchDisplayName(pending.branch)
@@ -1739,18 +1763,39 @@ export function TopBar() {
             {/* Always the plain plus — never a spinner/disabled swap. Every
                 click reserves an independent workspace, while the optimistic
                 tab + navigation provide immediate per-click feedback. */}
-            <Tooltip label="New workspace" side="bottom">
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className={INSET_ICON_BUTTON_CLS}
-                aria-label="New workspace"
-                onClick={() => void handleCreateWorkspace()}
+            <DropdownMenu>
+              <Tooltip label="New workspace" side="bottom">
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className={INSET_ICON_BUTTON_CLS}
+                    aria-label="New workspace"
+                  >
+                    <Plus className="size-4" strokeWidth={1.5} />
+                  </Button>
+                </DropdownMenuTrigger>
+              </Tooltip>
+              <DropdownMenuContent
+                align="start"
+                sideOffset={6}
+                className="w-48"
               >
-                <Plus className="size-4" strokeWidth={1.5} />
-              </Button>
-            </Tooltip>
+                <DropdownMenuItem
+                  onSelect={() => void handleCreateWorkspace("code")}
+                >
+                  <GitBranch className="text-fg2" />
+                  <span>Code workspace</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onSelect={() => void handleCreateWorkspace("design")}
+                >
+                  <PenTool className="text-fg2" />
+                  <span>Design workspace</span>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         )}
 

@@ -21,6 +21,7 @@ import {
 } from "./column2-ratio";
 import { cn } from "../zeros/ui/cn";
 import { useResizeHint } from "./use-resize-hint";
+import { DesignWorkspaceSidebarPanels } from "../zeros/panels/design-workspace-sidebar-panels";
 
 // ── Column 2 className constants ───────────────────────────
 // Wave 1.5 finalize (2026-05-16): the .zeros-column-2 family
@@ -100,15 +101,14 @@ const RESIZE_HANDLE_HIDDEN_CLS = "hidden";
 // Matches the sidebar seam's DRAG_THRESHOLD_PX (use-sidebar-drag.ts).
 const DRAG_THRESHOLD_PX = 3;
 
-const BODY_BASE_CLS =
-  "flex-1 overflow-hidden min-h-0 flex flex-col p-0 [&>*]:flex-1 [&>*]:min-h-0";
+const BODY_BASE_CLS = "flex-1 overflow-hidden min-h-0 flex flex-col p-0";
 /** Stacking wrapper for the body — the split-pane tree and the
  *  terminal deck both live here as siblings, so the long-lived
  *  terminal layers persist across pane-layout churn while each pane
  *  keyed-remounts its own chat view. (Chat-content centering is owned
  *  by AgentChat's inner `mx-auto max-w-[1152px]` measure; the per-pane
  *  chat-root classes moved into column2-panes.tsx.) */
-const BODY_STACK_CLS = "relative size-full min-h-0";
+const BODY_STACK_CLS = "relative min-h-0 flex-1";
 /** The pane tree fills the stack; terminal layers portal into panes. */
 const PANE_TREE_ROOT_CLS = "absolute inset-0 flex min-h-0 min-w-0";
 
@@ -159,9 +159,11 @@ function useColumn2Ratio(sectionRef: React.RefObject<HTMLElement | null>) {
 export function Column2Workspace({
   col3Collapsed = false,
   onToggleCol3,
+  surfaceActive = true,
 }: {
   col3Collapsed?: boolean;
   onToggleCol3?: () => void;
+  surfaceActive?: boolean;
 } = {}) {
   // User-resizable Column 2. Drag from the right edge updates col 2's
   // share of the row; localStorage persists across reload.
@@ -337,6 +339,7 @@ export function Column2Workspace({
               and shows only while it's that pane's displayed chat. */}
           <Column2TerminalDeck />
         </div>
+        <DesignWorkspaceSidebarPanels surfaceActive={surfaceActive} />
       </div>
       {/* Phase 2 chat overhaul (2026-05-07): drag handle for the right
           edge. Hidden when col3 is collapsed (col2 is full-width then).

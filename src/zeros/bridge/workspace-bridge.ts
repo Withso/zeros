@@ -120,7 +120,7 @@ const LOCAL_GIT_TIMEOUT_MS = 30_000;
 /** Send a WORKSPACE_REQUEST and await its WORKSPACE_RESPONSE / WORKSPACE_ERROR
  *  (both echo requestId, so request() resolves on whichever arrives). Throws on
  *  a WORKSPACE_ERROR. */
-async function workspaceOp(
+export async function workspaceOp(
   bridge: RuntimeClient,
   op: string,
   params: Record<string, unknown> = {},
@@ -508,7 +508,12 @@ export interface PreparedWorkspaceCreateWire {
  *  naming, no mkdir/checkout), so a disconnected prepare leaks nothing. */
 export async function bridgeWorkspacePrepareCreate(
   bridge: RuntimeClient,
-  args: { repoRoot: string; repoSlug?: string; prompt?: string },
+  args: {
+    repoRoot: string;
+    kind?: "code" | "design";
+    repoSlug?: string;
+    prompt?: string;
+  },
 ): Promise<PreparedWorkspaceCreateWire> {
   const r = (await workspaceOp(
     bridge,

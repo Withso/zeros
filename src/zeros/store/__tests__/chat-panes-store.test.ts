@@ -150,6 +150,20 @@ describe("pane-active memory", () => {
 });
 
 describe("collapse", () => {
+  it("drops an exact folder's retained split when its workspace forbids panes", () => {
+    const a = chat("a", FOLDER, 1);
+    hydrate([a], "a");
+    const pane = useChatPanesStore
+      .getState()
+      .splitPane(FOLDER, MAIN_PANE_ID, "row", null)!;
+    useChatPanesStore.getState().beginAssignNextChat(FOLDER, pane);
+
+    useChatPanesStore.getState().collapseFolder(FOLDER);
+
+    expect(useChatPanesStore.getState().byFolder[FOLDER]).toBeUndefined();
+    expect(useChatPanesStore.getState().pendingAssigns).toEqual([]);
+  });
+
   it("collapses a pane when its last chat is archived", () => {
     const a = chat("a", FOLDER, 1);
     const b = chat("b", FOLDER, 2);

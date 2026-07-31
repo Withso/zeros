@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Zeros Design Workspaces — v1 Implementation Plan (v3)</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0c0c0d; --panel: #131316; --panel2: #18181b;
+    --border: #27272a; --border2: #3f3f46;
+    --fg: #e6e6e6; --fg-strong: #fafafa; --muted: #a1a1aa; --dim: #71717a;
+    --red: #f87171; --red-bg: #2a1215; --green: #4ade80; --green-bg: #0f2418;
+    --amber: #fbbf24; --amber-bg: #2a2210; --blue: #7dd3fc; --violet: #c4b5fd;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.65 -apple-system, "SF Pro Text", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 56px 28px 96px; }
+  h1 { font-size: 30px; line-height: 1.2; color: var(--fg-strong); margin: 0 0 10px; letter-spacing: -0.02em; }
+  h2 { font-size: 21px; color: var(--fg-strong); margin: 64px 0 6px; letter-spacing: -0.01em; }
+  h3 { font-size: 16px; color: var(--fg-strong); margin: 28px 0 8px; }
+  p { margin: 10px 0; color: var(--fg); }
+  .lede { color: var(--muted); font-size: 16px; }
+  .kicker { font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim); margin-bottom: 18px; }
+  code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.88em;
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px 22px; margin: 16px 0; }
+  .badge { display: inline-block; font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+    padding: 3px 9px; border-radius: 99px; text-transform: uppercase; vertical-align: 2px; }
+  .b-green { color: var(--green); background: var(--green-bg); border: 1px solid #1e4630; }
+  .b-amber { color: var(--amber); background: var(--amber-bg); border: 1px solid #4d431a; }
+  .b-blue { color: var(--blue); background: #10222c; border: 1px solid #1f4256; }
+  .b-violet { color: var(--violet); background: #1d1930; border: 1px solid #3b3260; }
+  .gloss { color: var(--dim); font-style: italic; }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
+  th { text-align: left; color: var(--dim); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;
+    font-weight: 600; padding: 8px 12px; border-bottom: 1px solid var(--border2); }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  .ok { color: var(--green); } .warn { color: var(--amber); }
+  .flow { display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap; margin: 14px 0; }
+  .step { flex: 1 1 140px; background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 12px; font-size: 13px; position: relative; }
+  .step .n { color: var(--dim); font-size: 11px; display: block; margin-bottom: 2px; }
+  .step.hot { border-color: #1e4630; background: var(--green-bg); }
+  .arrow { align-self: center; color: var(--dim); font-size: 15px; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 700px) { .cols { grid-template-columns: 1fr; } }
+  .tree { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; line-height: 1.8;
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px;
+    white-space: pre; overflow-x: auto; color: var(--muted); }
+  .tree b { color: var(--fg-strong); font-weight: 600; }
+  .tree .g { color: var(--green); } .tree .d { color: var(--dim); } .tree .a { color: var(--amber); } .tree .v { color: var(--violet); }
+  .check { list-style: none; padding: 0; margin: 12px 0; }
+  .check li { padding: 10px 0 10px 34px; position: relative; border-bottom: 1px solid var(--border); }
+  .check li:last-child { border-bottom: none; }
+  .check li::before { content: attr(data-n); position: absolute; left: 0; top: 10px;
+    width: 22px; height: 22px; border-radius: 50%; background: var(--panel2); border: 1px solid var(--border2);
+    color: var(--muted); font-size: 11.5px; font-weight: 600; display: flex; align-items: center; justify-content: center; }
+  .callout { border-left: 3px solid var(--amber); background: var(--amber-bg); border-radius: 0 10px 10px 0;
+    padding: 12px 18px; margin: 18px 0; font-size: 14px; }
+  .callout.green { border-left-color: var(--green); background: var(--green-bg); }
+  .callout.blue { border-left-color: var(--blue); background: #10222c; }
+  .shell { border: 1px solid var(--border2); border-radius: 12px; overflow: hidden; margin: 16px 0; background: #0a0a0b;
+    display: grid; grid-template-columns: 200px 1fr 150px; min-height: 210px; font-size: 10.5px; color: var(--dim); }
+  .shell .pane { border-right: 1px solid var(--border); padding: 9px; }
+  .shell .pane:last-child { border-right: none; }
+  .shell .cap { color: var(--muted); font-size: 9.5px; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 7px; }
+  .shell .row { padding: 3px 6px; border-radius: 5px; margin-bottom: 3px; background: var(--panel2); border: 1px solid var(--border); }
+  .shell .row.hl { border-color: #1f4256; color: var(--blue); }
+  .shell .canvas { position: relative; background: radial-gradient(circle, #1c1c20 1px, transparent 1px); background-size: 16px 16px; }
+  .shell .fr { position: absolute; background: #101012; border: 1px solid var(--border2); border-radius: 6px; padding: 4px 6px; }
+  .shell .fr.sel { border-color: var(--blue); }
+  .shell .toolbar { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%);
+    background: var(--panel); border: 1px solid var(--border2); border-radius: 8px; padding: 3px 8px; color: var(--muted); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 56px 0 0; }
+  .src { font-size: 12.5px; color: var(--dim); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="kicker">Zeros · Design Workspaces · v1 Implementation Plan (v3) · 2026-07-31</div>
+  <h1>The first version: pure HTML+CSS frames,<br/>one design tool layer for every agent</h1>
+  <p class="lede">Third revision, folding in your decisions (the reference layout, pen-tool icon, no split chats, HTML+CSS only) and a second research pass: Nordcraft's open-source engine, paper.design's MCP, Figma's agent skills, and a full map of Zeros' own MCP plumbing. The <span class="mono">design-mode</span> branch is cut; this workspace targets it. Full technical version: <span class="mono">docs/design-mode-plan-2026-07-31.md</span>.</p>
+
+  <h2>The shell you sketched, mapped to build</h2>
+  <div class="shell">
+    <div class="pane">
+      <div class="cap">Chat · no splits</div>
+      <div class="row hl">Landing refresh</div>
+      <div class="row">Pricing exploration</div>
+      <div class="row" style="margin-top:10px; color:var(--muted)">Describe a design change…</div>
+      <div class="cap" style="margin-top:12px">Layers | Assets</div>
+      <div class="row"># Pricing</div>
+      <div class="row hl">&nbsp;&nbsp;Card · Pro</div>
+      <div class="row"># Dashboard</div>
+    </div>
+    <div class="pane canvas">
+      <div class="fr sel" style="left:14px; top:18px; width:110px; height:64px;">pricing.html</div>
+      <div class="fr" style="left:140px; top:40px; width:90px; height:52px;">home.html</div>
+      <div class="toolbar">▖ ⃞ T &lt;/&gt;</div>
+    </div>
+    <div class="pane">
+      <div class="cap">Design | Prototype</div>
+      <div class="row">X 142 · Y 62 · W 118 · H 186</div>
+      <div class="row">Auto layout · gap 12 · pad 16</div>
+      <div class="row">Fill 2A2624</div>
+      <div class="row">Stroke 3A3532 · 1</div>
+      <div class="row">Radius 14 · Export PNG</div>
+    </div>
+  </div>
+  <p class="src">Left: design-agent chat (multiple tabs, split-panes disabled) with Layers/Assets below the composer. Center: the canvas (reused from the shipped browser-tab canvas) with the floating toolbar and zoom. Right: the inspector — read-only first, editable in Phase 3. Top bar: design workspaces get the pen-tool icon in place of the git-branch icon.</p>
+
+  <h2>The five foundations <span class="gloss">(the "basement" — everything later stacks on these)</span></h2>
+  <table>
+    <tr><th>Foundation</th><th>Why it's load-bearing</th></tr>
+    <tr><td><b>Frames are plain HTML+CSS files, zero JavaScript</b></td><td>Inert documents — safe, diffable, portable, and the format agents are literally trained on. A lint rule bans <span class="mono">&lt;script&gt;</span>/event attributes; the only script in a rendered frame is our own editor runtime, injected at render time, never in the file.</td></tr>
+    <tr><td><b>The style language is real CSS — nothing invented</b></td><td>Nordcraft proved the inspector can be pure views over CSS declarations (size, layout, fill, stroke, effects…), with tooltips naming the real property. Our style editor, the future themes table, and every agent edit share one vocabulary. Their Apache-2.0 CSS parser round-trips text ⇄ controls.</td></tr>
+    <tr><td><b><span class="mono">tokens.css</span> = typed tokens + the layout reset</b></td><td>Design tokens as typed <span class="mono">@property</span> custom properties (with per-theme values) and a reset layer that makes every element behave like Figma auto-layout (flex column by default). Your future variables/themes table is just a UI over this one file — no new storage ever needed.</td></tr>
+    <tr><td><b>Stable element IDs (<span class="mono">data-oid</span>)</b></td><td>Every element carries a small ID (self-healed by the app). Click-to-select, the layers panel, style writeback, agent tools, and future component instances all address elements through this one scheme.</td></tr>
+    <tr><td><b>One mutation + validation layer in the engine</b></td><td>Agent file edits, inspector edits, and future structured tools all converge on: validate → minimal file edit → lint → broadcast. Constraints hold no matter who edited.</td></tr>
+  </table>
+
+  <h2>The design tool layer — your "very, very important" question, answered</h2>
+  <div class="callout green">✅ <b>It's a native MCP server, and it works for every agent.</b> All three adapters (Claude, Codex, Cursor) already accept per-session MCP servers — and the Zeros engine already runs a real MCP server internally (the gateway). The design server rides the same stack, injected only in design workspaces, workspace-aware (tools resolve against the calling agent's worktree). Future agents inherit it automatically. This is also what the field converged on: paper.design's whole agent story is a local MCP; Figma, Subframe, Webstudio likewise.</div>
+
+  <div class="cols">
+    <div class="card">
+      <h3 style="margin-top:0">The v1 toolset <span class="badge b-violet">7 tools</span></h3>
+      <p><span class="mono">get_selection</span> <span class="gloss">— what the user has selected on canvas: the context bridge</span><br/>
+      <span class="mono">list_frames</span> · <span class="mono">get_frame</span> <span class="gloss">— orientation + compact tree summaries</span><br/>
+      <span class="mono">screenshot_frame</span> <span class="gloss">— the agent sees its own work (Phase 2)</span><br/>
+      <span class="mono">lint_design</span> <span class="gloss">— the constraint engine's voice</span><br/>
+      <span class="mono">get_tokens</span> <span class="gloss">— the design-system vocabulary</span><br/>
+      <span class="mono">get_guide</span> <span class="gloss">— the rulebook, loaded on demand</span></p>
+      <p class="src">Deliberately small (Cursor caps ~40 tools total). Structured write tools (<span class="mono">write_html</span>, <span class="mono">update_styles</span>…) arrive with the style editor — thin wrappers over the same mutation layer.</p>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Editing: files first, tools around them</h3>
+      <p>Agents <b>write the HTML/CSS files directly</b> — that's what they're best at (claude.ai's own artifacts are files edited by targeted replacements), and it's fast. The MCP layer supplies what files can't: context, eyes, and rules.</p>
+      <p class="src">"Agent uses only design tools" is unenforceable for two of three agents (only Claude supports tool bans) — so exclusivity comes from the environment instead: in a sparse design worktree there is nothing else to edit, and the lint loop makes the good path the only passing path.</p>
+    </div>
+  </div>
+
+  <h3>How constraints actually bind <span class="gloss">(the four layers)</span></h3>
+  <div class="flow">
+    <div class="step"><span class="n">1 · teach</span><b>The contract</b><br/>system prompt + MCP instructions + <span class="mono">get_guide</span>: concrete, checkable rules only</div>
+    <div class="arrow">→</div>
+    <div class="step"><span class="n">2 · check</span><b>Design lint on every change</b><br/>no scripts, local refs only, valid HTML, known tokens — regardless of who edited</div>
+    <div class="arrow">→</div>
+    <div class="step hot"><span class="n">3 · correct</span><b>The feedback loop</b><br/>violations return inside tool results; file edits get a turn-end card + auto-follow-up — works for ALL agents</div>
+    <div class="arrow">→</div>
+    <div class="step"><span class="n">4 · harden</span><b>Hard rules where possible</b><br/>Claude path denies; the sparse worktree under everything</div>
+  </div>
+  <p class="src">This is the synthesis of what ships elsewhere: Figma teaches the valid document via skill files with hard gates; Framer's linter gives "instant, absolute feedback"; Vercel's rule — deterministic checks go to linters, judgment goes to guidance; Webstudio validates patches and rejects invalid references before applying.</p>
+
+  <h2>Components &amp; themes — later, but the basement already fits them</h2>
+  <table>
+    <tr><th>Future feature</th><th>What v1 lays down for it</th></tr>
+    <tr><td><b>Components</b> <span class="gloss">(Figma-like mockup components that are still markup)</span></td><td>A reserved <span class="mono">components/</span> folder and <span class="mono">zd-</span> tag prefix. The model: a component is an HTML file; an instance is a compact tag like <span class="mono">&lt;zd-button label="Get started"&gt;</span> that the <i>renderer</i> expands — files stay pure markup, no JS. Lint's grounding rule (borrowed from v0): an instance is valid only if its definition file exists.</td></tr>
+    <tr><td><b>Themes / variables table</b></td><td>Tokens are already typed <span class="mono">@property</span> entries in <span class="mono">tokens.css</span>; themes become attribute-scoped token blocks in the same file. The table is a UI over it — plus <span class="mono">get_tokens</span> already hands agents the vocabulary.</td></tr>
+    <tr><td><b>Prototype tab, comments, pen/shape tools</b></td><td>Rendered in the shell per your mock, disabled in v1; no architectural debt blocks any of them.</td></tr>
+  </table>
+
+  <h2>Build order</h2>
+  <ul class="check">
+    <li data-n="1"><b>The workspace + the loop.</b> Design workspaces end-to-end (sparse worktree, seeded <span class="mono">tokens.css</span>), the shell (canvas live-rendering <span class="mono">Zeros Design/*.html</span>, chat with no splits, panel scaffolds, pen-tool icon), the design MCP with 6 tools, the lint engine, the agent contract. <b>Exit test:</b> all three agents design, get linted, self-correct on the follow-up, and the frames commit to the design branch.</li>
+    <li data-n="2"><b>Selection, layers, eyes.</b> Click any element → layers tree + breadcrumb + read-only inspector; selection rides into the chat; <span class="mono">screenshot_frame</span> lets agents see and fix their own overflow.</li>
+    <li data-n="3"><b>The style editor.</b> The inspector becomes editable — instant, token-aware edits written as minimal file diffs with no agent turn; structured MCP writes land as wrappers over the same layer; frame CRUD, inline text, assets.</li>
+    <li data-n="4"><b>Scale &amp; polish.</b> Served frames (real asset URLs + CSP), contrast/overflow lint tier, PNG export, propose-directions cards, component-model spike, themes table.</li>
+  </ul>
+
+  <h2>Small confirmations wanted <span class="gloss">(the big decisions are made)</span></h2>
+  <ul class="check">
+    <li data-n="1">Toolbar v1: full bar with future tools disabled, or short bar (select · frame · text · code view) that grows?</li>
+    <li data-n="2">"Claude · Design" chip: a design-default label, or the normal agent/model selector?</li>
+    <li data-n="3">Top-bar badge on design workspaces: hide the diff count, or show design-file counts?</li>
+    <li data-n="4">"Save designs" commit button: Phase 1 or Phase 3?</li>
+    <li data-n="5">Layers/Assets below the composer confirmed for v1 (separating them parks until after Phase 2)?</li>
+  </ul>
+
+  <hr/>
+  <p class="src" style="margin-top:18px">Plan of record: <span class="mono">docs/design-mode-plan-2026-07-31.md</span> (v3) — the document model, the MCP toolset and constraint architecture with exact code seams, phase exit criteria, risks, and all sources (Nordcraft repo reads, paper.design docs, Figma skill files read verbatim, Zeros MCP map). Branch <span class="mono">design-mode</span> is live at <span class="mono">7fdb66b</span>; nothing else implemented yet.</p>
+
+</div>
+</body>
+</html>

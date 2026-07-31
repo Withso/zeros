@@ -15,6 +15,7 @@ export function samePersistedChat(
 ): boolean {
   return (
     left.id === right.id &&
+    (left.mode ?? "code") === (right.mode ?? "code") &&
     left.folder === right.folder &&
     left.kind === right.kind &&
     left.agentId === right.agentId &&

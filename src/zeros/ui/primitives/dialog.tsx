@@ -41,11 +41,28 @@ const DialogContent = React.forwardRef<
      *  expected close. */
     dismissable?: boolean;
   }
->(({ className, children, showCloseButton = true, dismissable = false, onPointerDownOutside, onInteractOutside, ...props }, ref) => (
+>(({ className, children, showCloseButton = true, dismissable = false, onPointerDownOutside, onInteractOutside, onKeyDownCapture, onEscapeKeyDown, ...props }, ref) => (
   <DialogPortal>
     <DialogOverlay />
     <DialogPrimitive.Content
       ref={ref}
+      onKeyDownCapture={(event) => {
+        onKeyDownCapture?.(event);
+        if (event.defaultPrevented || event.key !== "Escape") return;
+
+        // A Tooltip's closing Presence can briefly remain the topmost Radix
+        // DismissableLayer after a modal opens. In that overlap window the
+        // document-level Escape handler closes the already-closing tooltip and
+        // never reaches Dialog. Capture the key inside the focused modal and
+        // close through Radix's public Close primitive so teardown and trigger
+        // focus restoration keep their normal semantics.
+        onEscapeKeyDown?.(event.nativeEvent);
+        if (!event.defaultPrevented && !event.nativeEvent.defaultPrevented) {
+          event.currentTarget
+            .querySelector<HTMLButtonElement>("[data-dialog-escape-close]")
+            ?.click();
+        }
+      }}
       className={cn(
         // Dead-centered on both axes, then a subtle scale-from-center on
         // open/close. There are deliberately NO slide-in / slide-out helper
@@ -85,6 +102,13 @@ const DialogContent = React.forwardRef<
       }}
       {...props}
     >
+      <DialogPrimitive.Close
+        data-dialog-escape-close
+        type="button"
+        tabIndex={-1}
+        aria-hidden="true"
+        className="hidden"
+      />
       {children}
       {showCloseButton && (
         <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-[3px] focus:ring-highlighted-bright/50 disabled:pointer-events-none data-[state=open]:bg-bg2-hover data-[state=open]:text-fg2">

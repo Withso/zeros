@@ -117,6 +117,10 @@ export interface GitWatchTarget {
 export interface GitWatchChange {
   workspaceIds: string[];
   coarse: boolean;
+  /** Working-tree content changed (create/edit/delete), as opposed to only
+   * Git metadata. Consumers with source-derived caches use this narrower bit
+   * so stage/fetch/ref activity does not discard still-valid data. */
+  worktreeChanged?: true;
   /** A shared/common Git ref changed (fetch, branch create/delete/advance).
    * Consumers use this to invalidate branch catalogs without doing that work
    * for ordinary source-file saves. */
@@ -161,7 +165,9 @@ async function resolveCommonGitDir(gitDir: string): Promise<string> {
  * created/deleted ref, while file signatures detect an existing ref advancing.
  * The cap keeps pathological repositories from turning a one-second poll into
  * an unbounded filesystem walk; FETCH_HEAD remains covered independently. */
-async function collectCommonGitStatePaths(commonDir: string): Promise<string[]> {
+async function collectCommonGitStatePaths(
+  commonDir: string,
+): Promise<string[]> {
   const paths: string[] = [];
   const visit = async (dir: string): Promise<void> => {
     if (paths.length >= MAX_COMMON_GIT_STATE_PATHS) return;
@@ -248,6 +254,7 @@ function changedTargetForPath(
 function makeChange(
   targets: Iterable<GitWatchTarget | null>,
   gitRefsChanged = false,
+  worktreeChanged = false,
 ): GitWatchChange {
   const workspaceIds = new Set<string>();
   let coarse = false;
@@ -258,6 +265,7 @@ function makeChange(
   return {
     workspaceIds: Array.from(workspaceIds),
     coarse,
+    ...(worktreeChanged ? { worktreeChanged: true as const } : {}),
     ...(gitRefsChanged ? { gitRefsChanged: true as const } : {}),
   };
 }
@@ -325,10 +333,14 @@ export function startGitWatcher(
     worktreeTimer = setTimeout(() => {
       worktreeTimer = null;
       if (stopped) return;
-      const change = makeChange([
-        ...pendingWorktreeTargets.values(),
-        ...(pendingWorktreeCoarse ? [null] : []),
-      ]);
+      const change = makeChange(
+        [
+          ...pendingWorktreeTargets.values(),
+          ...(pendingWorktreeCoarse ? [null] : []),
+        ],
+        false,
+        true,
+      );
       pendingWorktreeTargets.clear();
       pendingWorktreeCoarse = false;
       onChange(change);
@@ -580,7 +592,10 @@ export function startGitWatcher(
   void Promise.all([...initialReady, tickInFlight ?? Promise.resolve()]).then(
     resolveReady,
   );
-  const timer = setInterval(runTick, options.pollIntervalMs ?? POLL_INTERVAL_MS);
+  const timer = setInterval(
+    runTick,
+    options.pollIntervalMs ?? POLL_INTERVAL_MS,
+  );
   timer.unref?.(); // never keep the engine process alive just for git polling
 
   return {

@@ -31,6 +31,7 @@ import {
   openZerosDb,
   closeZerosDb,
   setZerosDbPathForTesting,
+  zerosDesignWorkspacesRoot,
   zerosWorkspacesRoot,
 } from "../db";
 import {
@@ -38,7 +39,12 @@ import {
   worktreeSeedsRoot,
   zerosDotDirName,
 } from "../db/paths";
-import type { Workspace, WorkspaceStatus, PrState } from "./types";
+import type {
+  Workspace,
+  WorkspaceKind,
+  WorkspaceStatus,
+  PrState,
+} from "./types";
 
 export const WORKSPACE_OWNERSHIP_META_KEY = "workspace.ownership.v1";
 
@@ -80,6 +86,14 @@ export function worktreesRoot(): string {
     : zerosWorkspacesRoot();
 }
 
+/** The separately visible root for design worktrees. Sharing the state-root
+ * override keeps lifecycle tests hermetic while preserving kind separation. */
+export function designWorktreesRoot(): string {
+  return rootOverride
+    ? path.join(rootOverride, "design-worktrees")
+    : zerosDesignWorkspacesRoot();
+}
+
 /** The pre-Phase-0 hidden worktrees root (~/.zeros/worktrees). Used by the
  *  one-time relocation + as a fallback scan in seedFromDisk for any worktree the
  *  move couldn't relocate. Equals worktreesRoot() under the test override. */
@@ -118,7 +132,11 @@ function canonicalizePath(p: string): string {
  *  otherwise route archive to VALIDATION_FAILED instead of WORKTREE_MISSING). */
 export function isManagedWorktreePath(p: string): boolean {
   const real = canonicalizePath(p);
-  for (const root of [worktreesRoot(), legacyWorktreesRoot()]) {
+  for (const root of [
+    worktreesRoot(),
+    designWorktreesRoot(),
+    legacyWorktreesRoot(),
+  ]) {
     const rr = canonicalizePath(root);
     if (real === rr || real.startsWith(rr + path.sep)) return true;
   }
@@ -151,6 +169,7 @@ export function closeState(): void {
 
 interface WorkspaceRow {
   id: string;
+  kind: string;
   repo_slug: string;
   repo_root: string;
   branch: string;
@@ -173,6 +192,7 @@ interface WorkspaceRow {
 function rowToWorkspace(r: WorkspaceRow): Workspace {
   return {
     id: r.id,
+    kind: r.kind === "design" ? "design" : "code",
     repoSlug: r.repo_slug,
     repoRoot: r.repo_root,
     branch: r.branch,
@@ -198,14 +218,15 @@ export function insertWorkspace(w: Workspace): void {
   handle
     .prepare(
       `INSERT INTO workspaces
-        (id, repo_slug, repo_root, branch, base_branch, path, status,
+        (id, kind, repo_slug, repo_root, branch, base_branch, path, status,
          created_at, archived_at, stash_ref, archived_head, archive_snapshot,
          pr_number, pr_state, pr_url,
          agent_id, last_active_at, setup_state)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       w.id,
+      w.kind === "design" ? "design" : "code",
       w.repoSlug,
       w.repoRoot,
       w.branch,
@@ -343,6 +364,7 @@ export function listWorkspaces(filter?: {
 }
 
 export type WorkspacePatch = Partial<{
+  kind: WorkspaceKind;
   status: WorkspaceStatus;
   archivedAt: number | null;
   stashRef: string | null;
@@ -360,6 +382,7 @@ export type WorkspacePatch = Partial<{
 }>;
 
 const PATCH_COLUMN_MAP: Record<keyof WorkspacePatch, string> = {
+  kind: "kind",
   status: "status",
   archivedAt: "archived_at",
   stashRef: "stash_ref",
@@ -946,6 +969,7 @@ function seedFromAppData(): { inserted: number; skipped: number } {
     }
     insertWorkspace({
       id: seed.id,
+      kind: seed.kind === "design" ? "design" : "code",
       repoSlug: seed.repoSlug ?? path.basename(path.dirname(seed.path)),
       repoRoot: seed.repoRoot,
       branch: seed.branch,
@@ -1015,6 +1039,7 @@ function seedFromRoot(root: string): { inserted: number; skipped: number } {
       }
       const ws: Workspace = {
         id: seed.id,
+        kind: seed.kind === "design" ? "design" : "code",
         repoSlug: seed.repoSlug ?? repoSlug,
         repoRoot: seed.repoRoot,
         branch: seed.branch,
@@ -1049,9 +1074,11 @@ export function seedFromDisk(): { inserted: number; skipped: number } {
   const fromApp = seedFromAppData();
   let inserted = fromApp.inserted;
   let skipped = fromApp.skipped;
-  const roots = [worktreesRoot(), legacyWorktreesRoot()].filter(
-    (r, i, a) => a.indexOf(r) === i,
-  );
+  const roots = [
+    worktreesRoot(),
+    designWorktreesRoot(),
+    legacyWorktreesRoot(),
+  ].filter((r, i, a) => a.indexOf(r) === i);
   for (const root of roots) {
     const r = seedFromRoot(root);
     inserted += r.inserted;

@@ -798,6 +798,125 @@ describe("WorkspaceService", () => {
     expect(svc.isWriteOp("gh.authStatus")).toBe(false);
   });
 
+  it("returns exact design mutation snapshots and Save Designs commits only the design directory", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const workspace = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-service-test",
+      kind: "design",
+    });
+    await svc.handle("design.frame.create", {
+      workspaceId: workspace.workspaceId,
+      title: "Checkout",
+    });
+    type DesignTreeNode = {
+      tag: string;
+      oid: string | null;
+      children: DesignTreeNode[];
+    };
+    const before = (await svc.handle("design.snapshot", {
+      workspaceId: workspace.workspaceId,
+    })) as {
+      snapshot: {
+        frames: Array<{
+          file: string;
+          sourceVersion: string;
+          tree: DesignTreeNode[];
+        }>;
+      };
+    };
+    const frame = before.snapshot.frames[0]!;
+    expect(frame.tree.map((node) => node.tag)).toEqual(["main"]);
+    const main = frame.tree.find((node) => node.tag === "main");
+    expect(main?.oid).toMatch(/^f-.+-main$/);
+
+    await expect(
+      svc.handle("git.checkoutBranch", {
+        workspaceId: workspace.workspaceId,
+        branch: "main",
+      }),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_FAILED",
+      message: expect.stringMatching(/unavailable in a design workspace/i),
+    });
+
+    const tokenSnapshot = (await svc.handle("design.snapshot", {
+      workspaceId: workspace.workspaceId,
+    })) as {
+      snapshot: {
+        tokenSourceVersion: string;
+        tokens: Array<{ name: string; value: string }>;
+        frames: Array<{ file: string; sourceVersion: string }>;
+      };
+    };
+    const tokenReply = (await svc.handle("design.token.update", {
+      workspaceId: workspace.workspaceId,
+      name: "--accent",
+      theme: null,
+      value: "royalblue",
+      sourceVersion: tokenSnapshot.snapshot.tokenSourceVersion,
+    })) as {
+      mutation: { changed: boolean };
+      snapshot: {
+        tokenSourceVersion: string;
+        tokens: Array<{ name: string; value: string }>;
+        frames: Array<{ file: string; sourceVersion: string }>;
+      };
+    };
+    expect(tokenReply.mutation.changed).toBe(true);
+    expect(tokenReply.snapshot.tokenSourceVersion).not.toBe(
+      tokenSnapshot.snapshot.tokenSourceVersion,
+    );
+    expect(
+      tokenReply.snapshot.tokens.find((token) => token.name === "--accent")
+        ?.value,
+    ).toBe("royalblue");
+    const refreshedFrame = tokenReply.snapshot.frames.find(
+      (candidate) => candidate.file === frame.file,
+    )!;
+
+    const response = (await svc.handle("design.node.styles", {
+      workspaceId: workspace.workspaceId,
+      frame: frame.file,
+      nodeId: main!.oid!,
+      sourceVersion: refreshedFrame.sourceVersion,
+      styles: { padding: "36px" },
+    })) as {
+      mutation: { frame: { sourceVersion: string } };
+      snapshot: { frames: Array<{ source: string; sourceVersion: string }> };
+    };
+    expect(response.snapshot.frames[0]?.source).toContain("padding:36px;");
+    expect(response.snapshot.frames[0]?.sourceVersion).toBe(
+      response.mutation.frame.sourceVersion,
+    );
+
+    fs.writeFileSync(path.join(workspace.path, "outside.txt"), "leave me\n");
+    const saved = (await svc.handle("design.save", {
+      workspaceId: workspace.workspaceId,
+    })) as { sha: string; branch: string };
+    expect(saved.sha).toMatch(/^[a-f0-9]{40}$/);
+    const committed = execFileSync(
+      "git",
+      ["show", "--pretty=format:", "--name-only", "HEAD"],
+      { cwd: workspace.path, encoding: "utf8" },
+    );
+    expect(committed).toContain("Zeros Design/checkout.html");
+    expect(committed).not.toContain("outside.txt");
+    expect(
+      execFileSync("git", ["status", "--porcelain", "--", "outside.txt"], {
+        cwd: workspace.path,
+        encoding: "utf8",
+      }),
+    ).toContain("outside.txt");
+    await svc.handle("workspace.delete", {
+      workspaceId: workspace.workspaceId,
+      includeBranch: true,
+    });
+  });
+
   it("maps an unknown workspaceId to WORKSPACE_NOT_FOUND on a git op", async () => {
     await expect(
       svc.handle("git.status", { workspaceId: "does-not-exist" }),

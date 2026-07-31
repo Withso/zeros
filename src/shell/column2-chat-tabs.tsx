@@ -190,6 +190,8 @@ function chatTabNaturalOffsetLeft(tab: HTMLDivElement): number {
 
 export interface Column2ChatTabsProps {
   workspaceFolder: string;
+  mode?: "code" | "design";
+  allowSplits?: boolean;
   paneId: string;
   /** This pane's visible chats, createdAt ASC (strip order). */
   chats: ChatThread[];
@@ -217,6 +219,8 @@ export interface Column2ChatTabsProps {
 
 export function Column2ChatTabs({
   workspaceFolder,
+  mode = "code",
+  allowSplits = true,
   paneId,
   chats,
   activeChatId,
@@ -491,6 +495,7 @@ export function Column2ChatTabs({
                   onClose={onCloseTab}
                   onArrowKey={handleTabKeyDown}
                   registerRef={(node) => registerChatTab(chat.id, node)}
+                  allowDrag={allowSplits}
                 />
               ))
             )}
@@ -502,78 +507,85 @@ export function Column2ChatTabs({
             while preventing scrolled labels from leaking through. */}
         <div
           ref={outerLeftFadeRef}
-          className="from-(--pane-bg) pointer-events-none absolute inset-y-0 left-0 z-10 w-6 bg-gradient-to-r to-transparent opacity-0"
+          className="pointer-events-none absolute inset-y-0 left-0 z-10 w-6 bg-gradient-to-r from-(--pane-bg) to-transparent opacity-0"
           aria-hidden="true"
         />
         <div
           ref={outerRightFadeRef}
-          className="from-(--pane-bg) pointer-events-none absolute inset-y-0 right-0 z-10 w-6 bg-gradient-to-l to-transparent opacity-0"
+          className="pointer-events-none absolute inset-y-0 right-0 z-10 w-6 bg-gradient-to-l from-(--pane-bg) to-transparent opacity-0"
           aria-hidden="true"
         />
         <div
           ref={afterPinnedLeftFadeRef}
-          className="from-(--pane-bg) pointer-events-none absolute inset-y-0 left-0 z-10 w-6 bg-gradient-to-r to-transparent opacity-0 will-change-transform"
+          className="pointer-events-none absolute inset-y-0 left-0 z-10 w-6 bg-gradient-to-r from-(--pane-bg) to-transparent opacity-0 will-change-transform"
           aria-hidden="true"
         />
         <div
           ref={beforePinnedRightFadeRef}
-          className="from-(--pane-bg) pointer-events-none absolute inset-y-0 left-0 z-10 w-6 bg-gradient-to-l to-transparent opacity-0 will-change-transform"
+          className="pointer-events-none absolute inset-y-0 left-0 z-10 w-6 bg-gradient-to-l from-(--pane-bg) to-transparent opacity-0 will-change-transform"
           aria-hidden="true"
         />
         <div
-          className="bg-(--pane-bg) pointer-events-none absolute inset-y-0 left-0 z-30 w-1"
+          className="pointer-events-none absolute inset-y-0 left-0 z-30 w-1 bg-(--pane-bg)"
           aria-hidden="true"
         />
         <div
-          className="bg-(--pane-bg) pointer-events-none absolute inset-y-0 right-0 z-30 w-1"
+          className="pointer-events-none absolute inset-y-0 right-0 z-30 w-1 bg-(--pane-bg)"
           aria-hidden="true"
         />
       </div>
 
       <div className={PLUS_CONTROL_CLS}>
-        <Column2NewChatMenu workspaceFolder={workspaceFolder} paneId={paneId} />
+        <Column2NewChatMenu
+          workspaceFolder={workspaceFolder}
+          paneId={allowSplits ? paneId : undefined}
+          mode={mode}
+          allowTerminal={mode !== "design"}
+        />
       </div>
 
       <div className="min-w-0 flex-1" aria-hidden="true" />
 
       {/* Pane menu — fixed at the right end of the strip. */}
       <div className={PANE_MENU_CONTROL_CLS}>
-        <DropdownMenu>
-          <Tooltip label="Pane options">
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                className={PANE_MENU_BTN_CLS}
-                aria-label="Pane options"
-              >
-                <Ellipsis className="size-3.5" />
-              </Button>
-            </DropdownMenuTrigger>
-          </Tooltip>
-          <DropdownMenuContent align="end" sideOffset={6} className="w-44">
-            <DropdownMenuItem
-              disabled={!canSplitDown}
-              onSelect={() => onSplit("down")}
-            >
-              <Rows2 className="text-fg2" />
-              <span>Split Down</span>
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              disabled={!canSplitRight}
-              onSelect={() => onSplit("right")}
-            >
-              <Columns2 className="text-fg2" />
-              <span>Split Right</span>
-            </DropdownMenuItem>
-            {showOpenIn && (
-              <>
-                <DropdownMenuSeparator />
-                <OpenInSubmenu path={workspaceFolder} />
-              </>
-            )}
-          </DropdownMenuContent>
-        </DropdownMenu>
+        {(allowSplits || showOpenIn) && (
+          <DropdownMenu>
+            <Tooltip label="Pane options">
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  className={PANE_MENU_BTN_CLS}
+                  aria-label="Pane options"
+                >
+                  <Ellipsis className="size-3.5" />
+                </Button>
+              </DropdownMenuTrigger>
+            </Tooltip>
+            <DropdownMenuContent align="end" sideOffset={6} className="w-44">
+              {allowSplits && (
+                <>
+                  <DropdownMenuItem
+                    disabled={!canSplitDown}
+                    onSelect={() => onSplit("down")}
+                  >
+                    <Rows2 className="text-fg2" />
+                    <span>Split Down</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    disabled={!canSplitRight}
+                    onSelect={() => onSplit("right")}
+                  >
+                    <Columns2 className="text-fg2" />
+                    <span>Split Right</span>
+                  </DropdownMenuItem>
+                </>
+              )}
+              {allowSplits && showOpenIn && <DropdownMenuSeparator />}
+              {showOpenIn && <OpenInSubmenu path={workspaceFolder} />}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
         {extraTrailing}
       </div>
     </div>
@@ -615,6 +627,7 @@ interface TabRowProps {
   onClose: (chat: ChatThread, e?: React.MouseEvent) => void;
   onArrowKey: (chatId: string, e: React.KeyboardEvent) => void;
   registerRef: (node: HTMLDivElement | null) => void;
+  allowDrag: boolean;
 }
 
 function TabRow({
@@ -626,6 +639,7 @@ function TabRow({
   onClose,
   onArrowKey,
   registerRef,
+  allowDrag,
 }: TabRowProps) {
   const dispatch = useWorkspaceDispatch();
   const [renaming, setRenaming] = useState(false);
@@ -735,7 +749,7 @@ function TabRow({
           aria-selected={isActive}
           tabIndex={isActive ? 0 : -1}
           className={TAB_BASE_CLS}
-          draggable={!renaming}
+          draggable={allowDrag && !renaming}
           onPointerEnter={() => onPrefetch(chat.id)}
           onFocus={() => onPrefetch(chat.id)}
           onDragStart={handleDragStart}

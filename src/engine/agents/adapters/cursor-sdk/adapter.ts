@@ -294,7 +294,7 @@ export interface SdkAgent {
 type CursorMcpConfig =
   | { command: string; args?: string[]; env?: Record<string, string> }
   | { url: string; headers?: Record<string, string> };
-/** The SDK's on-disk SQLite store. The ONLY surface that exposes a run's
+/** The SDK's on-disk local store. The ONLY surface that exposes a run's
  *  terminal `error` (= the persisted `errorCode`), which `run.wait()` hides.
  *  Opened lazily per cwd and reused; defaults its state root to the same
  *  location the SDK writes to (getDefaultSdkStateRoot(cwd)), so reads see the
@@ -335,9 +335,8 @@ export interface CursorSdkModule {
       ): Promise<Array<{ id?: string; displayName?: string }>>;
     };
   };
-  /** On-disk SQLite store. We open it read-only-ish to recover a run's real
-   *  terminal `error` after wait() reports a detail-less failure. Optional so
-   *  the bundle tolerates an SDK without the export. */
+  /** Compatibility facade for the host's portable JSONL store. The property
+   *  retains its old name so the adapter can also tolerate older host builds. */
   SqliteLocalAgentStore?: {
     open(opts: {
       workspaceRef: string;
@@ -436,7 +435,7 @@ export class CursorSdkAdapter implements AgentAdapter {
    *  check, which can't predict it. resolveModel skips these so a denied
    *  default (e.g. composer-2.5 on a gated plan) isn't re-tried every turn. */
   private readonly deniedModels = new Set<string>();
-  /** Lazily-opened SDK SQLite stores, one per cwd, reused across turns and
+  /** Lazily-opened SDK local stores, one per cwd, reused across turns and
    *  disposed on adapter dispose. Used only to recover a run's real terminal
    *  error after wait() reports a detail-less failure. */
   private readonly storeByCwd = new Map<
@@ -592,7 +591,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     return null;
   }
 
-  /** Lazily open (and cache) the SDK's on-disk SQLite store for a cwd. The
+  /** Lazily open (and cache) the SDK's on-disk local store for a cwd. The
    *  store defaults its state root to the same place the SDK writes runs, so
    *  reads see the agent's own rows. Best-effort: null when unavailable. */
   private async openStore(cwd: string): Promise<CursorLocalStore | null> {
@@ -742,7 +741,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       agent = await sdk.Agent.resume(opts.sessionId, {
         apiKey,
         // Bind the resolved model on resume too. `Agent.resume` reconstructs
-        // the agent from Cursor's local SQLite store, which may hold NO
+        // the agent from Cursor's local store, which may hold NO
         // persisted model (a cross-worktree id, a rotated cache, or a
         // pre-SDK cursor-agent CLI id). Without an explicit model the
         // resumed agent's internal `_model` is undefined and the next
@@ -876,7 +875,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     await this.ensureAutoReview(session);
 
     // A Cursor LOCAL run can terminate `status:"error"` with NOTHING useful in
-    // run.wait() — the SDK persists the real reason to its local SQLite store
+    // run.wait() — the SDK persists the real reason to its local store
     // as `errorCode` but wait()'s RunResult deliberately drops it. So the only
     // way to tell the user WHY (auth / plan / model / network) is to read it
     // back from the store (readRunError). And when the reason is model gating
@@ -1187,7 +1186,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       }
     }
     this.sessions.clear();
-    // Close any SQLite stores we opened for error recovery.
+    // Release any local-store facade handles opened for error recovery.
     for (const p of this.storeByCwd.values()) {
       try {
         await (await p)?.dispose();

@@ -148,6 +148,7 @@
     "marked": "^18.0.2",
     "nanoid": "^5.1.11",
     "node-pty": "^1.1.0",
+    "parse5": "^7.3.0",
     "postcss": "^8.4.0",
     "posthog-js": "^1.379.2",
     "qrcode.react": "^4.2.0",

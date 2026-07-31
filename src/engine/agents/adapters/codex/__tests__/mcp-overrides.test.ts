@@ -50,4 +50,36 @@ describe("buildMcpServerOverrides — Codex -c MCP config", () => {
     ]);
     expect(args.join(" ")).toContain('\\"a\\"\\\\b');
   });
+
+  it("emits explicit per-tool approval modes for a trusted first-party server", () => {
+    const args = buildMcpServerOverrides([
+      {
+        name: "zeros-design",
+        transport: "http",
+        url: "http://127.0.0.1:41234/mcp?token=secret",
+        trusted: true,
+        approval: {
+          defaultMode: "prompt",
+          tools: {
+            list_frames: "approve",
+            get_frame: "approve",
+            update_styles: "prompt",
+          },
+        },
+      },
+    ] as McpServerRegistration[]);
+
+    expect(args).toContain(
+      'mcp_servers.zeros-design.default_tools_approval_mode="prompt"',
+    );
+    expect(args).toContain(
+      'mcp_servers.zeros-design.tools.list_frames.approval_mode="approve"',
+    );
+    expect(args).toContain(
+      'mcp_servers.zeros-design.tools.get_frame.approval_mode="approve"',
+    );
+    expect(args).toContain(
+      'mcp_servers.zeros-design.tools.update_styles.approval_mode="prompt"',
+    );
+  });
 });
