@@ -807,7 +807,7 @@ You also have access to these additional directories (read from them with your t
             </div>
             <div class="meta">
               <code>templates.ts:53</code> ·
-              mid-chat injection: <code>src/zeros/agent/sessions-provider.tsx:1193-1215</code>
+              mid-chat injection: <code>src/zeros/agent/sessions-provider.tsx:1198-1220</code>
             </div>
           </div>
           <div class="wire">
@@ -870,7 +870,7 @@ fix_errors = "…"         # → Fix-errors button
 rename_branch = "…"      # → Rename-branch button
 resolve_merge_conflicts = "…"  # → Resolve-conflicts button</span></pre>
             <div class="wire-note">
-              <code>src/engine/settings/schema.ts:138-147</code> defines all six keys
+              <code>src/engine/settings/schema.ts:161-170</code> defines all six keys
               (<code>general</code>: "Appended to every agent session."), layered user + repo +
               repo-local. Only <code>general</code> flows through
               <code>buildFirstTurnInstructionBody</code>; the other five are declared but dead —
@@ -1417,7 +1417,7 @@ Selected 2 elements:
             </div>
             <div class="meta">
               <code>composer-editor/serialize.ts · mentions.ts:193-211 ·
-              agent-attachments.ts:242-246 · agent-chat.tsx:2900-2920 ·
+              agent-attachments.ts:242-246 · agent-chat.tsx:3041-3070 ·
               claude-sdk/adapter.ts:2305-2313</code>
             </div>
           </div>
@@ -1593,7 +1593,7 @@ Selected 2 elements:
             </div>
             <div class="meta">
               <code>src/zeros/agent/replay.ts · synthesizeReplayPrompt() ·
-              sessions-provider.tsx:1511</code>
+              sessions-provider.tsx:1516</code>
             </div>
           </div>
           <div class="wire">
@@ -1682,7 +1682,7 @@ Continue from where the previous conversation left off. The user's next message 
               <div>
                 <h4>G-01 · Five of six <code>[prompts]</code> keys are declared but dead</h4>
                 <p>
-                  <code>src/engine/settings/schema.ts:138-147</code> defines
+                  <code>src/engine/settings/schema.ts:161-170</code> defines
                   <code>code_review</code>, <code>create_pr</code>, <code>fix_errors</code>,
                   <code>rename_branch</code>, <code>resolve_merge_conflicts</code> alongside
                   <code>general</code> — mapped to the Review / Create-PR / Fix-errors /
@@ -1897,7 +1897,7 @@ Continue from where the previous conversation left off. The user's next message 
               <div>
                 <h4>G-17 · <code>ZEROS_PERMISSION_MODE</code> is emitted but consumed by nothing</h4>
                 <p>
-                  <code>model-catalog.ts:853</code> stamps it into chat env as a durable record, and
+                  <code>model-catalog.ts:878</code> stamps it into chat env as a durable record, and
                   the relay scrubber singles it out as dangerous — but no adapter reads it (live
                   sessions use <code>setMode</code>). Harmless today; misleading to the next reader
                   and a stale-posture risk if an env-consuming agent is ever added.
