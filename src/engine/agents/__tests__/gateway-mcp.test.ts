@@ -220,7 +220,10 @@ describe("AgentGateway per-session MCP resolution", () => {
     const gateway = makeGateway();
     gateway.setDesignServerResolver((workspaceId) =>
       workspaceId === "ws-design"
-        ? "http://127.0.0.1:41234/mcp?workspaceId=ws-design&token=secret"
+        ? {
+            url: "http://127.0.0.1:41234/mcp?workspaceId=ws-design",
+            bearerToken: "super-secret",
+          }
         : null,
     );
     const internals = gateway as unknown as GwInternals;
@@ -236,7 +239,8 @@ describe("AgentGateway per-session MCP resolution", () => {
       {
         name: "zeros-design",
         transport: "http",
-        url: "http://127.0.0.1:41234/mcp?workspaceId=ws-design&token=secret",
+        url: "http://127.0.0.1:41234/mcp?workspaceId=ws-design",
+        bearerTokenEnvVar: "ZEROS_DESIGN_MCP_TOKEN",
         trusted: true,
         approval: { defaultMode: "writes" },
       },
@@ -252,5 +256,35 @@ describe("AgentGateway per-session MCP resolution", () => {
       },
       { name: "ctx7", transport: "stdio", command: "npx" },
     ]);
+  });
+
+  it("injects the design bearer token into the child environment, never the MCP URL", async () => {
+    const gateway = makeGateway();
+    gateway.setDesignServerResolver(() => ({
+      url: "http://127.0.0.1:41234/mcp?workspaceId=ws-design",
+      bearerToken: "super-secret",
+    }));
+    const captured: {
+      servers?: McpServerRegistration[];
+      env?: Record<string, string>;
+    } = {};
+    const adapter = capturingAdapter("claude", captured);
+    (adapter.newSession as unknown as (opts: {
+      env?: Record<string, string>;
+      mcpServers?: McpServerRegistration[];
+    }) => Promise<unknown>) = async (opts) => {
+      captured.env = opts.env;
+      captured.servers = opts.mcpServers;
+      return { session: { sessionId: "sess-1" }, initialize: {} };
+    };
+    (gateway as unknown as GwInternals).adapters.set("claude", adapter);
+
+    await gateway.newSession("claude", {
+      cwd: repoDir,
+      workspaceId: "ws-design",
+    });
+
+    expect(captured.env?.ZEROS_DESIGN_MCP_TOKEN).toBe("super-secret");
+    expect(JSON.stringify(captured.servers)).not.toContain("super-secret");
   });
 });

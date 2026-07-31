@@ -167,6 +167,7 @@ import {
   readDesignFrame,
   readDesignElementOffsetMap,
   readDesignFrameRenderIdentity,
+  readDesignFrameSelectionIdentity,
   readDesignWorkspaceSnapshot,
   readDesignTokens,
   renameDesignFrame,
@@ -1604,7 +1605,10 @@ export class WorkspaceService {
           setDesignSelection(workspaceId, null, selectionVersion);
           return { ok: true };
         }
-        const frame = await readDesignFrame(workspace.path, frameFile, 0);
+        const frame = await readDesignFrameSelectionIdentity(
+          workspace.path,
+          frameFile,
+        );
         const sourceVersion = reqStr(params, "sourceVersion");
         if (
           !/^[a-f0-9]{24}$/.test(sourceVersion) ||
@@ -1622,11 +1626,7 @@ export class WorkspaceService {
           256,
         );
         if (nodeIds.length > 0) {
-          const validNodeIds = new Set(
-            (await readDesignElementOffsetMap(workspace.path, frame.file)).map(
-              (offset) => offset.oid,
-            ),
-          );
+          const validNodeIds = new Set(frame.nodeIds);
           const missing = nodeIds.find((nodeId) => !validNodeIds.has(nodeId));
           if (missing) {
             throw new GitError({
@@ -1642,6 +1642,13 @@ export class WorkspaceService {
           160,
         );
         const rects = designSelectionRects(params.rects ?? []);
+        const updatedAt = reqNum(params, "updatedAt");
+        if (!Number.isSafeInteger(updatedAt) || updatedAt <= 0) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "updatedAt must be a positive safe integer.",
+          });
+        }
         if (nodeIds.length > 0 && rects.length !== nodeIds.length) {
           throw new GitError({
             code: "VALIDATION_FAILED",
@@ -1668,7 +1675,7 @@ export class WorkspaceService {
                     },
                   ],
             keyComputedStyles: designSelectionStyles(params.keyComputedStyles),
-            updatedAt: selectionVersion,
+            updatedAt,
           },
           selectionVersion,
         );
@@ -1771,47 +1778,46 @@ export class WorkspaceService {
           ),
         );
         const allowed = new Set(["contrast", "overflow", "spacing-scale"]);
-        const warnings: DesignLintViolation[] = params.warnings.map(
-          (rawWarning) => {
-            if (
-              !rawWarning ||
-              typeof rawWarning !== "object" ||
-              Array.isArray(rawWarning)
-            ) {
-              throw new GitError({
-                code: "VALIDATION_FAILED",
-                message: "Design runtime warning is malformed.",
-              });
-            }
-            const warning = rawWarning as Record<string, unknown>;
-            const ruleId = reqStr(warning, "ruleId");
-            const oid = reqStr(warning, "oid");
-            const message = reqStr(warning, "message");
-            const fix = reqStr(warning, "fix");
-            const offset = offsets.get(oid);
-            if (
-              !allowed.has(ruleId) ||
-              !offset ||
-              message.length > 1_000 ||
-              fix.length > 1_000
-            ) {
-              throw new GitError({
-                code: "VALIDATION_FAILED",
-                message: "Design runtime warning is invalid.",
-              });
-            }
-            return {
-              ruleId: ruleId as DesignLintViolation["ruleId"],
-              severity: "warning",
-              message,
-              file: frame.file,
-              line: offset.startLine,
-              column: offset.startColumn,
-              oid,
-              fix,
-            };
-          },
-        );
+        const warnings: DesignLintViolation[] = [];
+        for (const rawWarning of params.warnings) {
+          if (
+            !rawWarning ||
+            typeof rawWarning !== "object" ||
+            Array.isArray(rawWarning)
+          ) {
+            throw new GitError({
+              code: "VALIDATION_FAILED",
+              message: "Design runtime warning is malformed.",
+            });
+          }
+          const warning = rawWarning as Record<string, unknown>;
+          const ruleId = reqStr(warning, "ruleId");
+          const oid = reqStr(warning, "oid");
+          const message = reqStr(warning, "message");
+          const fix = reqStr(warning, "fix");
+          if (
+            !allowed.has(ruleId) ||
+            message.length > 1_000 ||
+            fix.length > 1_000
+          ) {
+            throw new GitError({
+              code: "VALIDATION_FAILED",
+              message: "Design runtime warning is invalid.",
+            });
+          }
+          const offset = offsets.get(oid);
+          if (!offset) continue;
+          warnings.push({
+            ruleId: ruleId as DesignLintViolation["ruleId"],
+            severity: "warning",
+            message,
+            file: frame.file,
+            line: offset.startLine,
+            column: offset.startColumn,
+            oid,
+            fix,
+          });
+        }
         setDesignRuntimeAudit({
           workspacePath: workspace.path,
           frame: frame.file,
@@ -1986,6 +1992,7 @@ export class WorkspaceService {
         await stagePaths({
           workspaceId,
           paths: [DESIGN_DIRECTORY_NAME],
+          force: true,
         });
         return commit({
           workspaceId,

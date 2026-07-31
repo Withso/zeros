@@ -1567,7 +1567,13 @@ async function createWorkspaceInner(
       // cone. Root files remain because that is Git cone-mode semantics.
       const initialized = await initializeDesignDocument(workspacePath);
       if (initialized.created.length > 0) {
-        await runGit(workspacePath, ["add", "-A", "--", DESIGN_DIRECTORY_NAME]);
+        await runGit(workspacePath, [
+          "add",
+          "-f",
+          "-A",
+          "--",
+          DESIGN_DIRECTORY_NAME,
+        ]);
         await runGit(workspacePath, [
           "-c",
           "user.name=Zeros",
@@ -1579,7 +1585,9 @@ async function createWorkspaceInner(
           "Initialize Zeros Design",
         ]);
       }
-      await setWorkingDirectories(workspacePath, [DESIGN_DIRECTORY_NAME]);
+      await setWorkingDirectories(workspacePath, [DESIGN_DIRECTORY_NAME], {
+        forceSparse: true,
+      });
       await lockDesignWorkspaceRoot(workspacePath);
     } else {
       // Run post-create FILE provisioning ONLY (copy / symlink / seed). The
@@ -3558,7 +3566,9 @@ async function restoreWorkspaceInner(
     // Sparse metadata is worktree-local and was removed with the archived
     // checkout. Reapply the one design cone before publishing the restored row,
     // then reinstate the root-file ACL boundary.
-    await setWorkingDirectories(targetPath, [DESIGN_DIRECTORY_NAME]);
+    await setWorkingDirectories(targetPath, [DESIGN_DIRECTORY_NAME], {
+      forceSparse: true,
+    });
     await lockDesignWorkspaceRoot(targetPath);
   }
   // Folder-keyed chats, the live workspace row, and journal removal share one

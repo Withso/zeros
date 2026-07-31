@@ -254,8 +254,15 @@ const TOOLS: Tool[] = [
 ];
 
 interface SessionEntry {
+  server: Server;
   transport: StreamableHTTPServerTransport;
   workspaceId: string;
+  closed: boolean;
+}
+
+export interface DesignMcpConnection {
+  url: string;
+  bearerToken: string;
 }
 
 export interface DesignMcpServerOptions {
@@ -328,6 +335,7 @@ export class DesignMcpServer {
   private readonly resolveWorkspace: DesignMcpServerOptions["resolveWorkspace"];
   private httpServer: http.Server | null = null;
   private readonly sessions = new Map<string, SessionEntry>();
+  private readonly provisionalConnections = new Set<SessionEntry>();
 
   constructor(options: DesignMcpServerOptions) {
     this.port = options.port ?? 0;
@@ -338,13 +346,22 @@ export class DesignMcpServer {
     return this.httpServer !== null;
   }
 
+  /** Number of initialized plus not-yet-initialized transports. Exposed so
+   * lifecycle tests can prove malformed/stale requests do not leak servers. */
+  get openConnectionCount(): number {
+    return this.sessions.size + this.provisionalConnections.size;
+  }
+
   urlForWorkspace(workspaceId: string): string | null {
+    return this.connectionForWorkspace(workspaceId)?.url ?? null;
+  }
+
+  connectionForWorkspace(workspaceId: string): DesignMcpConnection | null {
     const workspace = this.resolveDesignWorkspace(workspaceId);
     if (!this.running || !workspace) return null;
     const url = new URL(`http://127.0.0.1:${this.port}/mcp`);
     url.searchParams.set("workspaceId", workspace.id);
-    url.searchParams.set("token", this.secret);
-    return url.toString();
+    return { url: url.toString(), bearerToken: this.secret };
   }
 
   async start(): Promise<void> {
@@ -365,14 +382,15 @@ export class DesignMcpServer {
   }
 
   async stop(): Promise<void> {
-    for (const entry of this.sessions.values()) {
-      try {
-        await entry.transport.close();
-      } catch {
-        /* best-effort */
-      }
+    const entries = new Set([
+      ...this.sessions.values(),
+      ...this.provisionalConnections.values(),
+    ]);
+    for (const entry of entries) {
+      await this.closeEntry(entry);
     }
     this.sessions.clear();
+    this.provisionalConnections.clear();
     if (this.httpServer) {
       await new Promise<void>((resolve) =>
         this.httpServer?.close(() => resolve()),
@@ -394,6 +412,24 @@ export class DesignMcpServer {
     return (
       expected.length === actual.length && timingSafeEqual(expected, actual)
     );
+  }
+
+  private async closeEntry(entry: SessionEntry): Promise<void> {
+    if (entry.closed) return;
+    entry.closed = true;
+    this.provisionalConnections.delete(entry);
+    if (entry.transport.sessionId) {
+      this.sessions.delete(entry.transport.sessionId);
+    }
+    try {
+      await entry.server.close();
+    } catch {
+      try {
+        await entry.transport.close();
+      } catch {
+        /* best-effort */
+      }
+    }
   }
 
   private isAllowedRequest(request: http.IncomingMessage): boolean {
@@ -418,7 +454,10 @@ export class DesignMcpServer {
     const url = new URL(request.url ?? "/", `http://127.0.0.1:${this.port}`);
     if (url.pathname !== "/mcp") return null;
     const workspaceId = url.searchParams.get("workspaceId") ?? "";
-    const token = url.searchParams.get("token") ?? "";
+    const authorization = request.headers.authorization ?? "";
+    const token = authorization.startsWith("Bearer ")
+      ? authorization.slice("Bearer ".length)
+      : "";
     if (!workspaceId || !this.secretMatches(token)) return null;
     const workspace = this.resolveDesignWorkspace(workspaceId);
     return workspace ? { workspace, workspaceId } : null;
@@ -612,7 +651,7 @@ export class DesignMcpServer {
         return;
       }
       const sessionId = request.headers["mcp-session-id"];
-      let entry =
+      const entry =
         typeof sessionId === "string"
           ? this.sessions.get(sessionId)
           : undefined;
@@ -621,21 +660,41 @@ export class DesignMcpServer {
         response.end();
         return;
       }
+      if (typeof sessionId === "string" && !entry) {
+        response.statusCode = 404;
+        response.end();
+        return;
+      }
       if (!entry) {
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (id) => {
-            this.sessions.set(id, {
-              transport,
-              workspaceId: scope.workspaceId,
-            });
+            this.provisionalConnections.delete(provisional);
+            this.sessions.set(id, provisional);
           },
         });
+        const server = this.makeServer(scope.workspaceId);
+        const provisional: SessionEntry = {
+          server,
+          transport,
+          workspaceId: scope.workspaceId,
+          closed: false,
+        };
         transport.onclose = () => {
+          provisional.closed = true;
+          this.provisionalConnections.delete(provisional);
           if (transport.sessionId) this.sessions.delete(transport.sessionId);
         };
-        await this.makeServer(scope.workspaceId).connect(transport);
-        entry = { transport, workspaceId: scope.workspaceId };
+        this.provisionalConnections.add(provisional);
+        try {
+          await server.connect(transport);
+          await transport.handleRequest(request, response);
+        } finally {
+          if (this.provisionalConnections.has(provisional)) {
+            await this.closeEntry(provisional);
+          }
+        }
+        return;
       }
       await entry.transport.handleRequest(request, response);
     } catch (error) {

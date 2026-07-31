@@ -11,6 +11,8 @@ import {
   createWorkspace,
   getWorkspaceLifecycleStatus,
 } from "../../git";
+import { getDesignRuntimeAudit } from "../../design/runtime-audits";
+import { getDesignSelection } from "../../design/selection";
 
 describe("WorkspaceService", () => {
   let dir: string;
@@ -801,7 +803,8 @@ describe("WorkspaceService", () => {
   it("returns exact design mutation snapshots and Save Designs commits only the design directory", async () => {
     execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
     execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
-    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    fs.writeFileSync(path.join(dir, ".gitignore"), "Zeros Design/\n");
+    execFileSync("git", ["add", "hello.txt", ".gitignore"], { cwd: dir });
     execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
     const workspace = await createWorkspace({
       repoRoot: dir,
@@ -892,6 +895,51 @@ describe("WorkspaceService", () => {
     expect(response.snapshot.frames[0]?.sourceVersion).toBe(
       response.mutation.frame.sourceVersion,
     );
+
+    const selectedAt = Date.now();
+    await svc.handle("design.selection.set", {
+      workspaceId: workspace.workspaceId,
+      frame: frame.file,
+      sourceVersion: response.mutation.frame.sourceVersion,
+      selectionVersion: selectedAt * 1_024,
+      updatedAt: selectedAt,
+      nodeIds: [main!.oid!],
+      breadcrumb: ["main"],
+      rects: [{ x: 0, y: 0, width: 100, height: 100 }],
+      keyComputedStyles: {},
+    });
+    expect(getDesignSelection(workspace.workspaceId)?.updatedAt).toBe(
+      selectedAt,
+    );
+
+    await expect(
+      svc.handle("design.runtime.audit", {
+        workspaceId: workspace.workspaceId,
+        frame: frame.file,
+        sourceVersion: response.mutation.frame.sourceVersion,
+        warnings: [
+          {
+            ruleId: "overflow",
+            oid: "stale-runtime-oid",
+            message: "A stale runtime still reported this node.",
+            fix: "Refresh the frame.",
+          },
+          {
+            ruleId: "overflow",
+            oid: main!.oid!,
+            message: "Visible overflow.",
+            fix: "Constrain the element.",
+          },
+        ],
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect(
+      getDesignRuntimeAudit(
+        workspace.path,
+        frame.file,
+        response.mutation.frame.sourceVersion,
+      ).map((warning) => warning.oid),
+    ).toEqual([main!.oid!]);
 
     fs.writeFileSync(path.join(workspace.path, "outside.txt"), "leave me\n");
     const saved = (await svc.handle("design.save", {

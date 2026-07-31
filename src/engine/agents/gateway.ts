@@ -76,6 +76,13 @@ import type { AccountDetails, EnrichedRegistryAgent } from "../types";
 import { AgentFailureError } from "./types";
 import { dedupeMcpServers, resolveMcpServersForRepo } from "./mcp-registry";
 
+export const DESIGN_MCP_TOKEN_ENV = "ZEROS_DESIGN_MCP_TOKEN";
+
+export interface DesignServerConnection {
+  url: string;
+  bearerToken: string;
+}
+
 /** Phase 2 chat overhaul (2026-05-07): every agent spawn MUST carry an
  *  explicit, non-empty cwd. The earlier silent fallback to engine
  *  projectRoot caused chats labelled with one project in the UI to spawn agents
@@ -459,13 +466,21 @@ export class AgentGateway {
   /** Resolve the first-party design MCP endpoint for one workspace. Kept as a
    *  callback (rather than a boot snapshot) so archive/delete immediately
    *  revokes the URL and every new session gets exact workspace identity. */
-  private designServerUrlForWorkspace:
-    | ((workspaceId: string) => string | null)
+  private designServerConnectionForWorkspace:
+    | ((workspaceId: string) => DesignServerConnection | null)
     | null = null;
   setDesignServerResolver(
-    resolve: ((workspaceId: string) => string | null) | null,
+    resolve: ((workspaceId: string) => DesignServerConnection | null) | null,
   ): void {
-    this.designServerUrlForWorkspace = resolve;
+    this.designServerConnectionForWorkspace = resolve;
+  }
+
+  private resolveDesignConnection(
+    workspaceId?: string,
+  ): DesignServerConnection | null {
+    return workspaceId && this.designServerConnectionForWorkspace
+      ? this.designServerConnectionForWorkspace(workspaceId)
+      : null;
   }
   /** Recompute the shared, deduped adapter-facing view IN PLACE (the reference
    *  is shared with live adapter ctxs, so we mutate rather than reassign). */
@@ -490,6 +505,7 @@ export class AgentGateway {
     cwd: string,
     mainRepoRoot?: string,
     workspaceId?: string,
+    designConnection = this.resolveDesignConnection(workspaceId),
   ): Promise<McpServerRegistration[]> {
     const injected: McpServerRegistration[] = [];
     // The gateway endpoint fronting the auth:"oauth"/"header" backends.
@@ -500,15 +516,12 @@ export class AgentGateway {
         url: this.gatewayServerUrl,
       });
     }
-    const designUrl =
-      workspaceId && this.designServerUrlForWorkspace
-        ? this.designServerUrlForWorkspace(workspaceId)
-        : null;
-    if (designUrl) {
+    if (designConnection) {
       injected.push({
         name: "zeros-design",
         transport: "http",
-        url: designUrl,
+        url: designConnection.url,
+        bearerTokenEnvVar: DESIGN_MCP_TOKEN_ENV,
         // This URL is minted in-process, loopback-only, workspace-scoped, and
         // authenticated with an opaque token. Annotated reads run directly;
         // the structured source mutations retain Codex's MCP elicitation gate.
@@ -862,6 +875,7 @@ export class AgentGateway {
     // chat MUST have a folder bound. The error surfaces as a real
     // failure the user can act on instead of an invisible misfire.
     const cwd = resolveAgentCwd(opts.cwd, "newSession", opts.workspaceId);
+    const designConnection = this.resolveDesignConnection(opts.workspaceId);
     // Phase 4: overlay the repo/user TOML `env` table + `env_files` for this
     // cwd, UNDER the caller's env (per-session knobs + keychain secrets win),
     // then stamp ZEROS_WORKTREE_PATH so the agent's process/scripts know their
@@ -895,10 +909,13 @@ export class AgentGateway {
       { env: merged, cliBinary: opts.cliBinary },
       mainRepoRoot,
     );
+    const spawnEnv = designConnection
+      ? { ...spawn.env, [DESIGN_MCP_TOKEN_ENV]: designConnection.bearerToken }
+      : spawn.env;
     // Native-instruction adapters (Codex) take the first-turn orientation on
     // their protocol's own channel at thread creation; everyone else gets it
     // prepended in-band on the first prompt (withSystemInstruction).
-    const instructionCtx = this.parseInstructionCtx(spawn.env);
+    const instructionCtx = this.parseInstructionCtx(spawnEnv);
     const systemInstruction = this.nativeInstructionFor(
       adapter,
       cwd,
@@ -906,13 +923,14 @@ export class AgentGateway {
     );
     const { session } = await adapter.newSession({
       cwd,
-      env: spawn.env,
+      env: spawnEnv,
       cliBinary: spawn.cliBinary,
       mcpServers: await this.resolveSessionMcp(
         agentId,
         cwd,
         mainRepoRoot,
         opts.workspaceId,
+        designConnection,
       ),
       ...(systemInstruction ? { systemInstruction } : {}),
     });
@@ -948,22 +966,25 @@ export class AgentGateway {
     } = {},
   ): Promise<LoadSessionResponse> {
     const adapter = await this.adapterFor(agentId);
-    const cwd = resolveAgentCwd(opts.cwd, "loadSession", opts.workspaceId);
+    const workspaceId =
+      opts.workspaceId ?? this.sessionToWorkspace.get(sessionId);
+    const cwd = resolveAgentCwd(opts.cwd, "loadSession", workspaceId);
+    const designConnection = this.resolveDesignConnection(workspaceId);
     // Phase 4: same settings-env overlay + user-provider fallback as newSession,
     // so a resumed session gets the repo `env` table, `env_files`,
     // ZEROS_WORKTREE_PATH, and the user `[providers]` base_url/executable_path
     // fallback (couriered values win). The workspace-local layering applies here
     // too (see newSession).
-    const mainRepoRoot = opts.workspaceId
-      ? getWorkspaceById(opts.workspaceId)?.repoRoot
+    const mainRepoRoot = workspaceId
+      ? getWorkspaceById(workspaceId)?.repoRoot
       : undefined;
     const merged = withDesignAgentGuards(
       withWorkspaceModeEnv(
         await withTargetBranchEnv(
           withWorktreeEnv(mergeSpawnEnv(cwd, opts.env, mainRepoRoot), cwd),
-          opts.workspaceId,
+          workspaceId,
         ),
-        opts.workspaceId,
+        workspaceId,
       ),
       agentId,
     );
@@ -973,7 +994,10 @@ export class AgentGateway {
       { env: merged, cliBinary: opts.cliBinary },
       mainRepoRoot,
     );
-    const instructionCtx = this.parseInstructionCtx(spawn.env);
+    const spawnEnv = designConnection
+      ? { ...spawn.env, [DESIGN_MCP_TOKEN_ENV]: designConnection.bearerToken }
+      : spawn.env;
+    const instructionCtx = this.parseInstructionCtx(spawnEnv);
     const systemInstruction = this.nativeInstructionFor(
       adapter,
       cwd,
@@ -982,13 +1006,14 @@ export class AgentGateway {
     const response = await adapter.loadSession({
       sessionId,
       cwd,
-      env: spawn.env,
+      env: spawnEnv,
       cliBinary: spawn.cliBinary,
       mcpServers: await this.resolveSessionMcp(
         agentId,
         cwd,
         mainRepoRoot,
-        opts.workspaceId,
+        workspaceId,
+        designConnection,
       ),
       ...(systemInstruction ? { systemInstruction } : {}),
     });
@@ -998,7 +1023,7 @@ export class AgentGateway {
         (loadedSessionId !== sessionId
           ? ` requestedSessionId=${sessionId}`
           : "") +
-        (opts.workspaceId ? ` workspaceId=${opts.workspaceId}` : "") +
+        (workspaceId ? ` workspaceId=${workspaceId}` : "") +
         (systemInstruction ? " sysInstr=native" : ""),
     );
     if (loadedSessionId !== sessionId) {
@@ -1019,8 +1044,7 @@ export class AgentGateway {
       // re-inject in-band. (The cwd hint re-arm below still applies on a
       // fresh thread for non-self-aware agents.)
       this.sessionsInstructed.add(loadedSessionId);
-      if (response.resumedFresh)
-        this.sessionsCwdHinted.delete(loadedSessionId);
+      if (response.resumedFresh) this.sessionsCwdHinted.delete(loadedSessionId);
     } else if (response.resumedFresh) {
       // DEGRADED RESUME → the adapter couldn't resume and started a FRESH
       // thread/agent (Codex stale rollout, Cursor "agent not found", Claude
@@ -1036,8 +1060,8 @@ export class AgentGateway {
       // re-sends it.
       this.sessionsInstructed.add(loadedSessionId);
     }
-    if (opts.workspaceId) {
-      this.sessionToWorkspace.set(loadedSessionId, opts.workspaceId);
+    if (workspaceId) {
+      this.sessionToWorkspace.set(loadedSessionId, workspaceId);
     }
     return response;
   }

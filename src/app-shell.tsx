@@ -1064,6 +1064,7 @@ function MainShellBody({
                   folder={activeWorkspaceFolder}
                   surfaceActive={!isHome && !col3Collapsed}
                   collapsed={col3Collapsed}
+                  onToggleCol3={toggleCol3}
                 />
               ) : (
                 <Column3

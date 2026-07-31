@@ -181,6 +181,35 @@ describe("design document", () => {
     expect(report.violations.every((violation) => violation.line >= 1)).toBe(
       true,
     );
+    expect(
+      report.violations.find(
+        (violation) => violation.ruleId === "unknown-token",
+      )?.severity,
+    ).toBe("warning");
+  });
+
+  it("accepts frame-local custom properties and advises only truly unknown tokens", async () => {
+    await initializeDesignDocument(root);
+    await writeFile(
+      path.join(root, DESIGN_DIRECTORY_NAME, "local-tokens.html"),
+      `<!doctype html><html><head><style>:root { --frame-accent: rebeccapurple; }</style></head>
+<body><main data-oid="main" style="color:var(--frame-accent); border-color:var(--missing-accent)">Local</main></body></html>`,
+      "utf8",
+    );
+
+    const report = await lintDesignDocument(root, "local-tokens.html", {
+      healOids: false,
+    });
+    const unknown = report.violations.filter(
+      (violation) => violation.ruleId === "unknown-token",
+    );
+
+    expect(unknown).toEqual([
+      expect.objectContaining({
+        severity: "warning",
+        message: expect.stringContaining("--missing-accent"),
+      }),
+    ]);
   });
 
   it("rejects unsafe, cyclic, and symlinked component definitions", async () => {
@@ -352,7 +381,8 @@ describe("design document", () => {
     expect(snapshot.frames[0]?.source).toContain("<!doctype html>");
     expect(snapshot.frames[0]?.srcDoc).toContain("Content-Security-Policy");
     expect(snapshot.frames[0]?.srcDoc).toContain("data-zeros-design-runtime");
-    expect(snapshot.frames[0]?.srcDoc).toContain("script-src 'nonce-");
+    expect(snapshot.frames[0]?.srcDoc).toContain("script-src 'sha256-");
+    expect(snapshot.frames[0]?.srcDoc).not.toContain("nonce=");
     expect(snapshot.frames[0]?.srcDoc).toContain(
       `window.__zerosDesignSourceVersion="${snapshot.frames[0]!.sourceVersion}"`,
     );
@@ -561,6 +591,96 @@ describe("design document", () => {
         "utf8",
       ),
     ).toBe(sourceAfter);
+  });
+
+  it("allows a safe structured edit when an unrelated lint error already exists", async () => {
+    await initializeDesignDocument(root);
+    const created = await createDesignFrame(root, { title: "Legacy error" });
+    const target = path.join(root, DESIGN_DIRECTORY_NAME, created.file);
+    await writeFile(
+      target,
+      (await readFile(target, "utf8")).replace(
+        "</body>",
+        "<script>legacy()</script></body>",
+      ),
+    );
+    const before = (
+      await readDesignWorkspaceSnapshot(root, {
+        writeBack: false,
+      })
+    ).frames[0]!;
+    const main = before.tree[0]!;
+
+    const mutation = await updateDesignNodeStyles(root, {
+      frame: created.file,
+      nodeId: main.oid!,
+      sourceVersion: before.sourceVersion,
+      styles: { padding: "24px" },
+    });
+
+    expect(mutation.changed).toBe(true);
+    expect(mutation.frame.source).toContain("<script>legacy()</script>");
+    expect(
+      mutation.lint.violations.some(
+        (violation) => violation.ruleId === "no-script",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not treat oid healing as a newly introduced legacy error", async () => {
+    await initializeDesignDocument(root);
+    const created = await createDesignFrame(root, { title: "Legacy oid" });
+    const target = path.join(root, DESIGN_DIRECTORY_NAME, created.file);
+    await writeFile(
+      target,
+      (await readFile(target, "utf8")).replace(
+        "</body>",
+        '<a href="https://example.invalid">Legacy link</a></body>',
+      ),
+    );
+    const before = (
+      await readDesignWorkspaceSnapshot(root, {
+        writeBack: false,
+      })
+    ).frames[0]!;
+    const main = before.tree[0]!;
+
+    const mutation = await updateDesignNodeStyles(root, {
+      frame: created.file,
+      nodeId: main.oid!,
+      sourceVersion: before.sourceVersion,
+      styles: { padding: "32px" },
+    });
+
+    expect(mutation.changed).toBe(true);
+    expect(mutation.frame.source).toContain("https://example.invalid");
+  });
+
+  it("sanitizes parser-decoded active content before composing a frame", async () => {
+    await initializeDesignDocument(root);
+    await writeFile(
+      path.join(root, DESIGN_DIRECTORY_NAME, "encoded.html"),
+      `<!doctype html><html><head><meta http-equiv="refresh" content="0;url=https://evil.invalid"><meta http-equiv="Content-Security-Policy" content="script-src *"></head><body>
+<a data-oid="link" href="java&#x73;cript:alert(1)" oNcLiCk=alert(2)>Open</a>
+<svg><a data-oid="svg-link" xlink:href="j&#x61;vascript:alert(4)">SVG</a></svg>
+<iframe data-oid="frame" srcdoc="&lt;script&gt;alert(3)&lt;/script&gt;"></iframe>
+<script>window.pwned = true</script></body></html>`,
+      "utf8",
+    );
+
+    const rendered = (
+      await readDesignWorkspaceSnapshot(root, {
+        writeBack: false,
+      })
+    ).frames[0]!.srcDoc;
+
+    expect(rendered).not.toMatch(/javascript\s*:/i);
+    expect(rendered).not.toMatch(/\sonclick\s*=/i);
+    expect(rendered).not.toMatch(/\sxlink:href\s*=/i);
+    expect(rendered).not.toMatch(/\ssrcdoc\s*=/i);
+    expect(rendered).not.toContain("window.pwned");
+    expect(rendered).not.toMatch(/http-equiv=["']?refresh/i);
+    expect(rendered.match(/Content-Security-Policy/g)).toHaveLength(1);
   });
 
   it("edits direct text and appends healed safe HTML without reserializing the frame", async () => {

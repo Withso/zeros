@@ -76,6 +76,7 @@ function frameSelection(frame: DesignFrameDocumentWire) {
   return {
     frame: frame.file,
     sourceVersion: frame.sourceVersion,
+    updatedAt: Date.now(),
     nodeIds: [],
     breadcrumb: [frame.title],
     rects: [
@@ -97,6 +98,7 @@ function elementSelection(
   return {
     frame: frame.file,
     sourceVersion: frame.sourceVersion,
+    updatedAt: Date.now(),
     nodeIds: [details.oid],
     breadcrumb: details.breadcrumb,
     rects: [details.rect],
@@ -252,12 +254,15 @@ export async function selectDesignNodeAtLocation(input: {
   x: number;
   y: number;
 }): Promise<DesignRuntimeNodeDetails | null> {
+  const runtime = designFrameRuntime(input.workspaceId, input.frame.file);
+  if (!runtime) {
+    await selectDesignFrame(input.workspaceId, input.frame);
+    return null;
+  }
   const generation = nextGeneration(
     selectionGenerationByWorkspace,
     input.workspaceId,
   );
-  const runtime = designFrameRuntime(input.workspaceId, input.frame.file);
-  if (!runtime) return null;
   const details = await runtime.getElementAtLoc(input.x, input.y);
   if (selectionGenerationByWorkspace.get(input.workspaceId) !== generation) {
     return null;
@@ -437,9 +442,9 @@ export function reconcileDesignRuntimeSnapshot(input: {
       sourceVersion: frame.sourceVersion,
       warnings: snapshot.warnings,
     }).catch(() => {
-      if (runtimeAuditFingerprintByFrame.get(auditKey) === auditFingerprint) {
-        runtimeAuditFingerprintByFrame.delete(auditKey);
-      }
+      // Keep the attempted exact fingerprint. A deterministic validation
+      // failure must not turn every runtime snapshot into another bridge
+      // request; a changed source/warning set naturally produces a new key.
     });
   }
   const view = designWorkspaceView(workspaceId);

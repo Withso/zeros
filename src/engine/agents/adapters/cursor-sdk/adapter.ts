@@ -294,6 +294,44 @@ export interface SdkAgent {
 type CursorMcpConfig =
   | { command: string; args?: string[]; env?: Record<string, string> }
   | { url: string; headers?: Record<string, string> };
+
+/** Cursor's SDK accepts concrete in-memory headers rather than Claude/Codex's
+ * environment-reference config. Resolve the token only while constructing the
+ * SDK options; it never enters a URL or subprocess argument. */
+export function mcpServersForCursor(
+  servers: readonly McpServerRegistration[],
+  env?: Record<string, string>,
+): Record<string, CursorMcpConfig> | null {
+  if (servers.length === 0) return null;
+  return Object.fromEntries(
+    servers.map((server) => {
+      if (server.transport === "stdio") {
+        return [
+          server.name,
+          {
+            command: server.command,
+            ...(server.args ? { args: server.args } : {}),
+            ...(server.env ? { env: server.env } : {}),
+          },
+        ];
+      }
+      const token = server.bearerTokenEnvVar
+        ? env?.[server.bearerTokenEnvVar]
+        : undefined;
+      const headers = {
+        ...(server.headers ?? {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      };
+      return [
+        server.name,
+        {
+          url: server.url,
+          ...(Object.keys(headers).length > 0 ? { headers } : {}),
+        },
+      ];
+    }),
+  );
+}
 /** The SDK's on-disk local store. The ONLY surface that exposes a run's
  *  terminal `error` (= the persisted `errorCode`), which `run.wait()` hides.
  *  Opened lazily per cwd and reused; defaults its state root to the same
@@ -658,7 +696,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     await this.discoverModels(apiKey);
     const modelId = this.resolveModel(opts.env?.CURSOR_MODEL, opts.env);
     const sdk = await loadSdk();
-    const sessionMcp = this.mcpServers(opts.mcpServers);
+    const sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
     let agent: SdkAgent;
     try {
       agent = await sdk.Agent.create({
@@ -731,7 +769,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     // on resume too. Without this, a resumed chat kept whatever MCP set it was
     // first created with, so a server the user ADDED after the chat opened never
     // appeared until they started a brand-new chat.
-    const sessionMcp = this.mcpServers(opts.mcpServers);
+    const sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
     let agent: SdkAgent;
     // True when resume failed and we seeded a FRESH agent below — the gateway
     // re-injects the first-turn <system_instruction> (the fresh agent has no
@@ -1117,7 +1155,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     if (want === session.appliedAutoReview) return;
     try {
       const sdk = await loadSdk();
-      const sessionMcp = this.mcpServers(session.mcpServers);
+      const sessionMcp = this.mcpServers(session.mcpServers, session.env);
       session.agent = await sdk.Agent.resume(session.zerosSessionId, {
         apiKey: session.apiKey,
         model: { id: session.modelId },
@@ -1335,21 +1373,10 @@ export class CursorSdkAdapter implements AgentAdapter {
    *  RCE-gated); undefined → the global ctx.mcpServers. */
   private mcpServers(
     override?: McpServerRegistration[],
+    env?: Record<string, string>,
   ): Record<string, CursorMcpConfig> | null {
     const list = override ?? this.ctx.mcpServers;
-    if (list.length === 0) return null;
-    return Object.fromEntries(
-      list.map((s) => [
-        s.name,
-        s.transport === "stdio"
-          ? {
-              command: s.command,
-              ...(s.args ? { args: s.args } : {}),
-              ...(s.env ? { env: s.env } : {}),
-            }
-          : { url: s.url, ...(s.headers ? { headers: s.headers } : {}) },
-      ]),
-    );
+    return mcpServersForCursor(list, env);
   }
 
   private classify(

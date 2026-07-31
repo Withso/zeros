@@ -17,11 +17,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
-  lstat,
   mkdir,
   readFile,
   readdir,
-  realpath,
   rename,
   stat,
   unlink,
@@ -36,6 +34,7 @@ import postcss from "postcss";
 
 import { expandDesignComponents } from "./components";
 import { getDesignRuntimeAudit } from "./runtime-audits";
+import { inspectSafeRegularFile, readSafeRegularFile } from "./safe-files";
 
 export const DESIGN_DIRECTORY_NAME = "Zeros Design";
 export const DESIGN_CANVAS_FILE = ".zeros-canvas.json";
@@ -52,6 +51,7 @@ const FRAME_GRID_COLUMNS = 3;
 const MAX_DESIGN_ASSETS = 128;
 const MAX_ASSET_DEPTH = 4;
 const MAX_ASSET_BYTES = 10 * 1024 * 1024;
+const MAX_DESIGN_TEXT_BYTES = 2 * 1024 * 1024;
 const MAX_ASSET_PREVIEW_BYTES = 512 * 1024;
 const MAX_ASSET_PREVIEW_TOTAL_BYTES = 4 * 1024 * 1024;
 const NON_DESIGN_NODE_TAGS = new Set([
@@ -164,6 +164,15 @@ export interface DesignFrameDocument extends DesignFrameSummary {
 export interface DesignFrameRenderIdentity {
   file: string;
   sourceVersion: string;
+}
+
+export interface DesignFrameSelectionIdentity extends DesignFrameRenderIdentity {
+  title: string;
+  width: number;
+  height: number;
+  x: number;
+  y: number;
+  nodeIds: readonly string[];
 }
 
 export interface DesignTokenSummary {
@@ -501,7 +510,6 @@ async function writeIfMissing(
   created: string[],
   workspacePath: string,
 ): Promise<void> {
-  if (existsSync(file)) return;
   let wrote = false;
   try {
     await writeFile(file, content, { encoding: "utf8", flag: "wx" });
@@ -731,10 +739,7 @@ export function stripNonDesignOidsForRender(source: string): string {
     const startTag = element.sourceCodeLocation?.startTag;
     if (!location || !startTag) continue;
     let start = location.startOffset;
-    while (
-      start > startTag.startOffset &&
-      /\s/.test(source[start - 1] ?? "")
-    ) {
+    while (start > startTag.startOffset && /\s/.test(source[start - 1] ?? "")) {
       start -= 1;
     }
     edits.push({ start, end: location.endOffset });
@@ -1417,16 +1422,40 @@ async function mutateDesignFrameSource(
     const healed = healDesignOids(updated).html;
     const changed = healed !== source;
     if (changed) {
-      const linted = await lintFrame(
-        workspacePath,
-        file,
-        { healOids: false },
-        await knownTokenNames(workspacePath),
-        healed,
-      );
-      const errors = linted.violations.filter(
-        (violation) => violation.severity === "error",
-      );
+      const knownTokens = await knownTokenNames(workspacePath);
+      const [baseline, linted] = await Promise.all([
+        lintFrame(
+          workspacePath,
+          file,
+          { healOids: false },
+          knownTokens,
+          source,
+        ),
+        lintFrame(
+          workspacePath,
+          file,
+          { healOids: false },
+          knownTokens,
+          healed,
+        ),
+      ]);
+      const baselineErrors = new Map<string, number>();
+      for (const violation of baseline.violations) {
+        if (violation.severity !== "error") continue;
+        // Oid healing can attach an identity to the same legacy violation.
+        // Compare the semantic finding (with multiplicity), not incidental
+        // identity metadata, so healing does not make an old error look new.
+        const key = `${violation.ruleId}\0${violation.message}`;
+        baselineErrors.set(key, (baselineErrors.get(key) ?? 0) + 1);
+      }
+      const errors = linted.violations.filter((violation) => {
+        if (violation.severity !== "error") return false;
+        const key = `${violation.ruleId}\0${violation.message}`;
+        const remaining = baselineErrors.get(key) ?? 0;
+        if (remaining === 0) return true;
+        baselineErrors.set(key, remaining - 1);
+        return false;
+      });
       if (errors.length > 0) {
         const ruleIds = [...new Set(errors.map((error) => error.ruleId))].join(
           ", ",
@@ -1755,10 +1784,7 @@ export async function insertDesignAsset(
     (candidate) => candidate.path === input.assetPath,
   );
   if (!asset) throw new Error(`Design asset not found: ${input.assetPath}`);
-  const offsets = await readDesignElementOffsetMap(
-    workspacePath,
-    input.frame,
-  );
+  const offsets = await readDesignElementOffsetMap(workspacePath, input.frame);
   const root =
     offsets.find((element) => element.tag === "main") ?? offsets[0] ?? null;
   if (!root) {
@@ -1928,16 +1954,155 @@ async function inlineLocalAssets(
   return result;
 }
 
-function sanitizeFrameMarkup(source: string): string {
-  return source
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, "")
-    .replace(/<script\b[^>]*\/?>/gi, "")
-    .replace(/\s+on[a-z0-9_-]+\s*=\s*(["'])[\s\S]*?\1/gi, "")
-    .replace(/\s+on[a-z0-9_-]+\s*=\s*[^\s>]+/gi, "")
-    .replace(
-      /\s+(href|src|action|poster)\s*=\s*(["'])\s*javascript:[\s\S]*?\2/gi,
-      "",
-    );
+interface DesignSourceEdit {
+  start: number;
+  end: number;
+  text: string;
+}
+
+function applyDesignSourceEdits(
+  source: string,
+  edits: readonly DesignSourceEdit[],
+): string {
+  let result = source;
+  for (const edit of [...edits].sort(
+    (left, right) => right.start - left.start || right.end - left.end,
+  )) {
+    result = `${result.slice(0, edit.start)}${edit.text}${result.slice(edit.end)}`;
+  }
+  return result;
+}
+
+function attributeRemovalStart(source: string, start: number): number {
+  let cursor = start;
+  while (cursor > 0 && /\s/.test(source[cursor - 1] ?? "")) cursor -= 1;
+  return cursor;
+}
+
+function activeUrl(value: string): boolean {
+  const normalized = [...value]
+    .filter((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint > 0x20 && codePoint !== 0x7f;
+    })
+    .join("")
+    .toLowerCase();
+  return (
+    normalized.startsWith("javascript:") ||
+    normalized.startsWith("vbscript:") ||
+    normalized.startsWith("data:text/html")
+  );
+}
+
+/** Remove active authored markup using parse5's decoded attribute values and
+ * exact source locations. Regex sanitizers inspect encoded text rather than
+ * the DOM the browser executes, so `java&#115;cript:` and mixed/unquoted event
+ * handlers bypass them. This parser-backed sanitizer is shared by srcDoc and
+ * custom-protocol rendering. */
+export function sanitizeDesignFrameMarkup(source: string): string {
+  const document = parse(source, { sourceCodeLocationInfo: true });
+  const edits: DesignSourceEdit[] = [];
+  const urlAttributes = new Set([
+    "action",
+    "formaction",
+    "href",
+    "poster",
+    "src",
+  ]);
+  for (const { element } of elementRecords(document)) {
+    const location = element.sourceCodeLocation;
+    const httpEquiv = element.attrs
+      .find((attribute) => attribute.name === "http-equiv")
+      ?.value.trim()
+      .toLowerCase();
+    const removeElement =
+      element.tagName === "script" ||
+      element.tagName === "base" ||
+      (element.tagName === "meta" &&
+        (httpEquiv === "content-security-policy" || httpEquiv === "refresh"));
+    if (removeElement) {
+      if (location) {
+        edits.push({
+          start: location.startOffset,
+          end: location.endOffset,
+          text: "",
+        });
+      }
+      continue;
+    }
+    for (const attribute of element.attrs) {
+      const name = attribute.name.toLowerCase();
+      const dangerous =
+        name.startsWith("on") ||
+        name === "srcdoc" ||
+        (urlAttributes.has(name) && activeUrl(attribute.value));
+      if (!dangerous) continue;
+      // parse5 decodes namespace-qualified attributes (`xlink:href`) to
+      // name="href", prefix="xlink", while its location map retains the raw
+      // qualified spelling. Check that spelling first so active SVG links are
+      // removed from the exact authored range too.
+      const qualifiedName = attribute.prefix
+        ? `${attribute.prefix}:${attribute.name}`
+        : attribute.name;
+      const attributeLocation =
+        location?.attrs?.[qualifiedName] ?? location?.attrs?.[attribute.name];
+      if (!attributeLocation) continue;
+      edits.push({
+        start: attributeRemovalStart(source, attributeLocation.startOffset),
+        end: attributeLocation.endOffset,
+        text: "",
+      });
+    }
+  }
+  return applyDesignSourceEdits(source, edits);
+}
+
+export function createDesignRuntimeScript(sourceVersion: string): {
+  markup: string;
+  cspSource: string;
+} {
+  const body =
+    `window.__zerosDesignSourceVersion=${JSON.stringify(sourceVersion)};` +
+    DESIGN_RUNTIME_SOURCE;
+  const digest = createHash("sha256").update(body).digest("base64");
+  return {
+    markup: `<script data-zeros-design-runtime>${body}</script>`,
+    cspSource: `'sha256-${digest}'`,
+  };
+}
+
+export function insertDesignRuntimeScript(
+  source: string,
+  sourceVersion: string,
+): { html: string; cspSource: string } {
+  const runtime = createDesignRuntimeScript(sourceVersion);
+  const document = parse(source, { sourceCodeLocationInfo: true });
+  const records = elementRecords(document);
+  const body = records.find(
+    ({ element }) => element.tagName === "body",
+  )?.element;
+  const html = records.find(
+    ({ element }) => element.tagName === "html",
+  )?.element;
+  const insertAt =
+    body?.sourceCodeLocation?.endTag?.startOffset ??
+    html?.sourceCodeLocation?.endTag?.startOffset ??
+    source.length;
+  return {
+    html: `${source.slice(0, insertAt)}${runtime.markup}${source.slice(insertAt)}`,
+    cspSource: runtime.cspSource,
+  };
+}
+
+function insertDesignHeadMarkup(source: string, markup: string): string {
+  const document = parse(source, { sourceCodeLocationInfo: true });
+  const head = elementRecords(document).find(
+    ({ element }) => element.tagName === "head",
+  )?.element;
+  const insertAt = head?.sourceCodeLocation?.startTag?.endOffset;
+  return insertAt === undefined
+    ? `${markup}${source}`
+    : `${source.slice(0, insertAt)}${markup}${source.slice(insertAt)}`;
 }
 
 async function prepareFrameRenderSource(
@@ -1948,7 +2113,9 @@ async function prepareFrameRenderSource(
   const expanded = await expandDesignComponents(workspacePath, source);
   const withStyles = await inlineLocalStyles(workspacePath, expanded.html);
   const inlined = await inlineLocalAssets(workspacePath, withStyles);
-  const sanitized = stripNonDesignOidsForRender(sanitizeFrameMarkup(inlined));
+  const sanitized = stripNonDesignOidsForRender(
+    sanitizeDesignFrameMarkup(inlined),
+  );
   const sourceVersion = createHash("sha256")
     .update(sanitized)
     .update("\0")
@@ -1968,35 +2135,17 @@ async function composeFrameSrcDoc(
     source,
     viewport,
   );
-  const nonce = createHash("sha256")
-    .update(sanitized)
-    .digest("base64url")
-    .slice(0, 24);
+  const runtime = createDesignRuntimeScript(sourceVersion);
   const csp =
     `<meta http-equiv="Content-Security-Policy" ` +
-    `content="default-src 'none'; script-src 'nonce-${nonce}'; ` +
+    `content="default-src 'none'; script-src ${runtime.cspSource}; ` +
     `style-src 'unsafe-inline'; img-src data: blob:; font-src data:; ` +
     `connect-src 'none'; object-src 'none'; base-uri 'none';">`;
-  const runtime =
-    `<script nonce="${nonce}" data-zeros-design-runtime>` +
-    `window.__zerosDesignSourceVersion=${JSON.stringify(sourceVersion)};` +
-    `${DESIGN_RUNTIME_SOURCE}</script>`;
-  const withPolicy = /<head\b[^>]*>/i.test(sanitized)
-    ? sanitized.replace(/<head\b[^>]*>/i, (head) => `${head}${csp}`)
-    : `${csp}${sanitized}`;
-  if (/<\/body\s*>/i.test(withPolicy)) {
-    return {
-      sourceVersion,
-      srcDoc: withPolicy.replace(/<\/body\s*>/i, () => `${runtime}</body>`),
-    };
-  }
-  if (/<\/html\s*>/i.test(withPolicy)) {
-    return {
-      sourceVersion,
-      srcDoc: withPolicy.replace(/<\/html\s*>/i, () => `${runtime}</html>`),
-    };
-  }
-  return { sourceVersion, srcDoc: `${withPolicy}${runtime}` };
+  const withPolicy = insertDesignHeadMarkup(sanitized, csp);
+  return {
+    sourceVersion,
+    srcDoc: insertDesignRuntimeScript(withPolicy, sourceVersion).html,
+  };
 }
 
 /** Read the exact render generation for one frame without discovering,
@@ -2006,20 +2155,73 @@ export async function readDesignFrameRenderIdentity(
   workspacePath: string,
   frame: string,
 ): Promise<DesignFrameRenderIdentity> {
-  const { file, target } = await designFrameTarget(workspacePath, frame);
-  const source = await readFile(target, "utf8");
+  const identity = await readDesignFrameSelectionIdentity(workspacePath, frame);
+  return { file: identity.file, sourceVersion: identity.sourceVersion };
+}
+
+/** Hash the exact frame bytes already obtained from a verified descriptor. */
+export async function readDesignFrameRenderIdentityFromSource(
+  workspacePath: string,
+  frame: string,
+  source: string,
+): Promise<DesignFrameRenderIdentity> {
+  const identity = await designFrameSelectionIdentityFromSource(
+    workspacePath,
+    assertFrameFile(frame),
+    source,
+  );
+  return { file: identity.file, sourceVersion: identity.sourceVersion };
+}
+
+/** One-frame selection identity. Unlike readDesignFrame(), this never scans,
+ * heals, lints, or composes every frame in the workspace, and it reuses the
+ * same parse for metadata plus valid node ids. */
+export async function readDesignFrameSelectionIdentity(
+  workspacePath: string,
+  frame: string,
+): Promise<DesignFrameSelectionIdentity> {
+  const file = assertFrameFile(frame);
+  const directory = designDirectory(workspacePath);
+  const safe = await readSafeRegularFile(
+    directory,
+    path.join(directory, file),
+    MAX_DESIGN_TEXT_BYTES,
+  );
+  if (!safe) throw new Error(`Design frame not found: ${file}`);
+  return designFrameSelectionIdentityFromSource(
+    workspacePath,
+    file,
+    safe.body.toString("utf8"),
+  );
+}
+
+async function designFrameSelectionIdentityFromSource(
+  workspacePath: string,
+  file: string,
+  source: string,
+): Promise<DesignFrameSelectionIdentity> {
   const document = parse(source, { sourceCodeLocationInfo: true });
   const meta = readFrameMeta(document, file);
   const geometry = (await readCanvas(workspacePath)).frames[file];
+  const width = geometry?.w ?? meta.width;
+  const height = geometry?.h ?? meta.height;
   const { sourceVersion } = await prepareFrameRenderSource(
     workspacePath,
     source,
-    {
-      width: geometry?.w ?? meta.width,
-      height: geometry?.h ?? meta.height,
-    },
+    { width, height },
   );
-  return { file, sourceVersion };
+  return {
+    file,
+    sourceVersion,
+    title: meta.title,
+    width,
+    height,
+    x: geometry?.x ?? 0,
+    y: geometry?.y ?? 0,
+    nodeIds: designNodeRecords(document)
+      .map(({ oid }) => oid)
+      .filter((oid): oid is string => Boolean(oid)),
+  };
 }
 
 export async function readDesignFrame(
@@ -2117,68 +2319,29 @@ async function readSafeDesignText(
   directory: string,
   target: string,
 ): Promise<string | null> {
-  try {
-    const [directoryReal, targetReal, info] = await Promise.all([
-      realpath(directory),
-      realpath(target),
-      lstat(target),
-    ]);
-    if (
-      !info.isFile() ||
-      !targetReal.startsWith(`${directoryReal}${path.sep}`)
-    ) {
-      return null;
-    }
-    return await readFile(target, "utf8");
-  } catch {
-    return null;
-  }
+  const safe = await readSafeRegularFile(
+    directory,
+    target,
+    MAX_DESIGN_TEXT_BYTES,
+  );
+  return safe?.body.toString("utf8") ?? null;
 }
 
 async function readSafeDesignBuffer(
   directory: string,
   target: string,
 ): Promise<Buffer | null> {
-  try {
-    const [directoryReal, targetReal, info] = await Promise.all([
-      realpath(directory),
-      realpath(target),
-      lstat(target),
-    ]);
-    if (
-      !info.isFile() ||
-      !targetReal.startsWith(`${directoryReal}${path.sep}`) ||
-      info.size > MAX_ASSET_BYTES
-    ) {
-      return null;
-    }
-    return await readFile(target);
-  } catch {
-    return null;
-  }
+  return (
+    (await readSafeRegularFile(directory, target, MAX_ASSET_BYTES))?.body ??
+    null
+  );
 }
 
 async function safeDesignFileMetadata(
   directory: string,
   target: string,
 ): Promise<{ size: number; modifiedAt: number } | null> {
-  try {
-    const [directoryReal, targetReal, info] = await Promise.all([
-      realpath(directory),
-      realpath(target),
-      lstat(target),
-    ]);
-    if (
-      !info.isFile() ||
-      !targetReal.startsWith(`${directoryReal}${path.sep}`) ||
-      info.size > MAX_ASSET_BYTES
-    ) {
-      return null;
-    }
-    return { size: info.size, modifiedAt: info.mtimeMs };
-  } catch {
-    return null;
-  }
+  return inspectSafeRegularFile(directory, target, MAX_ASSET_BYTES);
 }
 
 /** Discover a bounded, symlink-free image catalog under assets/. Every path is
@@ -2283,9 +2446,55 @@ async function cssSourceFiles(workspacePath: string): Promise<string[]> {
 }
 
 async function knownTokenNames(workspacePath: string): Promise<Set<string>> {
-  return new Set(
+  const names = new Set(
     (await readDesignTokens(workspacePath)).map((token) => token.name),
   );
+  const directory = designDirectory(workspacePath);
+  for (const file of await cssSourceFiles(workspacePath)) {
+    const source = await readSafeDesignText(
+      directory,
+      path.join(directory, file),
+    );
+    if (source) collectDeclaredCustomProperties(source, names);
+  }
+  return names;
+}
+
+function collectDeclaredCustomProperties(
+  css: string,
+  names: Set<string>,
+  declarationList = false,
+): void {
+  try {
+    const root = postcss.parse(declarationList ? `x{${css}}` : css);
+    root.walkDecls((declaration) => {
+      if (/^--[A-Za-z0-9_-]+$/.test(declaration.prop)) {
+        names.add(declaration.prop);
+      }
+    });
+  } catch {
+    // The CSS parser's own lint path reports malformed authored CSS. A failed
+    // advisory declaration scan must not invent or hide a blocking error.
+  }
+}
+
+function frameCustomPropertyNames(
+  document: DefaultTreeAdapterTypes.Document,
+): Set<string> {
+  const names = new Set<string>();
+  for (const { element } of elementRecords(document)) {
+    if (element.tagName === "style") {
+      const css = element.childNodes
+        .map((node) => ("value" in node ? node.value : ""))
+        .join("");
+      collectDeclaredCustomProperties(css, names);
+    }
+    const inline = element.attrs.find(
+      (attribute) => attribute.name === "style",
+    )?.value;
+    if (inline) collectDeclaredCustomProperties(inline, names, true);
+  }
+  return names;
 }
 
 function lineAndColumnAt(
@@ -2452,9 +2661,13 @@ async function lintFrame(
     }
   }
 
+  const availableTokens = new Set([
+    ...knownTokens,
+    ...frameCustomPropertyNames(document),
+  ]);
   for (const match of source.matchAll(/var\(\s*(--[A-Za-z0-9_-]+)/g)) {
     const token = match[1];
-    if (knownTokens.has(token)) continue;
+    if (availableTokens.has(token)) continue;
     violations.push(
       violationAt(
         file,
@@ -2462,8 +2675,8 @@ async function lintFrame(
         `Unknown design token "${token}".`,
         lineAndColumnAt(source, match.index ?? 0),
         {
-          severity: "error",
-          fix: `Declare ${token} in tokens.css or use an existing token.`,
+          severity: "warning",
+          fix: `Declare ${token} locally or in tokens.css, or use an existing token.`,
         },
       ),
     );

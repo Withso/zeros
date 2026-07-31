@@ -34,6 +34,7 @@ import type { DesignRuntimeNodeDetails } from "@zeros/core/design-runtime";
 import { exportDesignPng } from "../../native/design";
 import { shellOpenUrl } from "../../native/native";
 import { CreatePrButton } from "../../shell/pr/create-pr-button";
+import { Col3ToggleButton } from "../../shell/column-toggle-buttons";
 import {
   type DesignFrameDocumentWire,
   type DesignFrameGeometryWire,
@@ -101,6 +102,7 @@ import {
 } from "../ui/primitives";
 import {
   fitDesignRects,
+  retainLiveDesignFrameFiles,
   selectLiveDesignFrameFiles,
   zoomDesignViewportAtPoint,
   type DesignViewport,
@@ -119,6 +121,8 @@ interface DesignWorkspaceColumnProps {
   surfaceActive: boolean;
   /** Mirrors Column 3 collapse without destroying canvas DOM. */
   collapsed?: boolean;
+  /** Open-state panel collapse action shared with the code workspace. */
+  onToggleCol3: () => void;
 }
 
 interface DesignCanvasProps {
@@ -154,6 +158,7 @@ interface DesignInspectorProps {
   /** Typed token rows and their exact tokens.css generation. */
   tokens: DesignTokenWire[];
   tokenSourceVersion: string | null;
+  onToggleCol3: () => void;
 }
 
 type FrameGestureMode = "move" | "resize";
@@ -288,6 +293,7 @@ export function DesignWorkspaceColumn({
   folder,
   surfaceActive,
   collapsed = false,
+  onToggleCol3,
 }: DesignWorkspaceColumnProps) {
   const workspaceId = workspace?.kind === "design" ? workspace.id : null;
   const snapshot = useDesignWorkspaceSnapshot(
@@ -370,6 +376,7 @@ export function DesignWorkspaceColumn({
         lint={snapshot.data?.lint ?? null}
         tokens={snapshot.data?.tokens ?? []}
         tokenSourceVersion={snapshot.data?.tokenSourceVersion ?? null}
+        onToggleCol3={onToggleCol3}
       />
     </section>
   );
@@ -451,19 +458,49 @@ function DesignCanvas({
   const textCommitKeyRef = useRef<string | null>(null);
   // Cancels whichever direct-DOM pointer gesture owns global listeners.
   const gestureCancelRef = useRef<(() => void) | null>(null);
-  const liveFrameFiles = useMemo(
-    () =>
+  const liveFrameFilesRef = useRef<{
+    owner: string;
+    files: ReadonlySet<string>;
+  }>({ owner: "", files: new Set() });
+  const liveFrameOwner = `${workspaceId ?? ""}\0${folder ?? ""}`;
+  const liveFrameFiles = useMemo(() => {
+    const previous =
+      liveFrameFilesRef.current.owner === liveFrameOwner
+        ? liveFrameFilesRef.current.files
+        : new Set<string>();
+    const frames = snapshot?.frames ?? [];
+    const next =
       active && snapshot
         ? selectLiveDesignFrameFiles({
-            frames: snapshot.frames,
+            frames,
             viewport: viewportSize,
             view,
             selectedFrame: selectedFrame?.file ?? null,
             maxLive: MAX_LIVE_DESIGN_FRAMES,
           })
-        : new Set<string>(),
-    [active, selectedFrame?.file, snapshot, view, viewportSize],
-  );
+        : new Set<string>();
+    const files = retainLiveDesignFrameFiles({
+      previous,
+      available: frames.map((frame) => frame.file),
+      active,
+      maxLive: MAX_LIVE_DESIGN_FRAMES,
+      next,
+    });
+    return files;
+  }, [
+    active,
+    liveFrameOwner,
+    selectedFrame?.file,
+    snapshot,
+    view,
+    viewportSize,
+  ]);
+  useLayoutEffect(() => {
+    liveFrameFilesRef.current = {
+      owner: liveFrameOwner,
+      files: liveFrameFiles,
+    };
+  }, [liveFrameFiles, liveFrameOwner]);
   const publishSelection = useCallback(
     (frame: DesignFrameDocumentWire | null) => {
       if (!workspaceId) return;
@@ -1492,6 +1529,7 @@ function DesignInspector({
   lint,
   tokens,
   tokenSourceVersion,
+  onToggleCol3,
 }: DesignInspectorProps) {
   const elementDetails = selectedNodeId ? details : null;
   const errors =
@@ -1621,8 +1659,8 @@ function DesignInspector({
           defaultValue="design"
           className="flex min-h-0 flex-1 flex-col overflow-hidden"
         >
-          <div className="border-border1 shrink-0 border-b p-2">
-            <TabsList className="h-7 w-full">
+          <div className="border-border1 flex shrink-0 items-center gap-2 border-b p-2">
+            <TabsList className="h-7 min-w-0 flex-1">
               <TabsTrigger value="design" className="h-5 flex-1 px-2 text-xs">
                 Design
               </TabsTrigger>
@@ -1634,6 +1672,7 @@ function DesignInspector({
                 Prototype
               </TabsTrigger>
             </TabsList>
+            <Col3ToggleButton col3Collapsed={false} onToggle={onToggleCol3} />
           </div>
 
           <TabsContent
@@ -1749,7 +1788,7 @@ function DesignInspector({
                         {warningGroups.slice(0, 3).map((group) => (
                           <span key={group.ruleId}>
                             {group.label} · {group.count}{" "}
-                            {group.count === 1 ? "finding" : "findings"}: {" "}
+                            {group.count === 1 ? "finding" : "findings"}:{" "}
                             {group.first.message}
                           </span>
                         ))}

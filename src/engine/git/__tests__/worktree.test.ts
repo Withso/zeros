@@ -205,6 +205,41 @@ describe("worktree lifecycle (integration)", () => {
     expect(existsSync(workspace.path)).toBe(false);
   });
 
+  it("force-adds an ignored design bootstrap and stays sparse when it is the only tracked directory", async () => {
+    await writeFile(path.join(repoRoot, ".gitignore"), "Zeros Design/\n");
+    await execFileAsync("git", ["add", ".gitignore"], { cwd: repoRoot });
+    await execFileAsync("git", ["commit", "-q", "-m", "ignore designs"], {
+      cwd: repoRoot,
+    });
+    await execFileAsync("git", ["push", "-q"], { cwd: repoRoot });
+
+    const created = await createWorkspace({ repoRoot, kind: "design" });
+    const sparse = await getWorkingDirectories(created.path);
+    const tracked = await execFileAsync(
+      "git",
+      ["ls-files", "--", "Zeros Design"],
+      { cwd: created.path },
+    );
+
+    expect(sparse).toMatchObject({
+      sparse: true,
+      included: ["Zeros Design"],
+    });
+    expect(tracked.stdout).toContain("Zeros Design/tokens.css");
+    expect(
+      (
+        await execFileAsync("git", ["log", "-1", "--format=%s"], {
+          cwd: created.path,
+        })
+      ).stdout.trim(),
+    ).toBe("Initialize Zeros Design");
+
+    await deleteWorkspace({
+      workspaceId: created.workspaceId,
+      includeBranch: true,
+    });
+  });
+
   it("preserves a pre-existing tracked design document and seeds only missing foundations", async () => {
     const designDir = path.join(repoRoot, "Zeros Design");
     await mkdir(path.join(designDir, "assets"), { recursive: true });

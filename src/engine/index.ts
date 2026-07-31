@@ -422,7 +422,11 @@ export class ZerosEngine {
     const workspace = getWorkspaceById(workspaceId);
     if (!workspace || workspace.kind !== "design") return;
     this.designLintFlights.add(workspaceId);
-    void lintDesignDocument(workspace.path)
+    // Watcher reactions must be observational. Healing data-oids here writes
+    // the watched file, queues another change event, and can loop forever on
+    // malformed/rapidly edited sources. Explicit UI/MCP lint requests remain
+    // the only auto-healing entry points.
+    void lintDesignDocument(workspace.path, undefined, { healOids: false })
       .catch((error) => {
         console.warn(
           `[Zeros] Design lint failed for ${workspaceId}:`,
@@ -977,7 +981,7 @@ export class ZerosEngine {
       resolveWorkspace: getWorkspaceById,
     });
     this.agents.setDesignServerResolver((workspaceId) =>
-      this.designMcpServer.urlForWorkspace(workspaceId),
+      this.designMcpServer.connectionForWorkspace(workspaceId),
     );
     this.loadMcpRegistry(); // boot-load; re-run by the settings watcher on edit
 
@@ -2576,10 +2580,7 @@ export class ZerosEngine {
             })(),
           );
           this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
-          const {
-            sessionId: replacementSessionId,
-            ...wireResponse
-          } = response;
+          const { sessionId: replacementSessionId, ...wireResponse } = response;
           const loadedSessionId = replacementSessionId ?? msg.sessionId;
           if (loadedSessionId !== msg.sessionId) {
             // A degraded Codex resume may replace a legacy Zeros-local id with
@@ -2593,13 +2594,9 @@ export class ZerosEngine {
             this.sessionMessages.delete(msg.sessionId);
             this.router.setOwner(loadedSessionId, client.id);
             this.sessionAgent.set(loadedSessionId, msg.agentId);
-            if (msg.chatId)
-              this.sessionChat.set(loadedSessionId, msg.chatId);
+            if (msg.chatId) this.sessionChat.set(loadedSessionId, msg.chatId);
             if (lifecycleWorkspaceId) {
-              this.sessionWorkspace.set(
-                loadedSessionId,
-                lifecycleWorkspaceId,
-              );
+              this.sessionWorkspace.set(loadedSessionId, lifecycleWorkspaceId);
             }
           }
           client.send(

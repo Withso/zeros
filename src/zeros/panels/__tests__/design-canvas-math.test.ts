@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   fitDesignRects,
+  retainLiveDesignFrameFiles,
   selectLiveDesignFrameFiles,
   zoomDesignViewportAtPoint,
 } from "../design-canvas-math";
@@ -74,5 +75,19 @@ describe("design canvas viewport math", () => {
     });
     expect(panned.has("frame-10.html")).toBe(true);
     expect(panned.has("frame-0.html")).toBe(false);
+  });
+
+  it("retains a bounded live iframe window while the design surface is hidden", () => {
+    const previous = new Set(["frame-0.html", "frame-1.html", "removed.html"]);
+    const retained = retainLiveDesignFrameFiles({
+      previous,
+      available: ["frame-0.html", "frame-1.html", "frame-2.html"],
+      active: false,
+      maxLive: 2,
+      next: new Set(),
+    });
+
+    expect([...retained]).toEqual(["frame-0.html", "frame-1.html"]);
+    expect(retained.size).toBeLessThanOrEqual(2);
   });
 });

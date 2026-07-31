@@ -5,7 +5,12 @@ import type { McpServerRegistration } from "../../../types";
 describe("buildMcpServerOverrides — Codex -c MCP config", () => {
   it("emits url + http_headers for an http server (no `type` field)", () => {
     const args = buildMcpServerOverrides([
-      { name: "tracker", transport: "http", url: "https://mcp.tracker.example/mcp", headers: { "X-Org": "acme" } },
+      {
+        name: "tracker",
+        transport: "http",
+        url: "https://mcp.tracker.example/mcp",
+        headers: { "X-Org": "acme" },
+      },
     ]);
     expect(args).toEqual([
       "-c",
@@ -16,22 +21,60 @@ describe("buildMcpServerOverrides — Codex -c MCP config", () => {
     expect(args.join(" ")).not.toContain(".type=");
   });
 
+  it("references bearer credentials by env name without putting the secret in argv", () => {
+    const args = buildMcpServerOverrides([
+      {
+        name: "zeros-design",
+        transport: "http",
+        url: "http://127.0.0.1:41234/mcp?workspaceId=ws-design",
+        bearerTokenEnvVar: "ZEROS_DESIGN_MCP_TOKEN",
+      },
+    ]);
+
+    expect(args).toContain(
+      'mcp_servers.zeros-design.bearer_token_env_var="ZEROS_DESIGN_MCP_TOKEN"',
+    );
+    expect(args.join(" ")).not.toContain("super-secret");
+    expect(args.join(" ")).not.toContain("token=");
+  });
+
   it("emits command/args/env for a stdio server", () => {
     const args = buildMcpServerOverrides([
-      { name: "ctx7", transport: "stdio", command: "npx", args: ["-y", "@upstash/context7-mcp"], env: { DEBUG: "1" } },
+      {
+        name: "ctx7",
+        transport: "stdio",
+        command: "npx",
+        args: ["-y", "@upstash/context7-mcp"],
+        env: { DEBUG: "1" },
+      },
     ]);
     expect(args).toContain('mcp_servers.ctx7.command="npx"');
-    expect(args).toContain('mcp_servers.ctx7.args=["-y", "@upstash/context7-mcp"]');
+    expect(args).toContain(
+      'mcp_servers.ctx7.args=["-y", "@upstash/context7-mcp"]',
+    );
     expect(args).toContain('mcp_servers.ctx7.env={ "DEBUG" = "1" }');
   });
 
   it("skips a server whose name isn't TOML-key-safe (no injection)", () => {
-    expect(buildMcpServerOverrides([{ name: "a.b evil", transport: "http", url: "https://x" } as McpServerRegistration])).toEqual([]);
+    expect(
+      buildMcpServerOverrides([
+        {
+          name: "a.b evil",
+          transport: "http",
+          url: "https://x",
+        } as McpServerRegistration,
+      ]),
+    ).toEqual([]);
   });
 
   it("escapes control characters in values → valid TOML (no raw CR/NUL breaking the parse)", () => {
     const args = buildMcpServerOverrides([
-      { name: "x", transport: "http", url: "https://x", headers: { K: "a\r\nb\tc\x00d\x08e" } },
+      {
+        name: "x",
+        transport: "http",
+        url: "https://x",
+        headers: { K: "a\r\nb\tc\x00d\x08e" },
+      },
     ]);
     const joined = args.join(" ");
     // No raw control characters survive into the emitted -c string.

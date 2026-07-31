@@ -52,6 +52,7 @@ function makeGateway() {
 type GwInternals = {
   adapters: Map<string, AgentAdapter>;
   sessionsInstructed: Set<string>;
+  sessionToWorkspace: Map<string, string>;
 };
 
 interface FakeCalls {
@@ -167,9 +168,9 @@ describe("gateway native system-instruction routing", () => {
     await designGateway.prompt("claude", "s-design-authoritative", [
       text("go"),
     ]);
-    expect(
-      (designCalls.prompts[0]![0] as { text: string }).text,
-    ).toContain("Zeros Design/");
+    expect((designCalls.prompts[0]![0] as { text: string }).text).toContain(
+      "Zeros Design/",
+    );
 
     workspaceRows.clear();
   });
@@ -352,6 +353,10 @@ describe("gateway native system-instruction routing", () => {
         calls: c,
       }),
     );
+    (gw as unknown as GwInternals).sessionToWorkspace.set(
+      "legacy-local-id",
+      "ws-design",
+    );
 
     const response = await gw.loadSession("codex", "legacy-local-id", {
       cwd: CWD,
@@ -365,6 +370,14 @@ describe("gateway native system-instruction routing", () => {
     ).toBe(true);
     expect(
       (gw as unknown as GwInternals).sessionsInstructed.has("legacy-local-id"),
+    ).toBe(false);
+    expect(
+      (gw as unknown as GwInternals).sessionToWorkspace.get(
+        "thread-replacement",
+      ),
+    ).toBe("ws-design");
+    expect(
+      (gw as unknown as GwInternals).sessionToWorkspace.has("legacy-local-id"),
     ).toBe(false);
     await gw.prompt("codex", "thread-replacement", [text("continue")]);
     expect(c.prompts[0]).toEqual([text("continue")]);

@@ -110,6 +110,9 @@ export interface DesignMutationReplyWire {
 export interface DesignSelectionInputWire {
   frame: string;
   sourceVersion: string;
+  /** Wall-clock time used in the public MCP response. This is deliberately
+   * separate from the renderer's synthetic monotonic conflict version. */
+  updatedAt: number;
   nodeIds: string[];
   breadcrumb: string[];
   rects: Array<{ x: number; y: number; width: number; height: number }>;

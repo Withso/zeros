@@ -172,6 +172,10 @@ export type McpServerRegistration = (
       transport: "http";
       url: string;
       headers?: Record<string, string>;
+      /** Environment variable containing a bearer token. The variable name is
+       * safe to place in provider config; its value stays in the child env and
+       * must never be serialized into URLs or argv. */
+      bearerTokenEnvVar?: string;
     }
 ) & {
   trusted?: boolean;
@@ -284,7 +288,9 @@ export interface AgentAdapter {
    *  ok=null inconclusive (network error — caller saves normally).
    *  Optional — only API-key-only adapters (Cursor) implement it. The key
    *  must never be logged or stored by the implementation. */
-  validateApiKey?(apiKey: string): Promise<{ ok: boolean | null; error?: string }>;
+  validateApiKey?(
+    apiKey: string,
+  ): Promise<{ ok: boolean | null; error?: string }>;
 
   /** Background one-shot text generation (the AI chat-title call): send ONE
    *  user prompt + a plain system instruction to `model` and return the

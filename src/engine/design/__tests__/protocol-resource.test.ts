@@ -67,6 +67,9 @@ describe("design protocol resources", () => {
     expect(response.headers["Content-Security-Policy"]).toContain(
       "img-src zeros-design:",
     );
+    expect(response.headers["Content-Security-Policy"]).toContain(
+      "script-src 'sha256-",
+    );
     expect(response.headers["Cross-Origin-Resource-Policy"]).toBe(
       "cross-origin",
     );
@@ -77,6 +80,7 @@ describe("design protocol resources", () => {
     expect(body).toContain('src="./assets/pixel.png?v=');
     expect(body).not.toContain("data:image/png");
     expect(body).toContain("data-zeros-design-runtime");
+    expect(body).not.toContain("nonce=");
     expect(body).toContain(identity.sourceVersion);
 
     const css = await readDesignProtocolResource(root, {
@@ -128,6 +132,29 @@ describe("design protocol resources", () => {
     );
     expect(rendered).toContain('<main data-oid="legacy-main">Visible</main>');
     expect(rendered).toContain("main { padding: 16px; }");
+  });
+
+  it("uses the shared parser sanitizer for entity-encoded active content", async () => {
+    const frame = await createDesignFrame(root, { title: "Encoded" });
+    const target = path.join(root, DESIGN_DIRECTORY_NAME, frame.file);
+    await writeFile(
+      target,
+      `<!doctype html><html><head><meta http-equiv="refresh" content="0;url=https://evil.invalid"></head><body><a data-oid="link" href="j&#x61;vascript:alert(1)" ONFOCUS=alert(2)>Open</a><svg><a data-oid="svg-link" xlink:href="j&#x61;vascript:alert(3)">SVG</a></svg><iframe data-oid="embed" srcdoc="&lt;script&gt;bad()&lt;/script&gt;"></iframe><script>bad()</script></body></html>`,
+    );
+    const identity = await readDesignFrameRenderIdentity(root, frame.file);
+
+    const response = await readDesignProtocolResource(root, {
+      path: frame.file,
+      sourceVersion: identity.sourceVersion,
+    });
+    const body = response.body.toString("utf8");
+
+    expect(body).not.toMatch(/javascript\s*:/i);
+    expect(body).not.toMatch(/\sonfocus\s*=/i);
+    expect(body).not.toMatch(/\sxlink:href\s*=/i);
+    expect(body).not.toMatch(/\ssrcdoc\s*=/i);
+    expect(body).not.toContain("bad()");
+    expect(body).not.toMatch(/http-equiv=["']?refresh/i);
   });
 
   it("rejects stale generations, traversal, and symlink escapes", async () => {

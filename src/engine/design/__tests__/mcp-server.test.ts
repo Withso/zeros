@@ -67,13 +67,69 @@ describe("zeros-design MCP server", () => {
   });
 
   async function connect(): Promise<Client> {
-    const url = server.urlForWorkspace(workspace.id);
-    expect(url).not.toBeNull();
+    const connection = server.connectionForWorkspace(workspace.id);
+    expect(connection).not.toBeNull();
+    expect(connection!.url).not.toContain("token=");
     const next = new Client({ name: "test", version: "1" });
-    await next.connect(new StreamableHTTPClientTransport(new URL(url!)));
+    await next.connect(
+      new StreamableHTTPClientTransport(new URL(connection!.url), {
+        requestInit: {
+          headers: { Authorization: `Bearer ${connection!.bearerToken}` },
+        },
+      }),
+    );
     client = next;
     return next;
   }
+
+  it("keeps the bearer secret out of the MCP URL and rejects query credentials", async () => {
+    const connection = server.connectionForWorkspace(workspace.id);
+    expect(connection).not.toBeNull();
+    expect(connection!.url).not.toContain(connection!.bearerToken);
+
+    const legacy = new URL(connection!.url);
+    legacy.searchParams.set("token", connection!.bearerToken);
+    const response = await fetch(legacy, {
+      method: "POST",
+      headers: {
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-03-26",
+          capabilities: {},
+          clientInfo: { name: "legacy-query-client", version: "1" },
+        },
+      }),
+    });
+
+    expect(response.status).toBe(404);
+  });
+
+  it("closes provisional transports after a request that never initializes", async () => {
+    const connection = server.connectionForWorkspace(workspace.id)!;
+    const response = await fetch(connection.url, {
+      method: "POST",
+      headers: {
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${connection.bearerToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/list",
+        params: {},
+      }),
+    });
+
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(server.openConnectionCount).toBe(0);
+  });
 
   it("exposes the compact design read and structured-write toolset", async () => {
     const connected = await connect();

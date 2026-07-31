@@ -1,7 +1,9 @@
-import { lstat, readFile, readdir, realpath } from "node:fs/promises";
+import { readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 
 import { parse, parseFragment, type DefaultTreeAdapterTypes } from "parse5";
+
+import { readSafeRegularFile } from "./safe-files";
 
 const MAX_COMPONENTS = 64;
 const MAX_COMPONENT_BYTES = 512 * 1024;
@@ -81,7 +83,7 @@ async function loadDefinitions(workspacePath: string): Promise<{
   if (!canonicalDirectory.startsWith(`${canonicalDesignRoot}${path.sep}`)) {
     return { definitions: new Map(), errors };
   }
-  const entries = (await readdir(directory, { withFileTypes: true }))
+  const entries = (await readdir(canonicalDirectory, { withFileTypes: true }))
     .filter(
       (entry) =>
         entry.isFile() &&
@@ -92,18 +94,14 @@ async function loadDefinitions(workspacePath: string): Promise<{
     .slice(0, MAX_COMPONENTS);
   const definitions = new Map<string, ComponentDefinition>();
   for (const entry of entries) {
-    const target = path.join(directory, entry.name);
-    const info = await lstat(target);
-    if (
-      !info.isFile() ||
-      info.isSymbolicLink() ||
-      info.size > MAX_COMPONENT_BYTES
-    ) {
-      continue;
-    }
-    const canonical = await realpath(target);
-    if (!canonical.startsWith(`${canonicalDirectory}${path.sep}`)) continue;
-    const source = await readFile(target, "utf8");
+    const target = path.join(canonicalDirectory, entry.name);
+    const safe = await readSafeRegularFile(
+      canonicalDirectory,
+      target,
+      MAX_COMPONENT_BYTES,
+    );
+    if (!safe) continue;
+    const source = safe.body.toString("utf8");
     const parseErrors: Array<{ code: string }> = [];
     const document = parse(source, {
       sourceCodeLocationInfo: true,

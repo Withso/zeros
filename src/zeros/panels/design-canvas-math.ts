@@ -113,3 +113,31 @@ export function selectLiveDesignFrameFiles(input: {
   }
   return result;
 }
+
+/** Preserve already-mounted runtimes while their owner surface is hidden.
+ * Removed frames are pruned immediately and the explicit bound is enforced,
+ * so retained iframes cannot grow with navigation history. */
+export function retainLiveDesignFrameFiles(input: {
+  previous: ReadonlySet<string>;
+  available: readonly string[];
+  active: boolean;
+  maxLive: number;
+  next: ReadonlySet<string>;
+}): ReadonlySet<string> {
+  const limit = Math.max(1, Math.floor(input.maxLive));
+  const allowed = new Set(input.available);
+  const source = input.active ? input.next : input.previous;
+  const retained = new Set<string>();
+  for (const file of source) {
+    if (!allowed.has(file)) continue;
+    retained.add(file);
+    if (retained.size >= limit) break;
+  }
+  if (
+    retained.size === input.previous.size &&
+    [...retained].every((file) => input.previous.has(file))
+  ) {
+    return input.previous;
+  }
+  return retained;
+}

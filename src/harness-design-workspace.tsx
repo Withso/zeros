@@ -292,6 +292,7 @@ async function main() {
             workspace={workspace}
             folder={workspacePath}
             surfaceActive
+            onToggleCol3={() => {}}
           />
         </main>
       </TooltipProvider>

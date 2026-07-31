@@ -47,16 +47,16 @@ export function useCachedRead<T>(
   cache: KeyedAsyncCache<T>,
   key: string | null,
   fetcher: (key: string) => Promise<T>,
-  options: { maxAgeMs?: number } = {},
+  options: { maxAgeMs?: number; enabled?: boolean } = {},
 ): CachedRead<T> {
-  const { maxAgeMs } = options;
+  const { maxAgeMs, enabled = true } = options;
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
 
   const subscribe = useCallback(
     (listener: () => void) =>
-      key === null ? () => {} : cache.subscribe(key, listener),
-    [cache, key],
+      key === null || !enabled ? () => {} : cache.subscribe(key, listener),
+    [cache, enabled, key],
   );
   const getSnapshot = useCallback(
     () =>
@@ -68,7 +68,7 @@ export function useCachedRead<T>(
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
   useEffect(() => {
-    if (key === null) return;
+    if (key === null || !enabled) return;
     void cache
       .load(key, () => fetcherRef.current(key), { maxAgeMs })
       .catch(() => {
@@ -77,14 +77,14 @@ export function useCachedRead<T>(
     // Invalidations keep confirmed data intact and advance only this version,
     // making an OPEN surface revalidate immediately. Load/error snapshots do
     // not retrigger the effect, so an offline fetch cannot spin in a retry loop.
-  }, [cache, key, maxAgeMs, snapshot.invalidationVersion]);
+  }, [cache, enabled, key, maxAgeMs, snapshot.invalidationVersion]);
 
   const refresh = useCallback(() => {
-    if (key === null) return;
+    if (key === null || !enabled) return;
     void cache
       .load(key, () => fetcherRef.current(key), { force: true })
       .catch(() => {});
-  }, [cache, key]);
+  }, [cache, enabled, key]);
 
   return { ...snapshot, refresh };
 }

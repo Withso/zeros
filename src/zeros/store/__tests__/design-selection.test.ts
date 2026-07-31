@@ -20,6 +20,7 @@ vi.mock("../../bridge/design-frame-runtime", () => ({
 
 import {
   hoverDesignNode,
+  reconcileDesignRuntimeSnapshot,
   resetDesignSelectionWorkflowsForTests,
   selectDesignNode,
   selectDesignNodeAtLocation,
@@ -171,6 +172,34 @@ describe("design selection workflows", () => {
     expect(mocks.designSetSelection).toHaveBeenCalledTimes(1);
   });
 
+  it("selects the frame when a cached canvas has no live iframe runtime", async () => {
+    mocks.designFrameRuntime.mockReturnValue(undefined);
+
+    await expect(
+      selectDesignNodeAtLocation({
+        workspaceId: "workspace-a",
+        folder: "/design/a",
+        frame: FRAME,
+        x: 20,
+        y: 20,
+      }),
+    ).resolves.toBeNull();
+
+    expect(designWorkspaceView("workspace-a")).toMatchObject({
+      selectedFrame: "home.html",
+      selectedNodeId: null,
+    });
+    expect(mocks.designSetSelection).toHaveBeenCalledTimes(1);
+    expect(mocks.designSetSelection).toHaveBeenCalledWith(
+      "workspace-a",
+      expect.objectContaining({
+        frame: "home.html",
+        updatedAt: expect.any(Number),
+      }),
+      expect.any(Number),
+    );
+  });
+
   it("rejects details returned by the iframe generation being replaced", async () => {
     const stale = details("stale", "111111111111111111111111");
     const result = await selectDesignNode({
@@ -202,5 +231,51 @@ describe("design selection workflows", () => {
         nodeId: "removed",
       }),
     ).resolves.toBeUndefined();
+  });
+
+  it("does not retry a rejected runtime-audit fingerprint on every snapshot", async () => {
+    mocks.designSetRuntimeAudit.mockRejectedValue(
+      new Error("permanent validation failure"),
+    );
+    const snapshot = {
+      sourceVersion: FRAME.sourceVersion,
+      revision: 1,
+      tree: [],
+      frame: details("frame"),
+      warnings: [
+        {
+          ruleId: "overflow" as const,
+          oid: "removed",
+          message: "Stale warning",
+          fix: "Refresh",
+        },
+      ],
+      viewport: {
+        width: FRAME.width,
+        height: FRAME.height,
+        scrollX: 0,
+        scrollY: 0,
+      },
+    };
+
+    reconcileDesignRuntimeSnapshot({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      snapshot,
+    });
+    await vi.waitFor(() =>
+      expect(mocks.designSetRuntimeAudit).toHaveBeenCalledTimes(1),
+    );
+    await Promise.resolve();
+    reconcileDesignRuntimeSnapshot({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      snapshot,
+    });
+    await Promise.resolve();
+
+    expect(mocks.designSetRuntimeAudit).toHaveBeenCalledTimes(1);
   });
 });

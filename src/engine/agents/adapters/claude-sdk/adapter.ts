@@ -84,6 +84,7 @@ import {
   type StopReason,
   type TurnUsage,
 } from "../../types";
+
 import { SESSION_EXPIRED_KEYWORDS } from "../shared/session-expiry";
 import { PERMISSION_RESPONSE_TIMEOUT_MS } from "../shared/constants";
 import { preserveAmbientConfigRoots } from "../shared/config-isolation";
@@ -102,6 +103,50 @@ import {
   type ClaudeCliSourceKind,
 } from "./binary-resolver";
 import { InputQueue, createDeferred, type Deferred } from "./input-queue";
+
+/** Translate the gateway registry into Claude's inline MCP config. Claude
+ * expands ${ENV_VAR} references in HTTP headers inside its child process, so
+ * bearer values stay out of the JSON config/argv while ordinary headers keep
+ * their authored values. */
+export function mcpServersForClaude(
+  servers: readonly McpServerRegistration[],
+): Record<string, unknown> | undefined {
+  if (servers.length === 0) return undefined;
+  return Object.fromEntries(
+    servers.map((server) => {
+      if (server.transport === "stdio") {
+        return [
+          server.name,
+          {
+            type: "stdio",
+            command: server.command,
+            ...(server.args ? { args: server.args } : {}),
+            ...(server.env ? { env: server.env } : {}),
+          },
+        ];
+      }
+      const bearerTokenEnvVar =
+        server.bearerTokenEnvVar &&
+        /^[A-Za-z_][A-Za-z0-9_]*$/.test(server.bearerTokenEnvVar)
+          ? server.bearerTokenEnvVar
+          : null;
+      const headers = {
+        ...(server.headers ?? {}),
+        ...(bearerTokenEnvVar
+          ? { Authorization: `Bearer \${${bearerTokenEnvVar}}` }
+          : {}),
+      };
+      return [
+        server.name,
+        {
+          type: "http",
+          url: server.url,
+          ...(Object.keys(headers).length > 0 ? { headers } : {}),
+        },
+      ];
+    }),
+  );
+}
 
 /** Which CLI tier we last logged, so the breadcrumb lands once per engine boot
  *  (and again if the tier ever changes mid-run) instead of once per turn. */
@@ -2106,26 +2151,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // Per-session registry (gateway-resolved for this cwd: user + repo +
     // workspace layers, RCE-gated) wins; fall back to the global view.
     const sessionMcp = state.mcpServers ?? this.ctx.mcpServers;
-    const mcpServers =
-      sessionMcp.length > 0
-        ? Object.fromEntries(
-            sessionMcp.map((s) => [
-              s.name,
-              s.transport === "stdio"
-                ? {
-                    type: "stdio",
-                    command: s.command,
-                    ...(s.args ? { args: s.args } : {}),
-                    ...(s.env ? { env: s.env } : {}),
-                  }
-                : {
-                    type: "http",
-                    url: s.url,
-                    ...(s.headers ? { headers: s.headers } : {}),
-                  },
-            ]),
-          )
-        : undefined;
+    const mcpServers = mcpServersForClaude(sessionMcp);
 
     // Resolve the `claude` executable OURSELVES rather than letting the SDK do
     // it. See binary-resolver.ts — the SDK's lookup can only work where a real
@@ -2149,7 +2175,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       loggedCliSource = cli.source;
       console.info(
         `[claude-sdk] claude CLI: ${cliPath} (source=${cli.source}${
-          isPinnedClaudeRuntime(cli.source) ? "" : ", NOT the app's pinned runtime"
+          isPinnedClaudeRuntime(cli.source)
+            ? ""
+            : ", NOT the app's pinned runtime"
         })`,
       );
     }

@@ -16,7 +16,7 @@ export function useDesignWorkspaceSnapshot(
   workspacePath: string | null | undefined,
   active = true,
 ) {
-  const refreshVersion = useGitRefreshKey(workspacePath, workspaceId);
+  const refreshVersion = useGitRefreshKey(workspacePath, workspaceId, active);
 
   useEffect(() => {
     if (!workspaceId) return;
@@ -25,8 +25,8 @@ export function useDesignWorkspaceSnapshot(
 
   return useCachedRead(
     designWorkspaceSnapshotCache,
-    active && workspaceId ? workspaceId : null,
+    workspaceId ?? null,
     fetchDesignWorkspaceSnapshot,
-    { maxAgeMs: DESIGN_SNAPSHOT_MAX_AGE_MS },
+    { maxAgeMs: DESIGN_SNAPSHOT_MAX_AGE_MS, enabled: active },
   );
 }

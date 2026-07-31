@@ -1,17 +1,17 @@
-import { createHash } from "node:crypto";
-import { lstat, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 
-import { DESIGN_RUNTIME_SOURCE } from "@zeros/core/design-runtime";
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
 import postcss from "postcss";
 
 import {
   DESIGN_DIRECTORY_NAME,
-  readDesignFrameRenderIdentity,
+  insertDesignRuntimeScript,
+  readDesignFrameRenderIdentityFromSource,
+  sanitizeDesignFrameMarkup,
   stripNonDesignOidsForRender,
 } from "./document";
 import { expandDesignComponents } from "./components";
+import { readSafeRegularFile } from "./safe-files";
 
 const MAX_TEXT_RESOURCE_BYTES = 2 * 1024 * 1024;
 const MAX_BINARY_RESOURCE_BYTES = 10 * 1024 * 1024;
@@ -106,49 +106,6 @@ function safeRelativePath(value: string): string | null {
   return segments.join("/");
 }
 
-async function safeResourceTarget(
-  workspacePath: string,
-  relativePath: string,
-): Promise<{ target: string; size: number } | null> {
-  const designRoot = path.join(workspacePath, DESIGN_DIRECTORY_NAME);
-  const canonicalRoot = await realpath(designRoot).catch(() => null);
-  if (!canonicalRoot) return null;
-  const target = path.join(designRoot, ...relativePath.split("/"));
-  let current = designRoot;
-  for (const segment of relativePath.split("/")) {
-    current = path.join(current, segment);
-    const info = await lstat(current).catch(() => null);
-    if (!info || info.isSymbolicLink()) return null;
-  }
-  const info = await lstat(target).catch(() => null);
-  if (!info?.isFile()) return null;
-  const canonical = await realpath(target).catch(() => null);
-  if (
-    !canonical ||
-    (canonical !== canonicalRoot &&
-      !canonical.startsWith(`${canonicalRoot}${path.sep}`))
-  ) {
-    return null;
-  }
-  return { target, size: info.size };
-}
-
-function sanitizeFrameMarkup(source: string): string {
-  return source
-    .replace(
-      /<meta\b[^>]*http-equiv\s*=\s*(["'])Content-Security-Policy\1[^>]*>/gi,
-      "",
-    )
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, "")
-    .replace(/<script\b[^>]*\/?>/gi, "")
-    .replace(/\s+on[a-z0-9_-]+\s*=\s*(["'])[\s\S]*?\1/gi, "")
-    .replace(/\s+on[a-z0-9_-]+\s*=\s*[^\s>]+/gi, "")
-    .replace(
-      /\s+(href|src|action|poster)\s*=\s*(["'])\s*javascript:[\s\S]*?\2/gi,
-      "",
-    );
-}
-
 function versionLocalResources(source: string, sourceVersion: string): string {
   const document = parse(source, { sourceCodeLocationInfo: true });
   const edits: Array<{ start: number; end: number; text: string }> = [];
@@ -238,34 +195,14 @@ function injectRuntime(
   source: string,
   sourceVersion: string,
 ): { html: string; csp: string } {
-  const nonce = createHash("sha256")
-    .update(sourceVersion)
-    .update(source)
-    .digest("base64url")
-    .slice(0, 24);
+  const injected = insertDesignRuntimeScript(source, sourceVersion);
   const csp =
-    `default-src 'none'; script-src 'nonce-${nonce}'; ` +
+    `default-src 'none'; script-src ${injected.cspSource}; ` +
     `style-src zeros-design: 'unsafe-inline'; img-src zeros-design: data: blob:; ` +
     `font-src zeros-design: data:; media-src zeros-design: data:; connect-src 'none'; ` +
     `worker-src 'none'; frame-src 'none'; object-src 'none'; ` +
     `base-uri 'none'; form-action 'none'; sandbox allow-scripts`;
-  const runtime =
-    `<script nonce="${nonce}" data-zeros-design-runtime>` +
-    `window.__zerosDesignSourceVersion=${JSON.stringify(sourceVersion)};` +
-    `${DESIGN_RUNTIME_SOURCE}</script>`;
-  if (/<\/body\s*>/i.test(source)) {
-    return {
-      html: source.replace(/<\/body\s*>/i, `${runtime}</body>`),
-      csp,
-    };
-  }
-  if (/<\/html\s*>/i.test(source)) {
-    return {
-      html: source.replace(/<\/html\s*>/i, `${runtime}</html>`),
-      csp,
-    };
-  }
-  return { html: `${source}${runtime}`, csp };
+  return { html: injected.html, csp };
 }
 
 export async function readDesignProtocolResource(
@@ -285,16 +222,25 @@ export async function readDesignProtocolResource(
     (extension === ".css" && !relativePath.includes("/")) ||
     (relativePath.startsWith("assets/") && MIME_TYPES[extension]);
   if (!topLevelHtml && !allowedResource) return response(404, "Not found.");
-  const safe = await safeResourceTarget(workspacePath, relativePath);
+  const byteLimit =
+    topLevelHtml || extension === ".css"
+      ? MAX_TEXT_RESOURCE_BYTES
+      : MAX_BINARY_RESOURCE_BYTES;
+  const designRoot = path.join(workspacePath, DESIGN_DIRECTORY_NAME);
+  const safe = await readSafeRegularFile(
+    designRoot,
+    path.join(designRoot, ...relativePath.split("/")),
+    byteLimit + 1,
+  );
   if (!safe) return response(404, "Not found.");
+  if (safe.size > byteLimit) return response(413, "Resource is too large.");
 
   if (topLevelHtml) {
-    if (safe.size > MAX_TEXT_RESOURCE_BYTES) {
-      return response(413, "Design frame is too large.");
-    }
-    const identity = await readDesignFrameRenderIdentity(
+    const authored = safe.body.toString("utf8");
+    const identity = await readDesignFrameRenderIdentityFromSource(
       workspacePath,
       topLevelHtml,
+      authored,
     ).catch(() => null);
     if (!identity) return response(404, "Not found.");
     if (sourceVersion && sourceVersion !== identity.sourceVersion) {
@@ -302,10 +248,9 @@ export async function readDesignProtocolResource(
         "Cache-Control": "private, no-store",
       });
     }
-    const authored = await readFile(safe.target, "utf8");
     const expanded = await expandDesignComponents(workspacePath, authored);
     const sanitized = stripNonDesignOidsForRender(
-      sanitizeFrameMarkup(expanded.html),
+      sanitizeDesignFrameMarkup(expanded.html),
     );
     const versioned = versionLocalResources(sanitized, identity.sourceVersion);
     const rendered = injectRuntime(versioned, identity.sourceVersion);
@@ -315,10 +260,7 @@ export async function readDesignProtocolResource(
     });
   }
 
-  const byteLimit =
-    extension === ".css" ? MAX_TEXT_RESOURCE_BYTES : MAX_BINARY_RESOURCE_BYTES;
-  if (safe.size > byteLimit) return response(413, "Resource is too large.");
-  const rawBody = await readFile(safe.target);
+  const rawBody = safe.body;
   const body =
     extension === ".css" && sourceVersion
       ? Buffer.from(
