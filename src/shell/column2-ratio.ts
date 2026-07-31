@@ -40,6 +40,58 @@ export const COLUMN_2_MAX_PX = 2400;
  *  crushed mid-drag. */
 export const COLUMN_3_MIN_PX = 200;
 
+/** Where the ratio lives across launches. */
+export const COLUMN_2_RATIO_KEY = "zeros.column2.ratio";
+/** Pre-ratio installs persisted a pixel width here — migrated once
+ *  (px ÷ window width ≈ share of the row) then removed. */
+export const COLUMN_2_LEGACY_WIDTH_KEY = "zeros.column2.width";
+
+/** Read the persisted share of the row, migrating the pixel-era value on
+ *  first read. Lives HERE (not in the component) because the boot path
+ *  writes the same value onto <html> before React's first render — see
+ *  boot-layout-vars.ts. Two readers spelling the key or the clamp
+ *  differently would disagree, and a disagreement is exactly the
+ *  boot-time size animation the boot write exists to prevent. */
+export function readPersistedColumn2Ratio(): number {
+  if (typeof window === "undefined") return COLUMN_2_RATIO_DEFAULT;
+  try {
+    const raw = window.localStorage.getItem(COLUMN_2_RATIO_KEY);
+    if (raw != null) return sanitizeColumn2Ratio(Number.parseFloat(raw));
+    // One-time migration from the pixel era: the old value was col 2's
+    // width in a row that spanned (approximately) the window, so
+    // px ÷ innerWidth preserves the user's visual layout. Persist
+    // immediately so the migration survives the reload that removes the
+    // legacy key. (Idempotent under StrictMode's double initializer and
+    // under the boot write + hook read: the second run reads the freshly
+    // written key.)
+    const legacy = window.localStorage.getItem(COLUMN_2_LEGACY_WIDTH_KEY);
+    if (legacy != null) {
+      window.localStorage.removeItem(COLUMN_2_LEGACY_WIDTH_KEY);
+      const px = Number.parseInt(legacy, 10);
+      if (Number.isFinite(px) && window.innerWidth > 0) {
+        const migrated = sanitizeColumn2Ratio(px / window.innerWidth);
+        window.localStorage.setItem(COLUMN_2_RATIO_KEY, String(migrated));
+        return migrated;
+      }
+    }
+  } catch {
+    /* private mode / quota — fall through to default */
+  }
+  return COLUMN_2_RATIO_DEFAULT;
+}
+
+/** Store a committed ratio. Returns the clamped value actually stored so
+ *  the caller's React state and the DOM can never diverge from it. */
+export function persistColumn2Ratio(next: number): number {
+  const clamped = sanitizeColumn2Ratio(next);
+  try {
+    window.localStorage.setItem(COLUMN_2_RATIO_KEY, String(clamped));
+  } catch {
+    /* persistence is best-effort */
+  }
+  return clamped;
+}
+
 /** Cancel and synchronously paint a queued seam-resize frame. Pointer-up can
  *  beat requestAnimationFrame; flushing keeps the DOM on the same ratio that
  *  will be persisted even when React bails out of an unchanged state update. */

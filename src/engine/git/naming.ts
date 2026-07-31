@@ -149,17 +149,18 @@ function randomColour(): string {
   return COLOURS[randomIndex(COLOURS.length)];
 }
 
-/** The `zeros/` prefix marks a ref as workspace-owned (see
- *  pruneOrphanWorkspaceBranchOwnershipRefs). Branch = prefix + colour. */
-export const BRANCH_PREFIX = "zeros/";
-
-/** Strip the ownership prefix to get the display name: `zeros/Cream` →
- *  `Cream`. Non-prefixed refs (a user's own branch) pass through. */
-export function branchDisplayName(branch: string): string {
-  return branch.startsWith(BRANCH_PREFIX)
-    ? branch.slice(BRANCH_PREFIX.length)
-    : branch;
-}
+// The branch-name RULES (prefix grammar, join, display-name boundary) live in
+// branch-naming.ts — a node-free module the renderer imports too, so the two
+// processes cannot drift. Re-exported here so engine call sites keep importing
+// from `./naming`.
+export {
+  BRANCH_PREFIX,
+  DEFAULT_BRANCH_PREFIX,
+  allocatedNameSuffix,
+  branchDisplayName,
+  joinBranchPrefix,
+  normalizeBranchPrefix,
+} from "./branch-naming";
 
 /** How many `-vN` rounds to try once all 350 base colours are taken. Each
  *  round is another full 350 names, so this ceiling is 35,350 workspaces in

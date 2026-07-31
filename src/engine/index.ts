@@ -46,7 +46,10 @@ import {
 import { appendSecurityAudit } from "./auth/audit-log";
 import { MessageRouter } from "./transport/router";
 import { WorkspaceService } from "./workspace/service";
-import { dbChangedKinds, LONG_LIFECYCLE_OPS } from "./workspace/change-events";
+import {
+  dbChangedIncludesOriginator,
+  dbChangedKinds,
+} from "./workspace/change-events";
 import { PtyService } from "./pty/service";
 import {
   createNodePtyShell,
@@ -74,7 +77,7 @@ import {
   runActionOneShot,
   runSessionId,
 } from "@zeros/core/run-actions";
-import { setTokenStore } from "./git/github";
+import { getAuthStatus, setTokenStore } from "./git/github";
 import {
   closeGitCredentialBroker,
   prepareGitCredentialShellEnvironment,
@@ -3256,14 +3259,10 @@ export class ZerosEngine {
         }
       }
       // Cross-device live sync (Phase 3): tell the OTHER clients a list changed
-      // so they refetch. The originator already has the change locally — EXCEPT
-      // for the long worktree lifecycle ops (create/restore/archive/…), whose
-      // RPC can outlive the renderer's request budget: the engine finishes and
-      // the row is real, but the originator's promise already rejected with
-      // "Request timeout", so it never learned about the change. Those ops
-      // broadcast to EVERYONE (a refetch is idempotent + cheap for the
-      // originator on the happy path) so a timed-out creator still sees the
-      // workspace appear instead of a phantom that only shows after a restart.
+      // so they refetch. The originator already has the change locally — except
+      // for the ops dbChangedIncludesOriginator names, which broadcast to
+      // EVERYONE (a refetch is idempotent + cheap on the happy path). See that
+      // predicate for why each family is there.
       const changed = dbChangedKinds(op, result);
       if (changed) {
         const workspaceIds = changed.includes("workspaces")
@@ -3275,7 +3274,7 @@ export class ZerosEngine {
           kinds: changed,
           ...(workspaceIds ? { workspaceIds } : {}),
         });
-        if (LONG_LIFECYCLE_OPS.has(op)) {
+        if (dbChangedIncludesOriginator(op)) {
           this.router.broadcast(dbChangedMsg);
         } else {
           this.router.broadcastExcept(client.id, dbChangedMsg);
@@ -4099,6 +4098,26 @@ export class ZerosEngine {
     stdin.resume();
   }
 
+  /** Learn the login behind the credential the host just seeded.
+   *
+   *  `cachedGithubLogin()` is process-local and starts null on every engine
+   *  boot. Workspace creation reads it to build a `branch_prefix_type =
+   *  "github"` branch name and must not block on the network, so it takes
+   *  whatever is cached. Without this prime the first workspace created after
+   *  a relaunch silently fell back to the default `zeros/` prefix while
+   *  Settings still showed "GitHub username (…)", and nothing said why.
+   *
+   *  It hangs off the SEED rather than off startup because the credential
+   *  arrives asynchronously over stdin — a probe fired at boot would run
+   *  before there is anything to probe. This is not auto-adoption: it reads
+   *  the credential the host explicitly selected and writes no token.
+   *  Fire-and-forget, so offline just leaves the fallback in place. */
+  private primeGithubLogin(): void {
+    void getAuthStatus().catch(() => {
+      /* best-effort — a failed probe just leaves the prefix fallback */
+    });
+  }
+
   private handleHostControlLine(line: string): void {
     let msg: {
       type?: string;
@@ -4114,6 +4133,7 @@ export class ZerosEngine {
     }
     if (msg.type === "host.githubToken") {
       seedGithubToken(typeof msg.token === "string" ? msg.token : null);
+      this.primeGithubLogin();
       return;
     }
     if (msg.type === "host.githubCredential") {
@@ -4127,6 +4147,7 @@ export class ZerosEngine {
           ? msg.method
           : null,
       );
+      this.primeGithubLogin();
       return;
     }
     if (msg.type === MCP_VAULT_SEED_TYPE) {

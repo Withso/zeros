@@ -44,6 +44,7 @@ import { useSessionsStore } from "../zeros/agent/sessions-store";
 import { useBridgeStatus } from "../zeros/bridge/use-bridge";
 import { AgentChat } from "../zeros/agent/agent-chat";
 import { envForChat } from "../zeros/agent/model-catalog";
+import { agentAppliesConfigLive } from "../zeros/agent/live-config-support";
 import {
   FALLBACK_AGENT_ID,
   pickDefaultAgent,
@@ -355,10 +356,30 @@ function ChatBody({
     }
   }, [chatId, liveSessionId, chat, dispatch]);
 
-  // Respawn when the user changes model/effort. The new env takes
-  // effect on the next agent subprocess start; ensureSession with
-  // force=true drops browser state so messages don't appear to stick
-  // around under a different model.
+  // Respawn when the user changes model/effort — but ONLY for an agent that
+  // cannot absorb the change live (cursor today; see
+  // agent/live-config-support.ts).
+  //
+  // 2026-07-29: this effect used to fire for EVERY agent, and that was a bug
+  // with three faces. Claude and Codex already had the change pushed into the
+  // running session by agent-chat's pill handlers (setModel / updateConfig),
+  // so the respawn was pure duplicate work — and because `force` bypasses the
+  // in-flight de-dup in ensureSession, cycling the effort pill N times fired N
+  // concurrent AGENT_NEW_SESSION spawns that the engine then had to supersede.
+  //
+  // Worse, the rebuild is COLD: AGENT_NEW_SESSION carries no prior session id,
+  // so Claude minted a fresh claudeSessionId (no `--resume`) and Codex a fresh
+  // thread, while the renderer kept the transcript on screen — a
+  // mid-conversation model change silently gave the agent amnesia and
+  // overwrote the resumable chat.sessionId on the way out. And on a chat with
+  // nothing sent yet the warming→ready flip made the empty-state line blink
+  // out and back on every pill click (user report).
+  //
+  // For the agents that DO need it, the rebuild still runs here. For everyone
+  // else the safety net is sendPrompt's settings-drift reconcile
+  // (sessions-provider.tsx), which respawns at send time if the live apply
+  // never landed — see the appliedChatEnvKey stamp, which is deliberately only
+  // written when the agent really applied it.
   useEffect(() => {
     if (!surfaceActive) return;
     if (envKey === envKeyRef.current) return;
@@ -368,6 +389,7 @@ function ChatBody({
     // model/effort with no later render able to notice.
     if (!chat) return;
     envKeyRef.current = envKey;
+    if (agentAppliesConfigLive(agentId)) return;
     void session.ensureSession(agentId, {
       agentName,
       // Phase 2 chat overhaul (2026-05-07): pass cwd verbatim so the

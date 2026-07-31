@@ -130,6 +130,29 @@ export const LONG_LIFECYCLE_OPS = new Set([
   "gh.prMerge",
 ]);
 
+/** Should the DB_CHANGED broadcast reach the client that CAUSED it?
+ *
+ *  Normally no — the originator already applied the change locally, so echoing
+ *  it back is a wasted refetch. Two families are exceptions:
+ *
+ *    • LONG_LIFECYCLE_OPS, whose RPC can outlive the renderer's request budget
+ *      (see the comment on that set);
+ *    • settings writes, because "already applied locally" is only half true.
+ *      The write's own result carries the LAYER document, which the renderer
+ *      caches — but the RESOLVED tree is a different document merged from four
+ *      layers, and nothing in the response describes it. Without the echo the
+ *      writer's own `useResolvedSettings` stayed stale until the settings
+ *      file-watcher's 3-second poll broadcast to everyone anyway (see
+ *      settings/watch.ts POLL_INTERVAL_MS). Settings → Git is where that
+ *      showed: its radio group renders `checked` off the resolved tree, so a
+ *      click did nothing at all for three seconds and read as a frozen pane.
+ *      Every `pick(resolved, …)` provenance tag on the repo settings pages had
+ *      the same lag more quietly. Echoing costs one small resolve the poll was
+ *      going to force moments later regardless. */
+export function dbChangedIncludesOriginator(op: string): boolean {
+  return LONG_LIFECYCLE_OPS.has(op) || SETTINGS_MUTATIONS.has(op);
+}
+
 /** Which renderer server-state collections a successful operation changed. */
 export function dbChangedKinds(op: string, result?: unknown): string[] | null {
   if (CHAT_MUTATIONS.has(op)) return ["chats"];

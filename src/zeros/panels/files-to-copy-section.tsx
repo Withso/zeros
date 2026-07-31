@@ -7,32 +7,28 @@
 // run. This pane picks what rides along.
 //
 // It is deliberately a CHECKLIST first. The engine has already scanned the
-// repo by the time this paints, so the pane can show the real ignored files —
-// with sizes — instead of asking someone who has never written a `.gitignore`
-// to type `.env*` into an empty box and hope. Patterns are still there, one
-// disclosure down, and both editors write the same setting.
+// repo by the time this paints, so the pane can show the real ignored files
+// instead of asking someone who has never written a `.gitignore` to type
+// `.env*` into an empty box and hope. The pattern editor sits underneath,
+// always visible, and both editors write the same setting.
+//
+// The list is a FOLDER TREE, closed by default. Flat, the same repo is two or
+// three real directories wearing two dozen rows (`lib/api-zod/node_modules/`,
+// `lib/db/node_modules/`, …) and the file you came to tick is buried in the
+// middle of them. One rule keeps closing safe: a selection is never invisible,
+// so a partly-ticked folder surfaces what is ticked inside it even while
+// closed — the row you ticked is the row you need to find again to untick.
 //
 // Scope is per-repo, full stop. "Which files does this project need" has no
 // sensible cross-project answer, so there is no global/per-project switch —
 // saving always writes this repo's own `.zeros/settings.local.toml`.
 //
-// All pattern/row logic lives in files-to-copy-model.ts (pure, unit-tested);
-// this file is the wiring and the markup.
+// All pattern/row/tree logic lives in files-to-copy-model.ts (pure,
+// unit-tested); this file is the wiring and the markup.
 // ──────────────────────────────────────────────────────────
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  AlertTriangle,
-  Check,
-  ChevronRight,
-  FileText,
-  Folder,
-  Info,
-  KeyRound,
-  RotateCw,
-  Settings2,
-} from "lucide-react";
-import { toast } from "sonner";
+import { ChevronRight, Folder, Info, RotateCw } from "lucide-react";
 
 import type { Project } from "../store/projects-store";
 import { useBridge, useBridgeStatus } from "../bridge/use-bridge";
@@ -50,23 +46,35 @@ import {
 import { useCachedRead } from "../store/use-cached-read";
 import { useSettingsChanged, useSettingsLayer } from "../settings/use-settings";
 import { SettingsSection } from "../settings/settings-ui";
-import { Button, CodeTextarea } from "../ui/primitives";
+import {
+  Button,
+  Checkbox,
+  CodeTextarea,
+  Tooltip,
+  toast,
+  type CheckedState,
+} from "../ui/primitives";
 import { cn } from "../ui/cn";
 import {
   applyDraftOverlay,
   baseFor,
   buildCandidateRows,
+  buildCandidateTree,
   canMaterialize,
-  formatBytes,
+  flattenTree,
   formatPatternText,
-  groupCandidates,
+  hasConfirmedEmptyCandidates,
   materializePatterns,
+  nodeCheck,
+  nodeLocked,
   parsePatternText,
+  patternStatsForBox,
   sameList,
-  summarize,
-  summaryText,
-  togglePattern,
-  type CandidateRow,
+  summaryLead,
+  toggleManyPatterns,
+  toggleablePaths,
+  type CandidateTreeNode,
+  type CandidateTreeRow,
 } from "./files-to-copy-model";
 import type { EditableRepoLayer } from "./repositories-panel";
 
@@ -123,7 +131,11 @@ export function FilesToCopySection({
   );
   // The edit in progress, as a LIST. `null` = untouched since the last save.
   const [pending, setPending] = useState<string[] | null>(null);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
+  // Which folders are open. Ephemeral by design — it is a view of the list,
+  // not a choice about the project, so it lives and dies with the mount.
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(
+    () => new Set<string>(),
+  );
 
   // Adopt an external change (a hand-edit, another window) only while the user
   // has nothing of their own in flight — the same rule useSyncedDraft applies
@@ -193,8 +205,6 @@ export function FilesToCopySection({
   const lastGood = useRef<FilesToCopyPreviewWire | undefined>(undefined);
   if (read.data) lastGood.current = read.data;
   const preview = read.data ?? lastGood.current;
-  /** True while what's on screen predates the patterns now in the box. */
-  const previewStale = !read.data && !!preview;
 
   // A settings write (ours or a hand-edit) and a `.worktreeinclude` change both
   // move what a preview would return. Invalidate keeps the rows on screen and
@@ -226,7 +236,9 @@ export function FilesToCopySection({
           // The ARRAY is written even when empty. `null` would delete the key
           // and hand the repo back to the built-in `.env*`, so "I unticked
           // everything" would come back as "copy my .env" — the opposite of
-          // what was asked. Use the reset action to go back to the default.
+          // what was asked. Nothing here writes `null` any more: the "Reset to
+          // default" link that did was removed, so going back to the inherited
+          // default means deleting the key from `.zeros/settings.local.toml`.
           await writePatterns({ file_include_globs: patterns });
         } catch {
           toast.error("Couldn't save which files to copy");
@@ -236,15 +248,6 @@ export function FilesToCopySection({
     } finally {
       savingRef.current = false;
     }
-  }, [writePatterns]);
-
-  /** Drop this project's own list and inherit again (the built-in `.env*`, or
-   *  a hand-edited global list). This is the ONLY thing that writes `null`. */
-  const resetToDefault = useCallback(() => {
-    setPending(null);
-    void writePatterns({ file_include_globs: null }).catch(() => {
-      toast.error("Couldn't reset which files to copy");
-    });
   }, [writePatterns]);
 
   // Deliberately NOT gated on surfaceActive, unlike the scan. Switching tabs
@@ -286,10 +289,11 @@ export function FilesToCopySection({
   // …then re-point the boxes the user has toggled since that preview, so a
   // click ticks NOW rather than when the next scan lands.
   const liveRows = useMemo(
-    () => applyDraftOverlay(rows, overlayBase, effective ?? []),
+    () => applyDraftOverlay(rows, overlayBase, effective),
     [rows, overlayBase, effective],
   );
-  const groups = useMemo(() => groupCandidates(liveRows), [liveRows]);
+  const tree = useMemo(() => buildCandidateTree(liveRows), [liveRows]);
+  const treeRows = useMemo(() => flattenTree(tree, expanded), [tree, expanded]);
   const readOnly = preview?.source === "worktreeinclude";
   // Editing is refused, not silently wrong, when the scan we would build the
   // first edit from is not the whole truth: materializing from a cut-short or
@@ -302,16 +306,53 @@ export function FilesToCopySection({
   // character typed in the pattern editor.
   const effectiveRef = useRef(effective);
   effectiveRef.current = effective;
+  // Rows hand back a PATH, not a node: that keeps their props primitive, which
+  // is what lets `memo` skip a row whose visible state did not change.
+  const byPath = useMemo(() => {
+    const map = new Map<string, CandidateTreeNode>();
+    const walk = (nodes: readonly CandidateTreeNode[]): void => {
+      for (const n of nodes) {
+        map.set(n.path, n);
+        walk(n.children);
+      }
+    };
+    walk(tree);
+    return map;
+  }, [tree]);
+  // Read through a ref for the same reason `effective` is: it keeps `onToggle`
+  // identity-stable across tree rebuilds, so the memoized rows below don't all
+  // invalidate on a prop that only the click handler ever reads.
+  const byPathRef = useRef(byPath);
+  byPathRef.current = byPath;
+
   const onToggle = useCallback(
-    (row: CandidateRow) => {
-      if (!preview || !editable || row.locked) return;
+    (path: string) => {
+      const node = byPathRef.current.get(path);
+      if (!node || !preview || !editable || nodeLocked(node)) return;
+      const paths = toggleablePaths(node);
+      if (paths.length === 0) return;
+      // A folder that is only PARTLY ticked fills up rather than emptying —
+      // the same direction every tri-state checkbox has ever taken.
+      const on = nodeCheck(node) !== "on";
       // Composed on the LIVE list, so a second click inside the debounce
-      // window builds on the first instead of discarding it.
-      const base = baseFor(preview, effectiveRef.current);
-      setPending(togglePattern(base, row.path, !row.selected));
+      // window builds on the first instead of discarding it. One line per file
+      // even for a folder, which is what leaves every row underneath
+      // independently untickable afterwards — writing `/lib` instead would
+      // lock its own children behind an ancestor.
+      setPending(
+        toggleManyPatterns(baseFor(preview, effectiveRef.current), paths, on),
+      );
     },
     [preview, editable],
   );
+
+  const onExpand = useCallback((path: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(path)) next.add(path);
+      return next;
+    });
+  }, []);
 
   const openWorktreeInclude = useCallback(() => {
     if (preview?.sourcePath) void revealInFinder(preview.sourcePath);
@@ -319,14 +360,22 @@ export function FilesToCopySection({
 
   // Only a COMPLETE scan gets to state a total. "0 files" and "we couldn't
   // look" are different answers, and the pane must never print the first when
-  // it means the second.
-  const summary = preview?.complete ? summarize(preview) : null;
+  // it means the second — so this is `null`, not `0`, when the scan fell short.
+  const copyCount = preview?.complete ? preview.totalCount : null;
   // Scanning is only worth saying when there is nothing to look at yet. A
   // refresh behind existing rows stays silent — the rows are still true.
-  const firstLoad = (read.loading || previewStale) && !preview;
+  const firstLoad = read.loading && !preview;
   // Nothing to render and nothing in flight: the bridge is down, or the read
   // failed. Distinct from "this project has no ignored files".
   const unavailable = !preview && !firstLoad;
+  const confirmedEmpty = hasConfirmedEmptyCandidates(preview, liveRows.length);
+  // Per-line counts explain only the lines currently visible in the box.
+  // Exact comparison excludes inherited lists and a draft still inside its
+  // debounce; comments are prose, so they never receive a red zero either.
+  const patternStats = useMemo(
+    () => patternStatsForBox(effective ?? [], preview),
+    [effective, preview],
+  );
 
   return (
     <SettingsSection
@@ -377,7 +426,7 @@ export function FilesToCopySection({
             Try again
           </Button>
         </div>
-      ) : groups.length === 0 ? (
+      ) : confirmedEmpty ? (
         <div className="border-border2 bg-bg1-highlight flex flex-col items-center gap-2 rounded-lg border border-dashed px-4 py-6 text-center">
           <div className="text-fg1 text-[14px] font-medium">
             Nothing needs copying
@@ -387,350 +436,277 @@ export function FilesToCopySection({
             already be complete.
           </div>
         </div>
-      ) : (
-        <div className="flex flex-col gap-2">
-          {groups.map((group) => (
-            <div
-              key={group.id}
-              className="border-border1 overflow-hidden rounded-lg border"
-            >
-              <div className="border-border1 bg-bg1-highlight flex items-center gap-2 border-b px-3 py-2">
-                <GroupIcon id={group.id} />
-                <span className="text-fg1 text-xs font-medium">
-                  {group.label}
-                </span>
-                {group.recommended && (
-                  <span className="bg-green-bg text-green-fg rounded-full px-2 py-px text-[10px] font-semibold">
-                    Recommended
-                  </span>
-                )}
-                <span className="text-fg3 ml-auto text-[11px] tabular-nums">
-                  {group.rows.length}{" "}
-                  {group.rows.length === 1 ? "item" : "items"}
-                </span>
-              </div>
-              {group.rows.map((row) => (
-                <CandidateRowView
-                  key={row.path}
-                  row={row}
-                  disabled={!editable}
-                  onToggle={onToggle}
-                />
-              ))}
-            </div>
+      ) : liveRows.length > 0 ? (
+        <div className="border-border1 overflow-hidden rounded-lg border">
+          <div className="border-border1 bg-bg1-highlight border-b px-3 py-2">
+            <span className="text-fg1 text-xs font-medium">
+              Git ignored files
+            </span>
+          </div>
+          {treeRows.map((row) => (
+            // Keyed by node path, which each row holds exactly once: a folder
+            // is EITHER walked into (its children become rows) or closed (only
+            // its selected descendants surface), never both.
+            //
+            // Spread as PRIMITIVES rather than passed as the row object. A
+            // toggle rebuilds the tree, so every `CandidateTreeRow` is a fresh
+            // object and a memo keyed on it would miss on all 300 rows for a
+            // click that changed one — the identity `applyDraftOverlay` works
+            // to preserve, thrown away one layer down.
+            <TreeRowView
+              key={row.node.path}
+              path={row.node.path}
+              label={row.label}
+              depth={row.depth}
+              folder={row.folder}
+              branch={row.branch}
+              expanded={row.expanded}
+              checked={checkedOf(row)}
+              locked={!editable || nodeLocked(row.node)}
+              onToggle={onToggle}
+              onExpand={onExpand}
+            />
           ))}
         </div>
-      )}
+      ) : null}
 
-      {/* Matched but already tracked. Said out loud rather than dropped: a
-          pattern whose matches silently vanish reads as broken, and "why isn't
-          my file copied" has to have an answer. */}
-      {preview && preview.trackedMatches.length > 0 && (
-        <p className="text-fg3 m-0 text-xs">
-          {preview.trackedMatches.length === 1
-            ? "1 match is already tracked by Git"
-            : `${preview.trackedMatches.length} matches are already tracked by Git`}
-          , so every workspace has{" "}
-          {preview.trackedMatches.length === 1 ? "it" : "them"} already:{" "}
-          <span className="text-fg2 font-mono text-[11px]">
-            {preview.trackedMatches.slice(0, 3).join(", ")}
-            {preview.trackedMatches.length > 3 &&
-              ` +${preview.trackedMatches.length - 3} more`}
-          </span>
-        </p>
-      )}
-
-      {/* Rescan is anchored to the pane, not to a successful scan: it used to
-          render only alongside a summary, so the states that most need a retry
-          were the ones that didn't offer one. */}
+      {/* No rule above or below: the sentence belongs to the list it is
+          counting, and two hairlines made it read as a third region. */}
       {!!preview && (
-        <div className="border-border1 flex flex-wrap items-center gap-2 border-t pt-3">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="text-fg2 text-xs">
-            {summary ? (
+            {copyCount !== null ? (
               <>
                 <span className="text-fg1 font-medium">
-                  {summaryText(summary)}
+                  {summaryLead(copyCount)}
                 </span>{" "}
                 will be copied from{" "}
-                <span className="text-brown-primary font-mono text-[11px]">
+                <span className="text-brown-primary text-2xxs font-mono">
                   {preview.rootPath}
                 </span>
               </>
             ) : (
+              // The one honest thing left to say when the scan came up short.
+              // It replaces a count rather than sitting beside one, so an
+              // incomplete scan can never be read as "nothing to copy".
               <span className="text-fg3">
                 Couldn&rsquo;t work out what would be copied
               </span>
             )}
           </span>
-          {savedGlobs !== null && !readOnly && (
-            <button
-              type="button"
-              onClick={resetToDefault}
-              className="text-fg3 hover:text-fg1 text-xs underline underline-offset-2"
+          {/* Icon only. The label said "Rescan" beside an icon that already
+              says it, in a row whose job is the sentence to its left. */}
+          <Tooltip label="Rescan">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="ml-auto"
+              onClick={read.refresh}
+              disabled={!connected || read.refreshing}
+              aria-label="Rescan"
             >
-              Reset to default
-            </button>
-          )}
-          <Button
-            variant="ghost"
-            size="sm"
-            className="ml-auto"
-            onClick={read.refresh}
-            disabled={!connected || read.refreshing}
-          >
-            <RotateCw
-              className={cn(
-                "size-3",
-                (read.refreshing || previewStale) && "animate-spin",
-              )}
-              aria-hidden
-            />
-            Rescan
-          </Button>
+              <RotateCw
+                className={cn(
+                  "size-3",
+                  // In flight only. Spinning on "what's on screen is older than
+                  // the box" instead never stopped once the bridge dropped — no
+                  // key means no data forever, while the last result keeps
+                  // painting — so a DISABLED button spun for the rest of the
+                  // session, claiming a scan nobody could have started.
+                  (read.refreshing || read.loading) && "animate-spin",
+                )}
+                aria-hidden
+              />
+            </Button>
+          </Tooltip>
         </div>
       )}
 
       {/* Read-only patterns for the committed-file case. The list above is the
-          answer either way; the patterns that produced it stay one click down
-          rather than being dimmed into illegibility behind an explanation. */}
+          answer either way; these are the lines that produced it. */}
       {readOnly && preview?.sourceText !== undefined && (
-        <div className="border-border1 border-t pt-3">
-          <button
-            type="button"
-            onClick={() => setAdvancedOpen((v) => !v)}
-            className="text-fg2 hover:text-fg1 flex items-center gap-1.5 text-xs"
-            aria-expanded={advancedOpen}
-          >
-            <ChevronRight
-              className={cn(
-                "size-3 transition-transform",
-                advancedOpen && "rotate-90",
-              )}
-              aria-hidden
-            />
-            Show patterns
-          </button>
-          {advancedOpen && (
-            <pre className="bg-bg1-highlight text-fg2 mt-2 max-h-64 overflow-auto rounded-md px-3 py-2 font-mono text-[11px] leading-relaxed">
-              {preview.sourceText}
-            </pre>
-          )}
-        </div>
+        <pre className="bg-bg1-highlight text-fg2 text-2xxs m-0 max-h-64 overflow-auto rounded-md px-3 py-2 font-mono leading-relaxed">
+          {preview.sourceText}
+        </pre>
       )}
 
-      {/* Gated on a landed preview, not merely on `!readOnly`: while the source
-          is unknown the editor would accept typing that a committed
+      {/* The pattern editor, open. It used to sit behind an "Advanced —"
+          disclosure, which hid the box that answers "why is this file being
+          copied" from everyone who had not already guessed it was there.
+          Gated on a landed preview, not merely on `!readOnly`: while the
+          source is unknown the editor would accept typing that a committed
           `.worktreeinclude` then silently outranks. */}
       {!!preview && !readOnly && (
-        <div className="border-border1 border-t pt-3">
-          <button
-            type="button"
-            onClick={() => setAdvancedOpen((v) => !v)}
-            className="text-fg2 hover:text-fg1 flex items-center gap-1.5 text-xs"
-            aria-expanded={advancedOpen}
-          >
-            <ChevronRight
-              className={cn(
-                "size-3 transition-transform",
-                advancedOpen && "rotate-90",
-              )}
-              aria-hidden
-            />
-            Advanced — use file patterns instead
-          </button>
-          {advancedOpen && (
-            <div className="mt-2 flex flex-col gap-2">
-              <CodeTextarea
-                aria-label="Files to copy patterns"
-                value={draft}
-                onChange={setDraft}
-                description="One pattern per line, .gitignore syntax. Use ! to take something back out."
-              />
-              {preview && preview.patterns.length > 0 && (
-                <div className="flex flex-col gap-1">
-                  {preview.patterns.map((p) => (
-                    <div
-                      key={`${p.line}:${p.raw}`}
-                      className="flex items-center gap-2 text-xs"
-                    >
-                      <span
-                        className={cn(
-                          "rounded-full px-1.5 py-px text-[10px] font-semibold tabular-nums",
-                          p.matchCount === null
-                            ? "bg-bg2 text-fg3"
-                            : p.matchCount === 0
-                              ? "bg-red-bg text-red-fg"
-                              : p.negate
-                                ? "bg-bg2 text-fg3"
-                                : "bg-green-bg text-green-fg",
-                        )}
-                      >
-                        {p.matchCount === null
-                          ? "—"
+        <div className="flex flex-col gap-2">
+          <CodeTextarea
+            aria-label="Files to copy patterns"
+            value={draft}
+            onChange={setDraft}
+            description="One pattern per line, .gitignore syntax. Use ! to take something back out."
+          />
+          {patternStats.length > 0 && (
+            <div className="flex flex-col gap-1">
+              {patternStats.map((p) => (
+                <div
+                  key={`${p.line}:${p.raw}`}
+                  className="flex items-center gap-2 text-xs"
+                >
+                  <span
+                    className={cn(
+                      "text-xxs rounded-full px-1.5 py-px font-semibold tabular-nums",
+                      p.matchCount === null
+                        ? "bg-bg2 text-fg3"
+                        : p.matchCount === 0
+                          ? "bg-red-bg text-red-fg"
                           : p.negate
-                            ? `−${p.matchCount}`
-                            : p.matchCount}
-                      </span>
-                      <span className="text-fg1 font-mono">{p.raw}</span>
-                      {p.matchCount === 0 && !p.negate && (
-                        <span className="text-fg3">matches nothing</span>
-                      )}
-                    </div>
-                  ))}
+                            ? "bg-bg2 text-fg3"
+                            : "bg-green-bg text-green-fg",
+                    )}
+                  >
+                    {p.matchCount === null
+                      ? "—"
+                      : p.negate
+                        ? `−${p.matchCount}`
+                        : p.matchCount}
+                  </span>
+                  <span className="text-fg1 font-mono">{p.raw}</span>
+                  {p.matchCount === 0 && !p.negate && (
+                    <span className="text-fg3">matches nothing</span>
+                  )}
                 </div>
-              )}
+              ))}
             </div>
           )}
         </div>
       )}
-
-      {/* Bottom-anchored inline toasts. They sit UNDER the list they are
-          talking about: at the top they would push the file rows — the thing
-          the pane exists to show — down the screen every time one appears. */}
-      {preview && !preview.complete && (
-        <InlineToast
-          icon={<AlertTriangle className="size-3.5 shrink-0" aria-hidden />}
-          action={
-            <button
-              type="button"
-              onClick={read.refresh}
-              className="shrink-0 font-medium underline underline-offset-2"
-            >
-              Try again
-            </button>
-          }
-        >
-          <b className="font-semibold">Couldn&rsquo;t check this project.</b>{" "}
-          <code className="font-mono">{preview.rootPath}</code> isn&rsquo;t
-          readable right now, so this list may be out of date. Your selection is
-          saved and will still be used.
-        </InlineToast>
-      )}
-      {/* Suppressed while `complete` is false: the scan-failure warning is the
-          same fact the toast above already states, in engine words. */}
-      {preview?.complete &&
-        preview.warnings.map((warning, i) => (
-          <InlineToast
-            key={`${i}:${warning}`}
-            icon={<AlertTriangle className="size-3.5 shrink-0" aria-hidden />}
-          >
-            {warning.replace(/^files-to-copy:\s*/, "")}
-          </InlineToast>
-        ))}
     </SettingsSection>
   );
 }
 
-function InlineToast({
-  icon,
-  action,
-  children,
-}: {
-  icon: React.ReactNode;
-  action?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    // Container pair, per the palette rule: text and icons on a `--*-bg`
-    // surface use that family's `--*-fg`, never the vivid primary.
-    <div className="text-yellow-fg bg-yellow-bg flex items-start gap-2 rounded-md px-3 py-2 text-xs leading-relaxed">
-      {icon}
-      <span className="min-w-0">{children}</span>
-      {action}
-    </div>
-  );
+/** Indent per tree depth, as classes rather than a computed `paddingLeft` —
+ *  the spacing stays on the Tailwind scale and out of an inline style. Depth
+ *  is clamped to the last entry; nothing legible happens past five levels. */
+const DEPTH_INDENT = ["", "w-4", "w-8", "w-12", "w-16"] as const;
+
+/** A row's box state, in the primitive shape `Checkbox` takes. */
+function checkedOf(row: CandidateTreeRow): CheckedState {
+  const state = nodeCheck(row.node);
+  return state === "mixed" ? "indeterminate" : state === "on";
 }
 
-function GroupIcon({ id }: { id: "env" | "config" | "other" }) {
-  if (id === "env")
-    return (
-      <span className="bg-green-bg text-green-fg grid size-5 shrink-0 place-items-center rounded">
-        <KeyRound className="size-3" aria-hidden />
-      </span>
-    );
-  if (id === "config")
-    return (
-      <span className="bg-blue-bg text-blue-fg grid size-5 shrink-0 place-items-center rounded">
-        <Settings2 className="size-3" aria-hidden />
-      </span>
-    );
-  return (
-    <span className="bg-bg2 text-fg3 grid size-5 shrink-0 place-items-center rounded">
-      <FileText className="size-3" aria-hidden />
-    </span>
-  );
-}
-
-/** Memoized: applyDraftOverlay preserves the identity of rows the user did not
- *  touch, so a click re-renders one row rather than the whole list. */
-const CandidateRowView = memo(function CandidateRowView({
-  row,
-  disabled,
+/** Memoized on PRIMITIVES only, so a click that changes one row re-renders one
+ *  row. Every toggle rebuilds the tree — that is what keeps the counts on the
+ *  spine honest — so any prop carrying a node or a row object would miss on
+ *  every row in the list, which is the identity `applyDraftOverlay` exists to
+ *  preserve being thrown away one layer down. It also makes typing in the
+ *  always-open pattern editor free: the parent re-renders per keystroke and
+ *  every row here compares equal. */
+export const TreeRowView = memo(function TreeRowView({
+  path,
+  label,
+  depth,
+  folder,
+  branch,
+  expanded,
+  checked,
+  locked,
   onToggle,
+  onExpand,
 }: {
-  row: CandidateRow;
-  disabled: boolean;
-  onToggle: (row: CandidateRow) => void;
+  /** Repo-relative path — the row's identity, and what the callbacks name. */
+  path: string;
+  /** What to print: the node's own name, or its path relative to the closed
+   *  folder that surfaced it. */
+  label: string;
+  /** Indent level. */
+  depth: number;
+  /** Reads as a directory: folder icon and a trailing slash. */
+  folder: boolean;
+  /** A folder the user can open (as opposed to one git already collapsed). */
+  branch: boolean;
+  expanded: boolean;
+  checked: CheckedState;
+  /** Nothing this box could change: a glob holds it, or the whole pane is
+   *  read-only. */
+  locked: boolean;
+  onToggle: (path: string) => void;
+  onExpand: (path: string) => void;
 }) {
-  const locked = disabled || row.locked;
+  const toggle = useCallback(() => onToggle(path), [onToggle, path]);
+  const expand = useCallback(() => onExpand(path), [onExpand, path]);
+  const indent = DEPTH_INDENT[Math.min(depth, DEPTH_INDENT.length - 1)];
+  const text = cn(
+    "min-w-0 truncate font-mono text-2xxs",
+    checked === false ? "text-fg3" : "text-fg1",
+    locked && "opacity-55",
+  );
+  const box = (
+    <Checkbox
+      checked={checked}
+      disabled={locked}
+      aria-label={path}
+      onChange={toggle}
+    />
+  );
+
   return (
-    <label
+    <div
       className={cn(
-        "border-border1 flex items-center gap-2.5 border-b px-3 py-2 last:border-b-0",
-        locked ? "cursor-default" : "hover:bg-bg1-hover cursor-pointer",
+        "border-border1 flex items-center gap-2 border-b px-3 py-2 last:border-b-0",
+        !locked && "hover:bg-bg1-hover",
       )}
     >
-      <input
-        type="checkbox"
-        className="sr-only"
-        checked={row.selected}
-        disabled={locked}
-        onChange={() => onToggle(row)}
-      />
-      <span
-        aria-hidden
-        className={cn(
-          "grid size-3.5 shrink-0 place-items-center rounded border",
-          row.selected
-            ? "bg-inverted-bg border-inverted-bg text-inverted-fg"
-            : "border-border4",
-          locked && "opacity-55",
-        )}
-      >
-        {row.selected && <Check className="size-2.5" strokeWidth={3.5} />}
-      </span>
-      <span
-        className={cn(
-          "text-fg1 min-w-0 truncate font-mono text-[11px]",
-          !row.selected && "text-fg3",
-          locked && "opacity-55",
-        )}
-      >
-        {row.path}
-        {row.isDir && "/"}
-      </span>
-      {row.isDir && (
-        <span className="text-fg3 shrink-0">
-          <Folder className="size-3" aria-hidden />
-        </span>
+      {depth > 0 && <span aria-hidden className={cn("shrink-0", indent)} />}
+      {branch ? (
+        <>
+          <label className={locked ? "cursor-default" : "cursor-pointer"}>
+            {box}
+          </label>
+          {/* The name opens the folder rather than ticking it: with a whole
+              subtree behind one row, "show me what is in here" is the far
+              likelier intent, and the box is right there for the other one. */}
+          <button
+            type="button"
+            onClick={expand}
+            aria-expanded={expanded}
+            className="focus-visible:ring-highlighted-bright flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left focus-visible:ring-1 focus-visible:outline-none"
+          >
+            <ChevronRight
+              className={cn(
+                "text-fg3 size-3 shrink-0 transition-transform",
+                expanded && "rotate-90",
+              )}
+              aria-hidden
+            />
+            <Folder className="text-fg3 size-3 shrink-0" aria-hidden />
+            <span className={text}>{label}/</span>
+          </button>
+        </>
+      ) : (
+        <label
+          className={cn(
+            "flex min-w-0 flex-1 items-center gap-2",
+            locked ? "cursor-default" : "cursor-pointer",
+          )}
+        >
+          {box}
+          {/* Two reserved columns — the chevron and the icon a folder row puts
+              there — so every name in the list starts at the same x whether or
+              not the thing beside it can be opened. Without them, expanding a
+              folder shuffled the column its own children line up in. */}
+          <span aria-hidden className="w-3 shrink-0" />
+          {folder ? (
+            <Folder className="text-fg3 size-3 shrink-0" aria-hidden />
+          ) : (
+            <span aria-hidden className="w-3 shrink-0" />
+          )}
+          <span className={text}>
+            {label}
+            {folder && "/"}
+          </span>
+        </label>
       )}
-      {row.notIgnored && (
-        <span className="bg-yellow-bg text-yellow-fg shrink-0 rounded-full px-2 py-px text-[10px] font-semibold">
-          Git isn&rsquo;t ignoring this
-        </span>
-      )}
-      {/* Named only when one line can be responsible. With several globs in
-          play the pane used to print the first one regardless, sending people
-          to edit a pattern that had nothing to do with this row. */}
-      {row.locked && (
-        <span className="bg-bg2 text-fg3 shrink-0 rounded-full px-2 py-px text-[10px] font-semibold">
-          {row.lockedBy ? `from ${row.lockedBy}` : "from a pattern"}
-        </span>
-      )}
-      <span className="text-fg3 ml-auto shrink-0 text-[10px] tabular-nums">
-        {formatBytes(row.bytes)}
-      </span>
-    </label>
+    </div>
   );
 });
 

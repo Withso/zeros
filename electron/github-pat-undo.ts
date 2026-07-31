@@ -73,6 +73,23 @@ export class GithubPatUndoStore {
     };
   }
 
+  /**
+   * Re-arm an exact pending removal after its keychain write failed. A newer
+   * removal always wins, and the original absolute expiry is preserved so a
+   * failing restore cannot extend a secret's in-memory lifetime indefinitely.
+   */
+  restore(pending: PendingGithubPatUndo): boolean {
+    const remainingMs = pending.expiresAtMs - this.now();
+    if (this.pending || remainingMs <= 0) return false;
+    this.pending = {
+      ...pending,
+      credential: { ...pending.credential },
+    };
+    this.timer = setTimeout(() => this.clear(), remainingMs);
+    this.timer.unref?.();
+    return true;
+  }
+
   clear(): void {
     this.pending = null;
     if (this.timer) clearTimeout(this.timer);

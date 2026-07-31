@@ -73,7 +73,12 @@ import {
   type AgentFailure,
 } from "../bridge/failure";
 import { findMatchingPolicy } from "./policies";
-import { agentModeForPermission, envForChat } from "./model-catalog";
+import {
+  agentModeForPermission,
+  chatEnvDriftKey,
+  envForChat,
+} from "./model-catalog";
+import { agentAppliesConfigLive } from "./live-config-support";
 import { useWorkspaceStore } from "../store/workspace-store";
 import {
   buildAdditionalDirsSystemInstruction,
@@ -946,7 +951,7 @@ export function AgentSessionsProvider({
               // Settings-drift guard: record the chat env this session was
               // ACTUALLY created with, so sendPrompt can detect a stale
               // session (model/effort changed while warming) and respawn.
-              appliedChatEnvKey: JSON.stringify(options?.env ?? {}),
+              appliedChatEnvKey: chatEnvDriftKey(options?.env),
             });
             getStore().setWarmAgent(agentId, true);
             trackAgentSessionStarted(agentId, chatId);
@@ -1156,7 +1161,7 @@ export function AgentSessionsProvider({
             expected &&
             current.agentId &&
             current.appliedChatEnvKey !== undefined &&
-            current.appliedChatEnvKey !== JSON.stringify(expected) &&
+            current.appliedChatEnvKey !== chatEnvDriftKey(expected) &&
             ensureSessionRef.current
           ) {
             try {
@@ -2189,7 +2194,13 @@ export function AgentSessionsProvider({
       if (!chat) return;
       // Build the full composer env via the SAME encoder session-creation uses,
       // so the live update and a respawn carry an identical config map.
-      const env = envForChat(chat);
+      // `current.initialize` is passed for the same reason: sendPrompt's
+      // reconcile compares against envForChat(chat, initialize), and a stamp
+      // built WITHOUT it reads as drift for any agent that overrides its model
+      // env var via _meta — which force-respawns the session COLD on the next
+      // send (no resume, so the agent loses the conversation) for a change
+      // that had already been applied live. The two must be built identically.
+      const env = envForChat(chat, current.initialize);
       bridge.send({
         type: "AGENT_UPDATE_CONFIG",
         agentId: current.agentId,
@@ -2198,12 +2209,17 @@ export function AgentSessionsProvider({
       });
       // Settings-drift guard: this env is now live-applied — stamp it so
       // sendPrompt's reconcile doesn't ALSO force-respawn for the same change.
-      // (envForChat(chat) here vs (chat, initialize) at spawn only differ when
-      // an agent overrides its model env var via _meta — none of the curated
-      // families do; a false mismatch would cost one redundant respawn, not
-      // correctness.)
+      //
+      // Only stamp when the agent ACTUALLY applies config live. The gateway
+      // silently no-ops AGENT_UPDATE_CONFIG for adapters without the optional
+      // hook (cursor today), so stamping unconditionally would record a change
+      // that never landed — sendPrompt would then skip its reconcile and run
+      // the turn on the stale model/effort. Leaving the key stale is the
+      // correct signal: the reconcile respawns at send time, once, instead of
+      // on every pill click.
+      if (!agentAppliesConfigLive(current.agentId)) return;
       getStore().patchSession(chatId, {
-        appliedChatEnvKey: JSON.stringify(env),
+        appliedChatEnvKey: chatEnvDriftKey(env),
       });
     },
     [bridge, getStore],
@@ -2705,7 +2721,7 @@ export function AgentSessionsProvider({
           failure: null,
           // Settings-drift guard: same stamp as ensureSession — the chat env
           // this resumed session was actually loaded with.
-          appliedChatEnvKey: JSON.stringify(options?.env ?? {}),
+          appliedChatEnvKey: chatEnvDriftKey(options?.env),
         });
         // Re-apply the chat's persisted permission posture on resume too. The
         // agent's resumed session starts at its OWN default mode (permission

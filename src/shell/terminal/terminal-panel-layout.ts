@@ -14,6 +14,31 @@ export const TERMINAL_PANEL_DEFAULT_PCT = 50;
 export const TERMINAL_PANEL_MIN_PCT = 5;
 export const TERMINAL_PANEL_MAX_PCT = 95;
 
+// ── Seam geometry ─────────────────────────────────────────
+// These live in this leaf module (not in the resizer component) because
+// BOTH the drag clamp and the panel's CSS `flex-basis: clamp(...)` are
+// built from them. Two spellings of the same floor is how a drag ends up
+// clamping against one bound while CSS renders another — the snap-back
+// the proportional-columns work removed. See the lockstep test in
+// src/shell/__tests__/column-sizing-bounds-lockstep.test.ts.
+
+/** The panel's own pixel floor while expanded. */
+export const TERMINAL_PANEL_MIN_PX = 140;
+/** Row 1's pixel floor — the panel may never grow past it. */
+export const TERMINAL_ROW1_MIN_PX = 180;
+/** The 1px seam between row 1 and the panel. */
+export const TERMINAL_SEAM_PX = 1;
+/** Panel height beyond which row 1 would breach its floor. */
+export const TERMINAL_PANEL_MAX_OFFSET_PX =
+  TERMINAL_ROW1_MIN_PX + TERMINAL_SEAM_PX;
+
+/** The panel's live height, as a percentage of column 3. Set declaratively
+ *  by the panel itself and overwritten per animation frame by the seam
+ *  drag. Scoped to the PANEL element (not column 3): custom properties
+ *  inherit, so a per-frame write higher up would invalidate style for the
+ *  diff viewer, file tree, and browser iframes on every drag tick. */
+export const TERMINAL_PANEL_HEIGHT_VAR = "--zeros-terminal-panel-height";
+
 const STORAGE_KEY = "zeros:terminal-panel:layout-v2";
 /** Pre-global per-folder layouts; superseded by the single shared layout. */
 const LEGACY_STORAGE_KEY = "zeros:terminal-panel:layout-by-folder-v1";
@@ -52,6 +77,13 @@ export function normalizeTerminalPanelLayout(
         : TERMINAL_PANEL_DEFAULT_PCT,
     ),
   };
+}
+
+/** The persisted layout, validated. Exported because the pre-render boot
+ *  path publishes the height as an inherited CSS variable before React's
+ *  first render — see src/shell/boot-layout-vars.ts. */
+export function readPersistedTerminalPanelLayout(): TerminalPanelLayout {
+  return loadLayout();
 }
 
 function loadLayout(): TerminalPanelLayout {

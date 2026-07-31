@@ -117,6 +117,134 @@ export async function windowOlderMessages(
     .filter((m): m is AgentMessage => m !== null);
 }
 
+/** The engine clamps messages.window / messages.windowOlder at 1000 rows for
+ *  every caller (workspace/service.ts), so this is the largest useful page.
+ *  Asking for MORE than the clamp is harmless — the walk never treats a short
+ *  page as the end of history, so the two numbers are not coupled. */
+const TRANSCRIPT_PAGE = 1000;
+
+/** A page can carry megabytes of tool payloads — well past what the 10s
+ *  default (sized for small metadata ops) covers. */
+const TRANSCRIPT_PAGE_TIMEOUT_MS = 60_000;
+
+/** Backstop against an unterminated page walk (≈200k messages). */
+const TRANSCRIPT_MAX_PAGES = 200;
+
+/** Stop the walk once we hold more raw payload than the formatter could
+ *  possibly keep (it caps the document at TRANSCRIPT_TOTAL_MAX and only ever
+ *  shrinks payloads from there). Generous headroom over that cap, since
+ *  per-field clipping means raw bytes and rendered bytes aren't 1:1.
+ *
+ *  Safe precisely BECAUSE both halves run newest-first: this walk pages
+ *  backwards from the tail, and the formatter fills from the newest section
+ *  back — so the rows we stop short of are the oldest, which are exactly the
+ *  ones the formatter would have dropped anyway. Without this, a tool-heavy
+ *  chat pulls hundreds of MB across 200 round trips to render 2 MB. */
+const TRANSCRIPT_CHAR_BUDGET = 4_000_000;
+
+/** Is `beforeMsgId` the oldest row this chat has? One row, not one page — the
+ *  answer is a single bit and the walk only asks after it already holds
+ *  megabytes.
+ *
+ *  A failure answers "no". This runs only on the bound path, where the
+ *  alternative to a cheap wrong-in-the-safe-direction answer is failing a
+ *  transcript read that has otherwise entirely succeeded: telling the user
+ *  their copy may be partial costs them a sentence, and throwing costs them
+ *  the transcript. */
+async function noOlderThan(
+  bridge: Parameters<typeof bridgeMessageWindowOlder>[0],
+  chatId: string,
+  beforeMsgId: string,
+): Promise<boolean> {
+  try {
+    const probe = await bridgeMessageWindowOlder(
+      bridge,
+      chatId,
+      1,
+      beforeMsgId,
+      TRANSCRIPT_PAGE_TIMEOUT_MS,
+    );
+    return probe.length === 0;
+  } catch {
+    return false;
+  }
+}
+
+export interface LoadedTranscript {
+  /** Chronological, oldest-first. */
+  messages: AgentMessage[];
+  /** False when a bound stopped the walk before the start of history, so the
+   *  caller can say the copy is partial instead of reporting it complete. */
+  complete: boolean;
+}
+
+/** A chat's persisted transcript, oldest-first — for "copy transcript", which
+ *  must not silently stop at the renderer's window.
+ *
+ *  Neither in-memory source is usable here: a background tab's slot may be
+ *  empty (or hold exactly HYDRATE_WINDOW rows from the tab-hover prefetch,
+ *  which looks complete but isn't), and even the active slot is capped at
+ *  MAX_MESSAGES_PER_CHAT. So we page the engine.
+ *
+ *  Two deliberate properties of the walk:
+ *   - It cursors on the RAW wire `msgId`, not a parsed message. Mapping
+ *     through fromPersistedMessage first would let a page whose rows all fail
+ *     to parse filter down to [] and read as "no more history".
+ *   - Only an EMPTY page ends it. Treating a short page as the end would
+ *     couple this to the engine's exact row clamp, so lowering that clamp
+ *     would silently cap every copy in the app. Costs one extra round trip. */
+export async function loadFullTranscript(
+  chatId: string,
+): Promise<LoadedTranscript> {
+  const bridge = requireBridge("copy the chat transcript");
+  const pages: PersistedMessageWire[][] = [];
+  let page = await bridgeMessageWindow(
+    bridge,
+    chatId,
+    TRANSCRIPT_PAGE,
+    undefined,
+    TRANSCRIPT_PAGE_TIMEOUT_MS,
+  );
+  let chars = 0;
+  let complete = true;
+  while (page.length > 0) {
+    pages.unshift(page);
+    for (const r of page) chars += r.payload.length;
+    if (pages.length >= TRANSCRIPT_MAX_PAGES || chars >= TRANSCRIPT_CHAR_BUDGET) {
+      // Hitting a bound is not the same as leaving history behind, and the
+      // difference is user-visible: `complete: false` is what turns an
+      // otherwise silent success into "Attached the most recent part of X —
+      // the full history was too large to read" and into the partial-copy
+      // toast. A tool-heavy chat can blow the 4 MB budget INSIDE its first
+      // page (one page is up to 1000 rows, and a single Read result can be
+      // 100 KB), and that chat is complete — every row of it is in hand.
+      //
+      // So ask, rather than assume, with the cheapest question available: one
+      // row older than the oldest we hold. `limit: 1` is below any clamp the
+      // engine might apply, so this stays uncoupled from TRANSCRIPT_PAGE, and
+      // an empty answer is the same proof-of-end the loop already relies on.
+      // Fetching another full page to find out would cost megabytes to learn
+      // one bit.
+      complete = await noOlderThan(bridge, chatId, page[0].msgId);
+      break;
+    }
+    page = await bridgeMessageWindowOlder(
+      bridge,
+      chatId,
+      TRANSCRIPT_PAGE,
+      page[0].msgId,
+      TRANSCRIPT_PAGE_TIMEOUT_MS,
+    );
+  }
+  return {
+    messages: pages
+      .flat()
+      .map(fromPersistedMessage)
+      .filter((m): m is AgentMessage => m !== null),
+    complete,
+  };
+}
+
 export async function clearChat(chatId: string): Promise<void> {
   await bridgeMessageClear(requireBridge("clear the chat transcript"), chatId);
 }
@@ -148,6 +276,10 @@ export async function truncateMessagesFrom(
   return 0;
 }
 
+/** Hand-maintained 1:1 mirror of the engine's `ChatSummaryRow`
+ *  (engine/db/chats.ts). There is no schema and no coercion at this boundary —
+ *  the bridge result is a bare cast — so the two interfaces must be edited
+ *  together or the renderer reads undefined. */
 export interface ChatSummaryWire {
   chatId: string;
   title: string;
@@ -158,11 +290,19 @@ export interface ChatSummaryWire {
    *  render its monochrome logo on the summary pill. Null when no agent bound. */
   agentId: string | null;
   agentName: string | null;
+  /** Prompts the user sent to this agent — the number on a transcript pill.
+   *  NOT the persisted row count, which counts every tool call and reasoning
+   *  block and so reported "55 messages" for a two-question chat. See the
+   *  field's doc on the engine side. */
+  userMessageCount: number;
+  /** Epoch ms of the newest message; 0 when unknown. "Last active" in the
+   *  transcript hover preview. Never an ordering key. */
+  lastMessageAt: number;
 }
 
-/** Phase D2 (2026-05-07): prior chats in this folder with a summary (the first
- *  user message). Drives the "Add chat summaries:" pill row on
- *  new chats. Served from the engine — works on desktop AND web. */
+/** Prior chats in this folder with a summary (the first user message), newest
+ *  chat first by CREATION date. Drives the "Add chat transcripts" pill row on
+ *  an empty chat. Served from the engine — works on desktop AND web. */
 export async function listChatSummariesForFolder(args: {
   folder: string;
   excludeChatId?: string;

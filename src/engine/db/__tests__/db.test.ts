@@ -17,6 +17,7 @@ import {
   pruneWorktreeRepos,
 } from "../projects";
 import {
+  CHAT_SUMMARIES_SQL,
   listChats,
   listChatsSince,
   summariesForFolder,
@@ -129,9 +130,9 @@ describe("Zeros DB (unified engine store)", () => {
       .all() as { version: number }[];
     expect(applied.map((r) => r.version)).toEqual([
       1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-      22, 23, 24,
+      22, 23, 24, 25,
     ]);
-    expect(latestSchemaVersion()).toBe(24);
+    expect(latestSchemaVersion()).toBe(25);
   });
 
   it("stamps + backfills chats.workspace_id from folder via the resolver (v11)", () => {
@@ -183,7 +184,7 @@ describe("Zeros DB (unified engine store)", () => {
     const count = db
       .prepare("SELECT COUNT(*) AS n FROM schema_migrations")
       .get() as { n: number };
-    expect(count.n).toBe(24);
+    expect(count.n).toBe(25);
   });
 
   it("preserves created_at on upsert (immutable after first insert)", () => {
@@ -408,54 +409,152 @@ describe("Zeros DB (unified engine store)", () => {
     expect(listChats().some((c) => c.id === "c2")).toBe(false);
   });
 
-  it("summariesForFolder: first user message per chat; excludes archived / self / no-user", () => {
+  it("summariesForFolder: first user message per chat; includes archived; excludes self / no-user / other folders", () => {
     setZerosDbPathForTesting(tmpDbFile());
-    upsertChat(makeChat("a", { folder: "/proj", title: "A", updatedAt: 10 }));
-    upsertChat(makeChat("b", { folder: "/proj", title: "B", updatedAt: 20 }));
+    upsertChat(
+      makeChat("a", { folder: "/proj", title: "A", createdAt: 10, updatedAt: 10 }),
+    );
+    upsertChat(
+      makeChat("b", { folder: "/proj", title: "B", createdAt: 20, updatedAt: 20 }),
+    );
     upsertChat(
       makeChat("c", {
         folder: "/proj",
         title: "C",
+        createdAt: 30,
         updatedAt: 30,
         archived: true,
       }),
     );
-    upsertChat(makeChat("d", { folder: "/proj", title: "D", updatedAt: 40 })); // agent-only
+    upsertChat(
+      makeChat("d", { folder: "/proj", title: "D", createdAt: 40, updatedAt: 40 }),
+    ); // agent-only
     upsertChat(makeChat("z", { folder: "/elsewhere", updatedAt: 50 }));
-    const um = (id: string, text: string) => ({
+    const um = (id: string, text: string, createdAt = 1) => ({
       msgId: id,
       kind: "text",
       payload: JSON.stringify({ id, kind: "text", role: "user", text }),
-      createdAt: 1,
+      createdAt,
     });
-    const am = (id: string, text: string) => ({
+    const am = (id: string, text: string, createdAt = 2) => ({
       msgId: id,
       kind: "text",
       payload: JSON.stringify({ id, kind: "text", role: "agent", text }),
-      createdAt: 2,
+      createdAt,
     });
     upsertChatMessagesBulk("a", [
       um("a1", "first A question"),
       am("a2", "answer"),
-      um("a3", "second A"),
+      um("a3", "second A", 77),
     ]);
     upsertChatMessagesBulk("b", [um("b1", "first B question")]);
+    upsertChatMessagesBulk("c", [um("c1", "first C question")]);
     upsertChatMessagesBulk("d", [am("d1", "agent only — no user turn")]);
 
     const rows = summariesForFolder("/proj");
-    // archived c + agent-only d excluded; ordered by updated_at DESC (b=20 then a=10).
-    expect(rows.map((r) => r.chatId)).toEqual(["b", "a"]);
+    // agent-only d excluded; ARCHIVED c included and unmarked (2026-07-30 —
+    // you close a tab when the work finishes, which is when its transcript is
+    // most worth handing forward). Newest CREATION first: c=30, b=20, a=10.
+    expect(rows.map((r) => r.chatId)).toEqual(["c", "b", "a"]);
     expect(rows.find((r) => r.chatId === "a")!.summary).toBe(
       "first A question",
     ); // FIRST user msg
     expect(rows.find((r) => r.chatId === "b")!.summary).toBe(
       "first B question",
     );
+    // Volume + recency aggregates ride along on the same round trip.
+    // 2026-07-30: volume counts USER prompts, not persisted rows. Chat "a"
+    // holds three rows — two user, one agent — and reports 2. The old COUNT(*)
+    // is what put "55 messages" on a two-question chat.
+    expect(rows.find((r) => r.chatId === "a")!.userMessageCount).toBe(2);
+    expect(rows.find((r) => r.chatId === "a")!.lastMessageAt).toBe(77);
+    expect(rows.find((r) => r.chatId === "b")!.userMessageCount).toBe(1);
     // excludeChatId drops self; cross-folder z never appears.
     expect(summariesForFolder("/proj", "b").map((r) => r.chatId)).toEqual([
+      "c",
       "a",
     ]);
     expect(summariesForFolder("/nope")).toEqual([]);
+  });
+
+  // The user-prompt COUNT(*) is the one term in this query that cannot
+  // short-circuit — the summary subquery is ORDER BY ord LIMIT 1 and the
+  // EXISTS gate stops at the first row — so without idx_chat_messages_user_text
+  // it scans every message of every chat in the folder, running json_extract
+  // on each. That is invisible to a behavioural test (same rows, ~200× the
+  // time) and the row count only ever grows, so pin the PLAN instead.
+  //
+  // SQLite decides partial-index eligibility syntactically, which is why this
+  // can regress from an edit that looks like a pure reformat: reordering the
+  // two predicate terms or respelling the json_extract is enough to drop back
+  // to the scan, silently and with no error.
+  it("summariesForFolder: the user-prompt count uses the partial index, not a scan", () => {
+    setZerosDbPathForTesting(tmpDbFile());
+    upsertChat(makeChat("a", { folder: "/proj" }));
+    upsertChatMessagesBulk("a", [
+      {
+        msgId: "a1",
+        kind: "text",
+        payload: JSON.stringify({ id: "a1", kind: "text", role: "user", text: "q" }),
+        createdAt: 1,
+      },
+    ]);
+
+    const plan = openZerosDb()
+      .prepare(`EXPLAIN QUERY PLAN ${CHAT_SUMMARIES_SQL}`)
+      .all("/proj", "") as { detail: string }[];
+    const details = plan.map((r) => r.detail);
+
+    // The count's own subquery must ride the partial index.
+    expect(details.some((d) => d.includes("idx_chat_messages_user_text"))).toBe(
+      true,
+    );
+    // And nothing in this query may fall back to a bare table scan of
+    // chat_messages — that is the exact shape the index exists to remove.
+    expect(details.some((d) => /SCAN chat_messages\b(?! USING)/.test(d))).toBe(
+      false,
+    );
+  });
+
+  it("summariesForFolder: creation order wins over updated_at, and ties fall back to insertion order", () => {
+    setZerosDbPathForTesting(tmpDbFile());
+    const um = (id: string) => ({
+      msgId: id,
+      kind: "text",
+      payload: JSON.stringify({ id, kind: "text", role: "user", text: "q" }),
+      createdAt: 1,
+    });
+
+    // `updated_at` order deliberately CONTRADICTS creation order. It used to be
+    // the sort key and it is not activity: it moves when an AI title lands or
+    // a setting is written, and never when a message is persisted.
+    upsertChat(
+      makeChat("old", { folder: "/p2", createdAt: 100, updatedAt: 999 }),
+    );
+    upsertChat(
+      makeChat("new", { folder: "/p2", createdAt: 200, updatedAt: 1 }),
+    );
+    upsertChatMessagesBulk("old", [um("o1")]);
+    upsertChatMessagesBulk("new", [um("n1")]);
+    expect(summariesForFolder("/p2").map((r) => r.chatId)).toEqual([
+      "new",
+      "old",
+    ]);
+
+    // Legacy / coerced rows collapse to createdAt 0 (coerceChatRow defaults a
+    // missing createdAt to 0, and the column has no NOT NULL). Without the
+    // rowid tiebreak these would order arbitrarily and could differ per call.
+    setZerosDbPathForTesting(tmpDbFile());
+    upsertChat(makeChat("t1", { folder: "/p3", createdAt: 0 }));
+    upsertChat(makeChat("t2", { folder: "/p3", createdAt: 0 }));
+    upsertChat(makeChat("t3", { folder: "/p3", createdAt: 0 }));
+    upsertChatMessagesBulk("t1", [um("x1")]);
+    upsertChatMessagesBulk("t2", [um("x2")]);
+    upsertChatMessagesBulk("t3", [um("x3")]);
+    const first = summariesForFolder("/p3").map((r) => r.chatId);
+    // Insertion order, newest first — and stable across repeat calls.
+    expect(first).toEqual(["t3", "t2", "t1"]);
+    expect(summariesForFolder("/p3").map((r) => r.chatId)).toEqual(first);
   });
 
   it("delta sync: global rev is monotonic; pull returns only changes + deletions since a cursor", () => {

@@ -34,6 +34,7 @@ import React, {
 import {
   ClipboardList,
   Columns2,
+  Copy,
   Ellipsis,
   MessageCircleQuestionMark,
   Pencil,
@@ -71,6 +72,8 @@ import { ZerosSpinner } from "@/loaders";
 import { useTerminalBusy } from "./terminal/terminal-activity";
 import { Column2ChatHistoryMenu } from "./column2-chat-history-menu";
 import { Column2NewChatMenu } from "./column2-new-chat-menu";
+import { copyChatTranscript } from "./copy-chat-transcript";
+import type { TranscriptMode } from "../zeros/agent/transcript-format";
 import {
   CHAT_TAB_DRAG_MIME,
   armTabDrag,
@@ -653,6 +656,18 @@ function TabRow({
     setRenaming(false);
   }, [chat.title]);
 
+  // Copy this tab's transcript. The action reads the FULL transcript from the
+  // engine, so it works on a background tab whose slot was never hydrated.
+  const copyTranscript = useCallback(
+    (mode: TranscriptMode) =>
+      copyChatTranscript(chat.id, mode, {
+        title: chat.title,
+        folder: chat.folder,
+        exportedAt: Date.now(),
+      }),
+    [chat.id, chat.title, chat.folder],
+  );
+
   // Enter inline-rename mode and focus the input (survives the context
   // menu close — see overlay-focus.ts notes in the original).
   const beginRename = useCallback(() => {
@@ -835,6 +850,20 @@ function TabRow({
           <Pencil />
           <span>Rename</span>
         </ContextMenuItem>
+        {/* Terminal tabs are PTY-backed and have no agent transcript. */}
+        {!isTerminal && (
+          <>
+            <ContextMenuSeparator className="bg-border3" />
+            <ContextMenuItem onSelect={() => void copyTranscript("concise")}>
+              <ClipboardList />
+              <span>Copy concise transcript</span>
+            </ContextMenuItem>
+            <ContextMenuItem onSelect={() => void copyTranscript("full")}>
+              <Copy />
+              <span>Copy full transcript</span>
+            </ContextMenuItem>
+          </>
+        )}
         <ContextMenuSeparator className="bg-border3" />
         <ContextMenuItem onSelect={() => onClose(chat)}>
           <X />

@@ -251,8 +251,12 @@ export interface UseSettingsLayer {
   loading: boolean;
   error: string | null;
   refresh: () => void;
-  /** Patch this layer (`null` leaf deletes a key). Resolves once persisted;
-   *  the refreshed document follows via the settings-changed broadcast. */
+  /** Patch this layer (`null` leaf deletes a key). Resolves once persisted; the
+   *  refreshed LAYER document is applied here, and the refreshed RESOLVED tree
+   *  follows a moment later over the settings-changed broadcast, which the
+   *  engine now echoes back to the writer too (dbChangedIncludesOriginator).
+   *  A caller holding optimistic state should therefore yield it when a NEW
+   *  resolved snapshot arrives, not when this promise settles. */
   write: (patch: SettingsDoc) => Promise<void>;
   /** Overwrite this layer's file with RAW TOML text (the "Edit settings.toml"
    *  editor). Validated server-side; rejects unparseable TOML. Desktop-only. */

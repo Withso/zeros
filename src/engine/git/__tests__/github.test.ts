@@ -17,6 +17,7 @@ import {
   getPr,
   getRepositoryOwnerAvatar,
   getWorkspace,
+  getWorkspaceRepoAccess,
   listPrs,
   markPrReady,
   mergePr,
@@ -31,6 +32,9 @@ import {
   updatePr,
   verifyGithubToken,
 } from "..";
+// Not on the barrel: the process-local login cache is an internal hint for
+// branch prefixing, not part of the git layer's public surface.
+import { cachedGithubLogin } from "../github";
 
 const execFileAsync = promisify(execFile);
 
@@ -108,6 +112,12 @@ function makeOctokitMock() {
     type: "Organization",
     avatar_url: "https://avatars.githubusercontent.com/u/123?v=4",
   };
+  let repoPermissions: Record<string, boolean> | undefined = {
+    admin: false,
+    push: true,
+    pull: true,
+  };
+  let repoGetResponse: (() => unknown) | null = null;
   const behindBy = new Map<string, number>();
 
   const fake = {
@@ -214,6 +224,11 @@ function makeOctokitMock() {
         calls.push({ method: "repos.compareCommitsWithBasehead", args });
         return { data: { behind_by: behindBy.get(args.basehead) ?? 0 } };
       },
+      async get(args: { owner: string; repo: string }) {
+        calls.push({ method: "repos.get", args });
+        if (repoGetResponse) return repoGetResponse();
+        return { data: { permissions: repoPermissions } };
+      },
     },
     async graphql(_query: string, _vars: unknown) {
       calls.push({ method: "graphql", args: _vars });
@@ -239,6 +254,12 @@ function makeOctokitMock() {
     },
     setRepoOwner(owner: typeof repositoryOwner) {
       repositoryOwner = owner;
+    },
+    setRepoPermissions(permissions: Record<string, boolean> | undefined) {
+      repoPermissions = permissions;
+    },
+    setRepoGetResponse(fn: (() => unknown) | null) {
+      repoGetResponse = fn;
     },
     prCount() {
       return prs.size;
@@ -375,6 +396,44 @@ describe("github", () => {
   });
 
   describe("detectGhCli", () => {
+    it("borrows the stored github.com login instead of inherited token overrides", async () => {
+      const originalGhToken = process.env.GH_TOKEN;
+      const originalGithubToken = process.env.GITHUB_TOKEN;
+      process.env.GH_TOKEN = "stale-launcher-token";
+      process.env.GITHUB_TOKEN = "another-launcher-token";
+      const invocation = vi.fn(
+        async (
+          _command: string,
+          _args: string[],
+          _options?: { env?: Record<string, string | undefined> },
+        ) => ({
+          stdout: "stored-gh-token\n",
+          stderr: "",
+        }),
+      );
+      setRunFileForTesting(invocation);
+
+      try {
+        await detectGhCli();
+      } finally {
+        if (originalGhToken === undefined) delete process.env.GH_TOKEN;
+        else process.env.GH_TOKEN = originalGhToken;
+        if (originalGithubToken === undefined) delete process.env.GITHUB_TOKEN;
+        else process.env.GITHUB_TOKEN = originalGithubToken;
+      }
+
+      expect(invocation).toHaveBeenCalledWith(
+        "gh",
+        ["auth", "token", "--hostname", "github.com"],
+        expect.objectContaining({
+          env: expect.not.objectContaining({
+            GH_TOKEN: expect.anything(),
+            GITHUB_TOKEN: expect.anything(),
+          }),
+        }),
+      );
+    });
+
     it("is a pure probe and does not replace the active token", async () => {
       store.setToken("existing-pat");
       setRunFileForTesting(async () => ({
@@ -634,6 +693,103 @@ describe("github", () => {
         },
       });
       expect(await store.store.get()).toBe("github_pat_partial_sso");
+    });
+  });
+
+  // The preflight the Create PR control runs before it refuses for any other
+  // reason, and before it spends an agent turn. Its whole job is to separate
+  // "not signed in" from "signed in, but this repository is out of reach" —
+  // two states GitHub reports identically.
+  describe("getWorkspaceRepoAccess", () => {
+    it("confirms a repository the connection can push to", async () => {
+      store.setToken("ghp_test_token");
+      await expect(getWorkspaceRepoAccess(workspaceId)).resolves.toEqual({
+        state: "ok",
+        connected: true,
+      });
+    });
+
+    it("blocks with connected=false when nothing is signed in", async () => {
+      store.setToken(null);
+      await expect(getWorkspaceRepoAccess(workspaceId)).resolves.toMatchObject({
+        state: "blocked",
+        connected: false,
+        code: "NOT_AUTHENTICATED",
+      });
+    });
+
+    // The reported case: a GitHub App whose installation covers some other
+    // repository. GitHub answers 404, and the caller must be able to say so
+    // rather than ask an already-connected user to connect GitHub.
+    it("reports a repository outside the connection's reach as connected", async () => {
+      store.setToken("ghp_test_token");
+      mock.setRepoGetResponse(() => {
+        throw makeGithubError(404, "Not Found");
+      });
+      await expect(getWorkspaceRepoAccess(workspaceId)).resolves.toMatchObject({
+        state: "blocked",
+        connected: true,
+        code: "GITHUB_REPO_NOT_INSTALLED",
+      });
+    });
+
+    it("blocks read-only access, which cannot push a PR branch", async () => {
+      store.setToken("ghp_test_token");
+      mock.setRepoPermissions({ admin: false, push: false, pull: true });
+      await expect(getWorkspaceRepoAccess(workspaceId)).resolves.toMatchObject({
+        state: "blocked",
+        connected: true,
+        code: "GITHUB_FORBIDDEN_SCOPE",
+      });
+    });
+
+    // `push: true` is not a guarantee (an App installation can hold narrower
+    // `contents` permission than the user who authorized it), and a probe that
+    // may only remove a WRONG message must never remove a possible PR.
+    it("never blocks on an absent permissions block", async () => {
+      store.setToken("ghp_test_token");
+      mock.setRepoPermissions(undefined);
+      await expect(getWorkspaceRepoAccess(workspaceId)).resolves.toMatchObject({
+        state: "ok",
+      });
+    });
+
+    it("stays indeterminate when the probe itself fails", async () => {
+      store.setToken("ghp_test_token");
+      for (const failure of [
+        () => {
+          throw makeGithubError(403, "API rate limit exceeded");
+        },
+        () => {
+          throw makeGithubError(500, "Server Error");
+        },
+        () => {
+          throw Object.assign(new Error("getaddrinfo ENOTFOUND"), {
+            code: "ENOTFOUND",
+          });
+        },
+      ]) {
+        mock.setRepoGetResponse(failure);
+        await expect(
+          getWorkspaceRepoAccess(workspaceId),
+        ).resolves.toMatchObject({ state: "unknown", connected: true });
+      }
+    });
+
+    it("blocks on a repository with no GitHub remote at all", async () => {
+      store.setToken("ghp_test_token");
+      await execFileAsync("git", ["remote", "remove", "origin"], {
+        cwd: repoRoot,
+      });
+      const access = await getWorkspaceRepoAccess(workspaceId);
+      expect(access).toMatchObject({
+        state: "blocked",
+        connected: true,
+        code: "VALIDATION_FAILED",
+      });
+      // Reconnecting GitHub cannot fix a missing remote, so the caller must be
+      // able to tell this apart from the credential-shaped refusals.
+      expect(access.code).not.toBe("NOT_AUTHENTICATED");
     });
   });
 
@@ -1022,6 +1178,38 @@ describe("github", () => {
       expect(refreshAfterRejection).toHaveBeenCalledOnce();
       expect(clear).not.toHaveBeenCalled();
       expect(token).toBe("rejected-app-token");
+    });
+
+    // The remembered login is what resolveNewBranchPrefix stamps onto every
+    // new workspace branch under `branch_prefix_type = "github"`. A background
+    // gh.* call is the only credential clear most users ever hit, so leaving
+    // the login behind means every workspace created after a revoked token
+    // carries a disconnected account's name — and a created branch is
+    // permanent, where falling back to `zeros/` is not.
+    it("forgets the remembered login when a background call's credential is rejected", async () => {
+      store.setToken("ghp_will_be_revoked");
+      mock.setUser({ login: "octo-user" });
+      await getAuthStatus();
+      expect(cachedGithubLogin()).toBe("octo-user");
+
+      setOctokitFactoryForTesting(
+        () =>
+          ({
+            ...mock.octokit,
+            pulls: {
+              ...mock.octokit.pulls,
+              async list() {
+                throw makeGithubError(401, "Bad credentials");
+              },
+            },
+          }) as never,
+      );
+
+      await expect(
+        listPrs({ owner: "Acme", repo: "example", state: "open" }),
+      ).rejects.toMatchObject({ code: "NOT_AUTHENTICATED" });
+      expect(await store.store.get()).toBeNull();
+      expect(cachedGithubLogin()).toBeNull();
     });
   });
 

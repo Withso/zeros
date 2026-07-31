@@ -13,7 +13,7 @@ import { allocateWorkspaceBranch, getWorkspace } from "./worktree";
 import { assertSafeGitRef, runGit } from "./git-exec";
 import { resolveRepoGit } from "../settings/repo-git";
 import { GitError } from "./errors";
-import { isValidBranchName } from "./naming";
+import { branchDisplayName, isValidBranchName } from "./naming";
 import { updateWorkspace } from "./state";
 import type { Branch } from "./types";
 
@@ -108,6 +108,41 @@ export async function listRemoteBranches(
   return out;
 }
 
+/** The namespace a workspace's branch currently sits under — separator
+ *  included, so a rename can move it WITHIN that namespace — or `""` when the
+ *  branch has none.
+ *
+ *  Everything up to the LAST `/`, deliberately not branchDisplayName's
+ *  boundary. branchDisplayName only concedes a prefix when the tail is
+ *  allocator-shaped, which is right for labelling (a user's `feature/plain`
+ *  keeps its namespace as identity) but wrong here for two reasons:
+ *
+ *    • a branch renamed ONCE no longer has a colour-shaped tail, so a SECOND
+ *      rename of `jordan/add-canvas-zoom` found no prefix and silently
+ *      published a bare `login-fix`;
+ *    • an adopted `cursor/foo` lost its namespace on its first rename, for the
+ *      same reason.
+ *
+ *  Renaming is a different question from labelling: whatever the tail looks
+ *  like, `<namespace>/<name>` is the shape of the ref and a rename replaces
+ *  only `<name>`.
+ *
+ *  A branch with no slash simply has no namespace, and this returns `""`.
+ *
+ *  It briefly consulted the SETTING instead, to recover a prefix from a branch
+ *  where the string carries no boundary. That was wrong twice over. The shape
+ *  it was written for (`myname-Cream`, from a custom prefix spliced in
+ *  verbatim) has never existed in a shipped build — the released allocator only
+ *  ever emitted `zeros/<Colour>` — and the `startsWith` test it used matches
+ *  any coincidence: with the DEFAULT setting, an adopted branch named
+ *  `zeros-experiment` starts with `zeros`, so renaming it produced the
+ *  run-together `zerosadd-canvas-zoom`. A namespace is a slash-delimited thing;
+ *  guessing one from a substring match creates refs nobody asked for. */
+function resolveExistingBranchPrefix(ws: { branch: string }): string {
+  const cut = ws.branch.lastIndexOf("/");
+  return cut === -1 ? "" : ws.branch.slice(0, cut + 1);
+}
+
 export interface RenameBranchOptions {
   workspaceId: string;
   newName: string;
@@ -118,8 +153,16 @@ export interface RenameBranchOptions {
  *
  *  We validate `newName` against the same strict regex used for
  *  agent-proposed renames — keeps the surface uniform whether the
- *  rename came from a UI form or from the background-rename hook. */
-export async function renameBranch(opts: RenameBranchOptions): Promise<void> {
+ *  rename came from a UI form or from the background-rename hook.
+ *
+ *  Returns the RESULTING branch (unchanged on a no-op). Callers must not
+ *  reconstruct it: the prefix comes from the workspace's existing branch, so
+ *  `newName` alone doesn't determine the answer — and the renderer's inline
+ *  rename box guessed `zeros/<name>` for years, which was wrong for every
+ *  workspace on any other prefix. */
+export async function renameBranch(
+  opts: RenameBranchOptions,
+): Promise<string> {
   const ws = getWorkspace(opts.workspaceId);
   if (!opts.newName || typeof opts.newName !== "string") {
     throw new GitError({
@@ -127,11 +170,33 @@ export async function renameBranch(opts: RenameBranchOptions): Promise<void> {
       message: "renameBranch: 'newName' must be a non-empty string",
     });
   }
-  // Strip a "zeros/" prefix if the caller included one — the validator
-  // only allows the unprefixed slug, and we prepend zeros/ ourselves.
-  const slug = opts.newName.startsWith("zeros/")
-    ? opts.newName.slice("zeros/".length)
-    : opts.newName;
+  // The prefix ALWAYS comes from the existing branch — never from `newName`,
+  // even when the caller supplied a prefixed ref. `newName` is untrusted (the
+  // inline rename box, and `git.renameBranch` is remote-reachable) and lands as
+  // a `git branch -m` argument. Honouring a caller-supplied prefix let
+  // `--force/Login` through: branchDisplayName strips any TitleCase-tailed
+  // prefix, so the slug validated clean as `Login` while the raw string was
+  // passed to git. Rebuilding the ref from a validated slug plus the
+  // workspace's own prefix means no caller-controlled substring survives.
+  //
+  // Re-prefixing with THIS workspace's prefix rather than the global default is
+  // the other half: a rename moves a branch, it does not re-home it. Renaming
+  // `jordan/Cream` used to hand back `zeros/add-canvas-zoom`, silently dropping
+  // the user's configured namespace. Derived from the existing branch, so it
+  // stays correct even if the setting changed since the workspace was created.
+  const currentPrefix = resolveExistingBranchPrefix(ws);
+  // The caller may pass either the bare slug or an already-prefixed ref, and
+  // the validator only accepts the bare slug — so peel first. This workspace's
+  // OWN prefix leads: branchDisplayName recognises a prefix only when the tail
+  // is allocator-shaped, so a caller echoing back a ref this function itself
+  // produced (`jordan/add-canvas-zoom` — already renamed once, so no longer a
+  // colour name) failed validation on the slash it had just been handed. Note
+  // this widens what parses, not what is trusted: whatever is peeled here is
+  // discarded, and `target` below is rebuilt from `currentPrefix`.
+  const slug =
+    currentPrefix && opts.newName.startsWith(currentPrefix)
+      ? opts.newName.slice(currentPrefix.length)
+      : branchDisplayName(opts.newName);
   if (!isValidBranchName(slug)) {
     throw new GitError({
       code: "VALIDATION_FAILED",
@@ -140,14 +205,17 @@ export async function renameBranch(opts: RenameBranchOptions): Promise<void> {
         "Use 3-49 characters: letters, digits, and hyphens. Must start with a letter.",
     });
   }
-  const target = opts.newName.startsWith("zeros/")
-    ? opts.newName
-    : `zeros/${slug}`;
+  const target = `${currentPrefix}${slug}`;
+  // Defence in depth for the prefix half (the slug half is isValidBranchName'd
+  // above): it came from an existing row, but a row can be written by a paired
+  // device. createOwnedBranch guards its own refs the same way.
+  assertSafeGitRef(target, "renameBranch.target");
   if (target === ws.branch) {
-    return; // No-op rename.
+    return target; // No-op rename.
   }
   await runGit(ws.path, ["branch", "-m", target]);
   updateWorkspace(opts.workspaceId, { branch: target });
+  return target;
 }
 
 export interface CheckoutBranchOptions {

@@ -31,6 +31,7 @@ import {
   CommandItem,
   CommandList,
 } from "../ui/primitives/command";
+import { branchDisplayName } from "../lib/branch-name";
 import { cn } from "../ui/cn";
 import { dialogPickFolder, workspaceList, type Workspace } from "../../native/git";
 import { useProjects } from "../store/use-projects";
@@ -61,11 +62,12 @@ function baseName(p: string): string {
   return parts.length > 0 ? parts[parts.length - 1] : p;
 }
 
-/** A worktree's primary label: its branch, with the Zeros `zeros/` prefix
- *  stripped (matches the sidebar's WorkspaceRow). */
-function branchLabel(branch: string): string {
-  return branch.startsWith("zeros/") ? branch.slice("zeros/".length) : branch;
-}
+/** A worktree's primary label: its branch with the workspace prefix stripped
+ *  (matches the sidebar's WorkspaceRow). Shared branchDisplayName rather than a
+ *  private `zeros/` literal — Settings → Git made the prefix a choice, and an
+ *  inlined strip left `jordan/Cream` labelled with its whole ref here while
+ *  every other surface showed `Cream`. */
+const branchLabel = branchDisplayName;
 
 export function WorkspaceDirectoryPicker({
   open,

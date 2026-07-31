@@ -71,4 +71,45 @@ describe("GitHub PAT undo store", () => {
     expect(store.take(first.id)).toBeNull();
     expect(store.take(second.id)?.credential.accessToken).toBe("new-secret");
   });
+
+  it("can put a consumed handle back after a failed keychain restore", () => {
+    const store = new GithubPatUndoStore({
+      now: () => 1_000,
+      randomId: () => "opaque-handle",
+    });
+    store.stash(credential, true);
+    const pending = store.take("opaque-handle");
+
+    expect(pending).not.toBeNull();
+    expect(store.restore(pending!)).toBe(true);
+    expect(store.take("opaque-handle")).toEqual(
+      expect.objectContaining({
+        id: "opaque-handle",
+        credential,
+        wasSelected: true,
+        expiresAtMs: 11_000,
+      }),
+    );
+  });
+
+  it("never overwrites a newer undo or revives an expired one", () => {
+    let now = 1_000;
+    let sequence = 0;
+    const store = new GithubPatUndoStore({
+      now: () => now,
+      randomId: () => `handle-${++sequence}`,
+    });
+    const firstHandle = store.stash(credential, false);
+    const first = store.take(firstHandle.id)!;
+    const second = store.stash(
+      { ...credential, accessToken: "new-secret" },
+      true,
+    );
+
+    expect(store.restore(first)).toBe(false);
+    expect(store.take(second.id)?.credential.accessToken).toBe("new-secret");
+
+    now = first.expiresAtMs + 1;
+    expect(store.restore(first)).toBe(false);
+  });
 });

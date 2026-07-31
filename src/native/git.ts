@@ -51,12 +51,14 @@ import {
   bridgeGhPrCommits,
   bridgeGhPrReviews,
   bridgeGhPrCreate,
+  bridgeGhRepoAccess,
   bridgeGhRepositoryOwnerAvatar,
   bridgeGhListOwners,
   bridgeGhCheckRepoName,
   bridgeGhPublishRepo,
   bridgeGitInitInPlace,
   type GithubOwner,
+  type GithubRepoAccess,
   type GithubRepositoryOwnerAvatar,
   type PublishRepoResult,
   type InitRepoInPlaceResult,
@@ -97,6 +99,7 @@ import { isKnownProjectRoot } from "../zeros/store/projects-store";
 // native/git façade rather than reaching into the bridge module.
 export type {
   GithubOwner,
+  GithubRepoAccess,
   GithubRepositoryOwnerAvatar,
   InitRepoInPlaceResult,
   PublishRepoResult,
@@ -538,6 +541,10 @@ export async function workspaceSetupInfo(args: {
   workspaceId: string;
   repoRoot?: string;
   statusOnly?: boolean;
+  /** Keep `hasCommand`/`state` but drop the log payload — for pollers that
+   *  need to distinguish "no setup configured" from "setup ran" and never
+   *  render the output. */
+  omitLog?: boolean;
 }): Promise<WorkspaceSetupInfo> {
   return bridgeWorkspaceSetupInfo(
     requireBridge("read setup output"),
@@ -978,11 +985,13 @@ export async function gitRepoBranchCatalog(args: {
   );
 }
 
+/** Resolves to the RESULTING branch (prefix included), or null when the engine
+ *  didn't report one. Don't rebuild it from `newName` — see renameBranch. */
 export async function gitRenameBranch(args: {
   workspaceId: string;
   newName: string;
-}): Promise<void> {
-  await bridgeGitRenameBranch(requireBridge("rename the Git branch"), args);
+}): Promise<string | null> {
+  return bridgeGitRenameBranch(requireBridge("rename the Git branch"), args);
 }
 
 export async function gitStage(args: {
@@ -1217,6 +1226,25 @@ export async function ghPrCreate(args: {
   draft?: boolean;
 }): Promise<PR> {
   return bridgeGhPrCreate(requireBridge("create the pull request"), args);
+}
+
+/** Can the selected GitHub connection open a pull request on this workspace's
+ *  remote? The Create PR control runs this BEFORE it refuses for any other
+ *  reason and before it spends an agent turn.
+ *
+ *  Deliberately never rejects: this exists to pick the right message, so a
+ *  missing bridge or a failed request resolves to `unknown` — "we could not
+ *  find out", which callers must treat as "carry on", never as "blocked". */
+export async function ghRepoAccess(
+  workspaceId: string,
+): Promise<GithubRepoAccess> {
+  const bridge = getActiveBridge();
+  if (!bridge) return { state: "unknown" };
+  try {
+    return await bridgeGhRepoAccess(bridge, workspaceId);
+  } catch {
+    return { state: "unknown" };
+  }
 }
 
 // ── Publish to GitHub (desktop-only) ─────────────────────

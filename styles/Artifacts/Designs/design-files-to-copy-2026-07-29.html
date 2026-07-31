@@ -497,44 +497,14 @@
         border-bottom: 1px solid var(--border1);
         background: var(--bg1-highlight);
       }
-      .gicon {
-        display: inline-grid;
-        width: 19px;
-        height: 19px;
-        flex: none;
-        place-items: center;
-        border-radius: var(--radius-sm);
-      }
-      .gicon svg {
-        width: 11px;
-        height: 11px;
-      }
-      .gicon.env {
-        background: var(--green-bg);
-        color: var(--green-fg);
-      }
-      .gicon.cfg {
-        background: var(--blue-bg);
-        color: var(--blue-fg);
-      }
-      .gicon.other {
-        background: var(--bg2);
-        color: var(--fg3);
-      }
       .gname {
         font-size: 12px;
         font-weight: 600;
       }
-      .gmeta {
-        margin-left: auto;
-        color: var(--fg3);
-        font-size: 11px;
-        font-variant-numeric: tabular-nums;
-      }
       .grow {
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: 8px;
         padding: 7px 12px;
         border-bottom: 1px solid var(--border1);
       }
@@ -560,12 +530,42 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      .fsz {
+
+      /* ── Tree ──
+         One indent spacer, one chevron column, one icon column. Every name in
+         the list starts at the same x whether or not the row beside it opens,
+         so expanding a folder never shifts the column its children land in. */
+      .tind {
         flex: none;
-        margin-left: auto;
+      }
+      .tind.d1 {
+        width: 16px;
+      }
+      .tind.d2 {
+        width: 32px;
+      }
+      .tind.d3 {
+        width: 48px;
+      }
+      .chev {
+        flex: none;
+        width: 12px;
+        height: 12px;
         color: var(--fg3);
-        font-size: 10.5px;
-        font-variant-numeric: tabular-nums;
+        transition: transform 0.12s ease;
+      }
+      .chev.open {
+        transform: rotate(90deg);
+      }
+      .tgap {
+        flex: none;
+        width: 12px;
+      }
+      .ticon {
+        flex: none;
+        width: 12px;
+        height: 12px;
+        color: var(--fg3);
       }
 
       /* checkbox */
@@ -594,41 +594,29 @@
       .cb.dis {
         border-color: var(--border2);
       }
-
-      /* status pills on a row */
-      .rpill {
-        flex: none;
-        padding: 1px 7px;
-        border-radius: 999px;
-        font-size: 10px;
-        font-weight: 600;
-        white-space: nowrap;
+      /* Mixed — a folder some of whose contents are ticked. The state that
+         tells you there is something worth opening. */
+      .cb.mixed {
+        border-color: var(--inverted-bg);
+        background: var(--inverted-bg);
+        color: var(--inverted-fg);
       }
-      .rpill.warn {
-        background: var(--yellow-bg);
-        color: var(--yellow-fg);
-      }
-      .rpill.info {
-        background: var(--bg2);
-        color: var(--fg3);
-      }
-      .rpill.err {
-        background: var(--red-bg);
-        color: var(--red-fg);
-      }
-      .rpill.ok {
-        background: var(--green-bg);
-        color: var(--green-fg);
+      .cb.mixed::after {
+        width: 7px;
+        height: 2px;
+        border-radius: 1px;
+        background: currentColor;
+        content: "";
       }
 
       /* ── Summary bar ── */
+      /* No rule above and none below. The sentence belongs to the list it is
+         counting; two hairlines made it read as a third region of the pane. */
       .sum {
         display: flex;
         align-items: center;
         gap: 10px;
-        margin-top: 13px;
-        padding-top: 12px;
-        border-top: 1px solid var(--border1);
+        margin-top: 12px;
       }
       .sum-txt {
         color: var(--fg2);
@@ -662,6 +650,15 @@
       .btn.right {
         margin-left: auto;
       }
+      /* Icon only. The word "Rescan" sat beside an icon that already says it,
+         in a row whose job is the sentence to its left. */
+      .btn.icon {
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        justify-content: center;
+        border-color: transparent;
+      }
       .btn.primary {
         border-color: transparent;
         background: var(--inverted-bg);
@@ -674,28 +671,11 @@
       }
 
       /* ── Advanced disclosure + pattern editor ── */
+      /* The pattern editor. No rule above it and no disclosure over it: it used
+         to hide behind "Advanced — use file patterns instead", which is a fair
+         description of the box and a poor way to find it. */
       .adv {
-        margin-top: 13px;
-        padding-top: 12px;
-        border-top: 1px solid var(--border1);
-      }
-      .adv-head {
-        display: flex;
-        align-items: center;
-        gap: 7px;
-        color: var(--fg2);
-        font-size: 12px;
-        user-select: none;
-      }
-      .adv-head svg {
-        width: 11px;
-        height: 11px;
-      }
-      .adv-head.open {
-        color: var(--fg1);
-      }
-      .adv-head.open svg {
-        transform: rotate(90deg);
+        margin-top: 14px;
       }
       .ta {
         width: 100%;
@@ -710,6 +690,37 @@
       }
       .ta.focus {
         border-color: var(--highlighted-bright);
+      }
+      .tabox {
+        overflow: hidden;
+        margin-top: 10px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-sm);
+      }
+      .tadesc {
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--border1);
+        background: var(--bg1);
+        color: var(--fg2);
+        font-size: 12px;
+      }
+      .tabody {
+        display: flex;
+        min-height: 30px;
+        color: var(--fg1);
+        font: 11.5px/1.75 var(--mono);
+        white-space: pre;
+      }
+      .tabody .ln {
+        width: 30px;
+        flex: none;
+        padding: 5px 8px 5px 0;
+        border-right: 1px solid var(--border1);
+        color: var(--fg3);
+        text-align: right;
+      }
+      .tabody .src {
+        padding: 5px 10px;
       }
       .patlist {
         display: flex;
@@ -785,10 +796,6 @@
         background: color-mix(in srgb, var(--blue-primary) 10%, transparent);
         color: var(--blue-fg);
       }
-      .ban.warn {
-        background: color-mix(in srgb, var(--yellow-primary) 12%, transparent);
-        color: var(--yellow-fg);
-      }
       .ban .lnk {
         flex: none;
         align-self: center;
@@ -800,12 +807,81 @@
         text-decoration: underline;
         text-underline-offset: 3px;
       }
-      /* Bottom-anchored inline toast: sits under the list it is talking about,
-         at the edge of the pane, so it never pushes the content the user came
-         to read. */
-      .ban.toast {
-        margin-top: 12px;
-        margin-bottom: 0;
+      /* ── The global toast (sonner) ──
+         The only transient feedback this pane produces. It is NOT part of the
+         pane: it is a fixed 350px card at the bottom-right of the window,
+         painted by src/zeros/ui/primitives/elements/toast.tsx. Reproduced here
+         because the pane's inline yellow callouts were retired and this is
+         what is left. */
+      .toast-stage {
+        display: flex;
+        max-width: 620px;
+        min-height: 120px;
+        margin-left: auto;
+        flex-direction: column;
+        gap: 10px;
+        justify-content: flex-end;
+        align-items: flex-end;
+        padding: 24px;
+        border: 1px dashed var(--border2);
+        border-radius: var(--radius-lg);
+        background: var(--bg1-highlight);
+      }
+      .tcard {
+        position: relative;
+        display: flex;
+        width: 350px;
+        gap: 12px;
+        align-items: flex-start;
+        padding: 14px 16px;
+        border-radius: var(--radius-lg);
+        background: var(--bg1);
+        box-shadow: var(--shadow);
+        font-size: 13px;
+        color: var(--fg1);
+      }
+      .tcard .tclose {
+        position: absolute;
+        top: -8px;
+        left: -8px;
+        display: inline-flex;
+        width: 20px;
+        height: 20px;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: var(--bg1);
+        color: var(--fg1);
+      }
+      .tcard .tclose svg {
+        width: 11px;
+        height: 11px;
+      }
+      .tcard .ticon-lg {
+        flex: none;
+        width: 16px;
+        height: 16px;
+        margin-top: 2px;
+      }
+      .tcard .ticon-lg.err {
+        color: var(--red-primary);
+      }
+      .tcard .ticon-lg.warn {
+        color: var(--yellow-primary);
+      }
+      .tcard .ticon-lg.ok {
+        color: var(--green-primary);
+      }
+      .tcard .tmsg {
+        font-weight: 500;
+        line-height: 1.35;
+      }
+      .tcard .tdesc {
+        margin-top: 2px;
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.45;
       }
       .stale {
         opacity: 0.5;
@@ -1071,26 +1147,8 @@
         <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round">
           <path d="m5 13 4 4L19 7" />
         </symbol>
-        <symbol id="i-key" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="7.5" cy="15.5" r="4.5" />
-          <path d="m10.7 12.3 8.3-8.3M17 6l2.5 2.5M14.5 8.5 17 11" />
-        </symbol>
-        <symbol id="i-sliders" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h10M18 18h2" />
-          <circle cx="16" cy="6" r="2" />
-          <circle cx="10" cy="12" r="2" />
-          <circle cx="16" cy="18" r="2" />
-        </symbol>
-        <symbol id="i-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-          <path d="M14 2v6h6" />
-        </symbol>
         <symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
           <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-        </symbol>
-        <symbol id="i-folder-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-          <path d="m10 12 5 5m0-5-5 5" />
         </symbol>
         <symbol id="i-rotate" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M21 12a9 9 0 1 1-3-6.7L21 8" />
@@ -1112,6 +1170,12 @@
         </symbol>
         <symbol id="i-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <path d="M5 12h14M13 6l6 6-6 6" />
+        </symbol>
+        <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 6 6 18M6 6l12 12" />
+        </symbol>
+        <symbol id="i-circle-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10" /><path d="m15 9-6 6M9 9l6 6" />
         </symbol>
         <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="4" />
@@ -1141,7 +1205,7 @@
           </button>
           <div class="summary-chip">
             <strong>Show the files, not the syntax</strong>
-            <span>Patterns stay — one click away, for people who want them.</span>
+            <span>Patterns stay — right under the list, for people who want them.</span>
           </div>
         </div>
       </header>
@@ -1151,14 +1215,15 @@
           <h3>The answer is already on screen</h3>
           <p>
             The pane opens having already scanned the project. You tick real files
-            you can see, with their sizes — you never type a pattern and hope.
+            you can see — you never type a pattern and hope.
           </p>
         </div>
         <div class="thesis-card">
-          <h3>Every risky row says so</h3>
+          <h3>The files are the content</h3>
           <p>
-            “Only pick gitignored, untracked files” stops being a rule to remember.
-            Not-ignored, already-tracked and matches-nothing are labels on the row.
+            No group taxonomy, no item counts, no sizes, no row badges. Folders,
+            closed, with names in them. Everything else was the pane talking about
+            itself.
           </p>
         </div>
         <div class="thesis-card">
@@ -1173,17 +1238,19 @@
       <nav aria-label="Cases">
         <a href="#a0">A0 · Why it exists</a>
         <a href="#a1">A1 · The pane</a>
-        <a href="#a2">A2 · Rows that warn</a>
-        <a href="#a3">A3 · Advanced patterns</a>
+        <a href="#a2">A2 · Folders</a>
+        <a href="#a3">A3 · Patterns</a>
+        <a href="#a4">A4 · Phantom counts</a>
         <span class="nav-sep"></span>
         <a href="#b1">B1 · Textarea → checklist</a>
         <a href="#b2">B2 · .worktreeinclude</a>
         <a href="#b3">B3 · Silent typo</a>
         <span class="nav-sep"></span>
         <a href="#c1">C1 · Nothing to copy</a>
-        <a href="#c2">C2 · Too much</a>
+        <a href="#c2">C2 · A lot selected</a>
         <a href="#c3">C3 · Scanning</a>
         <a href="#c4">C4 · Can’t read</a>
+        <a href="#c5">C5 · Toasts</a>
         <span class="nav-sep"></span>
         <a href="#d1">D1 · Where it’s stored</a>
         <a href="#d2">D2 · Backend shape</a>
@@ -1261,16 +1328,16 @@
               </div>
               <h2>The default state — nothing configured yet</h2>
               <p class="case-copy">
-                The pane has already scanned the project and lists the ignored files
-                it found, grouped, with sizes. Environment and tool config are
-                pre-ticked and marked <b>Recommended</b>; the big, regenerable stuff
-                is listed but off. Most people will read this once and never touch
-                it.
+                The pane has already scanned the project. One heading, one list,
+                closed folders. Nothing is labelled, counted or measured: the
+                question on screen is “does this file need to come along”, and a
+                size, a badge and an item count are three answers to questions
+                nobody asked. Most people will read this once and never touch it.
               </p>
             </div>
             <div class="meta">
-              Sizes are load-bearing — they are what stops someone ticking a 2.1 MB
-              coverage report.
+              Seven rows for what a flat list drew as twenty-four — the same repo,
+              folded back into the folders it actually is.
             </div>
           </div>
 
@@ -1292,77 +1359,71 @@
                 <svg><use href="#i-copy" /></svg>Files to copy
               </h3>
               <p class="pane-desc">
-                New workspaces only contain files Git tracks. Tick the ignored files
-                Zeros should copy in from your main folder so the project runs
-                straight away.
+                New workspaces only contain files Git tracks. Pick the ignored files
+                to copy in from Zeros so a new workspace runs straight away.
               </p>
 
               <div class="grp">
                 <div class="ghead">
-                  <span class="gicon env"><svg><use href="#i-key" /></svg></span>
-                  <span class="gname">Environment &amp; secrets</span>
-                  <span class="rpill ok">Recommended</span>
-                  <span class="gmeta">2 files · 1.5 KB</span>
-                </div>
-                <div class="grow">
-                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
-                  <span class="fp">.env</span><span class="fsz">1.4 KB</span>
-                </div>
-                <div class="grow">
-                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
-                  <span class="fp">backend/.env</span><span class="fsz">122 B</span>
-                </div>
-              </div>
-
-              <div class="grp">
-                <div class="ghead">
-                  <span class="gicon cfg"><svg><use href="#i-sliders" /></svg></span>
-                  <span class="gname">Tool &amp; editor config</span>
-                  <span class="rpill ok">Recommended</span>
-                  <span class="gmeta">1 file · 110 B</span>
-                </div>
-                <div class="grow">
-                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
-                  <span class="fp">.mcp.json</span><span class="fsz">110 B</span>
-                </div>
-              </div>
-
-              <div class="grp">
-                <div class="ghead">
-                  <span class="gicon other"><svg><use href="#i-file" /></svg></span>
-                  <span class="gname">Other ignored files</span>
-                  <span class="gmeta">3 files · 2.1 MB</span>
+                  <span class="gname">Git ignored files</span>
                 </div>
                 <div class="grow off">
                   <span class="cb"></span>
-                  <span class="fp">.conductor/settings.local.toml</span
-                  ><span class="fsz">340 B</span>
+                  <svg class="chev"><use href="#i-chevron" /></svg>
+                  <svg class="ticon"><use href="#i-folder" /></svg>
+                  <span class="fp">artifacts/</span>
+                </div>
+                <div class="grow off">
+                  <span class="cb"></span><span class="tgap"></span>
+                  <svg class="ticon"><use href="#i-folder" /></svg>
+                  <span class="fp">coverage/</span>
                 </div>
                 <div class="grow off">
                   <span class="cb"></span>
-                  <span class="fp">coverage/lcov.info</span
-                  ><span class="fsz">2.1 MB</span>
+                  <svg class="chev"><use href="#i-chevron" /></svg>
+                  <svg class="ticon"><use href="#i-folder" /></svg>
+                  <span class="fp">lib/</span>
                 </div>
                 <div class="grow off">
-                  <span class="cb"></span>
-                  <span class="fp">debug.log</span><span class="fsz">18 KB</span>
+                  <span class="cb"></span><span class="tgap"></span>
+                  <svg class="ticon"><use href="#i-folder" /></svg>
+                  <span class="fp">node_modules/</span>
+                </div>
+                <div class="grow off">
+                  <span class="cb"></span><span class="tgap"></span
+                  ><span class="tgap"></span>
+                  <span class="fp">.DS_Store</span>
+                </div>
+                <div class="grow">
+                  <span class="cb on"><svg><use href="#i-check" /></svg></span
+                  ><span class="tgap"></span><span class="tgap"></span>
+                  <span class="fp">.env</span>
+                </div>
+                <div class="grow off">
+                  <span class="cb"></span><span class="tgap"></span
+                  ><span class="tgap"></span>
+                  <span class="fp">.mcp.json</span>
                 </div>
               </div>
 
               <div class="sum">
                 <span class="sum-txt"
-                  ><b>3 files · 1.6 KB</b> will be copied from
+                  ><b>1 file</b> will be copied from
                   <span class="sum-path">~/Documents/Zeros</span></span
                 >
-                <button class="btn right" type="button">
-                  <svg><use href="#i-rotate" /></svg>Rescan
+                <button class="btn icon right" type="button" title="Rescan"
+                  aria-label="Rescan">
+                  <svg><use href="#i-rotate" /></svg>
                 </button>
               </div>
 
               <div class="adv">
-                <div class="adv-head">
-                  <svg><use href="#i-chevron" /></svg>Advanced — use file patterns
-                  instead
+                <div class="tabox">
+                  <div class="tadesc">
+                    One pattern per line, .gitignore syntax. Use ! to take
+                    something back out.
+                  </div>
+                  <div class="tabody"><span class="ln">1</span></div>
                 </div>
               </div>
             </div>
@@ -1373,12 +1434,35 @@
               <b>Pre-ticked, not silently defaulted.</b> The built-in default is
               <code>.env*</code>, and any saved list <i>replaces</i> it. Turning that
               default into visible ticked rows is what stops someone losing their
-              <code>.env</code> the first time they touch this screen.
+              <code>.env</code> the first time they touch this screen — the first
+              tick writes out everything currently matched as explicit lines, so
+              the rows on screen become the rows in the file.
             </div>
             <div class="note">
-              <b>Grouping is derived, not configured.</b> Env / tool-config / other
-              comes from the resolved paths — no taxonomy for the user to learn, and
-              a project with only <code>.env</code> shows one group.
+              <b>The editor is empty on purpose here.</b> It shows <i>this
+              project’s</i> list, and this project has none yet — the tick above
+              comes from the inherited <code>.env*</code>. Pre-filling the box with
+              a default nobody wrote is how the phantom counts in A4 happened;
+              leaving it empty keeps “what I have set” and “what is in effect” from
+              being drawn as the same thing.
+            </div>
+            <div class="note fix">
+              <b>One heading, no taxonomy.</b> These were three cards —
+              <i>Environment &amp; secrets</i>, <i>Tool &amp; editor config</i>,
+              <i>Other ignored files</i> — each with a coloured glyph, a
+              <b>Recommended</b> pill and an item count. Every one of them was the
+              pane talking about itself. The files are the content.
+            </div>
+            <div class="note">
+              <b>No sizes.</b> They were argued for as the thing that stops someone
+              ticking a 2.1&nbsp;MB coverage report. In practice they put a
+              right-aligned number on every row — and an em-dash on every folder,
+              because a collapsed directory is never walked — to inform a decision
+              that <code>node_modules/</code> already announces by name.
+            </div>
+            <div class="note">
+              <b>Folders first, then files, alphabetical.</b> Fixed, so the list
+              never reshuffles as a scan lands.
             </div>
           </div>
         </section>
@@ -1391,68 +1475,139 @@
                 <span class="case-number">A2</span>
                 <span class="tag new">Proposed</span>
               </div>
-              <h2>Rows that need a warning</h2>
+              <h2>Folders, and the one rule that makes closing them safe</h2>
               <p class="case-copy">
-                Three states the backend can detect and a plain textarea can never
-                surface. This is where “only enter gitignored, untracked files”
-                stops being a rule the user has to hold in their head.
+                Git hands us a flat list —
+                <code>lib/api-zod/node_modules/</code>,
+                <code>lib/db/node_modules/</code>,
+                <code>artifacts/zdocs/dist/</code> — which is two or three real
+                directories wearing two dozen rows. Closing them is obvious. What
+                is not obvious is what happens to a file you already ticked.
               </p>
             </div>
             <div class="meta">
-              Each pill maps to one field on the preview response — no heuristics in
-              the renderer.
+              A closed folder that hides a tick is a file you cannot find again to
+              untick. That is the failure this rule exists to prevent.
             </div>
           </div>
 
-          <div class="frame single">
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label"><span class="dot-lg"></span>Closed — the default</div>
+              <div class="frame">
+                <div class="body pad-sm">
+                  <div class="grp" style="margin-bottom: 0">
+                    <div class="ghead"><span class="gname">Git ignored files</span></div>
+                    <div class="grow off">
+                      <span class="cb"></span>
+                      <svg class="chev"><use href="#i-chevron" /></svg>
+                      <svg class="ticon"><use href="#i-folder" /></svg>
+                      <span class="fp">lib/</span>
+                    </div>
+                    <div class="grow off">
+                      <span class="cb"></span><span class="tgap"></span
+                      ><span class="tgap"></span>
+                      <span class="fp">.DS_Store</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label"><span class="dot-lg"></span>Open — pick inside it</div>
+              <div class="frame">
+                <div class="body pad-sm">
+                  <div class="grp" style="margin-bottom: 0">
+                    <div class="ghead"><span class="gname">Git ignored files</span></div>
+                    <div class="grow off">
+                      <span class="cb"></span>
+                      <svg class="chev open"><use href="#i-chevron" /></svg>
+                      <svg class="ticon"><use href="#i-folder" /></svg>
+                      <span class="fp">lib/</span>
+                    </div>
+                    <div class="grow off">
+                      <span class="tind d1"></span><span class="cb"></span>
+                      <svg class="chev"><use href="#i-chevron" /></svg>
+                      <svg class="ticon"><use href="#i-folder" /></svg>
+                      <span class="fp">api-client-react/</span>
+                    </div>
+                    <div class="grow off">
+                      <span class="tind d1"></span><span class="cb"></span
+                      ><span class="tgap"></span>
+                      <svg class="ticon"><use href="#i-folder" /></svg>
+                      <span class="fp">api-spec/node_modules/</span>
+                    </div>
+                    <div class="grow off">
+                      <span class="tind d1"></span><span class="cb"></span>
+                      <svg class="chev"><use href="#i-chevron" /></svg>
+                      <svg class="ticon"><use href="#i-folder" /></svg>
+                      <span class="fp">db/</span>
+                    </div>
+                    <div class="grow off">
+                      <span class="cb"></span><span class="tgap"></span
+                      ><span class="tgap"></span>
+                      <span class="fp">.DS_Store</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="frame single" style="margin-top: 16px">
             <div class="body pad-sm">
               <div class="grp" style="margin-bottom: 0">
-                <div class="ghead">
-                  <span class="gicon other"><svg><use href="#i-file" /></svg></span>
-                  <span class="gname">Matched files</span>
+                <div class="ghead"><span class="gname">Git ignored files</span></div>
+                <div class="grow">
+                  <span class="cb mixed"></span>
+                  <svg class="chev"><use href="#i-chevron" /></svg>
+                  <svg class="ticon"><use href="#i-folder" /></svg>
+                  <span class="fp">lib/</span>
                 </div>
                 <div class="grow">
-                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
-                  <span class="fp">.env</span><span class="fsz">1.4 KB</span>
+                  <span class="tind d1"></span
+                  ><span class="cb on"><svg><use href="#i-check" /></svg></span
+                  ><span class="tgap"></span>
+                  <svg class="ticon"><use href="#i-folder" /></svg>
+                  <span class="fp">db/</span>
                 </div>
-                <div class="grow">
-                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
-                  <span class="fp">config/local.json</span>
-                  <span class="rpill warn">Git isn’t ignoring this</span>
-                  <span class="fsz">2 KB</span>
-                </div>
-                <div class="grow dis">
-                  <span class="cb dis"></span>
-                  <span class="fp">.env.example</span>
-                  <span class="rpill info">Already in every workspace</span>
-                  <span class="fsz">4.6 KB</span>
-                </div>
-                <div class="grow dis">
-                  <span class="cb dis"></span>
-                  <span class="fp">certs/*.pem</span>
-                  <span class="rpill err">Nothing matches this</span>
-                  <span class="fsz">—</span>
+                <div class="grow off">
+                  <span class="cb"></span><span class="tgap"></span
+                  ><span class="tgap"></span>
+                  <span class="fp">.DS_Store</span>
                 </div>
               </div>
             </div>
           </div>
 
           <div class="notes">
-            <div class="note">
-              <b>Git isn’t ignoring this</b> — untracked but absent from
-              <code>.gitignore</code>. Zeros still copies it (you named it), but it
-              lands in the workspace’s Changes tab where an agent could commit it.
-              The row expands to offer <b>Add to .gitignore</b>.
+            <div class="note fix" style="grid-column: 1 / -1">
+              <b>A partly-ticked folder still shows what is ticked inside it.</b>
+              Closed, <code>lib/</code> is one row with a dash in its box — “some of
+              this”, which is useless on its own. So the rows that <i>are</i> ticked
+              come up with it, labelled relative to the folder that surfaced them.
+              Collapsing hides only what is unselected.
             </div>
             <div class="note">
-              <b>Already in every workspace</b> — Git tracks it, so
-              <code>git worktree add</code> puts it there anyway. Disabled, never
-              hidden: hiding it makes the pattern look broken.
+              <b>A fully-ticked folder stays one row.</b> Its own box already says
+              “all of this”, so there is nothing hidden and nothing to surface —
+              otherwise one click on a closed folder would burst it into every file
+              it holds. Same reason a wholly-ticked <i>subfolder</i> comes up as one
+              row (<code>db/</code>) rather than as its three files.
             </div>
-            <div class="note" style="grid-column: 1 / -1">
-              <b>Nothing matches this</b> — the single most common failure. A
-              typo’d pattern copies nothing, silently, and you find out when the
-              workspace won’t boot. Shown in Advanced, where patterns are authored.
+            <div class="note">
+              <b>A folder with one thing in it is that thing.</b>
+              <code>scripts/</code> → <code>node_modules/</code> is a triangle that
+              hides nothing, so the chain merges into a single row reading
+              <code>scripts/node_modules/</code>. Same for
+              <code>lib/api-spec/node_modules/</code> above.
+            </div>
+            <div class="note">
+              <b>Ticking a folder writes one line per file, not one line for the
+              folder.</b> A saved <code>/lib</code> would match everything ignored
+              under it forever — including things added next week — and would lock
+              every row underneath behind an ancestor no checkbox can remove.
             </div>
           </div>
         </section>
@@ -1465,17 +1620,19 @@
                 <span class="case-number">A3</span>
                 <span class="tag new">Proposed</span>
               </div>
-              <h2>Advanced — patterns, expanded</h2>
+              <h2>The pattern editor, open</h2>
               <p class="case-copy">
-                The escape hatch for anyone who wants <code>.env*</code> or
-                <code>certs/**</code>. The same box other tools ship, plus a
-                per-line match count so a wrong pattern is obvious the moment you
-                stop typing.
+                For anyone who wants <code>.env*</code> or <code>certs/**</code>.
+                The same box other tools ship, plus a per-line match count so a
+                wrong pattern is obvious the moment you stop typing. It sits under
+                the list, always visible — it used to hide behind an
+                <b>Advanced — use file patterns instead</b> disclosure, which is a
+                fair description of the box and a poor way to find it.
               </p>
             </div>
             <div class="meta">
-              Ticking boxes in simple mode writes into this same list. One setting,
-              two editors — never two sources of truth.
+              Ticking boxes above writes into this same list. One setting, two
+              editors — never two sources of truth.
             </div>
           </div>
 
@@ -1484,11 +1641,7 @@
               <h3 class="pane-title">
                 <svg><use href="#i-copy" /></svg>Files to copy
               </h3>
-              <div class="adv" style="margin-top: 0; padding-top: 0; border-top: 0">
-                <div class="adv-head open">
-                  <svg><use href="#i-chevron" /></svg>Advanced — use file patterns
-                  instead
-                </div>
+              <div class="adv" style="margin-top: 0">
                 <div class="ta focus">.env*
 backend/.env*
 .mcp.json
@@ -1521,15 +1674,6 @@ certs/*.pem
                     ><span class="pm">removes .env.production</span>
                   </div>
                 </div>
-                <div class="sum">
-                  <span class="sum-txt"
-                    ><b>4 files · 1.6 KB</b> will be copied from
-                    <span class="sum-path">~/Documents/Zeros</span></span
-                  >
-                  <button class="btn right" type="button">
-                    <svg><use href="#i-rotate" /></svg>Rescan
-                  </button>
-                </div>
               </div>
             </div>
           </div>
@@ -1547,6 +1691,112 @@ certs/*.pem
               typo signal; a negation shows how many files it actually removed, so
               a dead <code>!</code> line reads as dead instead of looking
               load-bearing.
+            </div>
+            <div class="note" style="grid-column: 1 / -1">
+              <b>Comments get no count.</b> A <code>#</code> line matches nothing
+              by design, and the engine scores it <code>0</code> like any other
+              line — so the pane was printing a red zero and the words
+              <i>matches nothing</i> beside the user’s own note. Comment lines are
+              dropped from the list entirely; they are prose, not patterns. Same
+              rule as A4, one level down: only say something about a line when
+              there is something true to say.
+            </div>
+          </div>
+        </section>
+
+        <!-- A4 ───────────────────────────────────────────── -->
+        <section class="case" id="a4">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A4</span>
+                <span class="tag gap">Bug</span>
+              </div>
+              <h2>Counts for a line the box never showed</h2>
+              <p class="case-copy">
+                On a repo with nothing configured, the pane printed a red
+                <code>0</code> beside <code>.env*</code> under an
+                <i>empty</i> editor, with nothing ticked above it — blaming the user
+                for a pattern they had never written, in a state where they had done
+                nothing at all.
+              </p>
+            </div>
+            <div class="meta">
+              Absent and empty are different settings. The pane was rendering one
+              and measuring the other.
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="frame-wrap">
+              <div class="frame-label before"><span class="dot-lg"></span>Before — the box and the counts disagree</div>
+              <div class="frame">
+                <div class="body pad-sm">
+                  <div class="sum">
+                    <span class="sum-txt"
+                      ><b>Nothing</b> will be copied from
+                      <span class="sum-path">~/Documents/0docs</span></span
+                    >
+                  </div>
+                  <div class="adv">
+                    <div class="tabox">
+                      <div class="tadesc">
+                        One pattern per line, .gitignore syntax.
+                      </div>
+                      <div class="tabody"><span class="ln">1</span></div>
+                    </div>
+                    <div class="patlist">
+                      <div class="patrow">
+                        <span class="pcount err">0</span
+                        ><span class="pt">.env*</span
+                        ><span class="pm">matches nothing</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="frame-wrap">
+              <div class="frame-label after"><span class="dot-lg"></span>After — counts explain the lines you can see</div>
+              <div class="frame">
+                <div class="body pad-sm">
+                  <div class="sum">
+                    <span class="sum-txt"
+                      ><b>Nothing</b> will be copied from
+                      <span class="sum-path">~/Documents/0docs</span></span
+                    >
+                  </div>
+                  <div class="adv">
+                    <div class="tabox">
+                      <div class="tadesc">
+                        One pattern per line, .gitignore syntax.
+                      </div>
+                      <div class="tabody"><span class="ln">1</span></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes">
+            <div class="note">
+              <b>Why it happened.</b> With no list of its own, the project inherits
+              the built-in <code>.env*</code>. The editor renders <i>your</i> list —
+              which is nothing — while the counts came from the <i>resolved</i> one.
+              Two sources of truth, one screen.
+            </div>
+            <div class="note fix">
+              <b>The rule.</b> Per-line counts are printed only while the lines in
+              the box are the lines the engine measured. Inheriting the default, or
+              still inside the typing debounce, the pane says nothing rather than
+              attributing a number to a line that is not there.
+            </div>
+            <div class="note" style="grid-column: 1 / -1">
+              <b>“Nothing will be copied will be copied from …”.</b> The same row
+              had the summary sentence completing a lead that was already a whole
+              sentence. The lead is a noun phrase in both branches now —
+              <b>Nothing</b> / <b>3 files</b> — and the row reads once.
             </div>
           </div>
         </section>
@@ -1614,26 +1864,26 @@ certs/*.pem
                   </p>
                   <div class="grp">
                     <div class="ghead">
-                      <span class="gicon env"><svg><use href="#i-key" /></svg></span>
-                      <span class="gname">Environment &amp; secrets</span>
-                      <span class="gmeta">2 files · 1.5 KB</span>
+                      <span class="gname">Git ignored files</span>
                     </div>
                     <div class="grow">
-                      <span class="cb on"><svg><use href="#i-check" /></svg></span>
-                      <span class="fp">.env</span><span class="fsz">1.4 KB</span>
+                      <span class="cb on"><svg><use href="#i-check" /></svg></span
+                      ><span class="tgap"></span><span class="tgap"></span>
+                      <span class="fp">.env</span>
                     </div>
                     <div class="grow">
-                      <span class="cb on"><svg><use href="#i-check" /></svg></span>
-                      <span class="fp">.env.local</span><span class="fsz">122 B</span>
+                      <span class="cb on"><svg><use href="#i-check" /></svg></span
+                      ><span class="tgap"></span><span class="tgap"></span>
+                      <span class="fp">.env.local</span>
                     </div>
                   </div>
                   <div class="sum">
                     <span class="sum-txt"
-                      ><b>2 files · 1.5 KB</b> from
+                      ><b>2 files</b> will be copied from
                       <span class="sum-path">~/Documents/Zeros</span></span
                     >
-                    <button class="btn right" type="button">
-                      <svg><use href="#i-rotate" /></svg>Rescan
+                    <button class="btn icon right" type="button" title="Rescan">
+                      <svg><use href="#i-rotate" /></svg>
                     </button>
                   </div>
                 </div>
@@ -1648,9 +1898,9 @@ certs/*.pem
               preview below the box is the only feedback you get.
             </div>
             <div class="note fix">
-              <b>After:</b> the app supplies both, pre-ticked. The pattern box still
-              exists under <b>Advanced</b> (A3) for people who prefer it, and the
-              two write to the same setting.
+              <b>After:</b> the app supplies both, pre-ticked. The pattern box is
+              still there (A3), right under the list, and the two write to the same
+              setting.
             </div>
           </div>
         </section>
@@ -1736,32 +1986,29 @@ certs/*.pem
                   </div>
                   <div class="grp" style="margin-bottom: 0">
                     <div class="ghead">
-                      <span class="gname">What it copies</span>
-                      <span class="gmeta">4 files · 3.0 KB</span>
+                      <span class="gname">Git ignored files</span>
                     </div>
                     <div class="grow dis">
                       <span class="cb on"><svg><use href="#i-check" /></svg></span>
-                      <span class="fp">.env</span><span class="fsz">1.4 KB</span>
+                      <svg class="chev"><use href="#i-chevron" /></svg>
+                      <svg class="ticon"><use href="#i-folder" /></svg>
+                      <span class="fp">.conductor/</span>
                     </div>
                     <div class="grow dis">
-                      <span class="cb on"><svg><use href="#i-check" /></svg></span>
-                      <span class="fp">.mcp.json</span><span class="fsz">110 B</span>
+                      <span class="cb on"><svg><use href="#i-check" /></svg></span
+                      ><span class="tgap"></span><span class="tgap"></span>
+                      <span class="fp">.env</span>
                     </div>
                     <div class="grow dis">
-                      <span class="cb on"><svg><use href="#i-check" /></svg></span>
-                      <span class="fp">.conductor/settings.local.toml</span
-                      ><span class="fsz">340 B</span>
-                    </div>
-                    <div class="grow dis">
-                      <span class="cb on"><svg><use href="#i-check" /></svg></span>
-                      <span class="fp">.conductor/settings.toml</span
-                      ><span class="fsz">1.1 KB</span>
+                      <span class="cb on"><svg><use href="#i-check" /></svg></span
+                      ><span class="tgap"></span><span class="tgap"></span>
+                      <span class="fp">.mcp.json</span>
                     </div>
                   </div>
                   <div class="adv">
-                    <div class="adv-head">
-                      <svg><use href="#i-chevron" /></svg>Show patterns
-                    </div>
+                    <div class="ta" style="min-height: 0">.env
+.mcp.json
+.conductor/</div>
                   </div>
                 </div>
               </div>
@@ -1777,8 +2024,9 @@ certs/*.pem
             <div class="note fix">
               <b>After:</b> one sentence a non-engineer can parse, <b>Open file</b>
               for the person who does want to edit it, and the same resolved list as
-              every other state. The patterns live one click away under
-              <b>Show patterns</b> — not smeared at 16% opacity behind a paragraph.
+              every other state. The committed patterns are printed underneath,
+              read-only and legible — not smeared at 16% opacity behind a paragraph,
+              and not behind a disclosure either.
             </div>
           </div>
         </section>
@@ -1841,7 +2089,7 @@ certs/*.pem</div>
                   </div>
                   <div class="sum">
                     <span class="sum-txt"
-                      ><b>2 files · 1.5 KB</b> from
+                      ><b>2 files</b> will be copied from
                       <span class="sum-path">~/Documents/Zeros</span></span
                     >
                   </div>
@@ -1879,7 +2127,11 @@ certs/*.pem</div>
                 — rather than rendering an empty box that reads like a bug.
               </p>
             </div>
-            <div class="meta">Distinct from “couldn’t check” (C4).</div>
+            <div class="meta">
+              Distinct from “couldn’t check” (C4). The pattern editor is still
+              below it, so there is somewhere to go without needing a button here
+              to offer it.
+            </div>
           </div>
 
           <div class="frame single">
@@ -1896,7 +2148,6 @@ certs/*.pem</div>
                   Zeros found no ignored files in this project. New workspaces will
                   already be complete.
                 </div>
-                <button class="btn" type="button">Add a pattern anyway</button>
               </div>
             </div>
           </div>
@@ -1910,15 +2161,18 @@ certs/*.pem</div>
                 <span class="case-number">C2</span>
                 <span class="tag new">Proposed</span>
               </div>
-              <h2>Too much selected</h2>
+              <h2>A lot selected</h2>
               <p class="case-copy">
-                Fires on total <b>size</b>, not file count. The failure everyone
-                actually hits is one big directory, not many small files — a
-                64-file <code>docs/</code> at 2.3 MB sails under any count cap.
+                Someone has ticked <code>node_modules/</code>. Every new workspace
+                now pays that copy. The pane used to stack two yellow callouts
+                under the list saying so — one for the display cap, one for the
+                byte total — which is three sentences of scolding for a decision
+                the row itself already describes.
               </p>
             </div>
             <div class="meta">
-              Names the largest match, because that is the one to remove.
+              The count says it. <code>node_modules/</code> says it. A banner
+              saying it a third time is not information.
             </div>
           </div>
 
@@ -1929,57 +2183,49 @@ certs/*.pem</div>
               </h3>
               <div class="grp">
                 <div class="ghead">
-                  <span class="gicon other"><svg><use href="#i-file" /></svg></span>
-                  <span class="gname">Other ignored files</span>
-                  <span class="gmeta">1,240 files · 2.3 GB</span>
+                  <span class="gname">Git ignored files</span>
                 </div>
                 <div class="grow">
-                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
-                  <span class="fp">node_modules/…</span
-                  ><span class="fsz">2.2 GB</span>
+                  <span class="cb on"><svg><use href="#i-check" /></svg></span
+                  ><span class="tgap"></span>
+                  <svg class="ticon"><use href="#i-folder" /></svg>
+                  <span class="fp">node_modules/</span>
                 </div>
                 <div class="grow">
-                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
-                  <span class="fp">dist/…</span><span class="fsz">96 MB</span>
+                  <span class="cb on"><svg><use href="#i-check" /></svg></span
+                  ><span class="tgap"></span>
+                  <svg class="ticon"><use href="#i-folder" /></svg>
+                  <span class="fp">site/dist/</span>
                 </div>
-                <div class="grow">
-                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
-                  <span class="fp">coverage/lcov.info</span
-                  ><span class="fsz">2.1 MB</span>
+                <div class="grow off">
+                  <span class="cb"></span><span class="tgap"></span
+                  ><span class="tgap"></span>
+                  <span class="fp">.env</span>
                 </div>
               </div>
               <div class="sum">
                 <span class="sum-txt"
-                  ><b>1,240 files · 2.3 GB</b> will be copied from
+                  ><b>48,527 files</b> will be copied from
                   <span class="sum-path">~/Documents/Zeros</span></span
                 >
-                <button class="btn right" type="button">
-                  <svg><use href="#i-rotate" /></svg>Rescan
+                <button class="btn icon right" type="button" title="Rescan">
+                  <svg><use href="#i-rotate" /></svg>
                 </button>
-              </div>
-              <div class="ban warn toast">
-                <svg class="bi"><use href="#i-warning" /></svg>
-                <div>
-                  <b>That’s a lot to copy.</b> Every new workspace will be slow to
-                  start. Largest match: <code>node_modules/</code> — 1,190 files,
-                  2.2 GB, usually better rebuilt by your setup command.
-                </div>
-                <button class="lnk" type="button">Exclude it</button>
               </div>
             </div>
           </div>
 
           <div class="notes">
             <div class="note fix">
-              <b>Bottom-anchored.</b> The toast sits under the list it is talking
-              about, at the edge of the pane. A banner at the top would push the
-              file rows — the thing the user opened this pane to read — down the
-              screen every time it appears.
+              <b>The count carries it.</b> <code>48,527 files</code> beside a ticked
+              <code>node_modules/</code> is the whole warning. It is already the
+              most prominent number on the pane, it updates as you tick, and it
+              never has to be dismissed.
             </div>
             <div class="note">
-              <b>Advisory, never a block.</b> A user with a genuine reason to copy a
-              large tree can. The warning exists so nobody does it by accident and
-              then wonders why workspace creation got slow.
+              <b>Advisory, never a block.</b> Unchanged: a user with a genuine
+              reason to copy a large tree can. What went away is the pane
+              volunteering an opinion about it in a colour reserved for problems.
             </div>
           </div>
         </section>
@@ -1994,9 +2240,9 @@ certs/*.pem</div>
               </div>
               <h2>Scanning</h2>
               <p class="case-copy">
-                Appears only after ~400&nbsp;ms, and never blanks the list — the
-                previous result stays on screen and dims. A warm scan is
-                milliseconds, so most users will never see this at all.
+                Never blanks the list — the previous result stays on screen and the
+                rescan icon spins. A warm scan is milliseconds, so most users will
+                only ever see this on the very first open of a project.
               </p>
             </div>
             <div class="meta">
@@ -2008,17 +2254,17 @@ certs/*.pem</div>
             <div class="body pad-sm">
               <div class="grp" style="opacity: 0.45">
                 <div class="ghead">
-                  <span class="gicon env"><svg><use href="#i-key" /></svg></span>
-                  <span class="gname">Environment &amp; secrets</span>
-                  <span class="gmeta">2 files · 1.5 KB</span>
+                  <span class="gname">Git ignored files</span>
                 </div>
                 <div class="grow">
-                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
-                  <span class="fp">.env</span><span class="fsz">1.4 KB</span>
+                  <span class="cb on"><svg><use href="#i-check" /></svg></span
+                  ><span class="tgap"></span><span class="tgap"></span>
+                  <span class="fp">.env</span>
                 </div>
                 <div class="grow">
-                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
-                  <span class="fp">backend/.env</span><span class="fsz">122 B</span>
+                  <span class="cb on"><svg><use href="#i-check" /></svg></span
+                  ><span class="tgap"></span><span class="tgap"></span>
+                  <span class="fp">backend/.env</span>
                 </div>
               </div>
               <div class="sum">
@@ -2061,42 +2307,143 @@ certs/*.pem</div>
               </h3>
               <div class="grp stale">
                 <div class="ghead">
-                  <span class="gicon env"><svg><use href="#i-key" /></svg></span>
-                  <span class="gname">Environment &amp; secrets</span>
-                  <span class="gmeta">2 files · 1.5 KB</span>
+                  <span class="gname">Git ignored files</span>
                 </div>
                 <div class="grow">
-                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
-                  <span class="fp">.env</span><span class="fsz">1.4 KB</span>
+                  <span class="cb on"><svg><use href="#i-check" /></svg></span
+                  ><span class="tgap"></span><span class="tgap"></span>
+                  <span class="fp">.env</span>
                 </div>
                 <div class="grow">
-                  <span class="cb on"><svg><use href="#i-check" /></svg></span>
-                  <span class="fp">backend/.env</span><span class="fsz">122 B</span>
+                  <span class="cb on"><svg><use href="#i-check" /></svg></span
+                  ><span class="tgap"></span><span class="tgap"></span>
+                  <span class="fp">backend/.env</span>
                 </div>
               </div>
-              <div class="ban warn toast">
-                <svg class="bi"><use href="#i-folder-x" /></svg>
-                <div>
-                  <b>Couldn’t check this project.</b>
-                  <code>~/Documents/Zeros</code> isn’t readable right now, so this
-                  list may be out of date. Your selection is saved and will still be
-                  used.
-                </div>
-                <button class="lnk" type="button">Try again</button>
+              <div class="sum">
+                <span class="sum-txt" style="color: var(--fg3)"
+                  >Couldn’t work out what would be copied</span
+                >
+                <button class="btn icon right" type="button" title="Rescan">
+                  <svg><use href="#i-rotate" /></svg>
+                </button>
               </div>
             </div>
           </div>
 
           <div class="notes">
             <div class="note fix">
-              <b>The saved list is untouched.</b> A failed scan is a display
-              problem, not a config problem — nothing is cleared, and the next
-              workspace create still seeds from it.
+              <b>The count is replaced, not decorated.</b> This used to be a yellow
+              toast under the list <i>beside</i> a file count. Putting the failure
+              where the number goes is what makes it impossible to read the pane as
+              “nothing to copy” — there is no number to misread.
             </div>
             <div class="note">
               <b>Retain, don’t clear.</b> The last confirmed list stays on screen,
-              dimmed, with the toast underneath saying it might be stale. Blanking
-              it would turn “we couldn’t look” into “there is nothing”.
+              dimmed. Blanking it would turn “we couldn’t look” into “there is
+              nothing”, and the saved list is untouched either way — the next
+              workspace create still seeds from it.
+            </div>
+          </div>
+        </section>
+
+        <!-- C5 ───────────────────────────────────────────── -->
+        <section class="case" id="c5">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">C5</span>
+                <span class="tag new">Proposed</span>
+              </div>
+              <h2>What actually pops up at the bottom</h2>
+              <p class="case-copy">
+                The pane used to grow yellow callouts under the list — the empty
+                list, the display cap, the byte total, the failed scan — none of
+                which were toasts, all of which read as one. They are gone. What is
+                left is the app’s real toast surface: a fixed 350&nbsp;px card at
+                the bottom-right of the window, and this pane raises exactly
+                <b>one</b> of them.
+              </p>
+            </div>
+            <div class="meta">
+              <code>src/zeros/ui/primitives/elements/toast.tsx</code> ·
+              bottom-right, 24&nbsp;px offset, 3 visible, errors 6&nbsp;s.
+            </div>
+          </div>
+
+          <div class="toast-stage">
+            <div class="tcard">
+              <button class="tclose" type="button" aria-label="Dismiss">
+                <svg><use href="#i-x" /></svg>
+              </button>
+              <svg class="ticon-lg err"><use href="#i-circle-x" /></svg>
+              <div style="min-width: 0">
+                <div class="tmsg">Couldn’t save which files to copy</div>
+              </div>
+            </div>
+          </div>
+
+          <p class="case-copy" style="margin: 18px 0 10px">
+            The neighbours it stacks with — same card, raised by the workspace it
+            is about to seed, so this is the whole vocabulary a user sees around
+            this feature:
+          </p>
+
+          <div class="toast-stage">
+            <div class="tcard">
+              <button class="tclose" type="button" aria-label="Dismiss">
+                <svg><use href="#i-x" /></svg>
+              </button>
+              <svg class="ticon-lg err"><use href="#i-circle-x" /></svg>
+              <div style="min-width: 0">
+                <div class="tmsg">Couldn’t create workspace: …</div>
+                <div class="tdesc">
+                  The engine rolled the incomplete checkout back safely. Create it
+                  again to retry.
+                </div>
+              </div>
+            </div>
+            <div class="tcard">
+              <button class="tclose" type="button" aria-label="Dismiss">
+                <svg><use href="#i-x" /></svg>
+              </button>
+              <svg class="ticon-lg"><use href="#i-info" /></svg>
+              <div style="min-width: 0">
+                <div class="tmsg">Workspace creation is taking longer than usual</div>
+                <div class="tdesc">It’s still being created in the background.</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="notes">
+            <div class="note fix">
+              <b>One toast, and it is a write failure.</b> Saving is a debounced
+              autosave with no button to watch, so a failed write is the one thing
+              that genuinely has no other place to appear. Everything else the pane
+              knows is a fact about the list, and facts about the list belong
+              beside the list.
+            </div>
+            <div class="note fix">
+              <b>It was going through the wrong door.</b> This pane called
+              <code>sonner</code> directly instead of the app wrapper. The global
+              <code>&lt;Toaster&gt;</code> is mounted <code>unstyled</code> and
+              strips sonner’s own chrome, so the only toast this feature could
+              raise painted as bare unstyled text — no card, no padding, no
+              dismiss. It now goes through <code>toast</code> from
+              <code>ui/primitives</code>, like every other caller.
+            </div>
+            <div class="note">
+              <b>Engine warnings are not toasts.</b> <code>preview.warnings</code>
+              still comes back — cut-short scans, the candidate cap, the byte total
+              — and the seeding path still logs them. The pane no longer paints
+              them: an advisory the user cannot act on is noise, and the one that
+              matters (an incomplete scan) is already the summary line in C4.
+            </div>
+            <div class="note">
+              <b>No “Reset to default”.</b> The link beside the summary emptied the
+              whole list in one click, next to the sentence that told you how many
+              files you were about to lose. Unticking is the way back, one row at a
+              time, and it is undoable by re-ticking.
             </div>
           </div>
         </section>
@@ -2206,8 +2553,11 @@ certs/*.pem</div>
               <h2>What the UI needs from the engine</h2>
               <p class="case-copy">
                 One read call. Every state in Parts A–C is a render of this one
-                response — including the warning pills, the per-line counts and the
-                “couldn’t check” case.
+                response — the tree, the tick state, the per-line counts and the
+                “couldn’t check” case. It returns more than the pane now draws;
+                that is deliberate, and the unpainted half is listed below rather
+                than deleted, because a size or a warning is cheap to re-surface
+                and expensive to re-derive.
               </p>
             </div>
             <div class="meta">
@@ -2224,12 +2574,16 @@ certs/*.pem</div>
   <span class="tk">sourcePath</span>     <span class="tc">// absolute path of .worktreeinclude, when it won</span>
   <span class="tk">sourceText</span>     <span class="tc">// its raw text, for "Show patterns" (B2)</span>
   <span class="tk">rootPath</span>       <span class="tc">// the folder files are copied FROM</span>
-  <span class="tk">patterns</span>       [{ raw, negate, line, <span class="ts">matchCount</span> }]  <span class="tc">// A3 · B3</span>
-  <span class="tk">files</span>          [{ path, bytes, <span class="ts">ignored</span> }]           <span class="tc">// A1 · A2</span>
-  <span class="tk">trackedMatches</span> [ path ]                            <span class="tc">// "Already in every workspace"</span>
-  <span class="tk">totalCount</span> / <span class="tk">totalBytes</span> / <span class="tk">truncated</span>              <span class="tc">// C2</span>
-  <span class="tk">warnings</span>       [ string ]
-  <span class="tk">complete</span>       <span class="ts">true | false</span>                        <span class="tc">// false → C4, never "0 files"</span></pre>
+  <span class="tk">patterns</span>       [{ raw, negate, line, <span class="ts">matchCount</span> }]  <span class="tc">// A3 — only while they ARE the box (A4)</span>
+  <span class="tk">files</span>          [{ path, bytes, ignored }]           <span class="tc">// decides which boxes are ticked</span>
+  <span class="tk">candidates</span>     [{ path, isDir, bytes }]             <span class="tc">// the tick-box universe → the tree</span>
+  <span class="tk">totalCount</span>     <span class="tc">// the one number the pane prints</span>
+  <span class="tk">complete</span>       <span class="ts">true | false</span>                        <span class="tc">// false → C4, never "0 files"</span>
+
+  <span class="tc">// still returned, no longer painted:</span>
+  <span class="tc">totalBytes / truncated / bytes  — sizes came off every surface (A1)</span>
+  <span class="tc">trackedMatches                 — the "already tracked" line came off</span>
+  <span class="tc">warnings                       — the yellow callouts came off (C5)</span></pre>
 
           <div class="notes" style="margin-top: 18px">
             <div class="note">
@@ -2254,57 +2608,59 @@ certs/*.pem</div>
             <div>
               <div class="case-title-row">
                 <span class="case-number">D3</span>
-                <span class="tag context">Needs a decision</span>
+                <span class="tag context">Settled</span>
               </div>
-              <h2>Open questions</h2>
+              <h2>Questions this artifact used to ask</h2>
               <p class="case-copy">
-                Four calls I’d rather make with you than for you. Each one changes
-                the markup above, so they’re cheap now and expensive later.
-                (<i>Scope</i> is settled: the pane is per-repo, no global toggle.)
+                Four calls that were open when the pane was drawn. Three are
+                answered by what shipped; the fourth is still worth having.
               </p>
             </div>
-            <div class="meta">Answers here unblock the React implementation.</div>
+            <div class="meta">Kept so the reasoning survives the decision.</div>
           </div>
 
           <ul class="qlist">
             <li>
-              <b>Does simple mode write filenames or patterns?</b> Ticking
-              <code>.env</code> and <code>.env.local</code> could store the two exact
-              names, or collapse to <code>.env*</code>. Exact names are honest and
-              predictable; <code>.env*</code> keeps working when you add
-              <code>.env.staging</code> next week. Proposal: store exact names, plus
-              a one-click <i>“copy every .env file, including new ones”</i> chip that
-              swaps in the pattern.
+              <b>Does simple mode write filenames or patterns?</b>
+              <i>Exact names.</i> Ticking writes the anchored literal
+              <code>/backend/.env</code>, one line per file — including when you
+              tick a folder. It is what makes every row underneath independently
+              untickable afterwards, which a folder-wide <code>/lib</code> would
+              not be. A <code>.env*</code> that keeps working as you add
+              <code>.env.staging</code> is still available: type it in the pattern
+              editor, which is now visible without hunting for it.
             </li>
             <li>
               <b>Auto-tick on first open, or ship the built-in default until
-              touched?</b> Auto-ticking means the rows shown are the rows used. Not
-              auto-ticking means the pane can be opened and closed with zero risk.
-              A1 auto-ticks and marks them <b>Recommended</b>.
+              touched?</b> <i>Auto-tick.</i> The rows shown are the rows used. What
+              went with it is the <b>Recommended</b> pill that announced the fact —
+              a ticked box in a list of unticked ones does not need a label
+              explaining that it is ticked.
             </li>
             <li>
-              <b>Is <code>.worktreeinclude</code> creatable from the app?</b> A
-              <i>“Share this list with the team”</i> button that writes the file
-              would be genuinely useful — and would immediately make the setting
-              read-only, which needs saying out loud <i>before</i> the click.
+              <b>Where does this pane live?</b> <i>Its own Files tab</i> on the
+              project page, as drawn in A1.
             </li>
             <li>
-              <b>Where does this pane live?</b> Rendered above as its own
-              <b>Files</b> tab on the project page. The alternative is folding it
-              into <b>Paths</b>, which already edits per-project, this-Mac settings —
-              at the cost of burying it.
+              <b>Is <code>.worktreeinclude</code> creatable from the app?</b> Still
+              open. A <i>“Share this list with the team”</i> button that writes the
+              file would be genuinely useful — and would immediately make the
+              setting read-only (B2), which needs saying out loud <i>before</i> the
+              click, not after it.
             </li>
           </ul>
         </section>
       </div>
 
       <p class="footer-note">
-        Visual design reference for “Files to copy”. Checkboxes, pills and buttons
-        demonstrate placement, hierarchy and the shared warning language; nothing in
-        this artifact copies a file. Colors, radii and type are pulled from Zeros
-        Foundation (Zeros Shade dark + Light) — toggle the theme in the header to
-        check both. The engine work behind Part D has landed; Parts A–C are the
-        renderer, still to build.
+        Visual design reference for “Files to copy”. Checkboxes, chevrons and
+        buttons demonstrate placement and hierarchy; nothing in this artifact
+        copies a file. Colors, radii and type are pulled from Zeros Foundation
+        (Zeros Shade dark + Light) — toggle the theme in the header to check both.
+        Revised 2026-07-30: the group cards, item counts, sizes, row badges,
+        inline callouts, the “already tracked by Git” line, “Reset to default” and
+        the <b>Advanced</b> disclosure are gone; the list is a folder tree, and the
+        only toast left is C5.
       </p>
     </main>
 

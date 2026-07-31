@@ -39,6 +39,7 @@ import React, { useCallback, useLayoutEffect, useMemo, useRef } from "react";
 import { ExternalLink } from "lucide-react";
 
 import { Tooltip } from "@/zeros/ui/primitives";
+import { branchDisplayName } from "../lib/branch-name";
 import { Tabs, TabsList, TabsTrigger } from "../ui/primitives/tabs";
 import { StatusIcon } from "../ui/primitives/status-icon";
 import { WorkspaceContextMenu } from "../ui/workspace-context-menu";
@@ -121,9 +122,6 @@ export function repoPageViewForSection(
 
 // ── Workspaces view — day-grouped list ───────────────────
 
-function stripZerosPrefix(branch: string): string {
-  return branch.startsWith("zeros/") ? branch.slice("zeros/".length) : branch;
-}
 
 interface ListRow {
   workspace: Workspace;
@@ -256,7 +254,7 @@ function RepoWorkspacesList({ project }: { project: Project }) {
     }
     const rows = workspaces
       .map((w): ListRow => {
-        const branch = stripZerosPrefix(w.branch);
+        const branch = branchDisplayName(w.branch);
         return {
           workspace: w,
           title: titleByFolder.get(w.path)?.title || branch,
@@ -312,7 +310,7 @@ function RepoWorkspacesList({ project }: { project: Project }) {
             >
               <ZerosSpinner size={14} />
               <span className="text-fg1 min-w-0 truncate text-sm font-medium">
-                {p.branch ? stripZerosPrefix(p.branch) : "New workspace"}
+                {p.branch ? branchDisplayName(p.branch) : "New workspace"}
               </span>
               <span className="text-fg2 ml-auto shrink-0 text-xs">
                 Setting up workspace…

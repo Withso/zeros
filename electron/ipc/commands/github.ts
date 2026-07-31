@@ -39,6 +39,10 @@ import type { CommandHandler } from "../router";
 const patUndoStore = new GithubPatUndoStore();
 let methodSelectionRevision = 0;
 let patUndoSelectionRevision: number | null = null;
+/** Exact PAT working copy the engine rejected. The durable Keychain value is
+ * retained; a later successful health probe clears this marker and re-seeds
+ * the engine without asking the user to paste the token again. */
+let rejectedPatToken: string | null = null;
 
 function requireString(
   args: Record<string, unknown>,
@@ -272,7 +276,7 @@ export async function getGithubAuthSnapshot(
                   : "GitHub CLI is not installed.",
               });
 
-  return {
+  const snapshot: GithubAuthSnapshot = {
     selectedMethod,
     methods: {
       "gh-cli": cliSummary,
@@ -280,6 +284,22 @@ export async function getGithubAuthSnapshot(
       pat,
     },
   };
+  if (rejectedPatToken) {
+    const current = await githubCredentialStore.get("pat");
+    if (
+      current?.method !== "pat" ||
+      current.accessToken !== rejectedPatToken
+    ) {
+      // A remove/replace won the race; this rejection describes an older copy.
+      rejectedPatToken = null;
+    } else if (selectedMethod === "pat" && pat.health === "connected") {
+      // The same token GitHub rejected now passes a fresh identity probe. The
+      // engine deliberately kept it out of memory until this evidence arrived.
+      rejectedPatToken = null;
+      await pushGithubCredentialToEngine();
+    }
+  }
+  return snapshot;
 }
 
 export const ghAuthSnapshot: CommandHandler = async (args) =>
@@ -324,6 +344,7 @@ export const ghMethodSelect: CommandHandler = async (args) => {
   }
   await githubCredentialStore.setSelectedMethod(method);
   methodSelectionRevision += 1;
+  if (method === "pat") rejectedPatToken = null;
   await pushGithubCredentialToEngine();
   return getGithubAuthSnapshot();
 };
@@ -351,6 +372,7 @@ export const ghPatConnect: CommandHandler = async (args) => {
   methodSelectionRevision += 1;
   patUndoStore.clear();
   patUndoSelectionRevision = null;
+  rejectedPatToken = null;
   await pushGithubCredentialToEngine();
   // Return the post-write snapshot so Settings never has to re-probe to learn
   // about a write it just made — a failed follow-up probe used to leave the row
@@ -465,28 +487,59 @@ export const ghMethodDisconnect: CommandHandler = async (args) => {
   const method = requireMethod(args, "gh_method_disconnect");
   const selected = await githubCredentialStore.getSelectedMethod();
   let undo: { id: string; expiresAtMs: number } | undefined;
+  let fallbackSelectionRevision: number | null = null;
   if (method === "gh-cli") {
     await githubCredentialStore.markExplicitlyDisconnected();
   } else {
-    if (method === "github-app") {
-      const removed = await disconnectGithubApp().catch((error: unknown) =>
-        throwGithubAppCommandError(error, "gh_method_disconnect"),
-      );
-      if (!removed) {
-        throw new Error(
-          "The GitHub App connection changed while it was disconnecting. Try again.",
-        );
-      }
-    } else {
-      const previous = await githubCredentialStore.get("pat");
-      await githubCredentialStore.clear(method);
-      if (previous?.method === "pat") {
-        undo = patUndoStore.stash(previous, selected === "pat");
-      }
-    }
-    if (selected === method) {
+    const changesSelection = selected === method;
+    if (changesSelection) {
+      // Commit the non-secret fallback before deleting/revoking a credential.
+      // If the settings write fails, the selected credential remains intact.
       await githubCredentialStore.setFallbackMethod("gh-cli");
       methodSelectionRevision += 1;
+      fallbackSelectionRevision = methodSelectionRevision;
+    }
+    try {
+      if (method === "github-app") {
+        const removed = await disconnectGithubApp().catch((error: unknown) =>
+          throwGithubAppCommandError(error, "gh_method_disconnect"),
+        );
+        if (!removed) {
+          throw new Error(
+            "The GitHub App connection changed while it was disconnecting. Try again.",
+          );
+        }
+      } else {
+        const previous = await githubCredentialStore.get("pat");
+        await githubCredentialStore.clear(method);
+        rejectedPatToken = null;
+        if (previous?.method === "pat") {
+          undo = patUndoStore.stash(previous, changesSelection);
+        }
+      }
+    } catch (error) {
+      if (changesSelection) {
+        // Restore only if our fallback is still active and the credential
+        // survived. A concurrent selection/credential update wins.
+        try {
+          const [currentSelection, credential] = await Promise.all([
+            githubCredentialStore.getSelectedMethod(),
+            githubCredentialStore.get(method),
+          ]);
+          if (
+            currentSelection === "gh-cli" &&
+            credential &&
+            fallbackSelectionRevision === methodSelectionRevision
+          ) {
+            await githubCredentialStore.setSelectedMethod(method);
+            methodSelectionRevision += 1;
+          }
+        } catch {
+          // Preserve the destructive operation's original failure. Any
+          // surviving credential remains available for an explicit reselect.
+        }
+      }
+      throw error;
     }
   }
   patUndoSelectionRevision = undo ? methodSelectionRevision : null;
@@ -512,7 +565,15 @@ export const ghPatRestore: CommandHandler = async (args) => {
   if (!pending) {
     throw new Error("This Personal Access Token undo has expired.");
   }
-  await githubCredentialStore.set("pat", pending.credential);
+  try {
+    await githubCredentialStore.set("pat", pending.credential);
+  } catch (error) {
+    // `take` is single-use so concurrent clicks cannot both commit. If the
+    // secure write fails, put that exact handle back with its original expiry
+    // instead of discarding the only recoverable copy of the removed PAT.
+    patUndoStore.restore(pending);
+    throw error;
+  }
   const selected = await githubCredentialStore.getSelectedMethod();
   if (
     pending.wasSelected &&
@@ -523,6 +584,7 @@ export const ghPatRestore: CommandHandler = async (args) => {
     methodSelectionRevision += 1;
   }
   patUndoSelectionRevision = null;
+  rejectedPatToken = null;
   await pushGithubCredentialToEngine();
   return getGithubAuthSnapshot();
 };
@@ -542,10 +604,18 @@ export const ghCredentialClear: CommandHandler = async (args) => {
     }
     return null;
   }
+  if (method === "pat") {
+    // The engine already discarded this rejected working copy. Keep the
+    // hand-entered durable PAT so Settings can re-verify it and the user can
+    // reselect it after a transient GitHub incident; pushing here would only
+    // feed the known-rejected token straight back into the engine.
+    const current = await githubCredentialStore.get("pat");
+    rejectedPatToken =
+      current?.method === "pat" ? current.accessToken : null;
+    return null;
+  }
   if (method === "gh-cli") {
     await githubCredentialStore.markExplicitlyDisconnected();
-  } else {
-    await githubCredentialStore.clear(method);
   }
   await pushGithubCredentialToEngine();
   return null;

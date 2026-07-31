@@ -86,6 +86,7 @@ import { CodeThemePreview } from "./code-theme-preview";
 import { useProjects } from "../store/use-projects";
 import { ProvidersPanel } from "./providers-panel";
 import { TerminalAgentsSection } from "./terminal-agents-section";
+import { GitDefaultsSection } from "./git-defaults-section";
 import { useExperimentalFeature } from "../settings/experimental-features";
 import {
   useInternalFeature,
@@ -99,6 +100,7 @@ import {
 import { repoPageViewForSection } from "./repo-page";
 import { OpenSettingsFileButton } from "./open-settings-file-button";
 import { GitHubSection } from "./github-section";
+import { prefetchGithubAuthSnapshot } from "./github-auth-prefetch";
 import { TeamPanel } from "./team-panel";
 import { MembersPanel } from "./members-panel";
 import { CreateTeamDialog } from "./create-team-dialog";
@@ -708,6 +710,11 @@ export function SettingsPage() {
                         selection.section === section.id
                       }
                       onClick={() => setActive(userSelection(section.id))}
+                      onIntent={
+                        section.id === "integrations"
+                          ? prefetchGithubAuthSnapshot
+                          : undefined
+                      }
                     />
                   ))}
                   {isAdministration && zeroTeams && (
@@ -815,11 +822,13 @@ function SectionNavButton({
   label,
   isActive,
   onClick,
+  onIntent,
 }: {
   icon: LucideIcon;
   label: string;
   isActive: boolean;
   onClick: () => void;
+  onIntent?: () => void;
 }) {
   return (
     <Button
@@ -829,6 +838,14 @@ function SectionNavButton({
       data-state={isActive ? "active" : "inactive"}
       className={SIDEBAR_ENTRY_CLS}
       onClick={onClick}
+      // Called, never forwarded bare: React hands a handler the synthetic
+      // event, which `prefetchGithubAuthSnapshot` would take as its `fetcher`.
+      // `KeyedAsyncCache.load` then runs `.then(<event>)`, which resolves
+      // `undefined` — the prefetch silently does nothing AND publishes that
+      // `undefined` over a confirmed snapshot. `onIntent` is declared
+      // zero-argument; this is what honours it.
+      onPointerEnter={() => onIntent?.()}
+      onFocus={() => onIntent?.()}
     >
       <Icon size={14} />
       <span className="truncate">{label}</span>
@@ -1066,22 +1083,22 @@ function UsageDataSection() {
 // checks), not a "general" toggle. Any future third-party integration joins
 // this list.
 
-function IntegrationsPanel() {
+function IntegrationsPanel({
+  surfaceActive = true,
+}: {
+  surfaceActive?: boolean;
+}) {
   return (
     <div className="flex flex-col gap-8">
-      <GitHubSection />
+      <GitHubSection surfaceActive={surfaceActive} />
     </div>
   );
 }
 
-// ── Placeholder panels — built out one-by-one in later passes ──
-//
-// Left-aligned under the shell's section heading so the nav is complete and
-// honest about what's coming, without shipping a half-built control.
-
-function PlaceholderPanel({ hint }: { hint: string }) {
-  return <p className="text-fg2 max-w-prose text-sm leading-relaxed">{hint}</p>;
-}
+// PlaceholderPanel removed 2026-07-29 — Git was the last pane using it, and
+// every section in SECTIONS now renders a real control. Reintroducing a
+// "coming soon" panel is a step backwards: register the section only once it
+// has something to show.
 
 // ── Models — the default agent + effort + plan/fast for new chats ──
 //
@@ -1454,9 +1471,14 @@ function ModelsPanel() {
   );
 }
 
+/** Global git defaults. Branch naming lives here (a personal preference —
+ *  see git-defaults-section.tsx); remote + base branch stay per-repo on each
+ *  repo's own Git pane, because those ARE properties of the repo. */
 function GitDefaultsPanel() {
   return (
-    <PlaceholderPanel hint="Global git defaults — remote, base branch, and branch naming — applied to every repo will live here." />
+    <div className="flex flex-col gap-9">
+      <GitDefaultsSection />
+    </div>
   );
 }
 

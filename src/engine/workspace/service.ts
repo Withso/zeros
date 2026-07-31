@@ -45,6 +45,7 @@ import {
   getPrCommits,
   getPrReviews,
   getRepositoryOwnerAvatar,
+  getWorkspaceRepoAccess,
   createWorkspace,
   prepareWorkspaceCreate,
   getWorkspace,
@@ -1412,6 +1413,22 @@ export class WorkspaceService {
           inlineCommand: resolveRepoScript(repoRoot, "setup") || undefined,
           allowAutoSetup: true,
         });
+        // omitLog: the chat's provenance row needs `hasCommand` (to tell
+        // "Configure setup script" from "Completed setup script") but never
+        // renders the output — and it re-pulls on every workspaces broadcast
+        // like the tab dot does. Shipping the log to it would push up to
+        // 512 KB over the bridge per broadcast for bytes nothing reads.
+        // statusOnly can't serve this: it reports hasCommand:false as a
+        // placeholder, which would read as "no setup script configured".
+        if (optBool(params, "omitLog")) {
+          return {
+            hasCommand: !!command,
+            command: live?.command ?? command,
+            state,
+            log: "",
+            truncated: false,
+          };
+        }
         return {
           hasCommand: !!command,
           command: live?.command ?? command,
@@ -2476,11 +2493,15 @@ export class WorkspaceService {
         });
         return { ok: true };
       case "git.renameBranch":
-        await renameBranch({
-          workspaceId: reqStr(params, "workspaceId"),
-          newName: reqStr(params, "newName"),
-        });
-        return { ok: true };
+        return {
+          ok: true,
+          // The resulting ref, so the caller doesn't have to re-derive a
+          // prefix it can't see (see renameBranch's contract).
+          branch: await renameBranch({
+            workspaceId: reqStr(params, "workspaceId"),
+            newName: reqStr(params, "newName"),
+          }),
+        };
       case "git.changeTarget":
         return changeTargetBranch({
           workspaceId: reqStr(params, "workspaceId"),
@@ -2566,6 +2587,13 @@ export class WorkspaceService {
         }
         return initRepoInPlace(repoRoot);
       }
+      // Can the selected connection open a PR on this workspace's remote? A
+      // read, and LOCAL-ONLY by omission from every remote allowlist: it guards
+      // the desktop's Create PR control, which never renders without a native
+      // runtime. Returns a status object rather than throwing — see
+      // getWorkspaceRepoAccess.
+      case "gh.repoAccess":
+        return getWorkspaceRepoAccess(reqStr(params, "workspaceId"));
       case "gh.prGet":
         return getPr({
           workspaceId: reqStr(params, "workspaceId"),

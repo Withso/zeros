@@ -13,11 +13,11 @@ import { Column2TerminalDeck } from "./column2-terminal-deck";
 import { Column2ChatDeck } from "./column2-chat-deck";
 import { Column2TopBar } from "./column2-topbar";
 import {
-  COLUMN_2_RATIO_DEFAULT,
   COLUMN_2_RATIO_VAR,
   clampColumn2Ratio,
   flushPendingColumn2RatioPaint,
-  sanitizeColumn2Ratio,
+  persistColumn2Ratio,
+  readPersistedColumn2Ratio,
 } from "./column2-ratio";
 import { cn } from "../zeros/ui/cn";
 import { useResizeHint } from "./use-resize-hint";
@@ -58,10 +58,32 @@ const COL2_BASE_CLS = "flex flex-col bg-bg1 overflow-hidden relative";
 //     to ≥ 1 — with bare 0..1 factors, col 2 hitting its 2400px cap
 //     on an ultrawide left col 3 with `(1−ratio)·row` instead of the
 //     full remainder, i.e. an empty gap at the window's right edge.
+//   - The flex declaration is IDENTICAL in both the col-3-open and
+//     col-3-collapsed states. Only the max-width cap differs (see
+//     COL2_WIDE_CLS). Two reasons, both bugs we used to ship:
+//       1. Collapsed used to be `flex-1 basis-auto`, i.e. grow 1. On
+//          expand, col 2 went from grow 1 to grow ratio·100 while col 3
+//          appeared at grow (1−ratio)·100 — so the first frame handed col
+//          2 only 1/(1+50) of the row and it slammed into its 320px floor
+//          before growing back out. With a `transition-[flex-grow]` on
+//          top, that overshoot was *animated*: a measured 1600 → 320 →
+//          800px jerk on every expand. Same grow factor in both states =
+//          no overshoot and nothing to animate.
+//       2. `basis-auto` makes the browser compute the max-content width
+//          of the whole chat transcript to size the column. `basis: 0`
+//          costs nothing.
+//     There is deliberately NO transition on flex-grow: the only things
+//     that ever changed it were the collapse toggle and the boot-time
+//     variable write, and both were glitches rather than motion design.
 const COL2_DEFAULT_WIDTH_CLS =
-  "[flex:calc(var(--zeros-column-2-ratio,0.5)*100)_1_0px] min-w-[320px] max-w-[min(2400px,70%)] transition-[flex-grow] duration-150 ease-out";
-const COL2_WIDE_CLS = "flex-1 basis-auto min-w-[320px] border-r-0";
-const COL2_RESIZING_CLS = "transition-none";
+  "[flex:calc(var(--zeros-column-2-ratio,0.5)*100)_1_0px] min-w-[320px] max-w-[min(2400px,70%)]";
+// Collapsed: col 2 is the only item in the row, so the grow factor hands
+// it everything — but the 70% share cap would leave a 30% void where col 3
+// used to be, so it is lifted here (and the 2400px ultrawide ceiling with
+// it, matching the previous collapsed behaviour). Everything else is
+// character-for-character COL2_DEFAULT_WIDTH_CLS; see the note above.
+const COL2_WIDE_CLS =
+  "[flex:calc(var(--zeros-column-2-ratio,0.5)*100)_1_0px] min-w-[320px] max-w-none";
 
 // Resize handle — a 6px hit strip at col 2's right edge, which now butts
 // directly against column 3 (column 3 dropped its left padding, so there's
@@ -92,54 +114,25 @@ const PANE_TREE_ROOT_CLS = "absolute inset-0 flex min-h-0 min-w-0";
 
 /** 2026-07-17 proportional columns: persist col 2's SHARE of the
  *  two-column row (0..1) instead of a pixel width, so both columns
- *  scale together on window resize / maximize. The clamp math lives in
- *  column2-ratio.ts (a leaf module, unit-testable without the chat
- *  tree). */
-const COLUMN_2_RATIO_KEY = "zeros.column2.ratio";
-/** Pre-ratio installs persisted a pixel width here — migrated once
- *  (px ÷ window width ≈ share of the row) then removed. */
-const COLUMN_2_LEGACY_WIDTH_KEY = "zeros.column2.width";
-
-/** Read the persisted ratio once, apply it as --zeros-column-2-ratio
- *  on the two-column ROW element (col 2's parent — scoped there, not
- *  :root, so ratio writes only recalc the columns that consume it).
- *  Returns the current ratio and a setter that writes to both the CSS
- *  variable (immediate visual effect) and localStorage (persistence). */
+ *  scale together on window resize / maximize. The storage + clamp math
+ *  lives in column2-ratio.ts (a leaf module, unit-testable without the
+ *  chat tree, and importable from the pre-render boot path).
+ *
+ *  Applies the ratio as --zeros-column-2-ratio on the two-column ROW
+ *  element (col 2's parent — scoped there, not :root, so per-frame drag
+ *  writes only recalc the columns that consume it). Returns the current
+ *  ratio and a setter that writes to both the CSS variable (immediate
+ *  visual effect) and localStorage (persistence). */
 function useColumn2Ratio(sectionRef: React.RefObject<HTMLElement | null>) {
-  const [ratio, setRatio] = useState<number>(() => {
-    if (typeof window === "undefined") return COLUMN_2_RATIO_DEFAULT;
-    try {
-      const raw = window.localStorage.getItem(COLUMN_2_RATIO_KEY);
-      if (raw != null) {
-        return sanitizeColumn2Ratio(Number.parseFloat(raw));
-      }
-      // One-time migration from the pixel era: the old value was col
-      // 2's width in a row that spanned (approximately) the window,
-      // so px ÷ innerWidth preserves the user's visual layout.
-      // Persist immediately so the migration survives the reload that
-      // removes the legacy key. (Idempotent under StrictMode's double
-      // initializer: the second run reads the freshly written key.)
-      const legacy = window.localStorage.getItem(COLUMN_2_LEGACY_WIDTH_KEY);
-      if (legacy != null) {
-        window.localStorage.removeItem(COLUMN_2_LEGACY_WIDTH_KEY);
-        const px = Number.parseInt(legacy, 10);
-        if (Number.isFinite(px) && window.innerWidth > 0) {
-          const migrated = sanitizeColumn2Ratio(px / window.innerWidth);
-          window.localStorage.setItem(COLUMN_2_RATIO_KEY, String(migrated));
-          return migrated;
-        }
-      }
-    } catch {
-      /* private mode / quota — fall through to default */
-    }
-    return COLUMN_2_RATIO_DEFAULT;
-  });
+  const [ratio, setRatio] = useState<number>(readPersistedColumn2Ratio);
 
-  // Apply to the row on every change so the CSS picks it up (col 3 is
-  // a sibling under the same row, so it inherits the variable for its
-  // `calc(1 - ratio)` grow factor). Layout effect, not effect: the
-  // write must land before first paint, or a persisted non-default
-  // ratio flashes one frame of the 0.5 CSS fallback on mount.
+  // Layout effect, not effect: the write must land before paint. Note
+  // this is NOT the only writer — main.tsx publishes the same value on
+  // <html> before the first render, because a descendant layout effect
+  // that measures (ChatPane's split-availability observer) can flush
+  // style before this one runs. Without the boot write the flush
+  // resolved the columns at the 0.5 fallback first, which is a real
+  // style change and therefore an animatable one. See boot-layout-vars.ts.
   useLayoutEffect(() => {
     sectionRef.current?.parentElement?.style.setProperty(
       COLUMN_2_RATIO_VAR,
@@ -148,13 +141,16 @@ function useColumn2Ratio(sectionRef: React.RefObject<HTMLElement | null>) {
   }, [ratio, sectionRef]);
 
   const persist = useCallback((next: number) => {
-    const clamped = sanitizeColumn2Ratio(next);
+    const clamped = persistColumn2Ratio(next);
     setRatio(clamped);
-    try {
-      window.localStorage.setItem(COLUMN_2_RATIO_KEY, String(clamped));
-    } catch {
-      /* persistence is best-effort */
-    }
+    // Keep the document-level boot value current too: if the two-column
+    // row is ever recreated (it is rendered conditionally), its inline
+    // variable goes with it and the inherited value is what the newly
+    // inserted columns resolve against on their very first style pass.
+    document.documentElement.style.setProperty(
+      COLUMN_2_RATIO_VAR,
+      String(clamped),
+    );
   }, []);
 
   return { ratio, persist };
@@ -172,12 +168,15 @@ export function Column2Workspace({
   const sectionRef = useRef<HTMLElement | null>(null);
   const { ratio: colRatio, persist: persistColRatio } =
     useColumn2Ratio(sectionRef);
-  const [isResizing, setIsResizing] = useState(false);
   const { hintHandlers, hint } = useResizeHint("Drag to resize");
 
   const onResizePointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       if (col3Collapsed) return;
+      // Primary button only — matching TerminalPanelResizer. Without this
+      // a right-click on the seam started a capture-backed drag that ran
+      // underneath the context menu.
+      if (!e.isPrimary || e.button !== 0) return;
       e.preventDefault();
       const handle = e.currentTarget;
       const pointerId = e.pointerId;
@@ -186,7 +185,10 @@ export function Column2Workspace({
       } catch {
         /* capture can fail in rare cases; we'll proceed without it */
       }
-      setIsResizing(true);
+      // Deliberately NO React state for "is resizing": the column's flex
+      // declaration no longer transitions, so a resizing flag would exist
+      // only to re-render Column2Panes (every pane, every transcript)
+      // twice per gesture — a visible hitch at grab and release.
       // Geometry of the two-column flex ROW (col 2's parent), measured
       // once — the captured pointer means the window can't resize
       // mid-drag. The pointer's offset into the row IS col 2's share.
@@ -255,7 +257,8 @@ export function Column2Workspace({
         // final ratio synchronously before persisting it; if it equals the
         // existing React state, setRatio intentionally won't render again.
         flushPendingColumn2RatioPaint(rafId, cancelAnimationFrame, paintRatio);
-        setIsResizing(false);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
         try {
           if (handle.hasPointerCapture(pointerId)) {
             handle.releasePointerCapture(pointerId);
@@ -270,6 +273,12 @@ export function Column2Workspace({
         if (moved) persistColRatio(lastRatio);
       };
 
+      // Lock the cursor + suppress text selection window-wide for the whole
+      // gesture (matching TerminalPanelResizer and the Home rail seam). The
+      // 6px strip is narrow enough that a fast drag outruns the pointer and
+      // the I-beam flickers back in over the transcript otherwise.
+      document.body.style.cursor = "ew-resize";
+      document.body.style.userSelect = "none";
       handle.addEventListener("pointermove", onMove);
       handle.addEventListener("pointerup", finish);
       handle.addEventListener("pointercancel", finish);
@@ -289,7 +298,6 @@ export function Column2Workspace({
       className={cn(
         COL2_BASE_CLS,
         col3Collapsed ? COL2_WIDE_CLS : COL2_DEFAULT_WIDTH_CLS,
-        isResizing && COL2_RESIZING_CLS,
       )}
       aria-label="Agent Workspace"
     >

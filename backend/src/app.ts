@@ -58,6 +58,17 @@ export function createApp(
     }),
   );
 
+  // Every GitHub response is authentication state, an OAuth redirect, or a
+  // token-bearing exchange. Keep it out of browser, CDN, and intermediary
+  // caches even if a future Cloudflare rule becomes broader than today's
+  // dynamic pass-through. Set these before routing/auth so error responses
+  // (including 401/503) inherit the same boundary.
+  app.use("/v1/github/*", async (c, next) => {
+    c.header("Cache-Control", "no-store");
+    c.header("Pragma", "no-cache");
+    await next();
+  });
+
   // GitHub calls the callback from the system browser, so it cannot carry the
   // desktop user's Auth0 bearer token. Its one-time state is the
   // authorization. Register it before the auth middleware; every other GitHub

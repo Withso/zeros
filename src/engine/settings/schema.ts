@@ -22,6 +22,17 @@ import { GITHUB_AUTH_METHODS } from "@zeros/core/github-auth";
 
 export const RUN_MODES = ["concurrent", "nonconcurrent"] as const;
 export const PROVIDER_AUTH_METHODS = ["cli", "api-key"] as const;
+/** How a new workspace's branch name is prefixed (Settings → Git). "zeros" is
+ *  the historical default and stays the fallback: every workspace created
+ *  before this setting existed is on a `zeros/` branch, and that prefix is
+ *  what marks a ref as workspace-owned. */
+export const BRANCH_PREFIX_TYPES = [
+  "zeros",
+  "github",
+  "custom",
+  "none",
+] as const;
+export type BranchPrefixType = (typeof BRANCH_PREFIX_TYPES)[number];
 /** Reasoning-effort levels — mirror of the renderer's ChatEffort union. */
 export const EFFORT_LEVELS = [
   "low",
@@ -101,8 +112,20 @@ const gitSchema = z
     remote: z.string().describe("Git remote new workspaces branch from."),
     base_branch: z.string().describe("Branch new workspaces fork from."),
     branch_prefix_type: z
+      .enum(BRANCH_PREFIX_TYPES)
+      .describe(
+        'Which namespace a new workspace branch goes under: "github" = the ' +
+          'connected GitHub login, "custom" = the `branch_prefix` string, ' +
+          '"none" = no prefix (the bare workspace name). The namespace is ' +
+          "joined to the name with a single `/`.",
+      ),
+    branch_prefix: z
       .string()
-      .describe("How workspace branch names are generated."),
+      .describe(
+        'The namespace used when branch_prefix_type = "custom". Joined to the ' +
+          "workspace name with a single `/`, so `acme` gives `acme/Cream`. A " +
+          "leading or trailing slash is optional and ignored.",
+      ),
     delete_branch_on_archive: z
       .boolean()
       .describe("Delete the branch when archiving."),

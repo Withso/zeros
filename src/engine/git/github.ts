@@ -134,6 +134,20 @@ let ghRunFile: (
   opts?: RunFileOptions,
 ) => Promise<RunFileResult> = runFile;
 
+/**
+ * The gh-cli method means "borrow gh's durable github.com login", not an
+ * arbitrary token inherited by the app launcher. GH_TOKEN/GITHUB_TOKEN outrank
+ * gh's config, so a stale shell export otherwise makes Settings report 401
+ * even after a successful `gh auth login`. The PAT method is the explicit path
+ * for user-supplied tokens.
+ */
+function ghCliStoredAuthOptions(): RunFileOptions {
+  const env: Record<string, string | undefined> = { ...process.env };
+  delete env.GH_TOKEN;
+  delete env.GITHUB_TOKEN;
+  return { timeoutMs: 5000, env };
+}
+
 function cacheOctokit(oct: OctokitClass, token: string): void {
   cachedOctokit = oct;
   cachedOctokitToken = token;
@@ -261,17 +275,58 @@ export interface AuthStatusResult {
   };
 }
 
+/** Last login GitHub confirmed for us, remembered across calls.
+ *
+ *  Exists for ONE caller: workspace creation, which prefixes the new branch
+ *  with the login when Settings → Git says `branch_prefix_type = "github"`.
+ *  Creating a workspace must not wait on (or fail because of) a /user round
+ *  trip, so that path reads this cache and falls back to the default `zeros/`
+ *  prefix when it is empty. Every code path that LEARNS a login writes here;
+ *  a rejected credential and a credential swap clear it.
+ *
+ *  It is deliberately NOT read off the seeded credential's own `login` field:
+ *  that field is only populated for the `github-app` method, so relying on it
+ *  would make branch prefixing work for one sign-in method and silently not
+ *  for the other two. */
+let lastKnownLogin: string | null = null;
+
+/** The last confirmed GitHub login, or null if we've never seen one this
+ *  process (or the credential was since cleared). Synchronous and
+ *  network-free — a best-effort hint, never an authorization signal. */
+export function cachedGithubLogin(): string | null {
+  return lastKnownLogin;
+}
+
+function rememberLogin(login: string | null | undefined): void {
+  lastKnownLogin = login && login.trim() ? login.trim() : null;
+}
+
+/** Drop the remembered login without asserting a new one — for when the
+ *  CREDENTIAL changed underneath us and the cached login stops being evidence
+ *  of anything (see seedGithubCredential, the desktop's sign-in/sign-out
+ *  route; the boot prime only covers launch). Branch prefixing then falls back
+ *  to the default until the next getAuthStatus re-learns it, which is the safe
+ *  direction: signing out and getting `zeros/Cream` is recoverable, whereas
+ *  stamping a disconnected account's name onto a branch is permanent. */
+export function forgetGithubLogin(): void {
+  lastKnownLogin = null;
+}
+
 /** Probe whether we have a working token. Rotating App credentials get the
  * same one-shot owner refresh as normal API calls; borrowed/PAT credentials
  * retain the legacy retry-and-clear behavior after two explicit rejections. */
 export async function getAuthStatus(): Promise<AuthStatusResult> {
   const token = await tokenStore.get();
-  if (!token) return { authenticated: false };
+  if (!token) {
+    rememberLogin(null);
+    return { authenticated: false };
+  }
   try {
     const response = await withAuthRetry((octokit) =>
       octokit.users.getAuthenticated(),
     );
     const warning = partialSsoWarning(response.headers);
+    rememberLogin(response.data.login);
     return {
       authenticated: true,
       login: response.data.login,
@@ -279,8 +334,11 @@ export async function getAuthStatus(): Promise<AuthStatusResult> {
     };
   } catch (err) {
     if (err instanceof GitError && err.code === "NOT_AUTHENTICATED") {
+      rememberLogin(null);
       return { authenticated: false };
     }
+    // A transient failure (offline, 5xx) is NOT evidence the login changed —
+    // keep the cached one so branch prefixing survives a flaky network.
     throw err;
   }
 }
@@ -307,9 +365,11 @@ async function probeGhCliCredential(): Promise<{
 }> {
   let token = "";
   try {
-    const { stdout } = await ghRunFile("gh", ["auth", "token"], {
-      timeoutMs: 5000,
-    });
+    const { stdout } = await ghRunFile(
+      "gh",
+      ["auth", "token", "--hostname", GITHUB_GIT_HOST],
+      ghCliStoredAuthOptions(),
+    );
     token = stdout.trim();
   } catch (err) {
     const available = (err as { code?: string }).code !== "ENOENT";
@@ -347,6 +407,12 @@ async function probeGhCliCredential(): Promise<{
   const octokit = await octokitFactory(token);
   try {
     const { data } = await octokit.users.getAuthenticated();
+    // Deliberately does NOT rememberLogin(): this probes the gh CLI's own
+    // credential, which since the three-way auth split is not necessarily the
+    // ACTIVE one. Caching a login from here would let a signed-out CLI account
+    // prefix branches for the App/PAT account actually in use. getAuthStatus()
+    // is the only writer, because it is the only probe of the active
+    // credential.
     return {
       available: true,
       configured: true,
@@ -397,9 +463,11 @@ async function probeGhCliCredential(): Promise<{
  *  uses detectGhCli(), which does verify the identity and returns no secret. */
 export async function readGhCliCredential(): Promise<GithubCredential | null> {
   try {
-    const { stdout } = await ghRunFile("gh", ["auth", "token"], {
-      timeoutMs: 5000,
-    });
+    const { stdout } = await ghRunFile(
+      "gh",
+      ["auth", "token", "--hostname", GITHUB_GIT_HOST],
+      ghCliStoredAuthOptions(),
+    );
     const accessToken = stdout.trim();
     return accessToken
       ? {
@@ -442,6 +510,9 @@ export async function verifyGithubToken(
   const octokit = await octokitFactory(trimmed);
   try {
     const { data } = await octokit.users.getAuthenticated();
+    // No rememberLogin() here either: this validates a CANDIDATE token and
+    // deliberately does not mutate the selected credential, so it is not
+    // evidence about the active account.
     return { login: data.login };
   } catch (err) {
     throw wrapApiError(err, "GitHub rejected the token");
@@ -830,6 +901,22 @@ async function withAuthRetry<T>(
     } catch (retryErr) {
       if (isCredentialInvalid(retryErr)) {
         clearOctokitCache();
+        // GitHub has now rejected this credential twice, so whatever login it
+        // once proved is no longer evidence of anything — drop it here rather
+        // than only in getAuthStatus. This path is the one reachable from
+        // ordinary background traffic (gh.prSync and every other gh.* op),
+        // and without it `cachedGithubLogin()` keeps returning the
+        // signed-out account while `resolveNewBranchPrefix` stamps it onto
+        // every branch created from here on. That direction is permanent;
+        // falling back to `zeros/` until the next getAuthStatus re-learns the
+        // login is not (see forgetGithubLogin).
+        //
+        // Unconditional, and deliberately not gated on whether the CAS below
+        // actually cleared: `false` there means a concurrent reconnect won
+        // with a NEWER credential, which may well belong to a different
+        // account — the one case where the cached login is most certainly
+        // stale.
+        rememberLogin(null);
         if (retryToken && tokenStore.clearAfterRejection) {
           await tokenStore.clearAfterRejection(retryToken);
         } else if (retryToken && (await tokenStore.get()) === retryToken) {
@@ -1062,6 +1149,121 @@ async function workspaceRemote(workspaceId: string): Promise<{
     });
   }
   return parseGitHubRemote(stdout.trim());
+}
+
+// ── Repository access preflight ──────────────────────────
+
+/** Can the selected connection open a pull request on this workspace's remote? */
+export interface GithubRepoAccess {
+  /** `blocked` is a DEFINITE refusal — the same request with the same
+   *  connection cannot succeed. `unknown` means the probe itself failed
+   *  (offline, rate limited, 5xx) and is deliberately not a refusal: callers
+   *  must fall through to the real operation rather than ground it for a
+   *  reason the user cannot act on. */
+  state: "ok" | "blocked" | "unknown";
+  /** Whether any GitHub credential is selected and readable. Absent when the
+   *  probe never got as far as the credential store. */
+  connected?: boolean;
+  code?: GitErrorCode;
+  message?: string;
+  remediation?: string;
+}
+
+/** Refusals that survive a retry. Everything else — a rate limit, a dropped
+ *  connection, a GitHub 5xx — is a failure of the PROBE, not evidence about
+ *  access, and must never be reported as one. */
+const BLOCKING_ACCESS_CODES = new Set<GitErrorCode>([
+  "NOT_AUTHENTICATED",
+  "GITHUB_REPO_NOT_INSTALLED",
+  "GITHUB_FORBIDDEN_SCOPE",
+  "GITHUB_SSO_REQUIRED",
+  "GITHUB_INSTALLATION_SUSPENDED",
+]);
+
+/** One `GET /repos/{owner}/{repo}` against the workspace's CONFIGURED remote —
+ *  cheap next to the push + `pulls.create` it guards, and the only way to tell
+ *  "not signed in" apart from "signed in, but this repository is outside the
+ *  connection's reach".
+ *
+ *  Those two states are otherwise indistinguishable to every caller: GitHub
+ *  answers both with a 404, and `git push` answers the second with "remote:
+ *  Repository not found", which classifyGitTransportError has to read as
+ *  NOT_AUTHENTICATED so the credential-rotation retry still fires. Without this
+ *  probe, a user with a connected GitHub App that simply doesn't include this
+ *  repository was told to connect GitHub.
+ *
+ *  Never throws — the caller uses the result to CHOOSE a message, and a probe
+ *  that failed for its own reasons must not become that message. */
+export async function getWorkspaceRepoAccess(
+  workspaceId: string,
+): Promise<GithubRepoAccess> {
+  let connected: boolean;
+  try {
+    connected = Boolean(await tokenStore.get());
+  } catch {
+    return { state: "unknown" };
+  }
+  let owner: string;
+  let repo: string;
+  try {
+    ({ owner, repo } = await workspaceRemote(workspaceId));
+  } catch (err) {
+    // No configured remote, a non-github.com host, an embedded credential —
+    // definite and fixable, and none of them needs a GitHub round trip.
+    if (!isGitError(err)) return { state: "unknown", connected };
+    return {
+      state: "blocked",
+      connected,
+      code: err.code,
+      message: err.message,
+      ...(err.remediation ? { remediation: err.remediation } : {}),
+    };
+  }
+  if (!connected) {
+    return {
+      state: "blocked",
+      connected: false,
+      code: "NOT_AUTHENTICATED",
+      message: "Not signed in to GitHub",
+      remediation: "Connect GitHub in Settings → Integrations.",
+    };
+  }
+  try {
+    const response = await withAuthRetry((oct) =>
+      oct.repos.get({ owner, repo }),
+    );
+    // `permissions.push === false` is the authenticated account's own write
+    // bit: definite, so it blocks. `true` is NOT a guarantee (an App
+    // installation can hold narrower `contents` permission than the user who
+    // authorized it), so it never blocks — this probe may only ever remove a
+    // wrong message, never a pull request that would have worked.
+    if (response.data.permissions?.push === false) {
+      return {
+        state: "blocked",
+        connected: true,
+        code: "GITHUB_FORBIDDEN_SCOPE",
+        message: "This GitHub connection cannot push to this repository.",
+        remediation:
+          "A pull request has to push its branch first. Ask for write access on GitHub, or connect an account that has it.",
+      };
+    }
+    return { state: "ok", connected: true };
+  } catch (err) {
+    const wrapped = wrapApiError(
+      err,
+      "Could not check GitHub repository access",
+    );
+    if (!BLOCKING_ACCESS_CODES.has(wrapped.code)) {
+      return { state: "unknown", connected: true };
+    }
+    return {
+      state: "blocked",
+      connected: true,
+      code: wrapped.code,
+      message: wrapped.message,
+      ...(wrapped.remediation ? { remediation: wrapped.remediation } : {}),
+    };
+  }
 }
 
 export interface CreatePrOptions {
