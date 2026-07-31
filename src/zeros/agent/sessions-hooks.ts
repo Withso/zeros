@@ -96,6 +96,8 @@ export function useChatSession(
         segments,
       ),
     cancel: () => ctx.cancel(chatId),
+    stopBackgroundTask: (taskId: string) =>
+      ctx.stopBackgroundTask(chatId, taskId),
     respondToPermission: (response) =>
       ctx.respondToPermission(chatId, response),
     respondToQuestion: (response) => ctx.respondToQuestion(chatId, response),

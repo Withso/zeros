@@ -31,6 +31,7 @@
 
 import { randomUUID } from "node:crypto";
 
+import type { BackgroundTask } from "@zeros/core/agent-events";
 import { claudeContextWindow } from "@zeros/core/model-context";
 
 import { isDevRuntime } from "../../../runtime";
@@ -56,9 +57,26 @@ type ToolKind =
   | "question"
   | "skill"
   | "tool_search"
+  | "background_task"
   | "other";
 
 type Emit = (notification: SessionNotification) => void;
+
+export const SCHEDULED_WAKEUP_TASK_PREFIX = "scheduled-wakeup:";
+
+export function isScheduledWakeupTaskId(taskId: string): boolean {
+  return taskId.startsWith(SCHEDULED_WAKEUP_TASK_PREFIX);
+}
+
+export interface ClaudeScheduledWakeup {
+  id: string;
+  schedule: string;
+  recurring: boolean;
+  prompt: string;
+}
+
+const MAX_ACTIVE_BACKGROUND_TASKS = 100;
+const MAX_BACKGROUND_TASK_LIFECYCLE = 500;
 
 interface ClaudeAssistantContentBlock {
   type: string;
@@ -92,13 +110,40 @@ interface ClaudeMessageEvent {
   };
 }
 
-interface ClaudeSystemInitEvent {
+interface ClaudeSystemEvent {
   type: "system";
-  subtype: "init";
+  subtype: string;
   session_id?: string;
   model?: string;
   tools?: string[];
   mcp_servers?: Array<{ name: string; status?: string }>;
+  task_id?: string;
+  tool_use_id?: string;
+  description?: string;
+  subagent_type?: string;
+  task_type?: string;
+  workflow_name?: string;
+  prompt?: string;
+  skip_transcript?: boolean;
+  tasks?: Array<{
+    task_id?: string;
+    task_type?: string;
+    description?: string;
+  }>;
+  usage?: { duration_ms?: number };
+  last_tool_name?: string;
+  summary?: string;
+  patch?: {
+    status?: string;
+    description?: string;
+    end_time?: number;
+    total_paused_ms?: number;
+    error?: string;
+    is_backgrounded?: boolean;
+  };
+  status?: string;
+  state?: "idle" | "running" | "requires_action";
+  output_file?: string;
 }
 
 interface ClaudeResultEvent {
@@ -181,6 +226,35 @@ export class ClaudeStreamTranslator {
   /** Zeros-side tool call ids keyed by Claude's tool_use_id so
    *  tool_call_update can cross-reference a prior tool_call. */
   private readonly toolCallIds = new Map<string, string>();
+
+  /** Native tool-use metadata retained because task_started references only
+   * tool_use_id; it does not repeat a background shell's command. */
+  private readonly toolInputs = new Map<
+    string,
+    { name: string; input: unknown }
+  >();
+
+  /** Active background work is level-triggered by
+   * background_tasks_changed and enriched by the task edge stream. */
+  private readonly backgroundTasks = new Map<string, BackgroundTask>();
+  /** Edge metadata can arrive before membership (ordering is explicitly
+   * unspecified by the SDK). Cache it separately until the level signal says
+   * whether that task is actually background work. */
+  private readonly backgroundTaskMetadata = new Map<string, BackgroundTask>();
+  /** One-shot self-wakeups are reported by the SDK's Stop hook rather than
+   * `background_tasks_changed`. Keep their authoritative level separate so a
+   * native task membership frame cannot accidentally clear them. Recurring
+   * cron jobs are deliberately excluded (open task 008). */
+  private readonly scheduledWakeups = new Map<string, BackgroundTask>();
+  private latestScheduledWakeupReason: string | null = null;
+  private readonly taskRecordIds = new Map<string, string>();
+  private readonly skippedTaskRecords = new Set<string>();
+  private readonly notifiedTaskIds = new Set<string>();
+  /** Edge/level ordering is unspecified. Once an edge settles an id, ignore a
+   * late membership frame for it until the SDK process restarts. */
+  private readonly terminalTaskIds = new Set<string>();
+  private sessionActivityState: "idle" | "running" | "requires_action" | null =
+    null;
 
   /** Zeros-side (minted) tool call id for a native tool_use id — lets the
    *  adapter address a timeline row it only knows by vendor id (the
@@ -310,6 +384,44 @@ export class ClaudeStreamTranslator {
     this.streamPartials = opts.streamPartials ?? false;
   }
 
+  /** Replace the session's one-shot wakeups from StopHookInput.session_crons.
+   * Recurring jobs belong to the deliberately skipped scheduling feature and
+   * must never leak into the background-task card. */
+  setScheduledWakeups(crons: readonly ClaudeScheduledWakeup[]): void {
+    const now = Date.now();
+    const next = new Map<string, BackgroundTask>();
+    let pendingReason = this.latestScheduledWakeupReason;
+    for (const cron of crons) {
+      if (next.size >= MAX_ACTIVE_BACKGROUND_TASKS) break;
+      if (cron.recurring || !cron.id) continue;
+      const taskId = `${SCHEDULED_WAKEUP_TASK_PREFIX}${cron.id}`;
+      const previous = this.scheduledWakeups.get(taskId);
+      // A successful ScheduleWakeup tool result describes the newly-created
+      // entry only. Do not repaint every older cron in the next Stop snapshot
+      // with that latest reason. An unchanged entry can be reused verbatim,
+      // which also keeps hot renderer selectors stable.
+      if (previous && previous.summary === cron.schedule) {
+        next.set(taskId, previous);
+        continue;
+      }
+      const reason = pendingReason ?? scheduledWakeupReason(cron.prompt);
+      if (pendingReason !== null) pendingReason = null;
+      const name = scheduledWakeupName(cron.schedule, reason);
+      next.set(taskId, {
+        taskId,
+        name,
+        taskType: "scheduled_wakeup",
+        startedAt: previous?.startedAt ?? now,
+        updatedAt: now,
+        summary: cron.schedule,
+      });
+    }
+    this.scheduledWakeups.clear();
+    for (const [taskId, task] of next) this.scheduledWakeups.set(taskId, task);
+    this.latestScheduledWakeupReason = next.size === 0 ? null : pendingReason;
+    this.emitBackgroundTasks();
+  }
+
   /** Feed a parsed JSON event from Claude's stdout. */
   feed(event: unknown): void {
     if (!isObj(event) || typeof event.type !== "string") {
@@ -322,7 +434,7 @@ export class ClaudeStreamTranslator {
     if (event.type !== "system") this.retryBurstNoticed = false;
     switch (event.type) {
       case "system":
-        this.onSystem(event as unknown as ClaudeSystemInitEvent);
+        this.onSystem(event as unknown as ClaudeSystemEvent);
         break;
       case "user":
         this.onUser(event as unknown as ClaudeMessageEvent);
@@ -449,12 +561,40 @@ export class ClaudeStreamTranslator {
   }
 
   // ── System init ─────────────────────────────────────────
-  private onSystem(event: ClaudeSystemInitEvent): void {
+  private onSystem(event: ClaudeSystemEvent): void {
     if (event.subtype === "init" && typeof event.session_id === "string") {
       this.claudeSessionId = event.session_id;
     }
     if (event.subtype === "init" && typeof event.model === "string") {
       this.currentModel = event.model;
+    }
+    if (event.subtype === "init") {
+      // Agent SDK background membership is process-local. A query restart has
+      // no startup snapshot, so an explicit empty replace prevents stale tasks
+      // from surviving a reconnect in the renderer.
+      this.backgroundTasks.clear();
+      this.backgroundTaskMetadata.clear();
+      this.scheduledWakeups.clear();
+      this.latestScheduledWakeupReason = null;
+      this.taskRecordIds.clear();
+      this.skippedTaskRecords.clear();
+      this.notifiedTaskIds.clear();
+      this.terminalTaskIds.clear();
+      this.sessionActivityState = null;
+      this.emitBackgroundTasks();
+    }
+    if (event.subtype === "task_started") this.onTaskStarted(event);
+    if (event.subtype === "background_tasks_changed") {
+      this.onBackgroundTasksChanged(event);
+    }
+    if (event.subtype === "task_progress") this.onTaskProgress(event);
+    if (event.subtype === "task_updated") this.onTaskUpdated(event);
+    if (event.subtype === "task_notification") {
+      this.onTaskNotification(event);
+    }
+    if (event.subtype === "session_state_changed" && event.state) {
+      this.sessionActivityState = event.state;
+      this.emitBackgroundTasks();
     }
     // `api_retry` — the CLI hit a retryable API error (network blip, 5xx,
     // overload) and is retrying the SAME call itself after a backoff delay.
@@ -570,6 +710,347 @@ export class ClaudeStreamTranslator {
       }
     }
     // Nothing else to emit to the UI — the init event is just bookkeeping.
+  }
+
+  /** Emit the current active set as one bounded, authoritative replacement. */
+  private emitBackgroundTasks(): void {
+    const tasks = [
+      ...this.backgroundTasks.values(),
+      ...this.scheduledWakeups.values(),
+    ].slice(0, MAX_ACTIVE_BACKGROUND_TASKS);
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "background_tasks_update",
+        tasks,
+        waiting: this.sessionActivityState === "idle" && tasks.length > 0,
+      },
+    });
+  }
+
+  private onTaskStarted(event: ClaudeSystemEvent): void {
+    if (!event.task_id) return;
+    const now = Date.now();
+    const tool = event.tool_use_id
+      ? this.toolInputs.get(event.tool_use_id)
+      : undefined;
+    const input = isObj(tool?.input) ? tool.input : {};
+    const command = pickFirstString(input.command, input.cmd, input.script);
+    const previous = this.backgroundTasks.get(event.task_id);
+    const previousMetadata = this.backgroundTaskMetadata.get(event.task_id);
+    const name =
+      pickFirstString(
+        event.description,
+        input.description,
+        command,
+        event.prompt,
+      ) ?? `Task ${event.task_id}`;
+    const metadata: BackgroundTask = {
+      taskId: event.task_id,
+      name,
+      taskType: event.task_type ?? previousMetadata?.taskType,
+      startedAt: previousMetadata?.startedAt ?? previous?.startedAt ?? now,
+      updatedAt: now,
+      ...(command
+        ? { command }
+        : previousMetadata?.command
+          ? { command: previousMetadata.command }
+          : {}),
+      ...(previousMetadata?.summary
+        ? { summary: previousMetadata.summary }
+        : {}),
+      ...(previousMetadata?.lastToolName
+        ? { lastToolName: previousMetadata.lastToolName }
+        : {}),
+    };
+    setBoundedMap(
+      this.backgroundTaskMetadata,
+      event.task_id,
+      metadata,
+      MAX_BACKGROUND_TASK_LIFECYCLE,
+    );
+    if (previous) {
+      this.backgroundTasks.set(event.task_id, {
+        ...previous,
+        ...metadata,
+        startedAt: previous.startedAt,
+        updatedAt: now,
+      });
+      this.emitBackgroundTasks();
+    }
+
+    if (event.skip_transcript) {
+      addBoundedSet(
+        this.skippedTaskRecords,
+        event.task_id,
+        MAX_BACKGROUND_TASK_LIFECYCLE,
+      );
+      return;
+    }
+    if (this.taskRecordIds.has(event.task_id)) return;
+    const toolCallId = `background-task-${randomUUID()}`;
+    setBoundedMap(
+      this.taskRecordIds,
+      event.task_id,
+      toolCallId,
+      MAX_BACKGROUND_TASK_LIFECYCLE,
+    );
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId,
+        title: "Task Started",
+        kind: "background_task",
+        status: "in_progress",
+        rawInput: {
+          taskId: event.task_id,
+          name,
+          ...(event.task_type ? { taskType: event.task_type } : {}),
+          ...(event.workflow_name ? { workflowName: event.workflow_name } : {}),
+          ...(event.subagent_type ? { subagentType: event.subagent_type } : {}),
+          ...(command ? { command } : {}),
+          ...(event.prompt ? { prompt: event.prompt } : {}),
+        },
+      },
+    });
+  }
+
+  private onBackgroundTasksChanged(event: ClaudeSystemEvent): void {
+    const now = Date.now();
+    const next = new Map<string, BackgroundTask>();
+    for (const incoming of (event.tasks ?? []).slice(
+      0,
+      MAX_ACTIVE_BACKGROUND_TASKS,
+    )) {
+      if (!incoming.task_id || this.terminalTaskIds.has(incoming.task_id)) {
+        continue;
+      }
+      const previous = this.backgroundTasks.get(incoming.task_id);
+      const metadata = this.backgroundTaskMetadata.get(incoming.task_id);
+      next.set(incoming.task_id, {
+        taskId: incoming.task_id,
+        name:
+          previous?.name ||
+          metadata?.name ||
+          incoming.description ||
+          `Task ${incoming.task_id}`,
+        taskType:
+          incoming.task_type ?? previous?.taskType ?? metadata?.taskType,
+        startedAt: previous?.startedAt ?? metadata?.startedAt ?? now,
+        updatedAt: now,
+        ...((previous?.command ?? metadata?.command)
+          ? { command: previous?.command ?? metadata?.command }
+          : {}),
+        ...((previous?.summary ?? metadata?.summary)
+          ? { summary: previous?.summary ?? metadata?.summary }
+          : {}),
+        ...((previous?.lastToolName ?? metadata?.lastToolName)
+          ? { lastToolName: previous?.lastToolName ?? metadata?.lastToolName }
+          : {}),
+      });
+    }
+    this.backgroundTasks.clear();
+    for (const [taskId, task] of next) this.backgroundTasks.set(taskId, task);
+    this.emitBackgroundTasks();
+  }
+
+  private onTaskProgress(event: ClaudeSystemEvent): void {
+    if (!event.task_id) return;
+    const previous = this.backgroundTasks.get(event.task_id);
+    const previousMetadata = this.backgroundTaskMetadata.get(event.task_id);
+    if (!previous && !previousMetadata) return;
+    const now = Date.now();
+    const durationMs = event.usage?.duration_ms;
+    const base = previous ?? previousMetadata!;
+    const updated: BackgroundTask = {
+      ...base,
+      // A duration lets an out-of-order progress edge recover a more accurate
+      // start time than receipt time without ever moving it forwards.
+      startedAt:
+        typeof durationMs === "number"
+          ? Math.min(base.startedAt, now - Math.max(0, durationMs))
+          : base.startedAt,
+      updatedAt: now,
+      ...(event.description ? { summary: event.description } : {}),
+      ...(event.summary ? { summary: event.summary } : {}),
+      ...(event.last_tool_name ? { lastToolName: event.last_tool_name } : {}),
+    };
+    setBoundedMap(
+      this.backgroundTaskMetadata,
+      event.task_id,
+      updated,
+      MAX_BACKGROUND_TASK_LIFECYCLE,
+    );
+    if (previous) {
+      this.backgroundTasks.set(event.task_id, updated);
+      this.emitBackgroundTasks();
+    }
+  }
+
+  private onTaskUpdated(event: ClaudeSystemEvent): void {
+    if (!event.task_id) return;
+    const status = event.patch?.status;
+    const terminal =
+      status === "completed" || status === "failed" || status === "killed";
+    const previous = this.backgroundTasks.get(event.task_id);
+    const previousMetadata = this.backgroundTaskMetadata.get(event.task_id);
+    if (event.patch?.is_backgrounded === true && !previous) {
+      const now = Date.now();
+      this.backgroundTasks.set(event.task_id, {
+        taskId: event.task_id,
+        name:
+          event.patch.description ||
+          event.description ||
+          `Task ${event.task_id}`,
+        taskType: event.task_type,
+        startedAt: now,
+        updatedAt: now,
+      });
+      this.emitBackgroundTasks();
+    } else if (previous && event.patch?.description) {
+      this.backgroundTasks.set(event.task_id, {
+        ...previous,
+        name: event.patch.description,
+        updatedAt: Date.now(),
+      });
+      this.emitBackgroundTasks();
+    }
+    if (event.patch?.description && previousMetadata) {
+      setBoundedMap(
+        this.backgroundTaskMetadata,
+        event.task_id,
+        {
+          ...previousMetadata,
+          name: event.patch.description,
+          updatedAt: Date.now(),
+        },
+        MAX_BACKGROUND_TASK_LIFECYCLE,
+      );
+    }
+    if (terminal || event.patch?.is_backgrounded === false) {
+      if (this.backgroundTasks.delete(event.task_id))
+        this.emitBackgroundTasks();
+    }
+    if (terminal) {
+      addBoundedSet(
+        this.terminalTaskIds,
+        event.task_id,
+        MAX_BACKGROUND_TASK_LIFECYCLE,
+      );
+      this.backgroundTaskMetadata.delete(event.task_id);
+    }
+    if (terminal && !this.skippedTaskRecords.has(event.task_id)) {
+      this.settleTaskRecord(
+        event.task_id,
+        {
+          status: status === "failed" ? "failed" : "completed",
+          providerStatus: status === "killed" ? "stopped" : status,
+          summary: event.patch?.description,
+          error: event.patch?.error,
+        },
+        previous ?? previousMetadata,
+      );
+    }
+  }
+
+  private onTaskNotification(event: ClaudeSystemEvent): void {
+    if (!event.task_id) return;
+    // Keep the last level/edge metadata long enough to build a useful durable
+    // row even if this completion bookend arrives without task_started (for
+    // example after a transiently missed edge).
+    const task =
+      this.backgroundTasks.get(event.task_id) ??
+      this.backgroundTaskMetadata.get(event.task_id);
+    addBoundedSet(
+      this.terminalTaskIds,
+      event.task_id,
+      MAX_BACKGROUND_TASK_LIFECYCLE,
+    );
+    this.backgroundTaskMetadata.delete(event.task_id);
+    if (this.backgroundTasks.delete(event.task_id)) this.emitBackgroundTasks();
+    if (event.skip_transcript || this.skippedTaskRecords.has(event.task_id)) {
+      return;
+    }
+    if (this.notifiedTaskIds.has(event.task_id)) return;
+    addBoundedSet(
+      this.notifiedTaskIds,
+      event.task_id,
+      MAX_BACKGROUND_TASK_LIFECYCLE,
+    );
+    this.settleTaskRecord(
+      event.task_id,
+      {
+        status: event.status === "failed" ? "failed" : "completed",
+        providerStatus: event.status,
+        summary: event.summary,
+        outputFile: event.output_file,
+        durationMs: event.usage?.duration_ms,
+      },
+      task,
+    );
+  }
+
+  private settleTaskRecord(
+    taskId: string,
+    result: {
+      status: "completed" | "failed";
+      providerStatus?: string;
+      summary?: string;
+      error?: string;
+      outputFile?: string;
+      durationMs?: number;
+    },
+    task?: BackgroundTask,
+  ): void {
+    const rawOutput = {
+      status: result.providerStatus ?? result.status,
+      ...(result.summary ? { summary: result.summary } : {}),
+      ...(result.error ? { error: result.error } : {}),
+      ...(result.outputFile ? { outputFile: result.outputFile } : {}),
+      ...(typeof result.durationMs === "number"
+        ? { durationMs: result.durationMs }
+        : {}),
+    };
+    const existing = this.taskRecordIds.get(taskId);
+    if (existing) {
+      this.emit({
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: existing,
+          title: "Background Task",
+          kind: "background_task",
+          status: result.status,
+          rawOutput,
+        },
+      });
+      return;
+    }
+    const toolCallId = `background-task-${randomUUID()}`;
+    setBoundedMap(
+      this.taskRecordIds,
+      taskId,
+      toolCallId,
+      MAX_BACKGROUND_TASK_LIFECYCLE,
+    );
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId,
+        title: "Background Task",
+        kind: "background_task",
+        status: result.status,
+        rawInput: {
+          taskId,
+          name: task?.name ?? `Task ${taskId}`,
+          ...(task?.taskType ? { taskType: task.taskType } : {}),
+          ...(task?.command ? { command: task.command } : {}),
+        },
+        rawOutput,
+      },
+    });
   }
 
   /** `system/status` — open/settle the compaction row (see onSystem). */
@@ -770,6 +1251,23 @@ export class ClaudeStreamTranslator {
     for (const b of blocks) {
       if (b.type !== "tool_result") continue;
       const tool = b as unknown as ClaudeToolResultBlock;
+      const nativeTool = this.toolInputs.get(tool.tool_use_id);
+      if (
+        nativeTool?.name === "ScheduleWakeup" &&
+        !tool.is_error &&
+        isObj(nativeTool.input)
+      ) {
+        if (nativeTool.input.stop === true) {
+          this.latestScheduledWakeupReason = null;
+          this.setScheduledWakeups([]);
+        } else {
+          this.latestScheduledWakeupReason =
+            typeof nativeTool.input.reason === "string" &&
+            nativeTool.input.reason.trim()
+              ? nativeTool.input.reason.trim()
+              : null;
+        }
+      }
       if (this.suppressedToolUseIds.has(tool.tool_use_id)) {
         this.suppressedToolUseIds.delete(tool.tool_use_id);
         continue;
@@ -946,6 +1444,7 @@ export class ClaudeStreamTranslator {
 
         const toolCallId = randomUUID();
         this.toolCallIds.set(block.id, toolCallId);
+        this.toolInputs.set(block.id, { name: block.name, input: block.input });
         // Stage 4.2: mergeKey collapses consecutive Edit/Write calls
         // against the same file into one card with "+N more changes"
         // history. Path is the only stable group key the renderer needs.
@@ -1170,6 +1669,40 @@ function isObj(x: unknown): x is Record<string, unknown> {
   return !!x && typeof x === "object" && !Array.isArray(x);
 }
 
+function pickFirstString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim().length > 0) return value;
+  }
+  return null;
+}
+
+function setBoundedMap<K, V>(
+  map: Map<K, V>,
+  key: K,
+  value: V,
+  limit: number,
+): void {
+  // Refresh insertion order when an existing lifecycle entry is observed so
+  // eviction always removes the oldest task, not an active/recent one.
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > limit) {
+    const oldest = map.keys().next().value as K | undefined;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
+
+function addBoundedSet<T>(set: Set<T>, value: T, limit: number): void {
+  set.delete(value);
+  set.add(value);
+  while (set.size > limit) {
+    const oldest = set.values().next().value as T | undefined;
+    if (oldest === undefined) break;
+    set.delete(oldest);
+  }
+}
+
 /** The `structuredPatch` array from a Claude Code `tool_use_result` — jsdiff
  *  hunks (`{oldStart, oldLines, newStart, newLines, lines}`) with REAL file
  *  line numbers, present on Edit/Write/MultiEdit results. Null for any other
@@ -1199,6 +1732,29 @@ function toolResultText(t: ClaudeToolResultBlock): string {
       .join("\n");
   }
   return "";
+}
+
+function scheduledWakeupReason(prompt: string): string | null {
+  const reason = prompt.trim();
+  if (!reason || /^<<[^>]+>>$/.test(reason)) return null;
+  return reason.length > 120 ? `${reason.slice(0, 119).trimEnd()}…` : reason;
+}
+
+function scheduledWakeupName(schedule: string, reason: string | null): string {
+  const fields = schedule.trim().split(/\s+/);
+  const minute = Number.parseInt(fields[0] ?? "", 10);
+  const hour = Number.parseInt(fields[1] ?? "", 10);
+  const clock =
+    Number.isInteger(minute) &&
+    minute >= 0 &&
+    minute <= 59 &&
+    Number.isInteger(hour) &&
+    hour >= 0 &&
+    hour <= 23
+      ? `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`
+      : schedule.trim();
+  const base = clock ? `Next check at ${clock}` : "Next check";
+  return reason ? `${base} · ${reason}` : base;
 }
 
 /** Claude wraps failed tool results in `<tool_use_error>…</tool_use_error>` —

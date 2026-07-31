@@ -35,6 +35,7 @@ export const KNOWN_MESSAGE_TYPES = [
   "AGENT_AUTHENTICATE",
   "AGENT_PROMPT",
   "AGENT_CANCEL",
+  "AGENT_STOP_BACKGROUND_TASK",
   "AGENT_STEER",
   "AGENT_STEERED",
   "AGENT_CLOSE_SESSION",
@@ -153,6 +154,10 @@ function assertInboundPayload(env: Record<string, unknown>): void {
     case "AGENT_LOAD_SESSION":
     case "AGENT_COMPACT":
       if (!isNonEmptyStr(env.sessionId)) bad("sessionId");
+      break;
+    case "AGENT_STOP_BACKGROUND_TASK":
+      if (!isNonEmptyStr(env.sessionId)) bad("sessionId");
+      if (!isNonEmptyStr(env.taskId)) bad("taskId");
       break;
     case "AGENT_SET_MODE":
       if (!isNonEmptyStr(env.sessionId)) bad("sessionId");

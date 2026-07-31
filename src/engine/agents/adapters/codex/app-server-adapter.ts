@@ -83,10 +83,15 @@ import { buildQuestionStamp } from "@zeros/core/agent-messages";
 import type {
   AdvertisedModel,
   AvailableCommand,
+  BackgroundTask,
 } from "@zeros/core/agent-events";
 import type { AccountDetails } from "@zeros/core/messages";
 import type { GetAccountResponse } from "./generated/v2/GetAccountResponse";
 import type { GetAccountParams } from "./generated/v2/GetAccountParams";
+import {
+  collectBackgroundTerminals,
+  reconcileBackgroundTerminals,
+} from "./background-terminals";
 
 const AGENT_ID = "codex";
 const CLIENT_INFO = { name: "Zeros", version: "0.0.5", title: "Zeros Mac App" };
@@ -225,6 +230,12 @@ interface CodexSession {
    *  renderer auto-rebuilds + resends — no manual "send again") instead of
    *  the generic protocol-error that stranded the user before. */
   childExitedMidTurn: boolean;
+  /** Last confirmed app-server background-terminal set. Retained while a
+   * refresh is in flight or fails; replacement happens only on a successful
+   * exact-thread read. */
+  backgroundTasks: Map<string, BackgroundTask>;
+  backgroundRefreshGeneration: number;
+  stoppedBackgroundTaskIds: Set<string>;
 }
 
 export class CodexAppServerAdapter implements AgentAdapter {
@@ -756,6 +767,27 @@ export class CodexAppServerAdapter implements AgentAdapter {
     );
   }
 
+  async stopBackgroundTask(opts: {
+    sessionId: string;
+    taskId: string;
+  }): Promise<void> {
+    const session = this.requireSession(opts.sessionId);
+    session.stoppedBackgroundTaskIds.add(opts.taskId);
+    try {
+      await session.runtime.request<{ terminated: boolean }>(
+        "thread/backgroundTerminals/terminate",
+        { threadId: session.threadId, processId: opts.taskId },
+        { timeoutMs: 5_000 },
+      );
+      // Whether terminate reports true or the process won a natural-exit race,
+      // the follow-up list is authoritative and removes stale UI promptly.
+      await this.refreshBackgroundTasks(session);
+    } catch (error) {
+      session.stoppedBackgroundTaskIds.delete(opts.taskId);
+      throw error;
+    }
+  }
+
   /** Change a live session's model without rebuilding it. runTurn reads
    *  `session.env.OPENAI_MODEL` fresh on EVERY turn (see prompt()), so
    *  rewriting the env is all it takes — the next turn carries the new model.
@@ -1261,12 +1293,20 @@ export class CodexAppServerAdapter implements AgentAdapter {
       turnActive: false,
       runtimeAlive: true,
       childExitedMidTurn: false,
+      backgroundTasks: new Map(),
+      backgroundRefreshGeneration: 0,
+      stoppedBackgroundTaskIds: new Set(),
     };
     this.sessions.set(zerosSessionId, session);
 
     this.wireTurnTracking(session, runtime);
     this.wireFileChangeCapture(session, runtime);
     this.wireAccountListeners(session, runtime);
+    this.wireBackgroundTerminalListeners(session, runtime);
+    // Resume may inherit terminals that outlived the previous turn. Read the
+    // authoritative thread-scoped set immediately; never wait for a new turn
+    // notification to make already-running work visible.
+    void this.refreshBackgroundTasks(session);
 
     // Slash-command discovery. Codex is a bespoke (non-stream-json)
     // adapter, so it doesn't inherit the shared first-prompt discovery
@@ -1693,6 +1733,86 @@ export class CodexAppServerAdapter implements AgentAdapter {
     ];
     for (const m of methods) {
       runtime.onNotification(m, (params) => translator.handle(m, params));
+    }
+  }
+
+  /** Re-read after lifecycle beats that can create or settle a background
+   * terminal. The list endpoint is the source of truth; notifications are
+   * only invalidations and never mutated into guessed membership locally. */
+  private wireBackgroundTerminalListeners(
+    session: CodexSession,
+    runtime: CodexAppServerHandle,
+  ): void {
+    for (const method of [
+      "item/started",
+      "item/completed",
+      "turn/completed",
+      "thread/status/changed",
+    ]) {
+      runtime.onNotification(method, () => {
+        queueMicrotask(() => void this.refreshBackgroundTasks(session));
+      });
+    }
+  }
+
+  /** Exact-thread, latest-request-wins refresh. Failed reads retain the last
+   * confirmed snapshot; overlapping reads cannot let an older response erase
+   * a newer one. */
+  private async refreshBackgroundTasks(session: CodexSession): Promise<void> {
+    const generation = ++session.backgroundRefreshGeneration;
+    try {
+      const terminals = await collectBackgroundTerminals(
+        (method, params, requestOpts) =>
+          session.runtime.request(method, params, requestOpts),
+        session.threadId,
+      );
+      if (
+        generation !== session.backgroundRefreshGeneration ||
+        this.sessions.get(session.zerosSessionId) !== session ||
+        !session.runtimeAlive
+      ) {
+        return;
+      }
+      const { active, removed } = reconcileBackgroundTerminals(
+        session.backgroundTasks,
+        terminals,
+        Date.now(),
+      );
+      session.backgroundTasks = active;
+      this.ctx.emit.onSessionUpdate(this.agentId, {
+        sessionId: session.zerosSessionId,
+        update: {
+          sessionUpdate: "background_tasks_update",
+          tasks: [...active.values()],
+          waiting: false,
+        },
+      });
+      for (const task of removed) {
+        const stopped = session.stoppedBackgroundTaskIds.delete(task.taskId);
+        this.ctx.emit.onSessionUpdate(this.agentId, {
+          sessionId: session.zerosSessionId,
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: `background-task-${randomUUID()}`,
+            title: "Background Task",
+            kind: "background_task",
+            status: "completed",
+            rawInput: {
+              taskId: task.taskId,
+              name: task.name,
+              taskType: task.taskType,
+              ...(task.command ? { command: task.command } : {}),
+            },
+            rawOutput: {
+              status: stopped ? "stopped" : "finished",
+              durationMs: Math.max(0, Date.now() - task.startedAt),
+            },
+          },
+        });
+      }
+    } catch {
+      // A refresh is keyed server state. Preserve the last confirmed snapshot
+      // while the runtime is reconnecting or the endpoint is transiently busy.
     }
   }
 

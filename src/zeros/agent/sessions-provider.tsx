@@ -2174,6 +2174,21 @@ export function AgentSessionsProvider({
     [bridge, getStore],
   );
 
+  const stopBackgroundTask = useCallback<SessionsActions["stopBackgroundTask"]>(
+    (chatId, taskId) => {
+      if (!bridge || !taskId) return;
+      const current = getStore().sessions[chatId];
+      if (!current?.agentId || !current.sessionId) return;
+      bridge.send({
+        type: "AGENT_STOP_BACKGROUND_TASK",
+        agentId: current.agentId,
+        sessionId: current.sessionId,
+        taskId,
+      });
+    },
+    [bridge, getStore],
+  );
+
   const updateConfig = useCallback<SessionsActions["updateConfig"]>(
     (chatId) => {
       if (!bridge) return;
@@ -2809,6 +2824,7 @@ export function AgentSessionsProvider({
       ensureSession,
       sendPrompt,
       cancel,
+      stopBackgroundTask,
       respondToPermission,
       respondToQuestion,
       setMode,
@@ -2834,6 +2850,7 @@ export function AgentSessionsProvider({
       ensureSession,
       sendPrompt,
       cancel,
+      stopBackgroundTask,
       respondToPermission,
       respondToQuestion,
       setMode,

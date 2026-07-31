@@ -483,6 +483,15 @@ export interface AgentCancelMessage extends BaseMessage {
   sessionId: string;
 }
 
+/** Stop one active background task without cancelling the parent turn or any
+ * sibling task. The task id is provider-native and scoped by sessionId. */
+export interface AgentStopBackgroundTaskMessage extends BaseMessage {
+  type: "AGENT_STOP_BACKGROUND_TASK";
+  agentId: string;
+  sessionId: string;
+  taskId: string;
+}
+
 /** Inject a user message into the RUNNING turn (mid-turn "steering") without
  *  cancelling it. Only valid while an AGENT_PROMPT for the same session is
  *  still in flight, and only for adapters that advertise
@@ -989,6 +998,7 @@ export type BridgeMessage =
   | AgentAuthenticateMessage
   | AgentPromptMessage
   | AgentCancelMessage
+  | AgentStopBackgroundTaskMessage
   | AgentSteerMessage
   | AgentCloseSessionMessage
   | AgentPermissionResponseMessage

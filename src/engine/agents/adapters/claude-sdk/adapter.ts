@@ -94,7 +94,10 @@ import {
   sessionDir,
   writeSessionMeta,
 } from "../../session-paths";
-import { ClaudeStreamTranslator } from "../claude/translator";
+import {
+  ClaudeStreamTranslator,
+  isScheduledWakeupTaskId,
+} from "../claude/translator";
 import {
   claudeCliMissingMessage,
   isPinnedClaudeRuntime,
@@ -1281,6 +1284,36 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     }
   }
 
+  async stopBackgroundTask(opts: {
+    sessionId: string;
+    taskId: string;
+  }): Promise<void> {
+    const state = this.mustState(opts.sessionId);
+    if (!state.query) {
+      throw new Error("Claude background task is no longer connected");
+    }
+    if (isScheduledWakeupTaskId(opts.taskId)) {
+      // ScheduleWakeup's one-shot timers live outside the normal task
+      // registry, so stopTask cannot address them. The Claude runtime's idle
+      // interrupt path is its documented user-abort seam and cancels pending
+      // dynamic-loop wakeups. Stop hooks expose at most one such wakeup (a new
+      // one supersedes the old one), and recurring cron jobs never enter this
+      // branch because task 008 remains intentionally excluded.
+      const q = state.query;
+      if (state.turn) {
+        await state.turn.promise.catch(() => undefined);
+      }
+      // A restart/dispose may have replaced the query while the turn settled.
+      if (state.query !== q || state.disposed) {
+        throw new Error("Claude scheduled wake-up is no longer connected");
+      }
+      await q.interrupt();
+      state.translator.setScheduledWakeups([]);
+      return;
+    }
+    await state.query.stopTask(opts.taskId);
+  }
+
   async setMode(opts: { sessionId: string; modeId: string }): Promise<void> {
     const state = this.mustState(opts.sessionId);
     const mode = normalizeModeId(opts.modeId);
@@ -2149,7 +2182,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       loggedCliSource = cli.source;
       console.info(
         `[claude-sdk] claude CLI: ${cliPath} (source=${cli.source}${
-          isPinnedClaudeRuntime(cli.source) ? "" : ", NOT the app's pinned runtime"
+          isPinnedClaudeRuntime(cli.source)
+            ? ""
+            : ", NOT the app's pinned runtime"
         })`,
       );
     }
@@ -2198,6 +2233,43 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // Deliberately excludes 'refusal_fallback_prompt' so refusal behavior is
       // unchanged.
       onUserDialog: this.onUserDialog(state),
+      // Passive lifecycle taps. `background_tasks_changed` does not include
+      // session-scoped one-shot wakeups; StopHookInput.session_crons is the
+      // SDK's authoritative snapshot for those. Recurring crons are filtered
+      // by the translator so the explicitly deferred schedules feature (008)
+      // remains untouched. A loop wake clears its now-fired timer before the
+      // new turn starts.
+      hooks: {
+        Stop: [
+          {
+            hooks: [
+              async (input) => {
+                if (input.hook_event_name === "Stop") {
+                  state.translator.setScheduledWakeups(
+                    input.session_crons ?? [],
+                  );
+                }
+                return {};
+              },
+            ],
+          },
+        ],
+        UserPromptSubmit: [
+          {
+            hooks: [
+              async (input) => {
+                if (
+                  input.hook_event_name === "UserPromptSubmit" &&
+                  input.source === "loop_wakeup"
+                ) {
+                  state.translator.setScheduledWakeups([]);
+                }
+                return {};
+              },
+            ],
+          },
+        ],
+      },
       supportedDialogKinds: [
         "ask_user_question",
         "user_question",
