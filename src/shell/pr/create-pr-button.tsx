@@ -15,9 +15,20 @@
 //   • Create PR manually — opens GitHub's compare/new-PR page in the browser.
 //
 // Only rendered for a real worktree that has no PR yet (see the topbar guard).
+//
+// GitHub access is cross-checked FIRST, on every path that can fail because of
+// it (see ghRepoAccess):
+//   • before the agent brief is sent, because the agent's own `gh pr create`
+//     runs on the very same brokered credential — an unreachable repository
+//     fails for it too, after a whole turn spent reviewing and committing;
+//   • ahead of the dirty-worktree refusal, so "commit changes first" is never
+//     shown for work that committing cannot unblock;
+//   • alongside the direct create, so a failure that arrives as the ambiguous
+//     "Repository not found" flavour of NOT_AUTHENTICATED doesn't tell an
+//     already-connected user to connect GitHub.
 // ──────────────────────────────────────────────────────────
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import {
   ChevronDown,
   ExternalLink,
@@ -37,12 +48,13 @@ import {
 import { toast } from "../../zeros/ui/primitives/elements";
 import {
   ghPrCreate,
+  ghRepoAccess,
   gitChangeCounts,
-  gitErrorDescription,
   gitLog,
   gitRepoBranchCatalog,
   gitStatus,
   isGitErrorShape,
+  type GithubRepoAccess,
   type Workspace,
 } from "../../native/git";
 import { shellOpenUrl } from "../../native/native";
@@ -57,8 +69,15 @@ import {
 import { ZerosSpinner } from "@/loaders";
 import {
   createPullRequestFromCommittedChanges,
+  GithubAccessError,
+  isPrAccessBlocked,
   UncommittedPullRequestError,
 } from "./create-pr-action";
+import {
+  describePrAccessBlock,
+  describePrCreateFailure,
+  type PrBlockMessage,
+} from "./pr-github-access";
 import { notifyWorkspacesChanged } from "../../zeros/store/use-projects";
 import { useWorkspaceDispatch } from "../../zeros/store/store";
 import { requestUserSettingsSection } from "../../zeros/settings/settings-navigation";
@@ -104,12 +123,71 @@ export function CreatePrButton({
   // uncommitted/upstream counts would describe a half-done tree.
   const agentWorking = useWorkspaceAgentWorking(workspace);
   const inert = busy || disabled === true || agentWorking;
+  // Guards read LIVE state through a ref, not through a captured render.
+  // "Ask agent" is reachable from a toast that outlives the click that raised
+  // it, so a closure-captured `agentWorking` would happily queue a PR brief
+  // behind a turn that started in between — the exact thing the gate exists to
+  // prevent. `busy` is written synchronously so a double-click inside one
+  // frame can't fire twice before React re-renders the disabled button.
+  const busyRef = useRef(false);
+  const gateRef = useRef({ disabled: false, agentWorking: false });
+  gateRef.current = { disabled: disabled === true, agentWorking };
+  const claim = useCallback((): boolean => {
+    if (busyRef.current) return false;
+    if (gateRef.current.disabled) return false;
+    if (gateRef.current.agentWorking) {
+      // Only the toast's "Ask agent" button can reach this — both real buttons
+      // are already disabled by the same gate. It outlives the click that
+      // raised it, so a turn can begin in between; say so rather than swallow
+      // the click, because the user has no disabled state to read here.
+      toast.error("Agent is working", { description: AGENT_WORKING_REASON });
+      return false;
+    }
+    busyRef.current = true;
+    setBusy(true);
+    return true;
+  }, []);
+  const release = useCallback(() => {
+    busyRef.current = false;
+    setBusy(false);
+  }, []);
+
+  const openGithubSettings = useCallback(() => {
+    requestUserSettingsSection("integrations");
+    dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
+  }, [dispatch]);
+
+  const showBlockToast = useCallback(
+    (message: PrBlockMessage) => {
+      toast.error(message.title, {
+        description: message.description,
+        ...(message.openSettings
+          ? {
+              action: {
+                label: "Open GitHub settings",
+                onClick: openGithubSettings,
+              },
+            }
+          : {}),
+      });
+    },
+    [openGithubSettings],
+  );
 
   const askAgentToCreate = useCallback(
     async (draft: boolean) => {
-      if (busy || disabled || agentWorking) return;
-      setBusy(true);
+      if (!claim()) return;
       try {
+        // Cross-check access BEFORE spending a turn. The agent's `gh pr create`
+        // runs through the same brokered credential this probe tests (see the
+        // gh shim in the engine's credential broker), so a repository the
+        // connection can't reach fails for the agent too — only later, after it
+        // has reviewed the diff and written a commit the user didn't ask for.
+        const access = await ghRepoAccess(workspace.id);
+        if (isPrAccessBlocked(access)) {
+          showBlockToast(describePrAccessBlock(access));
+          return;
+        }
         // Best-effort live counts; degrade to a still-valid brief on failure.
         let uncommittedCount = 0;
         let hasUpstream = false;
@@ -143,13 +221,13 @@ export function CreatePrButton({
           autoAction: draft ? "create-draft-pr" : "create-pr",
         });
       } finally {
-        setBusy(false);
+        release();
       }
     },
     [
-      busy,
-      disabled,
-      agentWorking,
+      claim,
+      release,
+      showBlockToast,
       workspace.id,
       workspace.branch,
       workspace.baseBranch,
@@ -158,15 +236,15 @@ export function CreatePrButton({
     ],
   );
 
-  const openGithubSettings = useCallback(() => {
-    requestUserSettingsSection("integrations");
-    dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
-  }, [dispatch]);
-
   const createDirect = useCallback(
     async (draft: boolean) => {
-      if (busy || disabled || agentWorking) return;
-      setBusy(true);
+      if (!claim()) return;
+      // Started here, not inside the orchestrator, so it overlaps the local
+      // change-count read and the push instead of queueing in front of them —
+      // the happy path pays nothing for it. Never rejects (ghRepoAccess
+      // resolves "unknown" on any failure), so leaving it unawaited on the
+      // success path cannot raise an unhandled rejection.
+      const accessProbe = ghRepoAccess(workspace.id);
       try {
         await createPullRequestFromCommittedChanges(
           {
@@ -174,6 +252,7 @@ export function CreatePrButton({
               gitChangeCounts(workspaceId),
             log: (args) => gitLog(args),
             create: (args) => ghPrCreate(args),
+            access: () => accessProbe,
           },
           {
             workspaceId: workspace.id,
@@ -186,6 +265,10 @@ export function CreatePrButton({
         // Refresh it instead of showing a redundant success toast.
         notifyWorkspacesChanged(workspace.repoSlug);
       } catch (err) {
+        if (err instanceof GithubAccessError) {
+          showBlockToast(describePrAccessBlock(err.access));
+          return;
+        }
         if (err instanceof UncommittedPullRequestError) {
           toast.error("Commit changes before creating this pull request", {
             description:
@@ -197,47 +280,31 @@ export function CreatePrButton({
           });
           return;
         }
-        const code = isGitErrorShape(err) ? err.code : "";
-        const needsGithubSettings = [
-          "NOT_AUTHENTICATED",
-          "GITHUB_SSO_REQUIRED",
-          "GITHUB_FORBIDDEN_SCOPE",
-          "GITHUB_REPO_NOT_INSTALLED",
-          "GITHUB_INSTALLATION_SUSPENDED",
-        ].includes(code);
-        toast.error(
-          code === "NOT_AUTHENTICATED"
-            ? "Connect GitHub to create this pull request"
-            : "Couldn't create pull request",
-          {
-            description:
-              code === "NOT_AUTHENTICATED"
-                ? "Choose an authentication method in Settings → Integrations to continue."
-                : gitErrorDescription(err),
-            ...(needsGithubSettings
-              ? {
-                  action: {
-                    label: "Open GitHub settings",
-                    onClick: openGithubSettings,
-                  },
-                }
-              : {}),
-          },
-        );
+        // Let the preflight explain the failure when it reached a verdict: a
+        // push refused for an unreachable repository surfaces here as a bare
+        // NOT_AUTHENTICATED (git reports GitHub's 404 as "Repository not
+        // found"), which on its own reads as "you are signed out".
+        const access: GithubRepoAccess = await accessProbe;
+        // A non-GitError (a bridge timeout, a thrown string) still has to keep
+        // whatever sentence it carries — dropping it for generic copy would
+        // hide the only detail there is.
+        const facts = isGitErrorShape(err)
+          ? err
+          : { message: err instanceof Error ? err.message : String(err) };
+        showBlockToast(describePrCreateFailure(facts, access));
       } finally {
-        setBusy(false);
+        release();
       }
     },
     [
-      busy,
-      disabled,
-      agentWorking,
+      claim,
+      release,
+      showBlockToast,
       workspace.id,
       workspace.branch,
       workspace.baseBranch,
       workspace.repoSlug,
       askAgentToCreate,
-      openGithubSettings,
     ],
   );
 

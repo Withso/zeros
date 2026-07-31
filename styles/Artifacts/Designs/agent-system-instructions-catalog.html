@@ -1,0 +1,1949 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-Zeros-root>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Zeros — Agent system instructions · Wire-text catalog</title>
+    <style>
+      /* ============================================================
+         Tokens — lifted verbatim from styles/zeros-tokens.css so the
+         catalog renders on the real Zeros Shade (dark) + Light palettes.
+         Toggle themes with the switch in the header.
+         ============================================================ */
+      :root {
+        color-scheme: dark;
+        --bg1: hsl(25 5% 7%);
+        --bg1-hover: hsl(8 5% 12%);
+        --bg1-highlight: hsl(25 5% 10%);
+        --bg2: hsl(25 4% 12%);
+        --bg2-hover: hsl(25 3% 15%);
+        --bg3: hsl(15 4% 16%);
+        --bg3-hover: hsl(15 3% 20%);
+        --sidebar-bg: hsl(25 5% 9%);
+        --fg1: hsl(0 2% 92%);
+        --fg2: hsl(20 4% 66%);
+        --fg3: hsl(15 1% 44%);
+        --muted-fg: hsl(15 4% 44%);
+        --border1: hsl(8 3% 14%);
+        --border2: hsl(25 1% 18%);
+        --border3: hsl(15 0% 24%);
+        --border4: hsl(15 0% 30%);
+        --highlighted-bright: hsl(25 5% 65%);
+        --inverted-bg: hsl(0 2% 92%);
+        --inverted-fg: hsl(5 7% 5%);
+        --green-primary: hsl(142 69% 58%);
+        --green-bg: hsl(120 23% 17%);
+        --green-fg: hsl(142 75% 73%);
+        --red-primary: hsl(0 91% 71%);
+        --red-bg: hsl(13 81% 14%);
+        --red-fg: hsl(20 97% 72%);
+        --yellow-primary: hsl(37 75% 60%);
+        --yellow-bg: hsl(38 68% 17%);
+        --yellow-fg: hsl(44 100% 50%);
+        --blue-primary: hsl(205 80% 73%);
+        --violet-primary: hsl(271 80% 73%);
+        --violet-bg: hsl(255 21% 18%);
+        --violet-fg: hsl(265 66% 77%);
+        --brown-primary: hsl(9 46% 72%);
+        --brown-bg: hsl(10 15% 15%);
+        --brown-fg: hsl(10 80% 72%);
+        --primary-button-bg: var(--inverted-bg);
+        --primary-button-fg: var(--inverted-fg);
+        --primary-button-hover: hsl(25 2% 83%);
+        --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+        --radius-sm: 4px;
+        --radius-md: 6px;
+        --radius-lg: 8px;
+        --sans:
+          "Geist Variable", Inter, ui-sans-serif, -apple-system,
+          BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --mono: "Geist Mono Variable", "SFMono-Regular", Consolas, monospace;
+      }
+
+      [data-theme="light"] {
+        color-scheme: light;
+        --bg1: hsl(0 0% 100%);
+        --bg1-hover: hsl(0 4% 95%);
+        --bg1-highlight: hsl(0 0% 97%);
+        --bg2: hsl(60 4% 95%);
+        --bg2-hover: hsl(60 4% 91%);
+        --bg3: hsl(0 0% 100%);
+        --bg3-hover: hsl(0 0% 95%);
+        --sidebar-bg: hsl(60 9% 98%);
+        --fg1: hsl(20 7% 16%);
+        --fg2: hsl(20 4% 37%);
+        --fg3: hsl(20 4% 56%);
+        --muted-fg: hsl(20 4% 68%);
+        --border1: hsl(30 9% 91%);
+        --border2: hsl(30 9% 91%);
+        --border3: hsl(60 3% 85%);
+        --border4: hsl(0 1% 83%);
+        --highlighted-bright: hsl(25 5% 45%);
+        --inverted-bg: hsl(20 7% 16%);
+        --inverted-fg: hsl(0 0% 100%);
+        --green-primary: hsl(142 75% 36%);
+        --green-bg: hsl(134 38% 89%);
+        --green-fg: hsl(142 70% 30%);
+        --red-primary: hsl(0 72% 51%);
+        --red-bg: hsl(18 87% 91%);
+        --red-fg: hsl(18 89% 40%);
+        --yellow-primary: hsl(37 90% 60%);
+        --yellow-bg: hsl(48 97% 89%);
+        --yellow-fg: hsl(37 100% 51%);
+        --blue-primary: hsl(221 83% 53%);
+        --violet-primary: hsl(271 80% 51%);
+        --violet-bg: hsl(274 93% 94%);
+        --violet-fg: hsl(271 55% 42%);
+        --brown-primary: hsl(5 35% 50%);
+        --brown-bg: hsl(5 74% 91%);
+        --brown-fg: hsl(0 20% 40%);
+        --primary-button-bg: var(--inverted-bg);
+        --primary-button-fg: var(--inverted-fg);
+        --primary-button-hover: hsl(22 6% 25%);
+        --shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        margin: 0;
+        min-width: 320px;
+        min-height: 100vh;
+        background:
+          radial-gradient(
+            circle at 50% -8%,
+            color-mix(in srgb, var(--fg1) 5%, transparent),
+            transparent 30rem
+          ),
+          var(--bg1);
+        color: var(--fg1);
+        font: 14px/1.5 var(--sans);
+        -webkit-font-smoothing: antialiased;
+      }
+      button {
+        font: inherit;
+        color: inherit;
+        cursor: pointer;
+      }
+      svg {
+        display: block;
+      }
+      code {
+        font-family: var(--mono);
+        font-size: 0.92em;
+      }
+
+      .page {
+        width: min(1180px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 48px 0 96px;
+      }
+
+      /* ── Hero ── */
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 28px;
+        align-items: end;
+        padding-bottom: 28px;
+        border-bottom: 1px solid var(--border1);
+      }
+      .eyebrow {
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        color: var(--green-primary);
+      }
+      h1 {
+        max-width: 820px;
+        margin: 9px 0 10px;
+        font-size: clamp(26px, 3.4vw, 40px);
+        line-height: 1.05;
+        letter-spacing: -0.035em;
+      }
+      .lede {
+        max-width: 760px;
+        margin: 0;
+        color: var(--fg2);
+        font-size: 15px;
+      }
+      .hero-aside {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        align-items: flex-end;
+      }
+      .summary-chip {
+        min-width: 250px;
+        padding: 14px 16px;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 90%, transparent);
+      }
+      .summary-chip strong {
+        display: block;
+        margin-bottom: 3px;
+        font-size: 13px;
+      }
+      .summary-chip span {
+        display: block;
+        color: var(--fg2);
+        font-size: 12px;
+      }
+      .theme-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 11px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: var(--bg2);
+        color: var(--fg1);
+        font-size: 12px;
+      }
+      .theme-toggle:hover {
+        background: var(--bg2-hover);
+      }
+
+      /* ── Thesis cards ── */
+      .thesis {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        margin: 24px 0 12px;
+      }
+      .thesis-card {
+        min-width: 0;
+        padding: 16px 18px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 86%, transparent);
+      }
+      .thesis-card.primary {
+        border-color: color-mix(in srgb, var(--green-primary) 26%, var(--border1));
+        background: color-mix(in srgb, var(--green-primary) 5%, var(--sidebar-bg));
+      }
+      .thesis-card h3 {
+        margin: 0 0 5px;
+        font-size: 13px;
+      }
+      .thesis-card p {
+        margin: 0;
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      /* ── Sticky nav ── */
+      nav {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+        margin: 26px -12px 40px;
+        padding: 10px 12px;
+        border-bottom: 1px solid color-mix(in srgb, var(--border1) 80%, transparent);
+        background: color-mix(in srgb, var(--bg1) 82%, transparent);
+        backdrop-filter: blur(14px);
+      }
+      nav a {
+        flex: none;
+        padding: 5px 9px;
+        border-radius: var(--radius-sm);
+        color: var(--fg2);
+        font-size: 12px;
+        text-decoration: none;
+      }
+      nav a:hover {
+        background: var(--bg2);
+        color: var(--fg1);
+      }
+      .nav-sep {
+        width: 1px;
+        margin: 3px 4px;
+        background: var(--border2);
+      }
+
+      /* ── Section headers / case scaffolding ── */
+      .band {
+        margin: 0 0 26px;
+        font-size: 12px;
+        font-weight: 650;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--fg3);
+      }
+      .catalog {
+        display: grid;
+        gap: 52px;
+      }
+      .catalog + .band {
+        margin-top: 64px;
+      }
+      .case {
+        scroll-margin-top: 68px;
+      }
+      .case-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 24px;
+        align-items: flex-start;
+        margin-bottom: 14px;
+      }
+      .case-title-row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        margin-bottom: 6px;
+      }
+      .case-number {
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.06em;
+        color: var(--fg3);
+      }
+      .tag {
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: var(--bg2);
+        color: var(--fg2);
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+      }
+      .tag.ship {
+        background: color-mix(in srgb, var(--green-primary) 12%, transparent);
+        color: var(--green-primary);
+      }
+      .tag.gap {
+        background: color-mix(in srgb, var(--yellow-primary) 12%, transparent);
+        color: var(--yellow-primary);
+      }
+      .tag.context {
+        background: color-mix(in srgb, var(--blue-primary) 12%, transparent);
+        color: var(--blue-primary);
+      }
+      .tag.changed {
+        background: color-mix(in srgb, var(--violet-primary) 15%, transparent);
+        color: var(--violet-primary);
+      }
+      .tag.danger {
+        background: color-mix(in srgb, var(--red-primary) 12%, transparent);
+        color: var(--red-primary);
+      }
+      .case h2 {
+        margin: 0;
+        font-size: 19px;
+        line-height: 1.22;
+        letter-spacing: -0.02em;
+      }
+      .case-copy {
+        max-width: 760px;
+        margin: 6px 0 0;
+        color: var(--fg2);
+        font-size: 13px;
+      }
+      .case-copy code {
+        color: var(--fg1);
+      }
+      .meta {
+        flex: none;
+        max-width: 300px;
+        padding-top: 2px;
+        color: var(--fg3);
+        font-size: 11px;
+        line-height: 1.5;
+        text-align: right;
+      }
+      .meta code {
+        font-size: 10px;
+      }
+
+      /* ── Wire-text blocks — the exact bytes the agent receives ── */
+      .wire {
+        position: relative;
+        overflow: hidden;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: var(--bg1);
+        box-shadow: var(--shadow);
+      }
+      .wire-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--border1);
+        background: color-mix(in srgb, var(--sidebar-bg) 92%, transparent);
+        font-size: 11px;
+        color: var(--fg3);
+      }
+      .wire-head .chan {
+        padding: 2px 7px;
+        border-radius: 999px;
+        font-size: 10px;
+        font-weight: 650;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+      .chan.wire-chan {
+        background: color-mix(in srgb, var(--green-primary) 13%, transparent);
+        color: var(--green-primary);
+      }
+      .chan.bubble-chan {
+        background: color-mix(in srgb, var(--brown-primary) 18%, transparent);
+        color: var(--brown-fg);
+      }
+      .chan.sys-chan {
+        background: color-mix(in srgb, var(--violet-primary) 15%, transparent);
+        color: var(--violet-fg);
+      }
+      .chan.env-chan {
+        background: color-mix(in srgb, var(--blue-primary) 13%, transparent);
+        color: var(--blue-primary);
+      }
+      .wire pre {
+        margin: 0;
+        padding: 14px 16px;
+        overflow-x: auto;
+        font: 12px/1.62 var(--mono);
+        color: var(--fg1);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .wire pre var {
+        padding: 0 4px;
+        border-radius: 3px;
+        background: color-mix(in srgb, var(--blue-primary) 14%, transparent);
+        color: var(--blue-primary);
+        font-style: normal;
+      }
+      .wire pre .cond {
+        display: block;
+        border-left: 2px solid color-mix(in srgb, var(--yellow-primary) 55%, transparent);
+        padding-left: 10px;
+        margin-left: -12px;
+      }
+      .wire pre .frame-tag {
+        color: var(--violet-fg);
+      }
+      .wire-note {
+        padding: 8px 12px 10px;
+        border-top: 1px dashed var(--border2);
+        color: var(--fg3);
+        font-size: 11px;
+      }
+      .wire-note code {
+        font-size: 10.5px;
+      }
+
+      /* Bubble mock — what the user sees for auto-sent messages */
+      .bubble-demo {
+        display: flex;
+        justify-content: flex-end;
+        margin: 10px 0 0;
+      }
+      .bubble {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        max-width: 420px;
+        padding: 8px 12px;
+        border-radius: 10px;
+        background: var(--brown-bg);
+        border: 1px solid color-mix(in srgb, var(--brown-primary) 22%, transparent);
+        color: var(--fg1);
+        font-size: 13px;
+      }
+      .bubble svg {
+        width: 14px;
+        height: 14px;
+        color: var(--brown-fg);
+      }
+      .bubble .by {
+        margin-left: 4px;
+        color: var(--fg3);
+        font-size: 10px;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+
+      /* Two-up: variants side by side */
+      .duo {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+        gap: 12px;
+      }
+
+      /* ── Data tables ── */
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        overflow: hidden;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: var(--bg1);
+        font-size: 12.5px;
+      }
+      .table-wrap {
+        overflow-x: auto;
+        border-radius: var(--radius-lg);
+        box-shadow: var(--shadow);
+      }
+      th,
+      td {
+        padding: 9px 12px;
+        border-bottom: 1px solid var(--border1);
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        background: color-mix(in srgb, var(--sidebar-bg) 92%, transparent);
+        color: var(--fg3);
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        white-space: nowrap;
+      }
+      tr:last-child td {
+        border-bottom: 0;
+      }
+      td code {
+        font-size: 11px;
+        color: var(--fg1);
+      }
+      td.dim,
+      .dim {
+        color: var(--fg2);
+      }
+      .pill {
+        display: inline-block;
+        padding: 1px 7px;
+        border-radius: 999px;
+        font-size: 10.5px;
+        font-weight: 650;
+        white-space: nowrap;
+      }
+      .pill.direct {
+        background: color-mix(in srgb, var(--blue-primary) 13%, transparent);
+        color: var(--blue-primary);
+      }
+      .pill.prompt {
+        background: color-mix(in srgb, var(--green-primary) 13%, transparent);
+        color: var(--green-primary);
+      }
+      .pill.navp {
+        background: var(--bg2);
+        color: var(--fg2);
+      }
+      .pill.compose {
+        background: color-mix(in srgb, var(--yellow-primary) 14%, transparent);
+        color: var(--yellow-primary);
+      }
+
+      /* ── Audit list (Part G) ── */
+      .audit {
+        display: grid;
+        gap: 10px;
+      }
+      .audit-item {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: 12px;
+        padding: 12px 14px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 86%, transparent);
+      }
+      .audit-item .sev {
+        flex: none;
+        align-self: start;
+        min-width: 74px;
+        text-align: center;
+      }
+      .audit-item h4 {
+        margin: 0 0 3px;
+        font-size: 13px;
+      }
+      .audit-item p {
+        margin: 0;
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+      .audit-item p code {
+        color: var(--fg1);
+        font-size: 11px;
+      }
+
+      footer {
+        margin-top: 72px;
+        padding-top: 18px;
+        border-top: 1px solid var(--border1);
+        color: var(--fg3);
+        font-size: 11.5px;
+      }
+      footer code {
+        font-size: 10.5px;
+      }
+    </style>
+  </head>
+  <body>
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <defs>
+        <symbol id="i-git-pr-create" viewBox="0 0 24 24">
+          <path d="M13 6h3a2 2 0 0 1 2 2v3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M18 15v6M15 18h6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          <circle cx="6" cy="6" r="3" fill="none" stroke="currentColor" stroke-width="2"/>
+          <path d="M6 9v12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </symbol>
+        <symbol id="i-merge-conflict" viewBox="0 0 24 24">
+          <circle cx="18" cy="18" r="3" fill="none" stroke="currentColor" stroke-width="2"/>
+          <circle cx="6" cy="6" r="3" fill="none" stroke="currentColor" stroke-width="2"/>
+          <path d="M6 21V9M18 15V9a9 9 0 0 0-2.64-6.36" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          <path d="m9 12 3-3-3-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </symbol>
+        <symbol id="i-commit-push" viewBox="0 0 24 24">
+          <path d="m8 6 4-4 4 4M12 2v6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="12" cy="15" r="3" fill="none" stroke="currentColor" stroke-width="2"/>
+          <path d="M3 15h6M15 15h6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </symbol>
+        <symbol id="i-arrow-down" viewBox="0 0 24 24">
+          <path d="M12 5v14m7-7-7 7-7-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </symbol>
+        <symbol id="i-sun" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2"/>
+          <path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </symbol>
+      </defs>
+    </svg>
+
+    <div class="page">
+      <!-- ═══════════════ Hero ═══════════════ -->
+      <header class="hero">
+        <div>
+          <div class="eyebrow">Zeros · Engineering audit</div>
+          <h1>Every word Zeros feeds the agents — session start, PR actions, and everything else</h1>
+          <p class="lede">
+            The verbatim wire texts Zeros injects into Claude / Codex / Cursor sessions: the
+            one-shot first-turn orientation, the Create-PR brief, the PR-island action prompts,
+            the Review-tab composer briefs, and the background/synthesized messages — plus the
+            delivery mechanics, the config knobs that ride alongside, and an audit of gaps and
+            edge cases. Sources: <code>packages/core/src/system-instructions/</code>,
+            <code>src/engine/agents/gateway.ts</code>, <code>src/shell/pr/</code>, adapters.
+          </p>
+        </div>
+        <div class="hero-aside">
+          <button class="theme-toggle" id="themeBtn" type="button">
+            <svg width="13" height="13"><use href="#i-sun" /></svg>
+            <span id="themeLabel">Light preview</span>
+          </button>
+          <div class="summary-chip">
+            <strong>21 wire texts · 2 delivery channels</strong>
+            <span>1 first-turn preamble · 4 auto-sent PR prompts · 4 composer briefs · 5 synthesized replies · 4 serialization wrappers · 1 recovery replay · 1 background system prompt · 1 editable slot (of 6 specced)</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- ═══════════════ Thesis ═══════════════ -->
+      <section class="thesis" aria-label="Principles">
+        <div class="thesis-card primary">
+          <h3>One editable home</h3>
+          <p>
+            Every hardcoded string Zeros injects into an agent prompt lives in
+            <code>packages/core/src/system-instructions/templates.ts</code>, tagged
+            <code>[SYS-INSTR: &lt;id&gt;]</code>. PR-action prompts live in
+            <code>src/shell/pr/pr-instructions.ts</code> + <code>pr-action-prompts.ts</code>.
+            Nothing else in the codebase is allowed to hardcode agent-facing prose.
+          </p>
+        </div>
+        <div class="thesis-card">
+          <h3>Wire text ≠ bubble text</h3>
+          <p>
+            Auto-sent actions show the user a tidy label ("Create a PR", "Resolve") on the brown
+            "sent by Zeros" bubble while the agent receives the full brief. The split rides
+            <code>sendPrompt(text, displayText, …, autoAction)</code>; the bubble is copy-only.
+          </p>
+        </div>
+        <div class="thesis-card">
+          <h3>Two delivery mechanisms</h3>
+          <p>
+            <strong>A — in-band</strong> (Claude, Cursor): the body is wrapped in
+            <code>&lt;system_instruction&gt;…&lt;/system_instruction&gt;</code> and prepended to the
+            first user message. <strong>B — native channel</strong> (Codex): the same body, unwrapped,
+            on <code>thread/start|resume.developerInstructions</code> — it survives compaction and
+            never masquerades as user speech.
+          </p>
+        </div>
+      </section>
+
+      <!-- ═══════════════ Nav ═══════════════ -->
+      <nav aria-label="Catalog">
+        <a href="#a1">A1 Preamble</a>
+        <a href="#a2">A2 /add-dir</a>
+        <a href="#a3">A3 Custom slot</a>
+        <a href="#a4">A4 Delivery matrix</a>
+        <a href="#a5">A5 cwd hint</a>
+        <a href="#a6">A6 Not ours</a>
+        <span class="nav-sep"></span>
+        <a href="#b1">B1 Create PR (direct)</a>
+        <a href="#b2">B2 Ask-agent brief</a>
+        <a href="#b3">B3 Dropdown</a>
+        <span class="nav-sep"></span>
+        <a href="#c1">C1 Resolve</a>
+        <a href="#c2">C2 Commit &amp; Push</a>
+        <a href="#c3">C3 Update branch</a>
+        <a href="#c4">C4 Direct actions</a>
+        <span class="nav-sep"></span>
+        <a href="#d1">D1 Fix check</a>
+        <a href="#d2">D2 Quote comment</a>
+        <a href="#d3">D3 ⌥-click element</a>
+        <a href="#d4">D4 Element submit</a>
+        <a href="#d5">D5 Mentions &amp; attachments</a>
+        <span class="nav-sep"></span>
+        <a href="#e1">E1 Chat title</a>
+        <a href="#e2">E2 Questions</a>
+        <a href="#e3">E3 Deny</a>
+        <a href="#e4">E4 /compact</a>
+        <a href="#e5">E5 Recovery replay</a>
+        <span class="nav-sep"></span>
+        <a href="#f1">F Config</a>
+        <a href="#g1">G Audit</a>
+      </nav>
+
+      <!-- ═══════════════ Part A ═══════════════ -->
+      <p class="band">Part A — Session start · the one-shot first-turn orientation</p>
+      <div class="catalog">
+        <section class="case" id="a1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A1</span>
+                <span class="tag ship">Shipped</span>
+                <span class="tag context">Every new chat · once</span>
+              </div>
+              <h2>The workspace preamble — <code>[SYS-INSTR: workspace-preamble]</code></h2>
+              <p class="case-copy">
+                The base, agent-agnostic orientation. Injected <strong>once, on the first user
+                message of every new chat</strong> (Claude / Codex / Cursor alike), then it lives in
+                the conversation history — it is <em>not</em> re-sent per turn. Deliberately minimal:
+                only what the agent cannot infer — where to work, what to diff/PR against, and that
+                the branch isn't its to rename.
+              </p>
+            </div>
+            <div class="meta">
+              <code>packages/core/src/system-instructions/templates.ts:42</code><br />
+              assembled in <code>build.ts</code> · sent by
+              <code>gateway.withSystemInstruction()</code>
+            </div>
+          </div>
+          <div class="wire">
+            <div class="wire-head">
+              <span class="chan sys-chan">Template</span>
+              <span><var>highlighted</var> = substituted at send time</span>
+            </div>
+            <pre>You are working inside Zeros, a Mac app for running coding agents in parallel.
+Your work should take place in the <var>{WORKSPACE_DIR}</var> directory (unless otherwise directed).
+The target branch for this workspace is <var>{TARGET_BRANCH}</var>. Use it for comparisons such as `git diff <var>{TARGET_BRANCH}</var>...` and as the base when creating a pull request.
+Do not rename the current branch unless the user explicitly tells you to do so.</pre>
+            <div class="wire-note">
+              <code>{WORKSPACE_DIR}</code> = the chat's resolved cwd (the worktree path).
+              <code>{TARGET_BRANCH}</code> = <code>ZEROS_TARGET_BRANCH</code> stamped from the
+              workspace row + configured <code>git.remote</code> at spawn
+              (<code>gateway.withTargetBranchEnv</code>); falls back to the literal
+              <code>origin/main</code> when unset (plain-folder chats).
+            </div>
+          </div>
+          <div class="wire" style="margin-top: 12px">
+            <div class="wire-head">
+              <span class="chan wire-chan">Wire · Claude &amp; Cursor (mechanism A)</span>
+              <span>prepended as the first text block of the first prompt</span>
+            </div>
+            <pre><span class="frame-tag">&lt;system_instruction&gt;</span>
+You are working inside Zeros, a Mac app for running coding agents in parallel.
+Your work should take place in the <var>/Users/you/zeros-worktrees/repo/washington</var> directory (unless otherwise directed).
+The target branch for this workspace is <var>origin/main</var>. Use it for comparisons such as `git diff <var>origin/main</var>...` and as the base when creating a pull request.
+Do not rename the current branch unless the user explicitly tells you to do so.
+<span class="cond">
+You also have access to these additional directories (read from them with your tools as needed): <var>/path/one, /path/two</var>.
+</span><span class="cond">
+<var>{repo/user [prompts] general — custom instructions, verbatim}</var>
+</span><span class="frame-tag">&lt;/system_instruction&gt;</span></pre>
+            <div class="wire-note">
+              Yellow-edged paragraphs are conditional: the /add-dir line only when the chat has
+              additional directories; the custom block only when <code>[prompts] general</code> is
+              set. Parts joined by blank lines
+              (<code>buildFirstTurnInstructionBody</code>). For <strong>Codex</strong> the SAME body
+              ships <em>unwrapped</em> on <code>thread/start.developerInstructions</code> (and again
+              on <code>thread/resume</code>) — never inside the user turn.
+            </div>
+          </div>
+        </section>
+
+        <section class="case" id="a2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A2</span>
+                <span class="tag ship">Shipped</span>
+                <span class="tag context">Conditional · always mechanism A mid-chat</span>
+              </div>
+              <h2>The /add-dir awareness line — <code>[SYS-INSTR: additional-dirs-notice]</code></h2>
+              <p class="case-copy">
+                The agent is <em>granted</em> filesystem access to extra dirs (Claude SDK
+                <code>additionalDirectories</code>) but is never told they exist — this line makes it
+                aware so it proactively reads them. Two placements: inside the first-turn preamble
+                (dirs present at chat start), or standalone on the next message after the user runs
+                <code>/add-dir</code> mid-chat (additions only, deduped per chat).
+              </p>
+            </div>
+            <div class="meta">
+              <code>templates.ts:53</code> ·
+              mid-chat injection: <code>src/zeros/agent/sessions-provider.tsx:1198-1220</code>
+            </div>
+          </div>
+          <div class="wire">
+            <div class="wire-head">
+              <span class="chan wire-chan">Wire · mid-chat variant</span>
+              <span>prepended to the agent-facing text of the user's next message; the bubble stays clean</span>
+            </div>
+            <pre><span class="frame-tag">&lt;system_instruction&gt;</span>
+You also have access to these additional directories (read from them with your tools as needed): <var>{DIRS, comma-joined}</var>.
+<span class="frame-tag">&lt;/system_instruction&gt;</span>
+
+<var>{the user's typed message}</var></pre>
+            <div class="wire-note">
+              Only <em>newly added</em> dirs are announced (<code>announcedDirsRef</code> diff);
+              removals are never announced — see audit G-07.
+            </div>
+          </div>
+        </section>
+
+        <section class="case" id="a3">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A3</span>
+                <span class="tag ship">Shipped</span>
+                <span class="tag gap">1 of 6 keys wired</span>
+              </div>
+              <h2>The custom-instructions slot — <code>[prompts] general</code></h2>
+              <p class="case-copy">
+                The only user-editable instruction slot that actually reaches an agent. Edited in
+                <strong>Settings → Repo → Actions</strong> ("Configure action-specific instructions
+                for this repository." → field <em>General preferences</em>, "Custom instructions sent
+                to the agent at the start of every new chat."), written to
+                <code>.zeros/settings.toml</code>, carried as <code>ZEROS_PROMPTS_GENERAL</code>
+                (exempt from the env hazard filter — the name is ours), and landed <em>verbatim</em>
+                as the last paragraph of the first-turn instruction body. First turn only — a
+                mid-session settings edit reaches only <em>new</em> sessions.
+              </p>
+            </div>
+            <div class="meta">
+              <code>src/zeros/panels/repositories-panel.tsx:1633-1706</code> ·
+              <code>src/engine/settings/spawn-env.ts:182-199</code> ·
+              <code>gateway.parseInstructionCtx()</code>
+            </div>
+          </div>
+          <div class="wire">
+            <div class="wire-head">
+              <span class="chan env-chan">settings.toml · full schema</span>
+              <span>→ <code>ZEROS_PROMPTS_GENERAL</code> → last paragraph of A1's body</span>
+            </div>
+            <pre>[prompts]
+general = """
+<var>Always run the linter before declaring work done.
+Prefer pnpm over npm in this repo.</var>
+"""
+<span class="cond">Declared in promptsSchema but INERT — no UI field, no consumer, no [SYS-INSTR: action-*] template:
+code_review = "…"        # → Review button
+create_pr = "…"          # → Create-PR button
+fix_errors = "…"         # → Fix-errors button
+rename_branch = "…"      # → Rename-branch button
+resolve_merge_conflicts = "…"  # → Resolve-conflicts button</span></pre>
+            <div class="wire-note">
+              <code>src/engine/settings/schema.ts:161-170</code> defines all six keys
+              (<code>general</code>: "Appended to every agent session."), layered user + repo +
+              repo-local. Only <code>general</code> flows through
+              <code>buildFirstTurnInstructionBody</code>; the other five are declared but dead —
+              audit G-01.
+            </div>
+          </div>
+        </section>
+
+        <section class="case" id="a4">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A4</span>
+                <span class="tag ship">Shipped</span>
+                <span class="tag context">Mechanics</span>
+              </div>
+              <h2>Delivery + re-injection matrix — when the one-shot fires</h2>
+              <p class="case-copy">
+                The gateway arms the preamble per session (<code>sessionsInstructed</code>) so it is
+                sent exactly once — and re-armed exactly when a fresh transcript would otherwise have
+                no orientation at all.
+              </p>
+            </div>
+            <div class="meta"><code>gateway.ts:804-910, 1027-1065</code></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Event</th>
+                  <th>Claude / Cursor (mechanism A)</th>
+                  <th>Codex (mechanism B)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>New session</strong></td>
+                  <td>First <code>prompt()</code> prepends the <code>&lt;system_instruction&gt;</code> block as its own leading text block — outermost, the very first thing the model reads.</td>
+                  <td>Body attached at <code>thread/start.developerInstructions</code>; session pre-marked instructed — the first prompt never double-sends.</td>
+                </tr>
+                <tr>
+                  <td><strong>True resume</strong></td>
+                  <td>Pre-marked instructed — the block already rides the resumed transcript. Never re-sent.</td>
+                  <td>Re-attached on <code>thread/resume.developerInstructions</code> (refreshes, and retro-fits pre-native sessions).</td>
+                </tr>
+                <tr>
+                  <td><strong>Degraded resume</strong> <span class="dim">(stale Codex rollout, Cursor "agent not found", Claude with no persisted id → fresh thread)</span></td>
+                  <td>One-shot re-armed (<code>sessionsInstructed.delete</code>) — the next prompt re-injects preamble + cwd hint.</td>
+                  <td>Adapter attaches it on the fallback <code>thread/start</code> too — both resume shapes covered.</td>
+                </tr>
+                <tr>
+                  <td><strong>Mid-turn steer</strong></td>
+                  <td colspan="2" class="dim">Never wrapped — steering is by definition not a first turn; the one-shots stay armed for the next real prompt (<code>gateway.ts:1106</code>).</td>
+                </tr>
+                <tr>
+                  <td><strong>Context compaction</strong></td>
+                  <td class="dim">No re-injection hook — the in-band block can be summarized away (audit G-03).</td>
+                  <td class="dim">Immune — developerInstructions live outside the compacted history.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="case" id="a5">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A5</span>
+                <span class="tag changed">Dormant insurance</span>
+              </div>
+              <h2>The cwd hint — <code>&lt;environment&gt;</code> block</h2>
+              <p class="case-copy">
+                For agents that don't self-report their cwd to their own model. Today every active
+                agent is in <code>CWD_SELF_AWARE_AGENTS</code>, so this never fires — it is dormant
+                insurance for a future backend. One-shot, prepended after the system instruction.
+              </p>
+            </div>
+            <div class="meta"><code>gateway.withCwdHint() · gateway.ts:948-976</code></div>
+          </div>
+          <div class="wire">
+            <div class="wire-head">
+              <span class="chan wire-chan">Wire · dormant</span>
+              <span>first prompt per session, non-self-aware agents only</span>
+            </div>
+            <pre><span class="frame-tag">&lt;environment&gt;</span>
+Your working directory is: <var>{cwd}</var>
+Use this absolute path (or paths under it) for all file operations unless explicitly told otherwise. Do NOT write to the filesystem root.
+<span class="frame-tag">&lt;/environment&gt;</span></pre>
+          </div>
+        </section>
+
+        <section class="case" id="a6">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">A6</span>
+                <span class="tag context">Context</span>
+              </div>
+              <h2>What Zeros deliberately does <em>not</em> author</h2>
+              <p class="case-copy">
+                The agents' real system prompts are their own. Zeros only ensures they load — and
+                leaves one user-controlled escape hatch per family.
+              </p>
+            </div>
+            <div class="meta"><code>claude-sdk/adapter.ts:2230-2242 · codex app-server-adapter.ts:484-508</code></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Agent</th><th>System prompt source</th><th>Project memory</th><th>User escape hatch</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Claude</strong></td>
+                  <td>Always the <code>claude_code</code> preset — it injects the CLI's own dynamic <code>&lt;env&gt;</code> block (cwd, git repo?, platform, git status, date). Zeros never omits it.</td>
+                  <td><code>settingSources: ["user","project","local"]</code> → CLAUDE.md, MCP, project config load exactly like the CLI.</td>
+                  <td><code>CLAUDE_APPEND_SYSTEM_PROMPT</code> env → <code>systemPrompt.append</code> (blocked for remote/relay clients as prompt injection).</td>
+                </tr>
+                <tr>
+                  <td><strong>Codex</strong></td>
+                  <td>Built-in instructions; <code>collaborationMode.settings.developer_instructions: null</code> = "use the built-ins for the mode". Zeros' body rides the separate <code>developerInstructions</code> field.</td>
+                  <td>AGENTS.md read natively by Codex.</td>
+                  <td class="dim">— (base instructions never replaced; that would drop Codex's own tool guidance)</td>
+                </tr>
+                <tr>
+                  <td><strong>Cursor</strong></td>
+                  <td>SDK-owned; Zeros passes mode/model only (effort/fast fold into the model id).</td>
+                  <td><code>settingSources: ["user","project","team","mdm","plugins"]</code> → repo rules, <code>~/.cursor/mcp.json</code>, project <code>.cursor/mcp.json</code>, team/MDM layers.</td>
+                  <td class="dim">—</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <!-- ═══════════════ Part B ═══════════════ -->
+      <p class="band">Part B — Create PR · the split button (Column 2 top bar / Changes tab)</p>
+      <div class="catalog">
+        <section class="case" id="b1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">B1</span>
+                <span class="tag ship">Shipped</span>
+                <span class="tag context">No agent message</span>
+              </div>
+              <h2>Primary "Create PR" (and "Create draft PR") — direct engine path</h2>
+              <p class="case-copy">
+                The main segment does <strong>not</strong> talk to the agent at all. It calls the
+                engine's authenticated <code>gh.prCreate</code> with a small deterministic draft built
+                from branch commits: <strong>title</strong> = the <em>oldest</em> branch commit's
+                subject (usually the feature intent), bounded to 80 chars
+                (<code>…slice(0,77) + "..."</code>), falling back to the humanized branch leaf;
+                <strong>body</strong> = <code>## Summary</code> + one bullet per commit subject
+                (never empty — the engine rejects empty bodies). Dirty tree → refused, because a push
+                cannot include uncommitted files.
+              </p>
+            </div>
+            <div class="meta">
+              <code>src/shell/pr/create-pr-button.tsx · create-pr-action.ts</code>
+            </div>
+          </div>
+          <div class="wire">
+            <div class="wire-head">
+              <span class="chan bubble-chan">User-facing refusal</span>
+              <span>dirty worktree — offers the agent workflow as recovery</span>
+            </div>
+            <pre>There are <var>N</var> uncommitted changes in this workspace — commit or discard them (including new untracked files) before creating a pull request.
+
+Toast: “Commit changes before creating this pull request”
+       “A pull request only includes committed work. Ask the agent to review, commit, and create it.”   [Ask agent]</pre>
+            <div class="wire-note">
+              The count includes <em>untracked</em> files — a single agent scratch file is enough to
+              land here, hence the "(including new untracked files)" clause. The
+              <strong>[Ask agent]</strong> action fires B2.
+            </div>
+          </div>
+        </section>
+
+        <section class="case" id="b2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">B2</span>
+                <span class="tag ship">Shipped</span>
+                <span class="tag context">Auto-sent prompt</span>
+              </div>
+              <h2>"Ask agent to create PR" — the full step-by-step brief</h2>
+              <p class="case-copy">
+                The dropdown's agent path (and the dirty-tree recovery). Generated from
+                <strong>live workspace state</strong> — branch, target, configured remote, uncommitted
+                count (net HEAD-vs-worktree), upstream presence — so the agent never re-derives it.
+                Parked while the agent has a turn in flight (the brief would describe a half-done
+                tree). The chat bubble shows only <em>"Create a PR"</em> / <em>"Create a draft
+                PR"</em> with the button's icon; the agent receives everything below.
+              </p>
+            </div>
+            <div class="meta">
+              <code>src/shell/pr/pr-instructions.ts · buildPrInstructions()</code><br />
+              sent via <code>useSendToActiveChat</code> · autoAction
+              <code>create-pr | create-draft-pr</code>
+            </div>
+          </div>
+          <div class="wire">
+            <div class="wire-head">
+              <span class="chan wire-chan">Wire · exact</span>
+              <span>example: branch <code>zeros/washington</code>, remote <code>origin</code>, base <code>main</code>, 3 dirty paths, no upstream, non-draft</span>
+            </div>
+            <pre>The user likes the current state of the code.
+
+<var>There are 3 uncommitted changes.</var>
+The current branch is <var>zeros/washington</var>.
+The target branch is <var>origin/main</var>.
+
+<var>There is no upstream branch yet.</var>
+<var>The user requested a PR.</var>
+
+Follow these steps to create a PR:
+
+- If you have any skills related to creating PRs, invoke them now. Instructions there should take precedence over these instructions.
+- Run `git diff` to review uncommitted changes.
+- Commit them. Follow any instructions the user gave you about writing commit messages.
+- Push with `git push -u '<var>origin</var>' HEAD:'<var>zeros/washington</var>'`.
+- Review the full PR diff (all committed and uncommitted changes vs the target branch) before writing the description.
+- Use `gh pr create --base <var>main</var>` to create a PR onto the target branch. Keep the title under 80 characters. Keep the description under five sentences, unless the user instructed you otherwise. Describe not just changes made in this session but ALL changes in the workspace diff.
+
+If any of these steps fail, ask the user for help.</pre>
+            <div class="wire-note">
+              Variant lines — uncommitted: <code>"There are no uncommitted changes."</code> /
+              <code>"There is 1 uncommitted change."</code> / <code>"There are N uncommitted
+              changes."</code> · upstream: <code>"The branch already has an upstream on
+              {remote}."</code> · draft: <code>"The user requested a draft PR."</code> and the create
+              command gains <code>--draft</code>. Status probes are best-effort — on failure the
+              brief degrades to 0 dirty / no upstream (audit G-05).
+            </div>
+          </div>
+          <div class="bubble-demo">
+            <div class="bubble">
+              <svg><use href="#i-git-pr-create" /></svg>
+              Create a PR
+              <span class="by">sent by Zeros</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="case" id="b3">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">B3</span>
+                <span class="tag context">No agent message</span>
+              </div>
+              <h2>The rest of the dropdown</h2>
+              <p class="case-copy">
+                <strong>Create draft PR</strong> — same direct engine path as B1 with
+                <code>draft: true</code>. <strong>Create PR manually</strong> — opens GitHub's
+                compare/new-PR page on the <em>configured</em> remote's repository (fork workflows:
+                <code>git.remote</code> may name upstream, not origin). Neither sends the agent
+                anything.
+              </p>
+            </div>
+            <div class="meta"><code>create-pr-button.tsx · githubCompareUrl()</code></div>
+          </div>
+        </section>
+      </div>
+
+      <!-- ═══════════════ Part C ═══════════════ -->
+      <p class="band">Part C — PR status island · three buttons prompt the agent, the rest act directly</p>
+      <div class="catalog">
+        <section class="case" id="c1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">C1</span>
+                <span class="tag ship">Shipped</span>
+                <span class="tag context">Auto-sent prompt</span>
+              </div>
+              <h2>Resolve — merge conflicts (local, or GitHub <code>mergeable_state: dirty</code>)</h2>
+              <p class="case-copy">
+                Wording is the user-approved 2026-07-19 spec verbatim, with the base branch
+                interpolated. Bubble label: <em>Resolve</em> (autoAction <code>resolve</code>).
+              </p>
+            </div>
+            <div class="meta"><code>src/shell/pr/pr-action-prompts.ts:36</code></div>
+          </div>
+          <div class="wire">
+            <div class="wire-head"><span class="chan wire-chan">Wire · exact</span></div>
+            <pre>Merge the remote branch (<var>main</var>) into your branch and resolve conflicts. Then, commit and push your changes</pre>
+            <div class="wire-note">
+              Interpolates the bare base branch — not <code>remote/base</code> like C3, and no
+              trailing period (spec-verbatim; see audit G-06).
+            </div>
+          </div>
+          <div class="bubble-demo">
+            <div class="bubble">
+              <svg><use href="#i-merge-conflict" /></svg>
+              Resolve
+              <span class="by">sent by Zeros</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="case" id="c2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">C2</span>
+                <span class="tag ship">Shipped</span>
+                <span class="tag context">Auto-sent prompt</span>
+              </div>
+              <h2>Commit &amp; Push — uncommitted changes on a PR branch</h2>
+              <p class="case-copy">Bubble label: <em>Commit &amp; Push</em> (autoAction <code>commit-and-push</code>).</p>
+            </div>
+            <div class="meta"><code>pr-action-prompts.ts:38</code></div>
+          </div>
+          <div class="wire">
+            <div class="wire-head"><span class="chan wire-chan">Wire · exact</span></div>
+            <pre>Commit and push all changes</pre>
+          </div>
+          <div class="bubble-demo">
+            <div class="bubble">
+              <svg><use href="#i-commit-push" /></svg>
+              Commit &amp; Push
+              <span class="by">sent by Zeros</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="case" id="c3">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">C3</span>
+                <span class="tag ship">Shipped</span>
+                <span class="tag context">Auto-sent prompt</span>
+              </div>
+              <h2>Update branch — base requires branch up to date (<code>mergeable_state: behind</code>)</h2>
+              <p class="case-copy">
+                Bubble label: <em>Update branch</em> (autoAction <code>update-branch</code>). Names
+                the configured remote, unlike C1.
+              </p>
+            </div>
+            <div class="meta"><code>pr-action-prompts.ts:40</code></div>
+          </div>
+          <div class="wire">
+            <div class="wire-head"><span class="chan wire-chan">Wire · exact</span></div>
+            <pre>Merge <var>origin</var>/<var>main</var> into this branch and resolve conflicts if any. Then push.</pre>
+          </div>
+          <div class="bubble-demo">
+            <div class="bubble">
+              <svg><use href="#i-arrow-down" /></svg>
+              Update branch
+              <span class="by">sent by Zeros</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="case" id="c4">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">C4</span>
+                <span class="tag context">No agent message</span>
+              </div>
+              <h2>Everything else on the island acts directly in the engine</h2>
+              <p class="case-copy">
+                2026-07-19 decision: deterministic git/GitHub work gets no agent round-trip — the
+                button shows an inline spinner and the island's next settled batch shows the new
+                state. All island actions except Archive and Show-checks are <strong>parked while the
+                agent has a turn in flight</strong> — prompts would queue behind the very turn
+                reshaping the branch; direct mutations could act on a half-pushed state.
+              </p>
+            </div>
+            <div class="meta"><code>src/shell/pr/pr-status.ts · isActionGatedWhileAgentWorking()</code></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Button</th><th>Island state</th><th>Behavior</th><th>What happens</th></tr>
+              </thead>
+              <tbody>
+                <tr><td><strong>Resolve</strong></td><td>Merge conflicts</td><td><span class="pill prompt">prompt</span></td><td class="dim">C1 wire text → active chat</td></tr>
+                <tr><td><strong>Commit &amp; Push</strong></td><td>Uncommitted changes</td><td><span class="pill prompt">prompt</span></td><td class="dim">C2 wire text → active chat</td></tr>
+                <tr><td><strong>Update branch</strong></td><td>Require branch up to date</td><td><span class="pill prompt">prompt</span></td><td class="dim">C3 wire text → active chat</td></tr>
+                <tr><td><strong>Push</strong></td><td>Ahead by N commits</td><td><span class="pill direct">direct</span></td><td class="dim">engine push</td></tr>
+                <tr><td><strong>Pull</strong></td><td>Behind / Diverged</td><td><span class="pill direct">direct</span></td><td class="dim">engine pull (rebase + autostash first on diverged)</td></tr>
+                <tr><td><strong>Ready for review</strong></td><td>Draft PR open</td><td><span class="pill direct">direct</span></td><td class="dim">engine marks PR ready</td></tr>
+                <tr><td><strong>Merge</strong></td><td>Ready to merge</td><td><span class="pill direct">direct</span></td><td class="dim">engine merge</td></tr>
+                <tr><td><strong>Continue</strong></td><td>Merged</td><td><span class="pill direct">direct</span></td><td class="dim">fresh branch in the same worktree; chats + tree untouched</td></tr>
+                <tr><td><strong>Archive</strong></td><td>Merged / Closed</td><td><span class="pill direct">direct</span></td><td class="dim">stops any running turn, archives the workspace</td></tr>
+                <tr><td><strong>Show checks</strong></td><td>N/M checks failed</td><td><span class="pill navp">navigate</span></td><td class="dim">opens Review tab → Checks</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <!-- ═══════════════ Part D ═══════════════ -->
+      <p class="band">Part D — Composer briefs · text staged for the user to review, edit, and send</p>
+      <div class="catalog">
+        <section class="case" id="d1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">D1</span>
+                <span class="tag ship">Shipped</span>
+                <span class="tag compose" style="background: color-mix(in srgb, var(--yellow-primary) 14%, transparent); color: var(--yellow-primary); border-radius: 999px;">Composer append</span>
+              </div>
+              <h2>"Add to chat" on a failing check — the fix-it brief</h2>
+              <p class="case-copy">
+                Review tab → Checks, hover a failing row. Lands in the composer
+                (<code>ENQUEUE_COMPOSER_APPEND</code>) — the user reviews/edits and sends, so it reads
+                as a complete brief rather than an auto-fired command.
+              </p>
+            </div>
+            <div class="meta"><code>pr-action-prompts.ts · buildFixCheckPrompt() · review-checks.tsx</code></div>
+          </div>
+          <div class="wire">
+            <div class="wire-head">
+              <span class="chan wire-chan">Composer text · exact</span>
+              <span>single line, segments space-joined; Details omitted when no URL</span>
+            </div>
+            <pre>The CI check `<var>typecheck</var>` is failing on PR #<var>16</var> (branch `<var>zeros/washington</var>`). Details: <var>https://github.com/…/runs/123</var> Investigate the failure — `gh pr checks <var>16</var>` lists the runs and `gh run view --log-failed` shows the failing log — then fix the root cause, verify the fix locally (build/tests), and commit and push so the check re-runs.</pre>
+          </div>
+        </section>
+
+        <section class="case" id="d2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">D2</span>
+                <span class="tag ship">Shipped</span>
+                <span class="tag compose" style="background: color-mix(in srgb, var(--yellow-primary) 14%, transparent); color: var(--yellow-primary); border-radius: 999px;">Composer append</span>
+              </div>
+              <h2>"Add to chat" on a review / comment card — quoted context</h2>
+              <p class="case-copy">
+                Review tab → timeline. Quoted context the user adds instructions under — deliberately
+                ends with a blank line and <em>no</em> instruction of its own.
+              </p>
+            </div>
+            <div class="meta"><code>pr-action-prompts.ts · buildReviewCommentContext() · review-timeline.tsx:333</code></div>
+          </div>
+          <div class="wire">
+            <div class="wire-head">
+              <span class="chan wire-chan">Composer text · exact</span>
+              <span>verdict suffix only for non-COMMENTED states, lowercased, underscores → spaces</span>
+            </div>
+            <pre>PR #<var>16</var> — @<var>jordan</var><var> (changes requested)</var>:
+&gt; <var>This helper duplicates resolveWorkspaceTargetRef —</var>
+&gt; <var>can we reuse it?</var>
+
+</pre>
+          </div>
+        </section>
+
+        <section class="case" id="d3">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">D3</span>
+                <span class="tag ship">Shipped</span>
+                <span class="tag compose" style="background: color-mix(in srgb, var(--yellow-primary) 14%, transparent); color: var(--yellow-primary); border-radius: 999px;">Composer append</span>
+              </div>
+              <h2>⌥-click an element in the embedded browser</h2>
+              <p class="case-copy">
+                Appends a one-line element context block to the active chat's composer
+                (<code>\n\n</code>-prefixed); the user keeps typing around it. No active chat →
+                toast, never a silent spawn.
+              </p>
+            </div>
+            <div class="meta"><code>browser-tab.tsx · formatElementForComposer()</code></div>
+          </div>
+          <div class="wire">
+            <div class="wire-head">
+              <span class="chan wire-chan">Composer text · exact shape</span>
+              <span>≤5 non-default computed styles; component name when known, else bare tag</span>
+            </div>
+            <pre>[<var>SubmitButton &lt;button&gt;</var> <var>#app &gt; form &gt; button.primary</var> @ <var>http://localhost:3000/checkout</var>] { <var>color=rgb(255,255,255), background-color=rgb(199,62,29), …</var> }</pre>
+          </div>
+        </section>
+
+        <section class="case" id="d4">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">D4</span>
+                <span class="tag ship">Shipped</span>
+                <span class="tag context">Auto-sent (chip submit)</span>
+              </div>
+              <h2>Element-picker chip submit — description + numbered blocks + screenshots</h2>
+              <p class="case-copy">
+                The multi-select picker chip fires a real chat submission
+                (<code>ENQUEUE_CHAT_SUBMISSION</code>): the user's typed description, then a header
+                that switches voice by count, plus one screenshot image attachment per element
+                (vision picks them up in list order).
+              </p>
+            </div>
+            <div class="meta"><code>browser-tab.tsx · submitElementsToChat() · elementBlock()</code></div>
+          </div>
+          <div class="wire">
+            <div class="wire-head">
+              <span class="chan wire-chan">Wire · exact shape (2 elements)</span>
+              <span>+ image content blocks appended after the text</span>
+            </div>
+            <pre><var>{the user's typed description}</var>
+
+Selected 2 elements:
+
+1. <var>SubmitButton (&lt;button&gt;)</var>
+  selector: <var>#app &gt; form &gt; button.primary</var>
+  url: <var>http://localhost:3000/checkout</var>
+  note: inside shadow-DOM
+  computed styles:
+  <var>color: rgb(255,255,255)</var>
+  <var>background-color: rgb(199,62,29)</var>
+
+2. <var>&lt;nav&gt;</var>
+  selector: <var>header &gt; nav</var>
+  url: <var>http://localhost:3000/checkout</var></pre>
+            <div class="wire-note">
+              Single element → <code>Selected element: {block}</code> (no numbering).
+              <code>note:</code> line only for shadow-DOM hosts; styles filtered of
+              <code>auto/normal/none</code> defaults.
+            </div>
+          </div>
+        </section>
+
+        <section class="case" id="d5">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">D5</span>
+                <span class="tag ship">Shipped</span>
+                <span class="tag context">Serialization wrappers</span>
+              </div>
+              <h2>@-mentions, attachments &amp; chat imports — how composer content hits the wire</h2>
+              <p class="case-copy">
+                The composer serializes to <em>wire text</em> (mentions expanded) +
+                <em>displayText</em> (mention tokens, attachments omitted) + protocol blocks. Four
+                wrappers Zeros authors along the way:
+              </p>
+            </div>
+            <div class="meta">
+              <code>composer-editor/serialize.ts · mentions.ts:193-211 ·
+              agent-attachments.ts:242-246 · agent-chat.tsx:3041-3070 ·
+              claude-sdk/adapter.ts:2305-2313</code>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Composer content</th><th>Wire form (exact)</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>@-mentioned file / folder</strong></td>
+                  <td><code>`src/foo.ts`</code> / <code>`components/`</code> — backtick-wrapped relative path, verbatim in the text; the agent's own tools resolve it.</td>
+                </tr>
+                <tr>
+                  <td><strong><code>@selection</code></strong> (Design-mode browser pick)</td>
+                  <td><code>the currently-selected element (&lt;<var>tag</var>&gt;, selector <var>selector</var>)</code> — expanded in place.</td>
+                </tr>
+                <tr>
+                  <td><strong>Image → vision agent</strong></td>
+                  <td>inline content block <code>{ type: "image", mimeType, data(base64) }</code> — no prose.</td>
+                </tr>
+                <tr>
+                  <td><strong>Image → non-vision agent</strong> (has cwd)</td>
+                  <td><code>&lt;attached_image name="<var>{name}</var>" mime="<var>{mimeType}</var>"&gt;<br />@<var>{relativePath}</var>&nbsp;&nbsp;<span class="dim">(Claude/Cursor; others get the absolute path)</span><br />&lt;/attached_image&gt;</code> — the file is written to disk first.</td>
+                </tr>
+                <tr>
+                  <td><strong>Import from a previous chat</strong></td>
+                  <td><code>&lt;from_previous_chat name="<var>{title|'prior chat'}</var>" agent="<var>{agentId}</var>"&gt;<br /><var>{summary}</var><br />&lt;/from_previous_chat&gt;</code> — silently prefixed to the wire text; the bubble shows only what the user typed.</td>
+                </tr>
+                <tr>
+                  <td><strong>Claude SDK block mapping</strong></td>
+                  <td class="dim"><code>resource_link</code> → <code>@{uri minus file://}</code> · image-by-URL → <code>![image]({url})</code>.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <!-- ═══════════════ Part E ═══════════════ -->
+      <p class="band">Part E — Background &amp; synthesized · messages the user never types</p>
+      <div class="catalog">
+        <section class="case" id="e1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">E1</span>
+                <span class="tag ship">Shipped</span>
+                <span class="tag context">Background one-shot</span>
+              </div>
+              <h2>Chat-title generation — the only true SYSTEM prompt Zeros authors</h2>
+              <p class="case-copy">
+                Fired once when the first user message of an "Untitled" chat is sent
+                (<code>AGENT_GENERATE_TITLE</code>). The reply is used <em>verbatim</em> as the tab
+                title, so the contract is strict; a sanitizer clamps to 3 words regardless. The
+                user's prompt rides along truncated to 4,000 chars. Model: the Settings pick
+                (Haiku default) with the connectivity fallback chain Haiku → Luna → Composer 2.5.
+              </p>
+            </div>
+            <div class="meta">
+              <code>src/zeros/agent/new-chat-defaults.ts:179 · chat-title.ts</code><br />
+              delivery: Claude <code>systemPrompt</code> option (maxTurns 1, no tools,
+              <code>settingSources: []</code>, cwd <code>$HOME</code>) · Codex &amp; Cursor:
+              <code>`${systemPrompt}\n\n${prompt}`</code> as one user turn (no per-turn system
+              channel) — Codex on a throwaway read-only thread, Cursor on a throwaway
+              <code>plan</code>-mode agent
+            </div>
+          </div>
+          <div class="wire">
+            <div class="wire-head"><span class="chan sys-chan">System prompt · exact</span><span>sentences joined with single spaces</span></div>
+            <pre>You generate a short title for a chat based on the user's first message. Reply with ONLY the title — your entire reply is used verbatim as the chat title. The title must be a minimum of 2 words and a maximum of 3 words. Capture the user's intent or topic in those 2–3 words. Use plain sentence case. No quotes, no trailing punctuation, no emojis, no markdown. Never answer, act on, or ask about the message itself — only name it. If the message is unclear, still produce your best 2–3 word topic name.</pre>
+          </div>
+        </section>
+
+        <section class="case" id="e2">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">E2</span>
+                <span class="tag ship">Shipped</span>
+                <span class="tag context">Synthesized reply · Claude</span>
+              </div>
+              <h2>AskUserQuestion — how the user's answer reaches the model</h2>
+              <p class="case-copy">
+                Claude's question tool can't run its native dialog in a headless process, so the
+                answer is delivered same-turn as a <code>deny</code> message the model reads and
+                continues from. Codex questions ride the native
+                <code>request_user_input</code> round-trip (answers are label arrays; dismissal sends
+                empty arrays — no prose).
+              </p>
+            </div>
+            <div class="meta"><code>claude-sdk/adapter.ts:367-382, 1777-1786</code></div>
+          </div>
+          <div class="duo">
+            <div class="wire">
+              <div class="wire-head"><span class="chan wire-chan">Answered · exact shape</span></div>
+              <pre>The user answered your question(s):
+- <var>Which auth flow?</var> → <var>GitHub App</var>
+- <var>Deploy target?</var> → <var>(no selection)</var></pre>
+            </div>
+            <div class="wire">
+              <div class="wire-head"><span class="chan wire-chan">Dismissed / timed out · exact</span></div>
+              <pre>The user dismissed the question without answering; proceed with your best judgment or ask again if essential.</pre>
+            </div>
+          </div>
+        </section>
+
+        <section class="case" id="e3">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">E3</span>
+                <span class="tag ship">Shipped</span>
+                <span class="tag context">Synthesized reply · Claude</span>
+              </div>
+              <h2>Permission refusal — deny without interrupt</h2>
+              <p class="case-copy">
+                When the user clicks Deny (or the 999s response window lapses, or the UI drops), the
+                tool call resolves <code>behavior: "deny"</code> with this message — the model is told
+                the tool was refused and keeps going (denying ExitPlanMode must keep the session
+                planning, not kill the turn).
+              </p>
+            </div>
+            <div class="meta"><code>claude-sdk/adapter.ts:1592</code></div>
+          </div>
+          <div class="wire">
+            <div class="wire-head"><span class="chan wire-chan">Wire · exact</span></div>
+            <pre>User denied this tool call.</pre>
+          </div>
+        </section>
+
+        <section class="case" id="e4">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">E4</span>
+                <span class="tag ship">Shipped</span>
+                <span class="tag context">Auto-sent · Claude</span>
+              </div>
+              <h2>"Compact now" — the literal <code>/compact</code> user message</h2>
+              <p class="case-copy">
+                The context gauge's Compact button (and a typed <code>/compact</code>) sends Claude
+                the CLI-native slash command as a user message; the CLI intercepts it server-side and
+                narrates through <code>compact_boundary</code>. Codex compacts via
+                <code>thread/compact/start</code> instead (no message).
+              </p>
+            </div>
+            <div class="meta"><code>claude-sdk/adapter.ts:877</code></div>
+          </div>
+          <div class="wire">
+            <div class="wire-head"><span class="chan wire-chan">Wire · exact</span></div>
+            <pre>/compact</pre>
+          </div>
+        </section>
+
+        <section class="case" id="e5">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">E5</span>
+                <span class="tag ship">Shipped</span>
+                <span class="tag context">Synthesized · on rebuild/resend</span>
+              </div>
+              <h2>Session-recovery replay — the <code>&lt;previous_conversation&gt;</code> preamble</h2>
+              <p class="case-copy">
+                When a session must be rebuilt and the agent-side transcript is gone (deleted
+                rollout, unresumable session), Zeros synthesizes the history from its own persisted
+                messages and prepends it as a text block before the user's prompt. Deliberately
+                terse — the model is never told <em>why</em> it's a replay. Latest compaction
+                summary rides first as its own block; the live tail renders as
+                <code>&lt;user&gt;/&lt;assistant&gt;</code> pairs (message-count + char-budget clamped).
+              </p>
+            </div>
+            <div class="meta">
+              <code>src/zeros/agent/replay.ts · synthesizeReplayPrompt() ·
+              sessions-provider.tsx:1516</code>
+            </div>
+          </div>
+          <div class="wire">
+            <div class="wire-head">
+              <span class="chan wire-chan">Wire · exact shape</span>
+              <span>summary block and omitted-note only when applicable</span>
+            </div>
+            <pre><span class="cond"><span class="frame-tag">&lt;previous_conversation_summary&gt;</span>
+<var>{latest compaction summary}</var>
+<span class="frame-tag">&lt;/previous_conversation_summary&gt;</span></span><span class="frame-tag">&lt;previous_conversation&gt;</span>
+<span class="cond">(Older messages omitted to fit context budget. Resume from the most recent exchange.)</span><span class="frame-tag">&lt;user&gt;</span><var>{message}</var><span class="frame-tag">&lt;/user&gt;</span>
+<span class="frame-tag">&lt;assistant&gt;</span><var>{message}</var><span class="frame-tag">&lt;/assistant&gt;</span>
+<span class="frame-tag">&lt;/previous_conversation&gt;</span>
+
+Continue from where the previous conversation left off. The user's next message follows.</pre>
+          </div>
+        </section>
+      </div>
+
+      <!-- ═══════════════ Part F ═══════════════ -->
+      <p class="band">Part F — Not prose, still fed · the config that shapes every session</p>
+      <div class="catalog">
+        <section class="case" id="f1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">F1</span>
+                <span class="tag context">Config surface</span>
+              </div>
+              <h2>Env knobs, SDK options, tools</h2>
+              <p class="case-copy">
+                Alongside the wire texts, every spawn carries settings-derived env
+                (<code>[env]</code> table + <code>env_files</code>, hazard-filtered), per-session MCP
+                registries (user + repo + workspace layers), and composer knobs. The ones that change
+                what the model can do or see:
+              </p>
+            </div>
+            <div class="meta"><code>spawn-env.ts · gateway.ts · adapters</code></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Knob</th><th>Carrier</th><th>Effect</th></tr>
+              </thead>
+              <tbody>
+                <tr><td><code>ZEROS_WORKTREE_PATH</code></td><td>env, every spawn</td><td class="dim">tells the agent's process/scripts their worktree</td></tr>
+                <tr><td><code>ZEROS_TARGET_BRANCH</code></td><td>env, stamped from workspace row</td><td class="dim">→ preamble's {TARGET_BRANCH}</td></tr>
+                <tr><td><code>ZEROS_ADDITIONAL_DIRS</code></td><td>env, JSON array (from /add-dir)</td><td class="dim">→ Claude SDK <code>additionalDirectories</code> + A2 notice; relay writes clamped to the managed workspace</td></tr>
+                <tr><td><code>ZEROS_PROMPTS_GENERAL</code></td><td>env, from <code>[prompts] general</code></td><td class="dim">→ A3 custom-instructions paragraph</td></tr>
+                <tr><td><code>CLAUDE_APPEND_SYSTEM_PROMPT</code></td><td>env (user-set)</td><td class="dim">appended to the <code>claude_code</code> preset system prompt; scrubbed from relay clients (prompt injection)</td></tr>
+                <tr><td><code>ANTHROPIC_MODEL</code> / <code>OPENAI_MODEL</code> / <code>CURSOR_MODEL</code> · <code>ZEROS_THINKING_EFFORT</code> · <code>ZEROS_FAST_MODE</code></td><td>env (composer pills)</td><td class="dim">model per family / reasoning effort (Codex <code>turn.effort</code>, Claude <code>effortLevel</code> incl. <code>ultracode</code>⇒xhigh+flag, Cursor folds into the model id) / fast tier (Codex <code>serviceTier:"fast"</code>, Claude <code>fastMode</code>)</td></tr>
+                <tr><td><code>CLAUDE_ALLOWED_TOOLS</code> / <code>CLAUDE_DISALLOWED_TOOLS</code></td><td>env</td><td class="dim">→ <code>Settings.permissions.allow/deny</code>; scrubbed from relay clients (auto-run scope)</td></tr>
+                <tr><td><code>CLAUDE_MAX_TURNS</code> / <code>CLAUDE_MAX_BUDGET_USD</code> / <code>CLAUDE_FALLBACK_MODEL</code></td><td>env → SDK options</td><td class="dim"><code>maxTurns</code> · <code>maxBudgetUsd</code> · <code>fallbackModel</code> (§3.6 R2/R3 reliability knobs)</td></tr>
+                <tr><td>Permission mode</td><td><code>AGENT_SET_MODE</code> (guarded path)</td><td class="dim">plan / auto / tool-approval / danger → Claude SDK modes (<code>plan/auto/acceptEdits/bypassPermissions</code>; bypass drops <code>canUseTool</code>), Codex approval+sandbox policy (ask=<code>untrusted</code>/workspace-write … full-access=<code>never</code>/danger-full-access), Cursor <code>plan/agent</code>+autoReview. <code>ZEROS_PERMISSION_MODE</code> is emitted as a durable record but consumed by no adapter</td></tr>
+                <tr><td>MCP servers</td><td><code>resolveSessionMcp()</code> per cwd</td><td class="dim">user + repo + workspace MCP layers (RCE-gated). Zeros injects exactly ONE server of its own — <code>zeros-gateway</code>, the OAuth broker/aggregator, only when a gateway URL is set and the repo has oauth/header MCP backends; name collisions with it are dropped</td></tr>
+                <tr><td>Git identity</td><td>engine-side git config</td><td class="dim">Zeros' OWN commits (clone/init, checkpoint turns) use <code>Zeros &lt;noreply@zeros.design&gt;</code> / <code>turns@zeros.local</code>. No Co-authored-by trailer is ever injected into agent commits — and no instruction asks agents to add one</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <!-- ═══════════════ Part G ═══════════════ -->
+      <p class="band">Part G — Audit · gaps, edge cases, and things not implemented yet</p>
+      <div class="catalog">
+        <section class="case" id="g1">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">G</span>
+                <span class="tag gap">Findings</span>
+              </div>
+              <h2>What's missing, inconsistent, or fragile</h2>
+              <p class="case-copy">
+                Ordered roughly by impact. <span class="tag gap" style="font-size:10px">planned</span>
+                = anticipated in code/spec but unbuilt ·
+                <span class="tag danger" style="font-size:10px">edge</span> = real scenario that
+                misbehaves · <span class="tag context" style="font-size:10px">polish</span> = wording
+                / consistency.
+              </p>
+            </div>
+          </div>
+          <div class="audit">
+            <div class="audit-item">
+              <span class="sev tag gap">planned</span>
+              <div>
+                <h4>G-01 · Five of six <code>[prompts]</code> keys are declared but dead</h4>
+                <p>
+                  <code>src/engine/settings/schema.ts:161-170</code> defines
+                  <code>code_review</code>, <code>create_pr</code>, <code>fix_errors</code>,
+                  <code>rename_branch</code>, <code>resolve_merge_conflicts</code> alongside
+                  <code>general</code> — mapped to the Review / Create-PR / Fix-errors /
+                  Rename-branch / Resolve-conflicts buttons. No <code>[SYS-INSTR: action-*]</code>
+                  template exists, no assembler consumes them, and the Actions tab renders only the
+                  <em>General preferences</em> field. A user who hand-writes
+                  <code>[prompts] create_pr</code> in settings.toml gets silence: the B2 brief and
+                  C1–C3 prompts stay hardcoded and non-customizable.
+                </p>
+              </div>
+            </div>
+            <div class="audit-item">
+              <span class="sev tag gap">planned</span>
+              <div>
+                <h4>G-02 · The "ONE home for hardcoded agent text" contract has drifted</h4>
+                <p>
+                  <code>templates.ts</code> claims every hardcoded agent-facing string lives there,
+                  and its deferral note says the Create-PR scaffolding "goes HERE" once built — but
+                  the button shipped with its prose in <code>pr-instructions.ts</code>, and further
+                  agent prose lives in <code>pr-action-prompts.ts</code>, <code>replay.ts</code>,
+                  <code>agent-attachments.ts</code>, <code>agent-chat.tsx</code> (imports), and the
+                  adapters (E2/E3). Tracked as hazard <strong>P-H2</strong>
+                  (<code>docs/github-integration/08-bugs-and-hazards.md</code>); wording contracts are
+                  pinned by <code>pr-instructions.test.ts</code> / <code>pr-action-prompts.test.ts</code>,
+                  so consolidation must move the tests too.
+                </p>
+              </div>
+            </div>
+            <div class="audit-item">
+              <span class="sev tag danger">edge</span>
+              <div>
+                <h4>G-03 · Mechanism-A orientation can be compacted away</h4>
+                <p>
+                  For Claude and Cursor the preamble lives inside the first user message. After a
+                  long session compacts/summarizes, the workspace orientation (target branch, don't
+                  rename, /add-dir awareness) may vanish, and nothing re-injects it — only a degraded
+                  resume re-arms the one-shot. Codex is immune (native
+                  <code>developerInstructions</code>). A post-compaction re-inject hook would close
+                  this.
+                </p>
+              </div>
+            </div>
+            <div class="audit-item">
+              <span class="sev tag danger">edge</span>
+              <div>
+                <h4>G-04 · Plain-folder chats claim a possibly-wrong target branch</h4>
+                <p>
+                  Chats without a workspaceId never get <code>ZEROS_TARGET_BRANCH</code> stamped, so
+                  the preamble asserts <code>origin/main</code> even for repos whose default is
+                  master/trunk or whose remote isn't origin. Also mid-chat settings changes
+                  (<code>[prompts] general</code>, target branch) never reach an already-instructed
+                  session.
+                </p>
+              </div>
+            </div>
+            <div class="audit-item">
+              <span class="sev tag danger">edge</span>
+              <div>
+                <h4>G-05 · The PR brief degrades silently when git probes fail</h4>
+                <p>
+                  <code>askAgentToCreate</code> uses <code>Promise.allSettled</code>; on failure the
+                  brief states <em>"There are no uncommitted changes."</em> and <em>"There is no
+                  upstream branch yet."</em> as fact. The agent may skip committing real work or
+                  force a redundant <code>-u</code> push. An "unknown — verify with git status"
+                  wording for the failure path would be more honest. Similarly, when the count is 0
+                  the brief still instructs "Run <code>git diff</code>… Commit them." unconditionally.
+                </p>
+              </div>
+            </div>
+            <div class="audit-item">
+              <span class="sev tag context">polish</span>
+              <div>
+                <h4>G-06 · Resolve-prompt wording is inconsistent with Update-branch</h4>
+                <p>
+                  C1 says "Merge the remote branch (<code>main</code>)…" — it labels the <em>base</em>
+                  branch "the remote branch", omits the remote prefix (C3 says
+                  <code>origin/main</code>), and drops the final period. With a non-origin
+                  <code>git.remote</code>, "the remote branch (main)" is ambiguous about which remote
+                  to fetch/merge from. (Spec-verbatim 2026-07-19 — a wording revision, not a code bug.)
+                </p>
+              </div>
+            </div>
+            <div class="audit-item">
+              <span class="sev tag danger">edge</span>
+              <div>
+                <h4>G-07 · /add-dir removals are never announced</h4>
+                <p>
+                  Only additions produce the A2 notice. When the user removes a directory the agent
+                  keeps believing it has access; its next read fails confusingly. The
+                  <code>announcedDirsRef</code> diff is also renderer-memory keyed by chat — on
+                  reopen it seeds from the current set, which is correct for the common path but
+                  can't retro-announce dirs added while a previous window never sent a turn.
+                </p>
+              </div>
+            </div>
+            <div class="audit-item">
+              <span class="sev tag danger">edge</span>
+              <div>
+                <h4>G-08 · Fix-check brief assumes <code>gh</code> auth inside the agent env</h4>
+                <p>
+                  D1 tells the agent to run <code>gh pr checks</code> / <code>gh run view
+                  --log-failed</code>. Zeros' own PR ops can be brokered through the GitHub App —
+                  the agent's shell may have no authenticated <code>gh</code> at all, and
+                  <code>gh run view --log-failed</code> without a run id is interactive. The brief
+                  has no fallback guidance (e.g., "if gh is unauthenticated, ask the user").
+                </p>
+              </div>
+            </div>
+            <div class="audit-item">
+              <span class="sev tag context">polish</span>
+              <div>
+                <h4>G-09 · Untracked files inflate the brief's "uncommitted changes" count</h4>
+                <p>
+                  The count is staged + unstaged + untracked + conflicted; an agent scratch file
+                  reads as "1 uncommitted change" in B2's wire text. The direct path's refusal
+                  message explains this ("including new untracked files"); the agent brief doesn't.
+                  A tracked-only count needs a new engine field (documented in
+                  <code>create-pr-action.ts</code>).
+                </p>
+              </div>
+            </div>
+            <div class="audit-item">
+              <span class="sev tag context">polish</span>
+              <div>
+                <h4>G-10 · Title contract vs sanitizer mismatch (1-word titles pass)</h4>
+                <p>
+                  E1 demands 2–3 words, but <code>sanitizeAiTitle</code> only rejects 0 words and
+                  clamps &gt;3 — a 1-word reply becomes the tab title. Codex/Cursor also receive the
+                  system prompt inside the same user turn (no system channel), so a hostile first
+                  message could try to override the contract; the sanitizer limits the blast radius
+                  to 3 words but can't stop a misleading title.
+                </p>
+              </div>
+            </div>
+            <div class="audit-item">
+              <span class="sev tag gap">planned</span>
+              <div>
+                <h4>G-11 · PR-adjacent agent actions that don't exist yet</h4>
+                <p>
+                  No one-click prompts for: fix <em>all</em> failing checks (island only navigates);
+                  address <em>all</em> review comments in bulk; update the PR title/description after
+                  new commits; rename the branch (reserved in templates); revert a merged PR; reply
+                  to / resolve a review thread. Each fits the existing
+                  auto-action pattern (short bubble + full wire brief).
+                </p>
+              </div>
+            </div>
+            <div class="audit-item">
+              <span class="sev tag context">polish</span>
+              <div>
+                <h4>G-12 · Prompt-button double-fire window</h4>
+                <p>
+                  Island prompt actions have no <code>acting</code> guard (direct actions do); two
+                  fast clicks before the turn registers as "agent working" send the same brief twice.
+                  Low impact — the second queues — but it double-stamps the transcript.
+                </p>
+              </div>
+            </div>
+            <div class="audit-item">
+              <span class="sev tag context">polish</span>
+              <div>
+                <h4>G-13 · Quoting edge in the push command</h4>
+                <p>
+                  B2 renders <code>git push -u 'origin' HEAD:'zeros/foo'</code> — safe for normal
+                  names, but a branch containing a single quote (legal in git) breaks the suggested
+                  command. Cosmetic; the agent usually normalizes.
+                </p>
+              </div>
+            </div>
+            <div class="audit-item">
+              <span class="sev tag context">polish</span>
+              <div>
+                <h4>G-14 · No commit-message-convention slot</h4>
+                <p>
+                  B2 says "Follow any instructions the user gave you about writing commit messages" —
+                  but the only durable place to put such instructions today is the generic
+                  <code>[prompts] general</code>. A dedicated commit/PR-description convention slot
+                  (fed into the brief itself) would make that sentence actionable.
+                </p>
+              </div>
+            </div>
+            <div class="audit-item">
+              <span class="sev tag gap">planned</span>
+              <div>
+                <h4>G-15 · <code>gh</code> is hardcoded into agent prose — blocks the multi-forge roadmap</h4>
+                <p>
+                  B2 (<code>gh pr create</code>) and D1 (<code>gh pr checks</code>,
+                  <code>gh run view --log-failed</code>) bake the GitHub CLI and "PR" vocabulary into
+                  wire text. The GitLab/Bitbucket roadmap
+                  (<code>docs/github-integration/06</code> P6, <code>08</code> P-H2) proposes
+                  <code>{FORGE_CLI}</code> / <code>{FORGE_CREATE_CMD}</code> /
+                  <code>{REVIEW_NOUN}</code> placeholders in templates.ts — "merge request" vs "pull
+                  request" must flow into both UI copy and agent prompts.
+                </p>
+              </div>
+            </div>
+            <div class="audit-item">
+              <span class="sev tag changed">spec drift</span>
+              <div>
+                <h4>G-16 · The specced user-supplied PR title/description pass-through was dropped</h4>
+                <p>
+                  The 2026-06-19 spec (<code>docs/source-tab-changes-review-audit.md</code> §13.4-13.5)
+                  defined conditional <code>## PR Title</code> / <code>## PR Description</code> blocks
+                  ("Use it exactly as-is") and a <code>gh pr create --base … --title … --body …</code>
+                  command. The shipped brief has no slot for a user-provided title/description — the
+                  agent always writes its own. Either re-add the slots or update the spec doc.
+                </p>
+              </div>
+            </div>
+            <div class="audit-item">
+              <span class="sev tag context">polish</span>
+              <div>
+                <h4>G-17 · <code>ZEROS_PERMISSION_MODE</code> is emitted but consumed by nothing</h4>
+                <p>
+                  <code>model-catalog.ts:878</code> stamps it into chat env as a durable record, and
+                  the relay scrubber singles it out as dangerous — but no adapter reads it (live
+                  sessions use <code>setMode</code>). Harmless today; misleading to the next reader
+                  and a stale-posture risk if an env-consuming agent is ever added.
+                </p>
+              </div>
+            </div>
+            <div class="audit-item">
+              <span class="sev tag context">polish</span>
+              <div>
+                <h4>G-18 · The PR-island design catalog contradicts itself on prompt-vs-direct</h4>
+                <p>
+                  <code>pr-status-island-state-catalog.html</code> labels Push / Pull / Ready-for-review
+                  / Continue "(prompt)" in the per-case meta blocks but "(direct)" in its F3 reference
+                  table. The code (and the 2026-07-19 decision) is <em>direct</em> — the catalog's
+                  meta blocks predate it and should be corrected so the next reader doesn't
+                  re-implement them as prompts.
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <footer>
+        Compiled 2026-07-30 from branch <code>washington</code>. Code of record:
+        <code>packages/core/src/system-instructions/{templates,build}.ts</code> ·
+        <code>src/engine/agents/gateway.ts</code> ·
+        <code>src/engine/settings/{spawn-env,schema}.ts</code> ·
+        <code>src/shell/pr/{pr-instructions,pr-action-prompts,create-pr-button,pr-status,pr-status-island}.tsx?</code> ·
+        <code>src/zeros/agent/{new-chat-defaults,chat-title,sessions-provider,replay,agent-attachments,mentions,auto-action}.tsx?</code> ·
+        <code>src/zeros/panels/repositories-panel.tsx</code> (Actions tab) ·
+        adapters under <code>src/engine/agents/adapters/</code>. Wire texts are quoted verbatim;
+        <var style="padding:0 4px;border-radius:3px;background:color-mix(in srgb, var(--blue-primary) 14%, transparent);color:var(--blue-primary);font-style:normal">vars</var>
+        mark runtime substitutions.
+      </footer>
+    </div>
+
+    <script>
+      const btn = document.getElementById("themeBtn");
+      const label = document.getElementById("themeLabel");
+      btn.addEventListener("click", () => {
+        const root = document.documentElement;
+        const dark = root.getAttribute("data-theme") === "dark";
+        root.setAttribute("data-theme", dark ? "light" : "dark");
+        label.textContent = dark ? "Dark preview" : "Light preview";
+      });
+    </script>
+  </body>
+</html>
