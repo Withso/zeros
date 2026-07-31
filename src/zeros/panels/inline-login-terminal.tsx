@@ -12,6 +12,33 @@ function shellQuoteIfNeeded(path: string): string {
   return `'${path.replace(/'/g, "'\\''")}'`;
 }
 
+/**
+ * Replace the disposable login shell with the auth process. Its exit now
+ * reaches TerminalSessionView immediately instead of returning to an idle
+ * prompt, and treating args as data avoids shell metacharacter injection.
+ */
+export function buildInlineLoginCommand(
+  binaryPath: string,
+  args: readonly string[],
+  unsetEnv: readonly string[] = [],
+): string {
+  for (const name of unsetEnv) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      throw new Error(`Invalid environment variable name: ${name}`);
+    }
+  }
+  const cleanEnvironment =
+    unsetEnv.length > 0
+      ? ["/usr/bin/env", ...unsetEnv.flatMap((name) => ["-u", name])]
+      : [];
+  return [
+    "exec",
+    ...cleanEnvironment.map(shellQuoteIfNeeded),
+    shellQuoteIfNeeded(binaryPath),
+    ...args.map(shellQuoteIfNeeded),
+  ].join(" ");
+}
+
 function makeLoginSessionId(ownerId: string): string {
   let random: string;
   try {
@@ -29,11 +56,13 @@ export function InlineLoginTerminal({
   ownerId,
   binary,
   args,
+  unsetEnv,
   onClose,
 }: {
   ownerId: string;
   binary: string;
   args: string[];
+  unsetEnv?: readonly string[];
   onClose: () => void;
 }) {
   const [binaryPath, setBinaryPath] = useState<string | null>(null);
@@ -59,7 +88,7 @@ export function InlineLoginTerminal({
 
   const label = `${binary} ${args.join(" ")}`.trim();
   const command = binaryPath
-    ? `${shellQuoteIfNeeded(binaryPath)} ${args.join(" ")}`.trim()
+    ? buildInlineLoginCommand(binaryPath, args, unsetEnv)
     : null;
 
   return (

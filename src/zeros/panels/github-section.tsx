@@ -213,7 +213,11 @@ function HealthDetail({ summary }: { summary: GithubCredentialSummary }) {
   );
 }
 
-export function GitHubSection() {
+export function GitHubSection({
+  surfaceActive = true,
+}: {
+  surfaceActive?: boolean;
+}) {
   const [setupMethod, setSetupMethod] = useState<GithubAuthMethod | null>(null);
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [pat, setPat] = useState("");
@@ -241,7 +245,7 @@ export function GitHubSection() {
   // bare would hand the key straight to its `options` parameter.
   const connection = useCachedRead(
     ghAuthStatusCache,
-    "auth",
+    surfaceActive ? "auth" : null,
     () => ghAuthSnapshot(),
     { maxAgeMs: GITHUB_READ_MAX_AGE_MS },
   );
@@ -354,49 +358,13 @@ export function GitHubSection() {
     }
   }, [refreshSnapshot, snapshot]);
 
-  const cliConnected = snapshot.methods["gh-cli"].health === "connected";
-  // Whether the terminal was opened while gh was ALREADY signed in (the
-  // "Reconnect / replace" path), which must not auto-close instantly.
-  const openedCliConnectedRef = useRef(false);
-
   const beginCliLogin = useCallback(() => {
-    openedCliConnectedRef.current = cliConnected;
     trackGithubConnectStarted({
       method: "gh-cli",
       entryPoint: "settings",
     });
     setTerminalOpen(true);
-  }, [cliConnected]);
-
-  // `gh auth login` runs inside a live login shell, so the shell does not exit
-  // when it finishes and `onExit` never fires. Poll the auth probe while the
-  // terminal is open — the same 3 s cadence the Claude/Codex login uses — so a
-  // completed sign-in is actually noticed.
-  //
-  // Bounded, unlike theirs: this probe also validates a configured PAT/App
-  // against the GitHub API, so an abandoned terminal left open all day would
-  // spend real rate limit. Five minutes covers any realistic browser handshake;
-  // after that the window-focus refresh and the row's Refresh still work.
-  useEffect(() => {
-    if (!terminalOpen || cliConnected) return;
-    let remaining = 100;
-    const id = window.setInterval(() => {
-      if (remaining-- <= 0) {
-        window.clearInterval(id);
-        return;
-      }
-      void refreshSnapshot();
-    }, 3_000);
-    return () => window.clearInterval(id);
-  }, [terminalOpen, cliConnected, refreshSnapshot]);
-
-  // Auto-close on a real signed-out→signed-in transition, matching the
-  // Claude/Codex terminal. finishCliTerminal closes it, selects gh CLI, and
-  // raises the one success toast.
-  useEffect(() => {
-    if (!terminalOpen || !cliConnected || openedCliConnectedRef.current) return;
-    void finishCliTerminal();
-  }, [terminalOpen, cliConnected, finishCliTerminal]);
+  }, []);
 
   const connectPat = useCallback(async () => {
     const token = pat.trim();
@@ -515,7 +483,30 @@ export function GitHubSection() {
     setBusyMethod(null);
   }, []);
 
+  // Settings retains visited panels. A hidden Integrations panel must not keep
+  // a login PTY, modal, network subscription, or late browser-start response
+  // alive. The app-wide notification listener still completes an OAuth
+  // callback and invalidates the cache; reactivation reads that exact snapshot.
   useEffect(() => {
+    if (surfaceActive) return;
+    appAttemptRef.current += 1;
+    setTerminalOpen(false);
+    setAppWaiting(false);
+    setAppError(null);
+    setSetupMethod(null);
+    // The card that shows the token is closed here, so the draft behind it is
+    // no longer reachable or visible — and leaving `showPat` set would render
+    // it in cleartext the next time the card opens, the same way Cancel used
+    // to. Both are cleared together, exactly as Cancel does.
+    setPat("");
+    setShowPat(false);
+    setBusyMethod(null);
+    setRefreshingMethod(null);
+    setDisconnectAppOpen(false);
+  }, [surfaceActive]);
+
+  useEffect(() => {
+    if (!surfaceActive) return;
     let closed = false;
     const disposers: Array<() => void> = [];
     void Promise.all([
@@ -545,7 +536,7 @@ export function GitHubSection() {
       closed = true;
       for (const dispose of disposers) dispose();
     };
-  }, [refreshSnapshot]);
+  }, [refreshSnapshot, surfaceActive]);
 
   const restorePat = useCallback(async (undoId: string) => {
     try {
@@ -807,7 +798,8 @@ export function GitHubSection() {
                         <InlineLoginTerminal
                           ownerId="github"
                           binary="gh"
-                          args={["auth", "login"]}
+                          args={["auth", "login", "--hostname", "github.com"]}
+                          unsetEnv={["GH_TOKEN", "GITHUB_TOKEN"]}
                           onClose={() => void finishCliTerminal()}
                         />
                       ) : (

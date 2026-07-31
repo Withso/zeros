@@ -67,6 +67,8 @@ describe("app assembly — no GitHub App registered", () => {
       expect(await response.json()).toMatchObject({
         error: { code: "github_not_configured" },
       });
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(response.headers.get("pragma")).toBe("no-cache");
     }
   });
 
@@ -91,6 +93,8 @@ describe("app assembly — GitHub App registered", () => {
     expect(await response.json()).toMatchObject({
       error: { code: "invalid_oauth_state" },
     });
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("pragma")).toBe("no-cache");
   });
 
   it("keeps every other GitHub route behind auth", async () => {
@@ -98,6 +102,8 @@ describe("app assembly — GitHub App registered", () => {
       method: "POST",
     });
     expect(response.status).toBe(401);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("pragma")).toBe("no-cache");
   });
 });
 
