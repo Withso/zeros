@@ -162,6 +162,14 @@ let nextStoreId = 1;
 // packaged app (Electron) two different on-disk formats — the exact
 // dev/packaged divergence that let this bug reach users — and would silently
 // orphan a workspace's history the day Electron is upgraded.
+//
+// The engine can also run @cursor/sdk IN-PROCESS (a non-bun engine, or
+// ZEROS_CURSOR_IN_PROCESS=1), which never reaches this file. That path gets the
+// same treatment from ../local-store.ts — same JSONL backend, same
+// getDefaultSdkStateRoot(cwd) roots, so both runtimes read one on-disk format.
+// It is a separate copy because this file ships STANDALONE (an electron-builder
+// extraResource spawned by absolute path) and cannot require out of src/. Change
+// one, change the other.
 
 /** rootDir → JsonlLocalAgentStore. The SDK requires the SAME instance across
  *  create/resume/list for a given root, so these are memoized rather than
@@ -181,11 +189,31 @@ function jsonlStoreAt(root) {
   return store;
 }
 
+/** The workspace ref a call's store should be rooted at.
+ *
+ *  `cwd` is legitimately ABSENT on `Agent.list({runtime: "local"})`:
+ *  src/engine/index.ts passes undefined when a relay client's cwd falls outside
+ *  the workspace allowlist, leaving the adapter to list the SDK's default
+ *  location. `getDefaultSdkStateRoot(undefined)` throws, so bailing out there
+ *  put `Agent.list` straight back on the node:sqlite default — where it threw
+ *  under Electron 33 and `listSessions`' catch turned it into an empty chat
+ *  list, with no error shown.
+ *
+ *  process.cwd() is not a guess: it is the ref the SDK ITSELF falls back to (a
+ *  store-less `Agent.list({runtime: "local"})` builds its default store at
+ *  exactly `getDefaultSdkStateRoot(process.cwd())`, verified against 1.0.26), so
+ *  the injected store lands in the SAME directory and only the backend changes.
+ *  In this process that is `resolveHostCwd()` — host-client.ts spawns us with
+ *  cwd set to it — so the fallback is stable across hosts rather than picking up
+ *  whatever the engine happened to be launched from. */
+function storeRefFor(cwd) {
+  return typeof cwd === "string" && cwd.length > 0 ? cwd : process.cwd();
+}
+
 function localStoreFor(cwd) {
   if (!getDefaultSdkStateRoot) return null;
-  if (typeof cwd !== "string" || cwd.length === 0) return null;
   try {
-    return jsonlStoreAt(getDefaultSdkStateRoot(cwd));
+    return jsonlStoreAt(getDefaultSdkStateRoot(storeRefFor(cwd)));
   } catch {
     return null;
   }
@@ -211,7 +239,10 @@ function withLocalStore(opts) {
 }
 
 /** Same, for Agent.list — whose ListAgentsOptions takes `store` at the TOP
- *  level (and only on the `runtime: "local"` arm), not under `local`. */
+ *  level (and only on the `runtime: "local"` arm), not under `local`. Unlike
+ *  create/resume this routinely arrives with NO cwd; storeRefFor supplies the
+ *  same fallback root the SDK would have used, so the listing path is never left
+ *  on the default store either. */
 function withListStore(opts) {
   const out = { ...(opts || {}) };
   if (out.runtime !== "local" || out.store) return out;

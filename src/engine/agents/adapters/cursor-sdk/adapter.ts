@@ -42,6 +42,7 @@ import {
   CURSOR_HOST_CRASH_LOOP_CODE,
   CURSOR_HOST_CRASH_LOOP_ADVICE,
 } from "./host/host-client";
+import { wrapSdkWithLocalStore, type RawCursorSdk } from "./local-store";
 
 const AGENT_ID = "cursor";
 /** Cursor LOCAL SDK agents (we always run `local: { cwd }`) require an
@@ -335,11 +336,19 @@ export interface CursorSdkModule {
       ): Promise<Array<{ id?: string; displayName?: string }>>;
     };
   };
-  /** The on-disk local agent store — the SAME one the host hands @cursor/sdk
-   *  for the agent's own runs (JSONL; see cursor-host.cjs). We open it to
-   *  recover a run's real terminal `error` after wait() reports a detail-less
-   *  failure. Optional so the bundle tolerates a host without the op. */
-  LocalAgentStore?: {
+  /** Opens the on-disk local agent store — the SAME instance the agents write
+   *  through (JSONL) — so we can recover a run's real terminal `error` after
+   *  wait() reports a detail-less failure.
+   *
+   *  NOT a @cursor/sdk export. The package exports a `JsonlLocalAgentStore`
+   *  CONSTRUCTOR (and `LocalAgentStore` only as a TYPE), so this is a surface
+   *  BOTH loaders synthesize: the host client proxies it to the `store.open`
+   *  protocol op, and local-store.ts builds it from the constructor in-process.
+   *  Named for what it does rather than after any SDK symbol, because probing
+   *  for an SDK-looking name is precisely how this went dead in-process —
+   *  nothing on the real namespace could ever have matched it. Optional so the
+   *  bundle tolerates a loader without the op. */
+  localStore?: {
     open(opts: {
       workspaceRef: string;
       stateRoot?: string;
@@ -392,7 +401,13 @@ async function loadSdk(): Promise<CursorSdkModule> {
       // subprocess instead (see shouldUseCursorHost / host/cursor-host.cjs).
       if (shouldUseCursorHost()) return getCursorHostModule();
       const m = await import("@cursor/sdk");
-      return m as unknown as CursorSdkModule;
+      // NEVER hand the raw namespace to the adapter. 1.0.26's default local
+      // store needs the node:sqlite builtin (Node >= 22.5), so on a Node 20/21
+      // engine every create/resume/list throws — the same failure the host
+      // fixes for the packaged app. wrapSdkWithLocalStore attaches the JSONL
+      // store the host attaches, and supplies the `localStore` surface the
+      // adapter's error recovery reads.
+      return wrapSdkWithLocalStore(m as unknown as RawCursorSdk);
     })();
   }
   return sdkPromise;
@@ -602,8 +617,8 @@ export class CursorSdkAdapter implements AgentAdapter {
       p = (async () => {
         try {
           const sdk = await loadSdk();
-          if (!sdk.LocalAgentStore?.open) return null;
-          return await sdk.LocalAgentStore.open({ workspaceRef: cwd });
+          if (!sdk.localStore?.open) return null;
+          return await sdk.localStore.open({ workspaceRef: cwd });
         } catch (err) {
           this.ctx.emit.onAgentStderr(
             AGENT_ID,

@@ -138,6 +138,34 @@ describe("cursor host — local agent store injection", () => {
     expect(res.items[0].nested).toBe("none");
   });
 
+  it("still attaches a store to agent.list when there is NO cwd — the chat-history path that silently returned empty", async () => {
+    // src/engine/index.ts passes cwd: undefined when a relay client's cwd falls
+    // outside the workspace allowlist, leaving the adapter to list the SDK's
+    // default location. getDefaultSdkStateRoot(undefined) throws, so the old
+    // guard bailed out and left Agent.list on the node:sqlite default — which
+    // throws under Electron 33, and listSessions' catch turned that into an
+    // empty chat list with no error shown.
+    const h = startHost();
+    await h.ready();
+    const res = await h.req<{ items: Array<{ top: string; nested: string }> }>(
+      "agent.list",
+      { opts: { runtime: "local" } },
+    );
+    // Rooted at the ref the SDK itself falls back to. The host inherits this
+    // process's cwd here; in production it is resolveHostCwd().
+    expect(res.items[0].top).toBe(`store1@/state-root${process.cwd()}`);
+  });
+
+  it("leaves a non-local agent.list alone — a cloud listing has no local store", async () => {
+    const h = startHost();
+    await h.ready();
+    const res = await h.req<{ items: Array<{ top: string; nested: string }> }>(
+      "agent.list",
+      { opts: { runtime: "cloud" } },
+    );
+    expect(res.items[0].top).toBe("none");
+  });
+
   it("reuses ONE store instance per workspace — the SDK requires the same instance across calls", async () => {
     const h = startHost();
     await h.ready();

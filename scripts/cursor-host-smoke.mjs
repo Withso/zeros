@@ -47,10 +47,17 @@
 // only authority and it needs a real API key.
 //
 // So: when CURSOR_API_KEY is set, this also asserts every curated cursor id in
-// catalogs/models-v1.json is one the account actually offers. Without it the
-// check SKIPS — loudly, never silently — and `--require-models` turns that skip
-// into a failure so a scheduled job holding the secret cannot quietly degrade
-// into testing nothing. Same trap agent-smoke.mjs's `--require` exists for.
+// catalogs/models-v1.json still RESOLVES against the account's catalog. Without
+// it the check SKIPS — loudly, never silently — and `--require-models` turns that
+// skip into a failure so a scheduled job holding the secret cannot quietly
+// degrade into testing nothing. Same trap agent-smoke.mjs's `--require` exists for.
+//
+// "Resolves", not "is offered verbatim": the catalog curates `grok-4.5` as a
+// LEVEL-FREE base, and the adapter completes such a base against this same live
+// catalog before spawning (applyCursorReasoning, §3.6 R1), so a suffixed
+// `grok-4.5-…` counts as resolvable. Today the bare id IS offered, so nothing is
+// completed in practice — see resolvesAgainst in ./cursor-curated-ids.mjs for the
+// rule and for why the gate must not depend on that staying true.
 //
 // The env var is the ONLY source. The app's own store (`<userData>/secrets.json`,
 // which agent-smoke.mjs reaches via ZEROS_SECRETS_FILE) holds safeStorage-
@@ -75,6 +82,8 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { resolvesAgainst } from "./cursor-curated-ids.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TIMEOUT_MS = 30000;
@@ -327,22 +336,29 @@ child.stdout.on("data", (chunk) => {
                   "ran against nothing, so a green run here would prove nothing.",
               );
             }
+            let completed = 0;
             for (const id of curated ?? []) {
-              if (!live.has(id)) {
+              const usable = resolvesAgainst(id, live);
+              if (usable === "suffixed") completed++;
+              if (!usable) {
                 problems.push(
-                  `curated cursor model "${id}" is NOT offered by this account ` +
-                    `(live: ${[...live].join(", ")}). Cursor validates model picks, so ` +
-                    `Agent.create will throw "Cannot use this model: ${id}" for every user. ` +
-                    "Either it was retired (drop it from catalogs/models-v1.json, with its " +
-                    "aliases and defaultFavorites) or renamed (update the id).",
+                  `curated cursor model "${id}" is NOT offered by this account, and no ` +
+                    `suffixed variant of it is either (live: ${[...live].join(", ")}). ` +
+                    "Cursor validates model picks, so the pick resolves to nothing this " +
+                    "account can run. Either it was retired (drop it from " +
+                    "catalogs/models-v1.json, with its aliases and defaultFavorites) or " +
+                    "renamed (update the id).",
                 );
               }
             }
             // Report the COUNT, so the PASS line's "verified" is falsifiable at
             // a glance instead of an assertion the reader has to take on trust.
+            // Level-free bases are called out separately because "present" means
+            // something weaker for them — a variant exists, not the id itself.
             modelNote =
-              `all ${curated?.length ?? 0} curated id(s) present, of ${live.size} ` +
-              `offered by the account (${cursorKey.from})`;
+              `all ${curated?.length ?? 0} curated id(s) resolvable, of ${live.size} ` +
+              `offered by the account (${cursorKey.from})` +
+              (completed ? `; ${completed} via a suffixed variant` : "");
           }
         }
       }

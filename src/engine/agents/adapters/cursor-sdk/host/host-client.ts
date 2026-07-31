@@ -13,7 +13,7 @@
 // This module is the bun-side half. It exposes `getCursorHostModule()`, which
 // returns an object shaped exactly like the slice of @cursor/sdk the adapter
 // uses (CursorSdkModule) — Agent.create/resume/list, Cursor.models.list,
-// LocalAgentStore.open — but every call is proxied to the host subprocess.
+// localStore.open — but every call is proxied to the host subprocess.
 // Because the adapter already programs against those structural interfaces, the
 // adapter's logic (model resolution, classify, translator, retry) is unchanged:
 // only the transport for the raw SDK calls moved out of process.
@@ -492,7 +492,7 @@ export class CursorHostClient {
             ),
         },
       },
-      LocalAgentStore: {
+      localStore: {
         open: async (opts) => {
           const res = await this.request<{ storeId: string | null }>(
             "store.open",
