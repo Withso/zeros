@@ -97,7 +97,11 @@
 # silently loses every project-level MCP server.
 /.mcp.json
 
-# External worktree-tool config, gitignored for the same reason: it is tool
-# config, not repo content. Seeded so the per-workspace setup command survives
-# into new worktrees instead of silently reverting to the tool's defaults.
+# External worktree-tool config. Only `.conductor/settings.local.toml` is
+# gitignored now — `settings.toml` is TRACKED (see .gitignore), so it arrives via
+# `git worktree add` like any other tracked file and correctly falls OUT of this
+# match set. The directory pattern is kept rather than narrowed so any future
+# machine-local file under .conductor/ is seeded without another edit here.
+# Seeded so the per-workspace setup command survives into new worktrees instead
+# of silently reverting to the tool's defaults.
 /.conductor/
