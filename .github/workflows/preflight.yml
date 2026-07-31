@@ -160,16 +160,50 @@ jobs:
         # comes from the weekly @cursor/sdk Renovate bump.
         run: pnpm check:cursor-asar
 
-      - name: Cursor SDK host actually loads (real spawn)
+      - name: Cursor SDK host actually loads (real spawn, source runtime)
         # The step above compares the asarUnpack globs to the require() closure
         # STATICALLY; this spawns the real cursor-host.cjs and drives a protocol
         # round-trip, so a dep that resolves in theory but not in practice fails
-        # here. It needs NO credentials — store.open and models.list only have to
-        # RESOLVE their modules (sqlite3's native chain, undici), not succeed — so
-        # unlike `agents:smoke` it can run on every PR. Worth blocking on: per
-        # renovate.json, @cursor/sdk IS the entire Cursor backend with no CLI/ACP
-        # fallback, so a host that cannot load means Cursor is dead in the DMG.
+        # here. It needs NO credentials — the probes only have to reach auth, not
+        # pass it — so unlike `agents:smoke` it can run on every PR. This run
+        # covers the runtime the engine uses from source (plain node).
         run: pnpm cursor:smoke
+
+      - name: Cursor SDK host actually works (real spawn, SHIPPED runtime)
+        # THE one that matters, and the one that was missing. The packaged app
+        # runs the host under the ELECTRON binary (electron/sidecar.ts sets
+        # ZEROS_PTY_HOST_RUNTIME=process.execPath + ELECTRON_RUN_AS_NODE=1), and
+        # Electron 33 bundles Node 20.18. @cursor/sdk 1.0.26's default local
+        # store needs the node:sqlite builtin, which exists on every CI runner's
+        # Node (>= 22.5) and on NO Electron 33 — so the step above passed green
+        # while Cursor was dead in the DMG for every user. A runtime the app
+        # never uses cannot prove the app works. Worth blocking on: per
+        # renovate.json, @cursor/sdk IS the entire Cursor backend with no
+        # CLI/ACP fallback.
+        run: pnpm cursor:smoke:electron
+
+      - name: Claude CLI actually launches under the Agent SDK
+        # check:runtime-pins execs `claude --version`, which proves the binary
+        # runs. It does NOT prove the SDK can DRIVE it — query() spawns the CLI
+        # over its own control protocol, and that seam broke in production once
+        # already (the SDK resolves its platform binary relative to sdk.mjs,
+        # which is impossible in the bun-compiled packaged engine; every send
+        # failed with "AGENT RESPONSE FAILURE" in Beta/Prod only). This drives a
+        # real query() and asserts it dies on AUTH, not on resolution/spawn.
+        # Costs nothing: the key is invalid and HOME is redirected to an empty
+        # dir, so the turn 401s before inference — the gate asserts
+        # total_cost_usd and output_tokens are both 0 rather than trusting that.
+        run: pnpm claude:smoke
+
+      - name: Codex app-server actually boots and matches the pin
+        # check:codex-pin compares three version STRINGS and never touches the
+        # artifact, so a missing platform package, an unspawnable binary, or a
+        # handshake regression all ship green. This boots the real
+        # `codex app-server`, completes the initialize handshake, and asserts
+        # the RUNNING binary's version equals the installed @openai/codex — the
+        # equivalent of the `claude --version` exec check, but proving the
+        # protocol the committed v2 bindings were generated from. No credentials.
+        run: pnpm codex:smoke
 
       - name: Migration ladder is forward-only
         # The shipped zeros.db is each user's only copy of their data; editing a
@@ -320,6 +354,18 @@ jobs:
         # deps — the shipped one installs on no other runner. This is the only
         # place the real artifact is resolved and executed before merge.
         run: pnpm check:runtime-pins
+
+      - name: All three agent runtimes boot on the SHIPPING platform
+        # Same reasoning as the step above, extended from "the pin resolves" to
+        # "the runtime actually works". Everything the `test` job proves about
+        # agents is linux-x64 only, because the platform packages that ship
+        # (@anthropic-ai/claude-agent-sdk-darwin-arm64, @openai/codex-darwin-arm64)
+        # and the Electron that hosts @cursor/sdk install on NO Linux runner.
+        # Cursor is the one that matters most here: the packaged app runs its
+        # SDK under the Electron binary, and Electron 33 bundles Node 20.18 —
+        # which is how a node:sqlite dependency got all the way to users with
+        # every ubuntu gate green. None of these need credentials.
+        run: pnpm agents:smoke:offline
 
       - name: Packaged engine health + workspace lifecycle
         # Source-mode tests do not reproduce Bun --compile runtime failures.

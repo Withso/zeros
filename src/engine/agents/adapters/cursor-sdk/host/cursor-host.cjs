@@ -56,7 +56,7 @@
 // `agent.send` returns {runId, sdkRunId}: `runId` is OUR opaque handle for the
 // run (used by run.wait/run.cancel + the stream events); `sdkRunId` is the
 // SDK's own run id, forwarded so the engine can look the run up in the local
-// SQLite store for error recovery (CursorLocalStore). The host begins draining
+// agent store for error recovery (CursorLocalStore). The host begins draining
 // `run.stream()` eagerly the moment the run is created and forwards every item
 // as a `run.msg` event, so no items are lost between `send` and the engine
 // reading the stream.
@@ -87,10 +87,11 @@ try {
 
 // @cursor/sdk location: the engine passes an absolute path
 // (ZEROS_CURSOR_SDK_ENTRY) resolved to the package's CJS entry — in a packaged
-// app that's the app.asar.unpacked copy (the SDK pulls a native sqlite3 binding
-// that can't be dlopen'd from inside asar). When unset (engine run from source
-// with no Electron host) fall back to ordinary module resolution, which walks
-// up to the repo node_modules.
+// app that's the app.asar.unpacked copy (its require closure reaches native
+// bindings that can't be dlopen'd from inside asar — see electron-builder.yml's
+// asarUnpack list, kept honest by `pnpm check:cursor-asar`). When unset (engine
+// run from source with no Electron host) fall back to ordinary module
+// resolution, which walks up to the repo node_modules.
 const sdkEntry = process.env.ZEROS_CURSOR_SDK_ENTRY;
 let sdk;
 try {
@@ -119,7 +120,8 @@ try {
 
 const Agent = sdk && sdk.Agent;
 const Cursor = sdk && sdk.Cursor;
-const SqliteLocalAgentStore = sdk && sdk.SqliteLocalAgentStore;
+const JsonlLocalAgentStore = sdk && sdk.JsonlLocalAgentStore;
+const getDefaultSdkStateRoot = sdk && sdk.getDefaultSdkStateRoot;
 
 /** runId → { run, done } ; sdk agentId → SdkAgent ; storeId → store */
 const runs = new Map();
@@ -127,6 +129,127 @@ const agents = new Map();
 const stores = new Map();
 let nextRunId = 1;
 let nextStoreId = 1;
+
+// ── The local agent store ─────────────────────────────────
+//
+// WHY WE HAND THE SDK A STORE INSTEAD OF LETTING IT PICK ONE
+// @cursor/sdk's DEFAULT local store is backed by the **node:sqlite builtin**
+// (1.0.26 dropped the native `sqlite3` dep that 1.0.18 carried). This host runs
+// under the **Electron** binary — electron/sidecar.ts points
+// ZEROS_PTY_HOST_RUNTIME at process.execPath with ELECTRON_RUN_AS_NODE=1 — and
+// Electron 33 bundles Node 20.18, which has NO node:sqlite (it landed in Node
+// 22.5). So on the shipped app EVERY Agent.create died with:
+//
+//   "Default local agent storage requires the built-in node:sqlite module
+//    (Node >= 22.13, or another runtime that implements node:sqlite)."
+//
+// …and only the FIRST time. The SDK's failed async chunk load leaves a
+// partially-initialized module behind, so every later call in the same host
+// process reports a bare `Cannot access 'n' before initialization` TDZ error
+// instead — classified UnknownAgentError, because the SDK's own node:sqlite
+// detector keys on the message/code and a TDZ error matches neither. This host
+// is long-lived and shared by every session, so that second, causeless message
+// is the one users actually saw.
+//
+// LocalAgentOptions.store's own doc claims the SDK falls back to
+// JsonlLocalAgentStore "when running without native SQLite" — it does not in
+// 1.0.26; it throws. Passing a store explicitly is what the thrown error itself
+// instructs, and it bypasses the default resolution entirely, so node:sqlite is
+// never required.
+//
+// JSONL is used UNCONDITIONALLY, on every runtime. Choosing per-runtime
+// ("sqlite where the builtin exists") would give dev (system Node ≥ 22) and the
+// packaged app (Electron) two different on-disk formats — the exact
+// dev/packaged divergence that let this bug reach users — and would silently
+// orphan a workspace's history the day Electron is upgraded.
+//
+// The engine can also run @cursor/sdk IN-PROCESS (a non-bun engine, or
+// ZEROS_CURSOR_IN_PROCESS=1), which never reaches this file. That path gets the
+// same treatment from ../local-store.ts — same JSONL backend, same
+// getDefaultSdkStateRoot(cwd) roots, so both runtimes read one on-disk format.
+// It is a separate copy because this file ships STANDALONE (an electron-builder
+// extraResource spawned by absolute path) and cannot require out of src/. Change
+// one, change the other.
+
+/** rootDir → JsonlLocalAgentStore. The SDK requires the SAME instance across
+ *  create/resume/list for a given root, so these are memoized rather than
+ *  rebuilt per call. Root is `getDefaultSdkStateRoot(cwd)` — the very directory
+ *  the SDK would have put its own store in, so stores stay per-workspace (one
+ *  workspace's agents never see another's) and land where the SDK expects. */
+const localStores = new Map();
+
+function jsonlStoreAt(root) {
+  if (!JsonlLocalAgentStore) return null;
+  if (typeof root !== "string" || root.length === 0) return null;
+  let store = localStores.get(root);
+  if (!store) {
+    store = new JsonlLocalAgentStore(root);
+    localStores.set(root, store);
+  }
+  return store;
+}
+
+/** The workspace ref a call's store should be rooted at.
+ *
+ *  `cwd` is legitimately ABSENT on `Agent.list({runtime: "local"})`:
+ *  src/engine/index.ts passes undefined when a relay client's cwd falls outside
+ *  the workspace allowlist, leaving the adapter to list the SDK's default
+ *  location. `getDefaultSdkStateRoot(undefined)` throws, so bailing out there
+ *  put `Agent.list` straight back on the node:sqlite default — where it threw
+ *  under Electron 33 and `listSessions`' catch turned it into an empty chat
+ *  list, with no error shown.
+ *
+ *  process.cwd() is not a guess: it is the ref the SDK ITSELF falls back to (a
+ *  store-less `Agent.list({runtime: "local"})` builds its default store at
+ *  exactly `getDefaultSdkStateRoot(process.cwd())`, verified against 1.0.26), so
+ *  the injected store lands in the SAME directory and only the backend changes.
+ *  In this process that is `resolveHostCwd()` — host-client.ts spawns us with
+ *  cwd set to it — so the fallback is stable across hosts rather than picking up
+ *  whatever the engine happened to be launched from. */
+function storeRefFor(cwd) {
+  return typeof cwd === "string" && cwd.length > 0 ? cwd : process.cwd();
+}
+
+function localStoreFor(cwd) {
+  if (!getDefaultSdkStateRoot) return null;
+  try {
+    return jsonlStoreAt(getDefaultSdkStateRoot(storeRefFor(cwd)));
+  } catch {
+    return null;
+  }
+}
+
+/** Copy `opts` with our store attached at `local.store` (Agent.create/resume).
+ *  A store is a live SDK object, so it can only be built HERE, where the SDK
+ *  lives — it cannot cross the JSON bridge from the engine, the same seam that
+ *  forces callback-shaped options to be attached in `agent.send`. A store the
+ *  caller supplied always wins; an SDK too old to export JsonlLocalAgentStore
+ *  falls through to the SDK's own default. */
+function withLocalStore(opts) {
+  const out = { ...(opts || {}) };
+  const local = { ...(out.local || {}) };
+  if (local.store) return out;
+  const cwd =
+    typeof local.cwd === "string" && local.cwd ? local.cwd : out.cwd;
+  const store = localStoreFor(cwd);
+  if (!store) return out;
+  local.store = store;
+  out.local = local;
+  return out;
+}
+
+/** Same, for Agent.list — whose ListAgentsOptions takes `store` at the TOP
+ *  level (and only on the `runtime: "local"` arm), not under `local`. Unlike
+ *  create/resume this routinely arrives with NO cwd; storeRefFor supplies the
+ *  same fallback root the SDK would have used, so the listing path is never left
+ *  on the default store either. */
+function withListStore(opts) {
+  const out = { ...(opts || {}) };
+  if (out.runtime !== "local" || out.store) return out;
+  const store = localStoreFor(out.cwd);
+  if (store) out.store = store;
+  return out;
+}
 
 function send(msg) {
   try {
@@ -180,19 +303,22 @@ async function handle(m) {
   const args = m.args || {};
   switch (op) {
     case "agent.create": {
-      const agent = await Agent.create(args || {});
+      const agent = await Agent.create(withLocalStore(args));
       agents.set(agent.agentId, agent);
       ok(id, { agentId: agent.agentId });
       return;
     }
     case "agent.resume": {
-      const agent = await Agent.resume(args.agentId, args.opts || {});
+      const agent = await Agent.resume(
+        args.agentId,
+        withLocalStore(args.opts),
+      );
       agents.set(agent.agentId, agent);
       ok(id, { agentId: agent.agentId });
       return;
     }
     case "agent.list": {
-      const res = await Agent.list(args.opts || {});
+      const res = await Agent.list(withListStore(args.opts));
       // Normalize to a plain {items} shape the engine tolerates either way.
       const items = Array.isArray(res) ? res : res && res.items ? res.items : [];
       ok(id, { items });
@@ -275,14 +401,18 @@ async function handle(m) {
       return;
     }
     case "store.open": {
-      if (!SqliteLocalAgentStore || !SqliteLocalAgentStore.open) {
+      // Hand back a handle to the SAME store the agents write through, so the
+      // adapter's readRunError() reads the agent's own rows. Before 1.0.26 this
+      // opened the SDK's `SqliteLocalAgentStore`; 1.0.26 stopped exporting that
+      // symbol altogether, which silently turned every store.open into
+      // {storeId: null} and left the adapter's terminal-error recovery dead.
+      const store = args.stateRoot
+        ? jsonlStoreAt(args.stateRoot)
+        : localStoreFor(args.workspaceRef);
+      if (!store) {
         ok(id, { storeId: null });
         return;
       }
-      const store = await SqliteLocalAgentStore.open({
-        workspaceRef: args.workspaceRef,
-        ...(args.stateRoot ? { stateRoot: args.stateRoot } : {}),
-      });
       const storeId = String(nextStoreId++);
       stores.set(storeId, store);
       ok(id, { storeId });
@@ -302,15 +432,12 @@ async function handle(m) {
       return;
     }
     case "store.dispose": {
-      const store = stores.get(args.storeId);
-      if (store) {
-        stores.delete(args.storeId);
-        try {
-          await store.dispose();
-        } catch {
-          /* ignore */
-        }
-      }
+      // Release the HANDLE only. The store behind it is the memoized
+      // per-workspace instance that live agents are still writing through, so
+      // tearing it down here would pull it out from under running runs. (It is
+      // file-backed and holds no connection to close — JsonlLocalAgentStore
+      // exposes no dispose() at all — so dropping the handle IS the teardown.)
+      stores.delete(args.storeId);
       ok(id, null);
       return;
     }
@@ -379,16 +506,12 @@ async function shutdown() {
       /* ignore */
     }
   }
-  for (const store of stores.values()) {
-    try {
-      pending.push(Promise.resolve(store.dispose()));
-    } catch {
-      /* ignore */
-    }
-  }
+  // Stores need no teardown: they are file-backed JSONL, hold no connection or
+  // handle, and every write is already awaited by the call that made it.
   runs.clear();
   agents.clear();
   stores.clear();
+  localStores.clear();
   try {
     // Cap at 2.5s: comfortably past the SDK's 1s SIGTERM→SIGKILL timer, and well
     // under the 5s grace the parent gives before it SIGKILLs this host's group.
