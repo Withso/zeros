@@ -45,6 +45,7 @@ import {
   getPrCommits,
   getPrReviews,
   getRepositoryOwnerAvatar,
+  getWorkspaceRepoAccess,
   createWorkspace,
   prepareWorkspaceCreate,
   getWorkspace,
@@ -2586,6 +2587,13 @@ export class WorkspaceService {
         }
         return initRepoInPlace(repoRoot);
       }
+      // Can the selected connection open a PR on this workspace's remote? A
+      // read, and LOCAL-ONLY by omission from every remote allowlist: it guards
+      // the desktop's Create PR control, which never renders without a native
+      // runtime. Returns a status object rather than throwing — see
+      // getWorkspaceRepoAccess.
+      case "gh.repoAccess":
+        return getWorkspaceRepoAccess(reqStr(params, "workspaceId"));
       case "gh.prGet":
         return getPr({
           workspaceId: reqStr(params, "workspaceId"),
