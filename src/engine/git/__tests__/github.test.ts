@@ -378,6 +378,44 @@ describe("github", () => {
   });
 
   describe("detectGhCli", () => {
+    it("borrows the stored github.com login instead of inherited token overrides", async () => {
+      const originalGhToken = process.env.GH_TOKEN;
+      const originalGithubToken = process.env.GITHUB_TOKEN;
+      process.env.GH_TOKEN = "stale-launcher-token";
+      process.env.GITHUB_TOKEN = "another-launcher-token";
+      const invocation = vi.fn(
+        async (
+          _command: string,
+          _args: string[],
+          _options?: { env?: Record<string, string | undefined> },
+        ) => ({
+          stdout: "stored-gh-token\n",
+          stderr: "",
+        }),
+      );
+      setRunFileForTesting(invocation);
+
+      try {
+        await detectGhCli();
+      } finally {
+        if (originalGhToken === undefined) delete process.env.GH_TOKEN;
+        else process.env.GH_TOKEN = originalGhToken;
+        if (originalGithubToken === undefined) delete process.env.GITHUB_TOKEN;
+        else process.env.GITHUB_TOKEN = originalGithubToken;
+      }
+
+      expect(invocation).toHaveBeenCalledWith(
+        "gh",
+        ["auth", "token", "--hostname", "github.com"],
+        expect.objectContaining({
+          env: expect.not.objectContaining({
+            GH_TOKEN: expect.anything(),
+            GITHUB_TOKEN: expect.anything(),
+          }),
+        }),
+      );
+    });
+
     it("is a pure probe and does not replace the active token", async () => {
       store.setToken("existing-pat");
       setRunFileForTesting(async () => ({

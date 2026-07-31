@@ -18,9 +18,17 @@ export function wireGithubCredentialWriteback(
     void nativeInvoke("gh_credential_clear", {
       method: change.method,
       reason: change.reason,
-    }).catch(() => {
-      // Best effort. The engine has already stopped using the invalid working
-      // copy, and the next status probe will remain disconnected.
-    });
+    })
+      .then(() => {
+        // The first invalidation can race ahead of main recording the rejected
+        // PAT or rotating an App token. Revalidate once that state transition
+        // is complete so a recovered PAT is re-seeded and a refreshed App
+        // snapshot cannot be overwritten by the pre-transition read.
+        ghAuthStatusCache.invalidateAll();
+      })
+      .catch(() => {
+        // Best effort. The engine has already stopped using the invalid working
+        // copy, and the next status probe will remain disconnected.
+      });
   });
 }

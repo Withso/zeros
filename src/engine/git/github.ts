@@ -134,6 +134,20 @@ let ghRunFile: (
   opts?: RunFileOptions,
 ) => Promise<RunFileResult> = runFile;
 
+/**
+ * The gh-cli method means "borrow gh's durable github.com login", not an
+ * arbitrary token inherited by the app launcher. GH_TOKEN/GITHUB_TOKEN outrank
+ * gh's config, so a stale shell export otherwise makes Settings report 401
+ * even after a successful `gh auth login`. The PAT method is the explicit path
+ * for user-supplied tokens.
+ */
+function ghCliStoredAuthOptions(): RunFileOptions {
+  const env: Record<string, string | undefined> = { ...process.env };
+  delete env.GH_TOKEN;
+  delete env.GITHUB_TOKEN;
+  return { timeoutMs: 5000, env };
+}
+
 function cacheOctokit(oct: OctokitClass, token: string): void {
   cachedOctokit = oct;
   cachedOctokitToken = token;
@@ -351,9 +365,11 @@ async function probeGhCliCredential(): Promise<{
 }> {
   let token = "";
   try {
-    const { stdout } = await ghRunFile("gh", ["auth", "token"], {
-      timeoutMs: 5000,
-    });
+    const { stdout } = await ghRunFile(
+      "gh",
+      ["auth", "token", "--hostname", GITHUB_GIT_HOST],
+      ghCliStoredAuthOptions(),
+    );
     token = stdout.trim();
   } catch (err) {
     const available = (err as { code?: string }).code !== "ENOENT";
@@ -447,9 +463,11 @@ async function probeGhCliCredential(): Promise<{
  *  uses detectGhCli(), which does verify the identity and returns no secret. */
 export async function readGhCliCredential(): Promise<GithubCredential | null> {
   try {
-    const { stdout } = await ghRunFile("gh", ["auth", "token"], {
-      timeoutMs: 5000,
-    });
+    const { stdout } = await ghRunFile(
+      "gh",
+      ["auth", "token", "--hostname", GITHUB_GIT_HOST],
+      ghCliStoredAuthOptions(),
+    );
     const accessToken = stdout.trim();
     return accessToken
       ? {

@@ -47,7 +47,7 @@ export function githubAppErrorCopy(reason: GithubAppErrorReason): {
     return {
       title: "GitHub App sign-in isn’t available yet",
       description:
-        "This Zeros build can’t connect the GitHub App. Use gh CLI or a Personal Access Token.",
+        "The deployed Zeros control plane is not configured with a GitHub App. Use gh CLI or a Personal Access Token.",
     };
   }
   if (reason === "github_unavailable") {

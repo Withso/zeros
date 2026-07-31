@@ -100,6 +100,7 @@ import {
 import { repoPageViewForSection } from "./repo-page";
 import { OpenSettingsFileButton } from "./open-settings-file-button";
 import { GitHubSection } from "./github-section";
+import { prefetchGithubAuthSnapshot } from "./github-auth-prefetch";
 import { TeamPanel } from "./team-panel";
 import { MembersPanel } from "./members-panel";
 import { CreateTeamDialog } from "./create-team-dialog";
@@ -709,6 +710,11 @@ export function SettingsPage() {
                         selection.section === section.id
                       }
                       onClick={() => setActive(userSelection(section.id))}
+                      onIntent={
+                        section.id === "integrations"
+                          ? prefetchGithubAuthSnapshot
+                          : undefined
+                      }
                     />
                   ))}
                   {isAdministration && zeroTeams && (
@@ -816,11 +822,13 @@ function SectionNavButton({
   label,
   isActive,
   onClick,
+  onIntent,
 }: {
   icon: LucideIcon;
   label: string;
   isActive: boolean;
   onClick: () => void;
+  onIntent?: () => void;
 }) {
   return (
     <Button
@@ -830,6 +838,14 @@ function SectionNavButton({
       data-state={isActive ? "active" : "inactive"}
       className={SIDEBAR_ENTRY_CLS}
       onClick={onClick}
+      // Called, never forwarded bare: React hands a handler the synthetic
+      // event, which `prefetchGithubAuthSnapshot` would take as its `fetcher`.
+      // `KeyedAsyncCache.load` then runs `.then(<event>)`, which resolves
+      // `undefined` — the prefetch silently does nothing AND publishes that
+      // `undefined` over a confirmed snapshot. `onIntent` is declared
+      // zero-argument; this is what honours it.
+      onPointerEnter={() => onIntent?.()}
+      onFocus={() => onIntent?.()}
     >
       <Icon size={14} />
       <span className="truncate">{label}</span>
@@ -1067,10 +1083,14 @@ function UsageDataSection() {
 // checks), not a "general" toggle. Any future third-party integration joins
 // this list.
 
-function IntegrationsPanel() {
+function IntegrationsPanel({
+  surfaceActive = true,
+}: {
+  surfaceActive?: boolean;
+}) {
   return (
     <div className="flex flex-col gap-8">
-      <GitHubSection />
+      <GitHubSection surfaceActive={surfaceActive} />
     </div>
   );
 }

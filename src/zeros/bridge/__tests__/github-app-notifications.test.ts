@@ -13,6 +13,7 @@ describe("GitHub App notification copy", () => {
     const copy = githubAppErrorCopy("not_configured");
 
     expect(copy?.title).toMatch(/isn’t available/);
+    expect(copy?.description).toMatch(/control plane.*not configured/i);
     expect(copy?.description).toMatch(/gh CLI or a Personal Access Token/);
     expect(copy?.description).not.toMatch(/try again/i);
   });
