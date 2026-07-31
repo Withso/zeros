@@ -495,7 +495,10 @@ export async function designSetRuntimeAudit(
 export async function designCreateFrame(
   workspaceId: string,
   title?: string,
-): Promise<DesignFrameSummaryWire> {
+): Promise<{
+  frame: DesignFrameSummaryWire;
+  snapshot: DesignWorkspaceSnapshotWire;
+}> {
   return bridgeDesignCreateFrame(
     requireBridge("create a design frame"),
     workspaceId,
@@ -507,7 +510,10 @@ export async function designRenameFrame(
   workspaceId: string,
   frame: string,
   title: string,
-): Promise<DesignFrameSummaryWire> {
+): Promise<{
+  frame: DesignFrameSummaryWire;
+  snapshot: DesignWorkspaceSnapshotWire;
+}> {
   return bridgeDesignRenameFrame(
     requireBridge("rename a design frame"),
     workspaceId,

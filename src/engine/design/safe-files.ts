@@ -113,7 +113,11 @@ export async function readSafeRegularFile(
   const opened = await openVerifiedRegularFile(root, target, maxBytes);
   if (!opened) return null;
   try {
-    const buffer = Buffer.allocUnsafe(maxBytes + 1);
+    // fstat already established the descriptor's bounded size. Read one byte
+    // beyond that exact generation so growth racing the stat fails closed,
+    // without reserving every caller's multi-megabyte policy limit.
+    const expectedSize = opened.metadata.size;
+    const buffer = Buffer.alloc(expectedSize + 1);
     let offset = 0;
     while (offset < buffer.length) {
       const { bytesRead } = await opened.handle.read(
@@ -125,9 +129,13 @@ export async function readSafeRegularFile(
       if (bytesRead === 0) break;
       offset += bytesRead;
     }
-    if (offset > maxBytes) return null;
+    if (offset > expectedSize || offset > maxBytes) return null;
+    // Buffer.subarray would retain the read buffer (and, for pooled buffers,
+    // potentially an even larger slab). Give callers an exact backing store.
+    const body = Buffer.alloc(offset);
+    buffer.copy(body, 0, 0, offset);
     return {
-      body: buffer.subarray(0, offset),
+      body,
       size: offset,
       modifiedAt: opened.metadata.modifiedAt,
     };

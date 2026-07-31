@@ -28,6 +28,7 @@ import {
 } from "../design-protocol";
 
 describe("zeros-design protocol", () => {
+  const capability = "c".repeat(64);
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.fetch.mockResolvedValue(
@@ -41,10 +42,11 @@ describe("zeros-design protocol", () => {
   it("accepts only an exact workspace host, workspace id, resource path, and version", () => {
     expect(
       parseDesignProtocolUrl(
-        "zeros-design://workspace/ws_abc123/home.html?v=aaaaaaaaaaaaaaaaaaaaaaaa",
+        `zeros-design://workspace/ws_abc123/${capability}/home.html?v=aaaaaaaaaaaaaaaaaaaaaaaa`,
       ),
     ).toEqual({
       workspaceId: "ws_abc123",
+      capability,
       path: "home.html",
       sourceVersion: "aaaaaaaaaaaaaaaaaaaaaaaa",
     });
@@ -55,13 +57,21 @@ describe("zeros-design protocol", () => {
       parseDesignProtocolUrl("zeros-design://workspace/ws_abc123/../secret"),
     ).toBeNull();
     expect(
+      parseDesignProtocolUrl("zeros-design://workspace/ws_abc123/home.html"),
+    ).toBeNull();
+    expect(
       parseDesignProtocolUrl(
-        "zeros-design://workspace/ws_abc123/assets%2F..%2Fsecret.png",
+        "zeros-design://workspace/ws_abc123/not-a-capability/home.html",
       ),
     ).toBeNull();
     expect(
       parseDesignProtocolUrl(
-        "zeros-design://workspace/ws_abc123/home.html?v=wrong",
+        `zeros-design://workspace/ws_abc123/${capability}/assets%2F..%2Fsecret.png`,
+      ),
+    ).toBeNull();
+    expect(
+      parseDesignProtocolUrl(
+        `zeros-design://workspace/ws_abc123/${capability}/home.html?v=wrong`,
       ),
     ).toBeNull();
   });
@@ -82,12 +92,12 @@ describe("zeros-design protocol", () => {
     }) => Promise<Response>;
     const result = await handler({
       method: "GET",
-      url: "zeros-design://workspace/ws_abc123/assets/logo.png?v=aaaaaaaaaaaaaaaaaaaaaaaa",
+      url: `zeros-design://workspace/ws_abc123/${capability}/assets/logo.png?v=aaaaaaaaaaaaaaaaaaaaaaaa`,
     });
 
     expect(await result.text()).toBe("ok");
     expect(mocks.fetch).toHaveBeenCalledWith(
-      "http://127.0.0.1:24193/design/ws_abc123/assets/logo.png?v=aaaaaaaaaaaaaaaaaaaaaaaa",
+      `http://127.0.0.1:24193/design/ws_abc123/${capability}/assets/logo.png?v=aaaaaaaaaaaaaaaaaaaaaaaa`,
       expect.objectContaining({
         headers: { "X-Zeros-Engine-Token": "host-secret" },
       }),

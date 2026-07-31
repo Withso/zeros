@@ -34,6 +34,7 @@ import {
   updateDesignToken,
   writeDesignNodeHtml,
 } from "../document";
+import { withDesignDocumentWrite } from "../document-write-lock";
 import {
   resetDesignRuntimeAuditsForTests,
   setDesignRuntimeAudit,
@@ -119,6 +120,25 @@ describe("design document", () => {
     expect(healed.html.replace(/ data-oid="[^"]+"/g, "")).toBe(
       source.replace(/ data-oid="[^"]+"/g, ""),
     );
+  });
+
+  it("numbers generated oid collisions from the stable base", () => {
+    const template =
+      '<!doctype html><html><body><div data-oid="aaaaaaaaaaa"></div><div data-oid="aaaaaaaaaaa-2"></div><h1>Target</h1></body></html>';
+    const generated = [
+      ...healDesignOids(template).html.matchAll(/data-oid="([^"]+)"/g),
+    ][2]?.[1];
+    expect(generated).toMatch(/^o-[a-f0-9]{9}$/);
+
+    const collisionSource = template
+      .replace("aaaaaaaaaaa", generated!)
+      .replace("aaaaaaaaaaa-2", `${generated!}-2`);
+    const healed = healDesignOids(collisionSource);
+    const ids = [...healed.html.matchAll(/data-oid="([^"]+)"/g)].map(
+      (match) => match[1],
+    );
+
+    expect(ids[2]).toBe(`${generated}-3`);
   });
 
   it("requires stable ids only on rendered elements inside the body", async () => {
@@ -681,6 +701,56 @@ describe("design document", () => {
     expect(rendered).not.toContain("window.pwned");
     expect(rendered).not.toMatch(/http-equiv=["']?refresh/i);
     expect(rendered.match(/Content-Security-Policy/g)).toHaveLength(1);
+  });
+
+  it("removes every non-raster data URL while retaining bounded image payloads", async () => {
+    await initializeDesignDocument(root);
+    await writeFile(
+      path.join(root, DESIGN_DIRECTORY_NAME, "data-urls.html"),
+      `<!doctype html><html><body><main data-oid="main">
+<iframe data-oid="plain" src="data:text/plain,active"></iframe>
+<img data-oid="svg" src="data:image/svg+xml,%3Csvg%20onload=alert(1)%3E">
+<img data-oid="png" src="data:image/png;base64,iVBORw==">
+</main></body></html>`,
+      "utf8",
+    );
+
+    const rendered = (
+      await readDesignWorkspaceSnapshot(root, { writeBack: false })
+    ).frames[0]!.srcDoc;
+
+    expect(rendered).not.toContain("data:text/plain");
+    expect(rendered).not.toContain("data:image/svg+xml");
+    expect(rendered).toContain("data:image/png;base64,iVBORw==");
+  });
+
+  it("serializes oid-healing lint with document mutations", async () => {
+    await initializeDesignDocument(root);
+    await createDesignFrame(root, { title: "Locked lint" });
+    let release!: () => void;
+    const blocker = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const holding = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const first = withDesignDocumentWrite(root, async () => {
+      entered();
+      await blocker;
+    });
+    await holding;
+
+    let settled = false;
+    const lint = lintDesignDocument(root).finally(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    release();
+    await first;
+    await expect(lint).resolves.toMatchObject({ healedOids: 0 });
   });
 
   it("edits direct text and appends healed safe HTML without reserializing the frame", async () => {

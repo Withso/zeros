@@ -350,6 +350,23 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     };
   }
 
+  function frameDetailsOf(element) {
+    var oid = oidOf(element);
+    if (oid) return detailsOf(element);
+    return {
+      sourceVersion: SOURCE_VERSION,
+      oid: "",
+      tag: element.tagName.toLowerCase(),
+      name: nameOf(element),
+      text: directText(element),
+      selector: element === document.body ? "body" : "html",
+      visible: visibleOf(element),
+      breadcrumb: [],
+      rect: rectOf(element),
+      styles: stylesOf(element)
+    };
+  }
+
   function frameElement() {
     return document.querySelector("main[data-oid]") ||
       document.body ||
@@ -493,7 +510,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       sourceVersion: SOURCE_VERSION,
       revision: revision,
       tree: roots,
-      frame: detailsOf(frameElement()),
+      frame: frameDetailsOf(frameElement()),
       warnings: auditWarnings(),
       viewport: {
         width: document.documentElement.clientWidth || window.innerWidth,

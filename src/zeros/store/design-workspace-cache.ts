@@ -165,12 +165,14 @@ export function stabilizeDesignWorkspaceSnapshot(
       ? previous.lint
       : { ...next.lint, violations };
   return frames === previous.frames &&
+    next.protocolCapability === previous.protocolCapability &&
     tokens === previous.tokens &&
     next.tokenSourceVersion === previous.tokenSourceVersion &&
     assets === previous.assets &&
     lint === previous.lint
     ? previous
     : {
+        protocolCapability: next.protocolCapability,
         frames,
         tokens,
         tokenSourceVersion: next.tokenSourceVersion,
@@ -223,8 +225,8 @@ export async function refreshDesignWorkspaceSnapshot(
   );
 }
 
-/** Frame creation needs source/srcDoc that the mutation response intentionally
- * does not repeat, so resolve the aggregate snapshot before returning. */
+/** Publish the mutation's exact aggregate response without a second bridge
+ * round trip on the click path. */
 export async function createDesignFrameAndRefresh(
   workspaceId: string,
   title?: string,
@@ -232,10 +234,11 @@ export async function createDesignFrameAndRefresh(
   frame: DesignFrameSummaryWire;
   snapshot: DesignWorkspaceSnapshotWire;
 }> {
-  const frame = await designCreateFrame(workspaceId, title);
-  invalidateDesignWorkspaceSnapshot(workspaceId);
-  const snapshot = await refreshDesignWorkspaceSnapshot(workspaceId);
-  return { frame, snapshot };
+  const result = await designCreateFrame(workspaceId, title);
+  return {
+    frame: result.frame,
+    snapshot: publishDesignWorkspaceSnapshot(workspaceId, result.snapshot),
+  };
 }
 
 export async function renameDesignFrameAndRefresh(
@@ -243,9 +246,8 @@ export async function renameDesignFrameAndRefresh(
   frame: string,
   title: string,
 ): Promise<DesignWorkspaceSnapshotWire> {
-  await designRenameFrame(workspaceId, frame, title);
-  invalidateDesignWorkspaceSnapshot(workspaceId);
-  return refreshDesignWorkspaceSnapshot(workspaceId);
+  const result = await designRenameFrame(workspaceId, frame, title);
+  return publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
 }
 
 export async function duplicateDesignFrameCached(

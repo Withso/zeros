@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { decodeDesignPng, designPngSuggestedName } from "../design-export";
+import {
+  decodeDesignPng,
+  designPngSaveDialogOptions,
+  designPngSuggestedName,
+} from "../design-export";
 
 describe("design PNG export", () => {
   it("accepts a bounded PNG payload and normalizes the suggested name", () => {
@@ -12,6 +16,14 @@ describe("design PNG export", () => {
     expect(designPngSuggestedName("Pricing / Desktop.html")).toBe(
       "Pricing - Desktop.png",
     );
+  });
+
+  it("uses only save-dialog options", () => {
+    expect(designPngSaveDialogOptions("Frame.png")).toEqual({
+      title: "Export design as PNG",
+      defaultPath: "Frame.png",
+      filters: [{ name: "PNG image", extensions: ["png"] }],
+    });
   });
 
   it("rejects malformed base64, non-PNG bytes, and oversized payloads", () => {

@@ -89,11 +89,23 @@ export interface DesignAssetWire {
 }
 
 export interface DesignWorkspaceSnapshotWire {
+  /** Host-local resource authority. Null on remote/srcDoc renderers. */
+  protocolCapability: string | null;
   frames: DesignFrameDocumentWire[];
   tokens: DesignTokenWire[];
   tokenSourceVersion: string;
   assets: DesignAssetWire[];
   lint: DesignLintReportWire;
+}
+
+function validProtocolCapability(
+  snapshot: DesignWorkspaceSnapshotWire | undefined,
+): boolean {
+  return (
+    !!snapshot &&
+    (snapshot.protocolCapability === null ||
+      /^[a-f0-9]{64}$/.test(snapshot.protocolCapability))
+  );
 }
 
 export interface DesignMutationResultWire {
@@ -174,6 +186,7 @@ export async function bridgeDesignSnapshot(
   })) as { snapshot?: DesignWorkspaceSnapshotWire };
   if (
     !result?.snapshot ||
+    !validProtocolCapability(result.snapshot) ||
     !Array.isArray(result.snapshot.frames) ||
     !Array.isArray(result.snapshot.tokens) ||
     !Array.isArray(result.snapshot.assets) ||
@@ -195,6 +208,7 @@ function designMutationReply(
     typeof reply.mutation.changed !== "boolean" ||
     typeof reply.mutation.frame?.file !== "string" ||
     !reply.snapshot ||
+    !validProtocolCapability(reply.snapshot) ||
     !Array.isArray(reply.snapshot.frames) ||
     !Array.isArray(reply.snapshot.assets) ||
     typeof reply.snapshot.tokenSourceVersion !== "string"
@@ -238,6 +252,7 @@ export async function bridgeDesignUpdateToken(
     !result.mutation ||
     typeof result.mutation.changed !== "boolean" ||
     !result.snapshot ||
+    !validProtocolCapability(result.snapshot) ||
     !Array.isArray(result.snapshot.tokens) ||
     typeof result.snapshot.tokenSourceVersion !== "string"
   ) {
@@ -307,15 +322,26 @@ export async function bridgeDesignCreateFrame(
   bridge: RuntimeClient,
   workspaceId: string,
   title?: string,
-): Promise<DesignFrameSummaryWire> {
+): Promise<{
+  frame: DesignFrameSummaryWire;
+  snapshot: DesignWorkspaceSnapshotWire;
+}> {
   const result = (await workspaceOp(bridge, "design.frame.create", {
     workspaceId,
     ...(title ? { title } : {}),
-  })) as { frame?: DesignFrameSummaryWire };
-  if (!result?.frame || typeof result.frame.file !== "string") {
+  })) as {
+    frame?: DesignFrameSummaryWire;
+    snapshot?: DesignWorkspaceSnapshotWire;
+  };
+  if (
+    !result?.frame ||
+    typeof result.frame.file !== "string" ||
+    !result.snapshot ||
+    !validProtocolCapability(result.snapshot)
+  ) {
     throw new Error("design.frame.create: malformed engine response");
   }
-  return result.frame;
+  return { frame: result.frame, snapshot: result.snapshot };
 }
 
 export async function bridgeDesignRenameFrame(
@@ -323,16 +349,27 @@ export async function bridgeDesignRenameFrame(
   workspaceId: string,
   frame: string,
   title: string,
-): Promise<DesignFrameSummaryWire> {
+): Promise<{
+  frame: DesignFrameSummaryWire;
+  snapshot: DesignWorkspaceSnapshotWire;
+}> {
   const result = (await workspaceOp(bridge, "design.frame.rename", {
     workspaceId,
     frame,
     title,
-  })) as { frame?: DesignFrameSummaryWire };
-  if (!result?.frame || typeof result.frame.file !== "string") {
+  })) as {
+    frame?: DesignFrameSummaryWire;
+    snapshot?: DesignWorkspaceSnapshotWire;
+  };
+  if (
+    !result?.frame ||
+    typeof result.frame.file !== "string" ||
+    !result.snapshot ||
+    !validProtocolCapability(result.snapshot)
+  ) {
     throw new Error("design.frame.rename: malformed engine response");
   }
-  return result.frame;
+  return { frame: result.frame, snapshot: result.snapshot };
 }
 
 export async function bridgeDesignUpdateCanvas(
@@ -355,7 +392,8 @@ export async function bridgeDesignUpdateCanvas(
   if (
     !result?.geometry ||
     typeof result.geometry.x !== "number" ||
-    !result.snapshot
+    !result.snapshot ||
+    !validProtocolCapability(result.snapshot)
   ) {
     throw new Error("design.canvas.update: malformed engine response");
   }
@@ -377,7 +415,11 @@ export async function bridgeDesignDuplicateFrame(
     frame?: DesignFrameSummaryWire;
     snapshot?: DesignWorkspaceSnapshotWire;
   };
-  if (!result.frame || !result.snapshot) {
+  if (
+    !result.frame ||
+    !result.snapshot ||
+    !validProtocolCapability(result.snapshot)
+  ) {
     throw new Error("design.frame.duplicate: malformed engine response");
   }
   return { frame: result.frame, snapshot: result.snapshot };
@@ -398,7 +440,11 @@ export async function bridgeDesignDeleteFrame(
     deleted?: { file: string };
     snapshot?: DesignWorkspaceSnapshotWire;
   };
-  if (!result.deleted || !result.snapshot) {
+  if (
+    !result.deleted ||
+    !result.snapshot ||
+    !validProtocolCapability(result.snapshot)
+  ) {
     throw new Error("design.frame.delete: malformed engine response");
   }
   return { deleted: result.deleted, snapshot: result.snapshot };

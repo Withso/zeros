@@ -16,6 +16,7 @@ import {
   connectDesignFrameRuntime,
   type DesignFrameRuntimeConnection,
 } from "../bridge/design-frame-runtime";
+import { designProtocolFrameUrl } from "../bridge/design-protocol-url";
 import {
   captureDesignRuntimeScreenshot,
   reconcileDesignRuntimeSnapshot,
@@ -26,6 +27,8 @@ import {
 interface DesignFrameRuntimeIframeProps {
   /** Exact workspace owner for runtime requests and MCP screenshot publication. */
   workspaceId: string;
+  /** Per-launch authority for this exact workspace's custom-protocol route. */
+  protocolCapability: string | null;
   /** Exact folder owner used by the composer selection lookup. */
   folder: string;
   /** Authored frame document and composed runtime-enabled srcDoc. */
@@ -60,6 +63,7 @@ function scheduleIdle(work: () => void): () => void {
 
 export function DesignFrameRuntimeIframe({
   workspaceId,
+  protocolCapability,
   folder,
   frame,
   active,
@@ -186,14 +190,19 @@ export function DesignFrameRuntimeIframe({
       });
   }, [active, autoCapture, handleSnapshot, selected]);
 
+  const protocolSource = isElectron()
+    ? designProtocolFrameUrl({
+        workspaceId,
+        capability: protocolCapability,
+        frame: frame.file,
+        sourceVersion: frame.sourceVersion,
+      })
+    : null;
+
   return (
     <iframe
       ref={setIframe}
-      {...(isElectron()
-        ? {
-            src: `zeros-design://workspace/${encodeURIComponent(workspaceId)}/${encodeURIComponent(frame.file)}?v=${frame.sourceVersion}`,
-          }
-        : { srcDoc: frame.srcDoc })}
+      {...(protocolSource ? { src: protocolSource } : { srcDoc: frame.srcDoc })}
       sandbox="allow-scripts"
       tabIndex={-1}
       className="bg-bg1 pointer-events-none block size-full border-0"

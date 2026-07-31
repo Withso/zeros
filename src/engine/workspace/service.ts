@@ -906,6 +906,16 @@ export class WorkspaceService {
   setGatewayAccessor(fn: () => McpGateway | null): void {
     this.gatewayAccessor = fn;
   }
+  /** Per-launch capability used only by the local Electron custom protocol.
+   * Remote renderers use srcDoc and never receive this host-local authority. */
+  private designProtocolCapabilityProvider:
+    | ((workspaceId: string) => string)
+    | null = null;
+  setDesignProtocolCapabilityProvider(
+    fn: (workspaceId: string) => string,
+  ): void {
+    this.designProtocolCapabilityProvider = fn;
+  }
   /** Why the gateway isn't running when it should be (start failure) — for the
    *  "Gateway unavailable" status (P0-3). null = healthy / not expected. */
   private gatewayErrorAccessor: (() => string | null) | null = null;
@@ -1261,6 +1271,18 @@ export class WorkspaceService {
     return workspace;
   }
 
+  private async readDesignSnapshot(workspace: Workspace, remote: boolean) {
+    const snapshot = await readDesignWorkspaceSnapshot(workspace.path, {
+      writeBack: !remote,
+    });
+    return {
+      ...snapshot,
+      protocolCapability: remote
+        ? null
+        : (this.designProtocolCapabilityProvider?.(workspace.id) ?? null),
+    };
+  }
+
   /** Canonicalize a pty/agent cwd token to its managed workspace id. The token
    *  may be a workspace ID (the web's opaque form) OR a real host PATH — the
    *  relaxed redaction sends real paths to trusted devices, and the desktop
@@ -1536,9 +1558,7 @@ export class WorkspaceService {
           remote,
         );
         return {
-          snapshot: await readDesignWorkspaceSnapshot(workspace.path, {
-            writeBack: !remote,
-          }),
+          snapshot: await this.readDesignSnapshot(workspace, remote),
         };
       }
       case "design.tokens": {
@@ -1568,7 +1588,7 @@ export class WorkspaceService {
         });
         return {
           mutation,
-          snapshot: await readDesignWorkspaceSnapshot(workspace.path),
+          snapshot: await this.readDesignSnapshot(workspace, remote),
         };
       }
       case "design.lint": {
@@ -1831,10 +1851,12 @@ export class WorkspaceService {
           reqStr(params, "workspaceId"),
           remote,
         );
+        const frame = await createDesignFrame(workspace.path, {
+          title: optStr(params, "title"),
+        });
         return {
-          frame: await createDesignFrame(workspace.path, {
-            title: optStr(params, "title"),
-          }),
+          frame,
+          snapshot: await this.readDesignSnapshot(workspace, remote),
         };
       }
       case "design.frame.rename": {
@@ -1842,12 +1864,14 @@ export class WorkspaceService {
           reqStr(params, "workspaceId"),
           remote,
         );
+        const frame = await renameDesignFrame(
+          workspace.path,
+          reqStr(params, "frame"),
+          reqStr(params, "title"),
+        );
         return {
-          frame: await renameDesignFrame(
-            workspace.path,
-            reqStr(params, "frame"),
-            reqStr(params, "title"),
-          ),
+          frame,
+          snapshot: await this.readDesignSnapshot(workspace, remote),
         };
       }
       case "design.frame.duplicate": {
@@ -1861,7 +1885,7 @@ export class WorkspaceService {
         );
         return {
           frame,
-          snapshot: await readDesignWorkspaceSnapshot(workspace.path),
+          snapshot: await this.readDesignSnapshot(workspace, remote),
         };
       }
       case "design.frame.delete": {
@@ -1875,7 +1899,7 @@ export class WorkspaceService {
         );
         return {
           deleted,
-          snapshot: await readDesignWorkspaceSnapshot(workspace.path),
+          snapshot: await this.readDesignSnapshot(workspace, remote),
         };
       }
       case "design.canvas.update": {
@@ -1896,7 +1920,7 @@ export class WorkspaceService {
         );
         return {
           geometry,
-          snapshot: await readDesignWorkspaceSnapshot(workspace.path),
+          snapshot: await this.readDesignSnapshot(workspace, remote),
         };
       }
       case "design.node.styles": {
@@ -1912,7 +1936,7 @@ export class WorkspaceService {
         });
         return {
           mutation,
-          snapshot: await readDesignWorkspaceSnapshot(workspace.path),
+          snapshot: await this.readDesignSnapshot(workspace, remote),
         };
       }
       case "design.node.text": {
@@ -1931,7 +1955,7 @@ export class WorkspaceService {
         });
         return {
           mutation,
-          snapshot: await readDesignWorkspaceSnapshot(workspace.path),
+          snapshot: await this.readDesignSnapshot(workspace, remote),
         };
       }
       case "design.node.html": {
@@ -1955,7 +1979,7 @@ export class WorkspaceService {
         });
         return {
           mutation,
-          snapshot: await readDesignWorkspaceSnapshot(workspace.path),
+          snapshot: await this.readDesignSnapshot(workspace, remote),
         };
       }
       case "design.asset.insert": {
@@ -1972,7 +1996,7 @@ export class WorkspaceService {
         });
         return {
           mutation,
-          snapshot: await readDesignWorkspaceSnapshot(workspace.path),
+          snapshot: await this.readDesignSnapshot(workspace, remote),
         };
       }
       case "design.save": {

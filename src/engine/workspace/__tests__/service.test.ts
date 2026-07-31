@@ -811,10 +811,34 @@ describe("WorkspaceService", () => {
       repoSlug: "design-service-test",
       kind: "design",
     });
-    await svc.handle("design.frame.create", {
+    const protocolCapability = "d".repeat(64);
+    svc.setDesignProtocolCapabilityProvider(() => protocolCapability);
+    const createdReply = (await svc.handle("design.frame.create", {
       workspaceId: workspace.workspaceId,
       title: "Checkout",
-    });
+    })) as {
+      frame: { file: string };
+      snapshot: {
+        protocolCapability: string | null;
+        frames: Array<{ file: string }>;
+      };
+    };
+    expect(createdReply.snapshot.protocolCapability).toBe(protocolCapability);
+    expect(createdReply.snapshot.frames.map((frame) => frame.file)).toContain(
+      createdReply.frame.file,
+    );
+    const renamedReply = (await svc.handle("design.frame.rename", {
+      workspaceId: workspace.workspaceId,
+      frame: createdReply.frame.file,
+      title: "Checkout flow",
+    })) as {
+      snapshot: { frames: Array<{ file: string; title: string }> };
+    };
+    expect(
+      renamedReply.snapshot.frames.find(
+        (frame) => frame.file === createdReply.frame.file,
+      )?.title,
+    ).toBe("Checkout flow");
     type DesignTreeNode = {
       tag: string;
       oid: string | null;
@@ -824,6 +848,7 @@ describe("WorkspaceService", () => {
       workspaceId: workspace.workspaceId,
     })) as {
       snapshot: {
+        protocolCapability: string | null;
         frames: Array<{
           file: string;
           sourceVersion: string;
@@ -831,6 +856,7 @@ describe("WorkspaceService", () => {
         }>;
       };
     };
+    expect(before.snapshot.protocolCapability).toBe(protocolCapability);
     const frame = before.snapshot.frames[0]!;
     expect(frame.tree.map((node) => node.tag)).toEqual(["main"]);
     const main = frame.tree.find((node) => node.tag === "main");
@@ -850,6 +876,7 @@ describe("WorkspaceService", () => {
       workspaceId: workspace.workspaceId,
     })) as {
       snapshot: {
+        protocolCapability: string | null;
         tokenSourceVersion: string;
         tokens: Array<{ name: string; value: string }>;
         frames: Array<{ file: string; sourceVersion: string }>;
@@ -864,15 +891,24 @@ describe("WorkspaceService", () => {
     })) as {
       mutation: { changed: boolean };
       snapshot: {
+        protocolCapability: string | null;
         tokenSourceVersion: string;
         tokens: Array<{ name: string; value: string }>;
         frames: Array<{ file: string; sourceVersion: string }>;
       };
     };
     expect(tokenReply.mutation.changed).toBe(true);
+    expect(tokenReply.snapshot.protocolCapability).toBe(protocolCapability);
     expect(tokenReply.snapshot.tokenSourceVersion).not.toBe(
       tokenSnapshot.snapshot.tokenSourceVersion,
     );
+
+    const remote = (await svc.handle(
+      "design.snapshot",
+      { workspaceId: workspace.workspaceId },
+      { remote: true },
+    )) as { snapshot: { protocolCapability: string | null } };
+    expect(remote.snapshot.protocolCapability).toBeNull();
     expect(
       tokenReply.snapshot.tokens.find((token) => token.name === "--accent")
         ?.value,

@@ -12,6 +12,7 @@ function snapshot(
   frames: Array<{ file: string; x?: number }> = [{ file: "home.html" }],
 ): DesignWorkspaceSnapshotWire {
   return {
+    protocolCapability: "c".repeat(64),
     frames: frames.map(({ file, x = 0 }, index) => ({
       file,
       title: file.replace(".html", ""),
@@ -109,6 +110,18 @@ describe("design workspace cache", () => {
 
     expect(stable.frames[0]).not.toBe(previous.frames[0]);
     expect(stable.frames[0]?.sourceVersion).toBe("ffffffffffffffffffffffff");
+  });
+
+  it("does not reuse a snapshot from another protocol capability generation", () => {
+    const previous = snapshot();
+    const next = snapshot();
+    next.protocolCapability = "d".repeat(64);
+
+    const stable = stabilizeDesignWorkspaceSnapshot(previous, next);
+
+    expect(stable).not.toBe(previous);
+    expect(stable.frames).toBe(previous.frames);
+    expect(stable.protocolCapability).toBe("d".repeat(64));
   });
 
   it("does not reuse tokens from another token source generation or theme value", () => {

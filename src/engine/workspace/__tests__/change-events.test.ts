@@ -46,6 +46,7 @@ describe("dbChangedKinds", () => {
     "design.node.text",
     "design.node.html",
     "design.asset.insert",
+    "design.token.update",
     "design.save",
     "git.fetch",
     "git.reset",

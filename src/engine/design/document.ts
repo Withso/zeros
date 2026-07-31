@@ -28,6 +28,7 @@ import {
 import path from "node:path";
 
 import { DESIGN_RUNTIME_SOURCE } from "@zeros/core/design-runtime";
+import { withDesignDocumentWrite as withDocumentWrite } from "./document-write-lock";
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
 import type { ParserError } from "parse5";
 import postcss from "postcss";
@@ -481,29 +482,6 @@ async function writeCanvas(
   await rename(temporary, target);
 }
 
-const documentFlights = new Map<string, Promise<void>>();
-
-async function withDocumentWrite<T>(
-  workspacePath: string,
-  run: () => Promise<T>,
-): Promise<T> {
-  const key = path.resolve(workspacePath);
-  const previous = documentFlights.get(key) ?? Promise.resolve();
-  let release!: () => void;
-  const turn = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const queued = previous.then(() => turn);
-  documentFlights.set(key, queued);
-  await previous;
-  try {
-    return await run();
-  } finally {
-    release();
-    if (documentFlights.get(key) === queued) documentFlights.delete(key);
-  }
-}
-
 async function writeIfMissing(
   file: string,
   content: string,
@@ -785,9 +763,10 @@ export function healDesignOids(source: string): {
       used.add(record.oid);
       continue;
     }
-    let oid = oidForElement(source, record.element);
+    const oidBase = oidForElement(source, record.element);
+    let oid = oidBase;
     for (let suffix = 2; used.has(oid); suffix++) {
-      oid = `${oid}-${suffix}`;
+      oid = `${oidBase}-${suffix}`;
     }
     used.add(oid);
     if (duplicate) {
@@ -1987,10 +1966,18 @@ function activeUrl(value: string): boolean {
     })
     .join("")
     .toLowerCase();
-  return (
+  if (
     normalized.startsWith("javascript:") ||
-    normalized.startsWith("vbscript:") ||
-    normalized.startsWith("data:text/html")
+    normalized.startsWith("vbscript:")
+  ) {
+    return true;
+  }
+  if (!normalized.startsWith("data:")) return false;
+  // Local design assets are inlined into these exact passive raster forms.
+  // Every other data payload is authored active content and is removed,
+  // including SVG and text MIME types that can carry markup or script.
+  return !/^data:image\/(?:avif|gif|jpeg|png|webp);base64,[a-z0-9+/]*={0,2}$/i.test(
+    normalized,
   );
 }
 
@@ -2595,7 +2582,7 @@ async function lintFrame(
               {
                 severity: "error",
                 oid: oid ?? undefined,
-                fix: "Use a file under Zeros Design/assets or a data URL.",
+                fix: "Use a supported file under Zeros Design/assets.",
               },
             ),
           );
@@ -2733,7 +2720,7 @@ async function lintFrame(
   return { violations, healedOids };
 }
 
-export async function lintDesignDocument(
+async function lintDesignDocumentUnlocked(
   workspacePath: string,
   frame?: string,
   options: { healOids?: boolean } = {},
@@ -2770,6 +2757,17 @@ export async function lintDesignDocument(
     ),
     healedOids,
   };
+}
+
+export function lintDesignDocument(
+  workspacePath: string,
+  frame?: string,
+  options: { healOids?: boolean } = {},
+): Promise<DesignLintReport> {
+  const lint = () => lintDesignDocumentUnlocked(workspacePath, frame, options);
+  return options.healOids === false
+    ? lint()
+    : withDocumentWrite(workspacePath, lint);
 }
 
 function designThemeName(selector: string): string | null {

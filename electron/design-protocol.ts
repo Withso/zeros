@@ -6,6 +6,7 @@ export const DESIGN_PROTOCOL_SCHEME = "zeros-design";
 
 export interface ParsedDesignProtocolUrl {
   workspaceId: string;
+  capability: string;
   path: string;
   sourceVersion: string | null;
 }
@@ -38,10 +39,12 @@ export function parseDesignProtocolUrl(
     return null;
   }
   const workspaceId = segments.shift() ?? "";
+  const capability = segments.shift() ?? "";
   if (
     !workspaceId ||
     workspaceId.length > 128 ||
     !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(workspaceId) ||
+    !/^[a-f0-9]{64}$/.test(capability) ||
     segments.length === 0 ||
     segments.some(
       (segment) =>
@@ -59,6 +62,7 @@ export function parseDesignProtocolUrl(
   if (rawVersion !== null && !/^[a-f0-9]{24}$/.test(rawVersion)) return null;
   return {
     workspaceId,
+    capability,
     path: segments.join("/"),
     sourceVersion: rawVersion,
   };
@@ -97,7 +101,7 @@ export function installDesignProtocol(): void {
       const version = parsed.sourceVersion ? `?v=${parsed.sourceVersion}` : "";
       const target =
         `http://127.0.0.1:${port}/design/` +
-        `${encodeURIComponent(parsed.workspaceId)}/${encodedPath}${version}`;
+        `${encodeURIComponent(parsed.workspaceId)}/${parsed.capability}/${encodedPath}${version}`;
       return await net.fetch(target, {
         method: "GET",
         redirect: "error",

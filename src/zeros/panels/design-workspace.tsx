@@ -233,6 +233,7 @@ function useDelayedColdBusy(loading: boolean): boolean {
 
 function DesignFrameRenderSurface({
   workspaceId,
+  protocolCapability,
   folder,
   frame,
   active,
@@ -240,6 +241,7 @@ function DesignFrameRenderSurface({
   live,
 }: {
   workspaceId: string;
+  protocolCapability: string | null;
   folder: string;
   frame: DesignFrameDocumentWire;
   active: boolean;
@@ -254,6 +256,7 @@ function DesignFrameRenderSurface({
     return (
       <DesignFrameRuntimeIframe
         workspaceId={workspaceId}
+        protocolCapability={protocolCapability}
         folder={folder}
         frame={frame}
         active={active}
@@ -1094,6 +1097,7 @@ function DesignCanvas({
                 {workspaceId && folder ? (
                   <DesignFrameRenderSurface
                     workspaceId={workspaceId}
+                    protocolCapability={snapshot.protocolCapability}
                     folder={folder}
                     frame={frame}
                     active={active}

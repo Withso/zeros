@@ -94,7 +94,10 @@ import { buildPtyEnv } from "./pty/shell-setup";
 import { resolveMcpServers } from "./agents/mcp-registry";
 import { McpGateway } from "./agents/gateway/server";
 import { DesignMcpServer } from "./design/mcp-server";
-import { lintDesignDocument } from "./design/document";
+import {
+  createDesignProtocolCapability,
+  parseDesignProtocolResourcePath,
+} from "./design/protocol-capability";
 import { OAuthVault } from "./agents/gateway/oauth-provider";
 import {
   MCP_VAULT_SEED_TYPE,
@@ -287,10 +290,6 @@ export class ZerosEngine {
   /** First-party, read-only design context. One loopback server mints an
    *  opaque workspace-scoped URL for each design agent session. */
   private readonly designMcpServer: DesignMcpServer;
-  /** Coalesce watcher bursts while guaranteeing one trailing lint when source
-   * changes again during an in-flight pass. */
-  private readonly designLintFlights = new Set<string>();
-  private readonly designLintQueued = new Set<string>();
   /** Why the gateway isn't running when it should be (start/reload failure, e.g.
    *  the port is taken) — surfaced via mcp.gateway.status so the UI shows
    *  "Gateway unavailable" instead of an OAuth server silently vanishing (P0-3).
@@ -413,32 +412,6 @@ export class ZerosEngine {
   private actualPort = 0;
   private framework: Framework = "unknown";
   private running = false;
-
-  private queueDesignLint(workspaceId: string): void {
-    if (this.designLintFlights.has(workspaceId)) {
-      this.designLintQueued.add(workspaceId);
-      return;
-    }
-    const workspace = getWorkspaceById(workspaceId);
-    if (!workspace || workspace.kind !== "design") return;
-    this.designLintFlights.add(workspaceId);
-    // Watcher reactions must be observational. Healing data-oids here writes
-    // the watched file, queues another change event, and can loop forever on
-    // malformed/rapidly edited sources. Explicit UI/MCP lint requests remain
-    // the only auto-healing entry points.
-    void lintDesignDocument(workspace.path, undefined, { healOids: false })
-      .catch((error) => {
-        console.warn(
-          `[Zeros] Design lint failed for ${workspaceId}:`,
-          error instanceof Error ? error.message : error,
-        );
-      })
-      .finally(() => {
-        this.designLintFlights.delete(workspaceId);
-        if (!this.designLintQueued.delete(workspaceId)) return;
-        this.queueDesignLint(workspaceId);
-      });
-  }
 
   constructor(options?: EngineOptions) {
     this.root = options?.root
@@ -772,6 +745,9 @@ export class ZerosEngine {
     this.localToken =
       process.env.ZEROS_LOCAL_WS_TOKEN?.trim() ||
       randomBytes(32).toString("hex");
+    this.workspace.setDesignProtocolCapabilityProvider((workspaceId) =>
+      createDesignProtocolCapability(this.localToken, workspaceId),
+    );
     // The dev renderer's http origin is the Vite dev server. Its port is normally
     // 5193, but a per-worktree dev instance (scripts/dev-instance.mjs) moves Vite
     // to a free port and exports it as ZEROS_VITE_PORT so this allowlist tracks the
@@ -791,19 +767,12 @@ export class ZerosEngine {
       token: this.localToken,
       allowedOrigins,
       handleHttp: async ({ url }) => {
-        const match = /^\/design\/([^/]+)\/(.+)$/.exec(url.pathname);
-        if (!match) return null;
-        let workspaceId: string;
-        let resourcePath: string;
-        try {
-          workspaceId = decodeURIComponent(match[1]!);
-          resourcePath = match[2]!
-            .split("/")
-            .map((segment) => decodeURIComponent(segment))
-            .join("/");
-        } catch {
-          return null;
-        }
+        const parsed = parseDesignProtocolResourcePath(
+          url.pathname,
+          this.localToken,
+        );
+        if (!parsed) return null;
+        const { workspaceId, resourcePath } = parsed;
         const workspace = getWorkspaceById(workspaceId);
         if (!workspace || workspace.kind !== "design") return null;
         const resource = await readDesignProtocolResource(workspace.path, {
@@ -1501,11 +1470,6 @@ export class ZerosEngine {
     this.gitWatcher = startGitWatcher(
       () => this.workspace.gitWatchTargets(),
       (change) => {
-        if (change.worktreeChanged) {
-          for (const workspaceId of change.workspaceIds) {
-            this.queueDesignLint(workspaceId);
-          }
-        }
         this.broadcast(
           createMessage({
             type: "DB_CHANGED",

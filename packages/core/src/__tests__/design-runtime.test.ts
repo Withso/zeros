@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { chromium } from "@playwright/test";
 
 import {
   DESIGN_RUNTIME_PROTOCOL,
@@ -25,6 +26,9 @@ describe("design runtime protocol", () => {
       "sourceVersion: SOURCE_VERSION,\n      oid: oid",
     );
     expect(DESIGN_RUNTIME_SOURCE).toContain("roots.push(treeNode(body))");
+    expect(DESIGN_RUNTIME_SOURCE).toContain(
+      "frame: frameDetailsOf(frameElement())",
+    );
     expect(DESIGN_RUNTIME_SOURCE).toContain(
       'element.style.setProperty("display", "revert", "important")',
     );
@@ -66,4 +70,59 @@ describe("design runtime protocol", () => {
     ).toBe(true);
     expect(isDesignRuntimeFrameMessage({ type: "response" })).toBe(false);
   });
+
+  it("publishes a ready snapshot when the authored frame has no main wrapper", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      const payload = await page.evaluate(
+        ({ source }) =>
+          new Promise<Record<string, unknown>>((resolve, reject) => {
+            document.body.innerHTML =
+              '<section data-oid="hero"><h1 data-oid="heading">Hello</h1></section>';
+            (
+              window as Window & {
+                __zerosDesignSourceVersion?: string;
+              }
+            ).__zerosDesignSourceVersion = "a".repeat(24);
+            const timeout = window.setTimeout(
+              () => reject(new Error("ready snapshot timed out")),
+              2_000,
+            );
+            window.addEventListener("message", (event) => {
+              const message = event.data as {
+                protocol?: string;
+                type?: string;
+                event?: string;
+                payload?: Record<string, unknown>;
+              };
+              if (
+                message.protocol !== "zeros-design-runtime" ||
+                message.type !== "event" ||
+                message.event !== "ready" ||
+                !message.payload
+              ) {
+                return;
+              }
+              window.clearTimeout(timeout);
+              resolve(message.payload);
+            });
+            try {
+              new Function(source)();
+            } catch (error) {
+              window.clearTimeout(timeout);
+              reject(error);
+            }
+          }),
+        { source: DESIGN_RUNTIME_SOURCE },
+      );
+
+      expect(payload).toMatchObject({
+        tree: [{ oid: "hero", tag: "section" }],
+        frame: { oid: "", tag: "body", selector: "body" },
+      });
+    } finally {
+      await browser.close();
+    }
+  }, 20_000);
 });

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { BrowserWindow, dialog } from "electron";
+import { BrowserWindow, dialog, type SaveDialogOptions } from "electron";
 
 import type { CommandHandler } from "../router";
 
@@ -42,20 +42,23 @@ export function designPngSuggestedName(value: string): string {
   return `${stem || "Design"}.png`;
 }
 
+export function designPngSaveDialogOptions(
+  suggestedName: string,
+): SaveDialogOptions {
+  return {
+    title: "Export design as PNG",
+    defaultPath: suggestedName,
+    filters: [{ name: "PNG image", extensions: ["png"] }],
+  };
+}
+
 export const designExportPng: CommandHandler = async (args, event) => {
   const data = typeof args.data === "string" ? args.data : "";
   const suggestedName = designPngSuggestedName(
     typeof args.suggestedName === "string" ? args.suggestedName : "Design",
   );
   const png = decodeDesignPng(data);
-  const options = {
-    title: "Export design as PNG",
-    defaultPath: suggestedName,
-    filters: [{ name: "PNG image", extensions: ["png"] }],
-    properties: ["createDirectory", "showOverwriteConfirmation"] as Array<
-      "createDirectory" | "showOverwriteConfirmation"
-    >,
-  };
+  const options = designPngSaveDialogOptions(suggestedName);
   const owner = BrowserWindow.fromWebContents(event.sender);
   const result = owner
     ? await dialog.showSaveDialog(owner, options)

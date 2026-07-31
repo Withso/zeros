@@ -24,10 +24,12 @@ describe("design safe file reads", () => {
     await writeFile(outside, "secret");
     await symlink(outside, path.join(root, "escape.css"));
 
-    await expect(readSafeRegularFile(root, safe, 4)).resolves.toMatchObject({
+    const read = await readSafeRegularFile(root, safe, 4);
+    expect(read).toMatchObject({
       body: Buffer.from("safe"),
       size: 4,
     });
+    expect(read?.body.buffer.byteLength).toBe(read?.body.byteLength);
     await expect(readSafeRegularFile(root, safe, 3)).resolves.toBeNull();
     await expect(
       readSafeRegularFile(root, path.join(root, "escape.css"), 100),

@@ -47,8 +47,10 @@ describe("resolveNewTabMode", () => {
     expect(resolveNewTabMode("code", "design", "design")).toBe("design");
   });
 
-  it("falls back to the active chat for ordinary workspace paths", () => {
-    expect(resolveNewTabMode("design", null, "code")).toBe("design");
+  it("prefers prepared and managed workspace identity over stale chat metadata", () => {
+    expect(resolveNewTabMode("design", null, "code")).toBe("code");
+    expect(resolveNewTabMode("code", "design", "code")).toBe("design");
     expect(resolveNewTabMode(null, null, "code")).toBe("code");
+    expect(resolveNewTabMode("design", null, null)).toBe("design");
   });
 });

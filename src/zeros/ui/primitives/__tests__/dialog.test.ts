@@ -41,8 +41,20 @@ vi.mock("@radix-ui/react-dialog", async () => {
 import { DialogContent } from "../dialog";
 
 describe("DialogContent", () => {
-  it("forwards Radix's escape event so callers can prevent dismissal", () => {
+  function escapeEvent() {
+    const event = {
+      key: "Escape",
+      defaultPrevented: false,
+      preventDefault() {
+        this.defaultPrevented = true;
+      },
+    };
+    return event;
+  }
+
+  it("calls the escape guard once when Radix and the bubble fallback see the same key", () => {
     const onEscapeKeyDown = vi.fn();
+    const close = vi.fn();
 
     renderToStaticMarkup(
       createElement(
@@ -52,6 +64,85 @@ describe("DialogContent", () => {
       ),
     );
 
-    expect(captured.contentProps?.onEscapeKeyDown).toBe(onEscapeKeyDown);
+    const nativeEvent = escapeEvent();
+    const onRadixEscape = captured.contentProps?.onEscapeKeyDown as (
+      event: typeof nativeEvent,
+    ) => void;
+    const onKeyDown = captured.contentProps?.onKeyDown as (event: {
+      key: string;
+      defaultPrevented: boolean;
+      nativeEvent: typeof nativeEvent;
+      currentTarget: { querySelector: () => { click: () => void } };
+    }) => void;
+    onRadixEscape(nativeEvent);
+    onKeyDown({
+      key: "Escape",
+      defaultPrevented: false,
+      nativeEvent,
+      currentTarget: { querySelector: () => ({ click: close }) },
+    });
+
+    expect(onEscapeKeyDown).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it("runs the fallback after child key handlers and honors either prevention", () => {
+    const close = vi.fn();
+    const guardedEscape = vi.fn((event: ReturnType<typeof escapeEvent>) => {
+      event.preventDefault();
+    });
+    renderToStaticMarkup(
+      createElement(
+        DialogContent,
+        { onEscapeKeyDown: guardedEscape, showCloseButton: false },
+        "Saving",
+      ),
+    );
+    const onKeyDown = captured.contentProps?.onKeyDown as (event: {
+      key: string;
+      defaultPrevented: boolean;
+      nativeEvent: ReturnType<typeof escapeEvent>;
+      currentTarget: { querySelector: () => { click: () => void } };
+    }) => void;
+    const preventedByChild = escapeEvent();
+    onKeyDown({
+      key: "Escape",
+      defaultPrevented: true,
+      nativeEvent: preventedByChild,
+      currentTarget: { querySelector: () => ({ click: close }) },
+    });
+    expect(guardedEscape).not.toHaveBeenCalled();
+
+    const guarded = escapeEvent();
+    onKeyDown({
+      key: "Escape",
+      defaultPrevented: false,
+      nativeEvent: guarded,
+      currentTarget: { querySelector: () => ({ click: close }) },
+    });
+    expect(guardedEscape).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it("closes through the Radix primitive when the document layer missed Escape", () => {
+    const close = vi.fn();
+    renderToStaticMarkup(
+      createElement(DialogContent, { showCloseButton: false }, "Saving"),
+    );
+    const nativeEvent = escapeEvent();
+    const onKeyDown = captured.contentProps?.onKeyDown as (event: {
+      key: string;
+      defaultPrevented: boolean;
+      nativeEvent: ReturnType<typeof escapeEvent>;
+      currentTarget: { querySelector: () => { click: () => void } };
+    }) => void;
+    onKeyDown({
+      key: "Escape",
+      defaultPrevented: false,
+      nativeEvent,
+      currentTarget: { querySelector: () => ({ click: close }) },
+    });
+
+    expect(close).toHaveBeenCalledTimes(1);
   });
 });

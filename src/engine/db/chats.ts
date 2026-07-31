@@ -199,7 +199,7 @@ VALUES (@id, @mode, @folder, @agent_id, @agent_name, @model, @effort, @permissio
         @created_at, @updated_at, @session_id, @pinned, @archived, @source_chat_id, @kind,
         @workspace_id, @rev)
 ON CONFLICT(id) DO UPDATE SET
-  mode=excluded.mode, folder=excluded.folder, agent_id=excluded.agent_id, agent_name=excluded.agent_name,
+  folder=excluded.folder, agent_id=excluded.agent_id, agent_name=excluded.agent_name,
   model=excluded.model, effort=excluded.effort, permission_mode=excluded.permission_mode,
   last_mode_id=excluded.last_mode_id, pre_plan_mode_id=excluded.pre_plan_mode_id,
   fast=excluded.fast, additional_directories=excluded.additional_directories,

@@ -40,11 +40,7 @@ export function resolveNewTabMode(
   pendingKind: "code" | "design" | null | undefined,
   pathKind: "code" | "design" | null | undefined,
 ): "code" | "design" {
-  return chatMode === "design" ||
-    pendingKind === "design" ||
-    pathKind === "design"
-    ? "design"
-    : "code";
+  return pendingKind ?? pathKind ?? chatMode ?? "code";
 }
 
 export function useNewTabHotkeys(): void {

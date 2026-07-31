@@ -105,6 +105,7 @@ async function main() {
     fix: "Use a design spacing token or a multiple of 4px.",
   }));
   designWorkspaceSnapshotCache.setData(workspaceId, {
+    protocolCapability: null,
     frames: [
       {
         file: "home.html",
