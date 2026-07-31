@@ -17,6 +17,7 @@ import {
   getPr,
   getRepositoryOwnerAvatar,
   getWorkspace,
+  getWorkspaceRepoAccess,
   listPrs,
   markPrReady,
   mergePr,
@@ -111,6 +112,12 @@ function makeOctokitMock() {
     type: "Organization",
     avatar_url: "https://avatars.githubusercontent.com/u/123?v=4",
   };
+  let repoPermissions: Record<string, boolean> | undefined = {
+    admin: false,
+    push: true,
+    pull: true,
+  };
+  let repoGetResponse: (() => unknown) | null = null;
   const behindBy = new Map<string, number>();
 
   const fake = {
@@ -217,6 +224,11 @@ function makeOctokitMock() {
         calls.push({ method: "repos.compareCommitsWithBasehead", args });
         return { data: { behind_by: behindBy.get(args.basehead) ?? 0 } };
       },
+      async get(args: { owner: string; repo: string }) {
+        calls.push({ method: "repos.get", args });
+        if (repoGetResponse) return repoGetResponse();
+        return { data: { permissions: repoPermissions } };
+      },
     },
     async graphql(_query: string, _vars: unknown) {
       calls.push({ method: "graphql", args: _vars });
@@ -242,6 +254,12 @@ function makeOctokitMock() {
     },
     setRepoOwner(owner: typeof repositoryOwner) {
       repositoryOwner = owner;
+    },
+    setRepoPermissions(permissions: Record<string, boolean> | undefined) {
+      repoPermissions = permissions;
+    },
+    setRepoGetResponse(fn: (() => unknown) | null) {
+      repoGetResponse = fn;
     },
     prCount() {
       return prs.size;
@@ -675,6 +693,103 @@ describe("github", () => {
         },
       });
       expect(await store.store.get()).toBe("github_pat_partial_sso");
+    });
+  });
+
+  // The preflight the Create PR control runs before it refuses for any other
+  // reason, and before it spends an agent turn. Its whole job is to separate
+  // "not signed in" from "signed in, but this repository is out of reach" —
+  // two states GitHub reports identically.
+  describe("getWorkspaceRepoAccess", () => {
+    it("confirms a repository the connection can push to", async () => {
+      store.setToken("ghp_test_token");
+      await expect(getWorkspaceRepoAccess(workspaceId)).resolves.toEqual({
+        state: "ok",
+        connected: true,
+      });
+    });
+
+    it("blocks with connected=false when nothing is signed in", async () => {
+      store.setToken(null);
+      await expect(getWorkspaceRepoAccess(workspaceId)).resolves.toMatchObject({
+        state: "blocked",
+        connected: false,
+        code: "NOT_AUTHENTICATED",
+      });
+    });
+
+    // The reported case: a GitHub App whose installation covers some other
+    // repository. GitHub answers 404, and the caller must be able to say so
+    // rather than ask an already-connected user to connect GitHub.
+    it("reports a repository outside the connection's reach as connected", async () => {
+      store.setToken("ghp_test_token");
+      mock.setRepoGetResponse(() => {
+        throw makeGithubError(404, "Not Found");
+      });
+      await expect(getWorkspaceRepoAccess(workspaceId)).resolves.toMatchObject({
+        state: "blocked",
+        connected: true,
+        code: "GITHUB_REPO_NOT_INSTALLED",
+      });
+    });
+
+    it("blocks read-only access, which cannot push a PR branch", async () => {
+      store.setToken("ghp_test_token");
+      mock.setRepoPermissions({ admin: false, push: false, pull: true });
+      await expect(getWorkspaceRepoAccess(workspaceId)).resolves.toMatchObject({
+        state: "blocked",
+        connected: true,
+        code: "GITHUB_FORBIDDEN_SCOPE",
+      });
+    });
+
+    // `push: true` is not a guarantee (an App installation can hold narrower
+    // `contents` permission than the user who authorized it), and a probe that
+    // may only remove a WRONG message must never remove a possible PR.
+    it("never blocks on an absent permissions block", async () => {
+      store.setToken("ghp_test_token");
+      mock.setRepoPermissions(undefined);
+      await expect(getWorkspaceRepoAccess(workspaceId)).resolves.toMatchObject({
+        state: "ok",
+      });
+    });
+
+    it("stays indeterminate when the probe itself fails", async () => {
+      store.setToken("ghp_test_token");
+      for (const failure of [
+        () => {
+          throw makeGithubError(403, "API rate limit exceeded");
+        },
+        () => {
+          throw makeGithubError(500, "Server Error");
+        },
+        () => {
+          throw Object.assign(new Error("getaddrinfo ENOTFOUND"), {
+            code: "ENOTFOUND",
+          });
+        },
+      ]) {
+        mock.setRepoGetResponse(failure);
+        await expect(
+          getWorkspaceRepoAccess(workspaceId),
+        ).resolves.toMatchObject({ state: "unknown", connected: true });
+      }
+    });
+
+    it("blocks on a repository with no GitHub remote at all", async () => {
+      store.setToken("ghp_test_token");
+      await execFileAsync("git", ["remote", "remove", "origin"], {
+        cwd: repoRoot,
+      });
+      const access = await getWorkspaceRepoAccess(workspaceId);
+      expect(access).toMatchObject({
+        state: "blocked",
+        connected: true,
+        code: "VALIDATION_FAILED",
+      });
+      // Reconnecting GitHub cannot fix a missing remote, so the caller must be
+      // able to tell this apart from the credential-shaped refusals.
+      expect(access.code).not.toBe("NOT_AUTHENTICATED");
     });
   });
 

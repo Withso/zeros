@@ -192,8 +192,11 @@ function HealthDetail({ summary }: { summary: GithubCredentialSummary }) {
       : summary.health === "sso-required"
         ? "Your organization requires SAML authorization for this connection."
         : summary.health === "not-installed"
-          ? summary.detail ||
-            "This repository is not included in the GitHub App installation."
+          ? // Settings has no "current repository" — this row describes the
+            // connection. Naming one here read as a per-repo verdict the panel
+            // is not in a position to make.
+            summary.detail ||
+            "The GitHub App isn’t installed on any account yet."
           : summary.health === "suspended"
             ? summary.detail ||
               "This installation was suspended by the account owner."

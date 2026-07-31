@@ -51,12 +51,14 @@ import {
   bridgeGhPrCommits,
   bridgeGhPrReviews,
   bridgeGhPrCreate,
+  bridgeGhRepoAccess,
   bridgeGhRepositoryOwnerAvatar,
   bridgeGhListOwners,
   bridgeGhCheckRepoName,
   bridgeGhPublishRepo,
   bridgeGitInitInPlace,
   type GithubOwner,
+  type GithubRepoAccess,
   type GithubRepositoryOwnerAvatar,
   type PublishRepoResult,
   type InitRepoInPlaceResult,
@@ -97,6 +99,7 @@ import { isKnownProjectRoot } from "../zeros/store/projects-store";
 // native/git façade rather than reaching into the bridge module.
 export type {
   GithubOwner,
+  GithubRepoAccess,
   GithubRepositoryOwnerAvatar,
   InitRepoInPlaceResult,
   PublishRepoResult,
@@ -1223,6 +1226,25 @@ export async function ghPrCreate(args: {
   draft?: boolean;
 }): Promise<PR> {
   return bridgeGhPrCreate(requireBridge("create the pull request"), args);
+}
+
+/** Can the selected GitHub connection open a pull request on this workspace's
+ *  remote? The Create PR control runs this BEFORE it refuses for any other
+ *  reason and before it spends an agent turn.
+ *
+ *  Deliberately never rejects: this exists to pick the right message, so a
+ *  missing bridge or a failed request resolves to `unknown` — "we could not
+ *  find out", which callers must treat as "carry on", never as "blocked". */
+export async function ghRepoAccess(
+  workspaceId: string,
+): Promise<GithubRepoAccess> {
+  const bridge = getActiveBridge();
+  if (!bridge) return { state: "unknown" };
+  try {
+    return await bridgeGhRepoAccess(bridge, workspaceId);
+  } catch {
+    return { state: "unknown" };
+  }
 }
 
 // ── Publish to GitHub (desktop-only) ─────────────────────
