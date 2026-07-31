@@ -688,6 +688,10 @@ function PaneSplitter({
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
+      // Primary button only, like every other seam in the app. A right- or
+      // middle-click otherwise opened a capture-backed drag that kept running
+      // under the context menu.
+      if (!e.isPrimary || e.button !== 0) return;
       e.preventDefault();
       const handle = e.currentTarget;
       const pointerId = e.pointerId;
@@ -735,6 +739,8 @@ function PaneSplitter({
           cancelAnimationFrame(rafId);
           rafId = null;
         }
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
         try {
           if (handle.hasPointerCapture(pointerId)) {
             handle.releasePointerCapture(pointerId);
@@ -754,6 +760,11 @@ function PaneSplitter({
         if (lastRatio !== null) setSplitRatio(folder, splitId, lastRatio);
       };
 
+      // Lock the cursor + suppress text selection for the gesture, like the
+      // other seams. Without it a fast drag that outruns the 6px strip put an
+      // I-beam over the transcript and started selecting message text.
+      document.body.style.cursor = isRow ? "ew-resize" : "ns-resize";
+      document.body.style.userSelect = "none";
       handle.addEventListener("pointermove", onMove);
       handle.addEventListener("pointerup", finish);
       handle.addEventListener("pointercancel", finish);
@@ -762,7 +773,15 @@ function PaneSplitter({
       window.addEventListener("pointercancel", finish);
       window.addEventListener("blur", finish);
     },
-    [clampToContainer, firstRef, secondRef, setSplitRatio, folder, splitId],
+    [
+      clampToContainer,
+      firstRef,
+      isRow,
+      secondRef,
+      setSplitRatio,
+      folder,
+      splitId,
+    ],
   );
 
   return (

@@ -85,7 +85,13 @@ import {
   RUN_ADD_SUBTAB,
   resolveTerminalPanelTab,
 } from "../terminal/terminal-tab-selection";
-import { useTerminalPanelLayoutStore } from "../terminal/terminal-panel-layout";
+import {
+  TERMINAL_PANEL_DEFAULT_PCT,
+  TERMINAL_PANEL_HEIGHT_VAR,
+  TERMINAL_PANEL_MAX_OFFSET_PX,
+  TERMINAL_PANEL_MIN_PX,
+  useTerminalPanelLayoutStore,
+} from "../terminal/terminal-panel-layout";
 import {
   SetupView,
   isSetupOutcome,
@@ -455,16 +461,30 @@ export function TerminalPanel({
         expanded
           ? {
               // Keep both pixel floors after a later window resize too, not
-              // only during the drag that produced the saved percentage.
-              flexBasis:
-                "clamp(140px, var(--zeros-terminal-panel-height, 50%), calc(100% - 181px))",
+              // only during the drag that produced the saved percentage. The
+              // percentage itself arrives as a custom property that this
+              // element owns — published by TerminalPanelResizer and rewritten
+              // there per drag frame, deliberately outside React's style prop
+              // so a re-render can never yank a live drag off the pointer.
+              flexBasis: `clamp(${TERMINAL_PANEL_MIN_PX}px, var(${TERMINAL_PANEL_HEIGHT_VAR}, ${TERMINAL_PANEL_DEFAULT_PCT}%), calc(100% - ${TERMINAL_PANEL_MAX_OFFSET_PX}px))`,
             }
           : undefined
       }
+      // Collapse and expand SNAP. The panel used to carry
+      // `transition-[flex-basis,min-height] duration-300`, which was wrong in
+      // three ways at once:
+      //   • The body is hidden the instant `expanded` flips, so a collapse
+      //     animated an already-empty box shut for 300ms.
+      //   • The expo-out curve put ~half the travel in the first frame and
+      //     then crawled the last few pixels — read as a jerk, not motion.
+      //   • Worst: xterm's ResizeObserver fires on every animated frame while
+      //     the panel is visible. One expand measured 14 distinct body
+      //     heights, i.e. 14 refits and 14 PTY resizes (SIGWINCH) — the
+      //     shell-redraw storm this file's spawn path (see the header note)
+      //     was written to avoid. Snapping makes it exactly one.
       className={cn(
         "bg-bg1 flex shrink-0 flex-col overflow-hidden",
         expanded ? "min-h-[140px]" : "min-h-10 basis-10",
-        "transition-[flex-basis,min-height] duration-300 [transition-timing-function:cubic-bezier(0.16,1,0.3,1)]",
       )}
     >
       <TerminalSubTabStrip
