@@ -154,6 +154,9 @@ export interface AgentSessionState {
   backgroundTasks: BackgroundTask[];
   /** Parent session is parked and waiting for the active task set to wake it. */
   waitingForBackgroundTasks: boolean;
+  /** Start of the current continuous parked interval. Session-owned so a
+   * retained-view eviction/remount cannot restart the visible timer. */
+  backgroundTasksWaitingSince: number | null;
   /** Settings-drift guard (2026-07-13): JSON of the CHAT-derived env
    *  (envForChat — model/effort/fast/dirs) this session was actually created
    *  with (or last live-applied via updateConfig). sendPrompt compares it
@@ -205,7 +208,7 @@ export interface AgentSessionControls {
   /** Cancel the in-flight prompt (if any). */
   cancel(): Promise<void>;
   /** Stop one background task without cancelling the foreground turn. */
-  stopBackgroundTask?(taskId: string): void;
+  stopBackgroundTask(taskId: string): void;
   /** Resolve a pending permission request. */
   respondToPermission(response: RequestPermissionResponse): void;
   /** Answer the head pending question (queue front). */

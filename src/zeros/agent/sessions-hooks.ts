@@ -77,6 +77,10 @@ export function useChatSession(
     [chatId],
   );
   const slot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const stopBackgroundTask = useCallback(
+    (taskId: string) => ctx.stopBackgroundTask(chatId, taskId),
+    [chatId, ctx],
+  );
 
   return {
     ...slot,
@@ -96,8 +100,7 @@ export function useChatSession(
         segments,
       ),
     cancel: () => ctx.cancel(chatId),
-    stopBackgroundTask: (taskId: string) =>
-      ctx.stopBackgroundTask(chatId, taskId),
+    stopBackgroundTask,
     respondToPermission: (response) =>
       ctx.respondToPermission(chatId, response),
     respondToQuestion: (response) => ctx.respondToQuestion(chatId, response),

@@ -66,6 +66,40 @@ describe("background task transcript routing", () => {
     expect(html).toContain("provider-task-17");
     expect(html).toContain("pnpm test:git");
   });
+
+  it("shows both the provider summary and error for a failed task", () => {
+    const message: AgentToolMessage = {
+      id: "tool-task-failed",
+      kind: "tool",
+      toolCallId: "task-failed",
+      title: "Background Task",
+      toolKind: "background_task",
+      status: "failed",
+      rawInput: { taskId: "provider-task-18", name: "Deploy preview" },
+      rawOutput: {
+        status: "failed",
+        summary: "Deployment did not complete",
+        error: "Preview service returned 503",
+      },
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const renderRecord = (
+      BackgroundTaskRecord as unknown as {
+        type: (props: {
+          message: AgentToolMessage;
+          ctx: never;
+        }) => ReactElement;
+      }
+    ).type;
+    const eventRow = renderRecord({ message, ctx: {} as never });
+    const html = renderToStaticMarkup(
+      cloneElement(eventRow, { defaultOpen: true }),
+    );
+
+    expect(html).toContain("Deployment did not complete");
+    expect(html).toContain("Preview service returned 503");
+  });
 });
 
 describe("background task live surfaces", () => {
@@ -103,6 +137,7 @@ describe("background task live surfaces", () => {
     const html = renderToStaticMarkup(
       createElement(BackgroundTasksWaitingLine, {
         tasks,
+        startedAt: Date.now() - 24_000,
         active: false,
       }),
     );

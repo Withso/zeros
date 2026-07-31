@@ -18,6 +18,8 @@ const rt = vi.hoisted(() => ({
     method: string;
     params: Record<string, unknown>;
   }>,
+  terminateError: null as Error | null,
+  terminateResult: true,
   fire(method: string, params: unknown): void {
     for (const handler of rt.handlers.get(method) ?? []) handler(params);
   },
@@ -76,7 +78,8 @@ vi.mock("../app-server", () => ({
         return request.deferred.promise;
       }
       if (method === "thread/backgroundTerminals/terminate") {
-        return { terminated: true };
+        if (rt.terminateError) throw rt.terminateError;
+        return { terminated: rt.terminateResult };
       }
       if (method === "skills/list") return { data: [] };
       return {};
@@ -107,13 +110,15 @@ describe("Codex background-terminal refresh", () => {
     rt.handlers.clear();
     rt.listRequests = [];
     rt.requests = [];
+    rt.terminateError = null;
+    rt.terminateResult = true;
   });
 
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  it("is exact-thread, latest-request-wins, and retains confirmed data on failure", async () => {
+  it("is exact-thread, coalesces lifecycle bursts, and retains confirmed data on failure", async () => {
     const emit = {
       onSessionUpdate: vi.fn(),
       onPermissionRequest: vi.fn(),
@@ -137,8 +142,32 @@ describe("Codex background-terminal refresh", () => {
       limit: 100,
     });
 
-    // Start a newer refresh before the initial read resolves.
-    rt.fire("item/started", { threadId: "thread-exact" });
+    // Unrelated threads and non-command items cannot change this thread's
+    // background-terminal list, so they must not invalidate it.
+    rt.fire("item/started", {
+      threadId: "thread-other",
+      item: { type: "commandExecution" },
+    });
+    rt.fire("item/started", {
+      threadId: "thread-exact",
+      item: { type: "agentMessage" },
+    });
+
+    // A streamed command can emit a burst of lifecycle beats while the
+    // initial exact-thread read is still in flight. Share that read and run
+    // at most one trailing refresh; never launch overlapping list RPCs.
+    for (let index = 0; index < 20; index += 1) {
+      rt.fire(index % 2 === 0 ? "item/started" : "item/completed", {
+        threadId: "thread-exact",
+        item: { type: "commandExecution", id: `command-${index}` },
+      });
+    }
+    await tick();
+    expect(rt.listRequests).toHaveLength(1);
+
+    // The invalidation makes this response stale. It must not publish a
+    // transient empty snapshot before the single trailing read settles.
+    rt.listRequests[0].deferred.resolve({ data: [], nextCursor: null });
     await tick();
     expect(rt.listRequests).toHaveLength(2);
     rt.listRequests[1].deferred.resolve({
@@ -156,10 +185,6 @@ describe("Codex background-terminal refresh", () => {
       nextCursor: null,
     });
     await tick();
-
-    // The stale initial response must not erase the newer terminal.
-    rt.listRequests[0].deferred.resolve({ data: [], nextCursor: null });
-    await tick();
     const snapshots = emit.onSessionUpdate.mock.calls
       .map((call) => call[1])
       .filter(
@@ -176,7 +201,10 @@ describe("Codex background-terminal refresh", () => {
     // A failed revalidation retains the last exact-key snapshot and emits no
     // synthetic empty state.
     const beforeFailure = snapshots.length;
-    rt.fire("item/completed", { threadId: "thread-exact" });
+    rt.fire("item/completed", {
+      threadId: "thread-exact",
+      item: { type: "commandExecution", id: "command-final" },
+    });
     await tick();
     rt.listRequests[2].deferred.reject(new Error("temporary disconnect"));
     await tick();
@@ -260,6 +288,131 @@ describe("Codex background-terminal refresh", () => {
         },
         rawOutput: { status: "stopped" },
       },
+    });
+    await adapter.dispose();
+  });
+
+  it("accepts authoritative removal when terminate reports an ambiguous transport error", async () => {
+    const emit = {
+      onSessionUpdate: vi.fn(),
+      onPermissionRequest: vi.fn(),
+      onQuestionRequest: vi.fn(),
+      onAgentStderr: vi.fn(),
+      onAgentExit: vi.fn(),
+    };
+    const ctx: AgentAdapterContext = {
+      projectRoot: "/tmp/proj",
+      mcpServers: [],
+      sessionDirRoot: "/tmp/sessions",
+      emit,
+    };
+    const adapter = new CodexAppServerAdapter(ctx);
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    await tick();
+    rt.listRequests[0].deferred.resolve({
+      data: [
+        {
+          itemId: "item-1",
+          processId: "process-1",
+          command: "pnpm test:git",
+          cwd: "/tmp/proj",
+          osPid: 101,
+          cpuPercent: null,
+          rssKb: null,
+        },
+      ],
+      nextCursor: null,
+    });
+    await tick();
+
+    rt.terminateError = new Error("connection closed after write");
+    const stopping = adapter.stopBackgroundTask({
+      sessionId: session.sessionId,
+      taskId: "process-1",
+    });
+    const stoppingOutcome = stopping.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await tick();
+    expect(rt.listRequests).toHaveLength(2);
+    rt.listRequests[1].deferred.resolve({ data: [], nextCursor: null });
+    await expect(stoppingOutcome).resolves.toBeNull();
+
+    const settled = emit.onSessionUpdate.mock.calls
+      .map((call) => call[1])
+      .find(
+        (notification) =>
+          notification.update.sessionUpdate === "tool_call" &&
+          notification.update.kind === "background_task",
+      );
+    expect(settled).toMatchObject({
+      update: { rawOutput: { status: "stopped" } },
+    });
+    await adapter.dispose();
+  });
+
+  it("does not label a natural exit as stopped when termination is refused", async () => {
+    const emit = {
+      onSessionUpdate: vi.fn(),
+      onPermissionRequest: vi.fn(),
+      onQuestionRequest: vi.fn(),
+      onAgentStderr: vi.fn(),
+      onAgentExit: vi.fn(),
+    };
+    const ctx: AgentAdapterContext = {
+      projectRoot: "/tmp/proj",
+      mcpServers: [],
+      sessionDirRoot: "/tmp/sessions",
+      emit,
+    };
+    const adapter = new CodexAppServerAdapter(ctx);
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    await tick();
+    const terminal = {
+      itemId: "item-1",
+      processId: "process-1",
+      command: "pnpm test:git",
+      cwd: "/tmp/proj",
+      osPid: 101,
+      cpuPercent: null,
+      rssKb: null,
+    };
+    rt.listRequests[0].deferred.resolve({ data: [terminal], nextCursor: null });
+    await tick();
+
+    rt.terminateResult = false;
+    const stopping = adapter.stopBackgroundTask({
+      sessionId: session.sessionId,
+      taskId: "process-1",
+    });
+    const stoppingOutcome = stopping.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await tick();
+    rt.listRequests[1].deferred.resolve({
+      data: [terminal],
+      nextCursor: null,
+    });
+    await expect(stoppingOutcome).resolves.toBeInstanceOf(Error);
+
+    rt.fire("item/completed", {
+      threadId: "thread-exact",
+      item: { type: "commandExecution", id: "item-1" },
+    });
+    await tick();
+    rt.listRequests[2].deferred.resolve({ data: [], nextCursor: null });
+    await tick();
+    const settled = emit.onSessionUpdate.mock.calls
+      .map((call) => call[1])
+      .find(
+        (notification) =>
+          notification.update.sessionUpdate === "tool_call" &&
+          notification.update.kind === "background_task",
+      );
+    expect(settled).toMatchObject({
+      update: { rawOutput: { status: "finished" } },
     });
     await adapter.dispose();
   });

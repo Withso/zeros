@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   BackgroundTask,
@@ -26,6 +26,10 @@ const note = (
 describe("sessions-store background task snapshots", () => {
   beforeEach(() => {
     useSessionsStore.getState().clearAll();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it("replaces the exact session's task set and accepts an authoritative empty set", () => {
@@ -83,6 +87,42 @@ describe("sessions-store background task snapshots", () => {
     store.applyBridgeUpdate(note("session-a", [task("p1", "pnpm test")]));
 
     expect(useSessionsStore.getState().sessions["chat-a"]).toBe(before);
+  });
+
+  it("owns the continuous waiting duration in exact-session state across UI remounts", () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const store = useSessionsStore.getState();
+    store.setSession("chat-a", {
+      ...BLANK,
+      agentId: "claude",
+      sessionId: "session-a",
+    });
+
+    store.applyBridgeUpdate(note("session-a", [task("one")], true));
+    expect(
+      useSessionsStore.getState().sessions["chat-a"]
+        .backgroundTasksWaitingSince,
+    ).toBe(1_000);
+
+    now.mockReturnValue(9_000);
+    store.applyBridgeUpdate(note("session-a", [task("one")], true));
+    expect(
+      useSessionsStore.getState().sessions["chat-a"]
+        .backgroundTasksWaitingSince,
+    ).toBe(1_000);
+
+    store.applyBridgeUpdate(note("session-a", [task("one")], false));
+    expect(
+      useSessionsStore.getState().sessions["chat-a"]
+        .backgroundTasksWaitingSince,
+    ).toBeNull();
+
+    now.mockReturnValue(12_000);
+    store.applyBridgeUpdate(note("session-a", [task("one")], true));
+    expect(
+      useSessionsStore.getState().sessions["chat-a"]
+        .backgroundTasksWaitingSince,
+    ).toBe(12_000);
   });
 
   it("clears process-owned background work when its agent session exits", () => {

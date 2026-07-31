@@ -36,7 +36,8 @@ export const BackgroundTaskRecord: Renderer<AgentToolMessage> = memo(
       `Task ${text(input.taskId) ?? ""}`.trim();
     const command = text(input.command);
     const taskId = text(input.taskId);
-    const summary = text(output.summary, output.error);
+    const summary = text(output.summary);
+    const error = text(output.error);
     const providerStatus = text(output.status);
     const outputFile = text(output.outputFile);
     const durationMs =
@@ -66,6 +67,7 @@ export const BackgroundTaskRecord: Renderer<AgentToolMessage> = memo(
                 <InfoRow label="Status" value={providerStatus} />
               ) : null}
               {summary ? <InfoRow label="Result" value={summary} /> : null}
+              {error ? <InfoRow label="Error" value={error} /> : null}
               {durationMs !== null ? (
                 <InfoRow label="Duration" value={formatElapsed(durationMs)} />
               ) : null}

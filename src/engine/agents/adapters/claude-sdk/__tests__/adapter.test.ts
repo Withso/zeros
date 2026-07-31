@@ -130,6 +130,10 @@ function makeScriptedQuery(
         isDeferred?: boolean;
       }>;
     };
+    /** Simulate an older SDK query without the task-stop control method. */
+    omitStopTask?: boolean;
+    /** Observe whether an unrelated turn is active at interrupt time. */
+    onInterrupt?: () => void;
   },
 ) {
   let call = 0;
@@ -198,12 +202,15 @@ function makeScriptedQuery(
     })();
     const q = gen as unknown as Record<string, unknown>;
     q.interrupt = async () => {
+      opts?.onInterrupt?.();
       control.interrupts += 1;
       release();
     };
-    q.stopTask = async (taskId: string) => {
-      control.stoppedTasks.push(taskId);
-    };
+    if (!opts?.omitStopTask) {
+      q.stopTask = async (taskId: string) => {
+        control.stoppedTasks.push(taskId);
+      };
+    }
     q.setPermissionMode = async (m: string) => {
       if (opts?.rejectModes?.test(m)) {
         throw new Error(
@@ -1263,6 +1270,84 @@ describe("ClaudeSdkAdapter", () => {
     });
     expect(control.stoppedTasks).toEqual(["shell-1"]);
     expect(control.interrupts).toBe(1);
+    await adapter.dispose();
+  });
+
+  it("never lets a scheduled-wakeup stop interrupt the next queued reply", async () => {
+    const adapterRef: { current: ClaudeSdkAdapter | null } = { current: null };
+    let interruptSawActiveTurn = false;
+    const { queryFn } = makeScriptedQuery(
+      [[initMsg("sdk-1"), resultOk("sdk-1")]],
+      {
+        keepAliveAfterResult: true,
+        onInterrupt: () => {
+          const sessionState = (
+            adapterRef.current as unknown as {
+              sessions: Map<string, { turn: unknown | null }>;
+            }
+          ).sessions.values().next().value;
+          interruptSawActiveTurn = sessionState?.turn !== null;
+        },
+      },
+    );
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    adapterRef.current = adapter;
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const firstPrompt = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("first reply")] as never,
+    });
+    const sessionState = (
+      adapter as unknown as {
+        sessions: Map<
+          string,
+          {
+            turn: {
+              promise: Promise<unknown>;
+            } | null;
+          }
+        >;
+      }
+    ).sessions.get(session.sessionId)!;
+    let queuedPrompt: Promise<unknown> = Promise.resolve();
+    sessionState.turn!.promise.then(() => {
+      queuedPrompt = adapter.prompt({
+        sessionId: session.sessionId,
+        prompt: [textBlock("queued reply")] as never,
+      });
+      void queuedPrompt.catch(() => undefined);
+    });
+
+    const stopping = adapter.stopBackgroundTask({
+      sessionId: session.sessionId,
+      taskId: "scheduled-wakeup:wake-1",
+    });
+    await firstPrompt;
+    await stopping;
+
+    expect(interruptSawActiveTurn).toBe(false);
+    await adapter.dispose();
+    await queuedPrompt.catch(() => undefined);
+  });
+
+  it("reports a clear compatibility error when native task stopping is unavailable", async () => {
+    const { queryFn } = makeScriptedQuery(
+      [[initMsg("sdk-1"), resultOk("sdk-1")]],
+      { keepAliveAfterResult: true, omitStopTask: true },
+    );
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("start work")] as never,
+    });
+
+    await expect(
+      adapter.stopBackgroundTask({
+        sessionId: session.sessionId,
+        taskId: "shell-1",
+      }),
+    ).rejects.toThrow("does not support stopping background tasks");
     await adapter.dispose();
   });
 

@@ -234,7 +234,12 @@ interface CodexSession {
    * refresh is in flight or fails; replacement happens only on a successful
    * exact-thread read. */
   backgroundTasks: Map<string, BackgroundTask>;
+  /** Monotonic invalidation generation for the exact thread key. */
   backgroundRefreshGeneration: number;
+  /** One shared paginated read per session; invalidations during it request a
+   * single trailing pass and make the older response ineligible to publish. */
+  backgroundRefreshInFlight: Promise<void> | null;
+  backgroundRefreshQueued: boolean;
   stoppedBackgroundTaskIds: Set<string>;
 }
 
@@ -772,19 +777,31 @@ export class CodexAppServerAdapter implements AgentAdapter {
     taskId: string;
   }): Promise<void> {
     const session = this.requireSession(opts.sessionId);
-    session.stoppedBackgroundTaskIds.add(opts.taskId);
+    const wasActive = session.backgroundTasks.has(opts.taskId);
+    if (wasActive) session.stoppedBackgroundTaskIds.add(opts.taskId);
+    let result: { terminated: boolean };
     try {
-      await session.runtime.request<{ terminated: boolean }>(
+      result = await session.runtime.request<{ terminated: boolean }>(
         "thread/backgroundTerminals/terminate",
         { threadId: session.threadId, processId: opts.taskId },
         { timeoutMs: 5_000 },
       );
-      // Whether terminate reports true or the process won a natural-exit race,
-      // the follow-up list is authoritative and removes stale UI promptly.
-      await this.refreshBackgroundTasks(session);
     } catch (error) {
+      // The terminate request can reach app-server and then lose its response.
+      // Re-read before surfacing that ambiguous transport error: confirmed
+      // removal means the user's requested outcome happened and consumes the
+      // stopped marker through publishBackgroundTasks.
+      await this.refreshBackgroundTasks(session);
+      if (wasActive && !session.backgroundTasks.has(opts.taskId)) return;
       session.stoppedBackgroundTaskIds.delete(opts.taskId);
       throw error;
+    }
+    // Whether terminate reports true or the process won a natural-exit race,
+    // the follow-up list is authoritative and removes stale UI promptly.
+    await this.refreshBackgroundTasks(session);
+    if (!result.terminated && session.backgroundTasks.has(opts.taskId)) {
+      session.stoppedBackgroundTaskIds.delete(opts.taskId);
+      throw new Error(`Codex did not terminate background task ${opts.taskId}`);
     }
   }
 
@@ -1295,6 +1312,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
       childExitedMidTurn: false,
       backgroundTasks: new Map(),
       backgroundRefreshGeneration: 0,
+      backgroundRefreshInFlight: null,
+      backgroundRefreshQueued: false,
       stoppedBackgroundTaskIds: new Set(),
     };
     this.sessions.set(zerosSessionId, session);
@@ -1749,70 +1768,110 @@ export class CodexAppServerAdapter implements AgentAdapter {
       "turn/completed",
       "thread/status/changed",
     ]) {
-      runtime.onNotification(method, () => {
+      runtime.onNotification(method, (params) => {
+        const notification = params as {
+          threadId?: unknown;
+          item?: { type?: unknown };
+        };
+        if (notification?.threadId !== session.threadId) return;
+        if (
+          (method === "item/started" || method === "item/completed") &&
+          notification.item?.type !== "commandExecution"
+        ) {
+          return;
+        }
         queueMicrotask(() => void this.refreshBackgroundTasks(session));
       });
     }
   }
 
-  /** Exact-thread, latest-request-wins refresh. Failed reads retain the last
-   * confirmed snapshot; overlapping reads cannot let an older response erase
-   * a newer one. */
-  private async refreshBackgroundTasks(session: CodexSession): Promise<void> {
-    const generation = ++session.backgroundRefreshGeneration;
-    try {
-      const terminals = await collectBackgroundTerminals(
-        (method, params, requestOpts) =>
-          session.runtime.request(method, params, requestOpts),
-        session.threadId,
-      );
-      if (
-        generation !== session.backgroundRefreshGeneration ||
-        this.sessions.get(session.zerosSessionId) !== session ||
-        !session.runtimeAlive
-      ) {
-        return;
+  /** Exact-thread single-flight refresh. Every invalidation advances the key's
+   * generation. A beat during a read schedules exactly one trailing pass and
+   * prevents the now-stale response from flashing obsolete membership. */
+  private refreshBackgroundTasks(session: CodexSession): Promise<void> {
+    session.backgroundRefreshGeneration += 1;
+    if (session.backgroundRefreshInFlight) {
+      session.backgroundRefreshQueued = true;
+      return session.backgroundRefreshInFlight;
+    }
+    const operation = Promise.resolve().then(async () => {
+      try {
+        do {
+          const generation = session.backgroundRefreshGeneration;
+          session.backgroundRefreshQueued = false;
+          try {
+            const terminals = await collectBackgroundTerminals(
+              (method, params, requestOpts) =>
+                session.runtime.request(method, params, requestOpts),
+              session.threadId,
+            );
+            if (
+              generation !== session.backgroundRefreshGeneration ||
+              this.sessions.get(session.zerosSessionId) !== session ||
+              !session.runtimeAlive
+            ) {
+              continue;
+            }
+            this.publishBackgroundTasks(session, terminals);
+          } catch {
+            // Preserve the last confirmed snapshot while the runtime is
+            // reconnecting or the experimental endpoint is transiently busy.
+          }
+        } while (
+          session.backgroundRefreshQueued &&
+          this.sessions.get(session.zerosSessionId) === session &&
+          session.runtimeAlive
+        );
+      } finally {
+        if (session.backgroundRefreshInFlight === operation) {
+          session.backgroundRefreshInFlight = null;
+        }
       }
-      const { active, removed } = reconcileBackgroundTerminals(
-        session.backgroundTasks,
-        terminals,
-        Date.now(),
-      );
-      session.backgroundTasks = active;
+    });
+    session.backgroundRefreshInFlight = operation;
+    return operation;
+  }
+
+  private publishBackgroundTasks(
+    session: CodexSession,
+    terminals: Awaited<ReturnType<typeof collectBackgroundTerminals>>,
+  ): void {
+    const { active, removed } = reconcileBackgroundTerminals(
+      session.backgroundTasks,
+      terminals,
+      Date.now(),
+    );
+    session.backgroundTasks = active;
+    this.ctx.emit.onSessionUpdate(this.agentId, {
+      sessionId: session.zerosSessionId,
+      update: {
+        sessionUpdate: "background_tasks_update",
+        tasks: [...active.values()],
+        waiting: false,
+      },
+    });
+    for (const task of removed) {
+      const stopped = session.stoppedBackgroundTaskIds.delete(task.taskId);
       this.ctx.emit.onSessionUpdate(this.agentId, {
         sessionId: session.zerosSessionId,
         update: {
-          sessionUpdate: "background_tasks_update",
-          tasks: [...active.values()],
-          waiting: false,
+          sessionUpdate: "tool_call",
+          toolCallId: `background-task-${randomUUID()}`,
+          title: "Background Task",
+          kind: "background_task",
+          status: "completed",
+          rawInput: {
+            taskId: task.taskId,
+            name: task.name,
+            taskType: task.taskType,
+            ...(task.command ? { command: task.command } : {}),
+          },
+          rawOutput: {
+            status: stopped ? "stopped" : "finished",
+            durationMs: Math.max(0, Date.now() - task.startedAt),
+          },
         },
       });
-      for (const task of removed) {
-        const stopped = session.stoppedBackgroundTaskIds.delete(task.taskId);
-        this.ctx.emit.onSessionUpdate(this.agentId, {
-          sessionId: session.zerosSessionId,
-          update: {
-            sessionUpdate: "tool_call",
-            toolCallId: `background-task-${randomUUID()}`,
-            title: "Background Task",
-            kind: "background_task",
-            status: "completed",
-            rawInput: {
-              taskId: task.taskId,
-              name: task.name,
-              taskType: task.taskType,
-              ...(task.command ? { command: task.command } : {}),
-            },
-            rawOutput: {
-              status: stopped ? "stopped" : "finished",
-              durationMs: Math.max(0, Date.now() - task.startedAt),
-            },
-          },
-        });
-      }
-    } catch {
-      // A refresh is keyed server state. Preserve the last confirmed snapshot
-      // while the runtime is reconnecting or the endpoint is transiently busy.
     }
   }
 

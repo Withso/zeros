@@ -111,15 +111,13 @@ export const BackgroundTasksCard = memo(function BackgroundTasksCard({
 export const BackgroundTasksWaitingLine = memo(
   function BackgroundTasksWaitingLine({
     tasks,
+    startedAt,
     active = true,
   }: {
     tasks: BackgroundTask[];
+    startedAt: number;
     active?: boolean;
   }) {
-    // This timer measures how long the parent has been parked, not how long
-    // the oldest child has been running (a task can run for minutes before
-    // Claude decides it must wait for it).
-    const [startedAt] = useState(() => Date.now());
     if (tasks.length === 0) return null;
     return (
       <div

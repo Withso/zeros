@@ -4040,12 +4040,13 @@ export function AgentChat({
             composer itself, never buried in the scrolling transcript. */}
           <BackgroundTasksCard
             tasks={session.backgroundTasks}
-            onStop={(taskId) => session.stopBackgroundTask?.(taskId)}
+            onStop={session.stopBackgroundTask}
             active={surfaceActive}
           />
           {session.waitingForBackgroundTasks ? (
             <BackgroundTasksWaitingLine
               tasks={session.backgroundTasks}
+              startedAt={session.backgroundTasksWaitingSince ?? Date.now()}
               active={surfaceActive}
             />
           ) : null}

@@ -182,6 +182,7 @@ export const BLANK: AgentSessionState = {
   availableSubagents: [],
   backgroundTasks: [],
   waitingForBackgroundTasks: false,
+  backgroundTasksWaitingSince: null,
 };
 
 export interface SessionsStoreState {
@@ -629,9 +630,16 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         const slot = state.sessions[chatId];
         if (!slot) return state;
         const tasks = incomingTasks.slice(0, MAX_BACKGROUND_TASKS_PER_CHAT);
+        const waitingSince = waiting
+          ? slot.waitingForBackgroundTasks &&
+            typeof slot.backgroundTasksWaitingSince === "number"
+            ? slot.backgroundTasksWaitingSince
+            : Date.now()
+          : null;
         if (
           sameBackgroundTasks(slot.backgroundTasks, tasks) &&
-          slot.waitingForBackgroundTasks === waiting
+          slot.waitingForBackgroundTasks === waiting &&
+          slot.backgroundTasksWaitingSince === waitingSince
         ) {
           return state;
         }
@@ -642,6 +650,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
               ...slot,
               backgroundTasks: tasks,
               waitingForBackgroundTasks: waiting,
+              backgroundTasksWaitingSince: waitingSince,
             },
           },
         };
@@ -865,11 +874,16 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         // no task in that snapshot can still receive progress or a scoped Stop.
         // Clear before the activelyDriven branch too, so a turn-recovery race
         // cannot leave dead work docked while the replacement session warms.
-        if (cur.backgroundTasks.length > 0 || cur.waitingForBackgroundTasks) {
+        if (
+          cur.backgroundTasks.length > 0 ||
+          cur.waitingForBackgroundTasks ||
+          cur.backgroundTasksWaitingSince !== null
+        ) {
           cur = {
             ...cur,
             backgroundTasks: [],
             waitingForBackgroundTasks: false,
+            backgroundTasksWaitingSince: null,
           };
           changed = true;
         }

@@ -418,6 +418,9 @@ interface SdkSession {
   /** The in-flight turn's deferred, settled when the consumer sees `result`
    *  (or the query errors). Null when idle. */
   turn: Deferred<{ stopReason: StopReason; usage?: TurnUsage }> | null;
+  /** Serializes the idle interrupt used to cancel a one-shot wake-up with the
+   * next prompt, so the control request can never hit an unrelated turn. */
+  scheduledWakeupStop: Promise<void> | null;
   /** Permission resolvers from canUseTool, keyed by permissionId. */
   readonly pendingPermissions: Map<
     string,
@@ -742,6 +745,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         },
       }),
       turn: null,
+      scheduledWakeupStop: null,
       pendingPermissions: new Map(),
       pendingQuestions: new Map(),
       questionByToolUse: new Map(),
@@ -760,7 +764,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     sessionId: string;
     prompt: ContentBlock[];
   }): Promise<{ stopReason: StopReason; response: PromptResponse }> {
-    const state = this.mustState(opts.sessionId);
+    let state = this.mustState(opts.sessionId);
     if (state.turn) {
       throw new AgentFailureError({
         kind: "protocol-error",
@@ -768,6 +772,22 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         stage: "prompt",
         agentId: this.agentId,
       });
+    }
+    // A scheduled-wakeup stop must issue its interrupt while the persistent
+    // query is genuinely idle. A queued prompt that arrives at the previous
+    // turn boundary waits here until that control request has settled.
+    const pendingWakeupStop = state.scheduledWakeupStop;
+    if (pendingWakeupStop) {
+      await pendingWakeupStop.catch(() => undefined);
+      state = this.mustState(opts.sessionId);
+      if (state.turn) {
+        throw new AgentFailureError({
+          kind: "protocol-error",
+          message: "a prompt is already in flight for this session",
+          stage: "prompt",
+          agentId: this.agentId,
+        });
+      }
     }
     state.cancelRequested = false;
     this.ensureQuery(state);
@@ -1299,19 +1319,45 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // dynamic-loop wakeups. Stop hooks expose at most one such wakeup (a new
       // one supersedes the old one), and recurring cron jobs never enter this
       // branch because task 008 remains intentionally excluded.
-      const q = state.query;
-      if (state.turn) {
-        await state.turn.promise.catch(() => undefined);
+      if (state.scheduledWakeupStop) {
+        await state.scheduledWakeupStop;
+        return;
       }
-      // A restart/dispose may have replaced the query while the turn settled.
-      if (state.query !== q || state.disposed) {
-        throw new Error("Claude scheduled wake-up is no longer connected");
+      const operation = Promise.resolve().then(async () => {
+        const q = state.query;
+        if (!q) {
+          throw new Error("Claude scheduled wake-up is no longer connected");
+        }
+        const turn = state.turn;
+        if (turn) await turn.promise.catch(() => undefined);
+        // The prompt gate above prevents a new turn from entering after the
+        // awaited one settles. Keep the explicit guard as a fail-safe for any
+        // future code path that bypasses prompt().
+        if (state.query !== q || state.disposed || state.turn !== null) {
+          throw new Error("Claude scheduled wake-up is no longer idle");
+        }
+        await q.interrupt();
+        state.translator.clearScheduledWakeups();
+      });
+      state.scheduledWakeupStop = operation;
+      try {
+        await operation;
+      } finally {
+        if (state.scheduledWakeupStop === operation) {
+          state.scheduledWakeupStop = null;
+        }
       }
-      await q.interrupt();
-      state.translator.setScheduledWakeups([]);
       return;
     }
-    await state.query.stopTask(opts.taskId);
+    const stopTask = (state.query as unknown as {
+      stopTask?: (taskId: string) => Promise<void>;
+    }).stopTask;
+    if (typeof stopTask !== "function") {
+      throw new Error(
+        "This Claude Agent SDK does not support stopping background tasks; update Claude before retrying.",
+      );
+    }
+    await stopTask.call(state.query, opts.taskId);
   }
 
   async setMode(opts: { sessionId: string; modeId: string }): Promise<void> {
@@ -2262,7 +2308,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
                   input.hook_event_name === "UserPromptSubmit" &&
                   input.source === "loop_wakeup"
                 ) {
-                  state.translator.setScheduledWakeups([]);
+                  state.translator.clearScheduledWakeups();
                 }
                 return {};
               },
