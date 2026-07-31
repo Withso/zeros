@@ -15,6 +15,7 @@ export { Input } from "./input";
 export { Textarea } from "./textarea";
 export { CodeTextarea, type CodeTextareaProps } from "./code-textarea";
 export { Label } from "./label";
+export { Checkbox, type CheckboxProps, type CheckedState } from "./checkbox";
 export { Badge, badgeVariants, type BadgeProps } from "./badge";
 export { RadioGroup, RadioGroupItem } from "./radio-group";
 export { Separator } from "./separator";
