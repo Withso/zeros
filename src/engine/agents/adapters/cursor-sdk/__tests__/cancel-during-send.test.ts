@@ -19,7 +19,7 @@ const { createSpy, sendSpy, modelsListSpy } = vi.hoisted(() => ({
 vi.mock("@cursor/sdk", () => ({
   Agent: { create: createSpy, resume: vi.fn(), list: vi.fn() },
   Cursor: { models: { list: modelsListSpy } },
-  SqliteLocalAgentStore: {
+  LocalAgentStore: {
     open: async () => ({ runs: { get: async () => null }, dispose: async () => {} }),
   },
 }));

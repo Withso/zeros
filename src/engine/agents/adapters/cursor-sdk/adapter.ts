@@ -335,10 +335,11 @@ export interface CursorSdkModule {
       ): Promise<Array<{ id?: string; displayName?: string }>>;
     };
   };
-  /** On-disk SQLite store. We open it read-only-ish to recover a run's real
-   *  terminal `error` after wait() reports a detail-less failure. Optional so
-   *  the bundle tolerates an SDK without the export. */
-  SqliteLocalAgentStore?: {
+  /** The on-disk local agent store — the SAME one the host hands @cursor/sdk
+   *  for the agent's own runs (JSONL; see cursor-host.cjs). We open it to
+   *  recover a run's real terminal `error` after wait() reports a detail-less
+   *  failure. Optional so the bundle tolerates a host without the op. */
+  LocalAgentStore?: {
     open(opts: {
       workspaceRef: string;
       stateRoot?: string;
@@ -592,17 +593,17 @@ export class CursorSdkAdapter implements AgentAdapter {
     return null;
   }
 
-  /** Lazily open (and cache) the SDK's on-disk SQLite store for a cwd. The
-   *  store defaults its state root to the same place the SDK writes runs, so
-   *  reads see the agent's own rows. Best-effort: null when unavailable. */
+  /** Lazily open (and cache) the on-disk local agent store for a cwd. The store
+   *  defaults its state root to the same place the SDK writes runs, so reads
+   *  see the agent's own rows. Best-effort: null when unavailable. */
   private async openStore(cwd: string): Promise<CursorLocalStore | null> {
     let p = this.storeByCwd.get(cwd);
     if (!p) {
       p = (async () => {
         try {
           const sdk = await loadSdk();
-          if (!sdk.SqliteLocalAgentStore?.open) return null;
-          return await sdk.SqliteLocalAgentStore.open({ workspaceRef: cwd });
+          if (!sdk.LocalAgentStore?.open) return null;
+          return await sdk.LocalAgentStore.open({ workspaceRef: cwd });
         } catch (err) {
           this.ctx.emit.onAgentStderr(
             AGENT_ID,

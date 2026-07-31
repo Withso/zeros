@@ -31,7 +31,7 @@ const { createSpy, resumeSpy, sendSpy, listSpy, modelsListSpy, storeGetSpy } =
 vi.mock("@cursor/sdk", () => ({
   Agent: { create: createSpy, resume: resumeSpy, list: listSpy },
   Cursor: { models: { list: modelsListSpy } },
-  SqliteLocalAgentStore: {
+  LocalAgentStore: {
     open: async () => ({
       runs: { get: storeGetSpy },
       dispose: async () => {},
