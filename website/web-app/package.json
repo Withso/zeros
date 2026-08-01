@@ -9,7 +9,7 @@
     "dev": "npm run build && npx wrangler@4 pages dev dist --port 8788 --ip 127.0.0.1 --compatibility-date=2026-07-10 --kv SESSIONS --binding MARKETING_HOSTS=127.0.0.1,localhost",
     "dev:app": "npm run build && npx wrangler@4 pages dev dist --port 8788 --ip 127.0.0.1 --compatibility-date=2026-07-10 --kv SESSIONS",
     "typecheck": "tsc --noEmit",
-    "test": "node --test lib/hosts.test.mjs lib/schemes.test.mjs"
+    "test": "node --test lib/github-completion.test.mjs lib/hosts.test.mjs lib/page.test.mjs lib/schemes.test.mjs"
   },
   "dependencies": {},
   "devDependencies": {

@@ -20,6 +20,21 @@ export function githubMethodDescription(method: GithubAuthMethod): string {
   return "Use a token you create and control on GitHub.";
 }
 
+/** A missing count means the bounded inventory was unavailable or incomplete,
+ * so prior server-side setup must still choose direct OAuth. Zero is published
+ * only after a complete inventory and is therefore safe to force back through
+ * GitHub's installation page. */
+export function githubAppConnectOptions(
+  summary: GithubCredentialSummary,
+  forceInstallRequested = false,
+): { installFlow: boolean; forceInstall: boolean } {
+  const confirmedEmpty = summary.configured && summary.installationCount === 0;
+  return {
+    installFlow: forceInstallRequested || !summary.configured || confirmedEmpty,
+    forceInstall: forceInstallRequested || confirmedEmpty,
+  };
+}
+
 export function githubMethodStatusCopy(
   summary: GithubCredentialSummary,
 ): string {

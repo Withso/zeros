@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { GithubCredentialSummary } from "@zeros/core/github-auth";
 import {
+  githubAppConnectOptions,
   githubAutomaticSetup,
   githubMethodLabel,
   githubMethodStatusCopy,
@@ -22,6 +23,36 @@ function summary(
 }
 
 describe("GitHub settings row helpers", () => {
+  it("forces installation only after a complete inventory confirms zero installations", () => {
+    expect(
+      githubAppConnectOptions(
+        summary({
+          method: "github-app",
+          configured: true,
+          installationCount: 0,
+        }),
+      ),
+    ).toEqual({ installFlow: true, forceInstall: true });
+    expect(
+      githubAppConnectOptions(
+        summary({
+          method: "github-app",
+          configured: true,
+          installationCount: undefined,
+        }),
+      ),
+    ).toEqual({ installFlow: false, forceInstall: false });
+    expect(
+      githubAppConnectOptions(
+        summary({
+          method: "github-app",
+          configured: false,
+          health: "not-connected",
+        }),
+      ),
+    ).toEqual({ installFlow: true, forceInstall: false });
+  });
+
   it("does not expose sign-in setup before the first confirmed auth snapshot", () => {
     const snapshot = {
       selectedMethod: "gh-cli" as const,

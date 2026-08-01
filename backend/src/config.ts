@@ -56,6 +56,11 @@ const GithubEnvSchema = z.object({
     .regex(/^[A-Za-z0-9-]+$/),
   /** Registered GitHub user-authorization callback. */
   GITHUB_OAUTH_CALLBACK_URL: z.string().url(),
+  /** Hosted browser page that hands the completed flow back to the desktop. */
+  GITHUB_COMPLETION_PAGE_URL: z
+    .string()
+    .url()
+    .default("https://app.zeros.build/github/connected"),
   /**
    * Key for the refresh-token binding HMAC. Defaults to the client secret for
    * continuity, but SET IT SEPARATELY in any environment that rotates the
@@ -87,6 +92,7 @@ export type GithubBackendConfig = {
   refreshBindingSecret: string;
   appSlug: string;
   oauthCallbackUrl: string;
+  completionPageUrl: string;
   webBaseUrl: string;
   apiBaseUrl: string;
   variantKey: "github.com";
@@ -127,6 +133,32 @@ function validatedServiceUrl(
   return url.toString().replace(/\/+$/, "");
 }
 
+function validatedBrowserUrl(
+  raw: string,
+  name: string,
+  nodeEnv: string,
+): string {
+  const url = new URL(raw);
+  const devLoopback =
+    nodeEnv !== "production" &&
+    url.protocol === "http:" &&
+    (url.hostname === "127.0.0.1" ||
+      url.hostname === "[::1]" ||
+      url.hostname === "localhost");
+  if (
+    (url.protocol !== "https:" && !devLoopback) ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error(
+      `Invalid environment: ${name} must use HTTPS (or dev loopback HTTP) and contain no credentials, query, or fragment`,
+    );
+  }
+  return url.toString();
+}
+
 /** Resolve the optional GitHub App block. Throws only so `loadConfig` can turn
  *  the reason into a warning — never into a failed boot. */
 function parseGithubConfig(env: NodeJS.ProcessEnv): GithubBackendConfig {
@@ -139,25 +171,6 @@ function parseGithubConfig(env: NodeJS.ProcessEnv): GithubBackendConfig {
     );
   }
   const e = parsed.data;
-  const callback = new URL(e.GITHUB_OAUTH_CALLBACK_URL);
-  if (
-    callback.username ||
-    callback.password ||
-    callback.search ||
-    callback.hash ||
-    (callback.protocol !== "https:" &&
-      !(
-        e.NODE_ENV !== "production" &&
-        callback.protocol === "http:" &&
-        (callback.hostname === "127.0.0.1" ||
-          callback.hostname === "[::1]" ||
-          callback.hostname === "localhost")
-      ))
-  ) {
-    throw new Error(
-      "GITHUB_OAUTH_CALLBACK_URL must use HTTPS (or dev loopback HTTP)",
-    );
-  }
   return {
     appId: e.GITHUB_APP_ID,
     clientId: e.GITHUB_APP_CLIENT_ID,
@@ -165,7 +178,16 @@ function parseGithubConfig(env: NodeJS.ProcessEnv): GithubBackendConfig {
     refreshBindingSecret:
       e.GITHUB_REFRESH_BINDING_SECRET ?? e.GITHUB_APP_CLIENT_SECRET,
     appSlug: e.GITHUB_APP_SLUG,
-    oauthCallbackUrl: callback.toString(),
+    oauthCallbackUrl: validatedBrowserUrl(
+      e.GITHUB_OAUTH_CALLBACK_URL,
+      "GITHUB_OAUTH_CALLBACK_URL",
+      e.NODE_ENV,
+    ),
+    completionPageUrl: validatedBrowserUrl(
+      e.GITHUB_COMPLETION_PAGE_URL,
+      "GITHUB_COMPLETION_PAGE_URL",
+      e.NODE_ENV,
+    ),
     webBaseUrl: validatedServiceUrl(
       e.GITHUB_WEB_BASE_URL,
       "GITHUB_WEB_BASE_URL",

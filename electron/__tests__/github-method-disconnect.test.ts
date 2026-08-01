@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  beginApp: vi.fn(),
   clear: vi.fn(),
   detectGhCli: vi.fn(),
   disconnectApp: vi.fn(),
@@ -28,7 +29,7 @@ vi.mock("../github-auth-runtime", () => ({
 }));
 
 vi.mock("../github-app-flow", () => ({
-  beginGithubAppConnection: vi.fn(),
+  beginGithubAppConnection: mocks.beginApp,
   cancelGithubAppConnection: vi.fn(),
   disconnectGithubApp: mocks.disconnectApp,
   recheckGithubAppInstallations: vi.fn(),
@@ -50,6 +51,7 @@ vi.mock("../ipc/commands/auth-session", () => ({
 }));
 
 import {
+  ghAppConnect,
   ghAuthSnapshot,
   ghCredentialClear,
   ghMethodDisconnect,
@@ -72,6 +74,7 @@ const cliCredential = {
 describe("GitHub method disconnect commit order", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.beginApp.mockResolvedValue("install");
     mocks.clear.mockResolvedValue(undefined);
     mocks.disconnectApp.mockResolvedValue(true);
     mocks.get.mockResolvedValue(patCredential);
@@ -81,6 +84,14 @@ describe("GitHub method disconnect commit order", () => {
     mocks.pushToEngine.mockResolvedValue(undefined);
     mocks.setFallbackMethod.mockResolvedValue(undefined);
     mocks.setSelectedMethod.mockResolvedValue(undefined);
+  });
+
+  it("forwards an explicit install recovery request to the App flow", async () => {
+    await expect(
+      ghAppConnect({ installFlow: true, forceInstall: true }, {} as never),
+    ).resolves.toEqual({ flowKind: "install" });
+
+    expect(mocks.beginApp).toHaveBeenCalledWith(true, true);
   });
 
   it("keeps a selected PAT when its fallback preference cannot be stored", async () => {

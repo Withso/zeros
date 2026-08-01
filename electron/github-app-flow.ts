@@ -17,7 +17,10 @@ import {
   githubCredentialStore,
   replaceGithubAppCredentialIfCurrent,
 } from "./github-auth-runtime";
-import { GithubAppClient } from "./github-app-client";
+import {
+  GithubAppClient,
+  type GithubAppFlowKind,
+} from "./github-app-client";
 import {
   GithubAppController,
   GithubAppFlowError,
@@ -223,10 +226,12 @@ function githubAppController(): GithubAppController {
 
 export async function beginGithubAppConnection(
   installFlow: boolean,
-): Promise<void> {
-  await githubAppController().begin({
+  forceInstall = false,
+): Promise<GithubAppFlowKind | null> {
+  return githubAppController().begin({
     scheme: schemeForChannel(channel()),
     installFlow,
+    forceInstall,
   });
 }
 

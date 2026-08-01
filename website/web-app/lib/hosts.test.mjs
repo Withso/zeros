@@ -57,6 +57,7 @@ function isAppOnlyPath(pathname) {
   return (
     pathname === "/launch" ||
     pathname === "/invite" ||
+    pathname === "/github/connected" ||
     pathname.startsWith("/auth/") ||
     pathname.startsWith("/handoff/")
   );
@@ -94,11 +95,12 @@ describe("classifyHost", () => {
 });
 
 describe("isAppOnlyPath", () => {
-  it("flags auth/handoff/launch/invite", () => {
+  it("flags auth/handoff/launch/invite/GitHub completion", () => {
     assert.equal(isAppOnlyPath("/auth/start"), true);
     assert.equal(isAppOnlyPath("/handoff/mint"), true);
     assert.equal(isAppOnlyPath("/launch"), true);
     assert.equal(isAppOnlyPath("/invite"), true);
+    assert.equal(isAppOnlyPath("/github/connected"), true);
   });
 
   it("does not flag marketing paths", () => {

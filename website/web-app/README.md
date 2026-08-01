@@ -18,6 +18,7 @@ Host routing lives in `functions/_middleware.ts` + `lib/hosts.ts`. Marketing tra
 ```
 GET  /   (and /launch alias)   → session-aware HUB (lib/hub.ts)
 GET  /auth/start|callback|logout
+GET  /github/connected         → GitHub App completion + Open Zeros handoff
 GET  /invite?token=
 POST /handoff/{mint,redeem,refresh,revoke}
 ```
@@ -31,7 +32,7 @@ GET  /schemas/*                → published settings JSON Schema
 GET  /robots.txt               → Allow: /  (middleware; not the app Disallow)
 ```
 
-App-only paths hit on a marketing host (`/auth/*`, `/handoff/*`, `/launch`, `/invite`) **302 → `app.zeros.build`**.
+App-only paths hit on a marketing host (`/auth/*`, `/handoff/*`, `/github/connected`, `/launch`, `/invite`) **302 → `app.zeros.build`**.
 
 ## Local development
 
@@ -127,6 +128,7 @@ web-app/
   functions/index.ts           → /        (hub — app host only)
   functions/launch.ts          → /launch
   functions/invite.ts          → /invite
+  functions/github/connected.ts → /github/connected
   functions/auth/*             → Auth0 PKCE
   functions/handoff/*          → desktop ticket APIs
   lib/hosts.ts                 → host classification + CSP

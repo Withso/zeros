@@ -463,10 +463,15 @@ export function withNativeErrors(handler: CommandHandler): CommandHandler {
 
 /** Begin the backend-bound browser authorization. New connections use the App
  * install URL; reconnects use direct OAuth + S256 PKCE to avoid creating a
- * duplicate installation. */
+ * duplicate installation. A completed empty inventory may explicitly force
+ * the install URL so an authorization-only account can recover. */
 export const ghAppConnect: CommandHandler = async (args) => {
   try {
-    await beginGithubAppConnection(args.installFlow !== false);
+    const flowKind = await beginGithubAppConnection(
+      args.installFlow !== false,
+      args.forceInstall === true,
+    );
+    return flowKind ? { flowKind } : null;
   } catch (error) {
     throwGithubAppCommandError(
       error,
@@ -474,7 +479,6 @@ export const ghAppConnect: CommandHandler = async (args) => {
       "The GitHub App connection could not be started. Try again.",
     );
   }
-  return null;
 };
 
 export const ghAppCancel: CommandHandler = () => {

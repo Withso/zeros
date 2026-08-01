@@ -17,6 +17,7 @@ import {
 import {
   GithubAppClientError,
   type GithubAppClient,
+  type GithubAppFlowKind,
 } from "./github-app-client";
 
 type GithubAppCredential = Extract<GithubCredential, { method: "github-app" }>;
@@ -233,7 +234,11 @@ export class GithubAppController {
     this.now = deps.now ?? Date.now;
   }
 
-  async begin(input: { scheme: string; installFlow: boolean }): Promise<void> {
+  async begin(input: {
+    scheme: string;
+    installFlow: boolean;
+    forceInstall?: boolean;
+  }): Promise<GithubAppFlowKind | null> {
     const epoch = this.cancelEpoch;
     const session = await this.deps.getSession();
     if (!session) {
@@ -257,6 +262,7 @@ export class GithubAppController {
         variantKey: "github.com",
         scheme: input.scheme,
         installFlow: input.installFlow,
+        forceInstall: input.forceInstall === true,
       });
     } catch (error) {
       throw mapClientError(error);
@@ -265,7 +271,7 @@ export class GithubAppController {
     // nonce now would leave a redeemable handoff, and for an already-authorized
     // app the browser redirects with no prompt — so a callback could still
     // connect and switch the selected method after the user said no.
-    if (epoch !== this.cancelEpoch) return;
+    if (epoch !== this.cancelEpoch) return null;
     this.deps.savePending({
       nonce,
       expiresAtMs: started.expiresAtMs,
@@ -281,6 +287,7 @@ export class GithubAppController {
         { cause: error },
       );
     }
+    return started.flowKind;
   }
 
   /** Cancel only the desktop half of the browser flow. A callback that arrives
