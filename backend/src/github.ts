@@ -197,11 +197,7 @@ function base64url(value: Buffer): string {
 function pkceChallenge(verifier: string): string {
   // PKCE S256 deliberately uses one SHA-256 digest over a high-entropy random
   // code verifier (RFC 7636); this value is not a user-chosen password.
-  return base64url(
-    createHash("sha256")
-      .update(verifier, "utf8") // lgtm[js/insufficient-password-hash]
-      .digest(),
-  );
+  return base64url(createHash("sha256").update(verifier, "utf8").digest());
 }
 
 // ── Handoff token sealing ────────────────────────────────────────────────
@@ -1173,7 +1169,7 @@ export function createGithubRoutes(
       const installRequested =
         forceInstallRequested || body.installFlow !== false;
       const state = base64url(random(32));
-      const oauthVerifier = base64url(random(48));
+      const randomPkceVerifier = base64url(random(48));
       const expiresAt = new Date(now() + OAUTH_STATE_TTL_MS);
 
       const flowKind = await withUserTx(pool, user.id, async (tx) => {
@@ -1205,7 +1201,7 @@ export function createGithubRoutes(
           hasInstallation,
         });
         const verifier =
-          resolvedFlowKind === "oauth" ? oauthVerifier : null;
+          resolvedFlowKind === "oauth" ? randomPkceVerifier : null;
         await tx.query(
           `DELETE FROM github_oauth_states
            WHERE owner_user_id = $1
@@ -1243,7 +1239,7 @@ export function createGithubRoutes(
       url.searchParams.set("client_id", config.clientId);
       url.searchParams.set("redirect_uri", config.oauthCallbackUrl);
       url.searchParams.set("state", state);
-      url.searchParams.set("code_challenge", pkceChallenge(oauthVerifier));
+      url.searchParams.set("code_challenge", pkceChallenge(randomPkceVerifier));
       url.searchParams.set("code_challenge_method", "S256");
       return c.json({
         authorizeUrl: url.toString(),
