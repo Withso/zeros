@@ -57,6 +57,50 @@ describe("buildPrInstructions", () => {
     expect(out).toContain("gh pr create --draft --base dev");
   });
 
+  // The direct button refuses a conflicted tree and offers "Ask agent" as the
+  // recovery — a brief that opened with "the user likes the current state of the
+  // code" and never mentioned the conflict would send the agent to commit
+  // `<<<<<<<` markers.
+  it("puts an unresolved conflict first, before the commit step", () => {
+    const out = buildPrInstructions({
+      branch: "b",
+      baseBranch: "main",
+      uncommittedCount: 3,
+      conflictedCount: 2,
+      hasUpstream: true,
+      draft: false,
+    });
+    expect(out).toContain("2 files have unresolved merge conflicts");
+    expect(out.indexOf("conflict")).toBeLessThan(out.indexOf("Commit them"));
+    expect(out).toContain("Resolve them first");
+  });
+
+  it("names an operation still in flight", () => {
+    const out = buildPrInstructions({
+      branch: "b",
+      baseBranch: "main",
+      uncommittedCount: 1,
+      operationInProgress: "rebase",
+      hasUpstream: true,
+      draft: false,
+    });
+    expect(out).toContain("A rebase is in progress");
+  });
+
+  it("says nothing about conflicts on a clean-enough tree", () => {
+    const out = buildPrInstructions({
+      branch: "b",
+      baseBranch: "main",
+      uncommittedCount: 1,
+      conflictedCount: 0,
+      operationInProgress: null,
+      hasUpstream: true,
+      draft: false,
+    });
+    expect(out).not.toMatch(/conflict/i);
+    expect(out).not.toMatch(/in progress/i);
+  });
+
   it("names the configured remote everywhere origin appeared", () => {
     const out = buildPrInstructions({
       branch: "zeros/my-feature",

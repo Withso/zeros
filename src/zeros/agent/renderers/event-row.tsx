@@ -51,8 +51,14 @@ interface EventRowProps {
   /** Optional trailing content rendered after the target — overrides
    *  `meta.trailing`. Used by EditCard for the green/red +N −M counts. */
   trailingNode?: React.ReactNode;
-  /** Force the detail body open from outside (active subagents start
-   *  open while running). */
+  /** Seed the detail body open at MOUNT (the exit-plan card starts open so
+   *  the plan is readable without a click). Mount-time only — it feeds
+   *  useState's initializer, so after first render `open` belongs to the
+   *  user and later prop changes neither open nor close the row. Do NOT
+   *  derive it from mutable message state (e.g. tool status): whether such a
+   *  row starts open would depend on whether the status landed before or
+   *  after the row's first commit, and every remount (summary-chip
+   *  re-expand, chat reopen) would re-apply it over the user's collapse. */
   defaultOpen?: boolean;
   /** Override the status-derived row tone. The question record uses "ok":
    *  its tool status is "failed" because Claude's answer is DELIVERED via a

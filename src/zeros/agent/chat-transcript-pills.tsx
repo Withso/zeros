@@ -76,6 +76,7 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/zeros/ui/primitives/context-menu";
+import { cn } from "@/zeros/ui/cn";
 import { AgentIcon } from "./agent-icon";
 import {
   loadTranscriptSnapshot,
@@ -137,6 +138,39 @@ function useDelayedPending(pending: boolean): boolean {
 }
 
 // --- RENDER ---
+/** The pill's leading glyph — sized by INK, not by box.
+ *
+ *  A pill is 24px around a 13px label, so the text beside the glyph is only
+ *  ~9.3px of actual cap-height. Match that and the glyph reads as a sibling of
+ *  the word; exceed it and the row reads as a strip of marks with captions.
+ *
+ *  The catch is that the two glyphs that share this slot fill their boxes very
+ *  differently, so one number cannot drive both:
+ *
+ *    - the brand SVGs are full-bleed in a 0 0 24 24 viewBox — ink == box, so
+ *      `size` is literally the ink height. 14 (the chat TAB's size, on a 28px
+ *      row where the logo is the thing you aim at) is 1.5× the cap-height
+ *      here, and even 12 is still 1.29×.
+ *    - ZerosSpinner reserves 25% of its box as padding (innerRatio 0.75), so
+ *      its ink is 0.75 × size.
+ *
+ *  Hence a fixed 14px SLOT with two different glyph sizes inside it, landing
+ *  both on ~10px of ink. The slot is what keeps the pill from resizing under
+ *  the pointer when the spinner swaps in mid-read.
+ *
+ *  LOGO_PX ALONE IS NOT ENOUGH, and this is the whole trap: `Button`'s base
+ *  class carries `[&_svg]:size-4`, which pins EVERY descendant svg to 16px.
+ *  AgentIcon sizes its wrapper <span> and leaves the inner svg on its
+ *  `width="1em"` presentation attribute — and CSS beats presentation
+ *  attributes, so inside a Button the mark renders 16px no matter what `size`
+ *  says. Lowering `size` just shrank a span around an unchanged glyph.
+ *  LOGO_CLASS is what actually moves the ink; the two must stay in step.
+ *  (ZerosSpinner is exempt — it draws divs, not svg — which is why its size
+ *  prop always worked.) */
+const LOGO_PX = 10; // full-bleed → 10px of ink
+const LOGO_CLASS = "[&_svg]:size-2.5"; // 10px — twMerge drops Button's size-4
+const SPINNER_PX = 14; // × 0.75 innerRatio → 10.5px of ink
+
 /** One chat = one pill.
  *
  *  `Button variant="secondary" size="sm"` already IS this shape — 24px tall,
@@ -246,30 +280,34 @@ function TranscriptPill({
       onFocus={warm}
       onClick={toggle}
       onKeyDown={openMenuFromKeyboard}
-      className="max-w-[14.5rem] gap-1.5"
+      className={cn("max-w-[14.5rem] gap-1.5", LOGO_CLASS)}
     >
-      {showSpinner || streaming ? (
-        // One glyph, two causes: this read is running, or the source chat is.
-        // Both are "something is happening to this chat", and it is the
-        // identical swap column2-chat-tabs makes on that chat's own tab — so
-        // one animation means one thing everywhere in the app.
-        <ZerosSpinner
-          size={14}
-          variant="agent"
-          label={showSpinner ? "Reading transcript" : "Agent working"}
-        />
-      ) : (
-        <AgentIcon
-          agentId={summary.agentId}
-          iconUrl={null}
-          size={14}
-          // monochrome→brand on select is already the tab strip's idiom.
-          monochrome={!attached}
-        />
-      )}
+      <span className="flex size-3.5 shrink-0 items-center justify-center">
+        {showSpinner || streaming ? (
+          // One glyph, two causes: this read is running, or the source chat is.
+          // Both are "something is happening to this chat", and it is the
+          // identical swap column2-chat-tabs makes on that chat's own tab — so
+          // one animation means one thing everywhere in the app.
+          <ZerosSpinner
+            size={SPINNER_PX}
+            variant="agent"
+            label={showSpinner ? "Reading transcript" : "Agent working"}
+          />
+        ) : (
+          <AgentIcon
+            agentId={summary.agentId}
+            iconUrl={null}
+            size={LOGO_PX}
+            // monochrome→brand on select is already the tab strip's idiom.
+            monochrome={!attached}
+          />
+        )}
+      </span>
       <span className="truncate">{label}</span>
       {attached ? (
-        <Check className="text-green-primary size-3" aria-hidden="true" />
+        // No size class: LOGO_CLASS governs every glyph in this pill, and a
+        // `size-*` here would be dead markup — the descendant rule outranks it.
+        <Check className="text-green-primary" aria-hidden="true" />
       ) : (
         <span className="text-fg3 text-2xxs tabular-nums">
           {summary.userMessageCount}

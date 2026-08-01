@@ -7,11 +7,14 @@
 //   └───────────────┴───┘
 //
 // Left segment (primary): creates the PR through the engine's authenticated
-// GitHub operation. If the worktree is dirty, it refuses to omit those files
-// and offers the explicit agent workflow as recovery.
+// GitHub operation. Pending work in the worktree is COMMITTED on the way (see
+// create-pr-action) — a pull request can only carry committed work, and telling
+// the user to go and commit it themselves is a chore handed back from the very
+// button that could do it. The commit is reported the moment it lands.
 // Dropdown:
 //   • Create draft PR    — same direct path, with draft=true.
-//   • Ask agent to create — the prior review/commit/push/gh workflow.
+//   • Ask agent to create — the review/commit/push/gh workflow, for when the
+//     commit wants a real message and a reviewed diff.
 //   • Create PR manually — opens GitHub's compare/new-PR page in the browser.
 //
 // Only rendered for a real worktree that has no PR yet (see the topbar guard).
@@ -21,8 +24,8 @@
 //   • before the agent brief is sent, because the agent's own `gh pr create`
 //     runs on the very same brokered credential — an unreachable repository
 //     fails for it too, after a whole turn spent reviewing and committing;
-//   • ahead of the dirty-worktree refusal, so "commit changes first" is never
-//     shown for work that committing cannot unblock;
+//   • ahead of the auto-commit, so the button never writes a commit for a pull
+//     request that could never have opened;
 //   • alongside the direct create, so a failure that arrives as the ambiguous
 //     "Repository not found" flavour of NOT_AUTHENTICATED doesn't tell an
 //     already-connected user to connect GitHub.
@@ -50,11 +53,15 @@ import {
   ghPrCreate,
   ghRepoAccess,
   gitChangeCounts,
+  gitCommit,
   gitLog,
   gitRepoBranchCatalog,
+  gitStage,
   gitStatus,
   isGitErrorShape,
+  isWorkspaceOpStillRunning,
   type GithubRepoAccess,
+  type StatusResult,
   type Workspace,
 } from "../../native/git";
 import { shellOpenUrl } from "../../native/native";
@@ -68,11 +75,16 @@ import {
 } from "./use-agent-working";
 import { ZerosSpinner } from "@/loaders";
 import {
-  createPullRequestFromCommittedChanges,
+  AutoCommitBlockedError,
+  AutoCommitFailedError,
+  createPullRequestForWorkspace,
   GithubAccessError,
   isPrAccessBlocked,
-  UncommittedPullRequestError,
 } from "./create-pr-action";
+import {
+  describeAutoCommitBlock,
+  describeAutoCommitFailure,
+} from "./pr-auto-commit";
 import {
   describePrAccessBlock,
   describePrCreateFailure,
@@ -81,6 +93,7 @@ import {
 import { notifyWorkspacesChanged } from "../../zeros/store/use-projects";
 import { useWorkspaceDispatch } from "../../zeros/store/store";
 import { requestUserSettingsSection } from "../../zeros/settings/settings-navigation";
+import { triggerGitRefresh } from "../use-git-refresh-key";
 
 // 24px (`h-6`) split control on the design-system "secondary" tokens
 // (TRANSPARENT fill so it blends with the row's surface + border2, hover
@@ -191,12 +204,19 @@ export function CreatePrButton({
         // Best-effort live counts; degrade to a still-valid brief on failure.
         let uncommittedCount = 0;
         let hasUpstream = false;
+        // The blocker facts come from the SAME status read — this path is the
+        // recovery the conflict refusal offers, so the brief has to name what
+        // the direct create refused to commit.
+        let conflictedCount = 0;
+        let operationInProgress: StatusResult["conflictState"] = null;
         const [status, counts] = await Promise.allSettled([
           gitStatus(workspace.id),
           gitChangeCounts(workspace.id),
         ]);
         if (status.status === "fulfilled") {
           hasUpstream = Boolean(status.value.upstream);
+          conflictedCount = status.value.conflicted.length;
+          operationInProgress = status.value.conflictState;
         }
         if (counts.status === "fulfilled") {
           // The prompt describes the net HEAD-vs-worktree diff. Summing
@@ -209,6 +229,8 @@ export function CreatePrButton({
           baseBranch: workspace.baseBranch,
           remote,
           uncommittedCount,
+          conflictedCount,
+          operationInProgress,
           hasUpstream,
           draft,
         });
@@ -245,14 +267,38 @@ export function CreatePrButton({
       // resolves "unknown" on any failure), so leaving it unawaited on the
       // success path cannot raise an unhandled rejection.
       const accessProbe = ghRepoAccess(workspace.id);
+      // Set by onCommitted so the catch can tell "nothing happened" apart from
+      // "the work is committed, only the pull request failed".
+      let didCommit = false;
       try {
-        await createPullRequestFromCommittedChanges(
+        await createPullRequestForWorkspace(
           {
             changeCounts: async (workspaceId) =>
               gitChangeCounts(workspaceId),
+            status: (workspaceId) => gitStatus(workspaceId),
+            stage: (args) => gitStage(args),
+            commit: (args) => gitCommit(args),
             log: (args) => gitLog(args),
             create: (args) => ghPrCreate(args),
             access: () => accessProbe,
+            onCommitted: (result) => {
+              didCommit = true;
+              // The engine withholds the DB_CHANGED echo from the client that
+              // caused a git.commit (it normally already knows), so nothing
+              // else tells THIS renderer the tree just went clean — and the
+              // push + GitHub round trip that follows can take seconds, or
+              // fail, leaving the Changes tab describing a tree that no longer
+              // exists.
+              triggerGitRefresh(workspace.path);
+              // A commit nobody typed a message for is the one part of this
+              // flow the user has to be told about, whatever GitHub does next.
+              toast.success(
+                result.files === 1
+                  ? "Committed 1 change"
+                  : `Committed ${result.files} changes`,
+                { description: result.subject },
+              );
+            },
           },
           {
             workspaceId: workspace.id,
@@ -265,18 +311,47 @@ export function CreatePrButton({
         // Refresh it instead of showing a redundant success toast.
         notifyWorkspacesChanged(workspace.repoSlug);
       } catch (err) {
+        // The commit outlives a failed pull request. Without this the workspace
+        // row keeps advertising uncommitted work (the Dashboard card's
+        // "Commit & Push") for a tree that is already committed.
+        if (didCommit) notifyWorkspacesChanged(workspace.repoSlug);
         if (err instanceof GithubAccessError) {
           showBlockToast(describePrAccessBlock(err.access));
           return;
         }
-        if (err instanceof UncommittedPullRequestError) {
-          toast.error("Commit changes before creating this pull request", {
-            description:
-              "A pull request only includes committed work. Ask the agent to review, commit, and create it.",
+        if (err instanceof AutoCommitBlockedError) {
+          // The one refusal left: committing a conflicted (or mid-rebase) tree
+          // would put `<<<<<<<` markers in the pull request. The agent is the
+          // recovery, and its brief names the conflicts (see buildPrInstructions).
+          const message = describeAutoCommitBlock(err.blocker);
+          toast.error(message.title, {
+            description: message.description,
             action: {
               label: "Ask agent",
               onClick: () => void askAgentToCreate(draft),
             },
+          });
+          return;
+        }
+        if (err instanceof AutoCommitFailedError) {
+          // Never `describePrCreateFailure` here: GitHub was never reached, and
+          // the engine's own sentence for a failed commit is the entire
+          // `git commit -m <generated message>` argv.
+          const facts = isGitErrorShape(err.reason) ? err.reason : null;
+          const message = describeAutoCommitFailure({
+            stillRunning: isWorkspaceOpStillRunning(err.reason),
+            ...(facts?.remediation ? { remediation: facts.remediation } : {}),
+          });
+          toast.error(message.title, {
+            description: message.description,
+            ...(message.canAskAgent
+              ? {
+                  action: {
+                    label: "Ask agent",
+                    onClick: () => void askAgentToCreate(draft),
+                  },
+                }
+              : {}),
           });
           return;
         }
@@ -304,6 +379,7 @@ export function CreatePrButton({
       workspace.branch,
       workspace.baseBranch,
       workspace.repoSlug,
+      workspace.path,
       askAgentToCreate,
     ],
   );
@@ -348,7 +424,9 @@ export function CreatePrButton({
             ? AGENT_WORKING_REASON
             : disabled && disabledReason
               ? disabledReason
-              : "Create PR"
+              : // States the side effect BEFORE the click: this button writes a
+                // commit when the branch has uncommitted work.
+                "Create PR — commits any uncommitted changes first"
         }
       >
         {/* span keeps the tooltip live over a disabled button (disabled
