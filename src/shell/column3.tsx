@@ -59,6 +59,7 @@ import {
   useRetainedViewKeys,
   useRetainedViewKeySet,
 } from "./use-retained-view-keys";
+import { PrStatusRow } from "./pr/pr-status-row";
 
 // Proportional columns (2026-07-17): col 3 grows by `(1 - ratio)·100`,
 // the complement of col 2's `--zeros-column-2-ratio` grow factor (see
@@ -201,7 +202,7 @@ function SettingUpRow({ grow }: { grow?: boolean }) {
   return (
     <div
       className={[
-        "flex min-h-0 flex-col items-center justify-center gap-3 overflow-hidden bg-bg1",
+        "bg-bg1 flex min-h-0 flex-col items-center justify-center gap-3 overflow-hidden",
         grow ? "flex-1" : "border-border1 h-[45%] shrink-0 border-t",
       ].join(" ")}
       role="status"
@@ -245,7 +246,8 @@ export function Column3({
   // The Changes tab's PR status row and the Review tab share one condition:
   // the active workspace has a PR. Tracked here for the creation-moment
   // auto-focus below.
-  const { workspace: activeWorkspace } = useActiveWorkspace();
+  const { workspace: activeWorkspace, project: activeProject } =
+    useActiveWorkspace();
   const refreshWorkspaceId = activeWorkspace
     ? isLocalMainWorkspace(activeWorkspace)
       ? activeWorkspace.repoRoot
@@ -262,6 +264,16 @@ export function Column3({
       tabs.find((t) => t.type === "changes")?.id ??
       tabs[0]?.id ??
       null);
+  const activeRow1Tab = tabs.find((tab) => tab.id === activeId) ?? null;
+  // Changes and Review are retained simultaneously, but their branch chrome
+  // must have ONE owner. Mounting PrStatusRow inside both bodies gave each tab
+  // an independent React snapshot; whichever tab refreshed last could disagree
+  // with the other until its next request settled. Keeping one row above the
+  // retained deck makes the status/action identity continuous across the hop.
+  const showSharedPrStatusRow =
+    !!activeWorkspace &&
+    !isLocalMainWorkspace(activeWorkspace) &&
+    (activeRow1Tab?.type === "changes" || activeRow1Tab?.type === "review");
   // Recent clean File views join the always-retained Browser/source surfaces;
   // this preserves tree/editor layout without mounting an unbounded tab set.
   const availableRow1Ids = useMemo(
@@ -461,6 +473,13 @@ export function Column3({
                   onToggle={onToggleCol3}
                 />
               </div>
+              {showSharedPrStatusRow && (
+                <PrStatusRow
+                  workspace={activeWorkspace}
+                  originUrl={activeProject?.originUrl ?? null}
+                  active={surfaceActive && !collapsed}
+                />
+              )}
               <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
                 {/* Pinned sources and active/dirty File surfaces stay mounted;
                   only the active tab is visible. */}

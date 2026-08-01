@@ -4,8 +4,11 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  claimPrIslandAction,
   derivePrIslandState,
   isActionGatedWhileAgentWorking,
+  releasePrIslandAction,
+  type PrIslandActionKind,
   type PrStatusInputs,
 } from "../pr-status";
 
@@ -26,7 +29,10 @@ function base(overrides: Partial<PrStatusInputs> = {}): PrStatusInputs {
   };
 }
 
-const readyPr = (mergeableState: string, isMergeable: boolean | null = true) => ({
+const readyPr = (
+  mergeableState: string,
+  isMergeable: boolean | null = true,
+) => ({
   state: "ready" as const,
   mergeableState,
   isMergeable,
@@ -76,7 +82,9 @@ describe("derivePrIslandState — terminal PR states win over everything", () =>
 describe("derivePrIslandState — local blockers, in priority order", () => {
   it("conflicts beat uncommitted / ahead / behind", () => {
     const s = derivePrIslandState(
-      base({ status: { uncommitted: 5, conflicts: true, ahead: 3, behind: 2 } }),
+      base({
+        status: { uncommitted: 5, conflicts: true, ahead: 3, behind: 2 },
+      }),
     );
     expect(s.kind).toBe("merge-conflicts");
     expect(s.tone).toBe("warning");
@@ -85,7 +93,9 @@ describe("derivePrIslandState — local blockers, in priority order", () => {
 
   it("uncommitted beats ahead / behind — Commit & Push prompt", () => {
     const s = derivePrIslandState(
-      base({ status: { uncommitted: 11, conflicts: false, ahead: 1, behind: 1 } }),
+      base({
+        status: { uncommitted: 11, conflicts: false, ahead: 1, behind: 1 },
+      }),
     );
     expect(s.kind).toBe("uncommitted");
     expect(s.actions[0].kind).toBe("commit-and-push");
@@ -97,7 +107,9 @@ describe("derivePrIslandState — local blockers, in priority order", () => {
     expect(
       derivePrIslandState(base({ status: { ...cleanStatus, ahead: 1 } })).label,
     ).toBe("Ahead by 1 commit");
-    const s = derivePrIslandState(base({ status: { ...cleanStatus, ahead: 3 } }));
+    const s = derivePrIslandState(
+      base({ status: { ...cleanStatus, ahead: 3 } }),
+    );
     expect(s.label).toBe("Ahead by 3 commits");
     expect(s.actions[0].kind).toBe("push");
     expect(s.actions[0].behavior).toBe("push");
@@ -108,13 +120,15 @@ describe("derivePrIslandState — local blockers, in priority order", () => {
       base({ status: { ...cleanStatus, ahead: 3, behind: 2 } }),
     );
     expect(s.kind).toBe("diverged");
-    expect(s.label).toBe("Diverged · 3 ahead, 2 behind");
+    expect(s.label).toBe("3 ahead and 2 behind");
     expect(s.actions[0].kind).toBe("pull");
     expect(s.actions[0].behavior).toBe("pull");
   });
 
   it("behind → Pull (direct)", () => {
-    const s = derivePrIslandState(base({ status: { ...cleanStatus, behind: 2 } }));
+    const s = derivePrIslandState(
+      base({ status: { ...cleanStatus, behind: 2 } }),
+    );
     expect(s.kind).toBe("behind");
     expect(s.actions[0].kind).toBe("pull");
     expect(s.actions[0].behavior).toBe("pull");
@@ -122,7 +136,10 @@ describe("derivePrIslandState — local blockers, in priority order", () => {
 
   it("null ahead/behind (no upstream) are treated as unknown, not blocking", () => {
     const s = derivePrIslandState(
-      base({ prState: "draft", status: { uncommitted: 0, conflicts: false, ahead: null, behind: null } }),
+      base({
+        prState: "draft",
+        status: { uncommitted: 0, conflicts: false, ahead: null, behind: null },
+      }),
     );
     expect(s.kind).toBe("draft");
   });
@@ -154,7 +171,10 @@ describe("derivePrIslandState — open PR readiness (needs GitHub metadata)", ()
 
   it("checks pending → count label, no button", () => {
     const s = derivePrIslandState(
-      base({ pr: readyPr("unknown"), checks: { pending: 2, failed: 0, total: 5 } }),
+      base({
+        pr: readyPr("unknown"),
+        checks: { pending: 2, failed: 0, total: 5 },
+      }),
     );
     expect(s.kind).toBe("checks-pending");
     expect(s.label).toBe("2 checks pending…");
@@ -163,7 +183,10 @@ describe("derivePrIslandState — open PR readiness (needs GitHub metadata)", ()
 
   it("clean + mergeable + no failures → Ready to merge (Merge)", () => {
     const s = derivePrIslandState(
-      base({ pr: readyPr("clean"), checks: { pending: 0, failed: 0, total: 4 } }),
+      base({
+        pr: readyPr("clean"),
+        checks: { pending: 0, failed: 0, total: 4 },
+      }),
     );
     expect(s.kind).toBe("ready-to-merge");
     expect(s.tone).toBe("success");
@@ -205,7 +228,10 @@ describe("derivePrIslandState — open PR readiness (needs GitHub metadata)", ()
 
   it("clean but failed checks → 'N/M checks failed' (not Ready)", () => {
     const s = derivePrIslandState(
-      base({ pr: readyPr("clean"), checks: { pending: 0, failed: 1, total: 3 } }),
+      base({
+        pr: readyPr("clean"),
+        checks: { pending: 0, failed: 1, total: 3 },
+      }),
     );
     expect(s.kind).toBe("unable-to-merge");
     expect(s.label).toBe("1/3 checks failed");
@@ -231,7 +257,10 @@ describe("derivePrIslandState — open PR readiness (needs GitHub metadata)", ()
 
   it("has_hooks (mergeable, repo has pre-receive hooks) → Ready to merge, not stuck Checking", () => {
     const s = derivePrIslandState(
-      base({ pr: readyPr("has_hooks"), checks: { pending: 0, failed: 0, total: 2 } }),
+      base({
+        pr: readyPr("has_hooks"),
+        checks: { pending: 0, failed: 0, total: 2 },
+      }),
     );
     expect(s.kind).toBe("ready-to-merge");
     expect(s.actions[0].kind).toBe("merge");
@@ -293,5 +322,21 @@ describe("isActionGatedWhileAgentWorking — actions parked mid-turn", () => {
     }).actions[0];
     expect(showChecks.behavior).toBe("show-checks");
     expect(isActionGatedWhileAgentWorking(showChecks)).toBe(false);
+  });
+});
+
+describe("PR island action single-flight claim", () => {
+  it("rejects a second click synchronously and only the owner can release it", () => {
+    const claim: { current: PrIslandActionKind | null } = { current: null };
+
+    expect(claimPrIslandAction(claim, "commit-and-push")).toBe(true);
+    expect(claimPrIslandAction(claim, "commit-and-push")).toBe(false);
+    expect(claimPrIslandAction(claim, "push")).toBe(false);
+
+    releasePrIslandAction(claim, "push");
+    expect(claim.current).toBe("commit-and-push");
+    releasePrIslandAction(claim, "commit-and-push");
+    expect(claim.current).toBeNull();
+    expect(claimPrIslandAction(claim, "push")).toBe(true);
   });
 });

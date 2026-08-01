@@ -55,6 +55,27 @@ export type PrIslandActionKind =
   | "archive"
   | "show-checks";
 
+/** A synchronous claim shared by prompt and direct island actions. React state
+ * disables the rendered controls, but it is not visible to another handler in
+ * the same event frame; this ref-shaped guard closes that double-fire window. */
+export function claimPrIslandAction(
+  claim: { current: PrIslandActionKind | null },
+  kind: PrIslandActionKind,
+): boolean {
+  if (claim.current != null) return false;
+  claim.current = kind;
+  return true;
+}
+
+/** Release only the action that owns the claim, so an old async completion can
+ * never unlock a newer operation. */
+export function releasePrIslandAction(
+  claim: { current: PrIslandActionKind | null },
+  kind: PrIslandActionKind,
+): void {
+  if (claim.current === kind) claim.current = null;
+}
+
 export interface PrIslandAction {
   kind: PrIslandActionKind;
   label: string;
@@ -179,7 +200,9 @@ const archiveAction: PrIslandAction = {
  *  the branch; the direct git/GitHub mutations (push / pull / ready / merge /
  *  continue) could act on a half-pushed state. Archive (deliberately stops the
  *  agent) and Show-checks (pure navigation) stay available. */
-export function isActionGatedWhileAgentWorking(action: PrIslandAction): boolean {
+export function isActionGatedWhileAgentWorking(
+  action: PrIslandAction,
+): boolean {
   return action.behavior !== "archive" && action.behavior !== "show-checks";
 }
 
@@ -238,7 +261,7 @@ export function derivePrIslandState(
     const behind = status.behind as number;
     return {
       kind: "diverged",
-      label: `Diverged · ${ahead} ahead, ${behind} behind`,
+      label: `${ahead} ahead and ${behind} behind`,
       tone: "neutral",
       // Rebase/autostash first; the resulting ahead-only state then offers
       // Push. An ordinary push from a diverged branch can never fast-forward.
@@ -365,5 +388,10 @@ export function derivePrIslandState(
   }
 
   // 4d. Mergeability still computing on GitHub's side, or an unknown state.
-  return { kind: "checking", label: "Checking mergeability…", tone: "neutral", actions: [] };
+  return {
+    kind: "checking",
+    label: "Checking mergeability…",
+    tone: "neutral",
+    actions: [],
+  };
 }

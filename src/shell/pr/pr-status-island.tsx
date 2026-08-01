@@ -1,10 +1,10 @@
 // ──────────────────────────────────────────────────────────
-// PrStatusIsland — the Changes tab's PR row: live PR status + one-tap actions
+// PrStatusIsland — shared Changes/Review PR row: status + one-tap actions
 // ──────────────────────────────────────────────────────────
 //
-// A status bar — the Changes tab's always-present first row — rendered
-// whenever the active workspace has a PR (else that row holds the Create PR
-// button; see ChangesRow1Tab → PrStatusRow). It shows a single
+// A status bar rendered above the retained Changes/Review bodies whenever the
+// active workspace has a PR (else that row holds the Create PR button; see
+// Column3 → PrStatusRow). It shows a single
 // derived state — "View PR ↗ Draft PR open", "Ready to merge", "Merged", … —
 // with the button that resolves it.
 //
@@ -22,8 +22,8 @@
 //     settled batch. Applying them as they land renders mixed-generation
 //     states — e.g. fresh "ahead 2" over a stale pr → a wrong "Ahead by 2"
 //     flash that resolves to "Ready to merge" a second later.
-//   • LAST-KNOWN cache — row-1 tab bodies unmount when inactive, so without
-//     it every switch back to Changes remounted this island empty and flashed
+//   • LAST-KNOWN cache — leaving the Changes/Review pair or switching workspace
+//     unmounts the row, so without it returning remounted the island empty and flashed
 //     the "PR open" placeholder before the refetch landed. The cache re-renders
 //     the last-known status instantly and updates in place. The last RENDERED
 //     state is additionally persisted per workspace#pr (pr-island-last-state,
@@ -86,8 +86,10 @@ import { useArchiveWorkspace } from "../../zeros/store/archive-actions";
 import { useGitRefreshKey } from "../use-git-refresh-key";
 import { useShowReviewTab } from "./use-open-review-tab";
 import {
+  claimPrIslandAction,
   derivePrIslandState,
   isActionGatedWhileAgentWorking,
+  releasePrIslandAction,
   type PrIslandAction,
   type PrIslandActionKind,
   type PrIslandState,
@@ -320,6 +322,16 @@ export function PrStatusIsland({
   // icon for a spinner and every button disables (the disabled dim doubles as
   // the "in flight" affordance).
   const [acting, setActing] = useState<PrIslandActionKind | null>(null);
+  const actionClaimRef = useRef<PrIslandActionKind | null>(null);
+  const claimAction = useCallback((kind: PrIslandActionKind): boolean => {
+    if (!claimPrIslandAction(actionClaimRef, kind)) return false;
+    setActing(kind);
+    return true;
+  }, []);
+  const finishAction = useCallback((kind: PrIslandActionKind): void => {
+    releasePrIslandAction(actionClaimRef, kind);
+    setActing((current) => (current === kind ? null : current));
+  }, []);
   const archiveWorkspace = useArchiveWorkspace();
   // Park git-mutating actions while an agent turn is in flight (see
   // isActionGatedWhileAgentWorking for the policy).
@@ -489,8 +501,7 @@ export function PrStatusIsland({
    *  continue. No agent message — spinner on the button, optimistic flip. */
   const runDirect = useCallback(
     async (action: PrIslandAction) => {
-      if (acting) return;
-      setActing(action.kind);
+      if (!claimAction(action.kind)) return;
       // The action is about to invalidate the current state on purpose — the
       // stability mask must not resurrect it over a following transient.
       clearPrIslandStability(stabilityKey);
@@ -601,11 +612,12 @@ export function PrStatusIsland({
                   : "Couldn't continue on a new branch";
         actionErrorToast(title, err);
       } finally {
-        setActing(null);
+        finishAction(action.kind);
       }
     },
     [
-      acting,
+      claimAction,
+      finishAction,
       data?.pr?.baseBranch,
       data?.pr?.mergeCommitSha,
       stabilityKey,
@@ -620,17 +632,16 @@ export function PrStatusIsland({
   );
 
   const handleArchive = useCallback(async () => {
-    if (acting) return;
-    setActing("archive");
+    if (!claimAction("archive")) return;
     try {
       // Shared: stops any running agent turn, repoints the view (archiving the
       // workspace you're viewing would otherwise strand the open chat on a
       // deleted folder), and offers Undo.
       await archiveWorkspace(workspace);
     } finally {
-      setActing(null);
+      finishAction("archive");
     }
-  }, [acting, workspace, archiveWorkspace]);
+  }, [claimAction, finishAction, workspace, archiveWorkspace]);
 
   const runAction = useCallback(
     (action: PrIslandAction) => {
@@ -644,20 +655,26 @@ export function PrStatusIsland({
           showPr("checks");
           return;
         case "prompt": {
+          if (!claimAction(action.kind)) return;
           const text = buildActionPrompt(action.kind, {
             baseBranch: workspace.baseBranch,
             remote,
           });
-          if (!text) return;
+          if (!text) {
+            finishAction(action.kind);
+            return;
+          }
           // Auto-sent treatment: the bubble shows the short label + the
           // action's icon (brown "sent by Zeros" bubble, copy-only); the
           // agent receives the full brief.
           const bubble = promptActionBubble(action.kind);
-          sendToChat({
+          const sent = sendToChat({
             text,
             displayText: bubble?.label,
             autoAction: bubble?.autoAction,
+            onSettled: () => finishAction(action.kind),
           });
+          if (!sent) finishAction(action.kind);
           return;
         }
         default:
@@ -667,6 +684,8 @@ export function PrStatusIsland({
     [
       handleArchive,
       showPr,
+      claimAction,
+      finishAction,
       workspace.baseBranch,
       remote,
       sendToChat,
