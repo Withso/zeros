@@ -23,6 +23,7 @@ import { CompactionRecordCard } from "./compaction-card";
 import { ModelSwitchRecordCard } from "./model-switch-card";
 import { BudgetStopRecordCard } from "./budget-stop-card";
 import { BackgroundTaskRecord } from "./background-task-record";
+import { TaskToolRecord } from "./task-tool-record";
 import { QuestionRecordCard } from "./question-card";
 import { SubagentCard } from "./tool-subagent";
 import { CursorTaskCard } from "./tool-cursor-task";
@@ -93,6 +94,8 @@ export const defaultRegistry: RendererRegistry = {
     // of the raw-JSON "other" fallback.
     skill: EventRowRenderer as any,
     tool_search: EventRowRenderer as any,
+    task_create: TaskToolRecord,
+    task_update: TaskToolRecord,
     // switch_mode is routed by the guarded matcher above (plan-body → the plan
     // card; bodiless Codex escalation → this generic fallback), so it's
     // intentionally NOT in the by-kind table.

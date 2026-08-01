@@ -339,6 +339,12 @@ export class ZerosEngine {
    *  into (the renderer's footer does the same, but a reset arriving from any
    *  other device/caller must not race a live stream into zombie rows). */
   private readonly promptSessions = new Set<string>();
+  /** Agent sessionId → the authoritative provider turn currently recording.
+   *  A mid-turn steer uses this owner instead of opening a second turn row. */
+  private readonly activeTurnSnapshots = new Map<
+    string,
+    TurnSnapshotContext
+  >();
   /** Workspace process/session starts and checkout mutations that have crossed
    *  the caller-side gate but have not settled. Archive/delete wait for these
    *  promises before enumerating processes and snapshotting. Without this
@@ -2163,6 +2169,9 @@ export class ZerosEngine {
             this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
             this.enterPrompt();
             this.promptSessions.add(msg.sessionId);
+            if (turnCtx) {
+              this.activeTurnSnapshots.set(msg.sessionId, turnCtx);
+            }
           } catch (err) {
             // A lifecycle that acquired the workspace while the pre-snapshot
             // was being built must leave no forever-"running" turn row. Do not
@@ -2244,6 +2253,9 @@ export class ZerosEngine {
               }),
             );
           } finally {
+            if (this.activeTurnSnapshots.get(msg.sessionId) === turnCtx) {
+              this.activeTurnSnapshots.delete(msg.sessionId);
+            }
             this.promptSessions.delete(msg.sessionId);
             this.cancelRequested.delete(msg.sessionId);
             this.exitPrompt();
@@ -2288,11 +2300,15 @@ export class ZerosEngine {
           // beginTurn/enterPrompt — the steered input rides the in-flight
           // AGENT_PROMPT's turn, which is still awaited above.
           await this.agents.steer(msg.agentId, msg.sessionId, msg.prompt);
+          const steeredTurnId = this.activeTurnSnapshots.get(
+            msg.sessionId,
+          )?.turnId;
           this.persistSteeredUserPrompt(
             msg.sessionId,
             msg.prompt,
             msg.bubble,
             msg.userMessageId,
+            steeredTurnId,
           );
           client.send(
             createMessage({
@@ -2301,6 +2317,7 @@ export class ZerosEngine {
               requestId: msg.id,
               agentId: msg.agentId,
               sessionId: msg.sessionId,
+              ...(steeredTurnId ? { turnId: steeredTurnId } : {}),
             }),
           );
           return;
@@ -2778,6 +2795,7 @@ export class ZerosEngine {
     prompt: ContentBlock[],
     bubble?: AgentPromptBubble,
     userMessageId?: string,
+    steeredTurnId?: string,
   ): void {
     const chatId = this.sessionChat.get(sessionId);
     if (!chatId) return;
@@ -2791,6 +2809,7 @@ export class ZerosEngine {
       role: "user",
       text,
       createdAt: Date.now(),
+      ...(steeredTurnId ? { steeredTurnId } : {}),
       ...(bubble?.segments && bubble.segments.length > 0
         ? { segments: bubble.segments }
         : {}),

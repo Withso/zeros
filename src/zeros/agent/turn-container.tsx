@@ -69,7 +69,13 @@ import {
 import { editSeedSource } from "./edit-seed";
 import type { Turn } from "./turn-grouping";
 
-export { groupMessagesIntoTurns, turnKey, type Turn } from "./turn-grouping";
+export {
+  groupMessagesIntoTurns,
+  isProviderTurnTail,
+  isTailProviderTurnSegment,
+  turnKey,
+  type Turn,
+} from "./turn-grouping";
 
 interface TurnContainerProps {
   turn: Turn;

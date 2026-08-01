@@ -131,8 +131,12 @@ export type ToolKind =
   // JSON, which reads as a failure to users.
   | "skill"
   | "tool_search"
-  // A command, watcher, helper, workflow, wake-up, or Codex terminal that
-  // continued outside the foreground turn. Active instances live in the
+  // Claude's durable task-list tools. These describe planned work and status;
+  // they are distinct from provider-native background execution.
+  | "task_create"
+  | "task_update"
+  // A Claude command, watcher, helper, workflow, or wake-up that continued
+  // outside the foreground turn. Active instances live in the
   // session-level BackgroundTask snapshot below; this kind is the durable,
   // settled transcript record.
   | "background_task"

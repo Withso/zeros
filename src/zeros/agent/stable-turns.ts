@@ -3,8 +3,15 @@ import type { Turn } from "./turn-container";
 function sameTurn(previous: Turn, next: Turn): boolean {
   return (
     previous.userPrompt === next.userPrompt &&
+    previous.recordedTurnId === next.recordedTurnId &&
+    previous.recordedStartedAt === next.recordedStartedAt &&
+    previous.isSteer === next.isSteer &&
     previous.events.length === next.events.length &&
-    previous.events.every((event, index) => event === next.events[index])
+    previous.events.every((event, index) => event === next.events[index]) &&
+    previous.providerEvents.length === next.providerEvents.length &&
+    previous.providerEvents.every(
+      (event, index) => event === next.providerEvents[index],
+    )
   );
 }
 

@@ -31,7 +31,15 @@
 // ──────────────────────────────────────────────────────────
 
 import { memo, type ReactNode } from "react";
-import { ArrowUp, Check, ChevronDown, ChevronUp, Paperclip, Pencil, Trash2 } from "lucide-react";
+import {
+  ArrowUp,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Paperclip,
+  Pencil,
+  Trash2,
+} from "lucide-react";
 
 import { cn } from "@/zeros/ui/cn";
 import { Tooltip, TooltipProvider } from "@/zeros/ui/primitives";
@@ -83,6 +91,9 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
   if (messages.length === 0) return null;
   const editing = editingId != null;
   const sendBlocked = streaming && !steeringSupported;
+  const sendLabel = sendBlocked
+    ? `${agentName} doesn't support mid-turn steering`
+    : "Send now";
 
   return (
     // -mb-2.5 tucks the card's bottom edge under the composer card that
@@ -177,7 +188,7 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
                         <Trash2 size={14} aria-hidden="true" />
                       </RowAction>
                       <RowAction
-                        label={sendBlocked ? "Steering unsupported" : "Send now"}
+                        label={sendLabel}
                         onClick={() => onSendNow(m.id)}
                         disabled={sendBlocked}
                       >
@@ -268,7 +279,7 @@ function RowAction({
 
 function Keycap({ children }: { children: ReactNode }) {
   return (
-    <kbd className="border-border2 bg-bg2 text-fg2 rounded-sm border px-1 py-0.5 font-sans text-xxs leading-none">
+    <kbd className="border-border2 bg-bg2 text-fg2 text-xxs rounded-sm border px-1 py-0.5 font-sans leading-none">
       {children}
     </kbd>
   );

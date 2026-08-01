@@ -85,6 +85,11 @@ export interface AgentTextMessage {
    *  leave Remove + retype. Transient; never persisted (queued bubbles are
    *  excluded from the SQLite write entirely). */
   queuedEditable?: boolean;
+  /** A user message injected into an already-running provider turn. The
+   *  message remains its own visual prompt segment, but this field points to the
+   *  opening user message whose persisted turn row owns duration, status,
+   *  authored files, and reset semantics. */
+  steeredTurnId?: string;
   /** 2026-07-19 (PR status island) — set on a user message that Zeros sent
    *  AUTOMATICALLY on the user's behalf (Create PR / Resolve / Commit & Push /
    *  Update branch buttons). Carries the action kind (e.g. `create-pr`).

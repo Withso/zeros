@@ -27,7 +27,7 @@
 //   item/commandExecution/outputDelta → tool_call_update (streaming exec output)
 //   item/fileChange/outputDelta       → tool_call_update (streaming edit)
 //   item/fileChange/patchUpdated      → tool_call_update (final patch)
-//   turn/plan/updated          → plan
+//   turn/diff/updated, turn/plan/updated → known aggregate no-ops
 //   error                      → terminal unless willRetry; emits notice row
 //   warning / deprecationNotice / configWarning → notice row (info-tier)
 //   account/updated            → captured externally by the adapter (not a UI event here)
@@ -42,9 +42,22 @@ import type { ContentBlock, SessionNotification, TurnUsage } from "../../types";
 
 type Emit = (notification: SessionNotification) => void;
 type ToolKind =
-  | "read" | "edit" | "delete" | "move" | "search" | "list" | "web_search"
-  | "execute" | "think" | "fetch" | "switch_mode"
-  | "subagent" | "mcp" | "question" | "compaction" | "other";
+  | "read"
+  | "edit"
+  | "delete"
+  | "move"
+  | "search"
+  | "list"
+  | "web_search"
+  | "execute"
+  | "think"
+  | "fetch"
+  | "switch_mode"
+  | "subagent"
+  | "mcp"
+  | "question"
+  | "compaction"
+  | "other";
 
 export interface CodexAppServerTranslatorOptions {
   sessionId: string;
@@ -92,7 +105,8 @@ export class CodexAppServerTranslator {
    *  Emit the transcript row from the request itself so the UI has a stable
    *  User input row to show AWAITING / ANSWERED / SKIPPED. */
   emitUserInputToolCall(params: Record<string, unknown>): string | undefined {
-    const itemId = typeof params.itemId === "string" ? params.itemId : undefined;
+    const itemId =
+      typeof params.itemId === "string" ? params.itemId : undefined;
     if (!itemId) return undefined;
     const toolCallId = this.ensureToolCallId(itemId);
     this.emitToolCallUpsert(toolCallId, {
@@ -120,7 +134,12 @@ export class CodexAppServerTranslator {
    *  adapter to persist for future resume. */
   private threadId: string | null = null;
 
-  private lastStopReason: "end_turn" | "max_tokens" | "max_turn_requests" | "refusal" | "cancelled" = "end_turn";
+  private lastStopReason:
+    | "end_turn"
+    | "max_tokens"
+    | "max_turn_requests"
+    | "refusal"
+    | "cancelled" = "end_turn";
   private hasSeenTurnTerminal = false;
   /** Set from a failed turn's / error's `codexErrorInfo` when it's an
    *  auth or usage-limit class — the adapter surfaces it as a real
@@ -225,6 +244,13 @@ export class CodexAppServerTranslator {
         // collab run; the collabAgentToolCall items carry the user-facing
         // story, so there is nothing to render here.
         break;
+      case "turn/diff/updated":
+      case "turn/plan/updated":
+        // Known aggregate snapshots. FileChange item events already drive the
+        // edit timeline + authored-file attribution, and Zeros deliberately
+        // has no plan card. Re-emitting either would duplicate UI; treating
+        // them as unknown only creates high-volume diagnostic noise.
+        break;
       case "item/started":
         this.onItemStarted(params);
         break;
@@ -280,7 +306,10 @@ export class CodexAppServerTranslator {
 
   private onTurnCompleted(params: unknown): void {
     const p = params as {
-      turn?: { status?: string; error?: { codexErrorInfo?: unknown; message?: string } };
+      turn?: {
+        status?: string;
+        error?: { codexErrorInfo?: unknown; message?: string };
+      };
     };
     this.hasSeenTurnTerminal = true;
     const status = p?.turn?.status;
@@ -388,7 +417,11 @@ export class CodexAppServerTranslator {
         // Message-shaped items — we wait for delta events to stream
         // text. Just remember the id for later delta correlation.
         if (typeof (item as { text?: string }).text === "string") {
-          this.emitMessageDelta(item.id, item.type === "reasoning", (item as { text: string }).text);
+          this.emitMessageDelta(
+            item.id,
+            item.type === "reasoning",
+            (item as { text: string }).text,
+          );
         }
         return;
 
@@ -426,7 +459,10 @@ export class CodexAppServerTranslator {
         // Grep / List card instead of a generic Bash row.
         // Falls back to the raw-command "execute" shape when the command is
         // compound or unparsed.
-        const parsed = item.type === "commandExecution" ? summarizeCommandActions(item) : null;
+        const parsed =
+          item.type === "commandExecution"
+            ? summarizeCommandActions(item)
+            : null;
         this.emitToolCallUpsert(toolCallId, {
           // Codex's own itemId — blocking user-input requests
           // (requestUserInput → QuestionRequest.toolCallId) reference it,
@@ -513,7 +549,8 @@ export class CodexAppServerTranslator {
         // show clean output in the detail body AND derive the "N lines" count
         // for Read cards / the match grep heuristic from real text.
         const contentText =
-          item.type === "commandExecution" && typeof item.aggregatedOutput === "string"
+          item.type === "commandExecution" &&
+          typeof item.aggregatedOutput === "string"
             ? item.aggregatedOutput
             : typeof output === "string"
               ? output
@@ -527,7 +564,15 @@ export class CodexAppServerTranslator {
             rawOutput: output,
             content:
               contentText.length > 0
-                ? [{ type: "content", content: { type: "text", text: contentText } as ContentBlock }]
+                ? [
+                    {
+                      type: "content",
+                      content: {
+                        type: "text",
+                        text: contentText,
+                      } as ContentBlock,
+                    },
+                  ]
                 : null,
           },
         });
@@ -586,7 +631,12 @@ export class CodexAppServerTranslator {
     if (typeof p?.itemId !== "string") return;
     const toolCallId = this.toolCallIds.get(p.itemId);
     if (!toolCallId) return;
-    const text = typeof p.delta === "string" ? p.delta : typeof p.output === "string" ? p.output : "";
+    const text =
+      typeof p.delta === "string"
+        ? p.delta
+        : typeof p.output === "string"
+          ? p.output
+          : "";
     this.emit({
       sessionId: this.sessionId,
       update: {
@@ -668,7 +718,12 @@ export class CodexAppServerTranslator {
     const text = p?.message ?? p?.reason;
     if (!text || typeof text !== "string") return;
     if (isRecoveringTransportAdvisory(text)) return;
-    const tag = method === "deprecationNotice" ? "Deprecation" : method === "configWarning" ? "Config" : "Warning";
+    const tag =
+      method === "deprecationNotice"
+        ? "Deprecation"
+        : method === "configWarning"
+          ? "Config"
+          : "Warning";
     this.emit({
       sessionId: this.sessionId,
       update: {
@@ -706,7 +761,11 @@ export class CodexAppServerTranslator {
     });
   }
 
-  private emitMessageDelta(itemId: string, isThought: boolean, fullText: string): void {
+  private emitMessageDelta(
+    itemId: string,
+    isThought: boolean,
+    fullText: string,
+  ): void {
     const already = this.emittedMessageText.get(itemId) ?? "";
     if (fullText.length <= already.length) return;
     const delta = fullText.slice(already.length);
@@ -715,7 +774,9 @@ export class CodexAppServerTranslator {
     this.emit({
       sessionId: this.sessionId,
       update: {
-        sessionUpdate: isThought ? "agent_thought_chunk" : "agent_message_chunk",
+        sessionUpdate: isThought
+          ? "agent_thought_chunk"
+          : "agent_message_chunk",
         content: { type: "text", text: delta } as ContentBlock,
         messageId: `${this.turnPrefix}-${itemId}`,
       },
@@ -740,7 +801,12 @@ export class CodexAppServerTranslator {
 type CommandActionLite =
   | { type: "read"; command?: string; name?: string; path?: string }
   | { type: "listFiles"; command?: string; path?: string | null }
-  | { type: "search"; command?: string; query?: string | null; path?: string | null }
+  | {
+      type: "search";
+      command?: string;
+      query?: string | null;
+      path?: string | null;
+    }
   | { type: "unknown"; command?: string };
 
 type ThreadItemUnion =
@@ -748,10 +814,41 @@ type ThreadItemUnion =
   | { type: "agentMessage"; id: string; text: string }
   | { type: "reasoning"; id: string; text?: string }
   | { type: "plan"; id: string; text: string }
-  | { type: "commandExecution"; id: string; command: string; cwd?: string; status?: string; exitCode?: number | null; aggregatedOutput?: string | null; commandActions?: CommandActionLite[] }
-  | { type: "fileChange"; id: string; changes?: Array<{ path?: string }>; status?: string }
-  | { type: "mcpToolCall"; id: string; server: string; tool: string; arguments?: unknown; result?: unknown; error?: unknown; status?: string }
-  | { type: "dynamicToolCall"; id: string; tool: string; arguments?: unknown; contentItems?: unknown; success?: boolean | null; status?: string }
+  | {
+      type: "commandExecution";
+      id: string;
+      command: string;
+      cwd?: string;
+      status?: string;
+      exitCode?: number | null;
+      aggregatedOutput?: string | null;
+      commandActions?: CommandActionLite[];
+    }
+  | {
+      type: "fileChange";
+      id: string;
+      changes?: Array<{ path?: string }>;
+      status?: string;
+    }
+  | {
+      type: "mcpToolCall";
+      id: string;
+      server: string;
+      tool: string;
+      arguments?: unknown;
+      result?: unknown;
+      error?: unknown;
+      status?: string;
+    }
+  | {
+      type: "dynamicToolCall";
+      id: string;
+      tool: string;
+      arguments?: unknown;
+      contentItems?: unknown;
+      success?: boolean | null;
+      status?: string;
+    }
   | CollabItem
   | { type: "webSearch"; id: string; query?: string }
   | { type: "imageView"; id: string; path?: string }
@@ -772,14 +869,20 @@ type CollabItem = {
   prompt?: string | null;
   model?: string | null;
   reasoningEffort?: string | null;
-  agentsStates?: Record<string, { status?: string; message?: string | null } | undefined>;
+  agentsStates?: Record<
+    string,
+    { status?: string; message?: string | null } | undefined
+  >;
 };
 
 /** Human title + tool kind for a collab item. spawnAgent's title stays
  *  "spawnAgent" on purpose — the SubagentCard's matcher recognizes that
  *  vocabulary and swaps the visible header for the prompt excerpt, so the
  *  row reads "Agent <task…>" like Claude's Task does. */
-function describeCollabTool(item: CollabItem): { kind: ToolKind; title: string } {
+function describeCollabTool(item: CollabItem): {
+  kind: ToolKind;
+  title: string;
+} {
   const receivers = Array.isArray(item.receiverThreadIds)
     ? item.receiverThreadIds.filter((r): r is string => typeof r === "string")
     : [];
@@ -811,7 +914,9 @@ function describeItem(item: ThreadItemUnion): string {
       return `Running ${truncate(item.command ?? "", 60) || "shell command"}`;
     case "fileChange": {
       const first = Array.isArray(item.changes)
-        ? item.changes.find((c): c is { path: string } => typeof c?.path === "string")
+        ? item.changes.find(
+            (c): c is { path: string } => typeof c?.path === "string",
+          )
         : undefined;
       return first ? `Editing ${first.path}` : "Editing files";
     }
@@ -822,7 +927,7 @@ function describeItem(item: ThreadItemUnion): string {
     case "webSearch":
       return `Searching ${truncate(item.query ?? "web", 40)}`;
     case "imageView":
-      return `Viewing image ${item.path ?? ""}`.trim();
+      return "Read image";
     case "imageGeneration":
       return `Generating image`;
     case "contextCompaction":
@@ -908,6 +1013,7 @@ function mapItemKind(type: ThreadItemUnion["type"]): ToolKind {
     case "webSearch":
       return "web_search";
     case "imageView":
+      return "read";
     case "imageGeneration":
       return "other";
     case "contextCompaction":
@@ -924,15 +1030,19 @@ function isRecoveringTransportAdvisory(text: string): boolean {
 function computeMergeKey(item: ThreadItemUnion): string | null {
   if (item.type !== "fileChange") return null;
   const first = Array.isArray(item.changes)
-    ? item.changes.find((c): c is { path: string } => typeof c?.path === "string")
+    ? item.changes.find(
+        (c): c is { path: string } => typeof c?.path === "string",
+      )
     : undefined;
   return first ? `edit:${first.path}` : null;
 }
 
 function computeStatus(item: ThreadItemUnion): "completed" | "failed" {
   if (item.type === "commandExecution") {
-    if (typeof item.exitCode === "number" && item.exitCode !== 0) return "failed";
-    if (item.status === "failed" || item.status === "cancelled") return "failed";
+    if (typeof item.exitCode === "number" && item.exitCode !== 0)
+      return "failed";
+    if (item.status === "failed" || item.status === "cancelled")
+      return "failed";
     return "completed";
   }
   if (item.type === "fileChange") {
@@ -957,7 +1067,11 @@ function toolInput(item: ThreadItemUnion): unknown {
     case "fileChange":
       return { changes: item.changes };
     case "mcpToolCall":
-      return { server: item.server, tool: item.tool, arguments: item.arguments };
+      return {
+        server: item.server,
+        tool: item.tool,
+        arguments: item.arguments,
+      };
     case "dynamicToolCall":
       return { tool: item.tool, arguments: item.arguments };
     case "collabAgentToolCall":
@@ -1024,22 +1138,45 @@ function classifyCodexErrorInfo(info: unknown): {
         : "";
   switch (tag) {
     case "unauthorized":
-      return { authQuota: true, stopReason: "end_turn", label: "Not signed in (unauthorized)" };
+      return {
+        authQuota: true,
+        stopReason: "end_turn",
+        label: "Not signed in (unauthorized)",
+      };
     case "usageLimitExceeded":
-      return { authQuota: true, stopReason: "end_turn", label: "Usage limit exceeded" };
+      return {
+        authQuota: true,
+        stopReason: "end_turn",
+        label: "Usage limit exceeded",
+      };
     case "contextWindowExceeded":
-      return { authQuota: false, stopReason: "max_turn_requests", label: "Context window exceeded" };
+      return {
+        authQuota: false,
+        stopReason: "max_turn_requests",
+        label: "Context window exceeded",
+      };
     case "serverOverloaded":
-      return { authQuota: false, stopReason: "end_turn", label: "Server overloaded" };
+      return {
+        authQuota: false,
+        stopReason: "end_turn",
+        label: "Server overloaded",
+      };
     default:
-      return { authQuota: false, stopReason: "end_turn", label: tag || "error" };
+      return {
+        authQuota: false,
+        stopReason: "end_turn",
+        label: tag || "error",
+      };
   }
 }
 
 function extractErrorMessage(raw: unknown): string {
   if (typeof raw !== "string" || raw.length === 0) return "";
   try {
-    const parsed = JSON.parse(raw) as { error?: { message?: string }; message?: string };
+    const parsed = JSON.parse(raw) as {
+      error?: { message?: string };
+      message?: string;
+    };
     if (parsed?.error?.message) return parsed.error.message;
     if (parsed?.message) return parsed.message;
   } catch {

@@ -56,7 +56,7 @@ import {
 import { QueuedMessagesCard } from "./queued-messages-card";
 import {
   BackgroundTasksCard,
-  BackgroundTasksWaitingLine,
+  shouldShowBackgroundTasksCard,
 } from "./background-tasks-card";
 import { EmbeddedTerminalCommand } from "./embedded-terminal-command";
 import { AddedDirectories } from "./added-directories";
@@ -187,6 +187,8 @@ import {
   TurnContainer,
   TurnPromptHeader,
   groupMessagesIntoTurns,
+  isProviderTurnTail,
+  isTailProviderTurnSegment,
   turnKey,
 } from "./turn-container";
 import { TurnEventList } from "./turn-event-list";
@@ -311,6 +313,9 @@ export function AgentChat({
   const pendingChatSubmission = usePendingChatSubmission();
   const pendingAutoSend = usePendingAutoSend(chatId);
   const pendingComposerAppend = usePendingComposerAppend();
+  // Chat-owned settings are needed by both the turn lifecycle and composer.
+  // In particular, background continuation chrome is an Ultracode-only aid.
+  const chatThread = useChatById(chatId);
   // Hidden CLI authentication is deliberately local-only. Relay/browser
   // sessions keep the status pill static and direct users to Providers.
   const nativeReady = useNativeRuntime().ready;
@@ -439,7 +444,17 @@ export function AgentChat({
         queuedMessages,
       };
     }, [session.messages]);
-  const isStreaming = session.status === "streaming";
+  const foregroundStreaming = session.status === "streaming";
+  const backgroundContinuationActive = shouldShowBackgroundTasksCard({
+    agentId: session.agentId,
+    effort: chatThread?.effort ?? null,
+    foregroundStreaming,
+    taskCount: session.backgroundTasks.length,
+  });
+  // A quiet Claude background continuation is still part of the active turn:
+  // keep its working stripe/shimmer and withhold the final answer/footer until
+  // the provider's authoritative active-task set becomes empty.
+  const isStreaming = foregroundStreaming || backgroundContinuationActive;
   // Stage 4.3 — QuestionCard's submit hook. Routes through
   // session.sendPrompt today (see RendererContext doc); same callsite
   // when adapters gain a native tool_result write-back path.
@@ -732,7 +747,6 @@ export function AgentChat({
 
   // Chat-thread-backed composer settings. When `chatId` is absent
   // (picker/beta flows) this returns null and the pills render stubs.
-  const chatThread = useChatById(chatId);
   // Background CLI sign-in for auth-required failures (Claude/Codex). One
   // click on the footer's Sign in button drives the CLI login in a hidden
   // PTY and opens the browser; on success the session is rebuilt in place
@@ -3670,10 +3684,19 @@ export function AgentChat({
               </ChatProvenance>
             )}
             {turns.map((turn, i) => {
-              const isActive = i === turns.length - 1;
+              // A steer starts a new VISUAL prompt segment but remains inside
+              // the same provider turn. Only the visual tail owns sticky/tail
+              // UI, while every segment sharing that provider turn stays live
+              // so its streaming tool group does not collapse mid-run.
+              const isVisualTail = i === turns.length - 1;
+              const isActiveProviderSegment = isTailProviderTurnSegment(
+                turns,
+                i,
+              );
+              const ownsProviderFooter = isProviderTurnTail(turns, i);
               return (
                 <React.Fragment key={turnKey(turn)}>
-                  <TurnContainer turn={turn} isActive={isActive}>
+                  <TurnContainer turn={turn} isActive={isVisualTail}>
                     {/* Still-pending queued sends do NOT render here — they
                         live in the QueuedMessagesCard docked above the
                         composer (2026-07-06 queue redesign), so every
@@ -3705,12 +3728,12 @@ export function AgentChat({
                         originalAttachments={turn.userPrompt.attachments}
                         originalSegments={turn.userPrompt.segments}
                         autoAction={turn.userPrompt.autoAction}
-                        // Auto-sent messages (PR island / Create PR) are
-                        // copy-only: the bubble shows a short label while the
-                        // wire text is a generated brief, so an inline edit
-                        // can't round-trip. No onEdit → no Edit affordance.
+                        // Auto-sent messages are copy-only because their short
+                        // label cannot round-trip. Mid-turn steers are also
+                        // copy-only: their reset boundary is the opening
+                        // provider prompt, not the steer message id.
                         onEdit={
-                          turn.userPrompt.autoAction
+                          turn.userPrompt.autoAction || turn.isSteer
                             ? undefined
                             : (editedText, attachments, segments) => {
                                 editAndResubmit(
@@ -3738,7 +3761,7 @@ export function AgentChat({
                             : undefined
                         }
                       >
-                        <div ref={isActive ? setActivePromptEl : null}>
+                        <div ref={isVisualTail ? setActivePromptEl : null}>
                           {/* The user prompt renders as a right-aligned,
                         fit-to-content bubble (Cursor / iMessage pattern).
                         TurnPromptHeader paints the bg-highlighted-bg +
@@ -3773,42 +3796,44 @@ export function AgentChat({
                     its last completed turn as live. */}
                     <TurnEventList
                       events={turn.events}
-                      isActive={isActive}
+                      isActive={isActiveProviderSegment}
                       isStreaming={
-                        session.status === "streaming" ||
+                        isStreaming ||
                         (session.status === "warming" &&
                           turn.events.length === 0)
                       }
+                      showActivity={isVisualTail}
+                      activityEvents={turn.providerEvents}
                       ctx={messageCtx}
                       footer={
-                        turn.userPrompt && chatId ? (
+                        turn.userPrompt && chatId && ownsProviderFooter ? (
                           <TurnFooter
                             chatId={chatId}
-                            turnId={turn.userPrompt.id}
-                            events={turn.events}
-                            startedAt={turn.userPrompt.createdAt}
+                            turnId={turn.recordedTurnId ?? turn.userPrompt.id}
+                            events={turn.providerEvents}
+                            startedAt={turn.recordedStartedAt}
                             live={
-                              isActive &&
-                              (session.status === "streaming" ||
+                              isVisualTail &&
+                              (isStreaming ||
                                 (session.status === "warming" &&
                                   turn.events.length === 0))
                             }
                             fallbackStopReason={
-                              isActive && session.status !== "streaming"
+                              isVisualTail && session.status !== "streaming"
                                 ? session.lastStopReason
                                 : null
                             }
                             fallbackStatusLabel={
-                              isActive && session.status !== "streaming"
+                              isVisualTail && session.status !== "streaming"
                                 ? footerLabelForFailure(session.failure)
                                 : null
                             }
                             retrying={
-                              isActive &&
+                              isVisualTail &&
                               (session.status === "warming" ||
                                 session.status === "reconnecting")
                             }
-                            isLastTurn={isActive}
+                            isLastTurn={isVisualTail}
                             // §3.6 R5/R3 — one-click resume after a token-cap /
                             // budget stop: functionally the user typing
                             // "Continue" and hitting send (same session, full
@@ -3819,7 +3844,7 @@ export function AgentChat({
                             // REQUIRED pill becomes a live Sign-in button
                             // (background CLI login → browser).
                             signInPhase={
-                              isActive &&
+                              isVisualTail &&
                               nativeReady &&
                               session.status !== "streaming" &&
                               supportsBackgroundSignIn(signInAgentId) &&
@@ -4033,21 +4058,14 @@ export function AgentChat({
               onReject={denyPlanReview}
             />
           )}
-          {/* Session-owned background work remains docked in non-scrolling
-            composer chrome across turn boundaries. The active set is one
-            provider-neutral card; settled tasks move into ordinary transcript
-            tool rows. Keep the wait status LAST so it is directly above the
-            composer itself, never buried in the scrolling transcript. */}
-          <BackgroundTasksCard
-            tasks={session.backgroundTasks}
-            onStop={session.stopBackgroundTask}
-            active={surfaceActive}
-          />
-          {session.waitingForBackgroundTasks ? (
-            <BackgroundTasksWaitingLine
+          {/* Claude's foreground can go quiet while provider-native work is
+            still active. Only then dock the task set above the composer. The
+            same predicate keeps the turn live; foreground streaming and other
+            providers never produce this card. */}
+          {backgroundContinuationActive ? (
+            <BackgroundTasksCard
               tasks={session.backgroundTasks}
-              startedAt={session.backgroundTasksWaitingSince ?? Date.now()}
-              active={surfaceActive}
+              onStop={session.stopBackgroundTask}
             />
           ) : null}
           {/* Wave 4 (2026-05-16): canonical AI Elements PromptInput

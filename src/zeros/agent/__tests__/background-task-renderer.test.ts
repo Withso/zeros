@@ -1,6 +1,7 @@
 import { cloneElement, createElement, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
+import { Play, SquareCheckBig } from "lucide-react";
 
 vi.mock("dompurify", () => ({
   default: { addHook: vi.fn(), sanitize: (value: string) => value },
@@ -8,11 +9,12 @@ vi.mock("dompurify", () => ({
 
 import { BackgroundTaskRecord } from "../renderers/background-task-record";
 import { resolveRenderer } from "../renderers/registry";
+import { TaskToolRecord } from "../renderers/task-tool-record";
 import type { AgentToolMessage } from "../use-agent-session";
 import { TooltipProvider } from "../../ui/primitives/tooltip";
 import {
   BackgroundTasksCard,
-  BackgroundTasksWaitingLine,
+  shouldShowBackgroundTasksCard,
 } from "../background-tasks-card";
 
 describe("background task transcript routing", () => {
@@ -65,6 +67,8 @@ describe("background task transcript routing", () => {
     expect(html).toContain("Task ID");
     expect(html).toContain("provider-task-17");
     expect(html).toContain("pnpm test:git");
+    expect(eventRow.props.meta.Icon).toBe(Play);
+    expect(eventRow.props.meta.label).toBe("Background Task");
   });
 
   it("shows both the provider summary and error for a failed task", () => {
@@ -113,14 +117,13 @@ describe("background task live surfaces", () => {
     },
   ];
 
-  it("renders only the shared title plus name, elapsed time, and scoped Stop", () => {
+  it("uses the bg1 surface and exact 36px header/rows without a timer", () => {
     const html = renderToStaticMarkup(
       createElement(
         TooltipProvider,
         null,
         createElement(BackgroundTasksCard, {
           tasks,
-          active: false,
           onStop: vi.fn(),
         }),
       ),
@@ -128,22 +131,119 @@ describe("background task live surfaces", () => {
 
     expect(html).toContain("Background Task");
     expect(html).toContain("Full test suite");
-    expect(html).toContain("18s");
+    expect(html).toContain("bg-bg1");
+    expect(html.match(/h-9/g)).toHaveLength(2);
+    expect(html).not.toContain("18s");
     expect(html).toContain('aria-label="Stop Full test suite"');
     expect(html).not.toMatch(/\b(?:Agent|LIVE|Running)\b/);
   });
 
-  it("renders the parked-parent status independently above the composer", () => {
-    const html = renderToStaticMarkup(
-      createElement(BackgroundTasksWaitingLine, {
-        tasks,
-        startedAt: Date.now() - 24_000,
-        active: false,
+  it("shows the card only after Claude foreground streaming settles with tasks active", () => {
+    const continuation = {
+      agentId: "claude",
+      effort: "ultracode",
+      foregroundStreaming: false,
+      taskCount: 1,
+    };
+    expect(shouldShowBackgroundTasksCard(continuation)).toBe(true);
+    expect(
+      shouldShowBackgroundTasksCard({
+        ...continuation,
+        foregroundStreaming: true,
       }),
+    ).toBe(false);
+    expect(
+      shouldShowBackgroundTasksCard({ ...continuation, effort: "max" }),
+    ).toBe(false);
+    expect(
+      shouldShowBackgroundTasksCard({ ...continuation, agentId: "codex" }),
+    ).toBe(false);
+    expect(
+      shouldShowBackgroundTasksCard({ ...continuation, agentId: "cursor" }),
+    ).toBe(false);
+    expect(
+      shouldShowBackgroundTasksCard({ ...continuation, taskCount: 0 }),
+    ).toBe(false);
+  });
+});
+
+describe("Claude task tools", () => {
+  it("renders TaskCreate as Task Created with the subject as its description", () => {
+    const message = {
+      id: "tool-task-create",
+      kind: "tool",
+      toolCallId: "task-create",
+      title: "Task Created",
+      toolKind: "task_create",
+      status: "completed",
+      rawInput: {
+        subject: "Dispatch and verify the Production release workflow",
+        description: "Watch the release through every gate.",
+      },
+      rawOutput: {
+        task: {
+          id: "3",
+          subject: "Dispatch and verify the Production release workflow",
+        },
+      },
+      createdAt: 1,
+      updatedAt: 2,
+    } as AgentToolMessage;
+
+    expect(resolveRenderer(message).Component).toBe(TaskToolRecord);
+    const renderRecord = (
+      TaskToolRecord as unknown as {
+        type: (props: {
+          message: AgentToolMessage;
+          ctx: never;
+        }) => ReactElement;
+      }
+    ).type;
+    const eventRow = renderRecord({ message, ctx: {} as never });
+    const html = renderToStaticMarkup(
+      cloneElement(eventRow, { defaultOpen: true }),
     );
 
-    expect(html).toContain('role="status"');
-    expect(html).toContain("Waiting for 1 background task");
-    expect(html).toContain("Waiting for background tasks");
+    expect(eventRow.props.meta.Icon).toBe(SquareCheckBig);
+    expect(eventRow.props.meta.label).toBe("Task Created");
+    expect(eventRow.props.meta.target).toBe(
+      "Dispatch and verify the Production release workflow",
+    );
+    expect(html).toContain("Watch the release through every gate.");
+    expect(html).toContain("Task ID");
+    expect(html).toContain("3");
+  });
+
+  it("renders an in-progress TaskUpdate as Task Started with explicit status", () => {
+    const message = {
+      id: "tool-task-update",
+      kind: "tool",
+      toolCallId: "task-update",
+      title: "Task Started",
+      toolKind: "task_update",
+      status: "completed",
+      rawInput: { taskId: "3", status: "in_progress" },
+      rawOutput: { success: true, taskId: "3" },
+      createdAt: 1,
+      updatedAt: 2,
+    } as AgentToolMessage;
+    const renderRecord = (
+      TaskToolRecord as unknown as {
+        type: (props: {
+          message: AgentToolMessage;
+          ctx: never;
+        }) => ReactElement;
+      }
+    ).type;
+    const eventRow = renderRecord({ message, ctx: {} as never });
+    const html = renderToStaticMarkup(
+      cloneElement(eventRow, { defaultOpen: true }),
+    );
+
+    expect(eventRow.props.meta.label).toBe("Task Started");
+    expect(html).toContain("Status");
+    expect(html).toContain("in_progress");
+    expect(html).toContain("Task ID");
+    expect(html).toContain("3");
   });
 });

@@ -26,9 +26,76 @@ export interface PersistedMessage {
 
 interface MsgDbRow {
   msg_id: string;
+  ord: number;
   kind: string;
   payload: string;
   created_at: number;
+}
+
+interface TurnOwnerDbRow {
+  turn_id: string;
+  started_at: number;
+  ended_at: number | null;
+  opening_ord: number;
+}
+
+/** Older builds persisted steered user bubbles but did not identify the
+ * provider turn that owned them. Infer that relationship at the read boundary
+ * from the durable turn interval and opening-message order. This is an
+ * in-memory compatibility annotation: it does not rewrite history or bump
+ * sync revisions. */
+function annotateLegacySteers(
+  chatId: string,
+  rows: MsgDbRow[],
+): MsgDbRow[] {
+  if (rows.length === 0) return rows;
+  const turns = openZerosDb()
+    .prepare(
+      `SELECT t.turn_id, t.started_at, t.ended_at, opening.ord AS opening_ord
+       FROM turns t
+       JOIN chat_messages opening
+         ON opening.chat_id = t.chat_id AND opening.msg_id = t.turn_id
+       WHERE t.chat_id = ?
+       ORDER BY opening.ord ASC`,
+    )
+    .all(chatId) as TurnOwnerDbRow[];
+  if (turns.length === 0) return rows;
+  const openingIds = new Set(turns.map((turn) => turn.turn_id));
+
+  return rows.map((row) => {
+    if (row.kind !== "text" || openingIds.has(row.msg_id)) return row;
+    let payload: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(row.payload) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return row;
+      }
+      payload = parsed as Record<string, unknown>;
+    } catch {
+      return row;
+    }
+    if (payload.role !== "user" || typeof payload.steeredTurnId === "string") {
+      return row;
+    }
+
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      const owner = turns[index];
+      if (
+        row.ord > owner.opening_ord &&
+        row.created_at >= owner.started_at &&
+        (owner.ended_at == null || row.created_at <= owner.ended_at)
+      ) {
+        return {
+          ...row,
+          payload: JSON.stringify({
+            ...payload,
+            steeredTurnId: owner.turn_id,
+          }),
+        };
+      }
+    }
+    return row;
+  });
 }
 
 /** The searchable text for a message (Phase 3 FTS): a text message's `text`,
@@ -96,16 +163,16 @@ export function windowChatMessages(
     before
       ? db
           .prepare(
-            "SELECT msg_id, kind, payload, created_at FROM chat_messages WHERE chat_id = ? AND ord < ? ORDER BY ord DESC LIMIT ?",
+            "SELECT msg_id, ord, kind, payload, created_at FROM chat_messages WHERE chat_id = ? AND ord < ? ORDER BY ord DESC LIMIT ?",
           )
           .all(chatId, before, limit)
       : db
           .prepare(
-            "SELECT msg_id, kind, payload, created_at FROM chat_messages WHERE chat_id = ? ORDER BY ord DESC LIMIT ?",
+            "SELECT msg_id, ord, kind, payload, created_at FROM chat_messages WHERE chat_id = ? ORDER BY ord DESC LIMIT ?",
           )
           .all(chatId, limit)
   ) as MsgDbRow[];
-  return rows.reverse().map((r) => ({
+  return annotateLegacySteers(chatId, rows.reverse()).map((r) => ({
     msgId: r.msg_id,
     kind: r.kind,
     payload: r.payload,

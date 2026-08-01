@@ -2,19 +2,23 @@ import * as React from "react";
 
 import { cn } from "@/zeros/ui/cn";
 
-const Card = React.forwardRef<
-  HTMLDivElement,
-  React.HTMLAttributes<HTMLDivElement>
->(({ className, ...props }, ref) => (
-  <div
-    ref={ref}
-    className={cn(
-      "rounded-lg border bg-bg2 text-fg1 shadow",
-      className,
-    )}
-    {...props}
-  />
-));
+type CardProps = React.HTMLAttributes<HTMLDivElement> & {
+  surface?: "default" | "base";
+};
+
+const Card = React.forwardRef<HTMLDivElement, CardProps>(
+  ({ className, surface = "default", ...props }, ref) => (
+    <div
+      ref={ref}
+      className={cn(
+        "text-fg1 rounded-lg border shadow",
+        surface === "base" ? "bg-bg1" : "bg-bg2",
+        className,
+      )}
+      {...props}
+    />
+  ),
+);
 Card.displayName = "Card";
 
 const CardHeader = React.forwardRef<
@@ -35,7 +39,7 @@ const CardTitle = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <div
     ref={ref}
-    className={cn("font-semibold leading-none tracking-tight", className)}
+    className={cn("leading-none font-semibold tracking-tight", className)}
     {...props}
   />
 ));
@@ -45,11 +49,7 @@ const CardDescription = React.forwardRef<
   HTMLDivElement,
   React.HTMLAttributes<HTMLDivElement>
 >(({ className, ...props }, ref) => (
-  <div
-    ref={ref}
-    className={cn("text-sm text-fg2", className)}
-    {...props}
-  />
+  <div ref={ref} className={cn("text-fg2 text-sm", className)} {...props} />
 ));
 CardDescription.displayName = "CardDescription";
 
@@ -73,4 +73,11 @@ const CardFooter = React.forwardRef<
 ));
 CardFooter.displayName = "CardFooter";
 
-export { Card, CardHeader, CardFooter, CardTitle, CardDescription, CardContent };
+export {
+  Card,
+  CardHeader,
+  CardFooter,
+  CardTitle,
+  CardDescription,
+  CardContent,
+};

@@ -517,6 +517,10 @@ export interface AgentSteeredMessage extends BaseMessage {
   requestId: string;
   agentId: string;
   sessionId: string;
+  /** Opening user-message id for the provider turn that accepted this steer.
+   *  Lets the renderer keep a separate steer bubble without inventing a
+   *  second persisted turn/footer. Absent for mixed-version engines. */
+  turnId?: string;
 }
 
 /** Fire-and-forget: tear down a session's engine-side resources when its

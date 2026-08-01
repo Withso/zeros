@@ -41,6 +41,7 @@ import {
   clearChatMessages,
   truncateChatMessagesFrom,
 } from "../messages";
+import { finishTurn, startTurn } from "../turns";
 
 function makeChat(id: string, over: Partial<ChatRow> = {}): ChatRow {
   return {
@@ -756,6 +757,66 @@ describe("Zeros DB (unified engine store)", () => {
     const beforeClear = headRev();
     clearChatMessages("c1");
     expect(tombstonesSince("msgreset", beforeClear)).toContain("c1");
+  });
+
+  it("annotates legacy mid-turn steer rows with their recorded turn owner", () => {
+    setZerosDbPathForTesting(tmpDbFile());
+    openZerosDb();
+    const user = (id: string, createdAt: number) => ({
+      msgId: id,
+      kind: "text",
+      payload: JSON.stringify({
+        id,
+        kind: "text",
+        role: "user",
+        text: id,
+        createdAt,
+      }),
+      createdAt,
+    });
+
+    upsertChatMessagesBulk("steer-chat", [
+      user("opening", 900),
+      user("legacy-steer", 1_500),
+      user("next-turn", 4_000),
+    ]);
+    startTurn({
+      chatId: "steer-chat",
+      turnId: "opening",
+      workspaceId: "w1",
+      folder: "/repo",
+      agentId: "codex",
+      summary: null,
+      startedAt: 1_000,
+      preSnapshot: null,
+    });
+    finishTurn("steer-chat", "opening", {
+      endedAt: 3_000,
+      stopReason: "end_turn",
+      status: "completed",
+      postSnapshot: null,
+      files: [],
+    });
+    startTurn({
+      chatId: "steer-chat",
+      turnId: "next-turn",
+      workspaceId: "w1",
+      folder: "/repo",
+      agentId: "codex",
+      summary: null,
+      startedAt: 4_100,
+      preSnapshot: null,
+    });
+
+    const payloads = Object.fromEntries(
+      windowChatMessages("steer-chat", 10).map((row) => [
+        row.msgId,
+        JSON.parse(row.payload) as { steeredTurnId?: string },
+      ]),
+    );
+    expect(payloads["legacy-steer"]?.steeredTurnId).toBe("opening");
+    expect(payloads.opening?.steeredTurnId).toBeUndefined();
+    expect(payloads["next-turn"]?.steeredTurnId).toBeUndefined();
   });
 
   it("backfillChatMessageRevs stamps legacy rev=0 rows and is idempotent", () => {

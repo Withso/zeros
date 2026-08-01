@@ -29,13 +29,21 @@ import { partitionTurn } from "./turn-partition";
 
 interface TurnEventListProps {
   events: AgentMessage[];
-  /** True for the most recent turn. Combined with `isStreaming` it decides
-   *  whether the working group is "live" (expanded + dimmed) or settled
-   *  (collapsed to a summary chip). */
+  /** True when this visual segment belongs to the provider turn currently at
+   *  the transcript tail. A steered provider turn can own several segments;
+   *  every one stays live/expanded until the shared turn settles. */
   isActive: boolean;
   /** Whether the session is streaming. Drives the live working group + the
    *  tail shimmer. */
   isStreaming?: boolean;
+  /** Only the newest visual segment renders the one tail activity shimmer.
+   *  Earlier segments of a steered provider turn remain expanded without
+   *  duplicating the shimmer/timer around each steer bubble. Defaults true. */
+  showActivity?: boolean;
+  /** Events from the whole provider turn used only to anchor the activity
+   *  timer. After a steer the newest visual segment can still be empty while
+   *  a tool from the preceding segment is running. */
+  activityEvents?: AgentMessage[];
   /** The turn footer (run time, copy, "…", file pills). Rendered INSIDE this
    *  component's 768 lane so it hugs the answer and the pills align under it —
    *  as a TurnContainer sibling it picked up the container's gap-4 (a ~20px gap
@@ -48,6 +56,8 @@ export const TurnEventList = memo(function TurnEventList({
   events,
   isActive,
   isStreaming,
+  showActivity = true,
+  activityEvents,
   footer,
   ctx,
 }: TurnEventListProps) {
@@ -83,7 +93,7 @@ export const TurnEventList = memo(function TurnEventList({
   // times out the indicator returns with the true total.
   const awaitingUserInput =
     ctx.pendingQuestionToolCallIds.size > 0 || !!ctx.pendingPermission;
-  const showShimmer = live && !awaitingUserInput;
+  const showShimmer = live && showActivity && !awaitingUserInput;
 
   // 2026-06-18: the agent's output + tool calls render in a LEFT-aligned lane
   // capped at max-w-[768px] (`w-full max-w-[768px] self-start`) — the reading
@@ -116,7 +126,7 @@ export const TurnEventList = memo(function TurnEventList({
   }
 
   return (
-    <div className="flex w-full min-w-0 max-w-[768px] flex-col self-start">
+    <div className="flex w-full max-w-[768px] min-w-0 flex-col self-start">
       {working.length > 0 && (
         <EventStripe events={working} ctx={ctx} live={live} />
       )}
@@ -126,7 +136,9 @@ export const TurnEventList = memo(function TurnEventList({
       {/* Shimmer + live timer at the tail of the active turn while streaming
           (pickStartedAt anchors the timer to the most recent in-flight tool —
           for a running subagent that's the subagent's own start time). */}
-      {showShimmer && <ActivityShimmer startedAt={pickStartedAt(events)} />}
+      {showShimmer && (
+        <ActivityShimmer startedAt={pickStartedAt(activityEvents ?? events)} />
+      )}
       {/* Per-turn footer, in-lane so it hugs the answer (see prop doc). */}
       {footer}
     </div>

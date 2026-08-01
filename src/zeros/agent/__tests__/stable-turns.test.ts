@@ -14,21 +14,32 @@ function text(id: string, value: string): AgentTextMessage {
   } as AgentTextMessage;
 }
 
+function turn(
+  userPrompt: AgentTextMessage | null,
+  events: AgentMessage[],
+): Turn {
+  return {
+    userPrompt,
+    recordedTurnId: userPrompt?.id ?? null,
+    recordedStartedAt: userPrompt?.createdAt ?? events[0]?.createdAt ?? 0,
+    isSteer: false,
+    events,
+    providerEvents: events,
+  };
+}
+
 describe("stabilizeTurns", () => {
   it("reuses every unchanged historical turn and only replaces the streamed tail", () => {
     const prompt = text("prompt", "question");
     const settled = text("settled", "answer");
     const streaming = text("streaming", "a");
     const previous: Turn[] = [
-      { userPrompt: prompt, events: [settled] },
-      { userPrompt: null, events: [streaming] },
+      turn(prompt, [settled]),
+      turn(null, [streaming]),
     ];
     const next: Turn[] = [
-      { userPrompt: prompt, events: [settled] },
-      {
-        userPrompt: null,
-        events: [text("streaming", "answer growing") as AgentMessage],
-      },
+      turn(prompt, [settled]),
+      turn(null, [text("streaming", "answer growing") as AgentMessage]),
     ];
 
     const stable = stabilizeTurns(previous, next);
@@ -38,9 +49,7 @@ describe("stabilizeTurns", () => {
 
   it("returns the prior array when grouping produced no semantic changes", () => {
     const event = text("event", "same");
-    const previous: Turn[] = [{ userPrompt: null, events: [event] }];
-    expect(
-      stabilizeTurns(previous, [{ userPrompt: null, events: [event] }]),
-    ).toBe(previous);
+    const previous: Turn[] = [turn(null, [event])];
+    expect(stabilizeTurns(previous, [turn(null, [event])])).toBe(previous);
   });
 });
