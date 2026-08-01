@@ -309,6 +309,30 @@ export function classifyGitTransportError(
   return undefined;
 }
 
+/** The user-facing next step for a transport failure.
+ *
+ *  `runGit` attaches this to the GitError it throws, because the message it
+ *  carries is the command line (`git push -u origin zeros/foo failed`) and the
+ *  renderer's shared description mapping prefers `remediation` when there is
+ *  one — without this, "Couldn't push" was explained with a git invocation.
+ *
+ *  The auth sentence deliberately does NOT say "sign in": GitHub answers a
+ *  repository outside the selected connection's reach with the same
+ *  "Repository not found" it uses for a revoked token, so the copy has to hold
+ *  for both. (Callers that can tell the two apart — the Create PR control, via
+ *  getWorkspaceRepoAccess — say something more specific.) */
+export function gitTransportRemediation(
+  code: GitErrorCode,
+): string | undefined {
+  if (code === "NOT_AUTHENTICATED") {
+    return "GitHub refused this operation. Check Settings → Integrations, and that the connected account can access this repository.";
+  }
+  if (code === "NETWORK_ERROR") {
+    return "Couldn't reach the remote. Check your connection, then try again.";
+  }
+  return undefined;
+}
+
 const NETWORK_GIT_COMMANDS = new Set([
   "clone",
   "fetch",
@@ -670,9 +694,11 @@ export async function runGit(
         }
       }
       const code = opts.mapErrorCode?.(stderr) ?? "GIT_COMMAND_FAILED";
+      const remediation = gitTransportRemediation(code);
       throw new GitError({
         code,
         message: `git ${args.join(" ")} failed`,
+        ...(remediation ? { remediation } : {}),
         cause: err,
         // Redacted: this context is logged and shipped with feedback, and git's
         // stderr can echo an authenticated remote URL or a helper's output. The

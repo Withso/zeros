@@ -47,6 +47,15 @@ import {
 import { newChatId } from "../store/chat-id";
 import { expandMentionsInText } from "./mentions";
 import {
+  buildDesignSelectionAttachment,
+  designSelectionMention,
+} from "./design-selection-attachment";
+import {
+  useDesignSelectionContext,
+  type DesignSelectionContext,
+} from "../store/use-design-selection-context";
+import { captureDesignRuntimeScreenshot } from "../store/design-selection";
+import {
   useComposerEditor,
   textToDoc,
   toMessageSegments,
@@ -54,6 +63,10 @@ import {
   type ComposerInitialContent,
 } from "./composer-editor";
 import { QueuedMessagesCard } from "./queued-messages-card";
+import {
+  BackgroundTasksCard,
+  BackgroundTasksWaitingLine,
+} from "./background-tasks-card";
 import { EmbeddedTerminalCommand } from "./embedded-terminal-command";
 import { AddedDirectories } from "./added-directories";
 import { PermissionCard } from "./permission-card";
@@ -304,6 +317,11 @@ export function AgentChat({
   const dispatch = useWorkspaceDispatch();
   const activeChatId = useActiveChatId();
   const browserPickerSelection = useBrowserPickerSelection();
+  const includeDesignSelectionImage =
+    session.initialize?.agentCapabilities?.promptCapabilities?.image !== false;
+  // Send paths read this ref before their first await, freezing an immutable
+  // design selection even if the user clicks elsewhere while a send prepares.
+  const designSelectionRef = useRef<DesignSelectionContext | null>(null);
   const pendingChatSubmission = usePendingChatSubmission();
   const pendingAutoSend = usePendingAutoSend(chatId);
   const pendingComposerAppend = usePendingComposerAppend();
@@ -512,6 +530,12 @@ export function AgentChat({
       segments?: MessageContentSegment[],
     ) => {
       const trimmed = editedText.trim();
+      const selectionAtSend = designSelectionRef.current;
+      const designAttachment = selectionAtSend
+        ? buildDesignSelectionAttachment(selectionAtSend, {
+            includeImage: includeDesignSelectionImage,
+          })
+        : null;
       if (!chatId) return;
       if (trimmed.length === 0 && attachments.length === 0) {
         return;
@@ -558,7 +582,11 @@ export function AgentChat({
       // the chip simply vanished from the resubmitted bubble and the agent
       // received nothing, with no explanation anywhere.
       reportSkippedAttachments(skippedOnEdit, toast.warning);
-      const mergedBubble = newBubbleMeta;
+      const mergedBlocks = [...newBlocks, ...(designAttachment?.blocks ?? [])];
+      const mergedBubble = [
+        ...newBubbleMeta,
+        ...(designAttachment?.bubbleAttachments ?? []),
+      ];
       // Truncate in-memory FIRST so the UI reflects the edit immediately.
       useSessionsStore
         .getState()
@@ -582,7 +610,7 @@ export function AgentChat({
         .sendPrompt(
           trimmed,
           trimmed,
-          newBlocks.length > 0 ? newBlocks : undefined,
+          mergedBlocks.length > 0 ? mergedBlocks : undefined,
           mergedBubble.length > 0 ? mergedBubble : undefined,
           segments && segments.length > 0 ? segments : undefined,
         )
@@ -590,7 +618,7 @@ export function AgentChat({
           /* error surfaces via session.error */
         });
     },
-    [chatId, session],
+    [chatId, includeDesignSelectionImage, session],
   );
 
   // Phase D1.5 (deferred, 2026-05-07): the user-triggered Summarize
@@ -729,6 +757,20 @@ export function AgentChat({
   // Chat-thread-backed composer settings. When `chatId` is absent
   // (picker/beta flows) this returns null and the pills render stubs.
   const chatThread = useChatById(chatId);
+  const designSelection = useDesignSelectionContext(
+    chatThread?.folder,
+    chatThread?.mode === "design",
+  );
+  useLayoutEffect(() => {
+    designSelectionRef.current = designSelection;
+  }, [designSelection]);
+  const composerMentionSelection = useMemo(
+    () =>
+      chatThread?.mode === "design"
+        ? designSelectionMention(designSelection)
+        : browserPickerSelection,
+    [browserPickerSelection, chatThread?.mode, designSelection],
+  );
   // Background CLI sign-in for auth-required failures (Claude/Codex). One
   // click on the footer's Sign in button drives the CLI login in a hidden
   // PTY and opens the browser; on success the session is rebuilt in place
@@ -1063,6 +1105,7 @@ export function AgentChat({
       }
       const fresh: ChatThread = {
         id: newChatId(),
+        mode: chatThread.mode,
         folder: chatThread.folder,
         kind: chatThread.kind,
         agentId: sel.agentId,
@@ -1339,6 +1382,7 @@ export function AgentChat({
           if (!chatId) return false;
           const fresh: ChatThread = {
             id: newChatId(),
+            mode: chatThread.mode,
             folder: chatThread.folder,
             kind: chatThread.kind,
             agentId: chatThread.agentId,
@@ -1439,6 +1483,7 @@ export function AgentChat({
     modelId: chatThread?.model ?? null,
     cwd: session.cwd ?? chatThread?.folder ?? null,
     originUrl: composerOriginUrl,
+    selection: composerMentionSelection,
     availableCommands: session.availableCommands,
     placeholder: 'Type your message… "/" for commands, "@" for files',
     onSubmit: () => submitRef.current(),
@@ -2871,6 +2916,11 @@ export function AgentChat({
       bubbleSegments?: MessageContentSegment[];
     },
   ) => {
+    let designSelectionAtSend = designSelectionRef.current;
+    const mentionSelectionAtSend =
+      chatThread?.mode === "design"
+        ? designSelectionMention(designSelectionAtSend)
+        : browserPickerSelection;
     // A transcript click starts an engine read and returns immediately (Rule
     // 11), so a cold-cache click followed by a fast Enter would snapshot the
     // composer BEFORE the chip lands: the prompt goes without the transcript,
@@ -2890,20 +2940,49 @@ export function AgentChat({
     // transcript read is real I/O, and a composer sitting visibly untouched
     // with a spinner on the pill is exactly when someone presses Enter again.
     //
-    // Scoped INSIDE the `size > 0` check on purpose: the guard then exists
-    // only while this send is genuinely parked on a read, so no other caller
-    // — the EmptyComposer hand-off, the queued-submission flush, "Continue" —
-    // can ever be turned away by it. Same shape as saveQueuedEdit's
-    // queueSaveInFlightRef.
-    if (transcriptAttachesRef.current.size > 0) {
+    // Design selection follows the same commit rule: its identity is frozen
+    // above, then a missing real-pixel capture joins this bounded preparation.
+    // The guard exists only while this send is genuinely parked on one of
+    // those reads, so unrelated callers are never turned away.
+    const contextReads: Promise<unknown>[] = [...transcriptAttachesRef.current];
+    if (
+      includeDesignSelectionImage &&
+      designSelectionAtSend &&
+      !designSelectionAtSend.screenshotDataUrl
+    ) {
+      const frozenSelection = designSelectionAtSend;
+      contextReads.push(
+        captureDesignRuntimeScreenshot(
+          frozenSelection.workspaceId,
+          frozenSelection.folder,
+          frozenSelection.frame,
+          frozenSelection.sourceVersion,
+          frozenSelection.nodeId,
+          frozenSelection.nodeId ? 1 : 0.75,
+        ).then((screenshot) => {
+          if (!screenshot) return;
+          designSelectionAtSend = {
+            ...frozenSelection,
+            screenshotDataUrl: screenshot.dataUrl,
+            capturedAt: Date.now(),
+          };
+        }),
+      );
+    }
+    if (contextReads.length > 0) {
       if (sendInFlightRef.current) return;
       sendInFlightRef.current = true;
       try {
-        await Promise.allSettled([...transcriptAttachesRef.current]);
+        await Promise.allSettled(contextReads);
       } finally {
         sendInFlightRef.current = false;
       }
     }
+    const designAttachmentAtSend = designSelectionAtSend
+      ? buildDesignSelectionAttachment(designSelectionAtSend, {
+          includeImage: includeDesignSelectionImage,
+        })
+      : null;
     // Normal send → snapshot the editor (text + inline pills); the hand-off
     // path (override) supplies the text + pre-built blocks directly.
     const snapshot = override === undefined ? serializeComposerState() : null;
@@ -3050,7 +3129,7 @@ export function AgentChat({
             .join("\n\n") + "\n\n"
         : "";
     const wireText =
-      importPrefix + expandMentionsInText(displayText, browserPickerSelection);
+      importPrefix + expandMentionsInText(displayText, mentionSelectionAtSend);
     const {
       blocks: localImageBlocks,
       bubbleAttachments: localBubbleAttachments,
@@ -3066,10 +3145,12 @@ export function AgentChat({
     reportSkippedAttachments(skippedAttachments, toast.warning);
     const extraBlocks: ContentBlock[] = [
       ...localImageBlocks,
+      ...(designAttachmentAtSend?.blocks ?? []),
       ...((extras?.extraAttachments as ContentBlock[] | undefined) ?? []),
     ];
     const bubbleAttachments = [
       ...localBubbleAttachments,
+      ...(designAttachmentAtSend?.bubbleAttachments ?? []),
       ...(extras?.bubbleAttachments ?? []),
     ];
     // Ordered segments for the sent-bubble inline render. Direct send → map
@@ -3192,13 +3273,23 @@ export function AgentChat({
     const s = serializeComposerState();
     const displayText = (s?.displayText ?? "").trim();
     const localAttachments = s?.attachments ?? [];
+    const designSelectionAtSave = designSelectionRef.current;
+    const mentionSelectionAtSave =
+      chatThread?.mode === "design"
+        ? designSelectionMention(designSelectionAtSave)
+        : browserPickerSelection;
+    const designAttachmentAtSave = designSelectionAtSave
+      ? buildDesignSelectionAttachment(designSelectionAtSave, {
+          includeImage: includeDesignSelectionImage,
+        })
+      : null;
     // Nothing to save — the tick is disabled; Esc cancels, Delete removes.
     if (displayText.length === 0 && localAttachments.length === 0) return;
     queueSaveInFlightRef.current = true;
     try {
       const wireText = expandMentionsInText(
         displayText,
-        browserPickerSelection,
+        mentionSelectionAtSave,
       );
       const { blocks, bubbleAttachments, skipped } =
         await encodeComposerAttachments(localAttachments);
@@ -3211,9 +3302,19 @@ export function AgentChat({
       session.editQueued?.(id, {
         text: wireText,
         displayText,
-        attachments: blocks.length > 0 ? blocks : undefined,
+        attachments:
+          blocks.length + (designAttachmentAtSave?.blocks.length ?? 0) > 0
+            ? [...blocks, ...(designAttachmentAtSave?.blocks ?? [])]
+            : undefined,
         bubbleAttachments:
-          bubbleAttachments.length > 0 ? bubbleAttachments : undefined,
+          bubbleAttachments.length +
+            (designAttachmentAtSave?.bubbleAttachments.length ?? 0) >
+          0
+            ? [
+                ...bubbleAttachments,
+                ...(designAttachmentAtSave?.bubbleAttachments ?? []),
+              ]
+            : undefined,
         segments: segments.length > 0 ? segments : undefined,
       });
     } finally {
@@ -4029,6 +4130,23 @@ export function AgentChat({
               onReject={denyPlanReview}
             />
           )}
+          {/* Session-owned background work remains docked in non-scrolling
+            composer chrome across turn boundaries. The active set is one
+            provider-neutral card; settled tasks move into ordinary transcript
+            tool rows. Keep the wait status LAST so it is directly above the
+            composer itself, never buried in the scrolling transcript. */}
+          <BackgroundTasksCard
+            tasks={session.backgroundTasks}
+            onStop={session.stopBackgroundTask}
+            active={surfaceActive}
+          />
+          {session.waitingForBackgroundTasks ? (
+            <BackgroundTasksWaitingLine
+              tasks={session.backgroundTasks}
+              startedAt={session.backgroundTasksWaitingSince ?? Date.now()}
+              active={surfaceActive}
+            />
+          ) : null}
           {/* Wave 4 (2026-05-16): canonical AI Elements PromptInput
             recipe replaces ComposerShell + ComposerTextarea +
             ComposerToolbar. PromptInput is a `<form>` element; the

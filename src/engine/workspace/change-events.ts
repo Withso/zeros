@@ -43,6 +43,20 @@ const WORKSPACE_MUTATIONS = new Set([
   "workspace.adoptExisting",
   "workspace.proposeBranchName",
   "workspace.continueOnNewBranch",
+  // First-party design document writes. These mutate tracked files or the
+  // app-owned canvas document, so every preview/lint consumer must advance in
+  // the same exact workspace generation as Files and Changes.
+  "design.frame.create",
+  "design.frame.rename",
+  "design.frame.duplicate",
+  "design.frame.delete",
+  "design.canvas.update",
+  "design.node.styles",
+  "design.node.text",
+  "design.node.html",
+  "design.asset.insert",
+  "design.token.update",
+  "design.save",
   "git.initInPlace",
   "detach.start",
   "detach.stop",

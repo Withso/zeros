@@ -16,7 +16,8 @@
 //     (~80 methods total).
 //   - Client → Server notifications: only `initialized` (post-init).
 //   - Server → Client requests: item/{commandExecution,fileChange,
-//     permissions}/requestApproval, account/chatgptAuthTokens/refresh,
+//     permissions}/requestApproval, item/tool/requestUserInput,
+//     mcpServer/elicitation/request, account/chatgptAuthTokens/refresh,
 //     attestation/generate.
 //   - Server → Client notifications: ~60 events including thread/started,
 //     turn/{started,completed}, item/{started,completed}, item/agentMessage/
@@ -48,7 +49,10 @@
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
-import { spawnStdioAgent, type StdioAgentProcess } from "../shared/stdio-process";
+import {
+  spawnStdioAgent,
+  type StdioAgentProcess,
+} from "../shared/stdio-process";
 import type { McpServerRegistration } from "../../types";
 import { JsonRpcStdioClient, JsonRpcRequestError } from "../shared/jsonrpc";
 import { buildSpawnEnvWithLoginPath } from "../shared/login-shell-path";
@@ -84,6 +88,8 @@ import type { AskForApproval as GenAskForApproval } from "./generated/v2/AskForA
 import type { UserInput as GenUserInput } from "./generated/v2/UserInput";
 import type { ThreadStartParams as GenThreadStartParams } from "./generated/v2/ThreadStartParams";
 import type { TurnStartParams as GenTurnStartParams } from "./generated/v2/TurnStartParams";
+import type { McpServerElicitationRequestParams as GenMcpServerElicitationRequestParams } from "./generated/v2/McpServerElicitationRequestParams";
+import type { McpServerElicitationRequestResponse as GenMcpServerElicitationRequestResponse } from "./generated/v2/McpServerElicitationRequestResponse";
 
 /** Content blocks accepted by `turn/start.input`. */
 export type CodexUserInput = GenUserInput;
@@ -107,6 +113,18 @@ export type CodexThreadStartParams = GenThreadStartParams;
 
 /** `turn/start` params. */
 export type CodexTurnStartParams = GenTurnStartParams;
+
+/** MCP `elicitation/create` forwarded by Codex app-server. Codex uses this
+ *  path both for real MCP forms and for its MCP tool-approval envelope. */
+export type CodexMcpElicitationParams = GenMcpServerElicitationRequestParams;
+export type CodexMcpElicitationResponse =
+  GenMcpServerElicitationRequestResponse;
+
+export interface CodexMcpElicitationRequest {
+  /** Zeros-owned routing id; independent of any MCP server request id. */
+  elicitationId: string;
+  params: CodexMcpElicitationParams;
+}
 
 /** Server-initiated approval request shape passed to the adapter.
  *  The adapter stores `permissionId` for routing and eventually calls
@@ -170,6 +188,12 @@ export interface CodexAppServerBootOptions {
    *  empty. Lets the adapter evict its own pending entry and tell the
    *  renderer to drop the parked card. */
   onUserInputSettled?: (questionId: string) => void;
+  /** Server-initiated MCP elicitation. This includes Codex's
+   *  `_meta.codex_approval_kind="mcp_tool_call"` approval form. If omitted,
+   *  the runtime cancels it immediately so the MCP request cannot hang. */
+  onMcpElicitationRequest?: (request: CodexMcpElicitationRequest) => void;
+  /** A pending MCP elicitation timed out without an explicit response. */
+  onMcpElicitationSettled?: (elicitationId: string) => void;
   /** Called with each line the server writes to stderr. */
   onStderr?: (line: string) => void;
   /** Called when the server exits (gracefully or otherwise). */
@@ -207,7 +231,9 @@ export interface CodexAppServerHandle {
   /** Resume a prior thread by id. Subsequent turns continue on the
    *  same conversation. `model` is the thread's resolved model when the
    *  server reports it (used as the collaboration-mode fallback). */
-  resumeThread(params: { threadId: string } & Partial<CodexThreadStartParams>): Promise<{
+  resumeThread(
+    params: { threadId: string } & Partial<CodexThreadStartParams>,
+  ): Promise<{
     threadId: string;
     model?: string;
     raw: unknown;
@@ -263,14 +289,28 @@ export interface CodexAppServerHandle {
    *  ({ answers: { [questionId]: { answers: string[] } } }). No-op if unknown. */
   respondToUserInput(questionId: string, response: unknown): void;
 
+  /** Resolve a pending `mcpServer/elicitation/request`. Unknown/already-settled
+   *  ids are safe no-ops, matching the other blocking request channels. */
+  respondToMcpElicitation(
+    elicitationId: string,
+    response: CodexMcpElicitationResponse,
+  ): void;
+
   /** Subscribe to a server-to-client notification by method name.
    *  Returns an unsubscribe function. Multiple subscribers per method
    *  are supported (fan-out). */
-  onNotification(method: string, handler: (params: unknown) => void): () => void;
+  onNotification(
+    method: string,
+    handler: (params: unknown) => void,
+  ): () => void;
 
   /** Send a one-off JSON-RPC request (escape hatch for methods the
    *  handle doesn't wrap explicitly — account/read, model/list, etc.). */
-  request<T = unknown>(method: string, params?: unknown, opts?: { timeoutMs?: number }): Promise<T>;
+  request<T = unknown>(
+    method: string,
+    params?: unknown,
+    opts?: { timeoutMs?: number },
+  ): Promise<T>;
 
   /** Tear down: stop the in-flight turn, close JSON-RPC, kill child. */
   dispose(): Promise<void>;
@@ -402,7 +442,9 @@ export async function bootCodexAppServerRuntime(
     onOutbound: rpcTraceEnabled
       ? (line) => {
           if (line.length < 2_000)
-            console.log(`[${logTag}] OUT ${truncate(redactRpcLine(line), 400)}`);
+            console.log(
+              `[${logTag}] OUT ${truncate(redactRpcLine(line), 400)}`,
+            );
         }
       : undefined,
     onInbound: (line) => {
@@ -441,7 +483,11 @@ export async function bootCodexAppServerRuntime(
     );
   } catch (err) {
     await teardown(proc, client);
-    throw wrapBootError("initialize", err, (proc as unknown as { _stderrTail?: string })._stderrTail);
+    throw wrapBootError(
+      "initialize",
+      err,
+      (proc as unknown as { _stderrTail?: string })._stderrTail,
+    );
   }
 
   const cliVersion = parseCliVersion(initResp.userAgent);
@@ -532,6 +578,58 @@ export async function bootCodexAppServerRuntime(
   wireApproval("item/fileChange/requestApproval");
   wireApproval("item/permissions/requestApproval");
 
+  // ── MCP elicitation round-trip (mcpServer/elicitation/request) ──
+  // Codex forwards MCP `elicitation/create` as a server→client request. Tool
+  // approvals use the same request with `_meta.codex_approval_kind` set to
+  // `mcp_tool_call`. An unhandled JSON-RPC request is a method-not-found error;
+  // worse, older clients could leave the upstream MCP call waiting. Always
+  // settle explicitly, fail closed when no adapter is present, and use the
+  // same bounded lifetime as every other blocking decision channel.
+  interface PendingMcpElicitationEntry {
+    resolve: (response: CodexMcpElicitationResponse) => void;
+    timer: NodeJS.Timeout;
+  }
+  const pendingMcpElicitations = new Map<string, PendingMcpElicitationEntry>();
+  client.onRequest("mcpServer/elicitation/request", (params) => {
+    return new Promise<CodexMcpElicitationResponse>((resolve) => {
+      const elicitationId = randomUUID();
+      if (!opts.onMcpElicitationRequest) {
+        console.warn(
+          `[${logTag}] MCP elicitation received but no handler is set — cancelling`,
+        );
+        resolve(cancelMcpElicitationResponse());
+        return;
+      }
+      const timer = setTimeout(() => {
+        if (!pendingMcpElicitations.delete(elicitationId)) return;
+        console.warn(
+          `[${logTag}] MCP elicitation ${elicitationId} timed out after ${APPROVAL_TIMEOUT_MS}ms — auto-cancelling`,
+        );
+        resolve(cancelMcpElicitationResponse());
+        opts.onMcpElicitationSettled?.(elicitationId);
+      }, APPROVAL_TIMEOUT_MS);
+      timer.unref?.();
+      pendingMcpElicitations.set(elicitationId, { resolve, timer });
+      touchActiveTurnActivity();
+      try {
+        opts.onMcpElicitationRequest({
+          elicitationId,
+          params: (params ?? {}) as CodexMcpElicitationParams,
+        });
+      } catch (err) {
+        // A renderer/adapter callback is outside the JSON-RPC trust boundary.
+        // Convert its failure into an explicit cancellation; otherwise the
+        // request returns -32000 and the upstream MCP call may retry or stall.
+        pendingMcpElicitations.delete(elicitationId);
+        clearTimeout(timer);
+        console.warn(
+          `[${logTag}] MCP elicitation handler threw — cancelling: ${String(err)}`,
+        );
+        resolve(cancelMcpElicitationResponse());
+      }
+    });
+  });
+
   // ── User-input round-trip (item/tool/requestUserInput) ──
   // Twin of the approval flow: a blocking question whose answer is deferred
   // until respondToUserInput. No cancel variant exists in the response schema,
@@ -574,7 +672,10 @@ export async function bootCodexAppServerRuntime(
 
   // ── Fan-out for general notifications ────────────────────
   const notifSubscribers = new Map<string, Set<(params: unknown) => void>>();
-  const subscribe = (method: string, handler: (params: unknown) => void): (() => void) => {
+  const subscribe = (
+    method: string,
+    handler: (params: unknown) => void,
+  ): (() => void) => {
     let set = notifSubscribers.get(method);
     if (!set) {
       set = new Set();
@@ -586,7 +687,9 @@ export async function bootCodexAppServerRuntime(
           try {
             sub(params);
           } catch (err) {
-            console.warn(`[${logTag}] notification handler '${method}' threw: ${String(err)}`);
+            console.warn(
+              `[${logTag}] notification handler '${method}' threw: ${String(err)}`,
+            );
           }
         }
       });
@@ -644,7 +747,10 @@ export async function bootCodexAppServerRuntime(
   };
 
   subscribe("turn/completed", (params) => {
-    const p = params as { threadId?: string; turn?: { id?: string; status?: string } };
+    const p = params as {
+      threadId?: string;
+      turn?: { id?: string; status?: string };
+    };
     const turnId = p?.turn?.id;
     if (!turnId) return;
     const status = p.turn?.status;
@@ -653,11 +759,19 @@ export async function bootCodexAppServerRuntime(
     // recorded as a normal completion.
     recordCompletion(
       turnId,
-      status === "failed" ? "failed" : status === "interrupted" ? "cancelled" : "completed",
+      status === "failed"
+        ? "failed"
+        : status === "interrupted"
+          ? "cancelled"
+          : "completed",
     );
   });
   subscribe("error", (params) => {
-    const p = params as { threadId?: string; turnId?: string; willRetry?: boolean };
+    const p = params as {
+      threadId?: string;
+      turnId?: string;
+      willRetry?: boolean;
+    };
     // willRetry=true means codex will retry the SAME turn — settling it as
     // terminal here would orphan/duplicate the still-running turn (runTurn
     // would resolve early while codex keeps streaming the retry).
@@ -701,8 +815,12 @@ export async function bootCodexAppServerRuntime(
         lastErr = err;
         if (err instanceof JsonRpcRequestError && err.code === -32001) {
           // Server overloaded. Back off with jitter.
-          const wait = OVERLOAD_RETRY_BASE_MS * 2 ** attempt + Math.floor(Math.random() * 250);
-          console.warn(`[${logTag}] server overloaded on ${method}; retrying in ${wait}ms (attempt ${attempt + 1})`);
+          const wait =
+            OVERLOAD_RETRY_BASE_MS * 2 ** attempt +
+            Math.floor(Math.random() * 250);
+          console.warn(
+            `[${logTag}] server overloaded on ${method}; retrying in ${wait}ms (attempt ${attempt + 1})`,
+          );
           await new Promise((r) => setTimeout(r, wait));
           attempt++;
           continue;
@@ -712,7 +830,9 @@ export async function bootCodexAppServerRuntime(
     }
     throw lastErr instanceof Error
       ? lastErr
-      : new Error(`codex ${method} failed after ${OVERLOAD_MAX_RETRIES + 1} attempts`);
+      : new Error(
+          `codex ${method} failed after ${OVERLOAD_MAX_RETRIES + 1} attempts`,
+        );
   };
 
   return {
@@ -802,39 +922,39 @@ export async function bootCodexAppServerRuntime(
       // duration; fail only when the app-server goes quiet for the inactivity
       // window, which catches lost/missed `turn/completed` without killing a
       // healthy long-running turn.
-      const finalStatus = await new Promise<"completed" | "failed" | "cancelled">(
-        (resolve) => {
-          let timer: NodeJS.Timeout | null = null;
-          const cleanup = () => {
-            if (timer) clearTimeout(timer);
-            timer = null;
-            turnActivityListeners.delete(touchActivity);
-          };
-          const arm = () => {
-            if (timer) clearTimeout(timer);
-            timer = setTimeout(() => {
-              if (turnWaiters.delete(turnId)) {
-                cleanup();
-                console.warn(
-                  `[${logTag}] turn ${turnId}: no app-server activity for ${TURN_INACTIVITY_TIMEOUT_MS}ms; treating as failed`,
-                );
-                resolve("failed");
-              }
-            }, TURN_INACTIVITY_TIMEOUT_MS);
-            timer.unref?.();
-          };
-          const touchActivity = () => arm();
-          turnActivityListeners.add(touchActivity);
-          arm();
-          turnWaiters.set(turnId, {
-            resolve: (status) => {
+      const finalStatus = await new Promise<
+        "completed" | "failed" | "cancelled"
+      >((resolve) => {
+        let timer: NodeJS.Timeout | null = null;
+        const cleanup = () => {
+          if (timer) clearTimeout(timer);
+          timer = null;
+          turnActivityListeners.delete(touchActivity);
+        };
+        const arm = () => {
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(() => {
+            if (turnWaiters.delete(turnId)) {
               cleanup();
-              resolve(status);
-            },
-            touchActivity,
-          });
-        },
-      );
+              console.warn(
+                `[${logTag}] turn ${turnId}: no app-server activity for ${TURN_INACTIVITY_TIMEOUT_MS}ms; treating as failed`,
+              );
+              resolve("failed");
+            }
+          }, TURN_INACTIVITY_TIMEOUT_MS);
+          timer.unref?.();
+        };
+        const touchActivity = () => arm();
+        turnActivityListeners.add(touchActivity);
+        arm();
+        turnWaiters.set(turnId, {
+          resolve: (status) => {
+            cleanup();
+            resolve(status);
+          },
+          touchActivity,
+        });
+      });
       return { turnId, status: finalStatus, raw: ack };
     },
 
@@ -852,7 +972,9 @@ export async function bootCodexAppServerRuntime(
         // Already responded (e.g. via dispose's cancel-all sweep, or
         // the approval timeout fired) or an unknown id — no-op.
         // Logged at debug so dev can correlate.
-        console.log(`[${logTag}] respondToPermission: unknown id ${permissionId}`);
+        console.log(
+          `[${logTag}] respondToPermission: unknown id ${permissionId}`,
+        );
         return;
       }
       pendingApprovals.delete(permissionId);
@@ -871,11 +993,28 @@ export async function bootCodexAppServerRuntime(
       pending.resolve(response);
     },
 
+    respondToMcpElicitation(elicitationId, response) {
+      const pending = pendingMcpElicitations.get(elicitationId);
+      if (!pending) {
+        console.log(
+          `[${logTag}] respondToMcpElicitation: unknown id ${elicitationId}`,
+        );
+        return;
+      }
+      pendingMcpElicitations.delete(elicitationId);
+      clearTimeout(pending.timer);
+      pending.resolve(response);
+    },
+
     onNotification(method, handler) {
       return subscribe(method, handler);
     },
 
-    request<T>(method: string, params?: unknown, rpcOpts?: { timeoutMs?: number }) {
+    request<T>(
+      method: string,
+      params?: unknown,
+      rpcOpts?: { timeoutMs?: number },
+    ) {
       return requestWithRetry<T>(method, params ?? {}, rpcOpts);
     },
 
@@ -895,6 +1034,11 @@ export async function bootCodexAppServerRuntime(
         pending.resolve({ answers: {} });
         pendingUserInputs.delete(questionId);
       }
+      for (const [elicitationId, pending] of pendingMcpElicitations) {
+        clearTimeout(pending.timer);
+        pending.resolve(cancelMcpElicitationResponse());
+        pendingMcpElicitations.delete(elicitationId);
+      }
       for (const w of turnWaiters.values()) w.resolve("cancelled");
       turnWaiters.clear();
       client.close("dispose");
@@ -905,12 +1049,19 @@ export async function bootCodexAppServerRuntime(
 
 // ── Internal helpers ─────────────────────────────────────────
 
-async function teardown(proc: StdioAgentProcess, client: JsonRpcStdioClient): Promise<void> {
+async function teardown(
+  proc: StdioAgentProcess,
+  client: JsonRpcStdioClient,
+): Promise<void> {
   client.close("boot failure");
   await proc.stop();
 }
 
-function wrapBootError(stage: string, err: unknown, stderrTail?: string): Error {
+function wrapBootError(
+  stage: string,
+  err: unknown,
+  stderrTail?: string,
+): Error {
   const inner = err instanceof Error ? err.message : String(err);
   const tail = stderrTail ? `\nstderr tail:\n${stderrTail.slice(-1024)}` : "";
   return new Error(`codex app-server boot failed at ${stage}: ${inner}${tail}`);
@@ -971,7 +1122,9 @@ function compareSemver(a: string, b: string): number {
  *
  *  and a stdio server emits `.command`/`.args`/`.env`. Per the codex 0.32+ MCP
  *  config schema. */
-export function buildMcpServerOverrides(servers: readonly McpServerRegistration[]): string[] {
+export function buildMcpServerOverrides(
+  servers: readonly McpServerRegistration[],
+): string[] {
   const args: string[] = [];
   for (const s of servers) {
     // Names go into TOML keys; only allow alnum + underscore + dash to
@@ -984,6 +1137,12 @@ export function buildMcpServerOverrides(servers: readonly McpServerRegistration[
     // TOML, so arrays/tables are emitted as TOML literals.
     if (s.transport === "http") {
       args.push("-c", `${base}.url="${escapeTomlString(s.url)}"`);
+      if (s.bearerTokenEnvVar) {
+        args.push(
+          "-c",
+          `${base}.bearer_token_env_var="${escapeTomlString(s.bearerTokenEnvVar)}"`,
+        );
+      }
       if (s.headers && Object.keys(s.headers).length > 0) {
         args.push("-c", `${base}.http_headers=${tomlInlineTable(s.headers)}`);
       }
@@ -995,6 +1154,18 @@ export function buildMcpServerOverrides(servers: readonly McpServerRegistration[
       if (s.env && Object.keys(s.env).length > 0) {
         args.push("-c", `${base}.env=${tomlInlineTable(s.env)}`);
       }
+    }
+    if (s.approval?.defaultMode) {
+      args.push(
+        "-c",
+        `${base}.default_tools_approval_mode="${s.approval.defaultMode}"`,
+      );
+    }
+    for (const [toolName, mode] of Object.entries(s.approval?.tools ?? {})) {
+      // Tool names are TOML path components too; reject rather than quote so
+      // the generated shape stays identical to Codex's documented config.
+      if (!/^[A-Za-z0-9_-]+$/.test(toolName)) continue;
+      args.push("-c", `${base}.tools.${toolName}.approval_mode="${mode}"`);
     }
   }
   return args;
@@ -1021,18 +1192,23 @@ function tomlInlineTable(table: Record<string, string>): string {
  *  on the command line, not just the offending one). Order matters: the
  *  backslash escape must run first so it doesn't double-escape the others. */
 function escapeTomlString(s: string): string {
-  return s
-    .replace(/\\/g, "\\\\")
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, "\\n")
-    .replace(/\t/g, "\\t")
-    .replace(/\r/g, "\\r")
-    .replace(/\f/g, "\\f")
-    // eslint-disable-next-line no-control-regex -- intentional: escape backspace
-    .replace(/\x08/g, "\\b")
-    // Any remaining C0 control char (incl. NUL) -> \uXXXX (TOML basic-string escape).
-    // eslint-disable-next-line no-control-regex -- intentional: escape all C0 controls
-    .replace(/[\x00-\x1f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  return (
+    s
+      .replace(/\\/g, "\\\\")
+      .replace(/"/g, '\\"')
+      .replace(/\n/g, "\\n")
+      .replace(/\t/g, "\\t")
+      .replace(/\r/g, "\\r")
+      .replace(/\f/g, "\\f")
+      // eslint-disable-next-line no-control-regex -- intentional: escape backspace
+      .replace(/\x08/g, "\\b")
+      // Any remaining C0 control char (incl. NUL) -> \uXXXX (TOML basic-string escape).
+      .replace(
+        // eslint-disable-next-line no-control-regex -- intentional: escape all C0 controls
+        new RegExp("[\\u0000-\\u001f]", "g"),
+        (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
+      )
+  );
 }
 
 /** Method-appropriate "auto-deny" response when no approval handler is
@@ -1049,7 +1225,10 @@ export function defaultDenyResponse(method: CodexApprovalMethod): unknown {
       // No granted permissions, scope ="turn" — the server interprets
       // an empty grant as "user declined the extra permission ask".
       return {
-        permissions: { network: { enabled: false }, fileSystem: { read: [], write: [] } },
+        permissions: {
+          network: { enabled: false },
+          fileSystem: { read: [], write: [] },
+        },
         scope: "turn",
       };
   }
@@ -1066,4 +1245,11 @@ export function defaultCancelResponse(method: CodexApprovalMethod): unknown {
     case "item/permissions/requestApproval":
       return defaultDenyResponse(method);
   }
+}
+
+/** Fail-closed response for an MCP elicitation that cannot be presented or
+ *  has outlived its owner. Keep every nullable protocol field explicit: this
+ *  shape is accepted by current Codex and MCP implementations. */
+function cancelMcpElicitationResponse(): CodexMcpElicitationResponse {
+  return { action: "cancel", content: null, _meta: null };
 }

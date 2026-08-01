@@ -120,7 +120,7 @@ const LOCAL_GIT_TIMEOUT_MS = 30_000;
 /** Send a WORKSPACE_REQUEST and await its WORKSPACE_RESPONSE / WORKSPACE_ERROR
  *  (both echo requestId, so request() resolves on whichever arrives). Throws on
  *  a WORKSPACE_ERROR. */
-async function workspaceOp(
+export async function workspaceOp(
   bridge: RuntimeClient,
   op: string,
   params: Record<string, unknown> = {},
@@ -508,7 +508,12 @@ export interface PreparedWorkspaceCreateWire {
  *  naming, no mkdir/checkout), so a disconnected prepare leaks nothing. */
 export async function bridgeWorkspacePrepareCreate(
   bridge: RuntimeClient,
-  args: { repoRoot: string; repoSlug?: string; prompt?: string },
+  args: {
+    repoRoot: string;
+    kind?: "code" | "design";
+    repoSlug?: string;
+    prompt?: string;
+  },
 ): Promise<PreparedWorkspaceCreateWire> {
   const r = (await workspaceOp(
     bridge,
@@ -1190,6 +1195,30 @@ export async function bridgeGhRepositoryOwnerAvatar(
   return (await workspaceOp(bridge, "gh.repoOwnerAvatar", {
     repoRoot,
   })) as GithubRepositoryOwnerAvatar | null;
+}
+
+/** Mirrors GithubRepoAccess in src/engine/git/github.ts. `code` is widened to
+ *  `string` here for the same reason every other wire type in this module is
+ *  restated: the renderer bundle must not import the engine. */
+export interface GithubRepoAccess {
+  state: "ok" | "blocked" | "unknown";
+  connected?: boolean;
+  code?: string;
+  message?: string;
+  remediation?: string;
+}
+
+/** Preflight for the Create PR control: can the selected GitHub connection
+ *  actually reach this workspace's remote? Resolves a status object (the engine
+ *  never throws for this op) so callers can distinguish a definite refusal from
+ *  a probe that simply couldn't complete. */
+export async function bridgeGhRepoAccess(
+  bridge: RuntimeClient,
+  workspaceId: string,
+): Promise<GithubRepoAccess> {
+  return (await workspaceOp(bridge, "gh.repoAccess", {
+    workspaceId,
+  })) as GithubRepoAccess;
 }
 
 export async function bridgeGhPrGet(

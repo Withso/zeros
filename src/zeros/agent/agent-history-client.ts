@@ -210,7 +210,10 @@ export async function loadFullTranscript(
   while (page.length > 0) {
     pages.unshift(page);
     for (const r of page) chars += r.payload.length;
-    if (pages.length >= TRANSCRIPT_MAX_PAGES || chars >= TRANSCRIPT_CHAR_BUDGET) {
+    if (
+      pages.length >= TRANSCRIPT_MAX_PAGES ||
+      chars >= TRANSCRIPT_CHAR_BUDGET
+    ) {
       // Hitting a bound is not the same as leaving history behind, and the
       // difference is user-visible: `complete: false` is what turns an
       // otherwise silent success into "Attached the most recent part of X —
@@ -344,6 +347,8 @@ export async function writeImageAttachment(args: {
  *  field types (booleans, optional fields). */
 export interface ChatRowWire {
   id: string;
+  /** Optional only for rolling compatibility; absent rows are code chats. */
+  mode?: "code" | "design";
   folder: string;
   agentId: string | null;
   agentName: string | null;

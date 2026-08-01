@@ -1,0 +1,19 @@
+"$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+
+[scripts]
+# Keep in step with .conductor/settings.local.toml, which overrides this file.
+#
+# backend/ is a SEPARATE pnpm root — it has its own pnpm-workspace.yaml and
+# lockfile, and the root workspace globs are `packages/*` and
+# `website/marketing`, so a root install never reaches it. Without the second
+# line, `pnpm test:backend` fails in every fresh workspace with
+# `vitest: command not found`.
+#
+# Deliberately NOT here: a `cp -R "$CONDUCTOR_ROOT_PATH/docs/." docs/` step.
+# docs/ has been TRACKED since 2026-07-28, so `git worktree add` materialises it
+# for free; copying over it would overwrite the branch's own docs with the main
+# checkout's working-tree version. See .worktreeinclude for the full history.
+setup = '''
+pnpm install
+pnpm --dir backend install
+'''

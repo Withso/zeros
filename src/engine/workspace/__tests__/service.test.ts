@@ -11,6 +11,8 @@ import {
   createWorkspace,
   getWorkspaceLifecycleStatus,
 } from "../../git";
+import { getDesignRuntimeAudit } from "../../design/runtime-audits";
+import { getDesignSelection } from "../../design/selection";
 
 describe("WorkspaceService", () => {
   let dir: string;
@@ -796,6 +798,226 @@ describe("WorkspaceService", () => {
     expect(svc.isWriteOp("gh.prComment")).toBe(true);
     expect(svc.isWriteOp("gh.prGet")).toBe(false);
     expect(svc.isWriteOp("gh.authStatus")).toBe(false);
+  });
+
+  it("returns exact design mutation snapshots and Save Designs commits only the design directory", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    fs.writeFileSync(path.join(dir, ".gitignore"), "Zeros Design/\n");
+    execFileSync("git", ["add", "hello.txt", ".gitignore"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const workspace = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-service-test",
+      kind: "design",
+    });
+    const protocolCapability = "d".repeat(64);
+    svc.setDesignProtocolCapabilityProvider(() => protocolCapability);
+    const createdReply = (await svc.handle("design.frame.create", {
+      workspaceId: workspace.workspaceId,
+      title: "Checkout",
+    })) as {
+      frame: { file: string };
+      snapshot: {
+        protocolCapability: string | null;
+        frames: Array<{ file: string }>;
+      };
+    };
+    expect(createdReply.snapshot.protocolCapability).toBe(protocolCapability);
+    expect(createdReply.snapshot.frames.map((frame) => frame.file)).toContain(
+      createdReply.frame.file,
+    );
+    const renamedReply = (await svc.handle("design.frame.rename", {
+      workspaceId: workspace.workspaceId,
+      frame: createdReply.frame.file,
+      title: "Checkout flow",
+    })) as {
+      snapshot: { frames: Array<{ file: string; title: string }> };
+    };
+    expect(
+      renamedReply.snapshot.frames.find(
+        (frame) => frame.file === createdReply.frame.file,
+      )?.title,
+    ).toBe("Checkout flow");
+    type DesignTreeNode = {
+      tag: string;
+      oid: string | null;
+      children: DesignTreeNode[];
+    };
+    const before = (await svc.handle("design.snapshot", {
+      workspaceId: workspace.workspaceId,
+    })) as {
+      snapshot: {
+        protocolCapability: string | null;
+        frames: Array<{
+          file: string;
+          sourceVersion: string;
+          tree: DesignTreeNode[];
+        }>;
+      };
+    };
+    expect(before.snapshot.protocolCapability).toBe(protocolCapability);
+    const frame = before.snapshot.frames[0]!;
+    expect(frame.tree.map((node) => node.tag)).toEqual(["main"]);
+    const main = frame.tree.find((node) => node.tag === "main");
+    expect(main?.oid).toMatch(/^f-.+-main$/);
+
+    await expect(
+      svc.handle("git.checkoutBranch", {
+        workspaceId: workspace.workspaceId,
+        branch: "main",
+      }),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_FAILED",
+      message: expect.stringMatching(/unavailable in a design workspace/i),
+    });
+
+    const tokenSnapshot = (await svc.handle("design.snapshot", {
+      workspaceId: workspace.workspaceId,
+    })) as {
+      snapshot: {
+        protocolCapability: string | null;
+        tokenSourceVersion: string;
+        tokens: Array<{ name: string; value: string }>;
+        frames: Array<{ file: string; sourceVersion: string }>;
+      };
+    };
+    const tokenReply = (await svc.handle("design.token.update", {
+      workspaceId: workspace.workspaceId,
+      name: "--accent",
+      theme: null,
+      value: "royalblue",
+      sourceVersion: tokenSnapshot.snapshot.tokenSourceVersion,
+    })) as {
+      mutation: { changed: boolean };
+      snapshot: {
+        protocolCapability: string | null;
+        tokenSourceVersion: string;
+        tokens: Array<{ name: string; value: string }>;
+        frames: Array<{ file: string; sourceVersion: string }>;
+      };
+    };
+    expect(tokenReply.mutation.changed).toBe(true);
+    expect(tokenReply.snapshot.protocolCapability).toBe(protocolCapability);
+    expect(tokenReply.snapshot.tokenSourceVersion).not.toBe(
+      tokenSnapshot.snapshot.tokenSourceVersion,
+    );
+
+    const remote = (await svc.handle(
+      "design.snapshot",
+      { workspaceId: workspace.workspaceId },
+      { remote: true },
+    )) as { snapshot: { protocolCapability: string | null } };
+    expect(remote.snapshot.protocolCapability).toBeNull();
+    expect(
+      tokenReply.snapshot.tokens.find((token) => token.name === "--accent")
+        ?.value,
+    ).toBe("royalblue");
+    const refreshedFrame = tokenReply.snapshot.frames.find(
+      (candidate) => candidate.file === frame.file,
+    )!;
+
+    const response = (await svc.handle("design.node.styles", {
+      workspaceId: workspace.workspaceId,
+      frame: frame.file,
+      nodeId: main!.oid!,
+      sourceVersion: refreshedFrame.sourceVersion,
+      styles: { padding: "36px" },
+    })) as {
+      mutation: { frame: { sourceVersion: string } };
+      snapshot: { frames: Array<{ source: string; sourceVersion: string }> };
+    };
+    expect(response.snapshot.frames[0]?.source).toContain("padding:36px;");
+    expect(response.snapshot.frames[0]?.sourceVersion).toBe(
+      response.mutation.frame.sourceVersion,
+    );
+
+    const selectedAt = Date.now();
+    await svc.handle("design.selection.set", {
+      workspaceId: workspace.workspaceId,
+      frame: frame.file,
+      sourceVersion: response.mutation.frame.sourceVersion,
+      selectionVersion: selectedAt * 1_024,
+      updatedAt: selectedAt,
+      nodeIds: [main!.oid!],
+      breadcrumb: ["main"],
+      rects: [{ x: 0, y: 0, width: 100, height: 100 }],
+      keyComputedStyles: {},
+    });
+    expect(getDesignSelection(workspace.workspaceId)?.updatedAt).toBe(
+      selectedAt,
+    );
+
+    const deepBreadcrumb = Array.from(
+      { length: 24 },
+      (_, index) => `layer-${index + 1}`,
+    );
+    await svc.handle("design.selection.set", {
+      workspaceId: workspace.workspaceId,
+      frame: frame.file,
+      sourceVersion: response.mutation.frame.sourceVersion,
+      selectionVersion: selectedAt * 1_024 + 1,
+      updatedAt: selectedAt + 1,
+      nodeIds: [main!.oid!],
+      breadcrumb: deepBreadcrumb,
+      rects: [{ x: 0, y: 0, width: 100, height: 100 }],
+      keyComputedStyles: {},
+    });
+    expect(getDesignSelection(workspace.workspaceId)?.breadcrumb).toEqual(
+      deepBreadcrumb.slice(-16),
+    );
+
+    await expect(
+      svc.handle("design.runtime.audit", {
+        workspaceId: workspace.workspaceId,
+        frame: frame.file,
+        sourceVersion: response.mutation.frame.sourceVersion,
+        warnings: [
+          {
+            ruleId: "overflow",
+            oid: "stale-runtime-oid",
+            message: "A stale runtime still reported this node.",
+            fix: "Refresh the frame.",
+          },
+          {
+            ruleId: "overflow",
+            oid: main!.oid!,
+            message: "Visible overflow.",
+            fix: "Constrain the element.",
+          },
+        ],
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect(
+      getDesignRuntimeAudit(
+        workspace.path,
+        frame.file,
+        response.mutation.frame.sourceVersion,
+      ).map((warning) => warning.oid),
+    ).toEqual([main!.oid!]);
+
+    fs.writeFileSync(path.join(workspace.path, "outside.txt"), "leave me\n");
+    const saved = (await svc.handle("design.save", {
+      workspaceId: workspace.workspaceId,
+    })) as { sha: string; branch: string };
+    expect(saved.sha).toMatch(/^[a-f0-9]{40}$/);
+    const committed = execFileSync(
+      "git",
+      ["show", "--pretty=format:", "--name-only", "HEAD"],
+      { cwd: workspace.path, encoding: "utf8" },
+    );
+    expect(committed).toContain("Zeros Design/checkout.html");
+    expect(committed).not.toContain("outside.txt");
+    expect(
+      execFileSync("git", ["status", "--porcelain", "--", "outside.txt"], {
+        cwd: workspace.path,
+        encoding: "utf8",
+      }),
+    ).toContain("outside.txt");
+    await svc.handle("workspace.delete", {
+      workspaceId: workspace.workspaceId,
+      includeBranch: true,
+    });
   });
 
   it("maps an unknown workspaceId to WORKSPACE_NOT_FOUND on a git op", async () => {

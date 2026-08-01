@@ -436,16 +436,19 @@ export function useGitRefreshCoordinator(): void {
 export function useGitRefreshKey(
   cwd?: string | null,
   workspaceId?: string | null,
+  active = true,
 ): number {
   const normalizedCwd = normalizeRefreshCwd(cwd);
   const normalizedWorkspaceId = normalizeWorkspaceId(workspaceId);
   const subscribe = useCallback(
     (listener: () => void) =>
-      subscribeRefresh(
-        { cwd: normalizedCwd, workspaceId: normalizedWorkspaceId },
-        listener,
-      ),
-    [normalizedCwd, normalizedWorkspaceId],
+      active
+        ? subscribeRefresh(
+            { cwd: normalizedCwd, workspaceId: normalizedWorkspaceId },
+            listener,
+          )
+        : () => {},
+    [active, normalizedCwd, normalizedWorkspaceId],
   );
   const getSnapshot = useCallback(
     () =>
@@ -459,9 +462,9 @@ export function useGitRefreshKey(
 
   const bridge = useBridge();
   useEffect(() => {
-    if (!bridge) return;
+    if (!active || !bridge) return;
     return retainBridgeRefreshSubscription(bridge);
-  }, [bridge]);
+  }, [active, bridge]);
 
   return key;
 }

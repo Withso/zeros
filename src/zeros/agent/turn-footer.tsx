@@ -62,6 +62,9 @@ import { useAgentSessions } from "./sessions-hooks";
 import { formatTokens } from "./context-gauge";
 import { displayNameForModelValue } from "./model-catalog";
 import type { AgentMessage } from "./use-agent-session";
+import { useWorkspaceStore } from "../store/store";
+import { useDesignWorkspaceSnapshot } from "../store/use-design-workspace";
+import { DesignChangeCard } from "./design-change-card";
 
 const PILL_PAGE = 10;
 
@@ -249,6 +252,15 @@ export const TurnFooter = memo(function TurnFooter({
   const [copied, setCopied] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const designMode = useWorkspaceStore(
+    (state) =>
+      state.chats.find((chat) => chat.id === chatId)?.mode === "design",
+  );
+  const designSnapshot = useDesignWorkspaceSnapshot(
+    designMode && isLastTurn && !live ? turn?.workspaceId : null,
+    turn?.folder,
+    designMode && !!isLastTurn && !live,
+  );
 
   // Once settled, fetch the recorded turn (authored files + real duration).
   useEffect(() => {
@@ -457,6 +469,9 @@ export const TurnFooter = memo(function TurnFooter({
 
   return (
     <>
+      {designMode ? (
+        <DesignChangeCard files={files} lint={designSnapshot.data?.lint} />
+      ) : null}
       <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
         {statusLabel &&
           (statusLabel === "SIGN IN REQUIRED" && onSignIn && signInPhase ? (
@@ -486,12 +501,20 @@ export const TurnFooter = memo(function TurnFooter({
                   </>
                 ) : signInPhase === "success" ? (
                   <>
-                    <Check className="size-3" strokeWidth={2} aria-hidden="true" />
+                    <Check
+                      className="size-3"
+                      strokeWidth={2}
+                      aria-hidden="true"
+                    />
                     Signed in
                   </>
                 ) : (
                   <>
-                    <LogIn className="size-3" strokeWidth={2} aria-hidden="true" />
+                    <LogIn
+                      className="size-3"
+                      strokeWidth={2}
+                      aria-hidden="true"
+                    />
                     Sign in
                   </>
                 )}
@@ -531,7 +554,7 @@ export const TurnFooter = memo(function TurnFooter({
                 </span>
                 {typeof usage?.totalCostUsd === "number" &&
                   usage.totalCostUsd > 0 && (
-                    <span className="text-fg2 font-mono text-2xxs">
+                    <span className="text-fg2 text-2xxs font-mono">
                       {formatUsd(usage.totalCostUsd)}
                     </span>
                   )}
@@ -544,7 +567,7 @@ export const TurnFooter = memo(function TurnFooter({
                   <span className="text-fg2 min-w-0 truncate text-[12.5px]">
                     {r.name}
                   </span>
-                  <span className="text-fg2 font-mono text-2xxs whitespace-nowrap tabular-nums">
+                  <span className="text-fg2 text-2xxs font-mono whitespace-nowrap tabular-nums">
                     {r.line}
                   </span>
                 </div>
@@ -556,7 +579,7 @@ export const TurnFooter = memo(function TurnFooter({
                 )}
               >
                 <span className="text-fg1 text-[12.5px]">Total</span>
-                <span className="text-fg1 font-mono text-2xxs whitespace-nowrap tabular-nums">
+                <span className="text-fg1 text-2xxs font-mono whitespace-nowrap tabular-nums">
                   {usageTotalLine}
                 </span>
               </div>
@@ -672,7 +695,7 @@ export const TurnFooter = memo(function TurnFooter({
           <button
             type="button"
             onClick={() => onContinue?.(continueReason)}
-            className="border-border3 bg-transparent text-fg1 hover:bg-bg2-hover flex h-[22px] items-center gap-1.5 rounded-sm border px-2 text-xs font-medium transition-colors"
+            className="border-border3 text-fg1 hover:bg-bg2-hover flex h-[22px] items-center gap-1.5 rounded-sm border bg-transparent px-2 text-xs font-medium transition-colors"
           >
             <Play className="size-3" strokeWidth={2} />
             Continue

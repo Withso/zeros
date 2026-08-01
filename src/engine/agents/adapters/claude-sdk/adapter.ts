@@ -84,6 +84,7 @@ import {
   type StopReason,
   type TurnUsage,
 } from "../../types";
+
 import { SESSION_EXPIRED_KEYWORDS } from "../shared/session-expiry";
 import { PERMISSION_RESPONSE_TIMEOUT_MS } from "../shared/constants";
 import { preserveAmbientConfigRoots } from "../shared/config-isolation";
@@ -94,7 +95,10 @@ import {
   sessionDir,
   writeSessionMeta,
 } from "../../session-paths";
-import { ClaudeStreamTranslator } from "../claude/translator";
+import {
+  ClaudeStreamTranslator,
+  isScheduledWakeupTaskId,
+} from "../claude/translator";
 import {
   claudeCliMissingMessage,
   isPinnedClaudeRuntime,
@@ -102,6 +106,50 @@ import {
   type ClaudeCliSourceKind,
 } from "./binary-resolver";
 import { InputQueue, createDeferred, type Deferred } from "./input-queue";
+
+/** Translate the gateway registry into Claude's inline MCP config. Claude
+ * expands ${ENV_VAR} references in HTTP headers inside its child process, so
+ * bearer values stay out of the JSON config/argv while ordinary headers keep
+ * their authored values. */
+export function mcpServersForClaude(
+  servers: readonly McpServerRegistration[],
+): Record<string, unknown> | undefined {
+  if (servers.length === 0) return undefined;
+  return Object.fromEntries(
+    servers.map((server) => {
+      if (server.transport === "stdio") {
+        return [
+          server.name,
+          {
+            type: "stdio",
+            command: server.command,
+            ...(server.args ? { args: server.args } : {}),
+            ...(server.env ? { env: server.env } : {}),
+          },
+        ];
+      }
+      const bearerTokenEnvVar =
+        server.bearerTokenEnvVar &&
+        /^[A-Za-z_][A-Za-z0-9_]*$/.test(server.bearerTokenEnvVar)
+          ? server.bearerTokenEnvVar
+          : null;
+      const headers = {
+        ...(server.headers ?? {}),
+        ...(bearerTokenEnvVar
+          ? { Authorization: `Bearer \${${bearerTokenEnvVar}}` }
+          : {}),
+      };
+      return [
+        server.name,
+        {
+          type: "http",
+          url: server.url,
+          ...(Object.keys(headers).length > 0 ? { headers } : {}),
+        },
+      ];
+    }),
+  );
+}
 
 /** Which CLI tier we last logged, so the breadcrumb lands once per engine boot
  *  (and again if the tier ever changes mid-run) instead of once per turn. */
@@ -415,6 +463,13 @@ interface SdkSession {
   /** The in-flight turn's deferred, settled when the consumer sees `result`
    *  (or the query errors). Null when idle. */
   turn: Deferred<{ stopReason: StopReason; usage?: TurnUsage }> | null;
+  /** Resolves only after prompt() has run its turn teardown. Control requests
+   * that require a truly idle persistent query wait on this seam rather than
+   * relying on promise-reaction ordering around the result deferred. */
+  turnIdle: Deferred<void> | null;
+  /** Serializes the idle interrupt used to cancel a one-shot wake-up with the
+   * next prompt, so the control request can never hit an unrelated turn. */
+  scheduledWakeupStop: Promise<void> | null;
   /** Permission resolvers from canUseTool, keyed by permissionId. */
   readonly pendingPermissions: Map<
     string,
@@ -739,6 +794,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         },
       }),
       turn: null,
+      turnIdle: null,
+      scheduledWakeupStop: null,
       pendingPermissions: new Map(),
       pendingQuestions: new Map(),
       questionByToolUse: new Map(),
@@ -757,7 +814,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     sessionId: string;
     prompt: ContentBlock[];
   }): Promise<{ stopReason: StopReason; response: PromptResponse }> {
-    const state = this.mustState(opts.sessionId);
+    let state = this.mustState(opts.sessionId);
     if (state.turn) {
       throw new AgentFailureError({
         kind: "protocol-error",
@@ -766,6 +823,38 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         agentId: this.agentId,
       });
     }
+    // The consumer clears `turn` immediately before settling its result, but
+    // prompt() may still be unwinding. Serialize on the explicit teardown
+    // seam so a control action cannot observe that transient half-idle state.
+    const previousTurnIdle = state.turnIdle;
+    if (previousTurnIdle) {
+      await previousTurnIdle.promise;
+      state = this.mustState(opts.sessionId);
+      if (state.turn) {
+        throw new AgentFailureError({
+          kind: "protocol-error",
+          message: "a prompt is already in flight for this session",
+          stage: "prompt",
+          agentId: this.agentId,
+        });
+      }
+    }
+    // A scheduled-wakeup stop must issue its interrupt while the persistent
+    // query is genuinely idle. A queued prompt that arrives at the previous
+    // turn boundary waits here until that control request has settled.
+    const pendingWakeupStop = state.scheduledWakeupStop;
+    if (pendingWakeupStop) {
+      await pendingWakeupStop.catch(() => undefined);
+      state = this.mustState(opts.sessionId);
+      if (state.turn) {
+        throw new AgentFailureError({
+          kind: "protocol-error",
+          message: "a prompt is already in flight for this session",
+          stage: "prompt",
+          agentId: this.agentId,
+        });
+      }
+    }
     state.cancelRequested = false;
     this.ensureQuery(state);
 
@@ -773,14 +862,16 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       stopReason: StopReason;
       usage?: TurnUsage;
     }>();
+    const turnIdle = createDeferred<void>();
     state.turn = turn;
-    state.input.push({
-      type: "user",
-      message: { role: "user", content: this.buildContent(opts.prompt) },
-      parent_tool_use_id: null,
-    } as SDKUserMessage);
-
+    state.turnIdle = turnIdle;
     try {
+      state.translator.beginTurn();
+      state.input.push({
+        type: "user",
+        message: { role: "user", content: this.buildContent(opts.prompt) },
+        parent_tool_use_id: null,
+      } as SDKUserMessage);
       const { stopReason, usage } = await turn.promise;
       // (The context-gauge usage refresh fires in runConsumer on every
       // `result` — including turnless runs like compactContext's /compact —
@@ -798,7 +889,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         } as PromptResponse,
       };
     } finally {
-      state.turn = null;
+      if (state.turn === turn) state.turn = null;
+      if (state.turnIdle === turnIdle) state.turnIdle = null;
+      turnIdle.resolve();
     }
   }
 
@@ -1278,6 +1371,111 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       await state.query?.interrupt();
     } catch {
       /* query already gone / between turns — nothing to interrupt */
+    }
+  }
+
+  async stopBackgroundTask(opts: {
+    sessionId: string;
+    taskId: string;
+  }): Promise<void> {
+    const state = this.mustState(opts.sessionId);
+    if (!state.query) {
+      throw new AgentFailureError({
+        kind: "transport-closed",
+        message: "Claude background task is no longer connected",
+        stage: "stopBackgroundTask",
+        agentId: this.agentId,
+      });
+    }
+    if (isScheduledWakeupTaskId(opts.taskId)) {
+      // ScheduleWakeup's one-shot timers live outside the normal task
+      // registry, so stopTask cannot address them. The Claude runtime's idle
+      // interrupt path is its documented user-abort seam and cancels pending
+      // dynamic-loop wakeups. Stop hooks expose at most one such wakeup (a new
+      // one supersedes the old one), and recurring cron jobs never enter this
+      // branch because task 008 remains intentionally excluded.
+      if (state.scheduledWakeupStop) {
+        await state.scheduledWakeupStop;
+        return;
+      }
+      const operation = Promise.resolve().then(async () => {
+        const q = state.query;
+        if (!q) {
+          throw new AgentFailureError({
+            kind: "transport-closed",
+            message: "Claude scheduled wake-up is no longer connected",
+            stage: "stopBackgroundTask",
+            agentId: this.agentId,
+          });
+        }
+        const turnIdle = state.turnIdle;
+        if (turnIdle) await turnIdle.promise;
+        // The prompt gate above prevents a new turn from entering after the
+        // awaited prompt teardown. Keep the explicit guard as a fail-safe for
+        // any future code path that bypasses prompt().
+        if (
+          state.query !== q ||
+          state.disposed ||
+          state.turn !== null ||
+          state.turnIdle !== null
+        ) {
+          throw new AgentFailureError({
+            kind: "protocol-error",
+            message: "Claude scheduled wake-up is no longer idle",
+            stage: "stopBackgroundTask",
+            agentId: this.agentId,
+          });
+        }
+        try {
+          await q.interrupt();
+        } catch (error) {
+          throw new AgentFailureError({
+            kind: "transport-closed",
+            message: `Claude could not stop the scheduled wake-up: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            stage: "stopBackgroundTask",
+            agentId: this.agentId,
+          });
+        }
+        state.translator.clearScheduledWakeups();
+      });
+      state.scheduledWakeupStop = operation;
+      try {
+        await operation;
+      } finally {
+        if (state.scheduledWakeupStop === operation) {
+          state.scheduledWakeupStop = null;
+        }
+      }
+      return;
+    }
+    const stopTask = (
+      state.query as unknown as {
+        stopTask?: (taskId: string) => Promise<void>;
+      }
+    ).stopTask;
+    if (typeof stopTask !== "function") {
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        message:
+          "This Claude Agent SDK does not support stopping background tasks; update Claude before retrying.",
+        stage: "stopBackgroundTask",
+        agentId: this.agentId,
+        advice: "Update Claude Code, then retry Stop.",
+      });
+    }
+    try {
+      await stopTask.call(state.query, opts.taskId);
+    } catch (error) {
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        message: `Claude could not stop background task ${opts.taskId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        stage: "stopBackgroundTask",
+        agentId: this.agentId,
+      });
     }
   }
 
@@ -2106,26 +2304,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // Per-session registry (gateway-resolved for this cwd: user + repo +
     // workspace layers, RCE-gated) wins; fall back to the global view.
     const sessionMcp = state.mcpServers ?? this.ctx.mcpServers;
-    const mcpServers =
-      sessionMcp.length > 0
-        ? Object.fromEntries(
-            sessionMcp.map((s) => [
-              s.name,
-              s.transport === "stdio"
-                ? {
-                    type: "stdio",
-                    command: s.command,
-                    ...(s.args ? { args: s.args } : {}),
-                    ...(s.env ? { env: s.env } : {}),
-                  }
-                : {
-                    type: "http",
-                    url: s.url,
-                    ...(s.headers ? { headers: s.headers } : {}),
-                  },
-            ]),
-          )
-        : undefined;
+    const mcpServers = mcpServersForClaude(sessionMcp);
 
     // Resolve the `claude` executable OURSELVES rather than letting the SDK do
     // it. See binary-resolver.ts — the SDK's lookup can only work where a real
@@ -2149,7 +2328,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       loggedCliSource = cli.source;
       console.info(
         `[claude-sdk] claude CLI: ${cliPath} (source=${cli.source}${
-          isPinnedClaudeRuntime(cli.source) ? "" : ", NOT the app's pinned runtime"
+          isPinnedClaudeRuntime(cli.source)
+            ? ""
+            : ", NOT the app's pinned runtime"
         })`,
       );
     }
@@ -2198,6 +2379,43 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // Deliberately excludes 'refusal_fallback_prompt' so refusal behavior is
       // unchanged.
       onUserDialog: this.onUserDialog(state),
+      // Passive lifecycle taps. `background_tasks_changed` does not include
+      // session-scoped one-shot wakeups; StopHookInput.session_crons is the
+      // SDK's authoritative snapshot for those. Recurring crons are filtered
+      // by the translator so the explicitly deferred schedules feature (008)
+      // remains untouched. A loop wake clears its now-fired timer before the
+      // new turn starts.
+      hooks: {
+        Stop: [
+          {
+            hooks: [
+              async (input) => {
+                if (input.hook_event_name === "Stop") {
+                  state.translator.setScheduledWakeups(
+                    input.session_crons ?? [],
+                  );
+                }
+                return {};
+              },
+            ],
+          },
+        ],
+        UserPromptSubmit: [
+          {
+            hooks: [
+              async (input) => {
+                if (
+                  input.hook_event_name === "UserPromptSubmit" &&
+                  input.source === "loop_wakeup"
+                ) {
+                  state.translator.clearScheduledWakeups();
+                }
+                return {};
+              },
+            ],
+          },
+        ],
+      },
       supportedDialogKinds: [
         "ask_user_question",
         "user_question",

@@ -42,6 +42,7 @@ import {
   CURSOR_HOST_CRASH_LOOP_CODE,
   CURSOR_HOST_CRASH_LOOP_ADVICE,
 } from "./host/host-client";
+import { wrapSdkWithLocalStore, type RawCursorSdk } from "./local-store";
 
 const AGENT_ID = "cursor";
 /** Cursor LOCAL SDK agents (we always run `local: { cwd }`) require an
@@ -294,7 +295,45 @@ export interface SdkAgent {
 type CursorMcpConfig =
   | { command: string; args?: string[]; env?: Record<string, string> }
   | { url: string; headers?: Record<string, string> };
-/** The SDK's on-disk SQLite store. The ONLY surface that exposes a run's
+
+/** Cursor's SDK accepts concrete in-memory headers rather than Claude/Codex's
+ * environment-reference config. Resolve the token only while constructing the
+ * SDK options; it never enters a URL or subprocess argument. */
+export function mcpServersForCursor(
+  servers: readonly McpServerRegistration[],
+  env?: Record<string, string>,
+): Record<string, CursorMcpConfig> | null {
+  if (servers.length === 0) return null;
+  return Object.fromEntries(
+    servers.map((server) => {
+      if (server.transport === "stdio") {
+        return [
+          server.name,
+          {
+            command: server.command,
+            ...(server.args ? { args: server.args } : {}),
+            ...(server.env ? { env: server.env } : {}),
+          },
+        ];
+      }
+      const token = server.bearerTokenEnvVar
+        ? env?.[server.bearerTokenEnvVar]
+        : undefined;
+      const headers = {
+        ...(server.headers ?? {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      };
+      return [
+        server.name,
+        {
+          url: server.url,
+          ...(Object.keys(headers).length > 0 ? { headers } : {}),
+        },
+      ];
+    }),
+  );
+}
+/** The SDK's on-disk local store. The ONLY surface that exposes a run's
  *  terminal `error` (= the persisted `errorCode`), which `run.wait()` hides.
  *  Opened lazily per cwd and reused; defaults its state root to the same
  *  location the SDK writes to (getDefaultSdkStateRoot(cwd)), so reads see the
@@ -335,10 +374,19 @@ export interface CursorSdkModule {
       ): Promise<Array<{ id?: string; displayName?: string }>>;
     };
   };
-  /** On-disk SQLite store. We open it read-only-ish to recover a run's real
-   *  terminal `error` after wait() reports a detail-less failure. Optional so
-   *  the bundle tolerates an SDK without the export. */
-  SqliteLocalAgentStore?: {
+  /** Opens the on-disk local agent store — the SAME instance the agents write
+   *  through (JSONL) — so we can recover a run's real terminal `error` after
+   *  wait() reports a detail-less failure.
+   *
+   *  NOT a @cursor/sdk export. The package exports a `JsonlLocalAgentStore`
+   *  CONSTRUCTOR (and `LocalAgentStore` only as a TYPE), so this is a surface
+   *  BOTH loaders synthesize: the host client proxies it to the `store.open`
+   *  protocol op, and local-store.ts builds it from the constructor in-process.
+   *  Named for what it does rather than after any SDK symbol, because probing
+   *  for an SDK-looking name is precisely how this went dead in-process —
+   *  nothing on the real namespace could ever have matched it. Optional so the
+   *  bundle tolerates a loader without the op. */
+  localStore?: {
     open(opts: {
       workspaceRef: string;
       stateRoot?: string;
@@ -391,7 +439,13 @@ async function loadSdk(): Promise<CursorSdkModule> {
       // subprocess instead (see shouldUseCursorHost / host/cursor-host.cjs).
       if (shouldUseCursorHost()) return getCursorHostModule();
       const m = await import("@cursor/sdk");
-      return m as unknown as CursorSdkModule;
+      // NEVER hand the raw namespace to the adapter. 1.0.26's default local
+      // store needs the node:sqlite builtin (Node >= 22.5), so on a Node 20/21
+      // engine every create/resume/list throws — the same failure the host
+      // fixes for the packaged app. wrapSdkWithLocalStore attaches the JSONL
+      // store the host attaches, and supplies the `localStore` surface the
+      // adapter's error recovery reads.
+      return wrapSdkWithLocalStore(m as unknown as RawCursorSdk);
     })();
   }
   return sdkPromise;
@@ -436,7 +490,7 @@ export class CursorSdkAdapter implements AgentAdapter {
    *  check, which can't predict it. resolveModel skips these so a denied
    *  default (e.g. composer-2.5 on a gated plan) isn't re-tried every turn. */
   private readonly deniedModels = new Set<string>();
-  /** Lazily-opened SDK SQLite stores, one per cwd, reused across turns and
+  /** Lazily-opened SDK local stores, one per cwd, reused across turns and
    *  disposed on adapter dispose. Used only to recover a run's real terminal
    *  error after wait() reports a detail-less failure. */
   private readonly storeByCwd = new Map<
@@ -592,17 +646,17 @@ export class CursorSdkAdapter implements AgentAdapter {
     return null;
   }
 
-  /** Lazily open (and cache) the SDK's on-disk SQLite store for a cwd. The
-   *  store defaults its state root to the same place the SDK writes runs, so
-   *  reads see the agent's own rows. Best-effort: null when unavailable. */
+  /** Lazily open (and cache) the on-disk local agent store for a cwd. The store
+   *  defaults its state root to the same place the SDK writes runs, so reads
+   *  see the agent's own rows. Best-effort: null when unavailable. */
   private async openStore(cwd: string): Promise<CursorLocalStore | null> {
     let p = this.storeByCwd.get(cwd);
     if (!p) {
       p = (async () => {
         try {
           const sdk = await loadSdk();
-          if (!sdk.SqliteLocalAgentStore?.open) return null;
-          return await sdk.SqliteLocalAgentStore.open({ workspaceRef: cwd });
+          if (!sdk.localStore?.open) return null;
+          return await sdk.localStore.open({ workspaceRef: cwd });
         } catch (err) {
           this.ctx.emit.onAgentStderr(
             AGENT_ID,
@@ -659,7 +713,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     await this.discoverModels(apiKey);
     const modelId = this.resolveModel(opts.env?.CURSOR_MODEL, opts.env);
     const sdk = await loadSdk();
-    const sessionMcp = this.mcpServers(opts.mcpServers);
+    const sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
     let agent: SdkAgent;
     try {
       agent = await sdk.Agent.create({
@@ -732,7 +786,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     // on resume too. Without this, a resumed chat kept whatever MCP set it was
     // first created with, so a server the user ADDED after the chat opened never
     // appeared until they started a brand-new chat.
-    const sessionMcp = this.mcpServers(opts.mcpServers);
+    const sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
     let agent: SdkAgent;
     // True when resume failed and we seeded a FRESH agent below — the gateway
     // re-injects the first-turn <system_instruction> (the fresh agent has no
@@ -742,7 +796,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       agent = await sdk.Agent.resume(opts.sessionId, {
         apiKey,
         // Bind the resolved model on resume too. `Agent.resume` reconstructs
-        // the agent from Cursor's local SQLite store, which may hold NO
+        // the agent from Cursor's local store, which may hold NO
         // persisted model (a cross-worktree id, a rotated cache, or a
         // pre-SDK cursor-agent CLI id). Without an explicit model the
         // resumed agent's internal `_model` is undefined and the next
@@ -876,7 +930,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     await this.ensureAutoReview(session);
 
     // A Cursor LOCAL run can terminate `status:"error"` with NOTHING useful in
-    // run.wait() — the SDK persists the real reason to its local SQLite store
+    // run.wait() — the SDK persists the real reason to its local store
     // as `errorCode` but wait()'s RunResult deliberately drops it. So the only
     // way to tell the user WHY (auth / plan / model / network) is to read it
     // back from the store (readRunError). And when the reason is model gating
@@ -1118,7 +1172,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     if (want === session.appliedAutoReview) return;
     try {
       const sdk = await loadSdk();
-      const sessionMcp = this.mcpServers(session.mcpServers);
+      const sessionMcp = this.mcpServers(session.mcpServers, session.env);
       session.agent = await sdk.Agent.resume(session.zerosSessionId, {
         apiKey: session.apiKey,
         model: { id: session.modelId },
@@ -1187,7 +1241,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       }
     }
     this.sessions.clear();
-    // Close any SQLite stores we opened for error recovery.
+    // Release any local-store facade handles opened for error recovery.
     for (const p of this.storeByCwd.values()) {
       try {
         await (await p)?.dispose();
@@ -1336,21 +1390,10 @@ export class CursorSdkAdapter implements AgentAdapter {
    *  RCE-gated); undefined → the global ctx.mcpServers. */
   private mcpServers(
     override?: McpServerRegistration[],
+    env?: Record<string, string>,
   ): Record<string, CursorMcpConfig> | null {
     const list = override ?? this.ctx.mcpServers;
-    if (list.length === 0) return null;
-    return Object.fromEntries(
-      list.map((s) => [
-        s.name,
-        s.transport === "stdio"
-          ? {
-              command: s.command,
-              ...(s.args ? { args: s.args } : {}),
-              ...(s.env ? { env: s.env } : {}),
-            }
-          : { url: s.url, ...(s.headers ? { headers: s.headers } : {}) },
-      ]),
-    );
+    return mcpServersForCursor(list, env);
   }
 
   private classify(

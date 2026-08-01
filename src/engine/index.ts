@@ -46,6 +46,7 @@ import {
 import { appendSecurityAudit } from "./auth/audit-log";
 import { MessageRouter } from "./transport/router";
 import { WorkspaceService } from "./workspace/service";
+import { readDesignProtocolResource } from "./design/protocol-resource";
 import {
   dbChangedIncludesOriginator,
   dbChangedKinds,
@@ -92,6 +93,11 @@ import { AgentGateway } from "./agents/gateway";
 import { buildPtyEnv } from "./pty/shell-setup";
 import { resolveMcpServers } from "./agents/mcp-registry";
 import { McpGateway } from "./agents/gateway/server";
+import { DesignMcpServer } from "./design/mcp-server";
+import {
+  createDesignProtocolCapability,
+  parseDesignProtocolResourcePath,
+} from "./design/protocol-capability";
 import { OAuthVault } from "./agents/gateway/oauth-provider";
 import {
   MCP_VAULT_SEED_TYPE,
@@ -281,6 +287,9 @@ export class ZerosEngine {
   /** The local MCP gateway (auth:"oauth" backends fronted on localhost). Lazily
    *  started when the user-level settings declare a gateway-managed server. */
   private mcpGateway: McpGateway | null = null;
+  /** First-party, read-only design context. One loopback server mints an
+   *  opaque workspace-scoped URL for each design agent session. */
+  private readonly designMcpServer: DesignMcpServer;
   /** Why the gateway isn't running when it should be (start/reload failure, e.g.
    *  the port is taken) — surfaced via mcp.gateway.status so the UI shows
    *  "Gateway unavailable" instead of an OAuth server silently vanishing (P0-3).
@@ -736,6 +745,9 @@ export class ZerosEngine {
     this.localToken =
       process.env.ZEROS_LOCAL_WS_TOKEN?.trim() ||
       randomBytes(32).toString("hex");
+    this.workspace.setDesignProtocolCapabilityProvider((workspaceId) =>
+      createDesignProtocolCapability(this.localToken, workspaceId),
+    );
     // The dev renderer's http origin is the Vite dev server. Its port is normally
     // 5193, but a per-worktree dev instance (scripts/dev-instance.mjs) moves Vite
     // to a free port and exports it as ZEROS_VITE_PORT so this allowlist tracks the
@@ -754,6 +766,25 @@ export class ZerosEngine {
       portSpan: this.portSpan,
       token: this.localToken,
       allowedOrigins,
+      handleHttp: async ({ url }) => {
+        const parsed = parseDesignProtocolResourcePath(
+          url.pathname,
+          this.localToken,
+        );
+        if (!parsed) return null;
+        const { workspaceId, resourcePath } = parsed;
+        const workspace = getWorkspaceById(workspaceId);
+        if (!workspace || workspace.kind !== "design") return null;
+        const resource = await readDesignProtocolResource(workspace.path, {
+          path: resourcePath,
+          sourceVersion: url.searchParams.get("v"),
+        });
+        return {
+          status: resource.status,
+          headers: resource.headers,
+          body: resource.body,
+        };
+      },
     });
     this.transports = [this.local];
 
@@ -915,6 +946,12 @@ export class ZerosEngine {
     };
 
     this.agents = new AgentGateway(backendOpts);
+    this.designMcpServer = new DesignMcpServer({
+      resolveWorkspace: getWorkspaceById,
+    });
+    this.agents.setDesignServerResolver((workspaceId) =>
+      this.designMcpServer.connectionForWorkspace(workspaceId),
+    );
     this.loadMcpRegistry(); // boot-load; re-run by the settings watcher on edit
 
     const engineStartTime = Date.now();
@@ -1235,6 +1272,35 @@ export class ZerosEngine {
       /* best-effort — never block startup on crash recovery */
     }
 
+    // Design ACLs live on disk, but a manual repair or an older build may have
+    // left a live design checkout unlocked. Reconcile every stable exact owner
+    // after lifecycle recovery and disk seeding, before any agent can spawn.
+    try {
+      const { listWorkspaces, getWorkspaceLifecycle } =
+        await import("./git/state");
+      const { lockDesignWorkspaceRoot } =
+        await import("./design/workspace-lock");
+      for (const workspace of listWorkspaces()) {
+        if (
+          workspace.kind !== "design" ||
+          workspace.archivedAt != null ||
+          getWorkspaceLifecycle(workspace.id) ||
+          !fs.existsSync(workspace.path)
+        ) {
+          continue;
+        }
+        await lockDesignWorkspaceRoot(workspace.path).catch((error) => {
+          console.warn(
+            `[Zeros] couldn't enforce the design lock for ${workspace.id}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        });
+      }
+    } catch {
+      /* best-effort — a failed lock is logged per workspace above */
+    }
+
     // Clear any setup_state="running" left over from a previous process (engine
     // quit mid-install) so the Setup tab doesn't spin forever — the in-memory
     // setup buffers are empty now, so a "running" row is necessarily orphaned.
@@ -1352,6 +1418,18 @@ export class ZerosEngine {
     await this.local.start();
     this.actualPort = this.local.actualPort;
 
+    // Design MCP is local-only and has no external dependency. Start it before
+    // any renderer can spawn a design chat so the very first session receives
+    // the same tool contract as every subsequent session.
+    try {
+      await this.designMcpServer.start();
+    } catch (err) {
+      console.warn(
+        "[Zeros] Design MCP failed to start:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+
     // MCP gateway (Phase 2): front any auth:"oauth" backends on a localhost
     // endpoint + inject that one server into every agent. Best-effort — a
     // gateway failure must never block engine boot.
@@ -1451,6 +1529,7 @@ export class ZerosEngine {
       this.parentWatchTimer = null;
     }
     await this.agents.dispose();
+    await this.designMcpServer.stop();
     if (this.vaultPersistTimer) {
       // Flush a pending debounced persist so a clean stop never drops a token.
       clearTimeout(this.vaultPersistTimer);
@@ -2262,6 +2341,18 @@ export class ZerosEngine {
           await this.agents.cancel(msg.agentId, msg.sessionId);
           return;
         }
+        case "AGENT_STOP_BACKGROUND_TASK": {
+          if (this.remoteMayNotActOnSession(msg.sessionId, client, false)) {
+            this.refuseSessionAccess(msg.id, msg.agentId, client);
+            return;
+          }
+          await this.agents.stopBackgroundTask(
+            msg.agentId,
+            msg.sessionId,
+            msg.taskId,
+          );
+          return;
+        }
         case "AGENT_STEER": {
           if (this.remoteMayNotActOnSession(msg.sessionId, client, true)) {
             this.refuseSessionAccess(msg.id, msg.agentId, client);
@@ -2465,14 +2556,33 @@ export class ZerosEngine {
             })(),
           );
           this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+          const { sessionId: replacementSessionId, ...wireResponse } = response;
+          const loadedSessionId = replacementSessionId ?? msg.sessionId;
+          if (loadedSessionId !== msg.sessionId) {
+            // A degraded Codex resume may replace a legacy Zeros-local id with
+            // the fresh thread/start id. Move every routing owner atomically
+            // before publishing success so subsequent notifications, mode
+            // changes, close, and the renderer's persisted chat all agree.
+            this.router.clearOwner(msg.sessionId);
+            this.sessionAgent.delete(msg.sessionId);
+            this.sessionChat.delete(msg.sessionId);
+            this.sessionWorkspace.delete(msg.sessionId);
+            this.sessionMessages.delete(msg.sessionId);
+            this.router.setOwner(loadedSessionId, client.id);
+            this.sessionAgent.set(loadedSessionId, msg.agentId);
+            if (msg.chatId) this.sessionChat.set(loadedSessionId, msg.chatId);
+            if (lifecycleWorkspaceId) {
+              this.sessionWorkspace.set(loadedSessionId, lifecycleWorkspaceId);
+            }
+          }
           client.send(
             createMessage({
               type: "AGENT_SESSION_LOADED",
               source: "engine",
               requestId: msg.id,
               agentId: msg.agentId,
-              sessionId: msg.sessionId,
-              response,
+              sessionId: loadedSessionId,
+              response: wireResponse,
             }),
           );
           return;

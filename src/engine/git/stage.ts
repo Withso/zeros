@@ -10,6 +10,9 @@ import { GitError } from "./errors";
 export interface StageOptions {
   workspaceId: string;
   paths: string[];
+  /** App-owned paths may be force-added even when a repository ignore rule
+   * covers them. Never populate this from the generic git.stage wire op. */
+  force?: boolean;
 }
 
 function validatePaths(paths: unknown): string[] {
@@ -38,13 +41,13 @@ function validatePaths(paths: unknown): string[] {
   return paths as string[];
 }
 
-/** Stage one or more paths via `git add -- <paths...>`. Honors
- *  .gitignore (use git_status to find untracked-but-not-ignored paths
- *  first). */
+/** Stage one or more paths via `git add -- <paths...>`. Honors .gitignore by
+ * default; the design-document save path opts into force for its app-owned,
+ * already sandboxed directory. */
 export async function stagePaths(opts: StageOptions): Promise<void> {
   const ws = await resolveRepoForGitOp(opts.workspaceId);
   const paths = validatePaths(opts.paths);
-  await runGit(ws.path, ["add", "--", ...paths]);
+  await runGit(ws.path, ["add", ...(opts.force ? ["-f"] : []), "--", ...paths]);
 }
 
 /** Unstage one or more paths via `git restore --staged -- <paths...>`.
@@ -69,7 +72,8 @@ function validatePatch(patch: unknown): string {
   if (typeof patch !== "string" || patch.trim().length === 0) {
     throw new GitError({
       code: "VALIDATION_FAILED",
-      message: "stageHunk/unstageHunk/discardHunk: 'patch' must be a non-empty unified diff",
+      message:
+        "stageHunk/unstageHunk/discardHunk: 'patch' must be a non-empty unified diff",
     });
   }
   // `git apply` requires a trailing newline on the patch stream.

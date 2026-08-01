@@ -34,6 +34,8 @@ import { branchDisplayName } from "../lib/branch-name";
 import { trackGitOp } from "../analytics/agent-events";
 import { toast } from "../ui/primitives/elements";
 import { clearChatPaneFolders, moveChatPaneFolder } from "./chat-panes-store";
+import { forgetDesignWorkspaceView } from "./design-workspace-ui";
+import { forgetDesignRuntimeWorkspace } from "./design-runtime-store";
 import { isLocalMainWorkspace } from "./local-main-workspace";
 import { loadProjects, type Project } from "./projects-store";
 import {
@@ -121,6 +123,7 @@ function detachWorkspaceRuntimeState(
     }
   }
   clearTerminalFolders([workspace.path], project?.id);
+  forgetDesignRuntimeWorkspace(workspace.id);
 }
 
 /** If we just archived/deleted the workspace whose chat is the active target,
@@ -182,6 +185,7 @@ function commitConfirmedDeletion(
   // the Changes snapshots. Archive intentionally does NOT purge: restore
   // reuses the id, and the retained caches repaint the restored PR instantly.
   forgetPrCachesForWorkspace(workspace.id);
+  forgetDesignWorkspaceView(workspace.id);
   const project = findProjectForFolder(workspace.repoRoot, loadProjects());
   clearTerminalFolders([workspace.path], project?.id);
   clearChatPaneFolders([workspace.path], project?.id);

@@ -25,6 +25,7 @@ export type {
   RestoreResult,
   SetupState,
   Workspace,
+  WorkspaceKind,
   WorkspaceStatus,
 } from "./types";
 
@@ -51,6 +52,7 @@ export {
 
 export {
   closeState,
+  designWorktreesRoot,
   detachLockPath,
   seedFromDisk,
   setStateRootForTesting,
@@ -277,6 +279,7 @@ export {
   getPrCommits,
   getPrReviews,
   getRepositoryOwnerAvatar,
+  getWorkspaceRepoAccess,
   listGithubOwners,
   listPrs,
   markPrReady,
@@ -300,6 +303,7 @@ export type {
   InitRepoInPlaceResult,
   GetPrOptions,
   GhCliResult,
+  GithubRepoAccess,
   GithubRepositoryOwnerAvatar,
   ListPrsOptions,
   MarkReadyOptions,

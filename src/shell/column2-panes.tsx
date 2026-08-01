@@ -61,6 +61,7 @@ import { buildLocalMainWorkspace } from "../zeros/store/local-main-workspace";
 import {
   findWorkspaceForFolder,
   resolveWorkspacePresentationFolder,
+  resolveWorkspacePresentationKind,
 } from "../zeros/store/workspace-resolution";
 import type { Workspace } from "../native/git";
 import { ptyKill } from "../native/pty";
@@ -69,6 +70,7 @@ import { useSessionsStore } from "../zeros/agent/sessions-store";
 import { getLiveChatDraft } from "../zeros/agent/composer-live-drafts";
 import {
   MAX_PANES,
+  DEFAULT_PANE_LAYOUT,
   type PaneLayout,
   type PaneNode,
   type SplitDirection,
@@ -92,7 +94,10 @@ import {
 } from "./scroll-memory";
 import { prepareColumn2ChatView } from "./column2-chat-intent";
 import { useInstantViewSwitch } from "../zeros/ui/use-instant-view-switch";
-import { useWorkspaceProvisioning } from "../zeros/store/pending-workspaces";
+import {
+  usePendingWorkspaceKind,
+  useWorkspaceProvisioning,
+} from "../zeros/store/pending-workspaces";
 import {
   CHAT_TAB_DRAG_MIME,
   MIN_PANE_HEIGHT,
@@ -133,6 +138,8 @@ type DropZone = "center" | "right" | "down";
 
 interface PaneCtx {
   folder: string;
+  mode: "code" | "design";
+  allowSplits: boolean;
   layout: PaneLayout;
   chatsByPane: Map<string, ChatThread[]>;
   focusedPaneId: string;
@@ -184,6 +191,13 @@ export function Column2Panes({
     [activeFolder, project, workspaces],
   );
   const activeWorkspaceProvisioning = useWorkspaceProvisioning(activeFolder);
+  const pendingWorkspaceKind = usePendingWorkspaceKind(activeFolder);
+  const workspaceMode = resolveWorkspacePresentationKind({
+    confirmedKind: activeWorkspace?.kind,
+    pendingKind: pendingWorkspaceKind,
+    folder: activeFolder,
+  });
+  const allowSplits = workspaceMode === "code";
   // ADD_CHAT publishes this exact prepared destination and its first Untitled
   // chat atomically in the workspace store. Use that same snapshot as the
   // first-paint presentation owner instead of depending solely on the separate
@@ -252,6 +266,7 @@ export function Column2Panes({
       }
       void spawnDefaultChatForWorkspace({
         folder: activeWorkspacePath,
+        mode: workspaceMode,
         sessions,
         dispatch,
       });
@@ -273,17 +288,29 @@ export function Column2Panes({
     visibleChats,
     newAgentFolder,
     activeWorkspacePath,
+    workspaceMode,
     pendingWorkspaceValidationFolder,
     sessions,
     dispatch,
   ]);
 
   // ── Pane layout + membership ─────────────────────────
-  const layout = usePaneLayout(activeWorkspacePath);
+  const retainedLayout = usePaneLayout(activeWorkspacePath);
+  // Design workspaces publish a single-pane destination on their first render,
+  // even if a stale/legacy layout exists. The cleanup below prunes that
+  // retained owner after commit; it never gets a frame on screen.
+  const layout = allowSplits ? retainedLayout : DEFAULT_PANE_LAYOUT;
   const splitPane = useChatPanesStore((s) => s.splitPane);
   const moveChatToPane = useChatPanesStore((s) => s.moveChatToPane);
   const setPaneActiveChat = useChatPanesStore((s) => s.setPaneActiveChat);
   const beginAssignNextChat = useChatPanesStore((s) => s.beginAssignNextChat);
+  const collapseFolder = useChatPanesStore((s) => s.collapseFolder);
+
+  useEffect(() => {
+    if (!allowSplits && activeWorkspacePath) {
+      collapseFolder(activeWorkspacePath);
+    }
+  }, [activeWorkspacePath, allowSplits, collapseFolder]);
 
   const chatsByPane = useMemo(() => {
     const map = new Map<string, ChatThread[]>();
@@ -390,6 +417,7 @@ export function Column2Panes({
           dispatch({ type: "SET_NEW_AGENT_FOLDER", folder: closedFolder });
           void spawnDefaultChatForWorkspace({
             folder: closedFolder,
+            mode: workspaceMode,
             sessions,
             dispatch,
           });
@@ -419,6 +447,7 @@ export function Column2Panes({
       activeWorkspacePath,
       setPaneActiveChat,
       layout,
+      workspaceMode,
     ],
   );
 
@@ -438,7 +467,7 @@ export function Column2Panes({
 
   const handleSplit = useCallback(
     (paneId: string, dir: "right" | "down") => {
-      if (!activeWorkspacePath) return;
+      if (!activeWorkspacePath || !allowSplits) return;
       const direction: SplitDirection = dir === "right" ? "row" : "column";
       const paneChats = chatsByPane.get(paneId) ?? EMPTY_CHATS;
       if (paneChats.length >= 2) {
@@ -463,6 +492,7 @@ export function Column2Panes({
         beginAssignNextChat(activeWorkspacePath, newPane);
         spawnNewChatTab({
           folder: activeWorkspacePath,
+          mode: workspaceMode,
           sessions,
           dispatch,
         })
@@ -480,6 +510,8 @@ export function Column2Panes({
     },
     [
       activeWorkspacePath,
+      allowSplits,
+      workspaceMode,
       chatsByPane,
       layout,
       splitPane,
@@ -492,7 +524,7 @@ export function Column2Panes({
 
   const handleDropOnPane = useCallback(
     (paneId: string, zone: DropZone, chatId: string) => {
-      if (!activeWorkspacePath) return;
+      if (!activeWorkspacePath || !allowSplits) return;
       const fromPane = paneForChat(layout, chatId);
       if (zone === "center") {
         if (fromPane !== paneId) {
@@ -518,6 +550,7 @@ export function Column2Panes({
     },
     [
       activeWorkspacePath,
+      allowSplits,
       layout,
       chatsByPane,
       moveChatToPane,
@@ -531,6 +564,8 @@ export function Column2Panes({
   const ctx = useMemo<PaneCtx>(
     () => ({
       folder: activeWorkspacePath ?? "",
+      mode: workspaceMode,
+      allowSplits,
       layout,
       chatsByPane,
       focusedPaneId,
@@ -551,6 +586,8 @@ export function Column2Panes({
     }),
     [
       activeWorkspacePath,
+      workspaceMode,
+      allowSplits,
       layout,
       chatsByPane,
       focusedPaneId,
@@ -961,8 +998,8 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
     !ctx.workspaceHasChats &&
     paneId === firstLeafId(ctx.layout.root);
 
-  const splitRightAllowed = canSplit.right && !atPaneCap;
-  const splitDownAllowed = canSplit.down && !atPaneCap;
+  const splitRightAllowed = ctx.allowSplits && canSplit.right && !atPaneCap;
+  const splitDownAllowed = ctx.allowSplits && canSplit.down && !atPaneCap;
 
   return (
     <section
@@ -983,6 +1020,8 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
     >
       <Column2ChatTabs
         workspaceFolder={ctx.folder}
+        mode={ctx.mode}
+        allowSplits={ctx.allowSplits}
         paneId={paneId}
         chats={paneChats}
         activeChatId={paneActiveChatId}
@@ -1086,7 +1125,7 @@ function PaneDropOverlay({
   const drag = useTabDragStore((s) => s.drag);
   const [zone, setZone] = useState<DropZone | null>(null);
 
-  const active = drag !== null && drag.folder === ctx.folder;
+  const active = ctx.allowSplits && drag !== null && drag.folder === ctx.folder;
   useEffect(() => {
     if (!active) setZone(null);
   }, [active]);

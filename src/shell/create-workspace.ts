@@ -57,8 +57,10 @@ type Dispatch = ReturnType<typeof useWorkspaceDispatch>;
 export async function createWorkspaceForProject(args: {
   project: Project;
   dispatch: Dispatch;
+  kind?: "code" | "design";
 }): Promise<boolean> {
   const { project, dispatch } = args;
+  const kind = args.kind === "design" ? "design" : "code";
   // Every call is an independent exact reservation. Do not serialize even the
   // cheap prepare phase: users intentionally fan out several workspaces while
   // prior creates and archives continue in parallel.
@@ -67,6 +69,7 @@ export async function createWorkspaceForProject(args: {
     prepared = await workspacePrepareCreate({
       repoRoot: project.repoRoot,
       repoSlug: project.repoSlug,
+      kind,
     });
   } catch (error: unknown) {
     if (isGitErrorShape(error)) {
@@ -82,6 +85,7 @@ export async function createWorkspaceForProject(args: {
   const pendingToken = beginPendingCreate({
     repoRoot: project.repoRoot,
     repoSlug: project.repoSlug,
+    kind,
     path: prepared.path,
     branch: prepared.branch,
   });
@@ -96,6 +100,7 @@ export async function createWorkspaceForProject(args: {
   const chat = spawnPreparedDefaultChat({
     folder: prepared.path,
     repoRoot: project.repoRoot,
+    mode: kind,
     dispatch,
   });
   const rollbackOptimisticChat = () => {
@@ -116,6 +121,7 @@ export async function createWorkspaceForProject(args: {
     const created = await workspaceCreate({
       repoRoot: project.repoRoot,
       repoSlug: project.repoSlug,
+      kind,
       ...(chat.agentId ? { agentId: chat.agentId } : {}),
       preparedId: prepared.workspaceId,
       preparedBranch: prepared.branch,

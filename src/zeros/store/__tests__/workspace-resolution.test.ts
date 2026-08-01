@@ -8,6 +8,8 @@ import {
   isWorktreePath,
   repoRootForCwd,
   repoSlugFromWorktreePath,
+  resolveWorkspacePresentationKind,
+  workspaceKindFromManagedPath,
   resolveWorkspacePresentationFolder,
   workspaceIdFromWorktreePath,
   workspaceIdForCwd,
@@ -58,6 +60,29 @@ describe("repoSlugFromWorktreePath", () => {
     ).toBe("widgets");
   });
 
+  it("extracts the owner from the sibling design-workspaces root", () => {
+    expect(
+      repoSlugFromWorktreePath(
+        "/Users/dev/zeros/design workspaces/widgets/landing-page",
+      ),
+    ).toBe("widgets");
+    expect(
+      repoSlugFromWorktreePath(
+        "/Users/dev/zeros-dev-montpellier-4281/design workspaces/widgets/landing-page/Zeros Design",
+      ),
+    ).toBe("widgets");
+    expect(
+      workspaceKindFromManagedPath(
+        "/Users/dev/zeros/design workspaces/widgets/landing-page/Zeros Design",
+      ),
+    ).toBe("design");
+    expect(
+      workspaceKindFromManagedPath(
+        "/Users/dev/zeros/workspaces/widgets/landing-page/src",
+      ),
+    ).toBe("code");
+  });
+
   it("extracts the slug from a per-worktree DEV INSTANCE root (zeros-dev-<inst>)", () => {
     // Regression: the engine names an instanced dev root `zeros-dev-<slug>`
     // (e.g. `zeros-dev-mogadishu-5486`). The old `(?:-dev)?` regex only matched
@@ -90,7 +115,9 @@ describe("repoSlugFromWorktreePath", () => {
     expect(repoSlugFromWorktreePath("/Users/dev/Documents/widgets")).toBeNull();
     // A decoy folder that merely contains "zeros-dev" mid-segment must NOT match.
     expect(
-      repoSlugFromWorktreePath("/Users/dev/my-zeros-dev/workspaces/widgets/ws_1"),
+      repoSlugFromWorktreePath(
+        "/Users/dev/my-zeros-dev/workspaces/widgets/ws_1",
+      ),
     ).toBeNull();
     expect(repoSlugFromWorktreePath("")).toBeNull();
   });
@@ -103,6 +130,43 @@ describe("repoSlugFromWorktreePath", () => {
     expect(
       repoSlugFromWorktreePath("/Users/dev/zeros/workspaces/widgets"),
     ).toBeNull();
+  });
+});
+
+describe("resolveWorkspacePresentationKind", () => {
+  const designPath =
+    "/Users/dev/zeros/design workspaces/widgets/landing-page";
+
+  it("lets a confirmed code workspace override every stale design hint", () => {
+    expect(
+      resolveWorkspacePresentationKind({
+        confirmedKind: "code",
+        pendingKind: "design",
+        folder: designPath,
+        chatMode: "design",
+      }),
+    ).toBe("code");
+  });
+
+  it("uses pending, managed-path, and chat hints only before a row confirms", () => {
+    expect(
+      resolveWorkspacePresentationKind({
+        pendingKind: "design",
+        folder: "/tmp/prepared",
+      }),
+    ).toBe("design");
+    expect(
+      resolveWorkspacePresentationKind({ folder: designPath }),
+    ).toBe("design");
+    expect(
+      resolveWorkspacePresentationKind({
+        folder: "/tmp/plain",
+        chatMode: "design",
+      }),
+    ).toBe("design");
+    expect(
+      resolveWorkspacePresentationKind({ folder: "/tmp/plain" }),
+    ).toBe("code");
   });
 });
 
@@ -122,6 +186,11 @@ describe("isWorktreePath", () => {
     expect(isWorktreePath("/Users/dev/zeros-dev/workspaces/widgets/ws_x")).toBe(
       true,
     );
+    expect(
+      isWorktreePath(
+        "/Users/dev/zeros-dev/design workspaces/widgets/landing-page",
+      ),
+    ).toBe(true);
   });
 
   it("is false for a real repo checkout and nullish input", () => {
@@ -527,7 +596,10 @@ describe("repoRootForCwd", () => {
   ];
   it("resolves a managed worktree (and a subdirectory of it) to the MAIN repo root", () => {
     expect(
-      repoRootForCwd("/Users/dev/zeros/workspaces/widgets/ws_abc123", workspaces),
+      repoRootForCwd(
+        "/Users/dev/zeros/workspaces/widgets/ws_abc123",
+        workspaces,
+      ),
     ).toBe("/Users/dev/Documents/Widgets");
     expect(
       repoRootForCwd(
@@ -549,9 +621,9 @@ describe("repoRootForCwd", () => {
   it("matches the repoRoot even when no workspace row carries the path", () => {
     // Repo with vars but only worktree rows: cwd under repoRoot still resolves.
     const worktreeOnly = [workspaces[0]!];
-    expect(repoRootForCwd("/Users/dev/Documents/Widgets/pkg", worktreeOnly)).toBe(
-      "/Users/dev/Documents/Widgets",
-    );
+    expect(
+      repoRootForCwd("/Users/dev/Documents/Widgets/pkg", worktreeOnly),
+    ).toBe("/Users/dev/Documents/Widgets");
   });
 
   it("returns null for a plain folder and for a missing cwd", () => {
@@ -565,6 +637,8 @@ describe("repoRootForCwd", () => {
       { id: "a", path: "/r/widgets", repoRoot: "/r/widgets" },
       { id: "b", path: "/r/widgets-prime", repoRoot: "/r/widgets-prime" },
     ];
-    expect(repoRootForCwd("/r/widgets-prime/src", prefixy)).toBe("/r/widgets-prime");
+    expect(repoRootForCwd("/r/widgets-prime/src", prefixy)).toBe(
+      "/r/widgets-prime",
+    );
   });
 });

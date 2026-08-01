@@ -9,6 +9,7 @@ import {
 } from "@/zeros/store/workspace-store";
 import {
   findProjectForFolder,
+  resolveWorkspacePresentationKind,
   workspaceIdFromWorktreePath,
 } from "@/zeros/store/workspace-resolution";
 import { loadProjects } from "@/zeros/store/projects-store";
@@ -22,11 +23,12 @@ import { prefetchReviewLiveData } from "./column3-tabs/review-data";
 import { warmIgnoredRoots } from "./column3-tabs/ignored-entries-cache";
 import { resolveReviewProvider } from "./pr/review-provider";
 import { parseRemote } from "./pr/github-url";
+import { warmDesignWorkspaceSnapshot } from "@/zeros/store/design-workspace-cache";
 
 /** Complete identity needed to navigate before an authoritative workspace list
  * is warm. Engine Workspace rows satisfy this shape directly. */
 export type WorkspaceNavigationTarget = Pick<Workspace, "path" | "repoRoot"> &
-  Partial<Pick<Workspace, "id" | "prNumber">> & {
+  Partial<Pick<Workspace, "id" | "kind" | "prNumber">> & {
     /** The target came from durable memory while its repo list was cold. */
     validationPending?: boolean;
   };
@@ -36,6 +38,15 @@ export function prefetchWorkspaceSurface(
 ): void {
   const folder = workspace.path;
   if (!folder) return;
+  if (
+    resolveWorkspacePresentationKind({
+      confirmedKind: workspace.kind,
+      folder,
+    }) === "design"
+  ) {
+    if (workspace.id) warmDesignWorkspaceSnapshot(workspace.id);
+    return;
+  }
   warmWorkspaceFiles(folder);
   // Both halves of the Files tree or neither: an ignored listing that lands
   // after the tracked one splices `.env`/`node_modules/` into the middle of the

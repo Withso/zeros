@@ -90,6 +90,9 @@ export interface ChatPanesStore {
    *  `folder`. The reservation also protects a freshly-split empty
    *  pane from reconcile-collapse until the chat lands. */
   beginAssignNextChat: (folder: string, paneId: string) => void;
+  /** Permanently return one exact workspace to the canonical single pane.
+   *  Used by workspace kinds whose UI contract forbids splits. */
+  collapseFolder: (folder: string) => void;
 }
 
 function layoutFor(
@@ -238,6 +241,28 @@ export const useChatPanesStore = create<ChatPanesStore>((set, get) => ({
       ],
     }));
   },
+
+  collapseFolder: (folder) => {
+    const layout = get().byFolder[folder];
+    const detachedPaneIds = layout
+      ? leafIds(layout.root).filter((paneId) => paneId !== MAIN_PANE_ID)
+      : [];
+    set((state) => {
+      const hasLayout = folder in state.byFolder;
+      const pendingAssigns = state.pendingAssigns.filter(
+        (pending) => pending.folder !== folder,
+      );
+      if (!hasLayout && pendingAssigns.length === state.pendingAssigns.length) {
+        return state;
+      }
+      const byFolder = hasLayout ? { ...state.byFolder } : state.byFolder;
+      if (hasLayout) delete byFolder[folder];
+      return { byFolder, pendingAssigns };
+    });
+    if (detachedPaneIds.length > 0) {
+      queueMicrotask(() => destroyPanePortalSlots(detachedPaneIds));
+    }
+  },
 }));
 
 /** Remove split-layout and in-flight assignment memory with deleted owners.
@@ -304,8 +329,7 @@ export function moveChatPaneFolder(
     folderIsWithinRoot(folder, fromFolder) &&
     (!project ||
       folderIsOwnedByProject(folder, project.id, projects, [fromFolder]));
-  const move = (folder: string) =>
-    toFolder + folder.slice(fromFolder.length);
+  const move = (folder: string) => toFolder + folder.slice(fromFolder.length);
   useChatPanesStore.setState((state) => {
     const movedLayouts = Object.entries(state.byFolder).filter(([folder]) =>
       belongs(folder),

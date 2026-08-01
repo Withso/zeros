@@ -16,7 +16,7 @@ import type {
   ContentBlock,
   InitializeResponse,
   ListSessionsResponse,
-  LoadSessionResponse,
+  LoadSessionResponse as WireLoadSessionResponse,
   NewSessionResponse,
   PromptResponse,
   QuestionAnswer,
@@ -33,6 +33,14 @@ import type {
   TurnUsage,
 } from "@zeros/core/agent-events";
 import type { AccountDetails } from "@zeros/core/messages";
+
+/** Adapter/gateway-only load result. A degraded Codex resume can replace a
+ * legacy Zeros-local UUID with the canonical thread id. The engine consumes
+ * this field to rekey ownership, then sends that id through the wire message's
+ * existing top-level `sessionId`; it must not extend the nested wire response. */
+export interface LoadSessionResponse extends WireLoadSessionResponse {
+  sessionId?: string;
+}
 
 // ── Failure taxonomy ─────────────────────────────────────
 //
@@ -60,6 +68,7 @@ export type AgentFailureStage =
   | "loadSession"
   | "prompt"
   | "cancel"
+  | "stopBackgroundTask"
   | "setMode";
 
 export interface AgentFailure {
@@ -130,12 +139,28 @@ export interface AgentGatewayEvents {
 
 // ── MCP server registration (matches current AgentSessionManager API) ─
 
+export type McpToolApprovalMode = "auto" | "prompt" | "writes" | "approve";
+
+export interface McpApprovalConfig {
+  /** Server-wide Codex approval policy. `writes` trusts annotated reads and
+   *  asks for mutating/unknown tools. */
+  defaultMode?: McpToolApprovalMode;
+  /** Optional exact tool overrides. Keys are validated again by each adapter
+   *  before they are embedded in provider configuration. */
+  tools?: Record<string, McpToolApprovalMode>;
+}
+
 /** One MCP server Zeros registers with every agent. A discriminated union over
  *  the two transports the MCP spec defines: `stdio` (a local subprocess) and
  *  `http` (Streamable HTTP / a remote URL). Secrets never live here — `env`
  *  values + header values are non-secret or reference env-var names; real
- *  credentials stay in the keychain (Phase 1 persistence). */
-export type McpServerRegistration =
+ *  credentials stay in the keychain (Phase 1 persistence).
+ *
+ *  `trusted` and `approval` are runtime-only hints minted by Zeros for managed
+ *  first-party endpoints. Settings parsing never grants them to user-provided
+ *  servers, so a repository cannot promote itself into an auto-approved
+ *  trust boundary. */
+export type McpServerRegistration = (
   | {
       name: string;
       transport: "stdio";
@@ -148,7 +173,15 @@ export type McpServerRegistration =
       transport: "http";
       url: string;
       headers?: Record<string, string>;
-    };
+      /** Environment variable containing a bearer token. The variable name is
+       * safe to place in provider config; its value stays in the child env and
+       * must never be serialized into URLs or argv. */
+      bearerTokenEnvVar?: string;
+    }
+) & {
+  trusted?: boolean;
+  approval?: McpApprovalConfig;
+};
 
 // ── Gateway construction shape (drop-in with AgentSessionManager) ──
 
@@ -232,6 +265,13 @@ export interface AgentAdapter {
   /** Abort the current turn. */
   cancel(opts: { sessionId: string }): Promise<void>;
 
+  /** Stop one provider-owned background task without interrupting the parent
+   * turn or sibling work. Optional for providers with no background-task API. */
+  stopBackgroundTask?(opts: {
+    sessionId: string;
+    taskId: string;
+  }): Promise<void>;
+
   /** Inject a user message into the RUNNING turn without cancelling it
    *  (mid-turn "steering"). Resolves once the message is delivered to the
    *  agent runtime; the in-flight prompt() keeps streaming and settles the
@@ -256,7 +296,9 @@ export interface AgentAdapter {
    *  ok=null inconclusive (network error — caller saves normally).
    *  Optional — only API-key-only adapters (Cursor) implement it. The key
    *  must never be logged or stored by the implementation. */
-  validateApiKey?(apiKey: string): Promise<{ ok: boolean | null; error?: string }>;
+  validateApiKey?(
+    apiKey: string,
+  ): Promise<{ ok: boolean | null; error?: string }>;
 
   /** Background one-shot text generation (the AI chat-title call): send ONE
    *  user prompt + a plain system instruction to `model` and return the
@@ -342,7 +384,6 @@ export type {
   ContentBlock,
   InitializeResponse,
   ListSessionsResponse,
-  LoadSessionResponse,
   NewSessionResponse,
   PromptResponse,
   QuestionAnswer,

@@ -75,6 +75,32 @@ describe("Zeros DB — migration ladder data safety (forward-only)", () => {
             .all() as { name: string }[]
         ).some((column) => column.name === "payload_json"),
       ).toBe(true);
+      const chatColumns = db.prepare("PRAGMA table_info(chats)").all() as {
+        name: string;
+        notnull: number;
+        dflt_value: string | null;
+      }[];
+      expect(
+        chatColumns.find((column) => column.name === "mode"),
+      ).toMatchObject({
+        name: "mode",
+        notnull: 1,
+        dflt_value: "'code'",
+      });
+      const workspaceColumns = db
+        .prepare("PRAGMA table_info(workspaces)")
+        .all() as {
+        name: string;
+        notnull: number;
+        dflt_value: string | null;
+      }[];
+      expect(
+        workspaceColumns.find((column) => column.name === "kind"),
+      ).toMatchObject({
+        name: "kind",
+        notnull: 1,
+        dflt_value: "'code'",
+      });
 
       // Idempotent: a second run on the same DB applies nothing and never throws
       // (re-applying a migration's CREATE/ALTER would throw — proves the

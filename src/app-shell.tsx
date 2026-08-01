@@ -46,6 +46,7 @@ import {
 } from "./zeros/settings/migrate-legacy";
 import { AgentSessionsProvider } from "./zeros/agent/sessions-provider";
 import { useAgentSessions } from "./zeros/agent/sessions-hooks";
+import { useDesignLintCoordinator } from "./zeros/agent/use-design-lint-coordinator";
 import { UpdateNotifications } from "./zeros/update/update-notifications";
 import { useCopyLogsHotkey } from "./shell/use-copy-logs-hotkey";
 import { useNewTabHotkeys } from "./shell/use-new-chat-hotkey";
@@ -58,12 +59,15 @@ import { ModelsSettingsSync } from "./zeros/agent/models-settings-sync";
 import { TopBar } from "./shell/top-bar";
 import { Column2Workspace } from "./shell/column2-workspace";
 import { Column3 } from "./shell/column3";
+import { DesignWorkspaceColumn } from "./zeros/panels/design-workspace";
 import { useWorkspacePrSync } from "./shell/pr/use-workspace-pr-sync";
 import { WorktreeMissingPanel } from "./shell/worktree-missing-panel";
 import { AddProjectProvider } from "./shell/add-project-provider";
 import { NoProjectsView } from "./shell/no-projects-view";
 import { HomeSidebar } from "./shell/home-sidebar";
 import { useActiveWorkspace } from "./zeros/store/use-active-workspace";
+import { usePendingWorkspaceKind } from "./zeros/store/pending-workspaces";
+import { resolveWorkspacePresentationKind } from "./zeros/store/workspace-resolution";
 import {
   notifyWorkspacesChanged,
   useProjects,
@@ -322,6 +326,7 @@ function HydrateAiApiKey() {
 function threadToRow(c: ChatThread): ChatRowWire {
   return {
     id: c.id,
+    mode: c.mode === "design" ? "design" : "code",
     folder: c.folder ?? "",
     agentId: c.agentId ?? null,
     agentName: c.agentName ?? null,
@@ -367,6 +372,7 @@ function rowToThread(r: ChatRowWire): ChatThread {
     r.kind === "terminal" || r.kind === "chat" ? r.kind : undefined;
   return {
     id: r.id,
+    mode: r.mode === "design" ? "design" : "code",
     folder: r.folder,
     agentId: r.agentId,
     agentName: r.agentName,
@@ -889,10 +895,26 @@ function MainShellBody({
   // is collapsed, Home is visible, or a missing-worktree panel replaces the
   // workspace shell. Consumers remain ordinary key subscriptions.
   useGitRefreshCoordinator();
+  useDesignLintCoordinator();
   const activePage = useActivePage();
   const activeRepoId = useActiveRepoId();
-  const { workspace: activeWorkspace, project: activeProject } =
-    useActiveWorkspace();
+  const {
+    workspace: activeWorkspace,
+    folder: activeWorkspaceFolder,
+    project: activeProject,
+  } = useActiveWorkspace();
+  const pendingWorkspaceKind = usePendingWorkspaceKind(activeWorkspaceFolder);
+  const activeChatMode = useWorkspaceStore(
+    (state) =>
+      state.chats.find((chat) => chat.id === state.activeChatId)?.mode ?? null,
+  );
+  const designWorkspaceActive =
+    resolveWorkspacePresentationKind({
+      confirmedKind: activeWorkspace?.kind,
+      pendingKind: pendingWorkspaceKind,
+      folder: activeWorkspaceFolder,
+      chatMode: activeChatMode,
+    }) === "design";
   const shellSurfaceRef = useRef<HTMLDivElement | null>(null);
   useInstantViewSwitch(
     `${activePage}:${activeWorkspace?.id ?? activeRepoId ?? activeProject?.id ?? "none"}`,
@@ -1032,12 +1054,25 @@ function MainShellBody({
               <Column2Workspace
                 col3Collapsed={col3Collapsed}
                 onToggleCol3={toggleCol3}
+                surfaceActive={!isHome}
               />
-              <Column3
-                onToggleCol3={toggleCol3}
-                surfaceActive={!isHome && !col3Collapsed}
-                collapsed={col3Collapsed}
-              />
+              {designWorkspaceActive ? (
+                <DesignWorkspaceColumn
+                  workspace={
+                    activeWorkspace?.kind === "design" ? activeWorkspace : null
+                  }
+                  folder={activeWorkspaceFolder}
+                  surfaceActive={!isHome && !col3Collapsed}
+                  collapsed={col3Collapsed}
+                  onToggleCol3={toggleCol3}
+                />
+              ) : (
+                <Column3
+                  onToggleCol3={toggleCol3}
+                  surfaceActive={!isHome && !col3Collapsed}
+                  collapsed={col3Collapsed}
+                />
+              )}
             </div>
           )}
           {showWelcome && !isHome && (

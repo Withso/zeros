@@ -320,7 +320,7 @@ describe("CursorHostClient proxy", () => {
     fake.emit({ k: "res", id: fake.reqOf("models.list")!.id, ok: true, result: [{ id: "composer-2" }] });
     expect(await pModels).toEqual([{ id: "composer-2" }]);
 
-    const pStore = mod.SqliteLocalAgentStore!.open({ workspaceRef: "/w" });
+    const pStore = mod.localStore!.open({ workspaceRef: "/w" });
     fake.emit({ k: "res", id: fake.reqOf("store.open")!.id, ok: true, result: { storeId: "st1" } });
     const store = await pStore;
     const pGet = store.runs.get({ agentId: "a1", runId: "r1" });
@@ -333,7 +333,7 @@ describe("CursorHostClient proxy", () => {
   it("returns null from a store opened with no backing (storeId null)", async () => {
     const { client, fake } = makeClient();
     const mod = client.module();
-    const pStore = mod.SqliteLocalAgentStore!.open({ workspaceRef: "/w" });
+    const pStore = mod.localStore!.open({ workspaceRef: "/w" });
     fake.emit({ k: "res", id: fake.reqOf("store.open")!.id, ok: true, result: { storeId: null } });
     const store = await pStore;
     expect(await store.runs.get({ agentId: "a", runId: "r" })).toBeNull();

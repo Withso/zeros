@@ -1151,6 +1151,121 @@ async function workspaceRemote(workspaceId: string): Promise<{
   return parseGitHubRemote(stdout.trim());
 }
 
+// ── Repository access preflight ──────────────────────────
+
+/** Can the selected connection open a pull request on this workspace's remote? */
+export interface GithubRepoAccess {
+  /** `blocked` is a DEFINITE refusal — the same request with the same
+   *  connection cannot succeed. `unknown` means the probe itself failed
+   *  (offline, rate limited, 5xx) and is deliberately not a refusal: callers
+   *  must fall through to the real operation rather than ground it for a
+   *  reason the user cannot act on. */
+  state: "ok" | "blocked" | "unknown";
+  /** Whether any GitHub credential is selected and readable. Absent when the
+   *  probe never got as far as the credential store. */
+  connected?: boolean;
+  code?: GitErrorCode;
+  message?: string;
+  remediation?: string;
+}
+
+/** Refusals that survive a retry. Everything else — a rate limit, a dropped
+ *  connection, a GitHub 5xx — is a failure of the PROBE, not evidence about
+ *  access, and must never be reported as one. */
+const BLOCKING_ACCESS_CODES = new Set<GitErrorCode>([
+  "NOT_AUTHENTICATED",
+  "GITHUB_REPO_NOT_INSTALLED",
+  "GITHUB_FORBIDDEN_SCOPE",
+  "GITHUB_SSO_REQUIRED",
+  "GITHUB_INSTALLATION_SUSPENDED",
+]);
+
+/** One `GET /repos/{owner}/{repo}` against the workspace's CONFIGURED remote —
+ *  cheap next to the push + `pulls.create` it guards, and the only way to tell
+ *  "not signed in" apart from "signed in, but this repository is outside the
+ *  connection's reach".
+ *
+ *  Those two states are otherwise indistinguishable to every caller: GitHub
+ *  answers both with a 404, and `git push` answers the second with "remote:
+ *  Repository not found", which classifyGitTransportError has to read as
+ *  NOT_AUTHENTICATED so the credential-rotation retry still fires. Without this
+ *  probe, a user with a connected GitHub App that simply doesn't include this
+ *  repository was told to connect GitHub.
+ *
+ *  Never throws — the caller uses the result to CHOOSE a message, and a probe
+ *  that failed for its own reasons must not become that message. */
+export async function getWorkspaceRepoAccess(
+  workspaceId: string,
+): Promise<GithubRepoAccess> {
+  let connected: boolean;
+  try {
+    connected = Boolean(await tokenStore.get());
+  } catch {
+    return { state: "unknown" };
+  }
+  let owner: string;
+  let repo: string;
+  try {
+    ({ owner, repo } = await workspaceRemote(workspaceId));
+  } catch (err) {
+    // No configured remote, a non-github.com host, an embedded credential —
+    // definite and fixable, and none of them needs a GitHub round trip.
+    if (!isGitError(err)) return { state: "unknown", connected };
+    return {
+      state: "blocked",
+      connected,
+      code: err.code,
+      message: err.message,
+      ...(err.remediation ? { remediation: err.remediation } : {}),
+    };
+  }
+  if (!connected) {
+    return {
+      state: "blocked",
+      connected: false,
+      code: "NOT_AUTHENTICATED",
+      message: "Not signed in to GitHub",
+      remediation: "Connect GitHub in Settings → Integrations.",
+    };
+  }
+  try {
+    const response = await withAuthRetry((oct) =>
+      oct.repos.get({ owner, repo }),
+    );
+    // `permissions.push === false` is the authenticated account's own write
+    // bit: definite, so it blocks. `true` is NOT a guarantee (an App
+    // installation can hold narrower `contents` permission than the user who
+    // authorized it), so it never blocks — this probe may only ever remove a
+    // wrong message, never a pull request that would have worked.
+    if (response.data.permissions?.push === false) {
+      return {
+        state: "blocked",
+        connected: true,
+        code: "GITHUB_FORBIDDEN_SCOPE",
+        message: "This GitHub connection cannot push to this repository.",
+        remediation:
+          "A pull request has to push its branch first. Ask for write access on GitHub, or connect an account that has it.",
+      };
+    }
+    return { state: "ok", connected: true };
+  } catch (err) {
+    const wrapped = wrapApiError(
+      err,
+      "Could not check GitHub repository access",
+    );
+    if (!BLOCKING_ACCESS_CODES.has(wrapped.code)) {
+      return { state: "unknown", connected: true };
+    }
+    return {
+      state: "blocked",
+      connected: true,
+      code: wrapped.code,
+      message: wrapped.message,
+      ...(wrapped.remediation ? { remediation: wrapped.remediation } : {}),
+    };
+  }
+}
+
 export interface CreatePrOptions {
   workspaceId: string;
   title: string;

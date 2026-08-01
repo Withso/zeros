@@ -155,8 +155,9 @@ function changeLinesTarget(workspace: Workspace | null): string | null {
  *  render nothing in either case rather than a placeholder. */
 export function useWorkspaceChangeLines(
   workspace: Workspace | null,
+  enabled = true,
 ): ChangeLineCounts {
-  const target = changeLinesTarget(workspace);
+  const target = enabled ? changeLinesTarget(workspace) : null;
   const refreshKey = useGitRefreshKey(workspace?.path, target);
   // The resolved pair carries its target so a workspace switch can never show
   // another workspace's numbers for a frame.

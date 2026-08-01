@@ -38,11 +38,16 @@ export interface NewChatMenuProps {
   /** The pane whose "+" this is — the new tab is routed there (split
    *  panes, 2026-07-17). Omitted → the focused pane gets it. */
   paneId?: string;
+  mode?: "code" | "design";
+  /** Design workspaces keep the normal chat selector but never offer PTYs. */
+  allowTerminal?: boolean;
 }
 
 export function Column2NewChatMenu({
   workspaceFolder,
   paneId,
+  mode = "code",
+  allowTerminal = true,
 }: NewChatMenuProps) {
   const dispatch = useWorkspaceDispatch();
   const sessions = useAgentSessions();
@@ -56,10 +61,11 @@ export function Column2NewChatMenu({
     if (paneId) beginAssignNextChat(workspaceFolder, paneId);
     void spawnNewChatTab({
       folder: workspaceFolder,
+      mode,
       sessions,
       dispatch,
     });
-  }, [dispatch, sessions, workspaceFolder, paneId, beginAssignNextChat]);
+  }, [dispatch, sessions, workspaceFolder, mode, paneId, beginAssignNextChat]);
 
   const openTerminal = useCallback(() => {
     if (paneId) beginAssignNextChat(workspaceFolder, paneId);
@@ -71,14 +77,16 @@ export function Column2NewChatMenu({
       variant="ghost"
       size="icon-sm"
       className={PLUS_BUTTON_CLS}
-      aria-label={terminalAgentsEnabled ? "New tab" : "New chat"}
-      onClick={terminalAgentsEnabled ? undefined : openChat}
+      aria-label={
+        terminalAgentsEnabled && allowTerminal ? "New tab" : "New chat"
+      }
+      onClick={terminalAgentsEnabled && allowTerminal ? undefined : openChat}
     >
       <Plus className="size-3.5" />
     </Button>
   );
 
-  if (!terminalAgentsEnabled) {
+  if (!terminalAgentsEnabled || !allowTerminal) {
     return (
       <div className="flex shrink-0 items-center">
         <Tooltip label="New chat" shortcut="⌘T">

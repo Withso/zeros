@@ -44,13 +44,18 @@ describe("live Run wave placement", () => {
     // They no longer compete for one slot: the tab is content-sized, so it can
     // afford both, and a running workspace should still report what it changed.
     // DOM order is the visual order — counts sit to the LEFT of the wave.
-    expect(topBar).toContain("useWorkspaceChangeLines(workspace)");
+    expect(topBar).toContain(
+      "useWorkspaceChangeLines(workspace, !designWorkspace)",
+    );
+    expect(topBar).toContain("!archiving && !designWorkspace");
     expect(topBar).toMatch(
       /<WorkspaceChangeCounts \{\.\.\.changeLines\} active=\{active\} \/>[\s\S]*?<RunWave/,
     );
     // Each is independently optional — neither may sit in the other's branch,
     // or one of them goes back to suppressing the other.
-    expect(topBar).toMatch(/\{!archiving && \([\s\S]*?<WorkspaceChangeCounts/);
+    expect(topBar).toMatch(
+      /\{!archiving && !designWorkspace && \([\s\S]*?<WorkspaceChangeCounts/,
+    );
     expect(topBar).toMatch(/\{runActionRunning && \([\s\S]*?<RunWave/);
     expect(topBar).not.toMatch(/runActionRunning \?[\s\S]{0,200}?<RunWave/);
   });

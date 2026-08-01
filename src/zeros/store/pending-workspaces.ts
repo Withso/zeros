@@ -35,6 +35,8 @@ export interface PendingWorkspaceCreate {
   token: string;
   repoRoot: string;
   repoSlug: string;
+  /** Optional only for old test/cache shapes; newly prepared rows always set it. */
+  kind?: "code" | "design";
   /** The announced final path (workspace.prepareCreate) — known before
    *  checkout, but not created until workspace.create owns the operation. */
   path?: string;
@@ -66,12 +68,21 @@ let tokenCounter = 0;
 export function beginPendingCreate(args: {
   repoRoot: string;
   repoSlug: string;
+  kind?: "code" | "design";
   path?: string;
   branch?: string;
 }): string {
   const token = `pwc-${Date.now().toString(36)}-${++tokenCounter}`;
   usePendingWorkspacesStore.setState((s) => ({
-    creates: [...s.creates, { token, ...args, startedAt: Date.now() }],
+    creates: [
+      ...s.creates,
+      {
+        token,
+        ...args,
+        kind: args.kind === "design" ? "design" : "code",
+        startedAt: Date.now(),
+      },
+    ],
   }));
   return token;
 }
@@ -149,6 +160,28 @@ export function isWorkspaceProvisioning(
   return usePendingWorkspacesStore
     .getState()
     .creates.some((create) => create.path === folder);
+}
+
+/** Synchronous first-paint kind for a prepared path before its authoritative
+ * Workspace row lands. */
+export function pendingWorkspaceKind(
+  folder: string | null | undefined,
+): "code" | "design" | null {
+  if (!folder) return null;
+  return (
+    usePendingWorkspacesStore
+      .getState()
+      .creates.find((create) => create.path === folder)?.kind ?? null
+  );
+}
+
+export function usePendingWorkspaceKind(
+  folder: string | null | undefined,
+): "code" | "design" | null {
+  return usePendingWorkspacesStore(
+    (state) =>
+      state.creates.find((create) => create.path === folder)?.kind ?? null,
+  );
 }
 
 /** Is this folder's freshly-created surface still assembling? */

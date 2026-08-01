@@ -31,12 +31,15 @@ const { createSpy, resumeSpy, sendSpy, listSpy, modelsListSpy, storeGetSpy } =
 vi.mock("@cursor/sdk", () => ({
   Agent: { create: createSpy, resume: resumeSpy, list: listSpy },
   Cursor: { models: { list: modelsListSpy } },
-  SqliteLocalAgentStore: {
-    open: async () => ({
-      runs: { get: storeGetSpy },
-      dispose: async () => {},
-    }),
+  // The REAL @cursor/sdk surface: a JsonlLocalAgentStore constructor plus
+  // getDefaultSdkStateRoot. Mocking a `LocalAgentStore.open` namespace (as this
+  // did) rubber-stamped a name the package has never exported, so the in-process
+  // store path looked covered while it could not work at all.
+  JsonlLocalAgentStore: class {
+    runs = { get: storeGetSpy };
+    constructor(readonly rootDir: string) {}
   },
+  getDefaultSdkStateRoot: (workspaceRef: string) => `/state-root${workspaceRef}`,
 }));
 
 let runSeq = 0;

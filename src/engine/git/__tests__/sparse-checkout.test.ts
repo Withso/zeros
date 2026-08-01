@@ -79,6 +79,19 @@ describe("working directories (sparse-checkout)", () => {
     expect(restored.sparse).toBe(false);
   });
 
+  it("can preserve a sparse cone when every tracked directory is selected", async () => {
+    const applied = await setWorkingDirectories(
+      repo,
+      ["drop", "keep", "nested"],
+      { forceSparse: true },
+    );
+
+    expect(applied.sparse).toBe(true);
+    expect(applied.included).toEqual(["drop", "keep", "nested"]);
+    expect(await exists(path.join(repo, "drop", "b.txt"))).toBe(true);
+    expect(await exists(path.join(repo, "keep", "a.txt"))).toBe(true);
+  });
+
   it("hides excluded files from the Files tab listing", async () => {
     // Regression: excluded paths keep their index rows (with skip-worktree),
     // so `ls-files -c` still reports them. Without the skip-worktree filter

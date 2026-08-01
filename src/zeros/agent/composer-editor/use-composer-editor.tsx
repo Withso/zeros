@@ -63,6 +63,7 @@ import {
   deriveWorkspaceEntries,
   filterMentions,
   type MentionItem,
+  type MentionSelection,
   type WorkspaceEntry,
 } from "../mentions";
 import { filterSlashCommands } from "../slash-command-filter";
@@ -112,6 +113,8 @@ export interface UseComposerEditorOpts {
   cwd: string | null;
   /** Repo origin for the #-PR picker (null disables it). */
   originUrl: string | null;
+  /** Exact live selection for @selection. Undefined keeps browser-picker fallback. */
+  selection?: MentionSelection | null;
   /** Session-discovered slash commands (merged under the curated floor). */
   availableCommands: AvailableCommand[];
   placeholder: string;
@@ -295,8 +298,10 @@ export function useComposerEditor(
   // ref to sidestep the getPrItems → ensurePrsLoaded → refresh declaration cycle.
   const refreshRef = useRef<() => void>(() => {});
   const browserSelection = useBrowserPickerSelection();
-  const browserSelectionRef = useRef(browserSelection);
-  browserSelectionRef.current = browserSelection;
+  const mentionSelection =
+    opts.selection === undefined ? browserSelection : opts.selection;
+  const mentionSelectionRef = useRef(mentionSelection);
+  mentionSelectionRef.current = mentionSelection;
 
   // Project skills (`<cwd>/skills/*.md`) — an INSTANT, agent-agnostic skill
   // source so the picker's Skills tab is populated the moment "/" opens
@@ -434,7 +439,7 @@ export function useComposerEditor(
   // ── stable suggestion data + pick handlers (read refs) ──
   const getMentionItems = useCallback((query: string): MentionItem[] => {
     const sel = filterMentions(
-      collectMentions(browserSelectionRef.current),
+      collectMentions(mentionSelectionRef.current),
       query,
     );
     const paths = buildPathMentions(workspaceEntriesRef.current, query, 8);
