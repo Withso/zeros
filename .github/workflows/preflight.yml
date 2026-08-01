@@ -69,7 +69,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 22
           cache: pnpm
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
@@ -131,7 +131,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 22
           cache: pnpm
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
@@ -295,7 +295,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 22
           cache: pnpm
       - name: Setup Bun (for the engine sidecar compile)
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -340,7 +340,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 22
           cache: pnpm
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -429,7 +429,7 @@ jobs:
     # control plane. Ephemeral per job, so the tests are free to DROP SCHEMA.
     services:
       postgres:
-        image: postgres:18
+        image: postgres:16
         env:
           POSTGRES_PASSWORD: postgres
         ports:
@@ -449,7 +449,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 22
       - name: Install backend dependencies
         # backend/ is its own pnpm workspace with its own lockfile, and the control
         # plane deploys continuously from main, so this job is where a type or
@@ -503,7 +503,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 22
           cache: pnpm
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
