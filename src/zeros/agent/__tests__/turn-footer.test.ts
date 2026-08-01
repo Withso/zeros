@@ -1,11 +1,65 @@
-import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const useWorkspaceFileDiffSnapshot = vi.hoisted(() =>
+  vi.fn(() => ({
+    data: undefined,
+    error: null,
+    loading: false,
+    stale: true,
+  })),
+);
+
+vi.mock("@/shell/workspace-file-data-cache", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("@/shell/workspace-file-data-cache")
+  >()),
+  useWorkspaceFileDiffSnapshot,
+}));
 
 import {
   canPreviewTurnFileDiff,
   isInterruptedTurn,
+  TurnFilePill,
   turnFooterFiles,
   turnFooterStatusLabel,
 } from "../turn-footer";
+import { TooltipProvider } from "@/zeros/ui/primitives/tooltip";
+
+describe("TurnFilePill cache ownership", () => {
+  beforeEach(() => useWorkspaceFileDiffSnapshot.mockClear());
+
+  const renderPill = (additions: number, deletions: number) =>
+    renderToStaticMarkup(
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(TurnFilePill, {
+          file: {
+            path: "src/history.ts",
+            status: "modified",
+            additions,
+            deletions,
+          },
+          chatId: "chat-1",
+          turnId: "turn-1",
+          workspaceId: "workspace-1",
+          onOpen: vi.fn(),
+        }),
+      ),
+    );
+
+  it("does not subscribe closed previewable pills to the shared diff cache", () => {
+    renderPill(1, 1);
+    expect(useWorkspaceFileDiffSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("never subscribes metadata-only pills to the shared diff cache", () => {
+    renderPill(0, 0);
+    expect(useWorkspaceFileDiffSnapshot).not.toHaveBeenCalled();
+  });
+});
 
 describe("turnFooterFiles", () => {
   it("does not invent a pill when the persisted turn says no file changed", () => {

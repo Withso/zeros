@@ -224,6 +224,31 @@ interface TurnFilePillProps {
   onOpen: (path: string) => void;
 }
 
+interface TurnFileDiffHoverPreviewProps {
+  path: string;
+  diffQuery: WorkspaceFileDiffQuery;
+}
+
+/** Radix mounts hover-card content only while it is open. Keeping the shared
+ * cache hook in this content-owned child means unopened transcript history
+ * creates neither empty cache entries nor immortal listeners. */
+const TurnFileDiffHoverPreview = memo(function TurnFileDiffHoverPreview({
+  path,
+  diffQuery,
+}: TurnFileDiffHoverPreviewProps) {
+  const diffSnapshot = useWorkspaceFileDiffSnapshot(diffQuery);
+  return (
+    <DiffHoverPreview
+      path={path}
+      patch={diffSnapshot.data}
+      loading={diffSnapshot.loading}
+      error={diffSnapshot.error}
+      showPath
+      compact
+    />
+  );
+});
+
 /** One footer file pill. Pointer/focus intent warms the immutable turn patch;
  * clicking remains an urgent navigation-only action. */
 export const TurnFilePill = memo(function TurnFilePill({
@@ -247,7 +272,6 @@ export const TurnFilePill = memo(function TurnFilePill({
     }),
     [workspaceId, chatId, file.path, turnId],
   );
-  const diffSnapshot = useWorkspaceFileDiffSnapshot(diffQuery);
   const warmPreview = useCallback(() => {
     if (previewable) prefetchWorkspaceFileDiff(diffQuery);
   }, [diffQuery, previewable]);
@@ -277,14 +301,7 @@ export const TurnFilePill = memo(function TurnFilePill({
 
   return (
     <DiffHoverCard trigger={pill}>
-      <DiffHoverPreview
-        path={file.path}
-        patch={diffSnapshot.data}
-        loading={diffSnapshot.loading}
-        error={diffSnapshot.error}
-        showPath
-        compact
-      />
+      <TurnFileDiffHoverPreview path={file.path} diffQuery={diffQuery} />
     </DiffHoverCard>
   );
 });
