@@ -197,8 +197,11 @@ function base64url(value: Buffer): string {
 function pkceChallenge(verifier: string): string {
   // PKCE S256 deliberately uses one SHA-256 digest over a high-entropy random
   // code verifier (RFC 7636); this value is not a user-chosen password.
-  // codeql[js/insufficient-password-hash]
-  return base64url(createHash("sha256").update(verifier, "utf8").digest());
+  return base64url(
+    createHash("sha256")
+      .update(verifier, "utf8") // lgtm[js/insufficient-password-hash]
+      .digest(),
+  );
 }
 
 // ── Handoff token sealing ────────────────────────────────────────────────
