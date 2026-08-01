@@ -16,8 +16,12 @@ import { Tooltip } from "@/zeros/ui/primitives";
 // border --border3 — the SAME chrome as the tool-row FileTag and the
 // turn-footer file pills, so composer pills, sent-bubble pills, and transcript
 // pills all read as one family.
+// max-w-full: the label caps at 16/18rem, but in a pane narrower than that
+// the pill would otherwise overflow the user bubble (whose MessageContent
+// hard-clips with overflow-hidden — no ellipsis). Capping the shell at its
+// container lets the truncating label absorb the squeeze instead.
 export const PILL_SHELL =
-  "inline-flex h-5 items-center gap-1 rounded-sm border border-border3 bg-bg1 align-middle text-xs leading-none text-fg1 select-none";
+  "inline-flex h-5 max-w-full items-center gap-1 rounded-sm border border-border3 bg-bg1 align-middle text-xs leading-none text-fg1 select-none";
 
 export function MentionPillView({
   label,

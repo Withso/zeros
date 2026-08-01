@@ -34,9 +34,9 @@
 //      a real (>= 4 col, >= 2 row) measurement. A ResizeObserver
 //      polls until we have stable dims, with a 1.5 s fallback to
 //      80×24 so a broken layout still gives a usable shell.
-//   2. After spawn, the live ResizeObserver coalesces with rAF
-//      (cancel-and-replace) so a burst of layout-settle events
-//      collapses into one `ptyResize` IPC.
+//   2. After spawn, the live ResizeObserver waits for native-window bursts
+//      to settle and suspends completely during known pane drags, then fits
+//      once on the next frame. This collapses a gesture into one PTY resize.
 //   3. All resize paths funnel through `proposeDimensions()` →
 //      `fit.fit()` → `ptyResize` (matching dim equality check),
 //      so the PTY and the xterm grid stay in lockstep.
@@ -84,6 +84,8 @@ import {
   bindPtyWriter,
   useTerminalStore,
 } from "./terminal-store";
+import { createTerminalResizeScheduler } from "./terminal-resize-scheduler";
+import { isContinuousLayoutResizeActive } from "./continuous-layout-resize";
 
 // Mirrors `--font-mono` in `styles/zeros-tokens.css` exactly — xterm can't
 // read a CSS variable, so this string has to be kept in sync by hand.
@@ -191,6 +193,9 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
   restartOnKeyRef.current = restartOnKey;
   const xtermRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const resizeSchedulerRef = useRef<ReturnType<
+    typeof createTerminalResizeScheduler
+  > | null>(null);
   const lastDimsRef = useRef<{ cols: number; rows: number }>({
     cols: FALLBACK_COLS,
     rows: FALLBACK_ROWS,
@@ -409,12 +414,18 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       });
     });
 
-    // Gated spawn: wait for a real proposed measurement before
-    // calling `pty_create`. Below, the same `roSpawn` is reused for
-    // live resize after the PTY is up — see post-spawn block.
+    // Gated spawn: wait for a real proposed measurement before calling
+    // `pty_create`. This observer disconnects as soon as spawning succeeds;
+    // the settled live-resize scheduler below owns later geometry changes.
     let spawned = false;
     let spawnRaf = 0;
     let cancelled = false;
+    let roSpawn: ResizeObserver | null = null;
+
+    const stopSpawnObserver = () => {
+      roSpawn?.disconnect();
+      roSpawn = null;
+    };
 
     const tryMeasureAndSpawn = () => {
       if (spawned || cancelled) return;
@@ -431,6 +442,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
         return; // keep polling
       }
       spawned = true;
+      stopSpawnObserver();
       try {
         fit.fit();
       } catch {
@@ -448,7 +460,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     spawnRaf = requestAnimationFrame(tryMeasureAndSpawn);
 
     // Keep trying as the container reaches its real size.
-    const roSpawn = new ResizeObserver(() => {
+    roSpawn = new ResizeObserver(() => {
       tryMeasureAndSpawn();
     });
     roSpawn.observe(host);
@@ -463,7 +475,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     //     have been the reason the host was reporting weird dims).
     //   - Post-spawn: runs `applyFit`, which is a no-op if cols/rows
     //     didn't actually change; if they did, it pushes a single
-    //     coalesced ptyResize — the shell sees one clean SIGWINCH
+    //     dimension-checked ptyResize — the shell sees one clean SIGWINCH
     //     instead of the previous "draw at wrong width → SIGWINCH →
     //     redraw → ghost" cascade.
     if (typeof document !== "undefined" && document.fonts && document.fonts.load) {
@@ -479,7 +491,10 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
           // Allow one frame for xterm to redraw with the new font
           // glyphs before we re-measure.
           requestAnimationFrame(() => {
-            if (!cancelled) applyFit();
+            if (cancelled) return;
+            const scheduler = resizeSchedulerRef.current;
+            if (scheduler) scheduler.flush();
+            else if (!isContinuousLayoutResizeActive()) applyFit();
           });
         });
     }
@@ -491,6 +506,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     const fallbackTimer = window.setTimeout(() => {
       if (!spawned && !cancelled) {
         spawned = true;
+        stopSpawnObserver();
         lastDimsRef.current = { cols: FALLBACK_COLS, rows: FALLBACK_ROWS };
         void spawn(term);
       }
@@ -500,7 +516,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       cancelled = true;
       cancelAnimationFrame(spawnRaf);
       window.clearTimeout(fallbackTimer);
-      roSpawn.disconnect();
+      stopSpawnObserver();
       host.removeEventListener("wheel", onWheelCapture, { capture: true });
       term.dispose();
       xtermRef.current = null;
@@ -734,26 +750,26 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     };
   }, [variant, prefs.codeTheme, surfaceToken]);
 
-  // Live resize observer (post-spawn). Coalesces a burst of resize
-  // events into one rAF so a layout-settle storm (panel finishes
-  // expanding, window finishes dragging) collapses into a single
-  // `fit + propose + ptyResize` cycle instead of N IPC round-trips.
+  // Live resize observer (post-spawn). xterm's own API recommends debouncing
+  // resize calls: each fit can reflow the complete scrollback buffer and then
+  // send SIGWINCH through the PTY. Native-window bursts settle briefly; known
+  // pane drags are suspended until release by the shared layout coordinator.
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    let pending = 0;
+    const scheduler = createTerminalResizeScheduler(applyFit);
+    resizeSchedulerRef.current = scheduler;
     const ro = new ResizeObserver(() => {
       if (!visibleRef.current) return;
-      if (pending) cancelAnimationFrame(pending);
-      pending = requestAnimationFrame(() => {
-        pending = 0;
-        applyFit();
-      });
+      scheduler.request();
     });
     ro.observe(host);
     return () => {
-      if (pending) cancelAnimationFrame(pending);
       ro.disconnect();
+      scheduler.dispose();
+      if (resizeSchedulerRef.current === scheduler) {
+        resizeSchedulerRef.current = null;
+      }
     };
     // applyFit is a stable closure over refs; pinning it as a dep
     // would re-attach the observer on every render.
@@ -768,6 +784,13 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
   // renderer skips paints while the ancestor is `visibility:hidden`.
   useEffect(() => {
     if (!visible) return;
+    // Dragging a collapsed panel open flips visibility mid-gesture. Mark the
+    // scheduler dirty explicitly so release always performs one exact fit,
+    // even if ResizeObserver coalesces away that intermediate geometry.
+    if (isContinuousLayoutResizeActive()) {
+      resizeSchedulerRef.current?.flush();
+      return;
+    }
     let raf1 = 0;
     let raf2 = 0;
     raf1 = requestAnimationFrame(() => {

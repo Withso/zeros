@@ -425,6 +425,7 @@ export function Column3({
     <DiffWorkerPoolProvider>
       <div
         ref={col3Ref}
+        data-zeros-column-3=""
         {...(collapsed ? { inert: "" } : {})}
         className={COL3_CLS}
         style={collapsed ? { display: "none" } : undefined}
@@ -446,7 +447,10 @@ export function Column3({
         ) : (
           <>
             {/* ── Row 1: File / Changes / Review + added File/Browser tabs. ── */}
-            <div className={COL3_ROW1_CLS}>
+            <div
+              className={COL3_ROW1_CLS}
+              data-zeros-resize-width-lock=""
+            >
               <div ref={headerRef} className={COL3_HEADER_CLS}>
                 <div className="h-full min-w-0 flex-1">
                   <Column3TabStrip

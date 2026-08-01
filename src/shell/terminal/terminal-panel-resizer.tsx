@@ -15,6 +15,7 @@ import React, {
 } from "react";
 
 import { useResizeHint } from "../use-resize-hint";
+import { beginContinuousLayoutResize } from "./continuous-layout-resize";
 import {
   TERMINAL_PANEL_DEFAULT_PCT,
   TERMINAL_PANEL_HEIGHT_VAR,
@@ -84,15 +85,14 @@ export function isTerminalPanelDoubleClick(
   );
 }
 
-/** Publish the committed height onto the PANEL element, which is also what
- *  the drag writes per frame.
+/** Publish the committed height onto the panel element. Live drag frames use
+ *  a direct `flex-basis`; the inherited variable is updated once on release.
  *
  *  Two deliberate choices, each fixing a real defect:
  *
- *  • The panel, not column 3. Custom properties inherit, so setting this one
- *    on the column invalidated style for every descendant — the diff viewer,
- *    the file tree, the browser iframes — on every animation frame of a seam
- *    drag. Scoping it to the panel confines that to the panel.
+ *  • The panel, not column 3. This confines committed-height invalidation to
+ *    the panel, while the direct live property confines each drag-frame style
+ *    change to the flex item itself.
  *
  *  • A layout effect, not React's `style` prop. React only rewrites style it
  *    owns when its own previous style object differs. Dragging the panel open
@@ -167,7 +167,7 @@ export function TerminalPanelResizer({
       const rect = container.getBoundingClientRect();
       const containerHeight = rect.height;
       const containerBottom = rect.bottom;
-      if (panel) panel.style.transition = "none";
+      const finishContinuousResize = beginContinuousLayoutResize();
 
       const layout = useTerminalPanelLayoutStore.getState().layout;
       lastPctRef.current = layout.heightPct;
@@ -201,10 +201,10 @@ export function TerminalPanelResizer({
           clientY: lastClientY,
         });
         lastPctRef.current = pct;
-        // Scoped to the PANEL, not column 3: custom properties inherit, so
-        // writing this one on the column dirtied style for the diff viewer,
-        // file tree, and browser iframes on every single drag frame.
-        panel?.style.setProperty(TERMINAL_PANEL_HEIGHT_VAR, `${pct}%`);
+        // `--zeros-terminal-panel-height` inherits through the full xterm DOM.
+        // A direct standard property invalidates only this flex item; the
+        // persisted variable is written once during the release handoff.
+        panel?.style.setProperty("flex-basis", `${pct}%`);
       };
 
       const onMove = (moveEvent: PointerEvent) => {
@@ -215,6 +215,7 @@ export function TerminalPanelResizer({
           Math.abs(moveEvent.clientY - startClientY) > DRAG_THRESHOLD_PX
         )
           moved = true;
+        if (!moved) return;
         if (rafId !== null) return;
         rafId = requestAnimationFrame(apply);
       };
@@ -225,6 +226,7 @@ export function TerminalPanelResizer({
         handle.removeEventListener("pointermove", onMove);
         handle.removeEventListener("pointerup", finish);
         handle.removeEventListener("pointercancel", finish);
+        handle.removeEventListener("lostpointercapture", finish);
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", finish);
         window.removeEventListener("pointercancel", finish);
@@ -240,7 +242,6 @@ export function TerminalPanelResizer({
         document.body.style.cursor = "";
         document.body.style.userSelect = "";
         if (panel) {
-          panel.style.transition = "";
           panel.style.opacity = "";
         }
         try {
@@ -252,19 +253,24 @@ export function TerminalPanelResizer({
 
         const committed =
           useTerminalPanelLayoutStore.getState().layout.heightPct;
-        // Both non-commit branches rewind the panel's override to the stored
-        // value themselves: nothing else will, because the layout effect above
-        // only fires when `heightPct` actually changes — and in these branches
-        // it deliberately hasn't.
+        // Publish the persisted custom property once, then reveal the class-
+        // owned clamp by dropping the temporary inline flex-basis. The live and
+        // committed values match exactly, so release has no correction frame.
         if (expandedNow && collapseIntent) {
-          setExpanded(false);
           panel?.style.setProperty(TERMINAL_PANEL_HEIGHT_VAR, `${committed}%`);
+          panel?.style.removeProperty("flex-basis");
+          setExpanded(false);
         } else if (expandedNow && moved) {
+          panel?.style.setProperty(
+            TERMINAL_PANEL_HEIGHT_VAR,
+            `${lastPctRef.current}%`,
+          );
+          panel?.style.removeProperty("flex-basis");
           setHeightPct(lastPctRef.current);
         } else if (expandedNow) {
-          // A click or sub-threshold jitter must never overwrite the saved size.
-          panel?.style.setProperty(TERMINAL_PANEL_HEIGHT_VAR, `${committed}%`);
+          panel?.style.removeProperty("flex-basis");
         }
+        finishContinuousResize();
       };
 
       document.body.style.cursor = "ns-resize";
@@ -272,6 +278,7 @@ export function TerminalPanelResizer({
       handle.addEventListener("pointermove", onMove);
       handle.addEventListener("pointerup", finish);
       handle.addEventListener("pointercancel", finish);
+      handle.addEventListener("lostpointercapture", finish);
       window.addEventListener("pointermove", onMove);
       window.addEventListener("pointerup", finish);
       window.addEventListener("pointercancel", finish);

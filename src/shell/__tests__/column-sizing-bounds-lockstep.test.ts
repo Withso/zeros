@@ -26,6 +26,8 @@ import {
   FILES_SIDEBAR_MIN_PX,
 } from "../column3-tabs/files-sidebar-width";
 import {
+  TERMINAL_PANEL_DEFAULT_PCT,
+  TERMINAL_PANEL_HEIGHT_VAR,
   TERMINAL_PANEL_MAX_OFFSET_PX,
   TERMINAL_PANEL_MIN_PX,
   TERMINAL_ROW1_MIN_PX,
@@ -84,6 +86,20 @@ describe("column 2 / column 3 sizing bounds stay in lockstep with CSS", () => {
       `calc((1_-_var(${COLUMN_2_RATIO_VAR},${COLUMN_2_RATIO_DEFAULT}))*100)`,
     );
   });
+
+  it("paints live drag grow factors directly instead of invalidating an inherited variable", () => {
+    expect(col2).toContain('style.setProperty("flex-grow"');
+    expect(col2).toContain('[data-zeros-column-3]');
+    expect(col3).toContain('data-zeros-column-3=""');
+  });
+
+  it("locks expensive child surfaces to one reflow per column drag", () => {
+    const terminalTab = read("../column3-tabs/terminal-tab.tsx");
+    expect(col2).toContain("lockResizeDescendantWidths(row)");
+    expect(col2).toContain('data-zeros-resize-width-lock=""');
+    expect(col3).toContain('data-zeros-resize-width-lock=""');
+    expect(terminalTab).toContain('data-zeros-resize-width-lock=""');
+  });
 });
 
 // ── The col-3 expand jerk, guarded ────────────────────────────────────────
@@ -129,6 +145,7 @@ describe("collapsing column 3 cannot move column 2", () => {
 // ── The terminal-panel collapse jank, guarded ─────────────────────────────
 describe("terminal panel seam geometry stays in lockstep with CSS", () => {
   const terminalTab = code("../column3-tabs/terminal-tab.tsx");
+  const setupTab = code("../column3-tabs/setup-tab.tsx");
 
   it("derives the panel max from the row-1 floor plus the seam", () => {
     expect(TERMINAL_PANEL_MAX_OFFSET_PX).toBe(
@@ -136,14 +153,13 @@ describe("terminal panel seam geometry stays in lockstep with CSS", () => {
     );
   });
 
-  it("builds the flex-basis clamp from the constants, not literals", () => {
-    // The clamp used to hardcode `clamp(140px, …, calc(100% - 181px))`, which
-    // is the drag clamp's arithmetic spelled a second time. Drift between the
-    // two is how a drag ends up clamping against one bound while CSS renders
-    // another.
-    expect(terminalTab).toContain("${TERMINAL_PANEL_MIN_PX}px");
-    expect(terminalTab).toContain("${TERMINAL_PANEL_MAX_OFFSET_PX}px");
-    expect(terminalTab).not.toContain("calc(100% - 181px)");
+  it("keeps the emitted flex-basis clamp equal to the geometry constants", () => {
+    // Tailwind must see a literal arbitrary class at build time, so this guard
+    // derives that literal from the TS constants and catches either side
+    // changing alone.
+    expect(terminalTab).toContain(
+      `[flex-basis:clamp(${TERMINAL_PANEL_MIN_PX}px,var(${TERMINAL_PANEL_HEIGHT_VAR},${TERMINAL_PANEL_DEFAULT_PCT}%),calc(100%_-_${TERMINAL_PANEL_MAX_OFFSET_PX}px))]`,
+    );
   });
 
   it("keeps the expanded min-height class equal to TERMINAL_PANEL_MIN_PX", () => {
@@ -158,6 +174,23 @@ describe("terminal panel seam geometry stays in lockstep with CSS", () => {
     // — the shell-redraw storm the spawn path was written to avoid.
     expect(terminalTab).not.toMatch(
       /transition-\[[^\]]*(flex-basis|min-height)/,
+    );
+  });
+
+  it("paints live flex-basis directly instead of invalidating xterm descendants", () => {
+    const resizer = code("../terminal/terminal-panel-resizer.tsx");
+    expect(resizer).toContain('style.setProperty("flex-basis"');
+  });
+
+  it("keeps padding outside Setup's measured xterm host", () => {
+    // FitAddon measures the terminal element's parent border box. Padding on
+    // that same host makes it over-count usable rows/columns and clip the grid
+    // at narrow sizes.
+    expect(setupTab).toContain(
+      'className="size-full min-h-0 min-w-0 overflow-hidden"',
+    );
+    expect(setupTab).not.toMatch(
+      /ref=\{hostRef\}[\s\S]{0,160}className=\{cn\([\s\S]{0,160}\b(?:px-|py-|p-)/,
     );
   });
 });

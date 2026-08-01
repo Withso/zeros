@@ -396,6 +396,12 @@
 [data-Zeros-root] .zeros-agent-md {
   white-space: normal;
   font-size: 14px;
+  /* Emergency break for unbroken tokens (long URLs, hashes, JSON runs) so
+     they wrap inside the 768px answer lane instead of clipping against the
+     scroller's overflow-x-hidden. break-word (not anywhere) on purpose:
+     it doesn't alter intrinsic min-content sizing, so table column widths
+     and the table horizontal scroller (markdown.ts) keep their behavior. */
+  overflow-wrap: break-word;
 }
 [data-Zeros-root] .zeros-agent-md > *:first-child {
   margin-top: 0;

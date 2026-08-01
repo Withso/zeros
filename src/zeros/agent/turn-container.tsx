@@ -331,7 +331,7 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
   }
 
   // ── Display ──────────────────────────────────────────────
-  // A right-aligned, fit-to-content bubble (capped at max-w-[768px]). The
+  // A right-aligned, fit-to-content bubble (capped at min(768px, 100%)). The
   // right offset + bubble shape is what signals "this is what *you* said"
   // — the Cursor / ChatGPT / iMessage convention. The 768px cap matches the
   // agent answer lane's cap (turn-event-list.tsx): both content streams read
@@ -339,9 +339,16 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
   // wrapper's `items-end` right-anchors this bubble to the band's right edge
   // (lining up with the composer's right edge); the answer lane is the
   // left-anchored counterpart, so the conversation reads prompt-right /
-  // answer-left within the wide envelope. The cap is ABSOLUTE, so the bubble
-  // fills the available width when the band is narrower than 768 (shrunk
-  // col 2 → it fits the window) and only caps once past 768. NOT sticky
+  // answer-left within the wide envelope. The 100% arm of the cap is
+  // LOAD-BEARING: `w-fit` floors at the content's min-content width, and a
+  // pasted log/JSON blob (no spaces → no soft-wrap opportunities) or an
+  // inline attachment pill can push min-content past a narrow pane. Because
+  // `items-end` anchors the RIGHT edge, every overflowing pixel spilled off
+  // the LEFT edge, where the scroller's overflow-x-hidden clipped it — the
+  // bubble read as "cut off" until the pane was widened. min(768px, 100%)
+  // keeps the fit-to-content look but never lets the bubble exceed the lane
+  // (text-message.tsx pairs this with `wrap-anywhere` so the text inside
+  // wraps rather than clips). NOT sticky
   // any more:
   // the prompt scrolls freely with the transcript (the JumpToPromptPill
   // still offers a manual "jump to your prompt" when it scrolls off).
@@ -362,7 +369,7 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
     <div className="zeros-agent-turn-prompt group/usermsg relative flex flex-col items-end">
       <div
         className={cn(
-          "w-fit max-w-[768px] cursor-text rounded-sm border px-3 py-2 select-text",
+          "w-fit max-w-[min(768px,100%)] cursor-text rounded-sm border px-3 py-2 select-text",
           autoAction
             ? // font-medium (500) sets the auto-sent label apart from typed
               // prose — only these "Create a PR" / "Commit & Push" bubbles.

@@ -11,12 +11,11 @@
 // Kept as a leaf module (no component imports) so the clamp math is
 // unit-testable without pulling in the chat tree.
 
-/** The shared CSS variable both columns read for their grow factors.
- *  Set on the two-column ROW element (not :root) — scoping the write
- *  keeps per-frame drag updates from invalidating style for the whole
- *  document (inherited custom properties recalc every descendant of
- *  the element they're set on). Same pattern as the terminal panel's
- *  TERMINAL_PANEL_HEIGHT_VAR. */
+/** The committed CSS variable both columns read for their grow factors.
+ *  It is published on the two-column row after a drag and on <html> during
+ *  boot. Live drag frames use direct `flex-grow` properties on the two flex
+ *  items instead: inherited custom-property writes would invalidate style
+ *  through every transcript, diff, iframe, and terminal descendant. */
 export const COLUMN_2_RATIO_VAR = "--zeros-column-2-ratio";
 
 // 50/50 default — a symmetric split matching the two-pane editor
