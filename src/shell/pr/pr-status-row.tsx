@@ -8,9 +8,9 @@
 //   │ PR #N · status · checks · one-tap actions…           │   (with PR)
 //   └─────────────────────────────────────────────────────┘
 //
-// The first row of BOTH the Changes tab and the Review tab (row 1), so PR
-// creation and PR status live in one stable place wherever the user is
-// looking at the branch. With a PR it IS the PR status island (live status +
+// One row owned by Column3 above the retained Changes and Review tab bodies,
+// so creation/status stays mounted — and keeps one live snapshot — across a
+// hop between them. With a PR it IS the PR status island (live status +
 // one-tap actions); without one it's the same 40px row holding the
 // target-branch picker (left) and the Create PR split-button (right). The two
 // are mutually exclusive on `prNumber`, exactly like the old topbar
@@ -36,7 +36,7 @@ export function PrStatusRow({
 }: {
   workspace: Workspace | null;
   originUrl: string | null;
-  /** Hidden retained row-1 surfaces stay inert (no Git/GitHub reads). */
+  /** Inactive/collapsed workspace surfaces stay inert (no Git/GitHub reads). */
   active: boolean;
 }) {
   const nativeReady = useNativeRuntime().ready;

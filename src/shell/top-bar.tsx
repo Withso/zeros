@@ -21,6 +21,7 @@ import {
   ChevronDown,
   ClipboardList,
   GitBranch,
+  GitMerge,
   GitMergeConflict,
   GitPullRequestArrow,
   GitPullRequestClosed,
@@ -457,8 +458,8 @@ interface WorkspaceTabProps {
 
 /** The idle tab glyph for a workspace WITH a PR (2026-07-19): the icon tracks
  *  the PR's live island state — brown PR-arrow while open, red conflict glyph
- *  on merge conflicts, green PR-arrow when ready to merge, a violet mirrored
- *  branch when merged, and a red closed glyph when closed. Falls back to the
+ *  on merge conflicts, green PR-arrow when ready to merge, a violet merge
+ *  glyph when merged, and a red closed glyph when closed. Falls back to the
  *  persisted prState for workspaces whose island hasn't derived yet this
  *  session. Null → the default branch icon. */
 function prTabIcon(
@@ -476,12 +477,8 @@ function prTabIcon(
       : (islandKind ?? "open");
   switch (kind) {
     case "merged":
-      // The flip of the default branch glyph — "work flowed back in".
       return (
-        <GitBranch
-          className="text-violet-fg size-3.5 -scale-x-100"
-          strokeWidth={1.25}
-        />
+        <GitMerge className="text-violet-fg size-3.5" strokeWidth={1.25} />
       );
     case "closed":
       return (

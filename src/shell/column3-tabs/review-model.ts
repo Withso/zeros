@@ -156,6 +156,65 @@ export function summarizeChecks(data: PrChecksResult | null): ChecksSummary {
   return { tone: "success", label: "All checks passed", fraction };
 }
 
+// ── shared PR action gates ──────────────────────────────────
+
+/**
+ * Review repeats two actions that also appear in the shared PR status island.
+ * Their enabled state must come from that island's single derived state, not
+ * from Review's narrower `isMergeable` field: local commits, divergence,
+ * pending checks, and branch-protection requirements all outrank it.
+ */
+export function reviewActionBlockReason(
+  islandKind: string | null,
+  action: "merge" | "ready",
+): string | null {
+  if (
+    (action === "merge" && islandKind === "ready-to-merge") ||
+    (action === "ready" && islandKind === "draft")
+  ) {
+    return null;
+  }
+
+  switch (islandKind) {
+    case null:
+      return "Pull request status is loading.";
+    case "merge-conflicts":
+      return "This branch has conflicts with the base branch — resolve them first.";
+    case "uncommitted":
+      return "Commit and push the local changes first.";
+    case "diverged":
+      return "Pull the remote branch and resolve the divergence first.";
+    case "ahead":
+      return "Push the local commits first.";
+    case "behind":
+      return "Pull the remote commits first.";
+    case "draft":
+      return action === "merge"
+        ? "Mark this pull request ready for review first."
+        : null;
+    case "checks-pending":
+      return "Wait for the required checks to finish.";
+    case "unable-to-merge":
+      return "Fix the failing checks before merging.";
+    case "behind-base":
+      return "Update the branch from the target branch first.";
+    case "blocked":
+      return "Complete the repository's merge requirements first.";
+    case "checking":
+      return "GitHub is still checking mergeability.";
+    case "pr-open":
+      return "Mergeability is unavailable; refresh the pull request status.";
+    case "merged":
+      return "This pull request is already merged.";
+    case "closed":
+      return "This pull request is closed.";
+    default:
+      return action === "ready"
+        ? "Resolve the current pull request status before marking it ready."
+        : "Resolve the current pull request status before merging.";
+  }
+}
+
 // ── activity timeline ────────────────────────────────────────
 
 /** The Reviews tab's merged event stream. Compositional (not an API shape):
@@ -215,5 +274,8 @@ export const FULL_POLL_MS = 60_000;
 
 /** True while any check is still running — the fast checks lane's gate. */
 export function hasPendingChecks(data: PrChecksResult | null): boolean {
-  return !!data && (data.pending > 0 || data.checks.some((c) => checkOutcome(c) === "pending"));
+  return (
+    !!data &&
+    (data.pending > 0 || data.checks.some((c) => checkOutcome(c) === "pending"))
+  );
 }

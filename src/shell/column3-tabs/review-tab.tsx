@@ -40,12 +40,13 @@ import { ZerosSpinner } from "@/loaders";
 import { parseUnifiedDiffFiles, type ChangedFile } from "./changes-parse";
 import { useScrollMemoryRef } from "../scroll-memory";
 import { AGENT_WORKING_REASON } from "../pr/use-agent-working";
+import { usePrIslandKind } from "../pr/pr-island-state-store";
 import {
   type ReviewMergeMethod,
   type ReviewProvider,
 } from "../pr/review-provider";
 import { humanGitError, useReviewLiveData } from "./review-data";
-import { summarizeChecks } from "./review-model";
+import { reviewActionBlockReason, summarizeChecks } from "./review-model";
 import {
   Centered,
   ErrorCallout,
@@ -105,9 +106,7 @@ function loadMergeMethod(provider: ReviewProvider): ReviewMergeMethod {
     const value = window.localStorage.getItem(mergeMethodKey(provider));
     if (
       value &&
-      provider.capabilities.mergeMethods.some(
-        (method) => method.id === value,
-      )
+      provider.capabilities.mergeMethods.some((method) => method.id === value)
     ) {
       return value;
     }
@@ -172,6 +171,7 @@ export function ReviewView({
     refreshKey,
     active,
   });
+  const islandKind = usePrIslandKind(workspaceId, prNumber);
   const [busy, setBusy] = useState(false);
 
   // One scroller hosts every sub-tab's body (the switch below swaps children
@@ -380,6 +380,7 @@ export function ReviewView({
           <MergeControls
             provider={provider}
             pr={pr}
+            islandKind={islandKind}
             busy={busy}
             agentWorking={agentWorking}
             onMarkReady={() => void runMarkReady()}
@@ -614,6 +615,7 @@ function DescriptionSection({ pr }: { pr: PR }) {
 function MergeControls({
   provider,
   pr,
+  islandKind,
   busy,
   agentWorking,
   onMarkReady,
@@ -621,6 +623,8 @@ function MergeControls({
 }: {
   provider: ReviewProvider;
   pr: PR;
+  /** Exact workspace+PR state rendered by the shared status island. */
+  islandKind: string | null;
   busy: boolean;
   agentWorking: boolean;
   onMarkReady: () => void;
@@ -635,11 +639,14 @@ function MergeControls({
     mergeMethods[0];
   if (pr.state === "merged" || pr.state === "closed") return null;
   if (pr.state === "draft") {
+    const actionBlock = reviewActionBlockReason(islandKind, "ready");
+    const blockedReason =
+      actionBlock ?? (agentWorking ? AGENT_WORKING_REASON : null);
     const ready = (
       <Button
         size="sm"
         variant="default"
-        disabled={busy || agentWorking}
+        disabled={busy || !!blockedReason}
         onClick={onMarkReady}
         className="gap-1.5"
       >
@@ -647,8 +654,8 @@ function MergeControls({
         Mark as ready
       </Button>
     );
-    return agentWorking ? (
-      <Tooltip label={AGENT_WORKING_REASON}>
+    return blockedReason ? (
+      <Tooltip label={blockedReason}>
         {/* span keeps the tooltip live over the disabled button */}
         <span className="inline-flex">{ready}</span>
       </Tooltip>
@@ -656,7 +663,9 @@ function MergeControls({
       ready
     );
   }
-  const conflicted = pr.isMergeable === false || pr.mergeableState === "dirty";
+  const actionBlock = reviewActionBlockReason(islandKind, "merge");
+  const blockedReason =
+    actionBlock ?? (agentWorking ? AGENT_WORKING_REASON : null);
   const pick = (m: ReviewMergeMethod) => {
     setMethod(m);
     saveMergeMethod(provider, m);
@@ -670,7 +679,7 @@ function MergeControls({
     <span className="inline-flex gap-px overflow-hidden rounded-sm">
       <button
         type="button"
-        disabled={busy || conflicted || agentWorking}
+        disabled={busy || !!blockedReason}
         onClick={() => onMerge(selectedMethod.id)}
         className="bg-green-primary text-bg1 flex h-6 items-center gap-1.5 px-2.5 text-xs font-medium transition-opacity duration-120 ease-out hover:opacity-90 disabled:pointer-events-none disabled:opacity-50"
       >
@@ -681,7 +690,7 @@ function MergeControls({
         <DropdownMenuTrigger asChild>
           <button
             type="button"
-            disabled={busy || conflicted || agentWorking}
+            disabled={busy || !!blockedReason}
             aria-label="Choose merge method"
             className="bg-green-primary text-bg1 flex h-6 items-center px-1.5 transition-opacity duration-120 ease-out hover:opacity-90 disabled:pointer-events-none disabled:opacity-50"
           >
@@ -694,10 +703,7 @@ function MergeControls({
             onValueChange={pick}
           >
             {mergeMethods.map((candidate) => (
-              <DropdownMenuRadioItem
-                key={candidate.id}
-                value={candidate.id}
-              >
+              <DropdownMenuRadioItem key={candidate.id} value={candidate.id}>
                 {candidate.label}
               </DropdownMenuRadioItem>
             ))}
@@ -706,12 +712,6 @@ function MergeControls({
       </DropdownMenu>
     </span>
   );
-  // Conflicts are the durable blocker, so that message wins the tooltip.
-  const blockedReason = conflicted
-    ? "This branch has conflicts with the base branch — resolve them first."
-    : agentWorking
-      ? AGENT_WORKING_REASON
-      : null;
   return blockedReason ? (
     <Tooltip label={blockedReason}>
       {/* span keeps the tooltip live over the disabled buttons */}
