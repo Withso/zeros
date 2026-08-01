@@ -14,9 +14,10 @@ export const GITHUB_COMPLETION_ERRORS = Object.freeze([
   "storage_failed",
 ]);
 
-/** Parse the fragment without trusting it as a URL. This function is also
- * embedded verbatim in the hosted page, keeping its browser behavior under the
- * same plain-Node regression tests as the desktop scheme allow-list. */
+/** Parse the fragment without trusting it as a URL. This function is embedded
+ * verbatim with Function.prototype.toString(), so it MUST remain self-contained
+ * apart from browser-standard URLSearchParams. The serialization regression
+ * test revives it without this module's scope to enforce that build contract. */
 export function parseGithubCompletionFragment(
   rawFragment,
   allowedSchemes,

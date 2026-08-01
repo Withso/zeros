@@ -58,7 +58,7 @@ describe("GitHub OAuth flow selection", () => {
     ).toBe("oauth");
   });
 
-  it("treats either account-side record as an existing setup", () => {
+  it("installs when the account has no setup evidence", () => {
     expect(
       resolveGithubOauthFlowKind({
         installRequested: true,
@@ -66,6 +66,9 @@ describe("GitHub OAuth flow selection", () => {
         hasInstallation: false,
       }),
     ).toBe("install");
+  });
+
+  it("keeps direct OAuth when authorization survives an incomplete inventory", () => {
     expect(
       resolveGithubOauthFlowKind({
         installRequested: true,
@@ -73,6 +76,9 @@ describe("GitHub OAuth flow selection", () => {
         hasInstallation: false,
       }),
     ).toBe("oauth");
+  });
+
+  it("keeps direct OAuth when an installation exists without authorization", () => {
     expect(
       resolveGithubOauthFlowKind({
         installRequested: true,
@@ -125,6 +131,7 @@ const githubConfig: GithubBackendConfig = {
   refreshBindingSecret: "test-binding-secret",
   appSlug: "zeros-test",
   oauthCallbackUrl: "https://api.example.test/v1/github/oauth/callback",
+  completionPageUrl: "https://app.example.test/github/connected",
   webBaseUrl: "https://github.example.test",
   apiBaseUrl: "https://api.github.example.test",
   variantKey: "github.com",
@@ -365,7 +372,7 @@ dbDescribe("GitHub App OAuth handoff", () => {
     const redirected = await callback(appA, started.state);
     expect(redirected.status).toBe(302);
     const location = new URL(redirected.headers.get("location")!);
-    expect(location.origin).toBe("https://app.zeros.build");
+    expect(location.origin).toBe("https://app.example.test");
     expect(location.pathname).toBe("/github/connected");
     expect(location.search).toBe("");
     const fragment = new URLSearchParams(location.hash.slice(1));

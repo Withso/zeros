@@ -78,6 +78,11 @@ Railway's backend secret store. The desktop release workflows also need the
 public `VITE_CONTROL_PLANE_URL` repository secret so Electron main can bake the
 correct control-plane origin; no GitHub credential is baked into the app.
 
+`GITHUB_COMPLETION_PAGE_URL` optionally selects the matching hosted browser
+confirmation page for a preview or local environment. It defaults to
+`https://app.zeros.build/github/connected`; deploy that page before directing a
+backend callback to it.
+
 **This block is optional and deliberately not a boot requirement.** Unset, the
 service starts normally and `/v1/github/*` answers `503 github_not_configured`,
 which the desktop renders as "GitHub App sign-in isn't available on this Zeros

@@ -3,7 +3,7 @@
 // The backend is the confidential-client boundary: the GitHub client secret
 // never ships in Electron. OAuth state + PKCE verifier are single-use (10 min);
 // the resulting token pair crosses a second, Auth0-user-bound handoff row for
-// at most 60 seconds before Electron persists it in safeStorage.
+// at most five minutes before Electron persists it in safeStorage.
 
 import {
   createCipheriv,
@@ -33,8 +33,6 @@ const MAX_INSTALLATION_PAGES = 10;
 const MAX_REPOSITORY_COUNT_PROBES = 50;
 const REPOSITORY_COUNT_CONCURRENCY = 4;
 const GITHUB_REQUEST_TIMEOUT_MS = 15_000;
-const GITHUB_COMPLETION_PAGE_URL =
-  "https://app.zeros.build/github/connected";
 /** Ceiling for one route's whole GitHub conversation. The per-request timeout
  *  bounds a single call; without an aggregate deadline 10 installation pages
  *  plus 50 count probes could hold a handler for ~6 minutes — long after the
@@ -151,7 +149,15 @@ export type GithubOauthFlowKind = "oauth" | "install";
 
 /** A desktop only knows whether this Mac has a credential. The control plane
  * owns the account-level view needed to distinguish a genuine first install
- * from a second Mac reconnecting to an installation that already exists. */
+ * from a second Mac reconnecting to an installation that already exists.
+ *
+ * Authorization alone deliberately counts as prior setup: a bounded or failed
+ * installation inventory read still persists the usable authorization but may
+ * have no installation rows. Forcing that account back through
+ * `/installations/new` recreates the Configure-page dead end this server-side
+ * decision exists to avoid. If a remote uninstall leaves only the authorization
+ * row, direct OAuth still preserves the usable user authorization; installation
+ * recovery remains a separate UI action. */
 export function resolveGithubOauthFlowKind(input: {
   installRequested: boolean;
   hasAuthorization: boolean;
@@ -196,8 +202,8 @@ function pkceChallenge(verifier: string): string {
 // nonce. Deriving the key from that nonce — of which Postgres keeps only a
 // SHA-256 — means the row is useless without the nonce: a WAL segment, a PITR
 // restore, or the nightly off-platform dump yields ciphertext, not credentials.
-// The 60-second row TTL never bounded that, because a refresh token stays live
-// for ~6 months after the row is gone.
+// The short-lived row TTL never bounds that risk by itself, because a refresh
+// token stays live for ~6 months after the row is gone.
 
 const HANDOFF_SEAL_INFO = "zeros-github-handoff.v1";
 const HANDOFF_SEAL_IV_BYTES = 12;
@@ -1015,7 +1021,7 @@ export function createGithubPublicRoutes(
     if (oauthError || !code) {
       return c.redirect(
         githubCompletionUrl(
-          GITHUB_COMPLETION_PAGE_URL,
+          config.completionPageUrl,
           pending,
           oauthError === "access_denied" ? "access_denied" : "oauth_failed",
         ),
@@ -1090,7 +1096,7 @@ export function createGithubPublicRoutes(
         });
       });
       return c.redirect(
-        githubCompletionUrl(GITHUB_COMPLETION_PAGE_URL, pending),
+        githubCompletionUrl(config.completionPageUrl, pending),
         302,
       );
     } catch (error) {
@@ -1113,7 +1119,7 @@ export function createGithubPublicRoutes(
         }`,
       );
       return c.redirect(
-        githubCompletionUrl(GITHUB_COMPLETION_PAGE_URL, pending, kind),
+        githubCompletionUrl(config.completionPageUrl, pending, kind),
         302,
       );
     }

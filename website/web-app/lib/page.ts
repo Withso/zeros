@@ -53,6 +53,7 @@ export function shell(
         font-size: 16px; line-height: 1.5;
       }
       .card-hero .btn { min-height: 48px; font-size: 16px; }
+      [hidden] { display: none !important; }
       .title { font-weight: 600; color: #f4f4f5; margin-bottom: 0.35rem; }
       .sub { color: #a1a1aa; font-size: 13px; line-height: 1.5; margin-bottom: 1.5rem; }
       a.btn, button.btn {

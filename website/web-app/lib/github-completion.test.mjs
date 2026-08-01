@@ -57,4 +57,22 @@ describe("GitHub browser completion handoff", () => {
       );
     }
   });
+
+  it("remains self-contained when embedded into the browser page", () => {
+    const revived = Function(
+      `"use strict"; return (${parseGithubCompletionFragment.toString()});`,
+    )();
+
+    assert.deepEqual(
+      revived(
+        `#scheme=zeros&nonce=${NONCE}`,
+        GITHUB_COMPLETION_SCHEMES,
+        GITHUB_COMPLETION_ERRORS,
+      ),
+      {
+        kind: "connected",
+        deepLink: `zeros://github/connected#nonce=${NONCE}`,
+      },
+    );
+  });
 });
