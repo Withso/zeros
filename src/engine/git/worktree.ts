@@ -722,11 +722,17 @@ function reservationKey(repoSlug: string, name: string): string {
   return `${repoSlug}\u0000${name.toLowerCase()}`;
 }
 
-function reservePreparedName(repoSlug: string, branch: string): void {
-  preparedNameReservations.set(
-    reservationKey(repoSlug, branchDisplayName(branch)),
-    Date.now() + PREPARED_NAME_TTL_MS,
-  );
+/** Atomically claim a prepared name after the allocator's async snapshot.
+ * Concurrent prepares may all select the same candidate before any of them
+ * reaches this synchronous compare-and-set; exactly one wins and the others
+ * retry against the now-visible reservation. */
+function tryReservePreparedName(repoSlug: string, branch: string): boolean {
+  const key = reservationKey(repoSlug, branchDisplayName(branch));
+  const now = Date.now();
+  const currentExpiry = preparedNameReservations.get(key);
+  if (currentExpiry != null && currentExpiry > now) return false;
+  preparedNameReservations.set(key, now + PREPARED_NAME_TTL_MS);
+  return true;
 }
 
 /** Called once a DB row owns the name — the row is now the reservation. */
@@ -1210,11 +1216,13 @@ export async function prepareWorkspaceCreate(input: {
       !(await refExists(input.repoRoot, `refs/heads/${candidate}`)) &&
       !existsSync(candidatePath)
     ) {
+      // Everything above can overlap with another prepare. Claim only after
+      // the final await, with no yield between this check and the map write.
+      if (!tryReservePreparedName(repoSlug, candidate)) continue;
       branch = candidate;
       workspacePath = candidatePath;
       // Hold the name until create inserts a row for it, so a second prepare
       // arriving before that create picks something else.
-      reservePreparedName(repoSlug, branch);
       break;
     }
   }
