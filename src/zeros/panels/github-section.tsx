@@ -426,11 +426,11 @@ export function GitHubSection({
       entryPoint: "settings",
     });
     try {
-      await ghAppConnect({ installFlow });
+      const started = await ghAppConnect({ installFlow });
       // Cancelled while the control plane was answering: main already discarded
       // the handoff, so there is nothing to finish on GitHub.
-      if (attempt !== appAttemptRef.current) return;
-      if (installFlow) {
+      if (attempt !== appAttemptRef.current || !started) return;
+      if (started.flowKind === "install") {
         trackGithubInstallOpened({
           variantKey: "github.com",
           kind: "new",
@@ -862,8 +862,8 @@ export function GitHubSection({
                         </h3>
                         <p className="text-fg2 m-0 text-xs">
                           {appWaiting
-                            ? "Authorize your account and choose repository access in the browser, then return to Zeros."
-                            : "GitHub opens in your browser so you can choose an account and select repository access."}
+                            ? "Finish on GitHub, then select Open Zeros on the confirmation page."
+                            : "GitHub opens in your browser to authorize Zeros and, when needed, choose repository access."}
                         </p>
                         <div className="flex flex-wrap items-center gap-2">
                           {appWaiting ? (

@@ -11,6 +11,9 @@ import {
   createGithubPublicRoutes,
   createGithubRoutes,
   createGithubUnconfiguredRoutes,
+  GITHUB_HANDOFF_TTL_MS,
+  githubCompletionUrl,
+  resolveGithubOauthFlowKind,
   type GithubRouteDependencies,
 } from "./github.js";
 import { runMigrations } from "./migrate.js";
@@ -37,6 +40,78 @@ describe("GitHub routes without a registered App", () => {
         error: { code: "github_not_configured" },
       });
     }
+  });
+});
+
+describe("GitHub OAuth flow selection", () => {
+  it("leaves time for the hosted Open Zeros gesture", () => {
+    expect(GITHUB_HANDOFF_TTL_MS).toBe(5 * 60_000);
+  });
+
+  it("reauthorizes instead of reopening installation settings for a known cross-device connection", () => {
+    expect(
+      resolveGithubOauthFlowKind({
+        installRequested: true,
+        hasAuthorization: true,
+        hasInstallation: true,
+      }),
+    ).toBe("oauth");
+  });
+
+  it("treats either account-side record as an existing setup", () => {
+    expect(
+      resolveGithubOauthFlowKind({
+        installRequested: true,
+        hasAuthorization: false,
+        hasInstallation: false,
+      }),
+    ).toBe("install");
+    expect(
+      resolveGithubOauthFlowKind({
+        installRequested: true,
+        hasAuthorization: true,
+        hasInstallation: false,
+      }),
+    ).toBe("oauth");
+    expect(
+      resolveGithubOauthFlowKind({
+        installRequested: true,
+        hasAuthorization: false,
+        hasInstallation: true,
+      }),
+    ).toBe("oauth");
+  });
+
+  it("preserves explicit OAuth behavior for a brand-new account", () => {
+    expect(
+      resolveGithubOauthFlowKind({
+        installRequested: false,
+        hasAuthorization: false,
+        hasInstallation: false,
+      }),
+    ).toBe("oauth");
+  });
+
+  it("keeps the desktop handoff secret in the hosted page fragment", () => {
+    const completion = new URL(
+      githubCompletionUrl(
+        "https://app.zeros.build/github/connected",
+        {
+          scheme: "zeros-beta",
+          client_nonce: "n".repeat(43),
+        },
+      ),
+    );
+
+    expect(completion.origin).toBe("https://app.zeros.build");
+    expect(completion.pathname).toBe("/github/connected");
+    expect(completion.search).toBe("");
+    expect(new URLSearchParams(completion.hash.slice(1))).toEqual(
+      new URLSearchParams({
+        scheme: "zeros-beta",
+        nonce: "n".repeat(43),
+      }),
+    );
   });
 });
 
@@ -150,7 +225,11 @@ async function startFlow(
   app: Hono,
   nonce: string,
   installFlow = true,
-): Promise<{ state: string; authorizeUrl: string }> {
+): Promise<{
+  state: string;
+  authorizeUrl: string;
+  flowKind: "oauth" | "install";
+}> {
   const response = await app.request("/v1/github/oauth/start", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -165,6 +244,7 @@ async function startFlow(
   return (await response.json()) as {
     state: string;
     authorizeUrl: string;
+    flowKind: "oauth" | "install";
   };
 }
 
@@ -234,6 +314,49 @@ dbDescribe("GitHub App OAuth handoff", () => {
     expect(url.pathname).toBe("/apps/zeros-test/installations/new");
     expect(url.searchParams.get("state")).toBe(started.state);
     expect(started.state).not.toBe(nonce);
+    expect(started.flowKind).toBe("install");
+  });
+
+  it("uses direct OAuth when another device already recorded this account's installation", async () => {
+    const crossDeviceUser = await ensureUser(pool, {
+      provider: "auth0",
+      providerSub: randomUUID(),
+      email: `github-cross-device-${randomUUID()}@example.com`,
+      displayName: "GitHub Cross Device",
+    });
+    await pool.query(
+      `INSERT INTO github_authorizations (
+         owner_user_id, app_variant, github_login
+       ) VALUES ($1, 'github.com', 'octocat')`,
+      [crossDeviceUser.id],
+    );
+    await pool.query(
+      `INSERT INTO github_installations (
+         github_installation_id, app_variant, owner_user_id,
+         account_login, account_type, target_type
+       ) VALUES (
+         246810, 'github.com', $1, 'Withso', 'Organization', 'Organization'
+       )`,
+      [crossDeviceUser.id],
+    );
+    const crossDeviceApp = testApp(pool, crossDeviceUser, {
+      fetch: githubFetch([]),
+    });
+
+    // A newly installed desktop has no local credential and therefore asks for
+    // an install flow. The account-level server snapshot must override that
+    // stale local inference or GitHub renders "Configure" and never completes
+    // the user-token callback needed by this Mac.
+    const started = await startFlow(
+      crossDeviceApp,
+      "m".repeat(43),
+      true,
+    );
+    const authorize = new URL(started.authorizeUrl);
+
+    expect(authorize.pathname).toBe("/login/oauth/authorize");
+    expect(authorize.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(started.flowKind).toBe("oauth");
   });
 
   it("consumes OAuth state and the desktop handoff exactly once", async () => {
@@ -242,12 +365,12 @@ dbDescribe("GitHub App OAuth handoff", () => {
     const redirected = await callback(appA, started.state);
     expect(redirected.status).toBe(302);
     const location = new URL(redirected.headers.get("location")!);
-    expect(location.protocol).toBe("zeros-dev:");
-    expect(location.hostname).toBe("github");
-    expect(location.pathname).toBe("/connected");
-    expect(new URLSearchParams(location.hash.slice(1)).get("nonce")).toBe(
-      nonce,
-    );
+    expect(location.origin).toBe("https://app.zeros.build");
+    expect(location.pathname).toBe("/github/connected");
+    expect(location.search).toBe("");
+    const fragment = new URLSearchParams(location.hash.slice(1));
+    expect(fragment.get("scheme")).toBe("zeros-dev");
+    expect(fragment.get("nonce")).toBe(nonce);
 
     const replayedState = await callback(appA, started.state);
     expect(replayedState.status).toBe(422);
@@ -313,6 +436,7 @@ dbDescribe("GitHub App OAuth handoff", () => {
     const nonce = "d".repeat(43);
     const started = await startFlow(appA, nonce, false);
     const authorize = new URL(started.authorizeUrl);
+    expect(started.flowKind).toBe("oauth");
     expect(authorize.pathname).toBe("/login/oauth/authorize");
     expect(authorize.searchParams.get("code_challenge_method")).toBe("S256");
     expect(authorize.searchParams.get("code_challenge")).toMatch(

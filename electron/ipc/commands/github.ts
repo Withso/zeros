@@ -466,7 +466,10 @@ export function withNativeErrors(handler: CommandHandler): CommandHandler {
  * duplicate installation. */
 export const ghAppConnect: CommandHandler = async (args) => {
   try {
-    await beginGithubAppConnection(args.installFlow !== false);
+    const flowKind = await beginGithubAppConnection(
+      args.installFlow !== false,
+    );
+    return flowKind ? { flowKind } : null;
   } catch (error) {
     throwGithubAppCommandError(
       error,
@@ -474,7 +477,6 @@ export const ghAppConnect: CommandHandler = async (args) => {
       "The GitHub App connection could not be started. Try again.",
     );
   }
-  return null;
 };
 
 export const ghAppCancel: CommandHandler = () => {

@@ -62,6 +62,7 @@ function harness(options?: {
     start: vi.fn(async () => ({
       authorizeUrl: "https://github.com/apps/zeros/installations/new",
       expiresAtMs: 2_000_000,
+      flowKind: "oauth" as const,
     })),
     exchange: vi.fn(async () => exchangeResult),
     refresh: vi.fn(async () => ({
@@ -163,7 +164,9 @@ describe("GitHub App desktop controller", () => {
     });
     const controller = new GithubAppController(h.deps);
 
-    await controller.begin({ scheme: "zeros-dev", installFlow: true });
+    await expect(
+      controller.begin({ scheme: "zeros-dev", installFlow: true }),
+    ).resolves.toBe("oauth");
 
     expect(h.client.start).toHaveBeenCalledWith(
       "zeros-access",
@@ -205,7 +208,11 @@ describe("GitHub App desktop controller", () => {
   // and begin() has nothing persisted to clear until the control plane answers.
   it("honors a cancel that lands while begin is still awaiting the control plane", async () => {
     const h = harness();
-    const started = deferred<{ authorizeUrl: string; expiresAtMs: number }>();
+    const started = deferred<{
+      authorizeUrl: string;
+      expiresAtMs: number;
+      flowKind: "oauth";
+    }>();
     h.client.start.mockImplementationOnce(() => started.promise);
     const begun = h.controller.begin({ scheme: "zeros", installFlow: false });
 
@@ -213,8 +220,9 @@ describe("GitHub App desktop controller", () => {
     started.resolve({
       authorizeUrl: "https://github.com/login/oauth/authorize?x=1",
       expiresAtMs: 2_000_000,
+      flowKind: "oauth",
     });
-    await begun;
+    await expect(begun).resolves.toBeNull();
 
     expect(h.pending()).toBeNull();
     expect(h.deps.openExternal).not.toHaveBeenCalled();
