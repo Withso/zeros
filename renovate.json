@@ -45,6 +45,12 @@
       "labels": ["dependencies", "automated", "ci"],
       "schedule": ["before 6am on the first day of the month"],
       "automerge": false
+    },
+    {
+      "description": "Runtime versions that happen to live inside workflow files are parity pins, not action pins, so they are carved back out of the rule above. `node-version: 22` must match the runtime the code actually ships on — backend/Dockerfile deploys the control plane on node:22-alpine, and the desktop app's Electron bundles its own Node — and the preflight `postgres:16` service must match the Railway Postgres major the migrations actually run against (backend/README.md documents 16 as the tested target). Letting the monthly actions group bump these makes CI validate a runtime nothing ships on: tests passing on Node 24 / PG 18 prove nothing about Node 22 / PG 16 in production. Bump them by hand, in the same PR that moves the real runtime (Dockerfile, engines, @types/node, or the Railway database).",
+      "matchManagers": ["github-actions"],
+      "matchDepNames": ["node", "postgres"],
+      "enabled": false
     }
   ],
   "vulnerabilityAlerts": {
