@@ -35,6 +35,7 @@ const homeSource = `<!doctype html>
       h1 { margin: 0; font-size: 88px; line-height: 0.95; letter-spacing: -0.06em; }
       p { max-width: 620px; margin: 0; color: dimgray; font-size: 24px; line-height: 1.5; }
       .button { width: fit-content; border-radius: 999px; background: black; color: white; padding: 16px 24px; }
+      .harness-layer { display: none; }
     </style>
   </head>
   <body data-oid="home-body">
@@ -44,6 +45,11 @@ const homeSource = `<!doctype html>
         <h1 data-oid="home-heading">Make the next move unmistakable.</h1>
         <p data-oid="home-copy">A decisive launch surface for teams building products that deserve attention.</p>
         <span data-oid="home-action" class="button">Explore the system →</span>
+        ${Array.from(
+          { length: 48 },
+          (_, index) =>
+            `<span data-oid="home-layer-${index + 1}" class="harness-layer">Layer ${index + 1}</span>`,
+        ).join("")}
       </div>
       <span data-oid="home-services">Strategy · Identity · Product</span>
     </main>
@@ -79,21 +85,63 @@ const pricingSource = `<!doctype html>
 </html>`;
 
 async function main() {
+  const workspaceId = "ws_design_harness";
+  const workspacePath =
+    "/Users/demo/zeros/design workspaces/north-one/launch-system";
+  const workspace = {
+    id: workspaceId,
+    kind: "design" as const,
+    repoSlug: "north-one",
+    repoRoot: "/Users/demo/north-one",
+    branch: "zeros/design-launch-system",
+    baseBranch: "main",
+    path: workspacePath,
+    status: "in-progress" as const,
+    createdAt: Date.now(),
+    archivedAt: null,
+    stashRef: null,
+    prNumber: 42,
+    prState: "ready" as const,
+    prUrl: "https://github.com/example/north-one/pull/42",
+    agentId: null,
+    lastActiveAt: Date.now(),
+  };
+  localStorage.setItem(
+    "zeros-projects-v1",
+    JSON.stringify([
+      {
+        id: "project_north_one",
+        name: "North One",
+        repoRoot: workspace.repoRoot,
+        repoSlug: workspace.repoSlug,
+        originUrl: "https://github.com/example/north-one.git",
+        addedAt: 1,
+      },
+    ]),
+  );
+
   const React = await import("react");
   const { createRoot } = await import("react-dom/client");
   const { TooltipProvider } = await import("./zeros/ui/primitives/tooltip");
   const { DesignWorkspaceColumn } =
     await import("./zeros/panels/design-workspace");
+  const { DesignWorkspaceSidebar } =
+    await import("./zeros/panels/design-workspace-sidebar");
   const { designWorkspaceSnapshotCache } =
     await import("./zeros/store/design-workspace-cache");
   const { useDesignWorkspaceUiStore } =
     await import("./zeros/store/design-workspace-ui");
   const { useDesignRuntimeStore } =
     await import("./zeros/store/design-runtime-store");
+  const { setWorkspaceRowsForTesting } =
+    await import("./zeros/store/use-projects");
+  const { useWorkspaceStore } = await import("./zeros/store/store");
 
-  const workspaceId = "ws_design_harness";
-  const workspacePath =
-    "/Users/demo/zeros/design workspaces/north-one/launch-system";
+  setWorkspaceRowsForTesting(workspace.repoSlug, [workspace]);
+  useWorkspaceStore.setState({
+    activeChatId: null,
+    newAgentFolder: workspacePath,
+  });
   const reviewFindings = Array.from({ length: 95 }, (_, index) => ({
     ruleId: "spacing-scale" as const,
     severity: "warning" as const,
@@ -243,6 +291,14 @@ async function main() {
                   visible: true,
                   children: [],
                 },
+                ...Array.from({ length: 48 }, (_, index) => ({
+                  oid: `home-layer-${index + 1}`,
+                  tag: "span",
+                  name: `Layer ${index + 1}`,
+                  text: `Layer ${index + 1}`,
+                  visible: false,
+                  children: [],
+                })),
               ],
             },
           ],
@@ -266,29 +322,11 @@ async function main() {
     .getState()
     .setSelection(workspaceId, "home.html", "home-heading");
 
-  const workspace = {
-    id: workspaceId,
-    kind: "design" as const,
-    repoSlug: "north-one",
-    repoRoot: "/Users/demo/north-one",
-    branch: "zeros/design-launch-system",
-    baseBranch: "main",
-    path: workspacePath,
-    status: "in-progress" as const,
-    createdAt: Date.now(),
-    archivedAt: null,
-    stashRef: null,
-    prNumber: 42,
-    prState: "ready" as const,
-    prUrl: "https://github.com/example/north-one/pull/42",
-    agentId: null,
-    lastActiveAt: Date.now(),
-  };
-
   function Harness() {
     return (
       <TooltipProvider delayDuration={300} skipDelayDuration={0}>
         <main className="bg-bg1 flex h-screen min-h-0 overflow-hidden">
+          <DesignWorkspaceSidebar surfaceActive />
           <DesignWorkspaceColumn
             workspace={workspace}
             folder={workspacePath}

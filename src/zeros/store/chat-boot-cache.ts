@@ -64,7 +64,6 @@ export function sanitizeCachedChat(value: unknown): ChatThread | null {
 
   return {
     id: raw.id,
-    mode: raw.mode === "design" ? "design" : "code",
     folder: typeof raw.folder === "string" ? raw.folder : "",
     kind,
     agentId:

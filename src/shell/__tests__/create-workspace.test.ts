@@ -8,7 +8,14 @@ const peekWorkspacesFor = vi.fn<(slug: string) => Workspace[] | undefined>();
 const reloadWorkspacesFor = vi.fn<(slug: string) => Promise<boolean>>();
 const workspacePrepareCreate = vi.fn();
 const workspaceCreate = vi.fn();
+const spawnPreparedDefaultChat = vi.fn((_args: unknown) => ({
+  id: "chat-1",
+  agentId: null,
+}));
 const toastError = vi.fn();
+const isInternalFeatureActive = vi.fn((_feature: string) => true);
+const isNativeRuntime = vi.fn(() => true);
+const isExpectedElectron = vi.fn(() => true);
 
 vi.mock("../../zeros/store/use-projects", () => ({
   peekWorkspacesFor: (slug: string) => peekWorkspacesFor(slug),
@@ -43,7 +50,16 @@ vi.mock("../../zeros/store/pending-workspaces", () => ({
   clearWorkspaceSettling: vi.fn(),
 }));
 vi.mock("../../zeros/store/spawn-default-chat", () => ({
-  spawnPreparedDefaultChat: vi.fn(() => ({ id: "chat-1", agentId: null })),
+  spawnPreparedDefaultChat: (args: unknown) =>
+    spawnPreparedDefaultChat(args),
+}));
+vi.mock("../../zeros/settings/internal-features", () => ({
+  isInternalFeatureActive: (feature: string) =>
+    isInternalFeatureActive(feature),
+}));
+vi.mock("../../native/runtime", () => ({
+  isNativeRuntime: () => isNativeRuntime(),
+  isExpectedElectron: () => isExpectedElectron(),
 }));
 
 const { createWorkspaceForProject, repoNeedsFirstWorkspace } = await import(
@@ -82,6 +98,9 @@ const project = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  isInternalFeatureActive.mockReturnValue(true);
+  isNativeRuntime.mockReturnValue(true);
+  isExpectedElectron.mockReturnValue(true);
 });
 
 describe("repoNeedsFirstWorkspace — the auto-create-on-add guard", () => {
@@ -96,6 +115,14 @@ describe("repoNeedsFirstWorkspace — the auto-create-on-add guard", () => {
     // later re-add should still be allowed to fork a fresh one.
     peekWorkspacesFor.mockReturnValue([workspace({ archivedAt: 123 })]);
     expect(await repoNeedsFirstWorkspace("zeros")).toBe(true);
+  });
+
+  it("ignores a live Design row when deciding whether the code create flow needs its first workspace", async () => {
+    peekWorkspacesFor.mockReturnValue([
+      workspace({ id: "ws_design", kind: "design" }),
+    ]);
+    expect(await repoNeedsFirstWorkspace("zeros")).toBe(true);
+    expect(reloadWorkspacesFor).not.toHaveBeenCalled();
   });
 
   it("distinguishes a warm-but-empty list from a cold one", async () => {
@@ -138,6 +165,64 @@ describe("repoNeedsFirstWorkspace — the auto-create-on-add guard", () => {
 });
 
 describe("createWorkspaceForProject", () => {
+  it("refuses Design creation outside the desktop runtime even for staff with the flag", async () => {
+    isNativeRuntime.mockReturnValue(false);
+    isExpectedElectron.mockReturnValue(false);
+
+    expect(
+      await createWorkspaceForProject({
+        project,
+        dispatch: vi.fn(),
+        kind: "design",
+      }),
+    ).toBe(false);
+    expect(workspacePrepareCreate).not.toHaveBeenCalled();
+    expect(workspaceCreate).not.toHaveBeenCalled();
+  });
+
+  it("refuses design creation before prepare unless the effective Internal gate holds", async () => {
+    isInternalFeatureActive.mockReturnValue(false);
+    workspacePrepareCreate.mockResolvedValue({
+      workspaceId: "ws_design",
+      path: "/design workspaces/zeros/landing-page",
+      repoSlug: "zeros",
+      branch: "zeros/design-landing-page",
+    });
+    workspaceCreate.mockResolvedValue({ status: "in-progress" });
+    reloadWorkspacesFor.mockResolvedValue(true);
+    peekWorkspacesFor.mockReturnValue([
+      workspace({ id: "ws_design", kind: "design" }),
+    ]);
+    const dispatch = vi.fn();
+
+    expect(
+      await createWorkspaceForProject({ project, dispatch, kind: "design" }),
+    ).toBe(false);
+    expect(isInternalFeatureActive).toHaveBeenCalledWith("designWorkspaces");
+    expect(workspacePrepareCreate).not.toHaveBeenCalled();
+    expect(workspaceCreate).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("rechecks design access after the asynchronous prepare boundary", async () => {
+    workspacePrepareCreate.mockImplementation(async () => {
+      isInternalFeatureActive.mockReturnValue(false);
+      return {
+        workspaceId: "ws_design",
+        path: "/design workspaces/zeros/landing-page",
+        repoSlug: "zeros",
+        branch: "zeros/design-landing-page",
+      };
+    });
+    const dispatch = vi.fn();
+
+    expect(
+      await createWorkspaceForProject({ project, dispatch, kind: "design" }),
+    ).toBe(false);
+    expect(workspaceCreate).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
   it("reports not-navigated and publishes nothing when prepare fails", async () => {
     // The contract the add paths depend on: a false return means the user was
     // never moved, so the caller still owns where they land. Prepare is where
@@ -171,6 +256,54 @@ describe("createWorkspaceForProject", () => {
     );
     expect(workspaceCreate).toHaveBeenCalledWith(
       expect.objectContaining({ preparedId: "ws_1" }),
+    );
+    expect(workspacePrepareCreate.mock.calls[0]?.[0]).not.toHaveProperty(
+      "kind",
+    );
+    expect(workspaceCreate.mock.calls[0]?.[0]).not.toHaveProperty("kind");
+  });
+
+  it("opens a design workspace without creating or attaching a coding-agent chat", async () => {
+    workspacePrepareCreate.mockResolvedValue({
+      workspaceId: "ws_design",
+      path: "/design workspaces/zeros/landing-page",
+      repoSlug: "zeros",
+      branch: "zeros/design-landing-page",
+    });
+    workspaceCreate.mockResolvedValue({ status: "in-progress" });
+    reloadWorkspacesFor.mockResolvedValue(true);
+    peekWorkspacesFor.mockReturnValue([
+      workspace({
+        id: "ws_design",
+        kind: "design",
+        path: "/design workspaces/zeros/landing-page",
+      }),
+    ]);
+    const dispatch = vi.fn();
+
+    expect(
+      await createWorkspaceForProject({ project, dispatch, kind: "design" }),
+    ).toBe(true);
+
+    expect(spawnPreparedDefaultChat).not.toHaveBeenCalled();
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "OPEN_WORKSPACE",
+      folder: "/design workspaces/zeros/landing-page",
+      repoRoot: "/repo",
+      chatId: null,
+      validationPending: true,
+    });
+    expect(workspaceCreate).toHaveBeenCalledWith(
+      expect.not.objectContaining({ optimisticChatId: expect.anything() }),
+    );
+    expect(workspaceCreate).toHaveBeenCalledWith(
+      expect.not.objectContaining({ agentId: expect.anything() }),
+    );
+    expect(workspacePrepareCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "design" }),
+    );
+    expect(workspaceCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "design" }),
     );
   });
 });

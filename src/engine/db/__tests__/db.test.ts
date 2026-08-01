@@ -204,18 +204,6 @@ describe("Zeros DB (unified engine store)", () => {
     expect(row.title).toBe("renamed");
   });
 
-  it("preserves a chat's immutable workspace mode on later upserts", () => {
-    setZerosDbPathForTesting(tmpDbFile());
-    const db = openZerosDb();
-    upsertChat(makeChat("design-chat", { mode: "design", title: "Design" }));
-    upsertChat(makeChat("design-chat", { mode: "code", title: "Renamed" }));
-
-    const row = db
-      .prepare("SELECT mode, title FROM chats WHERE id = ?")
-      .get("design-chat") as { mode: string; title: string };
-    expect(row).toEqual({ mode: "design", title: "Renamed" });
-  });
-
   it("round-trips a repo row", () => {
     setZerosDbPathForTesting(tmpDbFile());
     const db = openZerosDb();

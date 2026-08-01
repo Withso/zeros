@@ -6,12 +6,12 @@
 //   │ ⑃ Create PR   │ ▾ │
 //   └───────────────┴───┘
 //
-// Left segment (primary): creates the PR through the engine's authenticated
-// GitHub operation. If the worktree is dirty, it refuses to omit those files
-// and offers the explicit agent workflow as recovery.
+// Left segment (primary): sends a complete create-PR brief to the active agent,
+// which reviews the full change set and decides the commit/title/description.
 // Dropdown:
-//   • Create draft PR    — same direct path, with draft=true.
-//   • Ask agent to create — the prior review/commit/push/gh workflow.
+//   • Create draft PR      — the same agent path, with draft=true.
+//   • Create PR directly   — deterministic engine path; auto-commits if dirty.
+//   • Create draft directly — the direct path, with draft=true.
 //   • Create PR manually — opens GitHub's compare/new-PR page in the browser.
 //
 // Only rendered for a real worktree that has no PR yet (see the topbar guard).
@@ -21,20 +21,19 @@
 //   • before the agent brief is sent, because the agent's own `gh pr create`
 //     runs on the very same brokered credential — an unreachable repository
 //     fails for it too, after a whole turn spent reviewing and committing;
-//   • ahead of the dirty-worktree refusal, so "commit changes first" is never
-//     shown for work that committing cannot unblock;
+//   • ahead of the auto-commit, so the button never writes a commit for a pull
+//     request that could never have opened;
 //   • alongside the direct create, so a failure that arrives as the ambiguous
 //     "Repository not found" flavour of NOT_AUTHENTICATED doesn't tell an
 //     already-connected user to connect GitHub.
 // ──────────────────────────────────────────────────────────
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useRef } from "react";
 import {
   ChevronDown,
   ExternalLink,
   GitPullRequestCreate,
   GitPullRequestDraft,
-  MessageSquareText,
 } from "lucide-react";
 
 import { cn } from "../../zeros/ui/cn";
@@ -50,16 +49,20 @@ import {
   ghPrCreate,
   ghRepoAccess,
   gitChangeCounts,
+  gitCommit,
   gitLog,
   gitRepoBranchCatalog,
+  gitStage,
   gitStatus,
   isGitErrorShape,
+  isWorkspaceOpStillRunning,
   type GithubRepoAccess,
+  type StatusResult,
   type Workspace,
 } from "../../native/git";
 import { shellOpenUrl } from "../../native/native";
 import { buildPrInstructions, prBubbleDisplayText } from "./pr-instructions";
-import { githubCompareUrl } from "./github-url";
+import { githubCompareUrl, parseRemote } from "./github-url";
 import { useGitRemote } from "../../zeros/settings/use-git-remote";
 import { useSendToActiveChat } from "./use-send-to-active-chat";
 import {
@@ -68,11 +71,16 @@ import {
 } from "./use-agent-working";
 import { ZerosSpinner } from "@/loaders";
 import {
-  createPullRequestFromCommittedChanges,
+  AutoCommitBlockedError,
+  AutoCommitFailedError,
+  createPullRequestForWorkspace,
   GithubAccessError,
   isPrAccessBlocked,
-  UncommittedPullRequestError,
 } from "./create-pr-action";
+import {
+  describeAutoCommitBlock,
+  describeAutoCommitFailure,
+} from "./pr-auto-commit";
 import {
   describePrAccessBlock,
   describePrCreateFailure,
@@ -81,6 +89,12 @@ import {
 import { notifyWorkspacesChanged } from "../../zeros/store/use-projects";
 import { useWorkspaceDispatch } from "../../zeros/store/store";
 import { requestUserSettingsSection } from "../../zeros/settings/settings-navigation";
+import { triggerGitRefresh } from "../use-git-refresh-key";
+import {
+  claimPrCreateAction,
+  releasePrCreateAction,
+  usePrCreateActionClaimed,
+} from "./pr-create-claim";
 
 // 24px (`h-6`) split control on the design-system "secondary" tokens
 // (TRANSPARENT fill so it blends with the row's surface + border2, hover
@@ -114,7 +128,7 @@ export function CreatePrButton({
 }: CreatePrButtonProps) {
   const sendToChat = useSendToActiveChat();
   const dispatch = useWorkspaceDispatch();
-  const [busy, setBusy] = useState(false);
+  const busy = usePrCreateActionClaimed(workspace.id);
   // The repo's configured push/PR remote — the brief must name the same
   // remote the engine's own git ops use.
   const remote = useGitRemote(workspace.repoRoot);
@@ -127,30 +141,22 @@ export function CreatePrButton({
   // "Ask agent" is reachable from a toast that outlives the click that raised
   // it, so a closure-captured `agentWorking` would happily queue a PR brief
   // behind a turn that started in between — the exact thing the gate exists to
-  // prevent. `busy` is written synchronously so a double-click inside one
-  // frame can't fire twice before React re-renders the disabled button.
-  const busyRef = useRef(false);
+  // prevent. The exact-workspace claim is shared outside this component so it
+  // also closes double-clicks and Changes/Review → File → back remount races.
   const gateRef = useRef({ disabled: false, agentWorking: false });
   gateRef.current = { disabled: disabled === true, agentWorking };
-  const claim = useCallback((): boolean => {
-    if (busyRef.current) return false;
-    if (gateRef.current.disabled) return false;
+  const claim = useCallback(() => {
+    if (gateRef.current.disabled) return null;
     if (gateRef.current.agentWorking) {
       // Only the toast's "Ask agent" button can reach this — both real buttons
       // are already disabled by the same gate. It outlives the click that
       // raised it, so a turn can begin in between; say so rather than swallow
       // the click, because the user has no disabled state to read here.
       toast.error("Agent is working", { description: AGENT_WORKING_REASON });
-      return false;
+      return null;
     }
-    busyRef.current = true;
-    setBusy(true);
-    return true;
-  }, []);
-  const release = useCallback(() => {
-    busyRef.current = false;
-    setBusy(false);
-  }, []);
+    return claimPrCreateAction(workspace.id);
+  }, [workspace.id]);
 
   const openGithubSettings = useCallback(() => {
     requestUserSettingsSection("integrations");
@@ -176,7 +182,9 @@ export function CreatePrButton({
 
   const askAgentToCreate = useCallback(
     async (draft: boolean) => {
-      if (!claim()) return;
+      const owner = claim();
+      if (!owner) return;
+      let releaseOnExit = true;
       try {
         // Cross-check access BEFORE spending a turn. The agent's `gh pr create`
         // runs through the same brokered credential this probe tests (see the
@@ -188,15 +196,28 @@ export function CreatePrButton({
           showBlockToast(describePrAccessBlock(access));
           return;
         }
-        // Best-effort live counts; degrade to a still-valid brief on failure.
-        let uncommittedCount = 0;
-        let hasUpstream = false;
-        const [status, counts] = await Promise.allSettled([
+        // Best-effort live facts; failures stay explicitly unknown. Inventing
+        // "clean" or "no upstream" here can make the agent skip work or push
+        // with the wrong assumptions precisely when the bridge is unhealthy.
+        let uncommittedCount: number | null = null;
+        let statusKnown = false;
+        let hasUpstream: boolean | null = null;
+        let repository: string | undefined;
+        // The blocker facts come from the SAME status read — this path is the
+        // recovery the conflict refusal offers, so the brief has to name what
+        // the direct create refused to commit.
+        let conflictedCount = 0;
+        let operationInProgress: StatusResult["conflictState"] = null;
+        const [status, counts, catalog] = await Promise.allSettled([
           gitStatus(workspace.id),
           gitChangeCounts(workspace.id),
+          gitRepoBranchCatalog({ repoRoot: workspace.repoRoot }),
         ]);
         if (status.status === "fulfilled") {
+          statusKnown = true;
           hasUpstream = Boolean(status.value.upstream);
+          conflictedCount = status.value.conflicted.length;
+          operationInProgress = status.value.conflictState;
         }
         if (counts.status === "fulfilled") {
           // The prompt describes the net HEAD-vs-worktree diff. Summing
@@ -204,31 +225,52 @@ export function CreatePrButton({
           // staged add and disk deletion cancel out completely.
           uncommittedCount = counts.value.uncommitted;
         }
+        if (catalog.status === "fulfilled" && catalog.value) {
+          const configured =
+            catalog.value.remotes.find(
+              (candidate) => candidate.name === remote,
+            ) ??
+            catalog.value.remotes.find(
+              (candidate) => candidate.name === catalog.value?.effectiveRemote,
+            );
+          const parsed =
+            configured?.isGitHub === true ? parseRemote(configured.url) : null;
+          if (parsed) repository = `${parsed.owner}/${parsed.repo}`;
+        }
         const text = buildPrInstructions({
           branch: workspace.branch,
           baseBranch: workspace.baseBranch,
           remote,
+          repository,
           uncommittedCount,
+          statusKnown,
+          conflictedCount,
+          operationInProgress,
           hasUpstream,
           draft,
         });
         // Auto-sent treatment (2026-07-19): a tidy "Create a PR" bubble with
         // the button's own icon on the brown "sent by Zeros" surface — no
         // attachment pill; the agent still receives the full brief.
-        sendToChat({
+        const sent = sendToChat({
           text,
           displayText: prBubbleDisplayText(draft),
           autoAction: draft ? "create-draft-pr" : "create-pr",
+          onSettled: () => releasePrCreateAction(owner),
         });
+        // Keep the synchronous claim (and spinner) through the accepted turn;
+        // onSettled releases it on either success or failure. If no active
+        // chat accepted the send, the ordinary finally releases immediately.
+        if (sent) releaseOnExit = false;
       } finally {
-        release();
+        if (releaseOnExit) releasePrCreateAction(owner);
       }
     },
     [
       claim,
-      release,
       showBlockToast,
       workspace.id,
+      workspace.repoRoot,
       workspace.branch,
       workspace.baseBranch,
       remote,
@@ -238,21 +280,45 @@ export function CreatePrButton({
 
   const createDirect = useCallback(
     async (draft: boolean) => {
-      if (!claim()) return;
+      const owner = claim();
+      if (!owner) return;
       // Started here, not inside the orchestrator, so it overlaps the local
       // change-count read and the push instead of queueing in front of them —
       // the happy path pays nothing for it. Never rejects (ghRepoAccess
       // resolves "unknown" on any failure), so leaving it unawaited on the
       // success path cannot raise an unhandled rejection.
       const accessProbe = ghRepoAccess(workspace.id);
+      // Set by onCommitted so the catch can tell "nothing happened" apart from
+      // "the work is committed, only the pull request failed".
+      let didCommit = false;
       try {
-        await createPullRequestFromCommittedChanges(
+        await createPullRequestForWorkspace(
           {
-            changeCounts: async (workspaceId) =>
-              gitChangeCounts(workspaceId),
+            changeCounts: async (workspaceId) => gitChangeCounts(workspaceId),
+            status: (workspaceId) => gitStatus(workspaceId),
+            stage: (args) => gitStage(args),
+            commit: (args) => gitCommit(args),
             log: (args) => gitLog(args),
             create: (args) => ghPrCreate(args),
             access: () => accessProbe,
+            onCommitted: (result) => {
+              didCommit = true;
+              // The engine withholds the DB_CHANGED echo from the client that
+              // caused a git.commit (it normally already knows), so nothing
+              // else tells THIS renderer the tree just went clean — and the
+              // push + GitHub round trip that follows can take seconds, or
+              // fail, leaving the Changes tab describing a tree that no longer
+              // exists.
+              triggerGitRefresh(workspace.path);
+              // A commit nobody typed a message for is the one part of this
+              // flow the user has to be told about, whatever GitHub does next.
+              toast.success(
+                result.files === 1
+                  ? "Committed 1 change"
+                  : `Committed ${result.files} changes`,
+                { description: result.subject },
+              );
+            },
           },
           {
             workspaceId: workspace.id,
@@ -265,18 +331,47 @@ export function CreatePrButton({
         // Refresh it instead of showing a redundant success toast.
         notifyWorkspacesChanged(workspace.repoSlug);
       } catch (err) {
+        // The commit outlives a failed pull request. Without this the workspace
+        // row keeps advertising uncommitted work (the Dashboard card's
+        // "Commit & Push") for a tree that is already committed.
+        if (didCommit) notifyWorkspacesChanged(workspace.repoSlug);
         if (err instanceof GithubAccessError) {
           showBlockToast(describePrAccessBlock(err.access));
           return;
         }
-        if (err instanceof UncommittedPullRequestError) {
-          toast.error("Commit changes before creating this pull request", {
-            description:
-              "A pull request only includes committed work. Ask the agent to review, commit, and create it.",
+        if (err instanceof AutoCommitBlockedError) {
+          // The one refusal left: committing a conflicted (or mid-rebase) tree
+          // would put `<<<<<<<` markers in the pull request. The agent is the
+          // recovery, and its brief names the conflicts (see buildPrInstructions).
+          const message = describeAutoCommitBlock(err.blocker);
+          toast.error(message.title, {
+            description: message.description,
             action: {
               label: "Ask agent",
               onClick: () => void askAgentToCreate(draft),
             },
+          });
+          return;
+        }
+        if (err instanceof AutoCommitFailedError) {
+          // Never `describePrCreateFailure` here: GitHub was never reached, and
+          // the engine's own sentence for a failed commit is the entire
+          // `git commit -m <generated message>` argv.
+          const facts = isGitErrorShape(err.reason) ? err.reason : null;
+          const message = describeAutoCommitFailure({
+            stillRunning: isWorkspaceOpStillRunning(err.reason),
+            ...(facts?.remediation ? { remediation: facts.remediation } : {}),
+          });
+          toast.error(message.title, {
+            description: message.description,
+            ...(message.canAskAgent
+              ? {
+                  action: {
+                    label: "Ask agent",
+                    onClick: () => void askAgentToCreate(draft),
+                  },
+                }
+              : {}),
           });
           return;
         }
@@ -293,17 +388,17 @@ export function CreatePrButton({
           : { message: err instanceof Error ? err.message : String(err) };
         showBlockToast(describePrCreateFailure(facts, access));
       } finally {
-        release();
+        releasePrCreateAction(owner);
       }
     },
     [
       claim,
-      release,
       showBlockToast,
       workspace.id,
       workspace.branch,
       workspace.baseBranch,
       workspace.repoSlug,
+      workspace.path,
       askAgentToCreate,
     ],
   );
@@ -348,7 +443,7 @@ export function CreatePrButton({
             ? AGENT_WORKING_REASON
             : disabled && disabledReason
               ? disabledReason
-              : "Create PR"
+              : "Send PR creation to the agent"
         }
       >
         {/* span keeps the tooltip live over a disabled button (disabled
@@ -358,7 +453,7 @@ export function CreatePrButton({
             type="button"
             className={MAIN_BTN_CLS}
             disabled={inert}
-            onClick={() => void createDirect(false)}
+            onClick={() => void askAgentToCreate(false)}
           >
             {busy ? (
               <ZerosSpinner size={14} />
@@ -387,15 +482,17 @@ export function CreatePrButton({
           sideOffset={4}
           className="min-w-[190px]"
         >
-          <DropdownMenuItem
-            onSelect={() => void createDirect(true)}
-          >
+          <DropdownMenuItem onSelect={() => void askAgentToCreate(true)}>
             <GitPullRequestDraft className={cn("text-fg2 size-3.5")} />
             <span>Create draft PR</span>
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => void askAgentToCreate(false)}>
-            <MessageSquareText className="text-fg2 size-3.5" />
-            <span>Ask agent to create PR</span>
+          <DropdownMenuItem onSelect={() => void createDirect(false)}>
+            <GitPullRequestCreate className="text-fg2 size-3.5" />
+            <span>Create PR directly</span>
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => void createDirect(true)}>
+            <GitPullRequestDraft className="text-fg2 size-3.5" />
+            <span>Create draft directly</span>
           </DropdownMenuItem>
           <DropdownMenuItem onSelect={() => void handleManual()}>
             <ExternalLink className="text-fg2 size-3.5" />

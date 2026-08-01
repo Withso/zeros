@@ -5,7 +5,7 @@
 // Canvas, inspector, and the lower Layers panel consume one aggregate engine
 // response. Keeping it in a bounded keyed cache prevents those siblings from
 // issuing independent bridge requests and preserves the last confirmed canvas
-// while an agent edit revalidates in the background.
+// while a disk edit revalidates in the background.
 
 import {
   designCreateFrame,

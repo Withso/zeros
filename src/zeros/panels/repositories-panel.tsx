@@ -1889,7 +1889,10 @@ function RemoveRepositorySection({ project }: { project: Project }) {
       // fallback identity for deletion cleanup; a successful list replaces it.
       let workspaces: Workspace[] = peekWorkspacesFor(project.repoSlug) ?? [];
       try {
-        workspaces = await workspaceList({ repoSlug: project.repoSlug });
+        workspaces = await workspaceList({
+          repoSlug: project.repoSlug,
+          includeDesign: true,
+        });
       } catch (err) {
         // Bridge down / engine unreachable — fall through and still remove the
         // project locally; leftover worktree folders can be cleaned on re-open.

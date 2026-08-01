@@ -1,20 +1,26 @@
 // ============================================
 // COMPONENT: DesignWorkspaceSidebarPanels
-// PURPOSE: Workspace-owned Layers and Assets panels beneath the unchanged chat
-// USED IN: Column2Workspace for design workspaces
+// PURPOSE: Searchable, collapsible Layers tree for the native design sidebar
+// USED IN: DesignWorkspaceSidebar for design workspaces
 // ============================================
 
 // --- IMPORTS ---
 
-import React, { useMemo, useRef } from "react";
+import React, { useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
+  Box,
+  ChevronDown,
   ChevronRight,
   Eye,
   EyeOff,
-  FileCode2,
+  Frame,
   Image,
-  Layers3,
+  ListCollapse,
+  Search,
+  Type,
+  X,
 } from "lucide-react";
+import type { DesignRuntimeTreeNode } from "@zeros/core/design-runtime";
 
 import {
   hoverDesignNode,
@@ -30,19 +36,20 @@ import { usePendingWorkspaceKind } from "../store/pending-workspaces";
 import { resolveWorkspacePresentationKind } from "../store/workspace-resolution";
 import {
   Button,
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput,
   ScrollArea,
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
   Tooltip,
   toast,
 } from "../ui/primitives";
 import {
+  collectDesignLayerParentIds,
+  designLayerAncestorIds,
   flattenDesignLayerTree,
   type FlatDesignLayer,
 } from "./design-layer-tree";
-import { DESIGN_ASSET_DRAG_TYPE } from "./design-assets";
 
 // --- TYPES ---
 
@@ -51,33 +58,52 @@ interface DesignWorkspaceSidebarPanelsProps {
   surfaceActive: boolean;
 }
 
+interface CollapsedLayerState {
+  ownerKey: string | null;
+  ids: ReadonlySet<string>;
+}
+
+interface LayerSearchState {
+  ownerKey: string | null;
+  value: string;
+}
+
+const EMPTY_LAYER_TREE: readonly DesignRuntimeTreeNode[] = Object.freeze([]);
+
 // --- WORKFLOWS ---
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "The layer action failed.";
 }
 
-function DesignFramePreview({
-  workspaceId,
-  frame,
-}: {
-  workspaceId: string | null;
-  frame: string;
-}) {
-  const thumbnail = useDesignRuntimeStore((state) =>
-    workspaceId
-      ? state.byWorkspace[workspaceId]?.frames[frame]?.screenshotsByNode[""]
-      : undefined,
-  );
-  return thumbnail ? (
-    <img
-      src={thumbnail.dataUrl}
-      alt=""
-      className="size-8 shrink-0 object-cover"
-    />
-  ) : (
-    <FileCode2 />
-  );
+function LayerTypeIcon({ tag }: { tag: string }) {
+  const normalized = tag.toLocaleLowerCase();
+  if (["img", "picture", "video", "canvas"].includes(normalized)) {
+    return <Image aria-hidden="true" />;
+  }
+  if (
+    [
+      "p",
+      "span",
+      "label",
+      "h1",
+      "h2",
+      "h3",
+      "h4",
+      "h5",
+      "h6",
+      "strong",
+      "em",
+    ].includes(normalized)
+  ) {
+    return <Type aria-hidden="true" />;
+  }
+  return <Box aria-hidden="true" />;
+}
+
+function layerDisplayName(layer: FlatDesignLayer): string {
+  const name = layer.node.name.trim();
+  return name || layer.node.tag;
 }
 
 // --- RENDER ---
@@ -99,11 +125,6 @@ export function DesignWorkspaceSidebarPanels({
     folder,
     surfaceActive && isDesign,
   );
-  const panel = useDesignWorkspaceUiStore((state) =>
-    workspaceId
-      ? (state.byWorkspace[workspaceId]?.panel ?? "layers")
-      : "layers",
-  );
   const selectedFrameFile = useDesignWorkspaceUiStore((state) =>
     workspaceId
       ? (state.byWorkspace[workspaceId]?.selectedFrame ?? null)
@@ -114,7 +135,6 @@ export function DesignWorkspaceSidebarPanels({
       ? (state.byWorkspace[workspaceId]?.selectedNodeId ?? null)
       : null,
   );
-  const setPanel = useDesignWorkspaceUiStore((state) => state.setPanel);
   const selectedFrame =
     snapshot.data?.frames.find((frame) => frame.file === selectedFrameFile) ??
     snapshot.data?.frames[0] ??
@@ -124,14 +144,97 @@ export function DesignWorkspaceSidebarPanels({
       ? state.byWorkspace[workspaceId]?.frames[selectedFrame.file]?.snapshot
       : undefined,
   );
-  const flattenedLayers = useMemo(
-    () => flattenDesignLayerTree(runtimeSnapshot?.tree ?? []),
-    [runtimeSnapshot?.tree],
+  const layerTree = runtimeSnapshot?.tree ?? EMPTY_LAYER_TREE;
+  const ownerKey =
+    workspaceId && selectedFrame
+      ? `${workspaceId}\u0000${selectedFrame.file}`
+      : null;
+  const [searchState, setSearchState] = useState<LayerSearchState>({
+    ownerKey: null,
+    value: "",
+  });
+  // Search is an ephemeral draft; it must not leak from frame A into frame B.
+  const query = searchState.ownerKey === ownerKey ? searchState.value : "";
+  const [collapsedState, setCollapsedState] = useState<CollapsedLayerState>({
+    ownerKey: null,
+    ids: new Set(),
+  });
+  const parentNodeIds = useMemo(
+    () => collectDesignLayerParentIds(layerTree),
+    [layerTree],
   );
-  // Scopes roving keyboard traversal to this one selected frame tree.
+  const selectedAncestors = useMemo(
+    () => designLayerAncestorIds(layerTree, selectedNodeId),
+    [layerTree, selectedNodeId],
+  );
+  const collapsedNodeIds = useMemo(() => {
+    const base =
+      collapsedState.ownerKey === ownerKey ? collapsedState.ids : parentNodeIds;
+    if (selectedAncestors.length === 0) return base;
+    const selectedPath = new Set(selectedAncestors);
+    return new Set([...base].filter((nodeId) => !selectedPath.has(nodeId)));
+  }, [collapsedState, ownerKey, parentNodeIds, selectedAncestors]);
+  const flattenedLayers = useMemo(
+    () =>
+      flattenDesignLayerTree(layerTree, {
+        collapsedNodeIds,
+        query,
+      }),
+    [collapsedNodeIds, layerTree, query],
+  );
+  const totalLayerCount = useMemo(
+    () => flattenDesignLayerTree(layerTree).length,
+    [layerTree],
+  );
+  // One composite tab stop; arrows move among the visible tree rows.
   const treeRef = useRef<HTMLDivElement | null>(null);
 
+  /** Canvas selection reveals its complete path before the browser paints. */
+  useLayoutEffect(() => {
+    if (!ownerKey || selectedAncestors.length === 0) return;
+    setCollapsedState((current) => {
+      const base = current.ownerKey === ownerKey ? current.ids : parentNodeIds;
+      const next = new Set(base);
+      let changed = current.ownerKey !== ownerKey;
+      for (const ancestorId of selectedAncestors) {
+        if (next.delete(ancestorId)) changed = true;
+      }
+      return changed ? { ownerKey, ids: next } : current;
+    });
+  }, [ownerKey, parentNodeIds, selectedAncestors]);
+
+  /** Keep an externally selected canvas layer inside the scroll viewport. */
+  useLayoutEffect(() => {
+    if (!selectedNodeId) return;
+    const row = Array.from(
+      treeRef.current?.querySelectorAll<HTMLElement>(
+        "[data-design-layer-id]",
+      ) ?? [],
+    ).find((candidate) => candidate.dataset.designLayerId === selectedNodeId);
+    row?.scrollIntoView({ block: "nearest" });
+  }, [flattenedLayers, selectedNodeId]);
+
   if (!isDesign) return null;
+
+  /** Every collapse mutation starts from the current semantic frame owner. */
+  const updateCollapsed = (update: (current: Set<string>) => Set<string>) => {
+    if (!ownerKey) return;
+    setCollapsedState((current) => {
+      const base = new Set(
+        current.ownerKey === ownerKey ? current.ids : parentNodeIds,
+      );
+      return { ownerKey, ids: update(base) };
+    });
+  };
+
+  const toggleExpanded = (layer: FlatDesignLayer) => {
+    if (!layer.hasChildren) return;
+    updateCollapsed((current) => {
+      if (current.has(layer.node.oid)) current.delete(layer.node.oid);
+      else current.add(layer.node.oid);
+      return current;
+    });
+  };
 
   /** Selection publication is immediate locally; engine/runtime reads finish off-path. */
   const chooseFrame = (frame: NonNullable<typeof selectedFrame>) => {
@@ -158,108 +261,218 @@ export function DesignWorkspaceSidebarPanels({
     });
   };
 
-  /** Tab/arrow traversal remains within the tree; Shift+Enter selects parent. */
+  const toggleVisibility = (layer: FlatDesignLayer) => {
+    if (!workspaceId || !folder || !selectedFrame) return;
+    void setDesignNodeVisibility({
+      workspaceId,
+      folder,
+      frame: selectedFrame.file,
+      sourceVersion: selectedFrame.sourceVersion,
+      nodeId: layer.node.oid,
+      visible: !layer.node.visible,
+    }).catch((error) => {
+      toast.error("Couldn't change layer visibility", {
+        description: errorMessage(error),
+      });
+    });
+  };
+
+  /** Desktop tree conventions: arrows navigate; Tab exits the composite. */
   const handleLayerKeyDown = (
     event: React.KeyboardEvent<HTMLButtonElement>,
     layer: FlatDesignLayer,
   ) => {
-    if (event.key === "Enter" && event.shiftKey && layer.parentOid) {
-      const parent = flattenedLayers.find(
-        (candidate) => candidate.node.oid === layer.parentOid,
-      );
-      if (parent) {
-        event.preventDefault();
-        chooseLayer(parent);
-      }
-      return;
-    }
-    const direction =
-      event.key === "ArrowDown" || (event.key === "Tab" && !event.shiftKey)
-        ? 1
-        : event.key === "ArrowUp" || (event.key === "Tab" && event.shiftKey)
-          ? -1
-          : 0;
-    if (direction === 0) return;
     const rows = Array.from(
       treeRef.current?.querySelectorAll<HTMLButtonElement>(
         "[data-design-layer-select]",
       ) ?? [],
     );
     const index = rows.indexOf(event.currentTarget);
-    const next = rows[index + direction];
-    if (!next) return;
-    event.preventDefault();
-    next.focus();
+    const focusRow = (next: HTMLButtonElement | undefined) => {
+      if (!next) return;
+      event.preventDefault();
+      next.focus();
+    };
+
+    if (event.key === "ArrowDown") return focusRow(rows[index + 1]);
+    if (event.key === "ArrowUp") return focusRow(rows[index - 1]);
+    if (event.key === "Home") return focusRow(rows[0]);
+    if (event.key === "End") return focusRow(rows.at(-1));
+    const visuallyExpanded =
+      layer.hasChildren &&
+      (Boolean(query) || !collapsedNodeIds.has(layer.node.oid));
+    if (event.key === "ArrowRight" && layer.hasChildren) {
+      if (!visuallyExpanded) {
+        event.preventDefault();
+        toggleExpanded(layer);
+      } else {
+        focusRow(rows[index + 1]);
+      }
+      return;
+    }
+    if (event.key === "ArrowLeft") {
+      if (visuallyExpanded && !query) {
+        event.preventDefault();
+        toggleExpanded(layer);
+        return;
+      }
+      const parent = rows.find(
+        (candidate) => candidate.dataset.designLayerId === layer.parentOid,
+      );
+      focusRow(parent);
+      return;
+    }
+    if (event.shiftKey && event.key.toLocaleLowerCase() === "h") {
+      event.preventDefault();
+      toggleVisibility(layer);
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      chooseLayer(layer);
+    }
   };
+
+  const selectedIsVisible = flattenedLayers.some(
+    (layer) => layer.node.oid === selectedNodeId,
+  );
+  const rovingTabStop = selectedIsVisible
+    ? selectedNodeId
+    : (flattenedLayers[0]?.node.oid ?? null);
 
   return (
     <section
-      className="border-border1 bg-bg1 flex h-52 shrink-0 flex-col overflow-hidden border-t"
-      aria-label="Design workspace panels"
+      id="design-layers-panel"
+      data-design-sidebar-panel=""
+      className="bg-bg1 flex min-h-0 flex-1 flex-col overflow-hidden"
+      aria-labelledby="design-layers-heading"
     >
-      <Tabs
-        value={panel}
-        onValueChange={(value) => {
-          if (!workspaceId || (value !== "layers" && value !== "assets")) {
-            return;
-          }
-          setPanel(workspaceId, value);
-        }}
-        className="flex min-h-0 flex-1 flex-col"
-      >
-        <div className="shrink-0 px-2 pt-2">
-          <TabsList className="h-7">
-            <TabsTrigger value="layers" className="h-5 gap-1.5 px-2 text-xs">
-              <Layers3 />
-              Layers
-            </TabsTrigger>
-            <TabsTrigger value="assets" className="h-5 gap-1.5 px-2 text-xs">
-              <Image />
-              Assets
-            </TabsTrigger>
-          </TabsList>
+        <div className="border-border1 flex h-10 shrink-0 items-center gap-2 border-b px-3">
+          <h2
+            id="design-layers-heading"
+            className="text-fg1 text-xs font-medium"
+          >
+            Layers
+          </h2>
+          <span
+            className="text-fg3 text-xs"
+            aria-label={`${totalLayerCount} layers`}
+          >
+            {totalLayerCount}
+          </span>
+          <Tooltip label="Collapse all layers">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="ml-auto"
+              aria-label="Collapse all layers"
+              disabled={parentNodeIds.size === 0}
+              onClick={() => {
+                const selectedPath = new Set(selectedAncestors);
+                updateCollapsed(
+                  () =>
+                    new Set(
+                      [...parentNodeIds].filter(
+                        (nodeId) => !selectedPath.has(nodeId),
+                      ),
+                    ),
+                );
+              }}
+            >
+              <ListCollapse />
+            </Button>
+          </Tooltip>
         </div>
 
-        <TabsContent
-          value="layers"
-          className="mt-0 min-h-0 flex-1 overflow-hidden"
-        >
-          <ScrollArea className="h-full">
-            <div className="flex flex-col gap-1 p-2">
-              {snapshot.data?.frames.map((frame) => {
-                const selected = selectedFrame?.file === frame.file;
-                return (
-                  <React.Fragment key={frame.file}>
+        <div className="border-border1 shrink-0 border-b p-2">
+          <InputGroup className="h-7">
+            <InputGroupAddon>
+              <Search />
+            </InputGroupAddon>
+            <InputGroupInput
+              value={query}
+              aria-label="Search layers"
+              placeholder="Search layers"
+              onKeyDown={(event) => {
+                if (event.key === "Escape" && query) {
+                  event.preventDefault();
+                  setSearchState({ ownerKey, value: "" });
+                }
+              }}
+              onChange={(event) =>
+                setSearchState({
+                  ownerKey,
+                  value: event.currentTarget.value,
+                })
+              }
+            />
+            {query ? (
+              <InputGroupAddon align="inline-end">
+                <InputGroupButton
+                  size="icon-xs"
+                  aria-label="Clear layer search"
+                  onClick={() => setSearchState({ ownerKey, value: "" })}
+                >
+                  <X />
+                </InputGroupButton>
+              </InputGroupAddon>
+            ) : null}
+          </InputGroup>
+        </div>
+
+        <ScrollArea className="min-h-0 min-w-0 flex-1">
+          <div className="flex min-w-0 flex-col gap-1 p-1">
+            {snapshot.data?.frames.map((frame) => {
+              const selected = selectedFrame?.file === frame.file;
+              return (
+                <React.Fragment key={frame.file}>
+                  <Tooltip
+                    label={`${frame.title} · ${frame.file}`}
+                    side="right"
+                    align="start"
+                  >
                     <Button
                       type="button"
                       variant={selected ? "secondary-on" : "ghost"}
                       size="sm"
+                      className="w-full min-w-0 justify-start"
                       onClick={() => chooseFrame(frame)}
                     >
-                      <DesignFramePreview
-                        workspaceId={workspaceId}
-                        frame={frame.file}
-                      />
-                      <span className="max-w-40 truncate">{frame.title}</span>
-                      <span className="text-fg3">{frame.file}</span>
+                      <Frame />
+                      <span className="min-w-0 flex-1 truncate text-left">
+                        {frame.title}
+                      </span>
+                      <span className="text-fg3 max-w-[40%] shrink-0 truncate text-xs">
+                        {frame.file}
+                      </span>
                     </Button>
+                  </Tooltip>
 
-                    {selected ? (
-                      <div
-                        ref={treeRef}
-                        role="tree"
-                        aria-label={`${frame.title} layers`}
-                        className="flex flex-col gap-1"
-                      >
-                        {flattenedLayers.map((layer) => (
+                  {selected ? (
+                    <div
+                      ref={treeRef}
+                      role="tree"
+                      aria-label={`${frame.title} layers`}
+                      className="flex min-w-0 flex-col"
+                    >
+                      {flattenedLayers.map((layer) => {
+                        const selectedLayer = selectedNodeId === layer.node.oid;
+                        const expanded =
+                          layer.hasChildren &&
+                          (Boolean(query) ||
+                            !collapsedNodeIds.has(layer.node.oid));
+                        const displayName = layerDisplayName(layer);
+                        const showTag =
+                          displayName.toLocaleLowerCase() !==
+                          layer.node.tag.toLocaleLowerCase();
+                        return (
                           <div
                             key={layer.node.oid}
-                            role="treeitem"
-                            aria-level={layer.depth + 1}
-                            aria-selected={selectedNodeId === layer.node.oid}
-                            className="flex min-w-0 items-center gap-1"
+                            role="none"
+                            className="group flex min-w-0 items-center"
                             style={{
-                              paddingLeft: 8 + layer.depth * 12,
+                              paddingLeft: 4 + Math.min(layer.depth, 16) * 12,
                             }}
                             onPointerEnter={() => {
                               if (!workspaceId || !folder) return;
@@ -282,136 +495,141 @@ export function DesignWorkspaceSidebarPanels({
                               });
                             }}
                           >
-                            <Button
-                              data-design-layer-select
-                              type="button"
-                              variant={
-                                selectedNodeId === layer.node.oid
-                                  ? "secondary-on"
-                                  : "ghost"
-                              }
-                              size="sm"
-                              className="min-w-0 flex-1 justify-start"
-                              onClick={() => chooseLayer(layer)}
-                              onKeyDown={(event) =>
-                                handleLayerKeyDown(event, layer)
-                              }
+                            <Tooltip
+                              label={`${displayName} · ${layer.node.tag}`}
+                              side="right"
+                              align="start"
                             >
-                              <ChevronRight />
-                              <span className="truncate">
-                                {layer.node.name}
-                              </span>
-                              <span className="text-fg3">{layer.node.tag}</span>
-                            </Button>
+                              <Button
+                                data-design-layer-select=""
+                                data-design-layer-id={layer.node.oid}
+                                type="button"
+                                role="treeitem"
+                                variant={
+                                  selectedLayer ? "secondary-on" : "ghost"
+                                }
+                                size="sm"
+                                className="min-w-0 flex-1 justify-start"
+                                tabIndex={
+                                  rovingTabStop === layer.node.oid ? 0 : -1
+                                }
+                                aria-level={layer.depth + 1}
+                                aria-selected={selectedLayer}
+                                aria-expanded={
+                                  layer.hasChildren ? expanded : undefined
+                                }
+                                aria-keyshortcuts="Shift+H"
+                                onClick={(event) => {
+                                  if (
+                                    layer.hasChildren &&
+                                    !query &&
+                                    (event.target as HTMLElement).closest(
+                                      "[data-layer-disclosure]",
+                                    )
+                                  ) {
+                                    toggleExpanded(layer);
+                                    return;
+                                  }
+                                  chooseLayer(layer);
+                                }}
+                                onKeyDown={(event) =>
+                                  handleLayerKeyDown(event, layer)
+                                }
+                              >
+                                {layer.hasChildren ? (
+                                  <span
+                                    data-layer-disclosure={
+                                      query ? undefined : ""
+                                    }
+                                  >
+                                    {expanded ? (
+                                      <ChevronDown aria-hidden="true" />
+                                    ) : (
+                                      <ChevronRight aria-hidden="true" />
+                                    )}
+                                  </span>
+                                ) : (
+                                  <span className="size-4 shrink-0" />
+                                )}
+                                <LayerTypeIcon tag={layer.node.tag} />
+                                <span className="min-w-0 flex-1 truncate text-left">
+                                  {displayName}
+                                </span>
+                                {showTag ? (
+                                  <span className="text-fg3 max-w-[32%] shrink-0 truncate text-xs">
+                                    {layer.node.tag}
+                                  </span>
+                                ) : null}
+                              </Button>
+                            </Tooltip>
                             <Tooltip
                               label={
                                 layer.node.visible
-                                  ? "Hide on canvas"
-                                  : "Show on canvas"
+                                  ? "Hide on canvas · ⇧H"
+                                  : "Show on canvas · ⇧H"
                               }
                             >
                               <Button
                                 type="button"
                                 variant="ghost"
                                 size="icon-sm"
-                                aria-label={`${layer.node.visible ? "Hide" : "Show"} ${layer.node.name}`}
-                                onClick={() => {
-                                  if (!workspaceId || !folder) return;
-                                  void setDesignNodeVisibility({
-                                    workspaceId,
-                                    folder,
-                                    frame: frame.file,
-                                    sourceVersion: frame.sourceVersion,
-                                    nodeId: layer.node.oid,
-                                    visible: !layer.node.visible,
-                                  }).catch((error) => {
-                                    toast.error(
-                                      "Couldn't change layer visibility",
-                                      { description: errorMessage(error) },
-                                    );
-                                  });
-                                }}
+                                className={
+                                  layer.node.visible
+                                    ? "invisible shrink-0 group-focus-within:visible group-hover:visible"
+                                    : "shrink-0"
+                                }
+                                tabIndex={-1}
+                                aria-label={`${layer.node.visible ? "Hide" : "Show"} ${displayName}`}
+                                onClick={() => toggleVisibility(layer)}
                               >
                                 {layer.node.visible ? <Eye /> : <EyeOff />}
                               </Button>
                             </Tooltip>
                           </div>
-                        ))}
-                        {!runtimeSnapshot ? (
-                          <span className="text-fg3 px-2 py-1 text-xs">
-                            Loading live layers…
-                          </span>
-                        ) : null}
-                      </div>
-                    ) : null}
-                  </React.Fragment>
-                );
-              })}
-              {!snapshot.data && snapshot.loading ? (
-                <span className="text-fg3 px-2 py-1 text-xs">
-                  Loading frames…
-                </span>
-              ) : null}
-              {snapshot.data?.frames.length === 0 ? (
-                <span className="text-fg3 px-2 py-1 text-xs">
-                  Create a frame from the canvas toolbar.
-                </span>
-              ) : null}
-            </div>
-          </ScrollArea>
-        </TabsContent>
-
-        <TabsContent
-          value="assets"
-          className="mt-0 min-h-0 flex-1 overflow-hidden"
-        >
-          <ScrollArea className="h-full">
-            <div className="grid grid-cols-2 gap-2 p-2">
-              {snapshot.data?.assets.map((asset) => (
-                <button
-                  key={asset.path}
+                        );
+                      })}
+                      {!runtimeSnapshot ? (
+                        <span className="text-fg3 px-2 py-2 text-xs">
+                          Connecting to the selected frame…
+                        </span>
+                      ) : null}
+                      {runtimeSnapshot &&
+                      query &&
+                      flattenedLayers.length === 0 ? (
+                        <span className="text-fg3 px-2 py-2 text-xs">
+                          No layers match “{query}”.
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </React.Fragment>
+              );
+            })}
+            {!snapshot.data && snapshot.loading ? (
+              <span className="text-fg3 px-2 py-2 text-xs">
+                Loading layers…
+              </span>
+            ) : null}
+            {!snapshot.data && snapshot.error ? (
+              <div className="flex flex-col items-start gap-2 px-2 py-2">
+                <span className="text-fg3 text-xs">Couldn’t load layers.</span>
+                <Button
                   type="button"
-                  draggable
-                  className="border-border2 bg-bg1 hover:bg-bg2-hover flex min-w-0 flex-col gap-1 rounded-md border p-2 text-left"
-                  title={`Drag ${asset.name} into a frame`}
-                  onDragStart={(event) => {
-                    event.dataTransfer.effectAllowed = "copy";
-                    event.dataTransfer.setData(
-                      DESIGN_ASSET_DRAG_TYPE,
-                      asset.path,
-                    );
-                  }}
+                  variant="secondary"
+                  size="sm"
+                  onClick={snapshot.refresh}
                 >
-                  {asset.dataUrl ? (
-                    <img
-                      src={asset.dataUrl}
-                      alt=""
-                      className="bg-bg2 h-16 w-full object-contain"
-                    />
-                  ) : (
-                    <span className="bg-bg2 text-fg3 flex h-16 w-full items-center justify-center">
-                      <Image />
-                    </span>
-                  )}
-                  <span className="text-fg1 w-full truncate text-xs">
-                    {asset.name}
-                  </span>
-                  <span className="text-fg3 text-xs">
-                    {Math.max(1, Math.round(asset.size / 1_024))} KB
-                  </span>
-                </button>
-              ))}
-              {snapshot.data?.assets.length === 0 ? (
-                <div className="text-fg3 col-span-2 flex h-24 flex-col items-center justify-center gap-2 px-4 text-center text-xs">
-                  <Image />
-                  Add images under Zeros Design/assets, then drag them into a
-                  frame.
-                </div>
-              ) : null}
-            </div>
-          </ScrollArea>
-        </TabsContent>
-      </Tabs>
+                  Retry
+                </Button>
+              </div>
+            ) : null}
+            {snapshot.data?.frames.length === 0 ? (
+              <span className="text-fg3 px-2 py-2 text-xs">
+                Create a frame from the canvas toolbar to start designing.
+              </span>
+            ) : null}
+          </div>
+        </ScrollArea>
     </section>
   );
 }

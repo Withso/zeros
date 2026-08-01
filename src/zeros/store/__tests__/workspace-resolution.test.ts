@@ -143,12 +143,11 @@ describe("resolveWorkspacePresentationKind", () => {
         confirmedKind: "code",
         pendingKind: "design",
         folder: designPath,
-        chatMode: "design",
       }),
     ).toBe("code");
   });
 
-  it("uses pending, managed-path, and chat hints only before a row confirms", () => {
+  it("uses pending and managed-path identity only before a row confirms", () => {
     expect(
       resolveWorkspacePresentationKind({
         pendingKind: "design",
@@ -157,12 +156,6 @@ describe("resolveWorkspacePresentationKind", () => {
     ).toBe("design");
     expect(
       resolveWorkspacePresentationKind({ folder: designPath }),
-    ).toBe("design");
-    expect(
-      resolveWorkspacePresentationKind({
-        folder: "/tmp/plain",
-        chatMode: "design",
-      }),
     ).toBe("design");
     expect(
       resolveWorkspacePresentationKind({ folder: "/tmp/plain" }),

@@ -70,6 +70,8 @@ describe("design document", () => {
     expect(source).toContain('name="zeros-frame"');
     expect(source).toContain('href="./tokens.css"');
     expect(source).not.toContain("<script");
+    expect(source).toContain("Shape this frame with the canvas and inspector.");
+    expect(source).not.toMatch(/\bchat\b/i);
     expect(source).not.toMatch(
       /<(?:html|head|meta|link|title|style|body)\b[^>]*\bdata-oid=/i,
     );

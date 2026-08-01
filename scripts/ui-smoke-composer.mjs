@@ -25,8 +25,6 @@
 //   5. The GitHub method overflow obeys click/Escape focus semantics.
 //   6. Its disconnect dialog itemizes consequences, initially focuses Cancel,
 //      closes with Escape, and returns focus to the originating trigger.
-//   7. The design harness exposes editable inspector fields, inline text, code
-//      view, and an explicit frame-delete confirmation with correct Escape.
 //
 // Usage:  node scripts/ui-smoke-composer.mjs   (pnpm test:ui-smoke)
 // ============================================================
@@ -36,6 +34,8 @@ import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import net from "node:net";
+
+import { runDesignWorkspaceSmoke } from "./ui-smoke-design-workspace.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -166,6 +166,10 @@ try {
     await waitFor(async () => !(await menuOpen()), "esc-close"),
   );
 
+  // The design surface owns a separate harness contract and deliberately has
+  // no coding-agent chat mounted while its native UX is under construction.
+  await runDesignWorkspaceSmoke({ page, waitFor, check });
+
   // 4. The GitHub settings overflow and disconnect dialog use Radix focus
   //    scopes. Exercise the real component: unit tests cannot reproduce the
   //    event ordering between portal mount, auto-focus, Escape, and focus
@@ -266,123 +270,7 @@ try {
     ),
   );
 
-  // 5. Phase 3 design interactions use a sandboxed runtime plus the same
-  // Radix focus primitives. Exercise the production component against its
-  // warm exact-key harness; bridge-backed writes are covered by engine tests.
-  await page.goto(`http://127.0.0.1:${port}/harness-design-workspace.html`, {
-    waitUntil: "networkidle",
-  });
-  const designCanvas = page.getByRole("region", { name: "Design workspace" });
-  await designCanvas.waitFor({ state: "visible", timeout: 10_000 });
-  const homeFrame = page.locator('[data-design-frame="home.html"]');
-  await homeFrame.waitFor({ state: "visible", timeout: 10_000 });
-  check(
-    "design inspector exposes editable fill",
-    await page
-      .getByLabel("Fill")
-      .isEditable()
-      .catch(() => false),
-  );
-  check(
-    "design inspector exposes typography controls",
-    (await page.getByText("Typography", { exact: true }).count()) === 1,
-  );
-  check(
-    "design inspector exposes the token themes table",
-    (await page.getByText("Themes", { exact: true }).count()) === 1 &&
-      (await page.getByLabel("Base").count()) === 1,
-  );
-  check(
-    "design inspector exposes PNG export",
-    await page
-      .getByRole("button", { name: "Export PNG" })
-      .isEnabled()
-      .catch(() => false),
-  );
-  check(
-    "design inspector reuses the pull request affordance",
-    (await page
-      .getByRole("button", { name: "Open PR #42", exact: true })
-      .count()) === 1,
-  );
-  check(
-    "design advisories are grouped and explicitly non-blocking",
-    (await page.getByText("Review 1 rule", { exact: true }).count()) === 1 &&
-      (await page
-        .getByText(/95 non-blocking design findings/)
-        .count()) === 1 &&
-      (await page.getByText(/Spacing scale · 95 findings/).count()) === 1,
-  );
-
-  await page.getByRole("button", { name: "Text tool" }).click();
-  const inlineText = page.getByLabel(/^Edit text for /);
-  check(
-    "text tool opens inline editor",
-    await waitFor(
-      () => inlineText.isVisible().catch(() => false),
-      "design-inline-text-ready",
-    ),
-  );
-  await page.keyboard.press("Escape");
-  check(
-    "Escape closes inline text editor",
-    await waitFor(
-      async () => !(await inlineText.isVisible().catch(() => false)),
-      "design-inline-text-escape",
-    ),
-  );
-
-  const codeToggle = page.getByRole("button", { name: "Toggle frame source" });
-  await codeToggle.click();
-  check(
-    "code tool opens authored frame source",
-    await page.getByText("Zeros Design/home.html").isVisible(),
-  );
-  await codeToggle.click();
-
-  const deleteFrameTrigger = page.getByRole("button", {
-    name: "Delete frame",
-  });
-  await deleteFrameTrigger.click();
-  const deleteFrameDialog = page.getByRole("dialog", {
-    name: "Delete Launch home?",
-  });
-  check(
-    "frame delete requires confirmation",
-    await waitFor(
-      () => deleteFrameDialog.isVisible().catch(() => false),
-      "design-delete-dialog",
-    ),
-  );
-  await waitFor(
-    () =>
-      page.evaluate(
-        () => document.activeElement?.textContent?.trim() === "Cancel",
-      ),
-    "design-delete-cancel-focus",
-  );
-  await page.keyboard.press("Escape");
-  check(
-    "Escape closes frame delete confirmation",
-    await waitFor(
-      async () => !(await deleteFrameDialog.isVisible().catch(() => false)),
-      "design-delete-escape",
-    ),
-  );
-  check(
-    "frame delete dialog returns focus",
-    await waitFor(
-      () =>
-        page.evaluate(
-          () =>
-            document.activeElement?.getAttribute("aria-label") ===
-            "Delete frame",
-        ),
-      "design-delete-focus-return",
-    ),
-  );
-
-  // 6. Whole-run invariant.
+  // 5. Whole-run invariant.
   check(
     "no uncaught page errors",
     pageErrors.length === 0,

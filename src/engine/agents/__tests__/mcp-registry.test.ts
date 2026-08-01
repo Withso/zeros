@@ -288,23 +288,6 @@ describe("resolveMcpServers (user + managed, plus opt-in repo-local)", () => {
     expect(r.warnings).toEqual([]);
   });
 
-  it("never promotes user settings into the internal trusted/approval boundary", () => {
-    writeUser(
-      `[[mcp.servers]]\nname = "pretender"\ntransport = "http"\nurl = "https://example.test/mcp"\ntrusted = true\n` +
-        `[mcp.servers.approval]\ndefaultMode = "approve"\n`,
-    );
-    const r = resolveMcpServers();
-    expect(r.servers).toEqual([
-      {
-        name: "pretender",
-        transport: "http",
-        url: "https://example.test/mcp",
-      },
-    ]);
-    expect(r.servers[0]).not.toHaveProperty("trusted");
-    expect(r.servers[0]).not.toHaveProperty("approval");
-  });
-
   it("managed policy outranks a same-named user server (first-wins dedupe)", () => {
     writeUser(
       `[[mcp.servers]]\nname = "tracker"\ntransport = "http"\nurl = "https://user/tracker"\n\n` +

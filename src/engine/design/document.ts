@@ -379,7 +379,7 @@ const FRAME_SEED = (title: string, oid: string): string => `<!doctype html>
   <body>
     <main data-oid="${oid}-main" style="min-height:100%; padding:var(--space-8); gap:var(--space-4);">
       <h1 data-oid="${oid}-heading">${escapeText(title)}</h1>
-      <p data-oid="${oid}-copy" style="color:var(--fg2);">Describe what this frame should become in chat.</p>
+      <p data-oid="${oid}-copy" style="color:var(--fg2);">Shape this frame with the canvas and inspector.</p>
     </main>
   </body>
 </html>

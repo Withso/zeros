@@ -11,7 +11,6 @@
 
 import {
   ADDITIONAL_DIRS_NOTICE,
-  DESIGN_WORKSPACE_PREAMBLE,
   SYSTEM_INSTRUCTION_CLOSE,
   SYSTEM_INSTRUCTION_OPEN,
   WORKSPACE_PREAMBLE,
@@ -28,8 +27,6 @@ export interface FirstTurnInstructionInput {
   additionalDirectories?: readonly string[];
   /** Repo/user `[prompts] general` from .zeros/settings.toml. Empty → skipped. */
   customInstructions?: string | null;
-  /** Conversation backend contract. Design adds the design-document rules. */
-  mode?: "code" | "design";
 }
 
 /** Fill {WORKSPACE_DIR} + {TARGET_BRANCH} in the base preamble. */
@@ -65,11 +62,8 @@ export function wrapSystemInstruction(body: string): string {
  *  /add-dir notice + (optional) custom instructions. For agents with a native
  *  instruction channel (Codex `thread/start.developerInstructions`) — a proper
  *  channel needs no <system_instruction> disguise. */
-export function buildFirstTurnInstructionBody(
-  input: FirstTurnInstructionInput,
-): string {
+export function buildFirstTurnInstructionBody(input: FirstTurnInstructionInput): string {
   const parts = [buildWorkspacePreamble(input)];
-  if (input.mode === "design") parts.push(DESIGN_WORKSPACE_PREAMBLE);
   const dirs = buildAdditionalDirsNotice(input.additionalDirectories);
   if (dirs) parts.push(dirs);
   const custom = input.customInstructions?.trim();
@@ -80,27 +74,20 @@ export function buildFirstTurnInstructionBody(
 /** Assemble the ONE first-turn block: the body above, wrapped for in-band
  *  injection. This is what the send path prepends to the first user message's
  *  agent text (mechanism A — agents without a native instruction channel). */
-export function buildFirstTurnSystemInstruction(
-  input: FirstTurnInstructionInput,
-): string {
+export function buildFirstTurnSystemInstruction(input: FirstTurnInstructionInput): string {
   return wrapSystemInstruction(buildFirstTurnInstructionBody(input));
 }
 
 /** Standalone <system_instruction> carrying ONLY the /add-dir awareness — for
  *  injecting on a mid-chat turn where the user just added directories (the
  *  first-turn preamble already shipped). Returns "" when there are no dirs. */
-export function buildAdditionalDirsSystemInstruction(
-  dirs?: readonly string[],
-): string {
+export function buildAdditionalDirsSystemInstruction(dirs?: readonly string[]): string {
   return wrapSystemInstruction(buildAdditionalDirsNotice(dirs));
 }
 
 /** Prepend an assembled <system_instruction> block to the agent-facing user
  *  text. No-op (returns the text unchanged) when the block is empty. The block
  *  goes ONLY into the agent payload — never the displayed bubble. */
-export function prependSystemInstruction(
-  block: string,
-  userText: string,
-): string {
+export function prependSystemInstruction(block: string, userText: string): string {
   return block ? `${block}\n\n${userText}` : userText;
 }

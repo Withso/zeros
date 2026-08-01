@@ -44,17 +44,6 @@ Your work should take place in the {WORKSPACE_DIR} directory (unless otherwise d
 The target branch for this workspace is {TARGET_BRANCH}. Use it for comparisons such as \`git diff {TARGET_BRANCH}...\` and as the base when creating a pull request.
 Do not rename the current branch unless the user explicitly tells you to do so.`;
 
-/** [SYS-INSTR: design-workspace-preamble]
- *  The compact, checkable contract added only to design-workspace chats.
- *  Deeper progressive guidance lives behind zeros-design.get_guide; keeping
- *  this short preserves the normal chat context budget. */
-export const DESIGN_WORKSPACE_PREAMBLE = `This is a Zeros design workspace.
-- Make design changes only inside \`Zeros Design/\`. Root files are context, not edit targets.
-- A top-level \`.html\` file is one canvas frame. Use pure HTML and CSS: no JavaScript, \`<script>\`, inline event handlers, external URLs, or references outside \`Zeros Design/\`.
-- Give every rendered element inside \`<body>\` a stable, unique \`data-oid\`; do not put \`data-oid\` on \`html\`, \`head\`, \`body\`, \`meta\`, \`link\`, \`title\`, or \`style\`. Reuse variables from \`tokens.css\` whenever an applicable token exists, and keep spacing on the 4px scale unless the user requests otherwise.
-- When asked to explore or propose directions, use the agent's blocking question tool to present 2–3 concrete, mutually exclusive visual directions with concise tradeoffs. Continue after the user's choice; do not simulate the question in prose or build a separate chat UI.
-- Use the \`zeros-design\` tools to inspect the current element selection and frames. After editing files, call \`lint_design\`, use \`screenshot_frame\` to visually verify the affected frame, then call \`lint_design\` again so browser-computed checks are included. Resolve every error and review non-blocking advisory findings before finishing.`;
-
 /** [SYS-INSTR: additional-dirs-notice]
  *  Awareness line for `/add-dir`. The agent is GRANTED filesystem access to
  *  these dirs (Claude SDK additionalDirectories) but is never told they exist —

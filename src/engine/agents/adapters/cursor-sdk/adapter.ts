@@ -295,45 +295,7 @@ export interface SdkAgent {
 type CursorMcpConfig =
   | { command: string; args?: string[]; env?: Record<string, string> }
   | { url: string; headers?: Record<string, string> };
-
-/** Cursor's SDK accepts concrete in-memory headers rather than Claude/Codex's
- * environment-reference config. Resolve the token only while constructing the
- * SDK options; it never enters a URL or subprocess argument. */
-export function mcpServersForCursor(
-  servers: readonly McpServerRegistration[],
-  env?: Record<string, string>,
-): Record<string, CursorMcpConfig> | null {
-  if (servers.length === 0) return null;
-  return Object.fromEntries(
-    servers.map((server) => {
-      if (server.transport === "stdio") {
-        return [
-          server.name,
-          {
-            command: server.command,
-            ...(server.args ? { args: server.args } : {}),
-            ...(server.env ? { env: server.env } : {}),
-          },
-        ];
-      }
-      const token = server.bearerTokenEnvVar
-        ? env?.[server.bearerTokenEnvVar]
-        : undefined;
-      const headers = {
-        ...(server.headers ?? {}),
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      };
-      return [
-        server.name,
-        {
-          url: server.url,
-          ...(Object.keys(headers).length > 0 ? { headers } : {}),
-        },
-      ];
-    }),
-  );
-}
-/** The SDK's on-disk local store. The ONLY surface that exposes a run's
+/** The SDK's on-disk SQLite store. The ONLY surface that exposes a run's
  *  terminal `error` (= the persisted `errorCode`), which `run.wait()` hides.
  *  Opened lazily per cwd and reused; defaults its state root to the same
  *  location the SDK writes to (getDefaultSdkStateRoot(cwd)), so reads see the
@@ -490,7 +452,7 @@ export class CursorSdkAdapter implements AgentAdapter {
    *  check, which can't predict it. resolveModel skips these so a denied
    *  default (e.g. composer-2.5 on a gated plan) isn't re-tried every turn. */
   private readonly deniedModels = new Set<string>();
-  /** Lazily-opened SDK local stores, one per cwd, reused across turns and
+  /** Lazily-opened SDK SQLite stores, one per cwd, reused across turns and
    *  disposed on adapter dispose. Used only to recover a run's real terminal
    *  error after wait() reports a detail-less failure. */
   private readonly storeByCwd = new Map<
@@ -713,7 +675,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     await this.discoverModels(apiKey);
     const modelId = this.resolveModel(opts.env?.CURSOR_MODEL, opts.env);
     const sdk = await loadSdk();
-    const sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
+    const sessionMcp = this.mcpServers(opts.mcpServers);
     let agent: SdkAgent;
     try {
       agent = await sdk.Agent.create({
@@ -786,7 +748,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     // on resume too. Without this, a resumed chat kept whatever MCP set it was
     // first created with, so a server the user ADDED after the chat opened never
     // appeared until they started a brand-new chat.
-    const sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
+    const sessionMcp = this.mcpServers(opts.mcpServers);
     let agent: SdkAgent;
     // True when resume failed and we seeded a FRESH agent below — the gateway
     // re-injects the first-turn <system_instruction> (the fresh agent has no
@@ -796,7 +758,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       agent = await sdk.Agent.resume(opts.sessionId, {
         apiKey,
         // Bind the resolved model on resume too. `Agent.resume` reconstructs
-        // the agent from Cursor's local store, which may hold NO
+        // the agent from Cursor's local SQLite store, which may hold NO
         // persisted model (a cross-worktree id, a rotated cache, or a
         // pre-SDK cursor-agent CLI id). Without an explicit model the
         // resumed agent's internal `_model` is undefined and the next
@@ -930,7 +892,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     await this.ensureAutoReview(session);
 
     // A Cursor LOCAL run can terminate `status:"error"` with NOTHING useful in
-    // run.wait() — the SDK persists the real reason to its local store
+    // run.wait() — the SDK persists the real reason to its local SQLite store
     // as `errorCode` but wait()'s RunResult deliberately drops it. So the only
     // way to tell the user WHY (auth / plan / model / network) is to read it
     // back from the store (readRunError). And when the reason is model gating
@@ -1172,7 +1134,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     if (want === session.appliedAutoReview) return;
     try {
       const sdk = await loadSdk();
-      const sessionMcp = this.mcpServers(session.mcpServers, session.env);
+      const sessionMcp = this.mcpServers(session.mcpServers);
       session.agent = await sdk.Agent.resume(session.zerosSessionId, {
         apiKey: session.apiKey,
         model: { id: session.modelId },
@@ -1241,7 +1203,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       }
     }
     this.sessions.clear();
-    // Release any local-store facade handles opened for error recovery.
+    // Close any SQLite stores we opened for error recovery.
     for (const p of this.storeByCwd.values()) {
       try {
         await (await p)?.dispose();
@@ -1390,10 +1352,21 @@ export class CursorSdkAdapter implements AgentAdapter {
    *  RCE-gated); undefined → the global ctx.mcpServers. */
   private mcpServers(
     override?: McpServerRegistration[],
-    env?: Record<string, string>,
   ): Record<string, CursorMcpConfig> | null {
     const list = override ?? this.ctx.mcpServers;
-    return mcpServersForCursor(list, env);
+    if (list.length === 0) return null;
+    return Object.fromEntries(
+      list.map((s) => [
+        s.name,
+        s.transport === "stdio"
+          ? {
+              command: s.command,
+              ...(s.args ? { args: s.args } : {}),
+              ...(s.env ? { env: s.env } : {}),
+            }
+          : { url: s.url, ...(s.headers ? { headers: s.headers } : {}) },
+      ]),
+    );
   }
 
   private classify(

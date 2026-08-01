@@ -56,8 +56,11 @@ import type { Project } from "../store/projects-store";
 import { useProjects, useWorkspacesFor } from "../store/use-projects";
 import {
   dedupePendingCreates,
+  filterPendingCreatesForDesignAccess,
+  filterWorkspacesForDesignAccess,
   selectLiveVisible,
 } from "../store/live-workspace-selectors";
+import { useInternalFeatureActive } from "../settings/internal-features";
 import {
   usePendingCreatesFor,
   useWorkspaceArchiving,
@@ -223,16 +226,34 @@ function RepoWorkspacesList({ project }: { project: Project }) {
   const { workspaces: allWorkspaces, loading } = useWorkspacesFor(
     project.repoSlug,
   );
+  const designWorkspacesActive =
+    useInternalFeatureActive("designWorkspaces");
+  const accessibleWorkspaces = useMemo(
+    () =>
+      filterWorkspacesForDesignAccess(
+        allWorkspaces,
+        designWorkspacesActive,
+      ),
+    [allWorkspaces, designWorkspacesActive],
+  );
   // Shared selector: a row leaves only after the engine confirms archive/delete;
   // while in flight it remains here, inert and visibly busy.
   const workspaces = useMemo(
-    () => selectLiveVisible(allWorkspaces),
-    [allWorkspaces],
+    () => selectLiveVisible(accessibleWorkspaces),
+    [accessibleWorkspaces],
   );
-  const pendingCreates = usePendingCreatesFor(project.repoSlug);
+  const rawPendingCreates = usePendingCreatesFor(project.repoSlug);
+  const pendingCreates = useMemo(
+    () =>
+      filterPendingCreatesForDesignAccess(
+        rawPendingCreates,
+        designWorkspacesActive,
+      ),
+    [designWorkspacesActive, rawPendingCreates],
+  );
   const pending = useMemo(
-    () => dedupePendingCreates(pendingCreates, allWorkspaces),
-    [pendingCreates, allWorkspaces],
+    () => dedupePendingCreates(pendingCreates, accessibleWorkspaces),
+    [accessibleWorkspaces, pendingCreates],
   );
   const chats = useChats();
   const openWorkspace = useOpenWorkspace();

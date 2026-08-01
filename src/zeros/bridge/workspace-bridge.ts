@@ -224,7 +224,12 @@ export async function requestWorkspaceList(
   const result = (await workspaceOp(bridge, "workspace.list")) as
     | { workspaces?: Workspace[] }
     | undefined;
-  return result?.workspaces ?? [];
+  // This helper exists for the coding-agent cwd → workspace-id resolver. A
+  // Design workspace must never become an additional-directory or agent cwd,
+  // even for staff who enabled the separate Design surface.
+  return (result?.workspaces ?? []).filter(
+    (workspace) => workspace.kind !== "design",
+  );
 }
 
 /** Like requestWorkspaceList but forwards the desktop's `{status, repoSlug}`

@@ -4,10 +4,8 @@
 import { describe, it, expect } from "vitest";
 import {
   buildPathMentions,
-  collectMentions,
   deriveWorkspaceEntries,
   detectMentionTrigger,
-  expandMentionsInText,
 } from "../mentions";
 
 const FILES = [
@@ -21,12 +19,8 @@ const FILES = [
 describe("deriveWorkspaceEntries", () => {
   it("emits every file plus each unique directory prefix", () => {
     const entries = deriveWorkspaceEntries(["src/zeros/agent/x.ts"]);
-    const folders = entries
-      .filter((e) => e.kind === "folder")
-      .map((e) => e.path);
-    const fileEntries = entries
-      .filter((e) => e.kind === "file")
-      .map((e) => e.path);
+    const folders = entries.filter((e) => e.kind === "folder").map((e) => e.path);
+    const fileEntries = entries.filter((e) => e.kind === "file").map((e) => e.path);
     expect(folders).toEqual(
       expect.arrayContaining(["src", "src/zeros", "src/zeros/agent"]),
     );
@@ -34,14 +28,8 @@ describe("deriveWorkspaceEntries", () => {
   });
 
   it("dedupes shared directory prefixes", () => {
-    const entries = deriveWorkspaceEntries([
-      "a/b/one.ts",
-      "a/b/two.ts",
-      "a/c.ts",
-    ]);
-    const folders = entries
-      .filter((e) => e.kind === "folder")
-      .map((e) => e.path);
+    const entries = deriveWorkspaceEntries(["a/b/one.ts", "a/b/two.ts", "a/c.ts"]);
+    const folders = entries.filter((e) => e.kind === "folder").map((e) => e.path);
     // "a" and "a/b" appear once each despite multiple children.
     expect(folders.filter((f) => f === "a")).toHaveLength(1);
     expect(folders.filter((f) => f === "a/b")).toHaveLength(1);
@@ -60,9 +48,7 @@ describe("buildPathMentions", () => {
   it("matches fuzzily across path segments (subsequence)", () => {
     // "agentchat" is a subsequence of "agent/agent-chat" — should match.
     const out = buildPathMentions(entries, "agentchat", 8);
-    expect(out.some((m) => m.query === "src/zeros/agent/agent-chat.tsx")).toBe(
-      true,
-    );
+    expect(out.some((m) => m.query === "src/zeros/agent/agent-chat.tsx")).toBe(true);
   });
 
   it("wraps files in backticks and folders with a trailing slash", () => {
@@ -117,30 +103,5 @@ describe("detectMentionTrigger", () => {
   it("does not trigger mid-word (email-style @)", () => {
     const text = "ping me@example";
     expect(detectMentionTrigger(text, text.length)).toBeNull();
-  });
-});
-
-describe("selection mentions", () => {
-  const designSelection = {
-    tag: "h1",
-    selector: '[data-oid="hero-heading"]',
-    componentName: "Hero heading",
-    frame: "home.html",
-    oid: "hero-heading",
-  };
-
-  it("describes an element-level design selection in the picker", () => {
-    expect(collectMentions(designSelection)).toEqual([
-      expect.objectContaining({
-        token: "@selection",
-        hint: "h1 (Hero heading)",
-      }),
-    ]);
-  });
-
-  it("expands @selection with the immutable frame and oid identity", () => {
-    expect(expandMentionsInText("Tighten @selection", designSelection)).toBe(
-      'Tighten the currently-selected design element (<h1>, frame home.html, data-oid "hero-heading")',
-    );
   });
 });

@@ -20,8 +20,6 @@
 import { openZerosDb } from "./index";
 import { nextRev, recordTombstone, clearTombstone } from "./sync";
 
-export type ChatMode = "code" | "design";
-
 // ── workspace_id stamping (v11) ────────────────────────────
 //
 // `chats.workspace_id` is a denormalized CACHE of the owning workspace,
@@ -59,8 +57,6 @@ function workspaceIdForChat(folder: string | null | undefined): string | null {
 /** Mirrors the renderer's ChatRowWire. */
 export interface ChatRow {
   id: string;
-  /** Backend contract; the user-facing chat surface is shared by both modes. */
-  mode?: ChatMode;
   folder: string;
   agentId: string | null;
   agentName: string | null;
@@ -88,7 +84,6 @@ export interface ChatRow {
 
 interface ChatDbRow {
   id: string;
-  mode: string | null;
   folder: string | null;
   agent_id: string | null;
   agent_name: string | null;
@@ -134,7 +129,6 @@ function parseDirs(raw: string | null | undefined): string[] {
 function toChatRow(r: ChatDbRow): ChatRow {
   return {
     id: r.id,
-    mode: r.mode === "design" ? "design" : "code",
     folder: r.folder ?? "",
     agentId: r.agent_id,
     agentName: r.agent_name,
@@ -159,7 +153,6 @@ function toChatRow(r: ChatDbRow): ChatRow {
 function toDbParams(c: ChatRow): Record<string, string | number | null> {
   return {
     id: c.id,
-    mode: c.mode === "design" ? "design" : "code",
     folder: c.folder ?? "",
     agent_id: c.agentId ?? null,
     agent_name: c.agentName ?? null,
@@ -188,12 +181,12 @@ function toDbParams(c: ChatRow): Record<string, string | number | null> {
 }
 
 const UPSERT_SQL = `
-INSERT INTO chats (id, mode, folder, agent_id, agent_name, model, effort, permission_mode,
+INSERT INTO chats (id, folder, agent_id, agent_name, model, effort, permission_mode,
                    last_mode_id, pre_plan_mode_id, fast,
                    additional_directories, title,
                    created_at, updated_at, session_id, pinned, archived, source_chat_id, kind,
                    workspace_id, rev)
-VALUES (@id, @mode, @folder, @agent_id, @agent_name, @model, @effort, @permission_mode,
+VALUES (@id, @folder, @agent_id, @agent_name, @model, @effort, @permission_mode,
         @last_mode_id, @pre_plan_mode_id, @fast,
         @additional_directories, @title,
         @created_at, @updated_at, @session_id, @pinned, @archived, @source_chat_id, @kind,
@@ -226,7 +219,6 @@ export function coerceChatRow(o: unknown): ChatRow | null {
     typeof v === "number" && Number.isFinite(v) ? v : 0;
   return {
     id: r.id,
-    mode: r.mode === "design" ? "design" : "code",
     folder: str(r.folder),
     agentId: strOrNull(r.agentId),
     agentName: strOrNull(r.agentName),
@@ -258,7 +250,7 @@ export function listChats(): ChatRow[] {
   const db = openZerosDb();
   const rows = db
     .prepare(
-      `SELECT id, mode, folder, agent_id, agent_name, model, effort, permission_mode,
+      `SELECT id, folder, agent_id, agent_name, model, effort, permission_mode,
               last_mode_id, pre_plan_mode_id, fast,
               additional_directories, title,
               created_at, updated_at, session_id, pinned, archived, source_chat_id, kind
@@ -276,7 +268,7 @@ export function getChat(id: string): ChatRow | null {
   const db = openZerosDb();
   const row = db
     .prepare(
-      `SELECT id, mode, folder, agent_id, agent_name, model, effort, permission_mode,
+      `SELECT id, folder, agent_id, agent_name, model, effort, permission_mode,
               last_mode_id, pre_plan_mode_id, fast,
               additional_directories, title,
               created_at, updated_at, session_id, pinned, archived, source_chat_id, kind
@@ -560,7 +552,7 @@ export function summariesForFolder(
 export function listChatsSince(since: number): ChatRow[] {
   const rows = openZerosDb()
     .prepare(
-      `SELECT id, mode, folder, agent_id, agent_name, model, effort, permission_mode,
+      `SELECT id, folder, agent_id, agent_name, model, effort, permission_mode,
               last_mode_id, pre_plan_mode_id, fast,
               additional_directories, title,
               created_at, updated_at, session_id, pinned, archived, source_chat_id, kind

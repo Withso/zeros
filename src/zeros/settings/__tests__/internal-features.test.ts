@@ -97,6 +97,16 @@ describe("isInternalUser — the staff gate", () => {
     signedOut();
     expect(store.isInternalUser()).toBe(false);
   });
+
+  it("distinguishes a pending staff lookup from a settled unavailable result", async () => {
+    const store = await freshStore();
+
+    expect(store.isInternalUserResolutionSettled("idle", true)).toBe(false);
+    expect(store.isInternalUserResolutionSettled("loading", true)).toBe(false);
+    expect(store.isInternalUserResolutionSettled("ready", true)).toBe(true);
+    expect(store.isInternalUserResolutionSettled("error", true)).toBe(true);
+    expect(store.isInternalUserResolutionSettled("idle", false)).toBe(true);
+  });
 });
 
 describe("internal feature flags", () => {
@@ -135,6 +145,18 @@ describe("internal feature flags", () => {
       store.setInternalFeatureEnabled("copyLogs", true),
     ).not.toThrow();
   });
+
+  it("keeps design workspaces off until this app channel explicitly enables them", async () => {
+    const backing = installLocalStorageStub();
+    const store = await freshStore();
+
+    expect(store.isInternalFeatureEnabled("designWorkspaces")).toBe(false);
+    store.setInternalFeatureEnabled("designWorkspaces", true);
+    expect(store.isInternalFeatureEnabled("designWorkspaces")).toBe(true);
+    expect(backing.get("zeros.internalFeatures")).toBe(
+      JSON.stringify({ designWorkspaces: true }),
+    );
+  });
 });
 
 describe("isInternalFeatureActive — the effective gate", () => {
@@ -156,5 +178,22 @@ describe("isInternalFeatureActive — the effective gate", () => {
 
     signedOut();
     expect(store.isInternalFeatureActive("copyLogs")).toBe(false);
+  });
+
+  it("never activates design workspaces for a non-staff or unresolved account", async () => {
+    installLocalStorageStub();
+    const store = await freshStore();
+
+    // A forged local flag is not sufficient: the live database-backed staff
+    // role is the second factor.
+    store.setInternalFeatureEnabled("designWorkspaces", true);
+    signedInAs(null);
+    expect(store.isInternalFeatureActive("designWorkspaces")).toBe(false);
+
+    signedOut();
+    expect(store.isInternalFeatureActive("designWorkspaces")).toBe(false);
+
+    signedInAs("developer");
+    expect(store.isInternalFeatureActive("designWorkspaces")).toBe(true);
   });
 });

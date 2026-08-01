@@ -652,14 +652,23 @@ export async function workspaceList(
     /** true → engine stamps `hasChanges` per live row (git probes). The Dashboard
      *  opts in; the sidebar does not, to keep its refetches git-free. */
     withChanges?: boolean;
+    /** Local façade option. Existing/code-only consumers stay isolated from
+     *  Design rows; the shared workspace store opts in and applies its Internal
+     *  runtime gate at each Design-capable surface. Never sent to the engine. */
+    includeDesign?: boolean;
   } = {},
 ): Promise<Workspace[]> {
   const bridge = requireBridge("list workspaces");
-  const list = await bridgeWorkspaceList(bridge, args);
+  const { includeDesign = false, ...bridgeArgs } = args;
+  const list = await bridgeWorkspaceList(bridge, bridgeArgs);
   // The engine prepends the synthetic `local-main` entry (the web list needs
   // it); the desktop list returned real worktrees only, so strip it to preserve
   // behavior — it's the sole entry with an empty repoSlug.
-  return list.filter((w) => w.repoSlug !== "");
+  return list.filter(
+    (workspace) =>
+      workspace.repoSlug !== "" &&
+      (includeDesign || workspace.kind !== "design"),
+  );
 }
 
 /** Exact local-engine workspace lookup. Unlike workspace.list, this can see a

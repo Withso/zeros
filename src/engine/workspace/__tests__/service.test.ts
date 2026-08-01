@@ -10,6 +10,7 @@ import {
   closeState,
   createWorkspace,
   getWorkspaceLifecycleStatus,
+  listRemoteRestrictedWorkspaceIds,
 } from "../../git";
 import { getDesignRuntimeAudit } from "../../design/runtime-audits";
 import { getDesignSelection } from "../../design/selection";
@@ -237,6 +238,55 @@ describe("WorkspaceService", () => {
     );
   });
 
+  it("keeps design workspaces local-only across discovery and design reads", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const design = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-remote-boundary",
+      kind: "design",
+    });
+    try {
+      expect(listRemoteRestrictedWorkspaceIds()).toContain(design.workspaceId);
+
+      const local = (await svc.handle(
+        "workspace.list",
+        {},
+        { remote: false },
+      )) as { workspaces: Array<{ id: string }> };
+      const remote = (await svc.handle(
+        "workspace.list",
+        {},
+        { remote: true },
+      )) as { workspaces: Array<{ id: string }> };
+      expect(
+        local.workspaces.some(
+          (workspace) => workspace.id === design.workspaceId,
+        ),
+      ).toBe(true);
+      expect(
+        remote.workspaces.some(
+          (workspace) => workspace.id === design.workspaceId,
+        ),
+      ).toBe(false);
+
+      await expect(
+        svc.handle(
+          "design.snapshot",
+          { workspaceId: design.workspaceId },
+          { remote: true },
+        ),
+      ).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
+    } finally {
+      await svc.handle("workspace.delete", {
+        workspaceId: design.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
   it("fs.listDir browses host directories (folder picker)", async () => {
     fs.mkdirSync(path.join(dir, "alpha"));
     fs.mkdirSync(path.join(dir, "beta"));
@@ -342,9 +392,72 @@ describe("WorkspaceService", () => {
       svc.handle("messages.clear", { chatId: "c1" }, { remote: true }),
     ).rejects.toThrow(/restricted/i);
     await expect(
+      svc.handle("messages.window", { chatId: "c1" }, { remote: true }),
+    ).rejects.toThrow(/restricted/i);
+    await expect(
+      svc.handle(
+        "messages.windowOlder",
+        { chatId: "c1", beforeMsgId: "m1" },
+        { remote: true },
+      ),
+    ).rejects.toThrow(/restricted/i);
+    await expect(
       svc.handle(
         "messages.truncateFrom",
         { chatId: "c1", fromMsgId: "m1" },
+        { remote: true },
+      ),
+    ).rejects.toThrow(/restricted/i);
+    await expect(
+      svc.handle(
+        "file.read",
+        { workspaceId: LOCAL_MAIN_WORKSPACE_ID, path: "hello.txt" },
+        { remote: true },
+      ),
+    ).rejects.toThrow(/restricted/i);
+    await expect(
+      svc.handle(
+        "chats.upsert",
+        { chat: { id: "c-hidden", folder: LOCAL_MAIN_WORKSPACE_ID } },
+        { remote: true },
+      ),
+    ).rejects.toThrow(/restricted/i);
+    await expect(
+      svc.handle(
+        "chats.bulkUpsert",
+        {
+          chats: [
+            { id: "c-visible", folder: "web-made" },
+            { id: "c-hidden-bulk", folder: LOCAL_MAIN_WORKSPACE_ID },
+          ],
+        },
+        { remote: true },
+      ),
+    ).rejects.toThrow(/restricted/i);
+    await expect(
+      svc.handle(
+        "chats.upsert",
+        {
+          chat: {
+            id: "c1",
+            // A forged visible destination must not let the remote overwrite
+            // an existing chat whose authoritative row is restricted.
+            folder: "web-made",
+            title: "stolen",
+          },
+        },
+        { remote: true },
+      ),
+    ).rejects.toThrow(/restricted/i);
+    await expect(
+      svc.handle(
+        "chats.bulkUpsert",
+        {
+          chats: [
+            { id: "c-visible", folder: "web-made" },
+            { id: "c1", folder: "web-made", title: "stolen in batch" },
+          ],
+        },
         { remote: true },
       ),
     ).rejects.toThrow(/restricted/i);
@@ -359,6 +472,11 @@ describe("WorkspaceService", () => {
       chatDeletions: string[];
     };
     expect(deletedSnapshot.chats.some((chat) => chat.id === "c1")).toBe(false);
+    expect(
+      deletedSnapshot.chats.some(
+        (chat) => chat.id === "c-hidden" || chat.id === "c-visible",
+      ),
+    ).toBe(false);
     expect(deletedSnapshot.chatDeletions).toContain("c1");
 
     // A chat in a NON-restricted workspace stays freely deletable remotely.
@@ -903,12 +1021,13 @@ describe("WorkspaceService", () => {
       tokenSnapshot.snapshot.tokenSourceVersion,
     );
 
-    const remote = (await svc.handle(
-      "design.snapshot",
-      { workspaceId: workspace.workspaceId },
-      { remote: true },
-    )) as { snapshot: { protocolCapability: string | null } };
-    expect(remote.snapshot.protocolCapability).toBeNull();
+    await expect(
+      svc.handle(
+        "design.snapshot",
+        { workspaceId: workspace.workspaceId },
+        { remote: true },
+      ),
+    ).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
     expect(
       tokenReply.snapshot.tokens.find((token) => token.name === "--accent")
         ?.value,
@@ -1086,6 +1205,11 @@ describe("WorkspaceService", () => {
       "workspace.get",
       "workspace.lifecycleStatus",
       "workspace.createFromBranchStatus",
+      "design.frames",
+      "design.frame",
+      "design.snapshot",
+      "design.lint",
+      "design.tokens",
     ]) {
       expect(svc.remoteReadable(op)).toBe(false);
       expect(svc.isRemoteAllowed(op)).toBe(false);

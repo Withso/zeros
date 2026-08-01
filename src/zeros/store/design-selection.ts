@@ -2,7 +2,7 @@
 // Live design selection workflows
 // ──────────────────────────────────────────────────────────
 //
-// Canvas, Layers, inspector, composer, and MCP all converge here. Visible
+// Canvas, Layers, inspector, and future design integrations converge here. Visible
 // frame+node identity is one atomic workspace-store update; async runtime
 // readback uses a per-workspace generation so A → B races cannot republish A
 // after the user has already selected B.
@@ -114,7 +114,7 @@ function screenshotBase64(screenshot: DesignRuntimeScreenshot): string | null {
 }
 
 /** Capture real rendered pixels once and share the same immutable image with
- * composer chips and the engine-held screenshot_frame MCP tool. */
+ * future design integrations and screenshot tooling. */
 export async function captureDesignRuntimeScreenshot(
   workspaceId: string,
   folder: string,

@@ -63,6 +63,7 @@ import {
   folderIsWithinRoot,
 } from "./workspace-resolution";
 import { previousWorkspaceInOrder } from "./archive-navigation";
+import { isInternalFeatureActive } from "../settings/internal-features";
 
 type Dispatch = ReturnType<typeof useWorkspaceDispatch>;
 
@@ -95,7 +96,9 @@ function pickRepointTarget(leaving: Workspace): {
   // Exclude rows whose confirmed mutation is pending — a burst-archive must
   // never repoint onto a workspace that is itself on its way out.
   const archivingIds = usePendingWorkspacesStore.getState().archivingIds;
-  const previous = previousWorkspaceInOrder(leaving, cached, archivingIds);
+  const previous = previousWorkspaceInOrder(leaving, cached, archivingIds, {
+    allowDesignWorkspaces: isInternalFeatureActive("designWorkspaces"),
+  });
   return previous
     ? { folder: previous.path, repoRoot: previous.repoRoot }
     : { folder: leaving.repoRoot, repoRoot: leaving.repoRoot };
@@ -598,6 +601,9 @@ function commitConfirmedRestore(
   opts?: RestoreFeedbackOptions,
 ): void {
   const restored = result.workspace;
+  const mayPublishNavigation =
+    restored.kind !== "design" ||
+    isInternalFeatureActive("designWorkspaces");
   unstable_batchedUpdates(() => {
     if (restored.path !== original.path) {
       moveChatPaneFolder(original.path, restored.path, original.repoRoot);
@@ -609,7 +615,7 @@ function commitConfirmedRestore(
       });
     }
     commitWorkspaceRestored(restored);
-    opts?.onRestored?.(result);
+    if (mayPublishNavigation) opts?.onRestored?.(result);
   });
   notifyWorkspacesChanged(original.repoSlug);
 }
@@ -765,6 +771,13 @@ export async function restoreWorkspaceWithFeedback(
   workspace: Workspace,
   opts?: RestoreFeedbackOptions,
 ): Promise<void> {
+  if (
+    workspace.kind === "design" &&
+    !isInternalFeatureActive("designWorkspaces")
+  ) {
+    opts?.onSettled?.();
+    return;
+  }
   if (restoringIds.has(workspace.id)) {
     opts?.onSettled?.(); // another restore owns this id — clear the caller's spinner
     return;

@@ -20,11 +20,11 @@ import {
   Code2,
   Copy,
   FileCode2,
+  Frame,
   Minus,
   MousePointer2,
   MoveDiagonal2,
   Plus,
-  SquareDashed,
   Trash2,
   Type,
 } from "lucide-react";
@@ -47,7 +47,7 @@ import { isEditableHotkeyTarget } from "../../shell/editable-target";
 import {
   groupDesignLintViolations,
   lintReviewBadgeLabel,
-} from "../agent/design-lint-summary";
+} from "./design-lint-summary";
 import {
   createDesignFrameAndRefresh,
   deleteDesignFrameCached,
@@ -97,6 +97,7 @@ import {
   TabsContent,
   TabsList,
   TabsTrigger,
+  Toolbar,
   Tooltip,
   toast,
 } from "../ui/primitives";
@@ -180,7 +181,7 @@ interface InlineTextEdit {
 // --- CONSTANTS ---
 
 const DESIGN_COLUMN_CLS =
-  "border-border1 relative flex min-h-0 min-w-[200px] overflow-hidden border-l bg-bg1 [flex:calc((1_-_var(--zeros-column-2-ratio,0.5))*100)_1_0px]";
+  "border-border1 relative flex min-h-0 min-w-[min(456px,58%)] overflow-hidden border-l bg-bg1 [flex:calc((1_-_var(--zeros-design-column-2-ratio,0.3))*100)_1_0px]";
 const MIN_FRAME_WIDTH = 240;
 const MIN_FRAME_HEIGHT = 160;
 const COLD_BUSY_DELAY_MS = 180;
@@ -291,7 +292,7 @@ function DesignFrameRenderSurface({
 
 // ============================================
 // COMPONENT: DesignWorkspaceColumn
-// PURPOSE: Swap the right work surface while preserving the chat column
+// PURPOSE: Native canvas and inspector beside the design-only Layers sidebar
 // USED IN: MainShellBody
 // ============================================
 
@@ -832,7 +833,7 @@ function DesignCanvas({
   );
 
   // Canvas shortcuts are focus-scoped and attach only while the visible design
-  // surface is active, protecting chat/composer input and retained Home shells.
+  // surface is active, protecting other inputs and retained Home shells.
   useEffect(() => {
     if (!active) return;
     const keyDown = (event: KeyboardEvent) => {
@@ -1268,16 +1269,20 @@ function DesignCanvas({
           </div>
         ) : null}
 
-        <div
+        <Toolbar
           data-design-controls
-          className="border-border2 bg-bg1 absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-lg border p-1 shadow-[var(--shadow-dropdown)]"
+          role="toolbar"
+          aria-label="Canvas tools"
+          className="absolute bottom-4 left-1/2 -translate-x-1/2"
         >
           <Tooltip label="Select" shortcut="V">
             <Button
               type="button"
               variant={activeTool === "select" ? "secondary-on" : "ghost"}
-              size="icon"
+              size="icon-lg"
               aria-label="Select"
+              aria-pressed={activeTool === "select"}
+              aria-keyshortcuts="V"
               onClick={() => setActiveTool("select")}
             >
               <MousePointer2 />
@@ -1287,21 +1292,23 @@ function DesignCanvas({
             <Button
               type="button"
               variant="ghost"
-              size="icon"
+              size="icon-lg"
               disabled={!workspaceId || creatingFrame}
               aria-label="New frame"
               onClick={() => void createFrame()}
             >
-              <SquareDashed />
+              <Frame />
             </Button>
           </Tooltip>
           <Tooltip label="Edit text" shortcut="T">
             <Button
               type="button"
               variant={activeTool === "text" ? "secondary-on" : "ghost"}
-              size="icon"
+              size="icon-lg"
               disabled={!workspaceId || !selectedFrame}
               aria-label="Text tool"
+              aria-pressed={activeTool === "text"}
+              aria-keyshortcuts="T"
               onClick={() => {
                 setActiveTool("text");
                 if (
@@ -1325,9 +1332,10 @@ function DesignCanvas({
             <Button
               type="button"
               variant={view.codeView ? "secondary-on" : "ghost"}
-              size="icon"
+              size="icon-lg"
               disabled={!workspaceId || !selectedFrame}
               aria-label="Toggle frame source"
+              aria-pressed={view.codeView}
               onClick={() => {
                 if (workspaceId) setCodeView(workspaceId, !view.codeView);
               }}
@@ -1335,11 +1343,13 @@ function DesignCanvas({
               <Code2 />
             </Button>
           </Tooltip>
-        </div>
+        </Toolbar>
 
-        <div
+        <Toolbar
           data-design-controls
-          className="border-border2 bg-bg1 absolute right-3 bottom-3 flex items-center gap-1 rounded-lg border p-1 shadow-[var(--shadow-dropdown)]"
+          role="toolbar"
+          aria-label="Canvas zoom"
+          className="absolute right-4 bottom-4"
         >
           <Button
             type="button"
@@ -1368,7 +1378,7 @@ function DesignCanvas({
           >
             <Plus />
           </Button>
-        </div>
+        </Toolbar>
       </div>
     </div>
   );
@@ -1674,16 +1684,16 @@ function DesignInspector({
           defaultValue="design"
           className="flex min-h-0 flex-1 flex-col overflow-hidden"
         >
-          <div className="border-border1 flex shrink-0 items-center gap-2 border-b p-2">
-            <TabsList className="h-7 min-w-0 flex-1">
-              <TabsTrigger value="design" className="h-5 flex-1 px-2 text-xs">
+          <div className="border-border1 flex h-10 shrink-0 items-center gap-1 border-b pr-1">
+            <TabsList
+              variant="chrome"
+              className="min-w-0 flex-1"
+              aria-label="Inspector modes"
+            >
+              <TabsTrigger value="design" variant="chrome">
                 Design
               </TabsTrigger>
-              <TabsTrigger
-                value="prototype"
-                className="h-5 flex-1 px-2 text-xs"
-                disabled
-              >
+              <TabsTrigger value="prototype" variant="chrome" disabled>
                 Prototype
               </TabsTrigger>
             </TabsList>

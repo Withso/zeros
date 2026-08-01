@@ -65,15 +65,7 @@ describe("modePolicyFor", () => {
     // preset. ask and auto-edit must NOT collapse into the same policy.
     expect(modePolicyFor("ask").approvalPolicy).toBe("untrusted");
     expect(modePolicyFor("auto-edit").approvalPolicy).toBe("on-request");
-    expect(modePolicyFor("full-access").approvalPolicy).toEqual({
-      granular: {
-        sandbox_approval: false,
-        rules: false,
-        skill_approval: false,
-        request_permissions: false,
-        mcp_elicitations: true,
-      },
-    });
+    expect(modePolicyFor("full-access").approvalPolicy).toBe("never");
     for (const mode of MODES) {
       expect(modePolicyFor(mode).approvalPolicy).not.toBe("on-failure");
     }

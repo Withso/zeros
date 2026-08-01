@@ -2,11 +2,11 @@
 // zeros-design MCP — first-party, workspace-scoped design context
 // ──────────────────────────────────────────────────────────
 //
-// One loopback Streamable-HTTP server is injected into every agent session in
-// a design workspace. A per-process secret plus opaque workspace id scopes the
-// endpoint; every tool call re-resolves that workspace before touching disk.
-// Claude, Codex, Cursor, and future adapters therefore see one identical tool
-// contract without agent-specific prompt/tool forks.
+// This standalone Streamable-HTTP implementation is retained for the future
+// native design harness. It is deliberately not started by ZerosEngine or
+// injected into the existing coding-agent gateway. A per-process secret plus
+// opaque workspace id scopes the endpoint; every tool call re-resolves that
+// workspace before touching disk.
 
 import {
   createHmac,

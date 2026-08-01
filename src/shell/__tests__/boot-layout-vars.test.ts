@@ -18,6 +18,10 @@ import {
   readPersistedColumn2Ratio,
 } from "../column2-ratio";
 import { TERMINAL_PANEL_HEIGHT_VAR } from "../terminal/terminal-panel-layout";
+import {
+  DESIGN_WORKSPACE_SIDEBAR_RATIO_KEY,
+  DESIGN_WORKSPACE_SIDEBAR_RATIO_VAR,
+} from "../../zeros/panels/design-workspace-width";
 
 // `environment: "node"` — stand up just enough of window/document for the
 // boot write. `style` is a Map-backed CSSStyleDeclaration shim.
@@ -90,6 +94,14 @@ describe("applyBootLayoutVars", () => {
     );
     applyBootLayoutVars();
     expect(declared.get(TERMINAL_PANEL_HEIGHT_VAR)).toBe("30%");
+  });
+
+  it("publishes design's independent sidebar ratio without changing Column 2", () => {
+    store.set(COLUMN_2_RATIO_KEY, "0.6");
+    store.set(DESIGN_WORKSPACE_SIDEBAR_RATIO_KEY, "0.4");
+    applyBootLayoutVars();
+    expect(declared.get(COLUMN_2_RATIO_VAR)).toBe("0.6");
+    expect(declared.get(DESIGN_WORKSPACE_SIDEBAR_RATIO_VAR)).toBe("0.4");
   });
 
   it("agrees with what the column hook reads a moment later", () => {

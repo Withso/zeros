@@ -43,12 +43,10 @@ type Dispatch = ReturnType<typeof useWorkspaceDispatch>;
 export function bornChatThread(
   agent: BridgeRegistryAgent | null,
   folder: string,
-  mode: "code" | "design" = "code",
 ): ChatThread {
   const born = newChatBornDefaults(agent?.id ?? null);
   return {
     id: newChatId(),
-    mode,
     folder,
     agentId: agent?.id ?? null,
     agentName: agent?.name ?? null,
@@ -73,14 +71,13 @@ function cachedDefaultAgent(): BridgeRegistryAgent | null {
  *  new tab (plus → Chat or ⌘T). */
 export async function spawnNewChatTab(args: {
   folder: string;
-  mode?: "code" | "design";
   sessions: SessionsCtx;
   dispatch: Dispatch;
 }): Promise<ChatThread> {
   const { folder, dispatch } = args;
   // Never put tab creation behind a native registry read. A cold cache creates
   // an agentless tab synchronously; AutoBindAgent fills it on first render.
-  const chat = bornChatThread(cachedDefaultAgent(), folder, args.mode);
+  const chat = bornChatThread(cachedDefaultAgent(), folder);
   dispatch({ type: "ADD_CHAT", chat });
   return chat;
 }
@@ -91,11 +88,10 @@ export async function spawnNewChatTab(args: {
  * treating it as a confirmed worktree while the provisional composer renders. */
 export function spawnPreparedDefaultChat(args: {
   folder: string;
-  mode?: "code" | "design";
   repoRoot: string;
   dispatch: Dispatch;
 }): ChatThread {
-  const chat = bornChatThread(cachedDefaultAgent(), args.folder, args.mode);
+  const chat = bornChatThread(cachedDefaultAgent(), args.folder);
   args.dispatch({
     type: "ADD_CHAT",
     chat,
@@ -132,7 +128,6 @@ function liveChatAtFolder(folder: string): ChatThread | undefined {
  *  so there's no `chats` argument to go stale. */
 export async function spawnDefaultChatForWorkspace(args: {
   folder: string;
-  mode?: "code" | "design";
   sessions: SessionsCtx;
   dispatch: Dispatch;
 }): Promise<boolean> {
@@ -165,7 +160,7 @@ export async function spawnDefaultChatForWorkspace(args: {
     // plan/fast posture. Shared with the "+" → Chat and ⌘T paths so they
     // can never drift. With no agent resolved, generic defaults apply and
     // AutoBindAgent fills the binding on first render.
-    const chat = bornChatThread(agent, folder, args.mode);
+    const chat = bornChatThread(agent, folder);
     dispatch({ type: "ADD_CHAT", chat });
     return true;
   } finally {

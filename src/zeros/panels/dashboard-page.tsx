@@ -40,8 +40,11 @@ import {
 } from "../store/use-projects";
 import {
   dedupePendingCreates,
+  filterPendingCreatesForDesignAccess,
+  filterWorkspacesForDesignAccess,
   selectLiveVisible,
 } from "../store/live-workspace-selectors";
+import { useInternalFeatureActive } from "../settings/internal-features";
 import {
   usePendingCreatesAll,
   useWorkspaceArchiving,
@@ -113,14 +116,40 @@ export function DashboardPage() {
   const { projects } = useProjects();
   const chats = useChats();
   const { workspaces: liveWorkspaces, loading } = useLiveWorkspaces();
+  const designWorkspacesActive =
+    useInternalFeatureActive("designWorkspaces");
+  const accessibleLiveWorkspaces = useMemo(
+    () =>
+      filterWorkspacesForDesignAccess(
+        liveWorkspaces,
+        designWorkspacesActive,
+      ),
+    [designWorkspacesActive, liveWorkspaces],
+  );
   // Destructive membership is confirmed-only: a busy row stays in its current
   // status column until the engine publishes the archive/delete result.
   const workspaces = useMemo(
-    () => selectLiveVisible(liveWorkspaces),
-    [liveWorkspaces],
+    () => selectLiveVisible(accessibleLiveWorkspaces),
+    [accessibleLiveWorkspaces],
   );
-  const allPending = usePendingCreatesAll();
-  const { workspaces: archivedWorkspaces } = useArchivedWorkspaces();
+  const rawPending = usePendingCreatesAll();
+  const allPending = useMemo(
+    () =>
+      filterPendingCreatesForDesignAccess(
+        rawPending,
+        designWorkspacesActive,
+      ),
+    [designWorkspacesActive, rawPending],
+  );
+  const { workspaces: rawArchivedWorkspaces } = useArchivedWorkspaces();
+  const archivedWorkspaces = useMemo(
+    () =>
+      filterWorkspacesForDesignAccess(
+        rawArchivedWorkspaces,
+        designWorkspacesActive,
+      ),
+    [designWorkspacesActive, rawArchivedWorkspaces],
+  );
   const openWorkspace = useOpenWorkspace();
   // Persist the requested repository identity. A removed/stale slug derives to
   // All projects during render, without a post-paint correction effect.
@@ -203,8 +232,8 @@ export function DashboardPage() {
   // In-flight optimistic creates as board placeholders, deduped against the real
   // union so a placeholder vanishes the instant its real row lands.
   const dedupedPending = useMemo(
-    () => dedupePendingCreates(allPending, liveWorkspaces),
-    [allPending, liveWorkspaces],
+    () => dedupePendingCreates(allPending, accessibleLiveWorkspaces),
+    [accessibleLiveWorkspaces, allPending],
   );
   const pendingRows = useMemo(
     () =>

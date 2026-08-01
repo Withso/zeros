@@ -596,11 +596,6 @@ const REMOTE_READABLE = new Set<string>([
   // Files. `file.ignored` is deliberately NOT here — see its handler.
   "file.tree",
   "file.read",
-  "design.frames",
-  "design.frame",
-  "design.snapshot",
-  "design.lint",
-  "design.tokens",
   // Host folder picker (browse to open a project remotely)
   "fs.listDir",
   // Git reads
@@ -1263,6 +1258,12 @@ export class WorkspaceService {
     workspaceId: string,
     remote: boolean,
   ): Workspace {
+    if (remote) {
+      throw new GitError({
+        code: "REMOTE_RESTRICTED",
+        message: "Design workspaces are available only in the desktop app.",
+      });
+    }
     const cwd = this.resolveReadCwd(workspaceId, remote);
     const workspace = getWorkspaceById(workspaceId);
     if (!workspace || workspace.kind !== "design" || workspace.path !== cwd) {
@@ -1421,12 +1422,16 @@ export class WorkspaceService {
    *  SAME mapping the list redaction uses (no drift). Unknown chat / no
    *  restrictions → false (allowed). Local clients never reach this. */
   private remoteChatRestricted(chatId: string): boolean {
-    const restricted = listRemoteRestrictedWorkspaceIds();
-    if (restricted.size === 0) return false;
     const chat = listChats().find((c) => c.id === chatId);
     if (!chat) return false;
+    return this.remoteFolderRestricted(chat.folder);
+  }
+
+  private remoteFolderRestricted(folder: string): boolean {
+    const restricted = listRemoteRestrictedWorkspaceIds();
+    if (restricted.size === 0) return false;
     return restricted.has(
-      this.redactChatFolderForRemote(chat.folder, listWorkspaces({})),
+      this.redactChatFolderForRemote(folder, listWorkspaces({})),
     );
   }
 
@@ -1462,17 +1467,53 @@ export class WorkspaceService {
     // chat is hidden from its list, so its data must be non-destroyable too).
     // Gate the destructive metadata ops on the target chat's workspace before the
     // switch reaches them. (chats.upsert/bulkUpsert add/move the client's own
-    // rows and carry no existing-chat target, so they're not gated here.)
+    // rows, so their requested destination folders are checked separately.)
     if (remote) {
+      const restricted = listRemoteRestrictedWorkspaceIds();
+      const targetWorkspaceId = optStr(params, "workspaceId");
+      if (targetWorkspaceId && restricted.has(targetWorkspaceId)) {
+        throw new GitError({
+          code: "REMOTE_RESTRICTED",
+          message: "This workspace is restricted from remote access.",
+        });
+      }
       const targetChatId =
         op === "chats.delete"
           ? optStr(params, "id")
-          : op === "messages.clear" ||
-              op === "messages.truncateFrom" ||
-              op === "messages.import"
-            ? optStr(params, "chatId")
-            : undefined;
+          : optStr(params, "chatId");
       if (targetChatId && this.remoteChatRestricted(targetChatId)) {
+        throw new GitError({
+          code: "REMOTE_RESTRICTED",
+          message: "This chat is in a workspace restricted from remote access.",
+        });
+      }
+      const directFolder =
+        op === "chats.summariesForFolder" || op === "messages.search"
+          ? optStr(params, "folder")
+          : undefined;
+      const chatInputs =
+        op === "chats.upsert"
+          ? [params.chat]
+          : op === "chats.bulkUpsert" && Array.isArray(params.chats)
+            ? params.chats
+            : [];
+      const targetsRestrictedFolder = chatInputs.some((input) => {
+        if (!input || typeof input !== "object") return false;
+        const folder = (input as Record<string, unknown>).folder;
+        return (
+          typeof folder === "string" && this.remoteFolderRestricted(folder)
+        );
+      });
+      const targetsRestrictedChat = chatInputs.some((input) => {
+        if (!input || typeof input !== "object") return false;
+        const id = (input as Record<string, unknown>).id;
+        return typeof id === "string" && this.remoteChatRestricted(id);
+      });
+      if (
+        (directFolder && this.remoteFolderRestricted(directFolder)) ||
+        targetsRestrictedFolder ||
+        targetsRestrictedChat
+      ) {
         throw new GitError({
           code: "REMOTE_RESTRICTED",
           message: "This chat is in a workspace restricted from remote access.",

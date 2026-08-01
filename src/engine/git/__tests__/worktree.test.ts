@@ -154,10 +154,13 @@ describe("worktree lifecycle (integration)", () => {
       repoRoot,
       kind: "design",
       setupScript: "must-not-run.sh",
+      agentId: "claude",
+      optimisticChatId: "legacy-design-chat",
     });
     const workspace = getWorkspace(created.workspaceId);
 
     expect(workspace.kind).toBe("design");
+    expect(workspace.agentId).toBeNull();
     expect(workspace.path.startsWith(designWorktreesRoot() + path.sep)).toBe(
       true,
     );

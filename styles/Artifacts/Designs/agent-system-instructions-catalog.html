@@ -694,10 +694,11 @@
         <a href="#a5">A5 cwd hint</a>
         <a href="#a6">A6 Not ours</a>
         <span class="nav-sep"></span>
-        <a href="#b1">B1 Create PR (direct)</a>
-        <a href="#b2">B2 Ask-agent brief</a>
+        <a href="#b1">B1 Direct shortcut</a>
+        <a href="#b2">B2 Primary agent brief</a>
         <a href="#b3">B3 Dropdown</a>
         <span class="nav-sep"></span>
+        <a href="#c0">C0 Status truth</a>
         <a href="#c1">C1 Resolve</a>
         <a href="#c2">C2 Commit &amp; Push</a>
         <a href="#c3">C3 Update branch</a>
@@ -1009,7 +1010,7 @@ Use this absolute path (or paths under it) for all file operations unless explic
       </div>
 
       <!-- ═══════════════ Part B ═══════════════ -->
-      <p class="band">Part B — Create PR · the split button (Column 2 top bar / Changes tab)</p>
+      <p class="band">Part B — Create PR · the shared Changes / Review status row</p>
       <div class="catalog">
         <section class="case" id="b1">
           <div class="case-head">
@@ -1019,35 +1020,50 @@ Use this absolute path (or paths under it) for all file operations unless explic
                 <span class="tag ship">Shipped</span>
                 <span class="tag context">No agent message</span>
               </div>
-              <h2>Primary "Create PR" (and "Create draft PR") — direct engine path</h2>
+              <h2>"Create PR directly" / "Create draft directly" — explicit engine path</h2>
               <p class="case-copy">
-                The main segment does <strong>not</strong> talk to the agent at all. It calls the
+                These explicitly labelled dropdown shortcuts do <strong>not</strong> talk to the
+                agent. They call the
                 engine's authenticated <code>gh.prCreate</code> with a small deterministic draft built
                 from branch commits: <strong>title</strong> = the <em>oldest</em> branch commit's
                 subject (usually the feature intent), bounded to 80 chars
                 (<code>…slice(0,77) + "..."</code>), falling back to the humanized branch leaf;
                 <strong>body</strong> = <code>## Summary</code> + one bullet per commit subject
-                (never empty — the engine rejects empty bodies). Dirty tree → refused, because a push
-                cannot include uncommitted files.
+                (never empty — the engine rejects empty bodies). Dirty tree → <strong>committed</strong>
+                (2026-08-01): a pull request can only carry committed work, so the button sweeps the
+                worktree (<code>git add -- . ':(exclude).zeros'</code>) and writes the commit itself
+                rather than handing the chore back. No model call — the message is generated.
               </p>
             </div>
             <div class="meta">
-              <code>src/shell/pr/create-pr-button.tsx · create-pr-action.ts</code>
+              <code>src/shell/pr/create-pr-button.tsx · create-pr-action.ts · pr-auto-commit.ts</code>
             </div>
           </div>
           <div class="wire">
             <div class="wire-head">
-              <span class="chan bubble-chan">User-facing refusal</span>
-              <span>dirty worktree — offers the agent workflow as recovery</span>
+              <span class="chan bubble-chan">Generated commit + user-facing copy</span>
+              <span>dirty worktree — committed, not refused</span>
             </div>
-            <pre>There are <var>N</var> uncommitted changes in this workspace — commit or discard them (including new untracked files) before creating a pull request.
+            <pre>Commit message (<var>subject</var> = 1 file: "Update a.ts" · 2: "Update a.ts and b.ts" · 3+: "Update a.ts and N more files" · over 72 chars: "Update N files"):
 
-Toast: “Commit changes before creating this pull request”
-       “A pull request only includes committed work. Ask the agent to review, commit, and create it.”   [Ask agent]</pre>
+<var>Update pills.tsx and 3 more files</var>
+
+Committed by Zeros while creating a pull request.
+
+- <var>src/zeros/agent/pills.tsx</var>
+- <var>…one line per path, capped at 50 + "…and N more"</var>
+
+Toast: “Committed <var>N</var> changes” / “<var>the subject above</var>”
+
+Still refused — a tree that must not be swept as it stands:
+Toast: “Resolve conflicts before creating this pull request”   [Ask agent]
+       “Finish the <var>rebase</var> before creating this pull request”   [Ask agent]</pre>
             <div class="wire-note">
-              The count includes <em>untracked</em> files — a single agent scratch file is enough to
-              land here, hence the "(including new untracked files)" clause. The
-              <strong>[Ask agent]</strong> action fires B2.
+              The sweep excludes <code>.zeros</code>, the one tree every Changes surface hides — so
+              the "N changes" count and the commit agree with what the user can see. The commit is
+              reported the moment it lands, ahead of the push + GitHub round trip, because it is
+              durable whether or not GitHub then accepts the PR. The <strong>[Ask agent]</strong>
+              action fires the same B2 agent path as the primary button, whose brief names the conflict.
             </div>
           </div>
         </section>
@@ -1060,11 +1076,13 @@ Toast: “Commit changes before creating this pull request”
                 <span class="tag ship">Shipped</span>
                 <span class="tag context">Auto-sent prompt</span>
               </div>
-              <h2>"Ask agent to create PR" — the full step-by-step brief</h2>
+              <h2>Primary "Create PR" / "Create draft PR" — the full agent brief</h2>
               <p class="case-copy">
-                The dropdown's agent path (and the dirty-tree recovery). Generated from
+                The main segment, the draft menu item, and the dirty-tree recovery all send this
+                brief to the active agent. Generated from
                 <strong>live workspace state</strong> — branch, target, configured remote, uncommitted
-                count (net HEAD-vs-worktree), upstream presence — so the agent never re-derives it.
+                count (net HEAD-vs-worktree), upstream presence, and configured GitHub repository —
+                then the agent verifies those facts before it writes anything.
                 Parked while the agent has a turn in flight (the brief would describe a half-done
                 tree). The chat bubble shows only <em>"Create a PR"</em> / <em>"Create a draft
                 PR"</em> with the button's icon; the agent receives everything below.
@@ -1079,7 +1097,7 @@ Toast: “Commit changes before creating this pull request”
           <div class="wire">
             <div class="wire-head">
               <span class="chan wire-chan">Wire · exact</span>
-              <span>example: branch <code>zeros/washington</code>, remote <code>origin</code>, base <code>main</code>, 3 dirty paths, no upstream, non-draft</span>
+              <span>example: branch <code>zeros/washington</code>, remote <code>origin</code>, repository <code>withso/zeros</code>, base <code>main</code>, 3 dirty paths, no upstream, non-draft</span>
             </div>
             <pre>The user likes the current state of the code.
 
@@ -1093,11 +1111,12 @@ The target branch is <var>origin/main</var>.
 Follow these steps to create a PR:
 
 - If you have any skills related to creating PRs, invoke them now. Instructions there should take precedence over these instructions.
-- Run `git diff` to review uncommitted changes.
+- Inspect `git status` and run `git diff` to review uncommitted changes.
 - Commit them. Follow any instructions the user gave you about writing commit messages.
 - Push with `git push -u '<var>origin</var>' HEAD:'<var>zeros/washington</var>'`.
 - Review the full PR diff (all committed and uncommitted changes vs the target branch) before writing the description.
-- Use `gh pr create --base <var>main</var>` to create a PR onto the target branch. Keep the title under 80 characters. Keep the description under five sentences, unless the user instructed you otherwise. Describe not just changes made in this session but ALL changes in the workspace diff.
+- Before creating anything, check whether this branch already has an open PR. If it does, report its URL and do not create a duplicate.
+- Use `gh pr create --repo '<var>withso/zeros</var>' --base '<var>main</var>' --head '<var>zeros/washington</var>'` with non-interactive `--title` and `--body` arguments to create a PR onto the target branch. Keep the title under 80 characters. Keep the description under five sentences, unless the user instructed you otherwise. Describe not just changes made in this session but ALL changes in the workspace diff.
 
 If any of these steps fail, ask the user for help.</pre>
             <div class="wire-note">
@@ -1105,8 +1124,20 @@ If any of these steps fail, ask the user for help.</pre>
               <code>"There is 1 uncommitted change."</code> / <code>"There are N uncommitted
               changes."</code> · upstream: <code>"The branch already has an upstream on
               {remote}."</code> · draft: <code>"The user requested a draft PR."</code> and the create
-              command gains <code>--draft</code>. Status probes are best-effort — on failure the
-              brief degrades to 0 dirty / no upstream (audit G-05).
+              command gains <code>--draft</code>. A confirmed clean tree replaces the commit step
+              with <code>"Do not create an empty commit."</code> Status probes are best-effort; a
+              failed read is now stated as <code>"could not be read"</code> / <code>"could not be
+              determined"</code> and tells the agent to inspect status and operations instead of
+              inventing a clean tree or missing upstream (resolved G-05).
+              <br /><br />
+              Blocker lines (2026-08-01), inserted <em>before</em> "Follow these steps" so the agent
+              meets the obstacle ahead of "Commit them" — this path is the recovery B1 offers when it
+              refuses a conflicted tree: <code>"N files have unresolved merge conflicts. Resolve them
+              first — never commit conflict markers."</code> and
+              <code>"A {merge|rebase|cherry-pick|revert} is in progress in this worktree. Finish or
+              abort it before committing."</code> Every remote/ref/repository argument is POSIX
+              shell-quoted (including embedded apostrophes), and <code>--repo owner/name</code>
+              pins <code>gh</code> to the configured remote in multi-remote and fork workflows.
             </div>
           </div>
           <div class="bubble-demo">
@@ -1123,18 +1154,33 @@ If any of these steps fail, ask the user for help.</pre>
             <div>
               <div class="case-title-row">
                 <span class="case-number">B3</span>
-                <span class="tag context">No agent message</span>
+                <span class="tag context">Routing contract</span>
               </div>
-              <h2>The rest of the dropdown</h2>
+              <h2>Creation routing — what sends a turn and what writes GitHub</h2>
               <p class="case-copy">
-                <strong>Create draft PR</strong> — same direct engine path as B1 with
-                <code>draft: true</code>. <strong>Create PR manually</strong> — opens GitHub's
+                <strong>Create PR</strong> and <strong>Create draft PR</strong> send B2 to the active
+                agent. <strong>Create PR directly</strong> and <strong>Create draft directly</strong>
+                call B1 immediately. <strong>Create PR manually</strong> opens GitHub's
                 compare/new-PR page on the <em>configured</em> remote's repository (fork workflows:
-                <code>git.remote</code> may name upstream, not origin). Neither sends the agent
-                anything.
+                <code>git.remote</code> may name upstream, not origin) but does not submit it.
+                Separately, <strong>"commit and push all changes" only commits and pushes Git</strong>;
+                it is not a request to create a PR. A compare URL printed by GitHub is a suggestion,
+                not an existing PR, so the island remains in create mode until sync discovers a real
+                PR number.
               </p>
             </div>
             <div class="meta"><code>create-pr-button.tsx · githubCompareUrl()</code></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Control</th><th>Agent turn</th><th>Direct GitHub write</th></tr></thead>
+              <tbody>
+                <tr><td><strong>Create PR / draft</strong></td><td><span class="pill prompt">yes</span> B2</td><td class="dim">agent ultimately runs <code>gh pr create</code></td></tr>
+                <tr><td><strong>Create PR / draft directly</strong></td><td>no</td><td><span class="pill direct">yes</span> engine <code>gh.prCreate</code></td></tr>
+                <tr><td><strong>Create PR manually</strong></td><td>no</td><td>no — browser navigation only</td></tr>
+                <tr><td><strong>Commit &amp; push</strong></td><td>yes, when invoked as C2</td><td>no PR write — Git push only</td></tr>
+              </tbody>
+            </table>
           </div>
         </section>
       </div>
@@ -1142,6 +1188,50 @@ If any of these steps fail, ask the user for help.</pre>
       <!-- ═══════════════ Part C ═══════════════ -->
       <p class="band">Part C — PR status island · three buttons prompt the agent, the rest act directly</p>
       <div class="catalog">
+        <section class="case" id="c0">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">C0</span>
+                <span class="tag ship">Single source</span>
+                <span class="tag context">Git + GitHub</span>
+              </div>
+              <h2>One status row, one precedence order, in both Changes and Review</h2>
+              <p class="case-copy">
+                Column 3 mounts exactly one <code>PrStatusRow</code> above the retained Changes and
+                Review bodies. Switching between them preserves the same component and exact-key
+                snapshot; two independently refreshing islands can no longer disagree. Review's
+                duplicate <strong>Mark as ready</strong> / <strong>Merge</strong> CTA also subscribes
+                to the island kind: only <code>draft</code> enables ready and only
+                <code>ready-to-merge</code> enables merge. Every other state supplies the same blocker
+                reason in its tooltip.
+              </p>
+            </div>
+            <div class="meta"><code>column3.tsx · pr-status.ts · review-model.ts</code></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Priority</th><th>Source</th><th>Rendered state</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><td>GitHub PR</td><td>Merged / Closed (terminal)</td></tr>
+                <tr><td>2</td><td>local Git</td><td>Conflicts → uncommitted → <strong>N ahead and M behind</strong> → ahead → behind</td></tr>
+                <tr><td>3</td><td>GitHub PR</td><td>Draft</td></tr>
+                <tr><td>4</td><td>GitHub checks</td><td>Failed before pending</td></tr>
+                <tr><td>5</td><td>GitHub merge state</td><td>Conflicts / behind base / blocked / ready / checking</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="wire-note">
+            Local <strong>ahead/behind</strong> is the checked-out feature branch versus its tracking
+            upstream (<code>@{upstream}</code>); it is not the PR branch versus the target branch.
+            GitHub's separate <code>mergeable_state: behind</code> becomes <em>Update branch</em>.
+            Reads settle atomically and preserve the last confirmed exact-key snapshot while
+            revalidating. Immediately after creation GitHub may return no mergeability verdict while
+            it computes one, so a new PR can honestly show <em>Checking mergeability…</em> until the
+            bounded retry observes the result.
+          </div>
+        </section>
+
         <section class="case" id="c1">
           <div class="case-head">
             <div>
@@ -1739,16 +1829,15 @@ Continue from where the previous conversation left off. The user's next message 
               </div>
             </div>
             <div class="audit-item">
-              <span class="sev tag danger">edge</span>
+              <span class="sev tag ship">fixed</span>
               <div>
-                <h4>G-05 · The PR brief degrades silently when git probes fail</h4>
+                <h4>G-05 · Fixed — failed PR-brief probes remain unknown</h4>
                 <p>
-                  <code>askAgentToCreate</code> uses <code>Promise.allSettled</code>; on failure the
-                  brief states <em>"There are no uncommitted changes."</em> and <em>"There is no
-                  upstream branch yet."</em> as fact. The agent may skip committing real work or
-                  force a redundant <code>-u</code> push. An "unknown — verify with git status"
-                  wording for the failure path would be more honest. Similarly, when the count is 0
-                  the brief still instructs "Run <code>git diff</code>… Commit them." unconditionally.
+                  <code>askAgentToCreate</code> still uses independent
+                  <code>Promise.allSettled</code> reads, but failures now remain nullable. The wire
+                  says the count/status/upstream could not be read and asks the agent to inspect the
+                  worktree. A confirmed zero emits <em>"Do not create an empty commit"</em>; only a
+                  positive confirmed count says <em>"Commit them."</em>
                 </p>
               </div>
             </div>
@@ -1797,10 +1886,9 @@ Continue from where the previous conversation left off. The user's next message 
                 <h4>G-09 · Untracked files inflate the brief's "uncommitted changes" count</h4>
                 <p>
                   The count is staged + unstaged + untracked + conflicted; an agent scratch file
-                  reads as "1 uncommitted change" in B2's wire text. The direct path's refusal
-                  message explains this ("including new untracked files"); the agent brief doesn't.
-                  A tracked-only count needs a new engine field (documented in
-                  <code>create-pr-action.ts</code>).
+                  reads as "1 uncommitted change" in B2's wire text, and the direct path now sweeps
+                  that scratch file into its commit without saying which files it took (only how
+                  many). A tracked-only count needs a new engine field.
                 </p>
               </div>
             </div>
@@ -1831,24 +1919,27 @@ Continue from where the previous conversation left off. The user's next message 
               </div>
             </div>
             <div class="audit-item">
-              <span class="sev tag context">polish</span>
+              <span class="sev tag ship">fixed</span>
               <div>
-                <h4>G-12 · Prompt-button double-fire window</h4>
+                <h4>G-12 · Fixed — prompt actions use a synchronous single-flight claim</h4>
                 <p>
-                  Island prompt actions have no <code>acting</code> guard (direct actions do); two
-                  fast clicks before the turn registers as "agent working" send the same brief twice.
-                  Low impact — the second queues — but it double-stamps the transcript.
+                  A ref-shaped claim is acquired before React state or the agent-working signal can
+                  lag. It covers prompt, direct, and archive actions; a second same-frame click is
+                  rejected, the running icon becomes a spinner, and prompt claims release only when
+                  the accepted agent turn settles (success or failure).
                 </p>
               </div>
             </div>
             <div class="audit-item">
-              <span class="sev tag context">polish</span>
+              <span class="sev tag ship">fixed</span>
               <div>
-                <h4>G-13 · Quoting edge in the push command</h4>
+                <h4>G-13 · Fixed — PR commands shell-quote repository data</h4>
                 <p>
-                  B2 renders <code>git push -u 'origin' HEAD:'zeros/foo'</code> — safe for normal
-                  names, but a branch containing a single quote (legal in git) breaks the suggested
-                  command. Cosmetic; the agent usually normalizes.
+                  The remote, branch, base, and <code>owner/repository</code> now use POSIX
+                  single-quote escaping, including embedded apostrophes. The create command also
+                  supplies <code>--repo</code> from the configured remote and an explicit
+                  <code>--head</code>, preventing <code>gh</code> from silently targeting origin in a
+                  multi-remote checkout.
                 </p>
               </div>
             </div>
@@ -1905,15 +1996,40 @@ Continue from where the previous conversation left off. The user's next message 
               </div>
             </div>
             <div class="audit-item">
-              <span class="sev tag context">polish</span>
+              <span class="sev tag ship">fixed</span>
               <div>
-                <h4>G-18 · The PR-island design catalog contradicts itself on prompt-vs-direct</h4>
+                <h4>G-18 · Fixed — PR-island catalog matches direct-action behavior</h4>
                 <p>
-                  <code>pr-status-island-state-catalog.html</code> labels Push / Pull / Ready-for-review
-                  / Continue "(prompt)" in the per-case meta blocks but "(direct)" in its F3 reference
-                  table. The code (and the 2026-07-19 decision) is <em>direct</em> — the catalog's
-                  meta blocks predate it and should be corrected so the next reader doesn't
-                  re-implement them as prompts.
+                  <code>pr-status-island-state-catalog.html</code> now labels Push / Pull /
+                  Ready-for-review / Continue as <em>direct</em> in both the case narratives and its
+                  F3 reference table, matching the 2026-07-19 implementation.
+                </p>
+              </div>
+            </div>
+            <div class="audit-item">
+              <span class="sev tag ship">fixed</span>
+              <div>
+                <h4>G-19 · Fixed — retained Changes and Review mounted competing islands</h4>
+                <p>
+                  Each retained tab previously owned a <code>PrStatusIsland</code> with local live
+                  state. The module cache was shared, but a tab's older local snapshot took
+                  precedence after the other tab refreshed, producing combinations such as
+                  <em>Diverged</em> in Changes and <em>Ready to merge</em> in Review. Column 3 now owns
+                  one row above both bodies, so the component and status identity do not change on
+                  the tab hop.
+                </p>
+              </div>
+            </div>
+            <div class="audit-item">
+              <span class="sev tag ship">fixed</span>
+              <div>
+                <h4>G-20 · Fixed — Review's merge CTA bypassed higher-priority blockers</h4>
+                <p>
+                  The Review header used only GitHub's coarse conflict fields, so it could offer
+                  <em>Squash &amp; merge</em> while the island showed uncommitted/ahead/diverged,
+                  pending or failed checks, behind-base, blocked, or checking. Its duplicate CTA now
+                  consumes the exact island kind and is enabled only for <code>ready-to-merge</code>;
+                  draft readiness is likewise enabled only for <code>draft</code>.
                 </p>
               </div>
             </div>
@@ -1922,7 +2038,7 @@ Continue from where the previous conversation left off. The user's next message 
       </div>
 
       <footer>
-        Compiled 2026-07-30 from branch <code>washington</code>. Code of record:
+        Updated 2026-08-01 from branch <code>bujumbura</code>. Code of record:
         <code>packages/core/src/system-instructions/{templates,build}.ts</code> ·
         <code>src/engine/agents/gateway.ts</code> ·
         <code>src/engine/settings/{spawn-env,schema}.ts</code> ·

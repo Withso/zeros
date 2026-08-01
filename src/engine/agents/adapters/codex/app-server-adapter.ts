@@ -69,8 +69,6 @@ import {
   type CodexApprovalPolicy,
   type CodexApprovalRequest,
   type CodexAppServerHandle,
-  type CodexMcpElicitationRequest,
-  type CodexMcpElicitationResponse,
   type CodexSandboxMode,
   type CodexSandboxPolicy,
   type CodexThreadStartParams,
@@ -151,10 +149,6 @@ export interface PendingApproval {
   params: Record<string, unknown>;
 }
 
-interface PendingMcpApproval {
-  runtime: CodexAppServerHandle;
-}
-
 interface CodexSession {
   zerosSessionId: string;
   cwd: string;
@@ -201,12 +195,6 @@ interface CodexSession {
    *  ids; the runtime tracks its own JSON-RPC-side promise map by the
    *  same id). */
   pendingApprovals: Map<string, PendingApproval>;
-  /** MCP tool-call approvals share the renderer's permission surface, but
-   *  answer a different app-server request/response protocol. */
-  pendingMcpApprovals: Map<string, PendingMcpApproval>;
-  /** Only Zeros-minted managed registrations may use Auto-Edit's first-party
-   *  auto-accept path. User/repository MCP config can never populate this. */
-  trustedMcpServers: Set<string>;
   /** questionId → pending blocking-question state (runtime + the request we
    *  built, for answer reshaping + dismiss). Twin of pendingApprovals. */
   pendingQuestions: Map<
@@ -438,7 +426,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // response/session wrapper + `available` field left the mode pill empty on
     // every resumed codex chat.
     return {
-      sessionId: session.zerosSessionId,
       modes: {
         currentModeId: session.modeId,
         availableModes: CODEX_MODES,
@@ -915,16 +902,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
       pending.runtime.respondToPermission(opts.permissionId, codexResponse);
       return;
     }
-    for (const session of this.sessions.values()) {
-      const pending = session.pendingMcpApprovals.get(opts.permissionId);
-      if (!pending) continue;
-      session.pendingMcpApprovals.delete(opts.permissionId);
-      pending.runtime.respondToMcpElicitation(
-        opts.permissionId,
-        mapResponseToMcpElicitation(opts.response),
-      );
-      return;
-    }
     // Unknown permissionId — already responded or session was disposed.
     // No throw; the gateway pipeline tolerates this.
     console.log(
@@ -1138,7 +1115,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
     if (!s) return;
     this.sessions.delete(sessionId);
     s.pendingApprovals.clear();
-    s.pendingMcpApprovals.clear();
     s.pendingQuestions.clear();
     this.disposing.add(sessionId);
     try {
@@ -1163,7 +1139,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
         // also auto-cancels its in-flight approval promises, so this
         // is belt-and-braces — but it keeps the adapter map clean.
         s.pendingApprovals.clear();
-        s.pendingMcpApprovals.clear();
         s.pendingQuestions.clear();
         await s.runtime.dispose();
         // Best-effort session dir removal.
@@ -1199,10 +1174,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
      *  through listSessions). For kind === "new", a fresh UUID. */
     zerosSessionId?: string;
   }): Promise<{ session: CodexSession; resumedFresh: boolean }> {
-    // The boot tag needs an id before thread/start returns, but it is NOT the
-    // public resume handle. Codex's returned threadId is the only id that can
-    // be resumed after this adapter process exits.
-    const bootSessionId = opts.zerosSessionId ?? randomUUID();
+    const zerosSessionId = opts.zerosSessionId ?? randomUUID();
+    await ensureSessionDir(zerosSessionId);
 
     // Always boot in "ask". The UI's mode pill is the canonical setter;
     // env-driven overrides would race the pill's persisted value, so
@@ -1216,30 +1189,20 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // eslint-disable-next-line prefer-const -- assigned after runtime boot; closures above capture the live ref.
     let session!: CodexSession;
     let runtime: CodexAppServerHandle;
-    const sessionMcpServers = opts.mcpServers ?? this.ctx.mcpServers;
-    const trustedMcpServers = new Set(
-      sessionMcpServers
-        .filter((server) => server.trusted === true)
-        .map((server) => server.name),
-    );
     try {
       runtime = await bootCodexAppServerRuntime({
         cwd: opts.cwd,
         env: opts.env,
         cliBinary: opts.cliBinary,
         clientInfo: CLIENT_INFO,
-        mcpServers: sessionMcpServers,
-        logTag: `codex-app-server:${bootSessionId.slice(0, 8)}`,
+        mcpServers: opts.mcpServers ?? this.ctx.mcpServers,
+        logTag: `codex-app-server:${zerosSessionId.slice(0, 8)}`,
         onApprovalRequest: (request) =>
           this.handleApprovalRequest(session, request),
         onUserInputRequest: (request) =>
           this.handleUserInputRequest(session, request),
         onUserInputSettled: (questionId) =>
           this.handleUserInputSettled(session, questionId),
-        onMcpElicitationRequest: (request) =>
-          this.handleMcpElicitationRequest(session, request),
-        onMcpElicitationSettled: (elicitationId) =>
-          this.handleMcpElicitationSettled(session, elicitationId),
         onStderr: (line) => {
           this.ctx.emit.onAgentStderr(this.agentId, line);
         },
@@ -1341,21 +1304,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
       );
     }
 
-    // Canonicalize every live/public session to Codex's persisted rollout id.
-    // For a new chat this prevents the renderer from storing an unresumable
-    // local UUID. For a stale legacy resume, thread/start's replacement id is
-    // returned to the gateway so routing + the chat row migrate in one pass.
-    const zerosSessionId = threadId;
-    try {
-      await ensureSessionDir(zerosSessionId);
-    } catch (err) {
-      await runtime.dispose();
-      throw classifyThreadFailure(
-        err,
-        opts.kind === "resume" ? "loadSession" : "newSession",
-      );
-    }
-
     const translator = new CodexAppServerTranslator({
       sessionId: zerosSessionId,
       emit: (notification: SessionNotification) =>
@@ -1383,8 +1331,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
       cancelRequested: false,
       postCancelInterruptUntil: 0,
       pendingApprovals: new Map(),
-      pendingMcpApprovals: new Map(),
-      trustedMcpServers,
       pendingQuestions: new Map(),
       fileEditPathsByItemId: new Map(),
       authMode: null,
@@ -1472,7 +1418,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
     session.activeTurnId = null;
     session.activeTurns.clear();
     session.pendingApprovals.clear();
-    session.pendingMcpApprovals.clear();
     session.pendingQuestions.clear();
     session.fileEditPathsByItemId.clear();
 
@@ -1707,76 +1652,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
       request.permissionId,
       canonical,
     );
-  }
-
-  /** Codex forwards MCP tool approvals through its elicitation request. Honor
-   *  the active Zeros mode here instead of letting `approvalPolicy:"never"`
-   *  reject them before the client sees them:
-   *    - Full Access accepts;
-   *    - Auto-Edit accepts only Zeros-minted trusted servers;
-   *    - Ask surfaces the normal permission card;
-   *    - Read-Only declines writes.
-   *  Real/unknown MCP forms have no safe canonical UI mapping yet, so they are
-   *  cancelled immediately rather than hanging or accidentally consenting. */
-  private handleMcpElicitationRequest(
-    session: CodexSession,
-    request: CodexMcpElicitationRequest,
-  ): void {
-    const params = request.params as unknown as Record<string, unknown>;
-    const meta = recordField(params, "_meta") ?? {};
-    if (stringField(meta, "codex_approval_kind") !== "mcp_tool_call") {
-      this.ctx.emit.onAgentStderr(
-        this.agentId,
-        `[codex] Unsupported MCP elicitation from ${stringField(params, "serverName") ?? "unknown server"}; cancelled safely.`,
-      );
-      session.runtime.respondToMcpElicitation(
-        request.elicitationId,
-        mcpElicitationDecision("cancel"),
-      );
-      return;
-    }
-
-    const serverName = stringField(params, "serverName") ?? "unknown";
-    if (session.modeId === "full-access") {
-      session.runtime.respondToMcpElicitation(
-        request.elicitationId,
-        mcpElicitationDecision("accept"),
-      );
-      return;
-    }
-    if (session.modeId === "read-only") {
-      session.runtime.respondToMcpElicitation(
-        request.elicitationId,
-        mcpElicitationDecision("decline"),
-      );
-      return;
-    }
-    if (
-      session.modeId === "auto-edit" &&
-      session.trustedMcpServers.has(serverName)
-    ) {
-      session.runtime.respondToMcpElicitation(
-        request.elicitationId,
-        mcpElicitationDecision("accept"),
-      );
-      return;
-    }
-
-    session.pendingMcpApprovals.set(request.elicitationId, {
-      runtime: session.runtime,
-    });
-    this.ctx.emit.onPermissionRequest(
-      this.agentId,
-      request.elicitationId,
-      mapMcpApprovalToCanonical(session, request),
-    );
-  }
-
-  private handleMcpElicitationSettled(
-    session: CodexSession | undefined,
-    elicitationId: string,
-  ): void {
-    session?.pendingMcpApprovals?.delete(elicitationId);
   }
 
   /** A blocking user-input question (item/tool/requestUserInput). Twin of
@@ -2394,19 +2269,7 @@ export function modePolicyFor(modeId: CodexModeId): CodexModePolicy {
       };
     case "full-access":
       return {
-        // `never` also auto-rejects MCP elicitations before this client can
-        // answer them, producing the misleading "user rejected MCP tool call"
-        // error. Keep every other approval category non-interactive while
-        // allowing MCP requests through to the explicit policy below.
-        approvalPolicy: {
-          granular: {
-            sandbox_approval: false,
-            rules: false,
-            skill_approval: false,
-            request_permissions: false,
-            mcp_elicitations: true,
-          },
-        },
+        approvalPolicy: "never",
         sandboxMode: "danger-full-access",
         sandboxPolicy: { type: "dangerFullAccess" },
       };
@@ -2636,101 +2499,6 @@ export function mapApprovalToCanonical(
   } as never;
 }
 
-function mapMcpApprovalToCanonical(
-  session: CodexSession,
-  request: CodexMcpElicitationRequest,
-): RequestPermissionRequest {
-  const params = request.params as unknown as Record<string, unknown>;
-  const meta = recordField(params, "_meta") ?? {};
-  const serverName = stringField(params, "serverName") ?? "unknown";
-  const toolTitle = stringField(meta, "tool_title") ?? "MCP tool";
-  const toolDescription = stringField(meta, "tool_description");
-  const message = stringField(params, "message");
-  const toolParams = recordField(meta, "tool_params") ?? {};
-
-  const persistRaw = meta.persist;
-  const persist = new Set(
-    (Array.isArray(persistRaw) ? persistRaw : [persistRaw]).filter(
-      (value): value is string => typeof value === "string",
-    ),
-  );
-  const options: Array<{
-    optionId: string;
-    name: string;
-    kind: "allow_once" | "allow_always" | "reject_once" | "reject_always";
-  }> = [{ optionId: "accept", name: "Approve", kind: "allow_once" }];
-  if (persist.has("session")) {
-    options.push({
-      optionId: "acceptForSession",
-      name: "Approve for session",
-      kind: "allow_always",
-    });
-  }
-  if (persist.has("always")) {
-    options.push({
-      optionId: "acceptAlways",
-      name: "Always approve",
-      kind: "allow_always",
-    });
-  }
-  options.push(
-    { optionId: "decline", name: "Decline", kind: "reject_once" },
-    { optionId: "cancel", name: "Cancel", kind: "reject_always" },
-  );
-
-  return {
-    sessionId: session.zerosSessionId as never,
-    toolCall: {
-      toolCallId: request.elicitationId,
-      title: `${serverName}: ${toolTitle}`,
-      kind: (session.trustedMcpServers.has(serverName)
-        ? "edit"
-        : "execute") as never,
-      status: "pending" as never,
-      rawInput: {
-        ...toolParams,
-        server: serverName,
-        tool: toolTitle,
-        ...(toolDescription ? { description: toolDescription } : {}),
-        ...(message ? { reason: message } : {}),
-      },
-    } as never,
-    options: options as never,
-  } as never;
-}
-
-function mcpElicitationDecision(
-  action: "accept" | "decline" | "cancel",
-  persist?: "session" | "always",
-): CodexMcpElicitationResponse {
-  return {
-    action,
-    content: null,
-    _meta: persist ? { persist } : null,
-  };
-}
-
-function mapResponseToMcpElicitation(
-  response: RequestPermissionResponse,
-): CodexMcpElicitationResponse {
-  if (response.outcome.outcome === "cancelled") {
-    return mcpElicitationDecision("cancel");
-  }
-  switch (response.outcome.optionId) {
-    case "accept":
-      return mcpElicitationDecision("accept");
-    case "acceptForSession":
-      return mcpElicitationDecision("accept", "session");
-    case "acceptAlways":
-      return mcpElicitationDecision("accept", "always");
-    case "decline":
-      return mcpElicitationDecision("decline");
-    case "cancel":
-    default:
-      return mcpElicitationDecision("cancel");
-  }
-}
-
 /** Convert a Zeros RequestPermissionResponse into the method-specific
  *  codex approval response shape. Receives the full PendingApproval so
  *  the permissions-request path can mirror the agent's *original*
@@ -2826,18 +2594,6 @@ function stringField(
 ): string | undefined {
   const v = params[key];
   return typeof v === "string" ? v : undefined;
-}
-
-function recordField(
-  params: Record<string, unknown>,
-  key: string,
-): Record<string, unknown> | undefined {
-  const value = params[key];
-  return value !== null &&
-    typeof value === "object" &&
-    !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
 }
 
 /** Pull the non-empty file paths off a streamed fileChange item's changes[]

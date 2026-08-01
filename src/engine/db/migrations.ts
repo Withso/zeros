@@ -782,6 +782,10 @@ const MIGRATION_26_CHAT_MODE = `
 ALTER TABLE chats ADD COLUMN mode TEXT NOT NULL DEFAULT 'code'
   CHECK (mode IN ('code', 'design'));
 `;
+// Historical/inert: the design workspace no longer uses the shared chat
+// backend, and current chat persistence intentionally ignores this column.
+// Keep v26 forever because existing databases may already have applied it;
+// removing or renumbering an applied migration would break the forward ladder.
 
 /** v27 — workspace product kind. Existing rows are code workspaces. A design
  * workspace shares the lifecycle table and Git semantics, but is provisioned

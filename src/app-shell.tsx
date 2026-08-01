@@ -46,7 +46,6 @@ import {
 } from "./zeros/settings/migrate-legacy";
 import { AgentSessionsProvider } from "./zeros/agent/sessions-provider";
 import { useAgentSessions } from "./zeros/agent/sessions-hooks";
-import { useDesignLintCoordinator } from "./zeros/agent/use-design-lint-coordinator";
 import { UpdateNotifications } from "./zeros/update/update-notifications";
 import { useCopyLogsHotkey } from "./shell/use-copy-logs-hotkey";
 import { useNewTabHotkeys } from "./shell/use-new-chat-hotkey";
@@ -60,6 +59,7 @@ import { TopBar } from "./shell/top-bar";
 import { Column2Workspace } from "./shell/column2-workspace";
 import { Column3 } from "./shell/column3";
 import { DesignWorkspaceColumn } from "./zeros/panels/design-workspace";
+import { DesignWorkspaceSidebar } from "./zeros/panels/design-workspace-sidebar";
 import { useWorkspacePrSync } from "./shell/pr/use-workspace-pr-sync";
 import { WorktreeMissingPanel } from "./shell/worktree-missing-panel";
 import { AddProjectProvider } from "./shell/add-project-provider";
@@ -113,6 +113,11 @@ import { useInstantViewSwitch } from "./zeros/ui/use-instant-view-switch";
 import { useRetainedViewKeys } from "./shell/use-retained-view-keys";
 import { useGitRefreshCoordinator } from "./shell/use-git-refresh-key";
 import { GithubAppNotifications } from "./zeros/bridge/github-app-notifications";
+import {
+  useInternalFeatureActive,
+  useInternalUserResolutionSettled,
+} from "./zeros/settings/internal-features";
+import { shouldLeaveBlockedDesignWorkspace } from "./shell/design-workspace-access";
 
 // Chat localStorage cache keys live in a shared module so the repo-removal
 // path (which bulk-deletes a repo's chats) reconciles the exact same keys this
@@ -326,7 +331,6 @@ function HydrateAiApiKey() {
 function threadToRow(c: ChatThread): ChatRowWire {
   return {
     id: c.id,
-    mode: c.mode === "design" ? "design" : "code",
     folder: c.folder ?? "",
     agentId: c.agentId ?? null,
     agentName: c.agentName ?? null,
@@ -372,7 +376,6 @@ function rowToThread(r: ChatRowWire): ChatThread {
     r.kind === "terminal" || r.kind === "chat" ? r.kind : undefined;
   return {
     id: r.id,
-    mode: r.mode === "design" ? "design" : "code",
     folder: r.folder,
     agentId: r.agentId,
     agentName: r.agentName,
@@ -895,7 +898,6 @@ function MainShellBody({
   // is collapsed, Home is visible, or a missing-worktree panel replaces the
   // workspace shell. Consumers remain ordinary key subscriptions.
   useGitRefreshCoordinator();
-  useDesignLintCoordinator();
   const activePage = useActivePage();
   const activeRepoId = useActiveRepoId();
   const {
@@ -904,17 +906,20 @@ function MainShellBody({
     project: activeProject,
   } = useActiveWorkspace();
   const pendingWorkspaceKind = usePendingWorkspaceKind(activeWorkspaceFolder);
-  const activeChatMode = useWorkspaceStore(
-    (state) =>
-      state.chats.find((chat) => chat.id === state.activeChatId)?.mode ?? null,
-  );
-  const designWorkspaceActive =
+  const designWorkspacesActive =
+    useInternalFeatureActive("designWorkspaces");
+  const internalUserResolutionSettled =
+    useInternalUserResolutionSettled();
+  const designWorkspaceRequested =
     resolveWorkspacePresentationKind({
       confirmedKind: activeWorkspace?.kind,
       pendingKind: pendingWorkspaceKind,
       folder: activeWorkspaceFolder,
-      chatMode: activeChatMode,
     }) === "design";
+  const designWorkspaceActive =
+    designWorkspacesActive && designWorkspaceRequested;
+  const designWorkspaceBlocked =
+    designWorkspaceRequested && !designWorkspacesActive;
   const shellSurfaceRef = useRef<HTMLDivElement | null>(null);
   useInstantViewSwitch(
     `${activePage}:${activeWorkspace?.id ?? activeRepoId ?? activeProject?.id ?? "none"}`,
@@ -923,12 +928,36 @@ function MainShellBody({
   // Reveal a PR opened outside the engine (agent `gh pr create` / terminal): if
   // the active workspace has no recorded prNumber, detect + backfill it so the
   // Column 3 PR-status island appears and the header "Create PR" button hides.
-  useWorkspacePrSync(activeWorkspace);
+  useWorkspacePrSync(designWorkspaceRequested ? null : activeWorkspace);
   const dispatch = useWorkspaceDispatch();
+  // A persisted design destination can outlive its per-channel Internal flag
+  // (or the staff role can be revoked between launches). Leave the workspace
+  // identity remembered, but move to the user's complete Home destination
+  // before paint. This avoids mounting either design UI or the coding harness,
+  // and avoids auto-spawning a coding chat merely as an access fallback.
+  React.useLayoutEffect(() => {
+    if (
+      !shouldLeaveBlockedDesignWorkspace({
+        workspaceRoute: activePage === "workspace",
+        designRequested: designWorkspaceRequested,
+        designActive: designWorkspaceActive,
+        internalUserResolutionSettled,
+      })
+    ) {
+      return;
+    }
+    dispatch({ type: "OPEN_HOME" });
+  }, [
+    activePage,
+    designWorkspaceActive,
+    designWorkspaceRequested,
+    dispatch,
+    internalUserResolutionSettled,
+  ]);
   const { projects } = useProjects();
   // ⌘T opens a chat; ⌘⇧T opens a terminal-agent tab when that feature is
   // enabled. Mounted here so neither shortcut fires from Settings.
-  useNewTabHotkeys();
+  useNewTabHotkeys(!designWorkspaceRequested);
   const worktreeMissing =
     !!activeWorkspace && activeWorkspace.present === false;
   // Zero projects -> full-window welcome (logo + Open project / GitHub /
@@ -987,7 +1016,12 @@ function MainShellBody({
   // Only the workspace view swaps in the missing-worktree panel — the Home
   // sub-pages have no active worktree content to lose, so they render normally
   // even while the selected workspace's folder is gone.
-  if (worktreeMissing && activeWorkspace && activePage === "workspace") {
+  if (
+    worktreeMissing &&
+    activeWorkspace &&
+    !designWorkspaceBlocked &&
+    activePage === "workspace"
+  ) {
     // Drop the DB row + worktree folder (branch kept), scrub every renderer
     // surface keyed on it, and repoint to the project's Local main so the open
     // chat isn't stranded. Shared with the corrupted-workspace archive-failure
@@ -1051,27 +1085,38 @@ function MainShellBody({
               ].join(" ")}
               aria-hidden={isHome}
             >
-              <Column2Workspace
-                col3Collapsed={col3Collapsed}
-                onToggleCol3={toggleCol3}
-                surfaceActive={!isHome}
-              />
-              {designWorkspaceActive ? (
-                <DesignWorkspaceColumn
-                  workspace={
-                    activeWorkspace?.kind === "design" ? activeWorkspace : null
-                  }
-                  folder={activeWorkspaceFolder}
-                  surfaceActive={!isHome && !col3Collapsed}
-                  collapsed={col3Collapsed}
-                  onToggleCol3={toggleCol3}
-                />
+              {designWorkspaceBlocked ? (
+                <div className="bg-bg1 flex min-h-0 min-w-0 flex-1" />
+              ) : designWorkspaceActive ? (
+                <>
+                  <DesignWorkspaceSidebar
+                    surfaceActive={!isHome}
+                    canvasCollapsed={col3Collapsed}
+                  />
+                  <DesignWorkspaceColumn
+                    workspace={
+                      activeWorkspace?.kind === "design"
+                        ? activeWorkspace
+                        : null
+                    }
+                    folder={activeWorkspaceFolder}
+                    surfaceActive={!isHome && !col3Collapsed}
+                    collapsed={col3Collapsed}
+                    onToggleCol3={toggleCol3}
+                  />
+                </>
               ) : (
-                <Column3
-                  onToggleCol3={toggleCol3}
-                  surfaceActive={!isHome && !col3Collapsed}
-                  collapsed={col3Collapsed}
-                />
+                <>
+                  <Column2Workspace
+                    col3Collapsed={col3Collapsed}
+                    onToggleCol3={toggleCol3}
+                  />
+                  <Column3
+                    onToggleCol3={toggleCol3}
+                    surfaceActive={!isHome && !col3Collapsed}
+                    collapsed={col3Collapsed}
+                  />
+                </>
               )}
             </div>
           )}

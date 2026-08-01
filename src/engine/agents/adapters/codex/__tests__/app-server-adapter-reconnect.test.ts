@@ -28,14 +28,6 @@ const rt = vi.hoisted(() => ({
     questionId: string;
     params: Record<string, unknown>;
   }) => void),
-  lastOnMcpElicitationRequest: null as null | ((request: {
-    elicitationId: string;
-    params: Record<string, unknown>;
-  }) => void),
-  mcpElicitationResponses: [] as Array<{
-    elicitationId: string;
-    response: unknown;
-  }>,
   runTurnImpl: null as
     | null
     | ((params: unknown, opts: { onTurnStarted?: (id: string) => void }) => Promise<unknown>),
@@ -48,11 +40,9 @@ vi.mock("../app-server", () => ({
   bootCodexAppServerRuntime: vi.fn(async (opts: {
     onExit?: typeof rt.lastOnExit;
     onUserInputRequest?: typeof rt.lastOnUserInputRequest;
-    onMcpElicitationRequest?: typeof rt.lastOnMcpElicitationRequest;
   }) => {
     rt.lastOnExit = opts.onExit ?? null;
     rt.lastOnUserInputRequest = opts.onUserInputRequest ?? null;
-    rt.lastOnMcpElicitationRequest = opts.onMcpElicitationRequest ?? null;
     return {
       initializeResponse: {
         userAgent: "codex_cli 0.139.0",
@@ -80,9 +70,6 @@ vi.mock("../app-server", () => ({
       },
       interruptTurn: async () => {},
       respondToPermission: () => {},
-      respondToMcpElicitation: (elicitationId: string, response: unknown) => {
-        rt.mcpElicitationResponses.push({ elicitationId, response });
-      },
       onNotification: () => () => {},
       request: vi.fn(async (method: string, params: unknown) => {
         rt.requests.push([method, params]);
@@ -133,8 +120,6 @@ describe("codex mid-turn reconnect + per-session crash signalling", () => {
     vi.useFakeTimers();
     rt.lastOnExit = null;
     rt.lastOnUserInputRequest = null;
-    rt.lastOnMcpElicitationRequest = null;
-    rt.mcpElicitationResponses = [];
     rt.runTurnImpl = null;
     rt.requests = [];
   });
@@ -287,200 +272,6 @@ describe("codex mid-turn reconnect + per-session crash signalling", () => {
       multiSelect: false,
       allowOther: true,
     });
-  });
-
-  it("auto-accepts MCP tool approvals in full-access instead of Codex auto-rejecting them", async () => {
-    const { adapter, emit } = makeAdapter();
-    const { session } = await adapter.newSession({
-      cwd: "/tmp/proj",
-      mcpServers: [
-        {
-          name: "zeros-design",
-          transport: "http",
-          url: "http://127.0.0.1:1234/mcp",
-          trusted: true,
-        },
-      ],
-    });
-    await adapter.setMode({
-      sessionId: session.sessionId,
-      modeId: "full-access",
-    });
-
-    rt.lastOnMcpElicitationRequest?.({
-      elicitationId: "mcp-approval-1",
-      params: {
-        threadId: "thread-1",
-        turnId: "turn-1",
-        serverName: "zeros-design",
-        mode: "form",
-        message: "Allow the zeros-design MCP server to run update_styles?",
-        requestedSchema: { type: "object", properties: {} },
-        _meta: {
-          codex_approval_kind: "mcp_tool_call",
-          tool_title: "update_styles",
-          tool_params: { frame: "home.html" },
-        },
-      },
-    });
-
-    expect(rt.mcpElicitationResponses).toEqual([
-      {
-        elicitationId: "mcp-approval-1",
-        response: { action: "accept", content: null, _meta: null },
-      },
-    ]);
-    expect(emit.onPermissionRequest).not.toHaveBeenCalled();
-  });
-
-  it("surfaces Ask-mode MCP approval and maps session persistence back to Codex", async () => {
-    const { adapter, emit } = makeAdapter();
-    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
-
-    rt.lastOnMcpElicitationRequest?.({
-      elicitationId: "mcp-approval-2",
-      params: {
-        threadId: "thread-1",
-        turnId: "turn-1",
-        serverName: "third-party",
-        mode: "form",
-        message: "Allow the tool?",
-        requestedSchema: { type: "object", properties: {} },
-        _meta: {
-          codex_approval_kind: "mcp_tool_call",
-          tool_title: "publish",
-          tool_description: "Publish a release",
-          tool_params: { tag: "v1.2.3" },
-          persist: ["session", "always"],
-        },
-      },
-    });
-
-    const [, permissionId, request] = emit.onPermissionRequest.mock.calls[0];
-    expect(permissionId).toBe("mcp-approval-2");
-    expect(request.toolCall).toMatchObject({
-      title: "third-party: publish",
-      rawInput: {
-        server: "third-party",
-        tool: "publish",
-        tag: "v1.2.3",
-      },
-    });
-    expect(request.options.map((option: { optionId: string }) => option.optionId)).toEqual([
-      "accept",
-      "acceptForSession",
-      "acceptAlways",
-      "decline",
-      "cancel",
-    ]);
-
-    adapter.respondToPermission({
-      permissionId,
-      response: {
-        outcome: { outcome: "selected", optionId: "acceptForSession" },
-      },
-    });
-    expect(rt.mcpElicitationResponses).toContainEqual({
-      elicitationId: "mcp-approval-2",
-      response: {
-        action: "accept",
-        content: null,
-        _meta: { persist: "session" },
-      },
-    });
-    expect(session.sessionId).toBeTruthy();
-  });
-
-  it("fails closed for MCP write approvals in read-only mode", async () => {
-    const { adapter, emit } = makeAdapter();
-    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
-    await adapter.setMode({ sessionId: session.sessionId, modeId: "read-only" });
-
-    rt.lastOnMcpElicitationRequest?.({
-      elicitationId: "mcp-approval-3",
-      params: {
-        serverName: "zeros-design",
-        mode: "form",
-        message: "Allow a write?",
-        requestedSchema: { type: "object", properties: {} },
-        _meta: { codex_approval_kind: "mcp_tool_call" },
-      },
-    });
-
-    expect(rt.mcpElicitationResponses).toContainEqual({
-      elicitationId: "mcp-approval-3",
-      response: { action: "decline", content: null, _meta: null },
-    });
-    expect(emit.onPermissionRequest).not.toHaveBeenCalled();
-  });
-
-  it("auto-accepts only trusted first-party MCP writes in Auto-Edit", async () => {
-    const { adapter, emit } = makeAdapter();
-    const { session } = await adapter.newSession({
-      cwd: "/tmp/proj",
-      mcpServers: [
-        {
-          name: "zeros-design",
-          transport: "http",
-          url: "http://127.0.0.1:1234/mcp",
-          trusted: true,
-        },
-      ],
-    });
-    await adapter.setMode({ sessionId: session.sessionId, modeId: "auto-edit" });
-
-    const approval = (elicitationId: string, serverName: string) => ({
-      elicitationId,
-      params: {
-        serverName,
-        mode: "form",
-        message: "Allow a write?",
-        requestedSchema: { type: "object", properties: {} },
-        _meta: {
-          codex_approval_kind: "mcp_tool_call",
-          tool_title: "write",
-        },
-      },
-    });
-    rt.lastOnMcpElicitationRequest?.(
-      approval("mcp-trusted", "zeros-design"),
-    );
-    rt.lastOnMcpElicitationRequest?.(
-      approval("mcp-untrusted", "third-party"),
-    );
-
-    expect(rt.mcpElicitationResponses).toContainEqual({
-      elicitationId: "mcp-trusted",
-      response: { action: "accept", content: null, _meta: null },
-    });
-    expect(emit.onPermissionRequest).toHaveBeenCalledTimes(1);
-    expect(emit.onPermissionRequest.mock.calls[0][1]).toBe("mcp-untrusted");
-  });
-
-  it("cancels non-approval and malformed MCP elicitations instead of hanging", async () => {
-    const { adapter, emit } = makeAdapter();
-    await adapter.newSession({ cwd: "/tmp/proj" });
-
-    rt.lastOnMcpElicitationRequest?.({
-      elicitationId: "mcp-form-1",
-      params: {
-        serverName: "third-party",
-        mode: "form",
-        message: "Enter a secret",
-        requestedSchema: { type: "object", properties: {} },
-        _meta: null,
-      },
-    });
-
-    expect(rt.mcpElicitationResponses).toContainEqual({
-      elicitationId: "mcp-form-1",
-      response: { action: "cancel", content: null, _meta: null },
-    });
-    expect(emit.onPermissionRequest).not.toHaveBeenCalled();
-    expect(emit.onAgentStderr).toHaveBeenCalledWith(
-      "codex",
-      expect.stringContaining("cancelled safely"),
-    );
   });
 
   it("still surfaces a generic protocol-error when a turn fails WITHOUT a child exit", async () => {

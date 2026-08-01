@@ -830,7 +830,6 @@ export function chatEnvDriftKey(
  *  adapter (→ `Options.additionalDirectories`). Only emitted when non-empty so
  *  it never perturbs the respawn key for chats without extra dirs. */
 export const ADDITIONAL_DIRS_ENV_VAR = "ZEROS_ADDITIONAL_DIRS";
-export const CHAT_MODE_ENV_VAR = "ZEROS_CHAT_MODE";
 
 /** §3.6 R2 — env var carrying the Settings → Models fallback model. Read by
  *  the Claude SDK adapter (→ `Options.fallbackModel`). Only emitted when a
@@ -851,7 +850,6 @@ export function envForChatSettings(args: {
   fast?: boolean;
   additionalDirectories?: string[];
   permissionMode?: string;
-  chatMode?: "code" | "design";
 }): Record<string, string> {
   const env: Record<string, string> = {};
   const modelEnv = modelEnvVarForAgent(args.agentId, args.initialize);
@@ -878,7 +876,6 @@ export function envForChatSettings(args: {
   );
   if (dirs.length > 0) env[ADDITIONAL_DIRS_ENV_VAR] = JSON.stringify(dirs);
   if (args.permissionMode) env[PERMISSION_MODE_ENV_VAR] = args.permissionMode;
-  if (args.chatMode === "design") env[CHAT_MODE_ENV_VAR] = "design";
   // §3.6 R2/R3 — the global reliability knobs ride the same env channel,
   // Claude-only (the other adapters expose no fallback/budget hook). Emitted
   // by omission when off so they never perturb the env tuple for chats that
@@ -907,6 +904,5 @@ export function envForChat(
     fast: chat.fast,
     additionalDirectories: chat.additionalDirectories,
     permissionMode: chat.permissionMode,
-    chatMode: chat.mode,
   });
 }

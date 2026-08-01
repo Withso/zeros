@@ -25,7 +25,7 @@ import {
 // --- TYPES ---
 
 interface DesignFrameRuntimeIframeProps {
-  /** Exact workspace owner for runtime requests and MCP screenshot publication. */
+  /** Exact workspace owner for runtime requests and screenshot publication. */
   workspaceId: string;
   /** Per-launch authority for this exact workspace's custom-protocol route. */
   protocolCapability: string | null;

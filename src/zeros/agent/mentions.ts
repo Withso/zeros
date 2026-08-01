@@ -20,11 +20,6 @@ import type { BrowserPickerSelection } from "../store/store";
 
 export type MentionKind = "selection" | "file" | "folder";
 
-export interface MentionSelection extends BrowserPickerSelection {
-  frame?: string;
-  oid?: string;
-}
-
 export interface MentionItem {
   id: string;
   kind: MentionKind;
@@ -35,7 +30,9 @@ export interface MentionItem {
   expansion: string;
 }
 
-export function collectMentions(sel: MentionSelection | null): MentionItem[] {
+export function collectMentions(
+  sel: BrowserPickerSelection | null,
+): MentionItem[] {
   // User spec (2026-06-08): no "nothing selected" placeholder row. The
   // @-selection mention only appears when a Design-mode browser selection
   // actually exists; otherwise the picker shows files/folders alone (and
@@ -43,12 +40,6 @@ export function collectMentions(sel: MentionSelection | null): MentionItem[] {
   if (!sel) return [];
 
   const classSuffix = sel.componentName ? ` (${sel.componentName})` : "";
-  const expansion =
-    sel.frame && sel.oid
-      ? `the currently-selected design element (<${sel.tag}>, frame ${sel.frame}, data-oid "${sel.oid}")`
-      : sel.frame
-        ? `the currently-selected design frame (${sel.frame})`
-        : `the currently-selected element (<${sel.tag}>, selector ${sel.selector})`;
   return [
     {
       id: "selection",
@@ -57,7 +48,7 @@ export function collectMentions(sel: MentionSelection | null): MentionItem[] {
       label: "selection",
       hint: `${sel.tag}${classSuffix}`,
       token: "@selection",
-      expansion,
+      expansion: `the currently-selected element (<${sel.tag}>, selector ${sel.selector})`,
     },
   ];
 }
@@ -207,7 +198,7 @@ export function buildPathMentions(
 
 export function expandMentionsInText(
   text: string,
-  sel: MentionSelection | null,
+  sel: BrowserPickerSelection | null,
 ): string {
   const items = collectMentions(sel);
   const byToken = new Map(items.map((m) => [m.token, m]));

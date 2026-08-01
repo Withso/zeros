@@ -90,20 +90,18 @@ export function workspaceKindFromManagedPath(
   return worktreePathParts(folder)?.kind ?? null;
 }
 
-/** A confirmed Workspace row is authoritative. Pending/path/chat hints exist
- * only to paint a prepared destination before that row arrives; they must
+/** A confirmed Workspace row is authoritative. Pending/path hints exist only
+ * to paint a prepared destination before that row arrives; they must
  * never turn a confirmed code workspace into a design surface. */
 export function resolveWorkspacePresentationKind(input: {
   confirmedKind?: "code" | "design" | null;
   pendingKind?: "code" | "design" | null;
   folder?: string | null;
-  chatMode?: "code" | "design" | null;
 }): "code" | "design" {
   if (input.confirmedKind) return input.confirmedKind;
   return (
     input.pendingKind ??
     workspaceKindFromManagedPath(input.folder) ??
-    input.chatMode ??
     "code"
   );
 }

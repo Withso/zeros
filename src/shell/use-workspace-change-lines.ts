@@ -143,8 +143,19 @@ export function changeLineCountsForGeneration(
  *  addressed by its opaque id, and the synthetic "Local main" trunk by its
  *  repository root, exactly as the Changes surfaces resolve it. A worktree
  *  whose folder is gone from disk has nothing to compare. */
-function changeLinesTarget(workspace: Workspace | null): string | null {
-  if (!workspace || workspace.present === false) return null;
+export function workspaceChangeLinesTarget(
+  workspace: Workspace | null,
+): string | null {
+  // Design tabs intentionally have no Git-status affordances. Keep this guard
+  // inside the hook so the established code-workspace call path stays exact,
+  // while a design tab cannot start any of the relatively expensive Git reads.
+  if (
+    !workspace ||
+    workspace.kind === "design" ||
+    workspace.present === false
+  ) {
+    return null;
+  }
   if (isLocalMainWorkspace(workspace)) return workspace.repoRoot || null;
   return workspace.id || null;
 }
@@ -155,9 +166,8 @@ function changeLinesTarget(workspace: Workspace | null): string | null {
  *  render nothing in either case rather than a placeholder. */
 export function useWorkspaceChangeLines(
   workspace: Workspace | null,
-  enabled = true,
 ): ChangeLineCounts {
-  const target = enabled ? changeLinesTarget(workspace) : null;
+  const target = workspaceChangeLinesTarget(workspace);
   const refreshKey = useGitRefreshKey(workspace?.path, target);
   // The resolved pair carries its target so a workspace switch can never show
   // another workspace's numbers for a frame.

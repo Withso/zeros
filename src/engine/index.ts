@@ -48,6 +48,9 @@ import { MessageRouter } from "./transport/router";
 import { WorkspaceService } from "./workspace/service";
 import { readDesignProtocolResource } from "./design/protocol-resource";
 import {
+  filterDesignWorkspaceDirectories,
+} from "./design/agent-boundary";
+import {
   dbChangedIncludesOriginator,
   dbChangedKinds,
 } from "./workspace/change-events";
@@ -70,7 +73,7 @@ import {
   type CreatedWorkspace,
 } from "./git";
 import { RunManager } from "./run/run-manager";
-import { getWorkspaceById } from "./git/state";
+import { getWorkspaceById, listWorkspaces } from "./git/state";
 import { resolveRunActions } from "./settings/repo-scripts";
 import {
   filterRunActionsForPlatform,
@@ -93,7 +96,6 @@ import { AgentGateway } from "./agents/gateway";
 import { buildPtyEnv } from "./pty/shell-setup";
 import { resolveMcpServers } from "./agents/mcp-registry";
 import { McpGateway } from "./agents/gateway/server";
-import { DesignMcpServer } from "./design/mcp-server";
 import {
   createDesignProtocolCapability,
   parseDesignProtocolResourcePath,
@@ -287,9 +289,6 @@ export class ZerosEngine {
   /** The local MCP gateway (auth:"oauth" backends fronted on localhost). Lazily
    *  started when the user-level settings declare a gateway-managed server. */
   private mcpGateway: McpGateway | null = null;
-  /** First-party, read-only design context. One loopback server mints an
-   *  opaque workspace-scoped URL for each design agent session. */
-  private readonly designMcpServer: DesignMcpServer;
   /** Why the gateway isn't running when it should be (start/reload failure, e.g.
    *  the port is taken) — surfaced via mcp.gateway.status so the UI shows
    *  "Gateway unavailable" instead of an OAuth server silently vanishing (P0-3).
@@ -946,12 +945,6 @@ export class ZerosEngine {
     };
 
     this.agents = new AgentGateway(backendOpts);
-    this.designMcpServer = new DesignMcpServer({
-      resolveWorkspace: getWorkspaceById,
-    });
-    this.agents.setDesignServerResolver((workspaceId) =>
-      this.designMcpServer.connectionForWorkspace(workspaceId),
-    );
     this.loadMcpRegistry(); // boot-load; re-run by the settings watcher on edit
 
     const engineStartTime = Date.now();
@@ -1418,18 +1411,6 @@ export class ZerosEngine {
     await this.local.start();
     this.actualPort = this.local.actualPort;
 
-    // Design MCP is local-only and has no external dependency. Start it before
-    // any renderer can spawn a design chat so the very first session receives
-    // the same tool contract as every subsequent session.
-    try {
-      await this.designMcpServer.start();
-    } catch (err) {
-      console.warn(
-        "[Zeros] Design MCP failed to start:",
-        err instanceof Error ? err.message : err,
-      );
-    }
-
     // MCP gateway (Phase 2): front any auth:"oauth" backends on a localhost
     // endpoint + inject that one server into every agent. Best-effort — a
     // gateway failure must never block engine boot.
@@ -1529,7 +1510,6 @@ export class ZerosEngine {
       this.parentWatchTimer = null;
     }
     await this.agents.dispose();
-    await this.designMcpServer.stop();
     if (this.vaultPersistTimer) {
       // Flush a pending debounced persist so a clean stop never drops a token.
       clearTimeout(this.vaultPersistTimer);
@@ -2070,7 +2050,11 @@ export class ZerosEngine {
             spawnOpts.workspaceId,
             spawnOpts.cwd,
           );
-          this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+          this.assertAgentWorkspaceProcessStartAllowed(
+            lifecycleWorkspaceId,
+            spawnOpts.workspaceId,
+            spawnOpts.cwd,
+          );
           const { initialize, session } = await this.trackWorkspaceProcessStart(
             lifecycleWorkspaceId,
             (async () => {
@@ -2079,7 +2063,9 @@ export class ZerosEngine {
               });
               // ensureAgent may spawn/initialize asynchronously. Re-check
               // before the workspace-scoped session itself is created.
-              this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+              this.assertAgentWorkspaceProcessStartAllowed(
+                lifecycleWorkspaceId,
+              );
               const session = await this.agents.newSession(msg.agentId, {
                 cwd: spawnOpts.cwd,
                 env: spawnOpts.env,
@@ -2099,7 +2085,9 @@ export class ZerosEngine {
                 );
               }
               try {
-                this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+                this.assertAgentWorkspaceProcessStartAllowed(
+                  lifecycleWorkspaceId,
+                );
               } catch (err) {
                 // The lifecycle acquired ownership while newSession was
                 // awaiting the adapter. Dispose before releasing the start
@@ -2117,7 +2105,7 @@ export class ZerosEngine {
               return { initialize, session };
             })(),
           );
-          this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+          this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
           if (msg.chatId) {
             // One live agent session per chat. This fresh session supersedes
             // any prior session still bound to the same chat — a model/effort
@@ -2207,7 +2195,7 @@ export class ZerosEngine {
           const lifecycleWorkspaceId = this.workspaceIdForAgentSession(
             msg.sessionId,
           );
-          this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+          this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
           this.router.setOwner(msg.sessionId, client.id);
           this.sessionAgent.set(msg.sessionId, msg.agentId);
           // Keep a start barrier registered from before the first await until
@@ -2239,7 +2227,9 @@ export class ZerosEngine {
             // error path — so a failed turn never leaves a stale marker.
             // Record this turn: snapshot the work tree BEFORE the agent runs.
             turnCtx = await this.beginTurn(msg.sessionId, msg.userMessageId);
-            this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+            this.assertAgentWorkspaceProcessStartAllowed(
+              lifecycleWorkspaceId,
+            );
             this.enterPrompt();
             this.promptSessions.add(msg.sessionId);
           } catch (err) {
@@ -2358,7 +2348,7 @@ export class ZerosEngine {
             this.refuseSessionAccess(msg.id, msg.agentId, client);
             return;
           }
-          this.assertWorkspaceProcessStartAllowed(
+          this.assertAgentWorkspaceProcessStartAllowed(
             this.workspaceIdForAgentSession(msg.sessionId),
           );
           // Deliver FIRST, persist after: if the adapter refuses (no turn in
@@ -2479,9 +2469,11 @@ export class ZerosEngine {
           // remote clients are scrubbed + their extra dirs clamped to the
           // managed-workspace allowlist.
           const updateEnv =
-            client.kind === "local"
-              ? msg.env
-              : this.scrubRelayUpdateConfigEnv(msg.env);
+            this.removeDesignAdditionalDirectories(
+              client.kind === "local"
+                ? msg.env
+                : this.scrubRelayUpdateConfigEnv(msg.env),
+            ) ?? {};
           // Fire-and-forget: apply the mid-session config change (effort /
           // fast / ultracode / additionalDirectories / allow-deny / maxTurns,
           // carried as the composer env map) to the live session. No-op for
@@ -2491,6 +2483,14 @@ export class ZerosEngine {
           return;
         }
         case "AGENT_LIST_SESSIONS": {
+          const listWorkspaceId = this.workspaceIdForProcess(
+            undefined,
+            msg.cwd,
+          );
+          this.assertAgentWorkspaceProcessStartAllowed(
+            listWorkspaceId,
+            msg.cwd,
+          );
           // A relay (untrusted) client must not enumerate sessions — or boot
           // an adapter's session-store lookup — at an arbitrary host cwd.
           // Clamp to the managed-workspace allowlist; drop anything else (the
@@ -2531,7 +2531,11 @@ export class ZerosEngine {
             loadOpts.workspaceId,
             loadOpts.cwd,
           );
-          this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+          this.assertAgentWorkspaceProcessStartAllowed(
+            lifecycleWorkspaceId,
+            loadOpts.workspaceId,
+            loadOpts.cwd,
+          );
           this.router.setOwner(msg.sessionId, client.id);
           this.sessionAgent.set(msg.sessionId, msg.agentId);
           if (msg.chatId) this.sessionChat.set(msg.sessionId, msg.chatId);
@@ -2551,38 +2555,21 @@ export class ZerosEngine {
                   cliBinary: loadOpts.cliBinary,
                 },
               );
-              this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+              this.assertAgentWorkspaceProcessStartAllowed(
+                lifecycleWorkspaceId,
+              );
               return response;
             })(),
           );
-          this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
-          const { sessionId: replacementSessionId, ...wireResponse } = response;
-          const loadedSessionId = replacementSessionId ?? msg.sessionId;
-          if (loadedSessionId !== msg.sessionId) {
-            // A degraded Codex resume may replace a legacy Zeros-local id with
-            // the fresh thread/start id. Move every routing owner atomically
-            // before publishing success so subsequent notifications, mode
-            // changes, close, and the renderer's persisted chat all agree.
-            this.router.clearOwner(msg.sessionId);
-            this.sessionAgent.delete(msg.sessionId);
-            this.sessionChat.delete(msg.sessionId);
-            this.sessionWorkspace.delete(msg.sessionId);
-            this.sessionMessages.delete(msg.sessionId);
-            this.router.setOwner(loadedSessionId, client.id);
-            this.sessionAgent.set(loadedSessionId, msg.agentId);
-            if (msg.chatId) this.sessionChat.set(loadedSessionId, msg.chatId);
-            if (lifecycleWorkspaceId) {
-              this.sessionWorkspace.set(loadedSessionId, lifecycleWorkspaceId);
-            }
-          }
+          this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
           client.send(
             createMessage({
               type: "AGENT_SESSION_LOADED",
               source: "engine",
               requestId: msg.id,
               agentId: msg.agentId,
-              sessionId: loadedSessionId,
-              response: wireResponse,
+              sessionId: msg.sessionId,
+              response,
             }),
           );
           return;
@@ -2654,7 +2641,8 @@ export class ZerosEngine {
     cliBinary?: string;
   }> {
     if (client.kind === "local") {
-      const pathValue = msg.env?.PATH ?? process.env.PATH ?? "";
+      const agentEnv = this.removeDesignAdditionalDirectories(msg.env);
+      const pathValue = agentEnv?.PATH ?? process.env.PATH ?? "";
       const contextId = msg.workspaceId
         ? `workspace:${msg.workspaceId}`
         : msg.cwd
@@ -2667,8 +2655,8 @@ export class ZerosEngine {
       return {
         cwd: msg.cwd,
         env: credentialEnv
-          ? { ...(msg.env ?? {}), ...credentialEnv.env }
-          : msg.env,
+          ? { ...(agentEnv ?? {}), ...credentialEnv.env }
+          : agentEnv,
         workspaceId: msg.workspaceId,
         cliBinary: msg.cliBinary,
       };
@@ -2711,6 +2699,66 @@ export class ZerosEngine {
       env: undefined,
       workspaceId: msg.workspaceId,
       cliBinary: undefined,
+    };
+  }
+
+  private isDesignWorkspaceProcessTarget(
+    target: string | null | undefined,
+  ): boolean {
+    if (!target) return false;
+    const workspaceId = this.workspace.workspaceIdForCwd(target) ?? target;
+    try {
+      return getWorkspaceById(workspaceId)?.kind === "design";
+    } catch {
+      return false;
+    }
+  }
+
+  private assertAgentWorkspaceProcessStartAllowed(
+    workspaceId: string | null | undefined,
+    ...targets: Array<string | null | undefined>
+  ): void {
+    this.assertWorkspaceProcessStartAllowed(workspaceId);
+    if (
+      ![workspaceId, ...targets].some((target) =>
+        this.isDesignWorkspaceProcessTarget(target),
+      )
+    ) {
+      return;
+    }
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: "Coding agents are unavailable in a design workspace.",
+      remediation: "Open a code workspace to use Claude, Codex, or Cursor.",
+      context: { workspaceId },
+    });
+  }
+
+  private removeDesignAdditionalDirectories(
+    env: Record<string, string> | undefined,
+  ): Record<string, string> | undefined {
+    const raw = env?.ZEROS_ADDITIONAL_DIRS?.trim();
+    if (!env || !raw) return env;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return env;
+    }
+    if (!Array.isArray(parsed)) return env;
+    const directories = parsed.filter(
+      (directory): directory is string => typeof directory === "string",
+    );
+    const filtered = filterDesignWorkspaceDirectories(
+      directories,
+      listWorkspaces({}),
+    );
+    if (filtered === directories || filtered.length === directories.length) {
+      return env;
+    }
+    return {
+      ...env,
+      ZEROS_ADDITIONAL_DIRS: JSON.stringify(filtered),
     };
   }
 
@@ -3838,6 +3886,15 @@ export class ZerosEngine {
       (reattach ? this.terminals.get(msg.sessionId)?.workspaceId : null) ??
       this.workspace.workspaceIdForCwd(msg.workspaceId) ??
       this.workspace.workspaceIdForCwd(msg.cwd);
+    if (
+      this.isDesignWorkspaceProcessTarget(canonicalWsId) ||
+      (!reattach &&
+        (this.isDesignWorkspaceProcessTarget(msg.workspaceId) ||
+          this.isDesignWorkspaceProcessTarget(msg.cwd)))
+    ) {
+      ptyExit();
+      return;
+    }
 
     let cwdInput = msg.cwd;
     if (client.kind !== "local" && !reattach) {
