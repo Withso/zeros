@@ -32,11 +32,10 @@ export const TERMINAL_SEAM_PX = 1;
 export const TERMINAL_PANEL_MAX_OFFSET_PX =
   TERMINAL_ROW1_MIN_PX + TERMINAL_SEAM_PX;
 
-/** The panel's live height, as a percentage of column 3. Set declaratively
- *  by the panel itself and overwritten per animation frame by the seam
- *  drag. Scoped to the PANEL element (not column 3): custom properties
- *  inherit, so a per-frame write higher up would invalidate style for the
- *  diff viewer, file tree, and browser iframes on every drag tick. */
+/** The panel's committed height, as a percentage of column 3. The seam uses a
+ *  direct `flex-basis` override during live movement, then writes this once on
+ *  release; changing an inherited custom property every frame would otherwise
+ *  invalidate the complete xterm descendant tree. */
 export const TERMINAL_PANEL_HEIGHT_VAR = "--zeros-terminal-panel-height";
 
 const STORAGE_KEY = "zeros:terminal-panel:layout-v2";

@@ -93,6 +93,7 @@ import {
 import { prepareColumn2ChatView } from "./column2-chat-intent";
 import { useInstantViewSwitch } from "../zeros/ui/use-instant-view-switch";
 import { useWorkspaceProvisioning } from "../zeros/store/pending-workspaces";
+import { beginContinuousLayoutResize } from "./terminal/continuous-layout-resize";
 import {
   CHAT_TAB_DRAG_MIME,
   MIN_PANE_HEIGHT,
@@ -703,6 +704,7 @@ function PaneSplitter({
       let lastRatio: number | null = null;
       let rafId: number | null = null;
       let finished = false;
+      const finishContinuousResize = beginContinuousLayoutResize();
 
       const apply = (ratio: number) => {
         // Imperative during the drag — a store write per frame would
@@ -731,6 +733,7 @@ function PaneSplitter({
         handle.removeEventListener("pointermove", onMove);
         handle.removeEventListener("pointerup", finish);
         handle.removeEventListener("pointercancel", finish);
+        handle.removeEventListener("lostpointercapture", finish);
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", finish);
         window.removeEventListener("pointercancel", finish);
@@ -758,6 +761,7 @@ function PaneSplitter({
         // diffs against its previous style prop, not the DOM), so the
         // handoff is seamless; clearing first would flash a 50/50 frame.
         if (lastRatio !== null) setSplitRatio(folder, splitId, lastRatio);
+        finishContinuousResize();
       };
 
       // Lock the cursor + suppress text selection for the gesture, like the
@@ -768,6 +772,7 @@ function PaneSplitter({
       handle.addEventListener("pointermove", onMove);
       handle.addEventListener("pointerup", finish);
       handle.addEventListener("pointercancel", finish);
+      handle.addEventListener("lostpointercapture", finish);
       window.addEventListener("pointermove", onMove);
       window.addEventListener("pointerup", finish);
       window.addEventListener("pointercancel", finish);
