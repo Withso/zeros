@@ -2341,6 +2341,18 @@ export class ZerosEngine {
           await this.agents.cancel(msg.agentId, msg.sessionId);
           return;
         }
+        case "AGENT_STOP_BACKGROUND_TASK": {
+          if (this.remoteMayNotActOnSession(msg.sessionId, client, false)) {
+            this.refuseSessionAccess(msg.id, msg.agentId, client);
+            return;
+          }
+          await this.agents.stopBackgroundTask(
+            msg.agentId,
+            msg.sessionId,
+            msg.taskId,
+          );
+          return;
+        }
         case "AGENT_STEER": {
           if (this.remoteMayNotActOnSession(msg.sessionId, client, true)) {
             this.refuseSessionAccess(msg.id, msg.agentId, client);

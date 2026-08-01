@@ -136,6 +136,1083 @@ describe("ClaudeStreamTranslator onUser", () => {
   });
 });
 
+describe("ClaudeStreamTranslator background task lifecycle", () => {
+  it("does not retain unrelated or unbounded raw tool inputs", () => {
+    const { t } = collect();
+    t.feed({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "large-write",
+            name: "Write",
+            input: {
+              file_path: "/tmp/large.txt",
+              content: "large-payload-marker".repeat(10_000),
+            },
+          },
+        ],
+      },
+    });
+
+    const retained = (
+      t as unknown as { toolInputs: Map<string, Record<string, unknown>> }
+    ).toolInputs;
+    expect(retained.size).toBe(0);
+
+    for (let index = 0; index < 520; index += 1) {
+      t.feed({
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: `shell-${index}`,
+              name: "Bash",
+              input: { command: `printf ${index}` },
+            },
+          ],
+        },
+      });
+    }
+    expect(retained.size).toBeLessThanOrEqual(500);
+    expect(JSON.stringify([...retained.values()])).not.toContain(
+      "large-payload-marker",
+    );
+  });
+
+  it("retains start/progress metadata when edge events beat the membership level", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tool-shell",
+            name: "Bash",
+            input: { command: "pnpm test:git" },
+          },
+        ],
+      },
+    });
+    t.feed({
+      type: "system",
+      subtype: "task_started",
+      task_id: "task-early",
+      tool_use_id: "tool-shell",
+      description: "Git tests",
+      task_type: "shell",
+    });
+    t.feed({
+      type: "system",
+      subtype: "task_progress",
+      task_id: "task-early",
+      summary: "Checking rename cases",
+      last_tool_name: "Bash",
+      usage: { duration_ms: 4_000 },
+    });
+    t.feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [
+        {
+          task_id: "task-early",
+          task_type: "shell",
+          description: "Git tests",
+        },
+      ],
+    });
+
+    expect(
+      updates
+        .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+        .at(-1)?.update,
+    ).toMatchObject({
+      tasks: [
+        expect.objectContaining({
+          taskId: "task-early",
+          command: "pnpm test:git",
+          summary: "Checking rename cases",
+          lastToolName: "Bash",
+        }),
+      ],
+    });
+  });
+
+  it("merges one-shot scheduled wakeups into the task snapshot but excludes recurring jobs", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [
+        {
+          task_id: "shell-1",
+          task_type: "shell",
+          description: "pnpm test",
+        },
+      ],
+    });
+
+    t.setScheduledWakeups([
+      {
+        id: "wake-1",
+        schedule: "3 19 31 7 *",
+        recurring: false,
+        prompt: "Check whether the deployment is ready",
+      },
+      {
+        id: "cron-1",
+        schedule: "0 9 * * 1-5",
+        recurring: true,
+        prompt: "Daily report",
+      },
+    ]);
+
+    const snapshots = updates
+      .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+      .map(
+        (u) =>
+          u.update as Extract<
+            typeof u.update,
+            { sessionUpdate: "background_tasks_update" }
+          >,
+      );
+    expect(snapshots.at(-1)?.tasks).toEqual([
+      expect.objectContaining({ taskId: "shell-1", name: "pnpm test" }),
+      expect.objectContaining({
+        taskId: "scheduled-wakeup:wake-1",
+        taskType: "scheduled_wakeup",
+        name: "Next check at 19:03 · Check whether the deployment is ready",
+      }),
+    ]);
+
+    // A later native level snapshot replaces only native membership; the
+    // independently-authoritative scheduled wake remains present.
+    t.feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [],
+    });
+    expect(
+      updates
+        .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+        .at(-1)?.update,
+    ).toMatchObject({
+      tasks: [expect.objectContaining({ taskId: "scheduled-wakeup:wake-1" })],
+    });
+
+    t.setScheduledWakeups([]);
+    expect(
+      updates
+        .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+        .at(-1)?.update,
+    ).toMatchObject({ tasks: [] });
+  });
+
+  it("uses only a successful ScheduleWakeup reason for the next-check row", () => {
+    const { t, updates } = collect();
+    const schedule = (id: string, reason: string, isError = false) => {
+      t.feed({
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id,
+              name: "ScheduleWakeup",
+              input: {
+                delaySeconds: 120,
+                reason,
+                prompt: "<<autonomous-loop-dynamic>>",
+              },
+            },
+          ],
+        },
+      });
+      t.feed({
+        type: "user",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: id,
+              content: isError ? "could not schedule" : "scheduled",
+              is_error: isError,
+            },
+          ],
+        },
+      });
+    };
+
+    schedule("wake-ok", "preview still provisioning");
+    schedule("wake-failed", "wrong failed reason", true);
+    t.setScheduledWakeups([
+      {
+        id: "wake-1",
+        schedule: "3 19 31 7 *",
+        recurring: false,
+        prompt: "<<autonomous-loop-dynamic>>",
+      },
+    ]);
+
+    expect(
+      updates
+        .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+        .at(-1)?.update,
+    ).toMatchObject({
+      tasks: [
+        expect.objectContaining({
+          name: "Next check at 19:03 · preview still provisioning",
+        }),
+      ],
+    });
+  });
+
+  it("does not overwrite an existing wake-up reason when a later one is scheduled", () => {
+    const { t, updates } = collect();
+    t.setScheduledWakeups([
+      {
+        id: "wake-existing",
+        schedule: "3 19 31 7 *",
+        recurring: false,
+        prompt: "Check the existing deployment",
+      },
+    ]);
+    t.feed({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "wake-new-tool",
+            name: "ScheduleWakeup",
+            input: {
+              reason: "check the second deployment",
+              prompt: "<<autonomous-loop-dynamic>>",
+            },
+          },
+        ],
+      },
+    });
+    t.feed({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "wake-new-tool",
+            content: "scheduled",
+          },
+        ],
+      },
+    });
+    t.setScheduledWakeups([
+      {
+        id: "wake-existing",
+        schedule: "3 19 31 7 *",
+        recurring: false,
+        prompt: "Check the existing deployment",
+      },
+      {
+        id: "wake-new",
+        schedule: "5 19 31 7 *",
+        recurring: false,
+        prompt: "<<autonomous-loop-dynamic>>",
+      },
+    ]);
+
+    const tasks = (
+      updates
+        .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+        .at(-1)?.update as Extract<
+        (typeof updates)[number]["update"],
+        { sessionUpdate: "background_tasks_update" }
+      >
+    ).tasks;
+    expect(tasks.map((task) => task.name)).toEqual([
+      "Next check at 19:03 · Check the existing deployment",
+      "Next check at 19:05 · check the second deployment",
+    ]);
+  });
+
+  it("does not consume a pending reason on an unchanged same-prompt snapshot", () => {
+    const { t, updates } = collect();
+    const existing = {
+      id: "wake-existing",
+      schedule: "3 19 31 7 *",
+      recurring: false,
+      prompt: "<<autonomous-loop-dynamic>>",
+    };
+    t.setScheduledWakeups([existing]);
+    t.feed({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "wake-new-tool",
+            name: "ScheduleWakeup",
+            input: {
+              reason: "check the new deployment",
+              prompt: "<<autonomous-loop-dynamic>>",
+            },
+          },
+        ],
+      },
+    });
+    t.feed({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "wake-new-tool",
+            content: "scheduled",
+          },
+        ],
+      },
+    });
+
+    t.setScheduledWakeups([existing]);
+    expect(
+      updates
+        .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+        .at(-1)?.update,
+    ).toMatchObject({
+      tasks: [expect.objectContaining({ name: "Next check at 19:03" })],
+    });
+
+    t.setScheduledWakeups([
+      existing,
+      {
+        id: "wake-new",
+        schedule: "5 19 31 7 *",
+        recurring: false,
+        prompt: "<<autonomous-loop-dynamic>>",
+      },
+    ]);
+    expect(
+      updates
+        .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+        .at(-1)?.update,
+    ).toMatchObject({
+      tasks: [
+        expect.objectContaining({ name: "Next check at 19:03" }),
+        expect.objectContaining({
+          name: "Next check at 19:05 · check the new deployment",
+        }),
+      ],
+    });
+  });
+
+  it("attributes a new wake-up reason to the new id, not an existing entry whose schedule also changed", () => {
+    const { t, updates } = collect();
+    t.setScheduledWakeups([
+      {
+        id: "wake-existing",
+        schedule: "3 19 31 7 *",
+        recurring: false,
+        prompt: "Check the existing deployment",
+      },
+    ]);
+    t.feed({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "wake-new-tool",
+            name: "ScheduleWakeup",
+            input: {
+              reason: "check the new deployment",
+              prompt: "<<autonomous-loop-dynamic>>",
+            },
+          },
+        ],
+      },
+    });
+    t.feed({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "wake-new-tool",
+            content: "scheduled",
+          },
+        ],
+      },
+    });
+
+    t.setScheduledWakeups([
+      {
+        id: "wake-existing",
+        schedule: "4 19 31 7 *",
+        recurring: false,
+        prompt: "Check the existing deployment",
+      },
+      {
+        id: "wake-new",
+        schedule: "5 19 31 7 *",
+        recurring: false,
+        prompt: "<<autonomous-loop-dynamic>>",
+      },
+    ]);
+
+    const tasks = (
+      updates
+        .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+        .at(-1)?.update as Extract<
+        (typeof updates)[number]["update"],
+        { sessionUpdate: "background_tasks_update" }
+      >
+    ).tasks;
+    expect(tasks.map((task) => task.name)).toEqual([
+      "Next check at 19:04 · Check the existing deployment",
+      "Next check at 19:05 · check the new deployment",
+    ]);
+  });
+
+  it("keeps a successful wake-up reason across a transient empty hook snapshot", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "wake-tool",
+            name: "ScheduleWakeup",
+            input: {
+              reason: "wait for the preview",
+              prompt: "<<autonomous-loop-dynamic>>",
+            },
+          },
+        ],
+      },
+    });
+    t.feed({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "wake-tool",
+            content: "scheduled",
+          },
+        ],
+      },
+    });
+
+    t.setScheduledWakeups([]);
+    t.setScheduledWakeups([
+      {
+        id: "wake-new",
+        schedule: "5 19 31 7 *",
+        recurring: false,
+        prompt: "<<autonomous-loop-dynamic>>",
+      },
+    ]);
+
+    expect(
+      updates
+        .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+        .at(-1)?.update,
+    ).toMatchObject({
+      tasks: [
+        expect.objectContaining({
+          name: "Next check at 19:05 · wait for the preview",
+        }),
+      ],
+    });
+  });
+
+  it("reserves snapshot capacity for a stoppable one-shot wake-up", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: Array.from({ length: 100 }, (_, index) => ({
+        task_id: `native-${index}`,
+        task_type: "shell",
+        description: `Native task ${index}`,
+      })),
+    });
+    t.setScheduledWakeups([
+      {
+        id: "wake-visible",
+        schedule: "5 19 31 7 *",
+        recurring: false,
+        prompt: "Check the deployment",
+      },
+    ]);
+
+    const snapshot = updates
+      .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+      .at(-1)?.update as Extract<
+      (typeof updates)[number]["update"],
+      { sessionUpdate: "background_tasks_update" }
+    >;
+    expect(snapshot.tasks).toHaveLength(100);
+    expect(snapshot.tasks).toContainEqual(
+      expect.objectContaining({ taskId: "scheduled-wakeup:wake-visible" }),
+    );
+  });
+
+  it("treats background_tasks_changed as a replace snapshot and enriches progress", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "system",
+      subtype: "task_started",
+      task_id: "task-1",
+      description: "Full test suite",
+      task_type: "shell",
+    });
+    t.feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [
+        {
+          task_id: "task-1",
+          task_type: "shell",
+          description: "Full test suite",
+        },
+      ],
+    });
+    t.feed({
+      type: "system",
+      subtype: "task_progress",
+      task_id: "task-1",
+      description: "Running provider checks",
+      last_tool_name: "Bash",
+      usage: { duration_ms: 12_000 },
+    });
+    t.feed({
+      type: "system",
+      subtype: "session_state_changed",
+      state: "idle",
+    });
+
+    const snapshots = updates
+      .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+      .map(
+        (u) =>
+          (u.update as unknown as { tasks: Array<Record<string, unknown>> })
+            .tasks,
+      );
+    expect(snapshots.at(-1)).toEqual([
+      expect.objectContaining({
+        taskId: "task-1",
+        name: "Full test suite",
+        summary: "Running provider checks",
+        lastToolName: "Bash",
+      }),
+    ]);
+    expect(
+      updates
+        .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+        .at(-1)?.update,
+    ).toEqual(expect.objectContaining({ waiting: true }));
+
+    t.feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [],
+    });
+    expect(
+      updates
+        .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+        .at(-1)?.update,
+    ).toEqual({
+      sessionUpdate: "background_tasks_update",
+      tasks: [],
+      waiting: false,
+    });
+  });
+
+  it("clears a stale waiting flag when a new turn begins without a running-state edge", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [
+        {
+          task_id: "task-1",
+          task_type: "shell",
+          description: "Watch deployment",
+        },
+      ],
+    });
+    t.feed({
+      type: "system",
+      subtype: "session_state_changed",
+      state: "idle",
+    });
+    expect(
+      updates
+        .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+        .at(-1)?.update,
+    ).toMatchObject({ waiting: true });
+
+    t.beginTurn();
+
+    expect(
+      updates
+        .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+        .at(-1)?.update,
+    ).toMatchObject({ waiting: false });
+  });
+
+  it("accepts an updated description from the authoritative level snapshot", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [
+        {
+          task_id: "task-rename",
+          task_type: "shell",
+          description: "Starting shell",
+        },
+      ],
+    });
+    t.feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [
+        {
+          task_id: "task-rename",
+          task_type: "shell",
+          description: "Run pnpm test:git",
+        },
+      ],
+    });
+
+    expect(
+      updates
+        .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+        .at(-1)?.update,
+    ).toMatchObject({
+      tasks: [expect.objectContaining({ name: "Run pnpm test:git" })],
+    });
+  });
+
+  it("does not emit a second bridge frame for an identical observation", () => {
+    const { t, updates } = collect();
+    const level = {
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [
+        {
+          task_id: "task-stable",
+          task_type: "shell",
+          description: "Run tests",
+        },
+      ],
+    };
+    t.feed(level);
+    const before = updates.filter(
+      (u) => u.update.sessionUpdate === "background_tasks_update",
+    ).length;
+
+    t.feed(level);
+
+    expect(
+      updates.filter(
+        (u) => u.update.sessionUpdate === "background_tasks_update",
+      ),
+    ).toHaveLength(before);
+  });
+
+  it("settles one durable Background Task record even when notification repeats", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "system",
+      subtype: "task_started",
+      task_id: "task-1",
+      description: "Full test suite",
+      task_type: "shell",
+    });
+    t.feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [
+        {
+          task_id: "task-1",
+          task_type: "shell",
+          description: "Full test suite",
+        },
+      ],
+    });
+    const notification = {
+      type: "system",
+      subtype: "task_notification",
+      task_id: "task-1",
+      status: "completed",
+      summary: "212 tests passed",
+      output_file: "/tmp/task-1.output",
+      usage: { duration_ms: 12_000 },
+    };
+    t.feed(notification);
+    t.feed(notification);
+
+    const lifecycle = updates.filter((u) => {
+      const update = u.update as { kind?: string };
+      return (
+        (u.update.sessionUpdate === "tool_call" ||
+          u.update.sessionUpdate === "tool_call_update") &&
+        update.kind === "background_task"
+      );
+    });
+    expect(
+      lifecycle.filter((u) => u.update.sessionUpdate === "tool_call"),
+    ).toHaveLength(1);
+    expect(
+      lifecycle.filter((u) => u.update.sessionUpdate === "tool_call_update"),
+    ).toHaveLength(1);
+    expect(lifecycle.at(-1)?.update).toEqual(
+      expect.objectContaining({
+        title: "Background Task",
+        status: "completed",
+        rawOutput: expect.objectContaining({
+          status: "completed",
+          summary: "212 tests passed",
+        }),
+      }),
+    );
+  });
+
+  it("merges terminal update details into the later notification on one row", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "system",
+      subtype: "task_started",
+      task_id: "task-merge",
+      description: "Deploy preview",
+      task_type: "shell",
+    });
+    t.feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [
+        {
+          task_id: "task-merge",
+          task_type: "shell",
+          description: "Deploy preview",
+        },
+      ],
+    });
+    t.feed({
+      type: "system",
+      subtype: "task_updated",
+      task_id: "task-merge",
+      patch: {
+        status: "failed",
+        description: "Deployment did not complete",
+        error: "Preview service returned 503",
+      },
+    });
+    t.feed({
+      type: "system",
+      subtype: "task_notification",
+      task_id: "task-merge",
+      status: "failed",
+      summary: "Deployment failed",
+      output_file: "/tmp/task-merge.output",
+      usage: { duration_ms: 2_000 },
+    });
+
+    const lifecycle = updates.filter((notification) => {
+      const update = notification.update as { kind?: string };
+      return (
+        (notification.update.sessionUpdate === "tool_call" ||
+          notification.update.sessionUpdate === "tool_call_update") &&
+        update.kind === "background_task"
+      );
+    });
+    expect(
+      lifecycle.filter(
+        (notification) => notification.update.sessionUpdate === "tool_call",
+      ),
+    ).toHaveLength(1);
+    expect(lifecycle.at(-1)?.update).toMatchObject({
+      status: "failed",
+      rawOutput: {
+        status: "failed",
+        summary: "Deployment failed",
+        error: "Preview service returned 503",
+        outputFile: "/tmp/task-merge.output",
+        durationMs: 2_000,
+      },
+    });
+  });
+
+  it("never turns a provider task notification into human input", () => {
+    const { t, kinds } = collect();
+    t.feed({
+      type: "user",
+      parent_tool_use_id: "task-1",
+      message: {
+        role: "user",
+        content: [{ type: "text", text: "background task completed" }],
+      },
+    });
+    t.feed({
+      type: "system",
+      subtype: "task_notification",
+      task_id: "task-1",
+      status: "completed",
+      summary: "done",
+      output_file: "/tmp/task-1.output",
+      usage: { duration_ms: 100 },
+    });
+    expect(kinds()).not.toContain("user_message_chunk");
+  });
+
+  it("retains level metadata when completion arrives without a start edge", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [
+        {
+          task_id: "task-without-start",
+          task_type: "local_bash",
+          description: "Full test suite",
+        },
+      ],
+    });
+    // The level signal commonly removes the task before the completion edge.
+    // Missing task_started must not make that ordering erase durable history.
+    t.feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [],
+    });
+    t.feed({
+      type: "system",
+      subtype: "task_notification",
+      task_id: "task-without-start",
+      status: "completed",
+      summary: "All tests passed",
+      output_file: "/tmp/task.output",
+      usage: { duration_ms: 1_000 },
+    });
+
+    expect(
+      updates.find((update) => {
+        const payload = update.update as { kind?: string };
+        return (
+          update.update.sessionUpdate === "tool_call" &&
+          payload.kind === "background_task"
+        );
+      })?.update,
+    ).toMatchObject({
+      rawInput: {
+        taskId: "task-without-start",
+        name: "Full test suite",
+        taskType: "local_bash",
+      },
+    });
+  });
+
+  it("keeps a missed-start ambient task out of durable history", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [
+        {
+          task_id: "ambient-task",
+          task_type: "housekeeping",
+          description: "Refresh internal index",
+        },
+      ],
+    });
+    t.feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [],
+    });
+    t.feed({
+      type: "system",
+      subtype: "task_notification",
+      task_id: "ambient-task",
+      status: "completed",
+      summary: "done",
+      skip_transcript: true,
+    });
+
+    expect(
+      updates.filter((notification) => {
+        const update = notification.update as { kind?: string };
+        return (
+          (notification.update.sessionUpdate === "tool_call" ||
+            notification.update.sessionUpdate === "tool_call_update") &&
+          update.kind === "background_task"
+        );
+      }),
+    ).toEqual([]);
+  });
+
+  it("does not resurrect a completed task from a late level snapshot", () => {
+    const { t, updates } = collect();
+    const active = {
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [
+        {
+          task_id: "task-1",
+          task_type: "shell",
+          description: "Full test suite",
+        },
+      ],
+    };
+    t.feed(active);
+    t.feed({
+      type: "system",
+      subtype: "task_notification",
+      task_id: "task-1",
+      status: "completed",
+      summary: "done",
+      usage: { duration_ms: 100 },
+    });
+    // SDK docs explicitly leave ordering between level and edge signals
+    // unspecified. A stale level event after the completion must not reopen it.
+    t.feed(active);
+
+    const final = updates
+      .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+      .at(-1)?.update as unknown as { tasks: unknown[] };
+    expect(final.tasks).toEqual([]);
+  });
+
+  it("does not resurrect a completed task from a late backgrounding edge", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [
+        {
+          task_id: "task-1",
+          task_type: "shell",
+          description: "Full test suite",
+        },
+      ],
+    });
+    t.feed({
+      type: "system",
+      subtype: "task_notification",
+      task_id: "task-1",
+      status: "completed",
+      summary: "done",
+      usage: { duration_ms: 100 },
+    });
+    t.feed({
+      type: "system",
+      subtype: "task_updated",
+      task_id: "task-1",
+      patch: { status: "running", is_backgrounded: true },
+    });
+
+    const final = updates
+      .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+      .at(-1)?.update as unknown as { tasks: unknown[] };
+    expect(final.tasks).toEqual([]);
+  });
+
+  it("settles a task backgrounded and completed in the same update", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "system",
+      subtype: "task_started",
+      task_id: "fast-background-task",
+      description: "Fast background task",
+      task_type: "shell",
+    });
+    t.feed({
+      type: "system",
+      subtype: "task_updated",
+      task_id: "fast-background-task",
+      patch: {
+        status: "completed",
+        is_backgrounded: true,
+        description: "Finished immediately",
+      },
+    });
+
+    const lifecycle = updates.filter((notification) => {
+      const update = notification.update as { kind?: string };
+      return (
+        (notification.update.sessionUpdate === "tool_call" ||
+          notification.update.sessionUpdate === "tool_call_update") &&
+        update.kind === "background_task"
+      );
+    });
+    expect(
+      lifecycle.map((notification) => notification.update.sessionUpdate),
+    ).toEqual(["tool_call", "tool_call_update"]);
+    expect(lifecycle.at(-1)?.update).toMatchObject({
+      status: "completed",
+      rawOutput: {
+        status: "completed",
+        summary: "Finished immediately",
+      },
+    });
+    const snapshots = updates.filter(
+      (notification) =>
+        notification.update.sessionUpdate === "background_tasks_update",
+    );
+    expect(snapshots).toEqual([]);
+  });
+
+  it("does not create a Background Task transcript row for foreground subagents", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "system",
+      subtype: "task_started",
+      task_id: "foreground-subagent",
+      description: "Explore the repository",
+      task_type: "subagent",
+      subagent_type: "Explore",
+    });
+    t.feed({
+      type: "system",
+      subtype: "task_notification",
+      task_id: "foreground-subagent",
+      status: "completed",
+      summary: "done",
+      usage: { duration_ms: 100 },
+    });
+
+    expect(
+      updates.filter((notification) => {
+        const update = notification.update as { kind?: string };
+        return (
+          (notification.update.sessionUpdate === "tool_call" ||
+            notification.update.sessionUpdate === "tool_call_update") &&
+          update.kind === "background_task"
+        );
+      }),
+    ).toEqual([]);
+  });
+});
+
 // Token-by-token streaming: with streamPartials on, text/thinking render
 // from stream_event deltas, and the matching blocks of the final full
 // assistant message are skipped so nothing double-renders.

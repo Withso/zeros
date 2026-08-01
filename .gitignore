@@ -149,7 +149,7 @@ website/**/tmp/
 # overrides everything below it), so it stays out of the repo and is seeded into
 # new worktrees via `.worktreeinclude` instead.
 #
-# settings.toml is the TEAM-SHARED layer and is deliberately TRACKED: Conductor — check-secrets:allow-identity
+# settings.toml is the TEAM-SHARED layer and is deliberately TRACKED: the tool
 # reads it from the default branch on the remote, so an ignored copy is read by
 # nobody and the "shared" file shares nothing. Its whole content is a schema URL
 # and a setup command — no secrets, safe in a public clone. Being tracked also

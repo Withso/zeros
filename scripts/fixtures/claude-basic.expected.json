@@ -2,6 +2,7 @@
   "fixture": "claude-basic.jsonl",
   "translator": "ClaudeStreamTranslator",
   "expectedUpdates": [
+    "background_tasks_update",
     "agent_thought_chunk",
     "agent_message_chunk",
     "usage_update"

@@ -478,7 +478,11 @@ export function startGitWatcher(
     }
     for (const [key, target] of nextByKey) {
       if (rootWatchers.has(key)) continue;
-      void installRootWatcher(target);
+      // A dynamic root can change after the target poll discovers it but
+      // before Chokidar finishes its ignoreInitial scan. Publish one exact
+      // refresh at readiness so that handoff window cannot swallow the first
+      // edit to a restored or newly-created checkout.
+      void installRootWatcher(target, options.usePolling ?? false, true);
     }
   };
 

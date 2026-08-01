@@ -386,8 +386,9 @@ describe("startGitWatcher", () => {
 
     // A restored checkout at the same semantic root is a new target. Its first
     // appearance clears the old-inode tombstone and installs a fresh watcher.
+    // Write immediately: the replacement's initial scan must not swallow a
+    // change made during the asynchronous resubscribe handoff.
     targetLive = true;
-    await new Promise((resolve) => setTimeout(resolve, 70));
     await writeFile(join(root, "old-inode-event.txt"), "restored\n");
     await waitFor(() =>
       changes.some((change) =>

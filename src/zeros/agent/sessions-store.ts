@@ -34,6 +34,7 @@ import { create } from "zustand";
 import type {
   AvailableCommand,
   AvailableSubagent,
+  BackgroundTask,
   QuestionOutcome,
   QuestionRequest,
   RequestPermissionRequest,
@@ -56,6 +57,30 @@ import { isPlanReviewRequest } from "./renderers/plan-body";
 import { loadPolicies, savePolicies, type PolicyRule } from "./policies";
 
 const MAX_STDERR_LINES = 200;
+const MAX_BACKGROUND_TASKS_PER_CHAT = 100;
+
+/** Background snapshots cross the JSON bridge, so even an unchanged refresh
+ * arrives as fresh objects. Compare the small bounded set before patching the
+ * slot to keep hot chat selectors reference-stable. */
+function sameBackgroundTasks(
+  a: BackgroundTask[],
+  b: BackgroundTask[],
+): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((task, index) => {
+    const other = b[index];
+    return (
+      task.taskId === other.taskId &&
+      task.name === other.name &&
+      task.taskType === other.taskType &&
+      task.startedAt === other.startedAt &&
+      task.updatedAt === other.updatedAt &&
+      task.command === other.command &&
+      task.summary === other.summary &&
+      task.lastToolName === other.lastToolName
+    );
+  });
+}
 
 /** Merge the engine's authoritative recent-message window into a local slot's
  *  message list (the cross-device reconcile in <AgentSessionsProvider>).
@@ -155,6 +180,9 @@ export const BLANK: AgentSessionState = {
   usage: BLANK_USAGE,
   availableCommands: [],
   availableSubagents: [],
+  backgroundTasks: [],
+  waitingForBackgroundTasks: false,
+  backgroundTasksWaitingSince: null,
 };
 
 export interface SessionsStoreState {
@@ -536,6 +564,8 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       currentModeId?: string;
       availableCommands?: AvailableCommand[];
       availableSubagents?: AvailableSubagent[];
+      tasks?: BackgroundTask[];
+      waiting?: boolean;
     };
 
     // usage_update → context window accounting. Keep cumulative counters
@@ -586,6 +616,44 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
     ) {
       get().patchSession(chatId, {
         availableSubagents: upd.availableSubagents,
+      });
+      return;
+    }
+
+    if (
+      upd.sessionUpdate === "background_tasks_update" &&
+      Array.isArray(upd.tasks)
+    ) {
+      const incomingTasks = upd.tasks;
+      const waiting = upd.waiting === true && incomingTasks.length > 0;
+      set((state) => {
+        const slot = state.sessions[chatId];
+        if (!slot) return state;
+        const tasks = incomingTasks.slice(0, MAX_BACKGROUND_TASKS_PER_CHAT);
+        const waitingSince = waiting
+          ? slot.waitingForBackgroundTasks &&
+            typeof slot.backgroundTasksWaitingSince === "number"
+            ? slot.backgroundTasksWaitingSince
+            : Date.now()
+          : null;
+        if (
+          sameBackgroundTasks(slot.backgroundTasks, tasks) &&
+          slot.waitingForBackgroundTasks === waiting &&
+          slot.backgroundTasksWaitingSince === waitingSince
+        ) {
+          return state;
+        }
+        return {
+          sessions: {
+            ...state.sessions,
+            [chatId]: {
+              ...slot,
+              backgroundTasks: tasks,
+              waitingForBackgroundTasks: waiting,
+              backgroundTasksWaitingSince: waitingSince,
+            },
+          },
+        };
       });
       return;
     }
@@ -799,6 +867,24 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         // and sendPrompt's rebuild+resend path starts from a clean gate.
         if (cur.pendingPermission) {
           cur = { ...cur, pendingPermission: null };
+          changed = true;
+        }
+        // Active task snapshots are owned by this provider process. Once the
+        // process exits they are no longer usable stale-while-revalidate data:
+        // no task in that snapshot can still receive progress or a scoped Stop.
+        // Clear before the activelyDriven branch too, so a turn-recovery race
+        // cannot leave dead work docked while the replacement session warms.
+        if (
+          cur.backgroundTasks.length > 0 ||
+          cur.waitingForBackgroundTasks ||
+          cur.backgroundTasksWaitingSince !== null
+        ) {
+          cur = {
+            ...cur,
+            backgroundTasks: [],
+            waitingForBackgroundTasks: false,
+            backgroundTasksWaitingSince: null,
+          };
           changed = true;
         }
         // Terminal states (failed / auth-required) already show the user a

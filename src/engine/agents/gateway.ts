@@ -1274,6 +1274,23 @@ export class AgentGateway {
     await adapter.cancel({ sessionId });
   }
 
+  async stopBackgroundTask(
+    agentId: string,
+    sessionId: string,
+    taskId: string,
+  ): Promise<void> {
+    const adapter = this.adapterForSession(sessionId, agentId);
+    if (!adapter.stopBackgroundTask) {
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        message: `agent ${adapter.agentId} does not support stopping background tasks`,
+        stage: "stopBackgroundTask",
+        agentId: adapter.agentId,
+      });
+    }
+    await adapter.stopBackgroundTask({ sessionId, taskId });
+  }
+
   /** Inject a user message into the running turn (mid-turn steering). No
    *  system-instruction / cwd-hint wrapping: those are first-turn one-shots
    *  and a steer is by definition never the first turn — leaving them

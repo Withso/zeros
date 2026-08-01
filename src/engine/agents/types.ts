@@ -68,6 +68,7 @@ export type AgentFailureStage =
   | "loadSession"
   | "prompt"
   | "cancel"
+  | "stopBackgroundTask"
   | "setMode";
 
 export interface AgentFailure {
@@ -263,6 +264,13 @@ export interface AgentAdapter {
 
   /** Abort the current turn. */
   cancel(opts: { sessionId: string }): Promise<void>;
+
+  /** Stop one provider-owned background task without interrupting the parent
+   * turn or sibling work. Optional for providers with no background-task API. */
+  stopBackgroundTask?(opts: {
+    sessionId: string;
+    taskId: string;
+  }): Promise<void>;
 
   /** Inject a user message into the RUNNING turn without cancelling it
    *  (mid-turn "steering"). Resolves once the message is delivered to the

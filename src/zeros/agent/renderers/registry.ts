@@ -22,6 +22,7 @@ import { matchSubagent } from "./subagent";
 import { CompactionRecordCard } from "./compaction-card";
 import { ModelSwitchRecordCard } from "./model-switch-card";
 import { BudgetStopRecordCard } from "./budget-stop-card";
+import { BackgroundTaskRecord } from "./background-task-record";
 import { QuestionRecordCard } from "./question-card";
 import { SubagentCard } from "./tool-subagent";
 import { CursorTaskCard } from "./tool-cursor-task";
@@ -108,6 +109,9 @@ export const defaultRegistry: RendererRegistry = {
     // §3.6 R3 — the per-turn budget cap ended the turn cleanly. "Turn
     // stopped · BUDGET · CLAUDE" record right above the footer.
     budget_stop: BudgetStopRecordCard,
+    // Session-level live background work settles into this ordinary,
+    // expandable transcript tool row (no provider-specific terminal chrome).
+    background_task: BackgroundTaskRecord,
     // Subagent keeps its own renderer too (threaded body).
     subagent: SubagentCard,
     // Cursor's `task` → the RAW task card (Input/Output JSON + live child tool

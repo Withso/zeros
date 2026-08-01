@@ -131,6 +131,11 @@ export type ToolKind =
   // JSON, which reads as a failure to users.
   | "skill"
   | "tool_search"
+  // A command, watcher, helper, workflow, wake-up, or Codex terminal that
+  // continued outside the foreground turn. Active instances live in the
+  // session-level BackgroundTask snapshot below; this kind is the durable,
+  // settled transcript record.
+  | "background_task"
   // Context compaction (§3.5) — a first-class two-state row ("Compacting.."
   // → "Context compacted · Done"). Codex streams it from the
   // contextCompaction item lifecycle; Claude emits a settled row from
@@ -310,6 +315,31 @@ export interface UsageStats {
   cost?: UsageCost;
 }
 
+// ── Background work ──────────────────────────────────────
+
+/** One task in the engine-authoritative set of background work owned by a
+ * session. The set contains active tasks only. Providers can enrich fields as
+ * lifecycle events arrive, but `taskId`, `name`, and `startedAt` are always
+ * present so the renderer can key rows and tick elapsed time immediately. */
+export interface BackgroundTask {
+  /** Provider-native task/process id, scoped by the owning agent session. */
+  taskId: string;
+  /** Human-readable row label (description, command, condition, or reason). */
+  name: string;
+  /** Provider-native task category, intentionally open for forward compat. */
+  taskType?: string;
+  /** Epoch milliseconds. Preserved across metadata refreshes. */
+  startedAt: number;
+  /** Epoch milliseconds of the latest provider observation. */
+  updatedAt: number;
+  /** Raw command when the provider exposes it. Shown only in expanded history. */
+  command?: string;
+  /** Latest progress summary. Not rendered in the compact live card. */
+  summary?: string;
+  /** Latest tool name (Claude progress heartbeat), retained for inspection. */
+  lastToolName?: string;
+}
+
 // ── Session updates (the streaming notification payload) ────
 //
 // Engine adapters emit these over the bridge as the chat unfolds.
@@ -323,6 +353,7 @@ export type SessionUpdate =
   | ToolCallChangeUpdate
   | AvailableCommandsUpdate
   | AvailableSubagentsUpdate
+  | BackgroundTasksUpdate
   | CurrentModeUpdate
   | ModeSwitchUpdate
   | ErrorNoticeUpdate
@@ -375,6 +406,16 @@ export interface AvailableCommandsUpdate {
 export interface AvailableSubagentsUpdate {
   sessionUpdate: "available_subagents_update";
   availableSubagents: AvailableSubagent[];
+}
+
+/** Full REPLACE snapshot of active background work for one exact session.
+ * Empty is authoritative and removes the live card. This deliberately is not
+ * a message event: only settled task records belong in persisted history. */
+export interface BackgroundTasksUpdate {
+  sessionUpdate: "background_tasks_update";
+  tasks: BackgroundTask[];
+  /** True only when the parent session reports idle while work remains. */
+  waiting: boolean;
 }
 
 export interface CurrentModeUpdate {

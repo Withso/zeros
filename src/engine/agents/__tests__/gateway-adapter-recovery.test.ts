@@ -82,4 +82,28 @@ describe("AgentGateway session/adapter recovery classification", () => {
     await gw.prompt("claude", "s2", []);
     expect(seen).toEqual(["s2"]);
   });
+
+  it("classifies a missing task-stop capability at the operation boundary", async () => {
+    const gw = makeGateway() as unknown as {
+      sessionToAgent: Map<string, string>;
+      adapters: Map<string, AgentAdapter>;
+      stopBackgroundTask(a: string, s: string, taskId: string): Promise<void>;
+    };
+    gw.adapters.set("claude", {
+      agentId: "claude",
+      respondToPermission: () => {},
+    } as unknown as AgentAdapter);
+    gw.sessionToAgent.set("s3", "claude");
+
+    const failure = await gw.stopBackgroundTask("claude", "s3", "task-1").then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(AgentFailureError);
+    expect((failure as AgentFailureError).failure).toMatchObject({
+      kind: "protocol-error",
+      stage: "stopBackgroundTask",
+      agentId: "claude",
+    });
+  });
 });

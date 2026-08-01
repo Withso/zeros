@@ -435,6 +435,22 @@ describe("formatTranscript — concise", () => {
     expect(out).not.toMatch(/the answer\n\n\n/);
   });
 
+  it("keeps the answer when a background task settles after the reply", () => {
+    const out = run(
+      [
+        text("user", "watch the deployment"),
+        text("agent", "The deployment is ready."),
+        tool({
+          title: "Background Task",
+          toolKind: "background_task",
+          status: "completed",
+        }),
+      ],
+      "concise",
+    ).text;
+    expect(out).toContain("The deployment is ready.");
+  });
+
   it("does not attribute trailing system text to the assistant", () => {
     // partitionTurn admits role:"system" as output; full mode labels it
     // "System", so concise must not relabel the same row "Assistant".
@@ -488,7 +504,10 @@ describe("formatTranscript — malformed rows", () => {
 
   it("keeps every other message when a prompt is unreadable", () => {
     // Losing one row is the contract; losing the transcript is not.
-    const out = run([noText("user"), text("agent", "the real answer")], "concise");
+    const out = run(
+      [noText("user"), text("agent", "the real answer")],
+      "concise",
+    );
     expect(out.text).toContain("the real answer");
     expect(out.text).toContain("unreadable");
     expect(out.count).toBeGreaterThan(0);
