@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   collectBackgroundTerminals,
+  collectLoadedDescendantThreadIds,
   reconcileBackgroundTerminals,
 } from "../background-terminals";
 
@@ -52,6 +53,42 @@ describe("Codex background terminals", () => {
     );
   });
 
+  it("counts unique process ids toward the pagination bound", async () => {
+    const duplicate = {
+      itemId: "item-duplicate",
+      processId: "process-duplicate",
+      command: "pnpm dev",
+      cwd: "/repo",
+      osPid: 1,
+      cpuPercent: null,
+      rssKb: null,
+    };
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: Array.from({ length: 100 }, () => duplicate),
+        nextCursor: "unique-page",
+      })
+      .mockResolvedValueOnce({
+        data: [
+          {
+            ...duplicate,
+            itemId: "item-unique",
+            processId: "process-unique",
+          },
+        ],
+        nextCursor: null,
+      });
+
+    await expect(
+      collectBackgroundTerminals(request, "thread-1"),
+    ).resolves.toEqual([
+      expect.objectContaining({ processId: "process-duplicate" }),
+      expect.objectContaining({ processId: "process-unique" }),
+    ]);
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
   it("preserves start time, returns removals, and omits CPU/memory chrome", () => {
     const first = reconcileBackgroundTerminals(
       new Map(),
@@ -81,5 +118,46 @@ describe("Codex background terminals", () => {
     expect(second.removed).toEqual([
       expect.objectContaining({ taskId: "process-1", startedAt: 100 }),
     ]);
+  });
+
+  it("discovers loaded descendants across pages for resumed collaboration trees", async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: [
+          { id: "child-active", status: { type: "active", activeFlags: [] } },
+          { id: "child-unloaded", status: { type: "notLoaded" } },
+        ],
+        nextCursor: "next-descendants",
+      })
+      .mockResolvedValueOnce({
+        data: [{ id: "grandchild-idle", status: { type: "idle" } }],
+        nextCursor: null,
+      });
+
+    await expect(
+      collectLoadedDescendantThreadIds(request, "thread-parent"),
+    ).resolves.toEqual(["child-active", "grandchild-idle"]);
+    expect(request).toHaveBeenNthCalledWith(
+      1,
+      "thread/list",
+      expect.objectContaining({
+        ancestorThreadId: "thread-parent",
+        cursor: null,
+        limit: 100,
+        sourceKinds: expect.arrayContaining([
+          "subAgent",
+          "subAgentThreadSpawn",
+          "subAgentOther",
+        ]),
+      }),
+      { timeoutMs: 5_000 },
+    );
+    expect(request).toHaveBeenNthCalledWith(
+      2,
+      "thread/list",
+      expect.objectContaining({ cursor: "next-descendants" }),
+      { timeoutMs: 5_000 },
+    );
   });
 });

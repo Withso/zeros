@@ -642,6 +642,38 @@ describe("ClaudeStreamTranslator background task lifecycle", () => {
     });
   });
 
+  it("reserves snapshot capacity for a stoppable one-shot wake-up", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: Array.from({ length: 100 }, (_, index) => ({
+        task_id: `native-${index}`,
+        task_type: "shell",
+        description: `Native task ${index}`,
+      })),
+    });
+    t.setScheduledWakeups([
+      {
+        id: "wake-visible",
+        schedule: "5 19 31 7 *",
+        recurring: false,
+        prompt: "Check the deployment",
+      },
+    ]);
+
+    const snapshot = updates
+      .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+      .at(-1)?.update as Extract<
+      (typeof updates)[number]["update"],
+      { sessionUpdate: "background_tasks_update" }
+    >;
+    expect(snapshot.tasks).toHaveLength(100);
+    expect(snapshot.tasks).toContainEqual(
+      expect.objectContaining({ taskId: "scheduled-wakeup:wake-visible" }),
+    );
+  });
+
   it("treats background_tasks_changed as a replace snapshot and enriches progress", () => {
     const { t, updates } = collect();
     t.feed({
@@ -711,6 +743,100 @@ describe("ClaudeStreamTranslator background task lifecycle", () => {
       tasks: [],
       waiting: false,
     });
+  });
+
+  it("clears a stale waiting flag when a new turn begins without a running-state edge", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [
+        {
+          task_id: "task-1",
+          task_type: "shell",
+          description: "Watch deployment",
+        },
+      ],
+    });
+    t.feed({
+      type: "system",
+      subtype: "session_state_changed",
+      state: "idle",
+    });
+    expect(
+      updates
+        .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+        .at(-1)?.update,
+    ).toMatchObject({ waiting: true });
+
+    t.beginTurn();
+
+    expect(
+      updates
+        .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+        .at(-1)?.update,
+    ).toMatchObject({ waiting: false });
+  });
+
+  it("accepts an updated description from the authoritative level snapshot", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [
+        {
+          task_id: "task-rename",
+          task_type: "shell",
+          description: "Starting shell",
+        },
+      ],
+    });
+    t.feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [
+        {
+          task_id: "task-rename",
+          task_type: "shell",
+          description: "Run pnpm test:git",
+        },
+      ],
+    });
+
+    expect(
+      updates
+        .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+        .at(-1)?.update,
+    ).toMatchObject({
+      tasks: [expect.objectContaining({ name: "Run pnpm test:git" })],
+    });
+  });
+
+  it("does not emit a second bridge frame for an identical observation", () => {
+    const { t, updates } = collect();
+    const level = {
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [
+        {
+          task_id: "task-stable",
+          task_type: "shell",
+          description: "Run tests",
+        },
+      ],
+    };
+    t.feed(level);
+    const before = updates.filter(
+      (u) => u.update.sessionUpdate === "background_tasks_update",
+    ).length;
+
+    t.feed(level);
+
+    expect(
+      updates.filter(
+        (u) => u.update.sessionUpdate === "background_tasks_update",
+      ),
+    ).toHaveLength(before);
   });
 
   it("settles one durable Background Task record even when notification repeats", () => {
@@ -1038,10 +1164,9 @@ describe("ClaudeStreamTranslator background task lifecycle", () => {
         update.kind === "background_task"
       );
     });
-    expect(lifecycle.map((notification) => notification.update.sessionUpdate)).toEqual([
-      "tool_call",
-      "tool_call_update",
-    ]);
+    expect(
+      lifecycle.map((notification) => notification.update.sessionUpdate),
+    ).toEqual(["tool_call", "tool_call_update"]);
     expect(lifecycle.at(-1)?.update).toMatchObject({
       status: "completed",
       rawOutput: {

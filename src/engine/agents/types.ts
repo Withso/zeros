@@ -60,6 +60,7 @@ export type AgentFailureStage =
   | "loadSession"
   | "prompt"
   | "cancel"
+  | "stopBackgroundTask"
   | "setMode";
 
 export interface AgentFailure {

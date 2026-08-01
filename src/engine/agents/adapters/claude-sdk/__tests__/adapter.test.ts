@@ -13,7 +13,11 @@ import * as path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { ClaudeSdkAdapter } from "../adapter";
-import type { AgentAdapterContext, SessionNotification } from "../../../types";
+import {
+  AgentFailureError,
+  type AgentAdapterContext,
+  type SessionNotification,
+} from "../../../types";
 import type { AvailableCommand } from "@zeros/core/agent-events";
 
 const TMP_DATA = path.join(os.tmpdir(), `zeros-sdk-test-${process.pid}`);
@@ -1285,7 +1289,9 @@ describe("ClaudeSdkAdapter", () => {
             adapterRef.current as unknown as {
               sessions: Map<string, { turn: unknown | null }>;
             }
-          ).sessions.values().next().value;
+          ).sessions
+            .values()
+            .next().value;
           interruptSawActiveTurn = sessionState?.turn !== null;
         },
       },
@@ -1342,12 +1348,24 @@ describe("ClaudeSdkAdapter", () => {
       prompt: [textBlock("start work")] as never,
     });
 
-    await expect(
-      adapter.stopBackgroundTask({
+    const failure = await adapter
+      .stopBackgroundTask({
         sessionId: session.sessionId,
         taskId: "shell-1",
-      }),
-    ).rejects.toThrow("does not support stopping background tasks");
+      })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    expect(failure).toBeInstanceOf(AgentFailureError);
+    expect((failure as AgentFailureError).failure).toMatchObject({
+      kind: "protocol-error",
+      stage: "stopBackgroundTask",
+      agentId: "claude",
+    });
+    expect((failure as Error).message).toContain(
+      "does not support stopping background tasks",
+    );
     await adapter.dispose();
   });
 

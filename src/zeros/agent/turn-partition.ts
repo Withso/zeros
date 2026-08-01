@@ -10,8 +10,8 @@
 //
 // `partitionTurn` is the pure boundary detector:
 //   - finalOutput = the trailing run of agent/system TEXT messages
-//     (the concluding answer). Walk from the end; stop at the first
-//     non-text event (a tool, a thought, a mode switch…).
+//     (the concluding answer) plus the few settled records that explicitly
+//     render beside it. Walk from the end; stop at the first working event.
 //   - working     = everything before that — tools, thinking,
 //     in-between agent narration, sub-agents.
 //
@@ -35,8 +35,8 @@ export interface TurnPartition {
   /** Tools, thinking, in-between narration, sub-agents — the reasoning
    *  feed shown dimmed (and collapsible once the turn settles). */
   working: AgentMessage[];
-  /** The trailing agent/system text — the agent's final answer, rendered
-   *  brightly. Empty when the turn ended on a tool (no concluding text). */
+  /** The trailing agent/system text and standalone settled records, rendered
+   *  brightly. Empty when the turn ended with working content only. */
   finalOutput: AgentMessage[];
 }
 
@@ -85,12 +85,31 @@ function isBudgetStop(e: AgentMessage): boolean {
   return (e as AgentToolMessage).toolKind === "budget_stop";
 }
 
+/** A background task can settle after its parent turn's answer. That late
+ * lifecycle record belongs beside the answer, not at the tail of the
+ * collapsible working stripe: otherwise the non-output tail makes the answer
+ * disappear and concise transcript copy loses it. Keep an in-progress record
+ * in working content until it has actually settled. */
+function isSettledBackgroundTask(e: AgentMessage): boolean {
+  if (e.kind !== "tool") return false;
+  const tool = e as AgentToolMessage;
+  return (
+    tool.toolKind === "background_task" &&
+    (tool.status === "completed" || tool.status === "failed")
+  );
+}
+
 /** Trailing-run membership: the concluding answer text, plus any manual
  *  compaction row (which typically lands AFTER the answer — the user
  *  compacted an idle chat — and must stay visible, not fold into the
  *  chip). */
 function isFinalOutputEvent(e: AgentMessage): boolean {
-  return isOutputText(e) || isManualCompaction(e) || isBudgetStop(e);
+  return (
+    isOutputText(e) ||
+    isManualCompaction(e) ||
+    isBudgetStop(e) ||
+    isSettledBackgroundTask(e)
+  );
 }
 
 export function partitionTurn(

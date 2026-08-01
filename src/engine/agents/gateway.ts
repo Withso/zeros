@@ -1146,9 +1146,12 @@ export class AgentGateway {
   ): Promise<void> {
     const adapter = this.adapterForSession(sessionId, agentId);
     if (!adapter.stopBackgroundTask) {
-      throw new Error(
-        `agent ${adapter.agentId} does not support stopping background tasks`,
-      );
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        message: `agent ${adapter.agentId} does not support stopping background tasks`,
+        stage: "stopBackgroundTask",
+        agentId: adapter.agentId,
+      });
     }
     await adapter.stopBackgroundTask({ sessionId, taskId });
   }

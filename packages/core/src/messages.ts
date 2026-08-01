@@ -779,6 +779,7 @@ export interface BridgeAgentFailure {
     | "loadSession"
     | "prompt"
     | "cancel"
+    | "stopBackgroundTask"
     | "setMode";
   agentId?: string;
   /** User-actionable next step, written for the END USER (not logs). The UI

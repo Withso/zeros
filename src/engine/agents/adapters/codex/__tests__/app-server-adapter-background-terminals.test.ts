@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentAdapterContext } from "../../../types";
+import { AgentFailureError, type AgentAdapterContext } from "../../../types";
 
 type Deferred = {
   promise: Promise<unknown>;
@@ -20,6 +20,7 @@ const rt = vi.hoisted(() => ({
   }>,
   terminateError: null as Error | null,
   terminateResult: true,
+  descendantThreads: [] as Array<Record<string, unknown>>,
   fire(method: string, params: unknown): void {
     for (const handler of rt.handlers.get(method) ?? []) handler(params);
   },
@@ -81,6 +82,13 @@ vi.mock("../app-server", () => ({
         if (rt.terminateError) throw rt.terminateError;
         return { terminated: rt.terminateResult };
       }
+      if (method === "thread/list") {
+        return {
+          data: rt.descendantThreads,
+          nextCursor: null,
+          backwardsCursor: null,
+        };
+      }
       if (method === "skills/list") return { data: [] };
       return {};
     }),
@@ -112,6 +120,7 @@ describe("Codex background-terminal refresh", () => {
     rt.requests = [];
     rt.terminateError = null;
     rt.terminateResult = true;
+    rt.descendantThreads = [];
   });
 
   afterEach(() => {
@@ -142,12 +151,9 @@ describe("Codex background-terminal refresh", () => {
       limit: 100,
     });
 
-    // Unrelated threads and non-command items cannot change this thread's
-    // background-terminal list, so they must not invalidate it.
-    rt.fire("item/started", {
-      threadId: "thread-other",
-      item: { type: "commandExecution" },
-    });
+    // Non-command items cannot change a background-terminal list, so they
+    // must not invalidate it. A different thread on this dedicated runtime is
+    // a collaboration descendant and is covered separately below.
     rt.fire("item/started", {
       threadId: "thread-exact",
       item: { type: "agentMessage" },
@@ -219,6 +225,482 @@ describe("Codex background-terminal refresh", () => {
       expect.objectContaining({ taskId: "process-new" }),
     ]);
 
+    await adapter.dispose();
+  });
+
+  it("does not publish an identical successful refresh twice", async () => {
+    const emit = {
+      onSessionUpdate: vi.fn(),
+      onPermissionRequest: vi.fn(),
+      onQuestionRequest: vi.fn(),
+      onAgentStderr: vi.fn(),
+      onAgentExit: vi.fn(),
+    };
+    const adapter = new CodexAppServerAdapter({
+      projectRoot: "/tmp/proj",
+      mcpServers: [],
+      sessionDirRoot: "/tmp/sessions",
+      emit,
+    });
+    await adapter.newSession({ cwd: "/tmp/proj" });
+    await tick();
+    const terminal = {
+      itemId: "item-stable",
+      processId: "process-stable",
+      command: "pnpm test",
+      cwd: "/tmp/proj",
+      osPid: 101,
+      cpuPercent: null,
+      rssKb: null,
+    };
+    rt.listRequests[0].deferred.resolve({
+      data: [terminal],
+      nextCursor: null,
+    });
+    await tick();
+    const before = emit.onSessionUpdate.mock.calls.filter(
+      (call) => call[1].update.sessionUpdate === "background_tasks_update",
+    ).length;
+
+    rt.fire("item/completed", {
+      threadId: "thread-exact",
+      item: { type: "commandExecution", id: "item-stable" },
+    });
+    await tick();
+    rt.listRequests[1].deferred.resolve({
+      data: [terminal],
+      nextCursor: null,
+    });
+    await tick();
+
+    expect(
+      emit.onSessionUpdate.mock.calls.filter(
+        (call) => call[1].update.sessionUpdate === "background_tasks_update",
+      ),
+    ).toHaveLength(before);
+    await adapter.dispose();
+  });
+
+  it("tracks and stops a terminal owned by a collaboration subthread", async () => {
+    const emit = {
+      onSessionUpdate: vi.fn(),
+      onPermissionRequest: vi.fn(),
+      onQuestionRequest: vi.fn(),
+      onAgentStderr: vi.fn(),
+      onAgentExit: vi.fn(),
+    };
+    const adapter = new CodexAppServerAdapter({
+      projectRoot: "/tmp/proj",
+      mcpServers: [],
+      sessionDirRoot: "/tmp/sessions",
+      emit,
+    });
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    await tick();
+    rt.listRequests[0].deferred.resolve({ data: [], nextCursor: null });
+    await tick();
+
+    rt.fire("item/started", {
+      threadId: "thread-child",
+      turnId: "turn-child",
+      item: {
+        type: "commandExecution",
+        id: "item-child",
+        command: "pnpm test:backend",
+      },
+    });
+    await tick();
+    const childRequest = rt.listRequests.find(
+      (request) => request.params.threadId === "thread-child",
+    );
+    expect(childRequest).toBeDefined();
+    for (const request of rt.listRequests.slice(1)) {
+      request.deferred.resolve({
+        data:
+          request.params.threadId === "thread-child"
+            ? [
+                {
+                  itemId: "item-child",
+                  processId: "process-child",
+                  command: "pnpm test:backend",
+                  cwd: "/tmp/proj",
+                  osPid: 202,
+                  cpuPercent: null,
+                  rssKb: null,
+                },
+              ]
+            : [],
+        nextCursor: null,
+      });
+    }
+    await tick();
+
+    const snapshot = emit.onSessionUpdate.mock.calls
+      .map((call) => call[1])
+      .filter(
+        (notification) =>
+          notification.update.sessionUpdate === "background_tasks_update",
+      )
+      .at(-1);
+    expect(snapshot).toMatchObject({
+      sessionId: session.sessionId,
+      update: {
+        tasks: [
+          expect.objectContaining({
+            name: "pnpm test:backend",
+            taskType: "codex_terminal",
+          }),
+        ],
+      },
+    });
+    const taskId = snapshot!.update.tasks[0].taskId;
+    const requestsBeforeStop = rt.listRequests.length;
+    const stopping = adapter.stopBackgroundTask({
+      sessionId: session.sessionId,
+      taskId,
+    });
+    await tick();
+    expect(rt.requests).toContainEqual({
+      method: "thread/backgroundTerminals/terminate",
+      params: { threadId: "thread-child", processId: "process-child" },
+    });
+    for (const request of rt.listRequests.slice(requestsBeforeStop)) {
+      request.deferred.resolve({ data: [], nextCursor: null });
+    }
+    await stopping;
+    await adapter.dispose();
+  });
+
+  it("does not let a full descendant cache hide a newly active command thread", async () => {
+    const emit = {
+      onSessionUpdate: vi.fn(),
+      onPermissionRequest: vi.fn(),
+      onQuestionRequest: vi.fn(),
+      onAgentStderr: vi.fn(),
+      onAgentExit: vi.fn(),
+    };
+    const adapter = new CodexAppServerAdapter({
+      projectRoot: "/tmp/proj",
+      mcpServers: [],
+      sessionDirRoot: "/tmp/sessions",
+      emit,
+    });
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    await tick();
+    const state = (
+      adapter as unknown as {
+        sessions: Map<
+          string,
+          {
+            backgroundThreadIds: Set<string>;
+          }
+        >;
+      }
+    ).sessions.get(session.sessionId)!;
+    for (let index = 0; index < 99; index += 1) {
+      state.backgroundThreadIds.add(`thread-idle-${index}`);
+    }
+
+    rt.fire("item/started", {
+      threadId: "thread-new-active",
+      turnId: "turn-new-active",
+      item: { type: "commandExecution", id: "item-new-active" },
+    });
+    rt.listRequests[0].deferred.resolve({ data: [], nextCursor: null });
+    await tick();
+    const requestedNewThread = rt.listRequests.some(
+      (request) => request.params.threadId === "thread-new-active",
+    );
+    for (const request of rt.listRequests.slice(1)) {
+      request.deferred.resolve({ data: [], nextCursor: null });
+    }
+    await tick();
+    await adapter.dispose();
+
+    expect(requestedNewThread).toBe(true);
+  });
+
+  it("settles a child task when the server authoritatively unloads its thread", async () => {
+    rt.descendantThreads = [
+      {
+        id: "thread-unloaded-child",
+        status: { type: "idle" },
+      },
+    ];
+    const emit = {
+      onSessionUpdate: vi.fn(),
+      onPermissionRequest: vi.fn(),
+      onQuestionRequest: vi.fn(),
+      onAgentStderr: vi.fn(),
+      onAgentExit: vi.fn(),
+    };
+    const adapter = new CodexAppServerAdapter({
+      projectRoot: "/tmp/proj",
+      mcpServers: [],
+      sessionDirRoot: "/tmp/sessions",
+      emit,
+    });
+    await adapter.newSession({ cwd: "/tmp/proj" });
+    await tick();
+    for (const request of rt.listRequests) {
+      request.deferred.resolve({
+        data:
+          request.params.threadId === "thread-unloaded-child"
+            ? [
+                {
+                  itemId: "item-unloaded-child",
+                  processId: "process-unloaded-child",
+                  command: "npm run watch",
+                  cwd: "/tmp/proj",
+                  osPid: 404,
+                  cpuPercent: null,
+                  rssKb: null,
+                },
+              ]
+            : [],
+        nextCursor: null,
+      });
+    }
+    await tick();
+
+    rt.fire("thread/status/changed", {
+      threadId: "thread-unloaded-child",
+      status: { type: "notLoaded" },
+    });
+    await tick();
+    const settledBeforeAnotherList = emit.onSessionUpdate.mock.calls.some(
+      (call) =>
+        call[1].update.sessionUpdate === "tool_call" &&
+        call[1].update.kind === "background_task" &&
+        call[1].update.rawInput?.name === "npm run watch",
+    );
+    for (const request of rt.listRequests.slice(2)) {
+      request.deferred.resolve({ data: [], nextCursor: null });
+    }
+    await tick();
+    await adapter.dispose();
+
+    expect(settledBeforeAnotherList).toBe(true);
+  });
+
+  it("retains one child exact-key snapshot when a sibling refresh fails", async () => {
+    rt.descendantThreads = [
+      {
+        id: "thread-retained-child",
+        status: { type: "idle" },
+      },
+    ];
+    const emit = {
+      onSessionUpdate: vi.fn(),
+      onPermissionRequest: vi.fn(),
+      onQuestionRequest: vi.fn(),
+      onAgentStderr: vi.fn(),
+      onAgentExit: vi.fn(),
+    };
+    const adapter = new CodexAppServerAdapter({
+      projectRoot: "/tmp/proj",
+      mcpServers: [],
+      sessionDirRoot: "/tmp/sessions",
+      emit,
+    });
+    await adapter.newSession({ cwd: "/tmp/proj" });
+    await tick();
+    for (const request of rt.listRequests) {
+      request.deferred.resolve({
+        data:
+          request.params.threadId === "thread-retained-child"
+            ? [
+                {
+                  itemId: "item-retained-child",
+                  processId: "process-retained-child",
+                  command: "pnpm dev",
+                  cwd: "/tmp/proj",
+                  osPid: 505,
+                  cpuPercent: null,
+                  rssKb: null,
+                },
+              ]
+            : [],
+        nextCursor: null,
+      });
+    }
+    await tick();
+
+    rt.fire("item/started", {
+      threadId: "thread-exact",
+      turnId: "turn-parent",
+      item: { type: "commandExecution", id: "item-parent" },
+    });
+    await tick();
+    const revalidation = rt.listRequests.slice(2);
+    revalidation
+      .find((request) => request.params.threadId === "thread-exact")!
+      .deferred.resolve({
+        data: [
+          {
+            itemId: "item-parent",
+            processId: "process-parent",
+            command: "pnpm lint",
+            cwd: "/tmp/proj",
+            osPid: 606,
+            cpuPercent: null,
+            rssKb: null,
+          },
+        ],
+        nextCursor: null,
+      });
+    revalidation
+      .find((request) => request.params.threadId === "thread-retained-child")!
+      .deferred.reject(new Error("child list temporarily unavailable"));
+    await tick();
+
+    const tasks = emit.onSessionUpdate.mock.calls
+      .map((call) => call[1])
+      .filter(
+        (notification) =>
+          notification.update.sessionUpdate === "background_tasks_update",
+      )
+      .at(-1)?.update.tasks;
+    expect(tasks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "pnpm dev" }),
+        expect.objectContaining({ name: "pnpm lint" }),
+      ]),
+    );
+    await adapter.dispose();
+  });
+
+  it("reserves aggregate capacity for a child when the parent is saturated", async () => {
+    rt.descendantThreads = [
+      {
+        id: "thread-fair-child",
+        status: { type: "idle" },
+      },
+    ];
+    const emit = {
+      onSessionUpdate: vi.fn(),
+      onPermissionRequest: vi.fn(),
+      onQuestionRequest: vi.fn(),
+      onAgentStderr: vi.fn(),
+      onAgentExit: vi.fn(),
+    };
+    const adapter = new CodexAppServerAdapter({
+      projectRoot: "/tmp/proj",
+      mcpServers: [],
+      sessionDirRoot: "/tmp/sessions",
+      emit,
+    });
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    await tick();
+    for (const request of rt.listRequests) {
+      const child = request.params.threadId === "thread-fair-child";
+      request.deferred.resolve({
+        data: child
+          ? [
+              {
+                itemId: "item-fair-child",
+                processId: "process-fair-child",
+                command: "pnpm test:backend",
+                cwd: "/tmp/proj",
+                osPid: 707,
+                cpuPercent: null,
+                rssKb: null,
+              },
+            ]
+          : Array.from({ length: 100 }, (_, index) => ({
+              itemId: `item-parent-${index}`,
+              processId: `process-parent-${index}`,
+              command: `parent command ${index}`,
+              cwd: "/tmp/proj",
+              osPid: index,
+              cpuPercent: null,
+              rssKb: null,
+            })),
+        nextCursor: null,
+      });
+    }
+    await tick();
+
+    const tasks = emit.onSessionUpdate.mock.calls
+      .map((call) => call[1])
+      .filter(
+        (notification) =>
+          notification.update.sessionUpdate === "background_tasks_update",
+      )
+      .at(-1)?.update.tasks;
+    expect(tasks).toHaveLength(100);
+    expect(tasks).toContainEqual(
+      expect.objectContaining({ name: "pnpm test:backend" }),
+    );
+    const authoritativeTaskCount = (
+      adapter as unknown as {
+        sessions: Map<string, { backgroundTasks: Map<string, unknown> }>;
+      }
+    ).sessions.get(session.sessionId)!.backgroundTasks.size;
+    expect(authoritativeTaskCount).toBe(101);
+    await adapter.dispose();
+  });
+
+  it("discovers a loaded descendant terminal when resuming before new item events", async () => {
+    rt.descendantThreads = [
+      {
+        id: "thread-resumed-child",
+        status: { type: "idle" },
+      },
+    ];
+    const emit = {
+      onSessionUpdate: vi.fn(),
+      onPermissionRequest: vi.fn(),
+      onQuestionRequest: vi.fn(),
+      onAgentStderr: vi.fn(),
+      onAgentExit: vi.fn(),
+    };
+    const adapter = new CodexAppServerAdapter({
+      projectRoot: "/tmp/proj",
+      mcpServers: [],
+      sessionDirRoot: "/tmp/sessions",
+      emit,
+    });
+    await adapter.newSession({ cwd: "/tmp/proj" });
+    await tick();
+    expect(
+      rt.listRequests.some(
+        (request) => request.params.threadId === "thread-resumed-child",
+      ),
+    ).toBe(true);
+    for (const request of rt.listRequests) {
+      request.deferred.resolve({
+        data:
+          request.params.threadId === "thread-resumed-child"
+            ? [
+                {
+                  itemId: "item-resumed-child",
+                  processId: "process-resumed-child",
+                  command: "npm run dev",
+                  cwd: "/tmp/proj",
+                  osPid: 303,
+                  cpuPercent: null,
+                  rssKb: null,
+                },
+              ]
+            : [],
+        nextCursor: null,
+      });
+    }
+    await tick();
+    expect(
+      emit.onSessionUpdate.mock.calls
+        .map((call) => call[1])
+        .filter(
+          (notification) =>
+            notification.update.sessionUpdate === "background_tasks_update",
+        )
+        .at(-1),
+    ).toMatchObject({
+      update: {
+        tasks: [expect.objectContaining({ name: "npm run dev" })],
+      },
+    });
     await adapter.dispose();
   });
 
@@ -395,7 +877,13 @@ describe("Codex background-terminal refresh", () => {
       data: [terminal],
       nextCursor: null,
     });
-    await expect(stoppingOutcome).resolves.toBeInstanceOf(Error);
+    const failure = await stoppingOutcome;
+    expect(failure).toBeInstanceOf(AgentFailureError);
+    expect((failure as AgentFailureError).failure).toMatchObject({
+      kind: "protocol-error",
+      stage: "stopBackgroundTask",
+      agentId: "codex",
+    });
 
     rt.fire("item/completed", {
       threadId: "thread-exact",

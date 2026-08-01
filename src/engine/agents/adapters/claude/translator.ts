@@ -288,6 +288,12 @@ export class ClaudeStreamTranslator {
   private readonly terminalTaskIds = new Set<string>();
   private sessionActivityState: "idle" | "running" | "requires_action" | null =
     null;
+  /** Last wire snapshot, retained only to suppress semantically identical
+   * provider observations before they cross the engine/renderer bridge. */
+  private lastEmittedBackgroundTasks: {
+    tasks: BackgroundTask[];
+    waiting: boolean;
+  } | null = null;
 
   /** Zeros-side (minted) tool call id for a native tool_use id — lets the
    *  adapter address a timeline row it only knows by vendor id (the
@@ -499,6 +505,16 @@ export class ClaudeStreamTranslator {
     this.emitBackgroundTasks();
   }
 
+  /** The local prompt boundary is authoritative evidence that the parent is
+   * running even if this CLI build omits a matching session-state edge. */
+  beginTurn(): void {
+    const wasWaiting =
+      this.sessionActivityState === "idle" &&
+      (this.backgroundTasks.size > 0 || this.scheduledWakeups.size > 0);
+    this.sessionActivityState = "running";
+    if (wasWaiting) this.emitBackgroundTasks();
+  }
+
   /** Feed a parsed JSON event from Claude's stdout. */
   feed(event: unknown): void {
     if (!isObj(event) || typeof event.type !== "string") {
@@ -509,6 +525,16 @@ export class ClaudeStreamTranslator {
     // settled) — the current retry burst, if any, is over. The next
     // api_retry starts a NEW burst and gets its own notice row.
     if (event.type !== "system") this.retryBurstNoticed = false;
+    // Internal loop wake-ups can begin without passing through adapter.prompt.
+    // Any model/user stream beat proves the parent is active and clears a
+    // stale idle+background waiting presentation defensively.
+    if (
+      event.type === "assistant" ||
+      event.type === "user" ||
+      event.type === "stream_event"
+    ) {
+      this.beginTurn();
+    }
     switch (event.type) {
       case "system":
         this.onSystem(event as unknown as ClaudeSystemEvent);
@@ -795,16 +821,36 @@ export class ClaudeStreamTranslator {
 
   /** Emit the current active set as one bounded, authoritative replacement. */
   private emitBackgroundTasks(): void {
+    const scheduled = [...this.scheduledWakeups.values()].slice(
+      0,
+      MAX_ACTIVE_BACKGROUND_TASKS,
+    );
+    // Keep native ordering while reserving capacity for every visible
+    // one-shot wake-up. Native membership may itself fill the provider cap;
+    // appending then slicing would make the only specially-stoppable row
+    // disappear exactly in that saturated case.
     const tasks = [
-      ...this.backgroundTasks.values(),
-      ...this.scheduledWakeups.values(),
-    ].slice(0, MAX_ACTIVE_BACKGROUND_TASKS);
+      ...[...this.backgroundTasks.values()].slice(
+        0,
+        MAX_ACTIVE_BACKGROUND_TASKS - scheduled.length,
+      ),
+      ...scheduled,
+    ];
+    const waiting = this.sessionActivityState === "idle" && tasks.length > 0;
+    if (
+      this.lastEmittedBackgroundTasks &&
+      this.lastEmittedBackgroundTasks.waiting === waiting &&
+      sameBackgroundTaskList(this.lastEmittedBackgroundTasks.tasks, tasks)
+    ) {
+      return;
+    }
+    this.lastEmittedBackgroundTasks = { tasks, waiting };
     this.emit({
       sessionId: this.sessionId,
       update: {
         sessionUpdate: "background_tasks_update",
         tasks,
-        waiting: this.sessionActivityState === "idle" && tasks.length > 0,
+        waiting,
       },
     });
   }
@@ -865,12 +911,15 @@ export class ClaudeStreamTranslator {
       );
     }
     if (previous) {
-      const activeTask = {
+      const candidate = {
         ...previous,
         ...metadata,
         startedAt: previous.startedAt,
         updatedAt: now,
       };
+      const activeTask = sameBackgroundTaskContents(previous, candidate)
+        ? previous
+        : candidate;
       this.backgroundTasks.set(event.task_id, activeTask);
       this.emitBackgroundTasks();
       if (!event.skip_transcript) {
@@ -886,10 +935,7 @@ export class ClaudeStreamTranslator {
     taskId: string,
     task: BackgroundTask,
   ): void {
-    if (
-      this.skippedTaskRecords.has(taskId) ||
-      this.taskRecordIds.has(taskId)
-    ) {
+    if (this.skippedTaskRecords.has(taskId) || this.taskRecordIds.has(taskId)) {
       return;
     }
     const toolCallId = `background-task-${randomUUID()}`;
@@ -929,13 +975,14 @@ export class ClaudeStreamTranslator {
       }
       const previous = this.backgroundTasks.get(incoming.task_id);
       const metadata = this.backgroundTaskMetadata.get(incoming.task_id);
-      const task: BackgroundTask = {
+      const candidate: BackgroundTask = {
         taskId: incoming.task_id,
         name:
-          previous?.name ||
-          metadata?.name ||
-          incoming.description ||
-          `Task ${incoming.task_id}`,
+          pickFirstString(
+            incoming.description,
+            previous?.name,
+            metadata?.name,
+          ) ?? `Task ${incoming.task_id}`,
         taskType:
           incoming.task_type ?? previous?.taskType ?? metadata?.taskType,
         startedAt: previous?.startedAt ?? metadata?.startedAt ?? now,
@@ -950,6 +997,10 @@ export class ClaudeStreamTranslator {
           ? { lastToolName: previous?.lastToolName ?? metadata?.lastToolName }
           : {}),
       };
+      const task =
+        previous && sameBackgroundTaskContents(previous, candidate)
+          ? previous
+          : candidate;
       next.set(incoming.task_id, task);
       addBoundedSet(
         this.observedBackgroundTaskIds,
@@ -982,7 +1033,7 @@ export class ClaudeStreamTranslator {
     const now = Date.now();
     const durationMs = event.usage?.duration_ms;
     const base = previous ?? previousMetadata!;
-    const updated: BackgroundTask = {
+    const candidate: BackgroundTask = {
       ...base,
       // A duration lets an out-of-order progress edge recover a more accurate
       // start time than receipt time without ever moving it forwards.
@@ -995,6 +1046,9 @@ export class ClaudeStreamTranslator {
       ...(event.summary ? { summary: event.summary } : {}),
       ...(event.last_tool_name ? { lastToolName: event.last_tool_name } : {}),
     };
+    const updated = sameBackgroundTaskContents(base, candidate)
+      ? base
+      : candidate;
     setBoundedMap(
       this.backgroundTaskMetadata,
       event.task_id,
@@ -1046,12 +1100,7 @@ export class ClaudeStreamTranslator {
       this.taskRecordIds.has(event.task_id) ||
       this.observedBackgroundTaskIds.has(event.task_id) ||
       explicitlyBackgrounded;
-    if (
-      explicitlyBackgrounded &&
-      !terminal &&
-      !previous &&
-      transitionTask
-    ) {
+    if (explicitlyBackgrounded && !terminal && !previous && transitionTask) {
       this.backgroundTasks.set(event.task_id, transitionTask);
       setBoundedMap(
         this.backgroundTaskMetadata,
@@ -1063,7 +1112,11 @@ export class ClaudeStreamTranslator {
         this.ensureBackgroundTaskRecord(event.task_id, transitionTask);
       }
       this.emitBackgroundTasks();
-    } else if (previous && event.patch?.description) {
+    } else if (
+      previous &&
+      event.patch?.description &&
+      previous.name !== event.patch.description
+    ) {
       this.backgroundTasks.set(event.task_id, {
         ...previous,
         name: event.patch.description,
@@ -1122,9 +1175,7 @@ export class ClaudeStreamTranslator {
     // row even if this completion bookend arrives without task_started (for
     // example after a transiently missed edge).
     const activeTask = this.backgroundTasks.get(event.task_id);
-    const task =
-      activeTask ??
-      this.backgroundTaskMetadata.get(event.task_id);
+    const task = activeTask ?? this.backgroundTaskMetadata.get(event.task_id);
     const wasBackground =
       !!activeTask ||
       this.taskRecordIds.has(event.task_id) ||
@@ -1896,9 +1947,7 @@ function retainToolInput(
   if (!command && !description) return null;
   return {
     name,
-    ...(command
-      ? { command: command.slice(0, MAX_RETAINED_TOOL_TEXT) }
-      : {}),
+    ...(command ? { command: command.slice(0, MAX_RETAINED_TOOL_TEXT) } : {}),
     ...(description
       ? { description: description.slice(0, MAX_RETAINED_TOOL_TEXT) }
       : {}),
@@ -1920,6 +1969,35 @@ function sameSettledTaskRecord(
     a.rawOutput.error === b.rawOutput.error &&
     a.rawOutput.outputFile === b.rawOutput.outputFile &&
     a.rawOutput.durationMs === b.rawOutput.durationMs
+  );
+}
+
+function sameBackgroundTaskContents(
+  a: BackgroundTask,
+  b: BackgroundTask,
+): boolean {
+  return (
+    a.taskId === b.taskId &&
+    a.name === b.name &&
+    a.taskType === b.taskType &&
+    a.startedAt === b.startedAt &&
+    a.command === b.command &&
+    a.summary === b.summary &&
+    a.lastToolName === b.lastToolName
+  );
+}
+
+function sameBackgroundTaskList(
+  a: readonly BackgroundTask[],
+  b: readonly BackgroundTask[],
+): boolean {
+  return (
+    a.length === b.length &&
+    a.every(
+      (task, index) =>
+        sameBackgroundTaskContents(task, b[index]) &&
+        task.updatedAt === b[index].updatedAt,
+    )
   );
 }
 
