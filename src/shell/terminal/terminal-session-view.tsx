@@ -84,8 +84,12 @@ import {
   bindPtyWriter,
   useTerminalStore,
 } from "./terminal-store";
-import { createTerminalResizeScheduler } from "./terminal-resize-scheduler";
+import {
+  createTerminalRevealScheduler,
+  createTerminalResizeScheduler,
+} from "./terminal-resize-scheduler";
 import { isContinuousLayoutResizeActive } from "./continuous-layout-resize";
+import { isUsableTerminalDimensions } from "./terminal-dimensions";
 
 // Mirrors `--font-mono` in `styles/zeros-tokens.css` exactly — xterm can't
 // read a CSS variable, so this string has to be kept in sync by hand.
@@ -105,15 +109,6 @@ const TERMINAL_FONT_SIZE_PX = 12;
 const FALLBACK_COLS = 80;
 const FALLBACK_ROWS = 24;
 const FIT_FALLBACK_MS = 1500;
-
-// Minimum dims we'll treat as "real" — anything smaller is almost
-// certainly a mid-layout transient (panel still expanding, flex still
-// resolving). `proposeDimensions` returns undefined when the host
-// is 0×0, and tiny positive values when the cell metrics give it
-// just one or two cells in some dimension. Below this threshold we
-// keep polling.
-const MIN_REAL_COLS = 4;
-const MIN_REAL_ROWS = 2;
 
 interface TerminalSessionViewProps {
   sessionId: string;
@@ -432,13 +427,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       // proposeDimensions() returns undefined when the host has zero
       // box, and a positive `{cols, rows}` once it has real layout.
       const dims = fit.proposeDimensions();
-      if (
-        !dims ||
-        !Number.isFinite(dims.cols) ||
-        !Number.isFinite(dims.rows) ||
-        dims.cols < MIN_REAL_COLS ||
-        dims.rows < MIN_REAL_ROWS
-      ) {
+      if (!isUsableTerminalDimensions(dims)) {
         return; // keep polling
       }
       spawned = true;
@@ -784,33 +773,24 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
   // renderer skips paints while the ancestor is `visibility:hidden`.
   useEffect(() => {
     if (!visible) return;
-    // Dragging a collapsed panel open flips visibility mid-gesture. Mark the
-    // scheduler dirty explicitly so release always performs one exact fit,
-    // even if ResizeObserver coalesces away that intermediate geometry.
-    if (isContinuousLayoutResizeActive()) {
-      resizeSchedulerRef.current?.flush();
-      return;
-    }
-    let raf1 = 0;
-    let raf2 = 0;
-    raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => {
-        applyFit();
-        const term = xtermRef.current;
-        if (term) {
-          try {
-            term.refresh(0, Math.max(0, term.rows - 1));
-            term.focus();
-          } catch {
-            /* not laid out yet */
-          }
+    // A collapsed panel can become visible while its seam gesture is still
+    // active. Keep the complete reveal follow-up pending until release; a fit
+    // alone cannot repaint DOM-renderer rows skipped under visibility:hidden
+    // and cannot restore keyboard focus.
+    const revealScheduler = createTerminalRevealScheduler(() => {
+      applyFit();
+      const term = xtermRef.current;
+      if (term) {
+        try {
+          term.refresh(0, Math.max(0, term.rows - 1));
+          term.focus();
+        } catch {
+          /* not laid out yet */
         }
-      });
+      }
     });
-    return () => {
-      cancelAnimationFrame(raf1);
-      cancelAnimationFrame(raf2);
-    };
+    revealScheduler.request();
+    return () => revealScheduler.dispose();
     // applyFit is a stable closure over refs (see post-spawn observer).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
@@ -826,13 +806,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     const term = xtermRef.current;
     if (!fit || !term) return;
     const proposed = fit.proposeDimensions();
-    if (
-      !proposed ||
-      !Number.isFinite(proposed.cols) ||
-      !Number.isFinite(proposed.rows) ||
-      proposed.cols < MIN_REAL_COLS ||
-      proposed.rows < MIN_REAL_ROWS
-    ) {
+    if (!isUsableTerminalDimensions(proposed)) {
       return;
     }
     // term.onResize will fire and push to ptyResize if the dims

@@ -4,10 +4,10 @@
 //
 // Moving a flex seam necessarily lays out the two flex items. It must not also
 // re-wrap a long transcript, diff, iframe deck, and terminal subtree for every
-// intermediate pixel. Marked child surfaces keep their exact starting width
-// while the outer columns track the pointer; overflow clips the preserved view.
-// Releasing the returned callback restores their prior inline state, allowing
-// one final layout at the committed width.
+// intermediate shrinking pixel. Marked child surfaces keep their starting
+// width as a floor while the outer columns track the pointer, so narrowing
+// clips the preserved view. They still stretch normally when their owner grows,
+// avoiding an exposed empty strip. Release restores their prior inline state.
 
 export const RESIZE_WIDTH_LOCK_ATTRIBUTE =
   "data-zeros-resize-width-lock" as const;
@@ -17,11 +17,11 @@ export const RESIZE_WIDTH_LOCK_SELECTOR =
 interface WidthSnapshot {
   element: HTMLElement;
   width: number;
-  previousValue: string;
-  previousPriority: string;
+  previousMinWidth: string;
+  previousMinWidthPriority: string;
 }
 
-/** Freeze every marked descendant at its current border-box width.
+/** Floor every marked descendant at its current border-box width.
  *
  * All geometry is read before the first style write so starting a drag causes
  * at most one layout flush rather than alternating read/write per surface.
@@ -38,28 +38,32 @@ export function lockResizeDescendantWidths(root: ParentNode): () => void {
     snapshots.push({
       element,
       width,
-      previousValue: element.style.getPropertyValue("width"),
-      previousPriority: element.style.getPropertyPriority("width"),
+      previousMinWidth: element.style.getPropertyValue("min-width"),
+      previousMinWidthPriority: element.style.getPropertyPriority("min-width"),
     });
   }
 
   for (const { element, width } of snapshots) {
-    element.style.setProperty("width", `${width}px`);
+    element.style.setProperty("min-width", `${width}px`);
   }
 
   let unlocked = false;
   return () => {
     if (unlocked) return;
     unlocked = true;
-    for (const { element, previousValue, previousPriority } of snapshots) {
-      if (previousValue) {
+    for (const {
+      element,
+      previousMinWidth,
+      previousMinWidthPriority,
+    } of snapshots) {
+      if (previousMinWidth) {
         element.style.setProperty(
-          "width",
-          previousValue,
-          previousPriority,
+          "min-width",
+          previousMinWidth,
+          previousMinWidthPriority,
         );
       } else {
-        element.style.removeProperty("width");
+        element.style.removeProperty("min-width");
       }
     }
   };

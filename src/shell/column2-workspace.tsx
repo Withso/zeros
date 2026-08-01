@@ -239,9 +239,9 @@ export function Column2Workspace({
         if (isFinished) return;
         if (!moved && Math.abs(ev.clientX - startClientX) > DRAG_THRESHOLD_PX) {
           moved = true;
-          // Keep the exact current transcript/diff/terminal view during the
-          // gesture. The outer flex items still follow every animation frame,
-          // but their expensive children reflow only once at release.
+          // Preserve the current transcript/diff width while its owner shrinks.
+          // A min-width floor clips that expensive subtree, while a widening
+          // owner can still stretch it instead of exposing an empty strip.
           if (row) unlockDescendantWidths = lockResizeDescendantWidths(row);
         }
         if (!moved) return;

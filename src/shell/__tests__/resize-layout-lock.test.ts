@@ -18,7 +18,7 @@ function fakeStyle(
 ): FakeStyle {
   const values = new Map<string, { value: string; priority: string }>();
   if (initial) {
-    values.set("width", {
+    values.set("min-width", {
       value: initial.value,
       priority: initial.priority ?? "",
     });
@@ -45,9 +45,9 @@ function fakeStyle(
 function fakeElement(
   width: number,
   events: string[],
-  initialWidth?: { value: string; priority?: string },
+  initialMinWidth?: { value: string; priority?: string },
 ) {
-  const style = fakeStyle(initialWidth);
+  const style = fakeStyle(initialMinWidth);
   return {
     style,
     getBoundingClientRect() {
@@ -58,7 +58,7 @@ function fakeElement(
 }
 
 describe("resize layout width lock", () => {
-  it("measures every marked surface before writing and restores exact inline state", () => {
+  it("sets a shrink floor without preventing surfaces from stretching wider", () => {
     const events: string[] = [];
     const first = fakeElement(640.25, events, {
       value: "72%",
@@ -69,7 +69,7 @@ describe("resize layout width lock", () => {
     for (const element of elements) {
       const originalSet = element.style.setProperty.bind(element.style);
       element.style.setProperty = (name, value, priority) => {
-        events.push(`write:${value}`);
+        events.push(`write:${name}:${value}`);
         originalSet(name, value, priority);
       };
     }
@@ -85,28 +85,32 @@ describe("resize layout width lock", () => {
     expect(events).toEqual([
       "read:640.25",
       "read:511",
-      "write:640.25px",
-      "write:511px",
+      "write:min-width:640.25px",
+      "write:min-width:511px",
     ]);
-    expect(first.style.values.get("width")).toEqual({
+    expect(first.style.values.get("min-width")).toEqual({
       value: "640.25px",
       priority: "",
     });
-    expect(second.style.values.get("width")).toEqual({
+    expect(second.style.values.get("min-width")).toEqual({
       value: "511px",
       priority: "",
     });
+    // Leaving `width` untouched lets normal stretch layout fill a widening
+    // owner instead of exposing a frozen-width empty strip.
+    expect(first.style.values.has("width")).toBe(false);
+    expect(second.style.values.has("width")).toBe(false);
 
     unlock();
-    expect(first.style.values.get("width")).toEqual({
+    expect(first.style.values.get("min-width")).toEqual({
       value: "72%",
       priority: "important",
     });
-    expect(second.style.values.has("width")).toBe(false);
+    expect(second.style.values.has("min-width")).toBe(false);
 
     // Cleanup can be reached through pointerup + lostpointercapture.
     unlock();
-    expect(first.style.values.get("width")?.value).toBe("72%");
+    expect(first.style.values.get("min-width")?.value).toBe("72%");
   });
 
   it("does not freeze disconnected or zero-width surfaces", () => {
@@ -118,8 +122,8 @@ describe("resize layout width lock", () => {
     };
 
     const unlock = lockResizeDescendantWidths(root as unknown as ParentNode);
-    expect(zero.style.values.has("width")).toBe(false);
-    expect(invalid.style.values.has("width")).toBe(false);
+    expect(zero.style.values.has("min-width")).toBe(false);
+    expect(invalid.style.values.has("min-width")).toBe(false);
     unlock();
   });
 });

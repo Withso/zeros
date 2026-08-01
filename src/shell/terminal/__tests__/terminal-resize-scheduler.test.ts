@@ -6,6 +6,7 @@ import {
 } from "../continuous-layout-resize";
 import {
   TERMINAL_RESIZE_SETTLE_MS,
+  createTerminalRevealScheduler,
   createTerminalResizeScheduler,
 } from "../terminal-resize-scheduler";
 
@@ -23,6 +24,27 @@ describe("terminal resize scheduler", () => {
     let nextFrameId = 1;
     const frames = new Map<number, FrameRequestCallback>();
     const scheduler = createTerminalResizeScheduler(run, {
+      requestFrame(callback) {
+        const id = nextFrameId++;
+        frames.set(id, callback);
+        return id;
+      },
+      cancelFrame(id) {
+        frames.delete(id);
+      },
+    });
+    const paint = () => {
+      const pending = [...frames.values()];
+      frames.clear();
+      for (const callback of pending) callback(performance.now());
+    };
+    return { scheduler, paint, frames };
+  }
+
+  function createRevealHarness(run: () => void) {
+    let nextFrameId = 1;
+    const frames = new Map<number, FrameRequestCallback>();
+    const scheduler = createTerminalRevealScheduler(run, {
       requestFrame(callback) {
         const id = nextFrameId++;
         frames.set(id, callback);
@@ -118,6 +140,48 @@ describe("terminal resize scheduler", () => {
     expect(frames.size).toBe(1);
     paint();
     expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("defers a visible terminal's redraw and focus until a drag releases", () => {
+    const run = vi.fn();
+    const finish = beginContinuousLayoutResize();
+    const { scheduler, paint, frames } = createRevealHarness(run);
+
+    scheduler.request();
+    expect(frames.size).toBe(0);
+    paint();
+    expect(run).not.toHaveBeenCalled();
+
+    finish();
+    expect(frames.size).toBe(1);
+    paint();
+    expect(run).not.toHaveBeenCalled();
+    expect(frames.size).toBe(1);
+
+    paint();
+    expect(run).toHaveBeenCalledTimes(1);
+    scheduler.dispose();
+  });
+
+  it("restarts reveal settling if another drag begins between frames", () => {
+    const run = vi.fn();
+    const { scheduler, paint, frames } = createRevealHarness(run);
+
+    scheduler.request();
+    paint();
+    expect(frames.size).toBe(1);
+
+    const finish = beginContinuousLayoutResize();
+    expect(frames.size).toBe(0);
+    paint();
+    expect(run).not.toHaveBeenCalled();
+
+    finish();
+    paint();
+    expect(run).not.toHaveBeenCalled();
+    paint();
+    expect(run).toHaveBeenCalledTimes(1);
+    scheduler.dispose();
   });
 
   it("disposal cancels timers, frames, and coordinator subscriptions", () => {

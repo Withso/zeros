@@ -93,7 +93,7 @@ describe("column 2 / column 3 sizing bounds stay in lockstep with CSS", () => {
     expect(col3).toContain('data-zeros-column-3=""');
   });
 
-  it("locks expensive child surfaces to one reflow per column drag", () => {
+  it("locks expensive child surfaces against repeated shrink reflow", () => {
     const terminalTab = read("../column3-tabs/terminal-tab.tsx");
     expect(col2).toContain("lockResizeDescendantWidths(row)");
     expect(col2).toContain('data-zeros-resize-width-lock=""');
@@ -146,6 +146,7 @@ describe("collapsing column 3 cannot move column 2", () => {
 describe("terminal panel seam geometry stays in lockstep with CSS", () => {
   const terminalTab = code("../column3-tabs/terminal-tab.tsx");
   const setupTab = code("../column3-tabs/setup-tab.tsx");
+  const terminalSession = code("../terminal/terminal-session-view.tsx");
 
   it("derives the panel max from the row-1 floor plus the seam", () => {
     expect(TERMINAL_PANEL_MAX_OFFSET_PX).toBe(
@@ -191,6 +192,18 @@ describe("terminal panel seam geometry stays in lockstep with CSS", () => {
     );
     expect(setupTab).not.toMatch(
       /ref=\{hostRef\}[\s\S]{0,160}className=\{cn\([\s\S]{0,160}\b(?:px-|py-|p-)/,
+    );
+  });
+
+  it("uses the same settled-dimension guard for Setup and shell terminals", () => {
+    expect(setupTab).toContain("isUsableTerminalDimensions(proposed)");
+    expect(terminalSession).toContain("isUsableTerminalDimensions(proposed)");
+  });
+
+  it("keeps reveal redraw and focus behind the continuous-resize gate", () => {
+    expect(terminalSession).toContain("createTerminalRevealScheduler");
+    expect(terminalSession).toMatch(
+      /createTerminalRevealScheduler\(\(\) => \{[\s\S]{0,500}term\.refresh\([\s\S]{0,200}term\.focus\(\)/,
     );
   });
 });

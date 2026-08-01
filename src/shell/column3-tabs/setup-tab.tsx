@@ -62,6 +62,7 @@ import { repoPageViewForSection } from "../../zeros/panels/repo-page";
 import { useThemeVariant } from "../../zeros/appearance/use-theme-variant";
 import { ZerosSpinner } from "@/loaders";
 import { createTerminalResizeScheduler } from "../terminal/terminal-resize-scheduler";
+import { isUsableTerminalDimensions } from "../terminal/terminal-dimensions";
 
 /** How often to re-pull the setup buffer while a run is live. The buffer is the
  *  source of truth; we delta-append, so polling is exact (no dup/gap). */
@@ -242,11 +243,7 @@ function WorkspaceSetup({
       if (!visibleRef.current) return;
       const proposed = fit.proposeDimensions();
       if (
-        !proposed ||
-        !Number.isFinite(proposed.cols) ||
-        !Number.isFinite(proposed.rows) ||
-        proposed.cols < 2 ||
-        proposed.rows < 1 ||
+        !isUsableTerminalDimensions(proposed) ||
         (proposed.cols === term.cols && proposed.rows === term.rows)
       ) {
         return;

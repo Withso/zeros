@@ -31,6 +31,13 @@ interface TerminalResizeScheduler {
   dispose(): void;
 }
 
+interface TerminalRevealScheduler {
+  /** Queue the visibility follow-up after layout is stable. */
+  request(): void;
+  /** Cancel queued frames and detach the shared gesture listener. */
+  dispose(): void;
+}
+
 const browserClock: TerminalResizeSchedulerClock = {
   requestFrame: (callback) => window.requestAnimationFrame(callback),
   cancelFrame: (frameId) => window.cancelAnimationFrame(frameId),
@@ -107,6 +114,80 @@ export function createTerminalResizeScheduler(
       disposed = true;
       cancelTimer();
       cancelFrame();
+      unsubscribe();
+    },
+  };
+}
+
+/** Schedule a visible terminal's fit, redraw, and focus work after two layout
+ * frames. Unlike the normal fit scheduler this never drops work requested
+ * during a pane drag: it remains dirty and starts the double-frame sequence
+ * when the outermost gesture releases. */
+export function createTerminalRevealScheduler(
+  run: () => void,
+  clock: TerminalResizeSchedulerClock = browserClock,
+): TerminalRevealScheduler {
+  let dirty = false;
+  let disposed = false;
+  let paused = isContinuousLayoutResizeActive();
+  let settleFrameId: number | null = null;
+  let runFrameId: number | null = null;
+
+  const cancelFrames = () => {
+    if (settleFrameId !== null) {
+      clock.cancelFrame(settleFrameId);
+      settleFrameId = null;
+    }
+    if (runFrameId !== null) {
+      clock.cancelFrame(runFrameId);
+      runFrameId = null;
+    }
+  };
+
+  const schedule = () => {
+    if (
+      disposed ||
+      paused ||
+      !dirty ||
+      settleFrameId !== null ||
+      runFrameId !== null
+    ) {
+      return;
+    }
+    settleFrameId = clock.requestFrame(() => {
+      settleFrameId = null;
+      if (disposed || paused || !dirty) return;
+      runFrameId = clock.requestFrame(() => {
+        runFrameId = null;
+        if (disposed || paused || !dirty) return;
+        dirty = false;
+        run();
+      });
+    });
+  };
+
+  const unsubscribe = subscribeContinuousLayoutResize((active) => {
+    paused = active;
+    if (active) {
+      // A second gesture can begin between the two settle frames. Preserve the
+      // request and restart the full sequence after its final geometry lands.
+      cancelFrames();
+      return;
+    }
+    schedule();
+  });
+
+  return {
+    request() {
+      if (disposed) return;
+      dirty = true;
+      schedule();
+    },
+
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      cancelFrames();
       unsubscribe();
     },
   };
