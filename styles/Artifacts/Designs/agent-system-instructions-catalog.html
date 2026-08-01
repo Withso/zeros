@@ -1027,27 +1027,41 @@ Use this absolute path (or paths under it) for all file operations unless explic
                 subject (usually the feature intent), bounded to 80 chars
                 (<code>…slice(0,77) + "..."</code>), falling back to the humanized branch leaf;
                 <strong>body</strong> = <code>## Summary</code> + one bullet per commit subject
-                (never empty — the engine rejects empty bodies). Dirty tree → refused, because a push
-                cannot include uncommitted files.
+                (never empty — the engine rejects empty bodies). Dirty tree → <strong>committed</strong>
+                (2026-08-01): a pull request can only carry committed work, so the button sweeps the
+                worktree (<code>git add -- . ':(exclude).zeros'</code>) and writes the commit itself
+                rather than handing the chore back. No model call — the message is generated.
               </p>
             </div>
             <div class="meta">
-              <code>src/shell/pr/create-pr-button.tsx · create-pr-action.ts</code>
+              <code>src/shell/pr/create-pr-button.tsx · create-pr-action.ts · pr-auto-commit.ts</code>
             </div>
           </div>
           <div class="wire">
             <div class="wire-head">
-              <span class="chan bubble-chan">User-facing refusal</span>
-              <span>dirty worktree — offers the agent workflow as recovery</span>
+              <span class="chan bubble-chan">Generated commit + user-facing copy</span>
+              <span>dirty worktree — committed, not refused</span>
             </div>
-            <pre>There are <var>N</var> uncommitted changes in this workspace — commit or discard them (including new untracked files) before creating a pull request.
+            <pre>Commit message (<var>subject</var> = 1 file: "Update a.ts" · 2: "Update a.ts and b.ts" · 3+: "Update a.ts and N more files" · over 72 chars: "Update N files"):
 
-Toast: “Commit changes before creating this pull request”
-       “A pull request only includes committed work. Ask the agent to review, commit, and create it.”   [Ask agent]</pre>
+<var>Update pills.tsx and 3 more files</var>
+
+Committed by Zeros while creating a pull request.
+
+- <var>src/zeros/agent/pills.tsx</var>
+- <var>…one line per path, capped at 50 + "…and N more"</var>
+
+Toast: “Committed <var>N</var> changes” / “<var>the subject above</var>”
+
+Still refused — a tree that must not be swept as it stands:
+Toast: “Resolve conflicts before creating this pull request”   [Ask agent]
+       “Finish the <var>rebase</var> before creating this pull request”   [Ask agent]</pre>
             <div class="wire-note">
-              The count includes <em>untracked</em> files — a single agent scratch file is enough to
-              land here, hence the "(including new untracked files)" clause. The
-              <strong>[Ask agent]</strong> action fires B2.
+              The sweep excludes <code>.zeros</code>, the one tree every Changes surface hides — so
+              the "N changes" count and the commit agree with what the user can see. The commit is
+              reported the moment it lands, ahead of the push + GitHub round trip, because it is
+              durable whether or not GitHub then accepts the PR. The <strong>[Ask agent]</strong>
+              action fires B2, whose brief now names the conflict.
             </div>
           </div>
         </section>
@@ -1107,6 +1121,13 @@ If any of these steps fail, ask the user for help.</pre>
               {remote}."</code> · draft: <code>"The user requested a draft PR."</code> and the create
               command gains <code>--draft</code>. Status probes are best-effort — on failure the
               brief degrades to 0 dirty / no upstream (audit G-05).
+              <br /><br />
+              Blocker lines (2026-08-01), inserted <em>before</em> "Follow these steps" so the agent
+              meets the obstacle ahead of "Commit them" — this path is the recovery B1 offers when it
+              refuses a conflicted tree: <code>"N files have unresolved merge conflicts. Resolve them
+              first — never commit conflict markers."</code> and
+              <code>"A {merge|rebase|cherry-pick|revert} is in progress in this worktree. Finish or
+              abort it before committing."</code>
             </div>
           </div>
           <div class="bubble-demo">
@@ -1797,10 +1818,9 @@ Continue from where the previous conversation left off. The user's next message 
                 <h4>G-09 · Untracked files inflate the brief's "uncommitted changes" count</h4>
                 <p>
                   The count is staged + unstaged + untracked + conflicted; an agent scratch file
-                  reads as "1 uncommitted change" in B2's wire text. The direct path's refusal
-                  message explains this ("including new untracked files"); the agent brief doesn't.
-                  A tracked-only count needs a new engine field (documented in
-                  <code>create-pr-action.ts</code>).
+                  reads as "1 uncommitted change" in B2's wire text, and the direct path now sweeps
+                  that scratch file into its commit without saying which files it took (only how
+                  many). A tracked-only count needs a new engine field.
                 </p>
               </div>
             </div>

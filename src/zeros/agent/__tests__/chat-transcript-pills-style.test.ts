@@ -365,4 +365,22 @@ describe("row geometry", () => {
     expect(src).toContain('role="group"');
     expect(src).toContain('aria-label="Add chat transcripts"');
   });
+
+  // Button's base class pins `[&_svg]:size-4` on every descendant svg. AgentIcon
+  // sizes its wrapper span and leaves the mark on `width="1em"`, which CSS
+  // outranks — so inside a Button the `size` prop moves the box and NOT the ink,
+  // and the logo sat at 16px against a 13px label (~9.3px cap) through two
+  // rounds of "make it smaller". The class is the only thing that moves it.
+  it("overrides Button's 16px svg floor so the logo tracks the label", () => {
+    const src = pills();
+    expect(src).toContain('const LOGO_CLASS = "[&_svg]:size-2.5"');
+    // …and it has to reach the pill, not just exist.
+    expect(src).toContain('cn("max-w-[14.5rem] gap-1.5", LOGO_CLASS)');
+  });
+
+  // A `size-*` on a glyph inside the pill loses to LOGO_CLASS's descendant
+  // selector, so one left in the markup states a size that never renders.
+  it("leaves per-glyph size classes out of the pill", () => {
+    expect(pills()).not.toMatch(/<Check className="[^"]*\bsize-\d/);
+  });
 });

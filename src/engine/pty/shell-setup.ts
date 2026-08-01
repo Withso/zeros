@@ -308,6 +308,21 @@ export function buildPtyEnv(opts?: {
   delete env.ZEROS_PTY_HOST_SCRIPT;
   delete env.ZEROS_PTY_NODE_PTY;
   delete env.ELECTRON_RUN_AS_NODE;
+  // Drop the CHANNEL identity, one level coarser than the instance vars below.
+  // Nothing in scripts/dev-instance.mjs exports this one: electron/main.ts seeds
+  // process.env.ZEROS_CHANNEL at boot for EVERY channel (from the compile-time
+  // bake) and hands it to the engine via {...process.env}, so every terminal a
+  // PACKAGED build opens carries ZEROS_CHANNEL=stable. A nested `pnpm
+  // electron:dev` then tripped main.ts's `if (!fromEnv)` guard — an inherited
+  // value is a VALID channel, so it wins over the dev signal — and the whole
+  // build took on the STABLE identity: db/paths.ts drops the per-worktree slug
+  // outside the dev channel, so userData, Chromium cache, logs and the DB all
+  // collapsed onto com.zeros. The dev app then went for the packaged app's
+  // single-instance lock, lost it, quit at boot with code 0 (deep-link.ts), and
+  // `concurrently -k` took vite + both tsup watchers down with it. That made
+  // dogfooding — running a dev instance from a terminal inside a released Zeros
+  // — impossible, which is exactly what this whole denylist exists to allow.
+  delete env.ZEROS_CHANNEL;
   // Drop this dev instance's IDENTITY for the same reason: it describes THE APP,
   // not the worktree. scripts/dev-instance.mjs derives one slug per worktree and
   // exports these so every `pnpm electron:dev` is its own app — own Vite port, own
