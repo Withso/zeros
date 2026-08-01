@@ -18,6 +18,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { EditCard } from "../renderers/tool-edit";
+import { EventRow } from "../renderers/event-row";
 import type { RendererContext } from "../renderers/types";
 import type { AgentToolMessage } from "../use-agent-session";
 
@@ -31,7 +32,11 @@ const editTool = (over: Partial<AgentToolMessage>): AgentToolMessage =>
     title: "Edit",
     toolKind: "edit",
     status: "completed",
-    rawInput: { file_path: "/src/a.ts", old_string: "old line", new_string: "new line 1\nnew line 2" },
+    rawInput: {
+      file_path: "/src/a.ts",
+      old_string: "old line",
+      new_string: "new line 1\nnew line 2",
+    },
     createdAt: 0,
     updatedAt: 0,
     ...over,
@@ -66,5 +71,54 @@ describe("EditCard — failed edits stay collapsed", () => {
 
   it("keeps a successful edit collapsed by default too (row parity)", () => {
     expect(render(editTool({}))).toContain('aria-expanded="false"');
+  });
+
+  it("makes a successful Edit row the trigger for a diff hover preview", () => {
+    expect(render(editTool({}))).toContain('data-slot="hover-card-trigger"');
+  });
+
+  it("makes a successful whole-file Write row a diff hover trigger too", () => {
+    expect(
+      render(
+        editTool({
+          title: "Write",
+          rawInput: { file_path: "/src/new.ts", content: "one\ntwo\n" },
+        }),
+      ),
+    ).toContain('data-slot="hover-card-trigger"');
+  });
+
+  it("does not preview a failed edit as though its attempted diff landed", () => {
+    expect(render(failed)).not.toContain('data-slot="hover-card-trigger"');
+  });
+
+  it("does not create a hover surface for a no-op Edit", () => {
+    expect(
+      render(
+        editTool({
+          rawInput: {
+            file_path: "/src/a.ts",
+            old_string: "unchanged",
+            new_string: "unchanged",
+          },
+        }),
+      ),
+    ).not.toContain('data-slot="hover-card-trigger"');
+  });
+
+  it("does not add a hover preview to Read rows", () => {
+    const read = editTool({
+      title: "Read",
+      toolKind: "read",
+      rawInput: { file_path: "/src/a.ts" },
+    });
+    const html = renderToStaticMarkup(
+      createElement(EventRow, {
+        message: read,
+        ctx,
+        detail: createElement("pre", null, "file body"),
+      }),
+    );
+    expect(html).not.toContain('data-slot="hover-card-trigger"');
   });
 });

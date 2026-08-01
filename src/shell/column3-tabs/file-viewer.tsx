@@ -697,7 +697,7 @@ export function FileViewer({
         {previewShown && previewHtml !== null && (
           <div
             ref={previewScrollRef}
-            className="h-full overflow-auto px-5 py-4"
+            className="h-full overflow-x-hidden overflow-y-auto px-5 py-4"
           >
             <MarkdownPreview html={previewHtml} />
           </div>
@@ -824,7 +824,7 @@ function DiffView({
       <DiffCodeView
         items={items}
         options={options}
-        className="relative h-full overflow-auto"
+        className="relative h-full overflow-x-hidden overflow-y-auto"
       />
     </div>
   );
@@ -888,11 +888,11 @@ function CodeView({
 
 // ── Markdown preview ───────────────────────────────────────
 
-function MarkdownPreview({ html }: { html: string }) {
+export function MarkdownPreview({ html }: { html: string }) {
   return (
     <div
       className={cn(
-        "text-fg1 max-w-3xl text-sm leading-relaxed",
+        "text-fg1 max-w-3xl min-w-0 text-sm leading-relaxed wrap-anywhere",
         "[&_h1]:mt-6 [&_h1]:mb-3 [&_h1]:text-xl [&_h1]:font-semibold first:[&_h1]:mt-0",
         "[&_h2]:mt-6 [&_h2]:mb-2 [&_h2]:text-lg [&_h2]:font-semibold",
         "[&_h3]:mt-4 [&_h3]:mb-2 [&_h3]:text-base [&_h3]:font-semibold",
@@ -902,12 +902,12 @@ function MarkdownPreview({ html }: { html: string }) {
         "[&_li]:my-1",
         "[&_a]:underline [&_a]:underline-offset-2",
         "[&_code]:bg-bg2 [&_code]:rounded-sm [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.85em]",
-        "[&_pre]:bg-bg2/40 [&_pre]:my-3 [&_pre]:overflow-auto [&_pre]:rounded-lg [&_pre]:p-3",
-        "[&_pre_code]:bg-transparent [&_pre_code]:p-0",
+        "[&_pre]:bg-bg2/40 [&_pre]:my-3 [&_pre]:overflow-x-hidden [&_pre]:rounded-lg [&_pre]:p-3 [&_pre]:break-words [&_pre]:whitespace-pre-wrap",
+        "[&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:break-words [&_pre_code]:whitespace-pre-wrap",
         "[&_blockquote]:border-border2 [&_blockquote]:text-fg2 [&_blockquote]:my-3 [&_blockquote]:border-l-2 [&_blockquote]:pl-3",
-        "[&_table]:my-3 [&_table]:w-full [&_table]:border-collapse",
-        "[&_th]:border-border1 [&_th]:border [&_th]:px-2 [&_th]:py-1 [&_th]:text-left",
-        "[&_td]:border-border1 [&_td]:border [&_td]:px-2 [&_td]:py-1",
+        "[&_table]:my-3 [&_table]:w-full [&_table]:table-fixed [&_table]:border-collapse",
+        "[&_th]:border-border1 [&_th]:border [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:wrap-anywhere",
+        "[&_td]:border-border1 [&_td]:border [&_td]:px-2 [&_td]:py-1 [&_td]:wrap-anywhere",
         "[&_hr]:border-border1 [&_hr]:my-5",
         "[&_img]:max-w-full",
       )}

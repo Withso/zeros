@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  canPreviewTurnFileDiff,
   isInterruptedTurn,
   turnFooterFiles,
   turnFooterStatusLabel,
@@ -22,6 +23,18 @@ describe("turnFooterFiles", () => {
       },
     ];
     expect(turnFooterFiles({ files })).toBe(files);
+  });
+});
+
+describe("canPreviewTurnFileDiff", () => {
+  it("previews persisted textual change pills, including one-sided writes and deletes", () => {
+    expect(canPreviewTurnFileDiff({ additions: 1, deletions: 1 })).toBe(true);
+    expect(canPreviewTurnFileDiff({ additions: 3, deletions: 0 })).toBe(true);
+    expect(canPreviewTurnFileDiff({ additions: 0, deletions: 4 })).toBe(true);
+  });
+
+  it("keeps metadata-only 0/0 pills on the lightweight path", () => {
+    expect(canPreviewTurnFileDiff({ additions: 0, deletions: 0 })).toBe(false);
   });
 });
 

@@ -3600,6 +3600,7 @@ export function AgentChat({
       <div className="relative flex min-h-0 flex-1 flex-col">
         <Conversation
           ref={setScrollContainer}
+          data-agent-diff-collision-boundary=""
           className="zeros-agent-body zeros-agent-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto bg-transparent"
           style={{ position: "relative" }}
         >

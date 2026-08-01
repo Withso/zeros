@@ -27,6 +27,10 @@
 //      closes with Escape, and returns focus to the originating trigger.
 //   7. A confirmed-empty GitHub App inventory exposes a recovery CTA whose IPC
 //      request explicitly forces the installation URL.
+//   8. Edit and turn-footer diff hover previews open, survive pointer travel,
+//      support keyboard focus, and never attach themselves to Read rows.
+//   9. File/diff reading surfaces wrap long lines, keep 450×350 hover geometry,
+//      and never expose horizontal scrolling.
 //
 // Usage:  node scripts/ui-smoke-composer.mjs   (pnpm test:ui-smoke)
 // ============================================================
@@ -161,7 +165,253 @@ try {
     await waitFor(async () => !(await menuOpen()), "esc-close"),
   );
 
-  // 4. The GitHub settings overflow and disconnect dialog use Radix focus
+  // 4. Diff previews use a hover portal around an already-clickable row/pill.
+  // Drive the real components so Slot handler composition and pointer travel
+  // into the portal cannot regress unnoticed.
+  await page.goto(`http://127.0.0.1:${port}/harness-diff-preview.html`, {
+    waitUntil: "networkidle",
+  });
+  const preview = page.locator("[data-agent-diff-preview]");
+  const placementEditRow = page
+    .locator('[data-testid="placement-edit-host"] button')
+    .first();
+  await placementEditRow.hover();
+  const placementPreview = page.locator(
+    '[aria-label="Diff preview for src/placement.ts"]',
+  );
+  check(
+    "A preview that would cross the transcript top opens below its pill",
+    await waitFor(
+      () =>
+        placementPreview
+          .evaluate(
+            (section) =>
+              section.parentElement?.getAttribute("data-side") === "bottom",
+          )
+          .catch(() => false),
+      "top-boundary-placement",
+    ),
+  );
+  await page.getByTestId("parking-lot").hover();
+  await waitFor(
+    async () => !(await placementPreview.isVisible().catch(() => false)),
+    "placement-preview-close",
+  );
+  await page.getByTestId("placement-edit-host").evaluate((host) => {
+    if (host instanceof HTMLElement) host.style.top = "180px";
+  });
+  await placementEditRow.hover();
+  check(
+    "The same preview stays above its pill when it clears the transcript top",
+    await waitFor(
+      () =>
+        placementPreview
+          .evaluate(
+            (section) =>
+              section.parentElement?.getAttribute("data-side") === "top",
+          )
+          .catch(() => false),
+      "clear-top-placement",
+    ),
+  );
+  await page.getByTestId("parking-lot").hover();
+  await waitFor(
+    async () => !(await placementPreview.isVisible().catch(() => false)),
+    "clear-top-preview-close",
+  );
+  const editRow = page.locator('[data-testid="edit-host"] button').first();
+  const editPreview = page.locator(
+    '[aria-label="Diff preview for src/shared.ts"]',
+  );
+  await editRow.waitFor({ state: "visible", timeout: 10_000 });
+  // Enter at the row's leading edge so the just-closed placement fixture's
+  // exit-animation box cannot intercept the pointer over the wide filename.
+  await editRow.hover({ position: { x: 8, y: 8 } });
+  check(
+    "Edit hover opens its diff preview",
+    await waitFor(
+      () => editPreview.isVisible().catch(() => false),
+      "edit-hover",
+    ),
+  );
+  // offset geometry ignores Radix's short opening scale transform and verifies
+  // the settled layout box the user actually receives.
+  const editBox = await editPreview.evaluate((section) => ({
+    width:
+      section.parentElement instanceof HTMLElement
+        ? section.parentElement.offsetWidth
+        : 0,
+    height: section instanceof HTMLElement ? section.offsetHeight : 0,
+  }));
+  check(
+    "Edit preview uses the fixed 450px width",
+    editBox.width === 450,
+    `${editBox.width}px`,
+  );
+  check(
+    "Edit preview stays within the 350px height cap",
+    editBox.height <= 350,
+    `${editBox.height}px`,
+  );
+  const editScroll = await editPreview
+    .locator(":scope > div")
+    .last()
+    .evaluate((el) => ({
+      clientWidth: el.clientWidth,
+      scrollWidth: el.scrollWidth,
+      clientHeight: el.clientHeight,
+      scrollHeight: el.scrollHeight,
+    }));
+  check(
+    "Edit preview wraps without horizontal overflow",
+    editScroll.scrollWidth <= editScroll.clientWidth + 1,
+    `${editScroll.scrollWidth}/${editScroll.clientWidth}`,
+  );
+  check(
+    "Edit preview retains vertical scrolling for long changes",
+    editScroll.scrollHeight > editScroll.clientHeight,
+    `${editScroll.scrollHeight}/${editScroll.clientHeight}`,
+  );
+  await editPreview.hover();
+  await page.waitForTimeout(500);
+  check(
+    "Edit preview stays open across trigger-to-card travel",
+    await editPreview.isVisible().catch(() => false),
+  );
+  await page.mouse.move(899, 699);
+  check(
+    "Edit preview closes after leaving it",
+    await waitFor(
+      async () => !(await editPreview.isVisible().catch(() => false)),
+      "edit-hover-close",
+    ),
+  );
+
+  const readRow = page.locator('[data-testid="read-host"] button').first();
+  await readRow.hover();
+  await page.waitForTimeout(500);
+  check(
+    "Read rows have no diff hover preview",
+    !(await preview.isVisible().catch(() => false)),
+  );
+
+  const footerPill = page.locator('[data-testid="footer-host"] button').first();
+  await footerPill.focus();
+  const footerPreview = page.locator(
+    '[aria-label="Diff preview for src/footer-preview.ts"]',
+  );
+  check(
+    "Footer diff pill opens from keyboard focus",
+    await waitFor(
+      () => footerPreview.isVisible().catch(() => false),
+      "footer-focus-preview",
+    ),
+  );
+  check(
+    "Footer preview identifies the exact file",
+    (await footerPreview.textContent()).includes("src/footer-preview.ts"),
+  );
+  const footerBox = await footerPreview.evaluate((section) => ({
+    width:
+      section.parentElement instanceof HTMLElement
+        ? section.parentElement.offsetWidth
+        : 0,
+    height: section instanceof HTMLElement ? section.offsetHeight : 0,
+  }));
+  check(
+    "Footer preview uses the fixed 450px width",
+    footerBox.width === 450,
+    `${footerBox.width}px`,
+  );
+  check(
+    "Footer preview stays within the 350px height cap",
+    footerBox.height <= 350,
+    `${footerBox.height}px`,
+  );
+  check(
+    "Footer filename header uses bg1 above the Changes-matched diff surface",
+    await footerPreview.evaluate((section) => {
+      const header = section.firstElementChild;
+      const body = header?.nextElementSibling;
+      if (!(header instanceof HTMLElement) || !(body instanceof HTMLElement))
+        return false;
+      const bg1Probe = document.createElement("div");
+      const changesProbe = document.createElement("div");
+      bg1Probe.style.backgroundColor = "var(--bg1)";
+      changesProbe.style.backgroundColor = "var(--sidebar-bg)";
+      document.body.append(bg1Probe, changesProbe);
+      const matches =
+        getComputedStyle(header).backgroundColor ===
+          getComputedStyle(bg1Probe).backgroundColor &&
+        getComputedStyle(body).backgroundColor ===
+          getComputedStyle(changesProbe).backgroundColor;
+      bg1Probe.remove();
+      changesProbe.remove();
+      return matches;
+    }),
+  );
+  const footerScroll = await footerPreview
+    .locator(":scope > div")
+    .last()
+    .evaluate((el) => ({
+      clientWidth: el.clientWidth,
+      scrollWidth: el.scrollWidth,
+      clientHeight: el.clientHeight,
+      scrollHeight: el.scrollHeight,
+    }));
+  check(
+    "Footer preview wraps without horizontal overflow",
+    footerScroll.scrollWidth <= footerScroll.clientWidth + 1,
+    `${footerScroll.scrollWidth}/${footerScroll.clientWidth}`,
+  );
+  check(
+    "Footer preview retains vertical scrolling for long changes",
+    footerScroll.scrollHeight > footerScroll.clientHeight,
+    `${footerScroll.scrollHeight}/${footerScroll.clientHeight}`,
+  );
+  await page.getByTestId("parking-lot").focus();
+
+  // The expanded transcript reuses the same wrapped renderer without inheriting
+  // the hover portal's fixed width.
+  await editRow.click();
+  const inlinePreview = page.locator(
+    '[aria-label="Diff preview for src/shared.ts"]:visible',
+  );
+  check(
+    "Expanded Edit transcript wraps without horizontal overflow",
+    await waitFor(
+      () =>
+        inlinePreview
+          .locator(":scope > div")
+          .last()
+          .evaluate((el) => el.scrollWidth <= el.clientWidth + 1)
+          .catch(() => false),
+      "inline-edit-wrap",
+    ),
+  );
+
+  check(
+    "File Edit mode enables CodeMirror line wrapping",
+    await page
+      .locator('[data-testid="file-editor-host"] .cm-content')
+      .evaluate((el) => el.classList.contains("cm-lineWrapping"))
+      .catch(() => false),
+  );
+  check(
+    "File Edit mode has no horizontal overflow",
+    await page
+      .locator('[data-testid="file-editor-host"] .cm-scroller')
+      .evaluate((el) => el.scrollWidth <= el.clientWidth + 1)
+      .catch(() => false),
+  );
+  check(
+    "Markdown Preview wraps unbroken text and code",
+    await page
+      .getByTestId("markdown-preview-host")
+      .evaluate((el) => el.scrollWidth <= el.clientWidth + 1),
+  );
+
+  // 5. The GitHub settings overflow and disconnect dialog use Radix focus
   //    scopes. Exercise the real component: unit tests cannot reproduce the
   //    event ordering between portal mount, auto-focus, Escape, and focus
   //    return.
@@ -248,7 +498,7 @@ try {
     ),
   );
 
-  // 5. A complete zero-installation snapshot must not send users back through
+  // 6. A complete zero-installation snapshot must not send users back through
   //    ordinary OAuth. Exercise the real Settings CTA and inspect the native
   //    boundary payload emitted by the harness bridge.
   await page.goto(
@@ -285,7 +535,7 @@ try {
       .catch(() => false),
   );
 
-  // 6. Whole-run invariant.
+  // 7. Whole-run invariant.
   check(
     "no uncaught page errors",
     pageErrors.length === 0,
