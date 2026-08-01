@@ -87,7 +87,12 @@ export function Column2TerminalDeck() {
         const layer = (
           <div
             key={chat.id}
-            {...(!isActive ? { inert: "" } : {})}
+            // Hidden terminal layers stay mounted for PTY/xterm survival; the
+            // freeze pin keeps them out of per-frame layout during seam drags
+            // (see resize-gesture-freeze.ts).
+            {...(!isActive
+              ? { inert: "", "data-zeros-resize-freeze": "" }
+              : {})}
             className={cn(
               // `p-4` matches the col-3 terminal panel's padding; the
               // padding area inherits bg-bg1 (= the xterm background)

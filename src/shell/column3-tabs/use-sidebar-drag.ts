@@ -12,6 +12,7 @@
 
 import { useCallback } from "react";
 
+import { beginContinuousLayoutResize } from "../terminal/continuous-layout-resize";
 import {
   clampFilesSidebarFraction,
   setFilesSidebarFraction,
@@ -68,6 +69,10 @@ export function useSidebarResizeDrag(
       let isFinished = false;
       // Click-vs-drag gate: only a real drag commits a width on release.
       let moved = false;
+      // Join the shared gesture: this seam resizes the diff viewer pane, so
+      // the retained hidden diff views behind it must be pinned (resize-
+      // gesture-freeze.ts) and terminal fits deferred, like every other seam.
+      const finishContinuousResize = beginContinuousLayoutResize();
 
       const apply = () => {
         rafId = null;
@@ -124,6 +129,7 @@ export function useSidebarResizeDrag(
         } else {
           sidebarEl.style.width = startInlineWidth;
         }
+        finishContinuousResize();
       };
 
       // Lock the cursor + suppress text selection window-wide so the pointer
