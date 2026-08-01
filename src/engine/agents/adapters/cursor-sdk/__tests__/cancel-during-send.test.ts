@@ -19,9 +19,13 @@ const { createSpy, sendSpy, modelsListSpy } = vi.hoisted(() => ({
 vi.mock("@cursor/sdk", () => ({
   Agent: { create: createSpy, resume: vi.fn(), list: vi.fn() },
   Cursor: { models: { list: modelsListSpy } },
-  SqliteLocalAgentStore: {
-    open: async () => ({ runs: { get: async () => null }, dispose: async () => {} }),
+  // Real surface — see the note in cwd-binding.test.ts. No run docs here; these
+  // suites only need create/send to reach the SDK.
+  JsonlLocalAgentStore: class {
+    runs = { get: async () => null };
+    constructor(readonly rootDir: string) {}
   },
+  getDefaultSdkStateRoot: (workspaceRef: string) => `/state-root${workspaceRef}`,
 }));
 
 const fakeAgent = { agentId: "agent-xyz", send: sendSpy, close: () => {} };

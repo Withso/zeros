@@ -313,12 +313,20 @@ export function knownClaudeModelIds() {
  *  as a literal — 2.1.220 ships `claude-opus-5[1m]` but NOT `claude-fable-5[1m]`
  *  — so matching the full value would fire on models that run fine.
  *
- *  Claude only. Codex is a native Rust binary whose string table packs ids
- *  contiguously (`gpt-5.2-codexgpt-5.2-codex`), so set membership is unreliable
- *  there — and the PACKAGED app runs whatever `codex` is on the user's PATH, not
- *  the bundled blob, so the bundled list wouldn't be authoritative anyway.
- *  Cursor resolves models server-side: neither `composer-2.5` nor `grok-4.5`
- *  appears anywhere in `@cursor/sdk`, so only `models:verify --live` can see it.
+ *  Claude only — the string-table scan does not port. Codex is a native Rust
+ *  binary that packs ids contiguously (`gpt-5.2-codexgpt-5.2-codex`), so set
+ *  membership is unreliable there; Cursor resolves models server-side, and
+ *  neither `composer-2.5` nor `grok-4.5` appears anywhere in `@cursor/sdk`.
+ *
+ *  The OTHER TWO ARE STILL GATED, just not from here — each is checked against
+ *  its own authoritative source, by the smoke that already has that runtime up:
+ *    • codex  → `pnpm codex:smoke` asks the booted app-server for `model/list`.
+ *      The binary's own answer, no credentials, so it runs on every PR.
+ *    • cursor → `pnpm cursor:smoke` compares `Cursor.models.list` when
+ *      CURSOR_API_KEY is set, and says so loudly when it is not;
+ *      `--require-models` turns that skip into a failure. Env var only — the
+ *      app's secrets.json holds safeStorage-encrypted values.
+ *  Keep those in mind before concluding a family is unverified.
  *
  *  Returns { missing, notes }: `missing` gates (hard error under `--strict`),
  *  `notes` never do — an inconclusive scan must not turn CI red. */
@@ -389,7 +397,9 @@ function liveCheck(catalog) {
       .filter((l) => l.includes(" - ") && !/^available/i.test(l))
       .map((l) => l.split(/\s+-\s+/)[0].trim()),
   );
-  warnings.push("claude / codex live ids: use `pnpm models:list <agent>` or the running app (no simple list CLI).");
+  warnings.push("codex live ids are gated by `pnpm codex:smoke` (model/list on the booted app-server).");
+  warnings.push("cursor live ids are gated by `pnpm cursor:smoke` when a key is present (--require-models to enforce).");
+  warnings.push("claude live ids: use `pnpm models:list claude` or the running app (no simple list CLI).");
   return warnings;
 }
 

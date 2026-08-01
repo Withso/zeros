@@ -1,9 +1,20 @@
 name: Scheduled smokes
 
-# Heavy / macOS-only checks that don't belong on the per-PR path (they cost ~10x
-# ubuntu minutes). Weekly + on-demand (workflow_dispatch). These mirror the steps
-# release.yml already runs, surfacing packaging/native-ABI breakage BEFORE you cut
-# a release rather than during it. Unsigned — no Apple secrets needed.
+# Checks that don't belong on the per-PR path. Weekly + on-demand
+# (workflow_dispatch). Three reasons something lands here rather than in
+# preflight.yml:
+#
+#   • COST — macOS runners are ~10x ubuntu minutes (native-abi, electron-pack).
+#     These mirror steps release.yml already runs, surfacing packaging/native-ABI
+#     breakage BEFORE you cut a release rather than during it. Unsigned, so no
+#     Apple secrets are needed.
+#   • REPORTING — staleness is a report, not a merge gate (runtime-drift).
+#   • CREDENTIALS — preflight.yml runs on `pull_request`, which means it executes
+#     UNTRUSTED fork input (arbitrary `pnpm install` lifecycle scripts) and is
+#     deliberately secret-free; GitHub also withholds secrets from fork PRs
+#     entirely, so a keyed gate there would be red for every external
+#     contributor and green for everyone else. Anything needing a secret runs
+#     here instead (cursor-models).
 
 on:
   schedule:
@@ -40,11 +51,79 @@ jobs:
         # still fails: `pipefail` is set on purpose so the exit code survives the
         # tee instead of being masked by it. Without pipefail this step would
         # report a missing Claude binary on main and still go green.
+        #
+        # `|| status=$?` + `exit $status` rather than a bare pipeline, for the
+        # same two reasons as the cursor-models step below: it does not rely on
+        # the runner's implicit `-e` to propagate the failure past the trailing
+        # `echo` (whose own exit 0 would otherwise become the step's), and it
+        # still closes the ``` fence on the BROKEN-pin path — under errexit a
+        # bare pipeline aborts the script first, leaving the failure text
+        # rendered inside an unterminated code block on the summary page.
         run: |
           set -o pipefail
           { echo '## Bundled agent runtime drift'; echo; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-          pnpm check:runtime-pins --drift 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          status=0
+          pnpm check:runtime-pins --drift 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || status=$?
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+  cursor-models:
+    name: cursor curated model ids (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Curated cursor model ids are still offered by the account
+        # The one agent whose catalog CANNOT be verified offline. Claude's ids
+        # are scanned out of the CLI binary's string table (models:verify) and
+        # Codex answers `model/list` on the booted app-server (codex:smoke), but
+        # Cursor resolves models SERVER-SIDE — neither `composer-2.5` nor
+        # `grok-4.5` appears anywhere in @cursor/sdk. `Cursor.models.list` with a
+        # real key is the only authority, hence a secret and hence this job.
+        #
+        # What it catches: retiring a model id bumps no version number, so there
+        # is no threshold any offline gate could compare against. Cursor
+        # VALIDATES model picks, so a curated id the account no longer offers
+        # makes Agent.create throw "Cannot use this model: <id>" for every user.
+        #
+        # `--require-models` is what keeps this honest: without it, a missing or
+        # misconfigured secret would SKIP the model comparison and still exit 0 —
+        # a job reporting "cursor models OK" forever while checking nothing. With
+        # it, no key is exit 2. Same trap agent-smoke.mjs's `--require` exists for.
+        #
+        # The secret is scoped to THIS step, not the job: `pnpm install` above
+        # runs third-party lifecycle scripts, and they have no business seeing it.
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+        # pipefail so the smoke's exit code survives the tee rather than being
+        # masked by it. The explicit `|| status=$?` + `exit $status` is doing two
+        # things the shorter form does not:
+        #
+        #   1. It does not depend on the runner's implicit `-e`. GitHub runs
+        #      `run:` blocks as `bash -e {0}` today, and errexit is the ONLY
+        #      reason a bare pipeline's failure isn't swallowed by the trailing
+        #      `echo` (whose own exit 0 would become the step's). Anyone adding
+        #      an explicit `shell:` without `-e` would silently turn this green.
+        #   2. It still closes the ``` fence when the gate FAILS. Under errexit
+        #      the script aborts at the failing pipeline, so the closing fence
+        #      never runs and the failure text renders inside an unterminated
+        #      code block — precisely when someone needs to read it.
+        run: |
+          set -o pipefail
+          { echo '## Cursor curated model ids'; echo; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          status=0
+          pnpm cursor:smoke --require-models 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || status=$?
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
 
   native-abi:
     name: native-module ABI smoke (macOS)
