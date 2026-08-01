@@ -767,7 +767,13 @@ function ChangesSurface({
             return (
               <div
                 key={changeFileViewIdentityKey(viewTarget)}
-                {...(!isVisible ? { inert: "" } : {})}
+                // Retained hidden diff views each carry @pierre/diffs' own
+                // ResizeObservers; pinning them during seam drags (resize-
+                // gesture-freeze.ts) keeps those quiet so only the visible
+                // diff re-virtualizes per frame.
+                {...(!isVisible
+                  ? { inert: "", "data-zeros-resize-freeze": "" }
+                  : {})}
                 className={cn(
                   "absolute inset-0 flex min-h-0 min-w-0 flex-col overflow-hidden",
                   isVisible

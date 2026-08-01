@@ -15,6 +15,7 @@ import { AppShell } from "./app-shell";
 import { ErrorBoundary } from "./zeros/ui/error-boundary";
 import { initRendererLogCapture } from "./zeros/logging/renderer-log";
 import { applyBootLayoutVars } from "./shell/boot-layout-vars";
+import { installResizeGestureFreeze } from "./shell/resize-gesture-freeze";
 
 // Structured log capture FIRST — everything the renderer logs from here on
 // (React warnings, bridge chatter, agent lifecycle) lands in the shared
@@ -25,6 +26,11 @@ initRendererLogCapture();
 // first style resolution uses the CSS fallbacks and the columns visibly
 // resize into place on launch. See src/shell/boot-layout-vars.ts.
 applyBootLayoutVars();
+
+// While a seam drag is active, pin hidden retained layers + iframes at their
+// pre-gesture size so per-frame layout is bounded to the visible surfaces.
+// One installation covers every seam via the shared continuous-resize signal.
+installResizeGestureFreeze();
 
 const rootEl = document.getElementById("root");
 if (!rootEl) {

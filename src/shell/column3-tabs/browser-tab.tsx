@@ -812,6 +812,18 @@ export function BrowserTab({ tab, active, scope }: BrowserTabProps) {
                   // every hover and can stick open, since the iframe swallows
                   // pointerleave — so the frame name stays a plain attribute.)
                   title={tab.title}
+                  // Pinned to its pre-gesture size during seam drags even
+                  // while VISIBLE (resize-gesture-freeze.ts): resizing an
+                  // iframe re-lays-out the guest document every frame, the
+                  // most expensive thing a drag can trigger. It clips/shows
+                  // surface bg mid-drag and snaps once on release — the
+                  // standard webview treatment during sash drags. Inline px
+                  // from the freeze beat size-full; in canvas mode the size
+                  // is already fixed, so the pin is a no-op there — but only
+                  // because the freeze normalizes its measurement by the
+                  // wrapper's scale(zoom): pinning the raw (visual) rect
+                  // would resize the iframe to zoom×layout for the drag.
+                  data-zeros-resize-freeze=""
                   className="absolute inset-0 block size-full border-0 bg-bg1"
                   // Block pointer events on the iframe while a
                   // resize drag is happening so the drag pointer

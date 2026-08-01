@@ -225,7 +225,15 @@ export function ReviewChangesSection({
               (f.binary ? (
                 <Centered>Binary file — no textual diff.</Centered>
               ) : f.patch ? (
-                <PatchDiff patch={f.patch} options={diffOptions} />
+                // content-visibility bounds this surface the way turn
+                // containers bound the transcript (turn-container.tsx): a PR
+                // auto-expands up to 25 unvirtualized diffs, and without the
+                // boundary every off-screen one paid style/layout on each
+                // scroll and seam-drag frame. `auto` remembers the rendered
+                // height once measured; 240px estimates a never-rendered one.
+                <div className="[content-visibility:auto] [contain-intrinsic-size:auto_0px_auto_240px]">
+                  <PatchDiff patch={f.patch} options={diffOptions} />
+                </div>
               ) : (
                 <Centered>No textual diff to show.</Centered>
               ))}

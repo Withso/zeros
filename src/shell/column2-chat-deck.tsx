@@ -109,7 +109,11 @@ export function Column2ChatDeck() {
           slot.activeChatId === chat.id;
         const layer = (
           <div
-            {...(!isActive ? { inert: "" } : {})}
+            // Hidden retained chats keep full layout (visibility retention),
+            // but a seam drag must not re-wrap 11 invisible transcripts per
+            // frame — the freeze pin rides the same conditional as `inert`.
+            // See resize-gesture-freeze.ts.
+            {...(!isActive ? { inert: "", "data-zeros-resize-freeze": "" } : {})}
             data-zeros-root=""
             className={cn(
               // --pane-bg is the chat-WINDOW fill, inherited from the pane

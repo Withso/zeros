@@ -93,12 +93,51 @@ describe("column 2 / column 3 sizing bounds stay in lockstep with CSS", () => {
     expect(col3).toContain('data-zeros-column-3=""');
   });
 
-  it("locks expensive child surfaces against repeated shrink reflow", () => {
+  it("pins hidden retained layers and iframes during seam gestures", () => {
+    // The freeze marker (resize-gesture-freeze.ts) must ride the same
+    // conditional as `inert` on every retained-deck layer, and sit
+    // unconditionally on the browser iframe. Losing one of these silently
+    // re-adds a full hidden-subtree relayout to every drag frame; the drag
+    // still works, it just gets slower the more content is open — exactly
+    // the regression this architecture replaced.
+    const chatDeck = read("../column2-chat-deck.tsx");
+    const terminalDeck = read("../column2-terminal-deck.tsx");
     const terminalTab = read("../column3-tabs/terminal-tab.tsx");
-    expect(col2).toContain("lockResizeDescendantWidths(row)");
-    expect(col2).toContain('data-zeros-resize-width-lock=""');
-    expect(col3).toContain('data-zeros-resize-width-lock=""');
-    expect(terminalTab).toContain('data-zeros-resize-width-lock=""');
+    const changesTab = read("../column3-tabs/changes-row1-tab.tsx");
+    const browserTab = read("../column3-tabs/browser-tab.tsx");
+    for (const source of [chatDeck, terminalDeck, terminalTab, changesTab]) {
+      expect(source).toContain('"data-zeros-resize-freeze": ""');
+    }
+    expect(col3).toContain('"data-zeros-resize-freeze": ""');
+    expect(browserTab).toContain('data-zeros-resize-freeze=""');
+  });
+
+  it("visible surfaces reflow live — the shrink-side width floor is gone", () => {
+    // The previous regime floored min-width on the column BODIES, so the
+    // shrinking column clipped its own live content at the moving seam (the
+    // composer's send button cut in half, transcript sliding under column
+    // 3). Active content must track the seam; only hidden layers freeze.
+    const terminalTab = read("../column3-tabs/terminal-tab.tsx");
+    for (const source of [col2, col3, terminalTab]) {
+      expect(source).not.toContain("data-zeros-resize-width-lock");
+    }
+    expect(col2).not.toContain("lockResizeDescendantWidths");
+  });
+
+  it("every seam drag joins the shared continuous-resize gesture", () => {
+    // The freeze module and the xterm fit schedulers key off ONE signal; a
+    // seam that forgets to begin/finish it re-lays-out hidden decks per
+    // frame and lets xterm refit mid-drag.
+    for (const seam of [
+      "../column2-workspace.tsx",
+      "../column2-panes.tsx",
+      "../terminal/terminal-panel-resizer.tsx",
+      "../column3-tabs/use-sidebar-drag.ts",
+      "../use-home-sidebar-drag.ts",
+    ]) {
+      expect(read(seam)).toContain("beginContinuousLayoutResize()");
+    }
+    expect(read("../../main.tsx")).toContain("installResizeGestureFreeze()");
   });
 });
 

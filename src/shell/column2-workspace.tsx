@@ -22,7 +22,6 @@ import {
 import { cn } from "../zeros/ui/cn";
 import { useResizeHint } from "./use-resize-hint";
 import { beginContinuousLayoutResize } from "./terminal/continuous-layout-resize";
-import { lockResizeDescendantWidths } from "./resize-layout-lock";
 
 // ── Column 2 className constants ───────────────────────────
 // Wave 1.5 finalize (2026-05-16): the .zeros-column-2 family
@@ -222,8 +221,12 @@ export function Column2Workspace({
       //     via an `isFinished` guard.
       //   • Also listen for blur and pointerleave-window to abort.
       let isFinished = false;
+      // Starting the shared gesture also freezes every hidden retained layer
+      // and iframe at its current size (see resize-gesture-freeze.ts), so the
+      // per-frame layout below is bounded to the VISIBLE surfaces. The active
+      // transcript and composer re-wrap live and track the seam exactly — no
+      // width floor, no content clipped under column 3 mid-drag.
       const finishContinuousResize = beginContinuousLayoutResize();
-      let unlockDescendantWidths: (() => void) | null = null;
 
       const paintRatio = () => {
         rafId = null;
@@ -239,10 +242,6 @@ export function Column2Workspace({
         if (isFinished) return;
         if (!moved && Math.abs(ev.clientX - startClientX) > DRAG_THRESHOLD_PX) {
           moved = true;
-          // Preserve the current transcript/diff width while its owner shrinks.
-          // A min-width floor clips that expensive subtree, while a widening
-          // owner can still stretch it instead of exposing an empty strip.
-          if (row) unlockDescendantWidths = lockResizeDescendantWidths(row);
         }
         if (!moved) return;
         // Ratio math in the move handler (cheap), style write in rAF
@@ -290,10 +289,9 @@ export function Column2Workspace({
           column3?.style.removeProperty("flex-grow");
           persistColRatio(lastRatio);
         }
-        unlockDescendantWidths?.();
-        unlockDescendantWidths = null;
-        // Terminal fit schedulers resume only after the exact final geometry is
-        // published, producing one xterm reflow instead of one per drag frame.
+        // Terminal fit schedulers resume — and frozen hidden layers thaw —
+        // only after the exact final geometry is published, producing one
+        // xterm reflow / one hidden-layer relayout instead of one per frame.
         finishContinuousResize();
       };
 
@@ -344,7 +342,7 @@ export function Column2Workspace({
         />
       </div>
 
-      <div className={BODY_BASE_CLS} data-zeros-resize-width-lock="">
+      <div className={BODY_BASE_CLS}>
         {/* Stacking container — the split-pane tree (each pane renders
             its own tab strip + chat body) + the terminal-agent deck.
             The deck stays mounted at THIS level so pane-layout churn

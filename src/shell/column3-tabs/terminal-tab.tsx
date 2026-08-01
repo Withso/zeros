@@ -454,7 +454,6 @@ export function TerminalPanel({
     <div
       ref={panelRef}
       data-terminal-panel=""
-      data-zeros-resize-width-lock=""
       aria-expanded={expanded}
       // Collapse and expand SNAP. The panel used to carry
       // `transition-[flex-basis,min-height] duration-300`, which was wrong in
@@ -533,7 +532,13 @@ export function TerminalPanel({
           return (
             <div
               key={s.id}
-              {...(!isActive ? { inert: "" } : {})}
+              // Hidden sessions are pinned during seam drags (resize-gesture-
+              // freeze.ts). A COLLAPSED panel's layers measure 0-height and
+              // are skipped, so dragging the panel open mid-gesture still
+              // reveals a live-sized terminal.
+              {...(!isActive
+                ? { inert: "", "data-zeros-resize-freeze": "" }
+                : {})}
               className={cn(
                 "absolute inset-0 flex min-h-0 min-w-0 flex-col p-2",
                 isActive
@@ -577,7 +582,9 @@ export function TerminalPanel({
           return (
             <div
               key={`setup:${setupFolderKey}`}
-              {...(!isActive ? { inert: "" } : {})}
+              {...(!isActive
+                ? { inert: "", "data-zeros-resize-freeze": "" }
+                : {})}
               className={cn(
                 "absolute inset-0 flex min-h-0 min-w-0 flex-col overflow-hidden",
                 isActive

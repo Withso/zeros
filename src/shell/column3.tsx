@@ -160,7 +160,10 @@ const RetainedBrowserView = React.memo(function RetainedBrowserView({
 }) {
   return (
     <div
-      {...(!active ? { inert: "" } : {})}
+      // A hidden iframe still re-lays-out its guest document on every size
+      // change; the freeze pin (resize-gesture-freeze.ts) keeps retained
+      // browser views frozen during seam drags so only the visible one pays.
+      {...(!active ? { inert: "", "data-zeros-resize-freeze": "" } : {})}
       className={[
         "absolute inset-0 flex min-h-0 min-w-0 flex-col overflow-hidden",
         active
@@ -459,10 +462,7 @@ export function Column3({
         ) : (
           <>
             {/* ── Row 1: File / Changes / Review + added File/Browser tabs. ── */}
-            <div
-              className={COL3_ROW1_CLS}
-              data-zeros-resize-width-lock=""
-            >
+            <div className={COL3_ROW1_CLS}>
               <div ref={headerRef} className={COL3_HEADER_CLS}>
                 <div className="h-full min-w-0 flex-1">
                   <Column3TabStrip
@@ -492,7 +492,12 @@ export function Column3({
                   return (
                     <div
                       key={tab.id}
-                      {...(!isActive ? { inert: "" } : {})}
+                      // Retained-but-hidden tab bodies (diff views, editors)
+                      // are pinned during seam drags so only the active tab
+                      // re-lays-out per frame. See resize-gesture-freeze.ts.
+                      {...(!isActive
+                        ? { inert: "", "data-zeros-resize-freeze": "" }
+                        : {})}
                       className={[
                         "absolute inset-0 flex min-h-0 min-w-0 flex-col overflow-hidden",
                         isActive
