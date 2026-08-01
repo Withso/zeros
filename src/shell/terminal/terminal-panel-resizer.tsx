@@ -19,11 +19,11 @@ import { beginContinuousLayoutResize } from "./continuous-layout-resize";
 import {
   TERMINAL_PANEL_DEFAULT_PCT,
   TERMINAL_PANEL_HEIGHT_VAR,
+  TERMINAL_PANEL_MAX_OFFSET_PX,
   TERMINAL_PANEL_MAX_PCT,
   TERMINAL_PANEL_MIN_PCT,
   TERMINAL_PANEL_MIN_PX,
   TERMINAL_ROW1_MIN_PX,
-  TERMINAL_SEAM_PX,
   useTerminalPanelLayoutStore,
 } from "./terminal-panel-layout";
 
@@ -47,6 +47,13 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+/** Keep the direct drag-time basis subject to the same live pixel floors as
+ * the class-owned committed basis. The percentage comes from pointer-down
+ * geometry, while CSS re-evaluates these bounds if the container changes. */
+export function terminalPanelFlexBasisForPct(heightPct: number): string {
+  return `clamp(${TERMINAL_PANEL_MIN_PX}px, ${heightPct}%, calc(100% - ${TERMINAL_PANEL_MAX_OFFSET_PX}px))`;
+}
+
 /** Pure drag geometry, exported so the two row floors stay regression-tested. */
 export function terminalPanelPctForPointer({
   containerHeight,
@@ -60,7 +67,7 @@ export function terminalPanelPctForPointer({
   if (containerHeight <= 0) return TERMINAL_PANEL_DEFAULT_PCT;
   const maxPanelPx = Math.max(
     TERMINAL_PANEL_MIN_PX,
-    containerHeight - TERMINAL_ROW1_MIN_PX - TERMINAL_SEAM_PX,
+    containerHeight - TERMINAL_PANEL_MAX_OFFSET_PX,
   );
   const panelPx = clamp(
     containerBottom - clientY,
@@ -202,9 +209,13 @@ export function TerminalPanelResizer({
         });
         lastPctRef.current = pct;
         // `--zeros-terminal-panel-height` inherits through the full xterm DOM.
-        // A direct standard property invalidates only this flex item; the
-        // persisted variable is written once during the release handoff.
-        panel?.style.setProperty("flex-basis", `${pct}%`);
+        // A direct standard property invalidates only this flex item; retaining
+        // the CSS clamp also keeps both row floors live if the container size
+        // changes before pointer release.
+        panel?.style.setProperty(
+          "flex-basis",
+          terminalPanelFlexBasisForPct(pct),
+        );
       };
 
       const onMove = (moveEvent: PointerEvent) => {

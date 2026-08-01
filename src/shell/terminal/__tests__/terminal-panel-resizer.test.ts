@@ -2,8 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   isTerminalPanelDoubleClick,
+  terminalPanelFlexBasisForPct,
   terminalPanelPctForPointer,
 } from "../terminal-panel-resizer";
+import {
+  TERMINAL_PANEL_MAX_OFFSET_PX,
+  TERMINAL_PANEL_MIN_PX,
+} from "../terminal-panel-layout";
 
 describe("terminal-panel resizer geometry", () => {
   it("maps the centered seam to an even split", () => {
@@ -41,6 +46,12 @@ describe("terminal-panel resizer geometry", () => {
         clientY: 0,
       }),
     ).toBe(50);
+  });
+
+  it("keeps live drag geometry behind the same CSS pixel-floor clamp", () => {
+    expect(terminalPanelFlexBasisForPct(62.5)).toBe(
+      `clamp(${TERMINAL_PANEL_MIN_PX}px, 62.5%, calc(100% - ${TERMINAL_PANEL_MAX_OFFSET_PX}px))`,
+    );
   });
 });
 

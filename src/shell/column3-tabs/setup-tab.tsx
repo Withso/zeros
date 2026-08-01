@@ -397,9 +397,10 @@ function WorkspaceSetup({
           it until there's output. */}
       <div
         className={cn(
-          // FitAddon measures xterm's immediate parent. Padding therefore lives
-          // on this outer box, leaving the measured host equal to the exact
-          // content area at every narrow width and short height.
+          // FitAddon reads width/height from xterm's immediate parent but only
+          // subtracts padding from xterm's own element. Under the app-wide
+          // border-box sizing, host padding is included in those dimensions,
+          // so it lives here and the measured child is the exact content area.
           "size-full min-h-0 min-w-0 overflow-hidden px-2 py-1",
           hasLog ? "opacity-100" : "opacity-0",
         )}

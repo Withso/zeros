@@ -89,7 +89,7 @@ describe("column 2 / column 3 sizing bounds stay in lockstep with CSS", () => {
 
   it("paints live drag grow factors directly instead of invalidating an inherited variable", () => {
     expect(col2).toContain('style.setProperty("flex-grow"');
-    expect(col2).toContain('[data-zeros-column-3]');
+    expect(col2).toContain("[data-zeros-column-3]");
     expect(col3).toContain('data-zeros-column-3=""');
   });
 
@@ -180,13 +180,14 @@ describe("terminal panel seam geometry stays in lockstep with CSS", () => {
 
   it("paints live flex-basis directly instead of invalidating xterm descendants", () => {
     const resizer = code("../terminal/terminal-panel-resizer.tsx");
-    expect(resizer).toContain('style.setProperty("flex-basis"');
+    expect(resizer).toMatch(/style\.setProperty\(\s*"flex-basis"/);
+    expect(resizer).toContain("terminalPanelFlexBasisForPct(pct)");
   });
 
   it("keeps padding outside Setup's measured xterm host", () => {
-    // FitAddon measures the terminal element's parent border box. Padding on
-    // that same host makes it over-count usable rows/columns and clip the grid
-    // at narrow sizes.
+    // FitAddon reads the terminal parent's computed dimensions but subtracts
+    // only the terminal element's own padding. With app-wide border-box sizing,
+    // parent padding is included and would over-count usable rows/columns.
     expect(setupTab).toContain(
       'className="size-full min-h-0 min-w-0 overflow-hidden"',
     );

@@ -1,10 +1,13 @@
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
 function source(relativePath: string): string {
-  return readFileSync(resolve(process.cwd(), relativePath), "utf8");
+  return readFileSync(
+    fileURLToPath(new URL(relativePath, import.meta.url)),
+    "utf8",
+  );
 }
 
 function code(relativePath: string): string {
@@ -15,22 +18,20 @@ function code(relativePath: string): string {
 
 describe("narrow transcript message overflow", () => {
   it("bounds user bubbles to their lane and shrinks unbroken text", () => {
-    expect(code("src/zeros/agent/turn-container.tsx")).toContain(
-      "max-w-[min(768px,100%)]",
-    );
+    expect(code("../turn-container.tsx")).toContain("max-w-[min(768px,100%)]");
 
-    const textMessage = code("src/zeros/agent/renderers/text-message.tsx");
+    const textMessage = code("../renderers/text-message.tsx");
     expect(textMessage.match(/wrap-anywhere/g)).toHaveLength(2);
   });
 
   it("lets inline pills shrink with the user bubble", () => {
-    expect(code("src/zeros/agent/composer-editor/pill-views.tsx")).toContain(
-      '"inline-flex h-5 max-w-full',
+    expect(code("../composer-editor/pill-views.tsx")).toContain(
+      '"inline-flex h-5 max-w-[calc(100%-3px)]',
     );
   });
 
   it("breaks unbroken markdown tokens without changing table min-content", () => {
-    expect(source("styles/globals.css")).toMatch(
+    expect(source("../../../../styles/globals.css")).toMatch(
       /\.zeros-agent-md\s*\{[^}]*overflow-wrap:\s*break-word;/,
     );
   });
