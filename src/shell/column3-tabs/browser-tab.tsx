@@ -819,7 +819,10 @@ export function BrowserTab({ tab, active, scope }: BrowserTabProps) {
                   // surface bg mid-drag and snaps once on release — the
                   // standard webview treatment during sash drags. Inline px
                   // from the freeze beat size-full; in canvas mode the size
-                  // is already fixed, so the pin is a no-op there.
+                  // is already fixed, so the pin is a no-op there — but only
+                  // because the freeze normalizes its measurement by the
+                  // wrapper's scale(zoom): pinning the raw (visual) rect
+                  // would resize the iframe to zoom×layout for the drag.
                   data-zeros-resize-freeze=""
                   className="absolute inset-0 block size-full border-0 bg-bg1"
                   // Block pointer events on the iframe while a

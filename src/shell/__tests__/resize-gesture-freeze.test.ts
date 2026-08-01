@@ -57,6 +57,44 @@ function fakeElement(width: number, height: number, events?: string[]) {
 
 type FakeEl = ReturnType<typeof fakeElement>;
 
+interface FakeAncestor {
+  parentElement: FakeAncestor | null;
+  transform?: string;
+  scale?: string;
+}
+
+/** Element under transformed ancestors — getBoundingClientRect() returns the
+ * VISUAL (post-transform) box, exactly like the real DOM, while the ancestor
+ * chain carries the computed transform/scale the freeze must normalize by.
+ * `ancestors` is listed outermost-first. */
+function fakeScaledElement(
+  visualWidth: number,
+  visualHeight: number,
+  ancestors: Array<{ transform?: string; scale?: string }>,
+) {
+  let parent: FakeAncestor | null = null;
+  for (const entry of ancestors) {
+    parent = { parentElement: parent, ...entry };
+  }
+  return {
+    style: fakeStyle(),
+    parentElement: parent,
+    ownerDocument: {
+      defaultView: {
+        getComputedStyle(node: { transform?: string; scale?: string }) {
+          return {
+            transform: node.transform ?? "none",
+            scale: node.scale ?? "none",
+          };
+        },
+      },
+    },
+    getBoundingClientRect() {
+      return { width: visualWidth, height: visualHeight };
+    },
+  };
+}
+
 function fakeRoot(elements: FakeEl[]): ParentNode {
   return {
     querySelectorAll(selector: string) {
@@ -151,6 +189,58 @@ describe("freezeResizeFreezeTargets", () => {
     expect(zeroHeight.style.values.size).toBe(0);
     expect(zeroWidth.style.values.size).toBe(0);
     expect(invalid.style.values.size).toBe(0);
+    release();
+  });
+
+  it("pins the untransformed layout size under a scaled ancestor (zoomed browser canvas)", () => {
+    // Canvas mode wraps the browser iframe in `transform: scale(zoom)`
+    // (browser-tab.tsx) with zoom routinely < 1. The rect is the visual box
+    // — zoom × layout — but the pin is written as inline LAYOUT px, so it
+    // must be normalized back or the iframe really resizes for the drag.
+    const el = fakeScaledElement(320.5, 240, [
+      { transform: "matrix(0.5, 0, 0, 0.5, 120, 40)" },
+    ]);
+    const release = freezeResizeFreezeTargets(fakeRoot([el]));
+    expect(el.style.values.get("width")?.value).toBe("641px");
+    expect(el.style.values.get("height")?.value).toBe("480px");
+
+    release();
+    expect(el.style.values.has("width")).toBe(false);
+    expect(el.style.values.has("height")).toBe(false);
+  });
+
+  it("compounds nested scales across matrix3d and the individual `scale` property", () => {
+    const el = fakeScaledElement(150, 60, [
+      { scale: "0.5 0.25" },
+      {
+        transform:
+          "matrix3d(0.5, 0, 0, 0, 0, 0.5, 0, 0, 0, 0, 1, 0, 10, 20, 0, 1)",
+      },
+    ]);
+    const release = freezeResizeFreezeTargets(fakeRoot([el]));
+    expect(el.style.values.get("width")?.value).toBe("600px");
+    expect(el.style.values.get("height")?.value).toBe("480px");
+    release();
+  });
+
+  it("keeps the rect's sub-pixel size under translate-only transforms", () => {
+    // Translation moves the box without scaling it — the rect width/height
+    // ARE the layout size and must pass through untouched.
+    const el = fakeScaledElement(640.25, 480, [
+      { transform: "matrix(1, 0, 0, 1, 100, 50)" },
+    ]);
+    const release = freezeResizeFreezeTargets(fakeRoot([el]));
+    expect(el.style.values.get("width")?.value).toBe("640.25px");
+    expect(el.style.values.get("height")?.value).toBe("480px");
+    release();
+  });
+
+  it("skips elements collapsed by a zero ancestor scale instead of pinning a non-finite size", () => {
+    const el = fakeScaledElement(0, 0, [
+      { transform: "matrix(0, 0, 0, 0, 0, 0)" },
+    ]);
+    const release = freezeResizeFreezeTargets(fakeRoot([el]));
+    expect(el.style.values.size).toBe(0);
     release();
   });
 

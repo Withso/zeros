@@ -63,13 +63,74 @@ interface FreezeSnapshot {
   previousHeightPriority: string;
 }
 
-/** Pin every marked element at its current border-box size.
+/** Factor by which ancestor transforms scale this element on screen —
+ * i.e. visual (getBoundingClientRect) size ÷ layout size.
+ *
+ * Needed because the pin is written as inline layout width/height, but the
+ * rect is the post-transform visual box. The browser iframe sits under the
+ * canvas-mode wrapper's `transform: scale(zoom)` (browser-tab.tsx), where
+ * zoom is routinely < 1, so pinning the raw rect would shrink the iframe to
+ * zoom×layout for the whole drag — a real resize plus two guest-document
+ * relayouts, the exact cost the freeze exists to avoid.
+ *
+ * Computed transforms resolve to matrix()/matrix3d(); the axis scale is the
+ * length of the corresponding basis column, which also stays correct if a
+ * rotation is composed in. The individual `scale` property composes outside
+ * `transform`, so it is read separately. Environments without a view (the
+ * node-env unit-test fakes) report 1. */
+function accumulatedAncestorScale(element: HTMLElement): {
+  x: number;
+  y: number;
+} {
+  const view = element.ownerDocument?.defaultView;
+  if (!view) return { x: 1, y: 1 };
+  let x = 1;
+  let y = 1;
+  for (
+    let node: HTMLElement | null = element;
+    node;
+    node = node.parentElement
+  ) {
+    const style = view.getComputedStyle(node);
+    const transform = style.transform;
+    if (transform && transform !== "none") {
+      const values = transform
+        .slice(transform.indexOf("(") + 1, transform.indexOf(")"))
+        .split(",")
+        .map((part) => Number.parseFloat(part));
+      if (transform.startsWith("matrix3d")) {
+        x *= Math.hypot(values[0], values[1], values[2]);
+        y *= Math.hypot(values[4], values[5], values[6]);
+      } else if (transform.startsWith("matrix")) {
+        x *= Math.hypot(values[0], values[1]);
+        y *= Math.hypot(values[2], values[3]);
+      }
+    }
+    const scale = style.scale;
+    if (scale && scale !== "none") {
+      const parts = scale.split(" ").map((part) => Number.parseFloat(part));
+      x *= parts[0];
+      y *= parts[1] ?? parts[0];
+    }
+  }
+  return { x, y };
+}
+
+/** Pin every marked element at its current border-box LAYOUT size — the
+ * measured rect normalized by the accumulated ancestor transform scale, so
+ * the pin is a true no-op under the zoomed browser canvas. Normalizing the
+ * rect (rather than reading offsetWidth/offsetHeight) keeps sub-pixel
+ * precision: offset* rounds to integers, which would un-pin every
+ * fractional-sized hidden layer by up to half a pixel and re-trigger the
+ * relayouts the freeze exists to avoid.
  *
  * All geometry is read before the first style write so starting a gesture
  * causes at most one layout flush rather than alternating read/write per
  * surface. Zero-size elements (a collapsed panel's 0-height body, a
  * display:none subtree) are skipped: there is nothing to pin, and pinning
  * 0 would keep a surface revealed mid-gesture invisible until release.
+ * A scale of 0 (an ancestor animating through scale(0)) makes the size
+ * non-finite and is skipped the same way.
  * The returned release is idempotent because pointerup and
  * lostpointercapture can race. */
 export function freezeResizeFreezeTargets(root: ParentNode): () => void {
@@ -80,18 +141,21 @@ export function freezeResizeFreezeTargets(root: ParentNode): () => void {
 
   for (const element of elements) {
     const rect = element.getBoundingClientRect();
+    const scale = accumulatedAncestorScale(element);
+    const width = rect.width / scale.x;
+    const height = rect.height / scale.y;
     if (
-      !Number.isFinite(rect.width) ||
-      !Number.isFinite(rect.height) ||
-      rect.width <= 0 ||
-      rect.height <= 0
+      !Number.isFinite(width) ||
+      !Number.isFinite(height) ||
+      width <= 0 ||
+      height <= 0
     ) {
       continue;
     }
     snapshots.push({
       element,
-      width: rect.width,
-      height: rect.height,
+      width,
+      height,
       previousWidth: element.style.getPropertyValue("width"),
       previousWidthPriority: element.style.getPropertyPriority("width"),
       previousHeight: element.style.getPropertyValue("height"),
