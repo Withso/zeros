@@ -149,6 +149,16 @@ const COMPACT_EDITOR_THEME = EditorView.theme({
   },
 });
 
+// Full File-tab editors wrap every logical line and reserve vertical scrolling
+// as the only navigation axis. Kept out of compact command editors, whose
+// single-line command ergonomics are a separate contract.
+const FILE_LINE_WRAP_EXTENSIONS: Extension[] = [
+  EditorView.lineWrapping,
+  EditorView.theme({
+    ".cm-scroller": { overflowX: "hidden" },
+  }),
+];
+
 export function CodeEditor({
   value,
   filePath,
@@ -235,6 +245,7 @@ export function CodeEditor({
       // internals like the autocomplete tooltip) is a JS boolean — recreate it
       // when the code theme's appearance (=== the app variant) flips.
       zerosEditorTheme(codeThemeOpt.appearance === "dark"),
+      ...(!compact ? FILE_LINE_WRAP_EXTENSIONS : []),
       ...(compact ? [Prec.highest(COMPACT_EDITOR_THEME)] : []),
       ...langExt,
       // Shiki color layer (exact parity). Recreated when the file's language or

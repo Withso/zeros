@@ -62,6 +62,15 @@ import { useAgentSessions } from "./sessions-hooks";
 import { formatTokens } from "./context-gauge";
 import { displayNameForModelValue } from "./model-catalog";
 import type { AgentMessage } from "./use-agent-session";
+import {
+  DiffHoverCard,
+  DiffHoverPreview,
+} from "./renderers/diff-hover-preview";
+import {
+  prefetchWorkspaceFileDiff,
+  useWorkspaceFileDiffSnapshot,
+  type WorkspaceFileDiffQuery,
+} from "@/shell/workspace-file-data-cache";
 
 const PILL_PAGE = 10;
 
@@ -132,6 +141,14 @@ export function turnFooterFiles(
   return turn?.files ?? [];
 }
 
+/** Metadata-only rows (most commonly a pure rename) do not promise a textual
+ * hunk. Every persisted line-changing row can warm and show its exact patch. */
+export function canPreviewTurnFileDiff(
+  file: Pick<TurnInfo["files"][number], "additions" | "deletions">,
+): boolean {
+  return file.additions > 0 || file.deletions > 0;
+}
+
 function baseName(p: string): string {
   const i = p.lastIndexOf("/");
   return i >= 0 ? p.slice(i + 1) : p;
@@ -193,6 +210,101 @@ const ICON_BTN =
 // 2026-07-05 per user). The ±counts render INSIDE the pill.
 const PILL =
   "flex h-5 min-w-0 items-center gap-1.5 rounded-sm border border-border3 bg-bg1 px-1.5 text-fg2 transition-colors hover:bg-bg2-hover hover:text-fg1";
+
+interface TurnFilePillProps {
+  /** Persisted file delta for this exact turn. */
+  file: TurnInfo["files"][number];
+  /** Exact turn owner for the historical patch request. */
+  chatId: string;
+  /** Exact turn identity for the historical patch request. */
+  turnId: string;
+  /** Workspace cache owner; null is recovered with a chat-scoped stable key. */
+  workspaceId: string | null;
+  /** Opens this turn-scoped diff in the retained row-1 viewer. */
+  onOpen: (path: string) => void;
+}
+
+interface TurnFileDiffHoverPreviewProps {
+  path: string;
+  diffQuery: WorkspaceFileDiffQuery;
+}
+
+/** Radix mounts hover-card content only while it is open. Keeping the shared
+ * cache hook in this content-owned child means unopened transcript history
+ * creates neither empty cache entries nor immortal listeners. */
+const TurnFileDiffHoverPreview = memo(function TurnFileDiffHoverPreview({
+  path,
+  diffQuery,
+}: TurnFileDiffHoverPreviewProps) {
+  const diffSnapshot = useWorkspaceFileDiffSnapshot(diffQuery);
+  return (
+    <DiffHoverPreview
+      path={path}
+      patch={diffSnapshot.data}
+      loading={diffSnapshot.loading}
+      error={diffSnapshot.error}
+      showPath
+      compact
+    />
+  );
+});
+
+/** One footer file pill. Pointer/focus intent warms the immutable turn patch;
+ * clicking remains an urgent navigation-only action. */
+export const TurnFilePill = memo(function TurnFilePill({
+  file,
+  chatId,
+  turnId,
+  workspaceId,
+  onOpen,
+}: TurnFilePillProps) {
+  const previewable = canPreviewTurnFileDiff(file);
+  const diffQuery = useMemo<WorkspaceFileDiffQuery>(
+    () => ({
+      // Historical turn reads do not actually require workspaceId at the
+      // transport boundary. The fallback preserves an exact, non-empty cache
+      // owner for older recorded rows that predate workspace attribution.
+      workspaceId: workspaceId ?? `turn:${chatId}`,
+      path: file.path,
+      diffScope: "turn",
+      turnChatId: chatId,
+      turnId,
+    }),
+    [workspaceId, chatId, file.path, turnId],
+  );
+  const warmPreview = useCallback(() => {
+    if (previewable) prefetchWorkspaceFileDiff(diffQuery);
+  }, [diffQuery, previewable]);
+
+  const pill = (
+    <button
+      type="button"
+      onPointerEnter={warmPreview}
+      onFocus={warmPreview}
+      onClick={() => onOpen(file.path)}
+      className={PILL}
+    >
+      <FileTypeIcon name={file.path} size={13} className="shrink-0" />
+      <span className="max-w-40 truncate">{baseName(file.path)}</span>
+      {/* Both halves render whenever the file changed at all — "+5 −0",
+          not a lone "+5" — mirroring the edit rows' badge exactly. */}
+      {previewable && (
+        <span className="shrink-0 tabular-nums">
+          <span className="text-green-primary">+{file.additions}</span>
+          <span className="text-red-primary ml-1">−{file.deletions}</span>
+        </span>
+      )}
+    </button>
+  );
+
+  if (!previewable) return <Tooltip label={file.path}>{pill}</Tooltip>;
+
+  return (
+    <DiffHoverCard trigger={pill}>
+      <TurnFileDiffHoverPreview path={file.path} diffQuery={diffQuery} />
+    </DiffHoverCard>
+  );
+});
 
 interface TurnFooterProps {
   chatId: string;
@@ -285,6 +397,19 @@ export const TurnFooter = memo(function TurnFooter({
       /* clipboard may be blocked in some sandbox configs */
     }
   }, [outputText]);
+
+  // A click publishes the complete turn-scoped viewer identity immediately;
+  // pointer/focus warming is owned by TurnFilePill and never awaited here.
+  const onOpenTurnFile = useCallback(
+    (path: string) =>
+      openInRow1(path, {
+        diff: true,
+        diffScope: "turn",
+        turnChatId: chatId,
+        turnId,
+      }),
+    [openInRow1, chatId, turnId],
+  );
 
   // Undo a reset by its id: restores the files AND re-inserts the truncated
   // conversation (messages, tool calls, outputs). When the transcript comes
@@ -486,12 +611,20 @@ export const TurnFooter = memo(function TurnFooter({
                   </>
                 ) : signInPhase === "success" ? (
                   <>
-                    <Check className="size-3" strokeWidth={2} aria-hidden="true" />
+                    <Check
+                      className="size-3"
+                      strokeWidth={2}
+                      aria-hidden="true"
+                    />
                     Signed in
                   </>
                 ) : (
                   <>
-                    <LogIn className="size-3" strokeWidth={2} aria-hidden="true" />
+                    <LogIn
+                      className="size-3"
+                      strokeWidth={2}
+                      aria-hidden="true"
+                    />
                     Sign in
                   </>
                 )}
@@ -531,7 +664,7 @@ export const TurnFooter = memo(function TurnFooter({
                 </span>
                 {typeof usage?.totalCostUsd === "number" &&
                   usage.totalCostUsd > 0 && (
-                    <span className="text-fg2 font-mono text-2xxs">
+                    <span className="text-fg2 text-2xxs font-mono">
                       {formatUsd(usage.totalCostUsd)}
                     </span>
                   )}
@@ -544,7 +677,7 @@ export const TurnFooter = memo(function TurnFooter({
                   <span className="text-fg2 min-w-0 truncate text-[12.5px]">
                     {r.name}
                   </span>
-                  <span className="text-fg2 font-mono text-2xxs whitespace-nowrap tabular-nums">
+                  <span className="text-fg2 text-2xxs font-mono whitespace-nowrap tabular-nums">
                     {r.line}
                   </span>
                 </div>
@@ -556,7 +689,7 @@ export const TurnFooter = memo(function TurnFooter({
                 )}
               >
                 <span className="text-fg1 text-[12.5px]">Total</span>
-                <span className="text-fg1 font-mono text-2xxs whitespace-nowrap tabular-nums">
+                <span className="text-fg1 text-2xxs font-mono whitespace-nowrap tabular-nums">
                   {usageTotalLine}
                 </span>
               </div>
@@ -626,33 +759,14 @@ export const TurnFooter = memo(function TurnFooter({
         </DropdownMenu>
 
         {shown.map((f) => (
-          <Tooltip key={f.path} label={f.path}>
-            <button
-              type="button"
-              onClick={() =>
-                openInRow1(f.path, {
-                  diff: true,
-                  diffScope: "turn",
-                  turnChatId: chatId,
-                  turnId,
-                })
-              }
-              className={PILL}
-            >
-              <FileTypeIcon name={f.path} size={13} className="shrink-0" />
-              <span className="max-w-40 truncate">{baseName(f.path)}</span>
-              {/* Both halves render whenever the file changed at all — "+5 −0",
-                not a lone "+5" — mirroring the edit rows' badge exactly, so the
-                footer pill and the tool rows above it read the same
-                (2026-07-05, per user). 0/0 still shows nothing (renames). */}
-              {(f.additions > 0 || f.deletions > 0) && (
-                <span className="shrink-0 tabular-nums">
-                  <span className="text-green-primary">+{f.additions}</span>
-                  <span className="text-red-primary ml-1">−{f.deletions}</span>
-                </span>
-              )}
-            </button>
-          </Tooltip>
+          <TurnFilePill
+            key={f.path}
+            file={f}
+            chatId={chatId}
+            turnId={turnId}
+            workspaceId={turn?.workspaceId ?? null}
+            onOpen={onOpenTurnFile}
+          />
         ))}
         {remaining > 0 && (
           <button
@@ -672,7 +786,7 @@ export const TurnFooter = memo(function TurnFooter({
           <button
             type="button"
             onClick={() => onContinue?.(continueReason)}
-            className="border-border3 bg-transparent text-fg1 hover:bg-bg2-hover flex h-[22px] items-center gap-1.5 rounded-sm border px-2 text-xs font-medium transition-colors"
+            className="border-border3 text-fg1 hover:bg-bg2-hover flex h-[22px] items-center gap-1.5 rounded-sm border bg-transparent px-2 text-xs font-medium transition-colors"
           >
             <Play className="size-3" strokeWidth={2} />
             Continue
