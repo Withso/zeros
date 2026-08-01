@@ -6,9 +6,10 @@ import { describe, it, expect } from "vitest";
 import {
   claimPrIslandAction,
   derivePrIslandState,
+  isActionDisabledByIslandClaim,
   isActionGatedWhileAgentWorking,
   releasePrIslandAction,
-  type PrIslandActionKind,
+  type PrIslandActionClaim,
   type PrStatusInputs,
 } from "../pr-status";
 
@@ -327,16 +328,92 @@ describe("isActionGatedWhileAgentWorking — actions parked mid-turn", () => {
 
 describe("PR island action single-flight claim", () => {
   it("rejects a second click synchronously and only the owner can release it", () => {
-    const claim: { current: PrIslandActionKind | null } = { current: null };
+    const claim: { current: PrIslandActionClaim | null } = { current: null };
+    const prompt = claimPrIslandAction(claim, {
+      kind: "commit-and-push",
+      behavior: "prompt",
+    });
 
-    expect(claimPrIslandAction(claim, "commit-and-push")).toBe(true);
-    expect(claimPrIslandAction(claim, "commit-and-push")).toBe(false);
-    expect(claimPrIslandAction(claim, "push")).toBe(false);
+    expect(prompt).not.toBeNull();
+    expect(
+      claimPrIslandAction(claim, {
+        kind: "commit-and-push",
+        behavior: "prompt",
+      }),
+    ).toBeNull();
+    expect(
+      claimPrIslandAction(claim, { kind: "push", behavior: "push" }),
+    ).toBeNull();
 
-    releasePrIslandAction(claim, "push");
-    expect(claim.current).toBe("commit-and-push");
-    releasePrIslandAction(claim, "commit-and-push");
+    releasePrIslandAction(claim, { kind: "push", behavior: "push" });
+    expect(claim.current).toBe(prompt);
+    releasePrIslandAction(claim, prompt!);
     expect(claim.current).toBeNull();
-    expect(claimPrIslandAction(claim, "push")).toBe(true);
+    expect(
+      claimPrIslandAction(claim, { kind: "push", behavior: "push" }),
+    ).not.toBeNull();
+  });
+
+  it("lets Archive take ownership from a prompt without a stale settle unlocking it", () => {
+    const claim: { current: PrIslandActionClaim | null } = { current: null };
+    const prompt = claimPrIslandAction(claim, {
+      kind: "commit-and-push",
+      behavior: "prompt",
+    });
+    const archive = claimPrIslandAction(claim, {
+      kind: "archive",
+      behavior: "archive",
+    });
+
+    expect(prompt).not.toBeNull();
+    expect(archive).not.toBeNull();
+    expect(claim.current).toBe(archive);
+
+    releasePrIslandAction(claim, prompt!);
+    expect(claim.current).toBe(archive);
+    releasePrIslandAction(claim, archive!);
+    expect(claim.current).toBeNull();
+  });
+
+  it("does not let Archive replace a direct worktree mutation", () => {
+    const claim: { current: PrIslandActionClaim | null } = { current: null };
+    const push = claimPrIslandAction(claim, {
+      kind: "push",
+      behavior: "push",
+    });
+
+    expect(push).not.toBeNull();
+    expect(
+      claimPrIslandAction(claim, {
+        kind: "archive",
+        behavior: "archive",
+      }),
+    ).toBeNull();
+    expect(claim.current).toBe(push);
+  });
+
+  it("keeps navigation and archive available during a long-lived prompt claim", () => {
+    const archive = derivePrIslandState(base({ prState: "closed" })).actions[0];
+    const showChecks = derivePrIslandState(base({ pr: readyPr("unstable") }))
+      .actions[0];
+    const merge = derivePrIslandState(
+      base({
+        pr: readyPr("clean"),
+        checks: { pending: 0, failed: 0, total: 1 },
+      }),
+    ).actions[0];
+
+    expect(isActionDisabledByIslandClaim("prompt", archive)).toBe(false);
+    expect(isActionDisabledByIslandClaim("prompt", showChecks)).toBe(false);
+    expect(isActionDisabledByIslandClaim("prompt", merge)).toBe(true);
+  });
+
+  it("keeps Show checks navigable but blocks Archive during a direct mutation", () => {
+    const archive = derivePrIslandState(base({ prState: "closed" })).actions[0];
+    const showChecks = derivePrIslandState(base({ pr: readyPr("unstable") }))
+      .actions[0];
+
+    expect(isActionDisabledByIslandClaim("push", showChecks)).toBe(false);
+    expect(isActionDisabledByIslandClaim("push", archive)).toBe(true);
   });
 });

@@ -28,7 +28,7 @@
 //     already-connected user to connect GitHub.
 // ──────────────────────────────────────────────────────────
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useRef } from "react";
 import {
   ChevronDown,
   ExternalLink,
@@ -90,6 +90,11 @@ import { notifyWorkspacesChanged } from "../../zeros/store/use-projects";
 import { useWorkspaceDispatch } from "../../zeros/store/store";
 import { requestUserSettingsSection } from "../../zeros/settings/settings-navigation";
 import { triggerGitRefresh } from "../use-git-refresh-key";
+import {
+  claimPrCreateAction,
+  releasePrCreateAction,
+  usePrCreateActionClaimed,
+} from "./pr-create-claim";
 
 // 24px (`h-6`) split control on the design-system "secondary" tokens
 // (TRANSPARENT fill so it blends with the row's surface + border2, hover
@@ -123,7 +128,7 @@ export function CreatePrButton({
 }: CreatePrButtonProps) {
   const sendToChat = useSendToActiveChat();
   const dispatch = useWorkspaceDispatch();
-  const [busy, setBusy] = useState(false);
+  const busy = usePrCreateActionClaimed(workspace.id);
   // The repo's configured push/PR remote — the brief must name the same
   // remote the engine's own git ops use.
   const remote = useGitRemote(workspace.repoRoot);
@@ -136,30 +141,22 @@ export function CreatePrButton({
   // "Ask agent" is reachable from a toast that outlives the click that raised
   // it, so a closure-captured `agentWorking` would happily queue a PR brief
   // behind a turn that started in between — the exact thing the gate exists to
-  // prevent. `busy` is written synchronously so a double-click inside one
-  // frame can't fire twice before React re-renders the disabled button.
-  const busyRef = useRef(false);
+  // prevent. The exact-workspace claim is shared outside this component so it
+  // also closes double-clicks and Changes/Review → File → back remount races.
   const gateRef = useRef({ disabled: false, agentWorking: false });
   gateRef.current = { disabled: disabled === true, agentWorking };
-  const claim = useCallback((): boolean => {
-    if (busyRef.current) return false;
-    if (gateRef.current.disabled) return false;
+  const claim = useCallback(() => {
+    if (gateRef.current.disabled) return null;
     if (gateRef.current.agentWorking) {
       // Only the toast's "Ask agent" button can reach this — both real buttons
       // are already disabled by the same gate. It outlives the click that
       // raised it, so a turn can begin in between; say so rather than swallow
       // the click, because the user has no disabled state to read here.
       toast.error("Agent is working", { description: AGENT_WORKING_REASON });
-      return false;
+      return null;
     }
-    busyRef.current = true;
-    setBusy(true);
-    return true;
-  }, []);
-  const release = useCallback(() => {
-    busyRef.current = false;
-    setBusy(false);
-  }, []);
+    return claimPrCreateAction(workspace.id);
+  }, [workspace.id]);
 
   const openGithubSettings = useCallback(() => {
     requestUserSettingsSection("integrations");
@@ -185,7 +182,8 @@ export function CreatePrButton({
 
   const askAgentToCreate = useCallback(
     async (draft: boolean) => {
-      if (!claim()) return;
+      const owner = claim();
+      if (!owner) return;
       let releaseOnExit = true;
       try {
         // Cross-check access BEFORE spending a turn. The agent's `gh pr create`
@@ -258,19 +256,18 @@ export function CreatePrButton({
           text,
           displayText: prBubbleDisplayText(draft),
           autoAction: draft ? "create-draft-pr" : "create-pr",
-          onSettled: release,
+          onSettled: () => releasePrCreateAction(owner),
         });
         // Keep the synchronous claim (and spinner) through the accepted turn;
         // onSettled releases it on either success or failure. If no active
         // chat accepted the send, the ordinary finally releases immediately.
         if (sent) releaseOnExit = false;
       } finally {
-        if (releaseOnExit) release();
+        if (releaseOnExit) releasePrCreateAction(owner);
       }
     },
     [
       claim,
-      release,
       showBlockToast,
       workspace.id,
       workspace.repoRoot,
@@ -283,7 +280,8 @@ export function CreatePrButton({
 
   const createDirect = useCallback(
     async (draft: boolean) => {
-      if (!claim()) return;
+      const owner = claim();
+      if (!owner) return;
       // Started here, not inside the orchestrator, so it overlaps the local
       // change-count read and the push instead of queueing in front of them —
       // the happy path pays nothing for it. Never rejects (ghRepoAccess
@@ -390,12 +388,11 @@ export function CreatePrButton({
           : { message: err instanceof Error ? err.message : String(err) };
         showBlockToast(describePrCreateFailure(facts, access));
       } finally {
-        release();
+        releasePrCreateAction(owner);
       }
     },
     [
       claim,
-      release,
       showBlockToast,
       workspace.id,
       workspace.branch,

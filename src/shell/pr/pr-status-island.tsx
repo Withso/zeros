@@ -88,9 +88,12 @@ import { useShowReviewTab } from "./use-open-review-tab";
 import {
   claimPrIslandAction,
   derivePrIslandState,
+  isActionDisabledByIslandClaim,
   isActionGatedWhileAgentWorking,
   releasePrIslandAction,
   type PrIslandAction,
+  type PrIslandActionBehavior,
+  type PrIslandActionClaim,
   type PrIslandActionKind,
   type PrIslandState,
   type PrIslandTone,
@@ -318,19 +321,26 @@ export function PrStatusIsland({
   const stabilityKey = data?.pr
     ? `${dataKey}@${data.pr.baseBranch}:${data.pr.headSha ?? "unknown"}`
     : `${dataKey}@unconfirmed`;
-  // Which action is running (direct engine ops). The running button swaps its
-  // icon for a spinner and every button disables (the disabled dim doubles as
-  // the "in flight" affordance).
-  const [acting, setActing] = useState<PrIslandActionKind | null>(null);
-  const actionClaimRef = useRef<PrIslandActionKind | null>(null);
-  const claimAction = useCallback((kind: PrIslandActionKind): boolean => {
-    if (!claimPrIslandAction(actionClaimRef, kind)) return false;
-    setActing(kind);
-    return true;
-  }, []);
-  const finishAction = useCallback((kind: PrIslandActionKind): void => {
-    releasePrIslandAction(actionClaimRef, kind);
-    setActing((current) => (current === kind ? null : current));
+  // The claimed prompt/direct operation. Its button swaps to a spinner;
+  // mutating peers disable, while pure navigation — and Archive during an
+  // agent prompt it deliberately stops — follow the shared action policy.
+  const [acting, setActing] = useState<PrIslandActionClaim | null>(null);
+  const actionClaimRef = useRef<PrIslandActionClaim | null>(null);
+  const claimAction = useCallback(
+    (
+      kind: PrIslandActionKind,
+      behavior: PrIslandActionBehavior,
+    ): PrIslandActionClaim | null => {
+      const owner = claimPrIslandAction(actionClaimRef, { kind, behavior });
+      if (!owner) return null;
+      setActing(owner);
+      return owner;
+    },
+    [],
+  );
+  const finishAction = useCallback((owner: PrIslandActionClaim): void => {
+    releasePrIslandAction(actionClaimRef, owner);
+    setActing((current) => (current === owner ? null : current));
   }, []);
   const archiveWorkspace = useArchiveWorkspace();
   // Park git-mutating actions while an agent turn is in flight (see
@@ -501,7 +511,8 @@ export function PrStatusIsland({
    *  continue. No agent message — spinner on the button, optimistic flip. */
   const runDirect = useCallback(
     async (action: PrIslandAction) => {
-      if (!claimAction(action.kind)) return;
+      const owner = claimAction(action.kind, action.behavior);
+      if (!owner) return;
       // The action is about to invalidate the current state on purpose — the
       // stability mask must not resurrect it over a following transient.
       clearPrIslandStability(stabilityKey);
@@ -612,7 +623,7 @@ export function PrStatusIsland({
                   : "Couldn't continue on a new branch";
         actionErrorToast(title, err);
       } finally {
-        finishAction(action.kind);
+        finishAction(owner);
       }
     },
     [
@@ -632,14 +643,15 @@ export function PrStatusIsland({
   );
 
   const handleArchive = useCallback(async () => {
-    if (!claimAction("archive")) return;
+    const owner = claimAction("archive", "archive");
+    if (!owner) return;
     try {
       // Shared: stops any running agent turn, repoints the view (archiving the
       // workspace you're viewing would otherwise strand the open chat on a
       // deleted folder), and offers Undo.
       await archiveWorkspace(workspace);
     } finally {
-      finishAction("archive");
+      finishAction(owner);
     }
   }, [claimAction, finishAction, workspace, archiveWorkspace]);
 
@@ -655,13 +667,14 @@ export function PrStatusIsland({
           showPr("checks");
           return;
         case "prompt": {
-          if (!claimAction(action.kind)) return;
+          const owner = claimAction(action.kind, action.behavior);
+          if (!owner) return;
           const text = buildActionPrompt(action.kind, {
             baseBranch: workspace.baseBranch,
             remote,
           });
           if (!text) {
-            finishAction(action.kind);
+            finishAction(owner);
             return;
           }
           // Auto-sent treatment: the bubble shows the short label + the
@@ -672,9 +685,9 @@ export function PrStatusIsland({
             text,
             displayText: bubble?.label,
             autoAction: bubble?.autoAction,
-            onSettled: () => finishAction(action.kind),
+            onSettled: () => finishAction(owner),
           });
-          if (!sent) finishAction(action.kind);
+          if (!sent) finishAction(owner);
           return;
         }
         default:
@@ -869,6 +882,10 @@ export function PrStatusIsland({
       {(island?.actions ?? []).map((action) => {
         const Icon = ACTION_ICON[action.kind];
         const gated = agentWorking && isActionGatedWhileAgentWorking(action);
+        const claimBlocked = isActionDisabledByIslandClaim(
+          acting?.behavior ?? null,
+          action,
+        );
         return (
           <Tooltip
             key={action.kind}
@@ -879,11 +896,11 @@ export function PrStatusIsland({
             <span className="inline-flex shrink-0">
               <button
                 type="button"
-                disabled={acting != null || gated}
+                disabled={claimBlocked || gated}
                 onClick={() => runAction(action)}
                 className={cn(BTN_BASE, actionButtonClass(action, tone))}
               >
-                {acting === action.kind ? (
+                {acting?.kind === action.kind ? (
                   <ZerosSpinner size={14} tone="inherit" />
                 ) : (
                   Icon && <Icon className="size-3.5" />

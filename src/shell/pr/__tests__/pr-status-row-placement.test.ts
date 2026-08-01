@@ -31,9 +31,10 @@ describe("PR prompt single-flight wiring", () => {
   it("claims before sending and releases only when the accepted turn settles", () => {
     const island = source("src/shell/pr/pr-status-island.tsx");
 
-    expect(island).toContain("if (!claimAction(action.kind)) return;");
     expect(island).toContain(
-      "onSettled: () => finishAction(action.kind)",
+      "const owner = claimAction(action.kind, action.behavior);",
     );
+    expect(island).toContain("if (!owner) return;");
+    expect(island).toContain("onSettled: () => finishAction(owner)");
   });
 });

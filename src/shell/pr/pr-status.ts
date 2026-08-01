@@ -55,25 +55,38 @@ export type PrIslandActionKind =
   | "archive"
   | "show-checks";
 
-/** A synchronous claim shared by prompt and direct island actions. React state
- * disables the rendered controls, but it is not visible to another handler in
- * the same event frame; this ref-shaped guard closes that double-fire window. */
-export function claimPrIslandAction(
-  claim: { current: PrIslandActionKind | null },
-  kind: PrIslandActionKind,
-): boolean {
-  if (claim.current != null) return false;
-  claim.current = kind;
-  return true;
+export interface PrIslandActionClaim {
+  readonly kind: PrIslandActionKind;
+  readonly behavior: PrIslandActionBehavior;
 }
 
-/** Release only the action that owns the claim, so an old async completion can
- * never unlock a newer operation. */
+/** A synchronous claim shared by prompt and direct island actions. React state
+ * disables the rendered controls, but it is not visible to another handler in
+ * the same event frame; this ref-shaped guard closes that double-fire window.
+ * Archive may replace a prompt claim because archiving deliberately stops that
+ * agent turn; every other pair remains single-flight. */
+export function claimPrIslandAction(
+  claim: { current: PrIslandActionClaim | null },
+  action: PrIslandActionClaim,
+): PrIslandActionClaim | null {
+  if (
+    claim.current != null &&
+    !(action.behavior === "archive" && claim.current.behavior === "prompt")
+  ) {
+    return null;
+  }
+  const owner = { kind: action.kind, behavior: action.behavior };
+  claim.current = owner;
+  return owner;
+}
+
+/** Release by owner identity, so an old async completion can never unlock a
+ * replacement Archive or a later operation of the same kind. */
 export function releasePrIslandAction(
-  claim: { current: PrIslandActionKind | null },
-  kind: PrIslandActionKind,
+  claim: { current: PrIslandActionClaim | null },
+  owner: PrIslandActionClaim,
 ): void {
-  if (claim.current === kind) claim.current = null;
+  if (claim.current === owner) claim.current = null;
 }
 
 export interface PrIslandAction {
@@ -204,6 +217,20 @@ export function isActionGatedWhileAgentWorking(
   action: PrIslandAction,
 ): boolean {
   return action.behavior !== "archive" && action.behavior !== "show-checks";
+}
+
+/** A prompt claim lasts for the complete agent turn, so it must inherit the
+ * agent-working policy instead of freezing every newly derived action. Direct
+ * mutations still block Archive, which could remove their worktree mid-write;
+ * Show checks is pure navigation and remains safe in either case. */
+export function isActionDisabledByIslandClaim(
+  runningBehavior: PrIslandActionBehavior | null,
+  action: PrIslandAction,
+): boolean {
+  if (runningBehavior == null || action.behavior === "show-checks")
+    return false;
+  if (action.behavior !== "archive") return true;
+  return runningBehavior !== "prompt";
 }
 
 /** Resolve the single state the island renders. */
