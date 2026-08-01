@@ -60,6 +60,7 @@ export type AgentFailureStage =
   | "loadSession"
   | "prompt"
   | "cancel"
+  | "stopBackgroundTask"
   | "setMode";
 
 export interface AgentFailure {
@@ -232,6 +233,13 @@ export interface AgentAdapter {
   /** Abort the current turn. */
   cancel(opts: { sessionId: string }): Promise<void>;
 
+  /** Stop one provider-owned background task without interrupting the parent
+   * turn or sibling work. Optional for providers with no background-task API. */
+  stopBackgroundTask?(opts: {
+    sessionId: string;
+    taskId: string;
+  }): Promise<void>;
+
   /** Inject a user message into the RUNNING turn without cancelling it
    *  (mid-turn "steering"). Resolves once the message is delivered to the
    *  agent runtime; the in-flight prompt() keeps streaming and settles the
@@ -256,7 +264,9 @@ export interface AgentAdapter {
    *  ok=null inconclusive (network error — caller saves normally).
    *  Optional — only API-key-only adapters (Cursor) implement it. The key
    *  must never be logged or stored by the implementation. */
-  validateApiKey?(apiKey: string): Promise<{ ok: boolean | null; error?: string }>;
+  validateApiKey?(
+    apiKey: string,
+  ): Promise<{ ok: boolean | null; error?: string }>;
 
   /** Background one-shot text generation (the AI chat-title call): send ONE
    *  user prompt + a plain system instruction to `model` and return the

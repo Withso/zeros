@@ -83,10 +83,18 @@ import { buildQuestionStamp } from "@zeros/core/agent-messages";
 import type {
   AdvertisedModel,
   AvailableCommand,
+  BackgroundTask,
 } from "@zeros/core/agent-events";
 import type { AccountDetails } from "@zeros/core/messages";
 import type { GetAccountResponse } from "./generated/v2/GetAccountResponse";
 import type { GetAccountParams } from "./generated/v2/GetAccountParams";
+import {
+  collectBackgroundTerminals,
+  collectLoadedDescendantThreadIds,
+  MAX_CODEX_BACKGROUND_TERMINALS,
+  MAX_CODEX_BACKGROUND_THREADS,
+  reconcileBackgroundTerminals,
+} from "./background-terminals";
 
 const AGENT_ID = "codex";
 const CLIENT_INFO = { name: "Zeros", version: "0.0.5", title: "Zeros Mac App" };
@@ -225,6 +233,28 @@ interface CodexSession {
    *  renderer auto-rebuilds + resends — no manual "send again") instead of
    *  the generic protocol-error that stranded the user before. */
   childExitedMidTurn: boolean;
+  /** Last confirmed app-server background-terminal set. Retained while a
+   * refresh is in flight or fails; replacement happens only on a successful
+   * exact-thread read. Bounded by threads × terminals, not the smaller UI
+   * presentation cap, so hidden running tasks keep lifecycle continuity. */
+  backgroundTasks: Map<string, BackgroundTask>;
+  /** Last bounded aggregate sent across the bridge. */
+  publishedBackgroundTasks: Map<string, BackgroundTask>;
+  /** Exact owner for each renderer task id. Descendant process ids require
+   * their own thread id for terminate/list; never route them through parent. */
+  backgroundTaskOwners: Map<string, { threadId: string; processId: string }>;
+  /** Parent plus loaded/observed descendant threads owned by this one
+   * app-server child. Explicitly bounded before any fan-out reads. */
+  backgroundThreadIds: Set<string>;
+  backgroundThreadDiscoveryComplete: boolean;
+  backgroundTasksPublished: boolean;
+  /** Monotonic invalidation generation for the exact thread key. */
+  backgroundRefreshGeneration: number;
+  /** One shared paginated read per session; invalidations during it request a
+   * single trailing pass and make the older response ineligible to publish. */
+  backgroundRefreshInFlight: Promise<void> | null;
+  backgroundRefreshQueued: boolean;
+  stoppedBackgroundTaskIds: Set<string>;
 }
 
 export class CodexAppServerAdapter implements AgentAdapter {
@@ -756,6 +786,54 @@ export class CodexAppServerAdapter implements AgentAdapter {
     );
   }
 
+  async stopBackgroundTask(opts: {
+    sessionId: string;
+    taskId: string;
+  }): Promise<void> {
+    const session = this.requireSession(opts.sessionId);
+    const owner = session.backgroundTaskOwners.get(opts.taskId);
+    // Stop is idempotent at the task boundary. A stale click that races the
+    // authoritative removal already has the requested outcome.
+    if (!owner || !session.backgroundTasks.has(opts.taskId)) return;
+    session.stoppedBackgroundTaskIds.add(opts.taskId);
+    let result: { terminated: boolean };
+    try {
+      result = await session.runtime.request<{ terminated: boolean }>(
+        "thread/backgroundTerminals/terminate",
+        { threadId: owner.threadId, processId: owner.processId },
+        { timeoutMs: 5_000 },
+      );
+    } catch (error) {
+      // The terminate request can reach app-server and then lose its response.
+      // Re-read before surfacing that ambiguous transport error: confirmed
+      // removal means the user's requested outcome happened and consumes the
+      // stopped marker through publishBackgroundTasks.
+      await this.refreshBackgroundTasks(session);
+      if (!session.backgroundTasks.has(opts.taskId)) return;
+      session.stoppedBackgroundTaskIds.delete(opts.taskId);
+      throw new AgentFailureError({
+        kind: "transport-closed",
+        message: `Codex could not stop background task ${opts.taskId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        stage: "stopBackgroundTask",
+        agentId: this.agentId,
+      });
+    }
+    // Whether terminate reports true or the process won a natural-exit race,
+    // the follow-up list is authoritative and removes stale UI promptly.
+    await this.refreshBackgroundTasks(session);
+    if (!result.terminated && session.backgroundTasks.has(opts.taskId)) {
+      session.stoppedBackgroundTaskIds.delete(opts.taskId);
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        message: `Codex did not terminate background task ${opts.taskId}`,
+        stage: "stopBackgroundTask",
+        agentId: this.agentId,
+      });
+    }
+  }
+
   /** Change a live session's model without rebuilding it. runTurn reads
    *  `session.env.OPENAI_MODEL` fresh on EVERY turn (see prompt()), so
    *  rewriting the env is all it takes — the next turn carries the new model.
@@ -1261,12 +1339,27 @@ export class CodexAppServerAdapter implements AgentAdapter {
       turnActive: false,
       runtimeAlive: true,
       childExitedMidTurn: false,
+      backgroundTasks: new Map(),
+      publishedBackgroundTasks: new Map(),
+      backgroundTaskOwners: new Map(),
+      backgroundThreadIds: new Set([threadId]),
+      backgroundThreadDiscoveryComplete: false,
+      backgroundTasksPublished: false,
+      backgroundRefreshGeneration: 0,
+      backgroundRefreshInFlight: null,
+      backgroundRefreshQueued: false,
+      stoppedBackgroundTaskIds: new Set(),
     };
     this.sessions.set(zerosSessionId, session);
 
     this.wireTurnTracking(session, runtime);
     this.wireFileChangeCapture(session, runtime);
     this.wireAccountListeners(session, runtime);
+    this.wireBackgroundTerminalListeners(session, runtime);
+    // Resume may inherit terminals that outlived the previous turn. Read the
+    // authoritative thread-scoped set immediately; never wait for a new turn
+    // notification to make already-running work visible.
+    void this.refreshBackgroundTasks(session);
 
     // Slash-command discovery. Codex is a bespoke (non-stream-json)
     // adapter, so it doesn't inherit the shared first-prompt discovery
@@ -1693,6 +1786,289 @@ export class CodexAppServerAdapter implements AgentAdapter {
     ];
     for (const m of methods) {
       runtime.onNotification(m, (params) => translator.handle(m, params));
+    }
+  }
+
+  /** Re-read after lifecycle beats that can create or settle a background
+   * terminal. The list endpoint is the source of truth; notifications are
+   * only invalidations and never mutated into guessed membership locally. */
+  private wireBackgroundTerminalListeners(
+    session: CodexSession,
+    runtime: CodexAppServerHandle,
+  ): void {
+    for (const method of [
+      "item/started",
+      "item/completed",
+      "turn/completed",
+      "thread/status/changed",
+      "thread/closed",
+    ]) {
+      runtime.onNotification(method, (params) => {
+        const notification = params as {
+          threadId?: unknown;
+          item?: { type?: unknown };
+          status?: { type?: unknown };
+        };
+        // One app-server child is dedicated to one Zeros session. Its
+        // non-parent notification threads are collaboration descendants, not
+        // unrelated chats; retain their exact key for list + terminate.
+        if (typeof notification?.threadId !== "string") return;
+        if (
+          (method === "item/started" || method === "item/completed") &&
+          notification.item?.type !== "commandExecution"
+        ) {
+          return;
+        }
+        const unloaded =
+          method === "thread/closed" ||
+          (method === "thread/status/changed" &&
+            notification.status?.type === "notLoaded");
+        if (unloaded) {
+          // Unload is stronger than a failed exact-key read: the endpoint is
+          // defined only for loaded threads, so there cannot be a queryable
+          // terminal left on this owner. Invalidate any in-flight tree read
+          // before publishing the authoritative empty subset.
+          void this.refreshBackgroundTasks(session);
+          session.activeTurns.delete(notification.threadId);
+          if (notification.threadId !== session.threadId) {
+            session.backgroundThreadIds.delete(notification.threadId);
+          }
+          this.publishBackgroundTaskReads(session, [
+            { threadId: notification.threadId, terminals: [] },
+          ]);
+          return;
+        }
+        this.rememberBackgroundThread(session, notification.threadId, true);
+        // refreshBackgroundTasks starts I/O in a promise job, but advances the
+        // invalidation generation synchronously. Calling it here closes the
+        // window where an already-settling read could publish after this edge.
+        void this.refreshBackgroundTasks(session);
+      });
+    }
+  }
+
+  private rememberBackgroundThread(
+    session: CodexSession,
+    threadId: string,
+    prioritizeObserved = false,
+  ): void {
+    if (session.backgroundThreadIds.has(threadId)) return;
+    if (session.backgroundThreadIds.size >= MAX_CODEX_BACKGROUND_THREADS) {
+      if (!prioritizeObserved) return;
+      // Discovery can fill the bound with old idle descendants just before a
+      // newly-active child announces a command. Prefer the live observation,
+      // evicting the oldest child without a visible task (idle first). Never
+      // evict the parent or a task owner, because that would make Stop lose
+      // its exact routing key.
+      let fallback: string | null = null;
+      let evictable: string | null = null;
+      const taskOwnerThreadIds = new Set(
+        [...session.backgroundTaskOwners.values()].map(
+          (owner) => owner.threadId,
+        ),
+      );
+      for (const candidate of session.backgroundThreadIds) {
+        if (candidate === session.threadId) continue;
+        if (taskOwnerThreadIds.has(candidate)) continue;
+        if (!session.activeTurns.has(candidate)) {
+          evictable = candidate;
+          break;
+        }
+        fallback ??= candidate;
+      }
+      evictable ??= fallback;
+      if (!evictable) return;
+      session.backgroundThreadIds.delete(evictable);
+    }
+    session.backgroundThreadIds.add(threadId);
+  }
+
+  /** Session-tree single-flight refresh. Each list call still has one exact
+   * thread key; the aggregate keeps per-thread confirmed data when one key
+   * fails, and a lifecycle beat during the fan-out schedules one trailing
+   * pass rather than overlapping another tree read. */
+  private refreshBackgroundTasks(session: CodexSession): Promise<void> {
+    session.backgroundRefreshGeneration += 1;
+    if (session.backgroundRefreshInFlight) {
+      session.backgroundRefreshQueued = true;
+      return session.backgroundRefreshInFlight;
+    }
+    const operation = Promise.resolve().then(async () => {
+      try {
+        do {
+          const generation = session.backgroundRefreshGeneration;
+          session.backgroundRefreshQueued = false;
+          const request = (
+            method: string,
+            params: unknown,
+            requestOpts?: { timeoutMs?: number },
+          ) => session.runtime.request(method, params, requestOpts);
+          if (!session.backgroundThreadDiscoveryComplete) {
+            try {
+              const descendants = await collectLoadedDescendantThreadIds(
+                request,
+                session.threadId,
+              );
+              for (const threadId of descendants) {
+                this.rememberBackgroundThread(session, threadId);
+              }
+              session.backgroundThreadDiscoveryComplete = true;
+            } catch {
+              // A pinned runtime supports descendant discovery, but a
+              // reconnect/older runtime must not block the parent exact-key
+              // inventory. Retry discovery on the next invalidation.
+            }
+          }
+          const threadIds = [...session.backgroundThreadIds].slice(
+            0,
+            MAX_CODEX_BACKGROUND_THREADS,
+          );
+          const reads = await Promise.all(
+            threadIds.map(async (threadId) => {
+              try {
+                return {
+                  threadId,
+                  terminals: await collectBackgroundTerminals(
+                    request,
+                    threadId,
+                  ),
+                };
+              } catch {
+                return { threadId, terminals: null };
+              }
+            }),
+          );
+          if (
+            generation !== session.backgroundRefreshGeneration ||
+            this.sessions.get(session.zerosSessionId) !== session ||
+            !session.runtimeAlive
+          ) {
+            continue;
+          }
+          this.publishBackgroundTaskReads(session, reads);
+        } while (
+          session.backgroundRefreshQueued &&
+          this.sessions.get(session.zerosSessionId) === session &&
+          session.runtimeAlive
+        );
+      } finally {
+        if (session.backgroundRefreshInFlight === operation) {
+          session.backgroundRefreshInFlight = null;
+        }
+      }
+    });
+    session.backgroundRefreshInFlight = operation;
+    return operation;
+  }
+
+  private publishBackgroundTaskReads(
+    session: CodexSession,
+    reads: Array<{
+      threadId: string;
+      terminals: Awaited<ReturnType<typeof collectBackgroundTerminals>> | null;
+    }>,
+  ): void {
+    const now = Date.now();
+    const nextTasks = new Map(session.backgroundTasks);
+    const nextOwners = new Map(session.backgroundTaskOwners);
+    const removed: BackgroundTask[] = [];
+    for (const read of reads) {
+      // A failed exact-key read retains that thread's last confirmed subset.
+      if (!read.terminals) continue;
+      const previousForThread = new Map<string, BackgroundTask>();
+      for (const [taskId, task] of session.backgroundTasks) {
+        if (
+          session.backgroundTaskOwners.get(taskId)?.threadId === read.threadId
+        ) {
+          previousForThread.set(taskId, task);
+        }
+      }
+      const taskIdForTerminal = (terminal: { processId: string }) =>
+        codexBackgroundTaskId(
+          session.threadId,
+          read.threadId,
+          terminal.processId,
+        );
+      const reconciled = reconcileBackgroundTerminals(
+        previousForThread,
+        read.terminals,
+        now,
+        taskIdForTerminal,
+      );
+      for (const taskId of previousForThread.keys()) {
+        nextTasks.delete(taskId);
+        nextOwners.delete(taskId);
+      }
+      for (const [taskId, task] of reconciled.active) {
+        nextTasks.set(taskId, task);
+      }
+      for (const terminal of read.terminals) {
+        const taskId = taskIdForTerminal(terminal);
+        if (!reconciled.active.has(taskId)) continue;
+        nextOwners.set(taskId, {
+          threadId: read.threadId,
+          processId: terminal.processId,
+        });
+      }
+      removed.push(...reconciled.removed);
+      if (
+        read.threadId !== session.threadId &&
+        reconciled.active.size === 0 &&
+        !session.activeTurns.has(read.threadId)
+      ) {
+        session.backgroundThreadIds.delete(read.threadId);
+      }
+    }
+    this.publishBackgroundTasks(session, nextTasks, nextOwners, removed);
+  }
+
+  private publishBackgroundTasks(
+    session: CodexSession,
+    active: Map<string, BackgroundTask>,
+    owners: Map<string, { threadId: string; processId: string }>,
+    removed: BackgroundTask[],
+  ): void {
+    const published = boundCodexBackgroundTasks(active, owners);
+    const changed = !sameBackgroundTaskMaps(
+      session.publishedBackgroundTasks,
+      published,
+    );
+    session.backgroundTasks = active;
+    session.backgroundTaskOwners = owners;
+    session.publishedBackgroundTasks = published;
+    if (!session.backgroundTasksPublished || changed) {
+      session.backgroundTasksPublished = true;
+      this.ctx.emit.onSessionUpdate(this.agentId, {
+        sessionId: session.zerosSessionId,
+        update: {
+          sessionUpdate: "background_tasks_update",
+          tasks: [...published.values()],
+          waiting: false,
+        },
+      });
+    }
+    for (const task of removed) {
+      const stopped = session.stoppedBackgroundTaskIds.delete(task.taskId);
+      this.ctx.emit.onSessionUpdate(this.agentId, {
+        sessionId: session.zerosSessionId,
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: `background-task-${randomUUID()}`,
+          title: "Background Task",
+          kind: "background_task",
+          status: "completed",
+          rawInput: {
+            taskId: task.taskId,
+            name: task.name,
+            taskType: task.taskType,
+            ...(task.command ? { command: task.command } : {}),
+          },
+          rawOutput: {
+            status: stopped ? "stopped" : "finished",
+            durationMs: Math.max(0, Date.now() - task.startedAt),
+          },
+        },
+      });
     }
   }
 
@@ -2232,6 +2608,72 @@ export function fileChangePaths(item: unknown): string[] {
     if (typeof p === "string" && p.trim().length > 0) paths.push(p);
   }
   return paths;
+}
+
+function codexBackgroundTaskId(
+  parentThreadId: string,
+  ownerThreadId: string,
+  processId: string,
+): string {
+  if (ownerThreadId === parentThreadId) return processId;
+  return `codex-terminal:${encodeURIComponent(ownerThreadId)}:${encodeURIComponent(processId)}`;
+}
+
+function sameBackgroundTaskMaps(
+  a: ReadonlyMap<string, BackgroundTask>,
+  b: ReadonlyMap<string, BackgroundTask>,
+): boolean {
+  if (a.size !== b.size) return false;
+  const aEntries = [...a];
+  const bEntries = [...b];
+  return aEntries.every(([taskId, task], index) => {
+    const [otherId, other] = bEntries[index] ?? [];
+    if (taskId !== otherId || !other) return false;
+    return (
+      task.taskId === other.taskId &&
+      task.name === other.name &&
+      task.taskType === other.taskType &&
+      task.startedAt === other.startedAt &&
+      task.updatedAt === other.updatedAt &&
+      task.command === other.command &&
+      task.summary === other.summary &&
+      task.lastToolName === other.lastToolName
+    );
+  });
+}
+
+/** Round-robin the explicit aggregate bound so a saturated parent cannot hide
+ * every child thread. The common one-thread path returns the existing maps. */
+function boundCodexBackgroundTasks(
+  tasks: Map<string, BackgroundTask>,
+  owners: Map<string, { threadId: string; processId: string }>,
+): Map<string, BackgroundTask> {
+  if (tasks.size <= MAX_CODEX_BACKGROUND_TERMINALS) {
+    return tasks;
+  }
+  const byThread = new Map<string, Array<[string, BackgroundTask]>>();
+  for (const entry of tasks) {
+    const threadId = owners.get(entry[0])?.threadId ?? "";
+    const bucket = byThread.get(threadId) ?? [];
+    bucket.push(entry);
+    byThread.set(threadId, bucket);
+  }
+  const boundedTasks = new Map<string, BackgroundTask>();
+  let offset = 0;
+  while (boundedTasks.size < MAX_CODEX_BACKGROUND_TERMINALS) {
+    let added = false;
+    for (const bucket of byThread.values()) {
+      const entry = bucket[offset];
+      if (!entry) continue;
+      const [taskId, task] = entry;
+      boundedTasks.set(taskId, task);
+      added = true;
+      if (boundedTasks.size >= MAX_CODEX_BACKGROUND_TERMINALS) break;
+    }
+    if (!added) break;
+    offset += 1;
+  }
+  return boundedTasks;
 }
 
 function truncate(s: string, n: number): string {

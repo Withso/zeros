@@ -29,8 +29,9 @@
 //
 // ──────────────────────────────────────────────────────────
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
+import type { BackgroundTask } from "@zeros/core/agent-events";
 import { claudeContextWindow } from "@zeros/core/model-context";
 
 import { isDevRuntime } from "../../../runtime";
@@ -56,9 +57,55 @@ type ToolKind =
   | "question"
   | "skill"
   | "tool_search"
+  | "background_task"
   | "other";
 
 type Emit = (notification: SessionNotification) => void;
+
+export const SCHEDULED_WAKEUP_TASK_PREFIX = "scheduled-wakeup:";
+
+export function isScheduledWakeupTaskId(taskId: string): boolean {
+  return taskId.startsWith(SCHEDULED_WAKEUP_TASK_PREFIX);
+}
+
+export interface ClaudeScheduledWakeup {
+  id: string;
+  schedule: string;
+  recurring: boolean;
+  prompt: string;
+}
+
+const MAX_ACTIVE_BACKGROUND_TASKS = 100;
+const MAX_BACKGROUND_TASK_LIFECYCLE = 500;
+const MAX_RETAINED_TOOL_TEXT = 2_000;
+
+interface RetainedToolInput {
+  name: string;
+  command?: string;
+  description?: string;
+  scheduledWakeup?: {
+    stop: boolean;
+    reason: string | null;
+    promptFingerprint: string | null;
+  };
+}
+
+interface PendingScheduledWakeupReason {
+  reason: string;
+  promptFingerprint: string | null;
+  knownTaskIds: Set<string>;
+}
+
+interface SettledTaskRecord {
+  status: "completed" | "failed";
+  rawOutput: {
+    status: string;
+    summary?: string;
+    error?: string;
+    outputFile?: string;
+    durationMs?: number;
+  };
+}
 
 interface ClaudeAssistantContentBlock {
   type: string;
@@ -92,13 +139,40 @@ interface ClaudeMessageEvent {
   };
 }
 
-interface ClaudeSystemInitEvent {
+interface ClaudeSystemEvent {
   type: "system";
-  subtype: "init";
+  subtype: string;
   session_id?: string;
   model?: string;
   tools?: string[];
   mcp_servers?: Array<{ name: string; status?: string }>;
+  task_id?: string;
+  tool_use_id?: string;
+  description?: string;
+  subagent_type?: string;
+  task_type?: string;
+  workflow_name?: string;
+  prompt?: string;
+  skip_transcript?: boolean;
+  tasks?: Array<{
+    task_id?: string;
+    task_type?: string;
+    description?: string;
+  }>;
+  usage?: { duration_ms?: number };
+  last_tool_name?: string;
+  summary?: string;
+  patch?: {
+    status?: string;
+    description?: string;
+    end_time?: number;
+    total_paused_ms?: number;
+    error?: string;
+    is_backgrounded?: boolean;
+  };
+  status?: string;
+  state?: "idle" | "running" | "requires_action";
+  output_file?: string;
 }
 
 interface ClaudeResultEvent {
@@ -181,6 +255,45 @@ export class ClaudeStreamTranslator {
   /** Zeros-side tool call ids keyed by Claude's tool_use_id so
    *  tool_call_update can cross-reference a prior tool_call. */
   private readonly toolCallIds = new Map<string, string>();
+
+  /** Small, bounded metadata for the two lifecycle joins that reference a
+   * native tool_use_id later. Never retain raw Write/Edit payloads here. */
+  private readonly toolInputs = new Map<string, RetainedToolInput>();
+
+  /** Active background work is level-triggered by
+   * background_tasks_changed and enriched by the task edge stream. */
+  private readonly backgroundTasks = new Map<string, BackgroundTask>();
+  /** Edge metadata can arrive before membership (ordering is explicitly
+   * unspecified by the SDK). Cache it separately until the level signal says
+   * whether that task is actually background work. */
+  private readonly backgroundTaskMetadata = new Map<string, BackgroundTask>();
+  /** One-shot self-wakeups are reported by the SDK's Stop hook rather than
+   * `background_tasks_changed`. Keep their authoritative level separate so a
+   * native task membership frame cannot accidentally clear them. Recurring
+   * cron jobs are deliberately excluded (open task 008). */
+  private readonly scheduledWakeups = new Map<string, BackgroundTask>();
+  private pendingScheduledWakeupReason: PendingScheduledWakeupReason | null =
+    null;
+  /** Separate edge/level evidence lets a missed task_started still settle
+   * after the authoritative level has already removed the task, without
+   * misclassifying ordinary foreground Task subagents. */
+  private readonly taskStartedIds = new Set<string>();
+  private readonly observedBackgroundTaskIds = new Set<string>();
+  private readonly taskRecordIds = new Map<string, string>();
+  private readonly settledTaskRecords = new Map<string, SettledTaskRecord>();
+  private readonly skippedTaskRecords = new Set<string>();
+  private readonly notifiedTaskIds = new Set<string>();
+  /** Edge/level ordering is unspecified. Once an edge settles an id, ignore a
+   * late membership frame for it until the SDK process restarts. */
+  private readonly terminalTaskIds = new Set<string>();
+  private sessionActivityState: "idle" | "running" | "requires_action" | null =
+    null;
+  /** Last wire snapshot, retained only to suppress semantically identical
+   * provider observations before they cross the engine/renderer bridge. */
+  private lastEmittedBackgroundTasks: {
+    tasks: BackgroundTask[];
+    waiting: boolean;
+  } | null = null;
 
   /** Zeros-side (minted) tool call id for a native tool_use id — lets the
    *  adapter address a timeline row it only knows by vendor id (the
@@ -310,6 +423,98 @@ export class ClaudeStreamTranslator {
     this.streamPartials = opts.streamPartials ?? false;
   }
 
+  /** Replace the session's one-shot wakeups from StopHookInput.session_crons.
+   * Recurring jobs belong to the deliberately skipped scheduling feature and
+   * must never leak into the background-task card. */
+  setScheduledWakeups(crons: readonly ClaudeScheduledWakeup[]): void {
+    const now = Date.now();
+    const next = new Map<string, BackgroundTask>();
+    const eligible = crons
+      .filter((cron) => !cron.recurring && !!cron.id)
+      .slice(0, MAX_ACTIVE_BACKGROUND_TASKS);
+    const pending = this.pendingScheduledWakeupReason;
+    let pendingTargetId: string | null = null;
+    let pendingApplied = false;
+    if (pending) {
+      const newlyObserved = eligible.filter(
+        (cron) =>
+          !pending.knownTaskIds.has(
+            `${SCHEDULED_WAKEUP_TASK_PREFIX}${cron.id}`,
+          ),
+      );
+      const promptMatches = pending.promptFingerprint
+        ? newlyObserved.filter(
+            (cron) =>
+              fingerprintText(cron.prompt) === pending.promptFingerprint,
+          )
+        : [];
+      const target =
+        promptMatches.length === 1
+          ? promptMatches[0]
+          : newlyObserved.length === 1
+            ? newlyObserved[0]
+            : null;
+      pendingTargetId = target
+        ? `${SCHEDULED_WAKEUP_TASK_PREFIX}${target.id}`
+        : null;
+    }
+    for (const cron of eligible) {
+      const taskId = `${SCHEDULED_WAKEUP_TASK_PREFIX}${cron.id}`;
+      const previous = this.scheduledWakeups.get(taskId);
+      // A successful ScheduleWakeup tool result describes the newly-created
+      // entry only. Do not repaint every older cron in the next Stop snapshot
+      // with that latest reason. An unchanged entry can be reused verbatim,
+      // which also keeps hot renderer selectors stable.
+      if (
+        previous &&
+        previous.summary === cron.schedule &&
+        taskId !== pendingTargetId
+      ) {
+        next.set(taskId, previous);
+        continue;
+      }
+      const reason =
+        taskId === pendingTargetId && pending
+          ? pending.reason
+          : scheduledWakeupReason(cron.prompt);
+      if (taskId === pendingTargetId) pendingApplied = true;
+      const name = scheduledWakeupName(cron.schedule, reason);
+      next.set(taskId, {
+        taskId,
+        name,
+        taskType: "scheduled_wakeup",
+        startedAt:
+          taskId === pendingTargetId ? now : (previous?.startedAt ?? now),
+        updatedAt: now,
+        summary: cron.schedule,
+      });
+    }
+    this.scheduledWakeups.clear();
+    for (const [taskId, task] of next) this.scheduledWakeups.set(taskId, task);
+    // An empty Stop-hook snapshot can race the runtime registering the cron.
+    // Consume the reason only after the newly-created id is actually present.
+    if (pendingApplied) this.pendingScheduledWakeupReason = null;
+    this.emitBackgroundTasks();
+  }
+
+  /** A fired or explicitly-stopped one-shot is authoritative cleanup, unlike
+   * a possibly-transient empty Stop-hook snapshot. */
+  clearScheduledWakeups(): void {
+    this.pendingScheduledWakeupReason = null;
+    this.scheduledWakeups.clear();
+    this.emitBackgroundTasks();
+  }
+
+  /** The local prompt boundary is authoritative evidence that the parent is
+   * running even if this CLI build omits a matching session-state edge. */
+  beginTurn(): void {
+    const wasWaiting =
+      this.sessionActivityState === "idle" &&
+      (this.backgroundTasks.size > 0 || this.scheduledWakeups.size > 0);
+    this.sessionActivityState = "running";
+    if (wasWaiting) this.emitBackgroundTasks();
+  }
+
   /** Feed a parsed JSON event from Claude's stdout. */
   feed(event: unknown): void {
     if (!isObj(event) || typeof event.type !== "string") {
@@ -320,9 +525,19 @@ export class ClaudeStreamTranslator {
     // settled) — the current retry burst, if any, is over. The next
     // api_retry starts a NEW burst and gets its own notice row.
     if (event.type !== "system") this.retryBurstNoticed = false;
+    // Internal loop wake-ups can begin without passing through adapter.prompt.
+    // Any model/user stream beat proves the parent is active and clears a
+    // stale idle+background waiting presentation defensively.
+    if (
+      event.type === "assistant" ||
+      event.type === "user" ||
+      event.type === "stream_event"
+    ) {
+      this.beginTurn();
+    }
     switch (event.type) {
       case "system":
-        this.onSystem(event as unknown as ClaudeSystemInitEvent);
+        this.onSystem(event as unknown as ClaudeSystemEvent);
         break;
       case "user":
         this.onUser(event as unknown as ClaudeMessageEvent);
@@ -449,12 +664,44 @@ export class ClaudeStreamTranslator {
   }
 
   // ── System init ─────────────────────────────────────────
-  private onSystem(event: ClaudeSystemInitEvent): void {
+  private onSystem(event: ClaudeSystemEvent): void {
     if (event.subtype === "init" && typeof event.session_id === "string") {
       this.claudeSessionId = event.session_id;
     }
     if (event.subtype === "init" && typeof event.model === "string") {
       this.currentModel = event.model;
+    }
+    if (event.subtype === "init") {
+      // Agent SDK background membership is process-local. A query restart has
+      // no startup snapshot, so an explicit empty replace prevents stale tasks
+      // from surviving a reconnect in the renderer.
+      this.backgroundTasks.clear();
+      this.backgroundTaskMetadata.clear();
+      this.toolInputs.clear();
+      this.scheduledWakeups.clear();
+      this.pendingScheduledWakeupReason = null;
+      this.taskStartedIds.clear();
+      this.observedBackgroundTaskIds.clear();
+      this.taskRecordIds.clear();
+      this.settledTaskRecords.clear();
+      this.skippedTaskRecords.clear();
+      this.notifiedTaskIds.clear();
+      this.terminalTaskIds.clear();
+      this.sessionActivityState = null;
+      this.emitBackgroundTasks();
+    }
+    if (event.subtype === "task_started") this.onTaskStarted(event);
+    if (event.subtype === "background_tasks_changed") {
+      this.onBackgroundTasksChanged(event);
+    }
+    if (event.subtype === "task_progress") this.onTaskProgress(event);
+    if (event.subtype === "task_updated") this.onTaskUpdated(event);
+    if (event.subtype === "task_notification") {
+      this.onTaskNotification(event);
+    }
+    if (event.subtype === "session_state_changed" && event.state) {
+      this.sessionActivityState = event.state;
+      this.emitBackgroundTasks();
     }
     // `api_retry` — the CLI hit a retryable API error (network blip, 5xx,
     // overload) and is retrying the SAME call itself after a backoff delay.
@@ -570,6 +817,490 @@ export class ClaudeStreamTranslator {
       }
     }
     // Nothing else to emit to the UI — the init event is just bookkeeping.
+  }
+
+  /** Emit the current active set as one bounded, authoritative replacement. */
+  private emitBackgroundTasks(): void {
+    const scheduled = [...this.scheduledWakeups.values()].slice(
+      0,
+      MAX_ACTIVE_BACKGROUND_TASKS,
+    );
+    // Keep native ordering while reserving capacity for every visible
+    // one-shot wake-up. Native membership may itself fill the provider cap;
+    // appending then slicing would make the only specially-stoppable row
+    // disappear exactly in that saturated case.
+    const tasks = [
+      ...[...this.backgroundTasks.values()].slice(
+        0,
+        MAX_ACTIVE_BACKGROUND_TASKS - scheduled.length,
+      ),
+      ...scheduled,
+    ];
+    const waiting = this.sessionActivityState === "idle" && tasks.length > 0;
+    if (
+      this.lastEmittedBackgroundTasks &&
+      this.lastEmittedBackgroundTasks.waiting === waiting &&
+      sameBackgroundTaskList(this.lastEmittedBackgroundTasks.tasks, tasks)
+    ) {
+      return;
+    }
+    this.lastEmittedBackgroundTasks = { tasks, waiting };
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "background_tasks_update",
+        tasks,
+        waiting,
+      },
+    });
+  }
+
+  private onTaskStarted(event: ClaudeSystemEvent): void {
+    if (!event.task_id) return;
+    const now = Date.now();
+    const tool = event.tool_use_id
+      ? this.toolInputs.get(event.tool_use_id)
+      : undefined;
+    const command = tool?.command;
+    const previous = this.backgroundTasks.get(event.task_id);
+    const previousMetadata = this.backgroundTaskMetadata.get(event.task_id);
+    const name =
+      pickFirstString(
+        event.description,
+        tool?.description,
+        previous?.name,
+        previousMetadata?.name,
+        command,
+        event.prompt,
+      ) ?? `Task ${event.task_id}`;
+    const metadata: BackgroundTask = {
+      taskId: event.task_id,
+      name,
+      taskType:
+        event.task_type ?? previous?.taskType ?? previousMetadata?.taskType,
+      startedAt: previousMetadata?.startedAt ?? previous?.startedAt ?? now,
+      updatedAt: now,
+      ...(command
+        ? { command }
+        : previousMetadata?.command
+          ? { command: previousMetadata.command }
+          : {}),
+      ...(previousMetadata?.summary
+        ? { summary: previousMetadata.summary }
+        : {}),
+      ...(previousMetadata?.lastToolName
+        ? { lastToolName: previousMetadata.lastToolName }
+        : {}),
+    };
+    setBoundedMap(
+      this.backgroundTaskMetadata,
+      event.task_id,
+      metadata,
+      MAX_BACKGROUND_TASK_LIFECYCLE,
+    );
+    addBoundedSet(
+      this.taskStartedIds,
+      event.task_id,
+      MAX_BACKGROUND_TASK_LIFECYCLE,
+    );
+    if (event.skip_transcript) {
+      addBoundedSet(
+        this.skippedTaskRecords,
+        event.task_id,
+        MAX_BACKGROUND_TASK_LIFECYCLE,
+      );
+    }
+    if (previous) {
+      const candidate = {
+        ...previous,
+        ...metadata,
+        startedAt: previous.startedAt,
+        updatedAt: now,
+      };
+      const activeTask = sameBackgroundTaskContents(previous, candidate)
+        ? previous
+        : candidate;
+      this.backgroundTasks.set(event.task_id, activeTask);
+      this.emitBackgroundTasks();
+      if (!event.skip_transcript) {
+        this.ensureBackgroundTaskRecord(event.task_id, activeTask);
+      }
+    }
+  }
+
+  /** Open the durable lifecycle row only after an authoritative background
+   * membership/transition proves this is background work. `task_started`
+   * also covers foreground subagents and workflows. */
+  private ensureBackgroundTaskRecord(
+    taskId: string,
+    task: BackgroundTask,
+  ): void {
+    if (this.skippedTaskRecords.has(taskId) || this.taskRecordIds.has(taskId)) {
+      return;
+    }
+    const toolCallId = `background-task-${randomUUID()}`;
+    setBoundedMap(
+      this.taskRecordIds,
+      taskId,
+      toolCallId,
+      MAX_BACKGROUND_TASK_LIFECYCLE,
+    );
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId,
+        title: "Task Started",
+        kind: "background_task",
+        status: "in_progress",
+        rawInput: {
+          taskId,
+          name: task.name,
+          ...(task.taskType ? { taskType: task.taskType } : {}),
+          ...(task.command ? { command: task.command } : {}),
+        },
+      },
+    });
+  }
+
+  private onBackgroundTasksChanged(event: ClaudeSystemEvent): void {
+    const now = Date.now();
+    const next = new Map<string, BackgroundTask>();
+    for (const incoming of (event.tasks ?? []).slice(
+      0,
+      MAX_ACTIVE_BACKGROUND_TASKS,
+    )) {
+      if (!incoming.task_id || this.terminalTaskIds.has(incoming.task_id)) {
+        continue;
+      }
+      const previous = this.backgroundTasks.get(incoming.task_id);
+      const metadata = this.backgroundTaskMetadata.get(incoming.task_id);
+      const candidate: BackgroundTask = {
+        taskId: incoming.task_id,
+        name:
+          pickFirstString(
+            incoming.description,
+            previous?.name,
+            metadata?.name,
+          ) ?? `Task ${incoming.task_id}`,
+        taskType:
+          incoming.task_type ?? previous?.taskType ?? metadata?.taskType,
+        startedAt: previous?.startedAt ?? metadata?.startedAt ?? now,
+        updatedAt: now,
+        ...((previous?.command ?? metadata?.command)
+          ? { command: previous?.command ?? metadata?.command }
+          : {}),
+        ...((previous?.summary ?? metadata?.summary)
+          ? { summary: previous?.summary ?? metadata?.summary }
+          : {}),
+        ...((previous?.lastToolName ?? metadata?.lastToolName)
+          ? { lastToolName: previous?.lastToolName ?? metadata?.lastToolName }
+          : {}),
+      };
+      const task =
+        previous && sameBackgroundTaskContents(previous, candidate)
+          ? previous
+          : candidate;
+      next.set(incoming.task_id, task);
+      addBoundedSet(
+        this.observedBackgroundTaskIds,
+        incoming.task_id,
+        MAX_BACKGROUND_TASK_LIFECYCLE,
+      );
+      setBoundedMap(
+        this.backgroundTaskMetadata,
+        incoming.task_id,
+        task,
+        MAX_BACKGROUND_TASK_LIFECYCLE,
+      );
+      // If the start edge arrived first, it already told us whether this row
+      // should be skipped. If the level arrived first, wait for that edge so
+      // an ambient skip_transcript task cannot flash into history.
+      if (this.taskStartedIds.has(incoming.task_id)) {
+        this.ensureBackgroundTaskRecord(incoming.task_id, task);
+      }
+    }
+    this.backgroundTasks.clear();
+    for (const [taskId, task] of next) this.backgroundTasks.set(taskId, task);
+    this.emitBackgroundTasks();
+  }
+
+  private onTaskProgress(event: ClaudeSystemEvent): void {
+    if (!event.task_id) return;
+    const previous = this.backgroundTasks.get(event.task_id);
+    const previousMetadata = this.backgroundTaskMetadata.get(event.task_id);
+    if (!previous && !previousMetadata) return;
+    const now = Date.now();
+    const durationMs = event.usage?.duration_ms;
+    const base = previous ?? previousMetadata!;
+    const candidate: BackgroundTask = {
+      ...base,
+      // A duration lets an out-of-order progress edge recover a more accurate
+      // start time than receipt time without ever moving it forwards.
+      startedAt:
+        typeof durationMs === "number"
+          ? Math.min(base.startedAt, now - Math.max(0, durationMs))
+          : base.startedAt,
+      updatedAt: now,
+      ...(event.description ? { summary: event.description } : {}),
+      ...(event.summary ? { summary: event.summary } : {}),
+      ...(event.last_tool_name ? { lastToolName: event.last_tool_name } : {}),
+    };
+    const updated = sameBackgroundTaskContents(base, candidate)
+      ? base
+      : candidate;
+    setBoundedMap(
+      this.backgroundTaskMetadata,
+      event.task_id,
+      updated,
+      MAX_BACKGROUND_TASK_LIFECYCLE,
+    );
+    if (previous) {
+      this.backgroundTasks.set(event.task_id, updated);
+      this.emitBackgroundTasks();
+    }
+  }
+
+  private onTaskUpdated(event: ClaudeSystemEvent): void {
+    if (!event.task_id) return;
+    // Level and edge ordering is unspecified. Once either terminal bookend has
+    // won, no later task_updated edge may mutate or reopen that lifecycle.
+    if (this.terminalTaskIds.has(event.task_id)) return;
+    const status = event.patch?.status;
+    const terminal =
+      status === "completed" || status === "failed" || status === "killed";
+    const previous = this.backgroundTasks.get(event.task_id);
+    const previousMetadata = this.backgroundTaskMetadata.get(event.task_id);
+    const explicitlyBackgrounded = event.patch?.is_backgrounded === true;
+    if (explicitlyBackgrounded) {
+      addBoundedSet(
+        this.observedBackgroundTaskIds,
+        event.task_id,
+        MAX_BACKGROUND_TASK_LIFECYCLE,
+      );
+    }
+    const transitionTask: BackgroundTask | undefined = explicitlyBackgrounded
+      ? {
+          taskId: event.task_id,
+          name:
+            event.patch?.description ||
+            event.description ||
+            previousMetadata?.name ||
+            `Task ${event.task_id}`,
+          taskType: event.task_type ?? previousMetadata?.taskType,
+          startedAt: previousMetadata?.startedAt ?? Date.now(),
+          updatedAt: Date.now(),
+          ...(previousMetadata?.command
+            ? { command: previousMetadata.command }
+            : {}),
+        }
+      : undefined;
+    const wasBackground =
+      !!previous ||
+      this.taskRecordIds.has(event.task_id) ||
+      this.observedBackgroundTaskIds.has(event.task_id) ||
+      explicitlyBackgrounded;
+    if (explicitlyBackgrounded && !terminal && !previous && transitionTask) {
+      this.backgroundTasks.set(event.task_id, transitionTask);
+      setBoundedMap(
+        this.backgroundTaskMetadata,
+        event.task_id,
+        transitionTask,
+        MAX_BACKGROUND_TASK_LIFECYCLE,
+      );
+      if (this.taskStartedIds.has(event.task_id)) {
+        this.ensureBackgroundTaskRecord(event.task_id, transitionTask);
+      }
+      this.emitBackgroundTasks();
+    } else if (
+      previous &&
+      event.patch?.description &&
+      previous.name !== event.patch.description
+    ) {
+      this.backgroundTasks.set(event.task_id, {
+        ...previous,
+        name: event.patch.description,
+        updatedAt: Date.now(),
+      });
+      this.emitBackgroundTasks();
+    }
+    if (event.patch?.description && previousMetadata) {
+      setBoundedMap(
+        this.backgroundTaskMetadata,
+        event.task_id,
+        {
+          ...previousMetadata,
+          name: event.patch.description,
+          updatedAt: Date.now(),
+        },
+        MAX_BACKGROUND_TASK_LIFECYCLE,
+      );
+    }
+    if (terminal || event.patch?.is_backgrounded === false) {
+      if (this.backgroundTasks.delete(event.task_id))
+        this.emitBackgroundTasks();
+    }
+    if (terminal) {
+      addBoundedSet(
+        this.terminalTaskIds,
+        event.task_id,
+        MAX_BACKGROUND_TASK_LIFECYCLE,
+      );
+      this.backgroundTaskMetadata.delete(event.task_id);
+    }
+    if (terminal && !this.skippedTaskRecords.has(event.task_id)) {
+      const task = previous ?? previousMetadata ?? transitionTask;
+      if (wasBackground && task) {
+        this.ensureBackgroundTaskRecord(event.task_id, task);
+        // Do not suppress a later task_notification: it owns output_file and
+        // duration. settleTaskRecord merges that enrichment into this same
+        // toolCallId and drops a semantically identical second bookend.
+        this.settleTaskRecord(
+          event.task_id,
+          {
+            status: status === "failed" ? "failed" : "completed",
+            providerStatus: status === "killed" ? "stopped" : status,
+            summary: event.patch?.description,
+            error: event.patch?.error,
+          },
+          task,
+        );
+      }
+    }
+  }
+
+  private onTaskNotification(event: ClaudeSystemEvent): void {
+    if (!event.task_id) return;
+    // Keep the last level/edge metadata long enough to build a useful durable
+    // row even if this completion bookend arrives without task_started (for
+    // example after a transiently missed edge).
+    const activeTask = this.backgroundTasks.get(event.task_id);
+    const task = activeTask ?? this.backgroundTaskMetadata.get(event.task_id);
+    const wasBackground =
+      !!activeTask ||
+      this.taskRecordIds.has(event.task_id) ||
+      this.observedBackgroundTaskIds.has(event.task_id);
+    addBoundedSet(
+      this.terminalTaskIds,
+      event.task_id,
+      MAX_BACKGROUND_TASK_LIFECYCLE,
+    );
+    this.backgroundTaskMetadata.delete(event.task_id);
+    if (this.backgroundTasks.delete(event.task_id)) this.emitBackgroundTasks();
+    if (event.skip_transcript || this.skippedTaskRecords.has(event.task_id)) {
+      return;
+    }
+    // task_started/task_notification also bookend foreground Task subagents.
+    // Only the level signal or an explicit backgrounding edge opts a task into
+    // this provider-neutral Background Task transcript.
+    if (!wasBackground) return;
+    if (this.notifiedTaskIds.has(event.task_id)) return;
+    addBoundedSet(
+      this.notifiedTaskIds,
+      event.task_id,
+      MAX_BACKGROUND_TASK_LIFECYCLE,
+    );
+    this.ensureBackgroundTaskRecord(
+      event.task_id,
+      task ?? {
+        taskId: event.task_id,
+        name: `Task ${event.task_id}`,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+      },
+    );
+    this.settleTaskRecord(
+      event.task_id,
+      {
+        status: event.status === "failed" ? "failed" : "completed",
+        providerStatus: event.status,
+        summary: event.summary,
+        outputFile: event.output_file,
+        durationMs: event.usage?.duration_ms,
+      },
+      task,
+    );
+  }
+
+  private settleTaskRecord(
+    taskId: string,
+    result: {
+      status: "completed" | "failed";
+      providerStatus?: string;
+      summary?: string;
+      error?: string;
+      outputFile?: string;
+      durationMs?: number;
+    },
+    task?: BackgroundTask,
+  ): void {
+    const previousSettlement = this.settledTaskRecords.get(taskId);
+    const rawOutput = {
+      ...previousSettlement?.rawOutput,
+      status: result.providerStatus ?? result.status,
+      ...(result.summary ? { summary: result.summary } : {}),
+      ...(result.error ? { error: result.error } : {}),
+      ...(result.outputFile ? { outputFile: result.outputFile } : {}),
+      ...(typeof result.durationMs === "number"
+        ? { durationMs: result.durationMs }
+        : {}),
+    };
+    const settlement: SettledTaskRecord = {
+      status: result.status,
+      rawOutput,
+    };
+    const existing = this.taskRecordIds.get(taskId);
+    if (
+      existing &&
+      previousSettlement &&
+      sameSettledTaskRecord(previousSettlement, settlement)
+    ) {
+      return;
+    }
+    setBoundedMap(
+      this.settledTaskRecords,
+      taskId,
+      settlement,
+      MAX_BACKGROUND_TASK_LIFECYCLE,
+    );
+    if (existing) {
+      this.emit({
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: existing,
+          title: "Background Task",
+          kind: "background_task",
+          status: result.status,
+          rawOutput,
+        },
+      });
+      return;
+    }
+    const toolCallId = `background-task-${randomUUID()}`;
+    setBoundedMap(
+      this.taskRecordIds,
+      taskId,
+      toolCallId,
+      MAX_BACKGROUND_TASK_LIFECYCLE,
+    );
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId,
+        title: "Background Task",
+        kind: "background_task",
+        status: result.status,
+        rawInput: {
+          taskId,
+          name: task?.name ?? `Task ${taskId}`,
+          ...(task?.taskType ? { taskType: task.taskType } : {}),
+          ...(task?.command ? { command: task.command } : {}),
+        },
+        rawOutput,
+      },
+    });
   }
 
   /** `system/status` — open/settle the compaction row (see onSystem). */
@@ -770,6 +1501,21 @@ export class ClaudeStreamTranslator {
     for (const b of blocks) {
       if (b.type !== "tool_result") continue;
       const tool = b as unknown as ClaudeToolResultBlock;
+      const nativeTool = this.toolInputs.get(tool.tool_use_id);
+      if (nativeTool?.name === "ScheduleWakeup") {
+        if (!tool.is_error && nativeTool.scheduledWakeup) {
+          if (nativeTool.scheduledWakeup.stop) {
+            this.clearScheduledWakeups();
+          } else if (nativeTool.scheduledWakeup.reason) {
+            this.pendingScheduledWakeupReason = {
+              reason: nativeTool.scheduledWakeup.reason,
+              promptFingerprint: nativeTool.scheduledWakeup.promptFingerprint,
+              knownTaskIds: new Set(this.scheduledWakeups.keys()),
+            };
+          }
+        }
+        this.toolInputs.delete(tool.tool_use_id);
+      }
       if (this.suppressedToolUseIds.has(tool.tool_use_id)) {
         this.suppressedToolUseIds.delete(tool.tool_use_id);
         continue;
@@ -946,6 +1692,15 @@ export class ClaudeStreamTranslator {
 
         const toolCallId = randomUUID();
         this.toolCallIds.set(block.id, toolCallId);
+        const retainedInput = retainToolInput(block.name, block.input);
+        if (retainedInput) {
+          setBoundedMap(
+            this.toolInputs,
+            block.id,
+            retainedInput,
+            MAX_BACKGROUND_TASK_LIFECYCLE,
+          );
+        }
         // Stage 4.2: mergeKey collapses consecutive Edit/Write calls
         // against the same file into one card with "+N more changes"
         // history. Path is the only stable group key the renderer needs.
@@ -1166,8 +1921,122 @@ function contextWindowForClaudeModel(model: string | null): number {
 
 // ── helpers ──────────────────────────────────────────────
 
+function retainToolInput(
+  name: string,
+  input: unknown,
+): RetainedToolInput | null {
+  const record = isObj(input) ? input : {};
+  if (name === "ScheduleWakeup") {
+    return {
+      name,
+      scheduledWakeup: {
+        stop: record.stop === true,
+        reason:
+          typeof record.reason === "string"
+            ? scheduledWakeupReason(record.reason)
+            : null,
+        promptFingerprint:
+          typeof record.prompt === "string"
+            ? fingerprintText(record.prompt)
+            : null,
+      },
+    };
+  }
+  const command = pickFirstString(record.command, record.cmd, record.script);
+  const description = pickFirstString(record.description);
+  if (!command && !description) return null;
+  return {
+    name,
+    ...(command ? { command: command.slice(0, MAX_RETAINED_TOOL_TEXT) } : {}),
+    ...(description
+      ? { description: description.slice(0, MAX_RETAINED_TOOL_TEXT) }
+      : {}),
+  };
+}
+
+function fingerprintText(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function sameSettledTaskRecord(
+  a: SettledTaskRecord,
+  b: SettledTaskRecord,
+): boolean {
+  return (
+    a.status === b.status &&
+    a.rawOutput.status === b.rawOutput.status &&
+    a.rawOutput.summary === b.rawOutput.summary &&
+    a.rawOutput.error === b.rawOutput.error &&
+    a.rawOutput.outputFile === b.rawOutput.outputFile &&
+    a.rawOutput.durationMs === b.rawOutput.durationMs
+  );
+}
+
+function sameBackgroundTaskContents(
+  a: BackgroundTask,
+  b: BackgroundTask,
+): boolean {
+  return (
+    a.taskId === b.taskId &&
+    a.name === b.name &&
+    a.taskType === b.taskType &&
+    a.startedAt === b.startedAt &&
+    a.command === b.command &&
+    a.summary === b.summary &&
+    a.lastToolName === b.lastToolName
+  );
+}
+
+function sameBackgroundTaskList(
+  a: readonly BackgroundTask[],
+  b: readonly BackgroundTask[],
+): boolean {
+  return (
+    a.length === b.length &&
+    a.every(
+      (task, index) =>
+        sameBackgroundTaskContents(task, b[index]) &&
+        task.updatedAt === b[index].updatedAt,
+    )
+  );
+}
+
 function isObj(x: unknown): x is Record<string, unknown> {
   return !!x && typeof x === "object" && !Array.isArray(x);
+}
+
+function pickFirstString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim().length > 0) return value;
+  }
+  return null;
+}
+
+function setBoundedMap<K, V>(
+  map: Map<K, V>,
+  key: K,
+  value: V,
+  limit: number,
+): void {
+  // Refresh insertion order when an existing lifecycle entry is observed so
+  // eviction always removes the oldest task, not an active/recent one.
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > limit) {
+    const oldest = map.keys().next().value as K | undefined;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
+
+function addBoundedSet<T>(set: Set<T>, value: T, limit: number): void {
+  set.delete(value);
+  set.add(value);
+  while (set.size > limit) {
+    const oldest = set.values().next().value as T | undefined;
+    if (oldest === undefined) break;
+    set.delete(oldest);
+  }
 }
 
 /** The `structuredPatch` array from a Claude Code `tool_use_result` — jsdiff
@@ -1199,6 +2068,29 @@ function toolResultText(t: ClaudeToolResultBlock): string {
       .join("\n");
   }
   return "";
+}
+
+function scheduledWakeupReason(prompt: string): string | null {
+  const reason = prompt.trim();
+  if (!reason || /^<<[^>]+>>$/.test(reason)) return null;
+  return reason.length > 120 ? `${reason.slice(0, 119).trimEnd()}…` : reason;
+}
+
+function scheduledWakeupName(schedule: string, reason: string | null): string {
+  const fields = schedule.trim().split(/\s+/);
+  const minute = Number.parseInt(fields[0] ?? "", 10);
+  const hour = Number.parseInt(fields[1] ?? "", 10);
+  const clock =
+    Number.isInteger(minute) &&
+    minute >= 0 &&
+    minute <= 59 &&
+    Number.isInteger(hour) &&
+    hour >= 0 &&
+    hour <= 23
+      ? `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`
+      : schedule.trim();
+  const base = clock ? `Next check at ${clock}` : "Next check";
+  return reason ? `${base} · ${reason}` : base;
 }
 
 /** Claude wraps failed tool results in `<tool_use_error>…</tool_use_error>` —

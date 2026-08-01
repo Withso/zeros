@@ -15,6 +15,16 @@ const systemText = (id: string): AgentMessage =>
   ({ kind: "text", role: "system", id }) as unknown as AgentMessage;
 const thought = (id: string): AgentMessage =>
   ({ kind: "text", role: "thought", id }) as unknown as AgentMessage;
+const backgroundTask = (
+  id: string,
+  status: "in_progress" | "completed" | "failed" = "completed",
+): AgentMessage =>
+  ({
+    kind: "tool",
+    id,
+    toolKind: "background_task",
+    status,
+  }) as unknown as AgentMessage;
 
 const ids = (xs: AgentMessage[]) => xs.map((m) => (m as { id: string }).id);
 
@@ -60,6 +70,25 @@ describe("partitionTurn", () => {
   it("never treats trailing thinking as the answer", () => {
     const { working, finalOutput } = partitionTurn([tool("t1"), thought("th")]);
     expect(ids(working)).toEqual(["t1", "th"]);
+    expect(finalOutput).toEqual([]);
+  });
+
+  it("keeps an answer visible when a settled background task arrives later", () => {
+    const { working, finalOutput } = partitionTurn([
+      tool("t1"),
+      agentText("answer"),
+      backgroundTask("background-settled"),
+    ]);
+    expect(ids(working)).toEqual(["t1"]);
+    expect(ids(finalOutput)).toEqual(["answer", "background-settled"]);
+  });
+
+  it("does not promote a still-running background task into final output", () => {
+    const { working, finalOutput } = partitionTurn([
+      agentText("provisional"),
+      backgroundTask("background-running", "in_progress"),
+    ]);
+    expect(ids(working)).toEqual(["provisional", "background-running"]);
     expect(finalOutput).toEqual([]);
   });
 

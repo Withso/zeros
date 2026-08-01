@@ -54,6 +54,10 @@ import {
   type ComposerInitialContent,
 } from "./composer-editor";
 import { QueuedMessagesCard } from "./queued-messages-card";
+import {
+  BackgroundTasksCard,
+  BackgroundTasksWaitingLine,
+} from "./background-tasks-card";
 import { EmbeddedTerminalCommand } from "./embedded-terminal-command";
 import { AddedDirectories } from "./added-directories";
 import { PermissionCard } from "./permission-card";
@@ -4029,6 +4033,23 @@ export function AgentChat({
               onReject={denyPlanReview}
             />
           )}
+          {/* Session-owned background work remains docked in non-scrolling
+            composer chrome across turn boundaries. The active set is one
+            provider-neutral card; settled tasks move into ordinary transcript
+            tool rows. Keep the wait status LAST so it is directly above the
+            composer itself, never buried in the scrolling transcript. */}
+          <BackgroundTasksCard
+            tasks={session.backgroundTasks}
+            onStop={session.stopBackgroundTask}
+            active={surfaceActive}
+          />
+          {session.waitingForBackgroundTasks ? (
+            <BackgroundTasksWaitingLine
+              tasks={session.backgroundTasks}
+              startedAt={session.backgroundTasksWaitingSince ?? Date.now()}
+              active={surfaceActive}
+            />
+          ) : null}
           {/* Wave 4 (2026-05-16): canonical AI Elements PromptInput
             recipe replaces ComposerShell + ComposerTextarea +
             ComposerToolbar. PromptInput is a `<form>` element; the

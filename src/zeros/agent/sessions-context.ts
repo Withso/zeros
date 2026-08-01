@@ -86,6 +86,9 @@ export interface SessionsActions {
     autoAction?: string,
   ): Promise<void>;
   cancel(chatId: string): Promise<void>;
+  /** Stop one background task while leaving the foreground turn and sibling
+   * tasks alone. Fire-and-forget; the next provider snapshot removes it. */
+  stopBackgroundTask(chatId: string, taskId: string): void;
   respondToPermission(
     chatId: string,
     response: RequestPermissionResponse,
@@ -116,7 +119,11 @@ export interface SessionsActions {
    *  sent. The payload is built by the composer's normal send pipeline
    *  (wire text with mentions expanded + display text + attachments), so
    *  editing mention-bearing sends is safe. */
-  editQueued(chatId: string, messageId: string, payload: QueuedEditPayload): void;
+  editQueued(
+    chatId: string,
+    messageId: string,
+    payload: QueuedEditPayload,
+  ): void;
   /** "Send now" for a queued message. While a turn is RUNNING and the agent
    *  supports steering, injects it into the running turn (AGENT_STEER) and
    *  promotes its bubble into the transcript; while idle (queue parked),
