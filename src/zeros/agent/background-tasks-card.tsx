@@ -1,13 +1,13 @@
 // BackgroundTasksCard
 //
-// Claude may park its foreground turn while a provider-native task continues.
-// This card is intentionally limited to that quiet continuation window: while
-// foreground events stream the transcript already communicates activity, and
-// once the active set is empty the turn can settle normally.
+// Provider-native work may outlive foreground streaming. Keep its task list
+// and Stop controls visible whenever work exists; whether that work also keeps
+// the foreground turn logically live is a separate provider-specific policy.
 
-import { memo, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { ChevronDown, Play, Square } from "lucide-react";
 
+import { formatElapsed, ZerosSpinner } from "@/loaders";
 import { cn } from "@/zeros/ui/cn";
 import { Button } from "@/zeros/ui/primitives/button";
 import {
@@ -21,6 +21,15 @@ import type { BackgroundTask } from "../bridge/agent-events";
 import { agentFamily } from "./model-catalog";
 
 export function shouldShowBackgroundTasksCard(options: {
+  agentId: string | null;
+  effort: string | null;
+  foregroundStreaming: boolean;
+  taskCount: number;
+}): boolean {
+  return options.taskCount > 0;
+}
+
+export function shouldKeepTurnLiveForBackgroundTasks(options: {
   agentId: string | null;
   effort: string | null;
   foregroundStreaming: boolean;
@@ -112,5 +121,64 @@ export const BackgroundTasksCard = memo(function BackgroundTasksCard({
         </CardContent>
       ) : null}
     </Card>
+  );
+});
+
+export const BackgroundTasksWaitingLine = memo(
+  function BackgroundTasksWaitingLine({
+    tasks,
+    startedAt,
+    active = true,
+  }: {
+    tasks: BackgroundTask[];
+    startedAt: number;
+    active?: boolean;
+  }) {
+    if (tasks.length === 0) return null;
+    return (
+      <div
+        className="text-fg2 flex min-h-8 items-center gap-2 px-1 text-sm"
+        role="status"
+        aria-live="polite"
+      >
+        <ZerosSpinner
+          size={16}
+          label="Waiting for background tasks"
+          className="shrink-0"
+        />
+        <span>
+          Waiting for {tasks.length} background task
+          {tasks.length === 1 ? "" : "s"}
+        </span>
+        <span aria-hidden="true">·</span>
+        <BackgroundTaskElapsed startedAt={startedAt} active={active} />
+      </div>
+    );
+  },
+);
+
+const BackgroundTaskElapsed = memo(function BackgroundTaskElapsed({
+  startedAt,
+  active,
+}: {
+  startedAt: number;
+  active: boolean;
+}) {
+  // Retained hidden chats stay mounted, so only advance the clock while this
+  // chat surface is active.
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    const intervalId = window.setInterval(
+      () => setTick((value) => value + 1),
+      1_000,
+    );
+    return () => window.clearInterval(intervalId);
+  }, [active]);
+  void tick;
+  return (
+    <span className="text-fg2 shrink-0 text-xs tabular-nums">
+      {formatElapsed(Math.max(0, Date.now() - startedAt))}
+    </span>
   );
 });

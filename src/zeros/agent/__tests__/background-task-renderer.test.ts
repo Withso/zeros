@@ -14,6 +14,8 @@ import type { AgentToolMessage } from "../use-agent-session";
 import { TooltipProvider } from "../../ui/primitives/tooltip";
 import {
   BackgroundTasksCard,
+  BackgroundTasksWaitingLine,
+  shouldKeepTurnLiveForBackgroundTasks,
   shouldShowBackgroundTasksCard,
 } from "../background-tasks-card";
 
@@ -138,32 +140,88 @@ describe("background task live surfaces", () => {
     expect(html).not.toMatch(/\b(?:Agent|LIVE|Running)\b/);
   });
 
-  it("shows the card only after Claude foreground streaming settles with tasks active", () => {
+  it("keeps every active task visible and stoppable regardless of effort or streaming", () => {
+    for (const options of [
+      {
+        agentId: "claude",
+        effort: "high",
+        foregroundStreaming: false,
+        taskCount: 1,
+      },
+      {
+        agentId: "claude",
+        effort: "ultracode",
+        foregroundStreaming: true,
+        taskCount: 1,
+      },
+      {
+        agentId: "cursor",
+        effort: null,
+        foregroundStreaming: false,
+        taskCount: 1,
+      },
+    ]) {
+      expect(shouldShowBackgroundTasksCard(options)).toBe(true);
+    }
+    expect(
+      shouldShowBackgroundTasksCard({
+        agentId: "claude",
+        effort: "high",
+        foregroundStreaming: false,
+        taskCount: 0,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps only a quiet Claude Ultracode continuation logically live", () => {
     const continuation = {
       agentId: "claude",
       effort: "ultracode",
       foregroundStreaming: false,
       taskCount: 1,
     };
-    expect(shouldShowBackgroundTasksCard(continuation)).toBe(true);
+    expect(shouldKeepTurnLiveForBackgroundTasks(continuation)).toBe(true);
     expect(
-      shouldShowBackgroundTasksCard({
+      shouldKeepTurnLiveForBackgroundTasks({
         ...continuation,
         foregroundStreaming: true,
       }),
     ).toBe(false);
     expect(
-      shouldShowBackgroundTasksCard({ ...continuation, effort: "max" }),
+      shouldKeepTurnLiveForBackgroundTasks({ ...continuation, effort: "max" }),
     ).toBe(false);
     expect(
-      shouldShowBackgroundTasksCard({ ...continuation, agentId: "codex" }),
+      shouldKeepTurnLiveForBackgroundTasks({
+        ...continuation,
+        agentId: "codex",
+      }),
     ).toBe(false);
     expect(
-      shouldShowBackgroundTasksCard({ ...continuation, agentId: "cursor" }),
+      shouldKeepTurnLiveForBackgroundTasks({
+        ...continuation,
+        agentId: "cursor",
+      }),
     ).toBe(false);
     expect(
-      shouldShowBackgroundTasksCard({ ...continuation, taskCount: 0 }),
+      shouldKeepTurnLiveForBackgroundTasks({
+        ...continuation,
+        taskCount: 0,
+      }),
     ).toBe(false);
+  });
+
+  it("retains an explicit parked-turn waiting explanation", () => {
+    const html = renderToStaticMarkup(
+      createElement(BackgroundTasksWaitingLine, {
+        tasks,
+        startedAt: Date.now() - 24_000,
+        active: false,
+      }),
+    );
+
+    expect(html).toContain('role="status"');
+    expect(html).toContain("Waiting for 1 background task");
+    expect(html).toContain("Waiting for background tasks");
   });
 });
 

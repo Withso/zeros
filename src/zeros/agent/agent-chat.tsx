@@ -56,6 +56,8 @@ import {
 import { QueuedMessagesCard } from "./queued-messages-card";
 import {
   BackgroundTasksCard,
+  BackgroundTasksWaitingLine,
+  shouldKeepTurnLiveForBackgroundTasks,
   shouldShowBackgroundTasksCard,
 } from "./background-tasks-card";
 import { EmbeddedTerminalCommand } from "./embedded-terminal-command";
@@ -445,12 +447,16 @@ export function AgentChat({
       };
     }, [session.messages]);
   const foregroundStreaming = session.status === "streaming";
-  const backgroundContinuationActive = shouldShowBackgroundTasksCard({
+  const backgroundTaskOptions = {
     agentId: session.agentId,
     effort: chatThread?.effort ?? null,
     foregroundStreaming,
     taskCount: session.backgroundTasks.length,
-  });
+  };
+  const showBackgroundTasksCard =
+    shouldShowBackgroundTasksCard(backgroundTaskOptions);
+  const backgroundContinuationActive =
+    shouldKeepTurnLiveForBackgroundTasks(backgroundTaskOptions);
   // A quiet Claude background continuation is still part of the active turn:
   // keep its working stripe/shimmer and withhold the final answer/footer until
   // the provider's authoritative active-task set becomes empty.
@@ -4058,14 +4064,24 @@ export function AgentChat({
               onReject={denyPlanReview}
             />
           )}
-          {/* Claude's foreground can go quiet while provider-native work is
-            still active. Only then dock the task set above the composer. The
-            same predicate keeps the turn live; foreground streaming and other
-            providers never produce this card. */}
-          {backgroundContinuationActive ? (
+          {/* Provider-native work must always retain a visible Stop surface.
+            Quiet Claude Ultracode continuation is a separate concern: it can
+            keep the turn live, but never owns task-card visibility. */}
+          {showBackgroundTasksCard ? (
             <BackgroundTasksCard
               tasks={session.backgroundTasks}
               onStop={session.stopBackgroundTask}
+            />
+          ) : null}
+          {session.waitingForBackgroundTasks ? (
+            <BackgroundTasksWaitingLine
+              tasks={session.backgroundTasks}
+              startedAt={
+                session.backgroundTasksWaitingSince ??
+                session.backgroundTasks[0]?.startedAt ??
+                Date.now()
+              }
+              active={surfaceActive}
             />
           ) : null}
           {/* Wave 4 (2026-05-16): canonical AI Elements PromptInput
