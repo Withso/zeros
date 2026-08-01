@@ -337,6 +337,42 @@ describe("ClaudeSdkAdapter", () => {
     await adapter.dispose();
   });
 
+  it("passes a composer image to Claude as an inline base64 image block", async () => {
+    const { queryFn, inputsSeen } = makeScriptedQuery([
+      [initMsg("sdk-image"), assistantText("I can see it"), resultOk("sdk-image")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [
+        textBlock("Inspect this screenshot"),
+        { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+      ] as never,
+    });
+    await tick();
+
+    expect(inputsSeen[0]).toMatchObject({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          { type: "text", text: "Inspect this screenshot" },
+          {
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: "image/png",
+              data: "aGVsbG8=",
+            },
+          },
+        ],
+      },
+    });
+    await adapter.dispose();
+  });
+
   it("ALWAYS passes pathToClaudeCodeExecutable, even with no cliBinary override", async () => {
     // Regression guard for the Beta/Production-only "AGENT RESPONSE FAILURE"
     // (0.0.14): this option used to be set ONLY from a user-typed Settings

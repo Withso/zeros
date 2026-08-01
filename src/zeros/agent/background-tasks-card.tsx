@@ -1,13 +1,11 @@
-// BackgroundTasksCard + BackgroundTasksWaitingLine
+// BackgroundTasksCard
 //
-// One provider-neutral live surface for Claude shells/watchers/helpers/
-// workflows/wake-ups and Codex background terminals. The deliberately quiet
-// shape follows the consolidated design: title + chevron; each row has only
-// its name, elapsed time, and Stop. Provider/type/status chrome stays out of
-// the compact card and remains available in the settled transcript record.
+// Provider-native work may outlive foreground streaming. Keep its task list
+// and Stop controls visible whenever work exists; whether that work also keeps
+// the foreground turn logically live is a separate provider-specific policy.
 
 import { memo, useEffect, useState } from "react";
-import { Activity, ChevronDown, Square } from "lucide-react";
+import { ChevronDown, Play, Square } from "lucide-react";
 
 import { formatElapsed, ZerosSpinner } from "@/loaders";
 import { cn } from "@/zeros/ui/cn";
@@ -20,18 +18,40 @@ import {
 } from "@/zeros/ui/primitives/card";
 import { Tooltip } from "@/zeros/ui/primitives/tooltip";
 import type { BackgroundTask } from "../bridge/agent-events";
+import { agentFamily } from "./model-catalog";
+
+export function shouldShowBackgroundTasksCard(options: {
+  agentId: string | null;
+  effort: string | null;
+  foregroundStreaming: boolean;
+  taskCount: number;
+}): boolean {
+  return options.taskCount > 0;
+}
+
+export function shouldKeepTurnLiveForBackgroundTasks(options: {
+  agentId: string | null;
+  effort: string | null;
+  foregroundStreaming: boolean;
+  taskCount: number;
+}): boolean {
+  const { agentId, effort, foregroundStreaming, taskCount } = options;
+  return (
+    agentFamily(agentId) === "claude" &&
+    effort === "ultracode" &&
+    !foregroundStreaming &&
+    taskCount > 0
+  );
+}
 
 export interface BackgroundTasksCardProps {
   tasks: BackgroundTask[];
   onStop: (taskId: string) => void;
-  /** Retained hidden chats stay mounted; suspend their clocks until visible. */
-  active?: boolean;
 }
 
 export const BackgroundTasksCard = memo(function BackgroundTasksCard({
   tasks,
   onStop,
-  active = true,
 }: BackgroundTasksCardProps) {
   // Collapse is draft-like view state: it intentionally does not survive a
   // remount, while the task snapshot itself remains session-keyed in Zustand.
@@ -40,10 +60,10 @@ export const BackgroundTasksCard = memo(function BackgroundTasksCard({
   if (tasks.length === 0) return null;
 
   return (
-    <Card className="overflow-hidden">
-      <CardHeader className="flex-row items-center justify-between space-y-0 px-3.5 py-2.5">
+    <Card surface="base" className="overflow-hidden">
+      <CardHeader className="h-9 flex-row items-center justify-between space-y-0 p-1">
         <CardTitle className="flex min-w-0 items-center gap-2 text-sm font-medium">
-          <Activity className="text-fg2 size-4 shrink-0" aria-hidden="true" />
+          <Play className="text-fg2 size-4 shrink-0" aria-hidden="true" />
           <span>Background Task</span>
         </CardTitle>
         <Tooltip
@@ -74,20 +94,16 @@ export const BackgroundTasksCard = memo(function BackgroundTasksCard({
         </Tooltip>
       </CardHeader>
       {!collapsed ? (
-        <CardContent className="border-border1 flex flex-col border-t p-1.5">
+        <CardContent className="border-border1 flex flex-col border-t p-1">
           {tasks.map((task) => {
             return (
               <div
                 key={task.taskId}
-                className="hover:bg-bg2-hover flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5"
+                className="hover:bg-bg2-hover flex h-9 min-w-0 items-center gap-2 rounded-md p-1"
               >
                 <span className="text-fg1 min-w-0 flex-1 truncate text-sm">
                   {task.name}
                 </span>
-                <BackgroundTaskElapsed
-                  startedAt={task.startedAt}
-                  active={active}
-                />
                 <Tooltip label="Stop task">
                   <Button
                     type="button"
@@ -148,8 +164,8 @@ const BackgroundTaskElapsed = memo(function BackgroundTaskElapsed({
   startedAt: number;
   active: boolean;
 }) {
-  // A one-second cadence is enough for elapsed time and avoids coupling the
-  // whole chat surface to a high-frequency clock.
+  // Retained hidden chats stay mounted, so only advance the clock while this
+  // chat surface is active.
   const [tick, setTick] = useState(0);
   useEffect(() => {
     if (!active) return;

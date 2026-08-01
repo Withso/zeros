@@ -136,6 +136,86 @@ describe("ClaudeStreamTranslator onUser", () => {
   });
 });
 
+describe("ClaudeStreamTranslator task tools", () => {
+  it("normalizes TaskCreate with structured output", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "task-create-1",
+            name: "TaskCreate",
+            input: {
+              subject: "Audit the release workflow",
+              description: "Check every release gate.",
+            },
+          },
+        ],
+      },
+    });
+    t.feed({
+      type: "user",
+      tool_use_result: {
+        task: { id: "7", subject: "Audit the release workflow" },
+      },
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "task-create-1",
+            content: "Task #7 created successfully: Audit the release workflow",
+          },
+        ],
+      },
+    });
+
+    expect(updates[0]?.update).toMatchObject({
+      sessionUpdate: "tool_call",
+      title: "Task Created",
+      kind: "task_create",
+    });
+    expect(updates[1]?.update).toMatchObject({
+      sessionUpdate: "tool_call_update",
+      rawOutput: {
+        task: { id: "7", subject: "Audit the release workflow" },
+      },
+    });
+  });
+
+  it.each([
+    ["in_progress", "Task Started"],
+    ["completed", "Task Completed"],
+    ["deleted", "Task Deleted"],
+    ["pending", "Task Updated"],
+  ])("normalizes TaskUpdate status %s as %s", (status, title) => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: `task-update-${status}`,
+            name: "TaskUpdate",
+            input: { taskId: "7", status },
+          },
+        ],
+      },
+    });
+
+    expect(updates[0]?.update).toMatchObject({
+      sessionUpdate: "tool_call",
+      title,
+      kind: "task_update",
+    });
+  });
+});
+
 describe("ClaudeStreamTranslator background task lifecycle", () => {
   it("does not retain unrelated or unbounded raw tool inputs", () => {
     const { t } = collect();
@@ -882,6 +962,9 @@ describe("ClaudeStreamTranslator background task lifecycle", () => {
     expect(
       lifecycle.filter((u) => u.update.sessionUpdate === "tool_call"),
     ).toHaveLength(1);
+    expect(lifecycle[0]?.update).toMatchObject({
+      title: "Background Task",
+    });
     expect(
       lifecycle.filter((u) => u.update.sessionUpdate === "tool_call_update"),
     ).toHaveLength(1);

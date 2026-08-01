@@ -57,6 +57,8 @@ type ToolKind =
   | "question"
   | "skill"
   | "tool_search"
+  | "task_create"
+  | "task_update"
   | "background_task"
   | "other";
 
@@ -950,7 +952,7 @@ export class ClaudeStreamTranslator {
       update: {
         sessionUpdate: "tool_call",
         toolCallId,
-        title: "Task Started",
+        title: "Background Task",
         kind: "background_task",
         status: "in_progress",
         rawInput: {
@@ -1502,6 +1504,13 @@ export class ClaudeStreamTranslator {
       if (b.type !== "tool_result") continue;
       const tool = b as unknown as ClaudeToolResultBlock;
       const nativeTool = this.toolInputs.get(tool.tool_use_id);
+      const structuredTaskOutput =
+        resultCount === 1 &&
+        nativeTool &&
+        /^(TaskCreate|TaskUpdate)$/i.test(nativeTool.name) &&
+        isObj(event.tool_use_result)
+          ? event.tool_use_result
+          : null;
       if (nativeTool?.name === "ScheduleWakeup") {
         if (!tool.is_error && nativeTool.scheduledWakeup) {
           if (nativeTool.scheduledWakeup.stop) {
@@ -1529,7 +1538,9 @@ export class ClaudeStreamTranslator {
           sessionUpdate: "tool_call_update",
           toolCallId,
           status: tool.is_error ? "failed" : "completed",
-          rawOutput: structuredPatch ? { structuredPatch } : tool.content,
+          rawOutput: structuredPatch
+            ? { structuredPatch }
+            : (structuredTaskOutput ?? tool.content),
           content: text
             ? [
                 {
@@ -1944,6 +1955,14 @@ function retainToolInput(
   }
   const command = pickFirstString(record.command, record.cmd, record.script);
   const description = pickFirstString(record.description);
+  if (/^(TaskCreate|TaskUpdate)$/i.test(name)) {
+    return {
+      name,
+      ...(description
+        ? { description: description.slice(0, MAX_RETAINED_TOOL_TEXT) }
+        : {}),
+    };
+  }
   if (!command && !description) return null;
   return {
     name,
@@ -2144,6 +2163,15 @@ export function describeTool(name: string, input: unknown): string {
           ? `Finding tools: ${truncate(q, 40)}`
           : "Finding tools";
     }
+    case "TaskCreate":
+      return "Task Created";
+    case "TaskUpdate": {
+      const status = typeof inp.status === "string" ? inp.status : "";
+      if (status === "in_progress") return "Task Started";
+      if (status === "completed") return "Task Completed";
+      if (status === "deleted") return "Task Deleted";
+      return "Task Updated";
+    }
     default:
       return name;
   }
@@ -2194,6 +2222,8 @@ export function mapToolKind(name: string): ToolKind {
   // "other" fallback with raw JSON.
   if (/^Skill$/i.test(name)) return "skill";
   if (/^ToolSearch$/i.test(name)) return "tool_search";
+  if (/^TaskCreate$/i.test(name)) return "task_create";
+  if (/^TaskUpdate$/i.test(name)) return "task_update";
   // MCP-prefixed tool names: `mcp__<server>__<tool>`. Anthropic's
   // convention. Surface as `mcp` so the dedicated card renders.
   if (/^mcp__/i.test(name)) return "mcp";

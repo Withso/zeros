@@ -86,6 +86,7 @@ import {
 } from "@zeros/core/system-instructions";
 import { resolveBridgeWorkspaceIdForCwd } from "../bridge/workspace-id-resolver";
 import { synthesizeReplayPrompt } from "./replay";
+import { activeProviderTurnId } from "./turn-grouping";
 import { ActionsCtx, type SessionsActions } from "./sessions-context";
 import {
   trackAgentSessionStarted,
@@ -2410,6 +2411,7 @@ export function AgentSessionsProvider({
             }
           : undefined;
       claim();
+      let steeredTurnId: string | undefined;
       try {
         const resp = await bridge.request<
           AgentSteeredMessage | AgentErrorMessage
@@ -2430,13 +2432,19 @@ export function AgentSessionsProvider({
           unclaim();
           return false;
         }
+        steeredTurnId =
+          resp.turnId ??
+          activeProviderTurnId(
+            getStore().sessions[chatId]?.messages ?? [],
+            messageId,
+          );
       } catch {
         unclaim();
         return false;
       }
       // Delivered into the running turn. Promote the placeholder to a live
-      // user bubble at the transcript END — events that stream in after it
-      // group under it as the steered turn (mirrors the flush promotion).
+      // user bubble at the transcript END. It remains a distinct visual
+      // segment, but shares the running provider turn's footer/reset owner.
       const fresh = getStore().sessions[chatId];
       const ph = fresh?.messages.find((m) => m.id === messageId);
       if (fresh && ph && ph.kind === "text") {
@@ -2449,6 +2457,7 @@ export function AgentSessionsProvider({
               queued: false,
               queuedEditable: undefined,
               createdAt: Date.now(),
+              ...(steeredTurnId ? { steeredTurnId } : {}),
             },
             fresh.historyExpanded,
           ),
