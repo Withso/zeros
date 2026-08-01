@@ -38,6 +38,7 @@ describe("GitHub App control-plane client", () => {
         variantKey: "github.com",
         scheme: "zeros-dev",
         installFlow: true,
+        forceInstall: true,
       }),
     ).resolves.toEqual({
       authorizeUrl:
@@ -50,6 +51,13 @@ describe("GitHub App control-plane client", () => {
       expect.objectContaining({
         headers: expect.objectContaining({
           authorization: "Bearer auth-access",
+        }),
+        body: JSON.stringify({
+          nonce: "n".repeat(43),
+          variantKey: "github.com",
+          scheme: "zeros-dev",
+          installFlow: true,
+          forceInstall: true,
         }),
       }),
     );

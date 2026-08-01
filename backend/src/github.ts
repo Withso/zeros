@@ -3,7 +3,7 @@
 // The backend is the confidential-client boundary: the GitHub client secret
 // never ships in Electron. OAuth state + PKCE verifier are single-use (10 min);
 // the resulting token pair crosses a second, Auth0-user-bound handoff row for
-// at most five minutes before Electron persists it in safeStorage.
+// at most 90 seconds before Electron persists it in safeStorage.
 
 import {
   createCipheriv,
@@ -25,10 +25,11 @@ import { rateLimit } from "./ratelimit.js";
 
 const API_VERSION = "2026-03-10";
 const OAUTH_STATE_TTL_MS = 10 * 60_000;
-/** The hosted completion page deliberately waits for an Open Zeros gesture.
- * Keep this comfortably shorter than a token lifetime while allowing time for
- * the user to return from GitHub, read the confirmation, and select the app. */
-export const GITHUB_HANDOFF_TTL_MS = 5 * 60_000;
+/** The hosted page exposes its Open Zeros link for one minute. Keep only 30
+ * seconds beyond that for the deep link to reach Electron and finish the
+ * authenticated exchange; an abandoned tab must not create a five-minute
+ * redemption window. */
+export const GITHUB_HANDOFF_TTL_MS = 90_000;
 const MAX_INSTALLATION_PAGES = 10;
 const MAX_REPOSITORY_COUNT_PROBES = 50;
 const REPOSITORY_COUNT_CONCURRENCY = 4;
@@ -151,18 +152,19 @@ export type GithubOauthFlowKind = "oauth" | "install";
  * owns the account-level view needed to distinguish a genuine first install
  * from a second Mac reconnecting to an installation that already exists.
  *
- * Authorization alone deliberately counts as prior setup: a bounded or failed
- * installation inventory read still persists the usable authorization but may
- * have no installation rows. Forcing that account back through
- * `/installations/new` recreates the Configure-page dead end this server-side
- * decision exists to avoid. If a remote uninstall leaves only the authorization
- * row, direct OAuth still preserves the usable user authorization; installation
- * recovery remains a separate UI action. */
+ * Authorization alone deliberately counts as prior setup for the automatic
+ * choice: a bounded or failed installation inventory read still persists the
+ * usable authorization but may have no installation rows. The desktop keeps
+ * that unknown inventory distinct from a completed empty inventory. Once it
+ * has confirmed zero installations, its explicit recovery action must bypass
+ * prior account state so GitHub can create an installation again. */
 export function resolveGithubOauthFlowKind(input: {
   installRequested: boolean;
+  forceInstallRequested: boolean;
   hasAuthorization: boolean;
   hasInstallation: boolean;
 }): GithubOauthFlowKind {
+  if (input.forceInstallRequested) return "install";
   return input.installRequested &&
     !(input.hasAuthorization || input.hasInstallation)
     ? "install"
@@ -1161,7 +1163,9 @@ export function createGithubRoutes(
           "Unsupported desktop callback scheme.",
         );
       }
-      const installRequested = body.installFlow !== false;
+      const forceInstallRequested = body.forceInstall === true;
+      const installRequested =
+        forceInstallRequested || body.installFlow !== false;
       const state = base64url(random(32));
       const oauthVerifier = base64url(random(48));
       const expiresAt = new Date(now() + OAUTH_STATE_TTL_MS);
@@ -1190,6 +1194,7 @@ export function createGithubRoutes(
         }
         const resolvedFlowKind = resolveGithubOauthFlowKind({
           installRequested,
+          forceInstallRequested,
           hasAuthorization,
           hasInstallation,
         });
@@ -1212,7 +1217,7 @@ export function createGithubRoutes(
             nonce,
             scheme,
             variant,
-            flowKind,
+            resolvedFlowKind,
             verifier,
             expiresAt,
           ],

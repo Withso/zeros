@@ -8,7 +8,9 @@
 // that started the connection.
 
 import {
+  armGithubCompletionExpiry,
   GITHUB_COMPLETION_ERRORS,
+  GITHUB_COMPLETION_LINK_TTL_MS,
   GITHUB_COMPLETION_SCHEMES,
   parseGithubCompletionFragment,
 } from "../../lib/github-completion.mjs";
@@ -18,6 +20,7 @@ import type { Env } from "../../lib/session";
 function completionInner(): string {
   const script = `
     const parseFragment = ${parseGithubCompletionFragment.toString()};
+    const armExpiry = ${armGithubCompletionExpiry.toString()};
     const parsed = parseFragment(
       window.location.hash,
       ${JSON.stringify(GITHUB_COMPLETION_SCHEMES)},
@@ -48,6 +51,13 @@ function completionInner(): string {
       open.addEventListener("click", () => {
         msg.textContent = "Opening Zeros… you can close this tab after the app opens.";
       });
+      const expire = armExpiry(
+        parsed,
+        { title, sub, open, msg },
+        setTimeout,
+        ${GITHUB_COMPLETION_LINK_TTL_MS}
+      );
+      window.addEventListener("pagehide", expire, { once: true });
     }
   `;
 

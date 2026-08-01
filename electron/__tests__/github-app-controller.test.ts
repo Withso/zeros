@@ -165,7 +165,11 @@ describe("GitHub App desktop controller", () => {
     const controller = new GithubAppController(h.deps);
 
     await expect(
-      controller.begin({ scheme: "zeros-dev", installFlow: true }),
+      controller.begin({
+        scheme: "zeros-dev",
+        installFlow: true,
+        forceInstall: true,
+      }),
     ).resolves.toBe("oauth");
 
     expect(h.client.start).toHaveBeenCalledWith(
@@ -173,6 +177,7 @@ describe("GitHub App desktop controller", () => {
       expect.objectContaining({
         scheme: "zeros-dev",
         installFlow: true,
+        forceInstall: true,
       }),
     );
   });

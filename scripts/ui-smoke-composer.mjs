@@ -25,6 +25,8 @@
 //   5. The GitHub method overflow obeys click/Escape focus semantics.
 //   6. Its disconnect dialog itemizes consequences, initially focuses Cancel,
 //      closes with Escape, and returns focus to the originating trigger.
+//   7. A confirmed-empty GitHub App inventory exposes a recovery CTA whose IPC
+//      request explicitly forces the installation URL.
 //
 // Usage:  node scripts/ui-smoke-composer.mjs   (pnpm test:ui-smoke)
 // ============================================================
@@ -246,7 +248,44 @@ try {
     ),
   );
 
-  // 5. Whole-run invariant.
+  // 5. A complete zero-installation snapshot must not send users back through
+  //    ordinary OAuth. Exercise the real Settings CTA and inspect the native
+  //    boundary payload emitted by the harness bridge.
+  await page.goto(
+    `http://127.0.0.1:${port}/harness-github-settings.html?state=not-installed`,
+    { waitUntil: "networkidle" },
+  );
+  const installApp = page.getByRole("button", { name: "Install GitHub App" });
+  await installApp.waitFor({ state: "visible", timeout: 10_000 });
+  check(
+    "GitHub missing-installation recovery is visible",
+    await installApp.isVisible().catch(() => false),
+  );
+  await installApp.click();
+  check(
+    "GitHub recovery forces the install flow",
+    await waitFor(
+      () =>
+        Promise.resolve(
+          consoleLines.some(
+            (line) =>
+              line.includes("[harness] gh_app_connect") &&
+              line.includes('"installFlow":true') &&
+              line.includes('"forceInstall":true'),
+          ),
+        ),
+      "github-force-install",
+    ),
+  );
+  check(
+    "GitHub recovery advances to browser completion",
+    await page
+      .getByRole("heading", { name: "Finish on GitHub" })
+      .isVisible()
+      .catch(() => false),
+  );
+
+  // 6. Whole-run invariant.
   check(
     "no uncaught page errors",
     pageErrors.length === 0,

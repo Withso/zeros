@@ -226,10 +226,12 @@ function githubAppController(): GithubAppController {
 
 export async function beginGithubAppConnection(
   installFlow: boolean,
+  forceInstall = false,
 ): Promise<GithubAppFlowKind | null> {
   return githubAppController().begin({
     scheme: schemeForChannel(channel()),
     installFlow,
+    forceInstall,
   });
 }
 

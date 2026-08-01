@@ -237,6 +237,7 @@ export class GithubAppController {
   async begin(input: {
     scheme: string;
     installFlow: boolean;
+    forceInstall?: boolean;
   }): Promise<GithubAppFlowKind | null> {
     const epoch = this.cancelEpoch;
     const session = await this.deps.getSession();
@@ -261,6 +262,7 @@ export class GithubAppController {
         variantKey: "github.com",
         scheme: input.scheme,
         installFlow: input.installFlow,
+        forceInstall: input.forceInstall === true,
       });
     } catch (error) {
       throw mapClientError(error);

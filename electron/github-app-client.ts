@@ -351,6 +351,9 @@ export class GithubAppClient {
       variantKey: string;
       scheme: string;
       installFlow: boolean;
+      /** Bypass account-level reconnect detection after a complete desktop
+       * inventory has confirmed that no installation remains. */
+      forceInstall?: boolean;
     },
   ): Promise<GithubAppStartResult> {
     const body = record(

@@ -1143,9 +1143,11 @@ export async function ghPatRestore(
 /** Begin the browser-owned GitHub App authorization/install flow. */
 export async function ghAppConnect(options?: {
   installFlow?: boolean;
+  forceInstall?: boolean;
 }): Promise<{ flowKind: "oauth" | "install" } | null> {
   return nativeInvoke("gh_app_connect", {
     installFlow: options?.installFlow !== false,
+    forceInstall: options?.forceInstall === true,
   });
 }
 

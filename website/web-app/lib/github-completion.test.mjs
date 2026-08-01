@@ -2,7 +2,9 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  armGithubCompletionExpiry,
   GITHUB_COMPLETION_ERRORS,
+  GITHUB_COMPLETION_LINK_TTL_MS,
   GITHUB_COMPLETION_SCHEMES,
   parseGithubCompletionFragment,
 } from "./github-completion.mjs";
@@ -35,8 +37,7 @@ describe("GitHub browser completion handoff", () => {
     assert.deepEqual(parsed, {
       kind: "error",
       error: "access_denied",
-      deepLink:
-        `zeros://github/connected#nonce=${NONCE}&error=access_denied`,
+      deepLink: `zeros://github/connected#nonce=${NONCE}&error=access_denied`,
     });
   });
 
@@ -74,5 +75,46 @@ describe("GitHub browser completion handoff", () => {
         deepLink: `zeros://github/connected#nonce=${NONCE}`,
       },
     );
+  });
+
+  it("removes an abandoned nonce-bearing link after one minute", () => {
+    const parsed = parseGithubCompletionFragment(
+      `#scheme=zeros&nonce=${NONCE}`,
+      GITHUB_COMPLETION_SCHEMES,
+      GITHUB_COMPLETION_ERRORS,
+    );
+    const title = { textContent: "GitHub connected" };
+    const sub = { textContent: "Open Zeros to finish linking GitHub." };
+    const msg = { textContent: "" };
+    const open = {
+      hidden: false,
+      href: parsed.deepLink,
+      removeAttribute(name) {
+        delete this[name];
+      },
+    };
+    let scheduled;
+
+    const revivedArmExpiry = Function(
+      `"use strict"; return (${armGithubCompletionExpiry.toString()});`,
+    )();
+    const expire = revivedArmExpiry(
+      parsed,
+      { title, sub, open, msg },
+      (callback, delayMs) => {
+        scheduled = { callback, delayMs };
+      },
+      GITHUB_COMPLETION_LINK_TTL_MS,
+    );
+
+    assert.equal(scheduled.delayMs, 60_000);
+    assert.equal(typeof expire, "function");
+    scheduled.callback();
+    assert.equal(parsed.deepLink, "");
+    assert.equal("href" in open, false);
+    assert.equal(open.hidden, true);
+    assert.equal(title.textContent, "This GitHub handoff has expired");
+    assert.match(sub.textContent, /start the connection again/);
+    assert.equal(msg.textContent, "");
   });
 });

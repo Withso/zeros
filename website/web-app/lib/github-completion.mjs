@@ -13,6 +13,9 @@ export const GITHUB_COMPLETION_ERRORS = Object.freeze([
   "signed_out",
   "storage_failed",
 ]);
+/** The user has one minute to select Open Zeros. The backend retains a separate
+ * 30-second grace period for the desktop's authenticated exchange. */
+export const GITHUB_COMPLETION_LINK_TTL_MS = 60_000;
 
 /** Parse the fragment without trusting it as a URL. This function is embedded
  * verbatim with Function.prototype.toString(), so it MUST remain self-contained
@@ -45,4 +48,27 @@ export function parseGithubCompletionFragment(
   return error
     ? { kind: "error", error, deepLink }
     : { kind: "connected", deepLink };
+}
+
+/** Remove the nonce from both live page state and the anchor after a short
+ * gesture window. This function is embedded verbatim in the completion page,
+ * so it must remain self-contained. Returning the idempotent expiry callback
+ * also lets pagehide clear an abandoned page before the timer fires. */
+export function armGithubCompletionExpiry(
+  parsed,
+  elements,
+  schedule,
+  timeoutMs,
+) {
+  const expire = () => {
+    if ("deepLink" in parsed) parsed.deepLink = "";
+    elements.open.removeAttribute("href");
+    elements.open.hidden = true;
+    elements.title.textContent = "This GitHub handoff has expired";
+    elements.sub.textContent =
+      "Return to Zeros, open Settings → Integrations, and start the connection again.";
+    elements.msg.textContent = "";
+  };
+  schedule(expire, timeoutMs);
+  return expire;
 }

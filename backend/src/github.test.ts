@@ -44,14 +44,15 @@ describe("GitHub routes without a registered App", () => {
 });
 
 describe("GitHub OAuth flow selection", () => {
-  it("leaves time for the hosted Open Zeros gesture", () => {
-    expect(GITHUB_HANDOFF_TTL_MS).toBe(5 * 60_000);
+  it("limits the hosted gesture to one minute plus desktop exchange grace", () => {
+    expect(GITHUB_HANDOFF_TTL_MS).toBe(90_000);
   });
 
   it("reauthorizes instead of reopening installation settings for a known cross-device connection", () => {
     expect(
       resolveGithubOauthFlowKind({
         installRequested: true,
+        forceInstallRequested: false,
         hasAuthorization: true,
         hasInstallation: true,
       }),
@@ -62,6 +63,7 @@ describe("GitHub OAuth flow selection", () => {
     expect(
       resolveGithubOauthFlowKind({
         installRequested: true,
+        forceInstallRequested: false,
         hasAuthorization: false,
         hasInstallation: false,
       }),
@@ -72,6 +74,7 @@ describe("GitHub OAuth flow selection", () => {
     expect(
       resolveGithubOauthFlowKind({
         installRequested: true,
+        forceInstallRequested: false,
         hasAuthorization: true,
         hasInstallation: false,
       }),
@@ -82,6 +85,7 @@ describe("GitHub OAuth flow selection", () => {
     expect(
       resolveGithubOauthFlowKind({
         installRequested: true,
+        forceInstallRequested: false,
         hasAuthorization: false,
         hasInstallation: true,
       }),
@@ -92,10 +96,22 @@ describe("GitHub OAuth flow selection", () => {
     expect(
       resolveGithubOauthFlowKind({
         installRequested: false,
+        forceInstallRequested: false,
         hasAuthorization: false,
         hasInstallation: false,
       }),
     ).toBe("oauth");
+  });
+
+  it("honors an explicit install request despite earlier account setup", () => {
+    expect(
+      resolveGithubOauthFlowKind({
+        installRequested: true,
+        forceInstallRequested: true,
+        hasAuthorization: true,
+        hasInstallation: true,
+      }),
+    ).toBe("install");
   });
 
   it("keeps the desktop handoff secret in the hosted page fragment", () => {
@@ -232,6 +248,7 @@ async function startFlow(
   app: Hono,
   nonce: string,
   installFlow = true,
+  forceInstall = false,
 ): Promise<{
   state: string;
   authorizeUrl: string;
@@ -245,6 +262,7 @@ async function startFlow(
       variantKey: "github.com",
       scheme: "zeros-dev",
       installFlow,
+      forceInstall,
     }),
   });
   expect(response.status).toBe(200);
@@ -364,6 +382,36 @@ dbDescribe("GitHub App OAuth handoff", () => {
     expect(authorize.pathname).toBe("/login/oauth/authorize");
     expect(authorize.searchParams.get("code_challenge_method")).toBe("S256");
     expect(started.flowKind).toBe("oauth");
+  });
+
+  it("uses the install URL when a confirmed-empty desktop explicitly requests recovery", async () => {
+    const authorizationOnlyUser = await ensureUser(pool, {
+      provider: "auth0",
+      providerSub: randomUUID(),
+      email: `github-force-install-${randomUUID()}@example.com`,
+      displayName: "GitHub Force Install",
+    });
+    await pool.query(
+      `INSERT INTO github_authorizations (
+         owner_user_id, app_variant, github_login
+       ) VALUES ($1, 'github.com', 'octocat')`,
+      [authorizationOnlyUser.id],
+    );
+    const authorizationOnlyApp = testApp(pool, authorizationOnlyUser, {
+      fetch: githubFetch([]),
+    });
+
+    const started = await startFlow(
+      authorizationOnlyApp,
+      "f".repeat(43),
+      true,
+      true,
+    );
+    const authorize = new URL(started.authorizeUrl);
+
+    expect(authorize.pathname).toBe("/apps/zeros-test/installations/new");
+    expect(authorize.searchParams.get("state")).toBe(started.state);
+    expect(started.flowKind).toBe("install");
   });
 
   it("consumes OAuth state and the desktop handoff exactly once", async () => {
