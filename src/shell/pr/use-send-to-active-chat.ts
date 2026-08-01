@@ -37,6 +37,9 @@ export interface SendToActiveChatArgs {
    *  copy-only. Typed as the canonical union so producers can't stamp a kind
    *  the icon registry doesn't know. See AgentTextMessage.autoAction. */
   autoAction?: AutoActionKind;
+  /** Called when the accepted send finishes or fails. Action surfaces use it
+   *  to retain their synchronous single-flight claim for the whole turn. */
+  onSettled?: () => void;
 }
 
 export function useSendToActiveChat(): (args: SendToActiveChatArgs) => boolean {
@@ -50,6 +53,7 @@ export function useSendToActiveChat(): (args: SendToActiveChatArgs) => boolean {
       bubbleAttachments,
       segments,
       autoAction,
+      onSettled,
     }: SendToActiveChatArgs) => {
       if (!activeChatId) {
         toast.error("No active chat", {
@@ -70,7 +74,8 @@ export function useSendToActiveChat(): (args: SendToActiveChatArgs) => boolean {
         .catch(() => {
           // The error surfaces on the chat's own error state; this is a
           // fire-and-forget from a button.
-        });
+        })
+        .finally(() => onSettled?.());
       return true;
     },
     [sessions, activeChatId],

@@ -32,7 +32,18 @@ describe("GitHub backend configuration", () => {
       variantKey: "github.com",
       webBaseUrl: "https://github.com",
       apiBaseUrl: "https://api.github.com",
+      completionPageUrl: "https://app.zeros.build/github/connected",
     });
+  });
+
+  it("allows each control-plane environment to select its completion page", () => {
+    expect(
+      loadConfig({
+        ...validEnv(),
+        GITHUB_COMPLETION_PAGE_URL:
+          "https://preview.example.com/github/connected",
+      }).github?.completionPageUrl,
+    ).toBe("https://preview.example.com/github/connected");
   });
 
   // The regression this guards is a whole-service outage: loadConfig() runs at
@@ -85,6 +96,31 @@ describe("GitHub backend configuration", () => {
     ).toBe("http://127.0.0.1:8080/v1/github/oauth/callback");
   });
 
+  it("allows a dev loopback completion page outside production", () => {
+    expect(
+      loadConfig({
+        ...validEnv(),
+        GITHUB_COMPLETION_PAGE_URL: "http://127.0.0.1:8788/github/connected",
+      }).github?.completionPageUrl,
+    ).toBe("http://127.0.0.1:8788/github/connected");
+  });
+
+  it("disables GitHub for a non-HTTPS completion page in production", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const config = loadConfig({
+      ...validEnv(),
+      NODE_ENV: "production",
+      GITHUB_COMPLETION_PAGE_URL: "http://127.0.0.1:8788/github/connected",
+    });
+
+    expect(config.github).toBeNull();
+    expect(error).toHaveBeenCalledWith(
+      expect.stringContaining("GITHUB_COMPLETION_PAGE_URL"),
+    );
+    error.mockRestore();
+  });
+
   it("rejects credential-bearing or ambiguous GitHub service URLs", () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     expect(
@@ -97,6 +133,13 @@ describe("GitHub backend configuration", () => {
       loadConfig({
         ...validEnv(),
         GITHUB_API_BASE_URL: "https://api.github.example/v3?target=other",
+      }).github,
+    ).toBeNull();
+    expect(
+      loadConfig({
+        ...validEnv(),
+        GITHUB_COMPLETION_PAGE_URL:
+          "https://preview.example/github/connected#stale-handoff",
       }).github,
     ).toBeNull();
     error.mockRestore();

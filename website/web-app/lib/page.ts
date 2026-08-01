@@ -15,7 +15,13 @@ export function html(body: string, status = 200): Response {
   });
 }
 
-export function shell(title: string, inner: string): string {
+export function shell(
+  title: string,
+  inner: string,
+  options: { presentation?: "compact" | "hero" } = {},
+): string {
+  const cardClass =
+    options.presentation === "hero" ? "card card-hero" : "card";
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -32,6 +38,22 @@ export function shell(title: string, inner: string): string {
         align-items: center; justify-content: center;
       }
       .card { width: 100%; max-width: 320px; padding: 0 1.5rem; text-align: center; }
+      .card-hero { max-width: 540px; }
+      .hero-logo {
+        width: 56px; height: 56px; box-sizing: border-box;
+        margin-bottom: 2rem; padding: 10px; border-radius: 14px;
+        background: #18181b; border: 1px solid #3f3f46;
+      }
+      .hero-title {
+        color: #f4f4f5; font-size: 32px; line-height: 1.2;
+        font-weight: 600; letter-spacing: -0.02em; margin-bottom: 0.75rem;
+      }
+      .hero-sub {
+        max-width: 440px; margin: 0 auto 2rem; color: #a1a1aa;
+        font-size: 16px; line-height: 1.5;
+      }
+      .card-hero .btn { min-height: 48px; font-size: 16px; }
+      [hidden] { display: none !important; }
       .title { font-weight: 600; color: #f4f4f5; margin-bottom: 0.35rem; }
       .sub { color: #a1a1aa; font-size: 13px; line-height: 1.5; margin-bottom: 1.5rem; }
       a.btn, button.btn {
@@ -50,6 +72,6 @@ export function shell(title: string, inner: string): string {
       .msg { color: #a1a1aa; font-size: 13px; margin-top: 0.75rem; }
     </style>
   </head>
-  <body><div class="card">${inner}</div></body>
+  <body><div class="${cardClass}">${inner}</div></body>
 </html>`;
 }

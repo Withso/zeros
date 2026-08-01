@@ -1,9 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import {
-  buildPrInstructions,
-  prBubbleDisplayText,
-} from "../pr-instructions";
+import { buildPrInstructions, prBubbleDisplayText } from "../pr-instructions";
 
 describe("buildPrInstructions", () => {
   it("interpolates branch, target, and the exact push/create commands", () => {
@@ -20,7 +17,7 @@ describe("buildPrInstructions", () => {
     expect(out).toContain("There is no upstream branch yet.");
     expect(out).toContain("The user requested a PR.");
     expect(out).toContain("git push -u 'origin' HEAD:'zeros/my-feature'");
-    expect(out).toContain("gh pr create --base main");
+    expect(out).toContain("gh pr create --base 'main'");
     expect(out).not.toContain("--draft");
   });
 
@@ -54,7 +51,7 @@ describe("buildPrInstructions", () => {
       draft: true,
     });
     expect(out).toContain("The user requested a draft PR.");
-    expect(out).toContain("gh pr create --draft --base dev");
+    expect(out).toContain("gh pr create --draft --base 'dev'");
   });
 
   // The direct button refuses a conflicted tree and offers "Ask agent" as the
@@ -114,6 +111,58 @@ describe("buildPrInstructions", () => {
     expect(out).toContain("The branch already has an upstream on upstream.");
     expect(out).toContain("git push -u 'upstream' HEAD:'zeros/my-feature'");
     expect(out).not.toContain("origin");
+  });
+
+  it("reports failed probes as unknown instead of inventing a clean tree and missing upstream", () => {
+    const out = buildPrInstructions({
+      branch: "zeros/my-feature",
+      baseBranch: "main",
+      remote: "origin",
+      uncommittedCount: null,
+      statusKnown: false,
+      hasUpstream: null,
+      draft: false,
+    });
+    expect(out).toContain("could not be read");
+    expect(out).toContain("Inspect the worktree for unresolved conflicts");
+    expect(out).toContain(
+      "If the inspection finds uncommitted changes, commit them",
+    );
+    expect(out).not.toContain("There are no uncommitted changes.");
+    expect(out).not.toContain("There is no upstream branch yet.");
+    expect(out).not.toContain("Commit them.");
+  });
+
+  it("does not instruct the agent to create an empty commit on a confirmed clean tree", () => {
+    const out = buildPrInstructions({
+      branch: "zeros/my-feature",
+      baseBranch: "main",
+      uncommittedCount: 0,
+      statusKnown: true,
+      hasUpstream: true,
+      draft: false,
+    });
+    expect(out).toContain("Do not create an empty commit");
+    expect(out).not.toContain("- Commit them.");
+  });
+
+  it("shell-quotes unusual but legal refs and pins gh to the configured repository", () => {
+    const out = buildPrInstructions({
+      branch: "zeros/o'clock",
+      baseBranch: "release/$next",
+      remote: "team's-fork",
+      repository: "withso/zeros",
+      uncommittedCount: 0,
+      statusKnown: true,
+      hasUpstream: true,
+      draft: false,
+    });
+    expect(out).toContain(
+      "git push -u 'team'\\''s-fork' HEAD:'zeros/o'\\''clock'",
+    );
+    expect(out).toContain(
+      "gh pr create --repo 'withso/zeros' --base 'release/$next'",
+    );
   });
 });
 

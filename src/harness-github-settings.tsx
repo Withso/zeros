@@ -9,6 +9,10 @@ import "../styles/globals.css";
 
 import type { GithubAuthSnapshot } from "@zeros/core/github-auth";
 
+const installationMissing =
+  new URLSearchParams(window.location.search).get("state") ===
+  "not-installed";
+
 const snapshot: GithubAuthSnapshot = {
   selectedMethod: "github-app",
   methods: {
@@ -21,12 +25,12 @@ const snapshot: GithubAuthSnapshot = {
     },
     "github-app": {
       method: "github-app",
-      health: "connected",
+      health: installationMissing ? "not-installed" : "connected",
       configured: true,
       login: "octocat",
-      installationCount: 1,
-      activeInstallationCount: 1,
-      repositoryCount: 3,
+      installationCount: installationMissing ? 0 : 1,
+      activeInstallationCount: installationMissing ? 0 : 1,
+      repositoryCount: installationMissing ? 0 : 3,
       allRepositories: false,
     },
     pat: {
@@ -38,12 +42,19 @@ const snapshot: GithubAuthSnapshot = {
 };
 
 window.__ZEROS_NATIVE__ = {
-  async invoke<T>(command: string): Promise<T> {
+  async invoke<T>(
+    command: string,
+    args?: Record<string, unknown>,
+  ): Promise<T> {
     if (command === "gh_auth_snapshot") {
       // Leave a genuine cold-read window so the browser smoke can prove that
       // placeholder state does not flash false sign-in controls.
       await new Promise((resolve) => setTimeout(resolve, 3_000));
       return snapshot as T;
+    }
+    if (command === "gh_app_connect") {
+      console.log("[harness] gh_app_connect", JSON.stringify(args));
+      return { flowKind: "install" } as T;
     }
     // The read-only commands a smoke click can reach resolve quietly. The smoke
     // asserts "no uncaught page errors", so a rejection here would fail the run

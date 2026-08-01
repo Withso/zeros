@@ -19,9 +19,14 @@ type GithubAppCredential = Extract<
   { method: "github-app" }
 >;
 
+export type GithubAppFlowKind = "oauth" | "install";
+
 export interface GithubAppStartResult {
   authorizeUrl: string;
   expiresAtMs: number;
+  /** Authoritative server decision. It may differ from this Mac's request when
+   * another device already recorded the account-level installation. */
+  flowKind: GithubAppFlowKind;
 }
 
 export type GithubAppTokenResult = Omit<
@@ -346,6 +351,9 @@ export class GithubAppClient {
       variantKey: string;
       scheme: string;
       installFlow: boolean;
+      /** Bypass account-level reconnect detection after a complete desktop
+       * inventory has confirmed that no installation remains. */
+      forceInstall?: boolean;
     },
   ): Promise<GithubAppStartResult> {
     const body = record(
@@ -353,11 +361,21 @@ export class GithubAppClient {
     );
     const authorizeUrl = boundedString(body.authorizeUrl, 4_096);
     const expiresAtRaw = boundedString(body.expiresAt, 100);
+    const flowKindRaw = body.flowKind;
+    const flowKind =
+      flowKindRaw === undefined
+        ? input.installFlow
+          ? "install"
+          : "oauth"
+        : flowKindRaw === "oauth" || flowKindRaw === "install"
+          ? flowKindRaw
+          : null;
     const expiresAtMs = expiresAtRaw
       ? new Date(expiresAtRaw).getTime()
       : Number.NaN;
     if (
       !authorizeUrl ||
+      !flowKind ||
       !Number.isFinite(expiresAtMs) ||
       expiresAtMs <= this.now() ||
       expiresAtMs - this.now() > MAX_AUTHORIZATION_WINDOW_MS
@@ -385,6 +403,7 @@ export class GithubAppClient {
     return {
       authorizeUrl: parsedAuthorizeUrl.toString(),
       expiresAtMs,
+      flowKind,
     };
   }
 
