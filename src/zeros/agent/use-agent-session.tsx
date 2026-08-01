@@ -19,6 +19,7 @@
 
 import type {
   AvailableCommand,
+  BackgroundTask,
   ContentBlock,
   InitializeResponse,
   NewSessionResponse,
@@ -148,6 +149,14 @@ export interface AgentSessionState {
    *  turn to a specific child agent (e.g. Claude Task). Audit doc
    *  2026-05-23 §P1.3. */
   availableSubagents: import("../bridge/agent-events").AvailableSubagent[];
+  /** Active background work owned by this exact session. Engine snapshots
+   * replace the set; completed tasks move into persisted tool-call history. */
+  backgroundTasks: BackgroundTask[];
+  /** Parent session is parked and waiting for the active task set to wake it. */
+  waitingForBackgroundTasks: boolean;
+  /** Start of the current continuous parked interval. Session-owned so a
+   * retained-view eviction/remount cannot restart the visible timer. */
+  backgroundTasksWaitingSince: number | null;
   /** Settings-drift guard (2026-07-13): JSON of the CHAT-derived env
    *  (envForChat — model/effort/fast/dirs) this session was actually created
    *  with (or last live-applied via updateConfig). sendPrompt compares it
@@ -198,6 +207,8 @@ export interface AgentSessionControls {
   ): Promise<void>;
   /** Cancel the in-flight prompt (if any). */
   cancel(): Promise<void>;
+  /** Stop one background task without cancelling the foreground turn. */
+  stopBackgroundTask(taskId: string): void;
   /** Resolve a pending permission request. */
   respondToPermission(response: RequestPermissionResponse): void;
   /** Answer the head pending question (queue front). */

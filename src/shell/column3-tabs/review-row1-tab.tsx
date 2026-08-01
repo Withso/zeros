@@ -2,9 +2,10 @@
 // ReviewRow1Tab — THE pinned row-1 Review tab
 // ──────────────────────────────────────────────────────────
 //
-// The PR review surface, second in row 1 and never closable: the shared PR
-// STATUS row first (the same PrStatusRow as the Changes tab — Target branch +
-// Create PR without a PR, the live status island with one), then ReviewView
+// The PR review surface, second in row 1 and never closable. Column3 owns one
+// shared PR STATUS row above the retained Changes/Review bodies (Target branch
+// + Create PR without a PR, the live status island with one); this body owns
+// ReviewView
 // (PR header / state / merge + Changes / Commits / Checks / Reviews sub-tabs)
 // for the active workspace's PR. ALWAYS visible — unlike the old conditional
 // "PR #N" pill it replaced, so instead of appearing/disappearing with the PR
@@ -23,7 +24,6 @@ import { useGitRefreshKey } from "../use-git-refresh-key";
 import { useWorkspaceAgentWorking } from "../pr/use-agent-working";
 import { type Column3Tab } from "../column3-tab-manager";
 import { parseRemote } from "../pr/github-url";
-import { PrStatusRow } from "../pr/pr-status-row";
 import { resolveReviewProvider } from "../pr/review-provider";
 import { EmptyState, useSourceTarget } from "./changes-tab";
 import { ReviewView } from "./review-tab";
@@ -43,7 +43,7 @@ export const ReviewRow1Tab = React.memo(function ReviewRow1Tab({
 }: TabBodyProps) {
   const dispatch = useWorkspaceDispatch();
   const { workspace, isLocalMain, changesTarget } = useSourceTarget();
-  // The owning project supplies the origin remote for "Create PR manually".
+  // The owning project supplies the provider host for the review connection.
   const { project } = useActiveWorkspace();
   // `project.originUrl` is a boot cache that is blank for folders registered
   // without one, so a missing host is "unknown", not "not GitHub". A workspace
@@ -97,17 +97,5 @@ export const ReviewRow1Tab = React.memo(function ReviewRow1Tab({
         }
       />
     );
-  return (
-    <div className="bg-bg1 flex h-full min-h-0 flex-col">
-      {/* Local main is the merge target, so it has no PR status/create row. */}
-      {!isLocalMain && (
-        <PrStatusRow
-          workspace={workspace}
-          originUrl={project?.originUrl ?? null}
-          active={active}
-        />
-      )}
-      {body}
-    </div>
-  );
+  return <div className="bg-bg1 flex h-full min-h-0 flex-col">{body}</div>;
 });

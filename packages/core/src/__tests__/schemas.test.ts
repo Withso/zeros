@@ -108,6 +108,28 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
         params: {},
       }).type,
     ).toBe("WORKSPACE_REQUEST");
+    expect(
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_STOP_BACKGROUND_TASK",
+        agentId: "claude",
+        sessionId: "s",
+        taskId: "task-1",
+      }).type,
+    ).toBe("AGENT_STOP_BACKGROUND_TASK");
+  });
+
+  it("rejects an invalid background-task stop target", () => {
+    const b = { ...base, source: "browser" as const };
+    expect(() =>
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_STOP_BACKGROUND_TASK",
+        agentId: "claude",
+        sessionId: "s",
+        taskId: "",
+      }),
+    ).toThrow(/taskId/);
   });
 
   it("stays permissive for engine→client / non-write types", () => {

@@ -16,6 +16,7 @@ import {
   buildUnifiedDiffPatch,
   resolveEditCounts,
   contentLineCount,
+  editFallbackText,
   ensureFileHeaders,
 } from "../renderers/tool-edit";
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
@@ -216,10 +217,19 @@ describe("extractDiffSource — Claude MultiEdit (edits[])", () => {
 });
 
 describe("computeEditBaselines — Write-overwrite diff baseline", () => {
-  const write = (id: string, path: string, content: string): AgentToolMessage =>
-    tool({ id: `tool-${id}`, toolCallId: id, toolKind: "edit", rawInput: { file_path: path, content } });
-  const edit = (id: string, path: string): AgentToolMessage =>
-    tool({ id: `tool-${id}`, toolCallId: id, toolKind: "edit", rawInput: { file_path: path, old_string: "x", new_string: "y" } });
+  const write = (
+    id: string,
+    path: string,
+    content: string,
+    status: AgentToolMessage["status"] = "completed",
+  ): AgentToolMessage =>
+    tool({ id: `tool-${id}`, toolCallId: id, toolKind: "edit", status, rawInput: { file_path: path, content } });
+  const edit = (
+    id: string,
+    path: string,
+    status: AgentToolMessage["status"] = "completed",
+  ): AgentToolMessage =>
+    tool({ id: `tool-${id}`, toolCallId: id, toolKind: "edit", status, rawInput: { file_path: path, old_string: "x", new_string: "y" } });
 
   it("gives a 2nd write to the same path the 1st write's content as baseline", () => {
     const msgs: AgentMessage[] = [write("w1", "/a.md", "A"), write("w2", "/a.md", "B")];
@@ -244,6 +254,44 @@ describe("computeEditBaselines — Write-overwrite diff baseline", () => {
     const msgs: AgentMessage[] = [write("w1", "/a", "A"), edit("e1", "/a"), write("w2", "/a", "C")];
     // After the Edit we can't reconstruct the file, so w2 falls back to all-additions.
     expect(computeEditBaselines(msgs).get("w2")).toBeUndefined();
+  });
+
+  it("a FAILED write neither records its content nor breaks the chain (2026-08-01)", () => {
+    // w2 never touched the disk, so w3's real "before" is still w1's content.
+    // Before the status guard, w3 diffed against w2's phantom body.
+    const msgs: AgentMessage[] = [
+      write("w1", "/a.md", "A"),
+      write("w2", "/a.md", "B", "failed"),
+      write("w3", "/a.md", "C"),
+    ];
+    const b = computeEditBaselines(msgs);
+    expect(b.get("w3")).toBe("A");
+    // The failed write still RECEIVES the prior baseline — its card truthfully
+    // shows "what this would have changed" against the file's real content.
+    expect(b.get("w2")).toBe("A");
+  });
+
+  it("a FAILED snippet Edit does not invalidate a baseline that is still true", () => {
+    const msgs: AgentMessage[] = [
+      write("w1", "/a.md", "A"),
+      edit("e1", "/a.md", "failed"),
+      write("w2", "/a.md", "C"),
+    ];
+    expect(computeEditBaselines(msgs).get("w2")).toBe("A");
+  });
+
+  it("an in-flight write gets the prior baseline but invalidates for successors", () => {
+    // Mid-stream, w2's card already diffs against w1 (its "before" is certain);
+    // but until w2 completes its own content isn't trustworthy as a baseline —
+    // an aborted turn can strand it in_progress forever.
+    const msgs: AgentMessage[] = [
+      write("w1", "/a.md", "A"),
+      write("w2", "/a.md", "B", "in_progress"),
+      write("w3", "/a.md", "C"),
+    ];
+    const b = computeEditBaselines(msgs);
+    expect(b.get("w2")).toBe("A");
+    expect(b.get("w3")).toBeUndefined();
   });
 
   it("end-to-end: the 2nd write renders a real diff (the claude-test.md case)", () => {
@@ -510,6 +558,33 @@ describe("real-patch rendering — actual file line numbers (2026-07-05)", () =>
       rawInput: { file_path: "/a.ts", old_string: "a\nb", new_string: "a\nB" },
     });
     expect(extractDiffSource(m)?.patch).toBeUndefined();
+  });
+});
+
+describe("editFallbackText — the failed edit's error line (2026-08-01)", () => {
+  // A failed edit's tool_call_update carries the error as a content text block
+  // (Claude translator strips the <tool_use_error> wrapper). EditCard renders
+  // it above the attempted diff so an expanded failed row answers WHY.
+
+  it("reads the error from the result's content text block", () => {
+    const m = tool({
+      status: "failed",
+      rawInput: { file_path: "/a.ts", old_string: "x", new_string: "y" },
+      content: [
+        {
+          type: "content",
+          content: { type: "text", text: "String to replace not found in file." },
+        },
+      ] as never,
+    });
+    expect(editFallbackText(m)).toBe("String to replace not found in file.");
+  });
+
+  it("falls back to a STRING rawOutput, and never JSON-dumps an object one", () => {
+    expect(editFallbackText(tool({ rawOutput: "File has not been read yet." }))).toBe(
+      "File has not been read yet.",
+    );
+    expect(editFallbackText(tool({ rawOutput: { jsonrpc: "2.0", error: {} } }))).toBeNull();
   });
 });
 

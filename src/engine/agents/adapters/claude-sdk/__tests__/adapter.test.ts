@@ -13,7 +13,11 @@ import * as path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { ClaudeSdkAdapter } from "../adapter";
-import type { AgentAdapterContext, SessionNotification } from "../../../types";
+import {
+  AgentFailureError,
+  type AgentAdapterContext,
+  type SessionNotification,
+} from "../../../types";
 import type { AvailableCommand } from "@zeros/core/agent-events";
 
 const TMP_DATA = path.join(os.tmpdir(), `zeros-sdk-test-${process.pid}`);
@@ -68,7 +72,10 @@ function makeCtx(
       onPermissionRequest: (_a: string, id: string, request: unknown) =>
         perms.push({ id, request }),
       onQuestionRequest: (_a: string, id: string, request: unknown) =>
-        extras?.questions?.push({ id, request: request as QuestionCapture["request"] }),
+        extras?.questions?.push({
+          id,
+          request: request as QuestionCapture["request"],
+        }),
       onQuestionSettled: (
         _a: string,
         questionId: string,
@@ -92,7 +99,12 @@ type Msg = Record<string, unknown>;
 function makeScriptedQuery(
   batches: Msg[][],
   opts?: {
-    commands?: Array<{ name: string; description: string; argumentHint: string; aliases?: string[] }>;
+    commands?: Array<{
+      name: string;
+      description: string;
+      argumentHint: string;
+      aliases?: string[];
+    }>;
     /** Model list query.supportedModels() resolves to (default []). */
     supportedModels?: unknown[];
     /** Per-call override; receives the 1-based call number (lets a test
@@ -116,8 +128,16 @@ function makeScriptedQuery(
     contextUsage?: {
       totalTokens: number;
       maxTokens: number;
-      categories?: Array<{ name: string; tokens: number; isDeferred?: boolean }>;
+      categories?: Array<{
+        name: string;
+        tokens: number;
+        isDeferred?: boolean;
+      }>;
     };
+    /** Simulate an older SDK query without the task-stop control method. */
+    omitStopTask?: boolean;
+    /** Observe whether an unrelated turn is active at interrupt time. */
+    onInterrupt?: () => void;
   },
 ) {
   let call = 0;
@@ -125,6 +145,7 @@ function makeScriptedQuery(
   const control = {
     interrupts: 0,
     closes: 0,
+    stoppedTasks: [] as string[],
     modes: [] as string[],
     models: [] as string[],
     /** Each applyFlagSettings() payload, in order. */
@@ -172,7 +193,9 @@ function makeScriptedQuery(
     });
     const hasResult = msgs.some((m) => m.type === "result");
     const stayOpen = !hasResult || opts?.keepAliveAfterResult === true;
-    const signal = (params.options?.abortController as AbortController | undefined)?.signal;
+    const signal = (
+      params.options?.abortController as AbortController | undefined
+    )?.signal;
     signal?.addEventListener("abort", () => release(), { once: true });
     const gen = (async function* () {
       for (const m of msgs) {
@@ -183,12 +206,20 @@ function makeScriptedQuery(
     })();
     const q = gen as unknown as Record<string, unknown>;
     q.interrupt = async () => {
+      opts?.onInterrupt?.();
       control.interrupts += 1;
       release();
     };
+    if (!opts?.omitStopTask) {
+      q.stopTask = async (taskId: string) => {
+        control.stoppedTasks.push(taskId);
+      };
+    }
     q.setPermissionMode = async (m: string) => {
       if (opts?.rejectModes?.test(m)) {
-        throw new Error(`Cannot set permission mode to ${m}: ${m} mode unavailable for this model`);
+        throw new Error(
+          `Cannot set permission mode to ${m}: ${m} mode unavailable for this model`,
+        );
       }
       control.modes.push(m);
     };
@@ -209,7 +240,13 @@ function makeScriptedQuery(
     };
     return q;
   };
-  return { queryFn: queryFn as never, captured, control, releaseModels, inputsSeen };
+  return {
+    queryFn: queryFn as never,
+    captured,
+    control,
+    releaseModels,
+    inputsSeen,
+  };
 }
 
 const initMsg = (sid: string): Msg => ({
@@ -244,7 +281,10 @@ const textBlock = (t: string) => ({ type: "text", text: t });
 const cmdUpdates = (emitted: SessionNotification[]) =>
   emitted.filter((n) => n.update.sessionUpdate === "available_commands_update");
 const cmdNames = (n: SessionNotification): string[] =>
-  ((n.update as { availableCommands?: AvailableCommand[] }).availableCommands ?? [])
+  (
+    (n.update as { availableCommands?: AvailableCommand[] })
+      .availableCommands ?? []
+  )
     .map((c) => c.name)
     .sort();
 // A token-by-token partial (what the SDK emits with includePartialMessages:
@@ -252,7 +292,10 @@ const cmdNames = (n: SessionNotification): string[] =>
 const streamText = (t: string): Msg => ({
   type: "stream_event",
   parent_tool_use_id: null,
-  event: { type: "content_block_delta", delta: { type: "text_delta", text: t } },
+  event: {
+    type: "content_block_delta",
+    delta: { type: "text_delta", text: t },
+  },
 });
 
 describe("ClaudeSdkAdapter", () => {
@@ -261,7 +304,12 @@ describe("ClaudeSdkAdapter", () => {
     // Real SDK shape with includePartialMessages: a text delta, THEN the
     // final full assistant message carrying the same text.
     const { queryFn, captured } = makeScriptedQuery([
-      [initMsg("sdk-1"), streamText("hi back"), assistantText("hi back"), resultOk("sdk-1")],
+      [
+        initMsg("sdk-1"),
+        streamText("hi back"),
+        assistantText("hi back"),
+        resultOk("sdk-1"),
+      ],
     ]);
     const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
     const { session } = await adapter.newSession({ cwd: "/tmp" });
@@ -365,7 +413,9 @@ describe("ClaudeSdkAdapter", () => {
     // emitContextUsage is fire-and-forget — let its microtask land.
     await new Promise((r) => setTimeout(r, 0));
 
-    const usage = emitted.filter((n) => n.update.sessionUpdate === "usage_update");
+    const usage = emitted.filter(
+      (n) => n.update.sessionUpdate === "usage_update",
+    );
     // The result-time billing update fires first; the window-truth update
     // must land LAST so it wins in the store.
     const final = usage.at(-1)!.update as {
@@ -398,7 +448,12 @@ describe("ClaudeSdkAdapter", () => {
       [
         [
           initMsg("sdk-cp"),
-          { type: "system", subtype: "status", status: "compacting", session_id: "sdk-cp" },
+          {
+            type: "system",
+            subtype: "status",
+            status: "compacting",
+            session_id: "sdk-cp",
+          },
           {
             type: "system",
             subtype: "compact_boundary",
@@ -432,7 +487,11 @@ describe("ClaudeSdkAdapter", () => {
     ).toBe(false);
     // Two-state row: opened running with the manual trigger, settled done.
     const open = emitted.find((n) => n.update.sessionUpdate === "tool_call")!
-      .update as { kind?: string; status?: string; rawInput?: { trigger?: string } };
+      .update as {
+      kind?: string;
+      status?: string;
+      rawInput?: { trigger?: string };
+    };
     expect(open.kind).toBe("compaction");
     expect(open.status).toBe("in_progress");
     expect(open.rawInput?.trigger).toBe("manual");
@@ -442,8 +501,12 @@ describe("ClaudeSdkAdapter", () => {
     expect(settle.title).toBe("Context compacted");
     expect(settle.status).toBe("completed");
     // The turnless result still refreshed the gauge.
-    const usage = emitted.filter((n) => n.update.sessionUpdate === "usage_update");
-    const final = usage.at(-1)?.update as { size?: number; used?: number } | undefined;
+    const usage = emitted.filter(
+      (n) => n.update.sessionUpdate === "usage_update",
+    );
+    const final = usage.at(-1)?.update as
+      | { size?: number; used?: number }
+      | undefined;
     expect(final?.size).toBe(200_000);
     expect(final?.used).toBe(12_000);
     await adapter.dispose();
@@ -461,7 +524,9 @@ describe("ClaudeSdkAdapter", () => {
       prompt: [textBlock("hi")] as never,
     });
     await new Promise((r) => setTimeout(r, 0));
-    const usage = emitted.filter((n) => n.update.sessionUpdate === "usage_update");
+    const usage = emitted.filter(
+      (n) => n.update.sessionUpdate === "usage_update",
+    );
     // Only the translator's billing update — none carries categories.
     expect(usage.every((n) => !("categories" in n.update))).toBe(true);
     await adapter.dispose();
@@ -475,9 +540,14 @@ describe("ClaudeSdkAdapter", () => {
     const a = makeScriptedQuery([
       [initMsg("sdk-pa"), assistantText("ok"), resultOk("sdk-pa")],
     ]);
-    const adapterA = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: a.queryFn });
+    const adapterA = new ClaudeSdkAdapter(makeCtx([], []), {
+      queryFn: a.queryFn,
+    });
     const { session: sa } = await adapterA.newSession({ cwd: "/tmp" });
-    await adapterA.prompt({ sessionId: sa.sessionId, prompt: [textBlock("hi")] as never });
+    await adapterA.prompt({
+      sessionId: sa.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
     expect(a.captured[0]?.systemPrompt).toEqual({
       type: "preset",
       preset: "claude_code",
@@ -488,12 +558,17 @@ describe("ClaudeSdkAdapter", () => {
     const b = makeScriptedQuery([
       [initMsg("sdk-pb"), assistantText("ok"), resultOk("sdk-pb")],
     ]);
-    const adapterB = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: b.queryFn });
+    const adapterB = new ClaudeSdkAdapter(makeCtx([], []), {
+      queryFn: b.queryFn,
+    });
     const { session: sb } = await adapterB.newSession({
       cwd: "/tmp",
       env: { CLAUDE_APPEND_SYSTEM_PROMPT: "be terse" },
     });
-    await adapterB.prompt({ sessionId: sb.sessionId, prompt: [textBlock("hi")] as never });
+    await adapterB.prompt({
+      sessionId: sb.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
     expect(b.captured[0]?.systemPrompt).toEqual({
       type: "preset",
       preset: "claude_code",
@@ -509,20 +584,28 @@ describe("ClaudeSdkAdapter", () => {
       {
         commands: [
           { name: "review", description: "Review a PR", argumentHint: "" },
-          { name: "compact", description: "Summarize", argumentHint: "<focus>" },
+          {
+            name: "compact",
+            description: "Summarize",
+            argumentHint: "<focus>",
+          },
         ],
       },
     );
     const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
     const { session } = await adapter.newSession({ cwd: "/tmp" });
-    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
     await tick();
 
     const updates = cmdUpdates(emitted);
     expect(updates.length).toBeGreaterThanOrEqual(1);
     expect(cmdNames(updates[0])).toEqual(["compact", "review"]);
-    const cmds = (updates[0].update as { availableCommands: AvailableCommand[] })
-      .availableCommands;
+    const cmds = (
+      updates[0].update as { availableCommands: AvailableCommand[] }
+    ).availableCommands;
     // argumentHint → input.hint only when non-empty (drives "takes input" tag).
     expect(cmds.find((c) => c.name === "compact")?.input?.hint).toBe("<focus>");
     expect(cmds.find((c) => c.name === "review")?.input).toBeUndefined();
@@ -557,12 +640,16 @@ describe("ClaudeSdkAdapter", () => {
     );
     const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
     const { session } = await adapter.newSession({ cwd: "/tmp" });
-    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
     await tick();
 
     const updates = cmdUpdates(emitted);
-    const cmds = (updates[0].update as { availableCommands: AvailableCommand[] })
-      .availableCommands;
+    const cmds = (
+      updates[0].update as { availableCommands: AvailableCommand[] }
+    ).availableCommands;
     expect(cmds.find((c) => c.name === "web-perf")?.kind).toBe("skill");
     expect(cmds.find((c) => c.name === "wrangler")?.kind).toBe("skill");
     expect(cmds.find((c) => c.name === "review")?.kind).toBe("command");
@@ -575,7 +662,9 @@ describe("ClaudeSdkAdapter", () => {
       [
         [
           initMsg("sdk-cc"),
-          commandsChanged([{ name: "newcmd", description: "fresh", argumentHint: "" }]),
+          commandsChanged([
+            { name: "newcmd", description: "fresh", argumentHint: "" },
+          ]),
           assistantText("ok"),
           resultOk("sdk-cc"),
         ],
@@ -584,7 +673,10 @@ describe("ClaudeSdkAdapter", () => {
     );
     const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
     const { session } = await adapter.newSession({ cwd: "/tmp" });
-    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
     await tick();
 
     const updates = cmdUpdates(emitted);
@@ -596,16 +688,26 @@ describe("ClaudeSdkAdapter", () => {
   it("resumes the persisted SDK session id after a reopen (fresh adapter, same id)", async () => {
     const emitted: SessionNotification[] = [];
     const q1 = makeScriptedQuery([[initMsg("sdk-7"), resultOk("sdk-7")]]);
-    const a1 = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: q1.queryFn });
+    const a1 = new ClaudeSdkAdapter(makeCtx(emitted, []), {
+      queryFn: q1.queryFn,
+    });
     const { session } = await a1.newSession({ cwd: "/tmp" });
-    await a1.prompt({ sessionId: session.sessionId, prompt: [textBlock("a")] as never });
+    await a1.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("a")] as never,
+    });
     await tick(); // let the consumer persist the captured session id
 
     // Simulate an engine restart: a FRESH adapter loads the SAME session id.
     const q2 = makeScriptedQuery([[assistantText("more"), resultOk("sdk-7")]]);
-    const a2 = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: q2.queryFn });
+    const a2 = new ClaudeSdkAdapter(makeCtx(emitted, []), {
+      queryFn: q2.queryFn,
+    });
     await a2.loadSession({ sessionId: session.sessionId, cwd: "/tmp" });
-    await a2.prompt({ sessionId: session.sessionId, prompt: [textBlock("b")] as never });
+    await a2.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("b")] as never,
+    });
 
     expect(q1.captured[0]?.resume).toBeUndefined(); // first ever turn: cold
     expect(q2.captured[0]?.resume).toBe("sdk-7"); // reopen: resumes real id
@@ -641,7 +743,9 @@ describe("ClaudeSdkAdapter", () => {
     expect(perms.length).toBe(1);
     adapter.respondToPermission({
       permissionId: perms[0].id,
-      response: { outcome: { outcome: "selected", optionId: "allow_once" } } as never,
+      response: {
+        outcome: { outcome: "selected", optionId: "allow_once" },
+      } as never,
     });
     expect((await decision).behavior).toBe("allow");
     await turn;
@@ -989,7 +1093,9 @@ describe("ClaudeSdkAdapter", () => {
     await tick();
     adapter.respondToPermission({
       permissionId: perms[0].id,
-      response: { outcome: { outcome: "selected", optionId: "reject_once" } } as never,
+      response: {
+        outcome: { outcome: "selected", optionId: "reject_once" },
+      } as never,
     });
     const result = await decision;
     expect(result.behavior).toBe("deny");
@@ -1087,10 +1193,179 @@ describe("ClaudeSdkAdapter", () => {
     const { queryFn, control } = makeScriptedQuery([[initMsg("sdk-1")]]);
     const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
     const { session } = await adapter.newSession({ cwd: "/tmp" });
-    void adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never });
+    void adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
     await tick();
     await adapter.cancel({ sessionId: session.sessionId });
     expect(control.interrupts).toBe(1);
+    await adapter.dispose();
+  });
+
+  it("publishes only one-shot wakeups from the passive Stop hook", async () => {
+    const emitted: SessionNotification[] = [];
+    const { queryFn, captured } = makeScriptedQuery([[initMsg("sdk-1")]]);
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    void adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("watch the deploy")] as never,
+    });
+    await tick();
+
+    const hooks = captured[0]?.hooks as {
+      Stop?: Array<{
+        hooks: Array<(input: Record<string, unknown>) => Promise<unknown>>;
+      }>;
+    };
+    expect(hooks.Stop).toHaveLength(1);
+    await hooks.Stop![0].hooks[0]({
+      hook_event_name: "Stop",
+      session_crons: [
+        {
+          id: "wake-1",
+          schedule: "3 19 31 7 *",
+          recurring: false,
+          prompt: "Check deployment status",
+        },
+        {
+          id: "cron-1",
+          schedule: "0 9 * * 1-5",
+          recurring: true,
+          prompt: "Daily report",
+        },
+      ],
+    });
+
+    expect(
+      emitted
+        .filter((n) => n.update.sessionUpdate === "background_tasks_update")
+        .at(-1)?.update,
+    ).toMatchObject({
+      tasks: [expect.objectContaining({ taskId: "scheduled-wakeup:wake-1" })],
+    });
+    await adapter.cancel({ sessionId: session.sessionId });
+    await adapter.dispose();
+  });
+
+  it("stops native tasks directly and cancels one-shot wakeups via idle interrupt", async () => {
+    const { queryFn, control } = makeScriptedQuery(
+      [[initMsg("sdk-1"), resultOk("sdk-1")]],
+      { keepAliveAfterResult: true },
+    );
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("start work")] as never,
+    });
+
+    await adapter.stopBackgroundTask({
+      sessionId: session.sessionId,
+      taskId: "shell-1",
+    });
+    expect(control.stoppedTasks).toEqual(["shell-1"]);
+    expect(control.interrupts).toBe(0);
+
+    await adapter.stopBackgroundTask({
+      sessionId: session.sessionId,
+      taskId: "scheduled-wakeup:wake-1",
+    });
+    expect(control.stoppedTasks).toEqual(["shell-1"]);
+    expect(control.interrupts).toBe(1);
+    await adapter.dispose();
+  });
+
+  it("never lets a scheduled-wakeup stop interrupt the next queued reply", async () => {
+    const adapterRef: { current: ClaudeSdkAdapter | null } = { current: null };
+    let interruptSawActiveTurn = false;
+    const { queryFn } = makeScriptedQuery(
+      [[initMsg("sdk-1"), resultOk("sdk-1")]],
+      {
+        keepAliveAfterResult: true,
+        onInterrupt: () => {
+          const sessionState = (
+            adapterRef.current as unknown as {
+              sessions: Map<string, { turn: unknown | null }>;
+            }
+          ).sessions
+            .values()
+            .next().value;
+          interruptSawActiveTurn = sessionState?.turn !== null;
+        },
+      },
+    );
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    adapterRef.current = adapter;
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const firstPrompt = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("first reply")] as never,
+    });
+    const sessionState = (
+      adapter as unknown as {
+        sessions: Map<
+          string,
+          {
+            turn: {
+              promise: Promise<unknown>;
+            } | null;
+          }
+        >;
+      }
+    ).sessions.get(session.sessionId)!;
+    let queuedPrompt: Promise<unknown> = Promise.resolve();
+    sessionState.turn!.promise.then(() => {
+      queuedPrompt = adapter.prompt({
+        sessionId: session.sessionId,
+        prompt: [textBlock("queued reply")] as never,
+      });
+      void queuedPrompt.catch(() => undefined);
+    });
+
+    const stopping = adapter.stopBackgroundTask({
+      sessionId: session.sessionId,
+      taskId: "scheduled-wakeup:wake-1",
+    });
+    await firstPrompt;
+    await stopping;
+
+    expect(interruptSawActiveTurn).toBe(false);
+    await adapter.dispose();
+    await queuedPrompt.catch(() => undefined);
+  });
+
+  it("reports a clear compatibility error when native task stopping is unavailable", async () => {
+    const { queryFn } = makeScriptedQuery(
+      [[initMsg("sdk-1"), resultOk("sdk-1")]],
+      { keepAliveAfterResult: true, omitStopTask: true },
+    );
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("start work")] as never,
+    });
+
+    const failure = await adapter
+      .stopBackgroundTask({
+        sessionId: session.sessionId,
+        taskId: "shell-1",
+      })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    expect(failure).toBeInstanceOf(AgentFailureError);
+    expect((failure as AgentFailureError).failure).toMatchObject({
+      kind: "protocol-error",
+      stage: "stopBackgroundTask",
+      agentId: "claude",
+    });
+    expect((failure as Error).message).toContain(
+      "does not support stopping background tasks",
+    );
     await adapter.dispose();
   });
 
@@ -1098,7 +1373,9 @@ describe("ClaudeSdkAdapter", () => {
     const emitted: SessionNotification[] = [];
     const perms: PermCapture[] = [];
     // No result → the turn stays in flight, blocked on the tool permission.
-    const { queryFn, captured, control } = makeScriptedQuery([[initMsg("sdk-1")]]);
+    const { queryFn, captured, control } = makeScriptedQuery([
+      [initMsg("sdk-1")],
+    ]);
     const adapter = new ClaudeSdkAdapter(makeCtx(emitted, perms), { queryFn });
     const { session } = await adapter.newSession({ cwd: "/tmp" });
     void adapter.prompt({
@@ -1175,7 +1452,10 @@ describe("ClaudeSdkAdapter", () => {
     const { session } = await adapter.newSession({ cwd: "/tmp" });
     // Pre-turn pick (no live query yet) → the flag rides the first query build.
     await adapter.setMode({ sessionId: session.sessionId, modeId: "bypass" });
-    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
 
     expect(captured).toHaveLength(1);
     expect(captured[0].permissionMode).toBe("bypassPermissions");
@@ -1195,7 +1475,10 @@ describe("ClaudeSdkAdapter", () => {
     const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
     const { session } = await adapter.newSession({ cwd: "/tmp" });
     await adapter.setMode({ sessionId: session.sessionId, modeId: "plan" });
-    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
     expect(captured[0].permissionMode).toBe("plan");
     expect(captured[0].allowDangerouslySkipPermissions).toBeUndefined();
     // The gate lives in canUseTool for every non-bypass mode.
@@ -1215,14 +1498,20 @@ describe("ClaudeSdkAdapter", () => {
     );
     const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
     const { session } = await adapter.newSession({ cwd: "/tmp" });
-    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("a")] as never });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("a")] as never,
+    });
     await tick();
     expect(captured).toHaveLength(1);
     expect(captured[0].allowDangerouslySkipPermissions).toBeUndefined();
 
     // The flag is creation-only, so this schedules a resume-rebuild.
     await adapter.setMode({ sessionId: session.sessionId, modeId: "bypass" });
-    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("b")] as never });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("b")] as never,
+    });
 
     expect(captured).toHaveLength(2); // rebuilt to pick up the flag
     expect(captured[1].permissionMode).toBe("bypassPermissions");
@@ -1249,7 +1538,10 @@ describe("ClaudeSdkAdapter", () => {
     const { session } = await adapter.newSession({ cwd: "/tmp" });
     // Build the first query in bypass: flag on, no canUseTool.
     await adapter.setMode({ sessionId: session.sessionId, modeId: "bypass" });
-    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("a")] as never });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("a")] as never,
+    });
     await tick();
     expect(captured).toHaveLength(1);
     expect(captured[0].allowDangerouslySkipPermissions).toBe(true);
@@ -1257,7 +1549,10 @@ describe("ClaudeSdkAdapter", () => {
 
     // Switch back to a gated mode → resume-rebuild so the gate returns.
     await adapter.setMode({ sessionId: session.sessionId, modeId: "default" });
-    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("b")] as never });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("b")] as never,
+    });
 
     expect(captured).toHaveLength(2); // rebuilt to drop the flag + re-add the gate
     expect(captured[1].permissionMode).toBe("default");
@@ -1275,7 +1570,10 @@ describe("ClaudeSdkAdapter", () => {
     });
     const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
     const { session } = await adapter.newSession({ cwd: "/tmp" });
-    void adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never });
+    void adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
     await tick();
 
     await adapter.setMode({ sessionId: session.sessionId, modeId: "auto" });
@@ -1286,7 +1584,9 @@ describe("ClaudeSdkAdapter", () => {
     const upd = emitted
       .filter((n) => n.update.sessionUpdate === "current_mode_update")
       .pop();
-    expect((upd?.update as { currentModeId?: string }).currentModeId).toBe("accept-edits");
+    expect((upd?.update as { currentModeId?: string }).currentModeId).toBe(
+      "accept-edits",
+    );
     await adapter.dispose();
   });
 
@@ -1301,7 +1601,10 @@ describe("ClaudeSdkAdapter", () => {
     const { session } = await adapter.newSession({ cwd: "/tmp" });
     // Pre-turn pick (no live query yet) — stored, applied at query creation.
     await adapter.setMode({ sessionId: session.sessionId, modeId: "auto" });
-    void adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never });
+    void adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
     await tick();
     await tick();
 
@@ -1309,7 +1612,9 @@ describe("ClaudeSdkAdapter", () => {
     const upd = emitted
       .filter((n) => n.update.sessionUpdate === "current_mode_update")
       .pop();
-    expect((upd?.update as { currentModeId?: string }).currentModeId).toBe("accept-edits");
+    expect((upd?.update as { currentModeId?: string }).currentModeId).toBe(
+      "accept-edits",
+    );
     await adapter.dispose();
   });
 
@@ -1324,7 +1629,10 @@ describe("ClaudeSdkAdapter", () => {
     const before = emitted.filter(
       (n) => n.update.sessionUpdate === "current_mode_update",
     ).length; // the setMode ack itself
-    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
     await tick();
     const after = emitted.filter(
       (n) => n.update.sessionUpdate === "current_mode_update",
@@ -1335,59 +1643,88 @@ describe("ClaudeSdkAdapter", () => {
 
   it("setModel applies live to the running query", async () => {
     // Open turn (no result) so the query stays alive to receive setModel.
-    const { queryFn, control, captured } = makeScriptedQuery([[initMsg("sdk-1")]]);
+    const { queryFn, control, captured } = makeScriptedQuery([
+      [initMsg("sdk-1")],
+    ]);
     const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
     const { session } = await adapter.newSession({
       cwd: "/tmp",
       env: { ANTHROPIC_MODEL: "claude-haiku-4-5" },
     });
-    void adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never });
+    void adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
     await tick();
     expect(captured[0]?.model).toBe("claude-haiku-4-5"); // created with env model
-    await adapter.setModel({ sessionId: session.sessionId, model: "claude-opus-4-8" });
+    await adapter.setModel({
+      sessionId: session.sessionId,
+      model: "claude-opus-4-8",
+    });
     expect(control.models).toContain("claude-opus-4-8"); // applied live
     await adapter.dispose();
   });
 
   it("setModel before a turn wins over env when the query is created", async () => {
-    const { queryFn, captured } = makeScriptedQuery([[initMsg("sdk-1"), resultOk("sdk-1")]]);
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-1"), resultOk("sdk-1")],
+    ]);
     const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
     const { session } = await adapter.newSession({
       cwd: "/tmp",
       env: { ANTHROPIC_MODEL: "claude-haiku-4-5" },
     });
-    await adapter.setModel({ sessionId: session.sessionId, model: "claude-opus-4-8" });
-    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never });
+    await adapter.setModel({
+      sessionId: session.sessionId,
+      model: "claude-opus-4-8",
+    });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
     expect(captured[0]?.model).toBe("claude-opus-4-8"); // live override beats env
     await adapter.dispose();
   });
 
   it("buildOptions carries additionalDirectories from ZEROS_ADDITIONAL_DIRS into settings.permissions", async () => {
-    const { queryFn, captured } = makeScriptedQuery([[initMsg("sdk-1"), resultOk("sdk-1")]]);
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-1"), resultOk("sdk-1")],
+    ]);
     const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
     const { session } = await adapter.newSession({
       cwd: "/tmp",
       env: { ZEROS_ADDITIONAL_DIRS: '["/work/api","/work/web"]' },
     });
-    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
     // Dirs now ride the flag-settings layer (so updateConfig can mutate them
     // live) — NOT a top-level Options field anymore.
     const settings = captured[0]?.settings as {
       permissions?: { additionalDirectories?: string[] };
     };
-    expect(settings.permissions?.additionalDirectories).toEqual(["/work/api", "/work/web"]);
+    expect(settings.permissions?.additionalDirectories).toEqual([
+      "/work/api",
+      "/work/web",
+    ]);
     expect(captured[0]?.additionalDirectories).toBeUndefined();
     await adapter.dispose();
   });
 
   it("buildOptions sends an EMPTY additionalDirectories array (not omitted) when env is absent or malformed", async () => {
-    const { queryFn, captured } = makeScriptedQuery([[initMsg("sdk-1"), resultOk("sdk-1")]]);
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-1"), resultOk("sdk-1")],
+    ]);
     const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
     const { session } = await adapter.newSession({
       cwd: "/tmp",
       env: { ZEROS_ADDITIONAL_DIRS: "not-json" },
     });
-    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
     // Empty array (not absence) so a later applyFlagSettings whole-object
     // permissions replacement can CLEAR a previously-set dir list.
     const settings = captured[0]?.settings as {
@@ -1400,7 +1737,9 @@ describe("ClaudeSdkAdapter", () => {
 
   it("loadSession re-advertises modes so a resumed chat keeps the agent permission pill", async () => {
     const emitted: SessionNotification[] = [];
-    const { queryFn } = makeScriptedQuery([[initMsg("sdk-1"), resultOk("sdk-1")]]);
+    const { queryFn } = makeScriptedQuery([
+      [initMsg("sdk-1"), resultOk("sdk-1")],
+    ]);
     const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
     const { session } = await adapter.newSession({ cwd: "/tmp" });
     const resp = (await adapter.loadSession({
@@ -1413,10 +1752,15 @@ describe("ClaudeSdkAdapter", () => {
 
   it("updateConfig applies effort/fast/dirs LIVE via applyFlagSettings without recreating the query", async () => {
     // Open turn (no result) → the query stays alive to receive the live update.
-    const { queryFn, captured, control } = makeScriptedQuery([[initMsg("sdk-1")]]);
+    const { queryFn, captured, control } = makeScriptedQuery([
+      [initMsg("sdk-1")],
+    ]);
     const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
     const { session } = await adapter.newSession({ cwd: "/tmp" });
-    void adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never });
+    void adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
     await tick();
     expect(captured.length).toBe(1); // one query created so far
 
@@ -1438,7 +1782,11 @@ describe("ClaudeSdkAdapter", () => {
     const applied = control.flagSettings[0] as {
       effortLevel?: string;
       fastMode?: boolean;
-      permissions?: { additionalDirectories?: string[]; allow?: string[]; deny?: string[] };
+      permissions?: {
+        additionalDirectories?: string[];
+        allow?: string[];
+        deny?: string[];
+      };
     };
     expect(applied.effortLevel).toBe("high");
     expect(applied.fastMode).toBe(true);
@@ -1458,7 +1806,10 @@ describe("ClaudeSdkAdapter", () => {
       cwd: "/tmp",
       env: { ZEROS_FAST_MODE: "1" },
     });
-    void adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never });
+    void adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
     await tick();
     // Toggle Fast OFF: envForChat OMITS ZEROS_FAST_MODE when off, sending only
     // the always-present effort key. A plain merge would strand the stale "1";
@@ -1480,7 +1831,10 @@ describe("ClaudeSdkAdapter", () => {
       cwd: "/tmp",
       env: { ZEROS_ADDITIONAL_DIRS: '["/work/api"]' },
     });
-    void adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never });
+    void adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
     await tick();
     // Remove the last dir: envForChat OMITS ZEROS_ADDITIONAL_DIRS when empty.
     await adapter.updateConfig({
@@ -1505,7 +1859,10 @@ describe("ClaudeSdkAdapter", () => {
     ]);
     const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
     const { session } = await adapter.newSession({ cwd: "/tmp" });
-    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("a")] as never });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("a")] as never,
+    });
     await tick(); // let the consumer persist the captured session id + go null
 
     // Fast mode was OFF at creation; stage it on (a flag-settings knob → no
@@ -1516,7 +1873,10 @@ describe("ClaudeSdkAdapter", () => {
     });
 
     // Next prompt recreates the query WITH resume + the staged env.
-    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("b")] as never });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("b")] as never,
+    });
     expect(captured.length).toBe(2);
     expect(captured[1]?.resume).toBe("sdk-1"); // resume preserved
     const settings = captured[1]?.settings as { fastMode?: boolean };
@@ -1539,7 +1899,10 @@ describe("ClaudeSdkAdapter", () => {
       cwd: "/tmp",
       env: { CLAUDE_MAX_TURNS: "10" },
     });
-    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("a")] as never });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("a")] as never,
+    });
     await tick(); // turn settled; query stays alive (idle)
     expect(captured.length).toBe(1);
 
@@ -1552,7 +1915,10 @@ describe("ClaudeSdkAdapter", () => {
     expect(control.interrupts).toBe(0);
 
     // Next prompt recreates WITH resume and the NEW maxTurns.
-    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("b")] as never });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("b")] as never,
+    });
     expect(captured.length).toBe(2);
     expect(captured[1]?.resume).toBe("sdk-1");
     expect(captured[1]?.maxTurns).toBe(25);
@@ -1561,13 +1927,18 @@ describe("ClaudeSdkAdapter", () => {
 
   it("updateConfig does NOT interrupt or recreate an IN-FLIGHT turn for a restart-only knob", async () => {
     // Open turn (no result) → a turn is in flight.
-    const { queryFn, captured, control } = makeScriptedQuery([[initMsg("sdk-1")]]);
+    const { queryFn, captured, control } = makeScriptedQuery([
+      [initMsg("sdk-1")],
+    ]);
     const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
     const { session } = await adapter.newSession({
       cwd: "/tmp",
       env: { CLAUDE_MAX_TURNS: "10" },
     });
-    void adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never });
+    void adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
     await tick();
     expect(captured.length).toBe(1);
 
@@ -1603,13 +1974,21 @@ describe("ClaudeSdkAdapter", () => {
         ],
       },
     );
-    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: q.queryFn });
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
+      queryFn: q.queryFn,
+    });
     const a = await adapter.newSession({ cwd: "/tmp" });
     const b = await adapter.newSession({ cwd: "/tmp" });
     // Fire both WITHOUT awaiting so their discoveries race; the single-flight
     // memo on the adapter must collapse them to ONE supportedModels() call.
-    void adapter.prompt({ sessionId: a.session.sessionId, prompt: [textBlock("a")] as never });
-    void adapter.prompt({ sessionId: b.session.sessionId, prompt: [textBlock("b")] as never });
+    void adapter.prompt({
+      sessionId: a.session.sessionId,
+      prompt: [textBlock("a")] as never,
+    });
+    void adapter.prompt({
+      sessionId: b.session.sessionId,
+      prompt: [textBlock("b")] as never,
+    });
     await tick();
     q.releaseModels(); // let the single in-flight discovery resolve
     await tick();
@@ -1619,27 +1998,41 @@ describe("ClaudeSdkAdapter", () => {
   });
 
   it("discoverModels appends the ultracode tier wherever a model supports xhigh", async () => {
-    const { queryFn } = makeScriptedQuery([[initMsg("sdk-1"), resultOk("sdk-1")]], {
-      supportedModels: [
-        {
-          value: "claude-opus-4-8",
-          displayName: "Opus 4.8",
-          supportsEffort: true,
-          supportedEffortLevels: ["low", "high", "xhigh"],
-          supportsFastMode: true,
-        },
-      ],
-    });
+    const { queryFn } = makeScriptedQuery(
+      [[initMsg("sdk-1"), resultOk("sdk-1")]],
+      {
+        supportedModels: [
+          {
+            value: "claude-opus-4-8",
+            displayName: "Opus 4.8",
+            supportsEffort: true,
+            supportedEffortLevels: ["low", "high", "xhigh"],
+            supportsFastMode: true,
+          },
+        ],
+      },
+    );
     const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
     const { session } = await adapter.newSession({ cwd: "/tmp" });
-    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
     await tick();
     await tick(); // let the (void) discovery settle into cachedInitialize
 
     const init = (await adapter.initialize()) as {
-      _meta?: { models?: Array<{ value: string; effortLevels?: string[]; supportsFast?: boolean }> };
+      _meta?: {
+        models?: Array<{
+          value: string;
+          effortLevels?: string[];
+          supportsFast?: boolean;
+        }>;
+      };
     };
-    const model = init._meta?.models?.find((m) => m.value === "claude-opus-4-8");
+    const model = init._meta?.models?.find(
+      (m) => m.value === "claude-opus-4-8",
+    );
     expect(model).toBeDefined();
     // xhigh present → the OUR-tier "ultracode" is appended after it.
     expect(model?.effortLevels).toEqual(["low", "high", "xhigh", "ultracode"]);
@@ -1675,20 +2068,30 @@ describe("ClaudeSdkAdapter", () => {
     const { session } = await adapter.newSession({ cwd: "/tmp" });
 
     // Turn 1: discovery fires + rejects → memo resets to null, catalog empty.
-    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("a")] as never });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("a")] as never,
+    });
     await tick();
     await tick();
-    const init1 = (await adapter.initialize()) as { _meta?: { models?: unknown[] } };
+    const init1 = (await adapter.initialize()) as {
+      _meta?: { models?: unknown[] };
+    };
     expect(init1._meta?.models).toBeUndefined(); // first discovery failed
 
     // Turn 2: a fresh query → discovery fires AGAIN (memo was reset) and succeeds.
-    await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("b")] as never });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("b")] as never,
+    });
     await tick();
     await tick();
     const init2 = (await adapter.initialize()) as {
       _meta?: { models?: Array<{ value: string }> };
     };
-    expect(init2._meta?.models?.map((m) => m.value)).toEqual(["claude-opus-4-8"]);
+    expect(init2._meta?.models?.map((m) => m.value)).toEqual([
+      "claude-opus-4-8",
+    ]);
     await adapter.dispose();
   });
 });
@@ -1894,9 +2297,7 @@ describe("ClaudeSdkAdapter AskUserQuestion", () => {
         outcome: { outcome: "answered", answers: [] },
       } as never,
     });
-    expect(
-      t.stderr.some((l) => l.includes("no pending question")),
-    ).toBe(true);
+    expect(t.stderr.some((l) => l.includes("no pending question"))).toBe(true);
     await t.turn;
     await t.adapter.dispose();
   });
@@ -2205,16 +2606,22 @@ describe("ClaudeSdkAdapter.steer", () => {
         prompt: [textBlock("hi")] as never,
       });
     } catch (err) {
-      failure = (err as { failure?: { kind?: string; message?: string } }).failure ?? null;
+      failure =
+        (err as { failure?: { kind?: string; message?: string } }).failure ??
+        null;
     }
     expect(failure).not.toBeNull();
     expect(failure?.kind).toBe("transport-closed");
     expect(failure?.message).toMatch(/network failure/i);
     // A durable transcript row records WHY the chat blipped.
-    const notice = emitted.find((n) => n.update.sessionUpdate === "error_notice");
+    const notice = emitted.find(
+      (n) => n.update.sessionUpdate === "error_notice",
+    );
     expect(notice).toBeTruthy();
     expect((notice!.update as { severity?: string }).severity).toBe("error");
-    expect((notice!.update as { recoverable?: boolean }).recoverable).toBe(true);
+    expect((notice!.update as { recoverable?: boolean }).recoverable).toBe(
+      true,
+    );
     await adapter.dispose();
   });
 
@@ -2240,9 +2647,9 @@ describe("ClaudeSdkAdapter.steer", () => {
       prompt: [textBlock("hi")] as never,
     });
     expect(res.stopReason).toBe("refusal");
-    expect(
-      emitted.some((n) => n.update.sessionUpdate === "error_notice"),
-    ).toBe(false);
+    expect(emitted.some((n) => n.update.sessionUpdate === "error_notice")).toBe(
+      false,
+    );
     await adapter.dispose();
   });
 
@@ -2275,4 +2682,3 @@ describe("ClaudeSdkAdapter.steer", () => {
     await adapter.dispose();
   });
 });
-

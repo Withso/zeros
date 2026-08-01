@@ -277,7 +277,11 @@ export class AgentGateway {
   private readonly sessionsInstructed = new Set<string>();
   private readonly sessionToInstructionCtx = new Map<
     string,
-    { additionalDirectories: string[]; targetBranch?: string; customInstructions?: string }
+    {
+      additionalDirectories: string[];
+      targetBranch?: string;
+      customInstructions?: string;
+    }
   >();
   private readonly agentInitializes = new Map<string, InitializeResponse>();
   /** Dedupe concurrent listAgents calls. Without this, every render
@@ -442,7 +446,11 @@ export class AgentGateway {
       const injected: McpServerRegistration[] = [];
       // The gateway endpoint fronting the auth:"oauth"/"header" backends.
       if (this.gatewayServerUrl) {
-        injected.push({ name: "zeros-gateway", transport: "http", url: this.gatewayServerUrl });
+        injected.push({
+          name: "zeros-gateway",
+          transport: "http",
+          url: this.gatewayServerUrl,
+        });
       }
       // Surface gateway backends that exist but have NO endpoint up yet.
       if (gatewayBackends.length > 0 && !this.gatewayServerUrl) {
@@ -457,7 +465,9 @@ export class AgentGateway {
       const reserved = new Set(injected.map((s) => s.name));
       const safeServers = servers.filter((s) => {
         if (!reserved.has(s.name)) return true;
-        console.warn(`[agents] ${agentId} MCP: server "${s.name}" uses a reserved gateway name — ignored.`);
+        console.warn(
+          `[agents] ${agentId} MCP: server "${s.name}" uses a reserved gateway name — ignored.`,
+        );
         return false;
       });
       return [...injected, ...safeServers];
@@ -602,7 +612,11 @@ export class AgentGateway {
     for (const m of AGENT_MANIFEST) {
       if (!m.runtimeUnavailable) continue;
       try {
-        const { cliBinary } = applyUserProviderConfig(this.projectRoot, m.id, {});
+        const { cliBinary } = applyUserProviderConfig(
+          this.projectRoot,
+          m.id,
+          {},
+        );
         const trimmed = cliBinary?.trim();
         if (trimmed) out.set(m.id, trimmed);
       } catch {
@@ -790,7 +804,9 @@ export class AgentGateway {
     // worktree workspace-local. mainRepoRoot is the workspace's primary checkout;
     // absent (a plain-folder chat) → repo-local resolves from cwd, no
     // workspace-local — the prior behavior.
-    const mainRepoRoot = opts.workspaceId ? getWorkspaceById(opts.workspaceId)?.repoRoot : undefined;
+    const mainRepoRoot = opts.workspaceId
+      ? getWorkspaceById(opts.workspaceId)?.repoRoot
+      : undefined;
     const merged = await withTargetBranchEnv(
       withWorktreeEnv(mergeSpawnEnv(cwd, opts.env, mainRepoRoot), cwd),
       opts.workspaceId,
@@ -805,7 +821,11 @@ export class AgentGateway {
     // their protocol's own channel at thread creation; everyone else gets it
     // prepended in-band on the first prompt (withSystemInstruction).
     const instructionCtx = this.parseInstructionCtx(spawn.env);
-    const systemInstruction = this.nativeInstructionFor(adapter, cwd, instructionCtx);
+    const systemInstruction = this.nativeInstructionFor(
+      adapter,
+      cwd,
+      instructionCtx,
+    );
     const { session } = await adapter.newSession({
       cwd,
       env: spawn.env,
@@ -851,7 +871,9 @@ export class AgentGateway {
     // ZEROS_WORKTREE_PATH, and the user `[providers]` base_url/executable_path
     // fallback (couriered values win). The workspace-local layering applies here
     // too (see newSession).
-    const mainRepoRoot = opts.workspaceId ? getWorkspaceById(opts.workspaceId)?.repoRoot : undefined;
+    const mainRepoRoot = opts.workspaceId
+      ? getWorkspaceById(opts.workspaceId)?.repoRoot
+      : undefined;
     const merged = await withTargetBranchEnv(
       withWorktreeEnv(mergeSpawnEnv(cwd, opts.env, mainRepoRoot), cwd),
       opts.workspaceId,
@@ -863,7 +885,11 @@ export class AgentGateway {
       mainRepoRoot,
     );
     const instructionCtx = this.parseInstructionCtx(spawn.env);
-    const systemInstruction = this.nativeInstructionFor(adapter, cwd, instructionCtx);
+    const systemInstruction = this.nativeInstructionFor(
+      adapter,
+      cwd,
+      instructionCtx,
+    );
     const response = await adapter.loadSession({
       sessionId,
       cwd,
@@ -993,7 +1019,9 @@ export class AgentGateway {
       try {
         const parsed: unknown = JSON.parse(raw);
         if (Array.isArray(parsed)) {
-          dirs = parsed.filter((d): d is string => typeof d === "string" && d.trim() !== "");
+          dirs = parsed.filter(
+            (d): d is string => typeof d === "string" && d.trim() !== "",
+          );
         }
       } catch {
         /* tolerate a malformed value — no extra dirs */
@@ -1033,7 +1061,10 @@ export class AgentGateway {
    *  pre-marked instructed there. First prompt per NEW session only; a resumed
    *  session is pre-marked (the block already rides in its history). The text
    *  itself lives in @zeros/core/system-instructions (one editable home). */
-  private withSystemInstruction(sessionId: string, prompt: ContentBlock[]): ContentBlock[] {
+  private withSystemInstruction(
+    sessionId: string,
+    prompt: ContentBlock[],
+  ): ContentBlock[] {
     if (this.sessionsInstructed.has(sessionId)) return prompt;
     this.sessionsInstructed.add(sessionId);
     const cwd = this.sessionToCwd.get(sessionId);
@@ -1064,7 +1095,10 @@ export class AgentGateway {
       this.withCwdHint(sessionId, adapter.agentId, prompt),
     );
     try {
-      const { response } = await adapter.prompt({ sessionId, prompt: outgoing });
+      const { response } = await adapter.prompt({
+        sessionId,
+        prompt: outgoing,
+      });
       // A clean prompt is the strongest possible signal that auth is
       // good — clear any prior failed-auth marker so the green dot
       // re-illuminates the moment the user resolves their login.
@@ -1088,9 +1122,11 @@ export class AgentGateway {
       // cross-agent false-auth pills). Inferring auth from a generic
       // protocol-error is exactly the kind of guessing that should live in
       // the adapter (which has the stderr/stream context), not the gateway.
-      const failure = (err as {
-        failure?: { kind?: string; stage?: string };
-      }).failure;
+      const failure = (
+        err as {
+          failure?: { kind?: string; stage?: string };
+        }
+      ).failure;
       if (failure?.kind === "auth-required") {
         this.markAuthFailed(adapter.agentId);
       }
@@ -1101,6 +1137,23 @@ export class AgentGateway {
   async cancel(agentId: string, sessionId: string): Promise<void> {
     const adapter = this.adapterForSession(sessionId, agentId);
     await adapter.cancel({ sessionId });
+  }
+
+  async stopBackgroundTask(
+    agentId: string,
+    sessionId: string,
+    taskId: string,
+  ): Promise<void> {
+    const adapter = this.adapterForSession(sessionId, agentId);
+    if (!adapter.stopBackgroundTask) {
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        message: `agent ${adapter.agentId} does not support stopping background tasks`,
+        stage: "stopBackgroundTask",
+        agentId: adapter.agentId,
+      });
+    }
+    await adapter.stopBackgroundTask({ sessionId, taskId });
   }
 
   /** Inject a user message into the running turn (mid-turn steering). No
@@ -1195,7 +1248,9 @@ export class AgentGateway {
     // session rebuild).
     let handled = false;
     for (const adapter of this.adapters.values()) {
-      if (adapter.respondToQuestion?.({ questionId, response, nativeRequestId })) {
+      if (
+        adapter.respondToQuestion?.({ questionId, response, nativeRequestId })
+      ) {
         handled = true;
       }
     }
@@ -1310,5 +1365,4 @@ export class AgentGateway {
     }
     return adapter;
   }
-
 }

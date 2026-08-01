@@ -134,6 +134,29 @@ describe("buildPtyEnv sheds the dev-instance identity", () => {
     expect(env.ZEROS_WORKSPACE_ID).toBe("ws-1");
     expect(env.ZEROS_TERMINAL).toBe("1");
   });
+
+  // The channel is the COARSER half of the same identity, and it leaks from a
+  // build the instance vars never touch: electron/main.ts seeds ZEROS_CHANNEL at
+  // boot on every channel, so a PACKAGED app hands every terminal it opens
+  // ZEROS_CHANNEL=stable. main.ts only seeds when the var is EMPTY, so the
+  // inherited value survives, db/paths.ts drops the per-worktree slug outside the
+  // dev channel, and a nested `pnpm electron:dev` came up on com.zeros — the
+  // packaged app's userData, whose single-instance lock it then lost, quitting at
+  // boot with code 0. Dogfooding a dev instance from inside a released Zeros is
+  // the case this guards.
+  it("drops the CHANNEL, so a dev instance launched from a packaged app is its own app", () => {
+    process.env.ZEROS_CHANNEL = "stable";
+    try {
+      for (const env of [buildPtyEnv(), buildPtyEnv({ scrub: true })]) {
+        expect(
+          env.ZEROS_CHANNEL,
+          "the parent's channel must not decide the child's identity",
+        ).toBeUndefined();
+      }
+    } finally {
+      delete process.env.ZEROS_CHANNEL;
+    }
+  });
 });
 
 // A one-shot shell runs a command and exits. `interactive` is what makes it

@@ -1141,9 +1141,9 @@
         <div class="thesis-card">
           <h3>Actions resolve the state</h3>
           <p>
-            Most buttons send a prompt to the active chat — the agent does the
-            git work. Only Merge (squash via <code>gh</code>), Archive (parks
-            the workspace) and Show checks (opens Review) act directly.
+            Resolve, Commit &amp; Push, and Update branch send prompts where the
+            agent must make judgments. Push, Pull, Ready, Merge, Continue, and
+            Archive are deterministic engine actions; Show checks navigates.
           </p>
         </div>
       </section>
@@ -1504,12 +1504,12 @@
               <p class="case-copy">
                 Everything is committed, but local commits haven't been pushed —
                 the PR on GitHub is stale. The label counts them ("Ahead by 1
-                commit" / "Ahead by 3 commits"). <b>Push</b> prompts the agent to
-                push the branch so the PR catches up.
+                commit" / "Ahead by 3 commits"). <b>Push</b> runs the engine's
+                deterministic push directly so the PR catches up.
               </p>
             </div>
             <div class="meta">
-              <code>kind: ahead</code> · tone neutral · <b>Push</b> (prompt)<br />
+              <code>kind: ahead</code> · tone neutral · <b>Push</b> (direct)<br />
               <code>ahead</code> is null (skipped) when the branch has no
               upstream.
             </div>
@@ -1541,12 +1541,12 @@
               <p class="case-copy">
                 The upstream has commits this local branch doesn't — e.g. the
                 agent pushed from another session, or a teammate pushed to the
-                same branch. <b>Pull</b> prompts the agent to pull (rebase
-                preferred), resolve anything, and push the result.
+                same branch. <b>Pull</b> runs the engine's rebase + autostash
+                pull directly; a conflict result returns to the Resolve state.
               </p>
             </div>
             <div class="meta">
-              <code>kind: behind</code> · tone neutral · <b>Pull</b> (prompt)<br />
+              <code>kind: behind</code> · tone neutral · <b>Pull</b> (direct)<br />
               Distinct from D4 "Behind base branch" — this is behind the
               branch's <b>own upstream</b>.
             </div>
@@ -1582,13 +1582,13 @@
               <p class="case-copy">
                 The PR exists but is a draft (persisted <code>prState</code> or
                 GitHub's <code>mergeable_state: draft</code>). <b>Ready for
-                review</b> prompts the agent to double-check the title and
-                description are current, then run <code>gh pr ready</code>.
+                review</b> calls the engine's authenticated mark-ready operation
+                directly; no agent turn is sent.
               </p>
             </div>
             <div class="meta">
               <code>kind: draft</code> · tone neutral ·
-              <b>Ready for review</b> (prompt)
+              <b>Ready for review</b> (direct)
             </div>
           </div>
 
@@ -1857,15 +1857,15 @@
                 The PR merged (state or <code>mergedAt</code>). Terminal: nothing
                 local matters any more, so this wins over <b>every</b> other
                 state. The row turns <code>--violet-bg</code>/<code>--violet-fg</code>
-                and offers two exits: <b>Continue</b> (dashed) prompts the agent
-                to summarise what shipped and plan the next task in this
-                workspace; <b>Archive</b> (filled) parks the workspace — with
-                Undo.
+                and offers two exits: <b>Continue</b> (dashed) directly creates
+                and checks out a fresh branch in the same worktree while keeping
+                chats and tree state; <b>Archive</b> (filled) parks the workspace
+                — with Undo.
               </p>
             </div>
             <div class="meta">
               <code>kind: merged</code> · tone merged ·
-              <b>Continue</b> (prompt) + <b>Archive</b> (direct)
+              <b>Continue</b> (direct) + <b>Archive</b> (direct)
             </div>
           </div>
 
@@ -2014,8 +2014,8 @@
             </div>
             <div class="rung">
               <span class="rung-n">2</span>
-              <span class="rung-what">Local blockers <span>— conflicts → uncommitted → ahead → behind</span></span>
-              <span class="rung-states"><span class="state-chip yellow">merge-conflicts</span><span class="state-chip">uncommitted</span><span class="state-chip">ahead</span><span class="state-chip">behind</span></span>
+              <span class="rung-what">Local blockers <span>— conflicts → uncommitted → diverged → ahead → behind</span></span>
+              <span class="rung-states"><span class="state-chip yellow">merge-conflicts</span><span class="state-chip">uncommitted</span><span class="state-chip">diverged</span><span class="state-chip">ahead</span><span class="state-chip">behind</span></span>
             </div>
             <div class="rung">
               <span class="rung-n">3</span>
@@ -2107,6 +2107,13 @@
                   <td>neutral → brown row</td>
                   <td>Commit &amp; Push (prompt)</td>
                   <td>staged + unstaged + untracked + conflicted &gt; 0</td>
+                </tr>
+                <tr>
+                  <td><code>diverged</code></td>
+                  <td><b>N ahead and M behind</b></td>
+                  <td>neutral → brown row</td>
+                  <td>Pull (direct, rebase + autostash)</td>
+                  <td>Both local and upstream contain unique commits</td>
                 </tr>
                 <tr>
                   <td><code>ahead</code></td>
