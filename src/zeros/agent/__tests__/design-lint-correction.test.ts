@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { DesignLintReportWire } from "../../../native/git";
 import {
+  designLintCorrectionBudgetAllows,
   designLintCorrectionPrompt,
   designLintCorrectionSignature,
 } from "../design-lint-correction";
@@ -18,6 +19,13 @@ function report(
 }
 
 describe("design lint correction", () => {
+  it("allows only one automatic correction during a continuously broken streak", () => {
+    expect(designLintCorrectionBudgetAllows(0)).toBe(true);
+    expect(designLintCorrectionBudgetAllows(1)).toBe(false);
+    expect(designLintCorrectionBudgetAllows(2)).toBe(false);
+    expect(designLintCorrectionBudgetAllows(0)).toBe(true);
+  });
+
   it("returns no signature for warnings-only reports", () => {
     expect(
       designLintCorrectionSignature(

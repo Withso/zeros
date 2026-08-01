@@ -61,6 +61,7 @@ describe("design frame runtime client", () => {
     };
     listenerRef.current?.({
       source: {},
+      origin: "null",
       data: {
         protocol: DESIGN_RUNTIME_PROTOCOL,
         version: DESIGN_RUNTIME_VERSION,
@@ -74,6 +75,20 @@ describe("design frame runtime client", () => {
 
     listenerRef.current?.({
       source,
+      origin: "https://untrusted.invalid",
+      data: {
+        protocol: DESIGN_RUNTIME_PROTOCOL,
+        version: DESIGN_RUNTIME_VERSION,
+        type: "response",
+        requestId: request.requestId,
+        ok: true,
+        result: snapshot(99),
+      },
+    } as unknown as MessageEvent);
+
+    listenerRef.current?.({
+      source,
+      origin: "null",
       data: {
         protocol: DESIGN_RUNTIME_PROTOCOL,
         version: DESIGN_RUNTIME_VERSION,
@@ -102,6 +117,7 @@ describe("design frame runtime client", () => {
     });
     listenerRef.current?.({
       source,
+      origin: "null",
       data: {
         protocol: DESIGN_RUNTIME_PROTOCOL,
         version: DESIGN_RUNTIME_VERSION,
@@ -115,6 +131,7 @@ describe("design frame runtime client", () => {
 
     listenerRef.current?.({
       source,
+      origin: "null",
       data: {
         protocol: DESIGN_RUNTIME_PROTOCOL,
         version: DESIGN_RUNTIME_VERSION,

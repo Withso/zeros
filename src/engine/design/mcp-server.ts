@@ -8,7 +8,12 @@
 // Claude, Codex, Cursor, and future adapters therefore see one identical tool
 // contract without agent-specific prompt/tool forks.
 
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import {
+  createHmac,
+  randomBytes,
+  randomUUID,
+  timingSafeEqual,
+} from "node:crypto";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 
@@ -361,7 +366,10 @@ export class DesignMcpServer {
     if (!this.running || !workspace) return null;
     const url = new URL(`http://127.0.0.1:${this.port}/mcp`);
     url.searchParams.set("workspaceId", workspace.id);
-    return { url: url.toString(), bearerToken: this.secret };
+    return {
+      url: url.toString(),
+      bearerToken: this.tokenForWorkspace(workspace.id),
+    };
   }
 
   async start(): Promise<void> {
@@ -406,9 +414,17 @@ export class DesignMcpServer {
       : null;
   }
 
-  private secretMatches(candidate: string): boolean {
-    const expected = Buffer.from(this.secret);
-    const actual = Buffer.from(candidate);
+  private tokenForWorkspace(workspaceId: string): string {
+    return createHmac("sha256", this.secret)
+      .update("zeros-design-mcp\0", "utf8")
+      .update(workspaceId, "utf8")
+      .digest("hex");
+  }
+
+  private secretMatches(workspaceId: string, candidate: string): boolean {
+    if (!/^[a-f0-9]{64}$/.test(candidate)) return false;
+    const expected = Buffer.from(this.tokenForWorkspace(workspaceId), "hex");
+    const actual = Buffer.from(candidate, "hex");
     return (
       expected.length === actual.length && timingSafeEqual(expected, actual)
     );
@@ -458,7 +474,7 @@ export class DesignMcpServer {
     const token = authorization.startsWith("Bearer ")
       ? authorization.slice("Bearer ".length)
       : "";
-    if (!workspaceId || !this.secretMatches(token)) return null;
+    if (!workspaceId || !this.secretMatches(workspaceId, token)) return null;
     const workspace = this.resolveDesignWorkspace(workspaceId);
     return workspace ? { workspace, workspaceId } : null;
   }

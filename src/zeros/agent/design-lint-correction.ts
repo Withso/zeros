@@ -3,6 +3,13 @@ import type {
   DesignLintViolationWire,
 } from "../../native/git";
 
+const MAX_AUTOMATIC_CORRECTIONS_PER_BROKEN_STREAK = 1;
+
+/** A clean lint pass resets this count; a still-broken correction never loops. */
+export function designLintCorrectionBudgetAllows(count: number): boolean {
+  return count < MAX_AUTOMATIC_CORRECTIONS_PER_BROKEN_STREAK;
+}
+
 export function designLintErrors(
   report: DesignLintReportWire,
 ): DesignLintViolationWire[] {

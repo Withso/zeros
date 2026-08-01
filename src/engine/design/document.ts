@@ -167,6 +167,11 @@ export interface DesignFrameRenderIdentity {
   sourceVersion: string;
 }
 
+export interface DesignFrameRenderSource extends DesignFrameRenderIdentity {
+  /** Sanitized, expanded HTML with local CSS and raster assets embedded. */
+  html: string;
+}
+
 export interface DesignFrameSelectionIdentity extends DesignFrameRenderIdentity {
   title: string;
   width: number;
@@ -776,10 +781,24 @@ export function healDesignOids(source: string): {
         attrLocation.startOffset,
         attrLocation.endOffset,
       );
-      const replacement = original.replace(
-        /(["'])(.*?)\1/,
-        (_match, quote: string) => `${quote}${oid}${quote}`,
-      );
+      const equalsAt = original.indexOf("=");
+      let valueStart = equalsAt + 1;
+      while (/\s/.test(original[valueStart] ?? "")) valueStart += 1;
+      const quote = original[valueStart];
+      let valueEnd = valueStart;
+      if (quote === '"' || quote === "'") {
+        valueStart += 1;
+        valueEnd = original.indexOf(quote, valueStart);
+      } else {
+        while (
+          valueEnd < original.length &&
+          !/[\s"'`=<>]/.test(original[valueEnd] ?? "")
+        ) {
+          valueEnd += 1;
+        }
+      }
+      if (equalsAt < 0 || valueEnd < valueStart) continue;
+      const replacement = `${original.slice(0, valueStart)}${oid}${original.slice(valueEnd)}`;
       edits.push({
         start: attrLocation.startOffset,
         end: attrLocation.endOffset,
@@ -1900,6 +1919,58 @@ async function inlineLocalStyles(
   return result;
 }
 
+function designAssetMimeType(reference: string): string | null {
+  const pathname = reference.trim().split(/[?#]/, 1)[0] ?? "";
+  return DESIGN_ASSET_MIME_TYPES[path.extname(pathname).toLowerCase()] ?? null;
+}
+
+async function inlineCssUrlValue(
+  directory: string,
+  value: string,
+): Promise<string> {
+  const matches = [
+    ...value.matchAll(/url\(\s*(["']?)([^"')]+)\1\s*\)/gi),
+  ];
+  let result = value;
+  for (const match of matches.reverse()) {
+    const reference = match[2] ?? "";
+    const mimeType = designAssetMimeType(reference);
+    const resolved = mimeType
+      ? safeLocalReference(directory, reference)
+      : null;
+    if (!resolved || !mimeType) continue;
+    const data = await readSafeDesignBuffer(directory, resolved);
+    if (!data || data.length > MAX_ASSET_BYTES) continue;
+    const start = match.index ?? 0;
+    const replacement = `url("data:${mimeType};base64,${data.toString("base64")}")`;
+    result = `${result.slice(0, start)}${replacement}${result.slice(start + match[0].length)}`;
+  }
+  return result;
+}
+
+async function inlineCssLocalAssets(
+  directory: string,
+  source: string,
+): Promise<string> {
+  let root: postcss.Root;
+  try {
+    root = postcss.parse(source);
+  } catch {
+    return source;
+  }
+  const declarations: postcss.Declaration[] = [];
+  root.walkDecls((declaration) => {
+    declarations.push(declaration);
+  });
+  for (const declaration of declarations) {
+    declaration.value = await inlineCssUrlValue(
+      directory,
+      declaration.value,
+    );
+  }
+  return root.toString();
+}
+
 async function inlineLocalAssets(
   workspacePath: string,
   source: string,
@@ -1908,10 +1979,33 @@ async function inlineLocalAssets(
   const document = parse(source, { sourceCodeLocationInfo: true });
   const edits: Array<{ start: number; end: number; text: string }> = [];
   for (const { element } of elementRecords(document)) {
+    if (
+      element.tagName === "style" &&
+      element.sourceCodeLocation?.startTag &&
+      element.sourceCodeLocation.endTag
+    ) {
+      const start = element.sourceCodeLocation.startTag.endOffset;
+      const end = element.sourceCodeLocation.endTag.startOffset;
+      const css = source.slice(start, end);
+      const inlined = await inlineCssLocalAssets(directory, css);
+      if (inlined !== css) edits.push({ start, end, text: inlined });
+    }
     for (const attribute of element.attrs) {
+      if (attribute.name === "style") {
+        const location = element.sourceCodeLocation?.attrs?.[attribute.name];
+        if (!location) continue;
+        const inlined = await inlineCssUrlValue(directory, attribute.value);
+        if (inlined !== attribute.value) {
+          edits.push({
+            start: location.startOffset,
+            end: location.endOffset,
+            text: `style="${escapeAttribute(inlined)}"`,
+          });
+        }
+        continue;
+      }
       if (attribute.name !== "src" && attribute.name !== "poster") continue;
-      const mimeType =
-        DESIGN_ASSET_MIME_TYPES[path.extname(attribute.value).toLowerCase()];
+      const mimeType = designAssetMimeType(attribute.value);
       const resolved = mimeType
         ? safeLocalReference(directory, attribute.value)
         : null;
@@ -2112,6 +2206,40 @@ async function prepareFrameRenderSource(
   return { sanitized, sourceVersion };
 }
 
+async function prepareFrameRenderSourceForFile(
+  workspacePath: string,
+  file: string,
+  source: string,
+): Promise<{
+  document: DefaultTreeAdapterTypes.Document;
+  meta: FrameMeta;
+  width: number;
+  height: number;
+  x: number;
+  y: number;
+  sanitized: string;
+  sourceVersion: string;
+}> {
+  const document = parse(source, { sourceCodeLocationInfo: true });
+  const meta = readFrameMeta(document, file);
+  const geometry = (await readCanvas(workspacePath)).frames[file];
+  const width = geometry?.w ?? meta.width;
+  const height = geometry?.h ?? meta.height;
+  const render = await prepareFrameRenderSource(workspacePath, source, {
+    width,
+    height,
+  });
+  return {
+    document,
+    meta,
+    width,
+    height,
+    x: geometry?.x ?? 0,
+    y: geometry?.y ?? 0,
+    ...render,
+  };
+}
+
 async function composeFrameSrcDoc(
   workspacePath: string,
   source: string,
@@ -2152,12 +2280,34 @@ export async function readDesignFrameRenderIdentityFromSource(
   frame: string,
   source: string,
 ): Promise<DesignFrameRenderIdentity> {
-  const identity = await designFrameSelectionIdentityFromSource(
+  const file = assertFrameFile(frame);
+  const render = await prepareFrameRenderSourceForFile(
     workspacePath,
-    assertFrameFile(frame),
+    file,
     source,
   );
-  return { file: identity.file, sourceVersion: identity.sourceVersion };
+  return { file, sourceVersion: render.sourceVersion };
+}
+
+/** Build the exact self-contained HTML served to a sandboxed protocol frame.
+ * Styles, element images, and CSS backgrounds retain their rendered pixels
+ * without foreignObject subresource reads. */
+export async function readDesignFrameRenderSourceFromSource(
+  workspacePath: string,
+  frame: string,
+  source: string,
+): Promise<DesignFrameRenderSource> {
+  const file = assertFrameFile(frame);
+  const render = await prepareFrameRenderSourceForFile(
+    workspacePath,
+    file,
+    source,
+  );
+  return {
+    file,
+    sourceVersion: render.sourceVersion,
+    html: render.sanitized,
+  };
 }
 
 /** One-frame selection identity. Unlike readDesignFrame(), this never scans,
@@ -2187,25 +2337,20 @@ async function designFrameSelectionIdentityFromSource(
   file: string,
   source: string,
 ): Promise<DesignFrameSelectionIdentity> {
-  const document = parse(source, { sourceCodeLocationInfo: true });
-  const meta = readFrameMeta(document, file);
-  const geometry = (await readCanvas(workspacePath)).frames[file];
-  const width = geometry?.w ?? meta.width;
-  const height = geometry?.h ?? meta.height;
-  const { sourceVersion } = await prepareFrameRenderSource(
+  const render = await prepareFrameRenderSourceForFile(
     workspacePath,
+    file,
     source,
-    { width, height },
   );
   return {
     file,
-    sourceVersion,
-    title: meta.title,
-    width,
-    height,
-    x: geometry?.x ?? 0,
-    y: geometry?.y ?? 0,
-    nodeIds: designNodeRecords(document)
+    sourceVersion: render.sourceVersion,
+    title: render.meta.title,
+    width: render.width,
+    height: render.height,
+    x: render.x,
+    y: render.y,
+    nodeIds: designNodeRecords(render.document)
       .map(({ oid }) => oid)
       .filter((oid): oid is string => Boolean(oid)),
   };

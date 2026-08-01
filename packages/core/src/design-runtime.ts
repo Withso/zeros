@@ -176,9 +176,22 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   var visibilityOverridesByOid = new Map();
   var previewStyleOverridesByOid = new Map();
   var mutationTimer = null;
+  var trustedParentOrigin = null;
+  try {
+    trustedParentOrigin = document.referrer
+      ? new URL(document.referrer).origin
+      : null;
+  } catch (_error) {
+    trustedParentOrigin = null;
+  }
 
   function post(message) {
-    parent.postMessage(message, "*");
+    parent.postMessage(
+      message,
+      trustedParentOrigin && trustedParentOrigin !== "null"
+        ? trustedParentOrigin
+        : "*"
+    );
   }
 
   function event(name, payload) {
@@ -667,15 +680,15 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       "\" y=\"" + (-documentY) + "\" width=\"" + viewportWidth +
       "\" height=\"" + viewportHeight + "\">" + serialized +
       "</foreignObject></svg>";
-    var blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
-    var url = URL.createObjectURL(blob);
+    // A blob URL makes Chromium mark a foreignObject canvas as origin-unclean.
+    // A self-contained data URL preserves the same pixels without tainting.
+    var url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
     return new Promise(function (resolve, reject) {
       var settled = false;
       var image = new Image();
       var timer = window.setTimeout(function () {
         if (settled) return;
         settled = true;
-        URL.revokeObjectURL(url);
         reject(new Error("Frame screenshot timed out."));
       }, 8000);
       image.onload = function () {
@@ -700,15 +713,12 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           });
         } catch (error) {
           reject(error);
-        } finally {
-          URL.revokeObjectURL(url);
         }
       };
       image.onerror = function () {
         if (settled) return;
         settled = true;
         window.clearTimeout(timer);
-        URL.revokeObjectURL(url);
         reject(new Error("Frame screenshot could not be rendered."));
       };
       image.src = url;
@@ -738,6 +748,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
 
   window.addEventListener("message", function (messageEvent) {
     if (messageEvent.source !== parent) return;
+    // Sandboxed frames may have an opaque origin, so pin the trusted parent
+    // from the referrer when available and otherwise from its first request.
+    if (trustedParentOrigin === null) trustedParentOrigin = messageEvent.origin;
+    if (messageEvent.origin !== trustedParentOrigin) return;
     var message = messageEvent.data;
     if (
       !message ||

@@ -148,7 +148,15 @@ class DesignRuntimeHub {
   }
 
   private readonly handleMessage = (event: MessageEvent): void => {
-    if (!event.source || !isDesignRuntimeFrameMessage(event.data)) return;
+    // Every connected design iframe is sandboxed without allow-same-origin,
+    // so its serialized origin must remain opaque for the connection lifetime.
+    if (
+      event.origin !== "null" ||
+      !event.source ||
+      !isDesignRuntimeFrameMessage(event.data)
+    ) {
+      return;
+    }
     this.connections.get(event.source)?.receive(event.data);
   };
 }

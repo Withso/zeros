@@ -107,6 +107,12 @@ import {
   zoomDesignViewportAtPoint,
   type DesignViewport,
 } from "./design-canvas-math";
+import {
+  beginInlineTextCommit,
+  cancelInlineTextCommit,
+  createInlineTextCommitGuard,
+  finishInlineTextCommit,
+} from "./design-inline-text-commit";
 import { DesignFrameRuntimeIframe } from "./design-frame-runtime-iframe";
 import { hasDesignAssetDrag, readDesignAssetDrag } from "./design-assets";
 
@@ -457,8 +463,10 @@ function DesignCanvas({
   const [inlineTextEdit, setInlineTextEdit] = useState<InlineTextEdit | null>(
     null,
   );
-  // Enter can cause blur during unmount; one exact edit key may commit once.
-  const textCommitKeyRef = useRef<string | null>(null);
+  // Orders Escape/blur cancellation and Enter/blur commit deduplication.
+  const textCommitGuardRef = useRef(
+    createInlineTextCommitGuard<InlineTextEdit>(),
+  );
   // Cancels whichever direct-DOM pointer gesture owns global listeners.
   const gestureCancelRef = useRef<(() => void) | null>(null);
   const liveFrameFilesRef = useRef<{
@@ -624,11 +632,10 @@ function DesignCanvas({
   const commitInlineText = useCallback(
     async (edit: InlineTextEdit) => {
       const key = `${edit.frame}\u0000${edit.nodeId}\u0000${edit.sourceVersion}`;
-      if (textCommitKeyRef.current === key) return;
-      textCommitKeyRef.current = key;
+      if (!beginInlineTextCommit(textCommitGuardRef.current, edit, key)) return;
       setInlineTextEdit((current) => (current === edit ? null : current));
       if (!workspaceId) {
-        textCommitKeyRef.current = null;
+        finishInlineTextCommit(textCommitGuardRef.current, key);
         return;
       }
       try {
@@ -643,7 +650,7 @@ function DesignCanvas({
           description: errorMessage(textError),
         });
       } finally {
-        if (textCommitKeyRef.current === key) textCommitKeyRef.current = null;
+        finishInlineTextCommit(textCommitGuardRef.current, key);
       }
     },
     [workspaceId],
@@ -1180,6 +1187,10 @@ function DesignCanvas({
                         void commitInlineText(inlineTextEdit);
                       } else if (event.key === "Escape") {
                         event.preventDefault();
+                        cancelInlineTextCommit(
+                          textCommitGuardRef.current,
+                          inlineTextEdit,
+                        );
                         setInlineTextEdit(null);
                       }
                     }}

@@ -31,7 +31,7 @@ describe("design protocol resources", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  it("serves runtime-injected HTML with relative CSS/assets and response CSP", async () => {
+  it("serves self-contained runtime HTML so raster capture keeps CSS and images", async () => {
     const frame = await createDesignFrame(root, { title: "Protocol" });
     await writeFile(
       path.join(root, DESIGN_DIRECTORY_NAME, "assets", "pixel.png"),
@@ -65,7 +65,7 @@ describe("design protocol resources", () => {
       "connect-src 'none'",
     );
     expect(response.headers["Content-Security-Policy"]).toContain(
-      "img-src zeros-design:",
+      "img-src zeros-design: data: blob:",
     );
     expect(response.headers["Content-Security-Policy"]).toContain(
       "script-src 'sha256-",
@@ -76,9 +76,10 @@ describe("design protocol resources", () => {
     expect(response.headers["Cache-Control"]).toBe(
       "private, max-age=31536000, immutable",
     );
-    expect(body).toContain('href="./tokens.css?v=');
-    expect(body).toContain('src="./assets/pixel.png?v=');
-    expect(body).not.toContain("data:image/png");
+    expect(body).not.toContain('href="./tokens.css');
+    expect(body).not.toContain('src="./assets/pixel.png');
+    expect(body.match(/data:image\/png;base64,/g)).toHaveLength(2);
+    expect(body).not.toContain('url("./assets/pixel.png")');
     expect(body).toContain("data-zeros-design-runtime");
     expect(body).not.toContain("nonce=");
     expect(body).toContain(identity.sourceVersion);

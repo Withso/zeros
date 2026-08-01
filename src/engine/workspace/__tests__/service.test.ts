@@ -948,6 +948,25 @@ describe("WorkspaceService", () => {
       selectedAt,
     );
 
+    const deepBreadcrumb = Array.from(
+      { length: 24 },
+      (_, index) => `layer-${index + 1}`,
+    );
+    await svc.handle("design.selection.set", {
+      workspaceId: workspace.workspaceId,
+      frame: frame.file,
+      sourceVersion: response.mutation.frame.sourceVersion,
+      selectionVersion: selectedAt * 1_024 + 1,
+      updatedAt: selectedAt + 1,
+      nodeIds: [main!.oid!],
+      breadcrumb: deepBreadcrumb,
+      rects: [{ x: 0, y: 0, width: 100, height: 100 }],
+      keyComputedStyles: {},
+    });
+    expect(getDesignSelection(workspace.workspaceId)?.breadcrumb).toEqual(
+      deepBreadcrumb.slice(-16),
+    );
+
     await expect(
       svc.handle("design.runtime.audit", {
         workspaceId: workspace.workspaceId,

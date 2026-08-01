@@ -110,6 +110,51 @@ describe("zeros-design MCP server", () => {
     expect(response.status).toBe(404);
   });
 
+  it("binds each bearer credential to exactly one design workspace", async () => {
+    const otherWorkspace: Workspace = {
+      ...workspace,
+      id: "ws_other_design",
+      path: path.join(root, "other-design"),
+      branch: "zeros/other-design",
+    };
+    await server.stop();
+    server = new DesignMcpServer({
+      resolveWorkspace: (id) =>
+        id === workspace.id
+          ? workspace
+          : id === otherWorkspace.id
+            ? otherWorkspace
+            : null,
+    });
+    await server.start();
+
+    const first = server.connectionForWorkspace(workspace.id)!;
+    const second = server.connectionForWorkspace(otherWorkspace.id)!;
+    expect(first.bearerToken).not.toBe(second.bearerToken);
+
+    const response = await fetch(second.url, {
+      method: "POST",
+      headers: {
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${first.bearerToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-03-26",
+          capabilities: {},
+          clientInfo: { name: "cross-workspace-client", version: "1" },
+        },
+      }),
+    });
+
+    expect(response.status).toBe(404);
+    expect(server.openConnectionCount).toBe(0);
+  });
+
   it("closes provisional transports after a request that never initializes", async () => {
     const connection = server.connectionForWorkspace(workspace.id)!;
     const response = await fetch(connection.url, {

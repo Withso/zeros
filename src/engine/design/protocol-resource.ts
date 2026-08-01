@@ -1,16 +1,12 @@
 import path from "node:path";
 
-import { parse, type DefaultTreeAdapterTypes } from "parse5";
 import postcss from "postcss";
 
 import {
   DESIGN_DIRECTORY_NAME,
   insertDesignRuntimeScript,
-  readDesignFrameRenderIdentityFromSource,
-  sanitizeDesignFrameMarkup,
-  stripNonDesignOidsForRender,
+  readDesignFrameRenderSourceFromSource,
 } from "./document";
-import { expandDesignComponents } from "./components";
 import { readSafeRegularFile } from "./safe-files";
 
 const MAX_TEXT_RESOURCE_BYTES = 2 * 1024 * 1024;
@@ -36,24 +32,6 @@ export interface DesignProtocolResource {
 interface DesignProtocolResourceInput {
   path: string;
   sourceVersion: string | null;
-}
-
-type ParentNode =
-  | DefaultTreeAdapterTypes.Document
-  | DefaultTreeAdapterTypes.Element;
-
-function elements(node: ParentNode): DefaultTreeAdapterTypes.Element[] {
-  const result: DefaultTreeAdapterTypes.Element[] = [];
-  const visit = (current: ParentNode) => {
-    for (const child of current.childNodes ?? []) {
-      if ("tagName" in child) {
-        result.push(child);
-        visit(child);
-      }
-    }
-  };
-  visit(node);
-  return result;
 }
 
 function response(
@@ -104,38 +82,6 @@ function safeRelativePath(value: string): string | null {
     return null;
   }
   return segments.join("/");
-}
-
-function versionLocalResources(source: string, sourceVersion: string): string {
-  const document = parse(source, { sourceCodeLocationInfo: true });
-  const edits: Array<{ start: number; end: number; text: string }> = [];
-  for (const element of elements(document)) {
-    for (const attribute of element.attrs) {
-      if (!new Set(["href", "src", "poster"]).has(attribute.name)) continue;
-      const value = attribute.value.trim();
-      if (
-        !value ||
-        value.startsWith("#") ||
-        value.startsWith("/") ||
-        /^[a-z][a-z0-9+.-]*:/i.test(value)
-      ) {
-        continue;
-      }
-      const location = element.sourceCodeLocation?.attrs?.[attribute.name];
-      if (!location) continue;
-      const separator = value.includes("?") ? "&" : "?";
-      edits.push({
-        start: location.startOffset,
-        end: location.endOffset,
-        text: `${attribute.name}="${value}${separator}v=${sourceVersion}"`,
-      });
-    }
-  }
-  let result = source;
-  for (const edit of edits.sort((left, right) => right.start - left.start)) {
-    result = `${result.slice(0, edit.start)}${edit.text}${result.slice(edit.end)}`;
-  }
-  return result;
 }
 
 function versionRelativeReference(
@@ -237,25 +183,23 @@ export async function readDesignProtocolResource(
 
   if (topLevelHtml) {
     const authored = safe.body.toString("utf8");
-    const identity = await readDesignFrameRenderIdentityFromSource(
+    const renderSource = await readDesignFrameRenderSourceFromSource(
       workspacePath,
       topLevelHtml,
       authored,
     ).catch(() => null);
-    if (!identity) return response(404, "Not found.");
-    if (sourceVersion && sourceVersion !== identity.sourceVersion) {
+    if (!renderSource) return response(404, "Not found.");
+    if (sourceVersion && sourceVersion !== renderSource.sourceVersion) {
       return response(409, "Design frame generation changed.", undefined, {
         "Cache-Control": "private, no-store",
       });
     }
-    const expanded = await expandDesignComponents(workspacePath, authored);
-    const sanitized = stripNonDesignOidsForRender(
-      sanitizeDesignFrameMarkup(expanded.html),
+    const rendered = injectRuntime(
+      renderSource.html,
+      renderSource.sourceVersion,
     );
-    const versioned = versionLocalResources(sanitized, identity.sourceVersion);
-    const rendered = injectRuntime(versioned, identity.sourceVersion);
     return response(200, rendered.html, "text/html; charset=utf-8", {
-      ...cacheHeaders(identity.sourceVersion),
+      ...cacheHeaders(renderSource.sourceVersion),
       "Content-Security-Policy": rendered.csp,
     });
   }

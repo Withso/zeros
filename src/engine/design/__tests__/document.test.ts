@@ -141,6 +141,24 @@ describe("design document", () => {
     expect(ids[2]).toBe(`${generated}-3`);
   });
 
+  it("heals an unquoted duplicate data-oid once and stays idempotent", () => {
+    const source =
+      "<!doctype html><html><body><main data-oid=shared><p data-oid=shared>Copy</p></main></body></html>";
+
+    const healed = healDesignOids(source);
+    const ids = [...healed.html.matchAll(/data-oid=([^\s>]+)/g)].map(
+      (match) => match[1]?.replace(/["']/g, ""),
+    );
+
+    expect(healed.changed).toBe(true);
+    expect(new Set(ids).size).toBe(2);
+    expect(healDesignOids(healed.html)).toMatchObject({
+      html: healed.html,
+      changed: false,
+      fixed: [],
+    });
+  });
+
   it("requires stable ids only on rendered elements inside the body", async () => {
     await initializeDesignDocument(root);
     await writeFile(
@@ -720,7 +738,7 @@ describe("design document", () => {
     ).frames[0]!.srcDoc;
 
     expect(rendered).not.toContain("data:text/plain");
-    expect(rendered).not.toContain("data:image/svg+xml");
+    expect(rendered).not.toMatch(/\bsrc=["']data:image\/svg\+xml/i);
     expect(rendered).toContain("data:image/png;base64,iVBORw==");
   });
 

@@ -22,6 +22,7 @@ import {
 import { useAgentSessions } from "./sessions-hooks";
 import { useSessionsStore } from "./sessions-store";
 import {
+  designLintCorrectionBudgetAllows,
   designLintCorrectionPrompt,
   designLintCorrectionSignature,
   designLintErrors,
@@ -62,6 +63,20 @@ function rememberSignature(
   }
 }
 
+function rememberCorrectionCount(
+  counts: Map<string, number>,
+  chatId: string,
+  count: number,
+): void {
+  counts.delete(chatId);
+  counts.set(chatId, count);
+  while (counts.size > MAX_CORRECTION_SIGNATURES) {
+    const oldest = counts.keys().next().value as string | undefined;
+    if (!oldest) break;
+    counts.delete(oldest);
+  }
+}
+
 export function useDesignLintCoordinator(): void {
   const sessions = useAgentSessions();
   const streamingChatIds = useSessionsStore(
@@ -74,6 +89,7 @@ export function useDesignLintCoordinator(): void {
   );
   const previousStreamingRef = useRef<readonly string[] | null>(null);
   const correctionSignaturesRef = useRef(new Map<string, string>());
+  const correctionCountsRef = useRef(new Map<string, number>());
   const lintFlightsRef = useRef(new Set<string>());
 
   useEffect(() => {
@@ -98,11 +114,15 @@ export function useDesignLintCoordinator(): void {
           const signature = designLintCorrectionSignature(snapshot.lint);
           if (!signature) {
             correctionSignaturesRef.current.delete(workspace.id);
+            correctionCountsRef.current.delete(chatId);
             return;
           }
           if (correctionSignaturesRef.current.get(workspace.id) === signature) {
             return;
           }
+          const correctionCount =
+            correctionCountsRef.current.get(chatId) ?? 0;
+          if (!designLintCorrectionBudgetAllows(correctionCount)) return;
 
           const liveSession = useSessionsStore.getState().sessions[chatId];
           if (
@@ -117,6 +137,12 @@ export function useDesignLintCoordinator(): void {
             correctionSignaturesRef.current,
             workspace.id,
             signature,
+          );
+          const nextCorrectionCount = correctionCount + 1;
+          rememberCorrectionCount(
+            correctionCountsRef.current,
+            chatId,
+            nextCorrectionCount,
           );
           const count = designLintErrors(snapshot.lint).length;
           try {
@@ -134,6 +160,18 @@ export function useDesignLintCoordinator(): void {
               correctionSignaturesRef.current.get(workspace.id) === signature
             ) {
               correctionSignaturesRef.current.delete(workspace.id);
+            }
+            if (
+              correctionCountsRef.current.get(chatId) === nextCorrectionCount
+            ) {
+              correctionCountsRef.current.delete(chatId);
+              if (correctionCount > 0) {
+                rememberCorrectionCount(
+                  correctionCountsRef.current,
+                  chatId,
+                  correctionCount,
+                );
+              }
             }
           }
         } finally {

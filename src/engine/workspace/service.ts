@@ -751,14 +751,16 @@ function designSelectionStrings(
   label: string,
   limit: number,
   maxLength: number,
+  keepMostSpecific = false,
 ): string[] {
-  if (!Array.isArray(value) || value.length > limit) {
+  if (!Array.isArray(value) || (!keepMostSpecific && value.length > limit)) {
     throw new GitError({
       code: "VALIDATION_FAILED",
       message: `${label} must be an array of at most ${limit} strings`,
     });
   }
-  const strings = value.filter(
+  const candidates = keepMostSpecific ? value.slice(-limit) : value;
+  const strings = candidates.filter(
     (item): item is string =>
       typeof item === "string" &&
       item.length > 0 &&
@@ -766,7 +768,7 @@ function designSelectionStrings(
       item.length <= maxLength &&
       !hasAsciiControl(item),
   );
-  if (strings.length !== value.length) {
+  if (strings.length !== candidates.length) {
     throw new GitError({
       code: "VALIDATION_FAILED",
       message: `${label} contains an invalid string`,
@@ -1661,6 +1663,7 @@ export class WorkspaceService {
           "breadcrumb",
           16,
           160,
+          true,
         );
         const rects = designSelectionRects(params.rects ?? []);
         const updatedAt = reqNum(params, "updatedAt");

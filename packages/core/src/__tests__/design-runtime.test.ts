@@ -33,6 +33,9 @@ describe("design runtime protocol", () => {
       'element.style.setProperty("display", "revert", "important")',
     );
     expect(DESIGN_RUNTIME_SOURCE).toContain("Math.max(0.01, scale)");
+    expect(DESIGN_RUNTIME_SOURCE).toContain(
+      "messageEvent.origin !== trustedParentOrigin",
+    );
     expect(DESIGN_RUNTIME_SOURCE).not.toContain("</script");
     expect(() => new Function(DESIGN_RUNTIME_SOURCE)).not.toThrow();
   });
@@ -121,6 +124,86 @@ describe("design runtime protocol", () => {
         tree: [{ oid: "hero", tag: "section" }],
         frame: { oid: "", tag: "body", selector: "body" },
       });
+    } finally {
+      await browser.close();
+    }
+  }, 20_000);
+
+  it("rasterizes embedded CSS and image pixels in a node screenshot", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      const pixels = await page.evaluate(async ({ source }) => {
+        document.documentElement.style.margin = "0";
+        document.body.style.margin = "0";
+        const seed = document.createElement("canvas");
+        seed.width = 10;
+        seed.height = 10;
+        const seedContext = seed.getContext("2d")!;
+        seedContext.fillStyle = "rgb(0, 0, 255)";
+        seedContext.fillRect(0, 0, 10, 10);
+        document.body.innerHTML =
+          '<main data-oid="target" style="width:40px;height:20px;background:rgb(255,0,0)">' +
+          `<img alt="Blue" src="${seed.toDataURL("image/png")}" style="display:block;width:10px;height:10px">` +
+          `<span style="position:absolute;left:20px;top:10px;width:10px;height:10px;background-image:url(${seed.toDataURL("image/png")});background-size:100% 100%"></span>` +
+          "</main>";
+        await (document.querySelector("img") as HTMLImageElement).decode();
+        (
+          window as Window & { __zerosDesignSourceVersion?: string }
+        ).__zerosDesignSourceVersion = "c".repeat(24);
+        const requestId = "capture-self-contained";
+        const response = new Promise<{ dataUrl: string }>((resolve, reject) => {
+          const timeout = window.setTimeout(
+            () => reject(new Error("capture response timed out")),
+            5_000,
+          );
+          window.addEventListener("message", (event) => {
+            const message = event.data as {
+              type?: string;
+              requestId?: string;
+              ok?: boolean;
+              result?: { dataUrl: string };
+              error?: string;
+            };
+            if (message.type !== "response" || message.requestId !== requestId) {
+              return;
+            }
+            window.clearTimeout(timeout);
+            if (message.ok && message.result) resolve(message.result);
+            else reject(new Error(message.error ?? "capture failed"));
+          });
+        });
+        new Function(source)();
+        window.postMessage(
+          {
+            protocol: "zeros-design-runtime",
+            version: 1,
+            type: "request",
+            requestId,
+            method: "captureScreenshot",
+            args: { nodeId: "target", scale: 1 },
+          },
+          "*",
+        );
+        const screenshot = await response;
+        const image = new Image();
+        image.src = screenshot.dataUrl;
+        await image.decode();
+        const canvas = document.createElement("canvas");
+        canvas.width = image.width;
+        canvas.height = image.height;
+        const context = canvas.getContext("2d")!;
+        context.drawImage(image, 0, 0);
+        return {
+          image: Array.from(context.getImageData(5, 5, 1, 1).data),
+          cssImage: Array.from(context.getImageData(25, 15, 1, 1).data),
+          background: Array.from(context.getImageData(30, 10, 1, 1).data),
+        };
+      }, { source: DESIGN_RUNTIME_SOURCE });
+
+      expect(pixels.image).toEqual([0, 0, 255, 255]);
+      expect(pixels.cssImage).toEqual([0, 0, 255, 255]);
+      expect(pixels.background).toEqual([255, 0, 0, 255]);
     } finally {
       await browser.close();
     }
