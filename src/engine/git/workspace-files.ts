@@ -153,7 +153,9 @@ export function collectSkipWorktree(tagged: string): Set<string> {
 //     single trailing-slash entry, so the whole set is ~8 rows in ~6ms instead
 //     of 60k. A directory holding BOTH tracked and ignored files isn't
 //     collapsed — git lists its ignored children individually, which is what
-//     the tree wants there anyway.
+//     the tree wants there anyway. Empty ignored directories are suppressed by
+//     a local readdir probe, NOT by `--no-empty-directory` — see
+//     listIgnoredRoots for the two ways that flag eats real entries.
 //   • children (`dir` set): a plain readdir one level down. Everything inside
 //     an ignored directory is ignored by inheritance, so git has nothing to
 //     add and would only re-walk the subtree.
@@ -220,17 +222,13 @@ export async function listIgnoredEntries(
 /** `git ls-files -o -i --exclude-standard --directory`, NUL-split. `-z` means
  *  paths arrive verbatim (no `core.quotePath` escaping), so a name with a space,
  *  a backslash or a newline survives intact. */
-async function ignoredLsFiles(
-  cwd: string,
-  noEmptyDirectory: boolean,
-): Promise<string[]> {
+async function ignoredLsFiles(cwd: string): Promise<string[]> {
   const { stdout } = await runGit(cwd, [
     "ls-files",
     "-o",
     "-i",
     "--exclude-standard",
     "--directory",
-    ...(noEmptyDirectory ? ["--no-empty-directory"] : []),
     "-z",
   ]);
   return stdout.split("\0").filter(Boolean);
@@ -241,34 +239,35 @@ async function listIgnoredRoots(
   limit: number,
 ): Promise<string[]> {
   try {
-    // TWO queries, because `--no-empty-directory` does more than its name says.
+    // ONE git query. We want `--directory`'s collapsing (a wholly-ignored dir
+    // → one row) AND we want empty ignored dirs suppressed (an unexpandable
+    // dead row) — but `--no-empty-directory`, the flag that promises the
+    // latter, is NOT usable as the emptiness oracle. It silently drops ignored
+    // entries out of any directory that has no tracked content but does have
+    // untracked, non-ignored content, and it drops DIRECTORIES as readily as
+    // files. Both failure shapes shipped as real bugs:
     //
-    // We want `--directory`'s collapsing (a wholly-ignored dir → one row) AND we
-    // want empty ignored dirs suppressed (an unexpandable dead row). The obvious
-    // move — pass both flags — silently DROPS ignored files out of any directory
-    // that has no tracked content but does have untracked, non-ignored content:
+    //   out/report.md (untracked)  out/run.log (ignored)
+    //     --directory                      → out/run.log
+    //     --directory --no-empty-directory → (nothing)      ← lost FILE
     //
-    //   out/report.md  (untracked, not ignored)   out/run.log  (ignored)
-    //   --directory                     → out/run.log
-    //   --directory --no-empty-directory → (nothing)
+    //   .context-graph/.gitignore (ignored)  .context-graph/local/ (ignored,
+    //   holds attachments)  .context-graph/shared/attachments/ (empty dirs)
+    //     --directory                      → .gitignore, local/
+    //     --directory --no-empty-directory → .context-graph/  ← collapse level
+    //                                        DISAGREES with the plain run, so
+    //                                        an exact-path keep-set dropped
+    //                                        `local/` as "empty" and the Files
+    //                                        tab hid every composer attachment
+    //   …and once shared/ holds a file (untracked, non-ignored), the second
+    //   run returns NOTHING for the whole subtree — same pathology as out/,
+    //   now eating a directory instead of a file.
     //
-    // That is exactly the case the feature exists for — an agent or a run action
-    // writes a report next to a log into a brand-new folder — and it stays
-    // broken until someone commits the sibling, which is why the original test
-    // (which committed it) passed. So: take the COLLAPSED DIRECTORIES from the
-    // --no-empty-directory run (that flag's one real job), and take the FILES
-    // from the plain run (which never loses them). Both are ~7ms and run
-    // concurrently.
-    const [all, nonEmpty] = await Promise.all([
-      ignoredLsFiles(cwd, false),
-      ignoredLsFiles(cwd, true).catch(() => null),
-    ]);
-    // Null → the second query failed on its own; fall back to keeping every
-    // directory rather than losing the whole listing over a dead row.
-    const keepDirs =
-      nonEmpty === null
-        ? null
-        : new Set(nonEmpty.filter((p) => p.endsWith("/")));
+    // So emptiness is decided here instead, with a bounded readdir probe per
+    // directory entry. The roots set is ~a dozen entries, each probe usually
+    // answers on its first readdir, and the probes run concurrently — cheaper
+    // than the second git process it replaces.
+    const all = await ignoredLsFiles(cwd);
     const out: string[] = [];
     const collapsed = new Set<string>();
     // `all` is byte-sorted by git, so a collapsed directory always precedes its
@@ -277,18 +276,83 @@ async function listIgnoredRoots(
     // so this stays defensive).
     for (const p of all) {
       if (p.endsWith("/")) {
-        if (keepDirs && !keepDirs.has(p)) continue; // empty ignored dir
         collapsed.add(p);
       } else if (isUnderCollapsedDir(p, collapsed)) {
         continue;
       }
       out.push(p);
-      if (out.length >= limit) break;
     }
-    return await markSymlinkedDirs(cwd, out);
+    // Empties are dropped BEFORE the cap so they never consume its slots, and
+    // the cap is applied before the per-entry symlink stats so those stay
+    // bounded by `limit` rather than by the raw listing.
+    const kept = await dropEmptyIgnoredDirs(cwd, out);
+    return await markSymlinkedDirs(cwd, kept.slice(0, limit));
   } catch {
     return []; // not a git repo → the non-git walk above already shows files
   }
+}
+
+/** How many directories the emptiness probes of ONE listing may readdir in
+ *  total before the remaining probes give up and call their trees non-empty.
+ *  Real empty subtrees are tiny (they hold nothing but directories), so a
+ *  healthy listing uses a handful; the shared budget exists so a pathological
+ *  all-directory repo can't multiply a per-entry bound by thousands of
+ *  entries on every refresh. Erring on "non-empty" shows a row the user can
+ *  open, which beats hiding real files. */
+const EMPTINESS_PROBE_DIR_BUDGET = 256;
+
+/** Drop the DIRECTORY entries whose subtree holds no actual entries — the
+ *  dead rows `--no-empty-directory` was for. Files pass through untouched, as
+ *  do symlinks (git classifies them as files, so they never carry the slash
+ *  here). Probes run concurrently against one shared budget. */
+async function dropEmptyIgnoredDirs(
+  cwd: string,
+  entries: string[],
+): Promise<string[]> {
+  const root = path.resolve(cwd);
+  const budget = { remaining: EMPTINESS_PROBE_DIR_BUDGET };
+  const kept = await Promise.all(
+    entries.map(async (p) => {
+      if (!p.endsWith("/")) return p;
+      return (await ignoredDirHasContent(path.join(root, p), budget))
+        ? p
+        : null;
+    }),
+  );
+  return kept.filter((p): p is string => p !== null);
+}
+
+/** True when `absDir` contains anything a tree row could show: a file, a
+ *  symlink, a socket — anything that is not a plain directory. Iterative and
+ *  budget-bounded; never follows symlinks (a link is already "content", and
+ *  following one could walk outside the worktree or cycle). A nested `.git`
+ *  is invisible to the tree (readIgnoredDir drops it from every expansion),
+ *  so it counts as nothing here too — otherwise a dir whose only content is
+ *  a nested object store would render as a row that expands to nothing. An
+ *  unreadable directory contributes nothing — if every readable corner is
+ *  empty, the row would expand to nothing, so suppressing it stays correct. */
+async function ignoredDirHasContent(
+  absDir: string,
+  budget: { remaining: number },
+): Promise<boolean> {
+  const stack = [absDir];
+  while (stack.length > 0) {
+    if (budget.remaining <= 0) return true; // budget spent — assume content
+    budget.remaining -= 1;
+    const dir = stack.pop()!;
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      continue; // vanished or unreadable — nothing showable here
+    }
+    for (const e of entries) {
+      if (e.name === ".git") continue; // never shown, at any depth
+      if (!e.isDirectory()) return true;
+      stack.push(path.join(dir, e.name));
+    }
+  }
+  return false;
 }
 
 /** Give a symlink-to-directory the trailing "/" the tree needs to treat it as

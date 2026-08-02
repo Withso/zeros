@@ -116,9 +116,16 @@ describe("encodeAttachments — text attachments reach the agent", () => {
         { type: "text", text: '<file name="notes.txt">\nhello world\n</file>' },
       ]);
       // The sent bubble must say "text" too — the old encoder hard-coded
-      // "image", which is why the bubble rendered a broken thumbnail.
+      // "image", which is why the bubble rendered a broken thumbnail. The
+      // attachmentId is the bubble's link back to the context-graph record —
+      // deleting a QUEUED bubble uses it to unstage.
       expect(bubbleAttachments).toEqual([
-        { name: "notes.txt", mimeType: "text/plain", kind: "text" },
+        {
+          name: "notes.txt",
+          mimeType: "text/plain",
+          kind: "text",
+          attachmentId: "att-1",
+        },
       ]);
     });
   }
@@ -139,6 +146,33 @@ describe("encodeAttachments — text attachments reach the agent", () => {
 
   it("skips the graph copy when there is no cwd or chat", async () => {
     await encodeAttachments([textAttachment()], NO_CWD);
+    expect(writeContextAttachment).not.toHaveBeenCalled();
+  });
+
+  it("still stages when the chat doesn't exist yet — the graph is workspace-scoped", async () => {
+    // Sending the FIRST prompt encodes before the chat row lands. chatId is
+    // provenance only; requiring it silently skipped the graph copy for
+    // every new-chat send.
+    await encodeAttachments([textAttachment()], { ...VISION, chatId: null });
+    expect(writeContextAttachment).toHaveBeenCalledTimes(1);
+    expect(writeContextAttachment.mock.calls[0][0]).toMatchObject({
+      cwd: "/repo",
+      attachmentId: "att-1",
+    });
+  });
+
+  it("does not re-stage a reconstructed chip — its send already owns a record", async () => {
+    // Edit-in-place rebuilds sent messages under fresh `att-edit-` ids
+    // (reconstruct.ts). Staging those again would duplicate the canvas card
+    // on every edit-resubmit.
+    const { blocks } = await encodeAttachments(
+      [textAttachment({ id: "att-edit-k2-1", text: "hello world" })],
+      VISION,
+    );
+    // The prompt still carries the body — only the graph copy is skipped.
+    expect(blocks).toEqual([
+      { type: "text", text: '<file name="notes.txt">\nhello world\n</file>' },
+    ]);
     expect(writeContextAttachment).not.toHaveBeenCalled();
   });
 
@@ -286,6 +320,18 @@ describe("encodeAttachments — image branches still work", () => {
       { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
     ]);
     expect(writeContextAttachment).not.toHaveBeenCalled();
+  });
+
+  it("keeps the disk-reference path for a non-vision agent on a brand-new chat", async () => {
+    // chatId used to gate the disk write, forcing pre-chat sends onto the
+    // inline fallback that non-vision adapters may drop. The graph write is
+    // workspace-scoped, so the path reference works without a chat row.
+    const { blocks } = await encodeAttachments([imageAttachment()], {
+      ...NON_VISION,
+      chatId: null,
+    });
+    expect(writeContextAttachment).toHaveBeenCalledTimes(1);
+    expect(blocks[0].type).toBe("text");
   });
 
   it("drops an image whose disk write fails, without losing the others", async () => {

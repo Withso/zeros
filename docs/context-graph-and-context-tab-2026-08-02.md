@@ -55,13 +55,34 @@ graph itself is NOT gitignored — only its private half is.
 - **Create:** `createWorkspaceInner` scaffolds the graph after provisioning
   (best-effort; never rolls back a worktree). Pre-existing workspaces get it
   lazily — first Context-tab open or first attachment write.
-- **Attachments:** `encodeAttachments` (the single staged-attachment →
-  wire-content chokepoint) now stages EVERY valid attachment into
-  `local/attachments/` via the `agent_attachment_write` IPC: images (vision
-  and non-vision paths) and text files / chat transcripts. For text + vision
-  sends the graph copy is additive — failure never skips the attachment; the
-  non-vision image path still treats the write as load-bearing (the prompt
-  references the path).
+- **Attachments (2026-08-02(2): attach-time, not send-time):** the composer
+  itself stages every attachment the moment it is added — drop, paste, pick,
+  or transcript pill — by diffing the document's attachment-id set on every
+  user edit (`composer-editor/context-graph-staging.ts`), so the card is on
+  the canvas while the prompt is still being typed. Removing a still-unsent
+  chip (×, Backspace, select-all delete) unstages it via
+  `agent_attachment_remove` — the canvas has no delete affordance, so
+  un-attaching is the only way a mistake leaves it. Undo/redo re-stage and
+  re-unstage symmetrically (the side store keeps bytes across removals).
+  `encodeAttachments` (the single staged-attachment → wire-content
+  chokepoint) keeps its write as an idempotent send-time safety net — the
+  engine skips same-size re-writes so mtimes (and canvas slots) hold — and
+  the non-vision image path still treats the write as load-bearing (the
+  prompt references the path). Writes are scope-pinned: an id already in
+  `shared/` is re-written THERE, never duplicated back into `local/`.
+  Reconstructed edit-in-place chips (`att-edit-` ids) never stage — their
+  original send owns the graph record — with ONE deliberate exception: the
+  non-vision disk-reference path writes whatever id it is given, because the
+  resubmitted prompt must reference a real file (see Known edges). `chatId`
+  is provenance-only/optional end to end, so staging and the non-vision disk
+  path work before the first prompt creates the chat. Bubble metadata now
+  carries `attachmentId`, which is how deleting a QUEUED (never-dispatched)
+  message unstages its files. Surfaces whose cwd is not the attachment's
+  workspace opt out via `stageIntoContextGraph: false` — the dispatcher
+  modal composes against the primary checkout while its worktree doesn't
+  exist yet, and relies on the send-path safety net instead. Validation-
+  failed attachments don't stage (the send path would exclude them, so the
+  canvas would assert context no agent received).
 - **Archive:** `.context-graph` is force-added into the archive snapshot
   (`archiveIncludePaths`) when it has content, so a workspace's context now
   SURVIVES archive and comes back on restore — parity with the harness'
@@ -99,14 +120,60 @@ The body (`context-row1-tab.tsx`) renders `ContextGraphCanvas`:
   other visual separation between the two scopes, by design.
 - **Data:** `KeyedAsyncCache` keyed by folder (Rule 11: retained snapshots,
   deduped requests), revalidated on the shared git refresh bus — agent
-  turn-end (which is when attachment writes land), git writes, engine
-  broadcasts — and force-refreshed after a local toggle, which also
+  turn-end, git writes, engine broadcasts — plus the in-process
+  graph-change signal (`notifyContextGraphChanged`), which every staging
+  write/remove fires, so a just-attached file appears immediately. The same
+  signal is bridged onto the git refresh bus (`use-git-refresh-key.ts`,
+  coalesced ~150 ms per workspace), which is what makes the FILES tab's
+  tracked + ignored listings pick up `.context-graph/local/…` the moment a
+  write lands. A local share toggle force-refreshes and
   `triggerGitRefresh()`s so the Changes tab sees the shared file appear.
+
+## 3b. Files tab (2026-08-02(2))
+
+`.context-graph/local/` was invisible in the Files tab: the ignored-roots
+listing used `git ls-files -o -i --exclude-standard --directory
+--no-empty-directory` as its "which ignored dirs are non-empty" oracle, and
+that flag (a) collapses at a DIFFERENT level than the plain `--directory` run
+for the graph's shape (`.context-graph/` vs `.context-graph/local/`), so the
+exact-path keep-set classified `local/` as empty, and (b) returns NOTHING for
+a subtree whose only non-ignored content is untracked (the moment anything is
+shared) — the same pathology that once ate `out/run.log`, now eating a
+directory. `listIgnoredRoots` (engine `git/workspace-files.ts`) now runs ONE
+git query and decides emptiness itself with concurrent readdir probes
+sharing one per-listing budget (`EMPTINESS_PROBE_DIR_BUDGET`, err on
+non-empty when spent). The probe skips `.git` at any depth — expansions
+never show it, so a vendored checkout cleaned down to its object store
+stays suppressed instead of becoming a dead row. Empty ignored dirs still
+don't render; `.context-graph/shared/` appears via the tracked/untracked
+listing as soon as it holds a file (git cannot list an empty untracked
+dir).
 
 ## 4. Known edges / follow-ups
 
 - Web/relay clients see a "desktop only" empty state; a remote surface would
-  filter to `shared/` and needs a deliberate allowlist decision.
+  filter to `shared/` and needs a deliberate allowlist decision. (Attach-time
+  staging silently no-ops there — the send path's inline blocks are still the
+  delivery.)
+- Un-attaching a chip removes the `local/` copy only; a SHARED attachment's
+  copy survives chip removal by design (sharing is an explicit keep act).
+- Deleting a queued row unstages the files it QUEUED with (bubble
+  `attachmentId`s). Two orphan paths remain, both inside queued-message
+  editing: attach a NEW file mid-edit then cancel (the discarded doc's fresh
+  record stays — programmatic doc swaps deliberately never unstage, because
+  most of them, send clears and draft/stash swaps, must not), and remove a
+  reconstructed chip mid-edit then save (the reconstruction's `att-edit-` id
+  can't be traced back to the original record). Rare; a canvas delete
+  affordance is the natural general fix.
+- Edit-resubmit of an IMAGE under a non-vision agent stages a fresh
+  `att-edit-…` folder per resubmit (the disk write is load-bearing — the
+  prompt references the path), so repeated edits accumulate duplicate cards
+  for the same bytes. Pre-existing shape; fixing it needs the sent bubble to
+  keep a usable link to the original folder without re-exposing sent records
+  to composer unstaging.
+- Empty dirs can't render in a git-driven tree: `.context-graph/shared/`
+  shows in the Files tab only once something is shared; `local/` only once
+  something is staged. Finder shows both from scaffold time.
 - Legacy `.context/attachments/<chatId>/…` files from older sends are not
   rendered on the canvas (different store, wholly private by contract).
 - Listing bounds: 400 items / depth 6 / 2000 entries per dir, `truncated`

@@ -1,19 +1,20 @@
 // ──────────────────────────────────────────────────────────
-// IPC commands: agent-attachments — write attachment bytes to disk
+// IPC commands: agent-attachments — attachment bytes on/off disk
 // ──────────────────────────────────────────────────────────
 //
 // Phase D2 (2026-05-07), re-homed 2026-08-02. The renderer can't write files
 // directly (the sandbox model + WebSocket bridge both prefer text payloads),
-// so this IPC handler takes a base64-encoded attachment, decodes it, and
-// writes it under the workspace's context graph:
+// so these handlers move a base64-encoded attachment in and out of the
+// workspace's context graph:
 //
-//   <cwd>/.context-graph/local/attachments/<attachmentId>/<safeFilename>
+//   <cwd>/.context-graph/<scope>/attachments/<attachmentId>/<safeFilename>
 //
 // One folder per attachment, exactly one file inside — the layout the Context
-// tab canvas renders and the share checkbox moves between `local/` (gitignored)
-// and `shared/` (committed). EVERY composer attachment lands here now — images
-// (which non-vision agents also reference by path) AND text files / chat
-// transcripts (which are additionally inlined into the prompt).
+// tab canvas renders and the share checkbox moves between `local/`
+// (gitignored) and `shared/` (committed). EVERY composer attachment lands
+// here the moment it is staged in the composer — images AND text files / chat
+// transcripts — and `agent_attachment_remove` takes it back out when the user
+// removes the chip before sending.
 //
 // Why store under the chat's cwd instead of a global temp dir?
 //   1. The agent's CLI runs with cwd = chatFolder. Saving here means
@@ -24,21 +25,17 @@
 //      force-added into the archive snapshot), so a workspace's context
 //      record outlives any one chat and even the worktree itself.
 //
-// Path safety:
-//   - chatId / attachmentId are validated as a-zA-Z0-9_-.
-//   - filename is sanitised — only the basename is used, special
-//     chars replaced with `_`, and capped to 80 chars so a hostile
-//     drag-source can't path-traverse.
-//   - Final write path is verified to start with the validated
-//     attachments root before fs.writeFile is called.
+// Path safety lives in src/engine/files/context-graph.ts (the ONE
+// implementation, shared with the engine bridge ops): ids validated as
+// a-zA-Z0-9_-, filenames reduced to a sanitised basename, and every resolved
+// path confined to the workspace lexically + by realpath. These handlers only
+// validate arg SHAPES and translate structured failures into throws.
 // ──────────────────────────────────────────────────────────
 
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
-  CONTEXT_GRAPH_DIR,
-  CONTEXT_GRAPH_LOCAL,
-  ensureContextGraph,
+  removeContextGraphAttachment,
+  stageContextGraphAttachment,
 } from "../../../src/engine/files/context-graph";
 import type { CommandHandler } from "../router";
 
@@ -52,27 +49,29 @@ function requireString(args: Record<string, unknown>, key: string): string {
 
 const ID_OK = /^[a-zA-Z0-9_-]+$/;
 
-function safeFilename(raw: string): string {
-  // Strip directory parts; keep extension. Hard cap to 80 chars.
-  const base = path.basename(raw);
-  const cleaned = base.replace(/[^a-zA-Z0-9._-]+/g, "_");
-  return cleaned.length <= 80 ? cleaned : cleaned.slice(0, 80);
-}
-
 /** agent_attachment_write — persist a base64-encoded attachment into the
  *  workspace's context graph and return the absolute path. The renderer
- *  calls this for every staged attachment on send: images so non-vision
- *  agents can Read them by path (and vision sends have a durable record),
- *  text files / transcripts so the Context tab shows what was attached. */
+ *  calls this the moment an attachment is staged in the composer (and again
+ *  from the send path as a cheap idempotent safety net): images so non-vision
+ *  agents can Read them by path, text files / transcripts so the Context tab
+ *  shows what was attached.
+ *
+ *  `chatId` is accepted for provenance but OPTIONAL — the graph is
+ *  workspace-scoped, and staging must work before the first prompt creates
+ *  the chat. */
 export const agentAttachmentWrite: CommandHandler = async (args) => {
   const cwd = requireString(args, "cwd");
-  const chatId = requireString(args, "chatId");
   const attachmentId = requireString(args, "attachmentId");
   const base64 = requireString(args, "base64");
   const mimeType = requireString(args, "mimeType");
   const filename = requireString(args, "filename");
+  const chatId = args.chatId;
 
-  if (!ID_OK.test(chatId)) {
+  if (
+    chatId !== undefined &&
+    chatId !== null &&
+    (typeof chatId !== "string" || !ID_OK.test(chatId))
+  ) {
     throw new Error("agent_attachment: invalid chatId");
   }
   if (!ID_OK.test(attachmentId)) {
@@ -82,48 +81,51 @@ export const agentAttachmentWrite: CommandHandler = async (args) => {
     throw new Error("agent_attachment: cwd must be absolute");
   }
 
-  // Attachments live in the workspace's `.context-graph/` — `local/` scope
-  // (gitignored via the graph's own .gitignore) until the user shares them
-  // from the Context tab. The scaffold call is idempotent and also (re)writes
-  // that .gitignore, so a hand-deleted skeleton heals here.
-  const scaffold = await ensureContextGraph(cwd);
-  if (!scaffold.ok) {
+  const staged = await stageContextGraphAttachment(cwd, {
+    attachmentId,
+    base64,
+    filename,
+  });
+  if (!staged.ok) {
     throw new Error(
-      `agent_attachment: ${scaffold.error ?? "couldn't scaffold the context graph"}`,
+      `agent_attachment: ${staged.error ?? "couldn't stage the attachment"}`,
     );
   }
-  const attachmentsRoot = path.join(
-    cwd,
-    CONTEXT_GRAPH_DIR,
-    CONTEXT_GRAPH_LOCAL,
-    "attachments",
-    attachmentId,
-  );
-  await fs.mkdir(attachmentsRoot, { recursive: true });
-
-  const safeName = safeFilename(filename);
-  const finalPath = path.join(attachmentsRoot, safeName);
-
-  // Belt: ensure the resolved write path stays inside the attachment's own
-  // folder. path.basename + ID_OK + the join above already make this true,
-  // but the check protects against future regressions (e.g. someone bypasses
-  // safeFilename and lets `..` slip through).
-  if (!finalPath.startsWith(attachmentsRoot + path.sep)) {
-    throw new Error("agent_attachment: refusing to write outside chat root");
-  }
-
-  const buf = Buffer.from(base64, "base64");
-  await fs.writeFile(finalPath, buf);
 
   // The renderer needs both the absolute path (for tool-call paths
   // like Read("/abs/path")) and the cwd-relative path (for @-mentions
   // like @.context-graph/local/attachments/...). Ship both so the prompt
   // builder can pick whichever the active agent prefers.
-  const relativePath = path.relative(cwd, finalPath);
   return {
-    absolutePath: finalPath,
-    relativePath,
+    absolutePath: staged.absolutePath,
+    relativePath: staged.relativePath,
     mimeType,
-    bytes: buf.length,
+    bytes: staged.bytes,
   };
+};
+
+/** agent_attachment_remove — delete one staged attachment folder from the
+ *  PRIVATE scope, the inverse of the write above. Called when the user
+ *  removes a still-unsent chip from the composer, so the Context tab doesn't
+ *  accumulate cards for files that were attached by mistake (the canvas has
+ *  no delete affordance of its own). Never touches `shared/` — sharing is an
+ *  explicit keep-this act — and a missing folder is a clean no-op. */
+export const agentAttachmentRemove: CommandHandler = async (args) => {
+  const cwd = requireString(args, "cwd");
+  const attachmentId = requireString(args, "attachmentId");
+
+  if (!ID_OK.test(attachmentId)) {
+    throw new Error("agent_attachment: invalid attachmentId");
+  }
+  if (!path.isAbsolute(cwd)) {
+    throw new Error("agent_attachment: cwd must be absolute");
+  }
+
+  const res = await removeContextGraphAttachment(cwd, attachmentId);
+  if (!res.ok) {
+    throw new Error(
+      `agent_attachment: ${res.error ?? "couldn't remove the attachment"}`,
+    );
+  }
+  return { removed: res.removed };
 };

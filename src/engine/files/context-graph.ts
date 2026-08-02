@@ -346,6 +346,184 @@ export async function listContextGraph(
   }
 }
 
+export interface ContextGraphStageResult {
+  ok: boolean;
+  absolutePath?: string;
+  relativePath?: string;
+  scope?: ContextGraphScope;
+  bytes?: number;
+  /** True when the target already held these bytes and nothing was written —
+   *  keeps the card's mtime (and so its canvas slot) stable across the
+   *  attach-time write and the send-time safety-net re-write. */
+  skipped?: boolean;
+  error?: string;
+}
+
+export interface ContextGraphRemoveResult {
+  ok: boolean;
+  /** False when there was nothing to remove (already gone / never staged). */
+  removed: boolean;
+  error?: string;
+}
+
+/** Strip directory parts, replace shell-hostile characters, cap the length.
+ *  The one filename sanitiser for attachment writes — the IPC used to own a
+ *  copy; it lives here so every writer and every test agree on the layout. */
+export function safeAttachmentFilename(raw: string): string {
+  const base = path.basename(raw);
+  const cleaned = base.replace(/[^a-zA-Z0-9._-]+/g, "_");
+  const capped = cleaned.length <= 80 ? cleaned : cleaned.slice(0, 80);
+  // basename("..") === ".." and a fully-hostile name can clean to "" — both
+  // would corrupt the one-folder-one-file layout. Park such names on a
+  // constant instead of failing the write.
+  return capped === "" || capped === "." || capped === ".." ? "attachment" : capped;
+}
+
+/** Write one attachment's bytes into the graph — the composer's attach-time
+ *  staging AND the send path's safety net, so it must be idempotent and
+ *  scope-aware:
+ *
+ *    • The folder is `<scope>/attachments/<attachmentId>/`, scope pinned to
+ *      wherever the id ALREADY lives. Without the pin, re-staging on send
+ *      would re-create `local/<id>` after the user shared the attachment,
+ *      leaving divergent copies in both scopes — the state setShared refuses
+ *      to touch.
+ *    • A same-size existing file is left alone (same id ⇒ same bytes; the id
+ *      is minted per staged attachment and its content never changes), so
+ *      re-writes don't bump mtime and reshuffle the canvas.
+ *
+ *  Never throws; callers get a structured result like the other mutations. */
+export async function stageContextGraphAttachment(
+  workspaceRoot: string,
+  args: { attachmentId: string; base64: string; filename: string },
+): Promise<ContextGraphStageResult> {
+  if (!ID_OK.test(args.attachmentId)) {
+    return { ok: false, error: "invalid attachment id" };
+  }
+  try {
+    const scaffold = await ensureContextGraph(workspaceRoot);
+    if (!scaffold.ok) {
+      return {
+        ok: false,
+        error: scaffold.error ?? "couldn't scaffold the context graph",
+      };
+    }
+    const root = graphRoot(workspaceRoot);
+    const dirForScope = (scope: ContextGraphScope) =>
+      path.join(root, scope, ATTACHMENTS_DIR, args.attachmentId);
+    const isDir = async (p: string) =>
+      (await fs.lstat(p).catch(() => null))?.isDirectory() === true;
+    const sharedAtPin = await isDir(dirForScope(CONTEXT_GRAPH_SHARED));
+    const localAtPin = await isDir(dirForScope(CONTEXT_GRAPH_LOCAL));
+    const scope: ContextGraphScope = sharedAtPin
+      ? CONTEXT_GRAPH_SHARED
+      : CONTEXT_GRAPH_LOCAL;
+    const otherScope: ContextGraphScope =
+      scope === CONTEXT_GRAPH_SHARED
+        ? CONTEXT_GRAPH_LOCAL
+        : CONTEXT_GRAPH_SHARED;
+    const otherAtPin = scope === CONTEXT_GRAPH_SHARED ? localAtPin : sharedAtPin;
+    const dir = dirForScope(scope);
+    if (!(await isConfined(dir, workspaceRoot))) {
+      return { ok: false, error: "path escapes workspace" };
+    }
+    await fs.mkdir(dir, { recursive: true });
+    const safeName = safeAttachmentFilename(args.filename);
+    const finalPath = path.join(dir, safeName);
+    // Belt: ID_OK + safeAttachmentFilename already make this true; the check
+    // protects against future regressions letting `..` through.
+    if (!finalPath.startsWith(dir + path.sep)) {
+      return { ok: false, error: "refusing to write outside the attachment folder" };
+    }
+    const buf = Buffer.from(args.base64, "base64");
+    const result = {
+      ok: true as const,
+      absolutePath: finalPath,
+      relativePath: path.relative(workspaceRoot, finalPath),
+      scope,
+      bytes: buf.length,
+    };
+    const existing = await fs.lstat(finalPath).catch(() => null);
+    if (existing?.isFile() && existing.size === buf.length) {
+      return { ...result, skipped: true };
+    }
+    if (existing && !existing.isFile()) {
+      // A non-file squatting at the write path — the attachment location is
+      // predictable, so a hostile in-worktree process could plant a symlink
+      // here and writeFile would follow it out of the folder. Remove the
+      // ENTRY itself (rm unlinks a link, never its target) and write fresh.
+      await fs.rm(finalPath, { recursive: true, force: true });
+    }
+    await fs.writeFile(finalPath, buf);
+    // A share toggle can move this id between the scope pin above and the
+    // write — the rename lands in the OTHER scope and the write re-creates
+    // the folder the move just emptied, the divergent two-scope state the
+    // toggle refuses to touch. Detect exactly that (the other scope was
+    // absent at pin time, occupied now), drop our redundant copy — same id
+    // ⇒ same bytes — and report the surviving location. When the other
+    // scope was ALREADY occupied at pin time the divergence pre-existed;
+    // leave it for the user rather than silently deleting a copy.
+    if (!otherAtPin && (await isDir(dirForScope(otherScope)))) {
+      await fs.rm(dir, { recursive: true, force: true });
+      const survivor = path.join(dirForScope(otherScope), safeName);
+      return {
+        ...result,
+        absolutePath: survivor,
+        relativePath: path.relative(workspaceRoot, survivor),
+        scope: otherScope,
+      };
+    }
+    return result;
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/** Delete one attachment folder from the PRIVATE scope — the composer removing
+ *  a chip that was staged at attach time but never sent. Deliberately never
+ *  touches `shared/`: sharing is an explicit keep-this-in-the-repo act from
+ *  the Context tab, and un-attaching a chip must not undo it. Missing folder
+ *  is a clean no-op (`removed: false`) — the id may have been shared, sent
+ *  from another lifecycle, or never staged at all. */
+export async function removeContextGraphAttachment(
+  workspaceRoot: string,
+  attachmentId: string,
+): Promise<ContextGraphRemoveResult> {
+  if (!ID_OK.test(attachmentId)) {
+    return { ok: false, removed: false, error: "invalid attachment id" };
+  }
+  const dir = path.join(
+    graphRoot(workspaceRoot),
+    CONTEXT_GRAPH_LOCAL,
+    ATTACHMENTS_DIR,
+    attachmentId,
+  );
+  try {
+    if (!(await isConfined(dir, workspaceRoot))) {
+      return { ok: false, removed: false, error: "path escapes workspace" };
+    }
+    const stat = await fs.lstat(dir).catch(() => null);
+    if (!stat) return { ok: true, removed: false };
+    if (!stat.isDirectory()) {
+      // Something squatting on the id (a stray file, a symlink). Remove the
+      // ENTRY itself — rm on a symlink unlinks the link, never its target.
+      await fs.rm(dir, { force: true });
+      return { ok: true, removed: true };
+    }
+    await fs.rm(dir, { recursive: true, force: true });
+    return { ok: true, removed: true };
+  } catch (err) {
+    return {
+      ok: false,
+      removed: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 /** Move one attachment folder between `local/` and `shared/` — the Context
  *  tab's share checkbox. Idempotent: already-there reports `moved: false`. */
 export async function setContextGraphAttachmentShared(

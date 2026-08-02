@@ -13,7 +13,10 @@ import {
   contextGraphHasContent,
   ensureContextGraph,
   listContextGraph,
+  removeContextGraphAttachment,
+  safeAttachmentFilename,
   setContextGraphAttachmentShared,
+  stageContextGraphAttachment,
 } from "../context-graph";
 
 let root: string;
@@ -227,5 +230,199 @@ describe("contextGraphHasContent", () => {
     expect(await contextGraphHasContent(root)).toBe(false);
     await seedAttachment("local", "att-1", "notes.md", "hi");
     expect(await contextGraphHasContent(root)).toBe(true);
+  });
+});
+
+describe("stageContextGraphAttachment", () => {
+  it("scaffolds on demand and writes to local/ by default", async () => {
+    const res = await stageContextGraphAttachment(root, {
+      attachmentId: "att-1",
+      base64: Buffer.from("hello").toString("base64"),
+      filename: "notes.txt",
+    });
+    expect(res.ok).toBe(true);
+    expect(res.scope).toBe("local");
+    expect(res.relativePath).toBe(
+      path.join(".context-graph", "local", "attachments", "att-1", "notes.txt"),
+    );
+    expect(
+      await fs.readFile(graph("local", "attachments", "att-1", "notes.txt"), "utf8"),
+    ).toBe("hello");
+  });
+
+  it("pins the write to shared/ when the id already lives there", async () => {
+    // Attach → share → send: the send path's safety-net re-write must land on
+    // the SHARED copy, not resurrect local/ — divergent copies in both scopes
+    // are the one state setContextGraphAttachmentShared refuses to touch.
+    await ensureContextGraph(root);
+    await seedAttachment("shared", "att-1", "notes.txt", "hello");
+    const res = await stageContextGraphAttachment(root, {
+      attachmentId: "att-1",
+      base64: Buffer.from("hello").toString("base64"),
+      filename: "notes.txt",
+    });
+    expect(res.ok).toBe(true);
+    expect(res.scope).toBe("shared");
+    const localStat = await fs
+      .lstat(graph("local", "attachments", "att-1"))
+      .catch(() => null);
+    expect(localStat).toBeNull();
+    // …and the share toggle still works after the re-write.
+    const back = await setContextGraphAttachmentShared(root, "att-1", false);
+    expect(back).toEqual({ ok: true, moved: true });
+  });
+
+  it("skips the write (and keeps mtime) when the same bytes are already there", async () => {
+    const first = await stageContextGraphAttachment(root, {
+      attachmentId: "att-1",
+      base64: Buffer.from("hello").toString("base64"),
+      filename: "notes.txt",
+    });
+    expect(first.skipped).toBeUndefined();
+    const file = graph("local", "attachments", "att-1", "notes.txt");
+    const before = await fs.stat(file);
+    await new Promise((r) => setTimeout(r, 20));
+    const second = await stageContextGraphAttachment(root, {
+      attachmentId: "att-1",
+      base64: Buffer.from("hello").toString("base64"),
+      filename: "notes.txt",
+    });
+    expect(second.ok).toBe(true);
+    expect(second.skipped).toBe(true);
+    const after = await fs.stat(file);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+  });
+
+  it("sanitises hostile filenames into the attachment folder", async () => {
+    const res = await stageContextGraphAttachment(root, {
+      attachmentId: "att-1",
+      base64: Buffer.from("x").toString("base64"),
+      filename: "../../../etc/passwd",
+    });
+    expect(res.ok).toBe(true);
+    expect(res.absolutePath).toContain(
+      path.join("local", "attachments", "att-1"),
+    );
+    // basename → "passwd"; nothing escaped the folder.
+    const entries = await fs.readdir(graph("local", "attachments", "att-1"));
+    expect(entries).toEqual(["passwd"]);
+  });
+
+  it("parks a name that sanitises to nothing on a constant", () => {
+    expect(safeAttachmentFilename("///")).toBe("attachment");
+    expect(safeAttachmentFilename("..")).toBe("attachment");
+    // Non-ASCII collapses to underscores (pre-existing policy) but keeps any
+    // ASCII extension: "日本語.png" → "_.png"; a bare "日本語" → "_".
+    expect(safeAttachmentFilename("日本語.png")).toBe("_.png");
+    expect(safeAttachmentFilename("ok name.png")).toBe("ok_name.png");
+  });
+
+  it("rejects traversal-shaped ids outright", async () => {
+    for (const id of ["../escape", "a/b", ".", "..", ""]) {
+      const res = await stageContextGraphAttachment(root, {
+        attachmentId: id,
+        base64: "aGk=",
+        filename: "a.txt",
+      });
+      expect(res.ok).toBe(false);
+      expect(res.error).toBe("invalid attachment id");
+    }
+  });
+
+  it("replaces a symlink squatting at the write path instead of following it", async () => {
+    // The post-attach path is predictable, so a hostile in-worktree process
+    // could plant a link there before the send-time re-write. writeFile
+    // follows symlinks; the stage must unlink the squatter, not its target.
+    await ensureContextGraph(root);
+    const target = path.join(root, "precious.txt");
+    await fs.writeFile(target, "keep me");
+    const dir = graph("local", "attachments", "att-1");
+    await fs.mkdir(dir, { recursive: true });
+    await fs.symlink(target, path.join(dir, "notes.txt"));
+    const res = await stageContextGraphAttachment(root, {
+      attachmentId: "att-1",
+      base64: Buffer.from("new bytes").toString("base64"),
+      filename: "notes.txt",
+    });
+    expect(res.ok).toBe(true);
+    expect(await fs.readFile(target, "utf8")).toBe("keep me");
+    const written = await fs.lstat(path.join(dir, "notes.txt"));
+    expect(written.isSymbolicLink()).toBe(false);
+    expect(await fs.readFile(path.join(dir, "notes.txt"), "utf8")).toBe(
+      "new bytes",
+    );
+  });
+
+  it("leaves a PRE-EXISTING two-scope divergence alone", async () => {
+    // An id hand-copied into both scopes is the state setShared refuses with
+    // "resolve on disk". The write refreshes the pinned (shared) copy but
+    // must not silently delete the other — only a mid-write toggle race
+    // (other scope absent at pin, occupied after) gets auto-resolved.
+    await ensureContextGraph(root);
+    await seedAttachment("local", "att-1", "notes.txt", "local copy");
+    await seedAttachment("shared", "att-1", "notes.txt", "shared copy");
+    const res = await stageContextGraphAttachment(root, {
+      attachmentId: "att-1",
+      base64: Buffer.from("shared copy").toString("base64"),
+      filename: "notes.txt",
+    });
+    expect(res.ok).toBe(true);
+    expect(res.scope).toBe("shared");
+    expect(
+      await fs.readFile(graph("local", "attachments", "att-1", "notes.txt"), "utf8"),
+    ).toBe("local copy");
+  });
+});
+
+describe("removeContextGraphAttachment", () => {
+  it("removes a staged local attachment folder", async () => {
+    await ensureContextGraph(root);
+    await seedAttachment("local", "att-1", "notes.txt", "bye");
+    const res = await removeContextGraphAttachment(root, "att-1");
+    expect(res).toEqual({ ok: true, removed: true });
+    const stat = await fs
+      .lstat(graph("local", "attachments", "att-1"))
+      .catch(() => null);
+    expect(stat).toBeNull();
+  });
+
+  it("is a clean no-op when nothing was staged", async () => {
+    await ensureContextGraph(root);
+    expect(await removeContextGraphAttachment(root, "att-none")).toEqual({
+      ok: true,
+      removed: false,
+    });
+  });
+
+  it("never touches the shared scope", async () => {
+    // Un-attaching a chip must not undo an explicit share. The id lives in
+    // shared/ only (the share MOVED it), so the remove finds nothing.
+    await ensureContextGraph(root);
+    await seedAttachment("shared", "att-1", "notes.txt", "kept");
+    const res = await removeContextGraphAttachment(root, "att-1");
+    expect(res).toEqual({ ok: true, removed: false });
+    expect(
+      await fs.readFile(graph("shared", "attachments", "att-1", "notes.txt"), "utf8"),
+    ).toBe("kept");
+  });
+
+  it("rejects traversal-shaped ids outright", async () => {
+    for (const id of ["../escape", "a/b", ".", "..", ""]) {
+      const res = await removeContextGraphAttachment(root, id);
+      expect(res.ok).toBe(false);
+      expect(res.error).toBe("invalid attachment id");
+    }
+  });
+
+  it("unlinks a symlink squatting on the id without following it", async () => {
+    await ensureContextGraph(root);
+    const target = path.join(root, "precious");
+    await fs.mkdir(target, { recursive: true });
+    await fs.writeFile(path.join(target, "keep.txt"), "keep");
+    await fs.symlink(target, graph("local", "attachments", "att-link"));
+    const res = await removeContextGraphAttachment(root, "att-link");
+    expect(res.ok).toBe(true);
+    // The link is gone; its target is untouched.
+    expect(await fs.readFile(path.join(target, "keep.txt"), "utf8")).toBe("keep");
   });
 });

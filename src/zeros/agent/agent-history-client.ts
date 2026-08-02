@@ -324,14 +324,16 @@ export interface AttachmentWriteResult {
 }
 
 /** Persist a base64-encoded attachment into the workspace's context graph
- *  (`<cwd>/.context-graph/local/attachments/<attachmentId>/<file>`) and return
- *  both the absolute and cwd-relative paths. Every composer attachment lands
- *  here on send: images so non-vision agents can reference them by path, text
- *  files / transcripts so the Context tab canvas shows what was attached.
- *  Unrelated to chat storage — a dedicated file-write IPC. */
+ *  (`<cwd>/.context-graph/<scope>/attachments/<attachmentId>/<file>`) and
+ *  return both the absolute and cwd-relative paths. Every composer attachment
+ *  lands here the moment it is staged — images so non-vision agents can
+ *  reference them by path, text files / transcripts so the Context tab canvas
+ *  shows what was attached. `chatId` is provenance only and optional: staging
+ *  happens before the first prompt creates the chat. Unrelated to chat
+ *  storage — a dedicated file-write IPC. */
 export async function writeContextAttachment(args: {
   cwd: string;
-  chatId: string;
+  chatId?: string | null;
   attachmentId: string;
   base64: string;
   mimeType: string;
@@ -344,6 +346,23 @@ export async function writeContextAttachment(args: {
   // The write is a plain IPC (no bridge op → no DB_CHANGED), and the git
   // refresh bus for this path only bumps at turn end — nudge the Context tab
   // directly so the card appears the moment the file lands, not minutes later.
+  notifyContextGraphChanged(args.cwd);
+  return result;
+}
+
+/** Delete one staged attachment folder from the graph's PRIVATE scope — the
+ *  inverse of writeContextAttachment, fired when the user removes a
+ *  still-unsent chip from the composer. `shared/` is never touched (sharing
+ *  is an explicit keep-this act on the Context tab), and removing an id that
+ *  was never staged is a clean no-op. */
+export async function removeContextAttachment(args: {
+  cwd: string;
+  attachmentId: string;
+}): Promise<{ removed: boolean }> {
+  const result = await nativeInvoke<{ removed: boolean }>(
+    "agent_attachment_remove",
+    args,
+  );
   notifyContextGraphChanged(args.cwd);
   return result;
 }

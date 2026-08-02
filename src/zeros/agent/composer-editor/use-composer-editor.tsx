@@ -50,9 +50,11 @@ import { ComposerEditorProvider } from "./composer-editor-context";
 import { serializeComposer, type ComposerSerialized } from "./serialize";
 import { filesToAttachments } from "./attachment-io";
 import {
+  collectAttachmentIds,
   collectSourceKeys,
   findAttachmentsBySourceKey,
 } from "./attachment-keys";
+import { executeGraphSync, planGraphSync } from "./context-graph-staging";
 import {
   validateAttachment,
   type AttachmentValidation,
@@ -110,6 +112,15 @@ export interface UseComposerEditorOpts {
   modelId: string | null;
   /** cwd the @-file list is read from. */
   cwd: string | null;
+  /** Default true: attachments stage into `<cwd>/.context-graph/` the moment
+   *  they're added, and unstage when their chip is removed (the Context tab's
+   *  attach-time sync). Set false on surfaces whose cwd is NOT the workspace
+   *  the attachments belong to — the dispatcher composes against the primary
+   *  checkout's root while the real worktree doesn't exist yet, and staging
+   *  there would leave permanent phantom cards on the trunk workspace's
+   *  canvas. Such surfaces rely on the send-path safety net, which stages
+   *  into whatever workspace the prompt actually lands in. */
+  stageIntoContextGraph?: boolean;
   /** Repo origin for the #-PR picker (null disables it). */
   originUrl: string | null;
   /** Session-discovered slash commands (merged under the curated floor). */
@@ -276,6 +287,46 @@ export function useComposerEditor(
         ? prev // reference-stable when nothing moved (Rule 11)
         : next,
     );
+  }, []);
+
+  // ── context-graph attach-time sync ──
+  //
+  // The doc's attachment-id set, diffed on every USER edit: an id appearing
+  // stages its file into `.context-graph/` right away (the Context tab shows
+  // it while the prompt is still being typed), an id disappearing unstages it
+  // (the canvas has no delete of its own, so an un-attached mistake must not
+  // squat there forever). Diffing the doc — rather than instrumenting
+  // insertFiles/removeBySourceKey/× — is what makes every gesture agree:
+  // paste, drop, pick, transcript swap, chip ×, Backspace, select-all delete,
+  // undo and redo all land here identically.
+  //
+  // Programmatic swaps (clear on send, setContent for drafts/edit seeds,
+  // setText) SUPPRESS the diff and just resync the set: those transitions say
+  // nothing about user intent toward the files — a send must keep its graph
+  // record, and an edit-in-place seed reconstructs already-sent chips whose
+  // record must survive a cancel. See context-graph-staging.ts for what else
+  // deliberately stays out (byte-less reconstructions, over-cap bodies).
+  const graphIdsRef = useRef<ReadonlySet<string>>(new Set());
+  const graphSyncSuppressedRef = useRef(false);
+  const resyncGraphIds = useCallback((ed: Editor) => {
+    graphIdsRef.current = new Set(collectAttachmentIds(ed.state.doc));
+  }, []);
+  const syncContextGraph = useCallback((ed: Editor) => {
+    const present = collectAttachmentIds(ed.state.doc);
+    if (
+      graphSyncSuppressedRef.current ||
+      optsRef.current.stageIntoContextGraph === false
+    ) {
+      graphIdsRef.current = new Set(present);
+      return;
+    }
+    const plan = planGraphSync(graphIdsRef.current, present, (id) =>
+      attachmentMapRef.current.get(id),
+    );
+    graphIdsRef.current = plan.nextIds;
+    const cwd = optsRef.current.cwd;
+    if (!cwd) return;
+    executeGraphSync(cwd, plan);
   }, []);
 
   const workspaceEntriesRef = useRef<WorkspaceEntry[]>([]);
@@ -644,6 +695,12 @@ export function useComposerEditor(
       setIsEmpty(e.isEmpty);
       // A seeded draft can already carry keyed attachments.
       syncSourceKeys(e);
+      // Record — never stage — what a seed mounted with. A restored draft's
+      // files were staged when they were first attached; an edit-in-place
+      // seed reconstructs SENT chips under fresh ids (reconstruct.ts), and
+      // staging those would duplicate the original send's graph record on
+      // every edit. Graph writes happen on user gestures and sends only.
+      resyncGraphIds(e);
     },
     // Re-read the workspace file list when the composer gains focus so @-files
     // reflect mid-session creates/deletes (throttled inside loadWorkspaceFiles).
@@ -654,6 +711,9 @@ export function useComposerEditor(
       // with its × or with Backspace. Without this the transcript pill would
       // stay lit after its chip was gone.
       syncSourceKeys(e);
+      // …and the same event drives the context-graph: every user edit that
+      // adds or removes an attachment node stages or unstages its file.
+      syncContextGraph(e);
       optsRef.current.onChange?.();
     },
   });
@@ -864,10 +924,20 @@ export function useComposerEditor(
     const ed = editorRef.current;
     attachmentMapRef.current.clear();
     if (ed) {
-      ed.commands.clearContent(true);
+      // Suppressed: clear() runs on SEND (and programmatic resets) — the
+      // just-sent attachments' graph records must survive the doc emptying.
+      graphSyncSuppressedRef.current = true;
+      try {
+        ed.commands.clearContent(true);
+      } finally {
+        graphSyncSuppressedRef.current = false;
+      }
+      resyncGraphIds(ed);
       setIsEmpty(true);
+    } else {
+      graphIdsRef.current = new Set();
     }
-  }, []);
+  }, [resyncGraphIds]);
 
   const setContent = useCallback(
     (content: ComposerInitialContent) => {
@@ -881,9 +951,16 @@ export function useComposerEditor(
         ed.commands.setContent(content.json ?? "", { emitUpdate: false });
         setIsEmpty(ed.isEmpty);
         syncSourceKeys(ed);
+        // A seed swap, not a user gesture — record the new id set without
+        // staging or unstaging (same reasoning as onCreate).
+        resyncGraphIds(ed);
+      } else {
+        graphIdsRef.current = new Set(
+          content.attachments.map((a) => a.id),
+        );
       }
     },
-    [syncSourceKeys],
+    [syncSourceKeys, resyncGraphIds],
   );
 
   const setText = useCallback(
@@ -904,9 +981,12 @@ export function useComposerEditor(
         );
         setIsEmpty(ed.isEmpty);
         syncSourceKeys(ed);
+        resyncGraphIds(ed);
+      } else {
+        graphIdsRef.current = new Set();
       }
     },
-    [syncSourceKeys],
+    [syncSourceKeys, resyncGraphIds],
   );
 
   const appendText = useCallback((text: string) => {

@@ -122,10 +122,11 @@ const commandTable: Record<string, CommandHandler> = {
   updater_status: notImpl("updater_status", 8),
   process_relaunch: notImpl("process_relaunch", 8),
 
-  // ── Agent image-attachment write (Phase D2) ───────────────
-  // Persists base64 image attachments to the chat folder so non-vision
-  // agents can reference them by path. A file-write, not chat storage.
+  // ── Agent attachment staging (Phase D2 / context graph) ──────
+  // Moves base64 attachment bytes in and out of the workspace's
+  // .context-graph. File-writes, not chat storage.
   agent_attachment_write: notImpl("agent_attachment_write", 8),
+  agent_attachment_remove: notImpl("agent_attachment_remove", 8),
 
   // (Phase 2c) agent transcript + chat-list channels removed — that storage
   // moved to the engine's Zeros DB (reached over the bridge).

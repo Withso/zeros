@@ -25,6 +25,7 @@
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import { useShallow } from "zustand/react/shallow";
 
+import { subscribeContextGraphChanged } from "../native/context-graph";
 import { useBridge } from "../zeros/bridge/use-bridge";
 import { onActiveBridgeConnected } from "../zeros/bridge/active-bridge";
 import type { RuntimeClient } from "../zeros/bridge/ws-client";
@@ -355,6 +356,30 @@ function releaseBridgeRefreshSubscription(bridge: RuntimeClient): void {
 export function triggerGitRefresh(changedCwd?: string): void {
   publishRefresh(changedCwd);
 }
+
+// Composer attachment staging writes into `.context-graph/` over a plain IPC —
+// no bridge op, no DB_CHANGED, and no turn end until the prompt is sent (if it
+// ever is). The graph's own change signal is the renderer-side substitute:
+// bridge it onto this refresh bus so the Files tab's tracked AND ignored
+// listings pick the new folder up the moment the write lands, exactly like a
+// row-1 editor save. Coalesced on a short trailing timer per workspace — a
+// multi-file drop stages one write per file, and each already notifies
+// individually — so one gesture costs one refresh.
+const GRAPH_REFRESH_COALESCE_MS = 150;
+const graphRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
+subscribeContextGraphChanged((cwd) => {
+  const key = normalizeRefreshCwd(cwd);
+  if (!key) return;
+  const pending = graphRefreshTimers.get(key);
+  if (pending) clearTimeout(pending);
+  graphRefreshTimers.set(
+    key,
+    setTimeout(() => {
+      graphRefreshTimers.delete(key);
+      triggerGitRefresh(key);
+    }, GRAPH_REFRESH_COALESCE_MS),
+  );
+});
 
 /** Return the chats that were streaming in the previous snapshot and are no
  * longer streaming now. Kept pure so the inactive-workspace edge case remains

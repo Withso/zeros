@@ -51,6 +51,7 @@ import {
   textToDoc,
   toMessageSegments,
   messageToEditorContent,
+  RECONSTRUCTED_ATTACHMENT_ID_PREFIX,
   type ComposerInitialContent,
 } from "./composer-editor";
 import { QueuedMessagesCard } from "./queued-messages-card";
@@ -207,6 +208,7 @@ import { collectPendingQuestionToolCallIds } from "./pending-question-tools";
 import {
   windowOlderMessages as ipcWindowOlderMessages,
   truncateMessagesFrom as ipcTruncateMessagesFrom,
+  removeContextAttachment,
 } from "./agent-history-client";
 
 // Error classification is handled by sessions-provider's AgentFailure
@@ -2852,11 +2854,11 @@ export function AgentChat({
 
   // Phase D2 (2026-05-07) iter 3: image attachments are universal —
   // vision-capable agents (Claude) get the inline ImageContent block;
-  // everyone else gets the bytes persisted to <cwd>/.context/attachments/…
-  // and a text block referencing the path (their models still Read the
-  // file). End of "silent drop" era. Shared by handleSend and the
-  // queued-message edit save, so an edited queued send re-encodes its
-  // attachments exactly like a fresh one.
+  // everyone else gets the bytes persisted to
+  // <cwd>/.context-graph/<scope>/attachments/… and a text block referencing
+  // the path (their models still Read the file). End of "silent drop" era.
+  // Shared by handleSend and the queued-message edit save, so an edited
+  // queued send re-encodes its attachments exactly like a fresh one.
   //
   // 2026-07-30: the loop moved to encode-attachments.ts, shared with
   // editAndResubmit. It used to be a second, divergent copy with no
@@ -3248,8 +3250,30 @@ export function AgentChat({
 
   const deleteQueued = (id: string) => {
     const idx = queuedMessages.findIndex((m) => m.id === id);
+    const target = idx >= 0 ? queuedMessages[idx] : undefined;
     if (editingQueuedRef.current === id) exitQueuedEdit();
     session.removeQueued?.(id);
+    // A deleted queued message was never dispatched — take its staged files
+    // back out of the context graph, exactly as removing its chips before
+    // queueing would have (the chips themselves died with the composer
+    // clear, so this is the only path left). Reconstructed entries never own
+    // a record; rows queued before attachmentId existed carry none (no-op).
+    // Fire-and-forget with the same contract as the composer's unstage.
+    const graphCwd = chatThread?.folder;
+    if (graphCwd && target?.attachments) {
+      for (const a of target.attachments) {
+        const attachmentId = a.attachmentId;
+        if (
+          !attachmentId ||
+          attachmentId.startsWith(RECONSTRUCTED_ATTACHMENT_ID_PREFIX)
+        ) {
+          continue;
+        }
+        void removeContextAttachment({ cwd: graphCwd, attachmentId }).catch(
+          () => {},
+        );
+      }
+    }
     // Keyboard flow: keep the selection on the neighbouring row so repeated
     // ⌫ walks the list; deleting the last row returns to the composer.
     if (queueSelectedRef.current === id) {
