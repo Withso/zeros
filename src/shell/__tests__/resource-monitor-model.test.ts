@@ -6,6 +6,7 @@ import type {
 } from "../../native/process-metrics";
 import {
   buildResourceView,
+  collectResourceNodeIds,
   copyResourceReport,
   flattenResourceView,
   formatCpuPercent,
@@ -256,6 +257,51 @@ describe("resource monitor presentation", () => {
       snapshot: current,
       usingRetainedTerminalSnapshot: false,
     });
+  });
+
+  it("keeps ids hidden under a collapsed ancestor in the live disclosure set", () => {
+    const view = buildResourceView({
+      processes,
+      totals: allTotals,
+      tree: true,
+      stack: false,
+      includeTerminal: true,
+      sortKey: "memory",
+      sortDirection: "desc",
+    });
+    // The user folds a nested branch, then folds the ancestor above it.
+    const collapsed = new Set(["terminal", "sidecar"]);
+    const visibleIds = new Set(
+      flattenResourceView(view, collapsed).map(({ node }) => node.id),
+    );
+    const liveIds = collectResourceNodeIds(view);
+
+    // Pruning against rendered rows is what silently re-expanded the branch.
+    expect(visibleIds.has("terminal")).toBe(false);
+    expect(liveIds.has("terminal")).toBe(true);
+    expect([...collapsed].filter((id) => liveIds.has(id))).toEqual([
+      "terminal",
+      "sidecar",
+    ]);
+  });
+
+  it("collects every id past the render cap, and only ids still present", () => {
+    const view = buildResourceView({
+      processes,
+      totals: allTotals,
+      tree: true,
+      stack: false,
+      includeTerminal: true,
+      sortKey: "memory",
+      sortDirection: "desc",
+    });
+    const liveIds = collectResourceNodeIds(view);
+
+    // Every process plus the synthetic App root, regardless of the row limit.
+    expect(flattenResourceView(view, new Set(), 2)).toHaveLength(2);
+    expect(liveIds.size).toBe(processes.length + 1);
+    // An exited process is still pruned — that is the point of the sweep.
+    expect(liveIds.has("exited")).toBe(false);
   });
 
   it("formats CPU and memory at compact, stable precision", () => {

@@ -51,6 +51,7 @@ import { Tooltip } from "../zeros/ui/primitives/tooltip";
 import { toast } from "../zeros/ui/primitives/elements";
 import {
   buildResourceView,
+  collectResourceNodeIds,
   copyResourceReport,
   flattenResourceView,
   formatCpuPercent,
@@ -337,6 +338,12 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
   // loop also refreshes the PID-only census because private Setup/ephemeral
   // sessions intentionally do not publish shared-terminal events.
   useEffect(() => {
+    // The monitor is desktop chrome and renders null without the native
+    // bridge, but hooks still run there. Without this guard a web/relay
+    // session would issue a PTY_LIST per mount, terminal change, and
+    // reconnect for a surface it never shows — and the engine withholds
+    // processPids from non-local clients, so every one of them fails.
+    if (!ready) return;
     let settleTimer: number | null = null;
     const refreshAfterRegistryChange = (): void => {
       terminalOwnership.current = {
@@ -373,7 +380,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
       offBridgeChange();
       offBridge();
     };
-  }, [refreshTerminalOwnership]);
+  }, [ready, refreshTerminalOwnership]);
 
   // Poll sequentially so reads never overlap. Open inspection gets a one-second
   // cadence; the closed pill backs off to four seconds and hidden windows stop
@@ -485,14 +492,17 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
   const rowsOmitted = rows.length > MAX_RENDERED_PROCESS_ROWS;
 
   // Bound disclosure state to the current live identities. Stable IDs retain
-  // collapse choices; exited/reused processes cannot accumulate forever.
+  // collapse choices; exited/reused processes cannot accumulate forever. The
+  // live set walks the whole view rather than the rendered rows, which omit
+  // anything inside a collapsed branch or past the row cap — pruning against
+  // those would forget a nested branch the moment its parent was folded.
   useEffect(() => {
-    const liveIds = new Set(rows.map(({ node }) => node.id));
+    const liveIds = collectResourceNodeIds(view);
     setCollapsedIds((current) => {
       if ([...current].every((id) => liveIds.has(id))) return current;
       return new Set([...current].filter((id) => liveIds.has(id)));
     });
-  }, [rows]);
+  }, [view]);
 
   /** Clicking the active sort column reverses it; selecting a new numeric
    * column starts descending while names start ascending. */

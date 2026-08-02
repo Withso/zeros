@@ -242,6 +242,24 @@ export function buildResourceView({
   ];
 }
 
+/** Every node id in the view, ignoring both collapse state and the render cap.
+ * Disclosure pruning must use this rather than the flattened rows: a node
+ * hidden inside a collapsed ancestor — or past the row limit — is still live,
+ * and dropping its id would silently re-expand a branch the user folded. */
+export function collectResourceNodeIds(
+  roots: readonly ResourceViewNode[],
+): Set<string> {
+  const ids = new Set<string>();
+  const visit = (nodes: readonly ResourceViewNode[]): void => {
+    for (const node of nodes) {
+      ids.add(node.id);
+      visit(node.children);
+    }
+  };
+  visit(roots);
+  return ids;
+}
+
 /** Flatten expanded tree rows for rendering. Collapse state belongs to the
  * popover and is intentionally ephemeral. */
 export function flattenResourceView(

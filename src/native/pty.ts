@@ -165,7 +165,15 @@ export async function ptyProcessPids(
   timeoutMs = 1_000,
 ): Promise<number[] | null> {
   const bridge = getActiveBridge();
-  return bridge ? bridgePtyProcessPids(bridge, timeoutMs) : null;
+  if (!bridge) return null;
+  try {
+    return await bridgePtyProcessPids(bridge, timeoutMs);
+  } catch {
+    // A missing or malformed census is an unavailable snapshot — an engine too
+    // old to send it, or a relay peer that never will. Never a proof of zero
+    // PTYs, which would let terminal CPU leak into an "excluding" total.
+    return null;
+  }
 }
 
 /** Subscribe to PTY stdout/stderr chunks. The handler receives every session's

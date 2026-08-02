@@ -945,8 +945,12 @@ export interface PtyListResultMessage extends BaseMessage {
   requestId: string;
   terminals: PtyTerminalInfo[];
   /** OS roots for every live PtyService session, including Run, Setup, and
-   * ephemeral command terminals. Local-only and optional for protocol
-   * compatibility; names, session IDs, cwd, and argv are deliberately omitted. */
+   * ephemeral command terminals. Local-only; names, session IDs, cwd, and argv
+   * are deliberately omitted. Purely additive and therefore wire-compatible in
+   * both directions — an old client ignores the field, and a new client treats
+   * its absence as "census unavailable" rather than zero PTYs — so this
+   * deliberately does NOT bump PROTOCOL_VERSION, which would strand an updated
+   * phone/web peer against a desktop engine that has not shipped yet. */
   processPids?: number[];
 }
 /** Engine → all clients: the shared terminal set changed (one was created or
