@@ -5,6 +5,7 @@ import {
   bridgePtyResize,
   bridgePtyKill,
   bridgePtyList,
+  bridgePtyProcessPids,
   bridgePtyTerminals,
   subscribeBridgePtyData,
   subscribeBridgePtyExit,
@@ -148,8 +149,37 @@ describe("pty-bridge", () => {
     ]);
   });
 
-  it("bridgePtyList returns [] (legacy native shape; shared list is separate)", async () => {
-    expect(await bridgePtyList({} as RuntimeClient)).toEqual([]);
+  it("bridgePtyProcessPids returns only the local engine PTY root PIDs", async () => {
+    const bridge = {
+      request: async () => ({
+        type: "PTY_LIST_RESULT",
+        requestId: "r",
+        terminals: [],
+        processPids: [101, 202],
+      }),
+    } as unknown as RuntimeClient;
+
+    await expect(bridgePtyProcessPids(bridge)).resolves.toEqual([101, 202]);
+  });
+
+  it("keeps the legacy native-shape PTY list empty", async () => {
+    await expect(bridgePtyList({} as RuntimeClient)).resolves.toEqual([]);
+  });
+
+  it("treats a missing or invalid PTY process census as unavailable, not empty", async () => {
+    const missing = {
+      request: async () => ({ terminals: [] }),
+    } as unknown as RuntimeClient;
+    const invalid = {
+      request: async () => ({ terminals: [], processPids: [101, -1, 2.5] }),
+    } as unknown as RuntimeClient;
+
+    await expect(bridgePtyProcessPids(missing)).rejects.toThrow(
+      "no local process PID snapshot",
+    );
+    await expect(bridgePtyProcessPids(invalid)).rejects.toThrow(
+      "invalid local process PID",
+    );
   });
 
   it("bridgePtyTerminals sends PTY_LIST and returns the shared terminal list", async () => {

@@ -106,6 +106,13 @@ const state: SidecarStateShape = {
   watchdogTimer: null,
 };
 
+/** Current engine child identity for read-only diagnostics. Null while the
+ * sidecar is stopped or between crash-recovery generations. */
+export function getEnginePid(): number | null {
+  const pid = state.child?.pid;
+  return typeof pid === "number" && pid > 0 ? pid : null;
+}
+
 class EngineHealthUnreachableError extends Error {
   constructor(readonly port: number) {
     super(`engine on port ${port} did not answer its exact /health identity`);

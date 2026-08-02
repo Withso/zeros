@@ -1847,6 +1847,16 @@ export class ZerosEngine {
             source: "engine",
             requestId: msg.id,
             terminals,
+            // A local resource monitor needs process OWNERSHIP, not a name
+            // heuristic. Include every live PtyService root (shared terminal,
+            // Run, Setup, ephemeral command) only for the trusted desktop.
+            // PID is sufficient: never send session IDs, cwd, argv, or other
+            // private metadata, and never expose even the census to a relay.
+            ...(client.kind === "local"
+              ? {
+                  processPids: this.pty.list().map((process) => process.pid),
+                }
+              : {}),
           }),
         );
         break;
