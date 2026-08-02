@@ -356,7 +356,9 @@ export class ProcessMetricsTracker {
         ? null
         : Math.max(0, input.sampledAt - this.previousCaptureAt);
     const cpuReady =
-      intervalMs != null && intervalMs > 0 && intervalMs <= MAX_CPU_BASELINE_MS;
+      intervalMs != null &&
+      intervalMs >= MIN_CPU_BASELINE_MS &&
+      intervalMs <= MAX_CPU_BASELINE_MS;
 
     const rowsByPid = new Map<number, RawProcessSample>();
     const childrenByParent = new Map<number, number[]>();
