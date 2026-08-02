@@ -1675,6 +1675,57 @@ describe("worktree lifecycle (integration)", () => {
     );
   });
 
+  it("scaffolds the context graph at create without dirtying git status", async () => {
+    const created = await createWorkspace({ repoRoot });
+    const ignore = await readFile(
+      path.join(created.path, ".context-graph", ".gitignore"),
+      "utf8",
+    );
+    expect(ignore).toContain("/local/");
+    expect(
+      existsSync(path.join(created.path, ".context-graph", "local", "attachments")),
+    ).toBe(true);
+    expect(
+      existsSync(
+        path.join(created.path, ".context-graph", "shared", "attachments"),
+      ),
+    ).toBe(true);
+    // The scaffold is self-ignoring: a fresh workspace still reads clean.
+    const { stdout } = await execFileAsync("git", [
+      "-C",
+      created.path,
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+    ]);
+    expect(stdout.trim()).toBe("");
+  });
+
+  it("round-trips private context-graph attachments through archive/restore", async () => {
+    const created = await createWorkspace({ repoRoot });
+    // A composer attachment staged into the PRIVATE (gitignored) scope — the
+    // exact material `git add -A` alone would drop from the snapshot.
+    const attachmentDir = path.join(
+      created.path,
+      ".context-graph",
+      "local",
+      "attachments",
+      "att-test-1",
+    );
+    await mkdir(attachmentDir, { recursive: true });
+    await writeFile(path.join(attachmentDir, "notes.md"), "# keep me\n");
+
+    await archiveWorkspace({
+      workspaceId: created.workspaceId,
+      stashUncommitted: true,
+    });
+    await restoreWorkspace(created.workspaceId);
+
+    expect(
+      await readFile(path.join(attachmentDir, "notes.md"), "utf8"),
+    ).toBe("# keep me\n");
+  });
+
   it("retries restore idempotently after WIP applied but before its phase write", async () => {
     const created = await createWorkspace({ repoRoot });
     await writeFile(path.join(created.path, "retry.txt"), "durable WIP\n");

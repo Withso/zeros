@@ -54,7 +54,7 @@ describe("column3 default slice", () => {
     expect(column3ScopeForFolder(null)).toBe("__ambient__");
   });
 
-  it("seeds exactly Open file, Changes, Review with Open file active", () => {
+  it("seeds exactly Open file, Changes, Review, Context with Open file active", () => {
     freshScope();
     const { tabs, activeId, recentBrowsers } = slice();
 
@@ -62,8 +62,14 @@ describe("column3 default slice", () => {
       ["files", "Open file"],
       ["changes", "Changes"],
       ["review", "Review"],
+      ["context", "Context"],
     ]);
-    expect(tabs.map((tab) => Boolean(tab.pinned))).toEqual([false, true, true]);
+    expect(tabs.map((tab) => Boolean(tab.pinned))).toEqual([
+      false,
+      true,
+      true,
+      true,
+    ]);
     expect(activeId).toBe(tabs[0].id);
     expect(recentBrowsers).toEqual([]);
   });
@@ -82,6 +88,7 @@ describe("column3 default slice", () => {
       "Open file",
       "Changes",
       "Review",
+      "Context",
     ]);
     expect(slice().activeId).toBe(slice().tabs[0].id);
     expect(slice().recentBrowsers).toEqual([]);
@@ -156,6 +163,7 @@ describe("ADD_COLUMN3_TAB", () => {
       "files",
       "changes",
       "review",
+      "context",
     ]);
     expect(slice().tabs[0].id).toBe(replacement.id);
   });
@@ -241,12 +249,13 @@ describe("REMOVE/UPDATE/ACTIVATE_COLUMN3_TAB", () => {
     ).toBe("reviews");
   });
 
-  it("protects Changes/Review but closes blank File, filled File, and Browser", () => {
+  it("protects Changes/Review/Context but closes blank File, filled File, and Browser", () => {
     freshScope();
     const initial = slice().tabs;
     const blank = initial.find((tab) => tab.type === "files")!;
     const changes = initial.find((tab) => tab.type === "changes")!;
     const review = initial.find((tab) => tab.type === "review")!;
+    const context = initial.find((tab) => tab.type === "context")!;
 
     dispatch({
       type: "UPDATE_COLUMN3_TAB",
@@ -255,14 +264,20 @@ describe("REMOVE/UPDATE/ACTIVATE_COLUMN3_TAB", () => {
     });
     dispatch({ type: "REMOVE_COLUMN3_TAB", id: changes.id });
     dispatch({ type: "REMOVE_COLUMN3_TAB", id: review.id });
+    dispatch({ type: "REMOVE_COLUMN3_TAB", id: context.id });
     expect(slice().tabs.some((tab) => tab.id === changes.id)).toBe(true);
     expect(slice().tabs.some((tab) => tab.id === review.id)).toBe(true);
+    expect(slice().tabs.some((tab) => tab.id === context.id)).toBe(true);
     expect(slice().tabs.find((tab) => tab.id === changes.id)?.pinned).toBe(
       true,
     );
 
     dispatch({ type: "REMOVE_COLUMN3_TAB", id: blank.id });
-    expect(slice().tabs.map((tab) => tab.type)).toEqual(["changes", "review"]);
+    expect(slice().tabs.map((tab) => tab.type)).toEqual([
+      "changes",
+      "review",
+      "context",
+    ]);
     expect(slice().activeId).toBe(changes.id);
 
     const file = createFilesTab("src/a.ts");
@@ -271,7 +286,11 @@ describe("REMOVE/UPDATE/ACTIVATE_COLUMN3_TAB", () => {
     dispatch({ type: "ADD_COLUMN3_TAB", tab: browser });
     dispatch({ type: "REMOVE_COLUMN3_TAB", id: file.id });
     dispatch({ type: "REMOVE_COLUMN3_TAB", id: browser.id });
-    expect(slice().tabs.map((tab) => tab.type)).toEqual(["changes", "review"]);
+    expect(slice().tabs.map((tab) => tab.type)).toEqual([
+      "changes",
+      "review",
+      "context",
+    ]);
   });
 
   it("fills a blank File tab and closes the whole tab when its file closes", () => {
@@ -585,10 +604,12 @@ describe("REORDER_COLUMN3_TABS", () => {
       ],
     });
 
+    const context = slice().tabs.find((tab) => tab.type === "context")!;
     expect(slice().tabs.map((tab) => tab.id)).toEqual([
       second.id,
       changes.id,
       review.id,
+      context.id,
       browser.id,
       first.id,
       initialBlank.id,

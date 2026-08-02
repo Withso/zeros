@@ -10,10 +10,11 @@
 //
 // Per-client UI state (scroll offsets, plan snapshots, policies) lives in
 // device-local.ts, not here. Image attachments still use a dedicated Electron
-// file-write IPC (writeImageAttachment) — unrelated to chat storage.
+// file-write IPC (writeContextAttachment) — unrelated to chat storage.
 // ──────────────────────────────────────────────────────────
 
 import { nativeInvoke } from "../../native/runtime";
+import { notifyContextGraphChanged } from "../../native/context-graph";
 import type { AgentMessage } from "./use-agent-session";
 import { getActiveBridge } from "../bridge/active-bridge";
 import {
@@ -322,11 +323,13 @@ export interface AttachmentWriteResult {
   bytes: number;
 }
 
-/** Phase D2 (2026-05-07): persist a base64-encoded image attachment to the chat's
- *  working directory so non-vision agents can reference it by path. The engine
- *  writes to `<cwd>/.context/attachments/<chatId>/` and returns both the absolute
- *  and cwd-relative paths. Unrelated to chat storage — a dedicated file-write IPC. */
-export async function writeImageAttachment(args: {
+/** Persist a base64-encoded attachment into the workspace's context graph
+ *  (`<cwd>/.context-graph/local/attachments/<attachmentId>/<file>`) and return
+ *  both the absolute and cwd-relative paths. Every composer attachment lands
+ *  here on send: images so non-vision agents can reference them by path, text
+ *  files / transcripts so the Context tab canvas shows what was attached.
+ *  Unrelated to chat storage — a dedicated file-write IPC. */
+export async function writeContextAttachment(args: {
   cwd: string;
   chatId: string;
   attachmentId: string;
@@ -334,7 +337,15 @@ export async function writeImageAttachment(args: {
   mimeType: string;
   filename: string;
 }): Promise<AttachmentWriteResult> {
-  return nativeInvoke<AttachmentWriteResult>("agent_attachment_write", args);
+  const result = await nativeInvoke<AttachmentWriteResult>(
+    "agent_attachment_write",
+    args,
+  );
+  // The write is a plain IPC (no bridge op → no DB_CHANGED), and the git
+  // refresh bus for this path only bumps at turn end — nudge the Context tab
+  // directly so the card appears the moment the file lands, not minutes later.
+  notifyContextGraphChanged(args.cwd);
+  return result;
 }
 
 // ── Chat list (sidebar metadata) — engine-backed over the bridge ──────────

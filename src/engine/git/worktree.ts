@@ -65,6 +65,11 @@ import {
   pathExists,
 } from "./setup-hooks";
 import { resolveFilesToCopy, resolvePatternSource } from "./files-to-copy";
+import {
+  CONTEXT_GRAPH_DIR,
+  contextGraphHasContent,
+  ensureContextGraph,
+} from "../files/context-graph";
 import { resolveRepoScript } from "../settings/repo-scripts";
 import { resolveRepoGit } from "../settings/repo-git";
 import { isKnownRepoRoot, listKnownRepoRoots } from "../db/projects";
@@ -1560,6 +1565,16 @@ async function createWorkspaceInner(
     // the branch checkout, or a vanished source) is simply one more entry for
     // `git add -f`, which no-ops when the file isn't there.
     addProvisionPaths(workspaceId, seedPaths);
+    // Every workspace gets its `.context-graph/` skeleton (Context tab canvas
+    // + composer-attachment store). Best-effort and quiet: the scaffold is
+    // self-gitignoring, and a failure here must never roll back the worktree —
+    // the attachment IPC and the Context tab both re-scaffold lazily.
+    const graph = await ensureContextGraph(workspacePath);
+    if (!graph.ok) {
+      console.warn(
+        `[worktree] context-graph scaffold skipped for ${workspaceId}: ${graph.error}`,
+      );
+    }
     updateWorkspaceLifecyclePhase(workspaceId, "work-applied");
   } catch (err) {
     const rolledBack = await safeRollback(
@@ -2525,6 +2540,14 @@ async function archiveWorkspaceInner(
         // settings. Keep them durable for the workspace's whole lifetime so a
         // later archive never drops an ignored provisioned file.
         ...readProvisionPaths(ws.id),
+        // The context graph survives archive — a workspace's attachments and
+        // shared docs are part of its durable record: force-add the whole
+        // tree, since `local/` is gitignored and `add -A` alone would drop it.
+        // Only when it holds real content, so an empty skeleton doesn't make
+        // the missing-snapshot check below stricter for clean workspaces.
+        ...((await contextGraphHasContent(ws.path))
+          ? [CONTEXT_GRAPH_DIR]
+          : []),
       ]),
     ];
     const archiveSnapshot = await snapshotWorkingTree(

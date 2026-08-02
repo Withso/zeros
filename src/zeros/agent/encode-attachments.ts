@@ -11,7 +11,7 @@
 //     (handleSend and the queued-edit save) — had neither. Every text
 //     attachment was emitted as `{type:"image", data:""}`, which the vision
 //     path drops silently (falsy base64 → no source.url), the non-vision path
-//     throws on (requireString in writeImageAttachment), and Codex turns into
+//     throws on (requireString in writeContextAttachment), and Codex turns into
 //     a zero-byte temp file. So dragging a .md into the composer rendered a
 //     chip, sent successfully, and the agent never saw the file.
 //
@@ -23,10 +23,19 @@
 // — there is no disk round-trip and no @path indirection. That is deliberate:
 // "the agent knows what happened" must not degrade to "the agent could find
 // out" (agents routinely skim or skip a referenced file).
+//
+// 2026-08-02: every valid attachment is ADDITIONALLY persisted into the
+// workspace's context graph (`.context-graph/local/attachments/<id>/<file>`)
+// — the store the Context tab canvas renders. For text and vision-image sends
+// this is a best-effort side-effect: a failed graph write (web client, read-
+// only disk) never skips the attachment, because the inline block already
+// carries the content. Only the non-vision image path still treats the write
+// as load-bearing (the prompt references the file BY PATH, so no file means
+// the agent sees nothing) and skips + reports on failure, as before.
 // ──────────────────────────────────────────────────────────
 
 import { imageReferenceBlock } from "./agent-attachments";
-import { writeImageAttachment } from "./agent-history-client";
+import { writeContextAttachment } from "./agent-history-client";
 import type { ComposerAttachment } from "./composer-attachments";
 import type { ContentBlock } from "../bridge/agent-events";
 import type { AgentTextMessageAttachment } from "@zeros/core/agent-messages";
@@ -66,6 +75,48 @@ export interface EncodedAttachments {
  *  XML-ish attribute is likelier to confuse than a `'`. */
 export function textAttachmentBlock(name: string, body: string): string {
   return `<file name="${name.replace(/"/g, "'")}">\n${body}\n</file>`;
+}
+
+/** UTF-8 → base64 without Node's Buffer (this runs in the renderer). Chunked
+ *  so a multi-MB text attachment doesn't blow the argument-spread limit. */
+function utf8ToBase64(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+/** Best-effort copy of an attachment into the workspace's context graph.
+ *  Fire-and-forget BY DESIGN, on both axes: the inline block already carries
+ *  the bytes, so a failed copy (web clients have no IPC) is a cosmetic gap on
+ *  the canvas, not a dropped attachment — and awaiting N additive disk writes
+ *  would put avoidable latency on the send path. Only the non-vision image
+ *  path awaits its write, because there the PATH is the delivery. */
+function stageInContextGraph(
+  ctx: EncodeAttachmentsContext,
+  a: { id: string; name: string; mimeType: string },
+  base64: string,
+): void {
+  if (!ctx.cwd || !ctx.chatId) return;
+  // Promise.resolve also absorbs a SYNCHRONOUS throw from the IPC façade —
+  // fire-and-forget must never take the send down with it.
+  void Promise.resolve()
+    .then(() =>
+      writeContextAttachment({
+        cwd: ctx.cwd!,
+        chatId: ctx.chatId!,
+        attachmentId: a.id,
+        base64,
+        mimeType: a.mimeType,
+        filename: a.name,
+      }),
+    )
+    .catch(() => {
+      /* graph copy is additive — the inline block already carries the bytes */
+    });
 }
 
 /** Hand `skipped` to the user, one warning per attachment.
@@ -133,6 +184,9 @@ export async function encodeAttachments(
         mimeType: a.mimeType,
         kind: "text",
       });
+      // The prompt carries the body inline; the graph copy is what makes the
+      // attachment visible on the Context tab canvas.
+      stageInContextGraph(ctx, a, utf8ToBase64(a.text));
       continue;
     }
 
@@ -150,11 +204,12 @@ export async function encodeAttachments(
         kind: "image",
         thumbnailUri: `data:${a.mimeType};base64,${a.data}`,
       });
+      stageInContextGraph(ctx, a, a.data);
       continue;
     }
 
     try {
-      const written = await writeImageAttachment({
+      const written = await writeContextAttachment({
         cwd: ctx.cwd,
         chatId: ctx.chatId,
         attachmentId: a.id,

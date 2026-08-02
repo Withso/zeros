@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 vi.mock("../agent-history-client", () => ({
-  writeImageAttachment: vi.fn(),
+  writeContextAttachment: vi.fn(),
 }));
 
 import { setZerosDbPathForTesting } from "../../../engine/db";
