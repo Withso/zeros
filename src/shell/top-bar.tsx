@@ -153,6 +153,7 @@ import { branchDisplayName } from "../zeros/lib/branch-name";
 import { useCustomWindowDrag } from "./use-custom-window-drag";
 import { useWorkspaceChangeLines } from "./use-workspace-change-lines";
 import { WorkspaceChangeCounts } from "./workspace-change-counts";
+import { ResourceMonitor } from "./resource-monitor";
 
 // --- CONSTANTS ---
 
@@ -1753,6 +1754,8 @@ export function TopBar() {
 
         <div className="min-w-0 flex-1" aria-hidden="true" />
       </div>
+
+      <ResourceMonitor />
 
       <div className="border-border1 flex h-full shrink-0 items-center border-l">
         {selectedProject ? (

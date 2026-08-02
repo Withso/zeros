@@ -15,7 +15,8 @@
 // mirror (src/engine/pty/mirror.ts) and serializes its resolved grid on
 // reattach, so PTY_CREATED carries `reattached` + `replay` — a web refresh /
 // panel reopen repaints the exact pre-existing screen (parity with desktop).
-// There's still no PTY_LIST message in the protocol, so listing returns [].
+// PTY_LIST also carries a PID-only, local process-root census used by the
+// desktop resource monitor; relay clients receive only scoped shared terminals.
 // ──────────────────────────────────────────────────────────
 
 import type { RuntimeClient } from "./ws-client";
@@ -168,10 +169,39 @@ export async function bridgeResolveAgentBinary(
   }
 }
 
-/** List host PTYs over the bridge in the native ptyList() shape. The shared
- *  terminal LIST is exposed separately via bridgePtyTerminals (richer shape with
- *  workspace + createdAt); this legacy shim stays [] so callers that only need
- *  the native PtySessionInfo[] don't special-case web. */
+/** Read the PID-only roots of every live engine-owned PTY. The engine includes
+ * this local-only field alongside PTY_LIST_RESULT, covering shared terminals
+ * plus Run, Setup, and ephemeral command sessions. A missing field is
+ * unavailable/stale (old engine), never an authoritative empty list. */
+export async function bridgePtyProcessPids(
+  bridge: RuntimeClient,
+  timeoutMs = 10_000,
+): Promise<number[]> {
+  const resp = (await bridge.request(
+    { type: "PTY_LIST" } as Partial<BridgeMessage> & { type: string },
+    timeoutMs,
+  )) as {
+    processPids?: unknown[];
+  };
+  if (!Array.isArray(resp.processPids)) {
+    throw new Error("PTY_LIST returned no local process PID snapshot");
+  }
+  return resp.processPids.map((pid) => {
+    if (
+      typeof pid !== "number" ||
+      !Number.isSafeInteger(pid) ||
+      pid < 0 ||
+      pid > 2_147_483_647
+    ) {
+      throw new Error("PTY_LIST returned an invalid local process PID");
+    }
+    return pid;
+  });
+}
+
+/** Legacy native-shape list. Shared terminal metadata lives in
+ * bridgePtyTerminals; diagnostics use bridgePtyProcessPids so they do not need
+ * to manufacture or expose cwd/session values. */
 export async function bridgePtyList(
   _bridge: RuntimeClient,
 ): Promise<PtySessionInfo[]> {

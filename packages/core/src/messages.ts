@@ -944,6 +944,10 @@ export interface PtyListResultMessage extends BaseMessage {
   type: "PTY_LIST_RESULT";
   requestId: string;
   terminals: PtyTerminalInfo[];
+  /** OS roots for every live PtyService session, including Run, Setup, and
+   * ephemeral command terminals. Local-only and optional for protocol
+   * compatibility; names, session IDs, cwd, and argv are deliberately omitted. */
+  processPids?: number[];
 }
 /** Engine → all clients: the shared terminal set changed (one was created or
  *  exited). Clients re-fetch PTY_LIST so every device's tab strip stays in

@@ -31,6 +31,7 @@ import {
   bridgePtyResize,
   bridgePtyKill,
   bridgePtyList,
+  bridgePtyProcessPids,
   bridgePtyTerminals,
   bridgeResolveAgentBinary,
   subscribeBridgePtyData,
@@ -156,6 +157,15 @@ export async function ptyKill(args: { sessionId: string }): Promise<void> {
 export async function ptyList(): Promise<PtySessionInfo[]> {
   const bridge = getActiveBridge();
   return bridge ? bridgePtyList(bridge) : [];
+}
+
+/** PID-only census for accurate resource-monitor terminal ownership. Null means
+ * the engine is unavailable; an empty array is an authoritative zero PTYs. */
+export async function ptyProcessPids(
+  timeoutMs = 1_000,
+): Promise<number[] | null> {
+  const bridge = getActiveBridge();
+  return bridge ? bridgePtyProcessPids(bridge, timeoutMs) : null;
 }
 
 /** Subscribe to PTY stdout/stderr chunks. The handler receives every session's
