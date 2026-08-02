@@ -342,6 +342,29 @@ describe("ProcessMetricsTracker", () => {
     expect(stale.cpuReady).toBe(false);
     expect(stale.totals.all.cpuPercent).toBe(0);
   });
+
+  it("ignores a CPU delta measured over an implausibly short interval", () => {
+    const tracker = new ProcessMetricsTracker();
+    const idle = { sidecar: 10, terminal: 10, terminalChild: 10 };
+    tracker.capture(captureInput(1_000, { main: 10, renderer: 10, ...idle }));
+
+    // A burst re-sample (a visibility flip landing on top of a scheduled read)
+    // divides a centisecond-resolution clock by a near-zero window.
+    const burst = tracker.capture(
+      captureInput(1_040, { main: 10.02, renderer: 10, ...idle }),
+    );
+    expect(burst.cpuReady).toBe(false);
+    expect(burst.totals.all.cpuPercent).toBe(0);
+    // A rejected sample must not record a peak from the bogus rate either.
+    expect(burst.totals.all.peakCpuPercent).toBe(0);
+
+    // The normal cadence still reports, measured from the burst sample.
+    const settled = tracker.capture(
+      captureInput(2_040, { main: 11, renderer: 10, ...idle }),
+    );
+    expect(settled.cpuReady).toBe(true);
+    expect(settled.totals.all.cpuPercent).toBeGreaterThan(0);
+  });
 });
 
 describe("ProcessMetricsScanCoordinator", () => {

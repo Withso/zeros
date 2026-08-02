@@ -14,6 +14,11 @@ import type {
   ProcessResourceTotals,
 } from "../src/native/process-metrics-types";
 
+// Below this gap the ps TIME clock (centisecond resolution) has too few ticks
+// to divide into a meaningful rate, so a delta would read as a wild spike or a
+// flat zero. Well under the 1 s open cadence, so steady sampling never trips it
+// — only a burst, such as the immediate re-sample on a visibility change.
+const MIN_CPU_BASELINE_MS = 250;
 const MAX_CPU_BASELINE_MS = 10_000;
 const MAX_PROCESS_NAME_LENGTH = 80;
 const MAX_TERMINAL_ROOTS = 256;
