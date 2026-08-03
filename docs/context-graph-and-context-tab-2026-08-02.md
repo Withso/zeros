@@ -183,3 +183,46 @@ dir).
 - Canvas viewport (pan/zoom) is deliberately ephemeral, like the Browser
   tab's canvas mode — it survives tab switches (the body stays mounted) but
   not a reload.
+
+## 5. 2026-08-03 — attach-time visibility closed for created workspaces; plain nested Files tree
+
+Three defects reported against the 2026-08-02(2) build (fresh workspace
+"Mauve": chip in the composer, Context tab "Nothing in the context graph
+yet"; Files tab showing a compacted `local/attachments` row):
+
+- **Dispatcher-created workspaces staged nothing until the first send.** The
+  dispatcher surface correctly opts out of attach-time staging (its cwd is
+  the trunk), and the seed's mount in the new workspace deliberately
+  recorded-without-staging — so the graph stayed empty until auto-send,
+  which waits on provisioning + a READY agent session (minutes, or forever
+  when sign-in is pending). Now `use-composer-editor` runs a stage-only
+  SWEEP (`planSeedStage` — never unstages, skips `att-edit-` ids and
+  byte-less chips) of the whole document (a) on seed mounts (`onCreate`) and
+  seed swaps (`setContent`), and (b) the moment `useWorkspaceProvisioning`
+  flips false for the composer's cwd. Writes are idempotent (same id ⇒ same
+  bytes; engine skips same-size re-writes without touching mtime), so
+  re-sweeping a restored draft is a no-op that doubles as self-heal.
+- **Provisioning writes are refused at the source.** `executeGraphSync` now
+  drops the whole plan while `isWorkspaceProvisioning(cwd)` — a stage write
+  into the reserved-but-not-yet-created worktree path would mkdir into it
+  and fail `git worktree add` itself. (Engine-side `isConfined` already
+  fails absent-root writes cleanly; the gate saves the doomed IPCs and makes
+  the contract explicit.) Everything skipped is re-covered by the
+  provisioning-end sweep; unstages skipped in that window had nothing on
+  disk to remove.
+- **A forced Context-tab reload could be swallowed.** The attach-time write
+  signal fires while the tab's activation listing (scaffold + list, two
+  bridge round trips) can still be in flight, and `KeyedAsyncCache` dedups a
+  forced load into a non-stale pending request — so the PRE-write listing
+  satisfied the "refresh now" call AND published as fresh.
+  `loadContextGraph` now invalidates the key before every forced load
+  (the invalidate-before-load contract the file caches follow): the stale
+  in-flight response is generation-blocked from publishing and exactly one
+  follow-up fetch runs after it settles.
+- **Files tab renders a plain nested tree.** `flattenEmptyDirectories` is
+  off (`workspace-file-tree.tsx`): single-child chains no longer compact
+  into composite rows like `local/attachments` — the graph now browses
+  `.context-graph → local → attachments → <id> → <file>`, Finder-style, one
+  row per directory. The ignored-side gitStatus still covers child
+  directories (not just roots) so colouring stays correct under either
+  configuration.

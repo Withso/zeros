@@ -54,7 +54,11 @@ import {
   collectSourceKeys,
   findAttachmentsBySourceKey,
 } from "./attachment-keys";
-import { executeGraphSync, planGraphSync } from "./context-graph-staging";
+import {
+  executeGraphSync,
+  planGraphSync,
+  planSeedStage,
+} from "./context-graph-staging";
 import {
   validateAttachment,
   type AttachmentValidation,
@@ -74,6 +78,7 @@ import type { AvailableCommand } from "../../bridge/agent-events";
 import { ghPrList, listWorkspaceFiles } from "../../../native/git";
 import { listSkills } from "../../../native/native";
 import { useBrowserPickerSelection } from "../../store/workspace-store";
+import { useWorkspaceProvisioning } from "../../store/pending-workspaces";
 import type {
   ComposerAttachment,
   ComposerAttachmentPreview,
@@ -310,6 +315,22 @@ export function useComposerEditor(
   const graphSyncSuppressedRef = useRef(false);
   const resyncGraphIds = useCallback((ed: Editor) => {
     graphIdsRef.current = new Set(collectAttachmentIds(ed.state.doc));
+  }, []);
+  // Seed sweep: idempotently ensure every byte-carrying attachment in the doc
+  // has a graph record. Runs on the mounts/swaps that arrive whole (onCreate,
+  // setContent) and again when a provisioning worktree lands — the one moment
+  // the dispatcher-seeded draft can finally be staged. Stage-only by design;
+  // see planSeedStage for why a seed must never unstage.
+  const stageDocIntoGraph = useCallback((ed: Editor) => {
+    if (optsRef.current.stageIntoContextGraph === false) return;
+    const cwd = optsRef.current.cwd;
+    if (!cwd) return;
+    const present = collectAttachmentIds(ed.state.doc);
+    if (present.length === 0) return;
+    executeGraphSync(
+      cwd,
+      planSeedStage(present, (id) => attachmentMapRef.current.get(id)),
+    );
   }, []);
   const syncContextGraph = useCallback((ed: Editor) => {
     const present = collectAttachmentIds(ed.state.doc);
@@ -695,12 +716,14 @@ export function useComposerEditor(
       setIsEmpty(e.isEmpty);
       // A seeded draft can already carry keyed attachments.
       syncSourceKeys(e);
-      // Record — never stage — what a seed mounted with. A restored draft's
-      // files were staged when they were first attached; an edit-in-place
-      // seed reconstructs SENT chips under fresh ids (reconstruct.ts), and
-      // staging those would duplicate the original send's graph record on
-      // every edit. Graph writes happen on user gestures and sends only.
+      // Record what the seed mounted with (the diff must not read the seed as
+      // user adds), then SWEEP it into the graph. The sweep is what puts a
+      // dispatcher-seeded draft's files on the Context tab before the first
+      // send; for a restored draft it is an idempotent no-op self-heal. An
+      // edit-in-place seed is safe: reconstruct.ts mints prefixed ids that
+      // planSeedStage skips, so a sent message's record is never duplicated.
       resyncGraphIds(e);
+      stageDocIntoGraph(e);
     },
     // Re-read the workspace file list when the composer gains focus so @-files
     // reflect mid-session creates/deletes (throttled inside loadWorkspaceFiles).
@@ -720,6 +743,22 @@ export function useComposerEditor(
 
   const editorRef = useRef<Editor | null>(null);
   editorRef.current = editor;
+
+  // While a dispatcher-created worktree is still being provisioned, every
+  // graph write is skipped (executeGraphSync — a write into the reserved path
+  // would fail `git worktree add` itself). This effect is the other half:
+  // the moment provisioning ends, sweep whatever the doc holds into the
+  // now-real worktree's graph, so the seeded attachments appear on the
+  // Context tab while setup/auto-send are still minutes away. False for
+  // every already-existing workspace, where the mount sweep in onCreate has
+  // already run.
+  const provisioning = useWorkspaceProvisioning(cwd ?? null);
+  useEffect(() => {
+    if (provisioning) return;
+    const ed = editorRef.current;
+    if (!ed || ed.isDestroyed) return;
+    stageDocIntoGraph(ed);
+  }, [provisioning, cwd, stageDocIntoGraph]);
 
   // ── attachment staging ──
   const insertFiles = useCallback(
@@ -951,16 +990,18 @@ export function useComposerEditor(
         ed.commands.setContent(content.json ?? "", { emitUpdate: false });
         setIsEmpty(ed.isEmpty);
         syncSourceKeys(ed);
-        // A seed swap, not a user gesture — record the new id set without
-        // staging or unstaging (same reasoning as onCreate).
+        // A seed swap, not a user gesture — record the new id set so the
+        // diff can't unstage anything, then sweep it into the graph (same
+        // reasoning as onCreate: idempotent, stage-only).
         resyncGraphIds(ed);
+        stageDocIntoGraph(ed);
       } else {
         graphIdsRef.current = new Set(
           content.attachments.map((a) => a.id),
         );
       }
     },
-    [syncSourceKeys, resyncGraphIds],
+    [syncSourceKeys, resyncGraphIds, stageDocIntoGraph],
   );
 
   const setText = useCallback(

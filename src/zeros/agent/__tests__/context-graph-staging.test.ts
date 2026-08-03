@@ -35,8 +35,13 @@ import { collectAttachmentIds } from "../composer-editor/attachment-keys";
 import {
   executeGraphSync,
   planGraphSync,
+  planSeedStage,
   stageablePayload,
 } from "../composer-editor/context-graph-staging";
+import {
+  beginPendingCreate,
+  finishPendingCreate,
+} from "../../store/pending-workspaces";
 import {
   HARD_TEXT_CAP_BYTES,
   MAX_IMAGE_BYTES,
@@ -154,6 +159,88 @@ describe("planGraphSync", () => {
     const plan = planGraphSync(new Set(), ["att-unknown"], storeOf());
     expect(plan.stage).toEqual([]);
     expect(plan.nextIds.has("att-unknown")).toBe(true);
+  });
+});
+
+describe("planSeedStage", () => {
+  it("stages every owned id in the doc and never unstages", () => {
+    // The seed path: a dispatcher-created workspace mounts a draft whose
+    // files were never staged (the dispatcher surface opts out). The sweep
+    // must cover them all — and must not read the seed as a removal of
+    // anything (prevIds from an earlier lifecycle are not its business).
+    const a = att();
+    const b = image({ id: "att-2" });
+    const plan = planSeedStage([a.id, b.id], storeOf(a, b));
+    expect(plan.stage.map((s) => s.id)).toEqual([a.id, b.id]);
+    expect(plan.unstage).toEqual([]);
+    expect([...plan.nextIds]).toEqual([a.id, b.id]);
+  });
+
+  it("skips reconstructed chips and ids the side store no longer owns", () => {
+    // An edit-in-place seed rebuilds SENT chips under `att-edit-` ids with
+    // bytes recovered from thumbnails — staging those would duplicate the
+    // original send's record on every edit. And an id with no store entry
+    // has no bytes to write, only a record to corrupt.
+    const ghost = image({ id: "att-edit-x1" });
+    const plan = planSeedStage([ghost.id, "att-unknown"], storeOf(ghost));
+    expect(plan.stage).toEqual([]);
+    expect(plan.unstage).toEqual([]);
+    expect(plan.nextIds.has("att-unknown")).toBe(true);
+  });
+});
+
+describe("executeGraphSync while the worktree is provisioning", () => {
+  beforeEach(() => {
+    writeContextAttachment.mockReset().mockResolvedValue({});
+    removeContextAttachment.mockReset().mockResolvedValue({ removed: true });
+  });
+
+  it("skips every op for a provisioning cwd and works again once it lands", async () => {
+    // The dispatcher reserves the worktree path before `git worktree add`
+    // creates it. A stage write in that window would mkdir into the reserved
+    // path and fail the creation itself — so the whole plan is dropped (the
+    // provisioning-end sweep re-covers it) rather than queued.
+    const token = beginPendingCreate({
+      repoRoot: "/repo",
+      repoSlug: "o/r",
+      path: "/repo-worktrees/mauve",
+    });
+    try {
+      executeGraphSync("/repo-worktrees/mauve", {
+        stage: [att()],
+        unstage: ["att-old"],
+        nextIds: new Set(["att-1"]),
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(writeContextAttachment).not.toHaveBeenCalled();
+      expect(removeContextAttachment).not.toHaveBeenCalled();
+    } finally {
+      finishPendingCreate(token);
+    }
+    executeGraphSync("/repo-worktrees/mauve", {
+      stage: [att()],
+      unstage: [],
+      nextIds: new Set(["att-1"]),
+    });
+    await vi.waitFor(() => expect(writeContextAttachment).toHaveBeenCalled());
+  });
+
+  it("leaves other workspaces' staging untouched", async () => {
+    const token = beginPendingCreate({
+      repoRoot: "/repo",
+      repoSlug: "o/r",
+      path: "/repo-worktrees/other",
+    });
+    try {
+      executeGraphSync("/repo", {
+        stage: [att()],
+        unstage: [],
+        nextIds: new Set(["att-1"]),
+      });
+      await vi.waitFor(() => expect(writeContextAttachment).toHaveBeenCalled());
+    } finally {
+      finishPendingCreate(token);
+    }
   });
 });
 

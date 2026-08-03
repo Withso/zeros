@@ -69,12 +69,23 @@ export function useContextGraphSnapshot(
 }
 
 /** Read or refresh one folder's graph. Concurrent callers share the request;
- *  `force` bypasses the freshness window after a known mutation. */
+ *  `force` bypasses the freshness window after a known mutation.
+ *
+ *  A forced load INVALIDATES first — the invalidate-before-load contract the
+ *  other refresh-bus caches follow. Force alone is not enough here: the
+ *  attach-time write signal fires while the tab's activation listing can
+ *  still be in flight, and KeyedAsyncCache dedups a forced load into a
+ *  non-stale pending request. Without the invalidation the PRE-write listing
+ *  both satisfies the forced reload and publishes as fresh — the just-staged
+ *  attachment stays off the canvas until the next unrelated refresh. The
+ *  generation bump inside invalidate() also stops that stale in-flight
+ *  response from publishing at all. */
 export function loadContextGraph(
   cwd: string,
   options: { force?: boolean; maxAgeMs?: number } = {},
 ): Promise<ContextGraphListWire> {
   const key = contextGraphKey(cwd);
+  if (options.force) graphCache.invalidate(key);
   return graphCache.load(key, () => fetchContextGraph(key), options);
 }
 

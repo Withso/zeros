@@ -47,6 +47,7 @@ import {
   HARD_TEXT_CAP_BYTES,
   MAX_IMAGE_BYTES,
 } from "../agent-attachments";
+import { isWorkspaceProvisioning } from "../../store/pending-workspaces";
 import { RECONSTRUCTED_ATTACHMENT_ID_PREFIX } from "./reconstruct";
 import type { ComposerAttachment } from "../composer-attachments";
 
@@ -115,6 +116,30 @@ export function planGraphSync(
   return { stage, unstage, nextIds: next };
 }
 
+/** Stage-only plan for everything currently in the doc — the SEED sync.
+ *
+ *  Runs where a document arrives whole instead of by user edits: the mount of
+ *  a restored draft, setContent() for a draft/edit seed, and the moment a
+ *  provisioning worktree lands on disk. Those documents can hold attachments
+ *  whose graph record doesn't exist yet — above all the new-workspace
+ *  dispatcher's seed, whose surface deliberately never stages (its cwd is the
+ *  trunk) and whose send may be minutes away behind setup + agent spawn. The
+ *  graph write is idempotent (same id ⇒ same bytes; the engine skips
+ *  same-size re-writes without touching mtime), so re-sweeping an
+ *  already-staged draft is a cheap no-op, and it doubles as self-heal for a
+ *  record lost to a crashed write or an externally pruned folder.
+ *
+ *  Never unstages: a seed says nothing about the user REMOVING a file, and
+ *  the ids it carries may belong to another lifecycle's record (reconstructed
+ *  chips are skipped by the shared diff for the same reason). */
+export function planSeedStage(
+  presentIds: readonly string[],
+  lookup: (id: string) => ComposerAttachment | undefined,
+): GraphSyncPlan {
+  const plan = planGraphSync(new Set<string>(), presentIds, lookup);
+  return { stage: plan.stage, unstage: [], nextIds: plan.nextIds };
+}
+
 // One in-flight chain per `cwd|id`, so a remove→undo→redo flurry can't
 // interleave its write and remove IPCs and settle on the wrong disk state —
 // ops for one attachment apply strictly in gesture order. Entries are pruned
@@ -139,8 +164,18 @@ function enqueuePerId(key: string, op: () => Promise<unknown>): void {
  *  signal itself (agent-history-client), which the Context tab and the git
  *  refresh bus both subscribe to — so visibility needs nothing further here.
  *  The deferred `op()` call inside the chain also absorbs a SYNCHRONOUS
- *  throw from the IPC façade. */
+ *  throw from the IPC façade.
+ *
+ *  A PROVISIONING cwd is skipped whole: the dispatcher reserves the worktree
+ *  path before `git worktree add` creates it, and a stage write in that
+ *  window would mkdir `.context-graph/` into the reserved path — worktree
+ *  add refuses a non-empty directory, so the write wouldn't just be early,
+ *  it would fail the workspace creation itself. Nothing is lost: the
+ *  composer's provisioning-end sweep (use-composer-editor) re-stages the
+ *  doc the moment the worktree lands, and unstages skipped here had nothing
+ *  on disk to remove anyway. */
 export function executeGraphSync(cwd: string, plan: GraphSyncPlan): void {
+  if (isWorkspaceProvisioning(cwd)) return;
   for (const a of plan.stage) {
     const base64 = stageablePayload(a);
     if (!base64) continue;
