@@ -51,7 +51,6 @@ import {
   textToDoc,
   toMessageSegments,
   messageToEditorContent,
-  RECONSTRUCTED_ATTACHMENT_ID_PREFIX,
   type ComposerInitialContent,
 } from "./composer-editor";
 import { QueuedMessagesCard } from "./queued-messages-card";
@@ -208,7 +207,6 @@ import { collectPendingQuestionToolCallIds } from "./pending-question-tools";
 import {
   windowOlderMessages as ipcWindowOlderMessages,
   truncateMessagesFrom as ipcTruncateMessagesFrom,
-  removeContextAttachment,
 } from "./agent-history-client";
 
 // Error classification is handled by sessions-provider's AgentFailure
@@ -3250,30 +3248,12 @@ export function AgentChat({
 
   const deleteQueued = (id: string) => {
     const idx = queuedMessages.findIndex((m) => m.id === id);
-    const target = idx >= 0 ? queuedMessages[idx] : undefined;
     if (editingQueuedRef.current === id) exitQueuedEdit();
     session.removeQueued?.(id);
-    // A deleted queued message was never dispatched — take its staged files
-    // back out of the context graph, exactly as removing its chips before
-    // queueing would have (the chips themselves died with the composer
-    // clear, so this is the only path left). Reconstructed entries never own
-    // a record; rows queued before attachmentId existed carry none (no-op).
-    // Fire-and-forget with the same contract as the composer's unstage.
-    const graphCwd = chatThread?.folder;
-    if (graphCwd && target?.attachments) {
-      for (const a of target.attachments) {
-        const attachmentId = a.attachmentId;
-        if (
-          !attachmentId ||
-          attachmentId.startsWith(RECONSTRUCTED_ATTACHMENT_ID_PREFIX)
-        ) {
-          continue;
-        }
-        void removeContextAttachment({ cwd: graphCwd, attachmentId }).catch(
-          () => {},
-        );
-      }
-    }
+    // The row's staged files deliberately STAY in the context graph — the
+    // graph is append-only (context-graph-staging.ts): deleting the message
+    // withdraws the prompt, not the workspace's record of its files. Only
+    // the user deleting them on disk removes them.
     // Keyboard flow: keep the selection on the neighbouring row so repeated
     // ⌫ walks the list; deleting the last row returns to the composer.
     if (queueSelectedRef.current === id) {

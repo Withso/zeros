@@ -359,13 +359,6 @@ export interface ContextGraphStageResult {
   error?: string;
 }
 
-export interface ContextGraphRemoveResult {
-  ok: boolean;
-  /** False when there was nothing to remove (already gone / never staged). */
-  removed: boolean;
-  error?: string;
-}
-
 /** Strip directory parts, replace shell-hostile characters, cap the length.
  *  The one filename sanitiser for attachment writes — the IPC used to own a
  *  copy; it lives here so every writer and every test agree on the layout. */
@@ -482,47 +475,11 @@ export async function stageContextGraphAttachment(
   }
 }
 
-/** Delete one attachment folder from the PRIVATE scope — the composer removing
- *  a chip that was staged at attach time but never sent. Deliberately never
- *  touches `shared/`: sharing is an explicit keep-this-in-the-repo act from
- *  the Context tab, and un-attaching a chip must not undo it. Missing folder
- *  is a clean no-op (`removed: false`) — the id may have been shared, sent
- *  from another lifecycle, or never staged at all. */
-export async function removeContextGraphAttachment(
-  workspaceRoot: string,
-  attachmentId: string,
-): Promise<ContextGraphRemoveResult> {
-  if (!ID_OK.test(attachmentId)) {
-    return { ok: false, removed: false, error: "invalid attachment id" };
-  }
-  const dir = path.join(
-    graphRoot(workspaceRoot),
-    CONTEXT_GRAPH_LOCAL,
-    ATTACHMENTS_DIR,
-    attachmentId,
-  );
-  try {
-    if (!(await isConfined(dir, workspaceRoot))) {
-      return { ok: false, removed: false, error: "path escapes workspace" };
-    }
-    const stat = await fs.lstat(dir).catch(() => null);
-    if (!stat) return { ok: true, removed: false };
-    if (!stat.isDirectory()) {
-      // Something squatting on the id (a stray file, a symlink). Remove the
-      // ENTRY itself — rm on a symlink unlinks the link, never its target.
-      await fs.rm(dir, { force: true });
-      return { ok: true, removed: true };
-    }
-    await fs.rm(dir, { recursive: true, force: true });
-    return { ok: true, removed: true };
-  } catch (err) {
-    return {
-      ok: false,
-      removed: false,
-      error: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
+// There is deliberately no per-attachment delete: the graph is append-only
+// from the app (2026-08-03(3)) — staged records outlive the composer chip,
+// the queued message, and the send that carried them. Files leave the graph
+// only when the user deletes them on disk. (setShared below MOVES a record
+// between scopes; it never destroys one.)
 
 /** Move one attachment folder between `local/` and `shared/` — the Context
  *  tab's share checkbox. Idempotent: already-there reports `moved: false`. */

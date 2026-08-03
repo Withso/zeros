@@ -123,10 +123,10 @@ const commandTable: Record<string, CommandHandler> = {
   process_relaunch: notImpl("process_relaunch", 8),
 
   // ── Agent attachment staging (Phase D2 / context graph) ──────
-  // Moves base64 attachment bytes in and out of the workspace's
-  // .context-graph. File-writes, not chat storage.
+  // Moves base64 attachment bytes into the workspace's .context-graph.
+  // A file-write, not chat storage. Write-only: the graph is append-only
+  // from the app (files leave it only via the user deleting them on disk).
   agent_attachment_write: notImpl("agent_attachment_write", 8),
-  agent_attachment_remove: notImpl("agent_attachment_remove", 8),
 
   // (Phase 2c) agent transcript + chat-list channels removed — that storage
   // moved to the engine's Zeros DB (reached over the bridge).

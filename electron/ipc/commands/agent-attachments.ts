@@ -4,8 +4,8 @@
 //
 // Phase D2 (2026-05-07), re-homed 2026-08-02. The renderer can't write files
 // directly (the sandbox model + WebSocket bridge both prefer text payloads),
-// so these handlers move a base64-encoded attachment in and out of the
-// workspace's context graph:
+// so this handler moves a base64-encoded attachment into the workspace's
+// context graph:
 //
 //   <cwd>/.context-graph/<scope>/attachments/<attachmentId>/<safeFilename>
 //
@@ -13,8 +13,11 @@
 // tab canvas renders and the share checkbox moves between `local/`
 // (gitignored) and `shared/` (committed). EVERY composer attachment lands
 // here the moment it is staged in the composer — images AND text files / chat
-// transcripts — and `agent_attachment_remove` takes it back out when the user
-// removes the chip before sending.
+// transcripts. Write is the ONLY verb: the graph is append-only from the app
+// (2026-08-03(3) — removing a chip from the composer must never delete the
+// workspace's record of the file; the `agent_attachment_remove` command that
+// once did is deleted). Files leave the graph only when the user deletes
+// them on disk.
 //
 // Why store under the chat's cwd instead of a global temp dir?
 //   1. The agent's CLI runs with cwd = chatFolder. Saving here means
@@ -33,10 +36,7 @@
 // ──────────────────────────────────────────────────────────
 
 import * as path from "node:path";
-import {
-  removeContextGraphAttachment,
-  stageContextGraphAttachment,
-} from "../../../src/engine/files/context-graph";
+import { stageContextGraphAttachment } from "../../../src/engine/files/context-graph";
 import type { CommandHandler } from "../router";
 
 function requireString(args: Record<string, unknown>, key: string): string {
@@ -102,30 +102,4 @@ export const agentAttachmentWrite: CommandHandler = async (args) => {
     mimeType,
     bytes: staged.bytes,
   };
-};
-
-/** agent_attachment_remove — delete one staged attachment folder from the
- *  PRIVATE scope, the inverse of the write above. Called when the user
- *  removes a still-unsent chip from the composer, so the Context tab doesn't
- *  accumulate cards for files that were attached by mistake (the canvas has
- *  no delete affordance of its own). Never touches `shared/` — sharing is an
- *  explicit keep-this act — and a missing folder is a clean no-op. */
-export const agentAttachmentRemove: CommandHandler = async (args) => {
-  const cwd = requireString(args, "cwd");
-  const attachmentId = requireString(args, "attachmentId");
-
-  if (!ID_OK.test(attachmentId)) {
-    throw new Error("agent_attachment: invalid attachmentId");
-  }
-  if (!path.isAbsolute(cwd)) {
-    throw new Error("agent_attachment: cwd must be absolute");
-  }
-
-  const res = await removeContextGraphAttachment(cwd, attachmentId);
-  if (!res.ok) {
-    throw new Error(
-      `agent_attachment: ${res.error ?? "couldn't remove the attachment"}`,
-    );
-  }
-  return { removed: res.removed };
 };

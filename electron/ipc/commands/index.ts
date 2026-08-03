@@ -53,10 +53,7 @@ import { skillsList } from "./skills";
 import { discoverLocalhostServices } from "./localhost";
 import { notifySend } from "./notifications";
 import { processMetricsSnapshot } from "./process-metrics";
-import {
-  agentAttachmentRemove,
-  agentAttachmentWrite,
-} from "./agent-attachments";
+import { agentAttachmentWrite } from "./agent-attachments";
 import {
   processRelaunch,
   updaterCheck,
@@ -197,7 +194,6 @@ export function registerAllCommands(): void {
   // of inline base64. The renderer calls this once per image attachment when the
   // active agent's promptCapabilities.image is false.
   setCommand("agent_attachment_write", agentAttachmentWrite);
-  setCommand("agent_attachment_remove", agentAttachmentRemove);
 
   // Roadmap 03a — Git + GitHub integration layer, phase 1: workspace
   // lifecycle. Engine logic lives in src/engine/git/; these handlers

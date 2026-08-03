@@ -350,22 +350,9 @@ export async function writeContextAttachment(args: {
   return result;
 }
 
-/** Delete one staged attachment folder from the graph's PRIVATE scope — the
- *  inverse of writeContextAttachment, fired when the user removes a
- *  still-unsent chip from the composer. `shared/` is never touched (sharing
- *  is an explicit keep-this act on the Context tab), and removing an id that
- *  was never staged is a clean no-op. */
-export async function removeContextAttachment(args: {
-  cwd: string;
-  attachmentId: string;
-}): Promise<{ removed: boolean }> {
-  const result = await nativeInvoke<{ removed: boolean }>(
-    "agent_attachment_remove",
-    args,
-  );
-  notifyContextGraphChanged(args.cwd);
-  return result;
-}
+// There is deliberately NO remove counterpart: the context graph is
+// append-only from the app (context-graph-staging.ts) — a record leaves the
+// graph only when the user deletes it on disk.
 
 // ── Chat list (sidebar metadata) — engine-backed over the bridge ──────────
 

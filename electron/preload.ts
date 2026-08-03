@@ -32,7 +32,6 @@ const EVENT_CHANNEL = "zeros:event";
 // missing entry silently breaks a feature; a stale one widens the XSS surface.
 const ALLOWED_COMMANDS = new Set<string>([
   "agent_attachment_write",
-  "agent_attachment_remove",
   "appearance_set_mode",
   "agent_context_files",
   "app_info",

@@ -297,20 +297,24 @@ export function useComposerEditor(
   // ── context-graph attach-time sync ──
   //
   // The doc's attachment-id set, diffed on every USER edit: an id appearing
-  // stages its file into `.context-graph/` right away (the Context tab shows
-  // it while the prompt is still being typed), an id disappearing unstages it
-  // (the canvas has no delete of its own, so an un-attached mistake must not
-  // squat there forever). Diffing the doc — rather than instrumenting
-  // insertFiles/removeBySourceKey/× — is what makes every gesture agree:
-  // paste, drop, pick, transcript swap, chip ×, Backspace, select-all delete,
-  // undo and redo all land here identically.
+  // stages its file into `.context-graph/` right away, so the Context tab
+  // shows it while the prompt is still being typed. Diffing the doc — rather
+  // than instrumenting insertFiles/paste/drop directly — is what makes every
+  // attach gesture agree: paste, drop, pick, transcript pill, undo and redo
+  // all land here identically.
+  //
+  // The sync is STAGE-ONLY — the graph is append-only by explicit product
+  // decision (2026-08-03(3)): an id disappearing (chip ×, Backspace,
+  // select-all delete, transcript untoggle) never deletes its graph record;
+  // only the user deleting the file on disk removes it. See
+  // context-graph-staging.ts for the full rationale.
   //
   // Programmatic swaps (clear on send, setContent for drafts/edit seeds,
   // setText) SUPPRESS the diff and just resync the set: those transitions say
-  // nothing about user intent toward the files — a send must keep its graph
-  // record, and an edit-in-place seed reconstructs already-sent chips whose
-  // record must survive a cancel. See context-graph-staging.ts for what else
-  // deliberately stays out (byte-less reconstructions, over-cap bodies).
+  // nothing about user intent toward the files — an edit-in-place seed
+  // reconstructs already-sent chips that were staged by their own send. See
+  // context-graph-staging.ts for what else deliberately stays out (byte-less
+  // reconstructions, over-cap bodies).
   const graphIdsRef = useRef<ReadonlySet<string>>(new Set());
   const graphSyncSuppressedRef = useRef(false);
   const resyncGraphIds = useCallback((ed: Editor) => {
@@ -735,7 +739,8 @@ export function useComposerEditor(
       // stay lit after its chip was gone.
       syncSourceKeys(e);
       // …and the same event drives the context-graph: every user edit that
-      // adds or removes an attachment node stages or unstages its file.
+      // adds an attachment node stages its file (append-only — removals
+      // deliberately leave the graph record in place).
       syncContextGraph(e);
       optsRef.current.onChange?.();
     },

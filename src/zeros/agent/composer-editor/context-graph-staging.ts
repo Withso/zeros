@@ -7,15 +7,23 @@
 // encoded it. Attach a screenshot, look at the Context tab, see nothing — the
 // canvas lagged the composer by one whole prompt. This module closes that
 // gap: the composer diffs the set of attachment ids in its document on every
-// user edit, and
+// user edit, and an id that APPEARED is written into the graph immediately
+// (bytes come from the composer's side store), so the card shows while the
+// user is still typing the prompt.
 //
-//   • an id that APPEARED is written into the graph immediately (bytes come
-//     from the composer's side store), so the card shows while the user is
-//     still typing the prompt;
-//   • an id that DISAPPEARED is deleted from the graph's private scope — the
-//     canvas has no delete affordance, so without this a mis-attached file
-//     would squat on it forever. `shared/` is never touched, and the engine
-//     refuses ids outside `local/attachments/<id>/`.
+// The graph is APPEND-ONLY from the app (2026-08-03(3), explicit product
+// decision): once a file lands in `.context-graph`, NO composer gesture
+// deletes it — not removing the chip (×, Backspace, select-all delete), not
+// untoggling a transcript pill, not deleting a queued message, not send's
+// clear(). The graph is the workspace's context RECORD, and the point of a
+// record is that it outlives the composer lifecycle that created it; the only
+// way a file leaves the graph is the user deleting it on disk (Finder, an
+// editor, `rm`). Between 2026-08-02(2) and 2026-08-03(3) chip removal DID
+// unstage (`agent_attachment_remove` IPC, since deleted) — that made "I'm not
+// sending this after all" also mean "erase it from the workspace's context",
+// which destroyed records the user meant to keep. So the diff acts on ADDS
+// only; ids that disappear merely leave the tracking set, and re-attaching
+// the same file later mints a fresh id and a fresh record.
 //
 // The diff (pure, tested) is separate from the IO (fire-and-forget): staging
 // must never block or break typing, and a failed write is only a cosmetic gap
@@ -26,26 +34,23 @@
 // "the canvas lags" and "the feature is broken" must not look identical.
 // Undo/redo work for free — ⌘Z after a removal makes the id reappear, the
 // diff sees an ADD, and the side store still holds the bytes (removal
-// deliberately keeps them, see removeBySourceKey) so the file is re-staged.
+// deliberately keeps them, see removeBySourceKey); the re-write is a same-id
+// same-bytes no-op the engine skips without touching mtime.
 //
-// What deliberately does NOT stage or unstage:
+// What deliberately does NOT stage:
 //   • programmatic doc swaps — clear() on send, setContent() for drafts and
 //     edit seeds, setText(). The hook suppresses the diff around them and
 //     resyncs the id set, because those transitions say nothing about user
-//     intent toward the FILES (a send must keep its record; an edit-in-place
-//     seed reconstructs sent chips whose record must survive a cancel).
+//     intent toward the FILES (an edit-in-place seed reconstructs sent chips
+//     that were staged by their own send).
 //   • attachments with no bytes in hand (a reconstructed text chip carries a
-//     name but never a body) — nothing to write, and unstaging them could
-//     only delete some other lifecycle's record, so both sides skip them.
+//     name but never a body) — nothing to write.
 //   • bytes past the validator's hard caps (5 MB images / 4 MB text): such an
 //     attachment can never ride a prompt under any model, and pushing tens of
 //     MB of base64 through the IPC on a paste would jank the renderer.
 // ──────────────────────────────────────────────────────────
 
-import {
-  removeContextAttachment,
-  writeContextAttachment,
-} from "../agent-history-client";
+import { writeContextAttachment } from "../agent-history-client";
 import { utf8ToBase64 } from "../encode-attachments";
 import {
   HARD_TEXT_CAP_BYTES,
@@ -58,14 +63,12 @@ import { RECONSTRUCTED_ATTACHMENT_ID_PREFIX } from "./reconstruct";
 import type { ComposerAttachment } from "../composer-attachments";
 
 /** What one doc change means for the graph. `nextIds` is the state to carry
- *  into the next diff whether or not any IO happens. */
+ *  into the next diff whether or not any IO happens. Stage-only by design —
+ *  the graph is append-only, so a disappearing id plans no IO at all. */
 export interface GraphSyncPlan {
   /** Attachments to stage — present in the doc now, absent before, bytes in
    *  the side store. */
   stage: ComposerAttachment[];
-  /** Ids to unstage — gone from the doc, previously present, and still owned
-   *  by this composer's lifecycle (bytes in the side store). */
-  unstage: string[];
   nextIds: ReadonlySet<string>;
 }
 
@@ -105,24 +108,16 @@ export function planGraphSync(
     if (prevIds.has(id)) continue;
     // A reconstructed chip is an already-SENT file under a fresh id — its
     // graph record exists under the original id, and belongs to the send,
-    // not to this edit session. Neither staged nor (below) unstaged.
+    // not to this edit session. Staging it would duplicate that record.
     if (id.startsWith(RECONSTRUCTED_ATTACHMENT_ID_PREFIX)) continue;
     const a = lookup(id);
     if (a) stage.push(a);
   }
-  const unstage: string[] = [];
-  for (const id of prevIds) {
-    if (next.has(id)) continue;
-    if (id.startsWith(RECONSTRUCTED_ATTACHMENT_ID_PREFIX)) continue;
-    // Only ids the side store still owns. After a send, clear() empties the
-    // store — so chips resurrected by ⌘Z and deleted again can't unstage the
-    // sent message's graph record.
-    if (lookup(id)) unstage.push(id);
-  }
-  return { stage, unstage, nextIds: next };
+  return { stage, nextIds: next };
 }
 
-/** Stage-only plan for everything currently in the doc — the SEED sync.
+/** Stage-only sweep of everything currently in the doc — the SEED sync, i.e.
+ *  the diff run against an empty previous set.
  *
  *  Runs where a document arrives whole instead of by user edits: the mount of
  *  a restored draft, setContent() for a draft/edit seed, and the moment a
@@ -133,17 +128,12 @@ export function planGraphSync(
  *  graph write is idempotent (same id ⇒ same bytes; the engine skips
  *  same-size re-writes without touching mtime), so re-sweeping an
  *  already-staged draft is a cheap no-op, and it doubles as self-heal for a
- *  record lost to a crashed write or an externally pruned folder.
- *
- *  Never unstages: a seed says nothing about the user REMOVING a file, and
- *  the ids it carries may belong to another lifecycle's record (reconstructed
- *  chips are skipped by the shared diff for the same reason). */
+ *  record lost to a crashed write or an externally pruned folder. */
 export function planSeedStage(
   presentIds: readonly string[],
   lookup: (id: string) => ComposerAttachment | undefined,
 ): GraphSyncPlan {
-  const plan = planGraphSync(new Set<string>(), presentIds, lookup);
-  return { stage: plan.stage, unstage: [], nextIds: plan.nextIds };
+  return planGraphSync(new Set<string>(), presentIds, lookup);
 }
 
 /** True when a staging-IPC failure reads like renderer/main BUILD SKEW: a
@@ -176,22 +166,18 @@ export function resetStagingFailureNoticesForTests(): void {
  *  IPC by design and the send path's inline blocks are still the delivery. */
 function reportStagingFailure(
   cwd: string,
-  filename: string | null,
+  filename: string,
   err: unknown,
 ): void {
   const message = err instanceof Error ? err.message : String(err);
   console.warn(
-    `[Zeros] context-graph staging failed in ${cwd}` +
-      (filename ? ` for "${filename}"` : "") +
-      `: ${message}`,
+    `[Zeros] context-graph staging failed in ${cwd} for "${filename}": ${message}`,
   );
   if (!isNativeRuntime()) return;
   if (notifiedFailureCwds.has(cwd)) return;
   notifiedFailureCwds.add(cwd);
   toast.error(
-    filename
-      ? `"${filename}" couldn't be added to the context graph`
-      : "The context graph couldn't be updated",
+    `"${filename}" couldn't be added to the context graph`,
     {
       id: `context-graph-staging:${cwd}`,
       description: isBuildSkewFailure(message)
@@ -201,31 +187,15 @@ function reportStagingFailure(
   );
 }
 
-// One in-flight chain per `cwd|id`, so a remove→undo→redo flurry can't
-// interleave its write and remove IPCs and settle on the wrong disk state —
-// ops for one attachment apply strictly in gesture order. Entries are pruned
-// as soon as their tail settles, so the map stays bounded by what's in
-// flight right now.
-const opChains = new Map<string, Promise<void>>();
-function enqueuePerId(key: string, op: () => Promise<unknown>): void {
-  const run = () => op().then(() => undefined);
-  const tail: Promise<void> = (opChains.get(key) ?? Promise.resolve())
-    .then(run, run)
-    .catch(() => {});
-  opChains.set(key, tail);
-  void tail.then(() => {
-    if (opChains.get(key) === tail) opChains.delete(key);
-  });
-}
-
 /** Execute a plan against the workspace graph. Fire-and-forget on every axis:
- *  each op is independently caught and never awaited — web clients have no
+ *  each write is independently caught and never awaited — web clients have no
  *  IPC, a read-only disk must not break typing, and the send-path safety net
- *  re-covers a failed write. Each op that lands notifies the graph-change
+ *  re-covers a failed write. Each write that lands notifies the graph-change
  *  signal itself (agent-history-client), which the Context tab and the git
  *  refresh bus both subscribe to — so visibility needs nothing further here.
- *  The deferred `op()` call inside the chain also absorbs a SYNCHRONOUS
- *  throw from the IPC façade.
+ *  Concurrent writes for the same id need no ordering: writes are the ONLY
+ *  op (the graph is append-only) and a given id always carries the same
+ *  bytes, so every interleaving settles on the same file.
  *
  *  A PROVISIONING cwd is skipped whole: the dispatcher reserves the worktree
  *  path before `git worktree add` creates it, and a stage write in that
@@ -233,35 +203,25 @@ function enqueuePerId(key: string, op: () => Promise<unknown>): void {
  *  add refuses a non-empty directory, so the write wouldn't just be early,
  *  it would fail the workspace creation itself. Nothing is lost: the
  *  composer's provisioning-end sweep (use-composer-editor) re-stages the
- *  doc the moment the worktree lands, and unstages skipped here had nothing
- *  on disk to remove anyway. */
+ *  doc the moment the worktree lands. */
 export function executeGraphSync(cwd: string, plan: GraphSyncPlan): void {
   if (isWorkspaceProvisioning(cwd)) return;
   for (const a of plan.stage) {
     const base64 = stageablePayload(a);
     if (!base64) continue;
-    enqueuePerId(`${cwd}|${a.id}`, () =>
-      // Promise.resolve() so a SYNCHRONOUS throw from the IPC façade reaches
-      // the same reporter as an async rejection — silent-catch was how a full
-      // day of skew-rejected writes went unnoticed.
-      Promise.resolve()
-        .then(() =>
-          writeContextAttachment({
-            cwd,
-            attachmentId: a.id,
-            base64,
-            mimeType: a.mimeType,
-            filename: a.name,
-          }),
-        )
-        .catch((err) => reportStagingFailure(cwd, a.name, err)),
-    );
-  }
-  for (const id of plan.unstage) {
-    enqueuePerId(`${cwd}|${id}`, () =>
-      Promise.resolve()
-        .then(() => removeContextAttachment({ cwd, attachmentId: id }))
-        .catch((err) => reportStagingFailure(cwd, null, err)),
-    );
+    // Promise.resolve() so a SYNCHRONOUS throw from the IPC façade reaches
+    // the same reporter as an async rejection — silent-catch was how a full
+    // day of skew-rejected writes went unnoticed.
+    void Promise.resolve()
+      .then(() =>
+        writeContextAttachment({
+          cwd,
+          attachmentId: a.id,
+          base64,
+          mimeType: a.mimeType,
+          filename: a.name,
+        }),
+      )
+      .catch((err) => reportStagingFailure(cwd, a.name, err));
   }
 }

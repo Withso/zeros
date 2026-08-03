@@ -59,11 +59,11 @@ graph itself is NOT gitignored — only its private half is.
   itself stages every attachment the moment it is added — drop, paste, pick,
   or transcript pill — by diffing the document's attachment-id set on every
   user edit (`composer-editor/context-graph-staging.ts`), so the card is on
-  the canvas while the prompt is still being typed. Removing a still-unsent
-  chip (×, Backspace, select-all delete) unstages it via
-  `agent_attachment_remove` — the canvas has no delete affordance, so
-  un-attaching is the only way a mistake leaves it. Undo/redo re-stage and
-  re-unstage symmetrically (the side store keeps bytes across removals).
+  the canvas while the prompt is still being typed. **The graph is
+  append-only (2026-08-03(3), see §7):** removing a chip (×, Backspace,
+  select-all delete, transcript untoggle) leaves the staged record in place —
+  only the user deleting the file on disk removes it. Undo of a removal
+  re-runs the write, which the engine skips as a same-size no-op.
   `encodeAttachments` (the single staged-attachment → wire-content
   chokepoint) keeps its write as an idempotent send-time safety net — the
   engine skips same-size re-writes so mtimes (and canvas slots) hold — and
@@ -75,14 +75,14 @@ graph itself is NOT gitignored — only its private half is.
   non-vision disk-reference path writes whatever id it is given, because the
   resubmitted prompt must reference a real file (see Known edges). `chatId`
   is provenance-only/optional end to end, so staging and the non-vision disk
-  path work before the first prompt creates the chat. Bubble metadata now
-  carries `attachmentId`, which is how deleting a QUEUED (never-dispatched)
-  message unstages its files. Surfaces whose cwd is not the attachment's
-  workspace opt out via `stageIntoContextGraph: false` — the dispatcher
-  modal composes against the primary checkout while its worktree doesn't
-  exist yet, and relies on the send-path safety net instead. Validation-
-  failed attachments don't stage (the send path would exclude them, so the
-  canvas would assert context no agent received).
+  path work before the first prompt creates the chat. Bubble metadata
+  carries `attachmentId` as provenance back to the record. Surfaces whose
+  cwd is not the attachment's workspace opt out via
+  `stageIntoContextGraph: false` — the dispatcher modal composes against
+  the primary checkout while its worktree doesn't exist yet, and relies on
+  the seed sweep + send-path safety net instead. Validation-failed
+  attachments don't stage (the send path would exclude them, so the canvas
+  would assert context no agent received).
 - **Archive:** `.context-graph` is force-added into the archive snapshot
   (`archiveIncludePaths`) when it has content, so a workspace's context now
   SURVIVES archive and comes back on restore — parity with the harness'
@@ -122,7 +122,7 @@ The body (`context-row1-tab.tsx`) renders `ContextGraphCanvas`:
   deduped requests), revalidated on the shared git refresh bus — agent
   turn-end, git writes, engine broadcasts — plus the in-process
   graph-change signal (`notifyContextGraphChanged`), which every staging
-  write/remove fires, so a just-attached file appears immediately. The same
+  write fires, so a just-attached file appears immediately. The same
   signal is bridged onto the git refresh bus (`use-git-refresh-key.ts`,
   coalesced ~150 ms per workspace), which is what makes the FILES tab's
   tracked + ignored listings pick up `.context-graph/local/…` the moment a
@@ -155,22 +155,16 @@ dir).
   filter to `shared/` and needs a deliberate allowlist decision. (Attach-time
   staging silently no-ops there — the send path's inline blocks are still the
   delivery.)
-- Un-attaching a chip removes the `local/` copy only; a SHARED attachment's
-  copy survives chip removal by design (sharing is an explicit keep act).
-- Deleting a queued row unstages the files it QUEUED with (bubble
-  `attachmentId`s). Two orphan paths remain, both inside queued-message
-  editing: attach a NEW file mid-edit then cancel (the discarded doc's fresh
-  record stays — programmatic doc swaps deliberately never unstage, because
-  most of them, send clears and draft/stash swaps, must not), and remove a
-  reconstructed chip mid-edit then save (the reconstruction's `att-edit-` id
-  can't be traced back to the original record). Rare; a canvas delete
-  affordance is the natural general fix.
+- The graph only grows (§7): un-attaching a chip, deleting a queued row, and
+  every other composer gesture leave staged records in place. Re-attaching
+  the same file after removing its chip mints a fresh id, so a new folder
+  (and canvas card) appears next to the old one — expected under the
+  append-only contract; the user prunes on disk when they care.
 - Edit-resubmit of an IMAGE under a non-vision agent stages a fresh
   `att-edit-…` folder per resubmit (the disk write is load-bearing — the
   prompt references the path), so repeated edits accumulate duplicate cards
   for the same bytes. Pre-existing shape; fixing it needs the sent bubble to
-  keep a usable link to the original folder without re-exposing sent records
-  to composer unstaging.
+  keep a usable link to the original folder.
 - Empty dirs can't render in a git-driven tree: `.context-graph/shared/`
   shows in the Files tab only once something is shared; `local/` only once
   something is staged. Finder shows both from scaffold time.
@@ -196,7 +190,7 @@ yet"; Files tab showing a compacted `local/attachments` row):
   recorded-without-staging — so the graph stayed empty until auto-send,
   which waits on provisioning + a READY agent session (minutes, or forever
   when sign-in is pending). Now `use-composer-editor` runs a stage-only
-  SWEEP (`planSeedStage` — never unstages, skips `att-edit-` ids and
+  SWEEP (`planSeedStage` — skips `att-edit-` ids and
   byte-less chips) of the whole document (a) on seed mounts (`onCreate`) and
   seed swaps (`setContent`), and (b) the moment `useWorkspaceProvisioning`
   flips false for the composer's cwd. Writes are idempotent (same id ⇒ same
@@ -208,8 +202,7 @@ yet"; Files tab showing a compacted `local/attachments` row):
   and fail `git worktree add` itself. (Engine-side `isConfined` already
   fails absent-root writes cleanly; the gate saves the doomed IPCs and makes
   the contract explicit.) Everything skipped is re-covered by the
-  provisioning-end sweep; unstages skipped in that window had nothing on
-  disk to remove.
+  provisioning-end sweep.
 - **A forced Context-tab reload could be swallowed.** The attach-time write
   signal fires while the tab's activation listing (scaffold + list, two
   bridge round trips) can still be in flight, and `KeyedAsyncCache` dedups a
@@ -249,8 +242,8 @@ zero user-visible signal, across two rounds of "fixes" that were correct
 but could not take effect without an app relaunch.
 
 Two durable changes:
-- **Staging failures are no longer silent.** Every failed stage/unstage op
-  logs to the structured app log (greppable in app.jsonl), and the first
+- **Staging failures are no longer silent.** Every failed stage write logs
+  to the structured app log (greppable in app.jsonl), and the first
   failure per workspace per session raises a toast. When the error matches
   a stale-main signature (`unknown command "agent_attachment_*"` /
   `missing required string 'chatId'` — see isBuildSkewFailure), the toast
@@ -259,3 +252,31 @@ Two durable changes:
 - **Dev-instance caveat, now written down:** any change to
   electron/ipc/*, preload, or the engine requires restarting the dev app —
   the renderer's HMR will happily run new callers against old handlers.
+
+## 7. 2026-08-03(3) — the graph is append-only from the app
+
+Explicit product decision: once an attachment lands in `.context-graph`,
+**nothing the user does in the composer deletes it** — not removing the
+still-unsent chip (×, Backspace, select-all delete), not untoggling a
+transcript pill, not deleting a queued message, not the send's clear(). The
+graph is the workspace's context *record*, and the record must outlive the
+composer lifecycle that created it; the only way a file leaves the graph is
+the user deleting it on disk (Finder, an editor, `rm`). Re-attaching a file
+whose chip was removed mints a fresh id and a fresh folder — accumulation
+is the intended trade.
+
+What was DELETED to enforce this (2026-08-02(2)'s unstage machinery):
+- `agent_attachment_remove` (IPC command, preload allowlist entry, router
+  registration) and the renderer's `removeContextAttachment` façade;
+- `removeContextGraphAttachment` in the engine (`setShared` still MOVES a
+  record between scopes; no engine op destroys one);
+- the `unstage` half of the composer diff (`GraphSyncPlan` is stage-only)
+  and its per-id write/remove ordering chain, which only existed so a
+  remove→undo flurry couldn't interleave — writes alone are idempotent
+  (same id ⇒ same bytes) in any order;
+- queued-message deletion's graph cleanup (`deleteQueued`).
+
+This also dissolves the old "orphan record" edge cases (mid-edit attach then
+cancel; queued-row deletion) — persistence is now the contract, not a leak.
+A future canvas delete affordance, if ever wanted, must be a deliberate
+user-facing act on the Context tab, not a side effect of composer editing.

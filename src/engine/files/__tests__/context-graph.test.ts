@@ -13,7 +13,6 @@ import {
   contextGraphHasContent,
   ensureContextGraph,
   listContextGraph,
-  removeContextGraphAttachment,
   safeAttachmentFilename,
   setContextGraphAttachmentShared,
   stageContextGraphAttachment,
@@ -374,55 +373,3 @@ describe("stageContextGraphAttachment", () => {
   });
 });
 
-describe("removeContextGraphAttachment", () => {
-  it("removes a staged local attachment folder", async () => {
-    await ensureContextGraph(root);
-    await seedAttachment("local", "att-1", "notes.txt", "bye");
-    const res = await removeContextGraphAttachment(root, "att-1");
-    expect(res).toEqual({ ok: true, removed: true });
-    const stat = await fs
-      .lstat(graph("local", "attachments", "att-1"))
-      .catch(() => null);
-    expect(stat).toBeNull();
-  });
-
-  it("is a clean no-op when nothing was staged", async () => {
-    await ensureContextGraph(root);
-    expect(await removeContextGraphAttachment(root, "att-none")).toEqual({
-      ok: true,
-      removed: false,
-    });
-  });
-
-  it("never touches the shared scope", async () => {
-    // Un-attaching a chip must not undo an explicit share. The id lives in
-    // shared/ only (the share MOVED it), so the remove finds nothing.
-    await ensureContextGraph(root);
-    await seedAttachment("shared", "att-1", "notes.txt", "kept");
-    const res = await removeContextGraphAttachment(root, "att-1");
-    expect(res).toEqual({ ok: true, removed: false });
-    expect(
-      await fs.readFile(graph("shared", "attachments", "att-1", "notes.txt"), "utf8"),
-    ).toBe("kept");
-  });
-
-  it("rejects traversal-shaped ids outright", async () => {
-    for (const id of ["../escape", "a/b", ".", "..", ""]) {
-      const res = await removeContextGraphAttachment(root, id);
-      expect(res.ok).toBe(false);
-      expect(res.error).toBe("invalid attachment id");
-    }
-  });
-
-  it("unlinks a symlink squatting on the id without following it", async () => {
-    await ensureContextGraph(root);
-    const target = path.join(root, "precious");
-    await fs.mkdir(target, { recursive: true });
-    await fs.writeFile(path.join(target, "keep.txt"), "keep");
-    await fs.symlink(target, graph("local", "attachments", "att-link"));
-    const res = await removeContextGraphAttachment(root, "att-link");
-    expect(res.ok).toBe(true);
-    // The link is gone; its target is untouched.
-    expect(await fs.readFile(path.join(target, "keep.txt"), "utf8")).toBe("keep");
-  });
-});

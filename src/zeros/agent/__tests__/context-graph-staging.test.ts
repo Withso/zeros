@@ -1,16 +1,18 @@
 // Attach-time context-graph staging: the composer diffs its document's
-// attachment ids on every user edit, stages what appeared and unstages what
-// disappeared. These pin the three properties that make that safe:
+// attachment ids on every user edit and stages what appeared. These pin the
+// properties that make that safe:
 //
-//   • LIFECYCLE — only ids the side store owns move the graph. After a send,
-//     clear() empties the store, so chips resurrected by ⌘Z and deleted again
-//     must not delete the sent message's graph record. Reconstructed
+//   • APPEND-ONLY — an id disappearing (chip ×, Backspace, select-all
+//     delete, undo) plans NO IO, ever: once a file lands in the graph, only
+//     the user deleting it on disk removes it (2026-08-03(3) product
+//     decision). There is no unstage op to misfire.
+//   • LIFECYCLE — only ids the side store owns stage. Reconstructed
 //     (`att-edit-`) chips belong to their ORIGINAL send, never to the edit
-//     session diffing them.
+//     session diffing them, so staging one would duplicate its record.
 //   • BYTES — a chip with no body in hand (a reconstructed text chip) has
 //     nothing to write; bodies past the validator's hard caps must not ride
 //     the IPC at all.
-//   • ISOLATION — one failed op (no IPC on web, read-only disk) breaks
+//   • ISOLATION — one failed write (no IPC on web, read-only disk) breaks
 //     neither its siblings nor the caller, which is the composer's keystroke
 //     path.
 
@@ -27,13 +29,10 @@ import Paragraph from "@tiptap/extension-paragraph";
 import Text from "@tiptap/extension-text";
 
 const writeContextAttachment = vi.fn();
-const removeContextAttachment = vi.fn();
 
 vi.mock("../agent-history-client", () => ({
   writeContextAttachment: (...args: unknown[]) =>
     writeContextAttachment(...args),
-  removeContextAttachment: (...args: unknown[]) =>
-    removeContextAttachment(...args),
 }));
 
 // The failure reporter's two collaborators: mocked so these node tests stay
@@ -135,11 +134,14 @@ describe("stageablePayload", () => {
 });
 
 describe("planGraphSync", () => {
-  it("stages an id that appeared and unstages one that disappeared", () => {
+  it("stages an id that appeared and plans NOTHING for one that disappeared", () => {
+    // The disappeared id ("gone") is still owned by the side store — the
+    // strongest version of the append-only pin: even a removal the composer
+    // could reverse must not plan any graph IO. The record stays until the
+    // user deletes the file on disk.
     const a = att();
     const plan = planGraphSync(new Set(["gone"]), [a.id], storeOf(a, att({ id: "gone" })));
     expect(plan.stage.map((s) => s.id)).toEqual([a.id]);
-    expect(plan.unstage).toEqual(["gone"]);
     expect([...plan.nextIds]).toEqual([a.id]);
   });
 
@@ -147,30 +149,23 @@ describe("planGraphSync", () => {
     const a = att();
     const plan = planGraphSync(new Set([a.id]), [a.id], storeOf(a));
     expect(plan.stage).toEqual([]);
-    expect(plan.unstage).toEqual([]);
   });
 
-  it("never unstages an id the side store no longer owns", () => {
-    // Send → clear() empties the store → ⌘Z resurrects the chips → user
-    // deletes them again. The disappearance must NOT delete the sent
-    // message's graph record.
-    const plan = planGraphSync(new Set(["att-sent"]), [], storeOf());
-    expect(plan.unstage).toEqual([]);
-    // …and the reappearance (the ⌘Z itself) had nothing to stage either.
+  it("stages nothing for an id the side store no longer owns", () => {
+    // Send → clear() empties the store → ⌘Z resurrects the chips. The
+    // reappearance has no bytes in hand, so there is nothing to write (the
+    // sent message's record already exists).
     const back = planGraphSync(new Set(), ["att-sent"], storeOf());
     expect(back.stage).toEqual([]);
   });
 
-  it("ignores reconstructed chips in both directions", () => {
+  it("never stages a reconstructed chip", () => {
     // Edit-in-place seeds carry `att-edit-` ids WITH image bytes recovered
     // from the thumbnail — appearing (undo of a chip removal mid-edit) must
-    // not create a duplicate graph card, and disappearing must not touch the
-    // original send's record.
+    // not create a duplicate graph card for the original send's record.
     const ghost = image({ id: "att-edit-x1" });
     const appear = planGraphSync(new Set(), [ghost.id], storeOf(ghost));
     expect(appear.stage).toEqual([]);
-    const vanish = planGraphSync(new Set([ghost.id]), [], storeOf(ghost));
-    expect(vanish.unstage).toEqual([]);
   });
 
   it("tracks ids it could not act on, so a later lookup can't replay them", () => {
@@ -181,16 +176,14 @@ describe("planGraphSync", () => {
 });
 
 describe("planSeedStage", () => {
-  it("stages every owned id in the doc and never unstages", () => {
+  it("stages every owned id in the doc", () => {
     // The seed path: a dispatcher-created workspace mounts a draft whose
     // files were never staged (the dispatcher surface opts out). The sweep
-    // must cover them all — and must not read the seed as a removal of
-    // anything (prevIds from an earlier lifecycle are not its business).
+    // must cover them all.
     const a = att();
     const b = image({ id: "att-2" });
     const plan = planSeedStage([a.id, b.id], storeOf(a, b));
     expect(plan.stage.map((s) => s.id)).toEqual([a.id, b.id]);
-    expect(plan.unstage).toEqual([]);
     expect([...plan.nextIds]).toEqual([a.id, b.id]);
   });
 
@@ -202,7 +195,6 @@ describe("planSeedStage", () => {
     const ghost = image({ id: "att-edit-x1" });
     const plan = planSeedStage([ghost.id, "att-unknown"], storeOf(ghost));
     expect(plan.stage).toEqual([]);
-    expect(plan.unstage).toEqual([]);
     expect(plan.nextIds.has("att-unknown")).toBe(true);
   });
 });
@@ -210,10 +202,9 @@ describe("planSeedStage", () => {
 describe("executeGraphSync while the worktree is provisioning", () => {
   beforeEach(() => {
     writeContextAttachment.mockReset().mockResolvedValue({});
-    removeContextAttachment.mockReset().mockResolvedValue({ removed: true });
   });
 
-  it("skips every op for a provisioning cwd and works again once it lands", async () => {
+  it("skips every write for a provisioning cwd and works again once it lands", async () => {
     // The dispatcher reserves the worktree path before `git worktree add`
     // creates it. A stage write in that window would mkdir into the reserved
     // path and fail the creation itself — so the whole plan is dropped (the
@@ -226,18 +217,15 @@ describe("executeGraphSync while the worktree is provisioning", () => {
     try {
       executeGraphSync("/repo-worktrees/mauve", {
         stage: [att()],
-        unstage: ["att-old"],
         nextIds: new Set(["att-1"]),
       });
       await new Promise((r) => setTimeout(r, 0));
       expect(writeContextAttachment).not.toHaveBeenCalled();
-      expect(removeContextAttachment).not.toHaveBeenCalled();
     } finally {
       finishPendingCreate(token);
     }
     executeGraphSync("/repo-worktrees/mauve", {
       stage: [att()],
-      unstage: [],
       nextIds: new Set(["att-1"]),
     });
     await vi.waitFor(() => expect(writeContextAttachment).toHaveBeenCalled());
@@ -252,7 +240,6 @@ describe("executeGraphSync while the worktree is provisioning", () => {
     try {
       executeGraphSync("/repo", {
         stage: [att()],
-        unstage: [],
         nextIds: new Set(["att-1"]),
       });
       await vi.waitFor(() => expect(writeContextAttachment).toHaveBeenCalled());
@@ -265,20 +252,18 @@ describe("executeGraphSync while the worktree is provisioning", () => {
 describe("staging failures are reported, once per workspace", () => {
   beforeEach(() => {
     writeContextAttachment.mockReset();
-    removeContextAttachment.mockReset().mockResolvedValue({ removed: true });
     toastError.mockReset();
     resetStagingFailureNoticesForTests();
     vi.spyOn(console, "warn").mockImplementation(() => {});
   });
 
-  it("logs every failed op but toasts only the first per workspace", async () => {
+  it("logs every failed write but toasts only the first per workspace", async () => {
     // The 2026-08-03 outage shape: a stale main process rejects EVERY write.
     // Each rejection must be greppable, but the user gets one notice — a
     // paste burst must not stack four identical toasts.
     writeContextAttachment.mockRejectedValue(new Error("disk on fire"));
     executeGraphSync("/w1", {
       stage: [att(), att({ id: "att-2", name: "b.txt" })],
-      unstage: [],
       nextIds: new Set(["att-1", "att-2"]),
     });
     await vi.waitFor(() => expect(console.warn).toHaveBeenCalledTimes(2));
@@ -286,7 +271,6 @@ describe("staging failures are reported, once per workspace", () => {
     // A different workspace gets its own notice.
     executeGraphSync("/w2", {
       stage: [att()],
-      unstage: [],
       nextIds: new Set(["att-1"]),
     });
     await vi.waitFor(() => expect(toastError).toHaveBeenCalledTimes(2));
@@ -301,27 +285,7 @@ describe("staging failures are reported, once per workspace", () => {
     );
     executeGraphSync("/w", {
       stage: [att()],
-      unstage: [],
       nextIds: new Set(["att-1"]),
-    });
-    await vi.waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
-    const [, opts] = toastError.mock.calls[0] as [
-      unknown,
-      { description?: string },
-    ];
-    expect(opts.description).toMatch(/relaunch/i);
-  });
-
-  it("reports failed unstages through the same channel", async () => {
-    removeContextAttachment.mockRejectedValue(
-      new Error(
-        '[Zeros] IPC: unknown command "agent_attachment_remove". Expected one of 70 registered commands.',
-      ),
-    );
-    executeGraphSync("/w", {
-      stage: [],
-      unstage: ["att-1"],
-      nextIds: new Set(),
     });
     await vi.waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
     const [, opts] = toastError.mock.calls[0] as [
@@ -339,7 +303,7 @@ describe("isBuildSkewFailure", () => {
     ).toBe(true);
     expect(
       isBuildSkewFailure(
-        '[Zeros] IPC: unknown command "agent_attachment_remove". Expected one of 70 registered commands.',
+        '[Zeros] IPC: unknown command "agent_attachment_write". Expected one of 70 registered commands.',
       ),
     ).toBe(true);
     expect(isBuildSkewFailure("EACCES: permission denied")).toBe(false);
@@ -350,17 +314,15 @@ describe("isBuildSkewFailure", () => {
 describe("executeGraphSync", () => {
   beforeEach(() => {
     writeContextAttachment.mockReset().mockResolvedValue({});
-    removeContextAttachment.mockReset().mockResolvedValue({ removed: true });
     toastError.mockReset();
     resetStagingFailureNoticesForTests();
     vi.spyOn(console, "warn").mockImplementation(() => {});
   });
 
-  it("writes stages and removes unstages against the workspace", async () => {
+  it("writes stages against the workspace", async () => {
     const a = att();
     executeGraphSync("/repo", {
       stage: [a],
-      unstage: ["att-old"],
       nextIds: new Set([a.id]),
     });
     await vi.waitFor(() => {
@@ -371,70 +333,25 @@ describe("executeGraphSync", () => {
         mimeType: "text/plain",
         filename: "notes.txt",
       });
-      expect(removeContextAttachment).toHaveBeenCalledWith({
-        cwd: "/repo",
-        attachmentId: "att-old",
-      });
     });
   });
 
   it("drops byte-less stages instead of writing empty files", async () => {
     executeGraphSync("/repo", {
       stage: [att({ text: "" })],
-      unstage: [],
       nextIds: new Set(["att-1"]),
     });
     await new Promise((r) => setTimeout(r, 0));
     expect(writeContextAttachment).not.toHaveBeenCalled();
   });
 
-  it("applies same-id ops strictly in gesture order", async () => {
-    // attach → ⌘Z-flurry: a write still in flight when the remove is issued
-    // must finish FIRST, or the disk settles on the wrong state (file present
-    // for a removed chip, or missing for a present one).
-    const order: string[] = [];
-    let releaseWrite!: () => void;
-    writeContextAttachment.mockImplementation(
-      () =>
-        new Promise<void>((resolve) => {
-          releaseWrite = () => {
-            order.push("write");
-            resolve();
-          };
-        }),
-    );
-    removeContextAttachment.mockImplementation(() => {
-      order.push("remove");
-      return Promise.resolve({ removed: true });
-    });
-    const a = att();
-    executeGraphSync("/repo", {
-      stage: [a],
-      unstage: [],
-      nextIds: new Set([a.id]),
-    });
-    executeGraphSync("/repo", {
-      stage: [],
-      unstage: [a.id],
-      nextIds: new Set(),
-    });
-    await new Promise((r) => setTimeout(r, 10));
-    expect(order).toEqual([]); // remove is queued behind the pending write
-    releaseWrite();
-    await vi.waitFor(() => expect(order).toEqual(["write", "remove"]));
-  });
-
   it("absorbs a synchronously-throwing IPC façade", async () => {
     writeContextAttachment.mockImplementation(() => {
-      throw new Error("no IPC");
-    });
-    removeContextAttachment.mockImplementation(() => {
       throw new Error("no IPC");
     });
     expect(() =>
       executeGraphSync("/repo", {
         stage: [att()],
-        unstage: ["att-old"],
         nextIds: new Set(["att-1"]),
       }),
     ).not.toThrow();
