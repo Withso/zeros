@@ -137,16 +137,27 @@ describe("workflow hover panel", () => {
     const html = renderPanel(workflow());
     const tracks = html.match(/role="progressbar"/g) ?? [];
     expect(tracks).toHaveLength(2);
-    const cells = html.match(/rounded-\[2px\]/g) ?? [];
-    expect(cells).toHaveLength(2 * WORKFLOW_SEGMENT_COUNT);
     expect(html).toContain('aria-valuenow="3"');
     expect(html).toContain('aria-valuemax="4"');
-    // 24 progressed --fg2 cells, the rest at the dimmer unprogressed token.
+    // The per-cell background tokens are what prove the density and the split:
+    // 24 progressed --fg2 cells, the rest at the dimmer unprogressed token,
+    // totalling one full track per phase. (Counting a shared utility like
+    // rounded-sm would also catch the header buttons.)
     expect((html.match(/bg-fg2/g) ?? []).length).toBe(24);
     expect((html.match(/bg-bg4/g) ?? []).length).toBe(
       2 * WORKFLOW_SEGMENT_COUNT - 24,
     );
     expect(html).not.toContain("h-[3px]");
+  });
+
+  it("draws cells on the fixed radius scale, never an arbitrary radius", () => {
+    // .workflow-segment uses var(--radius-sm) in the settled design artifact,
+    // and the radius scale is a deliberate 3 steps (zeros-tokens.css), so an
+    // off-scale rounded-[Npx] is both off-design and a RULES.md 1.3 violation.
+    // pnpm check:ui greps raw CSS only, so Tailwind arbitrary values need this.
+    const html = renderPanel(workflow());
+    expect(html).toContain("flex-1 rounded-sm");
+    expect(html).not.toMatch(/rounded-\[/);
   });
 
   it("turns every cell green once the workflow completes", () => {

@@ -202,8 +202,12 @@ const WorkflowPhaseRow = memo(function WorkflowPhaseRow({
         {Array.from({ length: WORKFLOW_SEGMENT_COUNT }, (_, index) => (
           <span
             key={index}
+            // rounded-sm is what the settled design specifies for these cells
+            // (.workflow-segment → var(--radius-sm) in the design artifact).
+            // The radius scale is a fixed 3 steps on purpose (zeros-tokens.css),
+            // so a hand-written rounded-[2px] was both off-scale and off-design.
             className={cn(
-              "h-2 min-w-0 flex-1 rounded-[2px]",
+              "h-2 min-w-0 flex-1 rounded-sm",
               complete
                 ? "bg-green-primary"
                 : index < filled
