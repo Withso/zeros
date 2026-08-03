@@ -84,6 +84,10 @@ export interface ClaudeScheduledWakeup {
 const MAX_ACTIVE_BACKGROUND_TASKS = 100;
 const MAX_BACKGROUND_TASK_LIFECYCLE = 500;
 const MAX_RETAINED_TOOL_TEXT = 2_000;
+/** Joins a workflow task id to a narrator line in the dedupe fingerprint. A
+ * character that cannot occur in either half, so the id stays a safe prefix to
+ * match when a finished run's fingerprints are dropped. */
+const WORKFLOW_NARRATION_SEPARATOR = "\u0000";
 
 interface RetainedToolInput {
   name: string;
@@ -1260,8 +1264,21 @@ export class ClaudeStreamTranslator {
     this.emitWorkflows();
   }
 
+  /** Narrator fingerprints belong to ONE workflow RUN, not to the whole SDK
+   * process: "exactly one durable row per line" must not stop a LATER workflow
+   * that re-uses the task id (or repeats a line verbatim after this run
+   * settled) from narrating at all. Dropped when the run leaves the live set. */
+  private forgetWorkflowNarration(taskId: string): void {
+    const prefix = `${taskId}${WORKFLOW_NARRATION_SEPARATOR}`;
+    for (const fingerprint of this.workflowNarration) {
+      if (fingerprint.startsWith(prefix)) {
+        this.workflowNarration.delete(fingerprint);
+      }
+    }
+  }
+
   private emitWorkflowNarration(taskId: string, message: string): void {
-    const fingerprint = `${taskId}\u0000${message}`;
+    const fingerprint = `${taskId}${WORKFLOW_NARRATION_SEPARATOR}${message}`;
     if (this.workflowNarration.has(fingerprint)) return;
     addBoundedSet(
       this.workflowNarration,
@@ -1403,6 +1420,7 @@ export class ClaudeStreamTranslator {
     const previous = this.workflows.get(event.task_id);
     if (!previous && event.task_type !== "local_workflow") return;
     if (event.patch?.is_backgrounded === true) {
+      this.forgetWorkflowNarration(event.task_id);
       if (this.workflows.delete(event.task_id)) this.emitWorkflows();
       return;
     }
@@ -1417,6 +1435,12 @@ export class ClaudeStreamTranslator {
             : providerStatus === "killed"
               ? "killed"
               : "running";
+    // This run is over: release its narrator fingerprints so a later workflow
+    // (including one that re-uses this task id) narrates from scratch. The
+    // snapshot itself stays until the turn boundary for its final counts.
+    if (status !== "running" && status !== "paused") {
+      this.forgetWorkflowNarration(event.task_id);
+    }
     const now = Date.now();
     const candidate: WorkflowProgress = {
       taskId: event.task_id,
@@ -2038,6 +2062,9 @@ export class ClaudeStreamTranslator {
       this.workflows.clear();
       this.emitWorkflows();
     }
+    // Narrator dedupe is scoped to the workflows that ran inside this turn — a
+    // next-turn workflow must be able to narrate the same line again.
+    this.workflowNarration.clear();
     this.pausedTaskIds.clear();
     // A compaction row that never got its definitive settle (success-status
     // with no boundary, or a run cut short) must not leak into the next

@@ -1928,12 +1928,22 @@ export function modePolicyFor(modeId: CodexModeId): CodexModePolicy {
  *  ZEROS_THINKING_EFFORT by `envForChatSettings`) onto the Codex
  *  app-server's `turn/start.effort` enum.
  *
- *  ReasoningEffort is intentionally open in the current generated protocol;
- *  `ultra` is the native proactive multi-agent tier. Unknown / empty values
- *  stay unset so Codex picks its own default (typically "medium"). */
+ *  ReasoningEffort is intentionally open in the current generated protocol
+ *  (`ReasoningEffort.ts` is just `string`), so a wrong token is NOT a compile
+ *  error — it comes back at runtime as `turn/start: Invalid request: unknown
+ *  variant`, i.e. every send fails. So each Zeros tier must map onto a token
+ *  Codex really has:
+ *    • `ultra`  — the native proactive multi-agent tier (`ultracode` → this).
+ *    • `max`    — Claude-only, NOT a Codex variant, so it clamps DOWN to
+ *                 `xhigh` (Codex's highest ordinary reasoning tier). It is
+ *                 normally unreachable (CODEX_LADDER excludes it), but a
+ *                 persisted/settings-derived effort can still carry it, and a
+ *                 graceful downgrade beats a hard turn failure.
+ *  Unknown / empty values stay unset so Codex picks its own default
+ *  (typically "medium"). */
 export function mapCodexEffortFromEnv(
   value: string | undefined,
-): "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" | undefined {
+): "minimal" | "low" | "medium" | "high" | "xhigh" | "ultra" | undefined {
   switch (value?.trim().toLowerCase()) {
     case "minimal":
       return "minimal";
@@ -1946,7 +1956,7 @@ export function mapCodexEffortFromEnv(
     case "xhigh":
       return "xhigh";
     case "max":
-      return "max";
+      return "xhigh";
     case "ultracode":
     case "ultra":
       return "ultra";
@@ -1955,7 +1965,12 @@ export function mapCodexEffortFromEnv(
   }
 }
 
-/** Codex protocol token → the already-shipping composer effort vocabulary. */
+/** Codex protocol token → the already-shipping composer effort vocabulary.
+ *
+ *  Deliberately asymmetric with {@link mapCodexEffortFromEnv}: this direction
+ *  reads what the SERVER claims to support, so an unexpected `max` is honoured
+ *  (shown as Max) rather than dropped — the outbound clamp then keeps the turn
+ *  itself on a token today's app-server accepts. */
 export function mapCodexAdvertisedEffort(
   value: string | undefined,
 ): string | undefined {

@@ -194,6 +194,7 @@ import {
   turnKey,
 } from "./turn-container";
 import { TurnEventList } from "./turn-event-list";
+import { pickActiveWorkflow } from "./workflow-activity";
 import { stabilizeTurns } from "./stable-turns";
 import { TurnFooter } from "./turn-footer";
 import { JumpToLatestButton, JumpToPromptPill } from "./jump-pills";
@@ -319,20 +320,10 @@ export function AgentChat({
   // In particular, background continuation chrome is an Ultracode-only aid.
   const chatThread = useChatById(chatId);
   const workflows = session.workflows;
-  const activeWorkflow = useMemo(() => {
-    let latest: (typeof workflows)[number] | null = null;
-    for (const workflow of workflows) {
-      if (
-        !latest ||
-        workflow.updatedAt > latest.updatedAt ||
-        (workflow.updatedAt === latest.updatedAt &&
-          workflow.startedAt > latest.startedAt)
-      ) {
-        latest = workflow;
-      }
-    }
-    return latest;
-  }, [workflows]);
+  const activeWorkflow = useMemo(
+    () => pickActiveWorkflow(workflows),
+    [workflows],
+  );
   // Hidden CLI authentication is deliberately local-only. Relay/browser
   // sessions keep the status pill static and direct users to Providers.
   const nativeReady = useNativeRuntime().ready;

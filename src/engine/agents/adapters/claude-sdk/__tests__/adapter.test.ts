@@ -919,7 +919,11 @@ describe("ClaudeSdkAdapter", () => {
     expect(request).toMatchObject({
       title: "Workflow approval",
       nativeRequestId: "workflow-request-1",
-      contextItems: ["Find · 8 agents", "Verify · 4", "Synthesize · 1"],
+      contextItems: [
+        "Find · 8 agents",
+        "Verify · 4 agents",
+        "Synthesize · 1 agent",
+      ],
       useOptionNames: true,
     });
     expect(request.options.map((option) => option.name)).toEqual([
@@ -938,6 +942,61 @@ describe("ClaudeSdkAdapter", () => {
       behavior: "completed",
       result: { behavior: "allow" },
     });
+    await turn;
+    await adapter.dispose();
+  });
+
+  it("reads every phase pill when a phase's own copy contains braces", async () => {
+    const emitted: SessionNotification[] = [];
+    const perms: PermCapture[] = [];
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-1"), resultOk("sdk-1")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, perms), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const turn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
+    await tick();
+
+    const onUserDialog = captured[0]?.onUserDialog as (req: {
+      dialogKind: string;
+      toolUseID?: string;
+      payload?: Record<string, unknown>;
+    }) => Promise<Record<string, unknown>>;
+    // A `{` inside a detail string must NOT open a bogus object and resync the
+    // delimiter matcher from inside the literal — that silently dropped or
+    // garbled the pills that follow.
+    const dialog = onUserDialog({
+      dialogKind: "permission_workflow",
+      toolUseID: "toolu-workflow-braces",
+      payload: {
+        requestId: "workflow-request-braces",
+        workflowName: "sweep",
+        script: `export const meta = {
+          name: "sweep",
+          phases: [
+            { title: "Find", detail: "8 agents {parallel}" },
+            { title: "Verify", detail: "4 agents" }
+          ]
+        }`,
+      },
+    });
+    await tick();
+
+    expect(perms).toHaveLength(1);
+    expect(
+      (perms[0].request as { contextItems?: string[] }).contextItems,
+    ).toEqual(["Find · 8 agents", "Verify · 4 agents"]);
+
+    adapter.respondToPermission({
+      permissionId: perms[0].id,
+      response: {
+        outcome: { outcome: "selected", optionId: "reject_once" },
+      } as never,
+    });
+    await dialog;
     await turn;
     await adapter.dispose();
   });

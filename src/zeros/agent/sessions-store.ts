@@ -47,6 +47,7 @@ import {
   type AgentMessage,
   type AgentSessionState,
   type AgentUsage,
+  type PendingPermission,
   type SessionStatus,
 } from "./use-agent-session";
 import { saveScrollPosition } from "./device-local";
@@ -56,6 +57,7 @@ import {
 } from "./chat-scroll-anchor";
 import { isPlanReviewRequest } from "./renderers/plan-body";
 import { loadPolicies, savePolicies, type PolicyRule } from "./policies";
+import { effortAdoptedEnvKey } from "./model-catalog";
 import { useWorkspaceStore } from "../store/workspace-store";
 import type { ChatEffort } from "../store/store";
 
@@ -117,6 +119,32 @@ function sameWorkflows(a: WorkflowProgress[], b: WorkflowProgress[]): boolean {
       })
     );
   });
+}
+
+/** Append a newly-arrived gate to the pending queue.
+ *
+ *  Arrival order, with ONE exception: a pending PLAN REVIEW yields to a real
+ *  Allow/Deny gate. Plan review deliberately does NOT take the composer's slot
+ *  (the user may keep typing to refine the plan), so it can legitimately sit at
+ *  the head for minutes — and only the head renders. A real gate arriving behind
+ *  it would then stay invisible until its own engine-side auto-deny timeout,
+ *  with the turn blocked the whole time. Real gates therefore queue AHEAD of
+ *  plan reviews; the plan re-surfaces (unanswered, undisturbed) as soon as they
+ *  are decided. Two real gates keep strict arrival order between themselves. */
+function queuePermission(
+  existing: PendingPermission[],
+  incoming: PendingPermission,
+): PendingPermission[] {
+  if (isPlanReviewRequest(incoming.request)) return [...existing, incoming];
+  const firstPlanReview = existing.findIndex((pending) =>
+    isPlanReviewRequest(pending.request),
+  );
+  if (firstPlanReview < 0) return [...existing, incoming];
+  return [
+    ...existing.slice(0, firstPlanReview),
+    incoming,
+    ...existing.slice(firstPlanReview),
+  ];
 }
 
 /** Merge the engine's authoritative recent-message window into a local slot's
@@ -662,6 +690,23 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           id: chatId,
           updates: { effort },
         });
+        // The agent is ALREADY running at this tier — it reported the change
+        // itself. Advance the live slot's applied-env stamp with the chat, or
+        // sendPrompt's settings-drift reconcile reads the write above as user
+        // drift and force-respawns COLD (AGENT_NEW_SESSION carries no prior
+        // session id, so Codex silently starts a brand-new thread and the
+        // conversation is gone while the transcript stays on screen). Only the
+        // effort slot moves, so an unapplied model/Fast/add-dir change is still
+        // reconciled. <AgentSessionsProvider> additionally pushes
+        // AGENT_UPDATE_CONFIG so the ENGINE's session env matches what the
+        // composer now shows (codex re-reads it on every turn/start).
+        const applied = effortAdoptedEnvKey(
+          get().sessions[chatId]?.appliedChatEnvKey,
+          effort,
+        );
+        if (applied !== undefined) {
+          get().patchSession(chatId, { appliedChatEnvKey: applied });
+        }
       }
       return;
     }
@@ -792,6 +837,12 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       // A rebuilt SDK re-arms the same vendor request under a fresh local id.
       // Preserve its queue position/card, but adopt the live resolver id so the
       // eventual answer cannot be sent into the dead pre-rebuild request.
+      //
+      // This can only ever collapse a REPLAY, never two live gates: every
+      // vendor id we key on is unique per parked request — Claude's
+      // `canUseTool` carries the control envelope's `requestId`, and its
+      // toolUseID fallback is documented unique per tool call within an
+      // assistant message.
       const pendingPermissions = existing.map((pending, index) =>
         index === nativeDuplicateIndex
           ? { agentId, permissionId, request }
@@ -803,10 +854,11 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       });
       return;
     }
-    const pendingPermissions = [
-      ...existing,
-      { agentId, permissionId, request },
-    ];
+    const pendingPermissions = queuePermission(existing, {
+      agentId,
+      permissionId,
+      request,
+    });
     get().patchSession(chatId, {
       pendingPermissions,
       pendingPermission: pendingPermissions[0] ?? null,
@@ -833,9 +885,21 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
   },
 
   clearStrandedPlanReview: (chatId) => {
-    const p = get().sessions[chatId]?.pendingPermission;
-    if (p && isPlanReviewRequest(p.request)) {
-      get().settlePendingPermission(chatId, p.permissionId);
+    const slot = get().sessions[chatId];
+    if (!slot) return;
+    // A plan review is no longer guaranteed to be the head — a real Allow/Deny
+    // gate queues ahead of it (see queuePermission) — so settle it wherever in
+    // the queue it sits.
+    const queued =
+      slot.pendingPermissions.length > 0
+        ? slot.pendingPermissions
+        : slot.pendingPermission
+          ? [slot.pendingPermission]
+          : [];
+    for (const pending of queued) {
+      if (isPlanReviewRequest(pending.request)) {
+        get().settlePendingPermission(chatId, pending.permissionId);
+      }
     }
   },
 

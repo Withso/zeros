@@ -1476,6 +1476,61 @@ describe("ClaudeStreamTranslator local workflow progress", () => {
     expect(cleared.workflows).toEqual([]);
   });
 
+  it("scopes narrator dedupe to the workflow RUN, not the whole SDK process", () => {
+    const { t, updates } = collect();
+    const narrationCount = () =>
+      updates.filter(
+        (note) =>
+          (note.update as { sessionUpdate?: string; title?: string })
+            .sessionUpdate === "tool_call" &&
+          (note.update as { title?: string }).title === "Workflow update",
+      ).length;
+    const run = () => {
+      t.feed({
+        type: "system",
+        subtype: "task_started",
+        task_id: "workflow-1",
+        task_type: "local_workflow",
+        workflow_name: "dependency-audit",
+      });
+      t.feed({
+        type: "system",
+        subtype: "task_progress",
+        task_id: "workflow-1",
+        workflow_progress: [
+          { type: "workflow_phase", index: 0, title: "Find" },
+          { type: "workflow_log", message: "Scanning 12 manifests." },
+        ],
+      });
+    };
+
+    run();
+    expect(narrationCount()).toBe(1);
+    // Same line, same run → still exactly one durable row.
+    t.feed({
+      type: "system",
+      subtype: "task_progress",
+      task_id: "workflow-1",
+      workflow_progress: [
+        { type: "workflow_phase", index: 0, title: "Find" },
+        { type: "workflow_log", message: "Scanning 12 manifests." },
+      ],
+    });
+    expect(narrationCount()).toBe(1);
+
+    t.feed({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+
+    // A LATER workflow re-using the task id must narrate again rather than be
+    // silently suppressed by the previous run's fingerprint.
+    run();
+    expect(narrationCount()).toBe(2);
+  });
+
   it("recovers when workflow progress arrives before task_started", () => {
     const { t, updates } = collect();
     t.feed({

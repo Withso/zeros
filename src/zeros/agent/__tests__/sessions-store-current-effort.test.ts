@@ -69,6 +69,78 @@ describe("sessions-store current effort updates", () => {
     expect(workspace.dispatch).toHaveBeenCalledTimes(1);
   });
 
+  it("moves the applied-env stamp with the adopted effort so the next send does not respawn cold", () => {
+    const store = useSessionsStore.getState();
+    store.setSession("chat-a", {
+      ...BLANK,
+      agentId: "codex",
+      sessionId: "session-a",
+      appliedChatEnvKey: JSON.stringify({
+        OPENAI_MODEL: "gpt-5.5-codex",
+        ZEROS_THINKING_EFFORT: "medium",
+      }),
+    });
+
+    store.applyBridgeUpdate({
+      sessionId: "session-a",
+      update: { sessionUpdate: "current_effort_update", effort: "ultracode" },
+    } as unknown as SessionNotification);
+
+    // Byte-identical to what sendPrompt's reconcile computes for the updated
+    // chat (envForChat's key order), so the drift guard stays quiet.
+    expect(
+      useSessionsStore.getState().sessions["chat-a"].appliedChatEnvKey,
+    ).toBe(
+      JSON.stringify({
+        OPENAI_MODEL: "gpt-5.5-codex",
+        ZEROS_THINKING_EFFORT: "ultracode",
+      }),
+    );
+  });
+
+  it("re-stamps ONLY the effort, so an unapplied model change still reconciles", () => {
+    const store = useSessionsStore.getState();
+    store.setSession("chat-a", {
+      ...BLANK,
+      agentId: "codex",
+      sessionId: "session-a",
+      appliedChatEnvKey: JSON.stringify({
+        OPENAI_MODEL: "gpt-5.5-codex",
+        ZEROS_THINKING_EFFORT: "medium",
+        ZEROS_FAST_MODE: "1",
+      }),
+    });
+
+    store.applyBridgeUpdate({
+      sessionId: "session-a",
+      update: { sessionUpdate: "current_effort_update", effort: "high" },
+    } as unknown as SessionNotification);
+
+    const stamped =
+      useSessionsStore.getState().sessions["chat-a"].appliedChatEnvKey;
+    expect(JSON.parse(stamped!)).toEqual({
+      OPENAI_MODEL: "gpt-5.5-codex",
+      ZEROS_THINKING_EFFORT: "high",
+      ZEROS_FAST_MODE: "1",
+    });
+  });
+
+  it("leaves an unstamped legacy slot alone (its reconcile already skips)", () => {
+    const store = useSessionsStore.getState();
+    store.setSession("chat-a", {
+      ...BLANK,
+      agentId: "codex",
+      sessionId: "session-a",
+    });
+    store.applyBridgeUpdate({
+      sessionId: "session-a",
+      update: { sessionUpdate: "current_effort_update", effort: "xhigh" },
+    } as unknown as SessionNotification);
+    expect(
+      useSessionsStore.getState().sessions["chat-a"].appliedChatEnvKey,
+    ).toBeUndefined();
+  });
+
   it("ignores an invalid provider effort instead of corrupting chat settings", () => {
     const store = useSessionsStore.getState();
     store.setSession("chat-a", {

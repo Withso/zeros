@@ -379,6 +379,13 @@ export function AgentSessionsProvider({
   const retriedAnswersRef = useRef(new Set<string>());
   const promptActivityRef = useRef(new Map<string, () => void>());
   const questionChatRef = useRef(new Map<string, string>());
+  /** `setModel` / `updateConfig` are declared below this component's bridge
+   *  effect, so the notification flush reaches them through refs (same pattern
+   *  as `ensureSessionRef`). Used for provider-originated composer changes — an
+   *  agent that raises its OWN effort still needs the new env pushed into the
+   *  live session, exactly as a pill click does. */
+  const setModelRef = useRef<SessionsActions["setModel"] | null>(null);
+  const updateConfigRef = useRef<SessionsActions["updateConfig"] | null>(null);
 
   // Bridge listeners feed the store. Phase 0 step 5: notifications are
   // buffered into a ring of arrays and flushed once per animation frame
@@ -524,11 +531,46 @@ export function AgentSessionsProvider({
         store.applyBridgeAgentExit(e.agentId, e.sessionId);
       }
 
+      // An agent can raise its OWN reasoning tier mid-session (Codex moving a
+      // thread to native `ultra`) and report it back as current_effort_update.
+      // applyBridgeUpdate persists that onto the chat so the ONE effort picker
+      // stays truthful; snapshot the pre-flush value here so we can tell an
+      // actual adoption from a repeated notification.
+      const effortBefore = new Map<string, string>();
+      for (const n of updates) {
+        const u = n.update as { sessionUpdate?: string };
+        if (u?.sessionUpdate !== "current_effort_update") continue;
+        const cid =
+          (n as { chatId?: string }).chatId ??
+          store.sessionToChatId[n.sessionId];
+        if (!cid || effortBefore.has(cid)) continue;
+        const chat = useWorkspaceStore
+          .getState()
+          .chats.find((c) => c.id === cid);
+        if (chat) effortBefore.set(cid, chat.effort);
+      }
+
       startTransition(() => {
         const s = useSessionsStore.getState();
         for (const n of updates) s.applyBridgeUpdate(n);
         for (const t of stderrs) s.applyBridgeStderr(t.agentId, t.line);
       });
+
+      // Push an adopted effort into the LIVE session, exactly as the composer's
+      // pills do. Codex re-reads `session.env` on every turn/start, so without
+      // this the picker would show the new tier while the next turn explicitly
+      // re-sent the old one. setModel FIRST, then updateConfig — the same order
+      // and for the same reason as the ModelPill: updateConfig pushes the WHOLE
+      // env and is what stamps appliedChatEnvKey, so the model it carries has to
+      // really be applied rather than merely recorded as applied.
+      for (const [cid, before] of effortBefore) {
+        const chat = useWorkspaceStore
+          .getState()
+          .chats.find((c) => c.id === cid);
+        if (!chat || chat.effort === before) continue;
+        if (chat.model) setModelRef.current?.(cid, chat.model);
+        updateConfigRef.current?.(cid);
+      }
     };
 
     const schedule = () => {
@@ -2272,6 +2314,12 @@ export function AgentSessionsProvider({
     },
     [bridge, getStore],
   );
+  // The bridge-notification flush is declared above these callbacks, so it
+  // reaches them through refs (provider-reported effort adoption → live push).
+  useEffect(() => {
+    setModelRef.current = setModel;
+    updateConfigRef.current = updateConfig;
+  }, [setModel, updateConfig]);
 
   const removeQueued = useCallback<SessionsActions["removeQueued"]>(
     (chatId, messageId) => {

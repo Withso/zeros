@@ -402,8 +402,19 @@ function parseWorkflowApprovalPhases(script: unknown): WorkflowApprovalPhase[] {
   if (arrayEnd < 0) return [];
   const body = script.slice(arrayStart + 1, arrayEnd);
   const objects: string[] = [];
+  // String-aware at the OBJECT boundary too, not just inside it: a brace in a
+  // phase's own copy (`detail: "8 agents {parallel}"`) would otherwise open a
+  // bogus object and leave matchingDelimiter resyncing from inside a literal,
+  // silently dropping or garbling the remaining phase pills.
   for (let cursor = 0; cursor < body.length; cursor += 1) {
-    if (body[cursor] !== "{") continue;
+    const char = body[cursor];
+    if (char === '"' || char === "'" || char === "`") {
+      const literalEnd = endOfStringLiteral(body, cursor);
+      if (literalEnd < 0) break;
+      cursor = literalEnd;
+      continue;
+    }
+    if (char !== "{") continue;
     const end = matchingDelimiter(body, cursor, "{", "}");
     if (end < 0) break;
     objects.push(body.slice(cursor, end + 1));
@@ -426,6 +437,20 @@ function parseWorkflowApprovalPhases(script: unknown): WorkflowApprovalPhase[] {
       return { title, agents: numeric };
     })
     .filter((phase): phase is WorkflowApprovalPhase => phase !== null);
+}
+
+/** Index of the quote that CLOSES the literal opening at `start`, or -1 when it
+ * is unterminated. */
+function endOfStringLiteral(source: string, start: number): number {
+  const quote = source[start];
+  let escaped = false;
+  for (let i = start + 1; i < source.length; i += 1) {
+    const char = source[i];
+    if (escaped) escaped = false;
+    else if (char === "\\") escaped = true;
+    else if (char === quote) return i;
+  }
+  return -1;
 }
 
 function matchingDelimiter(
@@ -2026,10 +2051,15 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         ? payload.workflowName.trim()
         : "Workflow";
     const phases = parseWorkflowApprovalPhases(payload.script);
-    const contextItems = phases.map((phase, index) =>
+    // Every pill carries its own unit. Stating it once (first pill only) made
+    // the rest read as bare numbers — and a pill is shown on its own, so
+    // "Verify · 4" has nothing to inherit the unit from.
+    const contextItems = phases.map((phase) =>
       phase.agents === null
         ? phase.title
-        : `${phase.title} · ${phase.agents}${index === 0 ? " agents" : ""}`,
+        : `${phase.title} · ${phase.agents} ${
+            phase.agents === 1 ? "agent" : "agents"
+          }`,
     );
     const request: RequestPermissionRequest = {
       sessionId: state.zerosSessionId,

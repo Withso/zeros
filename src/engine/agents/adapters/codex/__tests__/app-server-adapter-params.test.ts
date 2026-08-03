@@ -151,6 +151,27 @@ describe("Codex Ultra effort synchronization", () => {
     expect(mapCodexEffortFromEnv("ultracode")).toBe("ultra");
   });
 
+  it("clamps the Claude-only max tier down instead of failing the turn", () => {
+    // ReasoningEffort is an open `string` in the generated protocol, so an
+    // unknown variant is not a compile error — it is a hard `turn/start:
+    // Invalid request` on every send. "max" is Claude-only, so it must land on
+    // Codex's highest ordinary tier.
+    expect(mapCodexEffortFromEnv("max")).toBe("xhigh");
+    expect(mapCodexEffortFromEnv("MAX ")).toBe("xhigh");
+  });
+
+  it("passes the tiers Codex really has through verbatim", () => {
+    expect(mapCodexEffortFromEnv("minimal")).toBe("minimal");
+    expect(mapCodexEffortFromEnv("low")).toBe("low");
+    expect(mapCodexEffortFromEnv("medium")).toBe("medium");
+    expect(mapCodexEffortFromEnv("high")).toBe("high");
+    expect(mapCodexEffortFromEnv("xhigh")).toBe("xhigh");
+    expect(mapCodexEffortFromEnv("ultra")).toBe("ultra");
+    // Unknown / empty stays unset so Codex picks its own default.
+    expect(mapCodexEffortFromEnv("turbo")).toBeUndefined();
+    expect(mapCodexEffortFromEnv(undefined)).toBeUndefined();
+  });
+
   it("normalizes Codex's advertised ultra tier into the existing composer token", () => {
     expect(mapCodexAdvertisedEffort("ultra")).toBe("ultracode");
     expect(mapCodexAdvertisedEffort("xhigh")).toBe("xhigh");
