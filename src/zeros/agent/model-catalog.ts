@@ -825,6 +825,43 @@ export function chatEnvDriftKey(
   return JSON.stringify(rest);
 }
 
+/** Move an EXISTING `appliedChatEnvKey` stamp onto a new effort, leaving every
+ *  other component of the key untouched.
+ *
+ *  For a PROVIDER-ORIGINATED effort change (Codex raising its own thread to
+ *  Ultra, reported back via `current_effort_update`) the running session is
+ *  already at the new tier, so persisting it onto the chat must NOT read as
+ *  user drift in sendPrompt's reconcile — that respawns COLD (no resume, so
+ *  Codex loses the thread). Re-stamping only the effort slot is what keeps a
+ *  genuinely-unapplied model/Fast/add-dir change still visible as drift, which
+ *  a full `chatEnvDriftKey(envForChat(chat))` re-stamp would silently swallow.
+ *
+ *  Returns undefined when there is nothing safe to re-stamp: an unstamped slot
+ *  (legacy — the reconcile skips those anyway), an unparseable stamp, or one
+ *  built without an effort entry. */
+export function effortAdoptedEnvKey(
+  appliedChatEnvKey: string | undefined,
+  effort: string,
+): string | undefined {
+  if (!appliedChatEnvKey) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(appliedChatEnvKey);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const env = parsed as Record<string, unknown>;
+  if (typeof env[EFFORT_ENV_VAR] !== "string") return undefined;
+  if (env[EFFORT_ENV_VAR] === effort) return appliedChatEnvKey;
+  // In-place assignment keeps envForChat's insertion order, so the result is
+  // byte-identical to the key the reconcile will compute for the updated chat.
+  env[EFFORT_ENV_VAR] = effort;
+  return JSON.stringify(env);
+}
+
 /** Env var carrying the composer's extra working directories (Claude `/add-dir`)
  *  as a JSON array of absolute paths. Zeros convention. Read by the Claude SDK
  *  adapter (→ `Options.additionalDirectories`). Only emitted when non-empty so

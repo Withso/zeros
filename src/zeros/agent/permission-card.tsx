@@ -104,6 +104,7 @@ export function describePermission(
   const raw = (tc.rawInput ?? {}) as Record<string, unknown>;
   const str = (v: unknown): string | null =>
     typeof v === "string" && v.trim().length > 0 ? v : null;
+  const titleOverride = str(request.title);
 
   const command = str(raw.command);
   const label = str(raw.description) ?? str(raw.reason);
@@ -132,7 +133,7 @@ export function describePermission(
 
   if (kind === "execute" || command) {
     return {
-      title: "Do you want to run this command?",
+      title: titleOverride ?? "Do you want to run this command?",
       Icon: Terminal,
       label: label ?? str(tc.title),
       detail: command,
@@ -145,7 +146,7 @@ export function describePermission(
     // drop the path detail. One file keeps the familiar path row.
     if (fileCount > 1) {
       return {
-        title: `Apply changes to ${fileCount} files?`,
+        title: titleOverride ?? `Apply changes to ${fileCount} files?`,
         Icon: FilePen,
         label: `Edit ${fileCount} files`,
         detail: null,
@@ -153,7 +154,7 @@ export function describePermission(
       };
     }
     return {
-      title: "Do you want to apply this change?",
+      title: titleOverride ?? "Do you want to apply this change?",
       Icon: FilePen,
       label: label ?? "Edit",
       detail: singleFilePath,
@@ -168,7 +169,7 @@ export function describePermission(
   // the tool's verb — "Read 3 files" — rather than one arbitrary path.
   if (fileCount > 1) {
     return {
-      title: "Do you want to allow this action?",
+      title: titleOverride ?? "Do you want to allow this action?",
       Icon: FileText,
       label: `${str(tc.title) ?? label ?? "Access"} ${fileCount} files`,
       detail: null,
@@ -176,7 +177,7 @@ export function describePermission(
     };
   }
   return {
-    title: "Do you want to allow this action?",
+    title: titleOverride ?? "Do you want to allow this action?",
     Icon: singleFilePath ? FileText : Wrench,
     label: label ?? str(tc.title) ?? "Tool call",
     detail: singleFilePath,
@@ -212,6 +213,10 @@ export const PermissionCard = memo(function PermissionCard({
     : command
       ? `Yes, and don't ask again for: ${command}`
       : "Yes, and don't ask again";
+  const useOptionNames = request.useOptionNames === true;
+  const contextItems = (request.contextItems ?? []).filter(
+    (item) => typeof item === "string" && item.trim().length > 0,
+  );
 
   const respondWith = (opt: PermissionOption | undefined) => {
     if (!opt) return;
@@ -307,7 +312,18 @@ export const PermissionCard = memo(function PermissionCard({
     >
       <div className="text-fg1 text-sm font-medium">{title}</div>
 
-      {(label || detail) && (
+      {contextItems.length > 0 ? (
+        <div className="flex min-w-0 flex-wrap gap-1.5">
+          {contextItems.map((item, index) => (
+            <span
+              key={`${index}:${item}`}
+              className="border-border3 bg-bg1 text-fg2 max-w-full truncate rounded-md border px-2 py-1 text-xs"
+            >
+              {item}
+            </span>
+          ))}
+        </div>
+      ) : (label || detail) ? (
         <div className="flex min-w-0 items-center gap-2">
           <Icon className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />
           {label && (
@@ -321,19 +337,19 @@ export const PermissionCard = memo(function PermissionCard({
             </span>
           )}
         </div>
-      )}
+      ) : null}
 
       <div className="flex flex-col gap-1.5">
         {allowOnce && (
           <PermRow
-            label="Yes"
+            label={useOptionNames ? allowOnce.name : "Yes"}
             hint="↵"
             onClick={() => respondWith(allowOnce)}
           />
         )}
         {allowAlways && (
           <PermRow
-            label={allowAlwaysLabel}
+            label={useOptionNames ? allowAlways.name : allowAlwaysLabel}
             hint="⌘↵"
             onClick={() => respondWith(allowAlways)}
           />
@@ -348,7 +364,11 @@ export const PermissionCard = memo(function PermissionCard({
           />
         )}
         {reject && (
-          <PermRow label="No" hint="⌫" onClick={() => respondWith(reject)} />
+          <PermRow
+            label={useOptionNames ? reject.name : "No"}
+            hint="⌫"
+            onClick={() => respondWith(reject)}
+          />
         )}
       </div>
     </div>

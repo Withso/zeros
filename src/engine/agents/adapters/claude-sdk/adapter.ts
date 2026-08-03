@@ -384,6 +384,145 @@ function formatAnswerForClaude(
   return `The user answered your question(s):\n${lines.join("\n")}`;
 }
 
+interface WorkflowApprovalPhase {
+  title: string;
+  agents: number | null;
+}
+
+/** Read only the small literal `meta.phases` declaration accepted by Claude
+ * workflows. Deliberately no eval/Function: workflow scripts are agent-authored
+ * code and permission presentation must never execute them. */
+function parseWorkflowApprovalPhases(script: unknown): WorkflowApprovalPhase[] {
+  if (typeof script !== "string" || script.length === 0) return [];
+  const phasesKey = /\bphases\s*:/.exec(script);
+  if (!phasesKey) return [];
+  const arrayStart = script.indexOf("[", phasesKey.index + phasesKey[0].length);
+  if (arrayStart < 0) return [];
+  const arrayEnd = matchingDelimiter(script, arrayStart, "[", "]");
+  if (arrayEnd < 0) return [];
+  const body = script.slice(arrayStart + 1, arrayEnd);
+  const objects: string[] = [];
+  // String-aware at the OBJECT boundary too, not just inside it: a brace in a
+  // phase's own copy (`detail: "8 agents {parallel}"`) would otherwise open a
+  // bogus object and leave matchingDelimiter resyncing from inside a literal,
+  // silently dropping or garbling the remaining phase pills.
+  for (let cursor = 0; cursor < body.length; cursor += 1) {
+    const char = body[cursor];
+    if (char === '"' || char === "'" || char === "`") {
+      const literalEnd = endOfStringLiteral(body, cursor);
+      if (literalEnd < 0) break;
+      cursor = literalEnd;
+      continue;
+    }
+    if (char !== "{") continue;
+    const end = matchingDelimiter(body, cursor, "{", "}");
+    if (end < 0) break;
+    objects.push(body.slice(cursor, end + 1));
+    cursor = end;
+  }
+  return objects
+    .slice(0, 100)
+    .map((object) => {
+      const title =
+        readLiteralStringProperty(object, "title") ??
+        readLiteralStringProperty(object, "name");
+      if (!title) return null;
+      const numeric =
+        readNumericProperty(object, "agents") ??
+        readNumericProperty(object, "agentCount") ??
+        readNumericProperty(object, "count") ??
+        readAgentCountFromDetail(
+          readLiteralStringProperty(object, "detail"),
+        );
+      return { title, agents: numeric };
+    })
+    .filter((phase): phase is WorkflowApprovalPhase => phase !== null);
+}
+
+/** Index of the quote that CLOSES the literal opening at `start`, or -1 when it
+ * is unterminated. */
+function endOfStringLiteral(source: string, start: number): number {
+  const quote = source[start];
+  let escaped = false;
+  for (let i = start + 1; i < source.length; i += 1) {
+    const char = source[i];
+    if (escaped) escaped = false;
+    else if (char === "\\") escaped = true;
+    else if (char === quote) return i;
+  }
+  return -1;
+}
+
+function matchingDelimiter(
+  source: string,
+  start: number,
+  open: string,
+  close: string,
+): number {
+  let depth = 0;
+  let quote: string | null = null;
+  let escaped = false;
+  for (let i = start; i < source.length; i += 1) {
+    const char = source[i];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'" || char === "`") {
+      quote = char;
+      continue;
+    }
+    if (char === open) depth += 1;
+    else if (char === close && --depth === 0) return i;
+  }
+  return -1;
+}
+
+function readLiteralStringProperty(
+  source: string,
+  property: string,
+): string | null {
+  const match = new RegExp(
+    `(?:\\b${property}\\b|["']${property}["'])\\s*:\\s*(["'\\x60])`,
+  ).exec(source);
+  if (!match) return null;
+  const quote = match[1];
+  const start = match.index + match[0].length;
+  let escaped = false;
+  let value = "";
+  for (let i = start; i < source.length; i += 1) {
+    const char = source[i];
+    if (escaped) {
+      value += char;
+      escaped = false;
+    } else if (char === "\\") {
+      escaped = true;
+    } else if (char === quote) {
+      return value.trim() || null;
+    } else {
+      value += char;
+    }
+  }
+  return null;
+}
+
+function readNumericProperty(source: string, property: string): number | null {
+  const match = new RegExp(
+    `(?:\\b${property}\\b|["']${property}["'])\\s*:\\s*(\\d+)\\b`,
+  ).exec(source);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function readAgentCountFromDetail(detail: string | null): number | null {
+  if (!detail) return null;
+  const match = /\b(\d+)\s+(?:agents?|helpers?|tasks?)\b/i.exec(detail);
+  return match ? Number(match[1]) : null;
+}
+
 interface SdkSession {
   /** Zeros-side routing id (returned to the renderer; keys persistence). */
   readonly zerosSessionId: string;
@@ -1654,6 +1793,12 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       options: {
         signal: AbortSignal;
         toolUseID?: string;
+        /** Newer SDKs provide user-facing request copy/correlation metadata.
+         * They enrich the canonical PermissionCard only; helper identity never
+         * selects a separate renderer. */
+        title?: string;
+        requestId?: string;
+        agentID?: string;
         /** SDK-proposed permission rules for "always allow". We persist the
          *  scoped `addRules` ones (re-destined to localSettings) as the project
          *  rule; edit tools with no such rule fall back to a family allow (see
@@ -1704,6 +1849,13 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       const offerProject = projectRules.length > 0;
       const request: RequestPermissionRequest = {
         sessionId: state.zerosSessionId,
+        ...(typeof options.title === "string" && options.title.trim()
+          ? { title: options.title.trim() }
+          : {}),
+        nativeRequestId:
+          typeof options.requestId === "string" && options.requestId
+            ? options.requestId
+            : options.toolUseID ?? permissionId,
         toolCall: {
           toolCallId,
           title: toolName,
@@ -1732,8 +1884,21 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       } as never;
 
       return new Promise<PermissionResult>((resolve) => {
+        let settled = false;
+        const finish = (result: PermissionResult) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          options.signal.removeEventListener("abort", onAbort);
+          this.ctx.emit.onPermissionSettled?.(
+            this.agentId,
+            permissionId,
+            state.zerosSessionId,
+          );
+          resolve(result);
+        };
         const allow = (updatedPermissions?: PermissionUpdate[]) =>
-          resolve(
+          finish(
             updatedPermissions && updatedPermissions.length > 0
               ? { behavior: "allow", updatedInput: input, updatedPermissions }
               : { behavior: "allow", updatedInput: input },
@@ -1742,7 +1907,10 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         // keeps going (e.g. denying ExitPlanMode must keep the session
         // planning, not kill the turn).
         const deny = () =>
-          resolve({ behavior: "deny", message: "User denied this tool call." });
+          finish({
+            behavior: "deny",
+            message: "User denied this tool call.",
+          });
 
         // Map the picked option → SDK result. "Allow for this project" persists
         // `projectRules` to localSettings (`.claude/settings.local.json`) so the
@@ -1781,16 +1949,17 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         const onAbort = () => {
           if (!state.pendingPermissions.has(permissionId)) return;
           state.pendingPermissions.delete(permissionId);
-          clearTimeout(timer);
           deny();
         };
         options.signal.addEventListener("abort", onAbort, { once: true });
 
         state.pendingPermissions.set(permissionId, (response) => {
-          clearTimeout(timer);
-          options.signal.removeEventListener("abort", onAbort);
           settle(response);
         });
+        if (options.signal.aborted) {
+          onAbort();
+          return;
+        }
         this.ctx.emit.onPermissionRequest(this.agentId, permissionId, request);
       });
     };
@@ -1830,7 +1999,10 @@ export class ClaudeSdkAdapter implements AgentAdapter {
 
   /** onUserDialog path (A): the SDK's blocking dialog channel. */
   private onUserDialog(state: SdkSession) {
-    return (request: UserDialogRequest): Promise<UserDialogResult> => {
+    return (
+      request: UserDialogRequest,
+      options?: { signal: AbortSignal },
+    ): Promise<UserDialogResult> => {
       const payload = request.payload as Record<string, unknown> | undefined;
       const hasQuestions =
         Array.isArray(payload?.questions) &&
@@ -1841,6 +2013,14 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         this.agentId,
         `[zeros] onUserDialog dialogKind=${request.dialogKind} hasQuestions=${hasQuestions}`,
       );
+      if (request.dialogKind === "permission_workflow" && payload) {
+        return this.raiseWorkflowApproval(
+          state,
+          request,
+          payload,
+          options?.signal,
+        );
+      }
       // The SDK contract requires unrecognized kinds be answered `cancelled`.
       if (!hasQuestions) return Promise.resolve({ behavior: "cancelled" });
       const pq = this.raiseQuestion(state, request.toolUseID, payload!);
@@ -1848,6 +2028,124 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         pq.dialogResolve = resolve;
       });
     };
+  }
+
+  /** Claude's native workflow gate is a blocking dialog, but visually it is
+   * still the ONE PermissionCard. Only the title, phase pills, and row copy are
+   * data-driven; the renderer/card chrome is shared with every other gate. */
+  private raiseWorkflowApproval(
+    state: SdkSession,
+    dialog: UserDialogRequest,
+    payload: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<UserDialogResult> {
+    const permissionId = randomUUID();
+    const payloadRequestId =
+      typeof payload.requestId === "string" && payload.requestId
+        ? payload.requestId
+        : undefined;
+    const nativeRequestId =
+      payloadRequestId ?? dialog.toolUseID ?? permissionId;
+    const workflowName =
+      typeof payload.workflowName === "string" && payload.workflowName.trim()
+        ? payload.workflowName.trim()
+        : "Workflow";
+    const phases = parseWorkflowApprovalPhases(payload.script);
+    // Every pill carries its own unit. Stating it once (first pill only) made
+    // the rest read as bare numbers — and a pill is shown on its own, so
+    // "Verify · 4" has nothing to inherit the unit from.
+    const contextItems = phases.map((phase) =>
+      phase.agents === null
+        ? phase.title
+        : `${phase.title} · ${phase.agents} ${
+            phase.agents === 1 ? "agent" : "agents"
+          }`,
+    );
+    const request: RequestPermissionRequest = {
+      sessionId: state.zerosSessionId,
+      title: "Workflow approval",
+      nativeRequestId,
+      ...(contextItems.length > 0 ? { contextItems } : {}),
+      useOptionNames: true,
+      toolCall: {
+        toolCallId: dialog.toolUseID ?? nativeRequestId,
+        title: "Workflow",
+        kind: "other",
+        status: "pending",
+        rawInput: {
+          workflowName,
+          ...(typeof payload.description === "string"
+            ? { description: payload.description }
+            : {}),
+        },
+      },
+      options: [
+        { optionId: "allow_once", name: "Run once", kind: "allow_once" },
+        {
+          optionId: "allow_always",
+          name: "Always allow in this chat",
+          kind: "allow_always",
+        },
+        { optionId: "reject_once", name: "Deny", kind: "reject_once" },
+      ],
+    };
+
+    return new Promise<UserDialogResult>((resolve) => {
+      let settled = false;
+      const finish = (result: UserDialogResult) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", onAbort);
+        this.ctx.emit.onPermissionSettled?.(
+          this.agentId,
+          permissionId,
+          state.zerosSessionId,
+        );
+        resolve(result);
+      };
+      const timer = setTimeout(() => {
+        if (!state.pendingPermissions.has(permissionId)) return;
+        state.pendingPermissions.delete(permissionId);
+        finish({ behavior: "cancelled" });
+      }, PERMISSION_RESPONSE_TIMEOUT_MS);
+      timer.unref?.();
+      const onAbort = () => {
+        if (!state.pendingPermissions.has(permissionId)) return;
+        state.pendingPermissions.delete(permissionId);
+        clearTimeout(timer);
+        finish({ behavior: "cancelled" });
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      state.pendingPermissions.set(permissionId, (response) => {
+        clearTimeout(timer);
+        const outcome = response.outcome;
+        if (outcome.outcome !== "selected") {
+          finish({ behavior: "cancelled" });
+          return;
+        }
+        const optionId =
+          outcome.optionId;
+        if (optionId === "allow_once" || optionId === "allow_always") {
+          finish({
+            behavior: "completed",
+            result: { behavior: "allow" },
+          } as UserDialogResult);
+        } else {
+          finish({
+            behavior: "completed",
+            result: {
+              behavior: "deny",
+              message: "User denied this workflow.",
+            },
+          } as UserDialogResult);
+        }
+      });
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      this.ctx.emit.onPermissionRequest(this.agentId, permissionId, request);
+    });
   }
 
   /** Mint (or adopt, by toolUseID) a pending question and emit it once. */
@@ -2394,6 +2692,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         "ask_user_question",
         "user_question",
         "tool_use_question",
+        "permission_workflow",
       ],
       // Emit token-by-token `stream_event` deltas → the translator renders
       // a live typing animation (streamPartials) and de-dupes against the

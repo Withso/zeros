@@ -31,7 +31,11 @@
 
 import { createHash, randomUUID } from "node:crypto";
 
-import type { BackgroundTask } from "@zeros/core/agent-events";
+import type {
+  BackgroundTask,
+  WorkflowPhaseProgress,
+  WorkflowProgress,
+} from "@zeros/core/agent-events";
 import { claudeContextWindow } from "@zeros/core/model-context";
 
 import { isDevRuntime } from "../../../runtime";
@@ -80,6 +84,10 @@ export interface ClaudeScheduledWakeup {
 const MAX_ACTIVE_BACKGROUND_TASKS = 100;
 const MAX_BACKGROUND_TASK_LIFECYCLE = 500;
 const MAX_RETAINED_TOOL_TEXT = 2_000;
+/** Joins a workflow task id to a narrator line in the dedupe fingerprint. A
+ * character that cannot occur in either half, so the id stays a safe prefix to
+ * match when a finished run's fingerprints are dropped. */
+const WORKFLOW_NARRATION_SEPARATOR = "\u0000";
 
 interface RetainedToolInput {
   name: string;
@@ -163,6 +171,16 @@ interface ClaudeSystemEvent {
   }>;
   usage?: { duration_ms?: number };
   last_tool_name?: string;
+  workflow_progress?: Array<{
+    type?: string;
+    index?: number;
+    title?: string;
+    label?: string;
+    phaseIndex?: number;
+    phaseTitle?: string;
+    state?: string;
+    message?: string;
+  }>;
   summary?: string;
   patch?: {
     status?: string;
@@ -288,6 +306,10 @@ export class ClaudeStreamTranslator {
   /** Edge/level ordering is unspecified. Once an edge settles an id, ignore a
    * late membership frame for it until the SDK process restarts. */
   private readonly terminalTaskIds = new Set<string>();
+  /** A pause edge can legally beat the first workflow level frame. Preserve
+   * that edge separately so the later level cannot briefly reopen the row as
+   * running. Like terminal ids, this is process-local and bounded. */
+  private readonly pausedTaskIds = new Set<string>();
   private sessionActivityState: "idle" | "running" | "requires_action" | null =
     null;
   /** Last wire snapshot, retained only to suppress semantically identical
@@ -296,6 +318,13 @@ export class ClaudeStreamTranslator {
     tasks: BackgroundTask[];
     waiting: boolean;
   } | null = null;
+  /** Foreground local-workflow progress is a separate ephemeral level stream;
+   * it must never be folded into the background-task dock. */
+  private readonly workflows = new Map<string, WorkflowProgress>();
+  private lastEmittedWorkflows: WorkflowProgress[] | null = null;
+  /** task_progress frames repeat the full log prefix. Keep a bounded set so a
+   * narrator line becomes one durable standard tool row, not N duplicates. */
+  private readonly workflowNarration = new Set<string>();
 
   /** Zeros-side (minted) tool call id for a native tool_use id — lets the
    *  adapter address a timeline row it only knows by vendor id (the
@@ -689,8 +718,12 @@ export class ClaudeStreamTranslator {
       this.skippedTaskRecords.clear();
       this.notifiedTaskIds.clear();
       this.terminalTaskIds.clear();
+      this.pausedTaskIds.clear();
       this.sessionActivityState = null;
       this.emitBackgroundTasks();
+      this.workflows.clear();
+      this.workflowNarration.clear();
+      this.emitWorkflows();
     }
     if (event.subtype === "task_started") this.onTaskStarted(event);
     if (event.subtype === "background_tasks_changed") {
@@ -857,8 +890,56 @@ export class ClaudeStreamTranslator {
     });
   }
 
+  /** Emit one authoritative, bounded replacement of foreground workflows. */
+  private emitWorkflows(): void {
+    const workflows = [...this.workflows.values()].slice(
+      0,
+      MAX_ACTIVE_BACKGROUND_TASKS,
+    );
+    if (
+      this.lastEmittedWorkflows &&
+      sameWorkflowList(this.lastEmittedWorkflows, workflows)
+    ) {
+      return;
+    }
+    this.lastEmittedWorkflows = workflows;
+    this.emit({
+      sessionId: this.sessionId,
+      update: { sessionUpdate: "workflow_progress_update", workflows },
+    });
+  }
+
   private onTaskStarted(event: ClaudeSystemEvent): void {
     if (!event.task_id) return;
+    if (event.task_type === "local_workflow") {
+      const now = Date.now();
+      const previous = this.workflows.get(event.task_id);
+      const candidate: WorkflowProgress = {
+        taskId: event.task_id,
+        name:
+          pickFirstString(
+            event.workflow_name,
+            event.description,
+            previous?.name,
+          ) ?? `Workflow ${event.task_id}`,
+        status: this.pausedTaskIds.has(event.task_id)
+          ? "paused"
+          : previous?.status ?? "running",
+        startedAt: previous?.startedAt ?? now,
+        updatedAt: now,
+        phases: previous?.phases ?? [],
+      };
+      if (!previous || !sameWorkflowContents(previous, candidate)) {
+        setBoundedMap(
+          this.workflows,
+          event.task_id,
+          candidate,
+          MAX_ACTIVE_BACKGROUND_TASKS,
+        );
+        this.emitWorkflows();
+      }
+      return;
+    }
     const now = Date.now();
     const tool = event.tool_use_id
       ? this.toolInputs.get(event.tool_use_id)
@@ -1029,6 +1110,9 @@ export class ClaudeStreamTranslator {
 
   private onTaskProgress(event: ClaudeSystemEvent): void {
     if (!event.task_id) return;
+    if (Array.isArray(event.workflow_progress)) {
+      this.onWorkflowProgress(event);
+    }
     const previous = this.backgroundTasks.get(event.task_id);
     const previousMetadata = this.backgroundTaskMetadata.get(event.task_id);
     if (!previous && !previousMetadata) return;
@@ -1063,6 +1147,156 @@ export class ClaudeStreamTranslator {
     }
   }
 
+  private onWorkflowProgress(event: ClaudeSystemEvent): void {
+    if (!event.task_id || !Array.isArray(event.workflow_progress)) return;
+    // A terminal edge is authoritative even when a delayed level snapshot
+    // arrives afterwards. Recreating the workflow here would make a finished
+    // run visibly jump back to "running" until the next result boundary.
+    if (this.terminalTaskIds.has(event.task_id)) return;
+    const now = Date.now();
+    const previous = this.workflows.get(event.task_id);
+    const durationMs = event.usage?.duration_ms;
+    const phaseTitles = new Map<number, string>();
+    let currentPhaseIndex: number | null = null;
+    for (const entry of event.workflow_progress) {
+      if (entry.type !== "workflow_phase") continue;
+      const index =
+        typeof entry.index === "number" ? entry.index : phaseTitles.size;
+      const title = pickFirstString(entry.title) ?? `Phase ${index + 1}`;
+      phaseTitles.set(index, title);
+    }
+
+    // workflow_progress is a cumulative event prefix, not one row per live
+    // helper. Keep only the latest transition for each phase-local agent so
+    // start → progress → done still contributes exactly one to the total.
+    const agents = new Map<
+      number,
+      Map<string, { state: string; failed: boolean }>
+    >();
+    let anonymousAgentIndex = 0;
+    for (const entry of event.workflow_progress) {
+      if (entry.type === "workflow_phase") {
+        currentPhaseIndex =
+          typeof entry.index === "number" ? entry.index : currentPhaseIndex;
+        continue;
+      }
+      if (entry.type === "workflow_log") {
+        if (typeof entry.message === "string" && entry.message.trim()) {
+          this.emitWorkflowNarration(event.task_id, entry.message.trim());
+        }
+        continue;
+      }
+      if (entry.type !== "workflow_agent") continue;
+      const phaseIndex =
+        typeof entry.phaseIndex === "number"
+          ? entry.phaseIndex
+          : currentPhaseIndex ?? 0;
+      if (!phaseTitles.has(phaseIndex)) {
+        phaseTitles.set(
+          phaseIndex,
+          pickFirstString(entry.phaseTitle) ?? `Phase ${phaseIndex + 1}`,
+        );
+      }
+      const list = agents.get(phaseIndex) ?? new Map();
+      const agentKey =
+        typeof entry.index === "number"
+          ? `index:${entry.index}`
+          : typeof entry.label === "string" && entry.label.trim()
+            ? `label:${entry.label.trim()}`
+            : `anonymous:${anonymousAgentIndex++}`;
+      list.set(agentKey, {
+        state: typeof entry.state === "string" ? entry.state : "start",
+        failed: entry.state === "error",
+      });
+      agents.set(phaseIndex, list);
+    }
+
+    const phases: WorkflowPhaseProgress[] = [...phaseTitles.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([index, title]) => {
+        const phaseAgents = [...(agents.get(index)?.values() ?? [])];
+        const completed = phaseAgents.filter(
+          (agent) => agent.state === "done" || agent.state === "error",
+        ).length;
+        const failed = phaseAgents.some((agent) => agent.failed);
+        const total = phaseAgents.length;
+        const status: WorkflowPhaseProgress["status"] =
+          total === 0
+            ? "queued"
+            : failed
+              ? "failed"
+              : completed === total
+                ? "completed"
+                : "running";
+        return { index, title, completed, total, status };
+      });
+
+    const startedAt =
+      typeof durationMs === "number"
+        ? Math.min(
+            previous?.startedAt ?? now,
+            now - Math.max(0, durationMs),
+          )
+        : previous?.startedAt ?? now;
+    const candidate: WorkflowProgress = {
+      taskId: event.task_id,
+      name:
+        pickFirstString(
+          event.workflow_name,
+          event.description,
+          previous?.name,
+        ) ?? `Workflow ${event.task_id}`,
+      status:
+        this.pausedTaskIds.has(event.task_id) || previous?.status === "paused"
+          ? "paused"
+          : previous?.status ?? "running",
+      startedAt,
+      updatedAt: now,
+      phases,
+    };
+    if (previous && sameWorkflowContents(previous, candidate)) return;
+    setBoundedMap(
+      this.workflows,
+      event.task_id,
+      candidate,
+      MAX_ACTIVE_BACKGROUND_TASKS,
+    );
+    this.emitWorkflows();
+  }
+
+  /** Narrator fingerprints belong to ONE workflow RUN, not to the whole SDK
+   * process: "exactly one durable row per line" must not stop a LATER workflow
+   * that re-uses the task id (or repeats a line verbatim after this run
+   * settled) from narrating at all. Dropped when the run leaves the live set. */
+  private forgetWorkflowNarration(taskId: string): void {
+    const prefix = `${taskId}${WORKFLOW_NARRATION_SEPARATOR}`;
+    for (const fingerprint of this.workflowNarration) {
+      if (fingerprint.startsWith(prefix)) {
+        this.workflowNarration.delete(fingerprint);
+      }
+    }
+  }
+
+  private emitWorkflowNarration(taskId: string, message: string): void {
+    const fingerprint = `${taskId}${WORKFLOW_NARRATION_SEPARATOR}${message}`;
+    if (this.workflowNarration.has(fingerprint)) return;
+    addBoundedSet(
+      this.workflowNarration,
+      fingerprint,
+      MAX_BACKGROUND_TASK_LIFECYCLE,
+    );
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: `workflow-narration-${randomUUID()}`,
+        title: "Workflow update",
+        status: "completed",
+        rawOutput: message,
+      },
+    });
+  }
+
   private onTaskUpdated(event: ClaudeSystemEvent): void {
     if (!event.task_id) return;
     // Level and edge ordering is unspecified. Once either terminal bookend has
@@ -1071,6 +1305,16 @@ export class ClaudeStreamTranslator {
     const status = event.patch?.status;
     const terminal =
       status === "completed" || status === "failed" || status === "killed";
+    if (status === "paused") {
+      addBoundedSet(
+        this.pausedTaskIds,
+        event.task_id,
+        MAX_BACKGROUND_TASK_LIFECYCLE,
+      );
+    } else if (status === "pending" || status === "running" || terminal) {
+      this.pausedTaskIds.delete(event.task_id);
+    }
+    this.onWorkflowTaskUpdated(event);
     const previous = this.backgroundTasks.get(event.task_id);
     const previousMetadata = this.backgroundTaskMetadata.get(event.task_id);
     const explicitlyBackgrounded = event.patch?.is_backgrounded === true;
@@ -1171,8 +1415,77 @@ export class ClaudeStreamTranslator {
     }
   }
 
+  private onWorkflowTaskUpdated(event: ClaudeSystemEvent): void {
+    if (!event.task_id) return;
+    const previous = this.workflows.get(event.task_id);
+    if (!previous && event.task_type !== "local_workflow") return;
+    if (event.patch?.is_backgrounded === true) {
+      this.forgetWorkflowNarration(event.task_id);
+      if (this.workflows.delete(event.task_id)) this.emitWorkflows();
+      return;
+    }
+    const providerStatus = event.patch?.status;
+    const status: WorkflowProgress["status"] =
+      providerStatus === "paused"
+        ? "paused"
+        : providerStatus === "completed"
+          ? "completed"
+          : providerStatus === "failed"
+            ? "failed"
+            : providerStatus === "killed"
+              ? "killed"
+              : "running";
+    // This run is over: release its narrator fingerprints so a later workflow
+    // (including one that re-uses this task id) narrates from scratch. The
+    // snapshot itself stays until the turn boundary for its final counts.
+    if (status !== "running" && status !== "paused") {
+      this.forgetWorkflowNarration(event.task_id);
+    }
+    const now = Date.now();
+    const candidate: WorkflowProgress = {
+      taskId: event.task_id,
+      name:
+        pickFirstString(
+          event.workflow_name,
+          event.patch?.description,
+          event.description,
+          previous?.name,
+        ) ?? `Workflow ${event.task_id}`,
+      status,
+      startedAt: previous?.startedAt ?? now,
+      updatedAt: now,
+      phases: (previous?.phases ?? []).map((phase) =>
+        status === "completed"
+          ? { ...phase, completed: phase.total, status: "completed" }
+          : phase,
+      ),
+    };
+    if (previous && sameWorkflowContents(previous, candidate)) return;
+    setBoundedMap(
+      this.workflows,
+      event.task_id,
+      candidate,
+      MAX_ACTIVE_BACKGROUND_TASKS,
+    );
+    this.emitWorkflows();
+  }
+
   private onTaskNotification(event: ClaudeSystemEvent): void {
     if (!event.task_id) return;
+    if (this.workflows.has(event.task_id)) {
+      this.onWorkflowTaskUpdated({
+        ...event,
+        patch: {
+          ...event.patch,
+          status:
+            event.status === "failed"
+              ? "failed"
+              : event.status === "stopped"
+                ? "killed"
+                : "completed",
+        },
+      });
+    }
     // Keep the last level/edge metadata long enough to build a useful durable
     // row even if this completion bookend arrives without task_started (for
     // example after a transiently missed edge).
@@ -1187,6 +1500,7 @@ export class ClaudeStreamTranslator {
       event.task_id,
       MAX_BACKGROUND_TASK_LIFECYCLE,
     );
+    this.pausedTaskIds.delete(event.task_id);
     this.backgroundTaskMetadata.delete(event.task_id);
     if (this.backgroundTasks.delete(event.task_id)) this.emitBackgroundTasks();
     if (event.skip_transcript || this.skippedTaskRecords.has(event.task_id)) {
@@ -1744,6 +2058,14 @@ export class ClaudeStreamTranslator {
     // Turn boundary — any text after this should bubble separately.
     this.currentAssistantMessageId = null;
     this.emittedAssistantText = "";
+    if (this.workflows.size > 0) {
+      this.workflows.clear();
+      this.emitWorkflows();
+    }
+    // Narrator dedupe is scoped to the workflows that ran inside this turn — a
+    // next-turn workflow must be able to narrate the same line again.
+    this.workflowNarration.clear();
+    this.pausedTaskIds.clear();
     // A compaction row that never got its definitive settle (success-status
     // with no boundary, or a run cut short) must not leak into the next
     // run — a later compaction opens its own row. If it settled we just
@@ -2016,6 +2338,46 @@ function sameBackgroundTaskList(
       (task, index) =>
         sameBackgroundTaskContents(task, b[index]) &&
         task.updatedAt === b[index].updatedAt,
+    )
+  );
+}
+
+function sameWorkflowPhase(
+  a: WorkflowPhaseProgress,
+  b: WorkflowPhaseProgress,
+): boolean {
+  return (
+    a.index === b.index &&
+    a.title === b.title &&
+    a.completed === b.completed &&
+    a.total === b.total &&
+    a.status === b.status
+  );
+}
+
+/** Semantic comparison excludes updatedAt so repeated full provider frames do
+ * not manufacture a new snapshot merely because they were received later. */
+function sameWorkflowContents(a: WorkflowProgress, b: WorkflowProgress): boolean {
+  return (
+    a.taskId === b.taskId &&
+    a.name === b.name &&
+    a.status === b.status &&
+    a.startedAt === b.startedAt &&
+    a.phases.length === b.phases.length &&
+    a.phases.every((phase, index) => sameWorkflowPhase(phase, b.phases[index]))
+  );
+}
+
+function sameWorkflowList(
+  a: readonly WorkflowProgress[],
+  b: readonly WorkflowProgress[],
+): boolean {
+  return (
+    a.length === b.length &&
+    a.every(
+      (workflow, index) =>
+        sameWorkflowContents(workflow, b[index]) &&
+        workflow.updatedAt === b[index].updatedAt,
     )
   );
 }

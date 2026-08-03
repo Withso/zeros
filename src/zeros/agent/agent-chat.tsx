@@ -194,6 +194,7 @@ import {
   turnKey,
 } from "./turn-container";
 import { TurnEventList } from "./turn-event-list";
+import { pickActiveWorkflow } from "./workflow-activity";
 import { stabilizeTurns } from "./stable-turns";
 import { TurnFooter } from "./turn-footer";
 import { JumpToLatestButton, JumpToPromptPill } from "./jump-pills";
@@ -318,6 +319,11 @@ export function AgentChat({
   // Chat-owned settings are needed by both the turn lifecycle and composer.
   // In particular, background continuation chrome is an Ultracode-only aid.
   const chatThread = useChatById(chatId);
+  const workflows = session.workflows;
+  const activeWorkflow = useMemo(
+    () => pickActiveWorkflow(workflows),
+    [workflows],
+  );
   // Hidden CLI authentication is deliberately local-only. Relay/browser
   // sessions keep the status pill static and direct users to Providers.
   const nativeReady = useNativeRuntime().ready;
@@ -3811,6 +3817,8 @@ export function AgentChat({
                       }
                       showActivity={isVisualTail}
                       activityEvents={turn.providerEvents}
+                      workflow={activeWorkflow}
+                      onStopWorkflow={session.stopBackgroundTask}
                       ctx={messageCtx}
                       footer={
                         turn.userPrompt && chatId && ownsProviderFooter ? (

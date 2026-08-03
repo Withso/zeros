@@ -694,6 +694,16 @@ export interface AgentPermissionRequestMessage extends BaseMessage {
   request: RequestPermissionRequest;
 }
 
+/** A permission resolver settled engine-side (response, timeout, or abort).
+ * The renderer uses this receipt to evict a card whose resolver no longer
+ * exists and advance any concurrently queued helper gate. */
+export interface AgentPermissionSettledMessage extends BaseMessage {
+  type: "AGENT_PERMISSION_SETTLED";
+  agentId: string;
+  permissionId: string;
+  sessionId: string;
+}
+
 /** A blocking user-input question from the agent (twin of
  *  AGENT_PERMISSION_REQUEST). The renderer parks it in the interaction queue
  *  and answers via AGENT_QUESTION_RESPONSE. */
@@ -1033,6 +1043,7 @@ export type BridgeMessage =
   | AgentAuthCompletedMessage
   | AgentSessionUpdateMessage
   | AgentPermissionRequestMessage
+  | AgentPermissionSettledMessage
   | AgentQuestionRequestMessage
   | AgentQuestionSettledMessage
   | AgentModeChangedMessage
