@@ -14,7 +14,13 @@
 //     neither its siblings nor the caller, which is the composer's keystroke
 //     path.
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// console.warn spies are installed per-describe; restore between tests so a
+// silenced warn can't leak into blocks that don't expect the reporter to run.
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 import { getSchema } from "@tiptap/core";
 import Document from "@tiptap/extension-document";
 import Paragraph from "@tiptap/extension-paragraph";
@@ -30,12 +36,24 @@ vi.mock("../agent-history-client", () => ({
     removeContextAttachment(...args),
 }));
 
+// The failure reporter's two collaborators: mocked so these node tests stay
+// off the UI module graph AND can assert the once-per-workspace toast.
+const toastError = vi.fn();
+vi.mock("../../ui/primitives/elements", () => ({
+  toast: { error: (...args: unknown[]) => toastError(...args) },
+}));
+vi.mock("../../../native/runtime", () => ({
+  isNativeRuntime: () => true,
+}));
+
 import { AttachmentNode } from "../composer-editor/nodes";
 import { collectAttachmentIds } from "../composer-editor/attachment-keys";
 import {
   executeGraphSync,
+  isBuildSkewFailure,
   planGraphSync,
   planSeedStage,
+  resetStagingFailureNoticesForTests,
   stageablePayload,
 } from "../composer-editor/context-graph-staging";
 import {
@@ -244,10 +262,98 @@ describe("executeGraphSync while the worktree is provisioning", () => {
   });
 });
 
+describe("staging failures are reported, once per workspace", () => {
+  beforeEach(() => {
+    writeContextAttachment.mockReset();
+    removeContextAttachment.mockReset().mockResolvedValue({ removed: true });
+    toastError.mockReset();
+    resetStagingFailureNoticesForTests();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  it("logs every failed op but toasts only the first per workspace", async () => {
+    // The 2026-08-03 outage shape: a stale main process rejects EVERY write.
+    // Each rejection must be greppable, but the user gets one notice — a
+    // paste burst must not stack four identical toasts.
+    writeContextAttachment.mockRejectedValue(new Error("disk on fire"));
+    executeGraphSync("/w1", {
+      stage: [att(), att({ id: "att-2", name: "b.txt" })],
+      unstage: [],
+      nextIds: new Set(["att-1", "att-2"]),
+    });
+    await vi.waitFor(() => expect(console.warn).toHaveBeenCalledTimes(2));
+    expect(toastError).toHaveBeenCalledTimes(1);
+    // A different workspace gets its own notice.
+    executeGraphSync("/w2", {
+      stage: [att()],
+      unstage: [],
+      nextIds: new Set(["att-1"]),
+    });
+    await vi.waitFor(() => expect(toastError).toHaveBeenCalledTimes(2));
+  });
+
+  it("names build skew and prescribes a relaunch", async () => {
+    // The exact rejection an old main returns after the context-graph
+    // migration: its legacy write handler still requires chatId. The toast
+    // must say the one thing that fixes it — restart — not echo internals.
+    writeContextAttachment.mockRejectedValue(
+      new Error("agent_attachment: missing required string 'chatId'"),
+    );
+    executeGraphSync("/w", {
+      stage: [att()],
+      unstage: [],
+      nextIds: new Set(["att-1"]),
+    });
+    await vi.waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
+    const [, opts] = toastError.mock.calls[0] as [
+      unknown,
+      { description?: string },
+    ];
+    expect(opts.description).toMatch(/relaunch/i);
+  });
+
+  it("reports failed unstages through the same channel", async () => {
+    removeContextAttachment.mockRejectedValue(
+      new Error(
+        '[Zeros] IPC: unknown command "agent_attachment_remove". Expected one of 70 registered commands.',
+      ),
+    );
+    executeGraphSync("/w", {
+      stage: [],
+      unstage: ["att-1"],
+      nextIds: new Set(),
+    });
+    await vi.waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
+    const [, opts] = toastError.mock.calls[0] as [
+      unknown,
+      { description?: string },
+    ];
+    expect(opts.description).toMatch(/relaunch/i);
+  });
+});
+
+describe("isBuildSkewFailure", () => {
+  it("matches the two stale-main signatures and nothing else", () => {
+    expect(
+      isBuildSkewFailure("agent_attachment: missing required string 'chatId'"),
+    ).toBe(true);
+    expect(
+      isBuildSkewFailure(
+        '[Zeros] IPC: unknown command "agent_attachment_remove". Expected one of 70 registered commands.',
+      ),
+    ).toBe(true);
+    expect(isBuildSkewFailure("EACCES: permission denied")).toBe(false);
+    expect(isBuildSkewFailure("path escapes workspace")).toBe(false);
+  });
+});
+
 describe("executeGraphSync", () => {
   beforeEach(() => {
     writeContextAttachment.mockReset().mockResolvedValue({});
     removeContextAttachment.mockReset().mockResolvedValue({ removed: true });
+    toastError.mockReset();
+    resetStagingFailureNoticesForTests();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
   });
 
   it("writes stages and removes unstages against the workspace", async () => {

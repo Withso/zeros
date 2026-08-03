@@ -128,8 +128,15 @@ function stageInContextGraph(
         filename: a.name,
       }),
     )
-    .catch(() => {
-      /* graph copy is additive — the inline block already carries the bytes */
+    .catch((err) => {
+      // Additive — the inline block already carries the bytes — but never
+      // silent: a rejected copy here is the same signal the attach-time
+      // reporter surfaces, and the log line is what makes a stale-main or
+      // read-only-disk outage diagnosable from app.jsonl.
+      console.warn(
+        `[Zeros] context-graph copy failed for "${a.name}":`,
+        err instanceof Error ? err.message : err,
+      );
     });
 }
 

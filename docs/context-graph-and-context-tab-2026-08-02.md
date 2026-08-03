@@ -226,3 +226,36 @@ yet"; Files tab showing a compacted `local/attachments` row):
   row per directory. The ignored-side gitStatus still covers child
   directories (not just roots) so colouring stays correct under either
   configuration.
+
+## 6. 2026-08-03(2) — the "still not working" report was renderer/main build skew; failures are now loud
+
+Field debugging of the third "attachments never appear" report (workspace
+"Jasmine", drag-drop, `.context-graph/local/attachments/` empty in Finder)
+found the app's own logs full of, for every single attach attempt:
+
+    Error occurred in handler for 'zeros:invoke':
+      Error: agent_attachment: missing required string 'chatId'
+    …
+    [Zeros] IPC: unknown command "agent_attachment_remove".
+
+The dev instance's MAIN process had been running since before 984d8fe
+landed: Vite hot-reloads the renderer (which therefore had every fix), but
+main/preload/engine are frozen at launch. The old main still had the
+legacy Phase-D2 write handler (requires `chatId`, writes
+`.context/attachments/<chatId>/…` — a location the canvas never reads) and
+no `agent_attachment_remove` at all. So the renderer staged on every attach
+and the stale main rejected or misplaced every write — for a full day, with
+zero user-visible signal, across two rounds of "fixes" that were correct
+but could not take effect without an app relaunch.
+
+Two durable changes:
+- **Staging failures are no longer silent.** Every failed stage/unstage op
+  logs to the structured app log (greppable in app.jsonl), and the first
+  failure per workspace per session raises a toast. When the error matches
+  a stale-main signature (`unknown command "agent_attachment_*"` /
+  `missing required string 'chatId'` — see isBuildSkewFailure), the toast
+  says the one thing that fixes it: quit and relaunch. The send path's
+  fire-and-forget graph copy logs too.
+- **Dev-instance caveat, now written down:** any change to
+  electron/ipc/*, preload, or the engine requires restarting the dev app —
+  the renderer's HMR will happily run new callers against old handlers.

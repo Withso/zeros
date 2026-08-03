@@ -19,10 +19,14 @@
 //
 // The diff (pure, tested) is separate from the IO (fire-and-forget): staging
 // must never block or break typing, and a failed write is only a cosmetic gap
-// the send-path safety net (encode-attachments.ts) re-covers. Undo/redo work
-// for free — ⌘Z after a removal makes the id reappear, the diff sees an ADD,
-// and the side store still holds the bytes (removal deliberately keeps them,
-// see removeBySourceKey) so the file is re-staged.
+// the send-path safety net (encode-attachments.ts) re-covers. Fire-and-forget
+// is NOT silent, though — every failed op logs, and the first failure per
+// workspace raises a toast (reportStagingFailure). A day of writes rejected
+// by a stale main process produced zero user-visible signal on 2026-08-03;
+// "the canvas lags" and "the feature is broken" must not look identical.
+// Undo/redo work for free — ⌘Z after a removal makes the id reappear, the
+// diff sees an ADD, and the side store still holds the bytes (removal
+// deliberately keeps them, see removeBySourceKey) so the file is re-staged.
 //
 // What deliberately does NOT stage or unstage:
 //   • programmatic doc swaps — clear() on send, setContent() for drafts and
@@ -48,6 +52,8 @@ import {
   MAX_IMAGE_BYTES,
 } from "../agent-attachments";
 import { isWorkspaceProvisioning } from "../../store/pending-workspaces";
+import { isNativeRuntime } from "../../../native/runtime";
+import { toast } from "../../ui/primitives/elements";
 import { RECONSTRUCTED_ATTACHMENT_ID_PREFIX } from "./reconstruct";
 import type { ComposerAttachment } from "../composer-attachments";
 
@@ -140,6 +146,61 @@ export function planSeedStage(
   return { stage: plan.stage, unstage: [], nextIds: plan.nextIds };
 }
 
+/** True when a staging-IPC failure reads like renderer/main BUILD SKEW: a
+ *  long-lived dev instance keeps yesterday's main process while Vite
+ *  hot-reloads today's renderer, so the renderer speaks a command set the
+ *  main doesn't have. The two signatures are the exact errors an old main
+ *  returns for this feature — an unknown `agent_attachment_*` command, or
+ *  the pre-context-graph write handler demanding its required `chatId`.
+ *  Every op fails identically until the app restarts, so the toast should
+ *  say the one thing that fixes it. */
+export function isBuildSkewFailure(message: string): boolean {
+  return (
+    /unknown command "agent_attachment_/i.test(message) ||
+    /missing required string 'chatId'/i.test(message)
+  );
+}
+
+/** Workspaces whose staging failure has already been announced this session —
+ *  a paste burst or a doomed retry loop must cost one toast, not a stack. */
+const notifiedFailureCwds = new Set<string>();
+
+/** Test-only: clear the once-per-workspace toast latch. */
+export function resetStagingFailureNoticesForTests(): void {
+  notifiedFailureCwds.clear();
+}
+
+/** A staging op failed. Always logged (the renderer console rides the app's
+ *  structured log, so this is greppable in app.jsonl); toasted once per
+ *  workspace per session on desktop. Web clients stay silent — they have no
+ *  IPC by design and the send path's inline blocks are still the delivery. */
+function reportStagingFailure(
+  cwd: string,
+  filename: string | null,
+  err: unknown,
+): void {
+  const message = err instanceof Error ? err.message : String(err);
+  console.warn(
+    `[Zeros] context-graph staging failed in ${cwd}` +
+      (filename ? ` for "${filename}"` : "") +
+      `: ${message}`,
+  );
+  if (!isNativeRuntime()) return;
+  if (notifiedFailureCwds.has(cwd)) return;
+  notifiedFailureCwds.add(cwd);
+  toast.error(
+    filename
+      ? `"${filename}" couldn't be added to the context graph`
+      : "The context graph couldn't be updated",
+    {
+      id: `context-graph-staging:${cwd}`,
+      description: isBuildSkewFailure(message)
+        ? "Zeros' background process is running an older build — quit and relaunch the app, then attach the file again."
+        : message,
+    },
+  );
+}
+
 // One in-flight chain per `cwd|id`, so a remove→undo→redo flurry can't
 // interleave its write and remove IPCs and settle on the wrong disk state —
 // ops for one attachment apply strictly in gesture order. Entries are pruned
@@ -180,18 +241,27 @@ export function executeGraphSync(cwd: string, plan: GraphSyncPlan): void {
     const base64 = stageablePayload(a);
     if (!base64) continue;
     enqueuePerId(`${cwd}|${a.id}`, () =>
-      writeContextAttachment({
-        cwd,
-        attachmentId: a.id,
-        base64,
-        mimeType: a.mimeType,
-        filename: a.name,
-      }),
+      // Promise.resolve() so a SYNCHRONOUS throw from the IPC façade reaches
+      // the same reporter as an async rejection — silent-catch was how a full
+      // day of skew-rejected writes went unnoticed.
+      Promise.resolve()
+        .then(() =>
+          writeContextAttachment({
+            cwd,
+            attachmentId: a.id,
+            base64,
+            mimeType: a.mimeType,
+            filename: a.name,
+          }),
+        )
+        .catch((err) => reportStagingFailure(cwd, a.name, err)),
     );
   }
   for (const id of plan.unstage) {
     enqueuePerId(`${cwd}|${id}`, () =>
-      removeContextAttachment({ cwd, attachmentId: id }),
+      Promise.resolve()
+        .then(() => removeContextAttachment({ cwd, attachmentId: id }))
+        .catch((err) => reportStagingFailure(cwd, null, err)),
     );
   }
 }
