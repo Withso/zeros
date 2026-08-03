@@ -39,6 +39,7 @@ import type {
   QuestionRequest,
   RequestPermissionRequest,
   SessionNotification,
+  WorkflowProgress,
 } from "../bridge/agent-events";
 import {
   applyUpdate,
@@ -55,9 +56,20 @@ import {
 } from "./chat-scroll-anchor";
 import { isPlanReviewRequest } from "./renderers/plan-body";
 import { loadPolicies, savePolicies, type PolicyRule } from "./policies";
+import { useWorkspaceStore } from "../store/workspace-store";
+import type { ChatEffort } from "../store/store";
 
 const MAX_STDERR_LINES = 200;
 const MAX_BACKGROUND_TASKS_PER_CHAT = 100;
+const MAX_WORKFLOWS_PER_CHAT = 100;
+const VALID_CHAT_EFFORTS = new Set<ChatEffort>([
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultracode",
+]);
 
 /** Background snapshots cross the JSON bridge, so even an unchanged refresh
  * arrives as fresh objects. Compare the small bounded set before patching the
@@ -78,6 +90,31 @@ function sameBackgroundTasks(
       task.command === other.command &&
       task.summary === other.summary &&
       task.lastToolName === other.lastToolName
+    );
+  });
+}
+
+function sameWorkflows(a: WorkflowProgress[], b: WorkflowProgress[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((workflow, index) => {
+    const other = b[index];
+    return (
+      workflow.taskId === other.taskId &&
+      workflow.name === other.name &&
+      workflow.status === other.status &&
+      workflow.startedAt === other.startedAt &&
+      workflow.updatedAt === other.updatedAt &&
+      workflow.phases.length === other.phases.length &&
+      workflow.phases.every((phase, phaseIndex) => {
+        const otherPhase = other.phases[phaseIndex];
+        return (
+          phase.index === otherPhase.index &&
+          phase.title === otherPhase.title &&
+          phase.completed === otherPhase.completed &&
+          phase.total === otherPhase.total &&
+          phase.status === otherPhase.status
+        );
+      })
     );
   });
 }
@@ -170,6 +207,7 @@ export const BLANK: AgentSessionState = {
   status: "idle",
   messages: [],
   pendingPermission: null,
+  pendingPermissions: [],
   pendingQuestions: [],
   stderrLog: [],
   error: null,
@@ -181,6 +219,7 @@ export const BLANK: AgentSessionState = {
   availableCommands: [],
   availableSubagents: [],
   backgroundTasks: [],
+  workflows: [],
   waitingForBackgroundTasks: false,
   backgroundTasksWaitingSince: null,
 };
@@ -278,6 +317,10 @@ export interface SessionsStoreState {
     permissionId: string,
     request: RequestPermissionRequest,
   ) => void;
+
+  /** Settle one queued gate and expose the next head without changing the
+   * single-card rendering contract. */
+  settlePendingPermission: (chatId: string, permissionId: string) => void;
 
   /** Drop a STRANDED plan-review card (Claude's ExitPlanMode gate) when its
    *  turn reaches a TERMINAL state with the gate still pending — the adapter's
@@ -464,6 +507,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         // dangle. Plan stays since the user's intent is "edit this
         // prompt and continue"; the planner can re-emit if needed.
         pendingPermission: null,
+        pendingPermissions: [],
       };
       return {
         sessions: { ...state.sessions, [chatId]: updated },
@@ -565,7 +609,9 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       availableCommands?: AvailableCommand[];
       availableSubagents?: AvailableSubagent[];
       tasks?: BackgroundTask[];
+      workflows?: WorkflowProgress[];
       waiting?: boolean;
+      effort?: string;
     };
 
     // usage_update → context window accounting. Keep cumulative counters
@@ -599,6 +645,24 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
 
     if (upd.sessionUpdate === "current_mode_update" && upd.currentModeId) {
       get().patchSession(chatId, { currentModeId: upd.currentModeId });
+      return;
+    }
+
+    if (
+      upd.sessionUpdate === "current_effort_update" &&
+      typeof upd.effort === "string" &&
+      VALID_CHAT_EFFORTS.has(upd.effort as ChatEffort)
+    ) {
+      const effort = upd.effort as ChatEffort;
+      const workspace = useWorkspaceStore.getState();
+      const chat = workspace.chats.find((candidate) => candidate.id === chatId);
+      if (chat && chat.effort !== effort) {
+        workspace.dispatch({
+          type: "UPDATE_CHAT_SETTINGS",
+          id: chatId,
+          updates: { effort },
+        });
+      }
       return;
     }
 
@@ -658,6 +722,26 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       return;
     }
 
+    if (
+      upd.sessionUpdate === "workflow_progress_update" &&
+      Array.isArray(upd.workflows)
+    ) {
+      const incoming = upd.workflows;
+      set((state) => {
+        const slot = state.sessions[chatId];
+        if (!slot) return state;
+        const workflows = incoming.slice(0, MAX_WORKFLOWS_PER_CHAT);
+        if (sameWorkflows(slot.workflows, workflows)) return state;
+        return {
+          sessions: {
+            ...state.sessions,
+            [chatId]: { ...slot, workflows },
+          },
+        };
+      });
+      return;
+    }
+
     // Everything else → feed to the messages reducer.
     set((state) => {
       const slot = state.sessions[chatId];
@@ -686,19 +770,72 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
     const sid = (request as { sessionId?: string }).sessionId;
     const chatId = sid ? get().sessionToChatId[sid] : undefined;
     if (!chatId) return;
+    const slot = get().sessions[chatId];
+    if (!slot) return;
+    const existing =
+      slot.pendingPermissions.length > 0
+        ? slot.pendingPermissions
+        : slot.pendingPermission
+          ? [slot.pendingPermission]
+          : [];
+    if (existing.some((pending) => pending.permissionId === permissionId)) {
+      return;
+    }
+    const nativeDuplicateIndex =
+      request.nativeRequestId === undefined
+        ? -1
+        : existing.findIndex(
+            (pending) =>
+              pending.request.nativeRequestId === request.nativeRequestId,
+          );
+    if (nativeDuplicateIndex >= 0) {
+      // A rebuilt SDK re-arms the same vendor request under a fresh local id.
+      // Preserve its queue position/card, but adopt the live resolver id so the
+      // eventual answer cannot be sent into the dead pre-rebuild request.
+      const pendingPermissions = existing.map((pending, index) =>
+        index === nativeDuplicateIndex
+          ? { agentId, permissionId, request }
+          : pending,
+      );
+      get().patchSession(chatId, {
+        pendingPermissions,
+        pendingPermission: pendingPermissions[0] ?? null,
+      });
+      return;
+    }
+    const pendingPermissions = [
+      ...existing,
+      { agentId, permissionId, request },
+    ];
     get().patchSession(chatId, {
-      pendingPermission: {
-        agentId,
-        permissionId,
-        request,
-      },
+      pendingPermissions,
+      pendingPermission: pendingPermissions[0] ?? null,
+    });
+  },
+
+  settlePendingPermission: (chatId, permissionId) => {
+    const slot = get().sessions[chatId];
+    if (!slot) return;
+    const existing =
+      slot.pendingPermissions.length > 0
+        ? slot.pendingPermissions
+        : slot.pendingPermission
+          ? [slot.pendingPermission]
+          : [];
+    const pendingPermissions = existing.filter(
+      (pending) => pending.permissionId !== permissionId,
+    );
+    if (pendingPermissions.length === existing.length) return;
+    get().patchSession(chatId, {
+      pendingPermissions,
+      pendingPermission: pendingPermissions[0] ?? null,
     });
   },
 
   clearStrandedPlanReview: (chatId) => {
     const p = get().sessions[chatId]?.pendingPermission;
     if (p && isPlanReviewRequest(p.request)) {
-      get().patchSession(chatId, { pendingPermission: null });
+      get().settlePendingPermission(chatId, p.permissionId);
     }
   },
 
@@ -866,7 +1003,11 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         // of status — mirrors pendingQuestions above — so the composer returns
         // and sendPrompt's rebuild+resend path starts from a clean gate.
         if (cur.pendingPermission) {
-          cur = { ...cur, pendingPermission: null };
+          cur = {
+            ...cur,
+            pendingPermission: null,
+            pendingPermissions: [],
+          };
           changed = true;
         }
         // Active task snapshots are owned by this provider process. Once the
@@ -885,6 +1026,10 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
             waitingForBackgroundTasks: false,
             backgroundTasksWaitingSince: null,
           };
+          changed = true;
+        }
+        if (cur.workflows.length > 0) {
+          cur = { ...cur, workflows: [] };
           changed = true;
         }
         // Terminal states (failed / auth-required) already show the user a

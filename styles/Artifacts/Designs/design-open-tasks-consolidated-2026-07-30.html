@@ -7,7 +7,7 @@
       name="description"
       content="Zeros agent parity UI catalog: chat runtime, workflows, streaming, approvals, usage, sessions, settings, and future concepts."
     />
-    <title>Zeros — Complete agent parity UI catalog · 2026-07-31</title>
+    <title>Zeros — Complete agent parity UI catalog · 2026-08-03</title>
     <style>
       /* ============================================================
          Zeros design-system snapshot
@@ -1233,6 +1233,58 @@
         padding: var(--space-3);
       }
 
+      /* Tasks 014/016 are copy/data variants of the shipping PermissionCard,
+         not a new approval treatment. Keep this anatomy aligned with
+         src/zeros/agent/permission-card.tsx: title, optional context, then the
+         same neutral action rows. */
+      .canonical-permission-title {
+        color: var(--fg1);
+        font-size: var(--text-13);
+        font-weight: var(--weight-control);
+        line-height: 20px;
+      }
+
+      .canonical-permission-context {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        gap: var(--space-2);
+        color: var(--fg2);
+      }
+
+      .canonical-permission-context strong {
+        min-width: 0;
+        overflow: hidden;
+        color: var(--fg1);
+        font-size: var(--text-13);
+        font-weight: var(--weight-body);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .canonical-permission-context small {
+        min-width: 0;
+        overflow: hidden;
+        color: var(--fg2);
+        font-family: var(--font-mono);
+        font-size: var(--text-12);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .permission-action.canonical {
+        display: flex;
+        justify-content: space-between;
+        background: var(--bg1);
+        border-color: var(--border3);
+        color: var(--fg1);
+      }
+
+      .permission-action.canonical:hover {
+        background: var(--bg2);
+        border-color: var(--border4);
+      }
+
       .permission-head {
         display: flex;
         min-width: 0;
@@ -1984,42 +2036,6 @@
         font-weight: var(--weight-control);
       }
 
-      .warning-note {
-        display: flex;
-        align-items: flex-start;
-        gap: var(--space-2);
-        padding: var(--space-2);
-        border: 1px solid
-          color-mix(in srgb, var(--yellow-primary) 30%, var(--border2));
-        border-radius: var(--radius-md);
-        background: var(--yellow-bg);
-        color: var(--yellow-fg);
-        font-size: var(--text-11);
-        line-height: 16px;
-      }
-
-      .phase-list {
-        display: flex;
-        flex-direction: column;
-        gap: var(--space-1);
-      }
-
-      .phase-row {
-        display: grid;
-        grid-template-columns: 72px minmax(0, 1fr) auto;
-        gap: var(--space-2);
-        min-height: 28px;
-        align-items: center;
-        color: var(--fg2);
-        font-size: var(--text-11);
-      }
-
-      .phase-row strong {
-        color: var(--fg1);
-        font-size: var(--text-11);
-        font-weight: var(--weight-control);
-      }
-
       .progress-track {
         height: 4px;
         overflow: hidden;
@@ -2053,73 +2069,135 @@
         width: 100%;
       }
 
-      .workflow-status {
+      .workflow-hover {
+        position: relative;
         display: flex;
-        min-height: var(--h-control-lg);
-        align-items: center;
-        gap: var(--space-2);
-        padding: 0 var(--space-2);
-        border-top: 1px solid var(--border1);
-        background: var(--bg1);
-        color: var(--fg2);
-        font-size: var(--text-11);
+        min-width: 0;
+        flex-direction: column;
+        gap: var(--space-1);
+        padding-top: calc(var(--space-8) * 5);
       }
 
-      .workflow-status strong {
+      .workflow-hover > .tool-call-head {
+        width: max-content;
+      }
+
+      .workflow-popover {
+        position: absolute;
+        z-index: 2;
+        right: 0;
+        bottom: calc(var(--h-control-sm) * 2 + var(--space-2));
+        left: 0;
+        overflow: hidden;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: var(--bg1);
+        box-shadow: var(--shadow-dropdown);
+        opacity: 0;
+        pointer-events: none;
+        transition:
+          opacity var(--dur-fast) var(--ease-standard),
+          visibility var(--dur-fast) var(--ease-standard);
+        visibility: hidden;
+      }
+
+      .workflow-hover:hover .workflow-popover,
+      .workflow-hover:focus-within .workflow-popover {
+        opacity: 1;
+        pointer-events: auto;
+        visibility: visible;
+      }
+
+      .workflow-popover-head {
+        display: flex;
+        min-height: var(--h-control-lg);
+        min-width: 0;
+        align-items: center;
+        gap: var(--space-2);
+        padding: 0 var(--space-3);
+        border-bottom: 1px solid var(--border1);
+      }
+
+      .workflow-popover-head strong {
+        min-width: 0;
+        overflow: hidden;
         color: var(--fg1);
+        font-size: var(--text-13);
+        font-weight: var(--weight-control);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .workflow-popover-head .push {
+        margin-left: auto;
+      }
+
+      .workflow-phase-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0;
+        padding: var(--space-2) var(--space-3);
+      }
+
+      .workflow-phase-row {
+        display: grid;
+        grid-template-columns:
+          calc(var(--space-8) * 2 + var(--space-2)) minmax(0, 1fr)
+          calc(var(--space-8) + var(--space-4));
+        gap: var(--space-2);
+        min-height: var(--h-control-lg);
+        align-items: center;
+        color: var(--fg2);
+        font-size: var(--text-12);
+      }
+
+      .workflow-phase-row strong {
+        color: var(--fg1);
+        font-size: var(--text-12);
         font-weight: var(--weight-control);
       }
 
-      .nested-list {
-        margin-left: var(--space-8);
-        padding-left: var(--space-2);
+      .workflow-segments {
+        display: grid;
+        height: var(--space-2);
+        grid-template-columns: repeat(32, minmax(0, 1fr));
+        gap: 2px;
+      }
+
+      .workflow-segment {
+        border-radius: var(--radius-sm);
+        background: var(--bg4);
+      }
+
+      .workflow-segment.progressed {
+        background: var(--fg2);
+      }
+
+      .workflow-segment.complete {
+        background: var(--green-primary);
+      }
+
+      .workflow-phase-count {
+        color: var(--fg3);
+        font-family: var(--font-mono);
+        font-size: var(--text-10);
+        text-align: right;
+        white-space: nowrap;
+      }
+
+      .nested-tool-stack {
+        display: flex;
+        min-width: 0;
+        flex-direction: column;
+        gap: var(--space-1);
+        margin-left: var(--space-6);
+        padding: var(--space-1) 0 var(--space-1) var(--space-2);
         border-left: 1px solid var(--border2);
       }
 
-      .nested-row {
-        display: flex;
-        min-height: 24px;
-        min-width: 0;
-        align-items: center;
-        gap: var(--space-2);
-        color: var(--fg3);
-        font-size: var(--text-10);
-      }
-
-      .nested-row strong {
-        color: var(--fg2);
-        font-weight: var(--weight-control);
-      }
-
-      .roster-grid {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: var(--space-2);
-      }
-
-      .roster-card {
-        min-width: 0;
-        padding: var(--space-2);
-        border: 1px solid var(--border2);
-        border-radius: var(--radius-md);
-        background: var(--bg1);
-      }
-
-      .roster-card strong {
-        display: block;
-        color: var(--fg1);
-        font-size: var(--text-11);
-        font-weight: var(--weight-control);
-      }
-
-      .roster-card small {
-        display: block;
-        overflow: hidden;
-        color: var(--fg3);
-        font-size: var(--text-10);
-        line-height: 14px;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+      .tool-call-card + .nested-tool-stack,
+      .nested-tool-stack + .tool-call-card {
+        margin-top: var(--space-2);
       }
 
       .media-grid,
@@ -2828,6 +2906,10 @@
         color: var(--green-fg);
       }
 
+      .coverage-row[data-implementation="decision"] .coverage-home {
+        color: var(--yellow-fg);
+      }
+
       /* ============================================================
          Task-by-task prototype studio
          Every source task owns one deep-linkable, full-screen state.
@@ -3370,7 +3452,7 @@
       .prototype-feature .message-demo,
       .prototype-feature .terminal-output,
       .prototype-feature .soft-error,
-      .prototype-feature .warning-note {
+      .prototype-feature .workflow-hover {
         width: 100%;
       }
 
@@ -3657,10 +3739,6 @@
 
         .catalog-card.wide {
           grid-column: auto;
-        }
-
-        .roster-grid {
-          grid-template-columns: 1fr;
         }
 
         .sticky-nav {
@@ -4126,7 +4204,7 @@
     <main class="page">
       <header class="hero">
         <div>
-          <div class="eyebrow">Zeros · Complete agent parity UI catalog · 2026-07-31</div>
+          <div class="eyebrow">Zeros · Complete agent parity UI catalog · 2026-08-03</div>
           <h1>Every agent capability resolves into one coherent UI system.</h1>
           <p class="lede">
             A task-by-task, full-screen design and delivery ledger across all 100 parity tasks.
@@ -4134,7 +4212,10 @@
             state behaves, and what remains after it resolves. Shared Zeros anatomy and
             Claude, Codex, or Cursor-specific behavior can be inspected separately.
             Category 01 is now implemented for tasks 001–007 and 009–010; task 008
-            remains deliberately skipped pending separate scheduling research.
+            remains deliberately skipped pending separate scheduling research. The
+            Category 02 design pass settles seven shared-primitive treatments and skips
+            nine subagent-specific surfaces, including helper rosters (026), for a later
+            dedicated pass.
           </p>
         </div>
         <div class="hero-actions">
@@ -4184,7 +4265,7 @@
       </div>
 
       <nav class="sticky-nav" aria-label="Design sections">
-        <a href="#task-explorer">100 task screens</a>
+        <a href="#task-explorer">100 task decisions</a>
         <a href="#prototype">Common runtime</a>
         <a href="#parity-gallery">Parity gallery</a>
         <a href="#approval-states">Approval states</a>
@@ -4197,12 +4278,13 @@
       <section id="task-explorer">
         <div class="section-head">
           <div>
-            <div class="section-kicker">01 · 100 individual full-screen prototypes</div>
-            <h2>Every task number opens its own complete product state.</h2>
+            <div class="section-kicker">01 · 100 individual task decisions</div>
+            <h2>Every task number opens its settled state or explicit skip.</h2>
           </div>
           <p>
             Search or filter the task rail, switch between the common component contract
             and provider-specific behavior, then step through Before → Live → Outcome.
+            Skipped tasks explicitly show why no surface is claimed.
             “Full screen” uses the browser’s real full-screen mode; Esc returns here.
           </p>
         </div>
@@ -4281,8 +4363,8 @@
 
         <div class="design-callout">
           <div class="callout">
-            <strong>100 individual screens</strong>
-            <p>Every source task has its own selectable product state—no shared-number cards.</p>
+            <strong>100 individual decisions</strong>
+            <p>Every source task has a selectable state, explicit skip, or open product question.</p>
           </div>
           <div class="callout">
             <strong>300 lifecycle states</strong>
@@ -4299,7 +4381,7 @@
         </div>
       </section>
 
-      <section id="prototype" class="section-block" data-task-ids="1 2 3 4 5 6 7 11 12 13 14 15">
+      <section id="prototype" class="section-block" data-task-ids="1 2 3 4 5 6 7 14 15">
         <div class="section-head">
           <div>
             <div class="section-kicker">02 · Common runtime system</div>
@@ -4307,8 +4389,8 @@
           </div>
           <p>
             Switch states to inspect placement. Active work remains in the dock;
-            results become transcript records. A background helper’s approval keeps
-            the task summary visible while the permission card takes the composer slot.
+            results become transcript records. Approval requests reuse the standard
+            permission card, and helper Bash activity remains a standard tool call.
           </p>
         </div>
 
@@ -4341,20 +4423,6 @@
               <span>
                 <strong>Waiting</strong>
                 <small>watcher + wake-up</small>
-              </span>
-            </button>
-            <button
-              class="scenario-button"
-              type="button"
-              data-scene-target="fleet"
-              aria-selected="false"
-            >
-              <span class="scenario-glyph">
-                <svg class="icon" aria-hidden="true"><use href="#i-fork" /></svg>
-              </span>
-              <span>
-                <strong>Agent fleet</strong>
-                <small>model + lifecycle</small>
               </span>
             </button>
             <button
@@ -4470,13 +4538,6 @@
                         </button>
                       </div>
                       <div class="task-row simple">
-                        <span class="task-title">verify:auth helper</span>
-                        <span class="task-time">5m 12s</span>
-                        <button class="task-action destructive" type="button" aria-label="Stop verify auth agent">
-                          <svg class="icon-sm" aria-hidden="true"><use href="#i-square" /></svg>
-                        </button>
-                      </div>
-                      <div class="task-row simple">
                         <span class="task-title">Scratch probe · until scratch-probe exits</span>
                         <span class="task-time">3m 40s</span>
                         <button class="task-action destructive" type="button" aria-label="Stop scratch probe watcher">
@@ -4487,7 +4548,7 @@
                   </div>
                   <div class="waiting-line">
                     <span class="spinner" aria-hidden="true"></span>
-                    <span class="waiting-copy">Waiting for 3 background tasks</span>
+                    <span class="waiting-copy">Waiting for 2 background tasks</span>
                     <span class="waiting-time">12m 08s</span>
                   </div>
                   <div class="composer-card">
@@ -4603,124 +4664,6 @@
               </div>
             </div>
 
-            <div class="scene" data-scene="fleet" hidden>
-              <div class="chat-pane">
-                <div class="chat-header">
-                  <svg class="icon" aria-hidden="true"><use href="#i-fork" /></svg>
-                  <strong>Audit auth providers</strong>
-                  <span class="header-meta">Codex · gpt-5.6-sol</span>
-                  <span class="header-spacer"></span>
-                  <span class="status-badge running">3 agents</span>
-                </div>
-                <div class="transcript">
-                  <div class="user-message">
-                    Audit each provider path in parallel, then give me one consolidated fix.
-                  </div>
-                  <div class="assistant-message muted">
-                    I split research, implementation verification, and regression review into
-                    separate helpers.
-                  </div>
-                  <div class="event-row success">
-                    <svg class="icon event-icon" aria-hidden="true"><use href="#i-check" /></svg>
-                    <span class="event-title">research:sdk</span>
-                    <span class="event-detail">finished · found 6 call sites · Opus 5</span>
-                  </div>
-                  <div class="event-row">
-                    <svg class="icon event-icon" aria-hidden="true"><use href="#i-bot" /></svg>
-                    <span class="event-title">worker-2</span>
-                    <span class="event-detail">last tool: Read · app-server.ts</span>
-                  </div>
-                  <div class="activity-line">
-                    <span class="spinner" aria-hidden="true"></span>
-                    <span class="activity-copy">2 agents running</span>
-                    <span>· 1 finished · 84k tokens</span>
-                  </div>
-                </div>
-                <div class="chat-bottom">
-                  <div class="task-dock">
-                    <button
-                      class="task-summary"
-                      type="button"
-                      data-task-toggle
-                      aria-expanded="true"
-                    >
-                      <span class="summary-icon">
-                        <svg class="icon" aria-hidden="true"><use href="#i-fork" /></svg>
-                      </span>
-                      <strong>Helper fleet</strong>
-                      <span class="summary-copy">2 running · 1 finished</span>
-                      <span class="summary-time">5m</span>
-                      <svg class="icon" aria-hidden="true" data-chevron>
-                        <use href="#i-chevron-down" />
-                      </svg>
-                    </button>
-                    <div class="task-list">
-                      <div class="task-row">
-                        <span class="task-kind">Agent</span>
-                        <span class="task-main">
-                          <span class="task-name">
-                            <strong>verify:auth</strong>
-                            <span class="task-model">Sonnet 5</span>
-                          </span>
-                          <span class="task-detail">last tool: Bash · 31k tokens</span>
-                        </span>
-                        <span class="task-state"><i class="state-dot running"></i>running · 5m</span>
-                        <button class="task-action destructive" type="button" aria-label="Stop verify auth helper">
-                          <svg class="icon-sm" aria-hidden="true"><use href="#i-square" /></svg>
-                        </button>
-                      </div>
-                      <div class="task-row">
-                        <span class="task-kind">Agent</span>
-                        <span class="task-main">
-                          <span class="task-name">
-                            <strong>worker-2</strong>
-                            <span class="task-model">gpt-5.6-terra · high</span>
-                          </span>
-                          <span class="task-detail">Open thread · last tool: Read</span>
-                        </span>
-                        <span class="task-state"><i class="state-dot running"></i>running · 3m</span>
-                        <button class="task-action destructive" type="button" aria-label="Stop worker two">
-                          <svg class="icon-sm" aria-hidden="true"><use href="#i-square" /></svg>
-                        </button>
-                      </div>
-                      <div class="task-row">
-                        <span class="task-kind">Agent</span>
-                        <span class="task-main">
-                          <span class="task-name">
-                            <strong>research:sdk</strong>
-                            <span class="task-model">Opus 5</span>
-                          </span>
-                          <span class="task-detail">6 call sites · result available</span>
-                        </span>
-                        <span class="task-state"><i class="state-dot success"></i>done · 3m</span>
-                        <button class="task-action" type="button" aria-label="Open research SDK result">
-                          <svg class="icon-sm" aria-hidden="true"><use href="#i-eye" /></svg>
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="composer-card">
-                    <div class="composer-input">Steer the running agents…</div>
-                    <div class="composer-toolbar">
-                      <div class="composer-tools">
-                        <button class="composer-pill" type="button" aria-label="Add attachment">
-                          <svg class="icon" aria-hidden="true"><use href="#i-plus" /></svg>
-                        </button>
-                        <button class="composer-pill" type="button">gpt-5.6-sol</button>
-                        <button class="composer-pill optional" type="button">Ultra</button>
-                      </div>
-                      <div class="composer-actions">
-                        <span class="context-ring">68</span>
-                        <button class="send-button" type="button" aria-label="Stop agent">
-                          <svg class="icon-sm" aria-hidden="true"><use href="#i-square" /></svg>
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
             <div class="scene" data-scene="approval" hidden>
               <div class="chat-pane">
                 <div class="chat-header">
@@ -4734,14 +4677,9 @@
                   <div class="user-message">
                     Audit each provider path and verify the package install flow.
                   </div>
-                  <div class="event-row">
-                    <svg class="icon event-icon" aria-hidden="true"><use href="#i-fork" /></svg>
-                    <span class="event-title">Helper started</span>
-                    <span class="event-detail">verify:auth · Sonnet 5</span>
-                  </div>
                   <div class="assistant-message muted">
-                    The helper needs network access to validate the registry response.
-                    Other verification continues in the background.
+                    Network access is required to validate the registry response. The
+                    permission uses the same card as every other blocking request.
                   </div>
                   <div class="event-row">
                     <svg class="icon event-icon" aria-hidden="true"><use href="#i-terminal" /></svg>
@@ -4752,71 +4690,48 @@
                 <div class="chat-bottom">
                   <div class="task-dock">
                     <button
-                      class="task-summary"
+                      class="task-summary simple"
                       type="button"
                       data-task-toggle
                       aria-expanded="false"
                     >
-                      <span class="summary-icon task-attention">
-                        <svg class="icon" aria-hidden="true"><use href="#i-shield" /></svg>
+                      <span class="summary-icon">
+                        <svg class="icon" aria-hidden="true"><use href="#i-activity" /></svg>
                       </span>
-                      <strong>Background tasks</strong>
-                      <span class="summary-copy task-attention">verify:auth needs approval · 1 still running</span>
-                      <span class="summary-time">5m</span>
+                      <strong>Background Task</strong>
                       <svg class="icon" aria-hidden="true" data-chevron>
                         <use href="#i-chevron-up" />
                       </svg>
                     </button>
                     <div class="task-list" hidden>
-                      <div class="task-row">
-                        <span class="task-kind">Agent</span>
-                        <span class="task-main">
-                          <span class="task-name">
-                            <strong>verify:auth</strong>
-                            <span class="task-model">Sonnet 5</span>
-                          </span>
-                          <span class="task-detail">waiting for network approval</span>
-                        </span>
-                        <span class="task-state task-attention">needs input</span>
-                        <button class="task-action destructive" type="button" aria-label="Stop verify auth helper">
+                      <div class="task-row simple">
+                        <span class="task-title">pnpm test:auth</span>
+                        <span class="task-time">5m</span>
+                        <button class="task-action destructive" type="button" aria-label="Stop auth tests">
                           <svg class="icon-sm" aria-hidden="true"><use href="#i-square" /></svg>
                         </button>
                       </div>
                     </div>
                   </div>
-                  <div class="permission-card" tabindex="-1" data-permission-focus>
-                    <div class="permission-head">
-                      <span class="permission-icon">
-                        <svg class="icon" aria-hidden="true"><use href="#i-shield" /></svg>
-                      </span>
-                      <span>
-                        <strong>Allow network access?</strong>
-                        <small>verify:auth · background helper · Sonnet 5</small>
-                      </span>
-                    </div>
-                    <div class="permission-target">
+                  <div class="permission-card canonical-permission-card" tabindex="-1" data-permission-focus>
+                    <div class="canonical-permission-title">Allow network access</div>
+                    <div class="canonical-permission-context">
                       <svg class="icon" aria-hidden="true"><use href="#i-globe" /></svg>
-                      <span class="target-detail">
-                        <strong>registry.npmjs.org:443</strong>
-                        <small>HTTPS · requested by pnpm install · outbound only</small>
-                      </span>
-                      <span class="status-badge">Network</span>
+                      <strong>pnpm install</strong>
+                      <small>registry.npmjs.org:443</small>
                     </div>
                     <div class="permission-actions">
-                      <button class="permission-action once" type="button">
-                        <svg class="icon" aria-hidden="true"><use href="#i-check" /></svg>
-                        <span class="action-copy">Allow host once</span>
+                      <button class="permission-action canonical" type="button">
+                        <span class="action-copy">Allow once</span>
                         <kbd>↵</kbd>
                       </button>
-                      <button class="permission-action sticky" type="button">
-                        <svg class="icon" aria-hidden="true"><use href="#i-key" /></svg>
-                        <span class="action-copy">Always allow registry.npmjs.org in this chat</span>
+                      <button class="permission-action canonical" type="button">
+                        <span class="action-copy">Always allow in this chat</span>
                         <kbd>⌘↵</kbd>
                       </button>
-                      <button class="permission-action reject" type="button">
-                        <svg class="icon" aria-hidden="true"><use href="#i-x" /></svg>
-                        <span class="action-copy">Deny this helper</span>
-                        <kbd>esc</kbd>
+                      <button class="permission-action canonical" type="button">
+                        <span class="action-copy">Deny</span>
+                        <kbd>⌫</kbd>
                       </button>
                     </div>
                   </div>
@@ -4995,178 +4910,209 @@
             <div class="catalog-head">
               <span class="catalog-index">16</span>
               <span>
-                <h3>Workflow approval before fan-out</h3>
-                <p>Cost and scale are visible before an ultracode workflow launches.</p>
+                <h3>Workflow approval reuses the permission card</h3>
+                <p>The shipping card, colors, type, spacing, rows, and shortcuts stay unchanged; only title, pills, and action copy vary.</p>
               </span>
             </div>
             <div class="catalog-preview">
-              <div class="mini-surface">
-                <div class="mini-title">
-                  <svg class="icon" aria-hidden="true"><use href="#i-fork" /></svg>
-                  Launch dependency-audit?
-                </div>
+              <div class="permission-card canonical-permission-card">
+                <div class="canonical-permission-title">Workflow approval</div>
                 <div class="pill-row">
                   <span class="data-pill">Find · 8 agents</span>
                   <span class="data-pill">Verify · 4</span>
                   <span class="data-pill">Synthesize · 1</span>
                 </div>
-                <div class="warning-note">
-                  <svg class="icon" aria-hidden="true"><use href="#i-gauge" /></svg>
-                  <span><strong>Large workflow</strong><br />Estimated 240k–420k tokens across 13 agents.</span>
-                </div>
-                <div class="mini-actions">
-                  <button class="mini-action primary" type="button">
-                    Run once <kbd class="push">↵</kbd>
+                <div class="permission-actions">
+                  <button class="permission-action canonical" type="button">
+                    <span class="action-copy">Run once</span>
+                    <kbd>↵</kbd>
                   </button>
-                  <button class="mini-action sticky" type="button">
-                    <svg class="icon" aria-hidden="true"><use href="#i-key" /></svg>
-                    Always allow this workflow
+                  <button class="permission-action canonical" type="button">
+                    <span class="action-copy">Always allow in this chat</span>
+                    <kbd>⌘↵</kbd>
                   </button>
-                  <button class="mini-action" type="button">Deny</button>
+                  <button class="permission-action canonical" type="button">
+                    <span class="action-copy">Deny</span>
+                    <kbd>⌫</kbd>
+                  </button>
                 </div>
               </div>
             </div>
           </article>
 
-          <article class="catalog-card wide" data-task-ids="17 18 19 20 21 22 23">
+          <article class="catalog-card wide" data-task-ids="17">
             <div class="catalog-head">
-              <span class="catalog-index">17–23</span>
+              <span class="catalog-index">17</span>
               <span>
-                <h3>Live workflow and Codex fan-out</h3>
-                <p>Phases, lifecycle beats, narrator text, helper threads, and Ultra share one bounded detail view.</p>
+                <h3>Workflow progress appears from a tool-call-style hover target</h3>
+                <p>Hover or focus “Workflow running” for a sleek `--bg1` detail with current typography and equal 32-cell tracks; pending cells are deliberately dim.</p>
               </span>
             </div>
             <div class="catalog-preview">
-              <div class="split-preview">
-                <div class="demo-panel">
-                  <div class="demo-toolbar">
-                    <svg class="icon" aria-hidden="true"><use href="#i-fork" /></svg>
+              <div class="workflow-hover">
+                <div class="workflow-popover">
+                  <div class="workflow-popover-head">
                     <strong>dependency-audit</strong>
-                    <span class="status-badge running">Running</span>
                     <span class="push inline-actions">
                       <button class="text-action" type="button">Pause</button>
-                      <button class="text-action danger" type="button">Stop</button>
+                      <button class="task-action destructive" type="button" aria-label="Stop dependency audit">
+                        <svg class="icon-sm" aria-hidden="true"><use href="#i-square" /></svg>
+                      </button>
                     </span>
                   </div>
-                  <div class="demo-body">
-                    <div class="phase-list">
-                      <div class="phase-row">
-                        <strong>Find</strong>
-                        <div class="progress-track"><div class="progress-value success w-100"></div></div>
-                        <span>8/8 · 126k</span>
-                      </div>
-                      <div class="phase-row">
-                        <strong>Verify</strong>
-                        <div class="progress-track"><div class="progress-value w-62"></div></div>
-                        <span>3/4 · 188k</span>
-                      </div>
-                      <div class="phase-row">
-                        <strong>Synthesize</strong>
-                        <div class="progress-track"><div class="progress-value w-34"></div></div>
-                        <span>queued</span>
-                      </div>
+                  <div class="workflow-phase-list">
+                    <div class="workflow-phase-row">
+                      <strong>Find</strong>
+                      <div class="workflow-segments" data-workflow-segments data-filled="32" data-tone="complete" aria-label="Find complete, 8 of 8"></div>
+                      <span class="workflow-phase-count">8/8</span>
                     </div>
-                    <div class="activity-line">
-                      <span class="spinner" aria-hidden="true"></span>
-                      <span class="activity-copy">16 results in — verifiers running</span>
-                      <span>· narrator · 08:42</span>
+                    <div class="workflow-phase-row">
+                      <strong>Verify</strong>
+                      <div class="workflow-segments" data-workflow-segments data-filled="24" data-tone="progressed" aria-label="Verify in progress, 3 of 4"></div>
+                      <span class="workflow-phase-count">3/4</span>
                     </div>
-                  </div>
-                  <div class="workflow-status">
-                    <span class="state-dot running"></span>
-                    <strong>Workflow running</strong>
-                    <span>12 agents · 340k tokens · 8m 42s</span>
+                    <div class="workflow-phase-row">
+                      <strong>Synthesize</strong>
+                      <div class="workflow-segments" data-workflow-segments data-filled="0" data-tone="progressed" aria-label="Synthesize queued"></div>
+                      <span class="workflow-phase-count">queued</span>
+                    </div>
                   </div>
                 </div>
-                <div class="demo-panel">
-                  <div class="demo-toolbar">
-                    <svg class="icon" aria-hidden="true"><use href="#i-bot" /></svg>
-                    <strong>Codex helpers</strong>
-                    <span class="push status-badge">Ultra</span>
-                  </div>
-                  <div class="compact-list">
-                    <div class="compact-row">
-                      <span class="row-glyph">
-                        <svg class="icon" aria-hidden="true"><use href="#i-bot" /></svg>
-                      </span>
-                      <span class="row-copy">
-                        <strong>security-pass · gpt-5.6-sol · high</strong>
-                        <small>Read-only thread · last tool: search · 48k tokens</small>
-                      </span>
-                      <button class="text-action" type="button">Open</button>
-                    </div>
-                    <div class="compact-row">
-                      <span class="row-glyph">
-                        <svg class="icon" aria-hidden="true"><use href="#i-bot" /></svg>
-                      </span>
-                      <span class="row-copy">
-                        <strong>api-review · gpt-5.6-terra · medium</strong>
-                        <small>Interrupted by parent · result retained</small>
-                      </span>
-                      <span class="status-badge failure">Interrupted</span>
-                    </div>
-                    <div class="compact-row">
-                      <span class="row-glyph">
-                        <svg class="icon" aria-hidden="true"><use href="#i-check" /></svg>
-                      </span>
-                      <span class="row-copy">
-                        <strong>tests · gpt-5.6-terra · high</strong>
-                        <small>Closed · 212 tests passed · final model shown</small>
-                      </span>
-                      <span class="status-badge success">Done</span>
-                    </div>
+                <button class="tool-call-head" type="button" aria-label="Show workflow progress">
+                  <svg class="icon-sm tool-call-icon" aria-hidden="true"><use href="#i-fork" /></svg>
+                  <span class="tool-call-label">Workflow running</span>
+                </button>
+                <div class="activity-line">
+                  <span class="spinner" aria-hidden="true"></span>
+                  <span class="activity-copy">Agent working</span>
+                  <span>7m 38s</span>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <article class="catalog-card" data-task-ids="19">
+            <div class="catalog-head">
+              <span class="catalog-index">19</span>
+              <span>
+                <h3>Workflow narration is a normal tool call</h3>
+                <p>It expands for output and never gets a narrator-only card or loading shimmer.</p>
+              </span>
+            </div>
+            <div class="catalog-preview">
+              <div class="tool-call">
+                <button class="tool-call-head" type="button" data-tool-toggle aria-expanded="true">
+                  <svg class="icon-sm tool-call-icon" aria-hidden="true"><use href="#i-fork" /></svg>
+                  <span class="tool-call-label">Workflow progress</span>
+                  <span class="tool-call-pill">16 results in — verifiers running</span>
+                </button>
+                <div class="tool-call-body">
+                  <div class="tool-call-card">
+                    <strong>dependency-audit</strong>
+                    <small>Output</small>
+                    <code>Verifiers are checking 16 collected results across four work units.</code>
                   </div>
                 </div>
               </div>
             </div>
           </article>
 
-          <article class="catalog-card" data-task-ids="24 25 26">
+          <article class="catalog-card" data-task-ids="23">
             <div class="catalog-head">
-              <span class="catalog-index">24–26</span>
+              <span class="catalog-index">23</span>
               <span>
-                <h3>Cursor nesting and custom helper roster</h3>
-                <p>Nested activity stays legible; background reasons and configured roles are explicit.</p>
+                <h3>Ultra reflects in the existing effort picker</h3>
+                <p>The composer pill updates automatically; no “True Ultra” card or warning surface appears.</p>
               </span>
             </div>
             <div class="catalog-preview">
-              <div class="demo-panel">
-                <div class="compact-row">
-                  <span class="row-glyph">
-                    <svg class="icon" aria-hidden="true"><use href="#i-bot" /></svg>
-                  </span>
-                  <span class="row-copy">
-                    <strong>Cursor task · audit routes</strong>
-                    <small>Backgrounded · agent chose · Open transcript</small>
-                  </span>
-                  <span class="status-badge running">Running</span>
-                </div>
-                <div class="nested-list">
-                  <div class="nested-row">
-                    <svg class="icon-sm" aria-hidden="true"><use href="#i-search" /></svg>
-                    <strong>explore:routes</strong>
-                    <span>searching route handlers · 24s</span>
+              <div class="composer-card">
+                <div class="composer-input">Run this audit with Codex Ultra.</div>
+                <div class="composer-toolbar">
+                  <div class="composer-tools">
+                    <button class="composer-pill" type="button" aria-label="Add attachment">
+                      <svg class="icon" aria-hidden="true"><use href="#i-plus" /></svg>
+                    </button>
+                    <button class="composer-pill" type="button">5.6 Sol</button>
+                    <button class="composer-pill optional" type="button">Ultra</button>
                   </div>
-                  <div class="nested-row">
-                    <svg class="icon-sm" aria-hidden="true"><use href="#i-file" /></svg>
-                    <strong>review:types</strong>
-                    <span>reading schema.ts · 18k tokens</span>
+                  <div class="composer-actions">
+                    <span class="context-ring">42</span>
+                    <button class="send-button" type="button" aria-label="Send">
+                      <svg class="icon-sm" aria-hidden="true"><use href="#i-send" /></svg>
+                    </button>
                   </div>
                 </div>
-                <div class="demo-body">
-                  <div class="roster-grid">
-                    <div class="roster-card">
-                      <strong>Explore</strong>
-                      <small>Find call sites · Auto</small>
+              </div>
+            </div>
+          </article>
+
+          <article class="catalog-card wide" data-task-ids="24">
+            <div class="catalog-head">
+              <span class="catalog-index">24</span>
+              <span>
+                <h3>Cursor activity streams inside the existing Task working group</h3>
+                <p>Input and Output remain separate; nested work uses the same expandable tool-call rows as the rest of the transcript.</p>
+              </span>
+            </div>
+            <div class="catalog-preview">
+              <div class="tool-call">
+                <button class="tool-call-head" type="button" data-tool-toggle aria-expanded="true">
+                  <svg class="icon-sm tool-call-icon" aria-hidden="true"><use href="#i-bot" /></svg>
+                  <span class="tool-call-label">Task</span>
+                  <span class="tool-call-pill">Audit routes</span>
+                </button>
+                <div class="tool-call-body">
+                  <div class="tool-call-card">
+                    <strong>Input</strong>
+                    <code>Review the route handlers and verify their shared schema types.</code>
+                  </div>
+                  <div class="nested-tool-stack">
+                    <div class="tool-call">
+                      <button class="tool-call-head" type="button" data-tool-toggle aria-expanded="true">
+                        <svg class="icon-sm tool-call-icon" aria-hidden="true"><use href="#i-terminal" /></svg>
+                        <span class="tool-call-label">Bash</span>
+                        <span class="tool-call-pill">rg “route|schema” src</span>
+                      </button>
+                      <div class="tool-call-body">
+                        <div class="tool-call-card">
+                          <strong>Output</strong>
+                          <code>src/routes/auth.ts
+src/routes/billing.ts
+src/types/schema.ts</code>
+                        </div>
+                      </div>
                     </div>
-                    <div class="roster-card">
-                      <strong>Verify</strong>
-                      <small>Run focused tests · Sonnet 5</small>
+                    <div class="tool-call">
+                      <button class="tool-call-head" type="button" data-tool-toggle aria-expanded="false">
+                        <svg class="icon-sm tool-call-icon" aria-hidden="true"><use href="#i-file" /></svg>
+                        <span class="tool-call-label">Read</span>
+                        <span class="tool-call-pill">src/types/schema.ts</span>
+                      </button>
+                      <div class="tool-call-body" hidden>
+                        <div class="tool-call-card">
+                          <strong>Output</strong>
+                          <code>RouteSchema and AuthRouteSchema loaded.</code>
+                        </div>
+                      </div>
                     </div>
-                    <div class="roster-card">
-                      <strong>+ Add helper</strong>
-                      <small>Name · purpose · model</small>
+                    <div class="tool-call">
+                      <button class="tool-call-head" type="button" data-tool-toggle aria-expanded="false">
+                        <svg class="icon-sm tool-call-icon" aria-hidden="true"><use href="#i-terminal" /></svg>
+                        <span class="tool-call-label">Bash</span>
+                        <span class="tool-call-pill">pnpm exec vitest run src/routes</span>
+                      </button>
+                      <div class="tool-call-body" hidden>
+                        <div class="tool-call-card">
+                          <strong>Output</strong>
+                          <code>Streaming test output appears here while the Task runs.</code>
+                        </div>
+                      </div>
                     </div>
+                  </div>
+                  <div class="tool-call-card">
+                    <strong>Output</strong>
+                    <code>Working… nested tool calls continue to stream above.</code>
                   </div>
                 </div>
               </div>
@@ -6232,7 +6178,7 @@
               </div>
               <div class="rule-row">
                 <dt>Attribution</dt>
-                <dd>Name the requesting helper, model, command/tool, and requested boundary.</dd>
+                <dd>Use the standard request title and target details; helper scoping stays in state, not a helper-only frame.</dd>
               </div>
               <div class="rule-row">
                 <dt>One-time</dt>
@@ -6266,7 +6212,7 @@
               </div>
               <div class="rule-row">
                 <dt>Agents</dt>
-                <dd>Name + model + effort + last meaningful heartbeat.</dd>
+                <dd>No fleet or heartbeat chrome in this pass; Bash progress remains a standard tool call.</dd>
               </div>
               <div class="rule-row">
                 <dt>Terminals</dt>
@@ -6300,7 +6246,7 @@
               </div>
               <div class="rule-row">
                 <dt>Progress</dt>
-                <dd>4px tonal track plus numeric count; never use a bar without text.</dd>
+                <dd>Workflow phases use 32 equal cells: bg4 pending, fg2 progressed, all green when complete, plus an exact count.</dd>
               </div>
               <div class="rule-row">
                 <dt>Message kinds</dt>
@@ -6349,12 +6295,12 @@
         <div class="section-head">
           <div>
             <div class="section-kicker">06 · Consolidated task map</div>
-            <h2>Every tracked UI task has one canonical home.</h2>
+            <h2>Every settled UI task has one canonical home.</h2>
           </div>
           <p>
             This replaces the old “one bespoke card per feature” direction. New
             provider events compose from the same five surfaces instead of growing
-            parallel UI systems.
+            parallel UI systems; skipped and undecided tasks deliberately claim no home.
           </p>
         </div>
 
@@ -6385,13 +6331,16 @@
               <tr>
                 <td><strong>B · Helpers &amp; workflows</strong></td>
                 <td>
-                  <span class="surface-chip">Task dock</span>
-                  <span class="surface-chip">Task detail</span>
+                  <span class="surface-chip">Permission card</span>
+                  <span class="surface-chip">Workflow hover detail</span>
+                  <span class="surface-chip">Tool call</span>
                 </td>
-                <td><span class="surface-chip">Transcript record</span></td>
+                <td><span class="surface-chip">Existing composer / transcript</span></td>
                 <td>
-                  Helper model + effort, fleet status, Codex threads, ultracode phases,
-                  model switches, nested activity, user-defined helpers, workflow Pause/Stop.
+                  Standard helper/workflow approvals, workflow Pause + icon Stop,
+                  segmented phase counts, narrator tool calls, Ultra picker sync, and
+                  Cursor tool calls inside Task. Tasks 011–013, 018, 020–022, 025,
+                  and 026 are skipped for a later dedicated pass.
                 </td>
               </tr>
               <tr>
@@ -6507,14 +6456,14 @@
         <div class="section-head">
           <div>
             <div class="section-kicker">07 · Source-of-truth coverage ledger</div>
-            <h2>Every task maps to an individual prototype, owner, and delivery status.</h2>
+            <h2>Every task maps to an individual view, owner, and delivery status.</h2>
           </div>
           <p>
             Agent assignments mirror the source task tags. Mixed labels mean shared
             provider delivery; “All agents” means one cross-provider contract; “Shared
             engine” means provider-neutral cleanup. The right edge keeps each task’s
-            canonical UI home and implementation class. Select any row to reopen its
-            numbered full-screen prototype above.
+            canonical UI home or explicit skip status. Select any row to reopen
+            its numbered full-screen view above.
           </p>
         </div>
 
@@ -6524,11 +6473,11 @@
             <span>Category 01 tasks · implemented 2026-07-31</span>
           </div>
           <div class="coverage-stat">
-            <strong>66</strong>
+            <strong>58</strong>
             <span>New or changed UI tasks · designed</span>
           </div>
           <div class="coverage-stat">
-            <strong>17</strong>
+            <strong>16</strong>
             <span>Visible wiring tasks · state contract defined</span>
           </div>
           <div class="coverage-stat">
@@ -6540,8 +6489,8 @@
             <span>Bigger bets · scoped entry shells</span>
           </div>
           <div class="coverage-stat">
-            <strong>1</strong>
-            <span>Skipped for now · 008 · research pending</span>
+            <strong>10</strong>
+            <span>Skipped for now · 008, 011–013, 018, 020–022, 025–026</span>
           </div>
         </div>
 
@@ -6628,88 +6577,88 @@
             <summary>
               <span class="coverage-id">02</span>
               <strong>Subagents &amp; multi-agent workflows</strong>
-              <span>16 / 16 mapped</span>
+              <span>7 implemented · 9 skipped</span>
             </summary>
             <div class="coverage-rows">
-              <div class="coverage-row" data-task-id="11">
+              <div class="coverage-row" data-task-id="11" data-implementation="skipped">
                 <span class="coverage-id">011</span>
-                <span><strong>Subagent model and effort</strong> · final model retained after switches.</span>
-                <span class="coverage-home">Agent row · designed</span>
+                <span><strong>Subagent model and effort</strong> · no dedicated treatment in this pass.</span>
+                <span class="coverage-home">Skipped · 2026-08-03</span>
               </div>
-              <div class="coverage-row" data-task-id="12">
+              <div class="coverage-row" data-task-id="12" data-implementation="skipped">
                 <span class="coverage-id">012</span>
-                <span><strong>Background subagent lifecycle</strong> · launch now, settle after the turn.</span>
-                <span class="coverage-home">Task dock · designed</span>
+                <span><strong>Background subagent lifecycle</strong> · defer the helper lifecycle pass.</span>
+                <span class="coverage-home">Skipped · 2026-08-03</span>
               </div>
-              <div class="coverage-row" data-task-id="13">
+              <div class="coverage-row" data-task-id="13" data-implementation="skipped">
                 <span class="coverage-id">013</span>
-                <span><strong>Live helper strip</strong> · name, model, status, tokens.</span>
-                <span class="coverage-home">Task dock · designed</span>
+                <span><strong>Live helper strip</strong> · no helper strip or fleet card.</span>
+                <span class="coverage-home">Skipped · 2026-08-03</span>
               </div>
-              <div class="coverage-row" data-task-id="14">
+              <div class="coverage-row" data-task-id="14" data-implementation="implemented">
                 <span class="coverage-id">014</span>
-                <span><strong>Helper-specific approval</strong> · request and denial scoped to one helper.</span>
-                <span class="coverage-home">Composer gate · designed</span>
+                <span><strong>Standard permission card</strong> · shipping component and tokens stay unchanged; only request copy varies.</span>
+                <span class="coverage-home">Permission card · implemented 2026-08-03</span>
               </div>
-              <div class="coverage-row" data-task-id="15">
+              <div class="coverage-row" data-task-id="15" data-implementation="implemented">
                 <span class="coverage-id">015</span>
-                <span><strong>Helper heartbeats</strong> · elapsed, last tool, tokens, summary.</span>
-                <span class="coverage-home">Agent row · visible wiring</span>
+                <span><strong>Helper progress</strong> · reuse the standard expandable Bash tool call.</span>
+                <span class="coverage-home">Bash tool call · implemented 2026-08-03</span>
               </div>
-              <div class="coverage-row" data-task-id="16">
+              <div class="coverage-row" data-task-id="16" data-implementation="implemented">
                 <span class="coverage-id">016</span>
-                <span><strong>Workflow approval</strong> · phases, scale, token caution, Once / Always / Deny.</span>
-                <span class="coverage-home">Composer gate · designed</span>
+                <span><strong>Workflow approval</strong> · unchanged shipping permission card + phase pills; no token/cost banner.</span>
+                <span class="coverage-home">Permission card · implemented 2026-08-03</span>
               </div>
-              <div class="coverage-row" data-task-id="17">
+              <div class="coverage-row" data-task-id="17" data-implementation="implemented">
                 <span class="coverage-id">017</span>
-                <span><strong>Live workflow progress</strong> · phases, agents, tokens, drill-in, Pause / Stop.</span>
-                <span class="coverage-home">Task detail · designed</span>
+                <span><strong>Live workflow progress</strong> · `--bg1` hover detail, fixed 32-cell phase tracks, reserved Pause + functional icon Stop.</span>
+                <span class="coverage-home">Agent activity + hover · implemented 2026-08-03</span>
               </div>
-              <div class="coverage-row" data-task-id="18">
+              <div class="coverage-row" data-task-id="18" data-implementation="skipped">
                 <span class="coverage-id">018</span>
-                <span><strong>Persistent workflow status</strong> · agents, tokens, elapsed while backgrounded.</span>
-                <span class="coverage-home">Composer dock · designed</span>
+                <span><strong>Persistent workflow status</strong> · no workflow card/banner; retain existing working indicators.</span>
+                <span class="coverage-home">Skipped · 2026-08-03</span>
               </div>
-              <div class="coverage-row" data-task-id="19">
+              <div class="coverage-row" data-task-id="19" data-implementation="implemented">
                 <span class="coverage-id">019</span>
-                <span><strong>Workflow narrator lines</strong> · quiet progress, never answer typography.</span>
-                <span class="coverage-home">Activity line · visible wiring</span>
+                <span><strong>Workflow narrator lines</strong> · standard expandable tool call with output; no shimmer.</span>
+                <span class="coverage-home">Tool call · implemented 2026-08-03</span>
               </div>
-              <div class="coverage-row" data-task-id="20">
+              <div class="coverage-row" data-task-id="20" data-implementation="skipped">
                 <span class="coverage-id">020</span>
-                <span><strong>Codex fan-out</strong> · spawn / wait / close collapsed into one live card.</span>
-                <span class="coverage-home">Task detail · designed</span>
+                <span><strong>Codex fan-out</strong> · design separately with the Codex subagent pass.</span>
+                <span class="coverage-home">Skipped · 2026-08-03</span>
               </div>
-              <div class="coverage-row" data-task-id="21">
+              <div class="coverage-row" data-task-id="21" data-implementation="skipped">
                 <span class="coverage-id">021</span>
-                <span><strong>Codex helper lifecycle beats</strong> · started, interrupted, closed.</span>
-                <span class="coverage-home">Agent row · visible wiring</span>
+                <span><strong>Codex helper lifecycle beats</strong> · defer with Codex fan-out.</span>
+                <span class="coverage-home">Skipped · 2026-08-03</span>
               </div>
-              <div class="coverage-row" data-task-id="22">
+              <div class="coverage-row" data-task-id="22" data-implementation="skipped">
                 <span class="coverage-id">022</span>
-                <span><strong>Codex helper transcript</strong> · read-only thread action.</span>
-                <span class="coverage-home">Helper detail · designed</span>
+                <span><strong>Codex helper transcript</strong> · no transcript navigation in this pass.</span>
+                <span class="coverage-home">Skipped · 2026-08-03</span>
               </div>
-              <div class="coverage-row" data-task-id="23">
+              <div class="coverage-row" data-task-id="23" data-implementation="implemented">
                 <span class="coverage-id">023</span>
-                <span><strong>True Ultra effort</strong> · picker value and runtime label agree.</span>
-                <span class="coverage-home">Composer picker · visible wiring</span>
+                <span><strong>Ultra effort synchronization</strong> · runtime change updates the existing composer effort pill.</span>
+                <span class="coverage-home">Composer effort picker · implemented 2026-08-03</span>
               </div>
-              <div class="coverage-row" data-task-id="24">
+              <div class="coverage-row" data-task-id="24" data-implementation="implemented">
                 <span class="coverage-id">024</span>
-                <span><strong>Cursor nested helper activity</strong> · indented live child rows.</span>
-                <span class="coverage-home">Task row · designed</span>
+                <span><strong>Cursor nested helper activity</strong> · standard tool calls stream inside expanded Task.</span>
+                <span class="coverage-home">Task working group · implemented 2026-08-03</span>
               </div>
-              <div class="coverage-row" data-task-id="25">
+              <div class="coverage-row" data-task-id="25" data-implementation="skipped">
                 <span class="coverage-id">025</span>
-                <span><strong>Cursor background reason</strong> · agent / user / queued plus transcript link.</span>
-                <span class="coverage-home">Task row · designed</span>
+                <span><strong>Cursor background reason</strong> · no Cursor-specific card or banner.</span>
+                <span class="coverage-home">Skipped · 2026-08-03</span>
               </div>
-              <div class="coverage-row" data-task-id="26">
+              <div class="coverage-row" data-task-id="26" data-implementation="skipped">
                 <span class="coverage-id">026</span>
-                <span><strong>Custom helper roster</strong> · name, purpose, model, picker entry.</span>
-                <span class="coverage-home">Picker + Settings · designed</span>
+                <span><strong>Custom helper roster</strong> · defer the custom-subagent roster/editor/picker project.</span>
+                <span class="coverage-home">Skipped · 2026-08-03</span>
               </div>
             </div>
           </details>
@@ -7193,7 +7142,7 @@
           doing?”, the composer slot answers “what does it need from me?”, and the
           transcript answers “what happened?”
         </p>
-        <p class="mono">Zeros Shade + Light · token snapshot 2026-07-31</p>
+        <p class="mono">Zeros Shade + Light · design decisions 2026-08-03</p>
       </footer>
     </main>
 
@@ -7231,22 +7180,22 @@
           [8, "settings", "Skipped for now — deferred until we research how agent-created schedules should run.", "Run a dependency audit every weekday at 09:00.", "Skipped for now · nothing is designed or wired in this iteration.", "Open question: a scheduler inside Zeros fires only while the app runs; laptop-closed runs need cloud routines.", "To be researched, then designed and executed in a later iteration."],
           [9, "dock", "Codex leaves a terminal process running across turns.", "Keep pnpm test:git alive while we inspect failures.", "The command starts as an ordinary Codex command row.", "Background Task card · pnpm test:git · 18m · Stop.", "Terminal exited 0 · a collapsed Background Task record retains the output."],
           [10, "engine", "A background completion or notification enters the session without a human message.", "Continue when the background check finishes.", "The chat waits without manufacturing a user bubble.", "The provider envelope is consumed as lifecycle/tool-result transport, never emitted as a human message.", "A neutral Background Task record settles safely; no trust-gated human action is triggered."],
-          [11, "dock", "Any Claude or Codex helper is launched or reports a model change.", "Ask an Explore helper to audit the authentication paths.", "The helper card appears immediately with its role.", "Explore · Sonnet 5 · medium · last tool Read · 18k tokens.", "Explore finished · final model Opus 5 retained after its mid-run switch."],
-          [12, "dock", "Claude launches a subagent in the background, which is now the default lifecycle.", "Verify the auth fix in a background helper.", "The launch event creates a persistent task row before the helper emits output.", "verify:auth · launched · Sonnet 5 · running after the parent turn ends.", "Finish notification fills the same row, then writes a durable result record."],
-          [13, "dock", "Two or more Claude or Codex helpers are active in the same turn.", "Split research, tests, and safety review across helpers.", "The first helper uses a normal row; the second promotes the set into a compact fleet.", "Helper fleet · 2 running · 1 done · model, status, tokens, and elapsed per row.", "The fleet collapses to a summary record with each helper result preserved."],
-          [14, "gate", "A background helper requests permission while other work is still active.", "Let the verification helper install its test dependency if needed.", "The helper row changes to Needs input and the chat tab gains one attention badge.", "Allow network access? · verify:auth · Sonnet 5 · registry.npmjs.org.", "Allowed once / Blocked is attached only to verify:auth; sibling helpers keep running."],
-          [15, "activity", "A long-running helper emits a heartbeat or meaningful progress update.", "Keep me informed while the helper audits all providers.", "The helper remains visible without repeating noisy transcript messages.", "verify:providers · 5m · last tool Bash · 31k tokens · checking Vertex.", "The final result replaces heartbeat metadata and retains total time and tokens."],
-          [16, "gate", "An ultracode or other large workflow is ready to fan out.", "Run the dependency-audit workflow across the repository.", "The workflow plan is prepared but no helper is launched yet.", "Launch dependency-audit? · 13 agents · 240k–420k tokens · Once / Always / Deny.", "Approval is recorded, then the workflow detail opens as agents launch."],
-          [17, "detail", "An approved multi-phase workflow has at least one running phase.", "Audit dependencies with Find, Verify, and Synthesize phases.", "The approved plan is promoted from the composer gate into live task detail.", "Find 8/8 · Verify 3/4 · Synthesize queued · 340k tokens · Pause / Stop.", "Workflow complete · phase totals, duration, agent results, and final synthesis retained."],
-          [18, "dock", "A workflow continues after the current answer or while the user keeps chatting.", "Keep the workflow running while we discuss the first findings.", "The detailed workflow can be closed without losing its live state.", "Workflow running · 12 agents · 340k tokens · 8m 42s above the composer.", "The status line disappears only after a completion record is committed."],
-          [19, "activity", "A workflow emits short narrator progress separate from its final answer.", "Tell me when the verifiers begin.", "Agent/tool rows continue normally without narration styled as an answer.", "16 results in — verifiers running · narrator · 08:42.", "Narrator lines remain quiet timeline records; the final synthesis uses answer typography."],
-          [20, "detail", "Codex emits spawn, wait, or close operations for one or more helper threads.", "Have Codex fan out a security, API, and test review.", "The first collab operation opens one bounded fan-out card.", "Codex helpers · security-pass, api-review, tests · model, effort, live status.", "Closed helpers keep their result; the card settles into one consolidated record."],
-          [21, "detail", "A Codex helper starts, is interrupted, or closes.", "Interrupt the API helper if the safety review makes it unnecessary.", "Every helper row has one stable identity from spawn through close.", "api-review · interrupted by parent · result retained.", "The lifecycle reason and last useful result remain inspectable after settlement."],
-          [22, "session", "A user opens a Codex helper row that represents a real child thread.", "Open the security helper so I can inspect its reasoning and tools.", "The parent fan-out card keeps the helper summary and selection.", "Read-only helper transcript · prompt, recent tools, commentary, and result.", "Back returns atomically to the parent chat and the same selected helper row."],
-          [23, "picker", "The user opens Codex effort choices for a model that supports real ultra.", "Run this audit with Codex Ultra.", "The composer shows the current effort without silently translating it.", "Effort · Ultra · proactive multi-agent · high cost warning.", "The turn and helper rows retain Ultra as the actual runtime effort."],
-          [24, "tool", "Cursor streams activity from helpers nested inside a task.", "Have Cursor audit the routes and nested type checks.", "The parent Cursor task row appears as soon as it starts.", "audit routes · explore:routes searching · review:types reading schema.ts.", "Nested rows settle under the parent with final token and result summaries."],
-          [25, "dock", "A Cursor task moves to the background by agent choice, user action, or queueing.", "Move the route audit to the background.", "The task begins in the active transcript.", "Cursor task · audit routes · backgrounded by you · Open transcript.", "Finished result lands in the parent transcript with the background reason retained."],
-          [26, "settings", "The user creates or edits a reusable Claude/Cursor helper roster.", "Create Explore and Verify helpers for provider audits.", "Settings shows existing helpers without changing the current chat draft.", "Explore · find call sites · Auto; Verify · focused tests · Sonnet 5; Add helper.", "The saved roster appears in the composer helper picker for future turns."],
+          [11, "skipped", "Skipped for now — subagent model and effort UI is outside this design pass.", "Show which model the Explore helper used.", "No model/effort surface is introduced.", "Skipped · no dedicated card, row, or picker treatment.", "Revisit with the separate subagent design pass."],
+          [12, "skipped", "Skipped for now — background-subagent lifecycle UI will be designed separately.", "Verify the auth fix in a background helper.", "No lifecycle surface is introduced.", "Skipped · no launched/running/finished helper card in this pass.", "Revisit with the separate subagent design pass."],
+          [13, "skipped", "Skipped for now — no helper strip or fleet card is planned in this pass.", "Split research, tests, and safety review across helpers.", "No fleet surface is introduced.", "Skipped · existing chat activity remains unchanged.", "Revisit with the separate multi-agent design pass."],
+          [14, "gate", "A helper-originated request needs the same user approval as any other tool request.", "Let the verification helper install its test dependency if needed.", "The shipping PermissionCard replaces the composer and preserves the draft.", "Same card/tokens/rows/shortcuts as today · title Allow network access · Allow once / Always allow in this chat / Deny.", "The decision is routed only to the originating helper; no helper-specific chrome or visual override is retained."],
+          [15, "tool", "Helper progress is ordinary Bash activity that the transcript already knows how to render.", "Keep me informed while the helper audits all providers.", "The current expandable Bash tool call appears without restyling.", "Bash · pnpm test:providers · output streams inside the standard expanded body.", "The same Bash row settles with its command output; no heartbeat surface remains."],
+          [16, "gate", "A workflow plan needs approval before work begins.", "Run the dependency-audit workflow across the repository.", "The shipping PermissionCard replaces the composer and preserves the draft.", "Same card/tokens/rows/shortcuts as today · title Workflow approval · phase pills · Run once / Always allow in this chat / Deny.", "The decision is recorded without a large-workflow, token, cost, scale banner, or approval-style fork."],
+          [17, "workflow", "An approved workflow is running while the parent agent remains active.", "Audit dependencies with Find, Verify, and Synthesize phases.", "The existing agent-working shimmer and timer are already visible.", "Current tool-call row + Workflow running; hover shows a compact --bg1 detail, title-only header, Pause, icon Stop, and equal 32-cell 8/8 · 3/4 · queued tracks.", "Pending cells stay dim (--bg4), progressed cells use --fg2, and all 32 cells turn green when a phase completes."],
+          [18, "skipped", "Skipped for now — no persistent workflow card, dock, or banner.", "Keep the workflow running while we discuss the first findings.", "No additional workflow status surface appears.", "Existing workspace-top-bar and chat-tab agent-loading indicators remain active.", "Revisit only if those existing indicators prove insufficient."],
+          [19, "tool", "A workflow emits a narrator/progress message with inspectable output.", "Tell me when the verifiers begin.", "The current tool-call row is ready to receive the message unchanged.", "Workflow progress · 16 results in — verifiers running · expand for Output.", "The row settles like any other tool call; no narrator card, visual override, or shimmer is added."],
+          [20, "skipped", "Skipped for now — Codex fan-out UI needs its own design pass.", "Have Codex fan out a security, API, and test review.", "No fan-out surface is introduced.", "Skipped · no consolidated Codex helper card.", "Revisit with the later Codex subagent pass."],
+          [21, "skipped", "Skipped for now — Codex helper lifecycle beats are part of the later fan-out pass.", "Interrupt the API helper if it is no longer needed.", "No helper lifecycle surface is introduced.", "Skipped · started, interrupted, and closed beats get no new UI here.", "Revisit with task 020."],
+          [22, "skipped", "Skipped for now — Codex helper transcript navigation is not designed here.", "Open the security helper transcript.", "No helper-transcript destination is introduced.", "Skipped · no read-only child-thread screen in this pass.", "Revisit with tasks 020–021."],
+          [23, "picker", "The user asks Codex to use Ultra and the runtime effort changes.", "Run this audit with Codex Ultra.", "The existing composer effort pill shows the prior effort.", "That unchanged effort pill updates to Ultra automatically; no extra card or warning surface.", "Ultra remains selected in the existing picker for the active runtime."],
+          [24, "tool", "Cursor runs a Task working group and its nested tool activity becomes available.", "Have Cursor audit the routes and nested type checks.", "The existing expandable Task shows its Input section.", "Read/Bash operations stream through the same standard tool-call renderer inside expanded Task; Output remains separate.", "The nested rows and final Output settle inside the same Task working group without a visual fork."],
+          [25, "skipped", "Skipped for now — no Cursor-specific background reason card or banner.", "Move the route audit to the background.", "No background-reason surface is introduced.", "Skipped · existing Cursor Task and agent-working indicators remain unchanged.", "Revisit in a separate Cursor background-work pass."],
+          [26, "skipped", "Skipped for now — custom helper definitions need their own product and provider pass.", "Create reusable Explore and Verify helpers.", "No roster, editor, automatic-selection surface, or picker is introduced.", "Skipped · existing provider-owned helper behavior remains unchanged.", "Revisit as a separate custom-subagent project."],
           [27, "media", "A tool returns an image content block or screenshot.", "Capture the broken auth screen and inspect it.", "The tool row reports that visual output is arriving.", "browser-result.png · 1440×900 preview · Open / Save.", "The bounded image remains in the transcript with alt text and dimensions."],
           [28, "tool", "Codex streams successive output fragments from one long command.", "Run the Git suite and show the output as it arrives.", "The command row is mounted once with an empty output buffer.", "Lines append in order without replacing or flickering settled output.", "Exit 0 · 3,868 tests · stable full log and copy action."],
           [29, "tool", "Cursor emits the SDK delta channel during a turn.", "Stream the provider audit live.", "The turn begins with an immediate working state.", "Cursor delta · words, shell lines, thinking, and tokens update in place.", "Deltas settle into structurally stable transcript rows and a turn footer."],
@@ -7364,6 +7313,7 @@
           dock: { label: "Task dock", where: "Sticky directly above the composer", icon: "activity" },
           wait: { label: "Composer wait line", where: "Fixed directly above the composer while background work settles", icon: "clock" },
           activity: { label: "Activity line", where: "Quiet live row inside the chat transcript", icon: "activity" },
+          workflow: { label: "Workflow activity", where: "Tool-call-style row directly above the existing agent-working shimmer and timer", icon: "fork" },
           record: { label: "Transcript record", where: "Durable event row beside the affected turn", icon: "check" },
           detail: { label: "Task detail", where: "Expandable in-chat detail launched from the task dock", icon: "list" },
           gate: { label: "Composer gate", where: "Replaces the composer while preserving its draft", icon: "shield" },
@@ -7381,6 +7331,8 @@
           review: { label: "Review destination", where: "Built-in Review surface and transcript lifecycle rows", icon: "eye" },
           onboarding: { label: "Onboarding", where: "Preview-before-import onboarding step", icon: "download" },
           engine: { label: "Invisible contract", where: "No new chrome; it feeds an existing canonical surface", icon: "code" },
+          skipped: { label: "Skipped for now", where: "No UI or implementation is claimed in this design pass", icon: "clock" },
+          decision: { label: "Product decision needed", where: "No UI until behavior and ownership are settled", icon: "message" },
           future: { label: "Scoped product flow", where: "New entry point composed from existing runtime primitives", icon: "cloud" }
         };
         const providerProfiles = {
@@ -7788,7 +7740,7 @@
               card: [
                 ["title", "dependency-audit workflow"],
                 ["label", "Result"],
-                ["code", "Complete · 13 agents · 340k tokens · 9m 51s"]
+                ["code", "Complete · 13/13 work units · 9m 51s"]
               ]
             }
           ],
@@ -8010,14 +7962,34 @@
         }
 
         function renderGateFeature(task, provider) {
+          if (task.id === 14 || task.id === 16) {
+            const gateTitle = task.id === 14 ? "Allow network access" : "Workflow approval";
+            const supplemental =
+              task.id === 16
+                ? '<div class="pill-row"><span class="data-pill">Find · 8 agents</span><span class="data-pill">Verify · 4</span><span class="data-pill">Synthesize · 1</span></div>'
+                : '<div class="canonical-permission-context">' +
+                  prototypeIcon("globe") +
+                  '<strong>pnpm install</strong><small>registry.npmjs.org:443</small></div>';
+            return (
+              '<div class="permission-card canonical-permission-card">' +
+              '<div class="canonical-permission-title">' +
+              escapePrototypeText(gateTitle) +
+              "</div>" +
+              supplemental +
+              '<div class="permission-actions">' +
+              '<button class="permission-action canonical" type="button" data-resolve-task>' +
+              '<span class="action-copy">' +
+              (task.id === 16 ? "Run once" : "Allow once") +
+              '</span><kbd>↵</kbd></button>' +
+              '<button class="permission-action canonical" type="button">' +
+              '<span class="action-copy">Always allow in this chat</span><kbd>⌘↵</kbd></button>' +
+              '<button class="permission-action canonical" type="button" data-resolve-task>' +
+              '<span class="action-copy">Deny</span><kbd>⌫</kbd></button></div></div>'
+            );
+          }
+
           let supplemental = "";
-          if (task.id === 16) {
-            supplemental =
-              '<div class="pill-row"><span class="data-pill">Find · 8 agents</span><span class="data-pill">Verify · 4</span><span class="data-pill">Synthesize · 1</span></div>' +
-              '<div class="warning-note">' +
-              prototypeIcon("gauge") +
-              "<span><strong>Large workflow</strong><br>Estimated 240k–420k tokens.</span></div>";
-          } else if (task.id === 43) {
+          if (task.id === 43) {
             supplemental =
               '<div class="form-field"><label>API token · never written to chat</label><div class="input-mock">••••••••••••••••</div></div>';
           } else {
@@ -8030,12 +8002,13 @@
               escapePrototypeText(task.live) +
               '</small></span><span class="status-badge">Scoped</span></div>';
           }
+          const gateTitle = task.title;
           return (
             '<div class="permission-card">' +
             '<div class="permission-head"><span class="permission-icon">' +
             prototypeIcon("shield") +
             '</span><span><strong>' +
-            escapePrototypeText(task.title) +
+            escapePrototypeText(gateTitle) +
             "</strong><small>" +
             escapePrototypeText(provider) +
             " · blocking request · draft preserved</small></span></div>" +
@@ -8057,51 +8030,125 @@
           );
         }
 
-        function renderDetailFeature(task) {
-          if (task.id === 17) {
-            return (
-              '<div class="demo-panel"><div class="demo-toolbar">' +
-              prototypeIcon("fork") +
-              "<strong>dependency-audit</strong><span class=\"status-badge running\">Running</span>" +
-              '<span class="push inline-actions"><button class="text-action" type="button">Pause</button><button class="text-action danger" type="button" data-resolve-task>Stop</button></span></div>' +
-              '<div class="demo-body"><div class="phase-list">' +
-              '<div class="phase-row"><strong>Find</strong><div class="progress-track"><div class="progress-value success w-100"></div></div><span>8/8 · 126k</span></div>' +
-              '<div class="phase-row"><strong>Verify</strong><div class="progress-track"><div class="progress-value w-62"></div></div><span>3/4 · 188k</span></div>' +
-              '<div class="phase-row"><strong>Synthesize</strong><div class="progress-track"><div class="progress-value w-34"></div></div><span>queued</span></div>' +
-              "</div></div></div>"
-            );
-          }
-          const rows = [
-            ["Agent", "security-pass · gpt-5.6-sol", "running · 48k tokens"],
-            ["Agent", "api-review · gpt-5.6-terra", "interrupted · result retained"],
-            ["Agent", "tests · gpt-5.6-terra", "done · 212 tests"]
-          ];
+        const WORKFLOW_SEGMENT_COUNT = 32;
+
+        function workflowSegmentMarkup(filled, tone) {
+          const safeFilled = Math.max(
+            0,
+            Math.min(WORKFLOW_SEGMENT_COUNT, Math.round(filled)),
+          );
+          return Array.from({ length: WORKFLOW_SEGMENT_COUNT }, (_, index) => {
+            const state = index < safeFilled ? ` ${tone}` : "";
+            return `<i class="workflow-segment${state}"></i>`;
+          }).join("");
+        }
+
+        document.querySelectorAll("[data-workflow-segments]").forEach((track) => {
+          if (!(track instanceof HTMLElement)) return;
+          const filled = Number(track.dataset.filled ?? 0);
+          const tone = track.dataset.tone === "complete" ? "complete" : "progressed";
+          track.innerHTML = workflowSegmentMarkup(filled, tone);
+        });
+
+        function renderWorkflowSegments(done, total, label) {
+          const safeTotal = Math.max(1, total);
+          const filled = (Math.max(0, done) / safeTotal) * WORKFLOW_SEGMENT_COUNT;
+          const tone = done >= total && total > 0 ? "complete" : "progressed";
           return (
-            '<div class="demo-panel"><div class="demo-toolbar">' +
-            prototypeIcon("fork") +
-            "<strong>" +
-            escapePrototypeText(task.title) +
-            '</strong><span class="push status-badge running">Live</span></div>' +
-            '<div class="compact-list">' +
-            rows
-              .map(
-                (row) =>
-                  '<div class="compact-row"><span class="row-glyph">' +
-                  prototypeIcon(row[0] === "Shell" ? "terminal" : "bot") +
-                  '</span><span class="row-copy"><strong>' +
-                  escapePrototypeText(row[1]) +
-                  "</strong><small>" +
-                  escapePrototypeText(row[2]) +
-                  '</small></span><button class="text-action" type="button">' +
-                  (row[2].startsWith("done") ? "Open" : "Stop") +
-                  "</button></div>",
-              )
-              .join("") +
-            "</div></div>"
+            '<div class="workflow-segments" aria-label="' +
+            escapePrototypeText(label) +
+            '">' +
+            workflowSegmentMarkup(filled, tone) +
+            "</div>"
+          );
+        }
+
+        function renderWorkflowFeature() {
+          return (
+            '<div class="workflow-hover"><div class="workflow-popover">' +
+            '<div class="workflow-popover-head">' +
+            '<strong>dependency-audit</strong><span class="push inline-actions">' +
+            '<button class="text-action" type="button">Pause</button>' +
+            '<button class="task-action destructive" type="button" data-resolve-task aria-label="Stop dependency audit">' +
+            prototypeIcon("square", "icon-sm") +
+            "</button></span></div>" +
+            '<div class="workflow-phase-list"><div class="workflow-phase-row"><strong>Find</strong>' +
+            renderWorkflowSegments(8, 8, "Find complete, 8 of 8") +
+            '<span class="workflow-phase-count">8/8</span></div>' +
+            '<div class="workflow-phase-row"><strong>Verify</strong>' +
+            renderWorkflowSegments(3, 4, "Verify in progress, 3 of 4") +
+            '<span class="workflow-phase-count">3/4</span></div>' +
+            '<div class="workflow-phase-row"><strong>Synthesize</strong>' +
+            renderWorkflowSegments(0, 1, "Synthesize queued") +
+            '<span class="workflow-phase-count">queued</span></div></div></div>' +
+            '<button class="tool-call-head" type="button" aria-label="Show workflow progress">' +
+            prototypeIcon("fork", "icon-sm tool-call-icon") +
+            '<span class="tool-call-label">Workflow running</span></button>' +
+            '<div class="activity-line"><span class="spinner" aria-hidden="true"></span>' +
+            '<span class="activity-copy">Agent working</span><span>7m 38s</span></div></div>'
           );
         }
 
         function renderToolFeature(task) {
+          if (task.id === 15) {
+            return renderToolCallRow({
+              expanded: true,
+              icon: "terminal",
+              label: "Bash",
+              pill: "pnpm test:providers",
+              card: [
+                ["title", "pnpm test:providers"],
+                ["label", "Output"],
+                ["code", "Checking Anthropic… passed\nChecking Bedrock… passed\nChecking Vertex…"]
+              ]
+            });
+          }
+          if (task.id === 19) {
+            return renderToolCallRow({
+              expanded: true,
+              icon: "fork",
+              label: "Workflow progress",
+              pill: "16 results in — verifiers running",
+              card: [
+                ["title", "dependency-audit"],
+                ["label", "Output"],
+                ["code", "Verifiers are checking 16 collected results across four work units."]
+              ]
+            });
+          }
+          if (task.id === 24) {
+            const nestedBash = renderToolCallRow({
+              expanded: true,
+              icon: "terminal",
+              label: "Bash",
+              pill: "rg route src",
+              card: [
+                ["title", "Output"],
+                ["code", "src/routes/auth.ts\nsrc/routes/billing.ts\nsrc/types/schema.ts"]
+              ]
+            });
+            const nestedRead = renderToolCallRow({
+              icon: "file",
+              label: "Read",
+              pill: "src/types/schema.ts",
+              card: [
+                ["title", "Output"],
+                ["code", "RouteSchema and AuthRouteSchema loaded."]
+              ]
+            });
+            return (
+              '<div class="tool-call"><button class="tool-call-head" type="button" data-tool-toggle aria-expanded="true">' +
+              prototypeIcon("bot", "icon-sm tool-call-icon") +
+              '<span class="tool-call-label">Task</span><span class="tool-call-pill">Audit routes</span></button>' +
+              '<div class="tool-call-body"><div class="tool-call-card"><strong>Input</strong>' +
+              '<code>Review the route handlers and verify their shared schema types.</code></div>' +
+              '<div class="nested-tool-stack">' +
+              nestedBash +
+              nestedRead +
+              '</div><div class="tool-call-card"><strong>Output</strong>' +
+              '<code>Working… nested tool calls continue to stream above.</code></div></div></div>'
+            );
+          }
           if (task.id === 36) {
             return (
               '<div class="mini-surface"><div class="mini-title">' +
@@ -8252,6 +8299,20 @@
         }
 
         function renderPickerFeature(task) {
+          if (task.id === 23) {
+            return (
+              '<div class="composer-card"><div class="composer-input">Run this audit with Codex Ultra.</div>' +
+              '<div class="composer-toolbar"><div class="composer-tools">' +
+              '<button class="composer-pill" type="button" aria-label="Add attachment">' +
+              prototypeIcon("plus") +
+              '</button><button class="composer-pill" type="button">5.6 Sol</button>' +
+              '<button class="composer-pill optional" type="button">Ultra</button></div>' +
+              '<div class="composer-actions"><span class="context-ring">42</span>' +
+              '<button class="send-button" type="button" aria-label="Send">' +
+              prototypeIcon("send", "icon-sm") +
+              "</button></div></div></div>"
+            );
+          }
           return (
             '<div class="prototype-popover"><div class="demo-toolbar">' +
             prototypeIcon("bot") +
@@ -8261,7 +8322,7 @@
             '<div class="model-list"><div class="model-option selected">' +
             prototypeIcon("activity") +
             '<span><strong>' +
-            escapePrototypeText(task.id === 23 ? "Ultra" : task.id === 59 ? "Auto · Router" : "GPT-5.6 · High") +
+            escapePrototypeText(task.id === 59 ? "Auto · Router" : "GPT-5.6 · High") +
             "</strong><small>" +
             escapePrototypeText(task.live) +
             "</small></span>" +
@@ -8323,7 +8384,7 @@
           }
           if (task.surface === "dock") return renderDockFeature(task);
           if (task.surface === "gate") return renderGateFeature(task, provider);
-          if (task.surface === "detail") return renderDetailFeature(task);
+          if (task.surface === "workflow") return renderWorkflowFeature();
           if (task.surface === "tool") return renderToolFeature(task);
           if (task.surface === "media") return renderMediaFeature(task);
           if (task.surface === "renderer") return renderRendererFeature(task);
@@ -8475,7 +8536,7 @@
           const profile = providerProfiles[provider] || providerProfiles["Shared Zeros"];
           const bottomSurface =
             stage === "live" &&
-            ["dock", "wait", "gate", "picker", "usage", "composer", "auth"].includes(
+            ["dock", "wait", "gate", "workflow", "picker", "usage", "composer", "auth"].includes(
               task.surface,
             );
           const feature = renderFeature(task, stage, provider);
@@ -8492,7 +8553,7 @@
             ? '<div class="prototype-feature">' + feature + "</div>"
             : "";
           const composer =
-            task.surface === "gate" && stage === "live"
+            (task.surface === "gate" || task.id === 23) && stage === "live"
               ? ""
               : renderComposer(task, provider, stage);
           const statusClass = stage === "after" ? "success" : stage === "live" ? "running" : "";
@@ -8532,11 +8593,6 @@
         }
 
         function destinationSpecialContent(task) {
-          if (task.id === 26) {
-            return (
-              '<div class="roster-grid"><div class="roster-card"><strong>Explore</strong><small>Find call sites · Auto</small></div><div class="roster-card"><strong>Verify</strong><small>Focused tests · Sonnet 5</small></div><div class="roster-card"><strong>+ Add helper</strong><small>Name · purpose · model</small></div></div>'
-            );
-          }
           if (task.id === 61) {
             return (
               '<div class="form-field"><label>Codex personality</label><div class="segmented"><button class="segment" type="button">Friendly</button><button class="segment active" type="button">Pragmatic</button><button class="segment" type="button">None</button></div></div>'
@@ -8634,6 +8690,31 @@
         }
 
         function renderDestinationPrototype(task, stage, provider) {
+          if (task.surface === "skipped" || task.surface === "decision") {
+            const needsDecision = task.surface === "decision";
+            return (
+              '<main class="task-product-main"><div class="prototype-destination">' +
+              '<div class="prototype-destination-head">' +
+              prototypeIcon(surfaceMeta[task.surface].icon) +
+              "<strong>" +
+              escapePrototypeText(task.title) +
+              '</strong><span class="status-badge">' +
+              (needsDecision ? "Needs product decision" : "Skipped for now") +
+              '</span></div><div class="prototype-destination-body"><div class="prototype-no-ui">' +
+              '<div class="mini-title">' +
+              prototypeIcon(needsDecision ? "message" : "clock") +
+              (needsDecision ? "Behavior before interface" : "No UI in this iteration") +
+              '<span class="push status-badge">' +
+              stageLabel(stage) +
+              "</span></div><strong>" +
+              (needsDecision ? "What a helper roster means" : "Deliberately deferred") +
+              "</strong><p>" +
+              escapePrototypeText(stageCopy(task, stage)) +
+              "</p><p>" +
+              escapePrototypeText(task.after) +
+              "</p></div></div></div></main>"
+            );
+          }
           if (task.id === 8) {
             return (
               '<main class="task-product-main"><div class="prototype-destination">' +
@@ -8709,7 +8790,15 @@
         function renderTaskPrototype(task) {
           if (!(taskCanvas instanceof HTMLElement)) return;
           const provider = providerForView(task);
-          const destinationSurfaces = ["settings", "session", "review", "onboarding", "future"];
+          const destinationSurfaces = [
+            "settings",
+            "session",
+            "review",
+            "onboarding",
+            "skipped",
+            "decision",
+            "future"
+          ];
           const main = destinationSurfaces.includes(task.surface)
             ? renderDestinationPrototype(task, activeTaskStage, provider)
             : renderChatPrototype(task, activeTaskStage, provider);
@@ -8961,7 +9050,7 @@
           });
 
         document
-          .querySelectorAll("[data-scene] [data-tool-toggle]")
+          .querySelectorAll("[data-scene] [data-tool-toggle], .catalog-preview [data-tool-toggle]")
           .forEach((toggle) => {
             toggle.addEventListener("click", () => toggleToolCall(toggle));
           });

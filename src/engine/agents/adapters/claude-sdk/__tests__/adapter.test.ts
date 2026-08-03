@@ -54,12 +54,18 @@ interface SettleCapture {
   outcome: { outcome: string };
 }
 
+interface PermissionSettleCapture {
+  permissionId: string;
+  sessionId: string;
+}
+
 function makeCtx(
   emitted: SessionNotification[],
   perms: PermCapture[],
   extras?: {
     questions?: QuestionCapture[];
     settles?: SettleCapture[];
+    permissionSettles?: PermissionSettleCapture[];
     stderr?: string[];
   },
 ): AgentAdapterContext {
@@ -71,6 +77,11 @@ function makeCtx(
       onSessionUpdate: (_a: string, n: SessionNotification) => emitted.push(n),
       onPermissionRequest: (_a: string, id: string, request: unknown) =>
         perms.push({ id, request }),
+      onPermissionSettled: (
+        _a: string,
+        permissionId: string,
+        sessionId: string,
+      ) => extras?.permissionSettles?.push({ permissionId, sessionId }),
       onQuestionRequest: (_a: string, id: string, request: unknown) =>
         extras?.questions?.push({
           id,
@@ -784,6 +795,213 @@ describe("ClaudeSdkAdapter", () => {
       } as never,
     });
     expect((await decision).behavior).toBe("allow");
+    await turn;
+    await adapter.dispose();
+  });
+
+  it("uses the SDK permission title and native request id without helper-specific chrome", async () => {
+    const emitted: SessionNotification[] = [];
+    const perms: PermCapture[] = [];
+    const permissionSettles: PermissionSettleCapture[] = [];
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-1"), resultOk("sdk-1")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(
+      makeCtx(emitted, perms, { permissionSettles }),
+      { queryFn },
+    );
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const turn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
+    await tick();
+
+    const canUseTool = captured[0]?.canUseTool as (
+      t: string,
+      i: Record<string, unknown>,
+      o: {
+        signal: AbortSignal;
+        toolUseID?: string;
+        requestId?: string;
+        title?: string;
+        agentID?: string;
+      },
+    ) => Promise<{ behavior: string }>;
+    const decision = canUseTool(
+      "WebFetch",
+      { url: "https://example.com" },
+      {
+        signal: new AbortController().signal,
+        toolUseID: "toolu-helper-network",
+        requestId: "permission-helper-network",
+        title: "Allow network access",
+        agentID: "helper-dependency-audit",
+      },
+    );
+    await tick();
+
+    const request = perms[0].request as {
+      title?: string;
+      nativeRequestId?: string;
+      presentation?: unknown;
+    };
+    expect(request.title).toBe("Allow network access");
+    expect(request.nativeRequestId).toBe("permission-helper-network");
+    expect(request).not.toHaveProperty("presentation");
+
+    adapter.respondToPermission({
+      permissionId: perms[0].id,
+      response: {
+        outcome: { outcome: "selected", optionId: "allow_once" },
+      } as never,
+    });
+    expect((await decision).behavior).toBe("allow");
+    expect(permissionSettles).toEqual([
+      {
+        permissionId: perms[0].id,
+        sessionId: session.sessionId,
+      },
+    ]);
+    await turn;
+    await adapter.dispose();
+  });
+
+  it("routes permission_workflow through the canonical permission request", async () => {
+    const emitted: SessionNotification[] = [];
+    const perms: PermCapture[] = [];
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-1"), resultOk("sdk-1")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, perms), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const turn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
+    await tick();
+
+    expect(captured[0].supportedDialogKinds).toContain("permission_workflow");
+    const onUserDialog = captured[0]?.onUserDialog as (req: {
+      dialogKind: string;
+      toolUseID?: string;
+      payload?: Record<string, unknown>;
+    }) => Promise<Record<string, unknown>>;
+    const dialog = onUserDialog({
+      dialogKind: "permission_workflow",
+      toolUseID: "toolu-workflow",
+      payload: {
+        requestId: "workflow-request-1",
+        toolName: "Workflow",
+        workflowName: "dependency-audit",
+        permissionResult: {},
+        script: `export const meta = {
+          name: "dependency-audit",
+          description: "Audit dependencies",
+          phases: [
+            { title: "Find", detail: "8 agents" },
+            { title: "Verify", detail: "4 agents" },
+            { title: "Synthesize", detail: "1 agent" }
+          ]
+        }`,
+      },
+    });
+    await tick();
+
+    expect(perms).toHaveLength(1);
+    const request = perms[0].request as {
+      title?: string;
+      nativeRequestId?: string;
+      contextItems?: string[];
+      useOptionNames?: boolean;
+      options: Array<{ name: string; kind: string }>;
+    };
+    expect(request).toMatchObject({
+      title: "Workflow approval",
+      nativeRequestId: "workflow-request-1",
+      contextItems: ["Find · 8 agents", "Verify · 4", "Synthesize · 1"],
+      useOptionNames: true,
+    });
+    expect(request.options.map((option) => option.name)).toEqual([
+      "Run once",
+      "Always allow in this chat",
+      "Deny",
+    ]);
+
+    adapter.respondToPermission({
+      permissionId: perms[0].id,
+      response: {
+        outcome: { outcome: "selected", optionId: "allow_once" },
+      } as never,
+    });
+    expect(await dialog).toEqual({
+      behavior: "completed",
+      result: { behavior: "allow" },
+    });
+    await turn;
+    await adapter.dispose();
+  });
+
+  it("cancels a parked workflow dialog when its SDK signal aborts", async () => {
+    const emitted: SessionNotification[] = [];
+    const perms: PermCapture[] = [];
+    const permissionSettles: PermissionSettleCapture[] = [];
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-1"), resultOk("sdk-1")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(
+      makeCtx(emitted, perms, { permissionSettles }),
+      { queryFn },
+    );
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const turn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
+    await tick();
+
+    const onUserDialog = captured[0]?.onUserDialog as (
+      req: {
+        dialogKind: string;
+        toolUseID?: string;
+        payload: Record<string, unknown>;
+      },
+      options: { signal: AbortSignal },
+    ) => Promise<Record<string, unknown>>;
+    const abort = new AbortController();
+    const dialog = onUserDialog(
+      {
+        dialogKind: "permission_workflow",
+        toolUseID: "toolu-workflow-abort",
+        payload: {
+          requestId: "workflow-request-abort",
+          toolName: "Workflow",
+          permissionResult: {},
+          script:
+            'export const meta = { name: "audit", description: "Audit", phases: [] }',
+        },
+      },
+      { signal: abort.signal },
+    );
+    await tick();
+    expect(perms).toHaveLength(1);
+
+    abort.abort();
+    expect(await dialog).toEqual({ behavior: "cancelled" });
+    expect(permissionSettles).toEqual([
+      {
+        permissionId: perms[0].id,
+        sessionId: session.sessionId,
+      },
+    ]);
+    // A stale renderer response after the abort has no resolver to hit.
+    adapter.respondToPermission({
+      permissionId: perms[0].id,
+      response: {
+        outcome: { outcome: "selected", optionId: "allow_once" },
+      } as never,
+    });
+
     await turn;
     await adapter.dispose();
   });

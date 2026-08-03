@@ -401,6 +401,10 @@ export function AgentSessionsProvider({
       permissionId: string;
       request: PermissionReq;
     }> = [];
+    const permissionSettledBuffer: Array<{
+      permissionId: string;
+      sessionId: string;
+    }> = [];
     const questionBuffer: Array<{
       agentId: string;
       questionId: string;
@@ -425,6 +429,7 @@ export function AgentSessionsProvider({
       if (
         updateBuffer.length === 0 &&
         permBuffer.length === 0 &&
+        permissionSettledBuffer.length === 0 &&
         questionBuffer.length === 0 &&
         questionSettledBuffer.length === 0 &&
         stderrBuffer.length === 0 &&
@@ -436,6 +441,7 @@ export function AgentSessionsProvider({
       // queues for the next frame instead of being lost or re-processed.
       const updates = updateBuffer.splice(0);
       const perms = permBuffer.splice(0);
+      const permissionSettles = permissionSettledBuffer.splice(0);
       const questions = questionBuffer.splice(0);
       const questionSettles = questionSettledBuffer.splice(0);
       const stderrs = stderrBuffer.splice(0);
@@ -497,6 +503,12 @@ export function AgentSessionsProvider({
           p.permissionId,
           p.request,
         );
+      }
+      for (const settled of permissionSettles) {
+        const chatId = store.sessionToChatId[settled.sessionId];
+        if (chatId) {
+          store.settlePendingPermission(chatId, settled.permissionId);
+        }
       }
       for (const q of questions) {
         // No auto-policy path — questions are always shown (they carry no
@@ -599,6 +611,21 @@ export function AgentSessionsProvider({
       schedule();
     });
 
+    const unsubPermissionSettled = bridge.on(
+      "AGENT_PERMISSION_SETTLED",
+      (raw) => {
+        const msg = raw as { permissionId: string; sessionId: string };
+        const chatId =
+          useSessionsStore.getState().sessionToChatId[msg.sessionId];
+        if (chatId) promptActivityRef.current.get(chatId)?.();
+        permissionSettledBuffer.push({
+          permissionId: msg.permissionId,
+          sessionId: msg.sessionId,
+        });
+        schedule();
+      },
+    );
+
     const unsubQuestion = bridge.on("AGENT_QUESTION_REQUEST", (raw) => {
       const msg = raw as {
         agentId: string;
@@ -690,6 +717,7 @@ export function AgentSessionsProvider({
       flush();
       unsubUpdate();
       unsubPerm();
+      unsubPermissionSettled();
       unsubQuestion();
       unsubQuestionSettled();
       unsubStderr();
@@ -1949,6 +1977,7 @@ export function AgentSessionsProvider({
         // cancel (adapter.cancel resolves pendingPermissions), so the inline
         // card would otherwise be stranded + clickable against a dead turn.
         pendingPermission: null,
+        pendingPermissions: [],
         // Same for parked questions — adapter.cancel dismisses them engine-
         // side, so a leftover card would keep replacing the composer and
         // answer into a dead resolver.
@@ -1976,7 +2005,10 @@ export function AgentSessionsProvider({
         response,
       });
       promptActivityRef.current.get(chatId)?.();
-      getStore().patchSession(chatId, { pendingPermission: null });
+      getStore().settlePendingPermission(
+        chatId,
+        current.pendingPermission.permissionId,
+      );
     },
     [bridge, getStore],
   );

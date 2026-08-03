@@ -276,9 +276,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
    *  InitializeResponse `_meta.models` — replacing the bundled-catalog fallback
    *  with the account's REAL models. Best-effort + once per process (the catalog
    *  is account-stable). The Codex ReasoningEffort vocabulary
-   *  (none|minimal|low|medium|high|xhigh) is passed through verbatim, in the
-   *  server's intended order; the renderer coerces it to its ChatEffort set
-   *  (dropping none/minimal). `supportsFast` is set only when a "fast" service
+   *  ladder is normalized into Zeros' existing composer tokens in the
+   *  server's intended order (`ultra` → `ultracode`; none/minimal dropped).
+   *  `supportsFast` is set only when a "fast" service
    *  tier is advertised — otherwise left unset so the renderer's gpt-5*
    *  heuristic stands (never a regression). */
   private async discoverModels(session: CodexSession): Promise<void> {
@@ -299,6 +299,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         if (!m?.id || m.hidden) continue;
         const effortLevels = (m.supportedReasoningEfforts ?? [])
           .map((e) => e.reasoningEffort)
+          .map(mapCodexAdvertisedEffort)
           .filter((e): e is string => typeof e === "string");
         const hasFast =
           (m.serviceTiers ?? []).some((t) => t.id === "fast") ||
@@ -452,7 +453,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // the model written into OPENAI_MODEL at spawn time was used. A
     // session respawn fixed model but not effort.
     const model = session.env?.OPENAI_MODEL?.trim() || undefined;
-    const effort = mapEffortFromEnv(session.env?.ZEROS_THINKING_EFFORT);
+    const effort = mapCodexEffortFromEnv(
+      session.env?.ZEROS_THINKING_EFFORT,
+    );
     const fast = session.env?.ZEROS_FAST_MODE === "1";
     // Verification breadcrumb: one line per turn echoing the composer knobs
     // sent to the app-server. Tail the engine log and confirm it flips as you
@@ -1235,7 +1238,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
       },
     });
 
-    this.wireRuntimeToTranslator(runtime, translator);
+    this.wireRuntimeToTranslator(runtime, translator, {
+      threadId,
+      zerosSessionId,
+    });
 
     session = {
       zerosSessionId,
@@ -1659,6 +1665,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
   private wireRuntimeToTranslator(
     runtime: CodexAppServerHandle,
     translator: CodexAppServerTranslator,
+    owner: { threadId: string; zerosSessionId: string },
   ): void {
     const methods = [
       "thread/started",
@@ -1693,6 +1700,18 @@ export class CodexAppServerAdapter implements AgentAdapter {
     for (const m of methods) {
       runtime.onNotification(m, (params) => translator.handle(m, params));
     }
+    // Codex may autonomously raise the thread to native `ultra`. Keep the ONE
+    // existing composer effort picker truthful by persisting that provider
+    // state into the exact parent chat. Child/collaboration thread settings
+    // are intentionally ignored — they do not own the composer's setting.
+    runtime.onNotification("thread/settings/updated", (params) => {
+      const effort = codexEffortFromThreadSettings(params, owner.threadId);
+      if (!effort) return;
+      this.ctx.emit.onSessionUpdate(this.agentId, {
+        sessionId: owner.zerosSessionId,
+        update: { sessionUpdate: "current_effort_update", effort },
+      });
+    });
   }
 
   /** Materialise base64 image blocks to per-session tempfiles and
@@ -1909,14 +1928,12 @@ export function modePolicyFor(modeId: CodexModeId): CodexModePolicy {
  *  ZEROS_THINKING_EFFORT by `envForChatSettings`) onto the Codex
  *  app-server's `turn/start.effort` enum.
  *
- *  The generated ReasoningEffort enum is
- *  none | minimal | low | medium | high | xhigh — so "xhigh" is now
- *  passed through natively (it used to be clamped to "high" when Codex
- *  capped there). Unknown / empty values stay unset so Codex picks its
- *  own default (typically "medium"). */
-function mapEffortFromEnv(
+ *  ReasoningEffort is intentionally open in the current generated protocol;
+ *  `ultra` is the native proactive multi-agent tier. Unknown / empty values
+ *  stay unset so Codex picks its own default (typically "medium"). */
+export function mapCodexEffortFromEnv(
   value: string | undefined,
-): "minimal" | "low" | "medium" | "high" | "xhigh" | undefined {
+): "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" | undefined {
   switch (value?.trim().toLowerCase()) {
     case "minimal":
       return "minimal";
@@ -1928,14 +1945,49 @@ function mapEffortFromEnv(
       return "high";
     case "xhigh":
       return "xhigh";
-    // Zeros-only levels: Codex's enum tops out at "xhigh" (no max/ultracode),
-    // so clamp both down to "xhigh" — its highest reasoning tier.
     case "max":
+      return "max";
     case "ultracode":
-      return "xhigh";
+    case "ultra":
+      return "ultra";
     default:
       return undefined;
   }
+}
+
+/** Codex protocol token → the already-shipping composer effort vocabulary. */
+export function mapCodexAdvertisedEffort(
+  value: string | undefined,
+): string | undefined {
+  switch (value?.trim().toLowerCase()) {
+    case "low":
+    case "medium":
+    case "high":
+    case "xhigh":
+    case "max":
+    case "ultracode":
+      return value.trim().toLowerCase();
+    case "ultra":
+      return "ultracode";
+    default:
+      return undefined;
+  }
+}
+
+/** Safely read a thread/settings/updated frame and reject child-thread drift. */
+export function codexEffortFromThreadSettings(
+  params: unknown,
+  parentThreadId: string,
+): string | null {
+  if (!params || typeof params !== "object" || Array.isArray(params)) return null;
+  const frame = params as {
+    threadId?: unknown;
+    threadSettings?: { effort?: unknown } | null;
+  };
+  if (frame.threadId !== parentThreadId) return null;
+  return typeof frame.threadSettings?.effort === "string"
+    ? mapCodexAdvertisedEffort(frame.threadSettings.effort) ?? null
+    : null;
 }
 
 function mapStopReason(

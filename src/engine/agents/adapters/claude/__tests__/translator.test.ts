@@ -1328,6 +1328,295 @@ type ChunkUpdate = {
   redacted?: boolean;
 };
 
+describe("ClaudeStreamTranslator local workflow progress", () => {
+  it("replaces live phase progress, surfaces narration as a standard tool row, and clears at turn end", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "system",
+      subtype: "task_started",
+      task_id: "workflow-1",
+      task_type: "local_workflow",
+      workflow_name: "dependency-audit",
+    });
+    t.feed({
+      type: "system",
+      subtype: "task_progress",
+      task_id: "workflow-1",
+      usage: { duration_ms: 2_000 },
+      workflow_progress: [
+        { type: "workflow_phase", index: 0, title: "Find" },
+        {
+          type: "workflow_agent",
+          index: 0,
+          label: "scan package manifests",
+          phaseIndex: 0,
+          phaseTitle: "Find",
+          state: "done",
+        },
+        {
+          type: "workflow_agent",
+          index: 1,
+          label: "scan lockfiles",
+          phaseIndex: 0,
+          phaseTitle: "Find",
+          state: "progress",
+        },
+        { type: "workflow_phase", index: 1, title: "Verify" },
+        {
+          type: "workflow_agent",
+          index: 0,
+          label: "verify findings",
+          phaseIndex: 1,
+          phaseTitle: "Verify",
+          state: "start",
+        },
+        {
+          type: "workflow_log",
+          message: "Find phase identified two dependency risks.",
+        },
+      ],
+    });
+
+    const workflowUpdates = updates.filter(
+      (note) => note.update.sessionUpdate === "workflow_progress_update",
+    ) as Array<{
+      update: {
+        workflows: Array<{
+          taskId: string;
+          name: string;
+          status: string;
+          phases: Array<{
+            title: string;
+            completed: number;
+            total: number;
+            status: string;
+          }>;
+        }>;
+      };
+    }>;
+    expect(workflowUpdates.at(-1)?.update.workflows).toMatchObject([
+      {
+        taskId: "workflow-1",
+        name: "dependency-audit",
+        status: "running",
+        phases: [
+          { title: "Find", completed: 1, total: 2, status: "running" },
+          { title: "Verify", completed: 0, total: 1, status: "running" },
+        ],
+      },
+    ]);
+
+    const narration = updates.filter((note) => {
+      const update = note.update as {
+        sessionUpdate?: string;
+        title?: string;
+        rawOutput?: unknown;
+      };
+      return (
+        update.sessionUpdate === "tool_call" &&
+        update.title === "Workflow update"
+      );
+    });
+    expect(narration).toHaveLength(1);
+    expect(narration[0].update).toMatchObject({
+      sessionUpdate: "tool_call",
+      status: "completed",
+      rawOutput: "Find phase identified two dependency risks.",
+    });
+    expect(narration[0].update).not.toHaveProperty("kind");
+
+    // A level-identical provider frame does not cross the bridge twice, and
+    // the same narrator line does not duplicate in the transcript.
+    const before = updates.length;
+    t.feed({
+      type: "system",
+      subtype: "task_progress",
+      task_id: "workflow-1",
+      workflow_progress: [
+        { type: "workflow_phase", index: 0, title: "Find" },
+        {
+          type: "workflow_agent",
+          index: 0,
+          phaseIndex: 0,
+          phaseTitle: "Find",
+          state: "done",
+        },
+        {
+          type: "workflow_agent",
+          index: 1,
+          phaseIndex: 0,
+          phaseTitle: "Find",
+          state: "progress",
+        },
+        { type: "workflow_phase", index: 1, title: "Verify" },
+        {
+          type: "workflow_agent",
+          index: 0,
+          phaseIndex: 1,
+          phaseTitle: "Verify",
+          state: "start",
+        },
+        {
+          type: "workflow_log",
+          message: "Find phase identified two dependency risks.",
+        },
+      ],
+    });
+    expect(updates).toHaveLength(before);
+
+    t.feed({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    const cleared = updates.filter(
+      (note) => note.update.sessionUpdate === "workflow_progress_update",
+    ).at(-1)?.update as { workflows?: unknown[] };
+    expect(cleared.workflows).toEqual([]);
+  });
+
+  it("recovers when workflow progress arrives before task_started", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "system",
+      subtype: "task_progress",
+      task_id: "workflow-out-of-order",
+      workflow_progress: [
+        { type: "workflow_phase", index: 0, title: "Find" },
+        {
+          type: "workflow_agent",
+          index: 0,
+          phaseIndex: 0,
+          state: "done",
+        },
+      ],
+    });
+    const latest = updates.filter(
+      (note) => note.update.sessionUpdate === "workflow_progress_update",
+    ).at(-1)?.update as {
+      workflows?: Array<{ taskId: string; phases: unknown[] }>;
+    };
+    expect(latest.workflows?.[0]).toMatchObject({
+      taskId: "workflow-out-of-order",
+      phases: [{ title: "Find", completed: 1, total: 1 }],
+    });
+  });
+
+  it("counts cumulative state transitions for one workflow agent only once", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "system",
+      subtype: "task_started",
+      task_id: "workflow-cumulative",
+      task_type: "local_workflow",
+      workflow_name: "cumulative-progress",
+    });
+    t.feed({
+      type: "system",
+      subtype: "task_progress",
+      task_id: "workflow-cumulative",
+      workflow_progress: [
+        { type: "workflow_phase", index: 0, title: "Verify" },
+        {
+          type: "workflow_agent",
+          index: 0,
+          phaseIndex: 0,
+          label: "run tests",
+          state: "start",
+        },
+        {
+          type: "workflow_agent",
+          index: 0,
+          phaseIndex: 0,
+          label: "run tests",
+          state: "progress",
+        },
+        {
+          type: "workflow_agent",
+          index: 0,
+          phaseIndex: 0,
+          label: "run tests",
+          state: "done",
+        },
+        {
+          type: "workflow_agent",
+          index: 1,
+          phaseIndex: 0,
+          label: "review output",
+          state: "progress",
+        },
+      ],
+    });
+
+    const latest = updates.filter(
+      (note) => note.update.sessionUpdate === "workflow_progress_update",
+    ).at(-1)?.update as {
+      workflows?: Array<{
+        phases: Array<{
+          index: number;
+          title: string;
+          completed: number;
+          total: number;
+          status: string;
+        }>;
+      }>;
+    };
+    expect(latest.workflows?.[0]?.phases).toEqual([
+      {
+        index: 0,
+        title: "Verify",
+        completed: 1,
+        total: 2,
+        status: "running",
+      },
+    ]);
+  });
+
+  it("preserves an out-of-order pause edge and never reopens after a terminal edge", () => {
+    const paused = collect();
+    paused.t.feed({
+      type: "system",
+      subtype: "task_updated",
+      task_id: "workflow-paused",
+      patch: { status: "paused" },
+    });
+    paused.t.feed({
+      type: "system",
+      subtype: "task_progress",
+      task_id: "workflow-paused",
+      workflow_progress: [
+        { type: "workflow_phase", index: 0, title: "Verify" },
+      ],
+    });
+    const pausedFrame = paused.updates.filter(
+      (note) => note.update.sessionUpdate === "workflow_progress_update",
+    ).at(-1)?.update as { workflows?: Array<{ status: string }> };
+    expect(pausedFrame.workflows?.[0]?.status).toBe("paused");
+
+    const terminal = collect();
+    terminal.t.feed({
+      type: "system",
+      subtype: "task_updated",
+      task_id: "workflow-done",
+      patch: { status: "completed" },
+    });
+    terminal.t.feed({
+      type: "system",
+      subtype: "task_progress",
+      task_id: "workflow-done",
+      workflow_progress: [
+        { type: "workflow_phase", index: 0, title: "Find" },
+      ],
+    });
+    expect(
+      terminal.updates.some(
+        (note) => note.update.sessionUpdate === "workflow_progress_update",
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("ClaudeStreamTranslator streamPartials (token streaming)", () => {
   it("emits a chunk per text_delta and SKIPS the final full assistant text", () => {
     const { t, updates } = collectPartials();
@@ -1446,6 +1735,61 @@ describe("ClaudeStreamTranslator streamPartials (token streaming)", () => {
     );
     expect(chunk).toBeDefined();
     expect((chunk!.update as ChunkUpdate).parentToolId).toBeTruthy();
+  });
+
+  it("renders a helper heartbeat Bash operation as the standard nested Bash tool call", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_parent",
+            name: "Task",
+            input: { description: "Audit dependencies" },
+          },
+        ],
+      },
+    });
+    const parent = updates.find(
+      (note) =>
+        note.update.sessionUpdate === "tool_call" &&
+        (note.update as { nativeToolCallId?: string }).nativeToolCallId ===
+          "toolu_parent",
+    )?.update as { toolCallId?: string } | undefined;
+
+    t.feed({
+      type: "assistant",
+      parent_tool_use_id: "toolu_parent",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_helper_bash",
+            name: "Bash",
+            input: { command: "git status --short" },
+          },
+        ],
+      },
+    });
+    const child = updates.find(
+      (note) =>
+        note.update.sessionUpdate === "tool_call" &&
+        (note.update as { nativeToolCallId?: string }).nativeToolCallId ===
+          "toolu_helper_bash",
+    )?.update as
+      | { kind?: string; parentToolId?: string; title?: string }
+      | undefined;
+
+    expect(parent?.toolCallId).toBeTruthy();
+    expect(child).toMatchObject({
+      kind: "execute",
+      parentToolId: parent?.toolCallId,
+    });
+    expect(child?.title).toContain("git status --short");
   });
 
   it("coalesces redacted_thinking onto the streamed thinking (same messageId)", () => {

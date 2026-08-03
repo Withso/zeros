@@ -318,6 +318,21 @@ export function AgentChat({
   // Chat-owned settings are needed by both the turn lifecycle and composer.
   // In particular, background continuation chrome is an Ultracode-only aid.
   const chatThread = useChatById(chatId);
+  const workflows = session.workflows;
+  const activeWorkflow = useMemo(() => {
+    let latest: (typeof workflows)[number] | null = null;
+    for (const workflow of workflows) {
+      if (
+        !latest ||
+        workflow.updatedAt > latest.updatedAt ||
+        (workflow.updatedAt === latest.updatedAt &&
+          workflow.startedAt > latest.startedAt)
+      ) {
+        latest = workflow;
+      }
+    }
+    return latest;
+  }, [workflows]);
   // Hidden CLI authentication is deliberately local-only. Relay/browser
   // sessions keep the status pill static and direct users to Providers.
   const nativeReady = useNativeRuntime().ready;
@@ -3811,6 +3826,8 @@ export function AgentChat({
                       }
                       showActivity={isVisualTail}
                       activityEvents={turn.providerEvents}
+                      workflow={activeWorkflow}
+                      onStopWorkflow={session.stopBackgroundTask}
                       ctx={messageCtx}
                       footer={
                         turn.userPrompt && chatId && ownsProviderFooter ? (

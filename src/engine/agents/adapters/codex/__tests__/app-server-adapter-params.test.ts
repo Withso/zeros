@@ -19,7 +19,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildThreadStartParams,
+  codexEffortFromThreadSettings,
   fileChangePaths,
+  mapCodexAdvertisedEffort,
+  mapCodexEffortFromEnv,
   modePolicyFor,
   type CodexModeId,
 } from "../app-server-adapter";
@@ -140,5 +143,28 @@ describe("fileChangePaths", () => {
     expect(fileChangePaths({ type: "fileChange" })).toEqual([]);
     expect(fileChangePaths({ changes: "nope" })).toEqual([]);
     expect(fileChangePaths(null)).toEqual([]);
+  });
+});
+
+describe("Codex Ultra effort synchronization", () => {
+  it("sends the composer Ultra value as Codex's native ultra effort", () => {
+    expect(mapCodexEffortFromEnv("ultracode")).toBe("ultra");
+  });
+
+  it("normalizes Codex's advertised ultra tier into the existing composer token", () => {
+    expect(mapCodexAdvertisedEffort("ultra")).toBe("ultracode");
+    expect(mapCodexAdvertisedEffort("xhigh")).toBe("xhigh");
+    expect(mapCodexAdvertisedEffort("minimal")).toBeUndefined();
+  });
+
+  it("accepts settings updates only for the exact parent thread", () => {
+    const params = {
+      threadId: "thread-parent",
+      threadSettings: { effort: "ultra" },
+    };
+    expect(codexEffortFromThreadSettings(params, "thread-parent")).toBe(
+      "ultracode",
+    );
+    expect(codexEffortFromThreadSettings(params, "thread-helper")).toBeNull();
   });
 });

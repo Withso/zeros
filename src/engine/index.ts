@@ -850,6 +850,23 @@ export class ZerosEngine {
             }),
           );
         },
+        onPermissionSettled: (
+          agentId: string,
+          permissionId: string,
+          sessionId: string,
+        ) => {
+          this.permissionOwner.delete(permissionId);
+          this.routeSessionScoped(
+            sessionId,
+            createMessage({
+              type: "AGENT_PERMISSION_SETTLED",
+              source: "engine",
+              agentId,
+              permissionId,
+              sessionId,
+            }),
+          );
+        },
         onQuestionRequest: (
           agentId: string,
           questionId: string,

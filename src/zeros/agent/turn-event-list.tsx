@@ -25,7 +25,9 @@ import { EventStripe } from "./renderers/event-stripe";
 import { MessageView } from "./renderers";
 import type { RendererContext } from "./renderers";
 import type { AgentMessage } from "./use-agent-session";
+import type { WorkflowProgress } from "../bridge/agent-events";
 import { partitionTurn } from "./turn-partition";
+import { WorkflowActivity } from "./workflow-activity";
 
 interface TurnEventListProps {
   events: AgentMessage[];
@@ -44,6 +46,10 @@ interface TurnEventListProps {
    *  timer. After a steer the newest visual segment can still be empty while
    *  a tool from the preceding segment is running. */
   activityEvents?: AgentMessage[];
+  /** Newest foreground workflow for this exact session. It renders only at
+   * the live visual tail, directly above the ordinary agent shimmer. */
+  workflow?: WorkflowProgress | null;
+  onStopWorkflow?: (taskId: string) => void;
   /** The turn footer (run time, copy, "…", file pills). Rendered INSIDE this
    *  component's 768 lane so it hugs the answer and the pills align under it —
    *  as a TurnContainer sibling it picked up the container's gap-4 (a ~20px gap
@@ -58,6 +64,8 @@ export const TurnEventList = memo(function TurnEventList({
   isStreaming,
   showActivity = true,
   activityEvents,
+  workflow,
+  onStopWorkflow,
   footer,
   ctx,
 }: TurnEventListProps) {
@@ -133,6 +141,9 @@ export const TurnEventList = memo(function TurnEventList({
       {finalOutput.map((event) => (
         <MessageView key={event.id} message={event} ctx={ctx} />
       ))}
+      {showShimmer && workflow && onStopWorkflow ? (
+        <WorkflowActivity workflow={workflow} onStop={onStopWorkflow} />
+      ) : null}
       {/* Shimmer + live timer at the tail of the active turn while streaming
           (pickStartedAt anchors the timer to the most recent in-flight tool —
           for a running subagent that's the subagent's own start time). */}

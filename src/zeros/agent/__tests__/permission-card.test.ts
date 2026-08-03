@@ -12,10 +12,16 @@
 //     single gate): a count summary — "Apply changes to N files?" / "Edit N
 //     files" — replaces a misleading single path; one file keeps the path row
 
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, it, expect } from "vitest";
 import { FilePen, FileText, Terminal, Wrench } from "lucide-react";
 
-import { describePermission, relativizePath } from "../permission-card";
+import {
+  describePermission,
+  PermissionCard,
+  relativizePath,
+} from "../permission-card";
 import type { RequestPermissionRequest } from "../../bridge/agent-events";
 
 const CWD = "/Users/x/repos/ws-feverfew";
@@ -161,5 +167,57 @@ describe("describePermission", () => {
     expect(d.detail).toBeNull();
     expect(d.Icon).toBe(Wrench);
     expect(d.label).toBe("mcp__x__do");
+  });
+
+  it("uses a provider-supplied title without changing the underlying tool presentation", () => {
+    const request = req("other", "WebFetch", {
+      url: "https://example.com",
+    }) as RequestPermissionRequest & { title?: string };
+    request.title = "Allow network access";
+    const d = describePermission(request, CWD);
+    expect(d.title).toBe("Allow network access");
+    expect(d.label).toBe("WebFetch");
+    expect(d.Icon).toBe(Wrench);
+  });
+});
+
+describe("canonical permission-card variants", () => {
+  it("renders workflow copy and pills inside the unchanged shipping card chrome", () => {
+    const request: RequestPermissionRequest = {
+      sessionId: "s" as never,
+      title: "Workflow approval",
+      contextItems: ["Find · 8 agents", "Verify · 4", "Synthesize · 1"],
+      useOptionNames: true,
+      toolCall: {
+        toolCallId: "workflow-1",
+        title: "Workflow",
+        kind: "other",
+        status: "pending",
+      },
+      options: [
+        { optionId: "once", name: "Run once", kind: "allow_once" },
+        {
+          optionId: "chat",
+          name: "Always allow in this chat",
+          kind: "allow_always",
+        },
+        { optionId: "deny", name: "Deny", kind: "reject_once" },
+      ],
+    };
+    const html = renderToStaticMarkup(
+      createElement(PermissionCard, {
+        request,
+        onRespond: () => {},
+      }),
+    );
+
+    expect(html).toContain("border-border1 bg-bg2");
+    expect(html).toContain("border-border3 bg-bg1");
+    expect(html).toContain("Workflow approval");
+    expect(html).toContain("Find · 8 agents");
+    expect(html).toContain("Run once");
+    expect(html).toContain("Always allow in this chat");
+    expect(html).toContain("Deny");
+    expect(html).not.toMatch(/blocking request|estimated tokens|large workflow/i);
   });
 });
