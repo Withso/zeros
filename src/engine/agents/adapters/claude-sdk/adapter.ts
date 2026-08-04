@@ -1049,9 +1049,20 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         agentId: this.agentId,
       });
     }
-    const reservedState = state;
+    let reservedState = state;
     reservedState.pendingPromptCalls += 1;
     this.markSessionBusy(reservedState);
+    const transferPromptReservation = (next: SdkSession) => {
+      if (next === reservedState) return;
+      reservedState.pendingPromptCalls = Math.max(
+        0,
+        reservedState.pendingPromptCalls - 1,
+      );
+      this.refreshIdleTeardown(reservedState);
+      reservedState = next;
+      reservedState.pendingPromptCalls += 1;
+      this.markSessionBusy(reservedState);
+    };
     try {
       // The consumer clears `turn` immediately before settling its result, but
       // prompt() may still be unwinding. Serialize on the explicit teardown
@@ -1060,6 +1071,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       if (previousTurnIdle) {
         await previousTurnIdle.promise;
         state = this.mustState(opts.sessionId);
+        transferPromptReservation(state);
         if (state.turn) {
           throw new AgentFailureError({
             kind: "protocol-error",
@@ -1076,6 +1088,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       if (pendingWakeupStop) {
         await pendingWakeupStop.catch(() => undefined);
         state = this.mustState(opts.sessionId);
+        transferPromptReservation(state);
         if (state.turn) {
           throw new AgentFailureError({
             kind: "protocol-error",

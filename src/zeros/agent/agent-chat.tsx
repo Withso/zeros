@@ -1497,6 +1497,7 @@ export function AgentChat({
       false,
     modelId: chatThread?.model ?? null,
     cwd: session.cwd ?? chatThread?.folder ?? null,
+    attachmentImagesActive: surfaceActive,
     originUrl: composerOriginUrl,
     availableCommands: session.availableCommands,
     placeholder: 'Type your message… "/" for commands, "@" for files',

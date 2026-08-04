@@ -14,6 +14,7 @@ import {
 } from "../../git";
 import { getDesignRuntimeAudit } from "../../design/runtime-audits";
 import { getDesignSelection } from "../../design/selection";
+import { MAX_CONTEXT_GRAPH_ATTACHMENT_BYTES } from "../../files/context-graph";
 
 describe("WorkspaceService", () => {
   let dir: string;
@@ -150,6 +151,46 @@ describe("WorkspaceService", () => {
     expect(
       fs.readFileSync(path.join(dir, ".context-graph/.gitignore"), "utf8"),
     ).toContain("/local/");
+  });
+
+  it("rejects an oversized attachment from a paired remote client before writing", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync(
+      "git",
+      ["remote", "add", "origin", "https://example.com/attachments.git"],
+      { cwd: dir },
+    );
+    execFileSync("git", ["add", "."], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const workspace = await createWorkspace({ repoRoot: dir });
+    const attachmentId = "remote-oversized";
+
+    await expect(
+      svc.handle(
+        "attachment.write",
+        {
+          workspaceId: workspace.workspaceId,
+          attachmentId,
+          base64: Buffer.alloc(
+            MAX_CONTEXT_GRAPH_ATTACHMENT_BYTES + 1,
+          ).toString("base64"),
+          mimeType: "image/png",
+          filename: "oversized.png",
+        },
+        { remote: true },
+      ),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+
+    expect(
+      fs.existsSync(
+        path.join(
+          workspace.path,
+          ".context-graph/local/attachments",
+          attachmentId,
+        ),
+      ),
+    ).toBe(false);
   });
 
   it("externalizes legacy transcript data URLs on first window read", async () => {

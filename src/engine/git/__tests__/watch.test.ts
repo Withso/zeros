@@ -81,6 +81,46 @@ describe("startGitWatcher", () => {
     });
   });
 
+  it("observes changes below generated-looking directory names", async () => {
+    const root = await mkdtemp(join(tmpdir(), "zeros-generated-watch-"));
+    roots.push(root);
+    await mkdir(join(root, ".git", "logs"), { recursive: true });
+    await writeFile(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
+    await writeFile(join(root, ".git", "index"), "index");
+    await writeFile(join(root, ".git", "logs", "HEAD"), "");
+    await mkdir(join(root, "dist"), { recursive: true });
+    await mkdir(join(root, "src", "build"), { recursive: true });
+    const distFile = join(root, "dist", "published.js");
+    const buildFile = join(root, "src", "build", "source.ts");
+    await writeFile(distFile, "before\n");
+    await writeFile(buildFile, "before\n");
+
+    let changes = 0;
+    const watcher = startGitWatcher(
+      () => [{ root, workspaceId: "workspace-generated" }],
+      () => {
+        changes += 1;
+      },
+      {
+        pollIntervalMs: 25,
+        worktreeDebounceMs: 10,
+        awaitWriteFinishMs: 20,
+        usePolling: true,
+        worktreePollIntervalMs: 10,
+      },
+    );
+    watchers.push(watcher);
+    await watcher.ready;
+
+    let before = changes;
+    await writeFile(distFile, "after\n");
+    await waitFor(() => changes > before);
+
+    before = changes;
+    await writeFile(buildFile, "after\n");
+    await waitFor(() => changes > before);
+  });
+
   it("invalidates when terminal git changes the index without a source event", async () => {
     const root = await mkdtemp(join(tmpdir(), "zeros-git-state-watch-"));
     roots.push(root);

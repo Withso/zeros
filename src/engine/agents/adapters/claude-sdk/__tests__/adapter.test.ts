@@ -348,6 +348,48 @@ describe("ClaudeSdkAdapter", () => {
     }
   });
 
+  it("arms idle teardown on a replacement session that takes over a suspended prompt", async () => {
+    vi.useFakeTimers();
+    try {
+      const { queryFn, control } = makeScriptedQuery(
+        [[initMsg("sdk-rebuilt"), resultOk("sdk-rebuilt")]],
+        { keepAliveAfterResult: true },
+      );
+      const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
+        queryFn,
+        idleTimeoutMs: 1_000,
+      });
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      let releaseStop!: () => void;
+      const pendingStop = new Promise<void>((resolve) => {
+        releaseStop = resolve;
+      });
+      const internals = adapter as unknown as {
+        sessions: Map<
+          string,
+          { scheduledWakeupStop: Promise<void> | null }
+        >;
+      };
+      internals.sessions.get(session.sessionId)!.scheduledWakeupStop =
+        pendingStop;
+
+      const prompt = adapter.prompt({
+        sessionId: session.sessionId,
+        prompt: [textBlock("after rebuild")] as never,
+      });
+      await adapter.disposeSession(session.sessionId);
+      await adapter.loadSession({ sessionId: session.sessionId, cwd: "/tmp" });
+      releaseStop();
+      await prompt;
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(control.closes).toBe(1);
+      await adapter.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not tear down at the idle deadline when a prompt starts at the boundary", async () => {
     vi.useFakeTimers();
     try {

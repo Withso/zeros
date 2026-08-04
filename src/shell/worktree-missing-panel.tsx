@@ -30,6 +30,7 @@ import { Check, Copy, FolderX, Trash2 } from "lucide-react";
 
 import { Button } from "../zeros/ui";
 import { Tooltip } from "@/zeros/ui/primitives";
+import { isElementActuallyVisible } from "@/zeros/utils/element-visibility";
 import type { Workspace } from "../native/git";
 
 /** How often to re-stat the worktree while this placeholder is shown. Cheap (a
@@ -121,13 +122,7 @@ export function WorktreeMissingPanel({
       // round-trip in both states; the first visible tick self-heals.
       if (document.visibilityState === "hidden") return;
       const el = rootRef.current;
-      if (
-        el &&
-        typeof el.checkVisibility === "function" &&
-        !el.checkVisibility()
-      ) {
-        return;
-      }
+      if (el && !isElementActuallyVisible(el)) return;
       void refreshRef.current();
     }, PRESENCE_POLL_MS);
     return () => window.clearInterval(id);

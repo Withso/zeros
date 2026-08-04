@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { AttachmentImageSourceCache } from "../attachment-image-source";
@@ -63,5 +65,24 @@ describe("AttachmentImageSourceCache", () => {
     expect(await lease.source).toBe("blob:late");
     await Promise.resolve();
     expect(revoke).toHaveBeenCalledWith("blob:late");
+  });
+
+  it("threads retained-surface activity into composer image leases", () => {
+    const read = (relativePath: string) =>
+      readFileSync(resolve(process.cwd(), relativePath), "utf8");
+    expect(read("src/zeros/agent/composer-editor/pills.tsx")).toMatch(
+      /enabled:\s*ctx\.attachmentImagesActive/,
+    );
+    expect(
+      read("src/zeros/agent/composer-editor/composer-editor-context.tsx"),
+    ).toContain("attachmentImagesActive: boolean");
+    expect(read("src/zeros/agent/turn-container.tsx")).toContain(
+      "attachmentImagesActive: surfaceActive",
+    );
+    expect(
+      read("src/zeros/agent/agent-chat.tsx").match(
+        /attachmentImagesActive: surfaceActive/g,
+      ),
+    ).toHaveLength(2);
   });
 });

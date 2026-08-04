@@ -55,6 +55,7 @@ import {
   tokenizeSync,
   type TokenizedCode,
 } from "@/zeros/agent/renderers/syntax";
+import { isElementActuallyVisible } from "@/zeros/utils/element-visibility";
 
 // Shiki FontStyle bitmask (shikijs/vscode-textmate): Italic=1, Bold=2,
 // Underline=4, Strikethrough=8.
@@ -74,6 +75,29 @@ const HIDDEN_RETRY_MS = 1_000;
 // Files too big to tokenize synchronously still theme this many leading lines on
 // the first paint (~5ms) — more than a viewport — while the full pass runs.
 const FIRST_PAINT_HEAD_LINES = 240;
+
+export type ShikiHighlightWork = "settled" | "clear" | "defer" | "tokenize";
+
+/** Decide the next async highlight action without waking the visibility API
+ * for already-settled or one-shot clear states. Keeping this decision pure
+ * pins the hidden-editor timer contract independently of CodeMirror's DOM. */
+export function planShikiHighlightWork(args: {
+  paintComplete: boolean;
+  hasLanguage: boolean;
+  lineCount: number;
+  charCount: number;
+  isVisible: () => boolean;
+}): ShikiHighlightWork {
+  if (args.paintComplete) return "settled";
+  if (
+    !args.hasLanguage ||
+    args.lineCount > MAX_LINES ||
+    args.charCount > MAX_CHARS
+  ) {
+    return "clear";
+  }
+  return args.isVisible() ? "tokenize" : "defer";
+}
 
 export interface ShikiConfig {
   /** Shiki bundled language id, or null → no color (plain + Lezer structure). */
@@ -259,33 +283,27 @@ const shikiPlugin = ViewPlugin.fromClass(
     }
 
     private async run(view: EditorView) {
-      // Dispatching decorations re-enters CodeMirror's measure loop, and a
-      // visibility:hidden retained deck can never stabilize its viewport —
-      // each dispatch re-arms another rAF measure pass and eventually logs
-      // "Measure loop restarted more than 5 times", a permanent hidden-layout
-      // treadmill. Park the (re)tokenize until the editor is actually
-      // rendered; one idle timeout per hidden editor is far cheaper than a
-      // hidden relayout, and the first visible retry paints within a second.
-      const dom = view.dom;
-      if (typeof dom.checkVisibility === "function" && !dom.checkVisibility()) {
-        if (this.timer != null) clearTimeout(this.timer);
-        this.timer = setTimeout(() => {
-          this.timer = null;
-          void this.run(view);
-        }, HIDDEN_RETRY_MS);
-        return;
-      }
-      const myGen = ++this.gen; // race guard
       const cfg = view.state.facet(shikiConfig);
       const doc = view.state.doc;
+      const work = planShikiHighlightWork({
+        paintComplete: paintMatches(
+          view.state.field(shikiField).complete,
+          cfg,
+        ),
+        hasLanguage: Boolean(cfg.lang),
+        lineCount: doc.lines,
+        charCount: doc.length,
+        isVisible: () => isElementActuallyVisible(view.dom),
+      });
 
-      // The synchronous first paint (or an earlier async pass) already covers
-      // this exact config — nothing to redo, and no redundant dispatch.
-      if (paintMatches(view.state.field(shikiField).complete, cfg)) return;
+      // A synchronous first paint (or an earlier async pass) already covers
+      // this exact config. In particular, a hidden complete editor is SETTLED:
+      // it must not arm a one-second retry forever.
+      if (work === "settled") return;
+      const myGen = ++this.gen; // invalidate any older async result
 
-      // No language, or too big → clear color (the base foreground stays the
-      // theme's, supplied by the chrome theme).
-      if (!cfg.lang || doc.lines > MAX_LINES || doc.length > MAX_CHARS) {
+      // No language, or too big, is a one-shot clear and requires no layout.
+      if (work === "clear") {
         if (myGen === this.gen) {
           view.dispatch({
             effects: setPaint.of({ decos: Decoration.none, complete: cfg }),
@@ -294,10 +312,26 @@ const shikiPlugin = ViewPlugin.fromClass(
         return;
       }
 
+      // Dispatching decorations re-enters CodeMirror's measure loop, and a
+      // visibility:hidden retained deck can never stabilize its viewport —
+      // each dispatch re-arms another rAF measure pass and eventually logs
+      // "Measure loop restarted more than 5 times", a permanent hidden-layout
+      // treadmill. Park the (re)tokenize until the editor is actually
+      // rendered; one idle timeout per hidden editor is far cheaper than a
+      // hidden relayout, and the first visible retry paints within a second.
+      if (work === "defer") {
+        if (this.timer != null) clearTimeout(this.timer);
+        this.timer = setTimeout(() => {
+          this.timer = null;
+          void this.run(view);
+        }, HIDDEN_RETRY_MS);
+        return;
+      }
+
       const code = doc.toString(); // the EXACT string we map tokens back onto
       const res: TokenizedCode | null = await highlightToTokens(
         code,
-        cfg.lang,
+        cfg.lang!,
         cfg.theme,
       );
 

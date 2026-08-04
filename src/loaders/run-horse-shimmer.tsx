@@ -5,6 +5,7 @@
 import { useEffect, useRef } from "react";
 
 import { cn } from "@/zeros/ui/cn";
+import { isElementActuallyVisible } from "@/zeros/utils/element-visibility";
 import {
   RUN_HORSE_FRAME_COUNT,
   RUN_HORSE_MICRO_DEFAULTS,
@@ -129,9 +130,7 @@ export function RunHorseShimmer({ className }: RunHorseShimmerProps) {
       // The rAF keeps running (cheap when it does nothing) so the shimmer
       // resumes seamlessly — with the correct phase — on the first visible
       // frame; elapsed derives from `now`, not from frames painted.
-      const hidden =
-        typeof canvas.checkVisibility === "function" &&
-        !canvas.checkVisibility();
+      const hidden = !isElementActuallyVisible(canvas);
       if (!hidden) {
         const elapsed =
           ((now - anchorTime) * RUN_HORSE_MOTION_DEFAULTS.speed) /

@@ -145,6 +145,34 @@ describe("updateSettingsFile", () => {
     expect(readSettingsFile(file).doc).toEqual(next);
   });
 
+  it("preserves unknown nested model keys when patching a known sibling", () => {
+    const file = path.join(dir, "settings.toml");
+    writeFileSync(
+      file,
+      [
+        "[models.claude_code]",
+        'default = "claude-sonnet"',
+        'review_effort_level = "future-tier"',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    updateSettingsFile(
+      file,
+      { models: { claude_code: { default: "claude-opus" } } } as never,
+      { schemaUrl: null },
+    );
+
+    const claude = (
+      readSettingsFile(file).doc.models as {
+        claude_code: Record<string, unknown>;
+      }
+    ).claude_code;
+    expect(claude.default).toBe("claude-opus");
+    expect(claude.review_effort_level).toBe("future-tier");
+  });
+
   it("creates the file (with $schema) when it doesn't exist", () => {
     const file = path.join(dir, ".zeros", "settings.toml");
     updateSettingsFile(file, { git: { base_branch: "main" } }, { schemaUrl: SCHEMA_URL_REPO });

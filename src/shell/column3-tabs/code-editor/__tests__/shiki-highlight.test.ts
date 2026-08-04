@@ -1,6 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { ThemedToken } from "shiki";
-import { buildShikiDecorations } from "../shiki-highlight";
+import {
+  buildShikiDecorations,
+  planShikiHighlightWork,
+} from "../shiki-highlight";
 
 const tok = (content: string, offset: number, color?: string): ThemedToken =>
   ({ content, offset, color }) as ThemedToken;
@@ -50,5 +53,42 @@ describe("buildShikiDecorations", () => {
       5,
     );
     expect(set.size).toBe(2);
+  });
+});
+
+describe("planShikiHighlightWork", () => {
+  it("settles a hidden editor whose current paint is already complete", () => {
+    const isVisible = vi.fn(() => false);
+    expect(
+      planShikiHighlightWork({
+        paintComplete: true,
+        hasLanguage: true,
+        lineCount: 10,
+        charCount: 100,
+        isVisible,
+      }),
+    ).toBe("settled");
+    expect(isVisible).not.toHaveBeenCalled();
+  });
+
+  it("defers only pending tokenization while hidden", () => {
+    expect(
+      planShikiHighlightWork({
+        paintComplete: false,
+        hasLanguage: true,
+        lineCount: 10,
+        charCount: 100,
+        isVisible: () => false,
+      }),
+    ).toBe("defer");
+    expect(
+      planShikiHighlightWork({
+        paintComplete: false,
+        hasLanguage: false,
+        lineCount: 10,
+        charCount: 100,
+        isVisible: () => false,
+      }),
+    ).toBe("clear");
   });
 });

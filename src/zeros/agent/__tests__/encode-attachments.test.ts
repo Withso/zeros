@@ -31,6 +31,7 @@ import {
   type EncodeAttachmentsContext,
 } from "../encode-attachments";
 import type { ComposerAttachment } from "../composer-attachments";
+import { messageToEditorContent } from "../composer-editor/reconstruct";
 
 function textAttachment(
   over: Partial<ComposerAttachment> = {},
@@ -424,6 +425,47 @@ describe("encodeAttachments — image branches still work", () => {
       attachmentId: "original",
     });
     expect(skipped).toEqual([]);
+  });
+
+  it("gives a legacy image one durable id that later edit-resends reuse", async () => {
+    writeContextAttachment.mockImplementation(
+      async (args: { attachmentId: string; filename: string }) => ({
+        absolutePath: `/repo/.context-graph/local/attachments/${args.attachmentId}/${args.filename}`,
+        relativePath: `.context-graph/local/attachments/${args.attachmentId}/${args.filename}`,
+        mimeType: "image/png",
+        bytes: 5,
+      }),
+    );
+    const legacy = messageToEditorContent({
+      text: "",
+      attachments: [
+        {
+          name: "legacy.png",
+          mimeType: "image/png",
+          kind: "image",
+          thumbnailUri: "data:image/png;base64,aGVsbG8=",
+        },
+      ],
+    });
+
+    const first = await encodeAttachments(legacy.attachments, VISION);
+    const durableId = first.bubbleAttachments[0]!.attachmentId!;
+    const reconstructed = messageToEditorContent({
+      text: "",
+      attachments: first.bubbleAttachments,
+    });
+    readImageAttachment.mockResolvedValue({
+      base64: "aGVsbG8=",
+      mimeType: "image/png",
+      bytes: 5,
+    });
+    await encodeAttachments(reconstructed.attachments, VISION);
+
+    expect(
+      writeContextAttachment.mock.calls.map(
+        ([args]) => (args as { attachmentId: string }).attachmentId,
+      ),
+    ).toEqual([durableId, durableId]);
   });
 });
 

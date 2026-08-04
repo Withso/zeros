@@ -19,10 +19,13 @@ export interface ComposerEditorContextValue {
   onPreviewImage?: (dataUri: string) => void;
   /** Workspace root for disk-backed images reconstructed from transcripts. */
   cwd?: string | null;
+  /** False while a retained composer is hidden; disk image leases stay cold. */
+  attachmentImagesActive: boolean;
 }
 
 const ComposerEditorContext = createContext<ComposerEditorContextValue>({
   getAttachment: () => undefined,
+  attachmentImagesActive: true,
 });
 
 export const ComposerEditorProvider = ComposerEditorContext.Provider;

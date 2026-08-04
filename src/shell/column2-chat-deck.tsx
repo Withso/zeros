@@ -9,7 +9,7 @@
 // The deck is globally bounded; closed chats leave immediately.
 // ──────────────────────────────────────────────────────────
 
-import React, { useEffect, useMemo } from "react";
+import React, { useEffect, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useShallow } from "zustand/react/shallow";
 
@@ -82,15 +82,18 @@ export function Column2ChatDeck() {
     () => new Map(chats.map((chat) => [chat.id, chat] as const)),
     [chats],
   );
+  const setRetainedChatIds = sessions.setRetainedChatIds;
+  const setRetainedChatIdsRef = useRef(setRetainedChatIds);
+  setRetainedChatIdsRef.current = setRetainedChatIds;
 
   // Publish only the COMMITTED deck. The eviction action runs in a passive
   // effect, after removed ChatViews have flushed drafts/queue holds and after
   // newly-retained views exist. Recent switching remains the exact same 12-view
   // DOM deck; this merely bounds the transcript arrays behind older slots.
   useEffect(() => {
-    sessions.setRetainedChatIds(retainedChatIds);
-  }, [retainedChatIds, sessions]);
-  useEffect(() => () => sessions.setRetainedChatIds([]), [sessions]);
+    setRetainedChatIds(retainedChatIds);
+  }, [retainedChatIds, setRetainedChatIds]);
+  useEffect(() => () => setRetainedChatIdsRef.current([]), []);
 
   return (
     <>

@@ -90,6 +90,7 @@ export function AttachmentPill(props: NodeViewProps) {
     cwd: ctx.cwd,
     diskPath: att?.diskPath,
     attachmentId: att?.contextAttachmentId,
+    enabled: ctx.attachmentImagesActive,
   });
   const dataUri =
     att && isImage && att.data

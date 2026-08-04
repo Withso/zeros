@@ -125,6 +125,10 @@ export type IgnoredPathOp = {
 
 export interface IgnoredPathDeltaPlan {
   operations: IgnoredPathOp[];
+  /** @pierre/trees cannot incrementally replace an inferred directory with a
+   *  file without corrupting its child index. The caller must reset from the
+   *  already-reconciled full path list for this rare kind change. */
+  requiresReset: boolean;
   /** The explicit ignored paths the tree actually represents after operations.
    *  This can temporarily retain a disappearing directory while a roots-first
    *  refresh still carries its previous child listing. */
@@ -205,24 +209,33 @@ export function planIgnoredPathDelta(
   // and removes would turn a filesystem burst into quadratic renderer work.
   const removingByKey = new Map<string, string>();
   const removingFiles = new Set<string>();
-  const removedAncestorDirs = new Set<string>();
+  const removedDescendantsByAncestor = new Map<string, string[]>();
   for (const remove of removing) {
     removingByKey.set(dirKey(remove), remove);
     if (!isDirEntry(remove)) removingFiles.add(remove);
-    visitAncestorDirs(remove, (ancestor) => removedAncestorDirs.add(ancestor));
+    visitAncestorDirs(remove, (ancestor) => {
+      const descendants = removedDescendantsByAncestor.get(ancestor);
+      if (descendants) descendants.push(remove);
+      else removedDescendantsByAncestor.set(ancestor, [remove]);
+    });
   }
 
   // A file being added where the current tree has only explicit descendants
-  // still collides with their implicit directory. Remove that directory as the
-  // blocker even when it was not itself explicit in `applied`.
-  const syntheticBlockingDirs = new Set<string>();
-  for (const add of adding) {
-    if (!isDirEntry(add) && removedAncestorDirs.has(`${add}/`)) {
-      syntheticBlockingDirs.add(`${add}/`);
-    }
+  // collides with their implicit directory. @pierre/trees has no safe
+  // incremental sequence for that transition: removing the inferred directory
+  // corrupts its child index, while removing only descendants leaves the empty
+  // inferred node and the add throws. Rebuild this rare shape from the already-
+  // reconciled full path list instead of partially mutating the store.
+  const requiresReset = adding.some(
+    (add) =>
+      !isDirEntry(add) &&
+      (removedDescendantsByAncestor.get(`${add}/`)?.length ?? 0) > 0,
+  );
+  if (requiresReset) {
+    return { operations: [], requiresReset: true, applied: effectiveNext };
   }
 
-  const blocking = new Set<string>(syntheticBlockingDirs);
+  const blocking = new Set<string>();
   for (const add of adding) {
     const samePath = removingByKey.get(dirKey(add));
     if (samePath) blocking.add(samePath);
@@ -244,7 +257,7 @@ export function planIgnoredPathDelta(
     ),
   );
   appendDenestedRemoves(operations, remaining);
-  return { operations, applied: effectiveNext };
+  return { operations, requiresReset: false, applied: effectiveNext };
 }
 
 function appendDenestedRemoves(

@@ -25,6 +25,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 
 import { cn } from "@/zeros/ui/cn";
+import { isElementActuallyVisible } from "@/zeros/utils/element-visibility";
 
 // Shared utility classes — kept as module constants so consumers
 // composing their own className don't have to redefine the base.
@@ -56,9 +57,7 @@ export const LiveDuration = memo(function LiveDuration({
       // elapsed value is derived from startedAt at render time, so skipped
       // ticks cost nothing: the first visible tick shows the correct total.
       const el = elRef.current;
-      if (el && typeof el.checkVisibility === "function" && !el.checkVisibility()) {
-        return;
-      }
+      if (el && !isElementActuallyVisible(el)) return;
       setTick((t) => t + 1);
     }, 1000);
     return () => window.clearInterval(id);

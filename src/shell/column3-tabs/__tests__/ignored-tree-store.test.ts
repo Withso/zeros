@@ -171,6 +171,21 @@ describe("the store accepts every op ignoredPathDelta produces", () => {
     expect(tree.getItem("cache/")?.isDirectory()).toBe(true);
     expect(tree.getItem("cache/x.bin")).not.toBeNull();
   });
+
+  it("rebuilds when replacing an inferred directory and its descendants with a file", () => {
+    const tree = makeTree(["src/a.ts", "cache/item.bin"]);
+    const plan = planIgnoredPathDelta(
+      set("cache/item.bin"),
+      set("cache"),
+    );
+
+    expect(plan.requiresReset).toBe(true);
+    expect(plan.operations).toEqual([]);
+    expect(() => tree.resetPaths(["src/a.ts", "cache"])).not.toThrow();
+    expect(tree.getItem("cache")?.isDirectory()).toBe(false);
+    expect(tree.getItem("cache/item.bin")).toBeNull();
+    expect(tree.getItem("src/a.ts")).not.toBeNull();
+  });
 });
 
 describe("resetPaths input is reconciled before the store sees it", () => {

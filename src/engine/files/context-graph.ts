@@ -49,6 +49,13 @@ const GITIGNORE_BODY = [
 
 /** Same id alphabet the composer generates and the attachment IPC enforces. */
 const ID_OK = /^[a-zA-Z0-9_-]{1,128}$/;
+/** Keep remote/local graph writes on the same image budget as the composer and
+ * read-file bridge. The encoded ceiling is checked before Buffer allocation so
+ * a hostile relay cannot use an enormous invalid base64 string as a transient
+ * memory spike either. */
+export const MAX_CONTEXT_GRAPH_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+const MAX_CONTEXT_GRAPH_ATTACHMENT_BASE64_CHARS =
+  Math.ceil(MAX_CONTEXT_GRAPH_ATTACHMENT_BYTES / 3) * 4;
 
 // Listing bounds. The canvas is a bounded surface, not a file manager: cap the
 // walk so a graph someone filled with a node_modules-scale tree cannot wedge
@@ -472,6 +479,19 @@ export async function stageContextGraphAttachment(
   if (!ID_OK.test(args.attachmentId)) {
     return { ok: false, error: "invalid attachment id" };
   }
+  if (args.base64.length > MAX_CONTEXT_GRAPH_ATTACHMENT_BASE64_CHARS) {
+    return {
+      ok: false,
+      error: "attachment exceeds the 5 MiB size limit",
+    };
+  }
+  const buf = Buffer.from(args.base64, "base64");
+  if (buf.length > MAX_CONTEXT_GRAPH_ATTACHMENT_BYTES) {
+    return {
+      ok: false,
+      error: "attachment exceeds the 5 MiB size limit",
+    };
+  }
   try {
     const scaffold = await ensureContextGraph(workspaceRoot);
     if (!scaffold.ok) {
@@ -510,7 +530,6 @@ export async function stageContextGraphAttachment(
     if (!finalPath.startsWith(dir + path.sep)) {
       return { ok: false, error: "refusing to write outside the attachment folder" };
     }
-    const buf = Buffer.from(args.base64, "base64");
     const result = {
       ok: true as const,
       absolutePath: finalPath,

@@ -65,6 +65,7 @@ import {
   zeroContactRespawnBackoffMs,
 } from "./engine-health";
 import { createSharedBackpressureGate } from "./stream-backpressure";
+import { createBoundedLineForwarder } from "./bounded-line-forwarder";
 
 // Resolve lazily: main.ts imports this module before its body seeds the release
 // channel baked into a packaged build. Every actual sidecar operation runs after
@@ -1254,30 +1255,15 @@ async function doSpawnEngine(
     write: (s: string) => void,
   ) => {
     if (!stream) return;
-    // Partial-line ceiling: a child that emits a huge blob with no newline
-    // (a wedged binary dump, a runaway single-line log) would otherwise grow
-    // this buffer without bound inside Electron main. Flush the oversized
-    // fragment as its own line and continue.
-    const MAX_PARTIAL_LINE_CHARS = 1_000_000;
-    let buf = "";
+    // Bound both the partial-line buffer AND downstream log volume. A child
+    // that never emits a newline gets one fixed diagnostic for that logical
+    // line; the remaining bytes are discarded until its newline arrives.
+    const forwarder = createBoundedLineForwarder(write);
     stream.setEncoding?.("utf-8");
     stream.on("data", (chunk: string | Buffer) => {
-      buf += typeof chunk === "string" ? chunk : chunk.toString("utf-8");
-      let nl = buf.indexOf("\n");
-      while (nl !== -1) {
-        const line = buf.slice(0, nl).replace(/\r$/, "");
-        buf = buf.slice(nl + 1);
-        if (line.length > 0) write(line);
-        nl = buf.indexOf("\n");
-      }
-      if (buf.length > MAX_PARTIAL_LINE_CHARS) {
-        write(buf);
-        buf = "";
-      }
+      forwarder.push(chunk);
     });
-    stream.on("end", () => {
-      if (buf.length > 0) write(buf);
-    });
+    stream.on("end", () => forwarder.end());
   };
   // Strip ANSI escapes before the console sinks: the engine's startup banner
   // and run/setup surfaces emit color codes (src/cli.ts), and forwarding them
