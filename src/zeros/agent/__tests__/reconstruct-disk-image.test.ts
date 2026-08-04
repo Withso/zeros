@@ -14,6 +14,7 @@ describe("messageToEditorContent — disk-backed images", () => {
           mimeType: "image/png",
           kind: "image",
           diskPath: ".context-graph/local/attachments/a1/shot.png",
+          attachmentId: "a1",
         },
       ],
     });
@@ -24,6 +25,7 @@ describe("messageToEditorContent — disk-backed images", () => {
       kind: "image",
       data: "",
       diskPath: ".context-graph/local/attachments/a1/shot.png",
+      contextAttachmentId: "a1",
     });
   });
 

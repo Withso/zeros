@@ -89,6 +89,7 @@ export function AttachmentPill(props: NodeViewProps) {
   const diskImageSource = useAttachmentImageSource({
     cwd: ctx.cwd,
     diskPath: att?.diskPath,
+    attachmentId: att?.contextAttachmentId,
   });
   const dataUri =
     att && isImage && att.data

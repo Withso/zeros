@@ -14,9 +14,12 @@
 // ──────────────────────────────────────────────────────────
 
 import { nativeInvoke } from "../../native/runtime";
-import { readWorkspaceFile } from "../../native/files";
 import { notifyContextGraphChanged } from "../../native/context-graph";
 import type { AgentMessage } from "./use-agent-session";
+import {
+  isAgentAttachmentDiskPath,
+  readAgentAttachmentFile,
+} from "./attachment-file-reader";
 import { getActiveBridge } from "../bridge/active-bridge";
 import { resolveBridgeWorkspaceIdForCwd } from "../bridge/workspace-id-resolver";
 import {
@@ -341,13 +344,7 @@ export interface AttachmentReadResult {
  *  chat-scoped layout during migration) are valid transcript references. A
  *  transcript can arrive over sync/import, so never let a forged `diskPath`
  *  turn edit-resend into an arbitrary workspace-file reader. */
-export function isAgentAttachmentDiskPath(value: string): boolean {
-  return (
-    /^\.context-graph\/(?:local|shared)\/attachments\/[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/.test(
-      value,
-    ) || /^\.context\/attachments\/[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/.test(value)
-  );
-}
+export { isAgentAttachmentDiskPath } from "./attachment-file-reader";
 
 /** Persist a base64-encoded attachment into the workspace's context graph
  *  (`<cwd>/.context-graph/<scope>/attachments/<attachmentId>/<file>`) and
@@ -397,12 +394,13 @@ export async function writeContextAttachment(args: {
 export async function readImageAttachment(args: {
   cwd: string;
   diskPath: string;
+  attachmentId?: string;
   mimeType: string;
 }): Promise<AttachmentReadResult> {
   if (!isAgentAttachmentDiskPath(args.diskPath)) {
     throw new Error("invalid image attachment path");
   }
-  const result = await readWorkspaceFile(args.cwd, args.diskPath);
+  const result = await readAgentAttachmentFile(args);
   if (result?.kind !== "image" || !result.dataUrl) {
     throw new Error(
       result?.kind === "too-large"

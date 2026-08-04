@@ -107,6 +107,10 @@ import type {
 
 const PROVISION_PATHS_META_KEY = "create.provision-paths.v1";
 const WORKTREE_REMOVE_TIMEOUT_MS = 30_000;
+const LEGACY_ATTACHMENT_ARCHIVE_PATHS = [
+  ".context/.gitignore",
+  ".context/attachments",
+] as const;
 
 /** A repo with no commits (unborn HEAD — e.g. freshly `git init`'d) can't host
  *  a worktree: there's no base commit to fork from, and resolveWorktreeBase
@@ -2557,6 +2561,14 @@ async function archiveWorkspaceInner(
         // Only when it holds real content, so an empty skeleton doesn't make
         // the missing-snapshot check below stricter for clean workspaces.
         ...((await contextGraphHasContent(ws.path)) ? [CONTEXT_GRAPH_DIR] : []),
+        // Disk-backed transcript images briefly lived under `.context/` before
+        // the context graph landed. A transcript window lazily copies them into
+        // the graph, but an unopened chat must survive archive until that read.
+        ...(existsSync(path.join(ws.path, ".context/attachments"))
+          ? LEGACY_ATTACHMENT_ARCHIVE_PATHS.filter((relative) =>
+              existsSync(path.join(ws.path, relative)),
+            )
+          : []),
       ]),
     ];
     const archiveSnapshot = await snapshotWorkingTree(

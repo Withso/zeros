@@ -2,12 +2,12 @@
 // Legacy transcript image externalization
 // ──────────────────────────────────────────────────────────
 //
-// Pre-disk-protocol user messages persisted a full data URL in both the flat
-// attachment list and the ordered segment list. Window reads migrate only the
-// rows being opened: write each unique message image once into the workspace
-// context graph, replace both copies with the same diskPath, and upsert the
-// compact payload. A failed write leaves that legacy URI untouched so old chats
-// remain viewable/editable.
+// Two layouts predate the context graph: full data URLs in transcript JSON and
+// disk references under `.context/attachments/<chat>/`. Window reads migrate
+// only the rows being opened: copy each unique image once into the workspace
+// graph, replace both transcript copies with the same stable record id/path,
+// and upsert the compact payload. A failed copy leaves the old reference intact
+// so the chat remains viewable/editable.
 // ──────────────────────────────────────────────────────────
 
 import { createHash } from "node:crypto";
@@ -16,6 +16,7 @@ import path from "node:path";
 import type { PersistedMessage } from "../db/messages";
 import { upsertChatMessagesBulk } from "../db/messages";
 import { stageContextGraphAttachment } from "./context-graph";
+import { readWorkspaceFile } from "./read-file";
 
 interface LegacyImageRef {
   name?: unknown;
@@ -24,6 +25,26 @@ interface LegacyImageRef {
   type?: unknown;
   thumbnailUri?: unknown;
   diskPath?: unknown;
+  attachmentId?: unknown;
+}
+
+interface MigratedImage {
+  diskPath: string;
+  attachmentId: string;
+}
+
+const ID_OK = /^[a-zA-Z0-9_-]{1,128}$/;
+const CONTEXT_GRAPH_PATH =
+  /^\.context-graph\/(?:local|shared)\/attachments\/([a-zA-Z0-9_-]{1,128})\/[a-zA-Z0-9._-]+$/;
+const LEGACY_DISK_PATH =
+  /^\.context\/attachments\/[a-zA-Z0-9_-]{1,128}\/[a-zA-Z0-9._-]+$/;
+
+/** Cheap raw-payload gate shared with the window handlers. */
+export function payloadNeedsLegacyImageMigration(payload: string): boolean {
+  return (
+    (payload.includes('"thumbnailUri"') && payload.includes("data:image/")) ||
+    payload.includes(".context/attachments/")
+  );
 }
 
 function dataUrlParts(
@@ -71,10 +92,7 @@ export async function externalizeLegacyMessageImages(args: {
     // The common path is every newly-written message. Avoid JSON.parse over
     // large tool payloads unless the raw row can actually contain a legacy
     // image URI.
-    if (
-      !row.payload.includes('"thumbnailUri"') ||
-      !row.payload.includes("data:image/")
-    ) {
+    if (!payloadNeedsLegacyImageMigration(row.payload)) {
       result.push(row);
       continue;
     }
@@ -92,14 +110,34 @@ export async function externalizeLegacyMessageImages(args: {
     }
 
     const refs = imageRefs(message);
-    const writes = new Map<string, Promise<string | null>>();
+    const writes = new Map<string, Promise<MigratedImage | null>>();
     let changed = false;
     for (const ref of refs) {
-      if (typeof ref.diskPath === "string") continue;
-      const parts = dataUrlParts(ref.thumbnailUri);
-      if (!parts) continue;
-      const source = ref.thumbnailUri as string;
-      let write = writes.get(source);
+      const currentGraph =
+        typeof ref.diskPath === "string"
+          ? CONTEXT_GRAPH_PATH.exec(ref.diskPath)
+          : null;
+      if (currentGraph) {
+        if (ref.attachmentId !== currentGraph[1]) {
+          ref.attachmentId = currentGraph[1];
+          changed = true;
+        }
+        if (dataUrlParts(ref.thumbnailUri)) {
+          delete ref.thumbnailUri;
+          changed = true;
+        }
+        continue;
+      }
+
+      const legacyDiskPath =
+        typeof ref.diskPath === "string" && LEGACY_DISK_PATH.test(ref.diskPath)
+          ? ref.diskPath
+          : null;
+      const inline = dataUrlParts(ref.thumbnailUri);
+      if (!legacyDiskPath && !inline) continue;
+      const source = legacyDiskPath ?? (ref.thumbnailUri as string);
+      const sourceKey = `${legacyDiskPath ? "disk" : "data"}\0${source}`;
+      let write = writes.get(sourceKey);
       if (!write) {
         const digest = createHash("sha256")
           .update(args.chatId)
@@ -109,23 +147,38 @@ export async function externalizeLegacyMessageImages(args: {
           .update(source)
           .digest("hex")
           .slice(0, 20);
-        write = stageContextGraphAttachment(args.cwd, {
-          attachmentId: `legacy_${digest}`,
-          base64: parts.base64,
-          filename:
-            typeof ref.name === "string" && ref.name
-              ? ref.name
-              : `legacy-${digest}`,
-        })
-          .then((written) =>
-            written.ok && written.relativePath ? written.relativePath : null,
-          )
-          .catch(() => null);
-        writes.set(source, write);
+        const attachmentId =
+          typeof ref.attachmentId === "string" && ID_OK.test(ref.attachmentId)
+            ? ref.attachmentId
+            : `legacy_${digest}`;
+        write = (async (): Promise<MigratedImage | null> => {
+          let base64 = inline?.base64 ?? null;
+          if (legacyDiskPath) {
+            const read = readWorkspaceFile(args.cwd, legacyDiskPath);
+            if (read.kind !== "image" || !read.dataUrl) return null;
+            base64 = dataUrlParts(read.dataUrl)?.base64 ?? null;
+          }
+          if (!base64) return null;
+          const written = await stageContextGraphAttachment(args.cwd, {
+            attachmentId,
+            base64,
+            filename:
+              typeof ref.name === "string" && ref.name
+                ? ref.name
+                : legacyDiskPath
+                  ? path.posix.basename(legacyDiskPath)
+                  : `legacy-${digest}`,
+          });
+          return written.ok && written.relativePath
+            ? { diskPath: written.relativePath, attachmentId }
+            : null;
+        })().catch(() => null);
+        writes.set(sourceKey, write);
       }
-      const diskPath = await write;
-      if (!diskPath) continue;
-      ref.diskPath = diskPath;
+      const migrated = await write;
+      if (!migrated) continue;
+      ref.diskPath = migrated.diskPath;
+      ref.attachmentId = migrated.attachmentId;
       delete ref.thumbnailUri;
       changed = true;
     }

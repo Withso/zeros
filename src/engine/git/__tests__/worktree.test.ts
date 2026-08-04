@@ -1729,6 +1729,28 @@ describe("worktree lifecycle (integration)", () => {
     );
   });
 
+  it("preserves pre-context-graph attachments until transcript migration", async () => {
+    const created = await createWorkspace({ repoRoot });
+    const legacyAttachment = path.join(
+      created.path,
+      ".context",
+      "attachments",
+      "legacy-chat",
+      "old-shot.png",
+    );
+    await mkdir(path.dirname(legacyAttachment), { recursive: true });
+    await writeFile(path.join(created.path, ".context", ".gitignore"), "*\n");
+    await writeFile(legacyAttachment, "legacy image bytes");
+
+    await archiveWorkspace({
+      workspaceId: created.workspaceId,
+      stashUncommitted: true,
+    });
+    await restoreWorkspace(created.workspaceId);
+
+    expect(await readFile(legacyAttachment, "utf8")).toBe("legacy image bytes");
+  });
+
   it("retries restore idempotently after WIP applied but before its phase write", async () => {
     const created = await createWorkspace({ repoRoot });
     await writeFile(path.join(created.path, "retry.txt"), "durable WIP\n");

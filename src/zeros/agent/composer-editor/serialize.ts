@@ -31,9 +31,9 @@ export interface ComposerSerialized {
 }
 
 /** Map the composer's serialized segments to the persisted message segments
- *  the sent bubble renders. Drops transient fields (token, attachmentId) and
- *  copies only the encoder's disk reference — never the staged image base64.
- *  Pure — shared by direct send, queued edit, and edit-resubmit. */
+ *  the sent bubble renders. Drops transient editor fields and copies only the
+ *  encoder's durable graph reference — never the staged image base64. Pure —
+ *  shared by direct send, queued edit, and edit-resubmit. */
 export function toMessageSegments(
   segments: ComposerSegment[],
   attachments: ComposerAttachment[],
@@ -42,6 +42,7 @@ export function toMessageSegments(
     {
       diskPath?: string;
       thumbnailUri?: string;
+      attachmentId?: string;
     }
   >,
 ): MessageContentSegment[] {
@@ -60,6 +61,9 @@ export function toMessageSegments(
       kind: s.kind,
       ...(bubbleAttachment?.diskPath
         ? { diskPath: bubbleAttachment.diskPath }
+        : {}),
+      ...(bubbleAttachment?.attachmentId
+        ? { attachmentId: bubbleAttachment.attachmentId }
         : {}),
       // Compatibility for a legacy message being edited and saved without a
       // disk path. New encoder results never supply thumbnailUri.

@@ -40,6 +40,7 @@ function reconstructAttachment(
     kind: "image" | "text";
     thumbnailUri?: string;
     diskPath?: string;
+    attachmentId?: string;
   },
   id: string,
 ): ComposerAttachment {
@@ -58,6 +59,7 @@ function reconstructAttachment(
     size: data ? approxBytes(data) : 0,
     validation: { ok: true },
     ...(seg.diskPath ? { diskPath: seg.diskPath } : {}),
+    ...(seg.attachmentId ? { contextAttachmentId: seg.attachmentId } : {}),
   };
 }
 
@@ -82,6 +84,7 @@ export function messageToEditorContent(opts: {
               kind: a.kind,
               thumbnailUri: a.thumbnailUri,
               diskPath: a.diskPath,
+              attachmentId: a.attachmentId,
             }),
           ),
         ];

@@ -11,8 +11,10 @@
 
 import { useEffect, useState } from "react";
 
-import { readWorkspaceFile } from "@/native/files";
-import { isAgentAttachmentDiskPath } from "./agent-history-client";
+import {
+  isAgentAttachmentDiskPath,
+  readAgentAttachmentFile,
+} from "./attachment-file-reader";
 
 export interface AttachmentImageLease {
   source: Promise<string | null>;
@@ -26,7 +28,11 @@ interface CacheEntry {
   source: Promise<string | null>;
 }
 
-type SourceLoader = (cwd: string, diskPath: string) => Promise<string | null>;
+type SourceLoader = (
+  cwd: string,
+  diskPath: string,
+  attachmentId?: string,
+) => Promise<string | null>;
 type SourceReleaser = (source: string) => void;
 
 export class AttachmentImageSourceCache {
@@ -37,8 +43,12 @@ export class AttachmentImageSourceCache {
     private readonly revoke: SourceReleaser,
   ) {}
 
-  acquire(cwd: string, diskPath: string): AttachmentImageLease {
-    const key = `${cwd}\u0000${diskPath}`;
+  acquire(
+    cwd: string,
+    diskPath: string,
+    attachmentId?: string,
+  ): AttachmentImageLease {
+    const key = `${cwd}\u0000${attachmentId ?? diskPath}`;
     let entry = this.entries.get(key);
     if (!entry) {
       const created: CacheEntry = {
@@ -47,7 +57,7 @@ export class AttachmentImageSourceCache {
         value: null,
         source: Promise.resolve(null),
       };
-      created.source = this.load(cwd, diskPath)
+      created.source = this.load(cwd, diskPath, attachmentId)
         .catch(() => null)
         .then((source) => {
           created.settled = true;
@@ -96,9 +106,14 @@ function dataUrlToBlobUrl(dataUrl: string): string | null {
 async function loadDiskImageSource(
   cwd: string,
   diskPath: string,
+  attachmentId?: string,
 ): Promise<string | null> {
   if (!cwd || !isAgentAttachmentDiskPath(diskPath)) return null;
-  const result = await readWorkspaceFile(cwd, diskPath);
+  const result = await readAgentAttachmentFile({
+    cwd,
+    diskPath,
+    attachmentId,
+  });
   if (result?.kind !== "image" || !result.dataUrl) return null;
   return dataUrlToBlobUrl(result.dataUrl);
 }
@@ -111,12 +126,13 @@ const attachmentImageSources = new AttachmentImageSourceCache(
 export function useAttachmentImageSource(args: {
   cwd?: string | null;
   diskPath?: string;
+  attachmentId?: string;
   legacyUri?: string;
   /** Hidden retained chat surfaces stay mounted. Disable their reads so the
    *  twelve-view deck does not pin full-resolution blobs for invisible chats. */
   enabled?: boolean;
 }): string | null {
-  const { cwd, diskPath, legacyUri, enabled = true } = args;
+  const { cwd, diskPath, attachmentId, legacyUri, enabled = true } = args;
   const [source, setSource] = useState<string | null>(
     enabled ? (legacyUri ?? null) : null,
   );
@@ -134,7 +150,7 @@ export function useAttachmentImageSource(args: {
       setSource(null);
       return;
     }
-    const lease = attachmentImageSources.acquire(cwd, diskPath);
+    const lease = attachmentImageSources.acquire(cwd, diskPath, attachmentId);
     let live = true;
     setSource(null);
     void lease.source.then((next) => {
@@ -144,7 +160,7 @@ export function useAttachmentImageSource(args: {
       live = false;
       lease.release();
     };
-  }, [cwd, diskPath, legacyUri, enabled]);
+  }, [cwd, diskPath, attachmentId, legacyUri, enabled]);
 
   return source;
 }

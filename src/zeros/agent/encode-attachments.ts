@@ -149,6 +149,9 @@ function stageInContextGraph(
  *  already owns a durable graph record. Reuse that record's id for the
  *  idempotent send-time write instead of creating a duplicate canvas card. */
 function durableAttachmentId(attachment: ComposerAttachment): string {
+  if (attachment.contextAttachmentId) {
+    return attachment.contextAttachmentId;
+  }
   const match =
     typeof attachment.diskPath === "string"
       ? /^\.context-graph\/(?:local|shared)\/attachments\/([a-zA-Z0-9_-]+)\//.exec(
@@ -240,6 +243,7 @@ export async function encodeAttachments(
         const restored = await readImageAttachment({
           cwd: ctx.cwd,
           diskPath: a.diskPath,
+          attachmentId: a.contextAttachmentId,
           mimeType: a.mimeType,
         });
         imageBase64 = restored.base64;

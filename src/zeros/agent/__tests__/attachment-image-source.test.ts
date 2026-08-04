@@ -25,6 +25,25 @@ describe("AttachmentImageSourceCache", () => {
     other.release();
   });
 
+  it("keeps one lease key when a stable attachment moves between scopes", async () => {
+    const load = vi.fn(async (_cwd: string, path: string) => `blob:${path}`);
+    const revoke = vi.fn();
+    const cache = new AttachmentImageSourceCache(load, revoke);
+    const local = ".context-graph/local/attachments/att-1/shot.png";
+    const shared = ".context-graph/shared/attachments/att-1/shot.png";
+
+    const beforeMove = cache.acquire("/repo", local, "att-1");
+    const afterMove = cache.acquire("/repo", shared, "att-1");
+
+    expect(await beforeMove.source).toBe(`blob:${local}`);
+    expect(await afterMove.source).toBe(`blob:${local}`);
+    expect(load).toHaveBeenCalledTimes(1);
+    beforeMove.release();
+    expect(revoke).not.toHaveBeenCalled();
+    afterMove.release();
+    expect(revoke).toHaveBeenCalledWith(`blob:${local}`);
+  });
+
   it("releases a source that resolves after its last consumer unmounts", async () => {
     let resolve!: (value: string) => void;
     const load = vi.fn(

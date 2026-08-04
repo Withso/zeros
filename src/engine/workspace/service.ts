@@ -140,7 +140,10 @@ import {
 } from "../git";
 import { readWorkspaceFile, isSensitiveRepoPath } from "../files/read-file";
 import { writeWorkspaceFile } from "../files/write-file";
-import { externalizeLegacyMessageImages } from "../files/legacy-attachment-migration";
+import {
+  externalizeLegacyMessageImages,
+  payloadNeedsLegacyImageMigration,
+} from "../files/legacy-attachment-migration";
 import {
   ensureContextGraph,
   listContextGraph,
@@ -2162,10 +2165,8 @@ export class WorkspaceService {
         const limit = Math.min(optNum(params, "limit") ?? 200, WINDOW_MAX_ROWS);
         const before = optNum(params, "before");
         const messages = windowChatMessages(chatId, limit, before);
-        const needsImageMigration = messages.some(
-          (row) =>
-            row.payload.includes('"thumbnailUri"') &&
-            row.payload.includes("data:image/"),
+        const needsImageMigration = messages.some((row) =>
+          payloadNeedsLegacyImageMigration(row.payload),
         );
         const folder = needsImageMigration
           ? this.legacyImageMigrationCwd(chatId)
@@ -2188,10 +2189,8 @@ export class WorkspaceService {
           limit,
           reqStr(params, "beforeMsgId"),
         );
-        const needsImageMigration = messages.some(
-          (row) =>
-            row.payload.includes('"thumbnailUri"') &&
-            row.payload.includes("data:image/"),
+        const needsImageMigration = messages.some((row) =>
+          payloadNeedsLegacyImageMigration(row.payload),
         );
         const folder = needsImageMigration
           ? this.legacyImageMigrationCwd(chatId)

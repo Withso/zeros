@@ -398,6 +398,7 @@ describe("encodeAttachments — image branches still work", () => {
           data: "",
           size: 0,
           diskPath: ".context-graph/local/attachments/original/shot.png",
+          contextAttachmentId: "original",
         }),
       ],
       VISION,
@@ -406,6 +407,7 @@ describe("encodeAttachments — image branches still work", () => {
     expect(readImageAttachment).toHaveBeenCalledWith({
       cwd: "/repo",
       diskPath: ".context-graph/local/attachments/original/shot.png",
+      attachmentId: "original",
       mimeType: "image/png",
     });
     expect(writeContextAttachment).toHaveBeenCalledWith(

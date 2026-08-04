@@ -307,6 +307,7 @@ function MessageAttachmentPill({
   const source = useAttachmentImageSource({
     cwd,
     diskPath: seg.diskPath,
+    attachmentId: seg.attachmentId,
     legacyUri: seg.thumbnailUri,
     enabled: active,
   });
@@ -334,6 +335,7 @@ function UserBubbleAttachment({
   const source = useAttachmentImageSource({
     cwd: attachmentCwd,
     diskPath: a.diskPath,
+    attachmentId: a.attachmentId,
     legacyUri: a.thumbnailUri,
     enabled: attachmentImagesActive,
   });

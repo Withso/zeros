@@ -233,6 +233,97 @@ describe("WorkspaceService", () => {
     ).toBe(true);
   });
 
+  it("migrates legacy disk-backed transcript images into the context graph", async () => {
+    const { upsertChat } = await import("../../db/chats");
+    const { upsertChatMessagesBulk, windowChatMessages } =
+      await import("../../db/messages");
+    const chatId = "legacy-disk-images";
+    upsertChat({
+      id: chatId,
+      folder: dir,
+      agentId: "claude",
+      agentName: "Claude",
+      model: null,
+      effort: "",
+      permissionMode: "default",
+      lastModeId: null,
+      prePlanModeId: null,
+      fast: false,
+      additionalDirectories: [],
+      title: "Legacy disk image",
+      createdAt: 1,
+      updatedAt: 1,
+      sessionId: null,
+      pinned: false,
+      archived: false,
+      sourceChatId: null,
+      kind: "chat",
+    });
+    const oldDiskPath = `.context/attachments/${chatId}/old-shot.png`;
+    fs.mkdirSync(path.join(dir, path.dirname(oldDiskPath)), {
+      recursive: true,
+    });
+    fs.writeFileSync(path.join(dir, oldDiskPath), "legacy-disk-png");
+    const message = {
+      id: "m-disk",
+      kind: "text",
+      role: "user",
+      text: "see old image",
+      createdAt: 2,
+      attachments: [
+        {
+          name: "shot.png",
+          mimeType: "image/png",
+          kind: "image",
+          diskPath: oldDiskPath,
+        },
+      ],
+      segments: [
+        { type: "text", text: "see old image " },
+        {
+          type: "attachment",
+          name: "shot.png",
+          mimeType: "image/png",
+          kind: "image",
+          diskPath: oldDiskPath,
+        },
+      ],
+    };
+    upsertChatMessagesBulk(chatId, [
+      {
+        msgId: "m-disk",
+        kind: "text",
+        payload: JSON.stringify(message),
+        createdAt: 2,
+      },
+    ]);
+
+    const result = (await svc.handle("messages.window", {
+      chatId,
+      limit: 10,
+    })) as { messages: Array<{ payload: string }> };
+    const payload = JSON.parse(result.messages[0].payload) as typeof message & {
+      attachments: Array<{ diskPath: string; attachmentId?: string }>;
+      segments: Array<{ diskPath?: string; attachmentId?: string }>;
+    };
+
+    expect(payload.attachments[0].diskPath).toMatch(
+      /^\.context-graph\/local\/attachments\/legacy_[a-f0-9]+\//,
+    );
+    expect(payload.segments[1].diskPath).toBe(payload.attachments[0].diskPath);
+    expect(payload.attachments[0].attachmentId).toMatch(/^legacy_[a-f0-9]+$/);
+    expect(payload.segments[1].attachmentId).toBe(
+      payload.attachments[0].attachmentId,
+    );
+    expect(result.messages[0].payload).not.toContain(oldDiskPath);
+    expect(windowChatMessages(chatId, 10)[0].payload).toBe(
+      result.messages[0].payload,
+    );
+    expect(
+      fs.readFileSync(path.join(dir, payload.attachments[0].diskPath), "utf8"),
+    ).toBe("legacy-disk-png");
+  });
+
   it("does not recreate a missing chat folder while reading legacy images", async () => {
     const { upsertChat } = await import("../../db/chats");
     const { upsertChatMessagesBulk } = await import("../../db/messages");

@@ -64,6 +64,9 @@ export interface ComposerAttachment {
    *  Freshly staged images have bytes in `data`; edit-resend images may have
    *  only this reference until the send pipeline resolves them. */
   diskPath?: string;
+  /** Stable graph record id retained while `id` is replaced by the edit
+   *  composer's fresh node identity. */
+  contextAttachmentId?: string;
   /** Decoded body for text attachments (.md, .txt, etc.). */
   text?: string;
   /** Per-attachment validation outcome under the active agent +
