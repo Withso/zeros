@@ -25,7 +25,7 @@
       "enabled": false
     },
     {
-      "description": "Bundled agent runtimes — shipped executables, not ordinary libraries. A bump to @anthropic-ai/claude-agent-sdk swaps the actual claude-code binary the app stages (its claudeCodeVersion); @openai/codex swaps the Codex binary and desyncs the protocol triple; @cursor/sdk IS the entire Cursor backend (the sole and only Cursor runtime — there is no CLI/ACP fallback, see src/engine/agents/adapters/cursor-sdk/index.ts). All three are pinned EXACTLY, not by range: a range lets a lockfile refresh swap a shipped binary with no reviewed diff. Grouped into one weekly PR, labeled, and NOT auto-merged — a new SDK can carry protocol/API changes the adapters must adapt to, so a human reviews the green PR.",
+      "description": "Bundled agent runtimes — shipped executables, not ordinary libraries. A bump to @anthropic-ai/claude-agent-sdk swaps the actual claude-code binary the app stages (its claudeCodeVersion); @openai/codex swaps the Codex binary and desyncs the protocol triple; @cursor/sdk IS the entire Cursor backend (the sole and only Cursor runtime — there is no CLI/ACP fallback, see src/engine/agents/adapters/cursor-sdk/index.ts). All three are pinned EXACTLY, not by range: a range lets a lockfile refresh swap a shipped binary with no reviewed diff. Grouped into one weekly PR, labeled, and NOT auto-merged — a new SDK can carry protocol/API changes the adapters must adapt to, so a human reviews the green PR. SCHEDULE IS A WHOLE DAY, NOT A MORNING: `* * * * 1` = any time Monday (cron, in the `timezone` above), widened from `before 6am on monday` on 2026-08-04. A schedule is not a promise that Renovate RUNS then — it only permits a run that happens to land inside it. The hosted app was observed running this repo at 00:26:26 UTC, and 6am Asia/Kolkata is 00:30 UTC: a 3m34s margin. Any drift in when Mend schedules the run silently costs a full week, and the miss is invisible — the dashboard just keeps saying 'awaiting schedule'. A whole-day window trades a tighter delivery time (which nothing here needs) for a 24-hour target the run cannot realistically miss.",
       "matchPackageNames": [
         "@anthropic-ai/claude-agent-sdk",
         "@openai/codex",
@@ -34,16 +34,16 @@
       "enabled": true,
       "groupName": "agent CLIs",
       "labels": ["dependencies", "automated", "agent-pin"],
-      "schedule": ["before 6am on monday"],
+      "schedule": ["* * * * 1"],
       "automerge": false
     },
     {
-      "description": "GitHub Actions are pinned to full commit SHAs (with the version in a trailing comment) so a compromised upstream can't repoint a tag into a job that holds the Developer ID cert and the R2 write keys. A SHA pin only stays safe if something bumps it, and that something is this rule — without it the pins silently rot into permanently-outdated code. Grouped into one monthly PR so the pin refresh is a single reviewable diff rather than a trickle, and never auto-merged: the whole point of a SHA pin is that a human looks at what the new SHA is.",
+      "description": "GitHub Actions are pinned to full commit SHAs (with the version in a trailing comment) so a compromised upstream can't repoint a tag into a job that holds the Developer ID cert and the R2 write keys. A SHA pin only stays safe if something bumps it, and that something is this rule — without it the pins silently rot into permanently-outdated code. Grouped into one monthly PR so the pin refresh is a single reviewable diff rather than a trickle, and never auto-merged: the whole point of a SHA pin is that a human looks at what the new SHA is. SCHEDULE IS A WHOLE DAY, NOT A MORNING: `* * 1 * *` = any time on the 1st (cron, in the `timezone` above), widened from `before 6am on the first day of the month` on 2026-08-04 for the reason spelled out in the agent-CLI rule above — a 3m34s margin against the observed run time, where a miss costs a MONTH rather than a week. Whole-day windows are the shape Renovate's own presets use for day-granular schedules (`schedule:quarterly` is `* * 1 */3 *`), so this is the documented idiom, not a workaround. A missed window here is the worst kind: this rule is the only thing that stops the SHA pins rotting, so silently skipping a month directly weakens the supply-chain posture the pins exist to provide.",
       "matchManagers": ["github-actions"],
       "enabled": true,
       "groupName": "github actions",
       "labels": ["dependencies", "automated", "ci"],
-      "schedule": ["before 6am on the first day of the month"],
+      "schedule": ["* * 1 * *"],
       "automerge": false
     },
     {
