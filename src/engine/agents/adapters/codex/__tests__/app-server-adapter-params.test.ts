@@ -19,7 +19,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildThreadStartParams,
+  codexEffortFromThreadSettings,
   fileChangePaths,
+  mapCodexAdvertisedEffort,
+  mapCodexEffortFromEnv,
   modePolicyFor,
   type CodexModeId,
 } from "../app-server-adapter";
@@ -140,5 +143,49 @@ describe("fileChangePaths", () => {
     expect(fileChangePaths({ type: "fileChange" })).toEqual([]);
     expect(fileChangePaths({ changes: "nope" })).toEqual([]);
     expect(fileChangePaths(null)).toEqual([]);
+  });
+});
+
+describe("Codex Ultra effort synchronization", () => {
+  it("sends the composer Ultra value as Codex's native ultra effort", () => {
+    expect(mapCodexEffortFromEnv("ultracode")).toBe("ultra");
+  });
+
+  it("clamps the Claude-only max tier down instead of failing the turn", () => {
+    // ReasoningEffort is an open `string` in the generated protocol, so an
+    // unknown variant is not a compile error — it is a hard `turn/start:
+    // Invalid request` on every send. "max" is Claude-only, so it must land on
+    // Codex's highest ordinary tier.
+    expect(mapCodexEffortFromEnv("max")).toBe("xhigh");
+    expect(mapCodexEffortFromEnv("MAX ")).toBe("xhigh");
+  });
+
+  it("passes the tiers Codex really has through verbatim", () => {
+    expect(mapCodexEffortFromEnv("minimal")).toBe("minimal");
+    expect(mapCodexEffortFromEnv("low")).toBe("low");
+    expect(mapCodexEffortFromEnv("medium")).toBe("medium");
+    expect(mapCodexEffortFromEnv("high")).toBe("high");
+    expect(mapCodexEffortFromEnv("xhigh")).toBe("xhigh");
+    expect(mapCodexEffortFromEnv("ultra")).toBe("ultra");
+    // Unknown / empty stays unset so Codex picks its own default.
+    expect(mapCodexEffortFromEnv("turbo")).toBeUndefined();
+    expect(mapCodexEffortFromEnv(undefined)).toBeUndefined();
+  });
+
+  it("normalizes Codex's advertised ultra tier into the existing composer token", () => {
+    expect(mapCodexAdvertisedEffort("ultra")).toBe("ultracode");
+    expect(mapCodexAdvertisedEffort("xhigh")).toBe("xhigh");
+    expect(mapCodexAdvertisedEffort("minimal")).toBeUndefined();
+  });
+
+  it("accepts settings updates only for the exact parent thread", () => {
+    const params = {
+      threadId: "thread-parent",
+      threadSettings: { effort: "ultra" },
+    };
+    expect(codexEffortFromThreadSettings(params, "thread-parent")).toBe(
+      "ultracode",
+    );
+    expect(codexEffortFromThreadSettings(params, "thread-helper")).toBeNull();
   });
 });

@@ -55,7 +55,7 @@ describe("column3 default slice", () => {
     expect(column3ScopeForFolder(null)).toBe("__ambient__");
   });
 
-  it("seeds exactly Open file, Changes, Review with Open file active", () => {
+  it("seeds exactly Open file, Changes, Review, Context with Open file active", () => {
     freshScope();
     const { tabs, activeId, recentBrowsers } = slice();
 
@@ -63,8 +63,14 @@ describe("column3 default slice", () => {
       ["files", "Open file"],
       ["changes", "Changes"],
       ["review", "Review"],
+      ["context", "Context"],
     ]);
-    expect(tabs.map((tab) => Boolean(tab.pinned))).toEqual([false, true, true]);
+    expect(tabs.map((tab) => Boolean(tab.pinned))).toEqual([
+      false,
+      true,
+      true,
+      true,
+    ]);
     expect(tabs[0].fixed).toBe(true);
     expect(activeId).toBe(tabs[0].id);
     expect(recentBrowsers).toEqual([]);
@@ -84,6 +90,7 @@ describe("column3 default slice", () => {
       "Open file",
       "Changes",
       "Review",
+      "Context",
     ]);
     expect(slice().activeId).toBe(slice().tabs[0].id);
     expect(slice().recentBrowsers).toEqual([]);
@@ -157,11 +164,12 @@ describe("ADD_COLUMN3_TAB", () => {
       "files",
       "changes",
       "review",
+      "context",
       "files",
     ]);
     expect(slice().tabs[0].id).toBe(home.id);
-    expect(slice().tabs[3].id).toBe(extra.id);
-    expect(slice().tabs[3].fixed).toBeUndefined();
+    expect(slice().tabs[4].id).toBe(extra.id);
+    expect(slice().tabs[4].fixed).toBeUndefined();
     expect(slice().activeId).toBe(extra.id);
   });
 
@@ -195,6 +203,7 @@ describe("ADD_COLUMN3_TAB", () => {
         { id: homeA.id },
         { type: "changes" },
         { type: "review" },
+        { type: "context" },
         { id: fileA.id, fileTreeVisible: false },
       ],
     });
@@ -303,12 +312,13 @@ describe("REMOVE/UPDATE/ACTIVATE_COLUMN3_TAB", () => {
     ).toBe(true);
   });
 
-  it("protects Changes/Review and the fixed home; extras close fully", () => {
+  it("protects Changes/Review/Context and the fixed home; extras close fully", () => {
     freshScope();
     const initial = slice().tabs;
     const home = initial.find((tab) => tab.type === "files")!;
     const changes = initial.find((tab) => tab.type === "changes")!;
     const review = initial.find((tab) => tab.type === "review")!;
+    const context = initial.find((tab) => tab.type === "context")!;
 
     dispatch({
       type: "UPDATE_COLUMN3_TAB",
@@ -317,8 +327,10 @@ describe("REMOVE/UPDATE/ACTIVATE_COLUMN3_TAB", () => {
     });
     dispatch({ type: "REMOVE_COLUMN3_TAB", id: changes.id });
     dispatch({ type: "REMOVE_COLUMN3_TAB", id: review.id });
+    dispatch({ type: "REMOVE_COLUMN3_TAB", id: context.id });
     expect(slice().tabs.some((tab) => tab.id === changes.id)).toBe(true);
     expect(slice().tabs.some((tab) => tab.id === review.id)).toBe(true);
+    expect(slice().tabs.some((tab) => tab.id === context.id)).toBe(true);
     expect(slice().tabs.find((tab) => tab.id === changes.id)?.pinned).toBe(
       true,
     );
@@ -339,6 +351,7 @@ describe("REMOVE/UPDATE/ACTIVATE_COLUMN3_TAB", () => {
       "files",
       "changes",
       "review",
+      "context",
     ]);
   });
 
@@ -411,10 +424,11 @@ describe("REMOVE/UPDATE/ACTIVATE_COLUMN3_TAB", () => {
       id: extra.id,
       updates: { filePath: undefined },
     });
-    // Extras close entirely; the close-neighbor policy picks the next tab.
+    // Extras close entirely; the close-neighbor policy picks the next tab
+    // (Context now sits between Review and the extra).
     expect(slice().tabs.some((tab) => tab.id === extra.id)).toBe(false);
     expect(slice().activeId).toBe(
-      slice().tabs.find((tab) => tab.type === "review")!.id,
+      slice().tabs.find((tab) => tab.type === "context")!.id,
     );
   });
 
@@ -766,10 +780,12 @@ describe("REORDER_COLUMN3_TABS", () => {
 
     // The fixed home owns the leading slot no matter where the caller put it;
     // the other closable tabs keep the requested relative order.
+    const context = slice().tabs.find((tab) => tab.type === "context")!;
     expect(slice().tabs.map((tab) => tab.id)).toEqual([
       initialBlank.id,
       changes.id,
       review.id,
+      context.id,
       browser.id,
       second.id,
       first.id,

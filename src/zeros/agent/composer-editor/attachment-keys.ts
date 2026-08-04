@@ -33,6 +33,21 @@ export function collectSourceKeys(doc: ProseMirrorNode): string[] {
   return keys;
 }
 
+/** Every attachment node's id in the document, in document order. The read
+ *  side of the context-graph attach-time sync: diffing this set across doc
+ *  changes is what turns "the user attached / removed a file" into a graph
+ *  write, whatever gesture caused it (drop, paste, pick, chip ×, Backspace,
+ *  select-all delete, undo, redo). */
+export function collectAttachmentIds(doc: ProseMirrorNode): string[] {
+  const ids: string[] = [];
+  doc.descendants((node) => {
+    if (node.type.name !== "attachment") return;
+    const id = node.attrs.attachmentId;
+    if (typeof id === "string" && id) ids.push(id);
+  });
+  return ids;
+}
+
 /** Attachment nodes carrying `sourceKey`, ordered HIGHEST POSITION FIRST.
  *
  *  The order is the whole point. Every delete shifts the positions of

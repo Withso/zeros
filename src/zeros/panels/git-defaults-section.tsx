@@ -14,6 +14,12 @@
 // why branchDisplayName strips to the last slash rather than matching one
 // known prefix.
 //
+// An UNSET key means "GitHub username" (the engine's
+// DEFAULT_BRANCH_PREFIX_TYPE), which is what lets the first row be selected
+// from the first launch: there is no state in which this pane shows nothing
+// chosen, because "the user hasn't decided" and "the app has no answer" were
+// never the same thing.
+//
 // A prefix is a NAMESPACE, not a fragment: whatever is stored here is joined to
 // the workspace name with exactly one `/`, so `jordan` and `jordan/` both give
 // `jordan/Cream`. The rules are shared with the engine — normalizeBranchPrefix
@@ -38,7 +44,11 @@ import { badgeVariants } from "../ui/primitives/badge";
 import { toast } from "../ui/primitives/elements";
 import { Input } from "../ui/primitives/input";
 import { RadioGroup, RadioGroupItem } from "../ui/primitives/radio-group";
-import { joinBranchPrefix, normalizeBranchPrefix } from "../lib/branch-name";
+import {
+  DEFAULT_BRANCH_PREFIX,
+  joinBranchPrefix,
+  normalizeBranchPrefix,
+} from "../lib/branch-name";
 import { useGithubLogin } from "./use-github-login";
 
 /** Mirror of BRANCH_PREFIX_TYPES in engine/settings/schema.ts. Duplicated
@@ -48,11 +58,18 @@ import { useGithubLogin } from "./use-github-login";
 export type BranchPrefixType = "zeros" | "github" | "custom" | "none";
 
 /** The radio options, in display order. "zeros" is deliberately NOT offered as
- *  a row: it is the default, and surfacing an option literally named after the
- *  app reads as branding, not as a choice. A user on the default sees "None"
- *  unselected and picks what they want; the stored value stays "zeros" until
- *  they do, so nobody's existing branches change meaning. */
-const OPTIONS: Array<Exclude<BranchPrefixType, "zeros">> = [
+ *  a row: surfacing an option literally named after the app reads as branding,
+ *  not as a choice, and anyone who wants that namespace can type it into
+ *  Custom.
+ *
+ *  The first row is also the DEFAULT (DEFAULT_BRANCH_PREFIX_TYPE), which is
+ *  what makes this list complete: a radio group must never render with nothing
+ *  selected, and while the default was the unlisted "zeros" that is exactly
+ *  what a fresh install showed — three empty circles and a preview line
+ *  describing a fourth option that wasn't there. readType now folds every
+ *  value this list can't render onto "github", so `selected` is always one of
+ *  these rows. */
+export const OPTIONS: Array<Exclude<BranchPrefixType, "zeros">> = [
   "github",
   "custom",
   "none",
@@ -72,6 +89,7 @@ export function GitDefaultsSection() {
     | { git?: { branch_prefix_type?: unknown; branch_prefix?: unknown } }
     | undefined;
   const savedType = readType(effective?.git?.branch_prefix_type);
+  const previewType = readPreviewType(effective?.git?.branch_prefix_type);
   const savedPrefix =
     typeof effective?.git?.branch_prefix === "string"
       ? effective.git.branch_prefix
@@ -176,7 +194,13 @@ export function GitDefaultsSection() {
         </SettingsField>
       </SettingsList>
       <p className="text-fg2 text-xs">
-        {previewFor(selected, selected === "custom" ? draft : savedPrefix, login)}
+        {/* An optimistic pick owns the line the moment it's clicked; otherwise
+            describe the effective value, including the unrenderable `zeros`. */}
+        {previewFor(
+          pending ?? previewType,
+          selected === "custom" ? draft : savedPrefix,
+          login,
+        )}
       </p>
     </SettingsSection>
   );
@@ -262,10 +286,34 @@ function CustomPrefixInput({
   );
 }
 
-function readType(value: unknown): BranchPrefixType {
-  return value === "github" || value === "custom" || value === "none"
-    ? value
-    : "zeros";
+/** The row to show for whatever the effective tree holds.
+ *
+ *  Everything the pane can't render as a row — unset (the common case, and now
+ *  `github` by default), the unlisted "zeros", or a garbage value — resolves to
+ *  "github". That is the guarantee the radio needs: there is no state in which
+ *  nothing is selected.
+ *
+ *  Honest for every value the app itself can produce, since this pane only ever
+ *  writes the three OPTIONS and unset is genuinely `github`. A settings.toml or
+ *  team layer that pins "zeros" by hand is the one case where the shown ROW
+ *  (GitHub username) can't match what the engine will do (`zeros/`) — the radio
+ *  has nowhere else to put it. The preview line is not folded, so it still
+ *  reports `zeros/` honestly; that is what the "zeros" arm of previewFor is
+ *  for, and why it is kept rather than deleted. */
+export function readType(value: unknown): BranchPrefixType {
+  return value === "custom" || value === "none" ? value : "github";
+}
+
+/** What the PREVIEW line describes — which is not always the selected row.
+ *
+ *  The fold above exists for the RADIO's sake: it must always have a row to put
+ *  the dot on. The preview sentence has no such constraint, and folding it too
+ *  is what let the pane contradict the engine: a repo/team layer pinning
+ *  `branch_prefix_type = "zeros"` had the line promising `<login>/Cream` while
+ *  `zeros/Cream` landed on disk. Every other value resolves identically to
+ *  readType, so this only ever differs where the radio genuinely cannot follow. */
+export function readPreviewType(value: unknown): BranchPrefixType {
+  return value === "zeros" ? "zeros" : readType(value);
 }
 
 function labelFor(
@@ -336,14 +384,22 @@ export function previewFor(
       const namespace = normalizeBranchPrefix(prefix);
       return namespace
         ? example(namespace)
-        : "That prefix isn't a valid git ref, so new branches will keep the default zeros/ prefix.";
+        : `That prefix isn't a valid git ref, so new branches will keep the fallback ${DEFAULT_BRANCH_PREFIX}/ prefix.`;
     }
     case "github":
+      // No login is now the FRESH-INSTALL state, because this row is the
+      // default — so the ask alone ("Connect GitHub…") left a new user with no
+      // idea what their branches would be called in the meantime. Name the
+      // fallback first, then the ask: the engine substitutes `zeros/` for an
+      // unknown login rather than dropping the namespace.
       return login
-        ? example(normalizeBranchPrefix(login) ?? "zeros")
-        : "Connect GitHub in Settings → Integrations to use your username.";
+        ? example(normalizeBranchPrefix(login) ?? DEFAULT_BRANCH_PREFIX)
+        : `New branches will be named like ${joinBranchPrefix(
+            DEFAULT_BRANCH_PREFIX,
+            name,
+          )} until you connect GitHub in Settings → Integrations.`;
     case "zeros":
     default:
-      return example("zeros");
+      return example(DEFAULT_BRANCH_PREFIX);
   }
 }

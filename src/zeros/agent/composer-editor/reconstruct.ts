@@ -18,10 +18,16 @@ import type {
 import type { ComposerAttachment } from "../composer-attachments";
 import type { ComposerInitialContent } from "./use-composer-editor";
 
+/** Ids minted here mark a chip REBUILT from an already-sent message, not a
+ *  fresh attach. The context-graph staging paths key off this prefix: the
+ *  original send already recorded the file under its original id, so staging
+ *  a reconstruction would duplicate the card on every edit-in-place. */
+export const RECONSTRUCTED_ATTACHMENT_ID_PREFIX = "att-edit-";
+
 let seq = 0;
 function freshId(): string {
   seq += 1;
-  return `att-edit-${Date.now().toString(36)}-${seq.toString(36)}`;
+  return `${RECONSTRUCTED_ATTACHMENT_ID_PREFIX}${Date.now().toString(36)}-${seq.toString(36)}`;
 }
 
 function approxBytes(b64: string): number {

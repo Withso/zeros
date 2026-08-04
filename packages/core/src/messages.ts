@@ -643,6 +643,11 @@ export interface AgentSessionLoadedMessage extends BaseMessage {
   agentId: string;
   sessionId: string;
   response: LoadSessionResponse;
+  /** Engine-owned prompt state at the exact moment this session was adopted.
+   * Optional for compatibility with older engines. */
+  promptActive?: boolean;
+  /** Original engine prompt start, used to preserve the live elapsed clock. */
+  activeTurnStartedAt?: number;
 }
 
 export interface AgentAgentsListMessage extends BaseMessage {
@@ -692,6 +697,16 @@ export interface AgentPermissionRequestMessage extends BaseMessage {
   agentId: string;
   permissionId: string;
   request: RequestPermissionRequest;
+}
+
+/** A permission resolver settled engine-side (response, timeout, or abort).
+ * The renderer uses this receipt to evict a card whose resolver no longer
+ * exists and advance any concurrently queued helper gate. */
+export interface AgentPermissionSettledMessage extends BaseMessage {
+  type: "AGENT_PERMISSION_SETTLED";
+  agentId: string;
+  permissionId: string;
+  sessionId: string;
 }
 
 /** A blocking user-input question from the agent (twin of
@@ -1033,6 +1048,7 @@ export type BridgeMessage =
   | AgentAuthCompletedMessage
   | AgentSessionUpdateMessage
   | AgentPermissionRequestMessage
+  | AgentPermissionSettledMessage
   | AgentQuestionRequestMessage
   | AgentQuestionSettledMessage
   | AgentModeChangedMessage

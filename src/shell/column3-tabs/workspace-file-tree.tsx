@@ -380,7 +380,14 @@ export const WorkspaceFileTree = React.forwardRef<
         // the imperative bridge below.
         search: searchRef.current,
         initialExpansion: "closed" as const,
-        flattenEmptyDirectories: true,
+        // Finder-style nesting, one row per directory (2026-08-03). Flattening
+        // compacted single-child chains into rows like ".context-graph »
+        // local/attachments", which read as a directory that doesn't exist on
+        // disk — the graph's one-folder-per-attachment layout hit it on every
+        // workspace. The ignored-side gitStatus entries still cover CHILD
+        // directories, not just roots, so this stays correct either way (see
+        // ignored-entries.ts).
+        flattenEmptyDirectories: false,
         icons: { set: "complete" as const, colored: true },
         unsafeCSS: TREE_SHADOW_CSS,
         composition: { contextMenu: { enabled: true } },

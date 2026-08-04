@@ -161,6 +161,13 @@ export interface CodexAppServerBootOptions {
    *  `respondToPermission(permissionId, response)` is called. If unset,
    *  every approval is auto-denied with a stderr log line. */
   onApprovalRequest?: (request: CodexApprovalRequest) => void;
+  /** A pending approval settled WITHOUT a respondToPermission call — its
+   *  response timeout fired, or `dispose()` auto-cancelled it — and the codex
+   *  side is already answered. Twin of onUserInputSettled: lets the adapter
+   *  evict its own pending entry, drop the renderer's parked card, and keep the
+   *  engine's re-adoption replay set from re-presenting a gate nothing can
+   *  answer. */
+  onApprovalSettled?: (permissionId: string) => void;
   /** Server-initiated blocking user-input question received (item/tool/
    *  requestUserInput). Fired synchronously; the response is deferred until
    *  `respondToUserInput(questionId, response)`. If unset, answers empty. */
@@ -480,9 +487,10 @@ export async function bootCodexAppServerRuntime(
   //
   // 2026-05-28: added APPROVAL_TIMEOUT_MS so the codex side isn't held
   // open indefinitely when the renderer never responds (window closed,
-  // IPC drop, hung event loop). On timeout we settle the codex side
-  // with cancel and remove the pending entry. The adapter's pendingApprovals
-  // map will also have a stale entry which respondToPermission tolerates.
+  // IPC drop, hung event loop). On timeout we settle the codex side with
+  // cancel, remove the pending entry, and fire onApprovalSettled so the
+  // adapter drops its twin entry instead of leaving one for a later
+  // respondToPermission to merely tolerate.
   interface PendingApprovalEntry {
     resolve: (response: unknown) => void;
     method: CodexApprovalMethod;
@@ -513,6 +521,11 @@ export async function bootCodexAppServerRuntime(
           // suggests an active rejection by the user, which would be
           // misleading).
           resolve(defaultCancelResponse(method));
+          // Twin of onUserInputSettled below: the renderer's card is still
+          // parked on this id, and the engine keeps it in its replay set until
+          // told otherwise — so a reload would re-present a card whose resolver
+          // is already gone.
+          opts.onApprovalSettled?.(permissionId);
         }, APPROVAL_TIMEOUT_MS);
         timer.unref?.();
         pendingApprovals.set(permissionId, { resolve, method, timer });
@@ -889,6 +902,12 @@ export async function bootCodexAppServerRuntime(
         clearTimeout(pending.timer);
         pending.resolve(defaultCancelResponse(pending.method));
         pendingApprovals.delete(permissionId);
+        // Same reason as the timeout path above: this resolver is gone without
+        // a user choice, so the adapter and renderer both need telling. Reached
+        // when the runtime is disposed from underneath a parked approval — a
+        // sidecar teardown or a crash-recovery rebuild, neither of which routes
+        // through disposeSession's own drain.
+        opts.onApprovalSettled?.(permissionId);
       }
       for (const [questionId, pending] of pendingUserInputs) {
         clearTimeout(pending.timer);

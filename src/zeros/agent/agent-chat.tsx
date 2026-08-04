@@ -195,6 +195,7 @@ import {
   turnKey,
 } from "./turn-container";
 import { TurnEventList } from "./turn-event-list";
+import { pickActiveWorkflow } from "./workflow-activity";
 import { stabilizeTurns } from "./stable-turns";
 import { TurnFooter } from "./turn-footer";
 import { JumpToLatestButton, JumpToPromptPill } from "./jump-pills";
@@ -319,6 +320,11 @@ export function AgentChat({
   // Chat-owned settings are needed by both the turn lifecycle and composer.
   // In particular, background continuation chrome is an Ultracode-only aid.
   const chatThread = useChatById(chatId);
+  const workflows = session.workflows;
+  const activeWorkflow = useMemo(
+    () => pickActiveWorkflow(workflows),
+    [workflows],
+  );
   // Hidden CLI authentication is deliberately local-only. Relay/browser
   // sessions keep the status pill static and direct users to Providers.
   const nativeReady = useNativeRuntime().ready;
@@ -2854,11 +2860,11 @@ export function AgentChat({
 
   // Phase D2 (2026-05-07) iter 3: image attachments are universal —
   // vision-capable agents (Claude) get the inline ImageContent block;
-  // everyone else gets the bytes persisted to <cwd>/.context/attachments/…
-  // and a text block referencing the path (their models still Read the
-  // file). End of "silent drop" era. Shared by handleSend and the
-  // queued-message edit save, so an edited queued send re-encodes its
-  // attachments exactly like a fresh one.
+  // everyone else gets the bytes persisted to
+  // <cwd>/.context-graph/<scope>/attachments/… and a text block referencing
+  // the path (their models still Read the file). End of "silent drop" era.
+  // Shared by handleSend and the queued-message edit save, so an edited
+  // queued send re-encodes its attachments exactly like a fresh one.
   //
   // 2026-07-30: the loop moved to encode-attachments.ts, shared with
   // editAndResubmit. It used to be a second, divergent copy with no
@@ -3252,6 +3258,10 @@ export function AgentChat({
     const idx = queuedMessages.findIndex((m) => m.id === id);
     if (editingQueuedRef.current === id) exitQueuedEdit();
     session.removeQueued?.(id);
+    // The row's staged files deliberately STAY in the context graph — the
+    // graph is append-only (context-graph-staging.ts): deleting the message
+    // withdraws the prompt, not the workspace's record of its files. Only
+    // the user deleting them on disk removes them.
     // Keyboard flow: keep the selection on the neighbouring row so repeated
     // ⌫ walks the list; deleting the last row returns to the composer.
     if (queueSelectedRef.current === id) {
@@ -3813,6 +3823,14 @@ export function AgentChat({
                       }
                       showActivity={isVisualTail}
                       activityEvents={turn.providerEvents}
+                      activityStartedAt={
+                        isVisualTail
+                          ? (session.activeTurnStartedAt ??
+                            turn.recordedStartedAt)
+                          : turn.recordedStartedAt
+                      }
+                      workflow={activeWorkflow}
+                      onStopWorkflow={session.stopBackgroundTask}
                       ctx={messageCtx}
                       footer={
                         turn.userPrompt && chatId && ownsProviderFooter ? (

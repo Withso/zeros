@@ -231,15 +231,26 @@ describe("shouldMountRow1Tab", () => {
 });
 
 describe("defaultTabs", () => {
-  it("seeds exactly Open file, Changes, Review and opens the File tab", () => {
+  it("seeds exactly Open file, Changes, Review, Context and opens the File tab", () => {
     const { tabs, activeId, recentBrowsers } = defaultTabs();
-    expect(tabs.map((tab) => tab.type)).toEqual(["files", "changes", "review"]);
+    expect(tabs.map((tab) => tab.type)).toEqual([
+      "files",
+      "changes",
+      "review",
+      "context",
+    ]);
     expect(tabs.map((tab) => tab.title)).toEqual([
       "Open file",
       "Changes",
       "Review",
+      "Context",
     ]);
-    expect(tabs.map((tab) => Boolean(tab.pinned))).toEqual([false, true, true]);
+    expect(tabs.map((tab) => Boolean(tab.pinned))).toEqual([
+      false,
+      true,
+      true,
+      true,
+    ]);
     // The seeded blank File tab is THE permanent Files home.
     expect(tabs[0].fixed).toBe(true);
     expect(activeId).toBe(tabs[0].id);
@@ -262,7 +273,12 @@ describe("normalizeRow1Tabs", () => {
     const out = normalizeRow1Tabs([]);
     // Browsers and EXTRA File tabs stay gone, but the fixed Files home is
     // permanent now — a persisted slice without one is legacy state.
-    expect(out.map((tab) => tab.type)).toEqual(["files", "changes", "review"]);
+    expect(out.map((tab) => tab.type)).toEqual([
+      "files",
+      "changes",
+      "review",
+      "context",
+    ]);
     expect(out[0]).toMatchObject({
       title: "Open file",
       fixed: true,
@@ -296,6 +312,7 @@ describe("normalizeRow1Tabs", () => {
       "blank",
       expect.stringMatching(/^changes-/),
       expect.stringMatching(/^review-/),
+      expect.stringMatching(/^context-/),
       "b1",
       "b2",
       "f1",
@@ -665,6 +682,7 @@ describe("migrateScopes", () => {
       "files",
       "changes",
       "review",
+      "context",
     ]);
     expect(out["/repo/feature"].tabs[0].fixed).toBe(true);
   });

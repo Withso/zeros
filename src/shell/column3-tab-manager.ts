@@ -8,10 +8,16 @@ import {
   Globe,
   File as FileIcon,
   GitPullRequestArrow,
+  Shapes,
   type LucideIcon,
 } from "lucide-react";
 
-export type Column3TabType = "changes" | "review" | "browser" | "files";
+export type Column3TabType =
+  | "changes"
+  | "review"
+  | "context"
+  | "browser"
+  | "files";
 export type ReviewSubtab =
   | "changes"
   | "description"
@@ -251,9 +257,10 @@ export type Row1OpenPlan =
   | { kind: "new" };
 
 /** Keep expensive File surfaces lazy unless they are active or own an unsaved
- * draft. Browsers preserve iframe state; the two pinned source views preserve
- * their resolved lists and PR state. The terminal panel is mounted separately
- * below row 1. Clean, inactive File tabs remain the only lazy surface. */
+ * draft. Browsers preserve iframe state; the pinned home views preserve
+ * their resolved lists, PR state, and canvas viewport + decoded images. The
+ * terminal panel is mounted separately below row 1. Clean, inactive File tabs
+ * remain the only lazy surface. */
 export function shouldMountRow1Tab(
   tab: Column3Tab,
   activeId: string | null,
@@ -263,6 +270,7 @@ export function shouldMountRow1Tab(
     tab.type === "browser" ||
     tab.type === "changes" ||
     tab.type === "review" ||
+    tab.type === "context" ||
     tab.id === activeId ||
     dirtyEditorIds.has(tab.id)
   );
@@ -358,6 +366,17 @@ export function row1TabIconPath(tab: Column3Tab): string | null {
   return path ? path : null;
 }
 
+/** Build THE Context tab — the pinned canvas over the workspace's
+ *  `.context-graph/` (composer attachments + shared docs, auto-laid-out,
+ *  pan/zoom only). One per worktree, can't be closed. */
+export function createContextTab(): Column3Tab {
+  return {
+    id: nextId("context"),
+    type: "context",
+    title: "Context",
+  };
+}
+
 export const TAB_TYPE_META: Record<Column3TabType, TabTypeMeta> = {
   changes: {
     label: "Changes",
@@ -366,6 +385,10 @@ export const TAB_TYPE_META: Record<Column3TabType, TabTypeMeta> = {
   review: {
     label: "Review",
     icon: GitPullRequestArrow,
+  },
+  context: {
+    label: "Context",
+    icon: Shapes,
   },
   browser: {
     label: "Browser",
@@ -405,6 +428,7 @@ const REMOVED_TAB_TYPES = new Set([
 const CURRENT_TAB_TYPES = new Set<Column3TabType>([
   "changes",
   "review",
+  "context",
   "browser",
   "files",
 ]);
@@ -438,15 +462,18 @@ function validViewerMode(raw: unknown): ViewerMode | undefined {
 }
 
 /** Canonical row-1 order: the FIXED Files home (falling back to the first File
- *  tab in lists that predate the flag), then the pinned Changes and Review
- *  homes, followed by all other closable File/Browser tabs in their relative
- *  order. The leading slot is stable: extra File tabs never migrate into it
- *  while the home exists. */
+ *  tab in lists that predate the flag), then the pinned Changes, Review, and
+ *  Context homes, followed by all other closable File/Browser tabs in their
+ *  relative order. The leading slot is stable: extra File tabs never migrate
+ *  into it while the home exists. */
 export function orderRow1Tabs(tabs: Column3Tab[]): Column3Tab[] {
   const changes = tabs.find((t) => t.type === "changes");
   const review = tabs.find((t) => t.type === "review");
+  const context = tabs.find((t) => t.type === "context");
   const systemIds = new Set(
-    [changes?.id, review?.id].filter((id): id is string => Boolean(id)),
+    [changes?.id, review?.id, context?.id].filter((id): id is string =>
+      Boolean(id),
+    ),
   );
   const closable = tabs
     .filter((t) => !systemIds.has(t.id))
@@ -464,6 +491,7 @@ export function orderRow1Tabs(tabs: Column3Tab[]): Column3Tab[] {
     ...(firstFile ? [firstFile] : []),
     ...(changes ? [{ ...changes, pinned: true }] : []),
     ...(review ? [{ ...review, pinned: true }] : []),
+    ...(context ? [{ ...context, pinned: true }] : []),
     ...rest,
   ];
 }
@@ -474,6 +502,8 @@ export function orderRow1Tabs(tabs: Column3Tab[]): Column3Tab[] {
  *     Changes tab (its sidebar selection survives), or one is seeded;
  *   • exactly ONE Review tab — the first persisted one is promoted, or one is
  *     seeded (always visible; its body renders an empty state without a PR);
+ *   • exactly ONE Context tab — promoted or seeded the same way (pre-Context
+ *     persisted slices gain it here, no storage-key bump needed);
  *   • exactly ONE fixed Files home — the first persisted `fixed` File tab
  *     keeps the flag, else the first File tab is promoted (pre-flag slices),
  *     else a blank home is seeded: the Files surface is permanent now, so its
@@ -483,7 +513,8 @@ export function orderRow1Tabs(tabs: Column3Tab[]): Column3Tab[] {
  *   • every persisted Browser tab survives and is closable (legacy pins are
  *     stripped), enabling the multi-browser policy;
  *   • persisted row-1 Terminal tabs are removed (the terminal surface is row 2);
- *   • order is [fixed Files home, Changes, Review, ...other closable tabs].
+ *   • order is [fixed Files home, Changes, Review, Context, ...other closable
+ *     tabs].
  *  Result never becomes empty because the home tabs remain. */
 export function normalizeRow1Tabs(parsed: Column3Tab[]): Column3Tab[] {
   // Persistence is user-editable and old builds could leave duplicate ids.
@@ -545,6 +576,18 @@ export function normalizeRow1Tabs(parsed: Column3Tab[]): Column3Tab[] {
         fileTreeVisible: undefined,
       }
     : { ...createReviewTab(), pinned: true };
+  const firstContext = tabs.find((t) => t.type === "context");
+  const homeContext: Column3Tab = firstContext
+    ? {
+        ...firstContext,
+        title: "Context",
+        pinned: true,
+        filePath: undefined,
+        reviewSubtab: undefined,
+        changesView: undefined,
+        viewerMode: undefined,
+      }
+    : { ...createContextTab(), pinned: true };
   const closable = tabs
     .filter((t) => t.type === "files" || t.type === "browser")
     .map((tab) => {
@@ -610,6 +653,7 @@ export function normalizeRow1Tabs(parsed: Column3Tab[]): Column3Tab[] {
   return orderRow1Tabs([
     { ...homeChanges, fixed: undefined },
     { ...homeReview, fixed: undefined },
+    { ...homeContext, fixed: undefined },
     ...withHome,
   ]);
 }

@@ -25,7 +25,10 @@ import { EventStripe } from "./renderers/event-stripe";
 import { MessageView } from "./renderers";
 import type { RendererContext } from "./renderers";
 import type { AgentMessage } from "./use-agent-session";
+import type { WorkflowProgress } from "../bridge/agent-events";
 import { partitionTurn } from "./turn-partition";
+import { tailIndicators } from "./tail-indicators";
+import { WorkflowActivity } from "./workflow-activity";
 
 interface TurnEventListProps {
   events: AgentMessage[];
@@ -44,6 +47,13 @@ interface TurnEventListProps {
    *  timer. After a steer the newest visual segment can still be empty while
    *  a tool from the preceding segment is running. */
   activityEvents?: AgentMessage[];
+  /** Provider-turn start fallback for an adopted live turn whose newest visual
+   * segment has not received an event yet. */
+  activityStartedAt?: number;
+  /** Newest foreground workflow for this exact session. It renders only at
+   * the live visual tail, directly above the ordinary agent shimmer. */
+  workflow?: WorkflowProgress | null;
+  onStopWorkflow?: (taskId: string) => void;
   /** The turn footer (run time, copy, "…", file pills). Rendered INSIDE this
    *  component's 768 lane so it hugs the answer and the pills align under it —
    *  as a TurnContainer sibling it picked up the container's gap-4 (a ~20px gap
@@ -58,6 +68,9 @@ export const TurnEventList = memo(function TurnEventList({
   isStreaming,
   showActivity = true,
   activityEvents,
+  activityStartedAt,
+  workflow,
+  onStopWorkflow,
   footer,
   ctx,
 }: TurnEventListProps) {
@@ -85,15 +98,18 @@ export const TurnEventList = memo(function TurnEventList({
   // as working even when it's scrolled far from this tail — but only the
   // tail carries the elapsed timer, so the time is never shown twice.
   //
-  // While the agent is PARKED on the user — a blocking question, a permission
-  // gate, or Claude's plan review — it isn't "working": hide the tail shimmer
-  // + ticking timer (user feedback 2026-07-04, extended to plan review the
-  // same day). The elapsed clock still runs underneath (the shimmer derives
-  // its time from startedAt), so when the user answers/approves or the wait
-  // times out the indicator returns with the true total.
+  // The shimmer and the workflow row answer different questions and so have
+  // different gates — see tail-indicators.ts for why they must not be folded
+  // together. `pickActiveWorkflow` already restricts `workflow` to
+  // running/paused runs, so nothing settled can linger in this row.
   const awaitingUserInput =
     ctx.pendingQuestionToolCallIds.size > 0 || !!ctx.pendingPermission;
-  const showShimmer = live && showActivity && !awaitingUserInput;
+  const tail = tailIndicators({ live, showActivity, awaitingUserInput });
+  const showShimmer = tail.shimmer;
+  const workflowRow =
+    tail.workflow && workflow && onStopWorkflow
+      ? { workflow, onStop: onStopWorkflow }
+      : null;
 
   // 2026-06-18: the agent's output + tool calls render in a LEFT-aligned lane
   // capped at max-w-[768px] (`w-full max-w-[768px] self-start`) — the reading
@@ -120,6 +136,7 @@ export const TurnEventList = memo(function TurnEventList({
     working.length === 0 &&
     finalOutput.length === 0 &&
     !showShimmer &&
+    !workflowRow &&
     !footer
   ) {
     return null;
@@ -133,11 +150,17 @@ export const TurnEventList = memo(function TurnEventList({
       {finalOutput.map((event) => (
         <MessageView key={event.id} message={event} ctx={ctx} />
       ))}
+      {workflowRow ? <WorkflowActivity {...workflowRow} /> : null}
       {/* Shimmer + live timer at the tail of the active turn while streaming
           (pickStartedAt anchors the timer to the most recent in-flight tool —
           for a running subagent that's the subagent's own start time). */}
       {showShimmer && (
-        <ActivityShimmer startedAt={pickStartedAt(activityEvents ?? events)} />
+        <ActivityShimmer
+          startedAt={pickStartedAt(
+            activityEvents ?? events,
+            activityStartedAt,
+          )}
+        />
       )}
       {/* Per-turn footer, in-lane so it hugs the answer (see prop doc). */}
       {footer}

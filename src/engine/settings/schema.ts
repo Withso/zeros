@@ -23,9 +23,11 @@ import { GITHUB_AUTH_METHODS } from "@zeros/core/github-auth";
 export const RUN_MODES = ["concurrent", "nonconcurrent"] as const;
 export const PROVIDER_AUTH_METHODS = ["cli", "api-key"] as const;
 /** How a new workspace's branch name is prefixed (Settings → Git). "zeros" is
- *  the historical default and stays the fallback: every workspace created
+ *  the historical value and stays the FALLBACK PREFIX: every workspace created
  *  before this setting existed is on a `zeros/` branch, and that prefix is
- *  what marks a ref as workspace-owned. */
+ *  what marks a ref as workspace-owned. It is no longer the default TYPE — see
+ *  DEFAULT_BRANCH_PREFIX_TYPE — but remains accepted, so a settings.toml (or a
+ *  team layer) that pins it keeps working. */
 export const BRANCH_PREFIX_TYPES = [
   "zeros",
   "github",
@@ -33,6 +35,15 @@ export const BRANCH_PREFIX_TYPES = [
   "none",
 ] as const;
 export type BranchPrefixType = (typeof BRANCH_PREFIX_TYPES)[number];
+/** What an UNSET `git.branch_prefix_type` means (2026-08-03 founder direction).
+ *  The connected GitHub login, not `zeros`: a branch namespace is a person, so
+ *  this is the answer that needs no configuring, and it is why Settings → Git
+ *  can show a selected row from the first launch instead of three empty radios
+ *  standing for a default it declined to name. Not signed in still yields
+ *  `zeros/` branches — resolveNewBranchPrefix substitutes DEFAULT_BRANCH_PREFIX
+ *  rather than dropping the namespace — so this changes the default ANSWER, not
+ *  the guarantee that new branches are recognisably workspace-owned. */
+export const DEFAULT_BRANCH_PREFIX_TYPE: BranchPrefixType = "github";
 /** Reasoning-effort levels — mirror of the renderer's ChatEffort union. */
 export const EFFORT_LEVELS = [
   "low",
@@ -115,8 +126,9 @@ const gitSchema = z
       .enum(BRANCH_PREFIX_TYPES)
       .describe(
         'Which namespace a new workspace branch goes under: "github" = the ' +
-          'connected GitHub login, "custom" = the `branch_prefix` string, ' +
-          '"none" = no prefix (the bare workspace name). The namespace is ' +
+          'connected GitHub login (the default), "custom" = the ' +
+          '`branch_prefix` string, "none" = no prefix (the bare workspace ' +
+          'name), "zeros" = the fixed `zeros/` namespace. The namespace is ' +
           "joined to the name with a single `/`.",
       ),
     branch_prefix: z

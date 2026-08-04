@@ -105,6 +105,12 @@ const POST_CANCEL_INTERRUPT_MS = 15_000;
  *  practice; 1.5s is a comfortable margin that only collab turns ever pay. */
 const COLLAB_GRACE_MS = 1_500;
 
+/** Fail-closed response used whenever lifecycle teardown abandons a parked
+ * approval without a user choice. */
+const CANCELLED_PERMISSION_RESPONSE = {
+  outcome: { outcome: "cancelled" },
+} as RequestPermissionResponse;
+
 const CODEX_MODES: SessionMode[] = [
   {
     id: "ask",
@@ -276,9 +282,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
    *  InitializeResponse `_meta.models` — replacing the bundled-catalog fallback
    *  with the account's REAL models. Best-effort + once per process (the catalog
    *  is account-stable). The Codex ReasoningEffort vocabulary
-   *  (none|minimal|low|medium|high|xhigh) is passed through verbatim, in the
-   *  server's intended order; the renderer coerces it to its ChatEffort set
-   *  (dropping none/minimal). `supportsFast` is set only when a "fast" service
+   *  ladder is normalized into Zeros' existing composer tokens in the
+   *  server's intended order (`ultra` → `ultracode`; none/minimal dropped).
+   *  `supportsFast` is set only when a "fast" service
    *  tier is advertised — otherwise left unset so the renderer's gpt-5*
    *  heuristic stands (never a regression). */
   private async discoverModels(session: CodexSession): Promise<void> {
@@ -299,6 +305,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         if (!m?.id || m.hidden) continue;
         const effortLevels = (m.supportedReasoningEfforts ?? [])
           .map((e) => e.reasoningEffort)
+          .map(mapCodexAdvertisedEffort)
           .filter((e): e is string => typeof e === "string");
         const hasFast =
           (m.serviceTiers ?? []).some((t) => t.id === "fast") ||
@@ -452,7 +459,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // the model written into OPENAI_MODEL at spawn time was used. A
     // session respawn fixed model but not effort.
     const model = session.env?.OPENAI_MODEL?.trim() || undefined;
-    const effort = mapEffortFromEnv(session.env?.ZEROS_THINKING_EFFORT);
+    const effort = mapCodexEffortFromEnv(
+      session.env?.ZEROS_THINKING_EFFORT,
+    );
     const fast = session.env?.ZEROS_FAST_MODE === "1";
     // Verification breadcrumb: one line per turn echoing the composer knobs
     // sent to the app-server. Tail the engine log and confirm it flips as you
@@ -629,6 +638,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
       // child exit is now an idle crash, not a mid-turn one.
       session.turnActive = false;
       session.cancelRequested = false;
+      // A completed/failed turn cannot still service one of its approval
+      // resolvers. Fail closed and receipt every straggler before a later turn
+      // can enqueue behind a dead renderer card.
+      this.drainPendingApprovals(session, session.runtimeAlive);
     }
   }
 
@@ -739,6 +752,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
     if (!session) return;
     session.cancelRequested = true;
     session.postCancelInterruptUntil = Date.now() + POST_CANCEL_INTERRUPT_MS;
+    // Release approval RPCs as part of Stop itself. Interrupting the turn does
+    // not guarantee the app-server will settle every server→client request.
+    this.drainPendingApprovals(session, session.runtimeAlive);
     // Sweep EVERY live turn, not just the parent's. turn/interrupt is
     // per-(thread, turn), and collab subagent threads keep running —
     // streaming tool calls into the timeline — if only the parent turn
@@ -817,12 +833,11 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // bounded by active chats (single digits); the per-session Map
     // keeps the lookup itself O(1).
     for (const session of this.sessions.values()) {
-      const pending = session.pendingApprovals.get(opts.permissionId);
-      if (!pending) continue;
-      session.pendingApprovals.delete(opts.permissionId);
-      const codexResponse = mapResponseToCodexDecision(pending, opts.response);
-      pending.runtime.respondToPermission(opts.permissionId, codexResponse);
-      return;
+      if (
+        this.settlePendingApproval(session, opts.permissionId, opts.response)
+      ) {
+        return;
+      }
     }
     // Unknown permissionId — already responded or session was disposed.
     // No throw; the gateway pipeline tolerates this.
@@ -1035,8 +1050,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
   async disposeSession(sessionId: string): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
+    this.drainPendingApprovals(s, s.runtimeAlive);
     this.sessions.delete(sessionId);
-    s.pendingApprovals.clear();
     s.pendingQuestions.clear();
     this.disposing.add(sessionId);
     try {
@@ -1060,7 +1075,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         // map before disposing the runtime. The runtime's own dispose
         // also auto-cancels its in-flight approval promises, so this
         // is belt-and-braces — but it keeps the adapter map clean.
-        s.pendingApprovals.clear();
+        this.drainPendingApprovals(s, s.runtimeAlive);
         s.pendingQuestions.clear();
         await s.runtime.dispose();
         // Best-effort session dir removal.
@@ -1121,6 +1136,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
         logTag: `codex-app-server:${zerosSessionId.slice(0, 8)}`,
         onApprovalRequest: (request) =>
           this.handleApprovalRequest(session, request),
+        onApprovalSettled: (permissionId) =>
+          this.handleApprovalSettled(session, permissionId),
         onUserInputRequest: (request) =>
           this.handleUserInputRequest(session, request),
         onUserInputSettled: (questionId) =>
@@ -1235,7 +1252,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
       },
     });
 
-    this.wireRuntimeToTranslator(runtime, translator);
+    this.wireRuntimeToTranslator(runtime, translator, {
+      threadId,
+      zerosSessionId,
+    });
 
     session = {
       zerosSessionId,
@@ -1323,7 +1343,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
     //     codex side is gone.
     session.activeTurnId = null;
     session.activeTurns.clear();
-    session.pendingApprovals.clear();
+    // The runtime is already dead, so only drop local resolver handles and
+    // emit their receipts; there is no JSON-RPC peer left to answer.
+    this.drainPendingApprovals(session, false);
     session.pendingQuestions.clear();
     session.fileEditPathsByItemId.clear();
 
@@ -1560,6 +1582,79 @@ export class CodexAppServerAdapter implements AgentAdapter {
     );
   }
 
+  /** An approval settled inside the runtime WITHOUT a respondToPermission (its
+   *  response timeout, or dispose's cancel-all sweep, auto-cancelled the codex
+   *  side). Twin of handleUserInputSettled: evict the pending entry and emit the
+   *  settled echo so the renderer drops the parked card and the engine stops
+   *  replaying it to a reloaded renderer as a gate whose resolver is already
+   *  gone. No response argument — the codex side is already answered. */
+  private handleApprovalSettled(
+    session: CodexSession | undefined,
+    permissionId: string,
+  ): void {
+    if (!session) return;
+    this.settlePendingApproval(session, permissionId);
+  }
+
+  /** Settle one adapter-owned approval exactly once. When `response` is
+   *  present, this path also resolves the live app-server JSON-RPC request;
+   *  runtime-owned settlement callbacks omit it because that resolver is
+   *  already gone. Deleting before either side effect makes re-entrant or
+   *  duplicate lifecycle notifications harmless. */
+  private settlePendingApproval(
+    session: CodexSession,
+    permissionId: string,
+    response?: RequestPermissionResponse,
+  ): boolean {
+    const pending = session.pendingApprovals.get(permissionId);
+    if (!pending || !session.pendingApprovals.delete(permissionId)) {
+      return false;
+    }
+    try {
+      if (response) {
+        const codexResponse = mapResponseToCodexDecision(pending, response);
+        pending.runtime.respondToPermission(permissionId, codexResponse);
+      }
+    } finally {
+      try {
+        this.ctx.emit.onPermissionSettled?.(
+          this.agentId,
+          permissionId,
+          session.zerosSessionId,
+        );
+      } catch (err) {
+        this.ctx.emit.onAgentStderr(
+          this.agentId,
+          `[zeros] permission settle emit failed for ${permissionId}: ${String(err)}`,
+        );
+      }
+    }
+    return true;
+  }
+
+  /** Drain a stable snapshot because responding can synchronously advance the
+   *  Codex turn and mutate the pending map. */
+  private drainPendingApprovals(
+    session: CodexSession,
+    resolveRuntime: boolean,
+  ): void {
+    for (const permissionId of [...session.pendingApprovals.keys()]) {
+      try {
+        this.settlePendingApproval(
+          session,
+          permissionId,
+          resolveRuntime ? CANCELLED_PERMISSION_RESPONSE : undefined,
+        );
+      } catch (err) {
+        // One malformed resolver must not keep the rest of the queue alive.
+        this.ctx.emit.onAgentStderr(
+          this.agentId,
+          `[zeros] permission drain failed for ${permissionId}: ${String(err)}`,
+        );
+      }
+    }
+  }
+
   /** A blocking user-input question (item/tool/requestUserInput). Twin of
    *  handleApprovalRequest — the answer flows back via respondToQuestion. */
   private handleUserInputRequest(
@@ -1659,6 +1754,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
   private wireRuntimeToTranslator(
     runtime: CodexAppServerHandle,
     translator: CodexAppServerTranslator,
+    owner: { threadId: string; zerosSessionId: string },
   ): void {
     const methods = [
       "thread/started",
@@ -1693,6 +1789,18 @@ export class CodexAppServerAdapter implements AgentAdapter {
     for (const m of methods) {
       runtime.onNotification(m, (params) => translator.handle(m, params));
     }
+    // Codex may autonomously raise the thread to native `ultra`. Keep the ONE
+    // existing composer effort picker truthful by persisting that provider
+    // state into the exact parent chat. Child/collaboration thread settings
+    // are intentionally ignored — they do not own the composer's setting.
+    runtime.onNotification("thread/settings/updated", (params) => {
+      const effort = codexEffortFromThreadSettings(params, owner.threadId);
+      if (!effort) return;
+      this.ctx.emit.onSessionUpdate(this.agentId, {
+        sessionId: owner.zerosSessionId,
+        update: { sessionUpdate: "current_effort_update", effort },
+      });
+    });
   }
 
   /** Materialise base64 image blocks to per-session tempfiles and
@@ -1909,14 +2017,22 @@ export function modePolicyFor(modeId: CodexModeId): CodexModePolicy {
  *  ZEROS_THINKING_EFFORT by `envForChatSettings`) onto the Codex
  *  app-server's `turn/start.effort` enum.
  *
- *  The generated ReasoningEffort enum is
- *  none | minimal | low | medium | high | xhigh — so "xhigh" is now
- *  passed through natively (it used to be clamped to "high" when Codex
- *  capped there). Unknown / empty values stay unset so Codex picks its
- *  own default (typically "medium"). */
-function mapEffortFromEnv(
+ *  ReasoningEffort is intentionally open in the current generated protocol
+ *  (`ReasoningEffort.ts` is just `string`), so a wrong token is NOT a compile
+ *  error — it comes back at runtime as `turn/start: Invalid request: unknown
+ *  variant`, i.e. every send fails. So each Zeros tier must map onto a token
+ *  Codex really has:
+ *    • `ultra`  — the native proactive multi-agent tier (`ultracode` → this).
+ *    • `max`    — Claude-only, NOT a Codex variant, so it clamps DOWN to
+ *                 `xhigh` (Codex's highest ordinary reasoning tier). It is
+ *                 normally unreachable (CODEX_LADDER excludes it), but a
+ *                 persisted/settings-derived effort can still carry it, and a
+ *                 graceful downgrade beats a hard turn failure.
+ *  Unknown / empty values stay unset so Codex picks its own default
+ *  (typically "medium"). */
+export function mapCodexEffortFromEnv(
   value: string | undefined,
-): "minimal" | "low" | "medium" | "high" | "xhigh" | undefined {
+): "minimal" | "low" | "medium" | "high" | "xhigh" | "ultra" | undefined {
   switch (value?.trim().toLowerCase()) {
     case "minimal":
       return "minimal";
@@ -1928,14 +2044,54 @@ function mapEffortFromEnv(
       return "high";
     case "xhigh":
       return "xhigh";
-    // Zeros-only levels: Codex's enum tops out at "xhigh" (no max/ultracode),
-    // so clamp both down to "xhigh" — its highest reasoning tier.
     case "max":
-    case "ultracode":
       return "xhigh";
+    case "ultracode":
+    case "ultra":
+      return "ultra";
     default:
       return undefined;
   }
+}
+
+/** Codex protocol token → the already-shipping composer effort vocabulary.
+ *
+ *  Deliberately asymmetric with {@link mapCodexEffortFromEnv}: this direction
+ *  reads what the SERVER claims to support, so an unexpected `max` is honoured
+ *  (shown as Max) rather than dropped — the outbound clamp then keeps the turn
+ *  itself on a token today's app-server accepts. */
+export function mapCodexAdvertisedEffort(
+  value: string | undefined,
+): string | undefined {
+  switch (value?.trim().toLowerCase()) {
+    case "low":
+    case "medium":
+    case "high":
+    case "xhigh":
+    case "max":
+    case "ultracode":
+      return value.trim().toLowerCase();
+    case "ultra":
+      return "ultracode";
+    default:
+      return undefined;
+  }
+}
+
+/** Safely read a thread/settings/updated frame and reject child-thread drift. */
+export function codexEffortFromThreadSettings(
+  params: unknown,
+  parentThreadId: string,
+): string | null {
+  if (!params || typeof params !== "object" || Array.isArray(params)) return null;
+  const frame = params as {
+    threadId?: unknown;
+    threadSettings?: { effort?: unknown } | null;
+  };
+  if (frame.threadId !== parentThreadId) return null;
+  return typeof frame.threadSettings?.effort === "string"
+    ? mapCodexAdvertisedEffort(frame.threadSettings.effort) ?? null
+    : null;
 }
 
 function mapStopReason(

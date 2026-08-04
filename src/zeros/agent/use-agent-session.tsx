@@ -29,6 +29,7 @@ import type {
   RequestPermissionResponse,
   SessionMode,
   StopReason,
+  WorkflowProgress,
 } from "../bridge/agent-events";
 import type { BridgeRegistryAgent } from "../bridge/messages";
 
@@ -120,6 +121,10 @@ export interface AgentSessionState {
    *  cleared (and the trim re-applied) when they return to the bottom. */
   historyExpanded?: boolean;
   pendingPermission: PendingPermission | null;
+  /** Concurrent provider/helper gates in arrival order. The UI deliberately
+   * still renders ONE existing PermissionCard: `pendingPermission` is the head
+   * mirror, and settling it advances to the next queue item. */
+  pendingPermissions: PendingPermission[];
   /** Blocking user-input questions awaiting an answer, in arrival order. Only
    *  the head ([0]) renders; the rest surface one-by-one as it's answered. A
    *  queue (not a single slot) so a second question can't clobber the first. */
@@ -134,6 +139,9 @@ export interface AgentSessionState {
    *  whenever the session is warming/ready/streaming. */
   failure: import("../bridge/failure").AgentFailure | null;
   lastStopReason: StopReason | null;
+  /** Engine-owned active-turn start. Restored by loadSession after a renderer
+   * reload so an empty live tail does not restart its elapsed clock at 0s. */
+  activeTurnStartedAt: number | null;
   /** Modes advertised by the agent at session creation, if any. */
   availableModes: SessionMode[];
   /** Currently active mode id (echoed back by session/set_mode and
@@ -152,6 +160,10 @@ export interface AgentSessionState {
   /** Active background work owned by this exact session. Engine snapshots
    * replace the set; completed tasks move into persisted tool-call history. */
   backgroundTasks: BackgroundTask[];
+  /** Foreground multi-agent workflows owned by this exact session. Full
+   * engine snapshots replace this ephemeral list; narrator lines live in the
+   * ordinary tool-call transcript instead. */
+  workflows: WorkflowProgress[];
   /** Parent session is parked and waiting for the active task set to wake it. */
   waitingForBackgroundTasks: boolean;
   /** Start of the current continuous parked interval. Session-owned so a

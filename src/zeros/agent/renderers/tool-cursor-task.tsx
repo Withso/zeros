@@ -15,10 +15,9 @@
 //        │  <final report as markdown, no card>      ← like Claude's result
 //
 // The child tool calls arrive as parentToolId-tagged children (the engine
-// discovers the subagent's on-disk transcript — see cursor-sdk/translator.ts +
-// subagent-transcript.ts) and render through the SAME EventStripe the rest of
-// the timeline uses. In practice Cursor only delivers them once the subagent
-// COMPLETES, so the card renders collapsed by default (see below).
+// discovers and polls the subagent's on-disk transcript — see
+// cursor-sdk/translator.ts + subagent-transcript.ts) and render LIVE through
+// the SAME EventStripe the rest of the timeline uses.
 // ──────────────────────────────────────────────────────────
 
 import { memo, useMemo, useState } from "react";
@@ -38,6 +37,7 @@ import { statusTone } from "./event-meta";
 import { renderMarkdown } from "../markdown";
 import { cn } from "@/zeros/ui/cn";
 import { ZerosSpinner } from "@/loaders";
+import { cursorTaskOpenState } from "./cursor-task-state";
 
 const TONE_ICON_COLOR = {
   ok: "text-fg2",
@@ -71,12 +71,11 @@ export const CursorTaskCard: Renderer<AgentToolMessage> = memo(
     // children — rendered live in the body below.
     const children = ctx.subagentChildren.get(tool.toolCallId) ?? [];
 
-    // COLLAPSED by default — running or settled (2026-07-04, per user). Cursor
-    // only surfaces the child's tool calls after the subagent completes, so
-    // auto-expanding mid-run showed just the Input block. The header spinner
-    // conveys "working"; an explicit toggle opens the body and sticks.
+    // Empty tasks start collapsed. The first polled child tool call opens the
+    // group so activity is visible live; after the user toggles, their explicit
+    // choice owns the state and remains sticky while more children stream.
     const [userToggled, setUserToggled] = useState<boolean | null>(null);
-    const open = userToggled ?? false;
+    const open = cursorTaskOpenState(userToggled, children.length);
     // The Input row is itself collapsed by default — like Claude's Prompt row —
     // so an expanded task opens to a tidy list (Input + tool rows) instead of a
     // wall of JSON. Click the Input row to read the raw payload.

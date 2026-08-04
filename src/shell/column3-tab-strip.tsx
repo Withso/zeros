@@ -84,7 +84,12 @@ export function Column3TabStrip({
 
   const handleClose = (e: React.MouseEvent, tab: Column3Tab) => {
     e.stopPropagation();
-    if (tab.type === "changes" || tab.type === "review") return;
+    if (
+      tab.type === "changes" ||
+      tab.type === "review" ||
+      tab.type === "context"
+    )
+      return;
     dispatch({ type: "REMOVE_COLUMN3_TAB", id: tab.id });
   };
 

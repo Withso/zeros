@@ -5,7 +5,7 @@
 // (`encodeComposerAttachments` → handleSend + the queued-edit save) had no
 // `kind === "text"` branch at all: every text attachment became
 // `{type:"image", data:""}`, which the vision adapter drops silently (falsy
-// base64 → no source.url), `writeImageAttachment` throws on, and Codex turns
+// base64 → no source.url), `writeContextAttachment` throws on, and Codex turns
 // into a zero-byte temp file. Dragging a .md into the composer rendered a
 // chip, sent successfully, and the agent never saw the file.
 //
@@ -15,10 +15,10 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const writeImageAttachment = vi.fn();
+const writeContextAttachment = vi.fn();
 
 vi.mock("../agent-history-client", () => ({
-  writeImageAttachment: (...args: unknown[]) => writeImageAttachment(...args),
+  writeContextAttachment: (...args: unknown[]) => writeContextAttachment(...args),
 }));
 
 import {
@@ -91,10 +91,11 @@ describe("textAttachmentBlock", () => {
 
 describe("encodeAttachments — text attachments reach the agent", () => {
   beforeEach(() => {
-    writeImageAttachment.mockReset();
-    writeImageAttachment.mockResolvedValue({
-      absolutePath: "/repo/.context/attachments/chat-1/shot.png",
-      relativePath: ".context/attachments/chat-1/shot.png",
+    writeContextAttachment.mockReset();
+    writeContextAttachment.mockResolvedValue({
+      absolutePath:
+        "/repo/.context-graph/local/attachments/att-img/shot.png",
+      relativePath: ".context-graph/local/attachments/att-img/shot.png",
       mimeType: "image/png",
       bytes: 4,
     });
@@ -115,14 +116,79 @@ describe("encodeAttachments — text attachments reach the agent", () => {
         { type: "text", text: '<file name="notes.txt">\nhello world\n</file>' },
       ]);
       // The sent bubble must say "text" too — the old encoder hard-coded
-      // "image", which is why the bubble rendered a broken thumbnail.
+      // "image", which is why the bubble rendered a broken thumbnail. The
+      // attachmentId is the bubble's link back to the context-graph record —
+      // deleting a QUEUED bubble uses it to unstage.
       expect(bubbleAttachments).toEqual([
-        { name: "notes.txt", mimeType: "text/plain", kind: "text" },
+        {
+          name: "notes.txt",
+          mimeType: "text/plain",
+          kind: "text",
+          attachmentId: "att-1",
+        },
       ]);
-      // A text attachment never touches the image disk-write path.
-      expect(writeImageAttachment).not.toHaveBeenCalled();
     });
   }
+
+  it("stages the text body into the context graph when the chat has a cwd", async () => {
+    await encodeAttachments([textAttachment()], VISION);
+    expect(writeContextAttachment).toHaveBeenCalledTimes(1);
+    expect(writeContextAttachment).toHaveBeenCalledWith({
+      cwd: "/repo",
+      chatId: "chat-1",
+      attachmentId: "att-1",
+      // "hello world" as UTF-8 base64 — the graph copy carries the bytes.
+      base64: "aGVsbG8gd29ybGQ=",
+      mimeType: "text/plain",
+      filename: "notes.txt",
+    });
+  });
+
+  it("skips the graph copy when there is no cwd or chat", async () => {
+    await encodeAttachments([textAttachment()], NO_CWD);
+    expect(writeContextAttachment).not.toHaveBeenCalled();
+  });
+
+  it("still stages when the chat doesn't exist yet — the graph is workspace-scoped", async () => {
+    // Sending the FIRST prompt encodes before the chat row lands. chatId is
+    // provenance only; requiring it silently skipped the graph copy for
+    // every new-chat send.
+    await encodeAttachments([textAttachment()], { ...VISION, chatId: null });
+    expect(writeContextAttachment).toHaveBeenCalledTimes(1);
+    expect(writeContextAttachment.mock.calls[0][0]).toMatchObject({
+      cwd: "/repo",
+      attachmentId: "att-1",
+    });
+  });
+
+  it("does not re-stage a reconstructed chip — its send already owns a record", async () => {
+    // Edit-in-place rebuilds sent messages under fresh `att-edit-` ids
+    // (reconstruct.ts). Staging those again would duplicate the canvas card
+    // on every edit-resubmit.
+    const { blocks } = await encodeAttachments(
+      [textAttachment({ id: "att-edit-k2-1", text: "hello world" })],
+      VISION,
+    );
+    // The prompt still carries the body — only the graph copy is skipped.
+    expect(blocks).toEqual([
+      { type: "text", text: '<file name="notes.txt">\nhello world\n</file>' },
+    ]);
+    expect(writeContextAttachment).not.toHaveBeenCalled();
+  });
+
+  it("still delivers the inline block when the graph copy fails", async () => {
+    // The graph write is additive — the prompt already carries the body, so a
+    // failed copy (web client, read-only disk) must not skip the attachment.
+    writeContextAttachment.mockRejectedValueOnce(new Error("no IPC"));
+    const { blocks, skipped } = await encodeAttachments(
+      [textAttachment()],
+      VISION,
+    );
+    expect(blocks).toEqual([
+      { type: "text", text: '<file name="notes.txt">\nhello world\n</file>' },
+    ]);
+    expect(skipped).toEqual([]);
+  });
 
   it("never emits an empty image block for a text attachment", async () => {
     for (const ctx of [VISION, NON_VISION, NO_CWD]) {
@@ -162,7 +228,7 @@ describe("encodeAttachments — text attachments reach the agent", () => {
 });
 
 describe("encodeAttachments — validation", () => {
-  beforeEach(() => writeImageAttachment.mockReset());
+  beforeEach(() => writeContextAttachment.mockReset());
 
   it("excludes an invalid attachment — and reports it", async () => {
     // agent-attachments.ts documents that "submission filters out anything not
@@ -205,21 +271,35 @@ describe("encodeAttachments — validation", () => {
 
 describe("encodeAttachments — image branches still work", () => {
   beforeEach(() => {
-    writeImageAttachment.mockReset();
-    writeImageAttachment.mockResolvedValue({
-      absolutePath: "/repo/.context/attachments/chat-1/shot.png",
-      relativePath: ".context/attachments/chat-1/shot.png",
+    writeContextAttachment.mockReset();
+    writeContextAttachment.mockResolvedValue({
+      absolutePath:
+        "/repo/.context-graph/local/attachments/att-img/shot.png",
+      relativePath: ".context-graph/local/attachments/att-img/shot.png",
       mimeType: "image/png",
       bytes: 4,
     });
   });
 
-  it("inlines the image for a vision agent", async () => {
+  it("inlines the image for a vision agent — and stages the graph copy", async () => {
     const { blocks } = await encodeAttachments([imageAttachment()], VISION);
     expect(blocks).toEqual([
       { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
     ]);
-    expect(writeImageAttachment).not.toHaveBeenCalled();
+    // The inline block is the delivery; the graph copy is the canvas record.
+    expect(writeContextAttachment).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the inline image when the vision-path graph copy fails", async () => {
+    writeContextAttachment.mockRejectedValueOnce(new Error("no IPC"));
+    const { blocks, skipped } = await encodeAttachments(
+      [imageAttachment()],
+      VISION,
+    );
+    expect(blocks).toEqual([
+      { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+    ]);
+    expect(skipped).toEqual([]);
   });
 
   it("persists to disk and references it for a non-vision agent", async () => {
@@ -227,10 +307,10 @@ describe("encodeAttachments — image branches still work", () => {
       [imageAttachment()],
       NON_VISION,
     );
-    expect(writeImageAttachment).toHaveBeenCalledTimes(1);
+    expect(writeContextAttachment).toHaveBeenCalledTimes(1);
     expect(blocks[0].type).toBe("text");
     expect(bubbleAttachments[0].diskPath).toBe(
-      ".context/attachments/chat-1/shot.png",
+      ".context-graph/local/attachments/att-img/shot.png",
     );
   });
 
@@ -239,11 +319,23 @@ describe("encodeAttachments — image branches still work", () => {
     expect(blocks).toEqual([
       { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
     ]);
-    expect(writeImageAttachment).not.toHaveBeenCalled();
+    expect(writeContextAttachment).not.toHaveBeenCalled();
+  });
+
+  it("keeps the disk-reference path for a non-vision agent on a brand-new chat", async () => {
+    // chatId used to gate the disk write, forcing pre-chat sends onto the
+    // inline fallback that non-vision adapters may drop. The graph write is
+    // workspace-scoped, so the path reference works without a chat row.
+    const { blocks } = await encodeAttachments([imageAttachment()], {
+      ...NON_VISION,
+      chatId: null,
+    });
+    expect(writeContextAttachment).toHaveBeenCalledTimes(1);
+    expect(blocks[0].type).toBe("text");
   });
 
   it("drops an image whose disk write fails, without losing the others", async () => {
-    writeImageAttachment.mockRejectedValueOnce(new Error("EACCES"));
+    writeContextAttachment.mockRejectedValueOnce(new Error("EACCES"));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { blocks } = await encodeAttachments(
       [imageAttachment(), textAttachment()],
@@ -260,7 +352,7 @@ describe("encodeAttachments — image branches still work", () => {
 
 describe("encodeAttachments — ordering", () => {
   it("preserves composer order across mixed kinds", async () => {
-    writeImageAttachment.mockReset();
+    writeContextAttachment.mockReset();
     const { blocks } = await encodeAttachments(
       [
         textAttachment({ id: "a", name: "one.txt", text: "1" }),

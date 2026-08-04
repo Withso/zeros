@@ -65,6 +65,11 @@ import {
   pathExists,
 } from "./setup-hooks";
 import { resolveFilesToCopy, resolvePatternSource } from "./files-to-copy";
+import {
+  CONTEXT_GRAPH_DIR,
+  contextGraphHasContent,
+  ensureContextGraph,
+} from "../files/context-graph";
 import { resolveRepoScript } from "../settings/repo-scripts";
 import { resolveRepoGit } from "../settings/repo-git";
 import { isKnownRepoRoot, listKnownRepoRoots } from "../db/projects";
@@ -858,7 +863,11 @@ async function collectUsedWorkspaceNames(
  *  is what marks a ref as workspace-owned, and silently creating unprefixed
  *  branches in a user's repo because a lookup failed would litter it with names
  *  indistinguishable from their own. A settings problem must never block or
- *  reshape workspace creation. */
+ *  reshape workspace creation.
+ *
+ *  Unset means `github` (DEFAULT_BRANCH_PREFIX_TYPE), not `zeros` — so on a
+ *  signed-in machine that has never touched Settings → Git, new branches read
+ *  `jordan/Cream`. `zeros/` is then only the fallback for an unknown login. */
 export async function resolveNewBranchPrefix(
   repoRoot: string,
   /** The connected GitHub login, for `branch_prefix_type = "github"`.
@@ -867,11 +876,21 @@ export async function resolveNewBranchPrefix(
    *  network. Overridable so tests can pin it. */
   githubLogin: string | null = cachedGithubLogin(),
 ): Promise<string | null> {
+  /** The default type's namespace. Not signed in / login unusable as a ref →
+   *  `zeros` rather than null, so a missing login degrades the NAME and never
+   *  litters the repo with unprefixed branches. */
+  const fromLogin = () =>
+    normalizeBranchPrefix(githubLogin ?? undefined) ?? DEFAULT_BRANCH_PREFIX;
+
   let config;
   try {
     config = resolveRepoGit(repoRoot);
   } catch {
-    return DEFAULT_BRANCH_PREFIX;
+    // resolveRepoGit swallows its own failures, so this is belt-and-braces —
+    // but it must still mean the DEFAULT type, not the historical `zeros`, or
+    // an unreadable settings tree would quietly answer a different question
+    // from an empty one.
+    return fromLogin();
   }
   switch (config.branchPrefixType) {
     case "none":
@@ -879,17 +898,14 @@ export async function resolveNewBranchPrefix(
     case "custom":
       // Already normalized by resolveRepoGit; null when unset or unusable.
       return config.branchPrefix ?? DEFAULT_BRANCH_PREFIX;
-    case "github": {
-      // Not signed in / login unreadable → keep the default rather than
-      // silently dropping to no prefix.
-      return (
-        normalizeBranchPrefix(githubLogin ?? undefined) ??
-        DEFAULT_BRANCH_PREFIX
-      );
-    }
     case "zeros":
-    default:
+      // Only reachable from an explicit setting now (a hand-edited
+      // settings.toml or a team/managed layer) — unset resolves to the default
+      // type. Still honoured: it is what pre-2026-08-03 branches are under.
       return DEFAULT_BRANCH_PREFIX;
+    case "github":
+    default:
+      return fromLogin();
   }
 }
 
@@ -1560,6 +1576,16 @@ async function createWorkspaceInner(
     // the branch checkout, or a vanished source) is simply one more entry for
     // `git add -f`, which no-ops when the file isn't there.
     addProvisionPaths(workspaceId, seedPaths);
+    // Every workspace gets its `.context-graph/` skeleton (Context tab canvas
+    // + composer-attachment store). Best-effort and quiet: the scaffold is
+    // self-gitignoring, and a failure here must never roll back the worktree —
+    // the attachment IPC and the Context tab both re-scaffold lazily.
+    const graph = await ensureContextGraph(workspacePath);
+    if (!graph.ok) {
+      console.warn(
+        `[worktree] context-graph scaffold skipped for ${workspaceId}: ${graph.error}`,
+      );
+    }
     updateWorkspaceLifecyclePhase(workspaceId, "work-applied");
   } catch (err) {
     const rolledBack = await safeRollback(
@@ -2525,6 +2551,14 @@ async function archiveWorkspaceInner(
         // settings. Keep them durable for the workspace's whole lifetime so a
         // later archive never drops an ignored provisioned file.
         ...readProvisionPaths(ws.id),
+        // The context graph survives archive — a workspace's attachments and
+        // shared docs are part of its durable record: force-add the whole
+        // tree, since `local/` is gitignored and `add -A` alone would drop it.
+        // Only when it holds real content, so an empty skeleton doesn't make
+        // the missing-snapshot check below stricter for clean workspaces.
+        ...((await contextGraphHasContent(ws.path))
+          ? [CONTEXT_GRAPH_DIR]
+          : []),
       ]),
     ];
     const archiveSnapshot = await snapshotWorkingTree(

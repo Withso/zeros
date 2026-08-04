@@ -387,8 +387,9 @@ export type PendingChatSubmission = {
  *  model-catalog.ts (Opus = all six; Sonnet/GPT = low…xhigh; Haiku = low…high).
  *  Mapping to the agent: Claude takes `low|medium|high|xhigh|max` as the SDK
  *  `effort` option, and "ultracode" → `xhigh` + the `ultracode` setting
- *  (xhigh effort plus standing multi-agent-workflow permission). Codex
- *  has no `max`/`ultracode`, so it clamps to `xhigh`. */
+ *  (xhigh effort plus standing multi-agent-workflow permission). Codex maps
+ *  the existing “Ultra” picker value (`ultracode`) to its native `ultra`
+ *  effort token and maps provider-originated `ultra` updates back again. */
 export type ChatEffort =
   | "low"
   | "medium"

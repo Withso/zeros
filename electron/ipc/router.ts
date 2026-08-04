@@ -103,6 +103,7 @@ const commandTable: Record<string, CommandHandler> = {
   read_css_file: notImpl("read_css_file", 5),
   write_css_file: notImpl("write_css_file", 5),
   read_file: notImpl("read_file", 5),
+  read_image_thumbnail: notImpl("read_image_thumbnail", 5),
   write_file: notImpl("write_file", 5),
   skills_list: notImpl("skills_list", 5),
   discover_localhost_services: notImpl("discover_localhost_services", 5),
@@ -122,9 +123,10 @@ const commandTable: Record<string, CommandHandler> = {
   updater_status: notImpl("updater_status", 8),
   process_relaunch: notImpl("process_relaunch", 8),
 
-  // ── Agent image-attachment write (Phase D2) ───────────────
-  // Persists base64 image attachments to the chat folder so non-vision
-  // agents can reference them by path. A file-write, not chat storage.
+  // ── Agent attachment staging (Phase D2 / context graph) ──────
+  // Moves base64 attachment bytes into the workspace's .context-graph.
+  // A file-write, not chat storage. Write-only: the graph is append-only
+  // from the app (files leave it only via the user deleting them on disk).
   agent_attachment_write: notImpl("agent_attachment_write", 8),
 
   // (Phase 2c) agent transcript + chat-list channels removed — that storage
