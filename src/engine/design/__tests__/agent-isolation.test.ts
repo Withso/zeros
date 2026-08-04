@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -23,12 +23,13 @@ describe("design workspace agent isolation", () => {
     expect(codingHarness).not.toContain("ZEROS_CHAT_MODE");
   });
 
-  it("retains the native design MCP implementation without starting it globally", () => {
-    expect(read("src/engine/design/mcp-server.ts")).toContain(
-      "export class DesignMcpServer",
-    );
+  it("keeps the retired design MCP absent and blocks coding-agent access", () => {
+    expect(
+      existsSync(resolve(root, "src/engine/design/mcp-server.ts")),
+    ).toBe(false);
     const engine = read("src/engine/index.ts");
-    expect(engine).not.toMatch(/new DesignMcpServer|\.designMcpServer\.start/);
+    expect(engine).not.toContain("DesignMcpServer");
+    expect(engine).not.toContain("ZEROS_DESIGN_MCP_TOKEN");
     expect(engine).not.toContain("setDesignServerResolver");
     expect(engine).toContain("assertAgentWorkspaceProcessStartAllowed");
     expect(engine).toContain("removeDesignAdditionalDirectories");
