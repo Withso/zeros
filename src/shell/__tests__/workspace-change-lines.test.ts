@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { Workspace } from "../../native/git";
+
 const gitChangeLineCounts = vi.fn();
 
 vi.mock("../../native/git", () => ({
@@ -15,6 +17,7 @@ const {
   NO_CHANGE_LINES,
   rememberChangeLines,
   resetWorkspaceChangeLinesForTests,
+  workspaceChangeLinesTarget,
 } = await import("../use-workspace-change-lines");
 
 afterEach(() => {
@@ -85,6 +88,24 @@ describe("workspace change-line generations", () => {
       additions: 5,
       deletions: 1,
     });
+  });
+});
+
+describe("workspace change-line targets", () => {
+  it("keeps the established code target while design tabs start no Git read", () => {
+    const base = {
+      id: "ws-a",
+      path: "/repo/worktrees/a",
+      repoRoot: "/repo",
+      present: true,
+    };
+
+    expect(
+      workspaceChangeLinesTarget({ ...base, kind: "code" } as Workspace),
+    ).toBe("ws-a");
+    expect(
+      workspaceChangeLinesTarget({ ...base, kind: "design" } as Workspace),
+    ).toBeNull();
   });
 });
 

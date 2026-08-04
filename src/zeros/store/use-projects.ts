@@ -288,7 +288,11 @@ function stableWorkspaceRows(
  * create settlement so both paths participate in the same cache generation. */
 async function fetchLiveWorkspaceRows(repoSlug: string): Promise<Workspace[]> {
   const prior = workspaceCache.getSnapshot(repoSlug).data;
-  const fresh = await workspaceList({ repoSlug, archived: false });
+  const fresh = await workspaceList({
+    repoSlug,
+    archived: false,
+    includeDesign: true,
+  });
   // Cold-boot defense-in-depth ONLY: a seeded (provisional) slug that reads
   // empty on its first live response is usually a mid-swap / unsynced engine,
   // not a genuine emptying. Keep the seed and require one confirming read.
@@ -555,7 +559,10 @@ function runDiscovery(force: boolean): Promise<void> {
   const revisionsAtStart = new Map(workspaceRevisionBySlug);
   discoveryPromise = (async () => {
     try {
-      const rows = await workspaceList({ archived: false });
+      const rows = await workspaceList({
+        archived: false,
+        includeDesign: true,
+      });
       if (mutationEpoch !== workspaceMutationEpoch) {
         // A create/archive/restore/delete landed while this aggregate snapshot
         // was being assembled. Never project its pre-mutation rows; queue one
@@ -1025,7 +1032,11 @@ export function useArchivedWorkspaces(repoSlug?: string): {
     loadCachedWorkspaceCollection(
       key,
       () =>
-        workspaceList({ archived: true, ...(repoSlug ? { repoSlug } : {}) }),
+        workspaceList({
+          archived: true,
+          includeDesign: true,
+          ...(repoSlug ? { repoSlug } : {}),
+        }),
       true,
     );
   }, [key, repoSlug]);
@@ -1035,7 +1046,11 @@ export function useArchivedWorkspaces(repoSlug?: string): {
       loadCachedWorkspaceCollection(
         key,
         () =>
-          workspaceList({ archived: true, ...(repoSlug ? { repoSlug } : {}) }),
+          workspaceList({
+            archived: true,
+            includeDesign: true,
+            ...(repoSlug ? { repoSlug } : {}),
+          }),
         false,
         maxAgeMs,
       );

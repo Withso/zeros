@@ -29,6 +29,7 @@ import {
   ImageIcon,
   LaptopMinimal,
   MessageCircleQuestionMark,
+  PenTool,
   Plus,
   Settings,
 } from "lucide-react";
@@ -79,6 +80,8 @@ import {
 } from "../zeros/store/use-projects";
 import {
   dedupePendingCreates,
+  filterPendingCreatesForDesignAccess,
+  filterWorkspacesForDesignAccess,
   selectLiveVisible,
 } from "../zeros/store/live-workspace-selectors";
 import {
@@ -88,6 +91,7 @@ import {
 import {
   findProjectForFolder,
   findWorkspaceForFolder,
+  resolveWorkspacePresentationKind,
 } from "../zeros/store/workspace-resolution";
 import { Button } from "../zeros/ui/primitives/button";
 import {
@@ -116,6 +120,7 @@ import {
   isExperimentalEnabled,
   useExperimentalFeature,
 } from "../zeros/settings/experimental-features";
+import { useInternalFeatureActive } from "../zeros/settings/internal-features";
 import { createWorkspaceForProject } from "./create-workspace";
 import { toast } from "../zeros/ui/primitives/elements";
 import { Tooltip } from "../zeros/ui/primitives/tooltip";
@@ -131,6 +136,7 @@ import {
 import {
   usePendingCreatesAll,
   usePendingCreatesFor,
+  usePendingWorkspaceKind,
   useWorkspaceArchiving,
   useWorkspaceProvisioning,
 } from "../zeros/store/pending-workspaces";
@@ -162,7 +168,10 @@ const SELECTED_PROJECT_KEY = "zeros.top-bar.selected-project";
 /** Warm the exact workspace a repository switch will restore. This works even
  * while the repository's workspace-list key is cold because the persisted
  * folder itself is already a complete local navigation identity. */
-function prefetchProjectWorkspaceDestination(project: Project): void {
+function prefetchProjectWorkspaceDestination(
+  project: Project,
+  designWorkspacesActive: boolean,
+): void {
   prefetchWorkspacesFor(project.repoSlug);
   const state = useWorkspaceStore.getState();
   prefetchWorkspaceSurface(
@@ -176,6 +185,7 @@ function prefetchProjectWorkspaceDestination(project: Project): void {
       // Synchronous read: this warms the cache from a plain event handler, and
       // it must agree with the destination handleSelectProject will pick.
       allowLocalMain: isExperimentalEnabled("workInLocalMain"),
+      allowDesignWorkspaces: designWorkspacesActive,
     }),
   );
 }
@@ -443,9 +453,9 @@ interface WorkspaceTabProps {
   workspace: Workspace;
   /** Whether the workspace currently owns the app content. */
   active: boolean;
-  /** Live chat ids in this worktree, used for agent activity state. */
+  /** Live coding-chat ids in this worktree, used for agent activity state. */
   chatIds: readonly string[];
-  /** Opens the workspace and restores or creates its chat. */
+  /** Opens the workspace; only code destinations restore or create chat. */
   onSelect: (workspace: Workspace) => void;
   /** Warms the exact chat/tree/file destination on pointer or keyboard intent. */
   onPrefetch: (workspace: Workspace) => void;
@@ -454,6 +464,8 @@ interface WorkspaceTabProps {
   /** Registers the tab so the active workspace can be revealed on navigation. */
   tabRef?: (node: HTMLDivElement | null) => void;
 }
+
+const EMPTY_WORKSPACE_CHAT_IDS: readonly string[] = Object.freeze([]);
 
 // --- CHILD COMPONENTS ---
 
@@ -519,8 +531,10 @@ function WorkspaceTab({
   onArchive,
   tabRef,
 }: WorkspaceTabProps) {
-  const streaming = useAnyChatStreaming(chatIds);
-  const awaitingKind = useAnyChatAwaitingKind(chatIds);
+  const designWorkspace = workspace.kind === "design";
+  const agentChatIds = designWorkspace ? EMPTY_WORKSPACE_CHAT_IDS : chatIds;
+  const streaming = useAnyChatStreaming(agentChatIds);
+  const awaitingKind = useAnyChatAwaitingKind(agentChatIds);
   const islandKind = usePrIslandKind(workspace.id, workspace.prNumber);
   const runActionRunning = useAnyRunActionRunning(workspace.path);
   const changeLines = useWorkspaceChangeLines(workspace);
@@ -533,7 +547,7 @@ function WorkspaceTab({
       className={WORKSPACE_TAB_CLS}
       data-active={active}
       data-workspace-tab="true"
-      data-streaming={streaming || undefined}
+      data-streaming={(!designWorkspace && streaming) || undefined}
       aria-busy={archiving || undefined}
     >
       <Button
@@ -558,6 +572,8 @@ function WorkspaceTab({
         >
           {archiving ? (
             <ZerosSpinner size={16} label="Archiving workspace" />
+          ) : designWorkspace ? (
+            <PenTool className="size-3.5" strokeWidth={1.25} />
           ) : awaitingKind === "plan" ? (
             <ClipboardList className="size-3.5" strokeWidth={1.25} />
           ) : awaitingKind === "input" ? (
@@ -641,9 +657,11 @@ function WorkspaceTab({
  *  Non-interactive — there is nothing to open yet. */
 function PendingWorkspaceTab({
   label,
+  kind = "code",
   active = false,
 }: {
   label: string;
+  kind?: "code" | "design";
   active?: boolean;
 }) {
   return (
@@ -658,7 +676,11 @@ function PendingWorkspaceTab({
         className="inline-flex size-4 shrink-0 items-center justify-center"
         aria-hidden="true"
       >
-        <GitBranch className="size-3.5" strokeWidth={1.25} />
+        {kind === "design" ? (
+          <PenTool className="size-3.5" strokeWidth={1.25} />
+        ) : (
+          <GitBranch className="size-3.5" strokeWidth={1.25} />
+        )}
       </span>
       <span className="ml-2.5 min-w-0 flex-auto truncate text-left">
         {label}
@@ -678,6 +700,8 @@ interface ProjectPickerProps {
   onSelect: (project: Project) => void;
   /** Opens the Dispatcher scoped to the selected repository. */
   onCreate: () => void;
+  /** Effective Internal gate used by intent prefetch and route restoration. */
+  designWorkspacesActive: boolean;
 }
 
 function ProjectIconChip({
@@ -704,6 +728,7 @@ function ProjectPicker({
   openingRoot,
   onSelect,
   onCreate,
+  designWorkspacesActive,
 }: ProjectPickerProps) {
   const selectedOpening = openingRoot === selectedProject.repoRoot;
   const [iconDialogOpen, setIconDialogOpen] = useState(false);
@@ -753,11 +778,17 @@ function ProjectPicker({
                   <DropdownMenuItem
                     key={project.id}
                     onPointerEnter={() => {
-                      prefetchProjectWorkspaceDestination(project);
+                      prefetchProjectWorkspaceDestination(
+                        project,
+                        designWorkspacesActive,
+                      );
                       prefetchSettingsForRepo(project.repoRoot);
                     }}
                     onFocus={() => {
-                      prefetchProjectWorkspaceDestination(project);
+                      prefetchProjectWorkspaceDestination(
+                        project,
+                        designWorkspacesActive,
+                      );
                       prefetchSettingsForRepo(project.repoRoot);
                     }}
                     onSelect={() => onSelect(project)}
@@ -831,17 +862,25 @@ function ArchivedWorkspacePicker({ project }: { project: Project }) {
   const [query, setQuery] = useState("");
   const [restoringId, setRestoringId] = useState<string | null>(null);
   const openWorkspace = useOpenWorkspace();
+  const designWorkspacesActive =
+    useInternalFeatureActive("designWorkspaces");
   const { workspaces, loading, error, refresh } = useArchivedWorkspaces(
     project.repoSlug,
   );
+  const accessibleWorkspaces = useMemo(
+    () =>
+      filterWorkspacesForDesignAccess(workspaces, designWorkspacesActive),
+    [designWorkspacesActive, workspaces],
+  );
 
   const allForProject = useMemo(
-    () => filterArchivedWorkspaces(workspaces, project.repoSlug, ""),
-    [project.repoSlug, workspaces],
+    () => filterArchivedWorkspaces(accessibleWorkspaces, project.repoSlug, ""),
+    [accessibleWorkspaces, project.repoSlug],
   );
   const matches = useMemo(
-    () => filterArchivedWorkspaces(workspaces, project.repoSlug, query),
-    [project.repoSlug, query, workspaces],
+    () =>
+      filterArchivedWorkspaces(accessibleWorkspaces, project.repoSlug, query),
+    [accessibleWorkspaces, project.repoSlug, query],
   );
 
   useEffect(() => {
@@ -945,6 +984,12 @@ function ArchivedWorkspacePicker({ project }: { project: Project }) {
                   >
                     {restoringId === workspace.id ? (
                       <ZerosSpinner size={14} />
+                    ) : workspace.kind === "design" ? (
+                      <PenTool
+                        className="text-fg2 size-3.5 shrink-0"
+                        strokeWidth={1.25}
+                        aria-hidden="true"
+                      />
                     ) : (
                       <GitBranch
                         className="text-fg2 size-3.5 shrink-0"
@@ -977,10 +1022,17 @@ export function TopBar() {
   const chats = useChats();
   const activePage = useActivePage();
   const activeRepoId = useActiveRepoId();
+  const nativeRuntime = useNativeRuntime();
+  const designWorkspacesInternalActive =
+    useInternalFeatureActive("designWorkspaces");
+  const designWorkspacesActive =
+    designWorkspacesInternalActive &&
+    (nativeRuntime.ready || nativeRuntime.expectedElectron);
   const activeFolder = useWorkspaceStore(selectActiveFolder);
   // True while the active folder is a freshly-announced worktree whose create
   // is still landing — the list-validation effect below must not bounce it.
   const activeFolderProvisioning = useWorkspaceProvisioning(activeFolder);
+  const activeFolderPendingKind = usePendingWorkspaceKind(activeFolder);
   const dispatch = useWorkspaceDispatch();
   const sessions = useAgentSessions();
   const { projects } = useProjects();
@@ -1055,12 +1107,29 @@ export function TopBar() {
   // Dropping it from `visibleWorkspaces` would strand those paths instead.
   const [workInLocalMain] = useExperimentalFeature("workInLocalMain");
 
+  const accessibleWorkspaces = useMemo(
+    () =>
+      filterWorkspacesForDesignAccess(workspaces, designWorkspacesActive),
+    [designWorkspacesActive, workspaces],
+  );
+  const activeFolderConfirmedWorkspace = useMemo(
+    () => findWorkspaceForFolder(activeFolder, workspaces),
+    [activeFolder, workspaces],
+  );
+  const activeFolderBlockedDesign =
+    !designWorkspacesActive &&
+    resolveWorkspacePresentationKind({
+      confirmedKind: activeFolderConfirmedWorkspace?.kind,
+      pendingKind: activeFolderPendingKind,
+      folder: activeFolder,
+    }) === "design";
+
   const visibleWorkspaces = useMemo(
     () =>
       selectedProject
-        ? withLocalMainWorkspace(selectedProject, workspaces)
+        ? withLocalMainWorkspace(selectedProject, accessibleWorkspaces)
         : [],
-    [selectedProject, workspaces],
+    [accessibleWorkspaces, selectedProject],
   );
   // File indexes are the most visible cold-workspace waterfall. Warm a bounded
   // window only after the repository list settles and the browser is idle;
@@ -1081,7 +1150,15 @@ export function TopBar() {
   const mainWorkspace = visibleWorkspaces[0] ?? null;
   // In-flight creates across all repos — used both to render pending tabs and to
   // protect a slow-create's announced path from the bounce-to-main effect.
-  const allPendingCreates = usePendingCreatesAll();
+  const rawPendingCreates = usePendingCreatesAll();
+  const allPendingCreates = useMemo(
+    () =>
+      filterPendingCreatesForDesignAccess(
+        rawPendingCreates,
+        designWorkspacesActive,
+      ),
+    [designWorkspacesActive, rawPendingCreates],
+  );
   const realWorkspaces = useMemo(
     () =>
       orderWorkspaceTabs(
@@ -1100,6 +1177,10 @@ export function TopBar() {
   // invalidate that identity; when it proves the worktree was deleted, move to
   // main as a new authoritative navigation (never as an initial-cache guess).
   useEffect(() => {
+    // MainShellBody owns internal-access recovery for this route. Never turn a
+    // hidden design destination into a coding destination here: doing so could
+    // auto-spawn an unrelated coding chat while staff identity is still loading.
+    if (activeFolderBlockedDesign) return;
     if (
       activePage !== "workspace" ||
       !activeFolder ||
@@ -1115,7 +1196,7 @@ export function TopBar() {
     if (
       (mainWorkspace &&
         findWorkspaceForFolder(activeFolder, [mainWorkspace])) ||
-      findWorkspaceForFolder(activeFolder, workspaces)
+      findWorkspaceForFolder(activeFolder, accessibleWorkspaces)
     ) {
       if (
         useWorkspaceStore.getState().pendingWorkspaceValidationFolder ===
@@ -1130,7 +1211,7 @@ export function TopBar() {
     // yank the user off the "Setting up workspace" surface they just opened.
     // The exact create intent clears on authoritative publication/rollback, so
     // this guard cannot be held by Column 3's separate presentation settling.
-    if (activeFolderProvisioning) return;
+    if (activeFolderProvisioning && !activeFolderBlockedDesign) return;
     // A slow create (past the ~60s settling cap) whose real row hasn't landed
     // yet must not be bounced to main — its placeholder create is still in
     // flight, so the announced path is legitimate even though it isn't listed.
@@ -1139,16 +1220,20 @@ export function TopBar() {
       resolveRepoWorkspaceDestination({
         project: selectedProject,
         rememberedFolder: activeFolder,
-        cachedWorkspaces: workspaces,
+        cachedWorkspaces: accessibleWorkspaces,
         allowLocalMain: workInLocalMain,
+        allowDesignWorkspaces: designWorkspacesActive,
       }),
     );
   }, [
     activeFolder,
+    activeFolderBlockedDesign,
     activeFolderProvisioning,
     activePage,
     activeProject?.id,
+    accessibleWorkspaces,
     allPendingCreates,
+    designWorkspacesActive,
     dispatch,
     loading,
     mainWorkspace,
@@ -1156,7 +1241,6 @@ export function TopBar() {
     refreshing,
     selectedProject,
     workInLocalMain,
-    workspaces,
   ]);
 
   const chatIdsByWorkspace = useMemo(() => {
@@ -1478,6 +1562,7 @@ export function TopBar() {
           ),
           cachedWorkspaces: peekWorkspacesFor(project.repoSlug),
           allowLocalMain: workInLocalMain,
+          allowDesignWorkspaces: designWorkspacesActive,
         }),
       );
     },
@@ -1485,6 +1570,7 @@ export function TopBar() {
       activePage,
       activeProject?.id,
       activeRepoId,
+      designWorkspacesActive,
       dispatch,
       openWorkspace,
       persistSelectedProject,
@@ -1505,7 +1591,9 @@ export function TopBar() {
 
   const handlePrefetchWorkspace = useCallback(
     (workspace: Workspace) => {
+      if (workspace.kind === "design" && !designWorkspacesActive) return;
       prefetchWorkspaceSurface(workspace);
+      if (workspace.kind === "design") return;
       const chatId = selectChatToRestoreForFolder(
         useWorkspaceStore.getState(),
         workspace.path,
@@ -1515,22 +1603,38 @@ export function TopBar() {
         prepareColumn2ChatView(chatId);
       }
     },
-    [sessions],
+    [designWorkspacesActive, sessions],
   );
 
   /** Create directly in the selected repository, then move into the new
    * workspace. The global plus remains the richer Dispatcher entry point.
    * The optimistic flow itself lives in ./create-workspace, shared with the
    * repo-add paths that now open a workspace instead of the trunk. */
-  const handleCreateWorkspace = useCallback(async () => {
-    if (!selectedProject) return;
-    await createWorkspaceForProject({ project: selectedProject, dispatch });
-  }, [dispatch, selectedProject]);
+  const handleCreateWorkspace = useCallback(
+    async (kind: "code" | "design") => {
+      if (!selectedProject) return;
+      if (kind === "design" && !designWorkspacesActive) return;
+      await createWorkspaceForProject({
+        project: selectedProject,
+        dispatch,
+        kind,
+      });
+    },
+    [designWorkspacesActive, dispatch, selectedProject],
+  );
 
   // Pending creates for the visible repository — one "Setting up workspace…"
   // tab each, from ANY create surface (this plus or the Dispatcher).
-  const pendingCreates = usePendingCreatesFor(
+  const rawProjectPendingCreates = usePendingCreatesFor(
     selectedProject?.repoSlug ?? null,
+  );
+  const pendingCreates = useMemo(
+    () =>
+      filterPendingCreatesForDesignAccess(
+        rawProjectPendingCreates,
+        designWorkspacesActive,
+      ),
+    [designWorkspacesActive, rawProjectPendingCreates],
   );
   // Whether the strip renders anything at all — a real tab or an optimistic
   // placeholder. Drives the plus cell's divider; see its comment at that cell.
@@ -1596,6 +1700,7 @@ export function TopBar() {
             openingRoot={openingRoot}
             onSelect={handleSelectProject}
             onCreate={() => openDispatcher(selectedProject.id)}
+            designWorkspacesActive={designWorkspacesActive}
           />
         </div>
       ) : pendingOnly ? (
@@ -1683,6 +1788,7 @@ export function TopBar() {
                 (pending) => (
                   <PendingWorkspaceTab
                     key={pending.token}
+                    kind={pending.kind}
                     label={
                       pending.branch
                         ? branchDisplayName(pending.branch)
@@ -1734,21 +1840,57 @@ export function TopBar() {
                 : "flex h-full shrink-0 items-center px-1"
             }
           >
-            {/* Always the plain plus — never a spinner/disabled swap. Every
-                click reserves an independent workspace, while the optimistic
-                tab + navigation provide immediate per-click feedback. */}
-            <Tooltip label="New workspace" side="bottom">
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className={INSET_ICON_BUTTON_CLS}
-                aria-label="New workspace"
-                onClick={() => void handleCreateWorkspace()}
-              >
-                <Plus className="size-4" strokeWidth={1.5} />
-              </Button>
-            </Tooltip>
+            {/* Keep the shipped code-workspace action one click when Design is
+                unavailable. Internal staff who enable Design get the kind
+                picker; both paths retain the same plain plus affordance. */}
+            {designWorkspacesActive ? (
+              <DropdownMenu>
+                <Tooltip label="New workspace" side="bottom">
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className={INSET_ICON_BUTTON_CLS}
+                      aria-label="New workspace"
+                    >
+                      <Plus className="size-4" strokeWidth={1.5} />
+                    </Button>
+                  </DropdownMenuTrigger>
+                </Tooltip>
+                <DropdownMenuContent
+                  align="start"
+                  sideOffset={6}
+                  className="w-48"
+                >
+                  <DropdownMenuItem
+                    onSelect={() => void handleCreateWorkspace("code")}
+                  >
+                    <GitBranch className="text-fg2" />
+                    <span>Code workspace</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={() => void handleCreateWorkspace("design")}
+                  >
+                    <PenTool className="text-fg2" />
+                    <span>Design workspace</span>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : (
+              <Tooltip label="New workspace" side="bottom">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className={INSET_ICON_BUTTON_CLS}
+                  aria-label="New workspace"
+                  onClick={() => void handleCreateWorkspace("code")}
+                >
+                  <Plus className="size-4" strokeWidth={1.5} />
+                </Button>
+              </Tooltip>
+            )}
           </div>
         )}
 

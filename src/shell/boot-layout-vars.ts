@@ -27,6 +27,10 @@
 
 import { COLUMN_2_RATIO_VAR, readPersistedColumn2Ratio } from "./column2-ratio";
 import {
+  DESIGN_WORKSPACE_SIDEBAR_RATIO_VAR,
+  readPersistedDesignWorkspaceSidebarRatio,
+} from "../zeros/panels/design-workspace-width";
+import {
   TERMINAL_PANEL_HEIGHT_VAR,
   readPersistedTerminalPanelLayout,
 } from "./terminal/terminal-panel-layout";
@@ -47,6 +51,10 @@ export function applyBootLayoutVars(): void {
     root.style.setProperty(
       COLUMN_2_RATIO_VAR,
       String(readPersistedColumn2Ratio()),
+    );
+    root.style.setProperty(
+      DESIGN_WORKSPACE_SIDEBAR_RATIO_VAR,
+      String(readPersistedDesignWorkspaceSidebarRatio()),
     );
     root.style.setProperty(
       TERMINAL_PANEL_HEIGHT_VAR,

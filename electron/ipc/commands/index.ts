@@ -54,6 +54,7 @@ import { discoverLocalhostServices } from "./localhost";
 import { notifySend } from "./notifications";
 import { processMetricsSnapshot } from "./process-metrics";
 import { agentAttachmentWrite } from "./agent-attachments";
+import { designExportPng } from "./design-export";
 import {
   processRelaunch,
   updaterCheck,
@@ -195,6 +196,7 @@ export function registerAllCommands(): void {
   // of inline base64. The renderer calls this once per image attachment when the
   // active agent's promptCapabilities.image is false.
   setCommand("agent_attachment_write", agentAttachmentWrite);
+  setCommand("design_export_png", designExportPng);
 
   // Roadmap 03a — Git + GitHub integration layer, phase 1: workspace
   // lifecycle. Engine logic lives in src/engine/git/; these handlers

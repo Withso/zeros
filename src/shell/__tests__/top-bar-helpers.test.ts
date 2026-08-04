@@ -161,6 +161,40 @@ describe("repository workspace restoration", () => {
       repoRoot: "/repo",
     });
   });
+
+  it("fails closed instead of restoring a cold remembered design path", () => {
+    expect(
+      resolveRepoWorkspaceDestination({
+        project,
+        rememberedFolder:
+          "/Users/test/zeros/design workspaces/zeros/remembered",
+        cachedWorkspaces: undefined,
+        allowDesignWorkspaces: false,
+      }),
+    ).toMatchObject({ id: "local:zeros", path: "/repo" });
+  });
+
+  it("never selects a cached design row when design workspaces are disabled", () => {
+    const design = workspace("design", {
+      kind: "design",
+      archivedAt: null,
+      createdAt: 50,
+    });
+    const code = workspace("code", {
+      kind: "code",
+      archivedAt: null,
+      createdAt: 100,
+    });
+    expect(
+      resolveRepoWorkspaceDestination({
+        project,
+        rememberedFolder: design.path,
+        cachedWorkspaces: [design, code],
+        allowLocalMain: false,
+        allowDesignWorkspaces: false,
+      }),
+    ).toBe(code);
+  });
 });
 
 // The shared "not the trunk" destination. Exported because BOTH a repo switch

@@ -12,6 +12,7 @@
     "./agent-events": "./src/agent-events.ts",
     "./builtin-commands": "./src/builtin-commands.ts",
     "./agent-messages": "./src/agent-messages.ts",
+    "./design-runtime": "./src/design-runtime.ts",
     "./system-instructions": "./src/system-instructions/index.ts",
     "./version": "./src/version.ts",
     "./schemas": "./src/schemas.ts",

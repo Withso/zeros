@@ -17,6 +17,8 @@ export default defineConfig({
       // Release version scheme (pure function: baseline + tags → version).
       "scripts/__tests__/**/*.test.ts",
       "src/engine/git/__tests__/**/*.test.ts",
+      // Design workspaces: portable document parsing, lint, and MCP contracts.
+      "src/engine/design/__tests__/**/*.test.ts",
       "src/engine/agents/**/__tests__/**/*.test.ts",
       "src/zeros/store/__tests__/**/*.test.ts",
       // Native renderer boundary parsers (pure validation, no Electron host).

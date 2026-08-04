@@ -134,9 +134,9 @@ describe("Zeros DB (unified engine store)", () => {
       .all() as { version: number }[];
     expect(applied.map((r) => r.version)).toEqual([
       1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-      22, 23, 24, 25,
+      22, 23, 24, 25, 26, 27,
     ]);
-    expect(latestSchemaVersion()).toBe(25);
+    expect(latestSchemaVersion()).toBe(27);
   });
 
   it("stamps + backfills chats.workspace_id from folder via the resolver (v11)", () => {
@@ -188,7 +188,7 @@ describe("Zeros DB (unified engine store)", () => {
     const count = db
       .prepare("SELECT COUNT(*) AS n FROM schema_migrations")
       .get() as { n: number };
-    expect(count.n).toBe(25);
+    expect(count.n).toBe(27);
   });
 
   it("preserves created_at on upsert (immutable after first insert)", () => {
@@ -416,10 +416,20 @@ describe("Zeros DB (unified engine store)", () => {
   it("summariesForFolder: first user message per chat; includes archived; excludes self / no-user / other folders", () => {
     setZerosDbPathForTesting(tmpDbFile());
     upsertChat(
-      makeChat("a", { folder: "/proj", title: "A", createdAt: 10, updatedAt: 10 }),
+      makeChat("a", {
+        folder: "/proj",
+        title: "A",
+        createdAt: 10,
+        updatedAt: 10,
+      }),
     );
     upsertChat(
-      makeChat("b", { folder: "/proj", title: "B", createdAt: 20, updatedAt: 20 }),
+      makeChat("b", {
+        folder: "/proj",
+        title: "B",
+        createdAt: 20,
+        updatedAt: 20,
+      }),
     );
     upsertChat(
       makeChat("c", {
@@ -431,7 +441,12 @@ describe("Zeros DB (unified engine store)", () => {
       }),
     );
     upsertChat(
-      makeChat("d", { folder: "/proj", title: "D", createdAt: 40, updatedAt: 40 }),
+      makeChat("d", {
+        folder: "/proj",
+        title: "D",
+        createdAt: 40,
+        updatedAt: 40,
+      }),
     ); // agent-only
     upsertChat(makeChat("z", { folder: "/elsewhere", updatedAt: 50 }));
     const um = (id: string, text: string, createdAt = 1) => ({
@@ -499,7 +514,12 @@ describe("Zeros DB (unified engine store)", () => {
       {
         msgId: "a1",
         kind: "text",
-        payload: JSON.stringify({ id: "a1", kind: "text", role: "user", text: "q" }),
+        payload: JSON.stringify({
+          id: "a1",
+          kind: "text",
+          role: "user",
+          text: "q",
+        }),
         createdAt: 1,
       },
     ]);

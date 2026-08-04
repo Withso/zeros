@@ -124,7 +124,7 @@ const LOCAL_GIT_TIMEOUT_MS = 30_000;
 /** Send a WORKSPACE_REQUEST and await its WORKSPACE_RESPONSE / WORKSPACE_ERROR
  *  (both echo requestId, so request() resolves on whichever arrives). Throws on
  *  a WORKSPACE_ERROR. */
-async function workspaceOp(
+export async function workspaceOp(
   bridge: RuntimeClient,
   op: string,
   params: Record<string, unknown> = {},
@@ -228,7 +228,12 @@ export async function requestWorkspaceList(
   const result = (await workspaceOp(bridge, "workspace.list")) as
     | { workspaces?: Workspace[] }
     | undefined;
-  return result?.workspaces ?? [];
+  // This helper exists for the coding-agent cwd → workspace-id resolver. A
+  // Design workspace must never become an additional-directory or agent cwd,
+  // even for staff who enabled the separate Design surface.
+  return (result?.workspaces ?? []).filter(
+    (workspace) => workspace.kind !== "design",
+  );
 }
 
 /** Like requestWorkspaceList but forwards the desktop's `{status, repoSlug}`
@@ -512,7 +517,12 @@ export interface PreparedWorkspaceCreateWire {
  *  naming, no mkdir/checkout), so a disconnected prepare leaks nothing. */
 export async function bridgeWorkspacePrepareCreate(
   bridge: RuntimeClient,
-  args: { repoRoot: string; repoSlug?: string; prompt?: string },
+  args: {
+    repoRoot: string;
+    kind?: "code" | "design";
+    repoSlug?: string;
+    prompt?: string;
+  },
 ): Promise<PreparedWorkspaceCreateWire> {
   const r = (await workspaceOp(
     bridge,

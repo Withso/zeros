@@ -24,7 +24,9 @@ export function resolveNewTabShortcut(
     "metaKey" | "ctrlKey" | "altKey" | "shiftKey" | "code"
   >,
   terminalAgentsEnabled: boolean,
+  agentTabsEnabled = true,
 ): NewTabShortcut | null {
+  if (!agentTabsEnabled) return null;
   if (!event.metaKey || event.ctrlKey || event.altKey) return null;
   if (event.code !== "KeyT") return null;
   if (event.shiftKey) {
@@ -33,14 +35,18 @@ export function resolveNewTabShortcut(
   return "chat";
 }
 
-export function useNewTabHotkeys(): void {
+export function useNewTabHotkeys(agentTabsEnabled = true): void {
   const dispatch = useWorkspaceDispatch();
   const sessions = useAgentSessions();
   const [terminalAgentsEnabled] = useExperimentalFeature("terminalAgents");
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      const shortcut = resolveNewTabShortcut(event, terminalAgentsEnabled);
+      const shortcut = resolveNewTabShortcut(
+        event,
+        terminalAgentsEnabled,
+        agentTabsEnabled,
+      );
       if (!shortcut) return;
       const folder = selectActiveFolder(useWorkspaceStore.getState());
       if (!folder) return;
@@ -55,5 +61,5 @@ export function useNewTabHotkeys(): void {
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [dispatch, sessions, terminalAgentsEnabled]);
+  }, [agentTabsEnabled, dispatch, sessions, terminalAgentsEnabled]);
 }

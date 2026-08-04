@@ -128,6 +128,7 @@ const commandTable: Record<string, CommandHandler> = {
   // A file-write, not chat storage. Write-only: the graph is append-only
   // from the app (files leave it only via the user deleting them on disk).
   agent_attachment_write: notImpl("agent_attachment_write", 8),
+  design_export_png: notImpl("design_export_png", 8),
 
   // (Phase 2c) agent transcript + chat-list channels removed — that storage
   // moved to the engine's Zeros DB (reached over the bridge).

@@ -145,6 +145,11 @@ jobs:
         # XSS-reachable surface. Fast, so it runs before the suite.
         run: pnpm check:preload
 
+      - name: Install Playwright Chromium headless shell
+        # The Vitest suite contains real-browser design-runtime protocol tests.
+        # pnpm installs Playwright's API package but intentionally not its browser.
+        run: pnpm exec playwright install --with-deps --only-shell chromium
+
       - name: Run vitest suite
         run: pnpm test:git
 

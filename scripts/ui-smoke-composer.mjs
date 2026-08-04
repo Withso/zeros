@@ -31,17 +31,19 @@
 //      support keyboard focus, and never attach themselves to Read rows.
 //   9. File/diff reading surfaces wrap long lines, keep 450×350 hover geometry,
 //      and never expose horizontal scrolling.
-//  10. File Edit mode hangs soft-wrapped continuation rows at the line's own
+//  10. Design workspaces keep their native canvas/sidebar contract and never
+//      mount a coding-agent chat.
+//  11. File Edit mode hangs soft-wrapped continuation rows at the line's own
 //      indentation instead of dropping them to column 0.
-//  11. The Files-tab tree keeps its indent guides visible without hover and
+//  12. The Files-tab tree keeps its indent guides visible without hover and
 //      nests ~15.5px per level.
-//  12. The collapsed Files tab's floating tree popup wears the popover recipe
+//  13. The collapsed Files tab's floating tree popup wears the popover recipe
 //      (inset + rounded + shadow, quick-open search row, padded list),
 //      freezes its open-time height across container resizes, re-measures on
 //      reopen, keeps its filter input focused through tree clicks, and
 //      dismisses on file-open / double Escape / outside pointerdown while the
 //      trigger stays a toggle.
-//  13. A file editor is ALREADY syntax-colored on its first painted frame, with
+//  14. A file editor is ALREADY syntax-colored on its first painted frame, with
 //      the code theme's own base foreground — the "opens white, then repaints"
 //      flash. Only a real browser can prove this: the editor is mounted inside
 //      flushSync (CodeMirror's creating layout effect runs before paint) and the
@@ -55,6 +57,8 @@ import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import net from "node:net";
+
+import { runDesignWorkspaceSmoke } from "./ui-smoke-design-workspace.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -179,6 +183,10 @@ try {
     "Escape closes the menu",
     await waitFor(async () => !(await menuOpen()), "esc-close"),
   );
+
+  // The design surface owns a separate harness contract and deliberately has
+  // no coding-agent chat mounted.
+  await runDesignWorkspaceSmoke({ page, waitFor, check });
 
   // 4. Diff previews use a hover portal around an already-clickable row/pill.
   // Drive the real components so Slot handler composition and pointer travel

@@ -20,7 +20,9 @@ export function previousWorkspaceInOrder(
   leaving: Workspace,
   rows: readonly Workspace[],
   busyIds: Readonly<Record<string, number>>,
+  options: { allowDesignWorkspaces?: boolean } = {},
 ): Workspace | null {
+  const allowDesignWorkspaces = options.allowDesignWorkspaces !== false;
   // A server-state refresh can publish the confirmed archived list immediately
   // before the archive response continuation performs its atomic navigation
   // commit. Reinsert the known leaving identity for ordering only so that race
@@ -45,6 +47,7 @@ export function previousWorkspaceInOrder(
     if (
       candidate.archivedAt == null &&
       candidate.present !== false &&
+      (allowDesignWorkspaces || candidate.kind !== "design") &&
       candidate.path !== leaving.path &&
       !(candidate.id in busyIds)
     ) {

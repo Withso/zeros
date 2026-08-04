@@ -4,8 +4,10 @@ import { buildLocalMainWorkspace } from "../zeros/store/local-main-workspace";
 import type { Project } from "../zeros/store/projects-store";
 import {
   findWorkspaceForFolder,
+  workspaceKindFromManagedPath,
   workspaceIdFromWorktreePath,
 } from "../zeros/store/workspace-resolution";
+import { filterWorkspacesForDesignAccess } from "../zeros/store/live-workspace-selectors";
 import type { WorkspaceNavigationTarget } from "./prefetch-workspace-surface";
 
 export type WorkspacePinSide = "left" | "right" | null;
@@ -54,13 +56,22 @@ export function resolveRepoWorkspaceDestination(args: {
   rememberedFolder: string | null | undefined;
   cachedWorkspaces: readonly Workspace[] | undefined;
   allowLocalMain?: boolean;
+  allowDesignWorkspaces?: boolean;
 }): WorkspaceNavigationTarget {
   const { project, cachedWorkspaces } = args;
   const allowLocalMain = args.allowLocalMain !== false;
-  const rememberedFolder = args.rememberedFolder || project.repoRoot;
+  const allowDesignWorkspaces = args.allowDesignWorkspaces !== false;
+  const accessibleCachedWorkspaces = cachedWorkspaces
+    ? filterWorkspacesForDesignAccess(cachedWorkspaces, allowDesignWorkspaces)
+    : undefined;
+  const rememberedFolder =
+    !allowDesignWorkspaces &&
+    workspaceKindFromManagedPath(args.rememberedFolder) === "design"
+      ? project.repoRoot
+      : args.rememberedFolder || project.repoRoot;
   const main = buildLocalMainWorkspace(project);
-  const matched = cachedWorkspaces
-    ? findWorkspaceForFolder(rememberedFolder, [...cachedWorkspaces])
+  const matched = accessibleCachedWorkspaces
+    ? findWorkspaceForFolder(rememberedFolder, accessibleCachedWorkspaces)
     : null;
   if (matched) {
     return matched.path === rememberedFolder
@@ -72,14 +83,14 @@ export function resolveRepoWorkspaceDestination(args: {
     // A cold list can't prove a worktree exists, so it keeps the remembered
     // identity rather than guessing — the warm case is the one that redirects.
     if (!allowLocalMain) {
-      const alternative = leftmostLiveWorkspace(cachedWorkspaces);
+      const alternative = leftmostLiveWorkspace(accessibleCachedWorkspaces);
       if (alternative) return alternative;
     }
     return rememberedFolder === project.repoRoot
       ? main
       : { path: rememberedFolder, repoRoot: project.repoRoot };
   }
-  if (cachedWorkspaces === undefined) {
+  if (accessibleCachedWorkspaces === undefined) {
     const workspaceId = workspaceIdFromWorktreePath(rememberedFolder);
     return {
       path: rememberedFolder,
@@ -89,7 +100,7 @@ export function resolveRepoWorkspaceDestination(args: {
     };
   }
   if (!allowLocalMain) {
-    const alternative = leftmostLiveWorkspace(cachedWorkspaces);
+    const alternative = leftmostLiveWorkspace(accessibleCachedWorkspaces);
     if (alternative) return alternative;
   }
   return main;

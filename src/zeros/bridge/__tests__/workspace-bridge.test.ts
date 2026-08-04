@@ -60,6 +60,27 @@ describe("requestWorkspaceList", () => {
     expect(out).toEqual(workspaces);
   });
 
+  it("keeps design rows out of the coding-agent workspace resolver", async () => {
+    const code = {
+      id: "code",
+      kind: "code" as const,
+      path: "/root/zeros/workspaces/repo/code",
+    };
+    const design = {
+      id: "design",
+      kind: "design" as const,
+      path: "/root/zeros/design workspaces/repo/design",
+    };
+    const out = await requestWorkspaceList(
+      fakeBridge({
+        type: "WORKSPACE_RESPONSE",
+        op: "workspace.list",
+        result: { workspaces: [code, design] },
+      }),
+    );
+    expect(out).toEqual([code]);
+  });
+
   it("returns [] when the result carries no workspaces array", async () => {
     const out = await requestWorkspaceList(
       fakeBridge({

@@ -177,6 +177,26 @@ export function zerosWorkspacesRoot(): string {
   return path.join(homedir(), dir, "workspaces");
 }
 
+/** The visible sibling root for design worktrees:
+ * `~/zeros[-channel][-instance]/design workspaces`.
+ *
+ * Keep the space in the leaf: this is user-facing Finder territory, not an
+ * internal identifier. Tests/cloud may override it independently, or derive a
+ * sibling from ZEROS_WORKSPACES_DIR so one fixture root still isolates both
+ * workspace kinds. */
+export function zerosDesignWorkspacesRoot(): string {
+  if (process.env.ZEROS_DESIGN_WORKSPACES_DIR) {
+    return process.env.ZEROS_DESIGN_WORKSPACES_DIR;
+  }
+  if (process.env.ZEROS_WORKSPACES_DIR) {
+    return path.join(
+      path.dirname(process.env.ZEROS_WORKSPACES_DIR),
+      "design workspaces",
+    );
+  }
+  return path.join(path.dirname(zerosWorkspacesRoot()), "design workspaces");
+}
+
 /** A stable, collision-resistant, human-recognizable key for an engine root
  *  (the repo the engine serves). `<basename>-<sha256(realpath)[:12]>` — realpath
  *  so two paths that resolve to the same place (symlinks) share a key; the

@@ -24,6 +24,7 @@ export type WorkspaceStatus =
   | "cancelled";
 
 export type PrState = "draft" | "ready" | "merged" | "closed";
+export type WorkspaceKind = "code" | "design";
 
 /** Background setup-script state. NULL/undefined = no setup configured or it
  *  never ran. "running" while the setup PTY is live, then "passed"/"failed" on
@@ -43,6 +44,9 @@ export type DetectedTool =
 
 export interface Workspace {
   id: string;
+  /** Product surface and provisioning contract. Design workspaces retain the
+   * normal Git lifecycle but expose only `Zeros Design/` to agents. */
+  kind?: WorkspaceKind;
   repoSlug: string;
   /** Absolute path to the repo root (the "main" working tree). Stored
    *  per workspace so archive / restore / delete don't need the caller
@@ -176,6 +180,8 @@ export interface PR {
 }
 
 export interface CreateWorkspaceOptions {
+  /** Defaults to code for compatibility with every pre-design caller. */
+  kind?: WorkspaceKind;
   /** Optional — createWorkspace derives it from the origin URL
    *  (repoSlugFromOriginUrl) when omitted. Callers may pass one to override. */
   repoSlug?: string;

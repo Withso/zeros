@@ -775,6 +775,27 @@ CREATE INDEX idx_chat_messages_user_text
   WHERE kind = 'text' AND json_extract(payload, '$.role') = 'user';
 `;
 
+/** v26 — immutable chat backend mode. Chat `kind` already distinguishes the
+ * ordinary transcript surface from a terminal tab; `mode` instead records
+ * whether the same chat UI is backed by a code or design workspace. */
+const MIGRATION_26_CHAT_MODE = `
+ALTER TABLE chats ADD COLUMN mode TEXT NOT NULL DEFAULT 'code'
+  CHECK (mode IN ('code', 'design'));
+`;
+// Historical/inert: the design workspace no longer uses the shared chat
+// backend, and current chat persistence intentionally ignores this column.
+// Keep v26 forever because existing databases may already have applied it;
+// removing or renumbering an applied migration would break the forward ladder.
+
+/** v27 — workspace product kind. Existing rows are code workspaces. A design
+ * workspace shares the lifecycle table and Git semantics, but is provisioned
+ * under its own visible root with a sparse `Zeros Design/` checkout. */
+const MIGRATION_27_WORKSPACE_KIND = `
+ALTER TABLE workspaces ADD COLUMN kind TEXT NOT NULL DEFAULT 'code'
+  CHECK (kind IN ('code', 'design'));
+CREATE INDEX idx_workspaces_kind ON workspaces(kind, archived_at);
+`;
+
 /** The ordered migration list. Append only — NEVER edit or reorder a shipped
  *  entry; add a new one. */
 export const MIGRATIONS: Migration[] = [
@@ -898,6 +919,16 @@ export const MIGRATIONS: Migration[] = [
     version: 25,
     name: "chat_messages: partial index for the user-prompt count",
     up: MIGRATION_25_CHAT_MESSAGES_USER_TEXT,
+  },
+  {
+    version: 26,
+    name: "chats.mode (code or design backend, shared chat UI)",
+    up: MIGRATION_26_CHAT_MODE,
+  },
+  {
+    version: 27,
+    name: "workspaces.kind (code or design workspace)",
+    up: MIGRATION_27_WORKSPACE_KIND,
   },
 ];
 

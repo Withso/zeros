@@ -40,6 +40,10 @@ const ALLOWLIST = new Set([
   // in its shadow root, so they can't be recolored from our tokens — the
   // pill mirrors @pierre's values directly (see file header).
   "src/zeros/agent/composer-editor/file-type-icon.tsx",
+  // Portable design-document boundary. This module emits an authored
+  // `Zeros Design/tokens.css` seed whose palette cannot consume app-chrome
+  // custom properties (the resulting files also render outside Zeros).
+  "src/engine/design/document.ts",
 ]);
 
 // Skip entire directories
@@ -56,7 +60,9 @@ const ALLOWED_RADII_PX = new Set([0, 4, 6, 8, 12]);
 // Spacing scale — matches --space-1..--space-12 in tokens.css.
 // 1px is also allowed for column seams / dividers (Rule 13: "1px
 // seams, not tone steps"). Everything else must snap to scale.
-const ALLOWED_SPACE_PX = new Set([0, 1, 2, 4, 6, 8, 10, 12, 14, 16, 20, 24, 32, 40, 48]);
+const ALLOWED_SPACE_PX = new Set([
+  0, 1, 2, 4, 6, 8, 10, 12, 14, 16, 20, 24, 32, 40, 48,
+]);
 
 // Non-Zeros families (orange/purple/gray/…) are raw Tailwind defaults — always
 // banned in components; snap to a Zeros token instead.
@@ -130,12 +136,18 @@ const VISUAL_PROPS = new Set([
 // identifier/expression (no string / hex / number literal).
 function findInlineVisualViolations(body) {
   // Strip nested braces / parens for split safety.
-  const props = body.split(",").map((p) => p.trim()).filter(Boolean);
+  const props = body
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
   const bad = [];
   for (const p of props) {
     const colon = p.indexOf(":");
     if (colon === -1) continue;
-    const key = p.slice(0, colon).trim().replace(/^["']|["']$/g, "");
+    const key = p
+      .slice(0, colon)
+      .trim()
+      .replace(/^["']|["']$/g, "");
     const raw = p.slice(colon + 1).trim();
     if (!VISUAL_PROPS.has(key)) continue;
     // Strip surrounding quotes/backticks if any.
@@ -150,7 +162,12 @@ function findInlineVisualViolations(body) {
     //   - pure JS identifiers (rect.y, dims.w, foo?.bar, a ? b : c)
     if (/^var\s*\(/.test(value)) continue;
     if (/^0+$/.test(value)) continue;
-    if (/^(none|auto|inherit|initial|unset|currentColor|transparent)$/i.test(value)) continue;
+    if (
+      /^(none|auto|inherit|initial|unset|currentColor|transparent)$/i.test(
+        value,
+      )
+    )
+      continue;
     if (/^calc\s*\(/.test(value)) continue;
     // Runtime identifier / ternary expression: starts with identifier,
     // may include method calls, ternaries, string literals (for
@@ -168,7 +185,8 @@ function findInlineVisualViolations(body) {
   return bad;
 }
 
-const WEB_FONT_RE = /font-family\s*:\s*[^;]*\b(Inter|Roboto|Lato|Montserrat|Open Sans|Source Sans|IBM Plex|Poppins|Nunito)\b/i;
+const WEB_FONT_RE =
+  /font-family\s*:\s*[^;]*\b(Inter|Roboto|Lato|Montserrat|Open Sans|Source Sans|IBM Plex|Poppins|Nunito)\b/i;
 
 // --- 2026-07-12 audit-gap rules (color-theme audit §13) ---
 
@@ -291,7 +309,8 @@ function walk(dir, out = []) {
 
 function shouldScan(file) {
   const ext = extname(file).toLowerCase();
-  if (![".ts", ".tsx", ".js", ".jsx", ".mjs", ".css"].includes(ext)) return false;
+  if (![".ts", ".tsx", ".js", ".jsx", ".mjs", ".css"].includes(ext))
+    return false;
   if (file.includes("/scripts/")) return false;
   return true;
 }
@@ -325,8 +344,16 @@ function scanFile(absPath) {
       inBlock[i] = open;
       let j = 0;
       while (j < line.length) {
-        if (!open && line.startsWith("/*", j)) { open = true; j += 2; continue; }
-        if (open && line.startsWith("*/", j)) { open = false; j += 2; continue; }
+        if (!open && line.startsWith("/*", j)) {
+          open = true;
+          j += 2;
+          continue;
+        }
+        if (open && line.startsWith("*/", j)) {
+          open = false;
+          j += 2;
+          continue;
+        }
         j++;
       }
     });
@@ -358,7 +385,11 @@ function scanFile(absPath) {
           // Skip URL-looking contexts (anchor links, href="#…")
           const before = line.slice(Math.max(0, m.index - 5), m.index);
           if (before.includes("#")) continue;
-          push(rel, ln, `Hex color "${m[0]}" — use a token from tokens.css (see RULES.md).`);
+          push(
+            rel,
+            ln,
+            `Hex color "${m[0]}" — use a token from tokens.css (see RULES.md).`,
+          );
         }
       }
     }
@@ -371,33 +402,53 @@ function scanFile(absPath) {
         trimmed.startsWith("*") ||
         trimmed.startsWith("/*");
       if (!isComment) {
-        push(rel, ln, "rgba() literal — use a primitive token from styles/zeros-tokens.css (e.g. --bg3, --border3, --highlighted-bright) or add a new one there.");
+        push(
+          rel,
+          ln,
+          "rgba() literal — use a primitive token from styles/zeros-tokens.css (e.g. --bg3, --border3, --highlighted-bright) or add a new one there.",
+        );
       }
     }
 
     // --- Primitive token leaks ---
     if (!isAllowlisted && PRIMITIVE_TOKEN_RE.test(line)) {
-      push(rel, ln, "Primitive token referenced outside tokens.css — use a SEMANTIC token (e.g. --surface-0, --text-muted, --primary).");
+      push(
+        rel,
+        ln,
+        "Primitive token referenced outside tokens.css — use a SEMANTIC token (e.g. --surface-0, --text-muted, --primary).",
+      );
     }
 
     // --- Zeros raw-ramp via var() (numeric step, not an anchor) ---
     if (!isAllowlisted) {
       const m = line.match(ZEROS_RAMP_VAR_RE);
       if (m) {
-        push(rel, ln, `Raw palette ramp "${m[0]})" — numeric steps (--red-50…950) are private to zeros-tokens.css. Use a family anchor: var(--<family>-primary|secondary|bg|fg).`);
+        push(
+          rel,
+          ln,
+          `Raw palette ramp "${m[0]})" — numeric steps (--red-50…950) are private to zeros-tokens.css. Use a family anchor: var(--<family>-primary|secondary|bg|fg).`,
+        );
       }
     }
 
     // --- Tailwind color utility ---
     if (!isAllowlisted && !isCss && TAILWIND_COLOR_RE.test(line)) {
-      push(rel, ln, "Tailwind color class — use a semantic token or a primitive component (see RULES.md Rule 12).");
+      push(
+        rel,
+        ln,
+        "Tailwind color class — use a semantic token or a primitive component (see RULES.md Rule 12).",
+      );
     }
 
     // --- Zeros raw-ramp Tailwind class (numeric step, not an anchor) ---
     if (!isAllowlisted && !isCss) {
       const m = line.match(ZEROS_RAMP_CLASS_RE);
       if (m) {
-        push(rel, ln, `Raw palette ramp "${m[0]}" — numeric steps (red-50…950) are private. Use a family anchor: text-<family>-primary | bg-<family>-bg | text-<family>-fg (see zeros-foundation.md §2.4).`);
+        push(
+          rel,
+          ln,
+          `Raw palette ramp "${m[0]}" — numeric steps (red-50…950) are private. Use a family anchor: text-<family>-primary | bg-<family>-bg | text-<family>-fg (see zeros-foundation.md §2.4).`,
+        );
       }
     }
 
@@ -427,7 +478,11 @@ function scanFile(absPath) {
 
     // --- Web font ---
     if (!isAllowlisted && WEB_FONT_RE.test(line)) {
-      push(rel, ln, "Web font referenced directly — use var(--font-ui) or var(--font-mono).");
+      push(
+        rel,
+        ln,
+        "Web font referenced directly — use var(--font-ui) or var(--font-mono).",
+      );
     }
 
     // --- 2026-07-12 audit-gap rules (comments excluded like hex/rgba) ---
@@ -442,14 +497,22 @@ function scanFile(absPath) {
 
       // hsl()/oklch() literals
       if (!isAllowlisted && !isComment && HSL_OKLCH_RE.test(line)) {
-        push(rel, ln, "hsl()/oklch() literal — raw colors live in styles/zeros-tokens.css; reference a token via var(--…).");
+        push(
+          rel,
+          ln,
+          "hsl()/oklch() literal — raw colors live in styles/zeros-tokens.css; reference a token via var(--…).",
+        );
       }
 
       // *-white / *-black Tailwind classes
       if (!isAllowlisted && !isCss && !isComment) {
         const m = line.match(WHITE_BLACK_CLASS_RE);
         if (m) {
-          push(rel, ln, `Theme-static class "${m[0]}" — use a token (overlay veils: bg-scrim; inverted content: inverted-bg/inverted-fg).`);
+          push(
+            rel,
+            ln,
+            `Theme-static class "${m[0]}" — use a token (overlay veils: bg-scrim; inverted content: inverted-bg/inverted-fg).`,
+          );
         }
       }
 
@@ -457,15 +520,28 @@ function scanFile(absPath) {
       if (!isAllowlisted && !isCss && !isComment) {
         const m = line.match(DEAD_SHADCN_CLASS_RE);
         if (m) {
-          push(rel, ln, `Dead shadcn class "${m[0]}" — no such token exists here, so it renders no color (a paired ring-N paints solid currentColor). Use a Zeros token (fg1/border1/highlighted-bright…).`);
+          push(
+            rel,
+            ln,
+            `Dead shadcn class "${m[0]}" — no such token exists here, so it renders no color (a paired ring-N paints solid currentColor). Use a Zeros token (fg1/border1/highlighted-bright…).`,
+          );
         }
       }
 
       // bg3 as a fill outside popover surfaces (foundation §5.4)
-      if (!isAllowlisted && !isCss && !isComment && !BG3_SURFACE_FILES.has(rel)) {
+      if (
+        !isAllowlisted &&
+        !isCss &&
+        !isComment &&
+        !BG3_SURFACE_FILES.has(rel)
+      ) {
         const m = line.match(BG3_FILL_RE);
         if (m) {
-          push(rel, ln, `"${m[0]}" fill outside a popover surface — in light bg3 = bg1 (white), the fill vanishes. Chips → bg-bg2-hover; sidebar → sidebar-bg-hover; real popover panels → add the file to BG3_SURFACE_FILES.`);
+          push(
+            rel,
+            ln,
+            `"${m[0]}" fill outside a popover surface — in light bg3 = bg1 (white), the fill vanishes. Chips → bg-bg2-hover; sidebar → sidebar-bg-hover; real popover panels → add the file to BG3_SURFACE_FILES.`,
+          );
         }
       }
 
@@ -473,7 +549,11 @@ function scanFile(absPath) {
       if (!isAllowlisted && isCss && !isComment) {
         const m = line.match(BG3_CSS_FILL_RE);
         if (m) {
-          push(rel, ln, `"${m[0]}" — bg3 is floating-only (light bg3=bg1, dark bg3=sidebar-bg; a fill vanishes in both). Lifted content on bg1 → var(--bg1-highlight); a base surface → var(--bg2).`);
+          push(
+            rel,
+            ln,
+            `"${m[0]}" — bg3 is floating-only (light bg3=bg1, dark bg3=sidebar-bg; a fill vanishes in both). Lifted content on bg1 → var(--bg1-highlight); a base surface → var(--bg2).`,
+          );
         }
       }
 
@@ -481,7 +561,11 @@ function scanFile(absPath) {
       if (!isComment && rel.startsWith(PRIMITIVES_DIR)) {
         const m = line.match(TAILWIND_SHADOW_RE);
         if (m) {
-          push(rel, ln, `"${m[0]}" on a floating primitive — use shadow-[var(--shadow-dropdown)] so the lift re-themes (it's load-bearing in light).`);
+          push(
+            rel,
+            ln,
+            `"${m[0]}" on a floating primitive — use shadow-[var(--shadow-dropdown)] so the lift re-themes (it's load-bearing in light).`,
+          );
         }
       }
     }
@@ -492,7 +576,11 @@ function scanFile(absPath) {
       if (fs) {
         const n = Number(fs[1]);
         if (!ALLOWED_FONT_SIZES_PX.has(n)) {
-          push(rel, ln, `Off-scale font-size: ${n}px — snap to {10,11,12,13,15,18} via --text-N.`);
+          push(
+            rel,
+            ln,
+            `Off-scale font-size: ${n}px — snap to {10,11,12,13,15,18} via --text-N.`,
+          );
         }
       }
       // --- border-radius: Npx off-scale ---
@@ -500,13 +588,21 @@ function scanFile(absPath) {
       if (br) {
         const n = Number(br[1]);
         if (!ALLOWED_RADII_PX.has(n) && n !== 9999 && n !== 50) {
-          push(rel, ln, `Off-scale border-radius: ${n}px — use --radius-xs|sm|md|lg|pill|circle.`);
+          push(
+            rel,
+            ln,
+            `Off-scale border-radius: ${n}px — use --radius-xs|sm|md|lg|pill|circle.`,
+          );
         }
       }
       // --- numeric z-index in CSS outside tokens + primitives ---
       const zi = line.match(/z-index\s*:\s*(\d+)/);
       if (zi) {
-        push(rel, ln, `Numeric z-index: ${zi[1]} — use --z-chrome|panel|dropdown|modal|toast.`);
+        push(
+          rel,
+          ln,
+          `Numeric z-index: ${zi[1]} — use --z-chrome|panel|dropdown|modal|toast.`,
+        );
       }
       // --- odd space values in padding / gap / margin ---
       // Only flag solitary odd pixel values (e.g. `padding: 13px`).
@@ -516,7 +612,11 @@ function scanFile(absPath) {
         for (const v of values) {
           const n = Number(v.replace("px", ""));
           if (!ALLOWED_SPACE_PX.has(n) && n > 0) {
-            push(rel, ln, `Off-scale ${spaceMatch[1]} value: ${n}px — snap to even step via --space-N.`);
+            push(
+              rel,
+              ln,
+              `Off-scale ${spaceMatch[1]} value: ${n}px — snap to even step via --space-N.`,
+            );
           }
         }
       }
@@ -528,7 +628,11 @@ function scanFile(absPath) {
       for (const m of matches) {
         const bad = findInlineVisualViolations(m[1]);
         for (const b of bad) {
-          push(rel, ln, `Inline style "${b.key}: ${b.value}" — use a class or primitive with a token (RULES.md Rule 14).`);
+          push(
+            rel,
+            ln,
+            `Inline style "${b.key}: ${b.value}" — use a class or primitive with a token (RULES.md Rule 14).`,
+          );
         }
       }
     }
@@ -547,14 +651,17 @@ function checkTokenCommentDrift() {
   const abs = join(ROOT, rel);
   if (!existsSync(abs)) return;
   const hslToRgb = (h, s, l) => {
-    s /= 100; l /= 100;
+    s /= 100;
+    l /= 100;
     const k = (n) => (n + h / 30) % 12;
     const a = s * Math.min(l, 1 - l);
-    const f = (n) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+    const f = (n) =>
+      l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
     return [f(0), f(8), f(4)].map((v) => Math.round(v * 255));
   };
   const lines = readFileSync(abs, "utf8").split(/\r?\n/);
-  const re = /--[a-z0-9-]+:\s*hsl\(([\d.]+)\s+([\d.]+)%\s+([\d.]+)%\)\s*;\s*\/\*\s*(#[0-9a-fA-F]{6})/;
+  const re =
+    /--[a-z0-9-]+:\s*hsl\(([\d.]+)\s+([\d.]+)%\s+([\d.]+)%\)\s*;\s*\/\*\s*(#[0-9a-fA-F]{6})/;
   lines.forEach((line, idx) => {
     if (/check:ui\s+ignore-line/.test(line)) return;
     const m = line.match(re);
@@ -563,8 +670,17 @@ function checkTokenCommentDrift() {
     const commented = [1, 3, 5].map((i) => parseInt(m[4].slice(i, i + 2), 16));
     const delta = Math.max(...actual.map((v, i) => Math.abs(v - commented[i])));
     if (delta > 8) {
-      const hex = "#" + actual.map((v) => v.toString(16).padStart(2, "0")).join("").toUpperCase();
-      push(rel, idx + 1, `Comment-hex drift: value computes to ${hex} but the comment says ${m[4]} (Δ${delta}/channel) — fix the comment (or the value, deliberately).`);
+      const hex =
+        "#" +
+        actual
+          .map((v) => v.toString(16).padStart(2, "0"))
+          .join("")
+          .toUpperCase();
+      push(
+        rel,
+        idx + 1,
+        `Comment-hex drift: value computes to ${hex} but the comment says ${m[4]} (Δ${delta}/channel) — fix the comment (or the value, deliberately).`,
+      );
     }
   });
 }
@@ -573,7 +689,11 @@ function checkTokenCommentDrift() {
 function checkAllowlistFresh() {
   for (const rel of ALLOWLIST) {
     if (!existsSync(join(ROOT, rel))) {
-      push("scripts/check-ui-consistency.mjs", 1, `Stale ALLOWLIST entry "${rel}" — the file no longer exists; remove the entry.`);
+      push(
+        "scripts/check-ui-consistency.mjs",
+        1,
+        `Stale ALLOWLIST entry "${rel}" — the file no longer exists; remove the entry.`,
+      );
     }
   }
 }
@@ -596,12 +716,17 @@ for (const v of violations) {
   byFile.get(v.file).push(v);
 }
 
-console.log(`check:ui — ${violations.length} violation(s) across ${byFile.size} file(s)`);
+console.log(
+  `check:ui — ${violations.length} violation(s) across ${byFile.size} file(s)`,
+);
 console.log("");
 for (const [file, vs] of [...byFile.entries()].sort()) {
   console.log(`  ${file}`);
-  for (const v of vs) console.log(`    ${String(v.line).padStart(4)}: ${v.message}`);
+  for (const v of vs)
+    console.log(`    ${String(v.line).padStart(4)}: ${v.message}`);
   console.log("");
 }
-console.log('Fix violations above. See RULES.md — "Quick Decision Table" maps UI needs to tokens.');
+console.log(
+  'Fix violations above. See RULES.md — "Quick Decision Table" maps UI needs to tokens.',
+);
 process.exit(1);

@@ -46,6 +46,8 @@ import {
 import { appendSecurityAudit } from "./auth/audit-log";
 import { MessageRouter } from "./transport/router";
 import { WorkspaceService } from "./workspace/service";
+import { readDesignProtocolResource } from "./design/protocol-resource";
+import { filterDesignWorkspaceDirectories } from "./design/agent-boundary";
 import {
   dbChangedIncludesOriginator,
   dbChangedKinds,
@@ -69,7 +71,7 @@ import {
   type CreatedWorkspace,
 } from "./git";
 import { RunManager } from "./run/run-manager";
-import { getWorkspaceById } from "./git/state";
+import { getWorkspaceById, listWorkspaces } from "./git/state";
 import { resolveRunActions } from "./settings/repo-scripts";
 import {
   filterRunActionsForPlatform,
@@ -92,6 +94,10 @@ import { AgentGateway } from "./agents/gateway";
 import { buildPtyEnv } from "./pty/shell-setup";
 import { resolveMcpServers } from "./agents/mcp-registry";
 import { McpGateway } from "./agents/gateway/server";
+import {
+  createDesignProtocolCapability,
+  parseDesignProtocolResourcePath,
+} from "./design/protocol-capability";
 import { OAuthVault } from "./agents/gateway/oauth-provider";
 import {
   MCP_VAULT_SEED_TYPE,
@@ -386,10 +392,7 @@ export class ZerosEngine {
   >();
   /** Agent sessionId → the authoritative provider turn currently recording.
    *  A mid-turn steer uses this owner instead of opening a second turn row. */
-  private readonly activeTurnSnapshots = new Map<
-    string,
-    TurnSnapshotContext
-  >();
+  private readonly activeTurnSnapshots = new Map<string, TurnSnapshotContext>();
   /** Workspace process/session starts and checkout mutations that have crossed
    *  the caller-side gate but have not settled. Archive/delete wait for these
    *  promises before enumerating processes and snapshotting. Without this
@@ -803,6 +806,9 @@ export class ZerosEngine {
     this.localToken =
       process.env.ZEROS_LOCAL_WS_TOKEN?.trim() ||
       randomBytes(32).toString("hex");
+    this.workspace.setDesignProtocolCapabilityProvider((workspaceId) =>
+      createDesignProtocolCapability(this.localToken, workspaceId),
+    );
     // The dev renderer's http origin is the Vite dev server. Its port is normally
     // 5193, but a per-worktree dev instance (scripts/dev-instance.mjs) moves Vite
     // to a free port and exports it as ZEROS_VITE_PORT so this allowlist tracks the
@@ -821,6 +827,25 @@ export class ZerosEngine {
       portSpan: this.portSpan,
       token: this.localToken,
       allowedOrigins,
+      handleHttp: async ({ url }) => {
+        const parsed = parseDesignProtocolResourcePath(
+          url.pathname,
+          this.localToken,
+        );
+        if (!parsed) return null;
+        const { workspaceId, resourcePath } = parsed;
+        const workspace = getWorkspaceById(workspaceId);
+        if (!workspace || workspace.kind !== "design") return null;
+        const resource = await readDesignProtocolResource(workspace.path, {
+          path: resourcePath,
+          sourceVersion: url.searchParams.get("v"),
+        });
+        return {
+          status: resource.status,
+          headers: resource.headers,
+          body: resource.body,
+        };
+      },
     });
     this.transports = [this.local];
 
@@ -1346,6 +1371,35 @@ export class ZerosEngine {
       }
     } catch {
       /* best-effort — never block startup on crash recovery */
+    }
+
+    // Design ACLs live on disk, but a manual repair or an older build may have
+    // left a live design checkout unlocked. Reconcile every stable exact owner
+    // after lifecycle recovery and disk seeding, before any agent can spawn.
+    try {
+      const { listWorkspaces, getWorkspaceLifecycle } =
+        await import("./git/state");
+      const { lockDesignWorkspaceRoot } =
+        await import("./design/workspace-lock");
+      for (const workspace of listWorkspaces()) {
+        if (
+          workspace.kind !== "design" ||
+          workspace.archivedAt != null ||
+          getWorkspaceLifecycle(workspace.id) ||
+          !fs.existsSync(workspace.path)
+        ) {
+          continue;
+        }
+        await lockDesignWorkspaceRoot(workspace.path).catch((error) => {
+          console.warn(
+            `[Zeros] couldn't enforce the design lock for ${workspace.id}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        });
+      }
+    } catch {
+      /* best-effort — a failed lock is logged per workspace above */
     }
 
     // Clear any setup_state="running" left over from a previous process (engine
@@ -2114,7 +2168,11 @@ export class ZerosEngine {
             spawnOpts.workspaceId,
             spawnOpts.cwd,
           );
-          this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+          this.assertAgentWorkspaceProcessStartAllowed(
+            lifecycleWorkspaceId,
+            spawnOpts.workspaceId,
+            spawnOpts.cwd,
+          );
           const { initialize, session } = await this.trackWorkspaceProcessStart(
             lifecycleWorkspaceId,
             (async () => {
@@ -2123,7 +2181,9 @@ export class ZerosEngine {
               });
               // ensureAgent may spawn/initialize asynchronously. Re-check
               // before the workspace-scoped session itself is created.
-              this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+              this.assertAgentWorkspaceProcessStartAllowed(
+                lifecycleWorkspaceId,
+              );
               const session = await this.agents.newSession(msg.agentId, {
                 cwd: spawnOpts.cwd,
                 env: spawnOpts.env,
@@ -2147,7 +2207,9 @@ export class ZerosEngine {
                 );
               }
               try {
-                this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+                this.assertAgentWorkspaceProcessStartAllowed(
+                  lifecycleWorkspaceId,
+                );
               } catch (err) {
                 // The lifecycle acquired ownership while newSession was
                 // awaiting the adapter. Dispose before releasing the start
@@ -2167,7 +2229,7 @@ export class ZerosEngine {
               return { initialize, session };
             })(),
           );
-          this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+          this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
           if (msg.chatId) {
             // One live agent session per chat. This fresh session supersedes
             // any prior session still bound to the same chat — a model/effort
@@ -2296,7 +2358,7 @@ export class ZerosEngine {
           const lifecycleWorkspaceId = this.workspaceIdForAgentSession(
             msg.sessionId,
           );
-          this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+          this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
           this.router.setOwner(msg.sessionId, client.id);
           this.sessionAgent.set(msg.sessionId, msg.agentId);
           const activePrompt: ActivePromptContext = {
@@ -2337,7 +2399,7 @@ export class ZerosEngine {
             // error path — so a failed turn never leaves a stale marker.
             // Record this turn: snapshot the work tree BEFORE the agent runs.
             turnCtx = await this.beginTurn(msg.sessionId, msg.userMessageId);
-            this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+            this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
             this.enterPrompt();
             this.promptSessions.add(msg.sessionId);
             if (turnCtx) {
@@ -2489,7 +2551,7 @@ export class ZerosEngine {
             this.refuseSessionAccess(msg.id, msg.agentId, client);
             return;
           }
-          this.assertWorkspaceProcessStartAllowed(
+          this.assertAgentWorkspaceProcessStartAllowed(
             this.workspaceIdForAgentSession(msg.sessionId),
           );
           // Deliver FIRST, persist after: if the adapter refuses (no turn in
@@ -2627,9 +2689,11 @@ export class ZerosEngine {
           // remote clients are scrubbed + their extra dirs clamped to the
           // managed-workspace allowlist.
           const updateEnv =
-            client.kind === "local"
-              ? msg.env
-              : this.scrubRelayUpdateConfigEnv(msg.env);
+            this.removeDesignAdditionalDirectories(
+              client.kind === "local"
+                ? msg.env
+                : this.scrubRelayUpdateConfigEnv(msg.env),
+            ) ?? {};
           // Fire-and-forget: apply the mid-session config change (effort /
           // fast / ultracode / additionalDirectories / allow-deny / maxTurns,
           // carried as the composer env map) to the live session. No-op for
@@ -2639,6 +2703,11 @@ export class ZerosEngine {
           return;
         }
         case "AGENT_LIST_SESSIONS": {
+          const listWorkspaceId = this.workspaceIdForProcess(
+            undefined,
+            msg.cwd,
+          );
+          this.assertAgentWorkspaceNotDesign(listWorkspaceId, msg.cwd);
           // A relay (untrusted) client must not enumerate sessions — or boot
           // an adapter's session-store lookup — at an arbitrary host cwd.
           // Clamp to the managed-workspace allowlist; drop anything else (the
@@ -2698,7 +2767,10 @@ export class ZerosEngine {
               const sessionWorkspaceId = this.sessionWorkspace.get(
                 msg.sessionId,
               );
-              if (sessionWorkspaceId && sessionWorkspaceId !== msg.workspaceId) {
+              if (
+                sessionWorkspaceId &&
+                sessionWorkspaceId !== msg.workspaceId
+              ) {
                 throw new AgentFailureError({
                   kind: "protocol-error",
                   message:
@@ -2753,7 +2825,11 @@ export class ZerosEngine {
             loadOpts.workspaceId,
             loadOpts.cwd,
           );
-          this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+          this.assertAgentWorkspaceProcessStartAllowed(
+            lifecycleWorkspaceId,
+            loadOpts.workspaceId,
+            loadOpts.cwd,
+          );
           this.router.setOwner(msg.sessionId, client.id);
           this.sessionAgent.set(msg.sessionId, msg.agentId);
           if (msg.chatId) this.sessionChat.set(msg.sessionId, msg.chatId);
@@ -2773,11 +2849,13 @@ export class ZerosEngine {
                   cliBinary: loadOpts.cliBinary,
                 },
               );
-              this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+              this.assertAgentWorkspaceProcessStartAllowed(
+                lifecycleWorkspaceId,
+              );
               return response;
             })(),
           );
-          this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+          this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
           this.sessionLoadResponses.set(msg.sessionId, response);
           client.send(
             createMessage({
@@ -2860,7 +2938,8 @@ export class ZerosEngine {
     cliBinary?: string;
   }> {
     if (client.kind === "local") {
-      const pathValue = msg.env?.PATH ?? process.env.PATH ?? "";
+      const agentEnv = this.removeDesignAdditionalDirectories(msg.env);
+      const pathValue = agentEnv?.PATH ?? process.env.PATH ?? "";
       const contextId = msg.workspaceId
         ? `workspace:${msg.workspaceId}`
         : msg.cwd
@@ -2873,8 +2952,8 @@ export class ZerosEngine {
       return {
         cwd: msg.cwd,
         env: credentialEnv
-          ? { ...(msg.env ?? {}), ...credentialEnv.env }
-          : msg.env,
+          ? { ...(agentEnv ?? {}), ...credentialEnv.env }
+          : agentEnv,
         workspaceId: msg.workspaceId,
         cliBinary: msg.cliBinary,
       };
@@ -2931,6 +3010,73 @@ export class ZerosEngine {
       });
     }
     return cwd;
+  }
+
+  private isDesignWorkspaceProcessTarget(
+    target: string | null | undefined,
+  ): boolean {
+    if (!target) return false;
+    const workspaceId = this.workspace.workspaceIdForCwd(target) ?? target;
+    try {
+      return getWorkspaceById(workspaceId)?.kind === "design";
+    } catch {
+      return false;
+    }
+  }
+
+  private assertAgentWorkspaceProcessStartAllowed(
+    workspaceId: string | null | undefined,
+    ...targets: Array<string | null | undefined>
+  ): void {
+    this.assertWorkspaceProcessStartAllowed(workspaceId);
+    this.assertAgentWorkspaceNotDesign(workspaceId, ...targets);
+  }
+
+  private assertAgentWorkspaceNotDesign(
+    workspaceId: string | null | undefined,
+    ...targets: Array<string | null | undefined>
+  ): void {
+    if (
+      ![workspaceId, ...targets].some((target) =>
+        this.isDesignWorkspaceProcessTarget(target),
+      )
+    ) {
+      return;
+    }
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: "Coding agents are unavailable in a design workspace.",
+      remediation: "Open a code workspace to use Claude, Codex, or Cursor.",
+      context: { workspaceId },
+    });
+  }
+
+  private removeDesignAdditionalDirectories(
+    env: Record<string, string> | undefined,
+  ): Record<string, string> | undefined {
+    const raw = env?.ZEROS_ADDITIONAL_DIRS?.trim();
+    if (!env || !raw) return env;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return env;
+    }
+    if (!Array.isArray(parsed)) return env;
+    const directories = parsed.filter(
+      (directory): directory is string => typeof directory === "string",
+    );
+    const filtered = filterDesignWorkspaceDirectories(
+      directories,
+      listWorkspaces({}),
+    );
+    if (filtered === directories || filtered.length === directories.length) {
+      return env;
+    }
+    return {
+      ...env,
+      ZEROS_ADDITIONAL_DIRS: JSON.stringify(filtered),
+    };
   }
 
   /** Sanitize a relay (untrusted) client's AGENT_UPDATE_CONFIG env before it
@@ -4163,6 +4309,15 @@ export class ZerosEngine {
       (reattach ? this.terminals.get(msg.sessionId)?.workspaceId : null) ??
       this.workspace.workspaceIdForCwd(msg.workspaceId) ??
       this.workspace.workspaceIdForCwd(msg.cwd);
+    if (
+      this.isDesignWorkspaceProcessTarget(canonicalWsId) ||
+      (!reattach &&
+        (this.isDesignWorkspaceProcessTarget(msg.workspaceId) ||
+          this.isDesignWorkspaceProcessTarget(msg.cwd)))
+    ) {
+      ptyExit();
+      return;
+    }
 
     let cwdInput = msg.cwd;
     if (client.kind !== "local" && !reattach) {
