@@ -19,9 +19,28 @@ async function main() {
   const { MarkdownPreview } = await import("./shell/column3-tabs/file-viewer");
   const { primeWorkspaceFileDiff } =
     await import("./shell/workspace-file-data-cache");
+  const { WorkspaceFileTree } =
+    await import("./shell/column3-tabs/workspace-file-tree");
+  const { FilesTreePanel } =
+    await import("./shell/column3-tabs/files-tree-panel");
+  const { treePanelHeight } =
+    await import("./shell/column3-tabs/files-tab-layout");
+  const { primeWorkspaceFiles } = await import("./shell/workspace-files-cache");
+  const { flushSync } = await import("react-dom");
+  const { prewarmSyntax, ensureThemeColors } = await import(
+    "./zeros/agent/renderers/syntax"
+  );
+  const { resolveCodeTheme } = await import("./zeros/appearance/code-themes");
+  const { getPrefs } = await import("./zeros/appearance/store");
+  const { shikiLangForPath } = await import(
+    "./shell/column3-tabs/code-editor/shiki-lang"
+  );
 
   const oldLine = `const value = "${"old-city ".repeat(90)}";`;
   const newLine = `const value = "${"new-city ".repeat(90)}";`;
+  // Indented long line for the file-editor fixture: soft-wrapped continuation
+  // rows must hang at the line's own indent (6 spaces here), not column 0.
+  const indentedLine = `      const wrapped = "${"wrap-city ".repeat(40)}";`;
   const patch =
     "diff --git a/src/shared.ts b/src/shared.ts\n" +
     "--- a/src/shared.ts\n" +
@@ -42,6 +61,22 @@ async function main() {
     },
     patch.replaceAll("src/shared.ts", footerPath),
   );
+
+  // File-tree fixture: a real WorkspaceFileTree over a primed listing (no
+  // native IPC in the browser). Every directory keeps ≥2 children so
+  // flattenEmptyDirectories can't merge the depth levels the smoke checks
+  // measure, and the pre-selected depth-3 file expands the whole chain.
+  const treeCwd = "/workspace-smoke";
+  primeWorkspaceFiles(treeCwd, [
+    "artifacts/api-server/src/index.ts",
+    "artifacts/api-server/src/util.ts",
+    "artifacts/api-server/build.mjs",
+    "artifacts/api-server/package.json",
+    "artifacts/mockup-sandbox/index.html",
+    "artifacts/mockup-sandbox/package.json",
+    "lib/readme.md",
+    "package.json",
+  ]);
 
   const ctx = { editBaselines: new Map() } as never;
   const edit = {
@@ -85,6 +120,108 @@ async function main() {
     createdAt: 0,
     updatedAt: 0,
   } as never;
+
+  // The collapsed Files tab's floating tree popup, wired the way FilesTab
+  // wires it: the trigger measures the tab body at open time and freezes the
+  // popup height for that open (a later container resize must not reflow it),
+  // a row open closes the popup, and the trigger is exempt from the popup's
+  // outside-pointerdown dismissal so its click stays a toggle.
+  function TreePanelFixture() {
+    const [panel, setPanel] = React.useState<{ height: number } | null>(null);
+    const containerRef = React.useRef<HTMLDivElement | null>(null);
+    const triggerRef = React.useRef<HTMLButtonElement | null>(null);
+    return (
+      <div className="flex flex-col gap-2">
+        <button
+          ref={triggerRef}
+          type="button"
+          data-testid="tree-panel-trigger"
+          className="w-fit"
+          onClick={() =>
+            setPanel((open) =>
+              open
+                ? null
+                : {
+                    height: treePanelHeight(
+                      containerRef.current?.clientHeight ?? 0,
+                    ),
+                  },
+            )
+          }
+        >
+          Toggle tree panel
+        </button>
+        <div
+          ref={containerRef}
+          data-testid="tree-panel-container"
+          className="border-border1 bg-bg1 relative h-[420px] w-[560px] overflow-hidden border"
+        >
+          {panel && (
+            <FilesTreePanel
+              cwd={treeCwd}
+              reloadKey={0}
+              height={panel.height}
+              dismissIgnoreRef={triggerRef}
+              onOpenFile={(path) => {
+                console.log("[harness] panel open", path);
+                setPanel(null);
+              }}
+              onOpenInNewTab={(path) =>
+                console.log("[harness] panel new tab", path)
+              }
+              onDismiss={() => setPanel(null)}
+            />
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // FIRST-PAINT fixture. Opening a file used to show chrome-white text for a
+  // frame and then repaint in the code theme; the smoke asserts the fixed
+  // behaviour the only way that is observable — mount the real editor inside
+  // flushSync (React runs CodeMirror's creating layout effect before the browser
+  // can paint) and inspect the DOM in that same task, i.e. exactly what the user
+  // would first see. `mount()` warms the grammar the way every file read does
+  // (prewarmFileSyntax) before mounting.
+  const FIRST_PAINT_PATH = "src/first-paint.tsx";
+  const FIRST_PAINT_SOURCE = [
+    `import { useState } from "react";`,
+    ``,
+    `export function Badge({ label = "ok" }: { label?: string }) {`,
+    `  const [count, setCount] = useState(0);`,
+    `  return <b onClick={() => setCount(count + 1)}>{label}:{count}</b>;`,
+    `}`,
+  ].join("\n");
+
+  function FirstPaintEditorFixture() {
+    const [mounted, setMounted] = React.useState(false);
+    React.useEffect(() => {
+      const shikiTheme = resolveCodeTheme(getPrefs().codeTheme).shiki;
+      (
+        window as unknown as {
+          __zerosFirstPaintEditor?: () => Promise<string>;
+        }
+      ).__zerosFirstPaintEditor = async () => {
+        await prewarmSyntax(shikiLangForPath(FIRST_PAINT_PATH), shikiTheme);
+        // The theme's own foreground — the editor chrome must already be using
+        // it, not the app's --fg1, before any token lands.
+        const fg = (await ensureThemeColors(shikiTheme))?.fg ?? "";
+        flushSync(() => setMounted(true));
+        return fg;
+      };
+    }, []);
+    return (
+      <div
+        data-testid="file-editor-first-paint-host"
+        className="h-[180px] w-[450px] overflow-hidden"
+      >
+        {mounted && (
+          <CodeEditor value={FIRST_PAINT_SOURCE} filePath={FIRST_PAINT_PATH} />
+        )}
+      </div>
+    );
+  }
 
   function Harness() {
     return (
@@ -137,8 +274,21 @@ async function main() {
             data-testid="file-editor-host"
             className="h-[180px] w-[450px] overflow-hidden"
           >
-            <CodeEditor value={newLine} filePath="src/shared.ts" />
+            <CodeEditor
+              value={`${newLine}\n${indentedLine}`}
+              filePath="src/shared.ts"
+            />
           </div>
+          <FirstPaintEditorFixture />
+          <div data-testid="file-tree-host" className="h-[300px] w-[280px]">
+            <WorkspaceFileTree
+              cwd={treeCwd}
+              initialSelectedPath="artifacts/api-server/src/index.ts"
+              onOpenFile={(path) => console.log("[harness] tree open", path)}
+              className="h-full"
+            />
+          </div>
+          <TreePanelFixture />
           <div
             data-testid="markdown-preview-host"
             className="h-[180px] w-[450px] overflow-x-hidden overflow-y-auto"

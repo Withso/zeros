@@ -36,6 +36,7 @@ import { resolveBootActiveChatId } from "./boot-active-chat";
 import { setSetting } from "../../native/settings";
 import { ACTIVE_CHAT_KEY } from "./chats-local-cache";
 import {
+  blankFixedFilesTab,
   loadScopes,
   saveScopes,
   defaultScopeFor,
@@ -242,7 +243,13 @@ export type Action =
   | { type: "BUMP_PROJECT_GENERATION" }
   // Column 3 tabs (Roadmap 03b)
   | { type: "RESET_COLUMN3_TABS" }
-  | { type: "ADD_COLUMN3_TAB"; tab: Column3Tab; activate?: boolean }
+  | {
+      type: "ADD_COLUMN3_TAB";
+      tab: Column3Tab;
+      activate?: boolean;
+      /** Exact owner for delayed/background opens. Omitted for active UI. */
+      scope?: string;
+    }
   | { type: "REMOVE_COLUMN3_TAB"; id: string }
   | {
       type: "CLOSE_COLUMN3_FILE_IF_MATCHES";
@@ -1293,7 +1300,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       };
     }
     case "ADD_COLUMN3_TAB": {
-      const scope = column3ScopeKey(state);
+      const scope = action.scope ?? column3ScopeKey(state);
       const cur = state.column3ByScope[scope] ?? defaultScopeFor(scope);
       // Changes + Review + Context are singletons. A duplicate add
       // activates the existing home tab instead of creating duplicate
@@ -1320,13 +1327,16 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       // Duplicate ids break React keys and active-tab lookup; treat them as an
       // idempotent add rather than corrupting the slice.
       if (cur.tabs.some((t) => t.id === action.tab.id)) return state;
+      // ADDs never mint permanence: the fixed Files home is born only with the
+      // slice (defaultTabs/normalizeRow1Tabs), so a stray caller flag can't
+      // create a second unremovable tab.
       const tab =
         action.tab.type === "changes" ||
         action.tab.type === "review" ||
         action.tab.type === "context"
           ? { ...action.tab, pinned: true }
-          : action.tab.pinned
-            ? { ...action.tab, pinned: false }
+          : action.tab.pinned || action.tab.fixed
+            ? { ...action.tab, pinned: false, fixed: undefined }
             : action.tab;
       const activeId = action.activate !== false ? tab.id : cur.activeId;
       const next: Column3ScopeState = {
@@ -1348,7 +1358,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
     case "REMOVE_COLUMN3_TAB": {
       const scope = column3ScopeKey(state);
       const cur = state.column3ByScope[scope] ?? defaultScopeFor(scope);
-      // Only the pinned Changes/Review/Context homes are permanent. File and
+      // The pinned Changes/Review/Context homes are permanent; extra File and
       // Browser tabs close normally, including blank ones.
       const target = cur.tabs.find((t) => t.id === action.id);
       if (!target) return state;
@@ -1358,6 +1368,21 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         target.type === "context"
       )
         return state;
+      // The FIXED Files home is permanent too, but its ✕ means "close the
+      // FILE": revert the tab to the blank Open-file tree in place (same id,
+      // same slot, stays active). Already blank → nothing to close.
+      if (target.type === "files" && target.fixed) {
+        if (!target.filePath) return state;
+        return {
+          ...state,
+          column3ByScope: setColumn3Scope(state.column3ByScope, scope, {
+            ...cur,
+            tabs: cur.tabs.map((t) =>
+              t.id === target.id ? blankFixedFilesTab(t) : t,
+            ),
+          }),
+        };
+      }
       const next = removeColumn3Tabs(cur, (t) => t.id === action.id);
       return {
         ...state,
@@ -1453,14 +1478,27 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       const cur = state.column3ByScope[scope] ?? defaultScopeFor(scope);
       const target = cur.tabs.find((t) => t.id === action.id);
       if (!target) return state;
-      // An update that clears a File path means "close the file", which closes
-      // its owning File tab. Blank tabs are created explicitly via + → File;
-      // closing an opened file never silently turns it back into a blank tab.
+      // An update that clears a File path means "close the file". The FIXED
+      // Files home reverts to its blank Open-file state in place (it can never
+      // be removed); an extra File tab closes with its file — closing one
+      // never silently turns it into a second blank tab.
       if (
         target.type === "files" &&
         Object.prototype.hasOwnProperty.call(action.updates, "filePath") &&
         (!action.updates.filePath || !action.updates.filePath.trim())
       ) {
+        if (target.fixed) {
+          if (!target.filePath) return state;
+          return {
+            ...state,
+            column3ByScope: setColumn3Scope(state.column3ByScope, scope, {
+              ...cur,
+              tabs: cur.tabs.map((t) =>
+                t.id === target.id ? blankFixedFilesTab(t) : t,
+              ),
+            }),
+          };
+        }
         const next = removeColumn3Tabs(cur, (t) => t.id === action.id);
         return {
           ...state,
@@ -1475,6 +1513,9 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
           target.type === "changes" ||
           target.type === "review" ||
           target.type === "context",
+        // Permanence is born with the slice (defaultTabs/normalizeRow1Tabs):
+        // updates can neither demote the fixed Files home nor mint a new one.
+        fixed: target.fixed,
       };
       if (
         (target.type === "files" || target.type === "changes") &&
@@ -1537,18 +1578,23 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         // A deleted/staged-new file or reverted rename no longer exists at this
         // path. Close EVERY duplicate File tab for it; leaving any open
         // would expose a stale reader error instead of the tab lifecycle the
-        // user requested. The pinned Changes tab can't close, so its selection
-        // is cleared instead.
+        // user requested. The permanent surfaces can't close: the pinned
+        // Changes tab clears its selection and the fixed Files home reverts
+        // to its blank Open-file state instead.
         const next = removeColumn3Tabs(
           cur,
-          (t) => t.type === "files" && t.filePath === action.path,
+          (t) => t.type === "files" && !t.fixed && t.filePath === action.path,
         );
-        let clearedSelection = false;
+        let revertedPermanent = false;
         const tabs = next.tabs.map((t) => {
+          if (t.type === "files" && t.fixed && t.filePath === action.path) {
+            revertedPermanent = true;
+            return blankFixedFilesTab(t);
+          }
           const isChangesHit =
             t.type === "changes" && t.filePath === action.path;
           if (!isChangesHit) return t;
-          clearedSelection = true;
+          revertedPermanent = true;
           return {
             ...t,
             filePath: undefined,
@@ -1562,13 +1608,13 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
             viewerMode: undefined,
           };
         });
-        if (next === cur && !clearedSelection) return state;
+        if (next === cur && !revertedPermanent) return state;
         return {
           ...state,
           column3ByScope: setColumn3Scope(
             state.column3ByScope,
             scope,
-            clearedSelection ? { ...next, tabs } : next,
+            revertedPermanent ? { ...next, tabs } : next,
           ),
         };
       }

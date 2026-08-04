@@ -728,8 +728,15 @@ export const CheckpointRail = memo(function CheckpointRail({
             // list overflows its max-h.
             className={cn(
               "flex h-8 w-full flex-none cursor-pointer items-center gap-2.5 rounded-md px-2 text-left transition-colors",
+              // Selected row is pinned to bg2-hover — the same fill its
+              // siblings get on hover ("selected = the hover that doesn't go
+              // away"). It used --highlighted-bg, which rendered within 1/255
+              // of bg2-hover, but that token is the user-bubble surface and
+              // dropped to 12% L on 2026-08-02: the selected row would have
+              // sat DARKER than any hovered row. This card is bg2, so its
+              // bg2-hover row clears that surface in both theme palettes.
               i === activeIndex
-                ? "bg-highlighted-bg text-fg1"
+                ? "bg-bg2-hover text-fg1"
                 : "text-fg2 hover:bg-bg2-hover",
             )}
           >

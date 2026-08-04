@@ -4,8 +4,8 @@
 //
 // The virtualized, gitignore-aware file tree behind TWO surfaces:
 //   • the row-1 File tab's SIDEBAR (FilesTab) — persistent selection that
-//     mirrors the tab's open file (`selectedPath`), with the built-in
-//     filter bar (`search`); clicking a file navigates the same tab.
+//     mirrors the tab's open file (`selectedPath`); its shared outer header
+//     drives search through WorkspaceFileTreeHandle.
 //   • a LAUNCHER (deselectAfterOpen, historically row 2's "All Files") — a launcher
 //     (deselectAfterOpen) with no selection mirror and no search bar.
 //
@@ -24,6 +24,7 @@
 import React, {
   useCallback,
   useEffect,
+  useImperativeHandle,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -42,7 +43,11 @@ import {
 import { prefetchWorkspaceFileRead } from "../workspace-file-data-cache";
 import { isNativeRuntime, nativeInvoke } from "@/native/runtime";
 import { cn } from "@/zeros/ui/cn";
-import { ancestorDirPrefixes, treeSelectionMirrorIntent } from "./tree-paths";
+import {
+  ancestorDirPrefixes,
+  treeSelectionMirrorIntent,
+  treeSelectionOpenTarget,
+} from "./tree-paths";
 import { useScrollMemory } from "../scroll-memory";
 import { ignoredPathDelta, useIgnoredEntries } from "./ignored-entries";
 
@@ -89,6 +94,22 @@ const TREE_THEME_VARS = {
   // selection via its background only (kills the white outline bug).
   "--trees-focus-ring-color-override": "transparent",
   "--trees-selected-focused-border-color-override": "transparent",
+  // Nesting step. The library advances each level by level-gap + item row
+  // gap (6px) + half the icon width (8px), so its 8px default reads ~22px
+  // per level — too airy for a file tree. 2px lands ~15.5px per level while
+  // the guides stay centered under their parent folder icons.
+  "--trees-level-gap-override": "2px",
+} as React.CSSProperties;
+
+/** The same knobs re-based onto the floating-popover surface (--bg3, which is
+ *  one lift step above --bg1 in dark). Rows follow the bg3 recipes the menu
+ *  primitives use (hover → bg3-hover, like CommandItem); the selected chip
+ *  keeps the base tree's bg2-hover step so a focused search match still reads
+ *  over a hovered row. Used by the collapsed Files tab's floating panel. */
+const TREE_OVERLAY_THEME_VARS = {
+  ...TREE_THEME_VARS,
+  "--trees-bg-override": "var(--bg3)",
+  "--trees-bg-muted-override": "var(--bg3-hover)",
 } as React.CSSProperties;
 
 // Folders render a disclosure chevron ("dropdown") by default. We hide it
@@ -202,6 +223,14 @@ const TREE_SHADOW_CSS = `
   :host([data-search-accessory='true']) [data-file-tree-search-container] {
     padding-inline-end: ${TREE_PADDING_INLINE + SEARCH_ROW_ACCESSORY_GAP + SEARCH_ROW_ACCESSORY_SIZE}px;
   }
+  /* Indent guides are structure, not a hover affordance. The library ships
+     them hidden (opacity 0) and fades them in only under :host(:hover) — so
+     the tree's nesting vanished whenever the pointer left the column. Pin the
+     library's own hover opacity permanently; the :host(:hover) rule then
+     changes nothing. */
+  [data-item-section='spacing-item'] {
+    opacity: 0.75;
+  }
 `;
 
 const EMPTY_FILE_PATHS: string[] = [];
@@ -269,6 +298,11 @@ interface WorkspaceFileTreeProps {
    *  never re-fires. FilesTab leaves this off so its selection highlight
    *  persists (its viewer mirrors the selected row). */
   deselectAfterOpen?: boolean;
+  /** Surface the tree sits on. "base" (default) — the column's --bg1, the
+   *  sidebar recipes. "overlay" — a floating popover (--bg3): the root and
+   *  row states swap to the popover recipes so the popup reads as one
+   *  surface (in dark, bg3 is a visible lift step above bg1). */
+  surface?: "base" | "overlay";
   /** Bump to force a re-list (e.g. the Source panel's Refresh button). */
   reloadKey?: number;
   /** Owner-keyed scroll memory for the library's Shadow-DOM virtual scroller.
@@ -278,20 +312,35 @@ interface WorkspaceFileTreeProps {
   className?: string;
 }
 
-export function WorkspaceFileTree({
-  cwd,
-  initialSelectedPath,
-  selectedPath,
-  search,
-  searchRowAccessory,
-  onOpenFile,
-  onOpenInNewTab,
-  onCopyPath,
-  deselectAfterOpen,
-  reloadKey,
-  scrollMemoryKey,
-  className,
-}: WorkspaceFileTreeProps) {
+/** Imperative search bridge for hosts that place their filter in shared chrome
+ * outside the tree's Shadow DOM (the Files tab's full-width header row). */
+export interface WorkspaceFileTreeHandle {
+  setSearch: (value: string) => void;
+  focusNextSearchMatch: () => void;
+  focusPreviousSearchMatch: () => void;
+}
+
+export const WorkspaceFileTree = React.forwardRef<
+  WorkspaceFileTreeHandle,
+  WorkspaceFileTreeProps
+>(function WorkspaceFileTree(
+  {
+    cwd,
+    initialSelectedPath,
+    selectedPath,
+    search,
+    searchRowAccessory,
+    onOpenFile,
+    onOpenInNewTab,
+    onCopyPath,
+    surface = "base",
+    deselectAfterOpen,
+    reloadKey,
+    scrollMemoryKey,
+    className,
+  },
+  ref,
+) {
   // Seed the model from the shared snapshot in the very first render. The old
   // `[]` seed guaranteed a visible empty-tree paint followed by row-by-row
   // reconstruction in an effect whenever a File surface remounted.
@@ -326,8 +375,9 @@ export function WorkspaceFileTree({
       () => ({
         paths: initialPathsRef.current,
         // The filter bar is per-surface: the row-1 sidebar shows it (the
-        // reference design's "Filter files" header); the launcher mode
-        // stays bare — a dedicated workspace search is its own surface.
+        // reference design's "Filter files" header); launcher surfaces keep
+        // the library's input disabled and drive its live controller through
+        // the imperative bridge below.
         search: searchRef.current,
         initialExpansion: "closed" as const,
         // Finder-style nesting, one row per directory (2026-08-03). Flattening
@@ -347,6 +397,19 @@ export function WorkspaceFileTree({
       }),
       [],
     ),
+  );
+
+  // The Files tab owns a native Zeros Input in its shared header row. Bridge
+  // that input directly into this stable tree model; search never performs a
+  // file-list read and keeps the library's match/highlight behavior intact.
+  useImperativeHandle(
+    ref,
+    () => ({
+      setSearch: (value) => model.setSearch(value || null),
+      focusNextSearchMatch: () => model.focusNextSearchMatch(),
+      focusPreviousSearchMatch: () => model.focusPreviousSearchMatch(),
+    }),
+    [model],
   );
 
   // The .gitignore'd side of the worktree — node_modules/, dist/, .env — which
@@ -583,28 +646,37 @@ export function WorkspaceFileTree({
   // selection change.
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
+  // The previous publication, so only a NEWLY selected row can open a file —
+  // see treeSelectionOpenTarget. Updated on every publication (including the
+  // ones that open nothing) to mirror exactly what the user last saw selected.
+  const prevSelectedRef = useRef<readonly string[]>([]);
   useEffect(() => {
-    const last = selected[selected.length - 1];
-    if (!last) return;
-    const item = model.getItem(last);
+    const prevSelected = prevSelectedRef.current;
+    prevSelectedRef.current = selected;
+    // Both echo guards (mirror echo + re-publication echo) live in the pure
+    // helper. Without the re-publication guard, closing the fixed Files
+    // home's file while its tree was expanded re-opened the file instantly:
+    // the revert clears the mirror target, so a re-emitted selection of the
+    // still-known row sailed straight through the mirror guard.
+    const target = treeSelectionOpenTarget(
+      prevSelected,
+      selected,
+      selectedPathRef.current,
+    );
+    if (!target) return;
+    const item = model.getItem(target);
     if (!item || item.isDirectory()) return;
-    // A selection the MIRROR itself just applied (the effect below) must
-    // not echo back through onOpenFile — the file is already the caller's
-    // open path, and re-opening it would clobber its entry-point intent
-    // (e.g. flip a Changes-opened Diff view back to Edit).
-    if (selectedPathRef.current != null && last === selectedPathRef.current)
-      return;
     // Start the exact file read before the selection callback performs its
     // urgent tab update. The viewer joins this keyed request instead of
     // scheduling a second IPC after it mounts.
-    prefetchWorkspaceFileRead(cwdRef.current, last);
-    onOpenFileRef.current(last);
+    prefetchWorkspaceFileRead(cwdRef.current, target);
+    onOpenFileRef.current(target);
     // Launcher mode: drop the selection so a second click on the SAME file is
     // a real selection change (and thus re-opens it). Without this, the tree
-    // keeps `last` selected, useFileTreeSelection dedups the identical next
+    // keeps `target` selected, useFileTreeSelection dedups the identical next
     // selection, and this effect never re-fires — a dead click once the file's
     // row-1 tab has been closed. The resulting empty selection re-runs this
-    // effect once with no `last` (a harmless no-op), not a loop.
+    // effect once with no target (a harmless no-op), not a loop.
     if (deselectAfterOpen) item.deselect();
   }, [selected, model, deselectAfterOpen]);
 
@@ -661,10 +733,14 @@ export function WorkspaceFileTree({
     <div
       ref={treeRootRef}
       className={cn(
-        "bg-bg1 relative h-full min-h-0 overflow-hidden",
+        "relative h-full min-h-0 overflow-hidden",
+        // The overlay's owning FilesTreePanel already paints bg3 around this
+        // child; keeping the shared tree root transparent avoids granting this
+        // whole dual-surface file a file-granular bg3 lint exemption.
+        surface === "overlay" ? "bg-transparent" : "bg-bg1",
         className,
       )}
-      style={TREE_THEME_VARS}
+      style={surface === "overlay" ? TREE_OVERLAY_THEME_VARS : TREE_THEME_VARS}
     >
       {hasSearchAccessory && (
         // Dropped into the gutter the shadow CSS reserves past the input's
@@ -715,7 +791,7 @@ export function WorkspaceFileTree({
       />
     </div>
   );
-}
+});
 
 // ── Right-click menu ───────────────────────────────────────
 // Rendered by the tree (possibly inside its shadow root), so it's styled
