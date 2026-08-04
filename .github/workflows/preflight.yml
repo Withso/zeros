@@ -424,6 +424,18 @@ jobs:
           src/shell/__tests__/workspace-file-data-cache.test.ts
           src/zeros/store/__tests__/read-caches.test.ts
 
+      - name: Files tab read + thumbnail contracts
+        # These gates are realpath-shaped: read_file and read_image_thumbnail
+        # resolve the target before handing it to Electron, and macOS resolves
+        # its own tmpdir (/var/folders/… → /private/var/folders/…) while Linux
+        # does not. The ubuntu `test` job therefore cannot fail on a path the
+        # shipping platform rewrites — which is how seven broken assertions
+        # merged green and then blocked every alpha release on the macOS build.
+        run: >-
+          pnpm exec vitest run --config vitest.config.ts
+          electron/ipc/commands/__tests__/files.test.ts
+          electron/ipc/commands/__tests__/image-dimensions.test.ts
+
   backend:
     name: backend (control plane)
     runs-on: ubuntu-latest
