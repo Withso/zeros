@@ -73,14 +73,40 @@ describe("partitionTurn", () => {
     expect(finalOutput).toEqual([]);
   });
 
-  it("keeps an answer visible when a settled background task arrives later", () => {
+  it("keeps a late settled background task in the working group without hiding the answer", () => {
     const { working, finalOutput } = partitionTurn([
       tool("t1"),
       agentText("answer"),
       backgroundTask("background-settled"),
     ]);
-    expect(ids(working)).toEqual(["t1"]);
-    expect(ids(finalOutput)).toEqual(["answer", "background-settled"]);
+    expect(ids(working)).toEqual(["t1", "background-settled"]);
+    expect(ids(finalOutput)).toEqual(["answer"]);
+  });
+
+  it("keeps a settled background task grouped when it is the only event", () => {
+    const { working, finalOutput } = partitionTurn([
+      backgroundTask("background-settled"),
+    ]);
+    expect(ids(working)).toEqual(["background-settled"]);
+    expect(finalOutput).toEqual([]);
+  });
+
+  it("extracts the complete answer across multiple late background settlements", () => {
+    const budgetStop = {
+      kind: "tool",
+      id: "budget-stop",
+      toolKind: "budget_stop",
+    } as unknown as AgentMessage;
+    const { working, finalOutput } = partitionTurn([
+      tool("t1"),
+      agentText("answer-a"),
+      backgroundTask("background-a"),
+      systemText("answer-b"),
+      backgroundTask("background-b", "failed"),
+      budgetStop,
+    ]);
+    expect(ids(working)).toEqual(["t1", "background-a", "background-b"]);
+    expect(ids(finalOutput)).toEqual(["answer-a", "answer-b", "budget-stop"]);
   });
 
   it("does not promote a still-running background task into final output", () => {

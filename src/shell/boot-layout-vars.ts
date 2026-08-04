@@ -17,10 +17,10 @@
 //
 // Writing the variable onto <html> before React's first render fixes the
 // cause rather than the symptom: the flush already sees the real value, the
-// row's own write is a no-op, and nothing can transition. The row-scoped
-// write still wins during a drag (an inline value on a descendant shadows
-// the inherited one), so per-frame drag updates stay scoped to the two
-// columns exactly as before.
+// row's own write is a no-op, and nothing can transition. During a drag the
+// two column flex items receive direct `flex-grow` overrides; on release the
+// row publishes the final committed variable once and those overrides are
+// removed without changing the resolved geometry.
 //
 // Keep this module dependency-light: it is imported by main.tsx on the
 // critical boot path, so it must not drag the chat tree in behind it.
@@ -40,9 +40,9 @@ import {
  *  Idempotent and safe to call before the DOM has any app content.
  *
  *  Both variables are re-published later on the elements that own them (the
- *  two-column row, the terminal panel), which is what a drag updates. These
- *  root-level values exist only so that nothing resolves against the CSS
- *  fallback first — an inline value on a descendant shadows them. */
+ *  two-column row and terminal panel) when a drag commits. Live frames use
+ *  direct standard flex properties, so these root-level values only ensure
+ *  that nothing resolves against the CSS fallback first. */
 export function applyBootLayoutVars(): void {
   if (typeof document === "undefined") return;
   const root = document.documentElement;

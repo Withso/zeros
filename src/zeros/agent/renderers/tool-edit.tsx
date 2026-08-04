@@ -37,14 +37,12 @@
 import { memo, useMemo } from "react";
 import { FileEdit } from "lucide-react";
 import { diffLines, structuredPatch } from "diff";
-import { PatchDiff } from "@pierre/diffs/react";
 
 import type { Renderer } from "./types";
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
 import { EventRow } from "./event-row";
 import type { EventMeta } from "./event-meta";
-import { zerosDiffOptions } from "@/zeros/appearance/diff-theme";
-import { useCodeTheme } from "@/zeros/appearance/use-code-theme";
+import { DiffHoverPreview } from "./diff-hover-preview";
 
 interface DiffSource {
   /** File path the diff applies to. */
@@ -77,7 +75,10 @@ export const EditCard: Renderer<AgentToolMessage> = memo(function EditCard({
   // session, that prior content is the real "before" — use it so an overwrite
   // shows what CHANGED, not the whole file. (Ch.1, 2026-06-20)
   const baseline = ctx.editBaselines.get(tool.toolCallId);
-  const source = useMemo(() => extractDiffSource(tool, baseline), [tool, baseline]);
+  const source = useMemo(
+    () => extractDiffSource(tool, baseline),
+    [tool, baseline],
+  );
   // When no structured diff is available, fall back to any captured
   // output/content text rather than a dead-end "No diff available" — keeps
   // edit cards from rendering blank for adapters with unexpected field names.
@@ -128,26 +129,58 @@ export const EditCard: Renderer<AgentToolMessage> = memo(function EditCard({
   // something, so a true 0/0 is a no-op re-apply and the badge is just noise.
   // Also hidden on a Write row: "Write 5 lines" already says the count, so a
   // "+5 −0" badge next to it is redundant (2026-07-05, per user).
+  // Also hidden on a FAILED edit: the green/red counts are the app-wide
+  // vocabulary for APPLIED change (Changes tab, turn footer), and a failed
+  // edit applied nothing — a green +21 on a red row claims lines that never
+  // landed, and double-counts the retry that follows (2026-08-01, per user).
+  const failed = tool.status === "failed";
+  const hasChanges =
+    counts !== null && (counts.added > 0 || counts.removed > 0);
   const trailingNode =
-    !isWrite && counts && (counts.added > 0 || counts.removed > 0) ? (
+    !failed && !isWrite && hasChanges ? (
       <span className="shrink-0 text-xs tabular-nums">
         <span className="text-green-primary">+{counts.added}</span>
-        <span className="ml-1 text-red-primary">−{counts.removed}</span>
+        <span className="text-red-primary ml-1">−{counts.removed}</span>
       </span>
     ) : undefined;
 
+  // A failed edit's result text is the ERROR the agent got back (Claude's
+  // "String to replace not found…", a permission denial, …). Without it the
+  // expanded body is only the ATTEMPTED diff — which hides WHY it failed and
+  // reads as if the change landed. Shown above the diff, inside EventRow's
+  // red-tinted failure box.
+  const failureText = useMemo(
+    () => (failed ? editFallbackText(tool) : null),
+    [failed, tool],
+  );
+
   const detail = source ? (
-    <EditDiff source={source} />
+    <>
+      {failureText && (
+        <pre className="text-red-primary/90 m-0 mb-2 max-h-[200px] overflow-y-auto font-mono text-xs leading-relaxed break-words whitespace-pre-wrap">
+          {failureText}
+        </pre>
+      )}
+      <EditDiff source={source} />
+    </>
   ) : fallbackText ? (
-    <pre className="m-0 max-h-[200px] overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-bg2/60 p-2 font-mono text-sm leading-relaxed text-fg1">
+    <pre className="bg-bg2/60 text-fg1 m-0 max-h-[200px] overflow-y-auto rounded-md p-2 font-mono text-sm leading-relaxed break-words whitespace-pre-wrap">
       {fallbackText}
     </pre>
   ) : (
-    <div className="text-xs italic text-fg2">
+    <div className="text-fg2 text-xs italic">
       No diff available — adapter did not provide before/after content.
     </div>
   );
 
+  // NO defaultOpen — a failed edit stays collapsed like every other failed
+  // tool row; the red tint + icon are the signal, expand is the user's move.
+  // Seeding open off `status === "failed"` auto-expanded the row mid-stream
+  // whenever a fast-failing Edit's tool_call and failed result landed in the
+  // same commit (the row's FIRST mount already saw "failed"), yet did nothing
+  // when the failure arrived after mount (useState never re-seeds) — and it
+  // re-expanded on every remount (summary-chip re-expand, chat reopen) even
+  // after the user collapsed it by hand (2026-08-01, per user).
   return (
     <EventRow
       message={tool}
@@ -155,7 +188,11 @@ export const EditCard: Renderer<AgentToolMessage> = memo(function EditCard({
       meta={editMeta}
       detail={detail}
       trailingNode={trailingNode}
-      defaultOpen={tool.status === "failed"}
+      hoverPreview={
+        !failed && hasChanges && source ? (
+          <EditDiff source={source} compact />
+        ) : undefined
+      }
     />
   );
 });
@@ -172,11 +209,13 @@ export const EditCard: Renderer<AgentToolMessage> = memo(function EditCard({
 // the main thread (no worker spin-up per card).
 // ──────────────────────────────────────────────────────────
 
-function EditDiff({ source }: { source: DiffSource }) {
-  // Subscribe to the unified code theme so existing chat diffs re-highlight on
-  // a picker change or an app-theme flip. EditCard above is memo'd, but this
-  // hook re-renders EditDiff itself, so the memo doesn't pin stale colors.
-  const codeTheme = useCodeTheme();
+function EditDiff({
+  source,
+  compact = false,
+}: {
+  source: DiffSource;
+  compact?: boolean;
+}) {
   // A real agent-supplied patch renders verbatim — its hunk headers carry the
   // file's ACTUAL line numbers, so the gutter matches the file on disk and
   // unchanged gaps collapse into accurate "N unmodified lines" separators.
@@ -189,22 +228,12 @@ function EditDiff({ source }: { source: DiffSource }) {
     [source.patch, source.path, source.before, source.after],
   );
   if (!patch) {
-    return <div className="px-3 py-2 font-mono text-xs text-fg2">No changes.</div>;
+    return (
+      <div className="text-fg2 px-3 py-2 font-mono text-xs">No changes.</div>
+    );
   }
-  // The diff body's own type/colors live inside <PatchDiff>'s shadow DOM
-  // (themed via zerosDiffOptions); this wrapper only bounds the height + scrolls.
   return (
-    <div className="max-h-[480px] overflow-auto">
-      <PatchDiff
-        patch={patch}
-        options={zerosDiffOptions({
-          disableFileHeader: true,
-          surface: "bg1",
-          codeThemeId: codeTheme,
-        })}
-        disableWorkerPool
-      />
-    </div>
+    <DiffHoverPreview path={source.path} patch={patch} compact={compact} />
   );
 }
 
@@ -255,7 +284,9 @@ interface StructuredHunk {
 
 /** The `structuredPatch` hunks off an edit tool's rawOutput, or null when the
  *  output isn't the translator's `{ structuredPatch }` envelope. */
-export function readStructuredPatchHunks(out: unknown): StructuredHunk[] | null {
+export function readStructuredPatchHunks(
+  out: unknown,
+): StructuredHunk[] | null {
   if (!isObj(out) || !Array.isArray(out.structuredPatch)) return null;
   const hunks: StructuredHunk[] = [];
   for (const h of out.structuredPatch) {
@@ -284,7 +315,8 @@ export function patchFromStructuredHunks(
   path: string,
   hunks: StructuredHunk[],
 ): string {
-  const newFile = hunks.length === 1 && hunks[0].oldStart === 1 && hunks[0].oldLines === 0;
+  const newFile =
+    hunks.length === 1 && hunks[0].oldStart === 1 && hunks[0].oldLines === 0;
   const header = newFile
     ? `diff --git a/${path} b/${path}\nnew file mode 100644\n--- /dev/null\n+++ b/${path}\n`
     : `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n`;
@@ -567,7 +599,8 @@ function readPath(input: unknown): string | null {
   // `target_file` is Cursor's edit-path field; include it so Cursor edits
   // show the real path (and feed the edit:<path> mergeKey) instead of the
   // tool title.
-  const p = input.file_path ?? input.path ?? input.filePath ?? input.target_file;
+  const p =
+    input.file_path ?? input.path ?? input.filePath ?? input.target_file;
   return typeof p === "string" ? p : null;
 }
 
@@ -587,7 +620,16 @@ function writeFullContent(inp: Record<string, unknown>): string | null {
  *  "before", so the overwrite shows what changed. We chain ONLY full-content
  *  writes: an Edit/MultiEdit/patch reveals just a snippet (not the whole file),
  *  so it INVALIDATES the running baseline for its path — a later Write then
- *  falls back to all-additions rather than diffing against stale content. */
+ *  falls back to all-additions rather than diffing against stale content.
+ *
+ *  STATUS matters (2026-08-01): only a COMPLETED write is on disk. A FAILED
+ *  edit of any shape changed nothing — it must neither record its never-
+ *  applied content as the next write's baseline nor invalidate a baseline
+ *  that is still true. A pending/in-flight tool's outcome is unknown (an
+ *  aborted turn can strand one forever), so it conservatively invalidates;
+ *  the recompute on its completion restores the chain. Every edit row still
+ *  RECEIVES the baseline that held before it ran — for a failed write that
+ *  diff truthfully reads "what this would have changed". */
 export function computeEditBaselines(
   messages: readonly AgentMessage[],
 ): Map<string, string> {
@@ -605,27 +647,41 @@ export function computeEditBaselines(
     if (full !== null) {
       const prior = lastFull.get(path);
       if (prior !== undefined) baselines.set(tool.toolCallId, prior);
+    }
+    if (tool.status === "failed") {
+      // No-op on the chain: the file still holds whatever it held before.
+      continue;
+    }
+    if (full !== null && tool.status === "completed") {
       lastFull.set(path, full);
     } else {
-      // Edit/MultiEdit/patch — we can't reconstruct the resulting file, so the
-      // tracked content for this path is no longer trustworthy.
+      // Edit/MultiEdit/patch (snippet — can't reconstruct the resulting file)
+      // or a write still in flight (outcome unknown): the tracked content for
+      // this path is no longer trustworthy.
       lastFull.delete(path);
     }
   }
   return baselines;
 }
 
-/** Last-resort body for an edit card with no extractable diff: any text the
- *  tool's content blocks carry, else a STRING rawOutput. Deliberately does
- *  NOT JSON-dump an object/array rawOutput — edit tools (notably Codex's
- *  fileChange) set rawOutput to a raw protocol envelope, and dumping that
- *  would splat JSON-RPC noise into the card. Object output with no readable
- *  text falls through to the "No diff available" placeholder. */
-function editFallbackText(tool: AgentToolMessage): string | null {
+/** The text an edit tool's RESULT carries: any text in its content blocks,
+ *  else a STRING rawOutput. Two consumers — the body of a card with no
+ *  extractable diff, and the error line above a FAILED edit's attempted diff
+ *  (for a failed tool this text IS the error, via the translator's
+ *  tool_call_update content). Deliberately does NOT JSON-dump an object/array
+ *  rawOutput — edit tools (notably Codex's fileChange) set rawOutput to a raw
+ *  protocol envelope, and dumping that would splat JSON-RPC noise into the
+ *  card. Object output with no readable text falls through to the caller's
+ *  placeholder. */
+export function editFallbackText(tool: AgentToolMessage): string | null {
   const parts: string[] = [];
   for (const block of tool.content ?? []) {
     const b = block as any;
-    if (b.type === "content" && b.content?.type === "text" && typeof b.content.text === "string") {
+    if (
+      b.type === "content" &&
+      b.content?.type === "text" &&
+      typeof b.content.text === "string"
+    ) {
       parts.push(b.content.text);
     } else if (b.type === "text" && typeof b.text === "string") {
       parts.push(b.text);
@@ -638,7 +694,10 @@ function editFallbackText(tool: AgentToolMessage): string | null {
 }
 
 /** First string-valued key from `keys` on `input`, or null. */
-function readString(input: Record<string, unknown>, keys: string[]): string | null {
+function readString(
+  input: Record<string, unknown>,
+  keys: string[],
+): string | null {
   for (const k of keys) {
     if (typeof input[k] === "string") return input[k] as string;
   }
@@ -737,7 +796,11 @@ function reconstructFromUnifiedDiff(
       path = line.slice(4).split("\t")[0].replace(/^b\//, "").trim();
       continue;
     }
-    if (line.startsWith("--- ") || line.startsWith("diff --git") || line.startsWith("index ")) {
+    if (
+      line.startsWith("--- ") ||
+      line.startsWith("diff --git") ||
+      line.startsWith("index ")
+    ) {
       continue;
     }
     if (line.startsWith("@@")) {

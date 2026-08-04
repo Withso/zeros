@@ -150,7 +150,14 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(function TextMessage
           displaySegments.length > 0 ? (
             // 2026-06-08 — inline render: text + mention/attachment pills
             // exactly where they were composed (no separate chip row).
-            <div className="whitespace-pre-wrap break-words leading-snug">
+            // wrap-anywhere (not break-words): overflow-wrap:break-word only
+            // breaks at LAYOUT time and is ignored for intrinsic (min-content)
+            // sizing, so a pasted log/JSON blob kept a huge min-content that
+            // forced TurnPromptHeader's w-fit bubble wider than a narrow pane
+            // (right-anchored → clipped off the LEFT edge). `anywhere` counts
+            // those break opportunities in min-content, so the bubble can
+            // shrink to the lane and the text wraps at its edge instead.
+            <div className="wrap-anywhere whitespace-pre-wrap leading-snug">
               {displaySegments.map((seg, i) => (
                 <MessageSegmentView
                   key={i}
@@ -213,7 +220,10 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(function TextMessage
                 // pre-wrap` match the composer exactly. User bubbles trim
                 // trailing whitespace so stray end-of-message newlines/spaces
                 // don't balloon the bubble; interior/leading spacing is kept.
-                <div className="whitespace-pre-wrap break-words leading-snug">
+                // wrap-anywhere: see the segments branch above — break-words
+                // doesn't shrink min-content, so unbroken pastes overflowed
+                // the w-fit user bubble past a narrow pane's left edge.
+                <div className="wrap-anywhere whitespace-pre-wrap leading-snug">
                   {message.role === "user"
                     ? message.text.trimEnd()
                     : message.text}

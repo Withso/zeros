@@ -11,6 +11,7 @@ import {
   peekWorkspaceFileRead,
   primeWorkspaceFileDiff,
   primeWorkspaceFileRead,
+  prefetchWorkspaceFileDiff,
   resetWorkspaceFileDataCacheForTests,
 } from "../workspace-file-data-cache";
 
@@ -136,6 +137,45 @@ describe("workspace file data cache", () => {
       path: "src/b.ts",
     });
     expect(peekWorkspaceFileDiff(turn)).toBe("turn patch");
+  });
+
+  it("deduplicates hover/viewer reads while isolating the same path across turns", async () => {
+    const firstPending = deferred<string>();
+    diffTurn
+      .mockReturnValueOnce(firstPending.promise)
+      .mockResolvedValueOnce("second turn patch");
+    const first = {
+      workspaceId: "workspace-1",
+      path: "src/shared.ts",
+      diffScope: "turn" as const,
+      turnChatId: "chat-1",
+      turnId: "turn-1",
+    };
+    const second = { ...first, turnId: "turn-2" };
+
+    prefetchWorkspaceFileDiff(first);
+    const viewerRead = loadWorkspaceFileDiff(first);
+    await Promise.resolve();
+    expect(diffTurn).toHaveBeenCalledTimes(1);
+
+    await expect(loadWorkspaceFileDiff(second)).resolves.toBe(
+      "second turn patch",
+    );
+    firstPending.resolve("first turn patch");
+    await expect(viewerRead).resolves.toBe("first turn patch");
+
+    expect(peekWorkspaceFileDiff(first)).toBe("first turn patch");
+    expect(peekWorkspaceFileDiff(second)).toBe("second turn patch");
+    expect(diffTurn).toHaveBeenNthCalledWith(1, {
+      chatId: "chat-1",
+      turnId: "turn-1",
+      path: "src/shared.ts",
+    });
+    expect(diffTurn).toHaveBeenNthCalledWith(2, {
+      chatId: "chat-1",
+      turnId: "turn-2",
+      path: "src/shared.ts",
+    });
   });
 
   it("invalidates only one workspace's diff snapshots for an exact event", async () => {

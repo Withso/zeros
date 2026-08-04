@@ -1,10 +1,10 @@
 // ──────────────────────────────────────────────────────────
-// PrStatusIsland — the Changes tab's PR row: live PR status + one-tap actions
+// PrStatusIsland — shared Changes/Review PR row: status + one-tap actions
 // ──────────────────────────────────────────────────────────
 //
-// A status bar — the Changes tab's always-present first row — rendered
-// whenever the active workspace has a PR (else that row holds the Create PR
-// button; see ChangesRow1Tab → PrStatusRow). It shows a single
+// A status bar rendered above the retained Changes/Review bodies whenever the
+// active workspace has a PR (else that row holds the Create PR button; see
+// Column3 → PrStatusRow). It shows a single
 // derived state — "View PR ↗ Draft PR open", "Ready to merge", "Merged", … —
 // with the button that resolves it.
 //
@@ -22,8 +22,8 @@
 //     settled batch. Applying them as they land renders mixed-generation
 //     states — e.g. fresh "ahead 2" over a stale pr → a wrong "Ahead by 2"
 //     flash that resolves to "Ready to merge" a second later.
-//   • LAST-KNOWN cache — row-1 tab bodies unmount when inactive, so without
-//     it every switch back to Changes remounted this island empty and flashed
+//   • LAST-KNOWN cache — leaving the Changes/Review pair or switching workspace
+//     unmounts the row, so without it returning remounted the island empty and flashed
 //     the "PR open" placeholder before the refetch landed. The cache re-renders
 //     the last-known status instantly and updates in place. The last RENDERED
 //     state is additionally persisted per workspace#pr (pr-island-last-state,
@@ -86,9 +86,14 @@ import { useArchiveWorkspace } from "../../zeros/store/archive-actions";
 import { useGitRefreshKey } from "../use-git-refresh-key";
 import { useShowReviewTab } from "./use-open-review-tab";
 import {
+  claimPrIslandAction,
   derivePrIslandState,
+  isActionDisabledByIslandClaim,
   isActionGatedWhileAgentWorking,
+  releasePrIslandAction,
   type PrIslandAction,
+  type PrIslandActionBehavior,
+  type PrIslandActionClaim,
   type PrIslandActionKind,
   type PrIslandState,
   type PrIslandTone,
@@ -316,10 +321,27 @@ export function PrStatusIsland({
   const stabilityKey = data?.pr
     ? `${dataKey}@${data.pr.baseBranch}:${data.pr.headSha ?? "unknown"}`
     : `${dataKey}@unconfirmed`;
-  // Which action is running (direct engine ops). The running button swaps its
-  // icon for a spinner and every button disables (the disabled dim doubles as
-  // the "in flight" affordance).
-  const [acting, setActing] = useState<PrIslandActionKind | null>(null);
+  // The claimed prompt/direct operation. Its button swaps to a spinner;
+  // mutating peers disable, while pure navigation — and Archive during an
+  // agent prompt it deliberately stops — follow the shared action policy.
+  const [acting, setActing] = useState<PrIslandActionClaim | null>(null);
+  const actionClaimRef = useRef<PrIslandActionClaim | null>(null);
+  const claimAction = useCallback(
+    (
+      kind: PrIslandActionKind,
+      behavior: PrIslandActionBehavior,
+    ): PrIslandActionClaim | null => {
+      const owner = claimPrIslandAction(actionClaimRef, { kind, behavior });
+      if (!owner) return null;
+      setActing(owner);
+      return owner;
+    },
+    [],
+  );
+  const finishAction = useCallback((owner: PrIslandActionClaim): void => {
+    releasePrIslandAction(actionClaimRef, owner);
+    setActing((current) => (current === owner ? null : current));
+  }, []);
   const archiveWorkspace = useArchiveWorkspace();
   // Park git-mutating actions while an agent turn is in flight (see
   // isActionGatedWhileAgentWorking for the policy).
@@ -489,8 +511,8 @@ export function PrStatusIsland({
    *  continue. No agent message — spinner on the button, optimistic flip. */
   const runDirect = useCallback(
     async (action: PrIslandAction) => {
-      if (acting) return;
-      setActing(action.kind);
+      const owner = claimAction(action.kind, action.behavior);
+      if (!owner) return;
       // The action is about to invalidate the current state on purpose — the
       // stability mask must not resurrect it over a following transient.
       clearPrIslandStability(stabilityKey);
@@ -601,11 +623,12 @@ export function PrStatusIsland({
                   : "Couldn't continue on a new branch";
         actionErrorToast(title, err);
       } finally {
-        setActing(null);
+        finishAction(owner);
       }
     },
     [
-      acting,
+      claimAction,
+      finishAction,
       data?.pr?.baseBranch,
       data?.pr?.mergeCommitSha,
       stabilityKey,
@@ -620,17 +643,17 @@ export function PrStatusIsland({
   );
 
   const handleArchive = useCallback(async () => {
-    if (acting) return;
-    setActing("archive");
+    const owner = claimAction("archive", "archive");
+    if (!owner) return;
     try {
       // Shared: stops any running agent turn, repoints the view (archiving the
       // workspace you're viewing would otherwise strand the open chat on a
       // deleted folder), and offers Undo.
       await archiveWorkspace(workspace);
     } finally {
-      setActing(null);
+      finishAction(owner);
     }
-  }, [acting, workspace, archiveWorkspace]);
+  }, [claimAction, finishAction, workspace, archiveWorkspace]);
 
   const runAction = useCallback(
     (action: PrIslandAction) => {
@@ -644,20 +667,27 @@ export function PrStatusIsland({
           showPr("checks");
           return;
         case "prompt": {
+          const owner = claimAction(action.kind, action.behavior);
+          if (!owner) return;
           const text = buildActionPrompt(action.kind, {
             baseBranch: workspace.baseBranch,
             remote,
           });
-          if (!text) return;
+          if (!text) {
+            finishAction(owner);
+            return;
+          }
           // Auto-sent treatment: the bubble shows the short label + the
           // action's icon (brown "sent by Zeros" bubble, copy-only); the
           // agent receives the full brief.
           const bubble = promptActionBubble(action.kind);
-          sendToChat({
+          const sent = sendToChat({
             text,
             displayText: bubble?.label,
             autoAction: bubble?.autoAction,
+            onSettled: () => finishAction(owner),
           });
+          if (!sent) finishAction(owner);
           return;
         }
         default:
@@ -667,6 +697,8 @@ export function PrStatusIsland({
     [
       handleArchive,
       showPr,
+      claimAction,
+      finishAction,
       workspace.baseBranch,
       remote,
       sendToChat,
@@ -850,6 +882,10 @@ export function PrStatusIsland({
       {(island?.actions ?? []).map((action) => {
         const Icon = ACTION_ICON[action.kind];
         const gated = agentWorking && isActionGatedWhileAgentWorking(action);
+        const claimBlocked = isActionDisabledByIslandClaim(
+          acting?.behavior ?? null,
+          action,
+        );
         return (
           <Tooltip
             key={action.kind}
@@ -860,11 +896,11 @@ export function PrStatusIsland({
             <span className="inline-flex shrink-0">
               <button
                 type="button"
-                disabled={acting != null || gated}
+                disabled={claimBlocked || gated}
                 onClick={() => runAction(action)}
                 className={cn(BTN_BASE, actionButtonClass(action, tone))}
               >
-                {acting === action.kind ? (
+                {acting?.kind === action.kind ? (
                   <ZerosSpinner size={14} tone="inherit" />
                 ) : (
                   Icon && <Icon className="size-3.5" />

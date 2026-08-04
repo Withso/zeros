@@ -96,7 +96,28 @@ export function zerosDiffOptions(opts?: {
   themeType: "dark" | "light";
   unsafeCSS: string;
   diffStyle: "unified" | "split";
+  overflow: "wrap";
   disableFileHeader?: boolean;
+} {
+  return {
+    ...zerosSharedDiffPresentation(opts),
+    ...(opts?.disableFileHeader ? { disableFileHeader: true } : {}),
+  };
+}
+
+/** Visual contract shared by PatchDiff (Review/chat/hover) and CodeView
+ * (Changes files). Keeping these keys built in one place prevents compact
+ * previews from silently drifting in theme, diff style, chrome, or wrapping. */
+function zerosSharedDiffPresentation(opts?: {
+  diffStyle?: "unified" | "split";
+  codeThemeId?: string;
+  surface?: "bg1" | "bg2" | "sidebar-bg";
+}): {
+  theme: ThemesType;
+  themeType: "dark" | "light";
+  unsafeCSS: string;
+  diffStyle: "unified" | "split";
+  overflow: "wrap";
 } {
   const { theme, themeType } = resolveDiffTheme(opts?.codeThemeId);
   return {
@@ -104,7 +125,10 @@ export function zerosDiffOptions(opts?: {
     themeType,
     unsafeCSS: diffShadowCss(opts?.surface ?? "sidebar-bg"),
     diffStyle: opts?.diffStyle ?? "unified",
-    ...(opts?.disableFileHeader ? { disableFileHeader: true } : {}),
+    // One file-reading contract across Review, Changes, chat, and hover
+    // previews: long source lines reflow inside the available width instead of
+    // creating a second horizontal navigation axis.
+    overflow: "wrap",
   };
 }
 
@@ -120,12 +144,8 @@ export function zerosCodeViewOptions(opts?: {
   /** Diff surface bg. Column-3 file-tab diffs use "sidebar-bg" (default). */
   surface?: "bg1" | "bg2" | "sidebar-bg";
 }): CodeViewOptions<undefined> {
-  const { theme, themeType } = resolveDiffTheme(opts?.codeThemeId);
   return {
-    theme,
-    themeType,
-    unsafeCSS: diffShadowCss(opts?.surface ?? "sidebar-bg"),
-    diffStyle: opts?.diffStyle ?? "unified",
+    ...zerosSharedDiffPresentation(opts),
     ...(opts?.disableFileHeader ? { disableFileHeader: true } : {}),
     // Remove the leading top gap above the first line. With disableFileHeader,
     // @pierre/diffs stacks TWO top paddings that the file-viewer doesn't want

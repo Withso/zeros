@@ -67,6 +67,7 @@ import {
 import { useCachedRead } from "../store/use-cached-read";
 import { InlineLoginTerminal } from "./inline-login-terminal";
 import {
+  githubAppConnectOptions,
   githubAutomaticSetup,
   githubHealthNeedsAttention,
   githubMethodDescription,
@@ -415,22 +416,30 @@ export function GitHubSection({
     }
   }, [busyMethod, pat, snapshot]);
 
-  const connectApp = useCallback(async () => {
+  /** A confirmed-empty inventory has its own recovery route. Opening the setup
+   * card before the request keeps any control-plane failure visible inline. */
+  const connectApp = useCallback(async (options?: {
+    forceInstall?: boolean;
+  }) => {
     const attempt = appAttemptRef.current;
+    if (options?.forceInstall) setSetupMethod("github-app");
     setBusyMethod("github-app");
     setAppError(null);
     const app = snapshot.methods["github-app"];
-    const installFlow = !app.configured || app.installationCount === 0;
+    const connectOptions = githubAppConnectOptions(
+      app,
+      options?.forceInstall === true,
+    );
     trackGithubConnectStarted({
       method: "github-app",
       entryPoint: "settings",
     });
     try {
-      await ghAppConnect({ installFlow });
+      const started = await ghAppConnect(connectOptions);
       // Cancelled while the control plane was answering: main already discarded
       // the handoff, so there is nothing to finish on GitHub.
-      if (attempt !== appAttemptRef.current) return;
-      if (installFlow) {
+      if (attempt !== appAttemptRef.current || !started) return;
+      if (started.flowKind === "install") {
         trackGithubInstallOpened({
           variantKey: "github.com",
           kind: "new",
@@ -734,7 +743,16 @@ export function GitHubSection({
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
-                        {method === "github-app" ? (
+                        {method === "github-app" &&
+                        summary.installationCount === 0 ? (
+                          <DropdownMenuItem
+                            onSelect={() =>
+                              void connectApp({ forceInstall: true })
+                            }
+                          >
+                            <GithubIcon /> Install GitHub App
+                          </DropdownMenuItem>
+                        ) : method === "github-app" ? (
                           <DropdownMenuItem
                             onSelect={() => {
                               trackGithubInstallOpened({
@@ -862,8 +880,8 @@ export function GitHubSection({
                         </h3>
                         <p className="text-fg2 m-0 text-xs">
                           {appWaiting
-                            ? "Authorize your account and choose repository access in the browser, then return to Zeros."
-                            : "GitHub opens in your browser so you can choose an account and select repository access."}
+                            ? "Finish on GitHub, then select Open Zeros on the confirmation page."
+                            : "GitHub opens in your browser to authorize Zeros and, when needed, choose repository access."}
                         </p>
                         <div className="flex flex-wrap items-center gap-2">
                           {appWaiting ? (
@@ -1045,7 +1063,28 @@ export function GitHubSection({
                         </Button>
                       </div>
                     ) : (
-                      <HealthDetail summary={summary} />
+                      <>
+                        <HealthDetail summary={summary} />
+                        {method === "github-app" &&
+                        summary.health === "not-installed" ? (
+                          <div>
+                            <Button
+                              type="button"
+                              size="sm"
+                              loading={busyMethod === "github-app"}
+                              onClick={() =>
+                                void connectApp({ forceInstall: true })
+                              }
+                            >
+                              Install GitHub App
+                              <ExternalLink
+                                className="size-3.5"
+                                aria-hidden="true"
+                              />
+                            </Button>
+                          </div>
+                        ) : null}
+                      </>
                     )}
                   </div>
                 ) : null}

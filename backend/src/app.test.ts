@@ -30,6 +30,7 @@ const githubConfig: GithubBackendConfig = {
   refreshBindingSecret: "test-binding-secret",
   appSlug: "zeros-test",
   oauthCallbackUrl: "https://api.example.test/v1/github/oauth/callback",
+  completionPageUrl: "https://app.example.test/github/connected",
   webBaseUrl: "https://github.example.test",
   apiBaseUrl: "https://api.github.example.test",
   variantKey: "github.com",

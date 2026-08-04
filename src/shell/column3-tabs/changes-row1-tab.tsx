@@ -4,13 +4,11 @@
 //
 // The branch's permanent change-review surface:
 //
-//   Row A — the PR STATUS row on worktree workspaces (omitted on main, which is
-//           the merge target). With a PR it IS the PR status
-//           island (live status + one-tap actions — the same component that
-//           used to float between the rows); without one it's the same 40px row
-//           holding the Create PR split-button (moved here from the column-2
-//           topbar), so PR creation and PR status live in one stable place.
-//   Row B — the toolbar: the sidebar toggle first, then the All-changes scope
+//   Shared chrome — Column3 owns one PR STATUS row above both retained Changes
+//           and Review bodies (omitted on main, which is the merge target).
+//           Keeping it outside this body prevents the two tabs from holding
+//           independent live snapshots.
+//   Toolbar — the sidebar toggle first, then the All-changes scope
 //           dropdown + the turn filter. With the sidebar visible these sit in
 //           the sidebar's own header and the diff viewer's header (file
 //           breadcrumbs + Viewed / Discard / unified⇄split / mode toggle)
@@ -41,11 +39,9 @@ import React, {
 } from "react";
 import { FileDiff, PanelLeft } from "lucide-react";
 
-import { useActiveWorkspace } from "@/zeros/store/use-active-workspace";
 import { useWorkspaceDispatch } from "@/zeros/store/store";
 import { Tooltip } from "@/zeros/ui/primitives";
 import { cn } from "@/zeros/ui/cn";
-import { PrStatusRow } from "../pr/pr-status-row";
 import { useChatCwd } from "../use-chat-cwd";
 import { triggerGitRefresh, useGitRefreshKey } from "../use-git-refresh-key";
 import { useOpenFileInRow1, type OpenFileOpts } from "../use-open-file-in-row1";
@@ -104,8 +100,6 @@ export const ChangesRow1Tab = React.memo(function ChangesRow1Tab({
 }: TabBodyProps) {
   const cwd = useChatCwd();
   const { workspace, isLocalMain, changesTarget } = useSourceTarget();
-  // The owning project supplies the origin remote for "Create PR manually".
-  const { project } = useActiveWorkspace();
   // The same live refresh bus as the File tabs: agent turn-end / git
   // writes / editor saves re-pull the list, the PR row, and the open diff.
   const gitRefresh = useGitRefreshKey(cwd, changesTarget);
@@ -122,14 +116,6 @@ export const ChangesRow1Tab = React.memo(function ChangesRow1Tab({
 
   return (
     <div className="bg-bg1 flex h-full min-h-0 flex-col">
-      {/* Local main is the merge target, so it has no PR status/create row. */}
-      {!isLocalMain && (
-        <PrStatusRow
-          workspace={workspace}
-          originUrl={project?.originUrl ?? null}
-          active={active}
-        />
-      )}
       {trunkRoot && !checked ? (
         <div className="min-h-0 flex-1" aria-busy="true" />
       ) : nonGit ? (
@@ -781,7 +767,13 @@ function ChangesSurface({
             return (
               <div
                 key={changeFileViewIdentityKey(viewTarget)}
-                {...(!isVisible ? { inert: "" } : {})}
+                // Retained hidden diff views each carry @pierre/diffs' own
+                // ResizeObservers; pinning them during seam drags (resize-
+                // gesture-freeze.ts) keeps those quiet so only the visible
+                // diff re-virtualizes per frame.
+                {...(!isVisible
+                  ? { inert: "", "data-zeros-resize-freeze": "" }
+                  : {})}
                 className={cn(
                   "absolute inset-0 flex min-h-0 min-w-0 flex-col overflow-hidden",
                   isVisible

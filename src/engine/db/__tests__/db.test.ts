@@ -31,6 +31,9 @@ import {
 } from "../chats";
 import { headRev, tombstonesSince } from "../sync";
 import {
+  WINDOW_MAX_ROWS,
+  TURN_START_ORD_SQL,
+  TURN_START_ORD_ANY_USER_SQL,
   upsertChatMessage,
   upsertChatMessagesBulk,
   windowChatMessages,
@@ -41,6 +44,7 @@ import {
   clearChatMessages,
   truncateChatMessagesFrom,
 } from "../messages";
+import { finishTurn, startTurn } from "../turns";
 
 function makeChat(id: string, over: Partial<ChatRow> = {}): ChatRow {
   return {
@@ -689,6 +693,206 @@ describe("Zeros DB (unified engine store)", () => {
     expect(windowOlderChatMessages("c1", 10, "missing")).toEqual([]);
   });
 
+  // A turn is one user row followed by however many tool/reasoning/text rows the
+  // agent produced — hundreds, for a tool-heavy run. `LIMIT n` newest-first cuts
+  // at an arbitrary row, so without snapping, a tail window can open in the
+  // middle of a turn and the renderer (which derives turns by splitting on user
+  // rows) shows that turn with no prompt bubble, no footer and no checkpoint.
+  describe("chat_messages: a tail window never begins mid-turn", () => {
+    const user = (id: string) => ({
+      msgId: id,
+      kind: "text",
+      payload: JSON.stringify({ id, kind: "text", role: "user", text: "ask" }),
+      createdAt: 1,
+    });
+    const tool = (id: string) => ({
+      msgId: id,
+      kind: "tool",
+      payload: JSON.stringify({ id, kind: "tool" }),
+      createdAt: 1,
+    });
+    const agent = (id: string) => ({
+      msgId: id,
+      kind: "text",
+      payload: JSON.stringify({ id, kind: "text", role: "agent", text: "ans" }),
+      createdAt: 1,
+    });
+    /** A mid-turn steer: a user row that did NOT open a turn. */
+    const steer = (id: string, owner: string) => ({
+      msgId: id,
+      kind: "text",
+      payload: JSON.stringify({
+        id,
+        kind: "text",
+        role: "user",
+        text: "actually",
+        steeredTurnId: owner,
+      }),
+      createdAt: 1,
+    });
+
+    it("extends back to the prompt that opened the turn it landed in", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      upsertChatMessagesBulk("c1", [
+        user("u1"),
+        tool("t1"),
+        tool("t2"),
+        tool("t3"),
+        tool("t4"),
+        tool("t5"),
+        agent("a1"),
+      ]);
+
+      // Newest 3 alone would be t4/t5/a1 — a headless turn.
+      expect(windowChatMessages("c1", 3).map((m) => m.msgId)).toEqual([
+        "u1",
+        "t1",
+        "t2",
+        "t3",
+        "t4",
+        "t5",
+        "a1",
+      ]);
+    });
+
+    it("reaches past a mid-turn steer to the prompt that opened the turn", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      upsertChatMessagesBulk("c1", [
+        user("u1"),
+        tool("t1"),
+        steer("s1", "u1"),
+        tool("t2"),
+        agent("a1"),
+      ]);
+
+      // Newest 2 would cut at t2. A steer is a user row, so the snap used to
+      // stop there and present the interjection as the turn's opening prompt,
+      // with the real prompt (and everything before the steer) off-window.
+      expect(windowChatMessages("c1", 2).map((m) => m.msgId)).toEqual([
+        "u1",
+        "t1",
+        "s1",
+        "t2",
+        "a1",
+      ]);
+    });
+
+    it("falls back to a steer when the real opening is past the budget", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      upsertChatMessagesBulk("c1", [
+        user("u1"),
+        ...Array.from({ length: WINDOW_MAX_ROWS + 100 }, (_, i) =>
+          tool(`t${i}`),
+        ),
+        steer("s1", "u1"),
+        agent("a1"),
+      ]);
+
+      // Unreachable opening + reachable steer: a boundary the renderer splits
+      // on still beats a headless turn, so skipping steers must not cost the
+      // snap entirely.
+      const window = windowChatMessages("c1", 2);
+      expect(window[0]?.msgId).toBe("s1");
+      expect(window.map((m) => m.msgId)).toEqual(["s1", "a1"]);
+    });
+
+    it("leaves a window that already starts on a prompt alone", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      upsertChatMessagesBulk("c1", [
+        user("u1"),
+        agent("a1"),
+        user("u2"),
+        agent("a2"),
+      ]);
+
+      expect(windowChatMessages("c1", 2).map((m) => m.msgId)).toEqual([
+        "u2",
+        "a2",
+      ]);
+    });
+
+    it("does not snap an older page — it is anchored to rows the caller holds", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      upsertChatMessagesBulk("c1", [
+        user("u1"),
+        tool("t1"),
+        tool("t2"),
+        agent("a1"),
+      ]);
+
+      expect(
+        windowOlderChatMessages("c1", 2, "a1").map((m) => m.msgId),
+      ).toEqual(["t1", "t2"]);
+    });
+
+    it("leaves the window untouched when the prompt is past the row budget", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      upsertChatMessagesBulk("c1", [
+        user("u1"),
+        ...Array.from({ length: WINDOW_MAX_ROWS + 100 }, (_, i) =>
+          tool(`t${i}`),
+        ),
+      ]);
+
+      // A turn longer than WINDOW_MAX_ROWS can't be snapped without blowing the
+      // ceiling, so this degrades to the pre-snap window — all of it, and
+      // nothing extra. Growing partway would cost 800 rows of transcript and
+      // still render a headless turn, so it buys the reader nothing.
+      expect(windowChatMessages("c1", 200)).toHaveLength(200);
+    });
+
+    it("a caller asking for the ceiling gets no extension", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      upsertChatMessagesBulk("c1", [
+        user("u1"),
+        ...Array.from({ length: WINDOW_MAX_ROWS + 100 }, (_, i) =>
+          tool(`t${i}`),
+        ),
+      ]);
+
+      // loadFullTranscript pages at exactly this limit; the clamp's "cannot
+      // materialize a whole transcript" guarantee has to stay exact.
+      expect(windowChatMessages("c1", WINDOW_MAX_ROWS)).toHaveLength(
+        WINDOW_MAX_ROWS,
+      );
+    });
+
+    // This lookup runs on every chat open, and the difference between a bounded
+    // index search and a scan of the chat is invisible in the rows returned — so
+    // pin the PLAN, the same way CHAT_SUMMARIES_SQL does.
+    it("the turn-start lookup is an index search bounded at both ends", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      upsertChatMessagesBulk("c1", [user("u1"), tool("t1")]);
+
+      // Both queries: the steer-skipping primary (whose extra json_extract term
+      // must not cost the index) and the any-user fallback it degrades to.
+      for (const sql of [TURN_START_ORD_SQL, TURN_START_ORD_ANY_USER_SQL]) {
+        const details = (
+          openZerosDb()
+            .prepare(`EXPLAIN QUERY PLAN ${sql}`)
+            .all("c1", 0, 2) as { detail: string }[]
+        ).map((r) => r.detail);
+
+        // Both ord bounds have to reach the index: the lower one is what caps
+        // the reverse walk at the rows the window could actually absorb. Losing
+        // it still returns the right row, just after walking the chat to its
+        // start.
+        expect(
+          details.some(
+            (d) =>
+              d.includes("SEARCH chat_messages") &&
+              d.includes("idx_chat_messages_chat_ord") &&
+              d.includes("ord>?") &&
+              d.includes("ord<?"),
+          ),
+        ).toBe(true);
+        expect(
+          details.some((d) => /SCAN chat_messages\b(?! USING)/.test(d)),
+        ).toBe(false);
+      }
+    });
+  });
+
   it("FTS: cross-chat search over transcript content, hyphen-safe, follows updates", () => {
     setZerosDbPathForTesting(tmpDbFile());
     const text = (id: string, t: string) => ({
@@ -776,6 +980,66 @@ describe("Zeros DB (unified engine store)", () => {
     const beforeClear = headRev();
     clearChatMessages("c1");
     expect(tombstonesSince("msgreset", beforeClear)).toContain("c1");
+  });
+
+  it("annotates legacy mid-turn steer rows with their recorded turn owner", () => {
+    setZerosDbPathForTesting(tmpDbFile());
+    openZerosDb();
+    const user = (id: string, createdAt: number) => ({
+      msgId: id,
+      kind: "text",
+      payload: JSON.stringify({
+        id,
+        kind: "text",
+        role: "user",
+        text: id,
+        createdAt,
+      }),
+      createdAt,
+    });
+
+    upsertChatMessagesBulk("steer-chat", [
+      user("opening", 900),
+      user("legacy-steer", 1_500),
+      user("next-turn", 4_000),
+    ]);
+    startTurn({
+      chatId: "steer-chat",
+      turnId: "opening",
+      workspaceId: "w1",
+      folder: "/repo",
+      agentId: "codex",
+      summary: null,
+      startedAt: 1_000,
+      preSnapshot: null,
+    });
+    finishTurn("steer-chat", "opening", {
+      endedAt: 3_000,
+      stopReason: "end_turn",
+      status: "completed",
+      postSnapshot: null,
+      files: [],
+    });
+    startTurn({
+      chatId: "steer-chat",
+      turnId: "next-turn",
+      workspaceId: "w1",
+      folder: "/repo",
+      agentId: "codex",
+      summary: null,
+      startedAt: 4_100,
+      preSnapshot: null,
+    });
+
+    const payloads = Object.fromEntries(
+      windowChatMessages("steer-chat", 10).map((row) => [
+        row.msgId,
+        JSON.parse(row.payload) as { steeredTurnId?: string },
+      ]),
+    );
+    expect(payloads["legacy-steer"]?.steeredTurnId).toBe("opening");
+    expect(payloads.opening?.steeredTurnId).toBeUndefined();
+    expect(payloads["next-turn"]?.steeredTurnId).toBeUndefined();
   });
 
   it("backfillChatMessageRevs stamps legacy rev=0 rows and is idempotent", () => {

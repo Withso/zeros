@@ -3,6 +3,7 @@
 // deep-path imports.
 
 export { Button, buttonVariants, type ButtonProps } from "./button";
+export { Pill, type PillProps } from "./pill";
 export {
   Card,
   CardHeader,

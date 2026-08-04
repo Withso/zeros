@@ -16,8 +16,12 @@ import { Tooltip } from "@/zeros/ui/primitives";
 // border --border3 — the SAME chrome as the tool-row FileTag and the
 // turn-footer file pills, so composer pills, sent-bubble pills, and transcript
 // pills all read as one family.
+// FLAG: the 3px subtraction is the paired 1.5px inline-alignment margins used
+// by every caller. The label caps at 16/18rem, but in a narrower pane the pill
+// must cap its complete margin box at the composer/bubble width; the truncating
+// label then absorbs the squeeze while attachment remove buttons remain usable.
 export const PILL_SHELL =
-  "inline-flex h-5 items-center gap-1 rounded-sm border border-border3 bg-bg1 align-middle text-xs leading-none text-fg1 select-none";
+  "inline-flex h-5 max-w-[calc(100%-3px)] items-center gap-1 rounded-sm border border-border3 bg-bg1 align-middle text-xs leading-none text-fg1 select-none";
 
 export function MentionPillView({
   label,
@@ -30,10 +34,7 @@ export function MentionPillView({
 }) {
   return (
     <Tooltip label={path || label}>
-      <span
-        data-mention-pill=""
-        className={cn(PILL_SHELL, "mx-[1.5px] px-2")}
-      >
+      <span data-mention-pill="" className={cn(PILL_SHELL, "mx-[1.5px] px-2")}>
         <FileTypeIcon name={path || label} kind={kind} size={13} />
         <span className="max-w-[18rem] truncate">{label}</span>
       </span>

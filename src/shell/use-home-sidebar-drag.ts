@@ -12,6 +12,7 @@
 
 import { useCallback } from "react";
 
+import { beginContinuousLayoutResize } from "./terminal/continuous-layout-resize";
 import {
   clampHomeSidebarWidth,
   setHomeSidebarWidth,
@@ -55,6 +56,10 @@ export function useHomeSidebarResizeDrag(
       let isFinished = false;
       // Click-vs-drag gate: only a real drag commits a width on release.
       let moved = false;
+      // Join the shared gesture: moving the rail resizes columns 2 + 3, so
+      // hidden retained layers must be pinned and xterm fits deferred exactly
+      // like the column seam (resize-gesture-freeze.ts / fit schedulers).
+      const finishContinuousResize = beginContinuousLayoutResize();
 
       const apply = () => {
         rafId = null;
@@ -109,6 +114,7 @@ export function useHomeSidebarResizeDrag(
           railEl.style.width = startInlineWidth;
         }
         onResizingChange?.(false);
+        finishContinuousResize();
       };
 
       // Lock the cursor + suppress text selection window-wide so the pointer

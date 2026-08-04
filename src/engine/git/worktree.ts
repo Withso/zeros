@@ -875,7 +875,11 @@ async function collectUsedWorkspaceNames(
  *  is what marks a ref as workspace-owned, and silently creating unprefixed
  *  branches in a user's repo because a lookup failed would litter it with names
  *  indistinguishable from their own. A settings problem must never block or
- *  reshape workspace creation. */
+ *  reshape workspace creation.
+ *
+ *  Unset means `github` (DEFAULT_BRANCH_PREFIX_TYPE), not `zeros` — so on a
+ *  signed-in machine that has never touched Settings → Git, new branches read
+ *  `jordan/Cream`. `zeros/` is then only the fallback for an unknown login. */
 export async function resolveNewBranchPrefix(
   repoRoot: string,
   /** The connected GitHub login, for `branch_prefix_type = "github"`.
@@ -884,11 +888,21 @@ export async function resolveNewBranchPrefix(
    *  network. Overridable so tests can pin it. */
   githubLogin: string | null = cachedGithubLogin(),
 ): Promise<string | null> {
+  /** The default type's namespace. Not signed in / login unusable as a ref →
+   *  `zeros` rather than null, so a missing login degrades the NAME and never
+   *  litters the repo with unprefixed branches. */
+  const fromLogin = () =>
+    normalizeBranchPrefix(githubLogin ?? undefined) ?? DEFAULT_BRANCH_PREFIX;
+
   let config;
   try {
     config = resolveRepoGit(repoRoot);
   } catch {
-    return DEFAULT_BRANCH_PREFIX;
+    // resolveRepoGit swallows its own failures, so this is belt-and-braces —
+    // but it must still mean the DEFAULT type, not the historical `zeros`, or
+    // an unreadable settings tree would quietly answer a different question
+    // from an empty one.
+    return fromLogin();
   }
   switch (config.branchPrefixType) {
     case "none":
@@ -896,16 +910,14 @@ export async function resolveNewBranchPrefix(
     case "custom":
       // Already normalized by resolveRepoGit; null when unset or unusable.
       return config.branchPrefix ?? DEFAULT_BRANCH_PREFIX;
-    case "github": {
-      // Not signed in / login unreadable → keep the default rather than
-      // silently dropping to no prefix.
-      return (
-        normalizeBranchPrefix(githubLogin ?? undefined) ?? DEFAULT_BRANCH_PREFIX
-      );
-    }
     case "zeros":
-    default:
+      // Only reachable from an explicit setting now (a hand-edited
+      // settings.toml or a team/managed layer) — unset resolves to the default
+      // type. Still honoured: it is what pre-2026-08-03 branches are under.
       return DEFAULT_BRANCH_PREFIX;
+    case "github":
+    default:
+      return fromLogin();
   }
 }
 

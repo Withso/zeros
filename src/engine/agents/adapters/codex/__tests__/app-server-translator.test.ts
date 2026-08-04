@@ -61,6 +61,23 @@ describe("CodexAppServerTranslator", () => {
       expect(env.out.emitted).toHaveLength(0);
     });
 
+    it("accepts aggregate diff and plan notifications without unknown-event noise", () => {
+      env.t.handle("turn/diff/updated", {
+        threadId: "t1",
+        turnId: "u1",
+        diff: "diff --git a/a.ts b/a.ts",
+      });
+      env.t.handle("turn/plan/updated", {
+        threadId: "t1",
+        turnId: "u1",
+        explanation: null,
+        plan: [{ step: "Fix it", status: "inProgress" }],
+      });
+
+      expect(env.out.unknown).toEqual([]);
+      expect(env.out.emitted).toEqual([]);
+    });
+
     it("turn/completed with status=completed sets stopReason=end_turn", () => {
       env.t.handle("turn/completed", {
         threadId: "t1",
@@ -84,7 +101,11 @@ describe("CodexAppServerTranslator", () => {
     it("turn/completed failed + codexErrorInfo=contextWindowExceeded → max_turn_requests", () => {
       env.t.handle("turn/completed", {
         threadId: "t1",
-        turn: { id: "u1", status: "failed", error: { codexErrorInfo: "contextWindowExceeded" } },
+        turn: {
+          id: "u1",
+          status: "failed",
+          error: { codexErrorInfo: "contextWindowExceeded" },
+        },
       });
       expect(env.t.stopReason).toBe("max_turn_requests");
     });
@@ -92,7 +113,11 @@ describe("CodexAppServerTranslator", () => {
     it("turn/completed failed + codexErrorInfo=unauthorized flags an auth failure", () => {
       env.t.handle("turn/completed", {
         threadId: "t1",
-        turn: { id: "u1", status: "failed", error: { codexErrorInfo: "unauthorized" } },
+        turn: {
+          id: "u1",
+          status: "failed",
+          error: { codexErrorInfo: "unauthorized" },
+        },
       });
       // Generated TurnError carries the identity in codexErrorInfo, not a
       // non-existent `.code`; auth/quota is surfaced via authQuotaFailure.
@@ -230,7 +255,11 @@ describe("CodexAppServerTranslator", () => {
       );
       expect(calls).toHaveLength(1);
       expect(updates).toHaveLength(1);
-      const call = calls[0].update as { kind: string; status: string; title: string };
+      const call = calls[0].update as {
+        kind: string;
+        status: string;
+        title: string;
+      };
       expect(call.kind).toBe("execute");
       expect(call.status).toBe("in_progress");
       expect(call.title).toMatch(/ls -la/);
@@ -273,15 +302,26 @@ describe("CodexAppServerTranslator", () => {
           id: "cmd-read",
           command: "sed -n '1,3p' README.md",
           commandActions: [
-            { type: "read", command: "sed -n '1,3p' README.md", name: "README.md", path: "/repo/README.md" },
+            {
+              type: "read",
+              command: "sed -n '1,3p' README.md",
+              name: "README.md",
+              path: "/repo/README.md",
+            },
           ],
         },
         threadId: "t1",
         turnId: "u1",
         startedAtMs: 0,
       });
-      const call = env.out.emitted.find((n) => n.update.sessionUpdate === "tool_call");
-      const u = call!.update as { kind: string; title: string; rawInput: { file_path?: string } };
+      const call = env.out.emitted.find(
+        (n) => n.update.sessionUpdate === "tool_call",
+      );
+      const u = call!.update as {
+        kind: string;
+        title: string;
+        rawInput: { file_path?: string };
+      };
       expect(u.kind).toBe("read");
       expect(u.title).toMatch(/README\.md/);
       expect(u.rawInput.file_path).toBe("README.md");
@@ -300,8 +340,12 @@ describe("CodexAppServerTranslator", () => {
         turnId: "u1",
         completedAtMs: 100,
       });
-      const upd = env.out.emitted.find((n) => n.update.sessionUpdate === "tool_call_update");
-      const content = (upd!.update as { content?: Array<{ content: { text: string } }> }).content;
+      const upd = env.out.emitted.find(
+        (n) => n.update.sessionUpdate === "tool_call_update",
+      );
+      const content = (
+        upd!.update as { content?: Array<{ content: { text: string } }> }
+      ).content;
       expect(content?.[0]?.content.text).toBe("line1\nline2\nline3");
     });
 
@@ -311,13 +355,22 @@ describe("CodexAppServerTranslator", () => {
           type: "commandExecution",
           id: "cmd-grep",
           command: "rg foo src",
-          commandActions: [{ type: "search", command: "rg foo src", query: "foo", path: "src" }],
+          commandActions: [
+            {
+              type: "search",
+              command: "rg foo src",
+              query: "foo",
+              path: "src",
+            },
+          ],
         },
         threadId: "t1",
         turnId: "u1",
         startedAtMs: 0,
       });
-      const call = env.out.emitted.find((n) => n.update.sessionUpdate === "tool_call");
+      const call = env.out.emitted.find(
+        (n) => n.update.sessionUpdate === "tool_call",
+      );
       const u = call!.update as { kind: string; rawInput: { query?: string } };
       expect(u.kind).toBe("search");
       expect(u.rawInput.query).toBe("foo");
@@ -329,13 +382,17 @@ describe("CodexAppServerTranslator", () => {
           type: "commandExecution",
           id: "cmd-ls",
           command: "ls frontend",
-          commandActions: [{ type: "listFiles", command: "ls frontend", path: "frontend" }],
+          commandActions: [
+            { type: "listFiles", command: "ls frontend", path: "frontend" },
+          ],
         },
         threadId: "t1",
         turnId: "u1",
         startedAtMs: 0,
       });
-      const call = env.out.emitted.find((n) => n.update.sessionUpdate === "tool_call");
+      const call = env.out.emitted.find(
+        (n) => n.update.sessionUpdate === "tool_call",
+      );
       const u = call!.update as { kind: string; rawInput: { path?: string } };
       expect(u.kind).toBe("list");
       expect(u.rawInput.path).toBe("frontend");
@@ -358,7 +415,9 @@ describe("CodexAppServerTranslator", () => {
         turnId: "u1",
         startedAtMs: 0,
       });
-      const call = env.out.emitted.find((n) => n.update.sessionUpdate === "tool_call");
+      const call = env.out.emitted.find(
+        (n) => n.update.sessionUpdate === "tool_call",
+      );
       expect((call!.update as { kind: string }).kind).toBe("execute");
     });
 
@@ -366,15 +425,43 @@ describe("CodexAppServerTranslator", () => {
       // Backward-compat: older codex builds (or non-parsed commands) omit
       // commandActions entirely.
       env.t.handle("item/started", {
-        item: { type: "commandExecution", id: "cmd-plain", command: "make build" },
+        item: {
+          type: "commandExecution",
+          id: "cmd-plain",
+          command: "make build",
+        },
         threadId: "t1",
         turnId: "u1",
         startedAtMs: 0,
       });
-      const call = env.out.emitted.find((n) => n.update.sessionUpdate === "tool_call");
+      const call = env.out.emitted.find(
+        (n) => n.update.sessionUpdate === "tool_call",
+      );
       const u = call!.update as { kind: string; title: string };
       expect(u.kind).toBe("execute");
       expect(u.title).toMatch(/make build/);
+    });
+
+    it("imageView emits a Read image tool with the image path", () => {
+      env.t.handle("item/started", {
+        item: {
+          type: "imageView",
+          id: "image-view-1",
+          path: "/tmp/footer-diff-hover.png",
+        },
+        threadId: "t1",
+        turnId: "u1",
+        startedAtMs: 0,
+      });
+
+      const call = env.out.emitted.find(
+        (notification) => notification.update.sessionUpdate === "tool_call",
+      );
+      expect(call?.update).toMatchObject({
+        title: "Read image",
+        kind: "read",
+        rawInput: { path: "/tmp/footer-diff-hover.png" },
+      });
     });
 
     it("fileChange emits tool_call(edit) with mergeKey when path is present", () => {
@@ -392,7 +479,11 @@ describe("CodexAppServerTranslator", () => {
         (n) => n.update.sessionUpdate === "tool_call",
       );
       expect(call).toBeTruthy();
-      const u = call!.update as { kind: string; mergeKey?: string; title: string };
+      const u = call!.update as {
+        kind: string;
+        mergeKey?: string;
+        title: string;
+      };
       expect(u.kind).toBe("edit");
       // mergeKey uses the first changed path so consecutive edits to
       // the same file collapse into one card.
@@ -598,7 +689,10 @@ describe("CodexAppServerTranslator", () => {
       const done = env.out.emitted.find(
         (n) => n.update.sessionUpdate === "tool_call_update",
       );
-      const doneUpdate = done!.update as { status: string; rawOutput?: unknown };
+      const doneUpdate = done!.update as {
+        status: string;
+        rawOutput?: unknown;
+      };
       expect(doneUpdate.status).toBe("completed");
       expect(doneUpdate.rawOutput).toMatchObject({
         "019f2e0c-f63c-7183-ae41-41ab54638eaa": { status: "completed" },
@@ -607,13 +701,23 @@ describe("CodexAppServerTranslator", () => {
 
     it("a failed collab call completes as failed", () => {
       env.t.handle("item/started", {
-        item: { type: "collabAgentToolCall", id: "collab-3", tool: "closeAgent", status: "inProgress" },
+        item: {
+          type: "collabAgentToolCall",
+          id: "collab-3",
+          tool: "closeAgent",
+          status: "inProgress",
+        },
         threadId: "t1",
         turnId: "u1",
         startedAtMs: 0,
       });
       env.t.handle("item/completed", {
-        item: { type: "collabAgentToolCall", id: "collab-3", tool: "closeAgent", status: "failed" },
+        item: {
+          type: "collabAgentToolCall",
+          id: "collab-3",
+          tool: "closeAgent",
+          status: "failed",
+        },
         threadId: "t1",
         turnId: "u1",
       });
@@ -624,7 +728,10 @@ describe("CodexAppServerTranslator", () => {
     });
 
     it("thread/status/changed is a known no-op (no unknown-notification log)", () => {
-      env.t.handle("thread/status/changed", { threadId: "t1", status: "running" });
+      env.t.handle("thread/status/changed", {
+        threadId: "t1",
+        status: "running",
+      });
       expect(env.out.unknown).toHaveLength(0);
       expect(env.out.emitted).toHaveLength(0);
     });
@@ -673,7 +780,9 @@ describe("CodexAppServerTranslator", () => {
         (n) => n.update.sessionUpdate === "error_notice",
       );
       expect(notices).toHaveLength(2);
-      const ids = notices.map((n) => (n.update as { noticeId: string }).noticeId);
+      const ids = notices.map(
+        (n) => (n.update as { noticeId: string }).noticeId,
+      );
       expect(new Set(ids).size).toBe(2);
     });
 
@@ -726,7 +835,9 @@ describe("CodexAppServerTranslator", () => {
         (n) => n.update.sessionUpdate === "error_notice",
       );
       expect(notices).toHaveLength(2);
-      const ids = notices.map((n) => (n.update as { noticeId: string }).noticeId);
+      const ids = notices.map(
+        (n) => (n.update as { noticeId: string }).noticeId,
+      );
       expect(new Set(ids).size).toBe(2);
     });
 
@@ -736,9 +847,7 @@ describe("CodexAppServerTranslator", () => {
           "Falling back from WebSockets to HTTPS transport. request timed out.",
       });
       expect(
-        env.out.emitted.some(
-          (n) => n.update.sessionUpdate === "error_notice",
-        ),
+        env.out.emitted.some((n) => n.update.sessionUpdate === "error_notice"),
       ).toBe(false);
     });
 
@@ -870,8 +979,20 @@ describe("CodexAppServerTranslator", () => {
         threadId: "t1",
         turnId: "u1",
         tokenUsage: {
-          total: { totalTokens: 178_340, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
-          last: { totalTokens: 0, inputTokens: 44_000, cachedInputTokens: 40_000, outputTokens: 2_200, reasoningOutputTokens: 0 },
+          total: {
+            totalTokens: 178_340,
+            inputTokens: 0,
+            cachedInputTokens: 0,
+            outputTokens: 0,
+            reasoningOutputTokens: 0,
+          },
+          last: {
+            totalTokens: 0,
+            inputTokens: 44_000,
+            cachedInputTokens: 40_000,
+            outputTokens: 2_200,
+            reasoningOutputTokens: 0,
+          },
           modelContextWindow: 258_000,
         },
       });
@@ -895,8 +1016,20 @@ describe("CodexAppServerTranslator", () => {
         threadId: "t1",
         turnId: "u1",
         tokenUsage: {
-          total: { totalTokens: 28_803, inputTokens: 28_680, cachedInputTokens: 24_064, outputTokens: 123, reasoningOutputTokens: 17 },
-          last: { totalTokens: 4_298, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
+          total: {
+            totalTokens: 28_803,
+            inputTokens: 28_680,
+            cachedInputTokens: 24_064,
+            outputTokens: 123,
+            reasoningOutputTokens: 17,
+          },
+          last: {
+            totalTokens: 4_298,
+            inputTokens: 0,
+            cachedInputTokens: 0,
+            outputTokens: 0,
+            reasoningOutputTokens: 0,
+          },
           modelContextWindow: 353_400,
         },
       });
@@ -910,8 +1043,20 @@ describe("CodexAppServerTranslator", () => {
         threadId: "t1",
         turnId: "u1",
         tokenUsage: {
-          total: { totalTokens: 999_999, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
-          last: { totalTokens: 0, inputTokens, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
+          total: {
+            totalTokens: 999_999,
+            inputTokens: 0,
+            cachedInputTokens: 0,
+            outputTokens: 0,
+            reasoningOutputTokens: 0,
+          },
+          last: {
+            totalTokens: 0,
+            inputTokens,
+            cachedInputTokens: 0,
+            outputTokens: 0,
+            reasoningOutputTokens: 0,
+          },
           modelContextWindow: 258_000,
         },
       });
@@ -940,7 +1085,10 @@ describe("CodexAppServerTranslator", () => {
 
   describe("forward compatibility", () => {
     it("dispatches account/* notifications without surfacing them as bubbles", () => {
-      env.t.handle("account/updated", { authMode: "chatgpt", planType: "plus" });
+      env.t.handle("account/updated", {
+        authMode: "chatgpt",
+        planType: "plus",
+      });
       env.t.handle("account/rateLimits/updated", { snapshots: [] });
       // The translator deliberately swallows account events — the
       // adapter owns the auth/usage UI, not the chat stream.

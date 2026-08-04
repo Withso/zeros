@@ -61,6 +61,8 @@ import { useProjects } from "../../zeros/store/use-projects";
 import { repoPageViewForSection } from "../../zeros/panels/repo-page";
 import { useThemeVariant } from "../../zeros/appearance/use-theme-variant";
 import { ZerosSpinner } from "@/loaders";
+import { createTerminalResizeScheduler } from "../terminal/terminal-resize-scheduler";
+import { isUsableTerminalDimensions } from "../terminal/terminal-dimensions";
 
 /** How often to re-pull the setup buffer while a run is live. The buffer is the
  *  source of truth; we delta-append, so polling is exact (no dup/gap). */
@@ -171,7 +173,9 @@ function WorkspaceSetup({
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
   const xtermRef = useRef<XTerm | null>(null);
-  const fitRef = useRef<FitAddon | null>(null);
+  const resizeSchedulerRef = useRef<ReturnType<
+    typeof createTerminalResizeScheduler
+  > | null>(null);
   const refetchRequestRef = useRef<Promise<void> | null>(null);
   // How many chars of the engine buffer we've already written to the xterm.
   const writtenRef = useRef(0);
@@ -235,9 +239,15 @@ function WorkspaceSetup({
     term.loadAddon(fit);
     term.open(host);
     xtermRef.current = term;
-    fitRef.current = fit;
     const doFit = () => {
       if (!visibleRef.current) return;
+      const proposed = fit.proposeDimensions();
+      if (
+        !isUsableTerminalDimensions(proposed) ||
+        (proposed.cols === term.cols && proposed.rows === term.rows)
+      ) {
+        return;
+      }
       try {
         fit.fit();
       } catch {
@@ -245,14 +255,25 @@ function WorkspaceSetup({
       }
     };
     doFit();
-    const ro = new ResizeObserver(doFit);
+    // Setup used to run `fit()` synchronously for every ResizeObserver
+    // notification. Unlike a normal box measurement, xterm fit reflows its
+    // scrollback buffer; that hot loop was the visible terminal-panel jerk in
+    // the reported screenshots. Share the same settled scheduler as shells.
+    const scheduler = createTerminalResizeScheduler(doFit);
+    resizeSchedulerRef.current = scheduler;
+    const ro = new ResizeObserver(() => {
+      if (visibleRef.current) scheduler.request();
+    });
     ro.observe(host);
     void refetch();
     return () => {
       ro.disconnect();
+      scheduler.dispose();
+      if (resizeSchedulerRef.current === scheduler) {
+        resizeSchedulerRef.current = null;
+      }
       term.dispose();
       xtermRef.current = null;
-      fitRef.current = null;
       writtenRef.current = 0;
     };
   }, [refetch]);
@@ -279,14 +300,10 @@ function WorkspaceSetup({
   useEffect(() => {
     if (!visible) return;
     void refetch();
-    const frame = requestAnimationFrame(() => {
-      try {
-        fitRef.current?.fit();
-      } catch {
-        /* layout may still be settling; ResizeObserver gets the next change */
-      }
-    });
-    return () => cancelAnimationFrame(frame);
+    // This also marks the scheduler dirty when dragging the collapsed row
+    // open, guaranteeing one exact release-time fit even if ResizeObserver
+    // coalesces away the visibility geometry change.
+    resizeSchedulerRef.current?.flush();
   }, [visible, refetch]);
 
   // Re-resolve the xterm colors when the app variant flips (mode change OR an
@@ -375,16 +392,24 @@ function WorkspaceSetup({
   );
 
   return (
-    <div className="relative flex h-full min-h-0 flex-col">
+    <div className="relative flex size-full min-h-0 min-w-0 flex-col overflow-hidden">
       {/* The xterm is always mounted (so writes land); the empty overlay covers
           it until there's output. */}
       <div
-        ref={hostRef}
         className={cn(
-          "h-full w-full px-2 py-1",
+          // FitAddon reads width/height from xterm's immediate parent but only
+          // subtracts padding from xterm's own element. Under the app-wide
+          // border-box sizing, host padding is included in those dimensions,
+          // so it lives here and the measured child is the exact content area.
+          "size-full min-h-0 min-w-0 overflow-hidden px-2 py-1",
           hasLog ? "opacity-100" : "opacity-0",
         )}
-      />
+      >
+        <div
+          ref={hostRef}
+          className="size-full min-h-0 min-w-0 overflow-hidden"
+        />
+      </div>
 
       {!hasLog && (
         <div className="absolute inset-0">

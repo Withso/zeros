@@ -10,10 +10,10 @@
 //
 // `partitionTurn` is the pure boundary detector:
 //   - finalOutput = the trailing run of agent/system TEXT messages
-//     (the concluding answer) plus the few settled records that explicitly
-//     render beside it. Walk from the end; stop at the first working event.
-//   - working     = everything before that — tools, thinking,
-//     in-between agent narration, sub-agents.
+//     (the concluding answer) plus the few records that explicitly render
+//     beside it. Walk from the end; stop at the first working event.
+//   - working     = every other event — tools, thinking, in-between agent
+//     narration, sub-agents, and late background-task lifecycle records.
 //
 // Thinking (role:"thought") is NOT output — it's reasoning — so it
 // always stays in the working group even when it's the last event.
@@ -35,7 +35,7 @@ export interface TurnPartition {
   /** Tools, thinking, in-between narration, sub-agents — the reasoning
    *  feed shown dimmed (and collapsible once the turn settles). */
   working: AgentMessage[];
-  /** The trailing agent/system text and standalone settled records, rendered
+  /** The trailing agent/system text and standalone output records, rendered
    *  brightly. Empty when the turn ended with working content only. */
   finalOutput: AgentMessage[];
 }
@@ -85,11 +85,12 @@ function isBudgetStop(e: AgentMessage): boolean {
   return (e as AgentToolMessage).toolKind === "budget_stop";
 }
 
-/** A background task can settle after its parent turn's answer. That late
- * lifecycle record belongs beside the answer, not at the tail of the
- * collapsible working stripe: otherwise the non-output tail makes the answer
- * disappear and concise transcript copy loses it. Keep an in-progress record
- * in working content until it has actually settled. */
+/** A background task can settle after its parent turn's answer. It remains a
+ * tool call and therefore belongs in the collapsible working stripe, but its
+ * late arrival must be transparent to answer-boundary detection: otherwise a
+ * settled lifecycle row after the reply would make the real answer disappear.
+ * Running background tasks are NOT transparent because their presence means
+ * the turn has not reached a settled answer boundary. */
 function isSettledBackgroundTask(e: AgentMessage): boolean {
   if (e.kind !== "tool") return false;
   const tool = e as AgentToolMessage;
@@ -104,12 +105,7 @@ function isSettledBackgroundTask(e: AgentMessage): boolean {
  *  compacted an idle chat — and must stay visible, not fold into the
  *  chip). */
 function isFinalOutputEvent(e: AgentMessage): boolean {
-  return (
-    isOutputText(e) ||
-    isManualCompaction(e) ||
-    isBudgetStop(e) ||
-    isSettledBackgroundTask(e)
-  );
+  return isOutputText(e) || isManualCompaction(e) || isBudgetStop(e);
 }
 
 export function partitionTurn(
@@ -120,13 +116,27 @@ export function partitionTurn(
   // (A manual compaction can't be live-working content: it only happens
   // idle or queues to run post-turn, so no special case here.)
   if (options?.live) return { working: events, finalOutput: [] };
-  let cut = events.length;
+  // Most turns have one contiguous answer suffix. Settled background-task
+  // lifecycle rows are the exception: the provider can append them after the
+  // answer, but they still render as tool calls in the working group. Walk
+  // through those transparent rows while locating the answer, then partition
+  // by membership instead of slicing at one cut.
+  const finalOutputIndexes = new Set<number>();
   for (let i = events.length - 1; i >= 0; i--) {
+    if (isSettledBackgroundTask(events[i])) continue;
     if (isFinalOutputEvent(events[i])) {
-      cut = i;
+      finalOutputIndexes.add(i);
     } else {
       break;
     }
   }
-  return { working: events.slice(0, cut), finalOutput: events.slice(cut) };
+  if (finalOutputIndexes.size === 0) {
+    return { working: events.slice(), finalOutput: [] };
+  }
+  const working: AgentMessage[] = [];
+  const finalOutput: AgentMessage[] = [];
+  events.forEach((event, index) => {
+    (finalOutputIndexes.has(index) ? finalOutput : working).push(event);
+  });
+  return { working, finalOutput };
 }

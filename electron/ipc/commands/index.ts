@@ -52,6 +52,7 @@ import { readFile, writeFile } from "./files";
 import { skillsList } from "./skills";
 import { discoverLocalhostServices } from "./localhost";
 import { notifySend } from "./notifications";
+import { processMetricsSnapshot } from "./process-metrics";
 import { agentAttachmentWrite } from "./agent-attachments";
 import { designExportPng } from "./design-export";
 import {
@@ -179,6 +180,7 @@ export function registerAllCommands(): void {
 
   // Phase 8 — notifications, updater, process
   setCommand("notify_send", notifySend);
+  setCommand("process_metrics_snapshot", processMetricsSnapshot);
   setCommand("updater_check", updaterCheck);
   setCommand("updater_install", updaterInstall);
   setCommand("updater_status", updaterStatus);

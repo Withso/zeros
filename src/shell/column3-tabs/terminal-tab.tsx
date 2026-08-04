@@ -85,13 +85,7 @@ import {
   RUN_ADD_SUBTAB,
   resolveTerminalPanelTab,
 } from "../terminal/terminal-tab-selection";
-import {
-  TERMINAL_PANEL_DEFAULT_PCT,
-  TERMINAL_PANEL_HEIGHT_VAR,
-  TERMINAL_PANEL_MAX_OFFSET_PX,
-  TERMINAL_PANEL_MIN_PX,
-  useTerminalPanelLayoutStore,
-} from "../terminal/terminal-panel-layout";
+import { useTerminalPanelLayoutStore } from "../terminal/terminal-panel-layout";
 import {
   SetupView,
   isSetupOutcome,
@@ -168,6 +162,10 @@ interface TerminalPanelProps {
 /** Preserve the common workspace round-trip without attaching every terminal
  * ever opened in a large repository set. */
 const MAX_RETAINED_TERMINAL_FOLDERS = 4;
+// Literal layout class so Tailwind can emit it. The lockstep source test derives
+// these numbers from terminal-panel-layout.ts and fails if either side changes.
+const TERMINAL_PANEL_EXPANDED_LAYOUT_CLS =
+  "min-h-[140px] [flex-basis:clamp(140px,var(--zeros-terminal-panel-height,50%),calc(100%_-_181px))]";
 
 export function TerminalPanel({
   folderKey,
@@ -457,19 +455,6 @@ export function TerminalPanel({
       ref={panelRef}
       data-terminal-panel=""
       aria-expanded={expanded}
-      style={
-        expanded
-          ? {
-              // Keep both pixel floors after a later window resize too, not
-              // only during the drag that produced the saved percentage. The
-              // percentage itself arrives as a custom property that this
-              // element owns — published by TerminalPanelResizer and rewritten
-              // there per drag frame, deliberately outside React's style prop
-              // so a re-render can never yank a live drag off the pointer.
-              flexBasis: `clamp(${TERMINAL_PANEL_MIN_PX}px, var(${TERMINAL_PANEL_HEIGHT_VAR}, ${TERMINAL_PANEL_DEFAULT_PCT}%), calc(100% - ${TERMINAL_PANEL_MAX_OFFSET_PX}px))`,
-            }
-          : undefined
-      }
       // Collapse and expand SNAP. The panel used to carry
       // `transition-[flex-basis,min-height] duration-300`, which was wrong in
       // three ways at once:
@@ -484,7 +469,9 @@ export function TerminalPanel({
       //     was written to avoid. Snapping makes it exactly one.
       className={cn(
         "bg-bg1 flex shrink-0 flex-col overflow-hidden",
-        expanded ? "min-h-[140px]" : "min-h-10 basis-10",
+        expanded
+          ? TERMINAL_PANEL_EXPANDED_LAYOUT_CLS
+          : "min-h-10 basis-10",
       )}
     >
       <TerminalSubTabStrip
@@ -545,7 +532,13 @@ export function TerminalPanel({
           return (
             <div
               key={s.id}
-              {...(!isActive ? { inert: "" } : {})}
+              // Hidden sessions are pinned during seam drags (resize-gesture-
+              // freeze.ts). A COLLAPSED panel's layers measure 0-height and
+              // are skipped, so dragging the panel open mid-gesture still
+              // reveals a live-sized terminal.
+              {...(!isActive
+                ? { inert: "", "data-zeros-resize-freeze": "" }
+                : {})}
               className={cn(
                 "absolute inset-0 flex min-h-0 min-w-0 flex-col p-2",
                 isActive
@@ -589,7 +582,9 @@ export function TerminalPanel({
           return (
             <div
               key={`setup:${setupFolderKey}`}
-              {...(!isActive ? { inert: "" } : {})}
+              {...(!isActive
+                ? { inert: "", "data-zeros-resize-freeze": "" }
+                : {})}
               className={cn(
                 "absolute inset-0 flex min-h-0 min-w-0 flex-col overflow-hidden",
                 isActive

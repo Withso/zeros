@@ -71,6 +71,7 @@ const ALLOWED_COMMANDS = new Set<string>([
   "open_in_terminal",
   "open_install_terminal",
   "pick_project_folder",
+  "process_metrics_snapshot",
   "read_file",
   "write_file",
   "reveal_in_finder",

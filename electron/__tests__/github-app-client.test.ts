@@ -20,9 +20,10 @@ describe("GitHub App control-plane client", () => {
     const fetchImpl = vi.fn(async () =>
       jsonResponse({
         authorizeUrl:
-          "https://github.com/apps/zeros/installations/new?state=opaque",
+          "https://github.com/login/oauth/authorize?state=opaque",
         state: "must-not-leave-the-client",
         expiresAt: new Date(1_060_000).toISOString(),
+        flowKind: "oauth",
       }),
     );
     const client = new GithubAppClient({
@@ -37,11 +38,13 @@ describe("GitHub App control-plane client", () => {
         variantKey: "github.com",
         scheme: "zeros-dev",
         installFlow: true,
+        forceInstall: true,
       }),
     ).resolves.toEqual({
       authorizeUrl:
-        "https://github.com/apps/zeros/installations/new?state=opaque",
+        "https://github.com/login/oauth/authorize?state=opaque",
       expiresAtMs: 1_060_000,
+      flowKind: "oauth",
     });
     expect(fetchImpl).toHaveBeenCalledWith(
       "https://api.zeros.test/v1/github/oauth/start",
@@ -49,8 +52,62 @@ describe("GitHub App control-plane client", () => {
         headers: expect.objectContaining({
           authorization: "Bearer auth-access",
         }),
+        body: JSON.stringify({
+          nonce: "n".repeat(43),
+          variantKey: "github.com",
+          scheme: "zeros-dev",
+          installFlow: true,
+          forceInstall: true,
+        }),
       }),
     );
+  });
+
+  it("falls back to the requested flow kind with an older control plane", async () => {
+    const client = new GithubAppClient({
+      baseUrl: "https://api.zeros.test",
+      fetch: vi.fn(async () =>
+        jsonResponse({
+          authorizeUrl:
+            "https://github.com/apps/zeros/installations/new?state=opaque",
+          expiresAt: new Date(1_060_000).toISOString(),
+        }),
+      ) as typeof fetch,
+      now: () => 1_000_000,
+    });
+
+    await expect(
+      client.start("auth-access", {
+        nonce: "n".repeat(43),
+        variantKey: "github.com",
+        scheme: "zeros-dev",
+        installFlow: true,
+      }),
+    ).resolves.toMatchObject({ flowKind: "install" });
+  });
+
+  it("rejects an invented flow kind from the control plane", async () => {
+    const client = new GithubAppClient({
+      baseUrl: "https://api.zeros.test",
+      fetch: vi.fn(async () =>
+        jsonResponse({
+          authorizeUrl:
+            "https://github.com/login/oauth/authorize?state=opaque",
+          expiresAt: new Date(1_060_000).toISOString(),
+          flowKind: "configure",
+        }),
+      ) as typeof fetch,
+      now: () => 1_000_000,
+    });
+
+    await expect(
+      client.start("auth-access", {
+        nonce: "n".repeat(43),
+        variantKey: "github.com",
+        scheme: "zeros-dev",
+        installFlow: true,
+      }),
+    ).rejects.toMatchObject({ code: "bad_response" });
   });
 
   it("refuses a non-GitHub authorization destination from the control plane", async () => {

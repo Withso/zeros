@@ -517,6 +517,10 @@ export interface AgentSteeredMessage extends BaseMessage {
   requestId: string;
   agentId: string;
   sessionId: string;
+  /** Opening user-message id for the provider turn that accepted this steer.
+   *  Lets the renderer keep a separate steer bubble without inventing a
+   *  second persisted turn/footer. Absent for mixed-version engines. */
+  turnId?: string;
 }
 
 /** Fire-and-forget: tear down a session's engine-side resources when its
@@ -639,6 +643,11 @@ export interface AgentSessionLoadedMessage extends BaseMessage {
   agentId: string;
   sessionId: string;
   response: LoadSessionResponse;
+  /** Engine-owned prompt state at the exact moment this session was adopted.
+   * Optional for compatibility with older engines. */
+  promptActive?: boolean;
+  /** Original engine prompt start, used to preserve the live elapsed clock. */
+  activeTurnStartedAt?: number;
 }
 
 export interface AgentAgentsListMessage extends BaseMessage {
@@ -688,6 +697,16 @@ export interface AgentPermissionRequestMessage extends BaseMessage {
   agentId: string;
   permissionId: string;
   request: RequestPermissionRequest;
+}
+
+/** A permission resolver settled engine-side (response, timeout, or abort).
+ * The renderer uses this receipt to evict a card whose resolver no longer
+ * exists and advance any concurrently queued helper gate. */
+export interface AgentPermissionSettledMessage extends BaseMessage {
+  type: "AGENT_PERMISSION_SETTLED";
+  agentId: string;
+  permissionId: string;
+  sessionId: string;
 }
 
 /** A blocking user-input question from the agent (twin of
@@ -944,6 +963,14 @@ export interface PtyListResultMessage extends BaseMessage {
   type: "PTY_LIST_RESULT";
   requestId: string;
   terminals: PtyTerminalInfo[];
+  /** OS roots for every live PtyService session, including Run, Setup, and
+   * ephemeral command terminals. Local-only; names, session IDs, cwd, and argv
+   * are deliberately omitted. Purely additive and therefore wire-compatible in
+   * both directions — an old client ignores the field, and a new client treats
+   * its absence as "census unavailable" rather than zero PTYs — so this
+   * deliberately does NOT bump PROTOCOL_VERSION, which would strand an updated
+   * phone/web peer against a desktop engine that has not shipped yet. */
+  processPids?: number[];
 }
 /** Engine → all clients: the shared terminal set changed (one was created or
  *  exited). Clients re-fetch PTY_LIST so every device's tab strip stays in
@@ -1021,6 +1048,7 @@ export type BridgeMessage =
   | AgentAuthCompletedMessage
   | AgentSessionUpdateMessage
   | AgentPermissionRequestMessage
+  | AgentPermissionSettledMessage
   | AgentQuestionRequestMessage
   | AgentQuestionSettledMessage
   | AgentModeChangedMessage

@@ -21,6 +21,7 @@ import {
 } from "./column2-ratio";
 import { cn } from "../zeros/ui/cn";
 import { useResizeHint } from "./use-resize-hint";
+import { beginContinuousLayoutResize } from "./terminal/continuous-layout-resize";
 
 // ── Column 2 className constants ───────────────────────────
 // Wave 1.5 finalize (2026-05-16): the .zeros-column-2 family
@@ -118,11 +119,10 @@ const PANE_TREE_ROOT_CLS = "absolute inset-0 flex min-h-0 min-w-0";
  *  lives in column2-ratio.ts (a leaf module, unit-testable without the
  *  chat tree, and importable from the pre-render boot path).
  *
- *  Applies the ratio as --zeros-column-2-ratio on the two-column ROW
- *  element (col 2's parent — scoped there, not :root, so per-frame drag
- *  writes only recalc the columns that consume it). Returns the current
- *  ratio and a setter that writes to both the CSS variable (immediate
- *  visual effect) and localStorage (persistence). */
+ *  Applies the committed ratio as --zeros-column-2-ratio on the two-column
+ *  row. Live drag frames bypass this inherited variable and write direct
+ *  flex-grow values to the two flex items. Returns the current ratio and a
+ *  setter that persists it and keeps the pre-render boot value current. */
 function useColumn2Ratio(sectionRef: React.RefObject<HTMLElement | null>) {
   const [ratio, setRatio] = useState<number>(readPersistedColumn2Ratio);
 
@@ -189,10 +189,15 @@ export function Column2Workspace({
       // declaration no longer transitions, so a resizing flag would exist
       // only to re-render Column2Panes (every pane, every transcript)
       // twice per gesture — a visible hitch at grab and release.
-      // Geometry of the two-column flex ROW (col 2's parent), measured
-      // once — the captured pointer means the window can't resize
-      // mid-drag. The pointer's offset into the row IS col 2's share.
+      // Geometry of the two-column flex ROW (col 2's parent), measured once.
+      // The pointer's offset into the row IS col 2's share. Column 3 is kept as
+      // an explicit target so live frames can update the two standard
+      // `flex-grow` properties without changing an inherited custom property.
       const row = sectionRef.current?.parentElement;
+      const column2 = sectionRef.current;
+      const column3 = row?.querySelector<HTMLElement>(
+        "[data-zeros-column-3]",
+      );
       const rect = row?.getBoundingClientRect();
       const rowLeft = rect?.left ?? 0;
       const rowWidth = rect?.width ?? 0;
@@ -216,14 +221,21 @@ export function Column2Workspace({
       //     via an `isFinished` guard.
       //   • Also listen for blur and pointerleave-window to abort.
       let isFinished = false;
+      // Starting the shared gesture also freezes every hidden retained layer
+      // and iframe at its current size (see resize-gesture-freeze.ts), so the
+      // per-frame layout below is bounded to the VISIBLE surfaces. The active
+      // transcript and composer re-wrap live and track the seam exactly — no
+      // width floor, no content clipped under column 3 mid-drag.
+      const finishContinuousResize = beginContinuousLayoutResize();
 
       const paintRatio = () => {
         rafId = null;
-        // Writing the shared variable on the row moves BOTH columns:
-        // col 2 grows by `ratio`, col 3 by `1 - ratio` — and the
-        // scoped write keeps the per-frame style recalc inside the
-        // two-column subtree.
-        row?.style.setProperty(COLUMN_2_RATIO_VAR, String(lastRatio));
+        // A custom property written on the row inherits into every transcript,
+        // diff, iframe, and xterm descendant. Direct standard properties keep
+        // style invalidation on the two flex items while preserving the same
+        // ratio math and live layout.
+        column2?.style.setProperty("flex-grow", String(lastRatio * 100));
+        column3?.style.setProperty("flex-grow", String((1 - lastRatio) * 100));
       };
 
       const onMove = (ev: PointerEvent) => {
@@ -249,6 +261,7 @@ export function Column2Workspace({
         handle.removeEventListener("pointermove", onMove);
         handle.removeEventListener("pointerup", finish);
         handle.removeEventListener("pointercancel", finish);
+        handle.removeEventListener("lostpointercapture", finish);
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", finish);
         window.removeEventListener("pointercancel", finish);
@@ -266,11 +279,20 @@ export function Column2Workspace({
         } catch {
           /* already released */
         }
-        // Commit only a real drag. Persist re-applies the same variable
-        // value via state — the live drag and the committed layout
-        // agree, so no snap. A no-move click leaves the ratio untouched
-        // (the variable was never written this gesture).
-        if (moved) persistColRatio(lastRatio);
+        // Commit the inherited variable only ONCE, then remove the temporary
+        // direct grow overrides. Both declarations resolve to the same final
+        // geometry, so the handoff cannot snap; descendants avoid per-frame
+        // style invalidation throughout the drag.
+        if (moved) {
+          row?.style.setProperty(COLUMN_2_RATIO_VAR, String(lastRatio));
+          column2?.style.removeProperty("flex-grow");
+          column3?.style.removeProperty("flex-grow");
+          persistColRatio(lastRatio);
+        }
+        // Terminal fit schedulers resume — and frozen hidden layers thaw —
+        // only after the exact final geometry is published, producing one
+        // xterm reflow / one hidden-layer relayout instead of one per frame.
+        finishContinuousResize();
       };
 
       // Lock the cursor + suppress text selection window-wide for the whole
@@ -282,6 +304,7 @@ export function Column2Workspace({
       handle.addEventListener("pointermove", onMove);
       handle.addEventListener("pointerup", finish);
       handle.addEventListener("pointercancel", finish);
+      handle.addEventListener("lostpointercapture", finish);
       // Window-level fallbacks — if the pointer leaves the handle or
       // the browser drops capture, these still fire.
       window.addEventListener("pointermove", onMove);

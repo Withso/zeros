@@ -10,6 +10,7 @@ import {
   hasPendingChecks,
   recencyLabel,
   relTime,
+  reviewActionBlockReason,
   summarizeChecks,
 } from "../review-model";
 import type {
@@ -191,20 +192,23 @@ describe("checks buckets + summary", () => {
       pending: 0,
     };
     expect(summarizeChecks(null)).toMatchObject({ tone: "none" });
-    expect(summarizeChecks({ ...base, total: 0 })).toMatchObject({ tone: "none" });
+    expect(summarizeChecks({ ...base, total: 0 })).toMatchObject({
+      tone: "none",
+    });
     expect(summarizeChecks(base)).toMatchObject({
       tone: "success",
       fraction: "5/5",
     });
-    expect(
-      summarizeChecks({ ...base, passed: 3, failed: 2 }),
-    ).toMatchObject({ tone: "failure", label: "2 checks failing" });
-    expect(
-      summarizeChecks({ ...base, passed: 4, failed: 1 }).label,
-    ).toBe("1 check failing");
-    expect(
-      summarizeChecks({ ...base, passed: 4, pending: 1 }),
-    ).toMatchObject({ tone: "pending" });
+    expect(summarizeChecks({ ...base, passed: 3, failed: 2 })).toMatchObject({
+      tone: "failure",
+      label: "2 checks failing",
+    });
+    expect(summarizeChecks({ ...base, passed: 4, failed: 1 }).label).toBe(
+      "1 check failing",
+    );
+    expect(summarizeChecks({ ...base, passed: 4, pending: 1 })).toMatchObject({
+      tone: "pending",
+    });
   });
 
   it("hasPendingChecks reads both counters and rows", () => {
@@ -229,6 +233,38 @@ describe("checks buckets + summary", () => {
         pending: 0, // counter lies → rows win
       }),
     ).toBe(true);
+  });
+});
+
+describe("reviewActionBlockReason", () => {
+  it("enables Review's duplicate CTA only when the shared island enables the same action", () => {
+    expect(reviewActionBlockReason("ready-to-merge", "merge")).toBeNull();
+    expect(reviewActionBlockReason("draft", "ready")).toBeNull();
+  });
+
+  it("keeps merge disabled for every higher-priority local or GitHub blocker", () => {
+    expect(reviewActionBlockReason("merge-conflicts", "merge")).toMatch(
+      /conflicts/i,
+    );
+    expect(reviewActionBlockReason("uncommitted", "merge")).toMatch(/commit/i);
+    expect(reviewActionBlockReason("diverged", "merge")).toMatch(/pull/i);
+    expect(reviewActionBlockReason("ahead", "merge")).toMatch(/push/i);
+    expect(reviewActionBlockReason("checks-pending", "merge")).toMatch(
+      /checks/i,
+    );
+    expect(reviewActionBlockReason("unable-to-merge", "merge")).toMatch(
+      /checks/i,
+    );
+    expect(reviewActionBlockReason("behind-base", "merge")).toMatch(/update/i);
+    expect(reviewActionBlockReason("blocked", "merge")).toMatch(
+      /requirements/i,
+    );
+    expect(reviewActionBlockReason("checking", "merge")).toMatch(/checking/i);
+  });
+
+  it("does not let a draft skip local blockers when marking ready", () => {
+    expect(reviewActionBlockReason("uncommitted", "ready")).toMatch(/commit/i);
+    expect(reviewActionBlockReason(null, "ready")).toMatch(/loading/i);
   });
 });
 

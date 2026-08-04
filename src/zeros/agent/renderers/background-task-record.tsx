@@ -1,12 +1,12 @@
 // BackgroundTaskRecord — durable history for one settled/live lifecycle.
 //
-// Collapsed: Activity icon · "Background Task" (or the initial "Task
-// Started") · task-name pill. Expanded: the small information card. There is
+// Collapsed: Play icon · "Background Task" · task-name pill. Expanded: the
+// small information card. There is
 // intentionally no Outcome heading, success tick, status chip, View output, or
 // Inspect action; the provider result is already available in the detail.
 
 import { memo } from "react";
-import { Activity } from "lucide-react";
+import { Play } from "lucide-react";
 
 import { formatElapsed } from "@/loaders";
 import { Card, CardContent } from "@/zeros/ui/primitives/card";
@@ -43,9 +43,8 @@ export const BackgroundTaskRecord: Renderer<AgentToolMessage> = memo(
     const durationMs =
       typeof output.durationMs === "number" ? output.durationMs : null;
     const meta: EventMeta = {
-      Icon: Activity,
-      label:
-        message.title === "Task Started" ? "Task Started" : "Background Task",
+      Icon: Play,
+      label: "Background Task",
       target: name,
       expandable: true,
     };

@@ -3,11 +3,12 @@
   "translator": "ClaudeStreamTranslator",
   "expectedUpdates": [
     "background_tasks_update",
+    "workflow_progress_update",
     "agent_thought_chunk",
     "agent_message_chunk",
     "usage_update"
   ],
   "stopReason": "end_turn",
   "sawResult": true,
-  "notes": "Minimal round-trip: system.init (no emit) + user echo (INTENTIONALLY NOT re-emitted — the renderer shows the user bubble optimistically and the engine seeds it via persistUserPrompt; re-emitting the stream echo duplicated the bubble and rendered subagent user-turns as the real user) + thinking + answer + result. Tests the happy path for every content-block variant Claude emits in --output-format stream-json."
+  "notes": "Minimal round-trip: system.init (emits ONE authoritative empty snapshot per ephemeral live set — background_tasks_update, then workflow_progress_update — so a row from a pre-rebuild SDK process cannot linger when no result boundary ever arrives) + user echo (INTENTIONALLY NOT re-emitted — the renderer shows the user bubble optimistically and the engine seeds it via persistUserPrompt; re-emitting the stream echo duplicated the bubble and rendered subagent user-turns as the real user) + thinking + answer + result. Tests the happy path for every content-block variant Claude emits in --output-format stream-json."
 }

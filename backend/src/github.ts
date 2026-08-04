@@ -3,7 +3,7 @@
 // The backend is the confidential-client boundary: the GitHub client secret
 // never ships in Electron. OAuth state + PKCE verifier are single-use (10 min);
 // the resulting token pair crosses a second, Auth0-user-bound handoff row for
-// at most 60 seconds before Electron persists it in safeStorage.
+// at most 90 seconds before Electron persists it in safeStorage.
 
 import {
   createCipheriv,
@@ -25,7 +25,11 @@ import { rateLimit } from "./ratelimit.js";
 
 const API_VERSION = "2026-03-10";
 const OAUTH_STATE_TTL_MS = 10 * 60_000;
-const HANDOFF_TTL_MS = 60_000;
+/** The hosted page exposes its Open Zeros link for one minute. Keep only 30
+ * seconds beyond that for the deep link to reach Electron and finish the
+ * authenticated exchange; an abandoned tab must not create a five-minute
+ * redemption window. */
+export const GITHUB_HANDOFF_TTL_MS = 90_000;
 const MAX_INSTALLATION_PAGES = 10;
 const MAX_REPOSITORY_COUNT_PROBES = 50;
 const REPOSITORY_COUNT_CONCURRENCY = 4;
@@ -142,6 +146,31 @@ interface PendingOauthState {
   pkce_verifier: string | null;
 }
 
+export type GithubOauthFlowKind = "oauth" | "install";
+
+/** A desktop only knows whether this Mac has a credential. The control plane
+ * owns the account-level view needed to distinguish a genuine first install
+ * from a second Mac reconnecting to an installation that already exists.
+ *
+ * Authorization alone deliberately counts as prior setup for the automatic
+ * choice: a bounded or failed installation inventory read still persists the
+ * usable authorization but may have no installation rows. The desktop keeps
+ * that unknown inventory distinct from a completed empty inventory. Once it
+ * has confirmed zero installations, its explicit recovery action must bypass
+ * prior account state so GitHub can create an installation again. */
+export function resolveGithubOauthFlowKind(input: {
+  installRequested: boolean;
+  forceInstallRequested: boolean;
+  hasAuthorization: boolean;
+  hasInstallation: boolean;
+}): GithubOauthFlowKind {
+  if (input.forceInstallRequested) return "install";
+  return input.installRequested &&
+    !(input.hasAuthorization || input.hasInstallation)
+    ? "install"
+    : "oauth";
+}
+
 function parse<T>(
   schema: z.ZodType<T, z.ZodTypeDef, unknown>,
   value: unknown,
@@ -166,6 +195,8 @@ function base64url(value: Buffer): string {
 }
 
 function pkceChallenge(verifier: string): string {
+  // PKCE S256 deliberately uses one SHA-256 digest over a high-entropy random
+  // code verifier (RFC 7636); this value is not a user-chosen password.
   return base64url(createHash("sha256").update(verifier, "utf8").digest());
 }
 
@@ -175,8 +206,8 @@ function pkceChallenge(verifier: string): string {
 // nonce. Deriving the key from that nonce — of which Postgres keeps only a
 // SHA-256 — means the row is useless without the nonce: a WAL segment, a PITR
 // restore, or the nightly off-platform dump yields ciphertext, not credentials.
-// The 60-second row TTL never bounded that, because a refresh token stays live
-// for ~6 months after the row is gone.
+// The short-lived row TTL never bounds that risk by itself, because a refresh
+// token stays live for ~6 months after the row is gone.
 
 const HANDOFF_SEAL_INFO = "zeros-github-handoff.v1";
 const HANDOFF_SEAL_IV_BYTES = 12;
@@ -781,7 +812,7 @@ async function persistAuthorization(
       input.login,
       JSON.stringify(input.installations),
       input.installationsComplete,
-      new Date(input.nowMs + HANDOFF_TTL_MS),
+      new Date(input.nowMs + GITHUB_HANDOFF_TTL_MS),
     ],
   );
   await tx.query(
@@ -896,12 +927,17 @@ async function revokeGithubAccessToken(
   return response.ok || response.status === 404;
 }
 
-function callbackUrl(
+/** Send browser-only handoff material in the fragment so the hosted completion
+ * page can offer an exact-channel Open Zeros link without exposing the nonce
+ * to Cloudflare request logs, referrers, or query-string analytics. */
+export function githubCompletionUrl(
+  completionPageUrl: string,
   pending: Pick<PendingOauthState, "scheme" | "client_nonce">,
   error?: string,
 ): string {
-  const url = new URL(`${pending.scheme}://github/connected`);
+  const url = new URL(completionPageUrl);
   url.hash = new URLSearchParams({
+    scheme: pending.scheme,
     nonce: pending.client_nonce,
     ...(error ? { error } : {}),
   }).toString();
@@ -988,7 +1024,8 @@ export function createGithubPublicRoutes(
     const code = c.req.query("code");
     if (oauthError || !code) {
       return c.redirect(
-        callbackUrl(
+        githubCompletionUrl(
+          config.completionPageUrl,
           pending,
           oauthError === "access_denied" ? "access_denied" : "oauth_failed",
         ),
@@ -1062,7 +1099,10 @@ export function createGithubPublicRoutes(
           nowMs: now(),
         });
       });
-      return c.redirect(callbackUrl(pending), 302);
+      return c.redirect(
+        githubCompletionUrl(config.completionPageUrl, pending),
+        302,
+      );
     } catch (error) {
       const kind =
         error instanceof HttpError &&
@@ -1082,7 +1122,10 @@ export function createGithubPublicRoutes(
               : "unknown error"
         }`,
       );
-      return c.redirect(callbackUrl(pending, kind), 302);
+      return c.redirect(
+        githubCompletionUrl(config.completionPageUrl, pending, kind),
+        302,
+      );
     }
   });
 
@@ -1122,12 +1165,43 @@ export function createGithubRoutes(
           "Unsupported desktop callback scheme.",
         );
       }
-      const flowKind = body.installFlow === false ? "oauth" : "install";
+      const forceInstallRequested = body.forceInstall === true;
+      const installRequested =
+        forceInstallRequested || body.installFlow !== false;
       const state = base64url(random(32));
-      const verifier = flowKind === "oauth" ? base64url(random(48)) : null;
+      const randomPkceVerifier = base64url(random(48));
       const expiresAt = new Date(now() + OAUTH_STATE_TTL_MS);
 
-      await withUserTx(pool, user.id, async (tx) => {
+      const flowKind = await withUserTx(pool, user.id, async (tx) => {
+        let hasAuthorization = false;
+        let hasInstallation = false;
+        if (installRequested) {
+          const known = await tx.query<{
+            has_authorization: boolean;
+            has_installation: boolean;
+          }>(
+            `SELECT
+               EXISTS (
+                 SELECT 1 FROM github_authorizations
+                 WHERE owner_user_id = $1 AND app_variant = $2
+               ) AS has_authorization,
+               EXISTS (
+                 SELECT 1 FROM github_installations
+                 WHERE owner_user_id = $1 AND app_variant = $2
+               ) AS has_installation`,
+            [user.id, variant],
+          );
+          hasAuthorization = known.rows[0]?.has_authorization === true;
+          hasInstallation = known.rows[0]?.has_installation === true;
+        }
+        const resolvedFlowKind = resolveGithubOauthFlowKind({
+          installRequested,
+          forceInstallRequested,
+          hasAuthorization,
+          hasInstallation,
+        });
+        const verifier =
+          resolvedFlowKind === "oauth" ? randomPkceVerifier : null;
         await tx.query(
           `DELETE FROM github_oauth_states
            WHERE owner_user_id = $1
@@ -1145,11 +1219,12 @@ export function createGithubRoutes(
             nonce,
             scheme,
             variant,
-            flowKind,
+            resolvedFlowKind,
             verifier,
             expiresAt,
           ],
         );
+        return resolvedFlowKind;
       });
 
       if (flowKind === "install") {
@@ -1157,18 +1232,20 @@ export function createGithubRoutes(
           authorizeUrl: installUrl(config, state),
           state,
           expiresAt: expiresAt.toISOString(),
+          flowKind,
         });
       }
       const url = new URL("/login/oauth/authorize", `${config.webBaseUrl}/`);
       url.searchParams.set("client_id", config.clientId);
       url.searchParams.set("redirect_uri", config.oauthCallbackUrl);
       url.searchParams.set("state", state);
-      url.searchParams.set("code_challenge", pkceChallenge(verifier!));
+      url.searchParams.set("code_challenge", pkceChallenge(randomPkceVerifier));
       url.searchParams.set("code_challenge_method", "S256");
       return c.json({
         authorizeUrl: url.toString(),
         state,
         expiresAt: expiresAt.toISOString(),
+        flowKind,
       });
     },
   );

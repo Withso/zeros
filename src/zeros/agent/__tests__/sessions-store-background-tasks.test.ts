@@ -144,3 +144,86 @@ describe("sessions-store background task snapshots", () => {
     });
   });
 });
+
+describe("sessions-store workflow progress snapshots", () => {
+  beforeEach(() => {
+    useSessionsStore.getState().clearAll();
+  });
+
+  const workflow = (completed: number) => ({
+    taskId: "workflow-1",
+    name: "dependency-audit",
+    status: "running",
+    startedAt: 100,
+    updatedAt: 200,
+    phases: [
+      {
+        index: 0,
+        title: "Find",
+        completed,
+        total: 4,
+        status: "running",
+      },
+    ],
+  });
+
+  const workflowNote = (sessionId: string, workflows: unknown[]) =>
+    ({
+      sessionId,
+      update: { sessionUpdate: "workflow_progress_update", workflows },
+    }) as unknown as SessionNotification;
+
+  it("routes a full replacement only to the exact session", () => {
+    const store = useSessionsStore.getState();
+    store.setSession("chat-a", {
+      ...BLANK,
+      agentId: "claude",
+      sessionId: "session-a",
+    });
+    store.setSession("chat-b", {
+      ...BLANK,
+      agentId: "claude",
+      sessionId: "session-b",
+    });
+
+    store.applyBridgeUpdate(workflowNote("session-a", [workflow(3)]));
+    expect(
+      useSessionsStore.getState().sessions["chat-a"].workflows,
+    ).toEqual([workflow(3)]);
+    expect(
+      useSessionsStore.getState().sessions["chat-b"].workflows,
+    ).toEqual([]);
+
+    store.applyBridgeUpdate(workflowNote("session-a", []));
+    expect(
+      useSessionsStore.getState().sessions["chat-a"].workflows,
+    ).toEqual([]);
+  });
+
+  it("keeps the slot reference stable for a semantically identical frame", () => {
+    const store = useSessionsStore.getState();
+    store.setSession("chat-a", {
+      ...BLANK,
+      agentId: "claude",
+      sessionId: "session-a",
+    });
+    store.applyBridgeUpdate(workflowNote("session-a", [workflow(3)]));
+    const before = useSessionsStore.getState().sessions["chat-a"];
+    store.applyBridgeUpdate(workflowNote("session-a", [workflow(3)]));
+    expect(useSessionsStore.getState().sessions["chat-a"]).toBe(before);
+  });
+
+  it("clears process-owned workflow state when the session exits", () => {
+    const store = useSessionsStore.getState();
+    store.setSession("chat-a", {
+      ...BLANK,
+      agentId: "claude",
+      sessionId: "session-a",
+      workflows: [workflow(3)],
+    } as never);
+    store.applyBridgeAgentExit("claude", "session-a");
+    expect(useSessionsStore.getState().sessions["chat-a"].workflows).toEqual(
+      [],
+    );
+  });
+});

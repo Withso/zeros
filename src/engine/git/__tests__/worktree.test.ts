@@ -63,6 +63,7 @@ import {
 import {
   pruneOrphanArchiveSnapshots,
   pruneOrphanWorkspaceBranchOwnershipRefs,
+  resolveNewBranchPrefix,
 } from "../worktree";
 import {
   archiveSnapshotRef,
@@ -3066,6 +3067,62 @@ describe("worktree lifecycle (integration)", () => {
         `[git]\n${toml}\n`,
       );
     }
+
+    // The DEFAULT cases below assert what an EMPTY settings tree does, so the
+    // user layer has to be redirected — a dev machine that has picked `None` in
+    // Settings → Git would otherwise fail them. Scoped to this describe so the
+    // rest of the suite keeps its ambient environment.
+    let userSettingsDir: string;
+    let prevUserSettingsDir: string | undefined;
+    beforeEach(async () => {
+      prevUserSettingsDir = process.env.ZEROS_USER_SETTINGS_DIR;
+      userSettingsDir = await mkdtemp(path.join(tmpdir(), "zeros-ws-settings-"));
+      process.env.ZEROS_USER_SETTINGS_DIR = userSettingsDir;
+    });
+    afterEach(async () => {
+      if (prevUserSettingsDir === undefined)
+        delete process.env.ZEROS_USER_SETTINGS_DIR;
+      else process.env.ZEROS_USER_SETTINGS_DIR = prevUserSettingsDir;
+      await rm(userSettingsDir, { recursive: true, force: true });
+    });
+
+    // ── the default (nothing configured) ────────────────────────────────────
+    //
+    // 2026-08-03: unset means the connected GitHub login, not `zeros`. These go
+    // through resolveNewBranchPrefix rather than createWorkspace because the
+    // login it reads is the process-cached one (never primed in tests) — the
+    // override parameter exists precisely so the signed-in path is testable
+    // without a network call.
+
+    it("defaults to the connected GitHub login when nothing is configured", async () => {
+      expect(await resolveNewBranchPrefix(repoRoot, "jordan")).toBe("jordan");
+    });
+
+    it("falls back to zeros when the default type has no login to use", async () => {
+      // The fresh-install-not-signed-in state, and the reason the default is
+      // safe: a missing login degrades the NAME, it does not drop the namespace
+      // and litter the repo with unprefixed branches.
+      expect(await resolveNewBranchPrefix(repoRoot, null)).toBe("zeros");
+      const ws = await createWorkspace({ repoRoot });
+      expect(ws.branch).toMatch(/^zeros\//);
+    });
+
+    it("falls back to zeros when the login is not a usable ref", async () => {
+      expect(await resolveNewBranchPrefix(repoRoot, "bad name")).toBe("zeros");
+    });
+
+    it("still honours an explicit zeros over a connected login", async () => {
+      // The value the pane no longer offers as a row. A settings.toml or team
+      // layer that pins it must keep winning, or someone's convention silently
+      // changes under them.
+      await setPrefix('branch_prefix_type = "zeros"');
+      expect(await resolveNewBranchPrefix(repoRoot, "jordan")).toBe("zeros");
+    });
+
+    it("lets an explicit none beat a connected login", async () => {
+      await setPrefix('branch_prefix_type = "none"');
+      expect(await resolveNewBranchPrefix(repoRoot, "jordan")).toBeNull();
+    });
 
     it("joins a custom prefix with exactly one slash", async () => {
       await setPrefix('branch_prefix_type = "custom"\nbranch_prefix = "hello"');

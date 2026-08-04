@@ -27,17 +27,11 @@ import { memo, useState } from "react";
 import { Minus, Plus } from "lucide-react";
 
 import { cn } from "@/zeros/ui/cn";
-import type {
-  AgentMessage,
-  AgentToolMessage,
-} from "../use-agent-session";
-import {
-  metaForEvent,
-  statusTone,
-  type EventMeta,
-} from "./event-meta";
+import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
+import { metaForEvent, statusTone, type EventMeta } from "./event-meta";
 import { FileTag } from "./file-tag";
 import type { RendererContext } from "./types";
+import { DiffHoverCard } from "./diff-hover-preview";
 
 interface EventRowProps {
   message: AgentMessage;
@@ -51,8 +45,17 @@ interface EventRowProps {
   /** Optional trailing content rendered after the target — overrides
    *  `meta.trailing`. Used by EditCard for the green/red +N −M counts. */
   trailingNode?: React.ReactNode;
-  /** Force the detail body open from outside (active subagents start
-   *  open while running). */
+  /** Optional exact diff shown on hover/focus. Only EditCard supplies this;
+   *  generic/Read tool rows deliberately remain ordinary expandable rows. */
+  hoverPreview?: React.ReactNode;
+  /** Seed the detail body open at MOUNT (the exit-plan card starts open so
+   *  the plan is readable without a click). Mount-time only — it feeds
+   *  useState's initializer, so after first render `open` belongs to the
+   *  user and later prop changes neither open nor close the row. Do NOT
+   *  derive it from mutable message state (e.g. tool status): whether such a
+   *  row starts open would depend on whether the status landed before or
+   *  after the row's first commit, and every remount (summary-chip
+   *  re-expand, chat reopen) would re-apply it over the user's collapse. */
   defaultOpen?: boolean;
   /** Override the status-derived row tone. The question record uses "ok":
    *  its tool status is "failed" because Claude's answer is DELIVERED via a
@@ -84,6 +87,7 @@ export const EventRow = memo(function EventRow({
   meta: metaOverride,
   detail,
   trailingNode,
+  hoverPreview,
   defaultOpen,
   toneOverride,
 }: EventRowProps) {
@@ -103,98 +107,106 @@ export const EventRow = memo(function EventRow({
   const iconTone = sTone ? TONE_ICON_COLOR[sTone] : "text-fg2";
   const rowTint = sTone ? TONE_ROW_TINT[sTone] : "";
 
-  return (
-    <div className="flex flex-col">
-      <button
-        type="button"
-        // Width hugs the content (`w-fit`) and never exceeds the lane
-        // (`max-w-full`): the hover tint then wraps exactly the row's content
-        // instead of painting the empty space out to the right edge (user
-        // feedback — "the hover should fit the content, not exceed").
+  const row = (
+    <button
+      type="button"
+      // Width hugs the content (`w-fit`) and never exceeds the lane
+      // (`max-w-full`): the hover tint then wraps exactly the row's content
+      // instead of painting the empty space out to the right edge (user
+      // feedback — "the hover should fit the content, not exceed").
+      className={cn(
+        "group/event-row -ml-2 flex w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors",
+        expandable ? "hover:bg-bg2-hover/40 cursor-pointer" : "cursor-default",
+        rowTint,
+      )}
+      onClick={() => {
+        if (expandable) setOpen((v) => !v);
+      }}
+      aria-expanded={expandable ? open : undefined}
+      disabled={!expandable}
+    >
+      {/* Leading icon with hover swap to +/- when expandable. The cell IS
+          the icon — 12px (size-3) with NO larger wrapper box around it (user
+          spec): the size-3 inline-flex just stacks Icon / Plus / Minus in one
+          spot so only the active one shows. `[&_svg]:size-3` sizes every
+          descendant icon to 12×12. */}
+      <span
         className={cn(
-          "group/event-row -ml-2 flex w-fit min-w-0 max-w-full items-center gap-2 rounded-md px-2 py-1 text-left transition-colors",
-          expandable ? "cursor-pointer hover:bg-bg2-hover/40" : "cursor-default",
-          rowTint,
+          "relative inline-flex size-3 shrink-0 items-center justify-center [&_svg]:size-3",
+          iconTone,
         )}
-        onClick={() => {
-          if (expandable) setOpen((v) => !v);
-        }}
-        aria-expanded={expandable ? open : undefined}
-        disabled={!expandable}
+        aria-hidden="true"
       >
-        {/* Leading icon with hover swap to +/- when expandable. The cell IS
-            the icon — 12px (size-3) with NO larger wrapper box around it (user
-            spec): the size-3 inline-flex just stacks Icon / Plus / Minus in one
-            spot so only the active one shows. `[&_svg]:size-3` sizes every
-            descendant icon to 12×12. */}
         <span
           className={cn(
-            "relative inline-flex size-3 shrink-0 items-center justify-center [&_svg]:size-3",
-            iconTone,
+            "inline-flex",
+            expandable && "group-hover/event-row:hidden",
           )}
-          aria-hidden="true"
         >
-          <span
-            className={cn(
-              "inline-flex",
-              expandable && "group-hover/event-row:hidden",
-            )}
-          >
-            <Icon className={meta.iconClassName} />
+          <Icon className={meta.iconClassName} />
+        </span>
+        {expandable && (
+          <>
+            <Plus
+              className={cn(
+                "hidden size-3",
+                open ? "" : "group-hover/event-row:inline",
+              )}
+            />
+            <Minus
+              className={cn(
+                "hidden size-3",
+                open ? "group-hover/event-row:inline" : "",
+              )}
+            />
+          </>
+        )}
+      </span>
+
+      {/* Label — the tool NAME, at full `fg1` (the focal item the user
+          scans for) and the larger tier: `text-sm` (14px) per the user's
+          tool-row spec (name 14 / content 12). It can be long (e.g. a Claude
+          Bash description), so it is capped at `60ch` + truncated: a long
+          label ellipsizes there instead of shoving the command off the row.
+          The cap is in `ch` (not `%`) because the row is now content-width —
+          a `%` cap would resolve against the row's own shrunk width and could
+          clip even a short label. A short label ("Read"/"Bash") stays its
+          natural width and the command follows. */}
+      <span className="text-fg1 max-w-[60ch] shrink-0 truncate text-sm">
+        {meta.label}
+      </span>
+
+      {/* Target — a file/image TAG (FileTypeIcon + bg1/border3 pill) for file
+          tools (Read/Edit/List), else a plain command/query/thought pill. The
+          tag carries the same glyph as the Files tab so a Read of `foo.tsx`
+          and an Edit of it match. min-w-0 + truncate ellipsize a long name. */}
+      {meta.target &&
+        (meta.targetFile ? (
+          <FileTag name={meta.target} kind={meta.targetKind} />
+        ) : (
+          <span className="bg-bg1-hover text-fg2 max-w-[440px] min-w-0 truncate rounded-sm px-1.5 py-0.5 text-xs">
+            {meta.target}
           </span>
-          {expandable && (
-            <>
-              <Plus
-                className={cn(
-                  "hidden size-3",
-                  open ? "" : "group-hover/event-row:inline",
-                )}
-              />
-              <Minus
-                className={cn(
-                  "hidden size-3",
-                  open ? "group-hover/event-row:inline" : "",
-                )}
-              />
-            </>
-          )}
-        </span>
+        ))}
+      {/* Trailing — a custom node (EditCard's green/red +N −M) wins; else the
+          string meta.trailing (Grep match count, etc.). Read's line count
+          lives in the LABEL now, so reads carry no trailing. */}
+      {trailingNode ??
+        (meta.trailing ? (
+          <span className="text-fg2 shrink-0 text-xs tabular-nums">
+            {meta.trailing}
+          </span>
+        ) : null)}
+    </button>
+  );
 
-        {/* Label — the tool NAME, at full `fg1` (the focal item the user
-            scans for) and the larger tier: `text-sm` (14px) per the user's
-            tool-row spec (name 14 / content 12). It can be long (e.g. a Claude
-            Bash description), so it is capped at `60ch` + truncated: a long
-            label ellipsizes there instead of shoving the command off the row.
-            The cap is in `ch` (not `%`) because the row is now content-width —
-            a `%` cap would resolve against the row's own shrunk width and could
-            clip even a short label. A short label ("Read"/"Bash") stays its
-            natural width and the command follows. */}
-        <span className="max-w-[60ch] shrink-0 truncate text-sm text-fg1">
-          {meta.label}
-        </span>
-
-        {/* Target — a file/image TAG (FileTypeIcon + bg1/border3 pill) for file
-            tools (Read/Edit/List), else a plain command/query/thought pill. The
-            tag carries the same glyph as the Files tab so a Read of `foo.tsx`
-            and an Edit of it match. min-w-0 + truncate ellipsize a long name. */}
-        {meta.target &&
-          (meta.targetFile ? (
-            <FileTag name={meta.target} kind={meta.targetKind} />
-          ) : (
-            <span className="min-w-0 max-w-[440px] truncate rounded-sm bg-bg1-hover px-1.5 py-0.5 text-xs text-fg2">
-              {meta.target}
-            </span>
-          ))}
-        {/* Trailing — a custom node (EditCard's green/red +N −M) wins; else the
-            string meta.trailing (Grep match count, etc.). Read's line count
-            lives in the LABEL now, so reads carry no trailing. */}
-        {trailingNode ??
-          (meta.trailing ? (
-            <span className="shrink-0 text-xs tabular-nums text-fg2">
-              {meta.trailing}
-            </span>
-          ) : null)}
-      </button>
+  return (
+    <div className="flex flex-col">
+      {hoverPreview ? (
+        <DiffHoverCard trigger={row}>{hoverPreview}</DiffHoverCard>
+      ) : (
+        row
+      )}
       {expandable && open && (
         // Expanded detail is LEFT-ALIGNED with the row content — no pl-7 indent
         // under the label and no permanent left inset — so a thinking/bash/grep
@@ -213,9 +225,9 @@ export const EventRow = memo(function EventRow({
               // (event-row-renderer's HighlightedCode: Read by file language,
               // Bash/Grep/Glob as shell) — so it reads "like code" (user
               // feedback 2026-06-19). Plain/un-highlightable output inherits fg1.
-              "text-sm text-fg1",
+              "text-fg1 text-sm",
               sTone === "fail" &&
-                "rounded-md bg-red-primary/5 ring-1 ring-red-primary/15 px-2.5 py-1.5",
+                "bg-red-primary/5 ring-red-primary/15 rounded-md px-2.5 py-1.5 ring-1",
             )}
           >
             {detail}

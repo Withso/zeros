@@ -116,6 +116,7 @@ const commandTable: Record<string, CommandHandler> = {
 
   // ── Notifications / updater / process (Phase 8) ───────────
   notify_send: notImpl("notify_send", 8),
+  process_metrics_snapshot: notImpl("process_metrics_snapshot", 8),
   updater_check: notImpl("updater_check", 8),
   updater_install: notImpl("updater_install", 8),
   updater_status: notImpl("updater_status", 8),

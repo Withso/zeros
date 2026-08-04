@@ -34,6 +34,7 @@ const rt = vi.hoisted(() => ({
   /** Generic JSON-RPC requests the adapter fires (method, params) — e.g.
    *  compactContext → thread/compact/start. */
   requests: [] as Array<[string, unknown]>,
+  notificationHandlers: new Map<string, (params: unknown) => void>(),
 }));
 
 vi.mock("../app-server", () => ({
@@ -70,7 +71,10 @@ vi.mock("../app-server", () => ({
       },
       interruptTurn: async () => {},
       respondToPermission: () => {},
-      onNotification: () => () => {},
+      onNotification: (method: string, handler: (params: unknown) => void) => {
+        rt.notificationHandlers.set(method, handler);
+        return () => rt.notificationHandlers.delete(method);
+      },
       request: vi.fn(async (method: string, params: unknown) => {
         rt.requests.push([method, params]);
         return {};
@@ -122,6 +126,7 @@ describe("codex mid-turn reconnect + per-session crash signalling", () => {
     rt.lastOnUserInputRequest = null;
     rt.runTurnImpl = null;
     rt.requests = [];
+    rt.notificationHandlers.clear();
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -184,6 +189,34 @@ describe("codex mid-turn reconnect + per-session crash signalling", () => {
       "SIGKILL",
       session.sessionId,
     );
+  });
+
+  it("reflects a native Ultra settings change for the exact parent thread", async () => {
+    const { adapter, emit } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    const settingsUpdated = rt.notificationHandlers.get(
+      "thread/settings/updated",
+    );
+    expect(settingsUpdated).toBeDefined();
+
+    settingsUpdated?.({
+      threadId: "thread-1",
+      threadSettings: { effort: "ultra" },
+    });
+    expect(emit.onSessionUpdate).toHaveBeenCalledWith("codex", {
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: "current_effort_update",
+        effort: "ultracode",
+      },
+    });
+
+    emit.onSessionUpdate.mockClear();
+    settingsUpdated?.({
+      threadId: "collab-helper-thread",
+      threadSettings: { effort: "ultra" },
+    });
+    expect(emit.onSessionUpdate).not.toHaveBeenCalled();
   });
 
   it("self-heals a send that lands after the child died (no write to a dead client)", async () => {

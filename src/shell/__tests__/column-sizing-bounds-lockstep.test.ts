@@ -26,6 +26,8 @@ import {
   FILES_SIDEBAR_MIN_PX,
 } from "../column3-tabs/files-sidebar-width";
 import {
+  TERMINAL_PANEL_DEFAULT_PCT,
+  TERMINAL_PANEL_HEIGHT_VAR,
   TERMINAL_PANEL_MAX_OFFSET_PX,
   TERMINAL_PANEL_MIN_PX,
   TERMINAL_ROW1_MIN_PX,
@@ -84,6 +86,59 @@ describe("column 2 / column 3 sizing bounds stay in lockstep with CSS", () => {
       `calc((1_-_var(${COLUMN_2_RATIO_VAR},${COLUMN_2_RATIO_DEFAULT}))*100)`,
     );
   });
+
+  it("paints live drag grow factors directly instead of invalidating an inherited variable", () => {
+    expect(col2).toContain('style.setProperty("flex-grow"');
+    expect(col2).toContain("[data-zeros-column-3]");
+    expect(col3).toContain('data-zeros-column-3=""');
+  });
+
+  it("pins hidden retained layers and iframes during seam gestures", () => {
+    // The freeze marker (resize-gesture-freeze.ts) must ride the same
+    // conditional as `inert` on every retained-deck layer, and sit
+    // unconditionally on the browser iframe. Losing one of these silently
+    // re-adds a full hidden-subtree relayout to every drag frame; the drag
+    // still works, it just gets slower the more content is open — exactly
+    // the regression this architecture replaced.
+    const chatDeck = read("../column2-chat-deck.tsx");
+    const terminalDeck = read("../column2-terminal-deck.tsx");
+    const terminalTab = read("../column3-tabs/terminal-tab.tsx");
+    const changesTab = read("../column3-tabs/changes-row1-tab.tsx");
+    const browserTab = read("../column3-tabs/browser-tab.tsx");
+    for (const source of [chatDeck, terminalDeck, terminalTab, changesTab]) {
+      expect(source).toContain('"data-zeros-resize-freeze": ""');
+    }
+    expect(col3).toContain('"data-zeros-resize-freeze": ""');
+    expect(browserTab).toContain('data-zeros-resize-freeze=""');
+  });
+
+  it("visible surfaces reflow live — the shrink-side width floor is gone", () => {
+    // The previous regime floored min-width on the column BODIES, so the
+    // shrinking column clipped its own live content at the moving seam (the
+    // composer's send button cut in half, transcript sliding under column
+    // 3). Active content must track the seam; only hidden layers freeze.
+    const terminalTab = read("../column3-tabs/terminal-tab.tsx");
+    for (const source of [col2, col3, terminalTab]) {
+      expect(source).not.toContain("data-zeros-resize-width-lock");
+    }
+    expect(col2).not.toContain("lockResizeDescendantWidths");
+  });
+
+  it("every seam drag joins the shared continuous-resize gesture", () => {
+    // The freeze module and the xterm fit schedulers key off ONE signal; a
+    // seam that forgets to begin/finish it re-lays-out hidden decks per
+    // frame and lets xterm refit mid-drag.
+    for (const seam of [
+      "../column2-workspace.tsx",
+      "../column2-panes.tsx",
+      "../terminal/terminal-panel-resizer.tsx",
+      "../column3-tabs/use-sidebar-drag.ts",
+      "../use-home-sidebar-drag.ts",
+    ]) {
+      expect(read(seam)).toContain("beginContinuousLayoutResize()");
+    }
+    expect(read("../../main.tsx")).toContain("installResizeGestureFreeze()");
+  });
 });
 
 // ── The col-3 expand jerk, guarded ────────────────────────────────────────
@@ -129,6 +184,8 @@ describe("collapsing column 3 cannot move column 2", () => {
 // ── The terminal-panel collapse jank, guarded ─────────────────────────────
 describe("terminal panel seam geometry stays in lockstep with CSS", () => {
   const terminalTab = code("../column3-tabs/terminal-tab.tsx");
+  const setupTab = code("../column3-tabs/setup-tab.tsx");
+  const terminalSession = code("../terminal/terminal-session-view.tsx");
 
   it("derives the panel max from the row-1 floor plus the seam", () => {
     expect(TERMINAL_PANEL_MAX_OFFSET_PX).toBe(
@@ -136,14 +193,13 @@ describe("terminal panel seam geometry stays in lockstep with CSS", () => {
     );
   });
 
-  it("builds the flex-basis clamp from the constants, not literals", () => {
-    // The clamp used to hardcode `clamp(140px, …, calc(100% - 181px))`, which
-    // is the drag clamp's arithmetic spelled a second time. Drift between the
-    // two is how a drag ends up clamping against one bound while CSS renders
-    // another.
-    expect(terminalTab).toContain("${TERMINAL_PANEL_MIN_PX}px");
-    expect(terminalTab).toContain("${TERMINAL_PANEL_MAX_OFFSET_PX}px");
-    expect(terminalTab).not.toContain("calc(100% - 181px)");
+  it("keeps the emitted flex-basis clamp equal to the geometry constants", () => {
+    // Tailwind must see a literal arbitrary class at build time, so this guard
+    // derives that literal from the TS constants and catches either side
+    // changing alone.
+    expect(terminalTab).toContain(
+      `[flex-basis:clamp(${TERMINAL_PANEL_MIN_PX}px,var(${TERMINAL_PANEL_HEIGHT_VAR},${TERMINAL_PANEL_DEFAULT_PCT}%),calc(100%_-_${TERMINAL_PANEL_MAX_OFFSET_PX}px))]`,
+    );
   });
 
   it("keeps the expanded min-height class equal to TERMINAL_PANEL_MIN_PX", () => {
@@ -158,6 +214,36 @@ describe("terminal panel seam geometry stays in lockstep with CSS", () => {
     // — the shell-redraw storm the spawn path was written to avoid.
     expect(terminalTab).not.toMatch(
       /transition-\[[^\]]*(flex-basis|min-height)/,
+    );
+  });
+
+  it("paints live flex-basis directly instead of invalidating xterm descendants", () => {
+    const resizer = code("../terminal/terminal-panel-resizer.tsx");
+    expect(resizer).toMatch(/style\.setProperty\(\s*"flex-basis"/);
+    expect(resizer).toContain("terminalPanelFlexBasisForPct(pct)");
+  });
+
+  it("keeps padding outside Setup's measured xterm host", () => {
+    // FitAddon reads the terminal parent's computed dimensions but subtracts
+    // only the terminal element's own padding. With app-wide border-box sizing,
+    // parent padding is included and would over-count usable rows/columns.
+    expect(setupTab).toContain(
+      'className="size-full min-h-0 min-w-0 overflow-hidden"',
+    );
+    expect(setupTab).not.toMatch(
+      /ref=\{hostRef\}[\s\S]{0,160}className=\{cn\([\s\S]{0,160}\b(?:px-|py-|p-)/,
+    );
+  });
+
+  it("uses the same settled-dimension guard for Setup and shell terminals", () => {
+    expect(setupTab).toContain("isUsableTerminalDimensions(proposed)");
+    expect(terminalSession).toContain("isUsableTerminalDimensions(proposed)");
+  });
+
+  it("keeps reveal redraw and focus behind the continuous-resize gate", () => {
+    expect(terminalSession).toContain("createTerminalRevealScheduler");
+    expect(terminalSession).toMatch(
+      /createTerminalRevealScheduler\(\(\) => \{[\s\S]{0,500}term\.refresh\([\s\S]{0,200}term\.focus\(\)/,
     );
   });
 });

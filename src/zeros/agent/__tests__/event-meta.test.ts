@@ -49,6 +49,16 @@ describe("metaForEvent — read / search / list rows (Codex commandActions parit
     expect(meta.target).toBe("README.md");
   });
 
+  it("renders a Codex imageView as Read image with a filename pill", () => {
+    const meta = metaForEvent(
+      tool("read", { path: "/tmp/footer-diff-hover.png" }),
+    );
+    expect(meta.label).toBe("Read image");
+    expect(meta.target).toBe("footer-diff-hover.png");
+    expect(meta.targetFile).toBe(true);
+    expect(meta.expandable).toBe(false);
+  });
+
   it("search kind renders a Grep card targeting the query", () => {
     const meta = metaForEvent(tool("search", { query: "foo" }));
     expect(meta.label).toBe("Grep");
