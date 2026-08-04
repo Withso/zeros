@@ -125,9 +125,9 @@ interface FileViewerProps {
   /** Read-only target → hide the Discard action regardless. */
   readOnly?: boolean;
   /** Rendered at the START of the header row, before the path breadcrumbs. The
-   *  row-1 Changes tab injects its toolbar (sidebar toggle + filter dropdowns)
-   *  here while its sidebar is hidden, so toolbar + file + diff controls read
-   *  as ONE row. */
+   *  row-1 Changes and Files tabs inject their sidebar controls here while the
+   *  respective sidebar is hidden, so toolbar + file + viewer controls read as
+   *  ONE row. */
   headerLeading?: React.ReactNode;
   /** Where "open another file" lands (the Viewed auto-advance sweep). Default:
    *  the shared row-1 open flow (follow/reuse the active File tab). The Changes
@@ -724,6 +724,7 @@ export function FileViewer({
               cwd={cwd ?? ""}
               path={path}
               content={result?.content ?? ""}
+              offscreen={!sourceShown}
             />
           </div>
         )}

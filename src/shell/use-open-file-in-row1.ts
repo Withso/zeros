@@ -20,8 +20,15 @@ import {
   useActiveColumn3TabId,
   useColumn3Tabs,
   useWorkspaceDispatch,
+  useWorkspaceStore,
 } from "@/zeros/store/store";
-import { createFilesTab, planRow1Open } from "./column3-tab-manager";
+import { column3ScopeForFolder } from "@/zeros/store/workspace-store";
+import {
+  createFilesTab,
+  defaultScopeFor,
+  planRow1Open,
+} from "./column3-tab-manager";
+import { buildDirectFileOpenAction } from "./direct-file-open";
 import { useRow1DirtyEditorIds } from "./column3-tabs/code-editor/row1-editor-state";
 import { pickFileMatch } from "./resolve-file-ref";
 import { loadWorkspaceFileRead } from "./workspace-file-data-cache";
@@ -56,13 +63,7 @@ function relativeToCwd(abs: string, cwd: string): string | null {
  *  whether the Discard control is allowed (All-changes filter + uncommitted). */
 export interface OpenFileOpts {
   diff?: boolean;
-  diffScope?:
-    | "all"
-    | "uncommitted"
-    | "staged"
-    | "unstaged"
-    | "commit"
-    | "turn";
+  diffScope?: "all" | "uncommitted" | "staged" | "unstaged" | "commit" | "turn";
   diffSha?: string;
   /** When `diffScope === "turn"`: the chat + turn whose authored diff to show. */
   turnChatId?: string;
@@ -130,10 +131,12 @@ export function useOpenFileInRow1(): (
             updates: updatesFor(plan.id),
           });
           return;
-        case "replace":
+        case "replace": {
           // The active tab is a File tab → swap its file (+ intent) in place
           // (even if this file is open elsewhere), so the click lands where the
-          // user already is; then ensure it's frontmost.
+          // user already is; then ensure it's frontmost. Tree visibility is
+          // owned by the destination tab and survives this reuse; only the
+          // genuinely-new branch below starts with the collapsed default.
           dispatch({
             type: "OPEN_COLUMN3_TAB",
             id: plan.id,
@@ -144,6 +147,7 @@ export function useOpenFileInRow1(): (
             },
           });
           return;
+        }
         case "new":
           // Active tab is the Browser and no File tab is empty or matching → a
           // fresh File tab (appended + activated by the reducer).
@@ -168,37 +172,22 @@ export function useOpenChatFileInRow1(): (
   cwd: string | undefined,
   rawPath: string,
 ) => void {
-  const tabs = useColumn3Tabs();
-  const dispatch = useWorkspaceDispatch();
-  // Focus an already-open File tab, fill an existing blank File tab, else add a
-  // new one. Closing an opened file removes its tab; blanks only come from the
-  // fresh-workspace default or + → File.
-  const openTab = useCallback(
-    (target: string) => {
-      const existing = tabs.find(
-        (t) => t.type === "files" && t.filePath === target,
-      );
-      if (existing) {
-        dispatch({ type: "OPEN_COLUMN3_TAB", id: existing.id });
-        return;
-      }
-      const empty = tabs.find((t) => t.type === "files" && !t.filePath);
-      if (empty) {
-        dispatch({
-          type: "OPEN_COLUMN3_TAB",
-          id: empty.id,
-          updates: {
-            filePath: target,
-            title: baseName(target),
-            viewerMode: undefined,
-          },
-        });
-        return;
-      }
-      dispatch({ type: "ADD_COLUMN3_TAB", tab: createFilesTab(target) });
-    },
-    [tabs, dispatch],
-  );
+  // Focus an already-open File tab, fill the FIXED Files home when it is blank,
+  // else add a new tab. The shared policy preserves an existing destination's
+  // tree choice; only a newly allocated File tab starts collapsed. Read the
+  // exact scope at completion time because an uncached agent reference can
+  // resolve after the user has switched tabs or workspaces.
+  const openTab = useCallback((cwd: string, target: string) => {
+    const scope = column3ScopeForFolder(cwd);
+    const state = useWorkspaceStore.getState();
+    const scopeState = state.column3ByScope[scope] ?? defaultScopeFor(scope);
+    state.dispatch(
+      buildDirectFileOpenAction(scopeState.tabs, target, {
+        preferredExistingTabId: scopeState.activeId,
+        scope,
+      }),
+    );
+  }, []);
   return useCallback(
     (cwd, rawPath) => {
       let path = rawPath.trim();
@@ -221,11 +210,13 @@ export function useOpenChatFileInRow1(): (
           ? path
           : pickFileMatch(cached, path);
         if (target) {
-          openTab(target);
+          openTab(cwd, target);
         } else {
           // Not in the (possibly stale) list — maybe just-created or gitignored.
           // One read verifies it before opening; a dead ref opens nothing.
-          void verifyThenOpen(cwd, path, openTab).catch(() => {});
+          void verifyThenOpen(cwd, path, (target) =>
+            openTab(cwd, target),
+          ).catch(() => {});
         }
         return;
       }
@@ -237,12 +228,15 @@ export function useOpenChatFileInRow1(): (
           const target = files.includes(path)
             ? path
             : pickFileMatch(files, path);
-          if (target) openTab(target);
-          else await verifyThenOpen(cwd, path, openTab);
+          if (target) openTab(cwd, target);
+          else
+            await verifyThenOpen(cwd, path, (target) => openTab(cwd, target));
         } catch {
           // A direct read can still validate a gitignored/new path. If the
           // engine is unavailable too, leave the existing route untouched.
-          await verifyThenOpen(cwd, path, openTab).catch(() => {});
+          await verifyThenOpen(cwd, path, (target) =>
+            openTab(cwd, target),
+          ).catch(() => {});
         }
       })();
     },

@@ -156,6 +156,17 @@ export function resetWorkspaceFilesCacheForTests(): void {
   generations.clear();
 }
 
+/** Publish a listing directly into the cache (harness/tests) — lets the real
+ *  tree render in a plain browser, where the `git ls-files` IPC is absent.
+ *  The sibling of `primeWorkspaceFileDiff` in workspace-file-data-cache. */
+export function primeWorkspaceFiles(cwd: string, files: string[]): void {
+  writeCacheEntry(workspaceCacheKey(cwd), {
+    files,
+    at: Date.now(),
+    stale: false,
+  });
+}
+
 /** Synchronous best-effort peek — the cached list (even if slightly stale) or
  *  null if this cwd was never loaded. Lets a click resolve without waiting. */
 export function peekWorkspaceFiles(cwd: string): string[] | null {

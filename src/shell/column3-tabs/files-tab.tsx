@@ -2,31 +2,39 @@
 // FilesTab — row-1 file surface: All-Files sidebar + viewer
 // ──────────────────────────────────────────────────────────
 //
-// A row-1 File tab is a two-pane surface:
-//   Left:  the gitignore-aware workspace file tree (WorkspaceFileTree),
-//          with the built-in
-//          filter bar. Its selection MIRRORS the tab's open file, and
+// A row-1 File tab is a shared header over an optional two-pane surface:
+//   Header: tree toggle + search + working folders + file breadcrumb + viewer
+//           controls in one continuous chrome row.
+//   Left:  the gitignore-aware workspace file tree (WorkspaceFileTree). Its
+//          selection MIRRORS the tab's open file, and
 //          clicking another file navigates THIS tab in place (via
 //          useOpenFileInRow1, so dirty-draft protection and the active-tab
 //          policy hold). Right-click → "Open in new tab" spawns a separate
 //          File tab.
-//   Seam:  a 1px divider that doubles as a pointer-captured drag handle;
-//          the width is one shared, persisted preference
-//          (files-sidebar-width).
-//   Right: FileViewer — the file's content (Edit / Preview / Diff). The
-//          file path + view controls live in its own header.
+//   Seam:  a full-height 1px divider (it splits the header band too, aligned
+//          with the tree column's edge) that doubles as a drag handle; the
+//          width is one shared, persisted preference (files-sidebar-width).
+//   Right: FileViewer — the file's content (Edit / Preview / Diff).
+// Blank tabs omit the viewer and seam entirely, leaving a full-width tree.
+// Collapsed tabs swap the header controls to a tree toggle + a Search
+// trigger that floats a transient tree/filter POPUP over the full-width
+// content (files-tree-panel) — quick file jumps without re-expanding — and
+// keep the working-folders picker alongside them: sparse-checkout rewrites the
+// whole worktree, so it is a workspace action, not a tree-only affordance.
 //
 // Clean tabs can be reused in place; a tab with an unsaved editor is
 // retained separately so switching to another File/Terminal/Browser cannot
 // destroy its draft.
 // ──────────────────────────────────────────────────────────
 
-import React, { useCallback, useRef } from "react";
-import { FileQuestion } from "lucide-react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { FolderTree, Search } from "lucide-react";
 
 import { useActiveWorkspace } from "@/zeros/store/use-active-workspace";
 import { isLocalMainWorkspace } from "@/zeros/store/local-main-workspace";
 import { useWorkspaceDispatch } from "@/zeros/store/store";
+import { Button, Input, Tooltip } from "@/zeros/ui/primitives";
+import { cn } from "@/zeros/ui/cn";
 import { useChatCwd } from "../use-chat-cwd";
 import { useGitRefreshKey } from "../use-git-refresh-key";
 import { useOpenFileInRow1 } from "../use-open-file-in-row1";
@@ -35,7 +43,15 @@ import { useFilesSidebarFraction } from "./files-sidebar-width";
 import { useSidebarResizeDrag } from "./use-sidebar-drag";
 import { useResizeHint } from "../use-resize-hint";
 import { FileViewer } from "./file-viewer";
-import { WorkspaceFileTree } from "./workspace-file-tree";
+import {
+  FilesTreePanel,
+  type TreePanelDismissSource,
+} from "./files-tree-panel";
+import { resolveFilesTabLayout, treePanelHeight } from "./files-tab-layout";
+import {
+  WorkspaceFileTree,
+  type WorkspaceFileTreeHandle,
+} from "./workspace-file-tree";
 import {
   canPickWorkingDirectories,
   WorkingDirectoriesPopover,
@@ -93,8 +109,18 @@ export const FilesTab = React.memo(function FilesTab({
   // Sidebar element: the live drag writes its width directly (no React
   // re-render per pointer tick); the commit on release re-syncs the store.
   const sidebarRef = useRef<HTMLDivElement | null>(null);
+  // The Files header owns the tree's filter so it can share one chrome row
+  // with the open file and viewer controls. Search is ephemeral to this mount.
+  const [treeSearch, setTreeSearch] = useState("");
+  // Imperative bridge to @pierre/trees' stable model; typing never re-reads or
+  // rematerializes the workspace file collection.
+  const treeRef = useRef<WorkspaceFileTreeHandle | null>(null);
 
   const filePath = tab.filePath ?? "";
+  // Blank tabs are always tree-only and full width. A filled tab restores its
+  // own persisted visibility synchronously from the tab object.
+  const layout = resolveFilesTabLayout(tab.filePath, tab.fileTreeVisible);
+  const { fileTreeVisible } = layout;
 
   // A sidebar click navigates THIS tab. The same-path guard makes the
   // selection mirror's programmatic echo (and a re-click on the already-open
@@ -119,75 +145,251 @@ export const FilesTab = React.memo(function FilesTab({
     [dispatch],
   );
 
+  /** Apply the shared-header filter to the existing virtual tree model. */
+  const handleTreeSearchChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const value = event.currentTarget.value;
+      setTreeSearch(value);
+      treeRef.current?.setSearch(value);
+    },
+    [],
+  );
+
+  /** Enter advances through matches; Escape returns to the unfiltered tree. */
+  const handleTreeSearchKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLInputElement>) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        if (event.shiftKey) treeRef.current?.focusPreviousSearchMatch();
+        else treeRef.current?.focusNextSearchMatch();
+        return;
+      }
+      if (event.key === "Escape" && treeSearch) {
+        event.preventDefault();
+        setTreeSearch("");
+        treeRef.current?.setSearch("");
+      }
+    },
+    [treeSearch],
+  );
+
+  /** Persist visibility on this File tab only. Collapsing also clears its
+   * ephemeral filter so reopening never shows a filtered tree with no query. */
+  const toggleFileTree = useCallback(() => {
+    if (fileTreeVisible) {
+      setTreeSearch("");
+      treeRef.current?.setSearch("");
+    }
+    dispatch({
+      type: "UPDATE_COLUMN3_TAB",
+      id: tab.id,
+      scope,
+      updates: { fileTreeVisible: !fileTreeVisible },
+    });
+  }, [dispatch, fileTreeVisible, scope, tab.id]);
+
   // ── Seam drag (mirrors the column-1 resizer) ──
   // Shared with the Changes tab's sidebar (use-sidebar-drag): both resize the
   // same committed width preference, so the gesture and clamps are identical.
   const onResizePointerDown = useSidebarResizeDrag(containerRef, sidebarRef);
   const { hintHandlers, hint } = useResizeHint("Drag to resize");
 
-  // Blank File tabs are intentional, closable file-browsing entry points. They
-  // render the same tree and empty viewer as the fresh workspace's first tab.
-  return (
-    <div ref={containerRef} className="bg-bg1 flex h-full min-h-0">
-      {/* Sidebar — the workspace tree. Percentage width keeps the split
-          proportional as column 3 resizes; `min-w-[140px]`/`max-w-[70%]`
-          mirror the drag clamp's pixel floor and share cap. */}
-      <div
-        ref={sidebarRef}
-        className="h-full min-h-0 max-w-[70%] min-w-[140px] shrink-0 overflow-hidden"
-        style={{ width: `${sidebarFraction * 100}%` }}
+  // ── Floating tree panel (the collapsed state's quick file switcher) ──
+  // Transient, per-mount UI over THIS tab's content. A POPUP: its height is
+  // measured from the tab body once, when the trigger fires, and stays frozen
+  // for that open — resizing the column doesn't reflow an open popup.
+  // Expanding the real tree, closing the file (blank tabs show the full tree
+  // already), or leaving the tab all invalidate it.
+  const [treePanel, setTreePanel] = useState<{ height: number } | null>(null);
+  const treePanelOpen = treePanel !== null;
+  const treePanelTriggerRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (!active || fileTreeVisible || !layout.hasFile) setTreePanel(null);
+  }, [active, fileTreeVisible, layout.hasFile]);
+
+  const toggleTreePanel = useCallback(() => {
+    setTreePanel((open) =>
+      open
+        ? null
+        : { height: treePanelHeight(containerRef.current?.clientHeight ?? 0) },
+    );
+  }, []);
+
+  /** A panel row click: dismiss first, then navigate THIS tab in place (the
+   * same-path guard keeps a re-click of the open file a pure dismiss). The
+   * tab stays collapsed — direct opens keep the content full width. */
+  const handlePanelOpenFile = useCallback(
+    (p: string) => {
+      setTreePanel(null);
+      if (p === filePath) return;
+      openInRow1(p, { diff: false, diffScope: "all", discardable: false });
+    },
+    [filePath, openInRow1],
+  );
+
+  const handlePanelOpenInNewTab = useCallback(
+    (p: string) => {
+      setTreePanel(null);
+      dispatch({ type: "ADD_COLUMN3_TAB", tab: createFilesTab(p) });
+    },
+    [dispatch],
+  );
+
+  /** Keyboard dismissal (Escape) returns focus to the header trigger; a
+   * pointer dismissal already chose where focus goes next, so it only
+   * closes. */
+  const handlePanelDismiss = useCallback((source: TreePanelDismissSource) => {
+    setTreePanel(null);
+    if (source === "keyboard") treePanelTriggerRef.current?.focus();
+  }, []);
+
+  // One quiet fg2 glyph for BOTH states — the visible tree itself is the state
+  // indicator, so the toggle never latches a pressed fill or fg1 flip.
+  const treeToggle = layout.toggleVisible ? (
+    <Tooltip label={fileTreeVisible ? "Hide file tree" : "Show file tree"}>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        className="text-fg2 shrink-0"
+        aria-label={fileTreeVisible ? "Hide file tree" : "Show file tree"}
+        onClick={toggleFileTree}
       >
-        <WorkspaceFileTree
-          cwd={cwd}
-          reloadKey={gitRefresh}
-          search
-          // Working folders sits at the right end of the tree's own filter
-          // row rather than in a toolbar of its own — one header line instead
-          // of two, and no empty 36px band on the surfaces where the picker
-          // hides itself (a non-native client, or a tab with no workspace).
-          searchRowAccessory={
-            canPickWorkingDirectories(cwd) ? (
-              <WorkingDirectoriesPopover cwd={cwd} workspaceId={workspaceId} />
-            ) : undefined
-          }
-          // Pre-focus the tab's file on mount; then MIRROR it while this tab
-          // is visible. Hidden tabs (a dirty draft kept mounted) suspend the
-          // mirror — it re-asserts on re-activation, healing any divergence
-          // left when a click was diverted away to protect the draft.
-          initialSelectedPath={tab.filePath}
-          // `undefined` suspends the mirror for a hidden tab; `null` explicitly
-          // clears it when an active blank File tab has no open file.
-          selectedPath={treeSelectionMirrorTarget(active, tab.filePath)}
-          scrollMemoryKey={JSON.stringify(["files-tree", cwd ?? "", tab.id])}
-          onOpenFile={handleOpenFile}
-          onOpenInNewTab={handleOpenInNewTab}
-        />
-      </div>
+        <FolderTree className="size-3.5" />
+      </Button>
+    </Tooltip>
+  ) : null;
 
-      {/* Seam — 1px divider + invisible 7px grab strip. The resize cursor +
-          the idle "Drag to resize" hint above the pointer are the only
-          affordances (like the column-1 seam). */}
-      <div className="bg-border1 relative w-px shrink-0">
+  // Collapsed-only companion to the toggle: opens the floating tree popup so
+  // the user can jump files without giving up the full-width content. While
+  // the popup is up the trigger latches its selected fill (the ghost recipe's
+  // hover step, like every data-[state=open] popover trigger).
+  const treeSearchTrigger =
+    layout.toggleVisible && !fileTreeVisible ? (
+      <Tooltip label="Search files">
+        <Button
+          ref={treePanelTriggerRef}
+          variant="ghost"
+          size="icon-sm"
+          className={cn(
+            "text-fg2 shrink-0",
+            treePanelOpen && "bg-bg2-hover text-fg1",
+          )}
+          aria-label="Search files"
+          aria-haspopup="dialog"
+          aria-expanded={treePanelOpen}
+          onClick={toggleTreePanel}
+        >
+          <Search className="size-3.5" />
+        </Button>
+      </Tooltip>
+    ) : null;
+
+  // The sparse-checkout folder picker, hoisted so BOTH header states render the
+  // same control: the feature acts on the worktree (the agent, the terminal and
+  // the user's editor all stop seeing an unchecked folder), so collapsing the
+  // tree must not be the thing that hides it. Gated on
+  // canPickWorkingDirectories because the component returns null off the native
+  // runtime — a bare element would still make its flex row reserve the gap.
+  const workingDirectoriesPicker = canPickWorkingDirectories(cwd) ? (
+    <WorkingDirectoriesPopover cwd={cwd} workspaceId={workspaceId} />
+  ) : null;
+
+  // Blank File tabs are intentional tree-only entry points: there is no empty
+  // content column, divider, viewer header, or selection placeholder to paint.
+  return (
+    <div
+      ref={containerRef}
+      data-testid="files-tab"
+      className="bg-bg1 relative flex h-full min-h-0 overflow-hidden"
+    >
+      {fileTreeVisible && (
         <div
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="Resize files sidebar"
-          className="absolute -inset-x-[3px] inset-y-0 z-20 cursor-ew-resize select-none"
-          onPointerDown={onResizePointerDown}
-          onMouseDown={(e) => e.preventDefault()}
-          {...hintHandlers}
-        />
-        {hint}
-      </div>
+          ref={sidebarRef}
+          className={cn(
+            "flex h-full min-h-0 flex-col overflow-hidden",
+            layout.treeUsesSharedWidth
+              ? "max-w-[70%] min-w-[140px] shrink-0"
+              : "min-w-0 flex-1",
+          )}
+          style={
+            layout.treeUsesSharedWidth
+              ? { width: `${sidebarFraction * 100}%` }
+              : undefined
+          }
+        >
+          {/* Shared Files chrome: toggle + search + working-directory picker
+              line up with the viewer's slug and Preview/Edit controls. */}
+          <div
+            data-testid="files-tree-header"
+            className="flex h-9 shrink-0 items-center gap-1 px-2"
+          >
+            {treeToggle}
+            <Input
+              aria-label="Search workspace files"
+              placeholder="Search…"
+              value={treeSearch}
+              onChange={handleTreeSearchChange}
+              onKeyDown={handleTreeSearchKeyDown}
+              className="border-border2 h-6 min-w-0 flex-1"
+            />
+            {workingDirectoriesPicker}
+          </div>
+          <div className="min-h-0 flex-1">
+            <WorkspaceFileTree
+              ref={treeRef}
+              cwd={cwd}
+              reloadKey={gitRefresh}
+              // Pre-focus the tab's file on mount; then MIRROR it while this
+              // tab is visible. Hidden dirty tabs suspend the mirror until
+              // re-activation, when it heals any diverted selection.
+              initialSelectedPath={tab.filePath}
+              // `undefined` suspends a hidden tab; `null` explicitly clears an
+              // active blank tab's prior tree selection.
+              selectedPath={treeSelectionMirrorTarget(active, tab.filePath)}
+              scrollMemoryKey={JSON.stringify([
+                "files-tree",
+                cwd ?? "",
+                tab.id,
+              ])}
+              onOpenFile={handleOpenFile}
+              onOpenInNewTab={handleOpenInNewTab}
+            />
+          </div>
+        </div>
+      )}
 
-      {/* Viewer pane — the open file, or a blank tab's selection prompt. */}
-      <div className="h-full min-h-0 min-w-0 flex-1 overflow-hidden">
-        {tab.filePath ? (
+      {layout.seamVisible && (
+        // Full-height seam: the divider runs through the header band too, so
+        // the tree chrome (toggle + search + directories) reads as the tree
+        // column's own header, separated from the viewer's slug + controls on
+        // the exact line the two columns split on.
+        <div
+          data-testid="files-sidebar-seam"
+          className="bg-border1 relative w-px shrink-0"
+        >
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize files sidebar"
+            className="absolute -inset-x-[3px] inset-y-0 z-20 cursor-ew-resize select-none"
+            onPointerDown={onResizePointerDown}
+            onMouseDown={(e) => e.preventDefault()}
+            {...hintHandlers}
+          />
+          {hint}
+        </div>
+      )}
+
+      {layout.viewerVisible && (
+        <div
+          data-testid="files-viewer-pane"
+          className="h-full min-h-0 min-w-0 flex-1 overflow-hidden"
+        >
           <FileViewer
             tabId={tab.id}
             active={active}
             cwd={cwd}
-            path={tab.filePath}
+            path={filePath}
             workspaceId={workspaceId}
             diff={tab.diff ?? false}
             diffScope={tab.diffScope}
@@ -198,6 +400,22 @@ export const FilesTab = React.memo(function FilesTab({
             isNewFile={tab.isNewFile ?? false}
             contentRevision={tab.contentRevision ?? 0}
             viewerMode={tab.viewerMode}
+            headerLeading={
+              !fileTreeVisible ? (
+                // One tight gap-1 cluster (the tree header's own control
+                // spacing), so the three chrome glyphs read as a toolbar and
+                // the viewer's gap-2 falls between them and the file slug —
+                // not between the icons themselves.
+                <div
+                  data-testid="files-collapsed-toolbar"
+                  className="flex shrink-0 items-center gap-1"
+                >
+                  {treeToggle}
+                  {treeSearchTrigger}
+                  {workingDirectoriesPicker}
+                </div>
+              ) : undefined
+            }
             onViewerModeChange={(viewerMode) =>
               dispatch({
                 type: "UPDATE_COLUMN3_TAB",
@@ -209,13 +427,25 @@ export const FilesTab = React.memo(function FilesTab({
             refreshKey={gitRefresh}
             readOnly={false}
           />
-        ) : (
-          <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center">
-            <FileQuestion className="text-muted-fg size-10" strokeWidth={1} />
-            <p className="text-fg2 m-0 text-xs">Select a file to view</p>
-          </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {/* The collapsed state's floating tree + search popup — a launcher over
+          the full-width content, gated to the visible collapsed-with-file
+          state (the effect above also clears it when the gate flips). Height
+          was frozen when the trigger fired; the trigger itself is exempt from
+          outside-pointerdown dismissal so its click stays a pure toggle. */}
+      {treePanel && active && !fileTreeVisible && layout.hasFile && (
+        <FilesTreePanel
+          cwd={cwd}
+          reloadKey={gitRefresh}
+          height={treePanel.height}
+          dismissIgnoreRef={treePanelTriggerRef}
+          onOpenFile={handlePanelOpenFile}
+          onOpenInNewTab={handlePanelOpenInNewTab}
+          onDismiss={handlePanelDismiss}
+        />
+      )}
     </div>
   );
 });

@@ -35,4 +35,21 @@ describe("narrow transcript message overflow", () => {
       /\.zeros-agent-md\s*\{[^}]*overflow-wrap:\s*break-word;/,
     );
   });
+
+  it("keeps the sent-message reveal hover visible in both themes", () => {
+    const turnContainer = code("../turn-container.tsx");
+
+    expect(turnContainer).toContain(
+      "group-hover/more:bg-bg1-hover dark:group-hover/more:bg-bg2-hover",
+    );
+  });
+
+  it("keeps checkpoint rows on the hover token for their bg2 surface", () => {
+    const checkpointRail = code("../checkpoint-rail.tsx");
+    const hoverCard = code("../../ui/primitives/hover-card.tsx");
+
+    expect(hoverCard).toContain("border-border2 bg-bg2 text-fg1");
+    expect(checkpointRail).toContain('? "bg-bg2-hover text-fg1"');
+    expect(checkpointRail).toContain(': "text-fg2 hover:bg-bg2-hover"');
+  });
 });

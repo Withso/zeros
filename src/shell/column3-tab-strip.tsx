@@ -9,10 +9,12 @@
 // divider.
 //
 // Layout: [Open file] [Changes] [Review] [...File/Browser tabs] [+]
-// - Changes + Review are the only pinned homes. File and Browser tabs are all
-//   closable, including their blank "Open file" / "Browser" states. The Changes
+// - Changes + Review are pinned homes, and the leading File tab is the FIXED
+//   Files home: permanent like them, but its ✕ closes the open FILE (the tab
+//   reverts to the blank "Open file" tree) and hides entirely while blank.
+//   Extra File and Browser tabs are all closable, including blanks. The Changes
 //   pill carries the live All Changes count (committed + uncommitted net diff).
-// - The ✕ on a File or Browser tab removes the whole tab.
+// - The ✕ on an extra File or Browser tab removes the whole tab.
 // - Tab pill: icon + truncated title + absolute-positioned close button
 //   (no width-on-hover layout shift) + fade gradient mask. Blank tabs keep the
 //   explicit Open file / Browser labels.
@@ -25,8 +27,13 @@
 import React from "react";
 import { X } from "lucide-react";
 import { Tooltip } from "../zeros/ui/primitives";
+import { FileTypeIcon } from "../zeros/agent/composer-editor/file-type-icon";
 import { useWorkspaceDispatch } from "../zeros/store/store";
-import { TAB_TYPE_META, type Column3Tab } from "./column3-tab-manager";
+import {
+  TAB_TYPE_META,
+  row1TabIconPath,
+  type Column3Tab,
+} from "./column3-tab-manager";
 import {
   COLUMN3_TAB_PILL_ACTIVE_CLS,
   COLUMN3_TAB_PILL_BASE_CLS,
@@ -106,7 +113,12 @@ export function Column3TabStrip({
                 key={tab.id}
                 tab={tab}
                 active={tab.id === activeId}
-                canClose={tab.type === "files" || tab.type === "browser"}
+                canClose={
+                  tab.type === "browser" ||
+                  // The fixed Files home only offers ✕ while a file is open
+                  // (✕ = close the file); blank, there is nothing to close.
+                  (tab.type === "files" && (!tab.fixed || !!tab.filePath))
+                }
                 badge={tab.type === "changes" ? changeCount : 0}
                 onActivate={() => handleActivate(tab.id)}
                 onClose={(e) => handleClose(e, tab)}
@@ -159,6 +171,9 @@ function TabPill({
   const meta = TAB_TYPE_META[tab.type];
   const Icon = meta.icon;
   const showLabel = tabShowsLabel(tab);
+  // A File tab wears its file's own colored type glyph (same sprite as the tree
+  // and the viewer breadcrumb); everything else keeps its type's lucide glyph.
+  const iconPath = row1TabIconPath(tab);
   return (
     <div
       ref={registerRef}
@@ -188,7 +203,13 @@ function TabPill({
         active ? COLUMN3_TAB_PILL_ACTIVE_CLS : COLUMN3_TAB_PILL_INACTIVE_CLS,
       ].join(" ")}
     >
-      <Icon className="size-3.5 shrink-0" />
+      {iconPath ? (
+        // size 14 === the size-3.5 the lucide glyphs use, so swapping the glyph
+        // never shifts the pill's label.
+        <FileTypeIcon name={iconPath} size={14} className="shrink-0" />
+      ) : (
+        <Icon className="size-3.5 shrink-0" />
+      )}
       {showLabel && <span className="truncate">{tab.title}</span>}
       {badge > 0 && (
         // Bare count — no chip bg (saves space); the pill's gap spaces it.
@@ -206,7 +227,11 @@ function TabPill({
         // shift. focus-within keeps it visible for keyboard users. Reveal keys
         // off the strip-driven data-hovered, not :hover (sticky-strip rule).
         <div className="from-bg2 pointer-events-none absolute inset-y-0 right-0 flex w-10 items-center justify-end bg-gradient-to-l from-50% to-transparent pr-1.5 pl-4 opacity-0 transition-none group-data-[hovered=true]/tab:opacity-100 focus-within:opacity-100">
-          <Tooltip label="Close tab">
+          <Tooltip
+            label={
+              tab.type === "files" && tab.fixed ? "Close file" : "Close tab"
+            }
+          >
             <button
               type="button"
               onClick={(e) => {

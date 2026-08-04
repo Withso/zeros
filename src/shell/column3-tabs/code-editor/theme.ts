@@ -7,13 +7,17 @@
 // --font-mono…) so the editor matches the surrounding Files-tab surface, with
 // color-mix overlays keeping the tints subtle and theme-agnostic.
 //
-// COLOR is owned entirely by the Shiki layer (shiki-highlight.ts) for exact
-// parity with the diff view + code blocks — so there is NO syntaxHighlighting()
-// here. The Lezer language extension still loads for STRUCTURE (folding, indent,
-// bracket matching). The Shiki plugin paints the base foreground from the active
-// theme; the background stays the app surface (--bg1) for every code
-// theme so the editor matches the diff + code-block surfaces. See
-// project_files_tab_editor memory.
+// TOKEN COLOR is owned entirely by the Shiki layer (shiki-highlight.ts) for
+// exact parity with the diff view + code blocks — so there is NO
+// syntaxHighlighting() here. The Lezer language extension still loads for
+// STRUCTURE (folding, indent, bracket matching). The BASE foreground is the
+// active code theme's own `fg` (resolved by the caller, see use-code-theme-fg),
+// applied here as CHROME rather than imperatively by the plugin: a CSS rule
+// lands on the very first painted frame, so even the rare cold-highlighter open
+// starts in the code theme instead of the app's --fg1 and repainting. It falls
+// back to --fg1 until the theme resolves. The background stays the app surface
+// (--bg1) for every code theme so the editor matches the diff + code-block
+// surfaces. See project_files_tab_editor memory.
 //
 // The `dark` flag tells CM which polarity its UNSTYLED internals (autocomplete
 // tooltip, fold placeholder, panels it invents) should default to — it must
@@ -24,12 +28,12 @@
 import { EditorView } from "@codemirror/view";
 import type { Extension } from "@codemirror/state";
 
-const chrome = (dark: boolean): Extension =>
+const chrome = (dark: boolean, baseFg: string | null): Extension =>
   EditorView.theme(
     {
       "&": {
         backgroundColor: "var(--bg1)",
-        color: "var(--fg1)",
+        color: baseFg ?? "var(--fg1)",
         height: "100%",
         fontSize: "12px",
       },
@@ -98,8 +102,13 @@ const chrome = (dark: boolean): Extension =>
     { dark },
   );
 
-/** Editor chrome only — color comes from the Shiki layer (shiki-highlight.ts).
- *  `dark` must be the active code theme's appearance (=== the app variant). */
-export function zerosEditorTheme(dark: boolean): Extension {
-  return chrome(dark);
+/** Editor chrome only — token color comes from the Shiki layer
+ *  (shiki-highlight.ts). `dark` must be the active code theme's appearance
+ *  (=== the app variant); `baseFg` is that theme's own foreground for text Shiki
+ *  leaves uncolored (null → the app's --fg1 until the theme is loaded). */
+export function zerosEditorTheme(
+  dark: boolean,
+  baseFg: string | null = null,
+): Extension {
+  return chrome(dark, baseFg);
 }

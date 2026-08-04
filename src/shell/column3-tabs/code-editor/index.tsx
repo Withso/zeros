@@ -39,7 +39,9 @@ import { resolveLanguage } from "./language";
 import { zerosEditorTheme } from "./theme";
 import { shikiColors } from "./shiki-highlight";
 import { indentationMarkers } from "@replit/codemirror-indentation-markers";
+import { wrappedLineIndent } from "./wrapped-line-indent";
 import { shikiLangForPath } from "./shiki-lang";
+import { useCodeThemeFg } from "./use-code-theme-fg";
 import { useCodeTheme } from "@/zeros/appearance/use-code-theme";
 import { resolveCodeTheme } from "@/zeros/appearance/code-themes";
 import { useScrollMemory } from "../../scroll-memory";
@@ -61,6 +63,11 @@ export interface CodeEditorProps {
   ariaLabel?: string;
   /** Optional id applied to CodeMirror's contenteditable surface. */
   editorId?: string;
+  /** True when this editor mounts behind another surface (the file viewer keeps
+   *  one alive behind Diff / Markdown preview so drafts survive a view switch).
+   *  Skips the synchronous first-paint tokenize — nothing is painted to get
+   *  right, so that work belongs off the click. */
+  offscreen?: boolean;
   /** Keyed scroll memory for `.cm-scroller` (see shell/scroll-memory). File
    *  editors remount per cwd::path::revision, so a stable key restores the
    *  reading offset across tab/workspace round-trips. Omit for embedded
@@ -150,10 +157,13 @@ const COMPACT_EDITOR_THEME = EditorView.theme({
 });
 
 // Full File-tab editors wrap every logical line and reserve vertical scrolling
-// as the only navigation axis. Kept out of compact command editors, whose
+// as the only navigation axis. Wrapped continuation rows hang at the line's
+// own indentation so long lines stay inside their block instead of cutting
+// across the indent guides. Kept out of compact command editors, whose
 // single-line command ergonomics are a separate contract.
 const FILE_LINE_WRAP_EXTENSIONS: Extension[] = [
   EditorView.lineWrapping,
+  wrappedLineIndent(),
   EditorView.theme({
     ".cm-scroller": { overflowX: "hidden" },
   }),
@@ -168,6 +178,7 @@ export function CodeEditor({
   compact = false,
   ariaLabel,
   editorId,
+  offscreen = false,
   scrollMemoryKey,
   className,
 }: CodeEditorProps) {
@@ -186,6 +197,9 @@ export function CodeEditor({
   // Lezer language (langExt) stays for structure; Shiki only paints color.
   const codeThemeOpt = resolveCodeTheme(useCodeTheme());
   const shikiLang = useMemo(() => shikiLangForPath(filePath), [filePath]);
+  // The theme's own base foreground, so uncolored text (and the pre-token frame
+  // of a cold open) reads as the code theme rather than the app's chrome white.
+  const baseFg = useCodeThemeFg(codeThemeOpt.shiki);
 
   // Keep the latest value + onSave for the ⌘S keymap WITHOUT re-creating the
   // extension on every keystroke (that would churn the whole editor config).
@@ -243,17 +257,21 @@ export function CodeEditor({
       ...BASE_EXTENSIONS,
       // Chrome rides live CSS vars, but CM's `dark` flag (polarity of unstyled
       // internals like the autocomplete tooltip) is a JS boolean — recreate it
-      // when the code theme's appearance (=== the app variant) flips.
-      zerosEditorTheme(codeThemeOpt.appearance === "dark"),
+      // when the code theme's appearance (=== the app variant) flips. The base
+      // foreground rides along so it applies on the first paint.
+      zerosEditorTheme(codeThemeOpt.appearance === "dark", baseFg),
       ...(!compact ? FILE_LINE_WRAP_EXTENSIONS : []),
       ...(compact ? [Prec.highest(COMPACT_EDITOR_THEME)] : []),
       ...langExt,
       // Shiki color layer (exact parity). Recreated when the file's language or
       // the code theme changes; its field/plugin are module-level so reconfigure
-      // preserves decorations and just re-tokenizes.
+      // preserves decorations and just re-tokenizes. A visible editor tokenizes
+      // its document synchronously as the state is built, so the first painted
+      // frame already wears the theme (no unthemed flash on open / tab switch).
       shikiColors({
         lang: shikiLang,
         theme: codeThemeOpt.shiki,
+        syncFirstPaint: !offscreen,
       }),
     ],
     [
@@ -264,6 +282,8 @@ export function CodeEditor({
       shikiLang,
       codeThemeOpt.shiki,
       codeThemeOpt.appearance,
+      baseFg,
+      offscreen,
     ],
   );
 
