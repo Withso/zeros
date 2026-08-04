@@ -184,6 +184,11 @@ export function DispatcherComposer({
     availableCommands: [],
     placeholder: "What do you want to work on?",
     onSubmit: () => submitRef.current(),
+    // cwd here is the PRIMARY checkout (the workspace this modal creates
+    // doesn't exist yet). Attach-time staging would write phantom cards into
+    // the trunk's .context-graph; the send-path safety net stages these
+    // attachments into the NEW worktree when the first prompt goes out.
+    stageIntoContextGraph: false,
   });
   const {
     serialize,

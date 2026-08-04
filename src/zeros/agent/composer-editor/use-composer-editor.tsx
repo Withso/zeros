@@ -50,9 +50,15 @@ import { ComposerEditorProvider } from "./composer-editor-context";
 import { serializeComposer, type ComposerSerialized } from "./serialize";
 import { filesToAttachments } from "./attachment-io";
 import {
+  collectAttachmentIds,
   collectSourceKeys,
   findAttachmentsBySourceKey,
 } from "./attachment-keys";
+import {
+  executeGraphSync,
+  planGraphSync,
+  planSeedStage,
+} from "./context-graph-staging";
 import {
   validateAttachment,
   type AttachmentValidation,
@@ -72,6 +78,7 @@ import type { AvailableCommand } from "../../bridge/agent-events";
 import { ghPrList, listWorkspaceFiles } from "../../../native/git";
 import { listSkills } from "../../../native/native";
 import { useBrowserPickerSelection } from "../../store/workspace-store";
+import { useWorkspaceProvisioning } from "../../store/pending-workspaces";
 import type {
   ComposerAttachment,
   ComposerAttachmentPreview,
@@ -110,6 +117,15 @@ export interface UseComposerEditorOpts {
   modelId: string | null;
   /** cwd the @-file list is read from. */
   cwd: string | null;
+  /** Default true: attachments stage into `<cwd>/.context-graph/` the moment
+   *  they're added, and unstage when their chip is removed (the Context tab's
+   *  attach-time sync). Set false on surfaces whose cwd is NOT the workspace
+   *  the attachments belong to — the dispatcher composes against the primary
+   *  checkout's root while the real worktree doesn't exist yet, and staging
+   *  there would leave permanent phantom cards on the trunk workspace's
+   *  canvas. Such surfaces rely on the send-path safety net, which stages
+   *  into whatever workspace the prompt actually lands in. */
+  stageIntoContextGraph?: boolean;
   /** Repo origin for the #-PR picker (null disables it). */
   originUrl: string | null;
   /** Session-discovered slash commands (merged under the curated floor). */
@@ -276,6 +292,66 @@ export function useComposerEditor(
         ? prev // reference-stable when nothing moved (Rule 11)
         : next,
     );
+  }, []);
+
+  // ── context-graph attach-time sync ──
+  //
+  // The doc's attachment-id set, diffed on every USER edit: an id appearing
+  // stages its file into `.context-graph/` right away, so the Context tab
+  // shows it while the prompt is still being typed. Diffing the doc — rather
+  // than instrumenting insertFiles/paste/drop directly — is what makes every
+  // attach gesture agree: paste, drop, pick, transcript pill, undo and redo
+  // all land here identically.
+  //
+  // The sync is STAGE-ONLY — the graph is append-only by explicit product
+  // decision (2026-08-03(3)): an id disappearing (chip ×, Backspace,
+  // select-all delete, transcript untoggle) never deletes its graph record;
+  // only the user deleting the file on disk removes it. See
+  // context-graph-staging.ts for the full rationale.
+  //
+  // Programmatic swaps (clear on send, setContent for drafts/edit seeds,
+  // setText) SUPPRESS the diff and just resync the set: those transitions say
+  // nothing about user intent toward the files — an edit-in-place seed
+  // reconstructs already-sent chips that were staged by their own send. See
+  // context-graph-staging.ts for what else deliberately stays out (byte-less
+  // reconstructions, over-cap bodies).
+  const graphIdsRef = useRef<ReadonlySet<string>>(new Set());
+  const graphSyncSuppressedRef = useRef(false);
+  const resyncGraphIds = useCallback((ed: Editor) => {
+    graphIdsRef.current = new Set(collectAttachmentIds(ed.state.doc));
+  }, []);
+  // Seed sweep: idempotently ensure every byte-carrying attachment in the doc
+  // has a graph record. Runs on the mounts/swaps that arrive whole (onCreate,
+  // setContent) and again when a provisioning worktree lands — the one moment
+  // the dispatcher-seeded draft can finally be staged. Stage-only by design;
+  // see planSeedStage for why a seed must never unstage.
+  const stageDocIntoGraph = useCallback((ed: Editor) => {
+    if (optsRef.current.stageIntoContextGraph === false) return;
+    const cwd = optsRef.current.cwd;
+    if (!cwd) return;
+    const present = collectAttachmentIds(ed.state.doc);
+    if (present.length === 0) return;
+    executeGraphSync(
+      cwd,
+      planSeedStage(present, (id) => attachmentMapRef.current.get(id)),
+    );
+  }, []);
+  const syncContextGraph = useCallback((ed: Editor) => {
+    const present = collectAttachmentIds(ed.state.doc);
+    if (
+      graphSyncSuppressedRef.current ||
+      optsRef.current.stageIntoContextGraph === false
+    ) {
+      graphIdsRef.current = new Set(present);
+      return;
+    }
+    const plan = planGraphSync(graphIdsRef.current, present, (id) =>
+      attachmentMapRef.current.get(id),
+    );
+    graphIdsRef.current = plan.nextIds;
+    const cwd = optsRef.current.cwd;
+    if (!cwd) return;
+    executeGraphSync(cwd, plan);
   }, []);
 
   const workspaceEntriesRef = useRef<WorkspaceEntry[]>([]);
@@ -644,6 +720,14 @@ export function useComposerEditor(
       setIsEmpty(e.isEmpty);
       // A seeded draft can already carry keyed attachments.
       syncSourceKeys(e);
+      // Record what the seed mounted with (the diff must not read the seed as
+      // user adds), then SWEEP it into the graph. The sweep is what puts a
+      // dispatcher-seeded draft's files on the Context tab before the first
+      // send; for a restored draft it is an idempotent no-op self-heal. An
+      // edit-in-place seed is safe: reconstruct.ts mints prefixed ids that
+      // planSeedStage skips, so a sent message's record is never duplicated.
+      resyncGraphIds(e);
+      stageDocIntoGraph(e);
     },
     // Re-read the workspace file list when the composer gains focus so @-files
     // reflect mid-session creates/deletes (throttled inside loadWorkspaceFiles).
@@ -654,12 +738,32 @@ export function useComposerEditor(
       // with its × or with Backspace. Without this the transcript pill would
       // stay lit after its chip was gone.
       syncSourceKeys(e);
+      // …and the same event drives the context-graph: every user edit that
+      // adds an attachment node stages its file (append-only — removals
+      // deliberately leave the graph record in place).
+      syncContextGraph(e);
       optsRef.current.onChange?.();
     },
   });
 
   const editorRef = useRef<Editor | null>(null);
   editorRef.current = editor;
+
+  // While a dispatcher-created worktree is still being provisioned, every
+  // graph write is skipped (executeGraphSync — a write into the reserved path
+  // would fail `git worktree add` itself). This effect is the other half:
+  // the moment provisioning ends, sweep whatever the doc holds into the
+  // now-real worktree's graph, so the seeded attachments appear on the
+  // Context tab while setup/auto-send are still minutes away. False for
+  // every already-existing workspace, where the mount sweep in onCreate has
+  // already run.
+  const provisioning = useWorkspaceProvisioning(cwd ?? null);
+  useEffect(() => {
+    if (provisioning) return;
+    const ed = editorRef.current;
+    if (!ed || ed.isDestroyed) return;
+    stageDocIntoGraph(ed);
+  }, [provisioning, cwd, stageDocIntoGraph]);
 
   // ── attachment staging ──
   const insertFiles = useCallback(
@@ -864,10 +968,20 @@ export function useComposerEditor(
     const ed = editorRef.current;
     attachmentMapRef.current.clear();
     if (ed) {
-      ed.commands.clearContent(true);
+      // Suppressed: clear() runs on SEND (and programmatic resets) — the
+      // just-sent attachments' graph records must survive the doc emptying.
+      graphSyncSuppressedRef.current = true;
+      try {
+        ed.commands.clearContent(true);
+      } finally {
+        graphSyncSuppressedRef.current = false;
+      }
+      resyncGraphIds(ed);
       setIsEmpty(true);
+    } else {
+      graphIdsRef.current = new Set();
     }
-  }, []);
+  }, [resyncGraphIds]);
 
   const setContent = useCallback(
     (content: ComposerInitialContent) => {
@@ -881,9 +995,18 @@ export function useComposerEditor(
         ed.commands.setContent(content.json ?? "", { emitUpdate: false });
         setIsEmpty(ed.isEmpty);
         syncSourceKeys(ed);
+        // A seed swap, not a user gesture — record the new id set so the
+        // diff can't unstage anything, then sweep it into the graph (same
+        // reasoning as onCreate: idempotent, stage-only).
+        resyncGraphIds(ed);
+        stageDocIntoGraph(ed);
+      } else {
+        graphIdsRef.current = new Set(
+          content.attachments.map((a) => a.id),
+        );
       }
     },
-    [syncSourceKeys],
+    [syncSourceKeys, resyncGraphIds, stageDocIntoGraph],
   );
 
   const setText = useCallback(
@@ -904,9 +1027,12 @@ export function useComposerEditor(
         );
         setIsEmpty(ed.isEmpty);
         syncSourceKeys(ed);
+        resyncGraphIds(ed);
+      } else {
+        graphIdsRef.current = new Set();
       }
     },
-    [syncSourceKeys],
+    [syncSourceKeys, resyncGraphIds],
   );
 
   const appendText = useCallback((text: string) => {

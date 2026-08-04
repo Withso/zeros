@@ -5,6 +5,7 @@
 import React from "react";
 import { BrowserTab } from "./column3-tabs/browser-tab";
 import { ChangesRow1Tab } from "./column3-tabs/changes-row1-tab";
+import { ContextRow1Tab } from "./column3-tabs/context-row1-tab";
 import { FilesTab } from "./column3-tabs/files-tab";
 import { ReviewRow1Tab } from "./column3-tabs/review-row1-tab";
 import type { Column3Tab, Column3TabType } from "./column3-tab-manager";
@@ -22,6 +23,7 @@ const TAB_BODY_MAP: Record<
 > = {
   changes: ChangesRow1Tab,
   review: ReviewRow1Tab,
+  context: ContextRow1Tab,
   browser: BrowserTab,
   files: FilesTab,
 };

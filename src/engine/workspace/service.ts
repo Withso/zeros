@@ -141,6 +141,11 @@ import {
 import { readWorkspaceFile, isSensitiveRepoPath } from "../files/read-file";
 import { writeWorkspaceFile } from "../files/write-file";
 import {
+  ensureContextGraph,
+  listContextGraph,
+  setContextGraphAttachmentShared,
+} from "../files/context-graph";
+import {
   opSettingsMigrateLegacy,
   opSettingsRead,
   opSettingsResolve,
@@ -440,6 +445,10 @@ const WRITE_OPS = new Set<string>([
  * expose local-only Git controls to relay clients. */
 const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "file.write",
+  // Create/move files under `.context-graph/` — archive's snapshot force-adds
+  // that tree, so a mid-flight scaffold or share-toggle must drain first.
+  "context.graph.scaffold",
+  "context.graph.setShared",
   // Rewrites the checkout AND the index (sparse patterns + skip-worktree
   // bits), so it belongs on the barrier for the same reason checkoutBranch
   // does: archive/delete drains in-flight work before snapshotting or removing
@@ -2268,6 +2277,56 @@ export class WorkspaceService {
         // file.read — and writes atomically (tmp + rename) so a crash can't
         // truncate the file.
         return writeWorkspaceFile(cwd, rel, content, { remote });
+      }
+
+      // ── Context graph (the Context tab's canvas) ──────────
+      // DESKTOP-ONLY for now, and by explicit refusal like `file.ignored`, not
+      // omission: the graph's `local/` scope is gitignored private material,
+      // exactly the boundary the remote read allowlist exists to keep. A future
+      // remote surface would filter to `shared/` — do that deliberately, not by
+      // widening these cases.
+      case "context.graph.list": {
+        if (remote) {
+          throw new GitError({
+            code: "REMOTE_RESTRICTED",
+            message: "The context graph can only be read from the desktop app.",
+          });
+        }
+        const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
+        return listContextGraph(cwd);
+      }
+      case "context.graph.scaffold": {
+        if (remote) {
+          throw new GitError({
+            code: "REMOTE_RESTRICTED",
+            message:
+              "The context graph can only be scaffolded from the desktop app.",
+          });
+        }
+        const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
+        return ensureContextGraph(cwd);
+      }
+      case "context.graph.setShared": {
+        if (remote) {
+          throw new GitError({
+            code: "REMOTE_RESTRICTED",
+            message:
+              "Context attachments can only be shared from the desktop app.",
+          });
+        }
+        const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
+        const result = await setContextGraphAttachmentShared(
+          cwd,
+          reqStr(params, "attachmentId"),
+          params.shared === true,
+        );
+        if (!result.ok) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: result.error ?? "Couldn't move the attachment",
+          });
+        }
+        return result;
       }
 
       // ── Read: git ─────────────────────────────────────────

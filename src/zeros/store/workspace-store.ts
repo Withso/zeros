@@ -1295,11 +1295,15 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
     case "ADD_COLUMN3_TAB": {
       const scope = column3ScopeKey(state);
       const cur = state.column3ByScope[scope] ?? defaultScopeFor(scope);
-      // Changes + Review are singletons. A duplicate add
+      // Changes + Review + Context are singletons. A duplicate add
       // activates the existing home tab instead of creating duplicate
       // persistent surfaces. File and Browser tabs are both multi-instance and
       // closable; ADD strips legacy/caller pins below.
-      if (action.tab.type === "changes" || action.tab.type === "review") {
+      if (
+        action.tab.type === "changes" ||
+        action.tab.type === "review" ||
+        action.tab.type === "context"
+      ) {
         const existing = cur.tabs.find((t) => t.type === action.tab.type);
         if (existing) {
           if (action.activate === false || cur.activeId === existing.id)
@@ -1317,7 +1321,9 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       // idempotent add rather than corrupting the slice.
       if (cur.tabs.some((t) => t.id === action.tab.id)) return state;
       const tab =
-        action.tab.type === "changes" || action.tab.type === "review"
+        action.tab.type === "changes" ||
+        action.tab.type === "review" ||
+        action.tab.type === "context"
           ? { ...action.tab, pinned: true }
           : action.tab.pinned
             ? { ...action.tab, pinned: false }
@@ -1342,11 +1348,16 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
     case "REMOVE_COLUMN3_TAB": {
       const scope = column3ScopeKey(state);
       const cur = state.column3ByScope[scope] ?? defaultScopeFor(scope);
-      // Only the pinned Changes/Review homes are permanent. File and Browser
-      // tabs close normally, including blank ones.
+      // Only the pinned Changes/Review/Context homes are permanent. File and
+      // Browser tabs close normally, including blank ones.
       const target = cur.tabs.find((t) => t.id === action.id);
       if (!target) return state;
-      if (target.type === "changes" || target.type === "review") return state;
+      if (
+        target.type === "changes" ||
+        target.type === "review" ||
+        target.type === "context"
+      )
+        return state;
       const next = removeColumn3Tabs(cur, (t) => t.id === action.id);
       return {
         ...state,
@@ -1460,7 +1471,10 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         ...target,
         ...action.updates,
         // Type, not mutable persisted metadata, owns the close invariant.
-        pinned: target.type === "changes" || target.type === "review",
+        pinned:
+          target.type === "changes" ||
+          target.type === "review" ||
+          target.type === "context",
       };
       if (
         (target.type === "files" || target.type === "changes") &&

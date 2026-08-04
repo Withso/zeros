@@ -111,6 +111,13 @@ export interface AgentTextMessageAttachment {
    *  non-vision agent). Lets the renderer offer a "Open in
    *  Finder" affordance later. */
   diskPath?: string;
+  /** The composer attachment id this chip was encoded from — the key of its
+   *  `.context-graph/<scope>/attachments/<id>/` record (provenance: the
+   *  graph is append-only, so the record outlives the chip, the queue row,
+   *  and the send). Absent on pre-2026-08 rows; deliberately NOT reused by
+   *  edit-in-place reconstruction, whose fresh `att-edit-` ids are what keep
+   *  a sent record safe from later composer lifecycles. */
+  attachmentId?: string;
 }
 
 /** One ordered piece of a user message — text, an inline file/folder/
