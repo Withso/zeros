@@ -19,12 +19,16 @@ import { FileTree } from "@pierre/trees";
 import { ignoredPathDelta, mergeIgnoredPaths } from "../ignored-entries";
 import { ancestorDirPrefixes } from "../tree-paths";
 
-/** A headless controller with the same options WorkspaceFileTree uses. */
+/** A headless controller with the same options WorkspaceFileTree uses.
+ *  `flattenEmptyDirectories` went false on 2026-08-03 (Finder-style nesting —
+ *  the graph's one-folder-per-attachment layout turned every listing into
+ *  "local/attachments" composite rows); keep this in lockstep with
+ *  workspace-file-tree.tsx or these prove behavior the app doesn't have. */
 function makeTree(paths: string[]) {
   return new FileTree({
     paths,
     initialExpansion: "closed",
-    flattenEmptyDirectories: true,
+    flattenEmptyDirectories: false,
   });
 }
 
@@ -181,5 +185,71 @@ describe("resetPaths input is reconciled before the store sees it", () => {
       "dist-engine/",
       "packages/core/node_modules/",
     ]);
+  });
+});
+
+describe("the context graph under the production tree options", () => {
+  // The row-level "no `local/attachments` composite" contract lives in the
+  // library's renderer, which has no headless API — what CAN be pinned is
+  // that under the unflattened options every level of the graph's
+  // one-folder-per-attachment chain is its own expandable directory item,
+  // and that the lazy ignored-listing shape (a root that materialises one
+  // level at a time) keeps working against the store.
+  it("keeps each level of the attachment chain its own directory item", () => {
+    const tree = makeTree([
+      ".context-graph/.gitignore",
+      ".context-graph/local/attachments/UKhj7y/shot.png",
+      "src/app.ts",
+    ]);
+    const levels = [
+      ".context-graph/",
+      ".context-graph/local/",
+      ".context-graph/local/attachments/",
+      ".context-graph/local/attachments/UKhj7y/",
+    ];
+    for (const dir of levels) {
+      const item = tree.getItem(dir);
+      expect(item, dir).not.toBeNull();
+      expect(item!.isDirectory(), dir).toBe(true);
+      (item as unknown as { expand(): void }).expand();
+      expect(
+        (item as unknown as { isExpanded(): boolean }).isExpanded(),
+        dir,
+      ).toBe(true);
+    }
+    expect(
+      tree.getItem(".context-graph/local/attachments/UKhj7y/shot.png"),
+    ).not.toBeNull();
+  });
+
+  it("grows a lazily-listed graph root one level at a time without throwing", () => {
+    // The Files tab's actual sequence for `.context-graph/local/` — a root
+    // with no children yet, then each expansion adds the next level.
+    const tracked = ["src/a.ts"];
+    let applied = new Set<string>([".context-graph/local/"]);
+    const tree = makeTree([...tracked, ...applied]);
+    const grow = (next: Set<string>) => {
+      expect(() => tree.batch(ignoredPathDelta(applied, next))).not.toThrow();
+      applied = next;
+    };
+    grow(set(".context-graph/local/", ".context-graph/local/attachments/"));
+    grow(
+      set(
+        ".context-graph/local/",
+        ".context-graph/local/attachments/",
+        ".context-graph/local/attachments/UKhj7y/",
+      ),
+    );
+    grow(
+      set(
+        ".context-graph/local/",
+        ".context-graph/local/attachments/",
+        ".context-graph/local/attachments/UKhj7y/",
+        ".context-graph/local/attachments/UKhj7y/shot.png",
+      ),
+    );
+    expect(
+      tree.getItem(".context-graph/local/attachments/UKhj7y/shot.png"),
+    ).not.toBeNull();
   });
 });

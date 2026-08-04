@@ -143,6 +143,134 @@ describe("listIgnoredEntries", () => {
     expect(roots).toContain("dist/"); // …and a non-empty one still shows
   });
 
+  it("gives later empty roots a probe after one deep root spends its sub-budget", async () => {
+    let deep = path.join(workdir, "a-deep-empty");
+    for (let index = 0; index < 40; index += 1) {
+      deep = path.join(deep, `level-${index}`);
+      await mkdir(deep, { recursive: true });
+    }
+    await mkdir(path.join(workdir, "z-shallow-empty"));
+    await writeFile(
+      path.join(workdir, ".gitignore"),
+      "node_modules/\ndist/\n.env\na-deep-empty/\nz-shallow-empty/\n",
+    );
+
+    const roots = await listIgnoredEntries(workdir);
+
+    // The deep root safely remains visible once its own bounded proof expires;
+    // it must not consume the shared allowance needed to suppress the later row.
+    expect(roots).toContain("a-deep-empty/");
+    expect(roots).not.toContain("z-shallow-empty/");
+  });
+
+  it("suppresses an ignored dir whose only content is a nested .git", async () => {
+    // The tree never shows `.git` at any depth (readIgnoredDir drops it), so
+    // a vendored checkout cleaned down to its object store would render as a
+    // row that expands to nothing — the emptiness probe must not count what
+    // the expansion will hide.
+    await mkdir(path.join(workdir, "vendor", "emptydep"), { recursive: true });
+    await initRepo(path.join(workdir, "vendor", "emptydep"));
+    await mkdir(path.join(workdir, "vendor2", "realdep"), { recursive: true });
+    await initRepo(path.join(workdir, "vendor2", "realdep"));
+    await writeFile(
+      path.join(workdir, "vendor2", "realdep", "index.js"),
+      "//\n",
+    );
+    await writeFile(
+      path.join(workdir, ".gitignore"),
+      "node_modules/\ndist/\n.env\nvendor/\nvendor2/\n",
+    );
+    const roots = await listIgnoredEntries(workdir);
+    expect(roots).not.toContain("vendor/");
+    // …while a checkout that still holds real files keeps its row.
+    expect(roots).toContain("vendor2/");
+  });
+
+  // ── The .context-graph shape: a self-ignoring folder whose ignored dir
+  // sits NEXT TO an ignored file and a (possibly empty) not-ignored sibling.
+  // This is what every workspace's composer-attachment store looks like, and
+  // it broke the old `--no-empty-directory` keep-set two distinct ways. ──
+
+  it("keeps an ignored dir when git's empty-dir run collapses at a HIGHER level", async () => {
+    // Scaffold + one staged attachment, shared/ still empty. Git's plain
+    // --directory run emits `.context-graph/.gitignore` + `.context-graph/local/`,
+    // but the --no-empty-directory run collapses the WHOLE folder to
+    // `.context-graph/` — so an exact-path keep-set dropped `local/` as
+    // "empty" and the Files tab hid every composer attachment.
+    await mkdir(path.join(workdir, ".context-graph", "local", "attachments", "AbC123"), {
+      recursive: true,
+    });
+    await mkdir(path.join(workdir, ".context-graph", "shared", "attachments"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(workdir, ".context-graph", ".gitignore"),
+      "/.gitignore\n/local/\n",
+    );
+    await writeFile(
+      path.join(workdir, ".context-graph", "local", "attachments", "AbC123", "shot.png"),
+      "png\n",
+    );
+    const roots = await listIgnoredEntries(workdir);
+    expect(roots).toContain(".context-graph/local/");
+    expect(roots).toContain(".context-graph/.gitignore");
+    // …and the attachment itself is one lazy expansion away, not flattened
+    // into the roots payload.
+    expect(await listIgnoredEntries(workdir, ".context-graph/local")).toEqual([
+      ".context-graph/local/attachments/",
+    ]);
+  });
+
+  it("keeps an ignored dir whose sibling holds untracked, non-ignored content", async () => {
+    // Same store once something is SHARED: shared/ now holds an untracked,
+    // non-ignored file, and `--directory --no-empty-directory` returns
+    // NOTHING for the subtree (the out/report.md pathology, eating a
+    // directory this time). The probe-based listing must not care.
+    await mkdir(path.join(workdir, ".context-graph", "local", "attachments", "AbC123"), {
+      recursive: true,
+    });
+    await mkdir(path.join(workdir, ".context-graph", "shared", "attachments", "xY42"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(workdir, ".context-graph", ".gitignore"),
+      "/.gitignore\n/local/\n",
+    );
+    await writeFile(
+      path.join(workdir, ".context-graph", "local", "attachments", "AbC123", "shot.png"),
+      "png\n",
+    );
+    await writeFile(
+      path.join(workdir, ".context-graph", "shared", "attachments", "xY42", "notes.md"),
+      "# shared\n",
+    );
+    const roots = await listIgnoredEntries(workdir);
+    expect(roots).toContain(".context-graph/local/");
+    // The shared file is untracked-not-ignored: the OTHER listing's territory.
+    expect(roots.some((p) => p.includes("shared"))).toBe(false);
+    const tracked = await listWorkspaceFiles(workdir);
+    expect(tracked).toContain(".context-graph/shared/attachments/xY42/notes.md");
+  });
+
+  it("still suppresses the ignored dir while it holds no files at all", async () => {
+    // The freshly-scaffolded store: local/attachments/ exists but is empty.
+    // The ignored FILE next to it must survive; the empty dir must not
+    // become a dead row.
+    await mkdir(path.join(workdir, ".context-graph", "local", "attachments"), {
+      recursive: true,
+    });
+    await mkdir(path.join(workdir, ".context-graph", "shared", "attachments"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(workdir, ".context-graph", ".gitignore"),
+      "/.gitignore\n/local/\n",
+    );
+    const roots = await listIgnoredEntries(workdir);
+    expect(roots).toContain(".context-graph/.gitignore");
+    expect(roots).not.toContain(".context-graph/local/");
+  });
+
   it("marks a SYMLINKED ignored directory as expandable in the roots listing", async () => {
     // `git ls-files --directory` classifies a symlink as a file, so a symlinked
     // ignored dir inside a MIXED directory came back with no trailing slash —

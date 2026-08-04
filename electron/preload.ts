@@ -73,6 +73,7 @@ const ALLOWED_COMMANDS = new Set<string>([
   "pick_project_folder",
   "process_metrics_snapshot",
   "read_file",
+  "read_image_thumbnail",
   "write_file",
   "reveal_in_finder",
   "shell_open_url",

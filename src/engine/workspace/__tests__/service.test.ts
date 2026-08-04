@@ -990,6 +990,15 @@ describe("WorkspaceService", () => {
       message: expect.stringMatching(/unavailable in a design workspace/i),
     });
 
+    await expect(
+      svc.handle("context.graph.scaffold", {
+        workspaceId: workspace.workspaceId,
+      }),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_FAILED",
+      message: expect.stringMatching(/unavailable in a design workspace/i),
+    });
+
     const tokenSnapshot = (await svc.handle("design.snapshot", {
       workspaceId: workspace.workspaceId,
     })) as {

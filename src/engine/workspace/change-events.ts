@@ -109,6 +109,14 @@ const WORKSPACE_MUTATIONS = new Set([
 
   // Files-tab manual save changes content and its Git comparisons.
   "file.write",
+
+  // Context-graph writes: scaffolding the folder skeleton and moving an
+  // attachment between the gitignored `local/` and committed `shared/` scopes
+  // (the latter changes git status too). No-op results are suppressed in
+  // dbChangedKinds so the idempotent re-scaffold on every Context-tab open
+  // doesn't broadcast a global refresh.
+  "context.graph.scaffold",
+  "context.graph.setShared",
 ]);
 
 /** Ops whose RPC can legitimately outlive the renderer's request budget. Two
@@ -180,6 +188,17 @@ export function dbChangedKinds(op: string, result?: unknown): string[] | null {
   // The periodic PR detector is a read until it actually finds and persists a
   // PR. Avoid turning a once-per-minute null probe into a global Git refresh.
   if (op === "gh.prSync" && result == null) return null;
+  // Context-graph mutations that changed nothing on disk (the idempotent
+  // re-scaffold, an already-in-scope share toggle) don't invalidate anything.
+  if (
+    (op === "context.graph.scaffold" || op === "context.graph.setShared") &&
+    !!result &&
+    typeof result === "object" &&
+    (result as { created?: boolean; moved?: boolean }).created !== true &&
+    (result as { created?: boolean; moved?: boolean }).moved !== true
+  ) {
+    return null;
+  }
   if (WORKSPACE_MUTATIONS.has(op)) return ["workspaces"];
   return null;
 }

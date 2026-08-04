@@ -2858,11 +2858,11 @@ export function AgentChat({
 
   // Phase D2 (2026-05-07) iter 3: image attachments are universal —
   // vision-capable agents (Claude) get the inline ImageContent block;
-  // everyone else gets the bytes persisted to <cwd>/.context/attachments/…
-  // and a text block referencing the path (their models still Read the
-  // file). End of "silent drop" era. Shared by handleSend and the
-  // queued-message edit save, so an edited queued send re-encodes its
-  // attachments exactly like a fresh one.
+  // everyone else gets the bytes persisted to
+  // <cwd>/.context-graph/<scope>/attachments/… and a text block referencing
+  // the path (their models still Read the file). End of "silent drop" era.
+  // Shared by handleSend and the queued-message edit save, so an edited
+  // queued send re-encodes its attachments exactly like a fresh one.
   //
   // 2026-07-30: the loop moved to encode-attachments.ts, shared with
   // editAndResubmit. It used to be a second, divergent copy with no
@@ -3256,6 +3256,10 @@ export function AgentChat({
     const idx = queuedMessages.findIndex((m) => m.id === id);
     if (editingQueuedRef.current === id) exitQueuedEdit();
     session.removeQueued?.(id);
+    // The row's staged files deliberately STAY in the context graph — the
+    // graph is append-only (context-graph-staging.ts): deleting the message
+    // withdraws the prompt, not the workspace's record of its files. Only
+    // the user deleting them on disk removes them.
     // Keyboard flow: keep the selection on the neighbouring row so repeated
     // ⌫ walks the list; deleting the last row returns to the composer.
     if (queueSelectedRef.current === id) {
