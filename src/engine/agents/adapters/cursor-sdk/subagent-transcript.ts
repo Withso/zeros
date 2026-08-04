@@ -386,7 +386,13 @@ function mapTranscriptTool(
     return { toolKind: "web_search", title: "Web search", rawInput: { query: str(inp.query ?? inp.q) } };
   if (/fetch/.test(n))
     return { toolKind: "fetch", title: "Fetch", rawInput: { url: str(inp.url ?? inp.URL) } };
-  if (/^mcp__|mcp/.test(n)) return { toolKind: "mcp", title: name, rawInput: inp };
+  // Was `/^mcp__|mcp/`, where `^` bound only to the first alternative — so the
+  // bare `mcp` branch already matched everything the anchored one did, making
+  // the whole pattern exactly `/mcp/` with a misleading anchor bolted on
+  // (CodeQL js/regex/missing-regexp-anchor). Loose matching is deliberate here
+  // and matches the neighbouring /delete/ and /fetch/ probes, so this keeps the
+  // behaviour and drops the part that never did anything.
+  if (/mcp/.test(n)) return { toolKind: "mcp", title: name, rawInput: inp };
   if (/^(task|agent|spawn)/.test(n))
     return {
       toolKind: "subagent",

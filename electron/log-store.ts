@@ -340,8 +340,16 @@ export function readRecentLogs(maxBytes: number = RECENT_LOG_BYTES): string {
  *  scrubs the content first so the viewed file matches, byte for byte, what a
  *  feedback submission would share — no surprises after the fact. */
 export function exportLogsToTemp(content: string): string {
-  const file = path.join(os.tmpdir(), `zeros-feedback-logs-${Date.now()}.jsonl`);
-  fs.writeFileSync(file, content, "utf8");
+  // SECURITY: the name used to be `zeros-feedback-logs-${Date.now()}.jsonl`
+  // directly in the shared temp dir — fully predictable, so another local
+  // account could pre-create that path as a symlink and redirect this write
+  // (CodeQL js/insecure-temporary-file). mkdtempSync creates a 0700 directory
+  // with an unguessable suffix and fails outright if it already exists, so the
+  // file inside it cannot be pre-planted. The timestamp stays in the filename
+  // because it is what makes successive exports readable to a human.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-feedback-"));
+  const file = path.join(dir, `zeros-feedback-logs-${Date.now()}.jsonl`);
+  fs.writeFileSync(file, content, { encoding: "utf8", mode: 0o600 });
   return file;
 }
 

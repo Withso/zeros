@@ -17,8 +17,8 @@
 // reading process.arch.
 // ──────────────────────────────────────────────────────────
 
-import { execSync } from "node:child_process";
-import { mkdirSync, existsSync, mkdtempSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdirSync, existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,15 +58,20 @@ mkdirSync(binariesDir, { recursive: true });
 
 const outfile = resolve(binariesDir, `zeros-engine-${mapping.rustTriple}`);
 
-const cmd = [
-  "bun",
+// NOT .join(" ") into a shell. `entry` and `outfile` are absolute paths derived
+// from the checkout location, so a repo cloned to a path containing a space
+// silently built the wrong thing, and one containing shell metacharacters was an
+// injection (CodeQL js/shell-command-injection-from-environment). Keeping the argv
+// as an array and handing it to execFileSync means no shell parses it at all —
+// paths with spaces just work, and there is nothing left to quote.
+const cmdArgs = [
   "build",
   entry,
   "--compile",
   `--target=${mapping.bunTarget}`,
   "--outfile",
   outfile,
-].join(" ");
+];
 
 // Run from a throwaway tmp dir: Bun drops intermediate `.*.bun-build` files in
 // CWD during compile and strands them if the build is killed. Keeping CWD out
@@ -74,10 +79,12 @@ const cmd = [
 // accumulating in the project root.
 const buildCwd = mkdtempSync(join(tmpdir(), "zeros-sidecar-"));
 
-console.log(`[build-sidecar] ${cmd}`);
-execSync(cmd, { stdio: "inherit", cwd: buildCwd });
+console.log(`[build-sidecar] bun ${cmdArgs.join(" ")}`);
+execFileSync("bun", cmdArgs, { stdio: "inherit", cwd: buildCwd });
 
 // Bun writes 755 already; chmod defensively in case of umask weirdness.
-execSync(`chmod +x ${outfile}`, { stdio: "inherit" });
+// chmodSync, not `execSync("chmod +x …")` — same unquoted-path problem as above,
+// and spawning a process to set one mode bit was never worth it.
+chmodSync(outfile, 0o755);
 
 console.log(`[build-sidecar] wrote ${outfile}`);

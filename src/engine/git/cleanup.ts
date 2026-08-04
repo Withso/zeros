@@ -97,7 +97,21 @@ export async function prepareHeavyDirEviction(
     tmpdir(),
     `zeros-trash-${randomBytes(4).toString("hex")}`,
   );
-  await mkdir(trashRoot, { recursive: true });
+  // SECURITY: `mkdir(..., { recursive: true })` SUCCEEDS on a path that already
+  // exists, which made this a squattable target in a world-writable dir — guess
+  // the suffix, pre-create it (or symlink it), and an evicted worktree gets
+  // renamed somewhere you control (CodeQL js/insecure-temporary-file). Plain
+  // non-recursive mkdir fails EEXIST instead, so a lost race aborts the eviction
+  // loudly rather than proceeding into a hostile directory. tmpdir() always
+  // exists, so `recursive` was never doing anything here anyway.
+  //
+  // NOT mkdtemp, deliberately: TRASH_DIR_RE above is /^\.?zeros-trash-[0-9a-f]{8}$/
+  // and startup crash-reclaim uses it to find abandoned trash. mkdtemp's 6-char
+  // mixed-case suffix does not match that, so switching primitives here would
+  // quietly strand every orphaned trash dir instead of reclaiming it. This keeps
+  // the 8-hex naming contract that the reclaim path and its test both assert, and
+  // matches how the sibling `.zeros-trash-` root below is already created.
+  await mkdir(trashRoot);
   await markTrashOwner(trashRoot, worktreePath);
   const entries: Array<{ src: string; dst: string }> = [];
   for (const name of HEAVY_DIR_NAMES) {
