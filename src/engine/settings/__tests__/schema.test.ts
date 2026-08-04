@@ -125,6 +125,44 @@ describe("sanitizeLayer", () => {
     expect(repo.warnings).toHaveLength(5);
   });
 
+  it("round-trips every Models setting and validates Claude's idle timeout", () => {
+    const models = {
+      default: "claude-opus-4-8[1m]",
+      default_agent: "claude",
+      favorites: { claude: "claude-sonnet-5[1m]" },
+      chat_title_model: "claude-haiku-4-5",
+      claude_code: {
+        default_effort_level: "high",
+        fallback_model: "claude-sonnet-5[1m]",
+        budget_cap_usd: 5,
+        idle_timeout_minutes: 300,
+      },
+    };
+
+    expect(sanitizeLayer({ models }, "user")).toEqual({
+      doc: { models },
+      warnings: [],
+    });
+
+    const invalid = sanitizeLayer(
+      {
+        models: {
+          claude_code: {
+            fallback_model: "none",
+            idle_timeout_minutes: 301,
+          },
+        },
+      },
+      "user",
+    );
+    expect(invalid.doc).toEqual({
+      models: { claude_code: { fallback_model: "none" } },
+    });
+    expect(invalid.warnings).toEqual([
+      expect.stringContaining("models.claude_code.idle_timeout_minutes"),
+    ]);
+  });
+
   it("drops an invalid GitHub method without dropping its valid siblings", () => {
     const r = sanitizeLayer(
       {

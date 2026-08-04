@@ -60,6 +60,13 @@ export interface ComposerAttachment {
   kind: "image" | "text";
   /** base64 payload for images. Empty for text attachments. */
   data: string;
+  /** Persisted cwd-relative source for a reconstructed transcript image.
+   *  Freshly staged images have bytes in `data`; edit-resend images may have
+   *  only this reference until the send pipeline resolves them. */
+  diskPath?: string;
+  /** Stable graph record id retained while `id` is replaced by the edit
+   *  composer's fresh node identity. */
+  contextAttachmentId?: string;
   /** Decoded body for text attachments (.md, .txt, etc.). */
   text?: string;
   /** Per-attachment validation outcome under the active agent +

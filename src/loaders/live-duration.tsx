@@ -22,7 +22,7 @@
 // custom 1.6s ease-in-out infinite opacity pulse.
 // ──────────────────────────────────────────────────────────
 
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 
 import { cn } from "@/zeros/ui/cn";
 
@@ -47,15 +47,31 @@ export const LiveDuration = memo(function LiveDuration({
   // "is this still running" and "is it taking a long time", both
   // answered fine at 1s granularity.
   const [tick, setTick] = useState(0);
+  const elRef = useRef<HTMLSpanElement | null>(null);
   useEffect(() => {
-    const id = window.setInterval(() => setTick((t) => t + 1), 1000);
+    const id = window.setInterval(() => {
+      // Retained-but-hidden chat decks keep this component mounted
+      // (visibility:hidden), and N streaming tool cards across those decks
+      // would otherwise each re-render every second while invisible. The
+      // elapsed value is derived from startedAt at render time, so skipped
+      // ticks cost nothing: the first visible tick shows the correct total.
+      const el = elRef.current;
+      if (el && typeof el.checkVisibility === "function" && !el.checkVisibility()) {
+        return;
+      }
+      setTick((t) => t + 1);
+    }, 1000);
     return () => window.clearInterval(id);
   }, []);
   // tick is read only to satisfy the linter — the increment alone is
   // what schedules a re-render.
   void tick;
   const elapsedMs = Math.max(0, Date.now() - startedAt);
-  return <span className={cn(LIVE_DURATION_CLS, className)}>{formatElapsed(elapsedMs)}</span>;
+  return (
+    <span ref={elRef} className={cn(LIVE_DURATION_CLS, className)}>
+      {formatElapsed(elapsedMs)}
+    </span>
+  );
 });
 
 interface DurationChipProps {

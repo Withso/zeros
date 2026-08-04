@@ -123,10 +123,21 @@ export function RunHorseShimmer({ className }: RunHorseShimmerProps) {
     };
 
     const tick = (now: number) => {
-      const elapsed =
-        ((now - anchorTime) * RUN_HORSE_MOTION_DEFAULTS.speed) /
-        RUN_HORSE_MOTION_DEFAULTS.cycleDurationMs;
-      draw(elapsed);
+      // Retained hidden decks (collapsed terminal panels, background folders)
+      // keep this canvas mounted; skip the repaint while it isn't rendered so
+      // a run in a hidden surface doesn't cost a canvas draw every frame.
+      // The rAF keeps running (cheap when it does nothing) so the shimmer
+      // resumes seamlessly — with the correct phase — on the first visible
+      // frame; elapsed derives from `now`, not from frames painted.
+      const hidden =
+        typeof canvas.checkVisibility === "function" &&
+        !canvas.checkVisibility();
+      if (!hidden) {
+        const elapsed =
+          ((now - anchorTime) * RUN_HORSE_MOTION_DEFAULTS.speed) /
+          RUN_HORSE_MOTION_DEFAULTS.cycleDurationMs;
+        draw(elapsed);
+      }
       animationFrame = window.requestAnimationFrame(tick);
     };
 

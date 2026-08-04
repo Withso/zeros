@@ -17,6 +17,8 @@ export interface ComposerEditorContextValue {
   getAttachment: (id: string) => ComposerAttachment | undefined;
   /** Open the full-screen lightbox for an image pill (data: URL). */
   onPreviewImage?: (dataUri: string) => void;
+  /** Workspace root for disk-backed images reconstructed from transcripts. */
+  cwd?: string | null;
 }
 
 const ComposerEditorContext = createContext<ComposerEditorContextValue>({

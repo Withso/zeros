@@ -237,7 +237,13 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       fontSize: TERMINAL_FONT_SIZE_PX,
       cursorBlink: true,
       cursorStyle: "bar",
-      scrollback: 10_000,
+      // xterm's buffer costs ~12 bytes/cell, so scrollback × cols is resident
+      // memory PER terminal — and terminals stay mounted across the retained
+      // folder deck. 10k lines × ~200 cols was ~25 MB apiece; 2k keeps deep
+      // history for real use while capping the fleet's floor. The engine-side
+      // reattach mirror replays ~256 KB anyway, so deeper renderer scrollback
+      // only ever outlives a live attach, never a reattach.
+      scrollback: 2_000,
       allowProposedApi: true,
       // Background comes from `surfaceToken` so this one shared component matches
       // whatever it sits on (--bg1 everywhere today — col-2 agent terminals and

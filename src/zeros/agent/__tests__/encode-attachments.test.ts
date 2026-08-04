@@ -16,9 +16,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const writeContextAttachment = vi.fn();
+const readImageAttachment = vi.fn();
 
 vi.mock("../agent-history-client", () => ({
-  writeContextAttachment: (...args: unknown[]) => writeContextAttachment(...args),
+  writeContextAttachment: (...args: unknown[]) =>
+    writeContextAttachment(...args),
+  readImageAttachment: (...args: unknown[]) => readImageAttachment(...args),
 }));
 
 import {
@@ -68,7 +71,10 @@ const VISION: EncodeAttachmentsContext = {
   chatId: "chat-1",
   agentId: "claude",
 };
-const NON_VISION: EncodeAttachmentsContext = { ...VISION, supportsImage: false };
+const NON_VISION: EncodeAttachmentsContext = {
+  ...VISION,
+  supportsImage: false,
+};
 const NO_CWD: EncodeAttachmentsContext = {
   ...NON_VISION,
   cwd: null,
@@ -93,8 +99,7 @@ describe("encodeAttachments — text attachments reach the agent", () => {
   beforeEach(() => {
     writeContextAttachment.mockReset();
     writeContextAttachment.mockResolvedValue({
-      absolutePath:
-        "/repo/.context-graph/local/attachments/att-img/shot.png",
+      absolutePath: "/repo/.context-graph/local/attachments/att-img/shot.png",
       relativePath: ".context-graph/local/attachments/att-img/shot.png",
       mimeType: "image/png",
       bytes: 4,
@@ -272,34 +277,45 @@ describe("encodeAttachments — validation", () => {
 describe("encodeAttachments — image branches still work", () => {
   beforeEach(() => {
     writeContextAttachment.mockReset();
+    readImageAttachment.mockReset();
     writeContextAttachment.mockResolvedValue({
-      absolutePath:
-        "/repo/.context-graph/local/attachments/att-img/shot.png",
+      absolutePath: "/repo/.context-graph/local/attachments/att-img/shot.png",
       relativePath: ".context-graph/local/attachments/att-img/shot.png",
       mimeType: "image/png",
       bytes: 4,
     });
   });
 
-  it("inlines the image for a vision agent — and stages the graph copy", async () => {
-    const { blocks } = await encodeAttachments([imageAttachment()], VISION);
+  it("inlines the image for a vision agent while persisting only its disk path", async () => {
+    const { blocks, bubbleAttachments, bubbleAttachmentById } =
+      await encodeAttachments([imageAttachment()], VISION);
     expect(blocks).toEqual([
       { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
     ]);
-    // The inline block is the delivery; the graph copy is the canvas record.
     expect(writeContextAttachment).toHaveBeenCalledTimes(1);
+    expect(bubbleAttachments).toEqual([
+      {
+        name: "shot.png",
+        mimeType: "image/png",
+        kind: "image",
+        diskPath: ".context-graph/local/attachments/att-img/shot.png",
+        attachmentId: "att-img",
+      },
+    ]);
+    expect(bubbleAttachmentById.get("att-img")).toBe(bubbleAttachments[0]);
+    expect(JSON.stringify(bubbleAttachments)).not.toContain("aGVsbG8=");
   });
 
-  it("keeps the inline image when the vision-path graph copy fails", async () => {
+  it("reports a vision image when its durable graph copy fails", async () => {
     writeContextAttachment.mockRejectedValueOnce(new Error("no IPC"));
     const { blocks, skipped } = await encodeAttachments(
       [imageAttachment()],
       VISION,
     );
-    expect(blocks).toEqual([
-      { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+    expect(blocks).toEqual([]);
+    expect(skipped).toEqual([
+      { name: "shot.png", reason: "it couldn't be saved to disk" },
     ]);
-    expect(skipped).toEqual([]);
   });
 
   it("persists to disk and references it for a non-vision agent", async () => {
@@ -314,12 +330,24 @@ describe("encodeAttachments — image branches still work", () => {
     );
   });
 
-  it("falls back to the inline block when there is no cwd", async () => {
-    const { blocks } = await encodeAttachments([imageAttachment()], NO_CWD);
+  it("falls back to a byte-free transcript entry when there is no cwd", async () => {
+    const { blocks, bubbleAttachments } = await encodeAttachments(
+      [imageAttachment()],
+      NO_CWD,
+    );
     expect(blocks).toEqual([
       { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
     ]);
     expect(writeContextAttachment).not.toHaveBeenCalled();
+    expect(bubbleAttachments).toEqual([
+      {
+        name: "shot.png",
+        mimeType: "image/png",
+        kind: "image",
+        attachmentId: "att-img",
+      },
+    ]);
+    expect(JSON.stringify(bubbleAttachments)).not.toContain("aGVsbG8=");
   });
 
   it("keeps the disk-reference path for a non-vision agent on a brand-new chat", async () => {
@@ -348,11 +376,66 @@ describe("encodeAttachments — image branches still work", () => {
     ]);
     warn.mockRestore();
   });
+
+  it("rehydrates a disk-backed transcript image before edit-resend", async () => {
+    readImageAttachment.mockResolvedValue({
+      base64: "cmVsb2FkZWQ=",
+      mimeType: "image/png",
+      bytes: 8,
+    });
+    writeContextAttachment.mockResolvedValueOnce({
+      absolutePath: "/repo/.context-graph/local/attachments/original/shot.png",
+      relativePath: ".context-graph/local/attachments/original/shot.png",
+      mimeType: "image/png",
+      bytes: 8,
+      skipped: true,
+    });
+
+    const { blocks, bubbleAttachments, skipped } = await encodeAttachments(
+      [
+        imageAttachment({
+          id: "att-edit-new",
+          data: "",
+          size: 0,
+          diskPath: ".context-graph/local/attachments/original/shot.png",
+          contextAttachmentId: "original",
+        }),
+      ],
+      VISION,
+    );
+
+    expect(readImageAttachment).toHaveBeenCalledWith({
+      cwd: "/repo",
+      diskPath: ".context-graph/local/attachments/original/shot.png",
+      attachmentId: "original",
+      mimeType: "image/png",
+    });
+    expect(writeContextAttachment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attachmentId: "original",
+        base64: "cmVsb2FkZWQ=",
+      }),
+    );
+    expect(blocks).toEqual([
+      { type: "image", mimeType: "image/png", data: "cmVsb2FkZWQ=" },
+    ]);
+    expect(bubbleAttachments[0]).toMatchObject({
+      diskPath: ".context-graph/local/attachments/original/shot.png",
+      attachmentId: "original",
+    });
+    expect(skipped).toEqual([]);
+  });
 });
 
 describe("encodeAttachments — ordering", () => {
   it("preserves composer order across mixed kinds", async () => {
     writeContextAttachment.mockReset();
+    writeContextAttachment.mockResolvedValue({
+      absolutePath: "/repo/.context-graph/local/attachments/b/shot.png",
+      relativePath: ".context-graph/local/attachments/b/shot.png",
+      mimeType: "image/png",
+      bytes: 4,
+    });
     const { blocks } = await encodeAttachments(
       [
         textAttachment({ id: "a", name: "one.txt", text: "1" }),

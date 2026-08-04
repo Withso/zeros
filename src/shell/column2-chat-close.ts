@@ -64,6 +64,20 @@ export interface ChatCloseInputs {
   storedDraft: ComposerDraft | undefined;
 }
 
+/** Collapse the resident array + eviction-safe durable hint into the existing
+ *  close contract's count. A cold used chat must archive, never be discarded
+ *  merely because its message objects were released. */
+export function messageCountForChatClose(
+  slot:
+    | { messages: readonly unknown[]; hasTranscript?: boolean }
+    | null
+    | undefined,
+): number {
+  return slot && (slot.messages.length > 0 || slot.hasTranscript === true)
+    ? 1
+    : 0;
+}
+
 /** Should closing this tab DISCARD it (delete → never reaches History) rather
  *  than ARCHIVE it (the default → restorable from History)?
  *

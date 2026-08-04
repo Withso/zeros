@@ -110,6 +110,10 @@ import { InputQueue, createDeferred, type Deferred } from "./input-queue";
  *  (and again if the tier ever changes mid-run) instead of once per turn. */
 let loggedCliSource: ClaudeCliSourceKind | null = null;
 
+const CLAUDE_IDLE_TIMEOUT_ENV_VAR = "ZEROS_CLAUDE_IDLE_TIMEOUT_MINUTES";
+const DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES = 30;
+const ALLOWED_CLAUDE_IDLE_TIMEOUT_MINUTES = new Set([30, 60, 120, 300]);
+
 type ClaudeMode = "default" | "plan" | "accept-edits" | "auto" | "bypass";
 
 // Mirrors the engine adapters' auth-keyword matching. When the SDK
@@ -544,8 +548,8 @@ interface SdkSession {
    *  `resume`; null until the first turn has started. Persisted to the
    *  session dir so a reopen / engine-restart can resume the real id. */
   claudeSessionId: string | null;
-  /** The live persistent query (null until the first prompt, or after a
-   *  dispose / fatal error — recreated lazily with `resume`). */
+  /** The live persistent query (null until the first prompt, or after an idle
+   *  release / dispose / fatal error — recreated lazily with `resume`). */
   query: Query | null;
   /** Push channel feeding the query's prompt iterable. */
   input: InputQueue<SDKUserMessage>;
@@ -564,6 +568,16 @@ interface SdkSession {
   /** Serializes the idle interrupt used to cancel a one-shot wake-up with the
    * next prompt, so the control request can never hit an unrelated turn. */
   scheduledWakeupStop: Promise<void> | null;
+  /** Timer that detaches only the live query after a bounded idle period. */
+  idleTeardownTimer: ReturnType<typeof setTimeout> | null;
+  /** Start of the current uninterrupted eligible-idle interval. */
+  idleSince: number | null;
+  /** prompt() calls admitted but not fully unwound, including boundary waits. */
+  pendingPromptCalls: number;
+  /** Locally queued turnless runs (currently /compact) awaiting a result. */
+  turnlessRunsPending: number;
+  /** Provider-originated work running without a local prompt() deferred. */
+  providerRunActive: boolean;
   /** Permission resolvers from canUseTool, keyed by permissionId. */
   readonly pendingPermissions: Map<
     string,
@@ -630,10 +644,16 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   /** Injectable so tests can drive the lifecycle with a scripted query
    *  without spawning a real `claude` process. Defaults to the SDK's. */
   private readonly queryFn: typeof query;
+  /** Test-only millisecond override; production always uses the bounded env. */
+  private readonly idleTimeoutOverrideMs: number | undefined;
 
-  constructor(ctx: AgentAdapterContext, opts?: { queryFn?: typeof query }) {
+  constructor(
+    ctx: AgentAdapterContext,
+    opts?: { queryFn?: typeof query; idleTimeoutMs?: number },
+  ) {
     this.ctx = ctx;
     this.queryFn = opts?.queryFn ?? query;
+    this.idleTimeoutOverrideMs = opts?.idleTimeoutMs;
   }
 
   // ── initialize ────────────────────────────────────────
@@ -829,6 +849,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       existing.env = opts.env;
       existing.cliBinary = opts.cliBinary?.trim() || undefined;
       existing.mcpServers = opts.mcpServers;
+      this.refreshIdleTeardown(existing);
       return loadResponseWithModes(existing.permissionMode);
     }
     await ensureSessionDir(opts.sessionId);
@@ -890,6 +911,11 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       turn: null,
       turnIdle: null,
       scheduledWakeupStop: null,
+      idleTeardownTimer: null,
+      idleSince: null,
+      pendingPromptCalls: 0,
+      turnlessRunsPending: 0,
+      providerRunActive: false,
       pendingPermissions: new Map(),
       pendingQuestions: new Map(),
       questionByToolUse: new Map(),
@@ -900,6 +926,112 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       queryAllowsBypass: false,
       skillNames: new Set(),
     };
+  }
+
+  private idleTimeoutMs(state: SdkSession): number {
+    if (
+      typeof this.idleTimeoutOverrideMs === "number" &&
+      Number.isFinite(this.idleTimeoutOverrideMs) &&
+      this.idleTimeoutOverrideMs >= 0
+    ) {
+      return this.idleTimeoutOverrideMs;
+    }
+    const minutes = Number(state.env?.[CLAUDE_IDLE_TIMEOUT_ENV_VAR]);
+    const boundedMinutes = ALLOWED_CLAUDE_IDLE_TIMEOUT_MINUTES.has(minutes)
+      ? minutes
+      : DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES;
+    return boundedMinutes * 60_000;
+  }
+
+  private clearIdleTeardown(state: SdkSession): void {
+    if (state.idleTeardownTimer !== null) clearTimeout(state.idleTeardownTimer);
+    state.idleTeardownTimer = null;
+  }
+
+  private markSessionBusy(state: SdkSession): void {
+    this.clearIdleTeardown(state);
+    state.idleSince = null;
+  }
+
+  /** Rechecked both when arming and when the callback fires. In particular,
+   * wake-ups, queued input, provider-owned work, and approval/question gates
+   * keep the process alive. A known SDK session id is mandatory so teardown
+   * can never discard an unborn conversation that cannot be resumed. */
+  private canDetachIdleQuery(state: SdkSession): boolean {
+    return Boolean(
+      !state.disposed &&
+      state.query &&
+      !state.input.closed &&
+      state.claudeSessionId &&
+      state.turn === null &&
+      state.turnIdle === null &&
+      state.pendingPromptCalls === 0 &&
+      state.turnlessRunsPending === 0 &&
+      !state.providerRunActive &&
+      state.scheduledWakeupStop === null &&
+      state.pendingPermissions.size === 0 &&
+      state.pendingQuestions.size === 0 &&
+      state.input.pendingCount === 0 &&
+      !state.translator.hasActiveWork,
+    );
+  }
+
+  private refreshIdleTeardown(state: SdkSession): void {
+    this.clearIdleTeardown(state);
+    if (!this.canDetachIdleQuery(state)) {
+      state.idleSince = null;
+      return;
+    }
+    if (state.idleSince == null) state.idleSince = Date.now();
+    const remaining = Math.max(
+      0,
+      state.idleSince + this.idleTimeoutMs(state) - Date.now(),
+    );
+    const timer = setTimeout(() => {
+      if (state.idleTeardownTimer !== timer) return;
+      state.idleTeardownTimer = null;
+      if (!this.canDetachIdleQuery(state)) {
+        state.idleSince = null;
+        this.refreshIdleTeardown(state);
+        return;
+      }
+      const deadline =
+        (state.idleSince ?? Date.now()) + this.idleTimeoutMs(state);
+      if (Date.now() < deadline) {
+        this.refreshIdleTeardown(state);
+        return;
+      }
+      this.detachIdleQuery(state);
+    }, remaining);
+    state.idleTeardownTimer = timer;
+  }
+
+  /** End only the resumable live query. The SdkSession, translator, SDK
+   * session id, and on-disk metadata remain intact for ensureQuery() to lazily
+   * resume on the next turn. Null the generation slot before abort/close so a
+   * stale consumer can never clobber a concurrently-created replacement. */
+  private detachIdleQuery(state: SdkSession): void {
+    const q = state.query;
+    if (!q) return;
+    this.clearIdleTeardown(state);
+    state.idleSince = null;
+    state.query = null;
+    state.consumer = null;
+    state.queryAllowsBypass = false;
+    state.input.end();
+    try {
+      state.abort.abort();
+    } catch {
+      /* already aborted */
+    }
+    try {
+      q.close();
+    } catch {
+      /* already closed */
+    }
+    console.info(
+      `[claude-sdk] released idle query for ${state.zerosSessionId}`,
+    );
   }
 
   // ── prompt ────────────────────────────────────────────
@@ -917,75 +1049,86 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         agentId: this.agentId,
       });
     }
-    // The consumer clears `turn` immediately before settling its result, but
-    // prompt() may still be unwinding. Serialize on the explicit teardown
-    // seam so a control action cannot observe that transient half-idle state.
-    const previousTurnIdle = state.turnIdle;
-    if (previousTurnIdle) {
-      await previousTurnIdle.promise;
-      state = this.mustState(opts.sessionId);
-      if (state.turn) {
-        throw new AgentFailureError({
-          kind: "protocol-error",
-          message: "a prompt is already in flight for this session",
-          stage: "prompt",
-          agentId: this.agentId,
-        });
-      }
-    }
-    // A scheduled-wakeup stop must issue its interrupt while the persistent
-    // query is genuinely idle. A queued prompt that arrives at the previous
-    // turn boundary waits here until that control request has settled.
-    const pendingWakeupStop = state.scheduledWakeupStop;
-    if (pendingWakeupStop) {
-      await pendingWakeupStop.catch(() => undefined);
-      state = this.mustState(opts.sessionId);
-      if (state.turn) {
-        throw new AgentFailureError({
-          kind: "protocol-error",
-          message: "a prompt is already in flight for this session",
-          stage: "prompt",
-          agentId: this.agentId,
-        });
-      }
-    }
-    state.cancelRequested = false;
-    this.ensureQuery(state);
-
-    const turn = createDeferred<{
-      stopReason: StopReason;
-      usage?: TurnUsage;
-    }>();
-    const turnIdle = createDeferred<void>();
-    state.turn = turn;
-    state.turnIdle = turnIdle;
+    const reservedState = state;
+    reservedState.pendingPromptCalls += 1;
+    this.markSessionBusy(reservedState);
     try {
-      state.translator.beginTurn();
-      state.input.push({
-        type: "user",
-        message: { role: "user", content: this.buildContent(opts.prompt) },
-        parent_tool_use_id: null,
-      } as SDKUserMessage);
-      const { stopReason, usage } = await turn.promise;
-      // (The context-gauge usage refresh fires in runConsumer on every
-      // `result` — including turnless runs like compactContext's /compact —
-      // so there's nothing to emit here.)
-      // stopReason ALWAYS rides inside the response: the gateway returns only
-      // the inner response (discarding the outer field), so the old
-      // usage-gated `{}` shape dropped the stop reason whenever the
-      // translator had no usage — e.g. a clean cancel resolve persisted as a
-      // "completed" turn row instead of "cancelled".
-      return {
-        stopReason,
-        response: {
+      // The consumer clears `turn` immediately before settling its result, but
+      // prompt() may still be unwinding. Serialize on the explicit teardown
+      // seam so a control action cannot observe that transient half-idle state.
+      const previousTurnIdle = state.turnIdle;
+      if (previousTurnIdle) {
+        await previousTurnIdle.promise;
+        state = this.mustState(opts.sessionId);
+        if (state.turn) {
+          throw new AgentFailureError({
+            kind: "protocol-error",
+            message: "a prompt is already in flight for this session",
+            stage: "prompt",
+            agentId: this.agentId,
+          });
+        }
+      }
+      // A scheduled-wakeup stop must issue its interrupt while the persistent
+      // query is genuinely idle. A queued prompt that arrives at the previous
+      // turn boundary waits here until that control request has settled.
+      const pendingWakeupStop = state.scheduledWakeupStop;
+      if (pendingWakeupStop) {
+        await pendingWakeupStop.catch(() => undefined);
+        state = this.mustState(opts.sessionId);
+        if (state.turn) {
+          throw new AgentFailureError({
+            kind: "protocol-error",
+            message: "a prompt is already in flight for this session",
+            stage: "prompt",
+            agentId: this.agentId,
+          });
+        }
+      }
+      state.cancelRequested = false;
+      this.ensureQuery(state);
+
+      const turn = createDeferred<{
+        stopReason: StopReason;
+        usage?: TurnUsage;
+      }>();
+      const turnIdle = createDeferred<void>();
+      state.turn = turn;
+      state.turnIdle = turnIdle;
+      try {
+        state.translator.beginTurn();
+        state.input.push({
+          type: "user",
+          message: { role: "user", content: this.buildContent(opts.prompt) },
+          parent_tool_use_id: null,
+        } as SDKUserMessage);
+        const { stopReason, usage } = await turn.promise;
+        // (The context-gauge usage refresh fires in runConsumer on every
+        // `result` — including turnless runs like compactContext's /compact —
+        // so there's nothing to emit here.)
+        // stopReason ALWAYS rides inside the response: the gateway returns only
+        // the inner response (discarding the outer field), so the old
+        // usage-gated `{}` shape dropped the stop reason whenever the
+        // translator had no usage — e.g. a clean cancel resolve persisted as a
+        // "completed" turn row instead of "cancelled".
+        return {
           stopReason,
-          ...(usage ? { usage } : {}),
-        } as PromptResponse,
-      };
+          response: {
+            stopReason,
+            ...(usage ? { usage } : {}),
+          } as PromptResponse,
+        };
+      } finally {
+        if (state.turn === turn) state.turn = null;
+        if (state.turnIdle === turnIdle) state.turnIdle = null;
+        turnIdle.resolve();
+      }
     } finally {
-      if (state.turn === turn) state.turn = null;
-      if (state.turnIdle === turnIdle) state.turnIdle = null;
-      turnIdle.resolve();
+      reservedState.pendingPromptCalls = Math.max(
+        0,
+        reservedState.pendingPromptCalls - 1,
+      );
+      this.refreshIdleTeardown(reservedState);
     }
   }
 
@@ -996,11 +1139,13 @@ export class ClaudeSdkAdapter implements AgentAdapter {
    *  pendingRestart forces a recreate even when a query is alive: a
    *  restart-only knob (CLAUDE_MAX_TURNS / "max" effort) changed and can't be
    *  applied live, so we rebuild HERE — race-free, because prompt() is
-   *  single-flight (its state.turn guard) and compactContext() only runs
-   *  turnless, unlike an async idle teardown that overlaps a concurrent
-   *  prompt(). */
+   *  single-flight (its state.turn guard). The bounded idle releaser is safe
+   *  for the same reason: prompt() synchronously cancels its timer, and the
+   *  callback nulls the old query generation before abort/close. */
   private ensureQuery(state: SdkSession): void {
     if (state.query && !state.input.closed && !state.pendingRestart) return;
+    this.clearIdleTeardown(state);
+    state.idleSince = null;
     // Wind down an alive query we're replacing for a restart-only change.
     // runConsumer's `catch`/`finally` are generation-guarded (they act only
     // while state.query is still THEIR query), so the old loop can neither
@@ -1014,6 +1159,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       }
     }
     state.pendingRestart = false;
+    state.turnlessRunsPending = 0;
+    state.providerRunActive = false;
     state.input = new InputQueue<SDKUserMessage>();
     state.abort = new AbortController();
     try {
@@ -1057,13 +1204,21 @@ export class ClaudeSdkAdapter implements AgentAdapter {
    *  compacts right after the run — same contract as steer. */
   async compactContext(opts: { sessionId: string }): Promise<void> {
     const state = this.mustState(opts.sessionId);
+    this.markSessionBusy(state);
     this.ensureQuery(state);
     state.translator.expectManualCompaction();
-    state.input.push({
-      type: "user",
-      message: { role: "user", content: "/compact" },
-      parent_tool_use_id: null,
-    } as SDKUserMessage);
+    state.turnlessRunsPending += 1;
+    try {
+      state.input.push({
+        type: "user",
+        message: { role: "user", content: "/compact" },
+        parent_tool_use_id: null,
+      } as SDKUserMessage);
+    } catch (error) {
+      state.turnlessRunsPending = Math.max(0, state.turnlessRunsPending - 1);
+      this.refreshIdleTeardown(state);
+      throw error;
+    }
   }
 
   /** Emit a `usage_update` carrying the SDK's authoritative context-window
@@ -1231,12 +1386,30 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           if (Array.isArray(cmds)) void this.refreshSkillsThenEmit(state, cmds);
         }
 
+        // A provider wake-up/autonomous continuation has no local prompt()
+        // deferred. Treat visible provider traffic as active until its result
+        // so an already-armed idle timer cannot close the process mid-run.
+        if (
+          state.turn === null &&
+          state.turnlessRunsPending === 0 &&
+          (m.type === "assistant" ||
+            m.type === "user" ||
+            m.type === "stream_event")
+        ) {
+          state.providerRunActive = true;
+          this.markSessionBusy(state);
+        }
+
         // Translate → emit. The SDK shapes match the raw stream-json the
         // translator already understands (system/assistant/user/result).
+        const hadActiveWork = state.translator.hasActiveWork;
         try {
           state.translator.feed(msg);
         } catch (err) {
           console.warn(`[agents] claude-sdk translate failed: ${String(err)}`);
+        }
+        if (hadActiveWork !== state.translator.hasActiveWork) {
+          this.refreshIdleTeardown(state);
         }
 
         if (m.type === "result") {
@@ -1249,7 +1422,15 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           void this.emitContextUsage(state);
           const turn = state.turn;
           state.turn = null;
-          if (!turn) continue;
+          state.providerRunActive = false;
+          if (!turn) {
+            state.turnlessRunsPending = Math.max(
+              0,
+              state.turnlessRunsPending - 1,
+            );
+            this.refreshIdleTeardown(state);
+            continue;
+          }
           const terminalError = state.translator.terminalError;
           if (terminalError && looksLikeAuthPrompt(terminalError)) {
             // Not signed in — surface as auth-required (Sign-in chip), not
@@ -1367,6 +1548,10 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // installed a newer query — only clear the slot if it's still OURS, so a
       // stale teardown can't null the fresh query prompt() just created.
       if (state.query === q) {
+        this.clearIdleTeardown(state);
+        state.idleSince = null;
+        state.providerRunActive = false;
+        state.turnlessRunsPending = 0;
         state.query = null;
         state.consumer = null;
       }
@@ -1437,6 +1622,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   async cancel(opts: { sessionId: string }): Promise<void> {
     const state = this.sessions.get(opts.sessionId);
     if (!state) return;
+    this.markSessionBusy(state);
     state.cancelRequested = true;
     // Release any OPEN permission gate so a turn blocked inside canUseTool
     // unwinds immediately. interrupt() alone does NOT reliably cancel an
@@ -1465,6 +1651,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       await state.query?.interrupt();
     } catch {
       /* query already gone / between turns — nothing to interrupt */
+    } finally {
+      this.refreshIdleTeardown(state);
     }
   }
 
@@ -1535,12 +1723,14 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         state.translator.clearScheduledWakeups();
       });
       state.scheduledWakeupStop = operation;
+      this.refreshIdleTeardown(state);
       try {
         await operation;
       } finally {
         if (state.scheduledWakeupStop === operation) {
           state.scheduledWakeupStop = null;
         }
+        this.refreshIdleTeardown(state);
       }
       return;
     }
@@ -1740,7 +1930,12 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // budget knobs only when ON, so a stale value must not survive a toggle-OFF.
     delete carried.CLAUDE_FALLBACK_MODEL;
     delete carried.CLAUDE_MAX_BUDGET_USD;
+    delete carried[CLAUDE_IDLE_TIMEOUT_ENV_VAR];
     state.env = { ...carried, ...opts.env };
+    // Preserve the original idleSince while re-scheduling: shortening a
+    // timeout below time already elapsed releases immediately; lengthening it
+    // extends the same idle interval rather than restarting the clock.
+    this.refreshIdleTeardown(state);
     const maxTurnsChanged =
       prevEnv.CLAUDE_MAX_TURNS !== state.env.CLAUDE_MAX_TURNS;
     const maxEffortToggled =
@@ -1761,9 +1956,10 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     }
     // CLAUDE_MAX_TURNS / the "max" effort tier can't ride the live flag-settings
     // layer — they need a fresh query. Stage a restart for the NEXT prompt()
-    // (which recreates with resume) rather than tearing down here: an eager idle
-    // teardown races a concurrent prompt(), and a mid-turn teardown would abort
-    // the running turn. Deferring is race-free and turn-safe (see prompt()).
+    // (which recreates with resume) rather than tearing down here: an immediate
+    // config-driven teardown could race a concurrent prompt, and a mid-turn
+    // teardown would abort the running turn. The separate idle timer is
+    // generation-guarded and rechecks all activity at its boundary.
     state.pendingRestart = true;
   }
 
@@ -2410,6 +2606,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   private async teardown(state: SdkSession): Promise<void> {
     state.disposed = true;
     state.cancelRequested = true;
+    this.clearIdleTeardown(state);
+    state.idleSince = null;
     // Release any open permission gates so canUseTool unwinds.
     for (const resolver of state.pendingPermissions.values()) {
       resolver({
@@ -2666,6 +2864,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
                   state.translator.setScheduledWakeups(
                     input.session_crons ?? [],
                   );
+                  this.refreshIdleTeardown(state);
                 }
                 return {};
               },
@@ -2678,9 +2877,12 @@ export class ClaudeSdkAdapter implements AgentAdapter {
               async (input) => {
                 if (
                   input.hook_event_name === "UserPromptSubmit" &&
-                  input.source === "loop_wakeup"
+                  (input.source === "loop_wakeup" ||
+                    input.source === "schedule_wakeup")
                 ) {
                   state.translator.clearScheduledWakeups();
+                  state.providerRunActive = true;
+                  this.markSessionBusy(state);
                 }
                 return {};
               },

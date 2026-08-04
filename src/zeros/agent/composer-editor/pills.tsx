@@ -29,6 +29,7 @@ import {
   Tooltip,
 } from "@/zeros/ui/primitives";
 import { TranscriptPreviewShell } from "../chat-transcript-preview";
+import { useAttachmentImageSource } from "../attachment-image-source";
 
 // ── MentionPill — @-file / folder / selection ──────────────
 
@@ -85,8 +86,15 @@ export function AttachmentPill(props: NodeViewProps) {
   const ctx = useComposerEditorContext();
   const att = ctx.getAttachment(attrs.attachmentId);
   const isImage = attrs.kind === "image";
+  const diskImageSource = useAttachmentImageSource({
+    cwd: ctx.cwd,
+    diskPath: att?.diskPath,
+    attachmentId: att?.contextAttachmentId,
+  });
   const dataUri =
-    att && isImage ? `data:${att.mimeType};base64,${att.data}` : null;
+    att && isImage && att.data
+      ? `data:${att.mimeType};base64,${att.data}`
+      : diskImageSource;
   const invalid = att ? !att.validation.ok : false;
   const tooltip =
     att && !att.validation.ok

@@ -61,6 +61,8 @@ export function AttachmentPillView({
         <img
           src={thumbnailUri}
           alt=""
+          loading="lazy"
+          decoding="async"
           className="h-[16px] w-[16px] shrink-0 rounded-sm object-cover"
         />
       ) : (

@@ -91,25 +91,40 @@ let htmlCacheBytes = 0;
 function cacheKey(code: string, lang: string, theme: string): string {
   return `${theme} ${lang} ${code}`;
 }
-function cacheGet(code: string, lang: string, theme: string): string | undefined {
+/** What one entry really pins: the key string embeds the entire source (up to
+ *  HTML_CACHE_MAX_INPUT chars), so charging only the HTML would let true usage
+ *  run about twice the stated byte budget. */
+function entryBytes(key: string, html: string): number {
+  return key.length + html.length;
+}
+function cacheGet(
+  code: string,
+  lang: string,
+  theme: string,
+): string | undefined {
   return htmlCache.get(cacheKey(code, lang, theme));
 }
-function cachePut(code: string, lang: string, theme: string, html: string): void {
+function cachePut(
+  code: string,
+  lang: string,
+  theme: string,
+  html: string,
+): void {
   if (code.length > HTML_CACHE_MAX_INPUT) return;
   const key = cacheKey(code, lang, theme);
   const prev = htmlCache.get(key);
   if (prev !== undefined) {
-    htmlCacheBytes -= prev.length;
+    htmlCacheBytes -= entryBytes(key, prev);
     htmlCache.delete(key);
   }
   htmlCache.set(key, html);
-  htmlCacheBytes += html.length;
+  htmlCacheBytes += entryBytes(key, html);
   // Evict oldest (insertion order) until back under the byte budget.
   while (htmlCacheBytes > HTML_CACHE_MAX_BYTES && htmlCache.size > 1) {
     const oldest = htmlCache.keys().next().value;
     if (oldest === undefined) break;
     const evicted = htmlCache.get(oldest);
-    if (evicted !== undefined) htmlCacheBytes -= evicted.length;
+    if (evicted !== undefined) htmlCacheBytes -= entryBytes(oldest, evicted);
     htmlCache.delete(oldest);
   }
 }
@@ -245,14 +260,17 @@ function getWorker(): Promise<Worker | null> {
           new URL("./syntax.worker.ts", import.meta.url),
           { type: "module" },
         );
-        worker.addEventListener("message", (e: MessageEvent<WorkerResponse>) => {
-          const { id, html, error } = e.data;
-          const pending = pendingWorkerCalls.get(id);
-          if (!pending) return;
-          pendingWorkerCalls.delete(id);
-          if (error) pending.reject(new Error(error));
-          else pending.resolve(html);
-        });
+        worker.addEventListener(
+          "message",
+          (e: MessageEvent<WorkerResponse>) => {
+            const { id, html, error } = e.data;
+            const pending = pendingWorkerCalls.get(id);
+            if (!pending) return;
+            pendingWorkerCalls.delete(id);
+            if (error) pending.reject(new Error(error));
+            else pending.resolve(html);
+          },
+        );
         worker.addEventListener("error", (e) => {
           // A worker-level error breaks all in-flight calls. Fail
           // them so callers can fall back to plain-pre rendering.
@@ -318,7 +336,8 @@ export function highlightSync(
   const hit = cacheGet(code, lang, theme);
   if (hit) return hit;
   if (!mainHighlighter) return null;
-  if (!mainHighlighter.getLoadedLanguages().includes(lang)) return wrapPlain(code);
+  if (!mainHighlighter.getLoadedLanguages().includes(lang))
+    return wrapPlain(code);
   // Theme not loaded yet (e.g. just switched) → null routes the caller to the
   // async path, which loads the theme before highlighting.
   if (!mainHighlighter.getLoadedThemes().includes(theme)) return null;
@@ -361,12 +380,12 @@ export function getLang(pathOrExt: string | null | undefined): string {
       return ext === "md"
         ? "markdown"
         : ext === "py"
-        ? "python"
-        : ext === "rs"
-        ? "rust"
-        : ext === "yml"
-        ? "yaml"
-        : ext;
+          ? "python"
+          : ext === "rs"
+            ? "rust"
+            : ext === "yml"
+              ? "yaml"
+              : ext;
     case "sh":
     case "zsh":
     case "bash":
@@ -467,7 +486,9 @@ async function prepareTokenizer(
     const hl = await loadHighlighter();
     if (!hl.getLoadedLanguages().includes(shikiLang)) {
       try {
-        await hl.loadLanguage(shikiLang as Parameters<typeof hl.loadLanguage>[0]);
+        await hl.loadLanguage(
+          shikiLang as Parameters<typeof hl.loadLanguage>[0],
+        );
       } catch {
         return null; // language not in shiki's bundle
       }
@@ -674,7 +695,9 @@ export function getThemeColorsSync(theme: string): ThemeColors | null {
 /** Ensure the shared highlighter + theme are loaded, then return the theme's
  *  colors. Null only when shiki is unavailable (tests/SSR) or the theme fails to
  *  load — callers fall back to their token-based defaults. */
-export async function ensureThemeColors(theme: string): Promise<ThemeColors | null> {
+export async function ensureThemeColors(
+  theme: string,
+): Promise<ThemeColors | null> {
   try {
     const hl = await loadHighlighter();
     await ensureTheme(hl, theme);
@@ -711,9 +734,11 @@ if (
   typeof (window as { requestIdleCallback?: unknown }).requestIdleCallback ===
     "function"
 ) {
-  (window as unknown as {
-    requestIdleCallback: (cb: () => void, opts?: { timeout: number }) => void;
-  }).requestIdleCallback(
+  (
+    window as unknown as {
+      requestIdleCallback: (cb: () => void, opts?: { timeout: number }) => void;
+    }
+  ).requestIdleCallback(
     () => {
       void warmHighlighter();
     },

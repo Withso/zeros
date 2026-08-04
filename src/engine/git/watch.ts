@@ -298,10 +298,29 @@ export function startGitWatcher(
   let pendingWorktreeCoarse = false;
 
   const watcherOptions = (usePolling: boolean): ChokidarOptions => ({
+    // Generated/dependency dirs are excluded for the same reason as
+    // node_modules: they hold the bulk of a worktree's files, are effectively
+    // always gitignored (so their events refetch a status that hasn't
+    // changed), and under the packaged stat-poll backend every non-ignored
+    // file costs a persistent per-file poller — the watcher's memory and idle
+    // CPU scale directly with this set. Mirrors src/engine/watcher.ts.
     ignored: [
       /(?:^|[\\/])\.git(?:[\\/]|$)/,
       /(?:^|[\\/])\.zeros(?:[\\/]|$)/,
       /(?:^|[\\/])node_modules(?:[\\/]|$)/,
+      /(?:^|[\\/])dist(?:[\\/]|$)/,
+      /(?:^|[\\/])build(?:[\\/]|$)/,
+      /(?:^|[\\/])out(?:[\\/]|$)/,
+      /(?:^|[\\/])coverage(?:[\\/]|$)/,
+      /(?:^|[\\/])target(?:[\\/]|$)/,
+      /(?:^|[\\/])\.next(?:[\\/]|$)/,
+      /(?:^|[\\/])\.nuxt(?:[\\/]|$)/,
+      /(?:^|[\\/])\.turbo(?:[\\/]|$)/,
+      /(?:^|[\\/])\.cache(?:[\\/]|$)/,
+      /(?:^|[\\/])\.venv(?:[\\/]|$)/,
+      /(?:^|[\\/])venv(?:[\\/]|$)/,
+      /(?:^|[\\/])__pycache__(?:[\\/]|$)/,
+      /(?:^|[\\/])\.pytest_cache(?:[\\/]|$)/,
       /\.zeros-tmp$/,
     ],
     ignoreInitial: true,

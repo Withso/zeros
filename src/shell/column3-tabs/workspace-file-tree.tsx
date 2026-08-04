@@ -49,7 +49,7 @@ import {
   treeSelectionOpenTarget,
 } from "./tree-paths";
 import { useScrollMemory } from "../scroll-memory";
-import { ignoredPathDelta, useIgnoredEntries } from "./ignored-entries";
+import { planIgnoredPathDelta, useIgnoredEntries } from "./ignored-entries";
 
 /** Horizontal inset of every tree row AND of the search row (the library uses
  *  one `--trees-padding-inline` for both). Shared with the search-row overlay
@@ -582,18 +582,27 @@ export const WorkspaceFileTree = React.forwardRef<
     const applied = appliedRef.current;
     const ignoredSet = new Set(appliedIgnored);
     if (applied && applied.tracked === trackedPaths) {
-      const ops = ignoredPathDelta(applied.ignored, ignoredSet);
-      appliedRef.current = { tracked: trackedPaths, ignored: ignoredSet };
-      if (ops.length > 0) {
+      const plan = planIgnoredPathDelta(applied.ignored, ignoredSet);
+      if (plan.operations.length > 0) {
         try {
-          model.batch(ops);
+          model.batch(plan.operations);
+          appliedRef.current = {
+            tracked: trackedPaths,
+            ignored: new Set(plan.applied),
+          };
         } catch (err) {
           // batch does NOT roll back — an op that throws leaves the store
           // half-mutated and emits no notification, so the store and `paths`
           // would silently disagree. The rebuild is the only way back.
           console.error("[files] incremental ignored update failed:", err);
           resetPathsSafely(paths, expandedDirsRef.current);
+          appliedRef.current = { tracked: trackedPaths, ignored: ignoredSet };
         }
+      } else {
+        appliedRef.current = {
+          tracked: trackedPaths,
+          ignored: new Set(plan.applied),
+        };
       }
       return;
     }

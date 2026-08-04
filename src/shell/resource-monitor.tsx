@@ -66,7 +66,11 @@ import {
 // --- CONSTANTS ---
 
 const OPEN_SAMPLE_INTERVAL_MS = 1_000;
-const CLOSED_SAMPLE_INTERVAL_MS = 4_000;
+// The closed pill shows two rounded totals — it doesn't need a near-live
+// cadence, and every sample forks a `ps` process-table scan in Electron main
+// plus (while open) a PTY census round-trip. 15s keeps the pill honest while
+// making the idle app quiet; opening the popover snaps to the 1s cadence.
+const CLOSED_SAMPLE_INTERVAL_MS = 15_000;
 const MAX_VISIBLE_TREE_DEPTH = 8;
 const MAX_RENDERED_PROCESS_ROWS = 500;
 
@@ -407,8 +411,13 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
       // Setup and ephemeral PTYs intentionally do not publish the shared-tab
       // registry event. Refresh the cheap PID-only census at every bounded
       // sample so the filter still covers them within this sample's exact key.
-      await refreshTerminalOwnership();
-      if (disposed || generation !== requestGeneration.current) return;
+      // Only while the popover is OPEN: the closed pill shows rounded totals,
+      // the registry listener above still tracks ordinary terminal changes,
+      // and skipping the census keeps the idle app off the engine round-trip.
+      if (open) {
+        await refreshTerminalOwnership();
+        if (disposed || generation !== requestGeneration.current) return;
+      }
       const ownership = terminalOwnership.current;
       try {
         const next = await processMetricsSnapshot({

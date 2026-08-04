@@ -30,16 +30,18 @@
 // (composer-editor/context-graph-staging.ts) the graph copy normally already
 // exists by the time a send encodes; the write here is an idempotent safety
 // net (the engine skips byte-identical re-writes), kept because the send is the
-// last moment the bytes are certainly in memory. For text and vision-image
-// sends it is a best-effort side-effect: a failed graph write (web client,
-// read-only disk) never skips the attachment, because the inline block
-// already carries the content. Only the non-vision image path treats the
-// write as load-bearing (the prompt references the file BY PATH, so no file
-// means the agent sees nothing) and skips + reports on failure, as before.
+// last moment the bytes are certainly in memory. Text copies remain a
+// best-effort side effect because their prompt block already carries the body.
+// Image copies are awaited for every agent: transcript JSON keeps only the
+// returned disk path, never a full-resolution data URL. Vision agents still
+// receive the transient inline block; non-vision agents receive the path.
 // ──────────────────────────────────────────────────────────
 
 import { imageReferenceBlock } from "./agent-attachments";
-import { writeContextAttachment } from "./agent-history-client";
+import {
+  readImageAttachment,
+  writeContextAttachment,
+} from "./agent-history-client";
 import { RECONSTRUCTED_ATTACHMENT_ID_PREFIX } from "./composer-editor/reconstruct";
 import type { ComposerAttachment } from "./composer-attachments";
 import type { ContentBlock } from "../bridge/agent-events";
@@ -65,6 +67,9 @@ export interface EncodeAttachmentsContext {
 export interface EncodedAttachments {
   blocks: ContentBlock[];
   bubbleAttachments: AgentTextMessageAttachment[];
+  /** Ephemeral composer-id lookup used to stamp disk references onto ordered
+   *  message segments. Composer ids themselves are not persisted there. */
+  bubbleAttachmentById: Map<string, AgentTextMessageAttachment>;
   /** Attachments that will NOT reach the agent, with why.
    *
    *  Returned rather than logged because dropping silently is the bug this
@@ -140,6 +145,22 @@ function stageInContextGraph(
     });
 }
 
+/** Edit-in-place gives a reconstructed chip a fresh composer id, but its image
+ *  already owns a durable graph record. Reuse that record's id for the
+ *  idempotent send-time write instead of creating a duplicate canvas card. */
+function durableAttachmentId(attachment: ComposerAttachment): string {
+  if (attachment.contextAttachmentId) {
+    return attachment.contextAttachmentId;
+  }
+  const match =
+    typeof attachment.diskPath === "string"
+      ? /^\.context-graph\/(?:local|shared)\/attachments\/([a-zA-Z0-9_-]+)\//.exec(
+          attachment.diskPath,
+        )
+      : null;
+  return match?.[1] ?? attachment.id;
+}
+
 /** Hand `skipped` to the user, one warning per attachment.
  *
  *  Lives beside the producer, and takes the notifier rather than importing
@@ -171,6 +192,7 @@ export async function encodeAttachments(
 ): Promise<EncodedAttachments> {
   const blocks: ContentBlock[] = [];
   const bubbleAttachments: AgentTextMessageAttachment[] = [];
+  const bubbleAttachmentById = new Map<string, AgentTextMessageAttachment>();
   const skipped: { name: string; reason: string }[] = [];
 
   for (const a of attachments) {
@@ -200,69 +222,105 @@ export async function encodeAttachments(
         type: "text" as const,
         text: textAttachmentBlock(a.name, a.text),
       });
-      bubbleAttachments.push({
+      const bubbleAttachment: AgentTextMessageAttachment = {
         name: a.name,
         mimeType: a.mimeType,
         kind: "text",
         attachmentId: a.id,
-      });
+      };
+      bubbleAttachments.push(bubbleAttachment);
+      bubbleAttachmentById.set(a.id, bubbleAttachment);
       // The prompt carries the body inline; the graph copy is what makes the
       // attachment visible on the Context tab canvas.
       stageInContextGraph(ctx, a, utf8ToBase64(a.text));
       continue;
     }
 
-    // Inline image block: the vision path, or the no-cwd fallback (which the
-    // adapter may drop — at least we tried). A missing chatId no longer
-    // forces the fallback: the graph write is workspace-scoped, so the
-    // disk-reference path works before the first prompt creates the chat.
-    if (ctx.supportsImage || !ctx.cwd) {
+    let imageBase64 = a.data;
+    let imageMimeType = a.mimeType;
+    if (!imageBase64 && a.diskPath && ctx.cwd) {
+      try {
+        const restored = await readImageAttachment({
+          cwd: ctx.cwd,
+          diskPath: a.diskPath,
+          attachmentId: a.contextAttachmentId,
+          mimeType: a.mimeType,
+        });
+        imageBase64 = restored.base64;
+        imageMimeType = restored.mimeType;
+      } catch {
+        skipped.push({
+          name: a.name,
+          reason: "its saved copy isn't available — attach it again",
+        });
+        continue;
+      }
+    }
+    if (!imageBase64) {
+      skipped.push({
+        name: a.name,
+        reason: "its image bytes aren't available — attach it again",
+      });
+      continue;
+    }
+
+    // Without an owning workspace there is nowhere safe to keep a transcript
+    // image. Preserve the wire send but keep the persisted metadata byte-free;
+    // a later edit will explicitly ask the user to attach it again.
+    if (!ctx.cwd) {
       blocks.push({
         type: "image" as const,
-        mimeType: a.mimeType,
-        data: a.data,
+        mimeType: imageMimeType,
+        data: imageBase64,
       });
-      bubbleAttachments.push({
+      const bubbleAttachment: AgentTextMessageAttachment = {
         name: a.name,
-        mimeType: a.mimeType,
+        mimeType: imageMimeType,
         kind: "image",
-        thumbnailUri: `data:${a.mimeType};base64,${a.data}`,
         attachmentId: a.id,
-      });
-      stageInContextGraph(ctx, a, a.data);
+      };
+      bubbleAttachments.push(bubbleAttachment);
+      bubbleAttachmentById.set(a.id, bubbleAttachment);
       continue;
     }
 
     try {
+      const attachmentId = durableAttachmentId(a);
       const written = await writeContextAttachment({
         cwd: ctx.cwd,
         chatId: ctx.chatId ?? undefined,
-        attachmentId: a.id,
-        base64: a.data,
-        mimeType: a.mimeType,
+        attachmentId,
+        base64: imageBase64,
+        mimeType: imageMimeType,
         filename: a.name,
       });
-      blocks.push({
-        type: "text" as const,
-        text: imageReferenceBlock({
-          agentId: ctx.agentId,
-          filename: a.name,
-          absolutePath: written.absolutePath,
-          relativePath: written.relativePath,
-          mimeType: a.mimeType,
-        }),
-      });
-      bubbleAttachments.push({
+      if (ctx.supportsImage) {
+        blocks.push({
+          type: "image" as const,
+          mimeType: imageMimeType,
+          data: imageBase64,
+        });
+      } else {
+        blocks.push({
+          type: "text" as const,
+          text: imageReferenceBlock({
+            agentId: ctx.agentId,
+            filename: a.name,
+            absolutePath: written.absolutePath,
+            relativePath: written.relativePath,
+            mimeType: imageMimeType,
+          }),
+        });
+      }
+      const bubbleAttachment: AgentTextMessageAttachment = {
         name: a.name,
-        mimeType: a.mimeType,
+        mimeType: imageMimeType,
         kind: "image",
-        // Even on the disk-persisted path the BUBBLE thumbnail uses the
-        // in-memory base64 as a data: URL — Electron's renderer
-        // (webSecurity: true) blocks file:// in <img src=…>.
-        thumbnailUri: `data:${a.mimeType};base64,${a.data}`,
         diskPath: written.relativePath,
-        attachmentId: a.id,
-      });
+        attachmentId,
+      };
+      bubbleAttachments.push(bubbleAttachment);
+      bubbleAttachmentById.set(a.id, bubbleAttachment);
     } catch (err) {
       console.warn(
         `[Zeros agent-chat] failed to persist image ${a.name}:`,
@@ -272,5 +330,5 @@ export async function encodeAttachments(
     }
   }
 
-  return { blocks, bubbleAttachments, skipped };
+  return { blocks, bubbleAttachments, bubbleAttachmentById, skipped };
 }

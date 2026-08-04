@@ -1919,7 +1919,9 @@ echo '{"version":1,"frames":{}}' > "Zeros Design/.zeros-canvas.json"
     );
     expect(ignore).toContain("/local/");
     expect(
-      existsSync(path.join(created.path, ".context-graph", "local", "attachments")),
+      existsSync(
+        path.join(created.path, ".context-graph", "local", "attachments"),
+      ),
     ).toBe(true);
     expect(
       existsSync(
@@ -1957,9 +1959,31 @@ echo '{"version":1,"frames":{}}' > "Zeros Design/.zeros-canvas.json"
     });
     await restoreWorkspace(created.workspaceId);
 
-    expect(
-      await readFile(path.join(attachmentDir, "notes.md"), "utf8"),
-    ).toBe("# keep me\n");
+    expect(await readFile(path.join(attachmentDir, "notes.md"), "utf8")).toBe(
+      "# keep me\n",
+    );
+  });
+
+  it("preserves pre-context-graph attachments until transcript migration", async () => {
+    const created = await createWorkspace({ repoRoot });
+    const legacyAttachment = path.join(
+      created.path,
+      ".context",
+      "attachments",
+      "legacy-chat",
+      "old-shot.png",
+    );
+    await mkdir(path.dirname(legacyAttachment), { recursive: true });
+    await writeFile(path.join(created.path, ".context", ".gitignore"), "*\n");
+    await writeFile(legacyAttachment, "legacy image bytes");
+
+    await archiveWorkspace({
+      workspaceId: created.workspaceId,
+      stashUncommitted: true,
+    });
+    await restoreWorkspace(created.workspaceId);
+
+    expect(await readFile(legacyAttachment, "utf8")).toBe("legacy image bytes");
   });
 
   it("retries restore idempotently after WIP applied but before its phase write", async () => {

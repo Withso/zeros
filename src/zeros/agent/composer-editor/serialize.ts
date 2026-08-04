@@ -30,39 +30,45 @@ export interface ComposerSerialized {
   attachments: ComposerAttachment[];
 }
 
-/** Max base64 length of an image we'll inline as a persisted `thumbnailUri`.
- *  The thumbnail rides the normal message payload into SQLite (and over the
- *  relay on sync), and doubles as the lightbox source, so we keep the full
- *  bytes for typical pasted screenshots but refuse to persist a pathological
- *  multi-MB paste. ~1 MiB of base64 ≈ a ~768 KB image. Above the cap the bubble
- *  shows the attachment pill (name + file icon) with no inline preview; the
- *  full image still rides to the agent as its own content block. (A true
- *  downscale-to-thumbnail is the cleaner future upgrade — this is the cheap,
- *  zero-risk guard.) */
-const THUMBNAIL_MAX_BASE64 = 1024 * 1024;
-
 /** Map the composer's serialized segments to the persisted message segments
- *  the sent bubble renders. Drops transient fields (token, attachmentId) and
- *  attaches an image thumbnail (data: URL) so the bubble can show it inline.
- *  Pure — shared by the direct-send + EmptyComposer hand-off paths. */
+ *  the sent bubble renders. Drops transient editor fields and copies only the
+ *  encoder's durable graph reference — never the staged image base64. Pure —
+ *  shared by direct send, queued edit, and edit-resubmit. */
 export function toMessageSegments(
   segments: ComposerSegment[],
   attachments: ComposerAttachment[],
+  bubbleAttachmentById?: ReadonlyMap<
+    string,
+    {
+      diskPath?: string;
+      thumbnailUri?: string;
+      attachmentId?: string;
+    }
+  >,
 ): MessageContentSegment[] {
   return segments.map((s): MessageContentSegment => {
     if (s.type === "text") return { type: "text", text: s.text };
     if (s.type === "mention")
       return { type: "mention", label: s.label, path: s.path, kind: s.kind };
     const att = attachments.find((a) => a.id === s.attachmentId);
-    const inlineThumb =
-      s.kind === "image" && att && att.data.length <= THUMBNAIL_MAX_BASE64;
+    const bubbleAttachment = att
+      ? bubbleAttachmentById?.get(att.id)
+      : undefined;
     return {
       type: "attachment",
       name: s.name,
       mimeType: s.mimeType,
       kind: s.kind,
-      ...(inlineThumb
-        ? { thumbnailUri: `data:${att.mimeType};base64,${att.data}` }
+      ...(bubbleAttachment?.diskPath
+        ? { diskPath: bubbleAttachment.diskPath }
+        : {}),
+      ...(bubbleAttachment?.attachmentId
+        ? { attachmentId: bubbleAttachment.attachmentId }
+        : {}),
+      // Compatibility for a legacy message being edited and saved without a
+      // disk path. New encoder results never supply thumbnailUri.
+      ...(bubbleAttachment?.thumbnailUri
+        ? { thumbnailUri: bubbleAttachment.thumbnailUri }
         : {}),
     };
   });

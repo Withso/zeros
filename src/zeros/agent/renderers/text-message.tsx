@@ -46,6 +46,7 @@ import { Message, MessageContent } from "@/zeros/ui/primitives/elements";
 import { Tooltip } from "@/zeros/ui/primitives";
 import { trimTrailingSegments } from "./trim-trailing-segments";
 import { MarkdownCodeBlock } from "./markdown-code-block";
+import { useAttachmentImageSource } from "../attachment-image-source";
 
 type ChatRole = "user" | "assistant" | "system";
 
@@ -163,6 +164,8 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(function TextMessage
                   key={i}
                   seg={seg}
                   onPreviewImage={ctx.previewImage}
+                  attachmentCwd={ctx.attachmentCwd}
+                  attachmentImagesActive={ctx.attachmentImagesActive}
                 />
               ))}
             </div>
@@ -182,6 +185,8 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(function TextMessage
                         key={i}
                         a={a}
                         onPreviewImage={ctx.previewImage}
+                        attachmentCwd={ctx.attachmentCwd}
+                        attachmentImagesActive={ctx.attachmentImagesActive}
                       />
                     ))}
                   </div>
@@ -264,9 +269,13 @@ const MSG_CHIP_LABEL =
 function MessageSegmentView({
   seg,
   onPreviewImage,
+  attachmentCwd,
+  attachmentImagesActive,
 }: {
   seg: MessageContentSegment;
   onPreviewImage?: (src: string) => void;
+  attachmentCwd?: string | null;
+  attachmentImagesActive?: boolean;
 }) {
   if (seg.type === "text") return <>{seg.text}</>;
   if (seg.type === "mention") {
@@ -275,11 +284,39 @@ function MessageSegmentView({
     );
   }
   return (
+    <MessageAttachmentPill
+      seg={seg}
+      cwd={attachmentCwd}
+      active={attachmentImagesActive}
+      onPreview={onPreviewImage}
+    />
+  );
+}
+
+function MessageAttachmentPill({
+  seg,
+  cwd,
+  active,
+  onPreview,
+}: {
+  seg: Extract<MessageContentSegment, { type: "attachment" }>;
+  cwd?: string | null;
+  active?: boolean;
+  onPreview?: (src: string) => void;
+}) {
+  const source = useAttachmentImageSource({
+    cwd,
+    diskPath: seg.diskPath,
+    attachmentId: seg.attachmentId,
+    legacyUri: seg.thumbnailUri,
+    enabled: active,
+  });
+  return (
     <AttachmentPillView
       name={seg.name}
       kind={seg.kind}
-      thumbnailUri={seg.thumbnailUri}
-      onPreview={onPreviewImage}
+      thumbnailUri={source ?? undefined}
+      onPreview={onPreview}
     />
   );
 }
@@ -287,12 +324,23 @@ function MessageSegmentView({
 function UserBubbleAttachment({
   a,
   onPreviewImage,
+  attachmentCwd,
+  attachmentImagesActive,
 }: {
   a: AgentTextMessageAttachment;
   onPreviewImage?: (src: string) => void;
+  attachmentCwd?: string | null;
+  attachmentImagesActive?: boolean;
 }) {
-  const isImage = a.kind === "image" && Boolean(a.thumbnailUri);
-  if (isImage && a.thumbnailUri) {
+  const source = useAttachmentImageSource({
+    cwd: attachmentCwd,
+    diskPath: a.diskPath,
+    attachmentId: a.attachmentId,
+    legacyUri: a.thumbnailUri,
+    enabled: attachmentImagesActive,
+  });
+  const isImage = a.kind === "image" && Boolean(source);
+  if (isImage && source) {
     return (
       <Tooltip label={a.name}>
         <button
@@ -304,13 +352,19 @@ function UserBubbleAttachment({
           // affordance.
           onClick={(e) => {
             e.stopPropagation();
-            if (a.thumbnailUri && onPreviewImage) {
-              onPreviewImage(a.thumbnailUri);
+            if (onPreviewImage) {
+              onPreviewImage(source);
             }
           }}
           className={`${MSG_CHIP_BASE} cursor-pointer`}
         >
-          <img src={a.thumbnailUri} alt="" className={MSG_CHIP_THUMB} />
+          <img
+            src={source}
+            alt=""
+            loading="lazy"
+            decoding="async"
+            className={MSG_CHIP_THUMB}
+          />
           <span className={MSG_CHIP_LABEL}>{a.name}</span>
         </button>
       </Tooltip>

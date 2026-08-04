@@ -1,8 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  activeBridge: {} as object | null,
+  bridgeAttachmentWrite: vi.fn(),
   nativeInvoke: vi.fn(),
   notifyContextGraphChanged: vi.fn(),
+  resolveBridgeWorkspaceIdForCwd: vi.fn(),
 }));
 
 vi.mock("../../../native/runtime", () => ({
@@ -12,9 +15,13 @@ vi.mock("../../../native/context-graph", () => ({
   notifyContextGraphChanged: mocks.notifyContextGraphChanged,
 }));
 vi.mock("../../bridge/active-bridge", () => ({
-  getActiveBridge: vi.fn(() => ({})),
+  getActiveBridge: vi.fn(() => mocks.activeBridge),
+}));
+vi.mock("../../bridge/workspace-id-resolver", () => ({
+  resolveBridgeWorkspaceIdForCwd: mocks.resolveBridgeWorkspaceIdForCwd,
 }));
 vi.mock("../../bridge/workspace-bridge", () => ({
+  bridgeAttachmentWrite: mocks.bridgeAttachmentWrite,
   bridgeChatList: vi.fn(),
   bridgeChatSnapshot: vi.fn(),
   bridgeChatDelete: vi.fn(),
@@ -41,10 +48,12 @@ const writeArgs = {
 describe("writeContextAttachment", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.activeBridge = {};
+    mocks.resolveBridgeWorkspaceIdForCwd.mockResolvedValue("ws-1");
   });
 
   it("does not invalidate git surfaces for an idempotent safety-net write", async () => {
-    mocks.nativeInvoke.mockResolvedValue({
+    mocks.bridgeAttachmentWrite.mockResolvedValue({
       absolutePath: "/repo/worktree/.context-graph/local/notes.txt",
       relativePath: ".context-graph/local/notes.txt",
       mimeType: "text/plain",
@@ -58,6 +67,22 @@ describe("writeContextAttachment", () => {
   });
 
   it("notifies graph and Files subscribers after a real write", async () => {
+    mocks.bridgeAttachmentWrite.mockResolvedValue({
+      absolutePath: "/repo/worktree/.context-graph/local/notes.txt",
+      relativePath: ".context-graph/local/notes.txt",
+      mimeType: "text/plain",
+      bytes: 5,
+    });
+
+    await writeContextAttachment(writeArgs);
+
+    expect(mocks.notifyContextGraphChanged).toHaveBeenCalledWith(
+      "/repo/worktree",
+    );
+  });
+
+  it("uses the native writer while the workspace bridge is still starting", async () => {
+    mocks.activeBridge = null;
     mocks.nativeInvoke.mockResolvedValue({
       absolutePath: "/repo/worktree/.context-graph/local/notes.txt",
       relativePath: ".context-graph/local/notes.txt",
@@ -67,6 +92,11 @@ describe("writeContextAttachment", () => {
 
     await writeContextAttachment(writeArgs);
 
+    expect(mocks.nativeInvoke).toHaveBeenCalledWith(
+      "agent_attachment_write",
+      writeArgs,
+    );
+    expect(mocks.bridgeAttachmentWrite).not.toHaveBeenCalled();
     expect(mocks.notifyContextGraphChanged).toHaveBeenCalledWith(
       "/repo/worktree",
     );

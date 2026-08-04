@@ -148,11 +148,15 @@ export interface SessionsActions {
     sessionId: string,
     options?: StartForChatOptions,
   ): Promise<void>;
-  /** Load on-disk transcript for `chatId` if the in-memory slot is
-   *  empty. Idempotent — safe to call from a chat view's mount effect.
-   *  Does NOT touch a slot that's already populated; the live store
-   *  is the source of truth once the user is interacting. */
+  /** Load an explicitly cold transcript from disk. Idempotent and shared per
+   *  exact chat; resident slots only receive a background reconcile, while a
+   *  retained cold slot publishes `loading` until its authoritative window is
+   *  ready. */
   hydrateChat(chatId: string): Promise<void>;
+  /** Publish the exact bounded chat-view deck after React commits it. Slots
+   *  outside this set may release only their heavyweight transcript payload;
+   *  live session routing and control state remain resident. */
+  setRetainedChatIds(chatIds: readonly string[]): void;
   /** Tell the engine to tear down this chat's session (subprocess /
    *  server child / hook token / session dir) because its tab is being
    *  closed/archived. Fire-and-forget; the on-disk transcript is kept, so

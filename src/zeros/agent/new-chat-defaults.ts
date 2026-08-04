@@ -46,10 +46,15 @@ import {
   setFavoriteModel,
 } from "./model-favorites";
 import {
+  DEFAULT_CLAUDE_FALLBACK,
+  DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES,
   getClaudeBudgetCapUsd,
   getClaudeFallbackModel,
+  getClaudeIdleTimeoutMinutes,
+  isClaudeIdleTimeoutMinutes,
   setClaudeBudgetCapUsd,
   setClaudeFallbackModel,
+  setClaudeIdleTimeoutMinutes,
 } from "./reliability-settings";
 import type { ChatEffort, ChatPermissionMode } from "../store/store";
 
@@ -328,11 +333,14 @@ function buildModelsTable(): Record<string, unknown> {
         : getChatTitleModel(),
     claude_code: {
       default_effort_level: effort.claude ?? null,
-      // §3.6 R2/R3 — the reliability knobs, mirrored losslessly: the fallback
+      // Claude reliability knobs, mirrored losslessly: the fallback
       // writes its resolved value ("none" for explicit fail-fast) so the
-      // default never forges a user pick; a null cap (off) drops its key.
+      // default never forges a user pick; a null cap (off) drops its key. The
+      // idle timeout is always explicit so every process receives one of the
+      // four bounded choices even after a hand edit or cache migration.
       fallback_model: getClaudeFallbackModel() ?? "none",
       budget_cap_usd: getClaudeBudgetCapUsd(),
+      idle_timeout_minutes: getClaudeIdleTimeoutMinutes(),
     },
     codex: { default_thinking_level: effort.codex ?? null },
   };
@@ -423,9 +431,10 @@ export function hydrateModelsFromSettings(models: unknown): void {
     if (isEffort(claude) && getDefaultEffort("claude") !== claude) {
       setDefaultEffort("claude", claude);
     }
-    // §3.6 R2/R3 — reliability knobs. ADDITIVE for the fallback (an absent
+    // Claude reliability knobs. ADDITIVE for the fallback (an absent
     // key keeps the local value — legacy files predate it); the cap follows
-    // the same rule (absent = keep; explicit null in TOML can't occur).
+    // the same rule (absent = keep; explicit null in TOML can't occur). Idle
+    // timeout is authoritative: absence/invalid means the bounded default.
     const cc = m.claude_code as Record<string, unknown> | undefined;
     if (typeof cc?.fallback_model === "string" && cc.fallback_model) {
       const fb = cc.fallback_model === "none" ? null : cc.fallback_model;
@@ -435,6 +444,12 @@ export function hydrateModelsFromSettings(models: unknown): void {
       if (getClaudeBudgetCapUsd() !== cc.budget_cap_usd) {
         setClaudeBudgetCapUsd(cc.budget_cap_usd);
       }
+    }
+    const idleTimeout = isClaudeIdleTimeoutMinutes(cc?.idle_timeout_minutes)
+      ? cc.idle_timeout_minutes
+      : DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES;
+    if (getClaudeIdleTimeoutMinutes() !== idleTimeout) {
+      setClaudeIdleTimeoutMinutes(idleTimeout);
     }
     const codex = (m.codex as Record<string, unknown> | undefined)
       ?.default_thinking_level;
@@ -454,6 +469,10 @@ export function hasModelDefaults(): boolean {
   if (FAVORITE_FAMILIES.some((fam) => getFavoriteModel(fam))) return true;
   if (getDefaultPlanMode() || getDefaultFastMode()) return true;
   if (getChatTitleModel() !== DEFAULT_CHAT_TITLE_MODEL) return true;
+  if (getClaudeFallbackModel() !== DEFAULT_CLAUDE_FALLBACK) return true;
+  if (getClaudeBudgetCapUsd() != null) return true;
+  if (getClaudeIdleTimeoutMinutes() !== DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES)
+    return true;
   const e = readEffortMap();
   return Boolean(e.claude || e.codex);
 }

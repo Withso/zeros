@@ -126,6 +126,304 @@ describe("WorkspaceService", () => {
     }
   });
 
+  it("writes an image attachment into the workspace context graph", async () => {
+    const result = (await svc.handle("attachment.write", {
+      workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+      chatId: "chat-1",
+      attachmentId: "att-1",
+      base64: Buffer.from("full-resolution-image").toString("base64"),
+      mimeType: "image/png",
+      filename: "../../shot.png",
+    })) as {
+      absolutePath: string;
+      relativePath: string;
+      bytes: number;
+    };
+
+    expect(result.relativePath).toBe(
+      ".context-graph/local/attachments/att-1/shot.png",
+    );
+    expect(result.absolutePath).toBe(path.join(dir, result.relativePath));
+    expect(fs.readFileSync(result.absolutePath, "utf8")).toBe(
+      "full-resolution-image",
+    );
+    expect(
+      fs.readFileSync(path.join(dir, ".context-graph/.gitignore"), "utf8"),
+    ).toContain("/local/");
+  });
+
+  it("externalizes legacy transcript data URLs on first window read", async () => {
+    const { upsertChat } = await import("../../db/chats");
+    const { upsertChatMessagesBulk, windowChatMessages } =
+      await import("../../db/messages");
+    const chatId = "legacy-images";
+    upsertChat({
+      id: chatId,
+      folder: dir,
+      agentId: "claude",
+      agentName: "Claude",
+      model: null,
+      effort: "",
+      permissionMode: "default",
+      lastModeId: null,
+      prePlanModeId: null,
+      fast: false,
+      additionalDirectories: [],
+      title: "Legacy image",
+      createdAt: 1,
+      updatedAt: 1,
+      sessionId: null,
+      pinned: false,
+      archived: false,
+      sourceChatId: null,
+      kind: "chat",
+    });
+    const thumbnailUri = `data:image/png;base64,${Buffer.from("legacy-png").toString("base64")}`;
+    const message = {
+      id: "m1",
+      kind: "text",
+      role: "user",
+      text: "see image",
+      createdAt: 2,
+      attachments: [
+        {
+          name: "shot.png",
+          mimeType: "image/png",
+          kind: "image",
+          thumbnailUri,
+        },
+      ],
+      segments: [
+        { type: "text", text: "see image " },
+        {
+          type: "attachment",
+          name: "shot.png",
+          mimeType: "image/png",
+          kind: "image",
+          thumbnailUri,
+        },
+      ],
+    };
+    upsertChatMessagesBulk(chatId, [
+      {
+        msgId: "m1",
+        kind: "text",
+        payload: JSON.stringify(message),
+        createdAt: 2,
+      },
+    ]);
+
+    const result = (await svc.handle("messages.window", {
+      chatId,
+      limit: 10,
+    })) as { messages: Array<{ payload: string }> };
+    const payload = JSON.parse(result.messages[0].payload) as typeof message & {
+      attachments: Array<{ diskPath?: string; thumbnailUri?: string }>;
+      segments: Array<{ diskPath?: string; thumbnailUri?: string }>;
+    };
+    expect(payload.attachments[0].diskPath).toMatch(
+      /^\.context-graph\/local\/attachments\/legacy_[a-f0-9]+\//,
+    );
+    expect(payload.segments[1].diskPath).toBe(payload.attachments[0].diskPath);
+    expect(payload.attachments[0].thumbnailUri).toBeUndefined();
+    expect(payload.segments[1].thumbnailUri).toBeUndefined();
+    expect(result.messages[0].payload).not.toContain("base64");
+    expect(windowChatMessages(chatId, 10)[0].payload).toBe(
+      result.messages[0].payload,
+    );
+    expect(
+      fs.existsSync(path.join(dir, payload.attachments[0].diskPath!)),
+    ).toBe(true);
+  });
+
+  it("migrates legacy disk-backed transcript images into the context graph", async () => {
+    const { upsertChat } = await import("../../db/chats");
+    const { upsertChatMessagesBulk, windowChatMessages } =
+      await import("../../db/messages");
+    const chatId = "legacy-disk-images";
+    upsertChat({
+      id: chatId,
+      folder: dir,
+      agentId: "claude",
+      agentName: "Claude",
+      model: null,
+      effort: "",
+      permissionMode: "default",
+      lastModeId: null,
+      prePlanModeId: null,
+      fast: false,
+      additionalDirectories: [],
+      title: "Legacy disk image",
+      createdAt: 1,
+      updatedAt: 1,
+      sessionId: null,
+      pinned: false,
+      archived: false,
+      sourceChatId: null,
+      kind: "chat",
+    });
+    const oldDiskPath = `.context/attachments/${chatId}/old-shot.png`;
+    fs.mkdirSync(path.join(dir, path.dirname(oldDiskPath)), {
+      recursive: true,
+    });
+    fs.writeFileSync(path.join(dir, oldDiskPath), "legacy-disk-png");
+    const message = {
+      id: "m-disk",
+      kind: "text",
+      role: "user",
+      text: "see old image",
+      createdAt: 2,
+      attachments: [
+        {
+          name: "shot.png",
+          mimeType: "image/png",
+          kind: "image",
+          diskPath: oldDiskPath,
+        },
+      ],
+      segments: [
+        { type: "text", text: "see old image " },
+        {
+          type: "attachment",
+          name: "shot.png",
+          mimeType: "image/png",
+          kind: "image",
+          diskPath: oldDiskPath,
+        },
+      ],
+    };
+    upsertChatMessagesBulk(chatId, [
+      {
+        msgId: "m-disk",
+        kind: "text",
+        payload: JSON.stringify(message),
+        createdAt: 2,
+      },
+    ]);
+
+    const result = (await svc.handle("messages.window", {
+      chatId,
+      limit: 10,
+    })) as { messages: Array<{ payload: string }> };
+    const payload = JSON.parse(result.messages[0].payload) as typeof message & {
+      attachments: Array<{ diskPath: string; attachmentId?: string }>;
+      segments: Array<{ diskPath?: string; attachmentId?: string }>;
+    };
+
+    expect(payload.attachments[0].diskPath).toMatch(
+      /^\.context-graph\/local\/attachments\/legacy_[a-f0-9]+\//,
+    );
+    expect(payload.segments[1].diskPath).toBe(payload.attachments[0].diskPath);
+    expect(payload.attachments[0].attachmentId).toMatch(/^legacy_[a-f0-9]+$/);
+    expect(payload.segments[1].attachmentId).toBe(
+      payload.attachments[0].attachmentId,
+    );
+    expect(result.messages[0].payload).not.toContain(oldDiskPath);
+    expect(windowChatMessages(chatId, 10)[0].payload).toBe(
+      result.messages[0].payload,
+    );
+    expect(
+      fs.readFileSync(path.join(dir, payload.attachments[0].diskPath), "utf8"),
+    ).toBe("legacy-disk-png");
+  });
+
+  it("does not recreate a missing chat folder while reading legacy images", async () => {
+    const { upsertChat } = await import("../../db/chats");
+    const { upsertChatMessagesBulk } = await import("../../db/messages");
+    const chatId = "missing-legacy-folder";
+    const missingFolder = path.join(dir, "removed-worktree");
+    fs.mkdirSync(missingFolder);
+    upsertChat({
+      id: chatId,
+      folder: missingFolder,
+      agentId: "claude",
+      agentName: "Claude",
+      model: null,
+      effort: "",
+      permissionMode: "default",
+      lastModeId: null,
+      prePlanModeId: null,
+      fast: false,
+      additionalDirectories: [],
+      title: "Legacy image",
+      createdAt: 1,
+      updatedAt: 1,
+      sessionId: null,
+      pinned: false,
+      archived: false,
+      sourceChatId: null,
+      kind: "chat",
+    });
+    const thumbnailUri = `data:image/png;base64,${Buffer.from("legacy-png").toString("base64")}`;
+    upsertChatMessagesBulk(chatId, [
+      {
+        msgId: "m1",
+        kind: "text",
+        payload: JSON.stringify({
+          id: "m1",
+          kind: "text",
+          role: "user",
+          text: "see image",
+          createdAt: 2,
+          attachments: [
+            {
+              name: "shot.png",
+              mimeType: "image/png",
+              kind: "image",
+              thumbnailUri,
+            },
+          ],
+        }),
+        createdAt: 2,
+      },
+    ]);
+    fs.rmSync(missingFolder, { recursive: true, force: true });
+
+    const result = (await svc.handle("messages.window", {
+      chatId,
+      limit: 10,
+    })) as { messages: Array<{ payload: string }> };
+
+    expect(result.messages[0].payload).toContain("data:image/png;base64,");
+    expect(fs.existsSync(missingFolder)).toBe(false);
+  });
+
+  it("registers transcript-window migrations with the owning workspace barrier", async () => {
+    const { upsertChat } = await import("../../db/chats");
+    upsertChat({
+      id: "barrier-chat",
+      folder: dir,
+      agentId: "claude",
+      agentName: "Claude",
+      model: null,
+      effort: "",
+      permissionMode: "default",
+      lastModeId: null,
+      prePlanModeId: null,
+      fast: false,
+      additionalDirectories: [],
+      title: "Barrier",
+      createdAt: 1,
+      updatedAt: 1,
+      sessionId: null,
+      pinned: false,
+      archived: false,
+      sourceChatId: null,
+      kind: "chat",
+    });
+
+    expect(
+      svc.lifecycleMutationWorkspaceId("messages.window", {
+        chatId: "barrier-chat",
+      }),
+    ).toBe(LOCAL_MAIN_WORKSPACE_ID);
+    expect(
+      svc.lifecycleMutationWorkspaceId("messages.windowOlder", {
+        chatId: "barrier-chat",
+      }),
+    ).toBe(LOCAL_MAIN_WORKSPACE_ID);
+  });
+
   it("file.write writes a registered repo ROOT file for LOCAL; remote raw-path + non-strings rejected", async () => {
     const { upsertRepoByRoot } = await import("../../db/projects");
     const repoC = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-write-op-"));

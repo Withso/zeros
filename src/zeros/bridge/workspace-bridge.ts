@@ -824,6 +824,39 @@ export async function bridgeFileWrite(
   })) as WriteFileResult;
 }
 
+/** Persist attachment bytes in the workspace context graph. Transcript
+ *  payloads retain the returned relative path, never the base64. Unlike the
+ *  context-canvas read/move APIs below, this write is available to paired
+ *  clients so remote composer sends can materialize their own attachments. */
+export async function bridgeAttachmentWrite(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  args: {
+    chatId?: string | null;
+    attachmentId: string;
+    base64: string;
+    mimeType: string;
+    filename: string;
+  },
+): Promise<{
+  absolutePath: string;
+  relativePath: string;
+  mimeType: string;
+  bytes: number;
+  skipped?: boolean;
+}> {
+  return (await workspaceOp(bridge, "attachment.write", {
+    workspaceId,
+    ...args,
+  })) as {
+    absolutePath: string;
+    relativePath: string;
+    mimeType: string;
+    bytes: number;
+    skipped?: boolean;
+  };
+}
+
 // ── Context graph (the Context tab's canvas) ────────────────
 // DESKTOP ONLY, same posture as `file.ignored`: the graph's `local/` scope is
 // gitignored private material, so the engine refuses remote callers outright.

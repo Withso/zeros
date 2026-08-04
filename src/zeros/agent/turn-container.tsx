@@ -49,8 +49,8 @@ import {
   useComposerEditor,
   messageToEditorContent,
   textToDoc,
-  toMessageSegments,
   type ComposerInitialContent,
+  type ComposerSegment,
 } from "./composer-editor";
 import type { AvailableCommand } from "../bridge/agent-events";
 import {
@@ -226,10 +226,9 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
    *  paired with `onEdit`, clicking the header opens an editable
    *  textarea seeded with this text. Omit both to disable editing. */
   originalText?: string;
-  /** Attachments stamped on the original user message. Displayed
-   *  read-only above the editable composer (bubble metadata lacks
-   *  the bytes needed to re-encode them, so they ride through
-   *  `editAndResubmit`'s carriedBubbleAttachments instead). */
+  /** Attachments stamped on the original user message. Disk-backed image
+   *  references are reconstructed into the inline editor; legacy data URLs
+   *  remain supported. */
   originalAttachments?: AgentTextMessageAttachment[];
   /** Ordered segments of the original message — reconstructs mention pills
    *  when editing (plain-text fallback for pre-editor messages). */
@@ -240,7 +239,7 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
   onEdit?: (
     editedText: string,
     attachments: ComposerAttachment[],
-    segments: MessageContentSegment[],
+    segments: ComposerSegment[],
   ) => void;
   /** Pills (model / effort / permissions) rendered in the edit-mode
    *  toolbar so editing a past message has the same affordances as
@@ -616,7 +615,7 @@ function TurnPromptEditor({
   onEdit: (
     editedText: string,
     attachments: ComposerAttachment[],
-    segments: MessageContentSegment[],
+    segments: ComposerSegment[],
   ) => void;
   onCancel: () => void;
   editToolbarPills?: React.ReactNode;
@@ -627,8 +626,8 @@ function TurnPromptEditor({
 
   // Seed the editor: a prior in-progress edit (stash json), then its plain-text
   // mirror, then the WHOLE original message reconstructed as inline content —
-  // text + mention pills + attachment pills (image bytes recovered from the
-  // persisted thumbnails), in place. No separate "originals" row; everything is
+  // text + mention pills + attachment pills (images retain a disk reference),
+  // in place. No separate "originals" row; everything is
   // inline + editable. The choice itself lives in edit-seed.ts, which explains
   // why the middle rung is load-bearing.
   const initialContentRef = useRef<ComposerInitialContent>(
@@ -759,11 +758,7 @@ function TurnPromptEditor({
       return;
     }
     submittedRef.current = true;
-    onEdit(
-      trimmed,
-      attachments,
-      toMessageSegments(s?.segments ?? [], attachments),
-    );
+    onEdit(trimmed, attachments, s?.segments ?? []);
     onCancel();
   }, [serialize, onEdit, onCancel]);
   submitRef.current = submitEdit;

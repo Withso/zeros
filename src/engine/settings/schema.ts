@@ -318,6 +318,21 @@ const claudeModelsSchema = z
     default_effort_level: z
       .enum(EFFORT_LEVELS)
       .describe("Default reasoning effort for Claude models in new chats."),
+    fallback_model: z
+      .string()
+      .min(1)
+      .describe(
+        'Fallback Claude model id, or the sentinel "none" to fail fast.',
+      ),
+    budget_cap_usd: z
+      .number()
+      .positive()
+      .describe("Optional maximum Claude spend in USD per turn."),
+    idle_timeout_minutes: z
+      .union([z.literal(30), z.literal(60), z.literal(120), z.literal(300)])
+      .describe(
+        "How long an idle Claude session stays warm (30 minutes to 5 hours).",
+      ),
   })
   .partial();
 const codexModelsSchema = z
@@ -341,6 +356,12 @@ const modelsSchema = z
     review: z.string().describe("Model used for code reviews."),
     default_fast_mode: z.boolean().describe("Start new chats in fast mode."),
     default_plan_mode: z.boolean().describe("Start new chats in plan mode."),
+    favorites: z
+      .record(z.string(), z.string())
+      .describe("Favorite model id per agent family."),
+    chat_title_model: z
+      .string()
+      .describe("Model used to generate chat titles."),
     claude_code: claudeModelsSchema.describe("Claude-specific model defaults."),
     codex: codexModelsSchema.describe("Codex-specific model defaults."),
   })
@@ -523,6 +544,7 @@ function sanitizeTable(
   value: unknown,
   basePath: string,
   warnings: string[],
+  preserveUnknown = true,
 ): Record<string, unknown> | undefined {
   if (!isPlainObject(value)) {
     warnings.push(`${basePath}: expected a table — ignored`);
@@ -536,7 +558,9 @@ function sanitizeTable(
     // unknown-key branch and throw `field.safeParse is not a function`.
     const field = hasOwn(shape, k) ? shape[k] : undefined;
     if (!field) {
-      out[k] = v; // unknown key → preserve verbatim
+      // Nested per-model tables intentionally expose only validated fields;
+      // their in-place TOML writer still preserves unknown keys on disk.
+      if (preserveUnknown) out[k] = v;
       continue;
     }
     const r = field.safeParse(v);
@@ -562,6 +586,65 @@ function sanitizeRecord(
     const r = entrySchema.safeParse(v);
     if (r.success) out[k] = r.data;
     else warnings.push(`${basePath}.${k}: ${firstIssue(r.error)} — ignored`);
+  }
+  return out;
+}
+
+/** Models contains nested per-agent tables. Sanitize those leaf-by-leaf too:
+ * one invalid hand-edited idle timeout must not erase a valid fallback,
+ * budget, or effort sibling. */
+function sanitizeModels(
+  value: unknown,
+  warnings: string[],
+): Record<string, unknown> | undefined {
+  if (!isPlainObject(value)) {
+    warnings.push("models: expected a table — ignored");
+    return undefined;
+  }
+  const modelShape: Record<string, z.ZodType> = modelsSchema.shape;
+  const out: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (DANGEROUS_KEYS.has(key)) continue;
+    if (key === "claude_code") {
+      const table = sanitizeTable(
+        claudeModelsSchema.shape,
+        entry,
+        "models.claude_code",
+        warnings,
+        false,
+      );
+      if (table) out[key] = table;
+      continue;
+    }
+    if (key === "codex") {
+      const table = sanitizeTable(
+        codexModelsSchema.shape,
+        entry,
+        "models.codex",
+        warnings,
+        false,
+      );
+      if (table) out[key] = table;
+      continue;
+    }
+    if (key === "favorites") {
+      const favorites = sanitizeRecord(
+        z.string(),
+        entry,
+        "models.favorites",
+        warnings,
+      );
+      if (favorites) out[key] = favorites;
+      continue;
+    }
+    const field = hasOwn(modelShape, key) ? modelShape[key] : undefined;
+    if (!field) {
+      out[key] = entry;
+      continue;
+    }
+    const parsed = field.safeParse(entry);
+    if (parsed.success) out[key] = parsed.data;
+    else warnings.push(`models.${key}: ${firstIssue(parsed.error)} — ignored`);
   }
   return out;
 }
@@ -604,7 +687,6 @@ const TABLE_SHAPES: Record<string, Record<string, z.ZodType>> = {
   scripts: scriptsSchema.shape,
   git: gitSchema.shape,
   prompts: promptsSchema.shape,
-  models: modelsSchema.shape,
   workspaces: workspacesSchema.shape,
   github: githubSchema.shape,
 };
@@ -727,6 +809,11 @@ export function sanitizeLayer(
       if (typeof value === "boolean") doc[key] = value;
       else
         warnings.push(`tool_approvals_enabled: expected a boolean — ignored`);
+      continue;
+    }
+    if (key === "models") {
+      const models = sanitizeModels(value, warnings);
+      if (models) doc.models = models;
       continue;
     }
     const shape = hasOwn(TABLE_SHAPES, key) ? TABLE_SHAPES[key] : undefined;

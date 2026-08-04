@@ -60,10 +60,10 @@ export interface AgentTextMessage {
   /** Phase D2 (2026-05-07) iter 4 — attachments stamped on the user
    *  message at send time so the timeline bubble can render the
    *  same chip row the user saw in the composer. Persisted to
-   *  SQLite via the normal payload flow. For images, `thumbnailUri`
-   *  is a data: URL (Claude's vision path) or a file:// URL pointing
-   *  at the saved bytes (non-vision agents). For text files, the
-   *  body itself is too large to keep on every message — only the
+   *  SQLite via the normal payload flow. New image messages keep only a
+   *  cwd-relative `diskPath`; `thumbnailUri` is legacy compatibility for
+   *  transcripts written before disk-backed attachment storage. For text
+   *  files, the body itself is too large to keep on every message — only the
    *  filename + mime is stored. */
   attachments?: AgentTextMessageAttachment[];
   /** 2026-06-08 — ordered content of a user message: text interleaved with
@@ -104,12 +104,11 @@ export interface AgentTextMessageAttachment {
   name: string;
   mimeType: string;
   kind: "image" | "text";
-  /** Data URL (data:<mime>;base64,...) or file:// URL for the
-   *  thumbnail. Only populated for images. */
+  /** Legacy data/file URL written by older clients. New messages must not put
+   *  full-resolution image bytes in transcript JSON. */
   thumbnailUri?: string;
-  /** Cwd-relative path on disk (when the image was saved for a
-   *  non-vision agent). Lets the renderer offer a "Open in
-   *  Finder" affordance later. */
+  /** Cwd-relative image path under the workspace context graph. Its scope is
+   *  a hint because the Context tab can move the stable record after send. */
   diskPath?: string;
   /** The composer attachment id this chip was encoded from — the key of its
    *  `.context-graph/<scope>/attachments/<id>/` record (provenance: the
@@ -136,8 +135,12 @@ export type MessageContentSegment =
       name: string;
       mimeType: string;
       kind: "image" | "text";
-      /** data: URL for an image thumbnail (images only). */
+      /** Legacy data URL for images persisted by older clients. */
       thumbnailUri?: string;
+      /** Disk-backed image reference; its local/shared scope can become stale. */
+      diskPath?: string;
+      /** Stable context-graph record id; local/shared is a movable scope. */
+      attachmentId?: string;
     };
 
 export interface AgentToolMessage {
@@ -314,7 +317,6 @@ export type AgentMessage =
   | AgentModeSwitchMessage
   | AgentSubagentMessage
   | AgentErrorNoticeMessage;
-
 
 // ──────────────────────────────────────────────────────────
 // Question resolution stamps (the ANSWERED / SKIPPED record)

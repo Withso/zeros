@@ -7,6 +7,7 @@ import { describe, it, expect } from "vitest";
 import {
   draftHasContent,
   isChatDiscardableOnClose,
+  messageCountForChatClose,
   type ChatCloseInputs,
 } from "../column2-chat-close";
 import type { ComposerDraft } from "../../zeros/store/store";
@@ -119,5 +120,19 @@ describe("isChatDiscardableOnClose", () => {
     expect(isChatDiscardableOnClose(pristineInputs({ kind: "terminal" }))).toBe(
       false,
     );
+  });
+});
+
+describe("messageCountForChatClose", () => {
+  it("keeps a used chat after its resident transcript payload was evicted", () => {
+    expect(
+      messageCountForChatClose({ messages: [], hasTranscript: true }),
+    ).toBe(1);
+  });
+
+  it("keeps a genuinely pristine empty chat discardable", () => {
+    expect(
+      messageCountForChatClose({ messages: [], hasTranscript: false }),
+    ).toBe(0);
   });
 });

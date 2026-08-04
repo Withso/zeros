@@ -136,7 +136,8 @@ export interface AttachmentValidation {
 export function iconForFile(name: string, mimeType: string): LucideIcon {
   if (mimeType.startsWith("image/")) return ImageIcon;
   const lower = name.toLowerCase();
-  if (lower.endsWith(".json") || mimeType === "application/json") return FileJson;
+  if (lower.endsWith(".json") || mimeType === "application/json")
+    return FileJson;
   if (
     lower.endsWith(".ts") ||
     lower.endsWith(".tsx") ||
@@ -176,7 +177,7 @@ export function iconForFile(name: string, mimeType: string): LucideIcon {
  *
  *  Phase D2 (2026-05-07) iter 3: image-into-non-vision-agent is no
  *  longer marked invalid — the submit flow now writes the bytes to
- *  `<cwd>/.context/attachments/...` and references them by path inside
+ *  `<cwd>/.context-graph/<scope>/attachments/...` and references them by path inside
  *  a text block, so EVERY agent at minimum receives the file
  *  location. Vision-capable models (Claude, GPT-5, Cursor Composer-2)
  *  can then call their built-in Read / vision tool on that path;
@@ -233,8 +234,7 @@ export function imageReferenceBlock(input: {
   // cwd-relative path under @ so the agent's existing resolver
   // pulls it in. Other agents get an absolute path which their
   // Read tool / ls / cat can act on directly.
-  const useAtMention =
-    input.agentId === "claude" || input.agentId === "cursor";
+  const useAtMention = input.agentId === "claude" || input.agentId === "cursor";
   const reference = useAtMention
     ? `@${input.relativePath}`
     : input.absolutePath;

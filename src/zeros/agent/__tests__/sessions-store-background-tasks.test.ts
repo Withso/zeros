@@ -89,6 +89,30 @@ describe("sessions-store background task snapshots", () => {
     expect(useSessionsStore.getState().sessions["chat-a"]).toBe(before);
   });
 
+  it("treats a changed scheduled wake-up timestamp as new task metadata", () => {
+    const store = useSessionsStore.getState();
+    store.setSession("chat-a", {
+      ...BLANK,
+      agentId: "claude",
+      sessionId: "session-a",
+    });
+    const wakeup = {
+      ...task("scheduled-wakeup:one", "Next check"),
+      taskType: "scheduled_wakeup",
+      scheduledFor: 2_000,
+    };
+    store.applyBridgeUpdate(note("session-a", [wakeup]));
+    const before = useSessionsStore.getState().sessions["chat-a"];
+
+    store.applyBridgeUpdate(
+      note("session-a", [{ ...wakeup, scheduledFor: 3_000 }]),
+    );
+
+    const after = useSessionsStore.getState().sessions["chat-a"];
+    expect(after).not.toBe(before);
+    expect(after.backgroundTasks[0]?.scheduledFor).toBe(3_000);
+  });
+
   it("owns the continuous waiting duration in exact-session state across UI remounts", () => {
     const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
     const store = useSessionsStore.getState();

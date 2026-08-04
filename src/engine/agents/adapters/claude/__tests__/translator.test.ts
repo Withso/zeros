@@ -7,7 +7,7 @@
 // a duplicated user bubble, and "a subagent's message shows up as MY
 // message". Tool results must still surface; assistant text is unaffected.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { ClaudeStreamTranslator } from "../translator";
 import type { SessionNotification } from "../../../types";
@@ -396,6 +396,7 @@ describe("ClaudeStreamTranslator background task lifecycle", () => {
 
   it("uses only a successful ScheduleWakeup reason for the next-check row", () => {
     const { t, updates } = collect();
+    const scheduledFor = Date.now() + 60 * 60_000;
     const schedule = (id: string, reason: string, isError = false) => {
       t.feed({
         type: "assistant",
@@ -417,6 +418,13 @@ describe("ClaudeStreamTranslator background task lifecycle", () => {
       });
       t.feed({
         type: "user",
+        tool_use_result: isError
+          ? { error: "could not schedule" }
+          : {
+              scheduledFor,
+              clampedDelaySeconds: 3_600,
+              wasClamped: false,
+            },
         message: {
           role: "user",
           content: [
@@ -450,9 +458,41 @@ describe("ClaudeStreamTranslator background task lifecycle", () => {
       tasks: [
         expect.objectContaining({
           name: "Next check at 19:03 · preview still provisioning",
+          scheduledFor,
         }),
       ],
     });
+  });
+
+  it("derives the next exact timestamp from a fixed one-shot cron snapshot", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(2026, 7, 4, 10, 15, 0, 0));
+      const { t, updates } = collect();
+      t.setScheduledWakeups([
+        {
+          id: "wake-fixed",
+          schedule: "0 12 5 8 *",
+          recurring: false,
+          prompt: "Check tomorrow",
+        },
+      ]);
+
+      expect(
+        updates
+          .filter((u) => u.update.sessionUpdate === "background_tasks_update")
+          .at(-1)?.update,
+      ).toMatchObject({
+        tasks: [
+          expect.objectContaining({
+            taskId: "scheduled-wakeup:wake-fixed",
+            scheduledFor: new Date(2026, 7, 5, 12, 0, 0, 0).getTime(),
+          }),
+        ],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not overwrite an existing wake-up reason when a later one is scheduled", () => {

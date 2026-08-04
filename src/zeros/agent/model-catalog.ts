@@ -33,6 +33,7 @@ import type {
 import {
   getClaudeBudgetCapUsd,
   getClaudeFallbackModel,
+  getClaudeIdleTimeoutMinutes,
 } from "./reliability-settings";
 import catalogJson from "../../../catalogs/models-v1.json";
 
@@ -878,6 +879,9 @@ export const FALLBACK_MODEL_ENV_VAR = "CLAUDE_FALLBACK_MODEL";
  *  emitted when the cap is on. */
 export const BUDGET_CAP_ENV_VAR = "CLAUDE_MAX_BUDGET_USD";
 
+/** Renderer→engine carriage for the bounded persistent-query idle lifetime. */
+export const CLAUDE_IDLE_TIMEOUT_ENV_VAR = "ZEROS_CLAUDE_IDLE_TIMEOUT_MINUTES";
+
 /** Build env map from a chat's composer settings. */
 export function envForChatSettings(args: {
   agentId: string | null;
@@ -913,10 +917,10 @@ export function envForChatSettings(args: {
   );
   if (dirs.length > 0) env[ADDITIONAL_DIRS_ENV_VAR] = JSON.stringify(dirs);
   if (args.permissionMode) env[PERMISSION_MODE_ENV_VAR] = args.permissionMode;
-  // §3.6 R2/R3 — the global reliability knobs ride the same env channel,
-  // Claude-only (the other adapters expose no fallback/budget hook). Emitted
-  // by omission when off so they never perturb the env tuple for chats that
-  // don't use them. A self-fallback is skipped (the adapter guards too).
+  // The global reliability knobs ride the same env channel, Claude-only (the
+  // other adapters expose no fallback/budget/idle hook). Optional knobs are
+  // emitted by omission when off. Idle is always explicit so config drift and
+  // live timeout changes are exact, including the 30-minute default.
   if (agentFamily(args.agentId) === "claude") {
     const fallback = getClaudeFallbackModel();
     if (fallback && fallback !== args.model) {
@@ -924,6 +928,7 @@ export function envForChatSettings(args: {
     }
     const cap = getClaudeBudgetCapUsd();
     if (cap != null) env[BUDGET_CAP_ENV_VAR] = String(cap);
+    env[CLAUDE_IDLE_TIMEOUT_ENV_VAR] = String(getClaudeIdleTimeoutMinutes());
   }
   return env;
 }

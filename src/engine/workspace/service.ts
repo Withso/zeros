@@ -141,9 +141,14 @@ import {
 import { readWorkspaceFile, isSensitiveRepoPath } from "../files/read-file";
 import { writeWorkspaceFile } from "../files/write-file";
 import {
+  externalizeLegacyMessageImages,
+  payloadNeedsLegacyImageMigration,
+} from "../files/legacy-attachment-migration";
+import {
   ensureContextGraph,
   listContextGraph,
   setContextGraphAttachmentShared,
+  stageContextGraphAttachment,
 } from "../files/context-graph";
 import {
   opSettingsMigrateLegacy,
@@ -463,6 +468,7 @@ const WRITE_OPS = new Set<string>([
   // applies the secret denylist + workspace containment, and remote targeting is
   // clamped to repos the owner opened (resolveReadCwd / isKnownRepoRoot).
   "file.write",
+  "attachment.write",
 ]);
 
 /** Operations that can mutate a managed checkout, its index, or refs used by
@@ -473,6 +479,12 @@ const WRITE_OPS = new Set<string>([
  * expose local-only Git controls to relay clients. */
 const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "file.write",
+  "attachment.write",
+  // These are normally reads, but a window containing a legacy transcript
+  // image copies it into `.context-graph` before returning. Register the whole
+  // operation so archive/delete cannot move the checkout mid-migration.
+  "messages.window",
+  "messages.windowOlder",
   "design.frame.create",
   "design.frame.rename",
   "design.frame.duplicate",
@@ -1122,7 +1134,11 @@ export class WorkspaceService {
    * are returned too but harmless: no workspace lifecycle ever reaps them. */
   lifecycleMutationWorkspaceId(op: string, params: Params = {}): string | null {
     if (!LIFECYCLE_GATED_WORKSPACE_OPS.has(op)) return null;
-    if (op === "turns.reset") {
+    if (
+      op === "turns.reset" ||
+      op === "messages.window" ||
+      op === "messages.windowOlder"
+    ) {
       const chatId = optStr(params, "chatId");
       const location = chatId ? getChatLocation(chatId) : null;
       return location
@@ -1447,6 +1463,39 @@ export class WorkspaceService {
     );
   }
 
+  /** Resolve a writable, currently-live cwd for the one-time legacy image
+   * migration. A transcript read itself remains valid for an archived/missing
+   * workspace; in that case we simply return the legacy payload unchanged.
+   * Production also registers the window promise with the workspace lifecycle
+   * barrier (lifecycleMutationWorkspaceId), closing the check-to-write race. */
+  private legacyImageMigrationCwd(chatId: string): string | null {
+    const location = getChatLocation(chatId);
+    if (!location) return null;
+    const workspaceId = this.workspaceIdForCwd(
+      location.workspaceId ?? location.folder ?? undefined,
+    );
+    let cwd = location.folder ?? "";
+    if (workspaceId === LOCAL_MAIN_WORKSPACE_ID) {
+      if (!nodePath.isAbsolute(cwd)) cwd = this.root;
+    } else if (workspaceId) {
+      const workspace = getWorkspaceById(workspaceId);
+      if (!workspace) return null;
+      try {
+        this.assertWorkspaceProcessStartAllowed(workspace);
+      } catch {
+        return null;
+      }
+      cwd = workspace.path;
+    }
+    if (!nodePath.isAbsolute(cwd)) return null;
+    try {
+      if (!fs.statSync(cwd).isDirectory()) return null;
+    } catch {
+      return null;
+    }
+    return cwd;
+  }
+
   async handle(
     op: string,
     params: Params = {},
@@ -1460,7 +1509,14 @@ export class WorkspaceService {
     if (lifecycleMutationWorkspaceId) {
       const workspace = getWorkspaceById(lifecycleMutationWorkspaceId);
       if (workspace) {
-        this.assertWorkspaceProcessStartAllowed(workspace);
+        // Transcript windows remain readable while archived. Only their
+        // optional legacy-image rewrite needs a live checkout, and the handler
+        // below skips that rewrite when legacyImageMigrationCwd returns null.
+        const isTranscriptWindow =
+          op === "messages.window" || op === "messages.windowOlder";
+        if (!isTranscriptWindow) {
+          this.assertWorkspaceProcessStartAllowed(workspace);
+        }
         if (
           workspace.kind === "design" &&
           DESIGN_WORKSPACE_BLOCKED_MUTATIONS.has(op)
@@ -2943,20 +2999,48 @@ export class WorkspaceService {
         // materialize a whole transcript into memory. WINDOW_MAX_ROWS is also
         // the ceiling windowChatMessages honours when it extends a tail window
         // back to a turn boundary, so the two stay one number.
+        const chatId = reqStr(params, "chatId");
         const limit = Math.min(optNum(params, "limit") ?? 200, WINDOW_MAX_ROWS);
         const before = optNum(params, "before");
+        const messages = windowChatMessages(chatId, limit, before);
+        const needsImageMigration = messages.some((row) =>
+          payloadNeedsLegacyImageMigration(row.payload),
+        );
+        const folder = needsImageMigration
+          ? this.legacyImageMigrationCwd(chatId)
+          : null;
         return {
-          messages: windowChatMessages(reqStr(params, "chatId"), limit, before),
+          messages: folder
+            ? await externalizeLegacyMessageImages({
+                cwd: folder,
+                chatId,
+                rows: messages,
+              })
+            : messages,
         };
       }
       case "messages.windowOlder": {
+        const chatId = reqStr(params, "chatId");
         const limit = Math.min(optNum(params, "limit") ?? 200, WINDOW_MAX_ROWS);
+        const messages = windowOlderChatMessages(
+          chatId,
+          limit,
+          reqStr(params, "beforeMsgId"),
+        );
+        const needsImageMigration = messages.some((row) =>
+          payloadNeedsLegacyImageMigration(row.payload),
+        );
+        const folder = needsImageMigration
+          ? this.legacyImageMigrationCwd(chatId)
+          : null;
         return {
-          messages: windowOlderChatMessages(
-            reqStr(params, "chatId"),
-            limit,
-            reqStr(params, "beforeMsgId"),
-          ),
+          messages: folder
+            ? await externalizeLegacyMessageImages({
+                cwd: folder,
+                chatId,
+                rows: messages,
+              })
+            : messages,
         };
       }
       // Phase 2c — import pre-2b transcripts into the engine so the web sees a
@@ -3116,6 +3200,30 @@ export class WorkspaceService {
         // file.read — and writes atomically (tmp + rename) so a crash can't
         // truncate the file.
         return writeWorkspaceFile(cwd, rel, content, { remote });
+      }
+      case "attachment.write": {
+        const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
+        const mimeType = reqStr(params, "mimeType");
+        const staged = await stageContextGraphAttachment(cwd, {
+          attachmentId: reqStr(params, "attachmentId"),
+          base64: reqStr(params, "base64"),
+          filename: reqStr(params, "filename"),
+        });
+        if (!staged.ok) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message:
+              staged.error ??
+              "Couldn't stage the attachment in the context graph",
+          });
+        }
+        return {
+          absolutePath: staged.absolutePath,
+          relativePath: staged.relativePath,
+          mimeType,
+          bytes: staged.bytes,
+          ...(staged.skipped ? { skipped: true } : {}),
+        };
       }
 
       // ── Context graph (the Context tab's canvas) ──────────

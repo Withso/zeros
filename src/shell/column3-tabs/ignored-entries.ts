@@ -123,6 +123,14 @@ export type IgnoredPathOp = {
   recursive?: true;
 };
 
+export interface IgnoredPathDeltaPlan {
+  operations: IgnoredPathOp[];
+  /** The explicit ignored paths the tree actually represents after operations.
+   *  This can temporarily retain a disappearing directory while a roots-first
+   *  refresh still carries its previous child listing. */
+  applied: ReadonlySet<string>;
+}
+
 /** The add/remove ops that take the tree from `applied` to `next`.
  *
  *  Applying an ignored-side change incrementally instead of through resetPaths
@@ -136,24 +144,113 @@ export type IgnoredPathOp = {
  *  mid-batch throw leaves the store half-mutated and the caller has to fall back
  *  to the whole-tree rebuild this function exists to avoid.
  *    • `remove` on a directory that still holds children throws
- *      "Cannot remove a non-empty directory without recursive" — reachable
- *      whenever a directory disappears while its children are still in `next`
- *      (a build deletes `dist/` between the roots listing and the child listing).
- *    • ops came out PARENT-FIRST (the merged set is seeded from roots), so the
- *      parent's own removal is what hit that throw. Dropping any remove whose
- *      ancestor is also being removed makes the order irrelevant. */
+ *      "Cannot remove a non-empty directory without recursive".
+ *    • ops came out PARENT-FIRST (the merged set is seeded from roots), so a
+ *      parent's own removal hit that throw before its removed descendants.
+ *      De-nesting makes one recursive parent op cover that whole branch.
+ *
+ *  Staggered roots/child refreshes and kind changes need the richer plan below;
+ *  this compatibility helper returns only its operations. */
 export function ignoredPathDelta(
   applied: ReadonlySet<string>,
   next: ReadonlySet<string>,
 ): IgnoredPathOp[] {
-  const ops: IgnoredPathOp[] = [];
+  return planIgnoredPathDelta(applied, next).operations;
+}
+
+/** Plan a store-safe ignored-path transition and the exact snapshot to use for
+ *  the following delta.
+ *
+ *  Two store semantics make a plain set difference incorrect:
+ *
+ *  1. File/directory kind changes collide when the add runs before the old
+ *     node is removed (`cache` → `cache/`). Only blocking removals move ahead
+ *     of adds; ordinary adds remain first so replacing the last child in an
+ *     implicit directory does not materialize a stray empty row.
+ *  2. Roots and expanded children refresh independently. If `dist/` disappears
+ *     one render before stale `dist/old.js`, recursively removing it destroys a
+ *     path `next` still claims is present. We defer that parent removal and keep
+ *     it in `applied` until the child listing catches up, then one recursive op
+ *     clears the branch without a half-applied batch or fallback rebuild. */
+export function planIgnoredPathDelta(
+  applied: ReadonlySet<string>,
+  next: ReadonlySet<string>,
+): IgnoredPathDeltaPlan {
+  const effectiveNext = new Set(next);
+  const nextAncestorDirs = new Set<string>();
   for (const path of next) {
-    if (!applied.has(path)) ops.push({ path, type: "add" });
+    visitAncestorDirs(path, (ancestor) => nextAncestorDirs.add(ancestor));
+  }
+  for (const path of applied) {
+    if (
+      isDirEntry(path) &&
+      !next.has(path) &&
+      nextAncestorDirs.has(path)
+    ) {
+      effectiveNext.add(path);
+    }
+  }
+
+  const adding: string[] = [];
+  for (const path of next) {
+    if (!applied.has(path)) adding.push(path);
   }
   const removing = new Set<string>();
   for (const path of applied) {
-    if (!next.has(path)) removing.add(path);
+    if (!effectiveNext.has(path)) removing.add(path);
   }
+
+  // Pre-index removals by logical path and ancestry. Expanded ignored folders
+  // can contain tens of thousands of entries, so a cross-product between adds
+  // and removes would turn a filesystem burst into quadratic renderer work.
+  const removingByKey = new Map<string, string>();
+  const removingFiles = new Set<string>();
+  const removedAncestorDirs = new Set<string>();
+  for (const remove of removing) {
+    removingByKey.set(dirKey(remove), remove);
+    if (!isDirEntry(remove)) removingFiles.add(remove);
+    visitAncestorDirs(remove, (ancestor) => removedAncestorDirs.add(ancestor));
+  }
+
+  // A file being added where the current tree has only explicit descendants
+  // still collides with their implicit directory. Remove that directory as the
+  // blocker even when it was not itself explicit in `applied`.
+  const syntheticBlockingDirs = new Set<string>();
+  for (const add of adding) {
+    if (!isDirEntry(add) && removedAncestorDirs.has(`${add}/`)) {
+      syntheticBlockingDirs.add(`${add}/`);
+    }
+  }
+
+  const blocking = new Set<string>(syntheticBlockingDirs);
+  for (const add of adding) {
+    const samePath = removingByKey.get(dirKey(add));
+    if (samePath) blocking.add(samePath);
+    // An existing file must leave before a descendant can materialize its
+    // implicit directory chain (`cache` -> `cache/item`).
+    visitAncestorDirs(add, (ancestor) => {
+      const file = dirKey(ancestor);
+      if (removingFiles.has(file)) blocking.add(file);
+    });
+  }
+
+  const operations: IgnoredPathOp[] = [];
+  appendDenestedRemoves(operations, blocking);
+  for (const path of adding) operations.push({ path, type: "add" });
+
+  const remaining = new Set(
+    [...removing].filter(
+      (path) => !blocking.has(path) && !hasRemovedAncestor(path, blocking),
+    ),
+  );
+  appendDenestedRemoves(operations, remaining);
+  return { operations, applied: effectiveNext };
+}
+
+function appendDenestedRemoves(
+  ops: IgnoredPathOp[],
+  removing: ReadonlySet<string>,
+): void {
   for (const path of removing) {
     if (hasRemovedAncestor(path, removing)) continue; // covered recursively
     ops.push(
@@ -162,7 +259,15 @@ export function ignoredPathDelta(
         : { path, type: "remove" },
     );
   }
-  return ops;
+}
+
+function visitAncestorDirs(path: string, visit: (directory: string) => void) {
+  let slash = path.indexOf("/");
+  const last = path.length - 1;
+  while (slash !== -1 && slash < last) {
+    visit(path.slice(0, slash + 1));
+    slash = path.indexOf("/", slash + 1);
+  }
 }
 
 /** True when some ancestor DIRECTORY of `p` is also in `removing`, so a
