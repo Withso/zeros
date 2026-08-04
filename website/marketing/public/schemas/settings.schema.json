@@ -321,6 +321,20 @@
           "type": "boolean",
           "description": "Start new chats in plan mode."
         },
+        "favorites": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Favorite model id per agent family."
+        },
+        "chat_title_model": {
+          "type": "string",
+          "description": "Model used to generate chat titles."
+        },
         "claude_code": {
           "type": "object",
           "properties": {
@@ -335,6 +349,37 @@
                 "ultracode"
               ],
               "description": "Default reasoning effort for Claude models in new chats."
+            },
+            "fallback_model": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Fallback Claude model id, or the sentinel \"none\" to fail fast."
+            },
+            "budget_cap_usd": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "Optional maximum Claude spend in USD per turn."
+            },
+            "idle_timeout_minutes": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "const": 30
+                },
+                {
+                  "type": "number",
+                  "const": 60
+                },
+                {
+                  "type": "number",
+                  "const": 120
+                },
+                {
+                  "type": "number",
+                  "const": 300
+                }
+              ],
+              "description": "How long an idle Claude session stays warm (30 minutes to 5 hours)."
             }
           },
           "description": "Claude-specific model defaults."
@@ -370,6 +415,24 @@
     },
     "tool_approvals_enabled": {
       "type": "boolean"
+    },
+    "github": {
+      "type": "object",
+      "properties": {
+        "auth_method": {
+          "type": "string",
+          "enum": [
+            "gh-cli",
+            "github-app",
+            "pat"
+          ],
+          "description": "The GitHub credential method Zeros actively uses."
+        },
+        "disconnected_at": {
+          "type": "string",
+          "description": "ISO timestamp of the last explicit disconnect; prevents implicit credential adoption."
+        }
+      }
     },
     "providers": {
       "type": "object",

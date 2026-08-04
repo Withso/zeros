@@ -65,7 +65,11 @@ import {
   UsersRound,
   type LucideIcon,
 } from "lucide-react";
-import { useActivePage, useWorkspaceDispatch } from "../store/store";
+import {
+  useActivePage,
+  useWorkspaceDispatch,
+  useWorkspaceStore,
+} from "../store/store";
 import { Button, Input } from "../ui";
 import { Tooltip } from "@/zeros/ui/primitives";
 import { cn } from "@/zeros/ui/cn";
@@ -150,9 +154,12 @@ import {
   useDefaultPlanMode,
 } from "../agent/new-chat-defaults";
 import {
+  CLAUDE_IDLE_TIMEOUT_OPTIONS,
   DEFAULT_BUDGET_CAP_USD,
+  DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES,
   useClaudeBudgetCap,
   useClaudeFallbackModel,
+  useClaudeIdleTimeoutMinutes,
 } from "../agent/reliability-settings";
 import {
   DropdownMenu,
@@ -1170,6 +1177,18 @@ function ModelsPanel() {
   // §3.6 R2/R3 — Claude reliability knobs (fallback model + per-turn budget).
   const [fallbackModel, setFallbackModel] = useClaudeFallbackModel();
   const [budgetCap, setBudgetCap] = useClaudeBudgetCap();
+  const [idleTimeoutMinutes, setIdleTimeoutMinutes] =
+    useClaudeIdleTimeoutMinutes();
+  // Reliability settings are global, but already-loaded Claude chats hold an
+  // engine session. Push the same full env encoder those sessions use so a
+  // timeout change takes effect now instead of waiting for the next restart.
+  const applyClaudeSettings = () => {
+    mirrorModelsToSettings();
+    for (const chat of useWorkspaceStore.getState().chats) {
+      if (agentFamily(chat.agentId) === "claude")
+        sessions.updateConfig(chat.id);
+    }
+  };
   // The $-amount field edits locally and commits on blur/Enter so a
   // half-typed "0" never lands in settings.
   const [budgetDraft, setBudgetDraft] = useState<string | null>(null);
@@ -1178,7 +1197,7 @@ function ModelsPanel() {
     const v = Number.parseFloat(budgetDraft);
     setBudgetCap(Number.isFinite(v) && v > 0 ? v : budgetCap);
     setBudgetDraft(null);
-    mirrorModelsToSettings();
+    applyClaudeSettings();
   };
   // The Claude family's curated models — the fallback picker's options.
   const claudeModels = modelsForAgent("claude", null);
@@ -1403,6 +1422,47 @@ function ModelsPanel() {
       <SettingsSection title="Claude">
         <SettingsList className={MODELS_SECTION_CLS}>
           <SettingsRow
+            label="Keep sessions active"
+            hint={
+              <>
+                <span className="block">
+                  How long Claude stays ready between turns
+                </span>
+                {idleTimeoutMinutes > DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES && (
+                  <span className="text-yellow-fg block">
+                    Longer sessions use more memory.
+                  </span>
+                )}
+              </>
+            }
+          >
+            <Select
+              value={String(idleTimeoutMinutes)}
+              onValueChange={(value) => {
+                const option = CLAUDE_IDLE_TIMEOUT_OPTIONS.find(
+                  (candidate) => String(candidate.minutes) === value,
+                );
+                if (!option) return;
+                setIdleTimeoutMinutes(option.minutes);
+                applyClaudeSettings();
+              }}
+            >
+              <SelectTrigger className="min-w-[150px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent className="min-w-[180px]">
+                {CLAUDE_IDLE_TIMEOUT_OPTIONS.map((option) => (
+                  <SelectItem
+                    key={option.minutes}
+                    value={String(option.minutes)}
+                  >
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </SettingsRow>
+          <SettingsRow
             label="Fallback model"
             hint="Used automatically when the primary model is overloaded or unavailable"
           >
@@ -1410,7 +1470,7 @@ function ModelsPanel() {
               value={fallbackModel ?? "none"}
               onValueChange={(v) => {
                 setFallbackModel(v === "none" ? null : v);
-                mirrorModelsToSettings();
+                applyClaudeSettings();
               }}
             >
               <SelectTrigger className="min-w-[150px]">
@@ -1437,7 +1497,7 @@ function ModelsPanel() {
               onCheckedChange={(on) => {
                 setBudgetCap(on ? DEFAULT_BUDGET_CAP_USD : null);
                 setBudgetDraft(null);
-                mirrorModelsToSettings();
+                applyClaudeSettings();
               }}
               aria-label="Cap spend per turn"
             />

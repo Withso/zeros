@@ -113,6 +113,8 @@ const EARLY_DEATH_WINDOW_MS = 5_000;
  *  gets one free immediate respawn so a one-off boot blip still heals. */
 const RESPAWN_BACKOFF_BASE_MS = 1_000;
 const RESPAWN_BACKOFF_CAP_MS = 30_000;
+/** Ceiling for a partial (un-newline-terminated) protocol line — see onStdout. */
+const MAX_PARTIAL_LINE_CHARS = 32 * 1024 * 1024;
 
 class PtyHost {
   private child: ChildProcess | null = null;
@@ -280,6 +282,17 @@ class PtyHost {
       this.buf = this.buf.slice(nl + 1);
       if (line.length > 0) this.dispatch(line);
       nl = this.buf.indexOf("\n");
+    }
+    // A newline never arriving (host wedged mid-write, binary garbage on
+    // stdout) would otherwise grow this partial-line buffer without bound.
+    // Legit frames are far below this cap — a 24-row PTY data frame is tens of
+    // KB — so past it the line is already unparseable; drop it rather than let
+    // the engine's memory follow a broken host.
+    if (this.buf.length > MAX_PARTIAL_LINE_CHARS) {
+      console.error(
+        `[pty-host] dropped ${this.buf.length}-char partial protocol line (no newline)`,
+      );
+      this.buf = "";
     }
   }
 

@@ -91,7 +91,8 @@ function sameBackgroundTasks(
       task.updatedAt === other.updatedAt &&
       task.command === other.command &&
       task.summary === other.summary &&
-      task.lastToolName === other.lastToolName
+      task.lastToolName === other.lastToolName &&
+      task.scheduledFor === other.scheduledFor
     );
   });
 }

@@ -38,6 +38,7 @@ interface BunStatement {
   run(...a: unknown[]): { changes: number; lastInsertRowid: number | bigint };
   get(...a: unknown[]): unknown;
   all(...a: unknown[]): unknown[];
+  finalize?(): void;
 }
 interface BunDatabase {
   prepare(sql: string): BunStatement;
@@ -74,15 +75,56 @@ function wrapBunStatement(stmt: BunStatement): BunStatement {
   };
 }
 
+/** Statements a bun DB handle keeps prepared, keyed by SQL. Every engine call
+ *  site does `db.prepare(sql).run(...)` per invocation (better-sqlite3 style);
+ *  without a cache each of those allocates a fresh native sqlite3_stmt whose
+ *  release then waits on GC — under the engine's steady poll traffic that
+ *  accumulates as untracked `external` process memory. Bounded LRU; evicted
+ *  and closed statements are finalized eagerly so native memory is released
+ *  deterministically. SQLite re-prepares cached statements itself when the
+ *  schema changes underneath them, so caching across migrations is safe. */
+const MAX_CACHED_STATEMENTS = 256;
+
 /** Wrap a bun:sqlite Database so it quacks like a better-sqlite3 Database for the
  *  subset the engine uses (prepare/exec/pragma/transaction/close). */
 function wrapBunDb(db: BunDatabase): BetterSqlite3.Database {
+  const stmtCache = new Map<string, BunStatement>();
+  const finalize = (stmt: BunStatement | undefined): void => {
+    try {
+      stmt?.finalize?.();
+    } catch {
+      /* already finalized / driver without finalize */
+    }
+  };
+  const cachedPrepare = (sql: string): BunStatement => {
+    const hit = stmtCache.get(sql);
+    if (hit) {
+      // Re-insert to keep Map iteration order = LRU order.
+      stmtCache.delete(sql);
+      stmtCache.set(sql, hit);
+      return hit;
+    }
+    const stmt = db.prepare(sql);
+    stmtCache.set(sql, stmt);
+    if (stmtCache.size > MAX_CACHED_STATEMENTS) {
+      const oldest = stmtCache.keys().next().value;
+      if (oldest !== undefined) {
+        finalize(stmtCache.get(oldest));
+        stmtCache.delete(oldest);
+      }
+    }
+    return stmt;
+  };
   const wrapped = {
-    prepare: (sql: string) => wrapBunStatement(db.prepare(sql)),
+    prepare: (sql: string) => wrapBunStatement(cachedPrepare(sql)),
     exec: (sql: string) => db.exec(sql),
     pragma: (s: string) => db.exec(`PRAGMA ${s}`),
     transaction: <F extends AnyFn>(fn: F): F => db.transaction(fn),
-    close: () => db.close(),
+    close: () => {
+      for (const stmt of stmtCache.values()) finalize(stmt);
+      stmtCache.clear();
+      db.close();
+    },
   };
   return wrapped as unknown as BetterSqlite3.Database;
 }

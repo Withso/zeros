@@ -97,6 +97,11 @@ const MAX_CONSECUTIVE_EARLY_DEATHS = 3;
  *  silent retry should still heal a one-off boot blip seamlessly. */
 const RESPAWN_BACKOFF_BASE_MS = 1_000;
 const RESPAWN_BACKOFF_CAP_MS = 30_000;
+/** Ceiling on run.msg events buffered for a consumer that stopped iterating —
+ *  see AsyncMsgQueue.push. */
+const MAX_QUEUED_MSGS = 10_000;
+/** Ceiling for a partial (un-newline-terminated) protocol line — see onLine. */
+const MAX_PARTIAL_LINE_CHARS = 32 * 1024 * 1024;
 
 export function toHostError(e: SerializedHostError | undefined): Error {
   const err = new Error(e?.message ?? "cursor host error") as Error & {
@@ -121,6 +126,19 @@ export class AsyncMsgQueue<T = unknown> {
 
   push(msg: T): void {
     if (this.ended || this.failure !== null) return;
+    // The consumer (one adapter turn) normally drains as fast as the host
+    // produces; a backlog this deep means the turn stopped iterating (retry
+    // `continue`, cancel, classified failure) while the host keeps streaming.
+    // Fail the stream instead of buffering decoded messages without bound.
+    if (this.buffer.length >= MAX_QUEUED_MSGS) {
+      this.fail(
+        new Error(
+          `cursor run stream backlog exceeded ${MAX_QUEUED_MSGS} messages with no consumer`,
+        ),
+      );
+      this.buffer = [];
+      return;
+    }
     this.buffer.push(msg);
     this.wake();
   }
@@ -232,6 +250,16 @@ export class CursorHostClient {
       this.buf = this.buf.slice(nl + 1);
       if (one.length > 0) this.dispatch(one);
       nl = this.buf.indexOf("\n");
+    }
+    // A newline never arriving (host wedged mid-write, garbage on stdout)
+    // would grow this partial-line buffer without bound. Legit protocol lines
+    // sit far below this cap; past it the line is already unparseable — drop
+    // it rather than let the engine's memory follow a broken host.
+    if (this.buf.length > MAX_PARTIAL_LINE_CHARS) {
+      console.error(
+        `[cursor-host] dropped ${this.buf.length}-char partial protocol line (no newline)`,
+      );
+      this.buf = "";
     }
   }
 

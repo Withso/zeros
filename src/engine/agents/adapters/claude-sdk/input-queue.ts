@@ -51,6 +51,12 @@ export class InputQueue<T> implements AsyncIterable<T> {
     return this.ended;
   }
 
+  /** Buffered messages not yet pulled by the SDK consumer. Direct hand-offs
+   * to an already-waiting consumer never enter the buffer. */
+  get pendingCount(): number {
+    return this.buffer.length;
+  }
+
   [Symbol.asyncIterator](): AsyncIterator<T> {
     return {
       next: (): Promise<IteratorResult<T>> => {

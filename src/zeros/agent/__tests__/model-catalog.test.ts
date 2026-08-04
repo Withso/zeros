@@ -28,6 +28,7 @@ import {
   FAST_MODE_ENV_VAR,
   PERMISSION_MODE_ENV_VAR,
   ADDITIONAL_DIRS_ENV_VAR,
+  CLAUDE_IDLE_TIMEOUT_ENV_VAR,
 } from "../model-catalog";
 import type { SessionMode } from "../../bridge/agent-events";
 
@@ -586,6 +587,24 @@ describe("staticModesForAgent (pre-session fallback modes)", () => {
 });
 
 describe("envForChatSettings — permission posture carriage", () => {
+  it("carries Claude's bounded idle timeout only for Claude sessions", () => {
+    const claude = envForChatSettings({
+      agentId: "claude",
+      initialize: null,
+      model: "claude-opus-4-8[1m]",
+      effort: "high",
+    });
+    expect(claude[CLAUDE_IDLE_TIMEOUT_ENV_VAR]).toBe("30");
+
+    const codex = envForChatSettings({
+      agentId: "codex",
+      initialize: null,
+      model: "gpt-5.6-sol",
+      effort: "high",
+    });
+    expect(codex[CLAUDE_IDLE_TIMEOUT_ENV_VAR]).toBeUndefined();
+  });
+
   it("emits ZEROS_PERMISSION_MODE alongside ZEROS_THINKING_EFFORT", () => {
     const env = envForChatSettings({
       agentId: "codex",

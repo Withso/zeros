@@ -25,6 +25,12 @@ import {
   resolveChatTitleModel,
   setChatTitleModel,
 } from "../new-chat-defaults";
+import {
+  DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES,
+  getClaudeIdleTimeoutMinutes,
+  isClaudeWakeupBeyondIdleTimeout,
+  setClaudeIdleTimeoutMinutes,
+} from "../reliability-settings";
 import type { BridgeRegistryAgent } from "../../bridge/messages";
 
 // The test env is `environment: "node"`; native/settings is localStorage-backed.
@@ -153,6 +159,55 @@ describe("chat-title model (Settings → Models → Custom models)", () => {
     expect(getChatTitleModel()).toBe("claude-haiku-4-5");
     hydrateModelsFromSettings({ chat_title_model: "gpt-9-mega" });
     expect(getChatTitleModel()).toBe("claude-haiku-4-5");
+  });
+});
+
+describe("Claude idle timeout (Settings → Models → Claude)", () => {
+  beforeEach(() => installLocalStorage());
+  afterEach(() => {
+    delete (globalThis as { localStorage?: Storage }).localStorage;
+  });
+
+  it("defaults to 30 minutes and accepts only the four bounded choices", () => {
+    expect(getClaudeIdleTimeoutMinutes()).toBe(
+      DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES,
+    );
+    for (const value of [60, 120, 300] as const) {
+      setClaudeIdleTimeoutMinutes(value);
+      expect(getClaudeIdleTimeoutMinutes()).toBe(value);
+    }
+    setClaudeIdleTimeoutMinutes(999 as never);
+    expect(getClaudeIdleTimeoutMinutes()).toBe(
+      DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES,
+    );
+  });
+
+  it("hydrates a persisted choice and treats an absent or invalid value as the default", () => {
+    hydrateModelsFromSettings({
+      claude_code: { idle_timeout_minutes: 300 },
+    });
+    expect(getClaudeIdleTimeoutMinutes()).toBe(300);
+
+    hydrateModelsFromSettings({});
+    expect(getClaudeIdleTimeoutMinutes()).toBe(30);
+
+    setClaudeIdleTimeoutMinutes(120);
+    hydrateModelsFromSettings({
+      claude_code: { idle_timeout_minutes: 999 },
+    });
+    expect(getClaudeIdleTimeoutMinutes()).toBe(30);
+  });
+
+  it("warns only when a future wake-up is strictly beyond the chosen timeout", () => {
+    const now = 10_000;
+    expect(isClaudeWakeupBeyondIdleTimeout(now + 30 * 60_000, 30, now)).toBe(
+      false,
+    );
+    expect(
+      isClaudeWakeupBeyondIdleTimeout(now + 30 * 60_000 + 1, 30, now),
+    ).toBe(true);
+    expect(isClaudeWakeupBeyondIdleTimeout(now - 1, 30, now)).toBe(false);
+    expect(isClaudeWakeupBeyondIdleTimeout(Number.NaN, 30, now)).toBe(false);
   });
 });
 

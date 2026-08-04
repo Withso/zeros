@@ -52,6 +52,9 @@ const FS_STRIKE = 8;
 const MAX_LINES = 5_000;
 const MAX_CHARS = 300_000;
 const DEBOUNCE_MS = 75;
+/** Re-check cadence while the editor sits in a hidden retained layer — see
+ *  the visibility gate in run(). */
+const HIDDEN_RETRY_MS = 1_000;
 
 export interface ShikiConfig {
   /** Shiki bundled language id, or null → no color (plain + Lezer structure). */
@@ -156,6 +159,25 @@ const shikiPlugin = ViewPlugin.fromClass(
     }
 
     private async run(view: EditorView) {
+      // Dispatching decorations re-enters CodeMirror's measure loop, and a
+      // visibility:hidden retained deck can never stabilize its viewport —
+      // each dispatch re-arms another rAF measure pass and eventually logs
+      // "Measure loop restarted more than 5 times", a permanent hidden-layout
+      // treadmill. Park the (re)tokenize until the editor is actually
+      // rendered; one idle timeout per hidden editor is far cheaper than a
+      // hidden relayout, and the first visible retry paints within a second.
+      const dom = view.dom;
+      if (
+        typeof dom.checkVisibility === "function" &&
+        !dom.checkVisibility()
+      ) {
+        if (this.timer != null) clearTimeout(this.timer);
+        this.timer = setTimeout(() => {
+          this.timer = null;
+          void this.run(view);
+        }, HIDDEN_RETRY_MS);
+        return;
+      }
       const myGen = ++this.gen; // race guard
       const cfg = view.state.facet(shikiConfig);
       const doc = view.state.doc;

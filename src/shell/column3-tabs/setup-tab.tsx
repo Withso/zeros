@@ -223,7 +223,10 @@ function WorkspaceSetup({
       fontFamily:
         'ui-monospace, "Geist Mono", "SF Mono", Menlo, Consolas, monospace',
       fontSize: 12,
-      scrollback: 10_000,
+      // Same rationale as terminal-session-view: scrollback is resident
+      // memory per mounted terminal; setup logs rarely need more than a
+      // couple thousand lines of history.
+      scrollback: 2_000,
       disableStdin: true, // read-only log
       cursorStyle: "underline",
       cursorBlink: false,

@@ -284,19 +284,57 @@ function fail(id, e) {
 }
 
 /** Eagerly drain a run's stream, forwarding every item, so nothing is lost
- *  between `agent.send` returning and the engine consuming the stream. */
+ *  between `agent.send` returning and the engine consuming the stream.
+ *
+ *  Reaping: `runs` entries pin the SDK run (its HTTP/2 stream, abort
+ *  listeners, buffered frames) inside this long-lived host, so every path out
+ *  of a run must release its entry.
+ *   - clean end   → the engine calls run.wait() right after streamEnd, which
+ *                   deletes the entry; endedAt + the sweep below cover an
+ *                   engine that never gets to wait() (adapter died mid-turn).
+ *   - stream error → the engine never calls wait() after a streamError (the
+ *                   throw skips it), so reap HERE — and cancel() so a local
+ *                   run's detached cursor-agent subprocess is reaped too. */
 function drainRun(runId, run) {
   (async () => {
     try {
       for await (const msg of run.stream()) {
         send({ k: "ev", ev: "run.msg", runId, msg });
       }
+      const entry = runs.get(runId);
+      if (entry && entry.run === run) entry.endedAt = Date.now();
       send({ k: "ev", ev: "run.streamEnd", runId });
     } catch (err) {
+      const entry = runs.get(runId);
+      if (entry && entry.run === run) {
+        runs.delete(runId);
+        try {
+          const cancelled = run.cancel && run.cancel();
+          if (cancelled && typeof cancelled.catch === "function") {
+            cancelled.catch(() => {});
+          }
+        } catch {
+          /* best effort */
+        }
+      }
       send({ k: "ev", ev: "run.streamError", runId, error: serializeErr(err) });
     }
   })();
 }
+
+// Belt-and-suspenders reaper for ended runs whose wait() never arrived (the
+// engine crashed or dropped the turn between streamEnd and run.wait). Without
+// it those entries — and the SDK runs they pin — live for the host's lifetime.
+const ENDED_RUN_TTL_MS = 5 * 60_000;
+const endedRunSweep = setInterval(() => {
+  const now = Date.now();
+  for (const [runId, entry] of runs) {
+    if (entry.endedAt && now - entry.endedAt > ENDED_RUN_TTL_MS) {
+      runs.delete(runId);
+    }
+  }
+}, 60_000);
+if (typeof endedRunSweep.unref === "function") endedRunSweep.unref();
 
 async function handle(m) {
   const { id, op } = m;
@@ -341,7 +379,7 @@ async function handle(m) {
         typeof args.runId === "string" && args.runId
           ? args.runId
           : String(nextRunId++);
-      runs.set(runId, { run, done: false });
+      runs.set(runId, { run, endedAt: null });
       // Respond FIRST (so the engine pairs sdkRunId with the run), THEN start
       // draining — NDJSON over one pipe preserves order.
       ok(id, { sdkRunId: run && run.id ? run.id : null });

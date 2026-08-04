@@ -10,7 +10,7 @@
 
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { ClaudeSdkAdapter } from "../adapter";
 import {
@@ -310,6 +310,203 @@ const streamText = (t: string): Msg => ({
 });
 
 describe("ClaudeSdkAdapter", () => {
+  it("closes an idle Claude query at the configured deadline and lazily resumes the next turn", async () => {
+    vi.useFakeTimers();
+    try {
+      const { queryFn, captured, control } = makeScriptedQuery(
+        [
+          [initMsg("sdk-idle"), resultOk("sdk-idle")],
+          [assistantText("resumed"), resultOk("sdk-idle")],
+        ],
+        { keepAliveAfterResult: true },
+      );
+      const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
+        queryFn,
+        idleTimeoutMs: 1_000,
+      });
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+
+      await adapter.prompt({
+        sessionId: session.sessionId,
+        prompt: [textBlock("first")] as never,
+      });
+      await vi.advanceTimersByTimeAsync(999);
+      expect(control.closes).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(control.closes).toBe(1);
+
+      await adapter.prompt({
+        sessionId: session.sessionId,
+        prompt: [textBlock("second")] as never,
+      });
+      expect(captured).toHaveLength(2);
+      expect(captured[1]?.resume).toBe("sdk-idle");
+      await adapter.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not tear down at the idle deadline when a prompt starts at the boundary", async () => {
+    vi.useFakeTimers();
+    try {
+      const { queryFn, control } = makeScriptedQuery(
+        [
+          [initMsg("sdk-race"), resultOk("sdk-race")],
+          [assistantText("working")],
+        ],
+        { keepAliveAfterResult: true },
+      );
+      const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
+        queryFn,
+        idleTimeoutMs: 1_000,
+      });
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      await adapter.prompt({
+        sessionId: session.sessionId,
+        prompt: [textBlock("first")] as never,
+      });
+
+      await vi.advanceTimersByTimeAsync(999);
+      void adapter.prompt({
+        sessionId: session.sessionId,
+        prompt: [textBlock("start now")] as never,
+      });
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(control.closes).toBe(0);
+      await adapter.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the query alive for scheduled wake-ups and turnless queued work", async () => {
+    vi.useFakeTimers();
+    try {
+      const scheduled = makeScriptedQuery(
+        [[initMsg("sdk-wakeup"), resultOk("sdk-wakeup")]],
+        { keepAliveAfterResult: true },
+      );
+      const wakeupAdapter = new ClaudeSdkAdapter(makeCtx([], []), {
+        queryFn: scheduled.queryFn,
+        idleTimeoutMs: 1_000,
+      });
+      const { session: wakeupSession } = await wakeupAdapter.newSession({
+        cwd: "/tmp",
+      });
+      await wakeupAdapter.prompt({
+        sessionId: wakeupSession.sessionId,
+        prompt: [textBlock("schedule it")] as never,
+      });
+      const hooks = scheduled.captured[0]?.hooks as {
+        Stop?: Array<{
+          hooks: Array<(input: Record<string, unknown>) => Promise<unknown>>;
+        }>;
+      };
+      await hooks.Stop![0].hooks[0]({
+        hook_event_name: "Stop",
+        session_crons: [
+          {
+            id: "wake-later",
+            schedule: "0 12 5 8 *",
+            recurring: false,
+            prompt: "Check later",
+          },
+        ],
+      });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(scheduled.control.closes).toBe(0);
+      await hooks.Stop![0].hooks[0]({
+        hook_event_name: "Stop",
+        session_crons: [],
+      });
+      await vi.advanceTimersByTimeAsync(999);
+      expect(scheduled.control.closes).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(scheduled.control.closes).toBe(1);
+      await wakeupAdapter.dispose();
+
+      const compacting = makeScriptedQuery([[initMsg("sdk-compact")]]);
+      const compactAdapter = new ClaudeSdkAdapter(makeCtx([], []), {
+        queryFn: compacting.queryFn,
+        idleTimeoutMs: 1_000,
+      });
+      const { session: compactSession } = await compactAdapter.newSession({
+        cwd: "/tmp",
+      });
+      await compactAdapter.compactContext({
+        sessionId: compactSession.sessionId,
+      });
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(compacting.control.closes).toBe(0);
+      await compactAdapter.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-evaluates an already-idle query when the configured timeout is shortened", async () => {
+    vi.useFakeTimers();
+    try {
+      const { queryFn, control } = makeScriptedQuery(
+        [[initMsg("sdk-shorter"), resultOk("sdk-shorter")]],
+        { keepAliveAfterResult: true },
+      );
+      const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+      const { session } = await adapter.newSession({
+        cwd: "/tmp",
+        env: { ZEROS_CLAUDE_IDLE_TIMEOUT_MINUTES: "300" },
+      });
+      await adapter.prompt({
+        sessionId: session.sessionId,
+        prompt: [textBlock("first")] as never,
+      });
+      await vi.advanceTimersByTimeAsync(31 * 60_000);
+      expect(control.closes).toBe(0);
+
+      await adapter.updateConfig({
+        sessionId: session.sessionId,
+        env: { ZEROS_CLAUDE_IDLE_TIMEOUT_MINUTES: "30" },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(control.closes).toBe(1);
+      await adapter.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("fails a hand-edited out-of-range timeout closed to 30 minutes", async () => {
+    vi.useFakeTimers();
+    try {
+      const { queryFn, control } = makeScriptedQuery(
+        [[initMsg("sdk-bounded"), resultOk("sdk-bounded")]],
+        { keepAliveAfterResult: true },
+      );
+      const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+      const { session } = await adapter.newSession({
+        cwd: "/tmp",
+        env: { ZEROS_CLAUDE_IDLE_TIMEOUT_MINUTES: "999" },
+      });
+      await adapter.prompt({
+        sessionId: session.sessionId,
+        prompt: [textBlock("first")] as never,
+      });
+
+      await vi.advanceTimersByTimeAsync(30 * 60_000 - 1);
+      expect(control.closes).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(control.closes).toBe(1);
+      await adapter.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("first turn does NOT resume; streams text token-by-token; no double-render; end_turn", async () => {
     const emitted: SessionNotification[] = [];
     // Real SDK shape with includePartialMessages: a text delta, THEN the

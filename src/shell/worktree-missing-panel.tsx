@@ -102,6 +102,7 @@ export function WorktreeMissingPanel({
   onRefresh,
 }: WorktreeMissingPanelProps) {
   const [deleting, setDeleting] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
 
   // Auto-detect the worktree returning. Keep the latest onRefresh in a ref so
   // the interval isn't torn down and re-armed on every parent render (which
@@ -114,6 +115,19 @@ export function WorktreeMissingPanel({
   useEffect(() => {
     if (deleting) return; // stop probing once the user commits to deleting
     const id = window.setInterval(() => {
+      // "While the user is staring at it" is the premise of this tight
+      // cadence — but retained decks keep this panel mounted while hidden,
+      // and a backgrounded window keeps its timers. Skip the engine
+      // round-trip in both states; the first visible tick self-heals.
+      if (document.visibilityState === "hidden") return;
+      const el = rootRef.current;
+      if (
+        el &&
+        typeof el.checkVisibility === "function" &&
+        !el.checkVisibility()
+      ) {
+        return;
+      }
       void refreshRef.current();
     }, PRESENCE_POLL_MS);
     return () => window.clearInterval(id);
@@ -130,7 +144,10 @@ export function WorktreeMissingPanel({
   };
 
   return (
-    <div className="bg-bg1 flex h-full w-full items-center justify-center p-6">
+    <div
+      ref={rootRef}
+      className="bg-bg1 flex h-full w-full items-center justify-center p-6"
+    >
       <div className="flex w-full max-w-md flex-col items-center gap-5 text-center">
         <div className="bg-red-bg flex size-12 items-center justify-center rounded-sm">
           <FolderX

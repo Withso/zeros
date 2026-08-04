@@ -80,6 +80,11 @@ import {
 } from "./model-catalog";
 import { agentAppliesConfigLive } from "./live-config-support";
 import { useWorkspaceStore } from "../store/workspace-store";
+import { requestUserSettingsSection } from "../settings/settings-navigation";
+import {
+  getClaudeIdleTimeoutMinutes,
+  isClaudeWakeupBeyondIdleTimeout,
+} from "./reliability-settings";
 import {
   buildAdditionalDirsSystemInstruction,
   prependSystemInstruction,
@@ -304,6 +309,15 @@ function statusForFailure(failure: AgentFailure): SessionStatus {
   return "failed";
 }
 
+function openClaudeModelsSettings(): void {
+  // Publish the destination before the route so a cold/retained Settings page
+  // paints Models on its first visible render.
+  requestUserSettingsSection("models");
+  useWorkspaceStore
+    .getState()
+    .dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
+}
+
 // SessionsActions / SessionsCtx / StartForChatOptions / ActionsCtx all
 // live in ./sessions-context now — splitting them out kept Vite Fast
 // Refresh's "this file exports only components" boundary clean
@@ -386,6 +400,8 @@ export function AgentSessionsProvider({
    *  live session, exactly as a pill click does. */
   const setModelRef = useRef<SessionsActions["setModel"] | null>(null);
   const updateConfigRef = useRef<SessionsActions["updateConfig"] | null>(null);
+  // One warning per exact session/task/timestamp; bounded against task-id churn.
+  const warnedLongWakeupsRef = useRef(new Set<string>());
 
   // Bridge listeners feed the store. Phase 0 step 5: notifications are
   // buffered into a ring of arrays and flushed once per animation frame
@@ -586,6 +602,50 @@ export function AgentSessionsProvider({
         chatId?: string;
       };
       const state = useSessionsStore.getState();
+      const sessionUpdate = msg.notification.update as {
+        sessionUpdate?: string;
+        tasks?: Array<{
+          taskId: string;
+          taskType?: string;
+          scheduledFor?: number;
+        }>;
+      };
+      if (
+        msg.agentId === "claude" &&
+        sessionUpdate.sessionUpdate === "background_tasks_update" &&
+        Array.isArray(sessionUpdate.tasks)
+      ) {
+        const warned = warnedLongWakeupsRef.current;
+        const timeout = getClaudeIdleTimeoutMinutes();
+        const now = Date.now();
+        let showWarning = false;
+        for (const task of sessionUpdate.tasks) {
+          if (
+            task.taskType !== "scheduled_wakeup" ||
+            typeof task.scheduledFor !== "number" ||
+            !isClaudeWakeupBeyondIdleTimeout(task.scheduledFor, timeout, now)
+          )
+            continue;
+          const key = `${msg.notification.sessionId}\u0000${task.taskId}\u0000${task.scheduledFor}`;
+          if (warned.has(key)) continue;
+          warned.add(key);
+          showWarning = true;
+        }
+        while (warned.size > 200) {
+          const oldest = warned.values().next().value as string | undefined;
+          if (oldest === undefined) break;
+          warned.delete(oldest);
+        }
+        if (showWarning) {
+          toast.info("Claude will stay active", {
+            description: "A wake-up is beyond your idle limit.",
+            action: {
+              label: "Go to settings",
+              onClick: openClaudeModelsSettings,
+            },
+          });
+        }
+      }
       // Engine-authoritative chatId wins over the (possibly stale) local
       // sessionId→chatId index, so a live update is never dropped mid
       // force-respawn / create-load / early session emit.

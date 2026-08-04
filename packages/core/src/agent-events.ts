@@ -342,6 +342,8 @@ export interface BackgroundTask {
   summary?: string;
   /** Latest tool name (Claude progress heartbeat), retained for inspection. */
   lastToolName?: string;
+  /** Exact epoch milliseconds for a provider-scheduled one-shot wake-up. */
+  scheduledFor?: number;
 }
 
 // ── Foreground workflows ─────────────────────────────────

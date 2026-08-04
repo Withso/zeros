@@ -401,6 +401,19 @@ export function ProvidersPanel({
     [listAgents],
   );
 
+  // Login-terminal poll: a NON-force list. The forced path above busts the
+  // engine's version + account caches and re-spawns `<cli> --version` /
+  // account-probe children for EVERY agent — fine for one explicit click,
+  // a subprocess storm on a 3s interval. A plain list re-runs just the auth
+  // probes once the engine's short freshness window lapses, which is all the
+  // login poll needs (credential-file agents self-heal via the mtime jump).
+  // maxAgeMs below the poll cadence so each tick actually reaches the engine;
+  // the engine's own ~5s listAgents freshness cache then rate-limits probes.
+  const handlePollAuth = useCallback(
+    () => loadAgents(listAgents, 2_500),
+    [listAgents],
+  );
+
   return (
     <div className="flex flex-col gap-8">
       {ordered.length === 0 ? (
@@ -421,6 +434,7 @@ export function ProvidersPanel({
                 .filter((a) => !a.beta)
                 .map((a) => a.id)}
               onRefresh={handleRefresh}
+              onPollAuth={handlePollAuth}
             />
           )}
         </>
@@ -498,6 +512,7 @@ function ProviderCard({
   surfaceActive,
   defaultEnabledIds,
   onRefresh,
+  onPollAuth,
 }: {
   agent: BridgeRegistryAgent;
   /** False while Settings retains this provider form off-screen. */
@@ -509,6 +524,9 @@ function ProviderCard({
   /** Re-runs the engine probe sweep for all providers. Wired to the
    *  per-provider Refresh button in the connection block. */
   onRefresh: () => Promise<unknown>;
+  /** Cheap auth-only re-list for the login-terminal poll — no version /
+   *  account cache busting, no per-agent probe subprocess fan-out. */
+  onPollAuth: () => Promise<unknown>;
 }) {
   // For the save-time key validation round-trip (AGENT_VALIDATE_KEY).
   const bridge = useBridge();
@@ -775,14 +793,17 @@ function ProviderCard({
   }, [cliConnected]);
 
   // Auto-detect a successful sign-in: while the terminal is open and the CLI
-  // still reports not-connected, re-probe every few seconds. (refreshAgents
-  // dedupes in-flight calls, and the account fetch is skipped for
-  // unauthenticated agents — so this is just the cheap auth probe.)
+  // still reports not-connected, re-list every few seconds. Deliberately the
+  // NON-force path — the forced sweep busts the engine's version/account
+  // caches and fans out probe subprocesses per agent on every tick.
   useEffect(() => {
     if (!surfaceActive || !loginOpen || cliConnected) return;
-    const id = window.setInterval(() => void onRefresh().catch(() => {}), 3000);
+    const id = window.setInterval(
+      () => void onPollAuth().catch(() => {}),
+      3000,
+    );
     return () => window.clearInterval(id);
-  }, [surfaceActive, loginOpen, cliConnected, onRefresh]);
+  }, [surfaceActive, loginOpen, cliConnected, onPollAuth]);
 
   // Auto-close ONLY on a real disconnected→connected transition (login just
   // succeeded) — detected via the poll above, a manual Refresh, or the

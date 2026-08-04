@@ -104,6 +104,7 @@ interface PendingScheduledWakeupReason {
   reason: string;
   promptFingerprint: string | null;
   knownTaskIds: Set<string>;
+  scheduledFor?: number;
 }
 
 interface SettledTaskRecord {
@@ -454,6 +455,17 @@ export class ClaudeStreamTranslator {
     this.streamPartials = opts.streamPartials ?? false;
   }
 
+  /** True while provider-owned work needs the persistent Claude process.
+   * Adapter idle teardown consults this exact provider snapshot at both arm
+   * time and the timer boundary. */
+  get hasActiveWork(): boolean {
+    return (
+      this.backgroundTasks.size > 0 ||
+      this.scheduledWakeups.size > 0 ||
+      this.workflows.size > 0
+    );
+  }
+
   /** Replace the session's one-shot wakeups from StopHookInput.session_crons.
    * Recurring jobs belong to the deliberately skipped scheduling feature and
    * must never leak into the background-task card. */
@@ -508,6 +520,10 @@ export class ClaudeStreamTranslator {
         taskId === pendingTargetId && pending
           ? pending.reason
           : scheduledWakeupReason(cron.prompt);
+      const scheduledFor =
+        taskId === pendingTargetId && pending?.scheduledFor != null
+          ? pending.scheduledFor
+          : scheduledWakeupTimestamp(cron.schedule, now);
       if (taskId === pendingTargetId) pendingApplied = true;
       const name = scheduledWakeupName(cron.schedule, reason);
       next.set(taskId, {
@@ -518,6 +534,7 @@ export class ClaudeStreamTranslator {
           taskId === pendingTargetId ? now : (previous?.startedAt ?? now),
         updatedAt: now,
         summary: cron.schedule,
+        ...(scheduledFor != null ? { scheduledFor } : {}),
       });
     }
     this.scheduledWakeups.clear();
@@ -1834,6 +1851,9 @@ export class ClaudeStreamTranslator {
               reason: nativeTool.scheduledWakeup.reason,
               promptFingerprint: nativeTool.scheduledWakeup.promptFingerprint,
               knownTaskIds: new Set(this.scheduledWakeups.keys()),
+              scheduledFor: readScheduledWakeupResultTimestamp(
+                event.tool_use_result,
+              ),
             };
           }
         }
@@ -2324,7 +2344,8 @@ function sameBackgroundTaskContents(
     a.startedAt === b.startedAt &&
     a.command === b.command &&
     a.summary === b.summary &&
-    a.lastToolName === b.lastToolName
+    a.lastToolName === b.lastToolName &&
+    a.scheduledFor === b.scheduledFor
   );
 }
 
@@ -2449,6 +2470,69 @@ function toolResultText(t: ClaudeToolResultBlock): string {
       .join("\n");
   }
   return "";
+}
+
+function readScheduledWakeupResultTimestamp(
+  result: unknown,
+): number | undefined {
+  if (!isObj(result)) return undefined;
+  const scheduledFor = result.scheduledFor;
+  return typeof scheduledFor === "number" && Number.isFinite(scheduledFor)
+    ? scheduledFor
+    : undefined;
+}
+
+/** Resolve the fixed five-field cron emitted for a one-shot wake-up. The
+ * runtime uses local time. Wildcards/ranges are intentionally rejected: only
+ * a pinned minute/hour/day/month plus wildcard weekday is exact enough for a
+ * renderer warning. */
+function scheduledWakeupTimestamp(
+  schedule: string,
+  now: number,
+): number | undefined {
+  const fields = schedule.trim().split(/\s+/);
+  if (fields.length !== 5 || fields[4] !== "*") return undefined;
+  const [minuteText, hourText, dayText, monthText] = fields;
+  if (
+    !/^\d+$/.test(minuteText) ||
+    !/^\d+$/.test(hourText) ||
+    !/^\d+$/.test(dayText) ||
+    !/^\d+$/.test(monthText)
+  )
+    return undefined;
+  const minute = Number(minuteText);
+  const hour = Number(hourText);
+  const day = Number(dayText);
+  const month = Number(monthText);
+  if (
+    minute < 0 ||
+    minute > 59 ||
+    hour < 0 ||
+    hour > 23 ||
+    day < 1 ||
+    day > 31 ||
+    month < 1 ||
+    month > 12
+  )
+    return undefined;
+
+  const currentYear = new Date(now).getFullYear();
+  for (let year = currentYear; year <= currentYear + 1; year += 1) {
+    const candidate = new Date(year, month - 1, day, hour, minute, 0, 0);
+    // Reject impossible dates and DST-normalized hours rather than warning on
+    // a timestamp the provider did not actually describe.
+    if (
+      candidate.getFullYear() !== year ||
+      candidate.getMonth() !== month - 1 ||
+      candidate.getDate() !== day ||
+      candidate.getHours() !== hour ||
+      candidate.getMinutes() !== minute
+    )
+      continue;
+    const timestamp = candidate.getTime();
+    if (timestamp > now) return timestamp;
+  }
+  return undefined;
 }
 
 function scheduledWakeupReason(prompt: string): string | null {

@@ -321,6 +321,17 @@ export function ZerosSpinner({
       let refAnim: Animation | null = null;
       let lastIdx = -1;
       const tick = () => {
+        // Spinners in hidden retained decks (background chats, collapsed
+        // panels) stay mounted; skip the re-render while invisible. The phase
+        // derives from the shared clock, so the first visible frame lands on
+        // the exact right pose — no drift from skipped frames.
+        if (
+          typeof origin.checkVisibility === "function" &&
+          !origin.checkVisibility()
+        ) {
+          raf = window.requestAnimationFrame(tick);
+          return;
+        }
         if (!refAnim) refAnim = origin.getAnimations()[0] ?? null;
         const now = document.timeline.currentTime;
         const start = refAnim?.startTime;
@@ -344,6 +355,16 @@ export function ZerosSpinner({
     // Orbit (and the agent's fallback when the Web Animations clock is
     // unavailable): the original free-running interval cadence.
     const id = window.setInterval(() => {
+      // Same hidden-deck guard as the synced path: a free-running spinner
+      // resumes from its prior pose, which is fine for an orbit.
+      const el = restOriginRef.current;
+      if (
+        el &&
+        typeof el.checkVisibility === "function" &&
+        !el.checkVisibility()
+      ) {
+        return;
+      }
       setShapeIndex((i) => (i + 1) % shapes.length);
     }, stepMs);
     return () => window.clearInterval(id);
