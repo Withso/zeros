@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
 
-import { previewFor } from "../git-defaults-section";
-import { BRANCH_PREFIX_TYPES } from "../../../engine/settings/schema";
+import { OPTIONS, previewFor, readType } from "../git-defaults-section";
+import {
+  BRANCH_PREFIX_TYPES,
+  DEFAULT_BRANCH_PREFIX_TYPE,
+} from "../../../engine/settings/schema";
 import { normalizeBranchPrefix } from "../../lib/branch-name";
 import { cn } from "../../ui/cn";
 import { badgeVariants } from "../../ui/primitives/badge";
@@ -139,6 +142,11 @@ describe("previewFor", () => {
   it("says what to do when GitHub is picked but no account is connected", () => {
     const p = previewFor("github", "", null);
     expect(p).toMatch(/connect github/i);
+    // …and what happens UNTIL then. This row is the default (2026-08-03), so
+    // "no account connected" is the fresh-install state rather than a deliberate
+    // pick, and the ask alone left a new user with no idea what their branches
+    // would be called meanwhile. The engine substitutes the `zeros` fallback.
+    expect(p).toContain("zeros/Cream");
   });
 
   it("prompts for a value when custom is picked but empty", () => {
@@ -189,5 +197,52 @@ describe("BranchPrefixType", () => {
     expect([...BRANCH_PREFIX_TYPES].sort()).toEqual(
       ["custom", "github", "none", "zeros"].sort(),
     );
+  });
+});
+
+// The radio must never render with nothing selected (2026-08-03 founder
+// direction). Before this, the default was the unlisted "zeros", so a fresh
+// install showed three empty circles: the pane had a state for "the user hasn't
+// chosen" even though the app had already chosen for them. The fix is a real
+// default in the engine (repo-git.test.ts) plus this fold, which is what
+// guarantees `selected` always names a row that exists.
+describe("readType", () => {
+  it("selects GitHub username by default", () => {
+    // Unset is the fresh-install case — the pane reads the EFFECTIVE tree, and
+    // an untouched one has no `git.branch_prefix_type` at all.
+    expect(readType(undefined)).toBe("github");
+    expect(readType(null)).toBe("github");
+    // Whatever the engine defaults to is what the pane must preselect, or the
+    // dot describes a branch the engine won't create.
+    expect(readType(undefined)).toBe(DEFAULT_BRANCH_PREFIX_TYPE);
+  });
+
+  it("shows the user's explicit choice", () => {
+    expect(readType("github")).toBe("github");
+    expect(readType("custom")).toBe("custom");
+    expect(readType("none")).toBe("none");
+  });
+
+  it("never leaves the group unselected, whatever the tree holds", () => {
+    // "zeros" is a real schema value with no row of its own, and the rest are
+    // the shapes a hand-edited settings.toml can produce. Every one of them has
+    // to land on something the RadioGroup renders.
+    for (const value of [
+      undefined,
+      null,
+      "zeros",
+      "wat",
+      "",
+      42,
+      true,
+      {},
+      [],
+      "GitHub",
+    ]) {
+      expect(
+        OPTIONS as readonly string[],
+        `for ${JSON.stringify(value) ?? "undefined"}`,
+      ).toContain(readType(value));
+    }
   });
 });
