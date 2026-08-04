@@ -114,7 +114,7 @@
             "custom",
             "none"
           ],
-          "description": "Which namespace a new workspace branch goes under: \"github\" = the connected GitHub login, \"custom\" = the `branch_prefix` string, \"none\" = no prefix (the bare workspace name). The namespace is joined to the name with a single `/`."
+          "description": "Which namespace a new workspace branch goes under: \"github\" = the connected GitHub login (the default), \"custom\" = the `branch_prefix` string, \"none\" = no prefix (the bare workspace name), \"zeros\" = the fixed `zeros/` namespace. The namespace is joined to the name with a single `/`."
         },
         "branch_prefix": {
           "type": "string",

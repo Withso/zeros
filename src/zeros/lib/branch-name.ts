@@ -19,6 +19,7 @@
 
 export {
   branchDisplayName,
+  DEFAULT_BRANCH_PREFIX,
   joinBranchPrefix,
   normalizeBranchPrefix,
 } from "../../engine/git/branch-naming";

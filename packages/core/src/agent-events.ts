@@ -391,7 +391,30 @@ export type SessionUpdate =
   | ModeSwitchUpdate
   | ErrorNoticeUpdate
   | UsageUpdateNotification
-  | SessionInfoUpdateNotification;
+  | SessionInfoUpdateNotification
+  | TurnStateUpdateNotification;
+
+/** Engine-authored lifecycle notification for a provider turn. Unlike the
+ * AGENT_PROMPT RPC response, this survives renderer reload/re-adoption because
+ * it is routed as a session-scoped push to the current client.
+ *
+ * Purely additive and wire-compatible in both directions, so it deliberately
+ * does NOT bump PROTOCOL_VERSION (same reasoning as PTY_LIST_RESULT's
+ * `processPids`): applyUpdate ignores an unrecognised `sessionUpdate`, so an old
+ * client simply keeps its RPC-response-only behaviour, and a new client against
+ * an older engine sees no `promptActive` on AGENT_SESSION_LOADED and resolves to
+ * `ready` exactly as it does today. Bumping would strand a phone/web peer
+ * against a desktop engine that has not shipped yet. */
+export interface TurnStateUpdateNotification {
+  sessionUpdate: "turn_state";
+  /** Opening user-message id; identical to the durable turn-row key. */
+  turnId: string;
+  state: "running" | "completed" | "failed" | "cancelled";
+  /** Epoch ms for restoring the live elapsed clock after renderer reload. */
+  startedAt: number;
+  /** Present on terminal states when the adapter supplied one. */
+  stopReason?: StopReason | null;
+}
 
 export interface UserMessageChunkUpdate {
   sessionUpdate: "user_message_chunk";

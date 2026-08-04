@@ -513,6 +513,7 @@ export function applyUpdate(
     // (they change session slots other than `messages`), so skip here.
     case "current_mode_update":
     case "available_commands_update":
+    case "turn_state":
       return messages;
     case "mode_switch": {
       // Stage 4.4 — append a banner message to the timeline. Distinct
