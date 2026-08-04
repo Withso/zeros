@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  blockingDesignLintReason,
   groupDesignLintViolations,
   lintReviewBadgeLabel,
 } from "../design-lint-summary";
@@ -43,5 +44,18 @@ describe("design lint review summary", () => {
       }),
     ]);
     expect(lintReviewBadgeLabel(groups)).toBe("Review 2 rules");
+  });
+
+  it("names the exact first blocking file, line, and rule", () => {
+    expect(
+      blockingDesignLintReason({
+        ruleId: "component-invalid",
+        severity: "error",
+        message: "Component zd-card contains invalid HTML.",
+        file: "checkout.html",
+        line: 14,
+        column: 3,
+      }),
+    ).toBe("checkout.html:14 · component-invalid");
   });
 });

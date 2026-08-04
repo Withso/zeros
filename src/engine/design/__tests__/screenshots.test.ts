@@ -76,7 +76,7 @@ describe("design screenshot registry", () => {
         null,
         "aaaaaaaaaaaaaaaaaaaaaaaa",
       ),
-    ).toBeDefined();
+    ).toMatchObject({ sourceVersion: "aaaaaaaaaaaaaaaaaaaaaaaa" });
     expect(() =>
       setDesignScreenshot({
         ...screenshot("workspace-a", "home.html", null),
@@ -85,17 +85,9 @@ describe("design screenshot registry", () => {
     ).toThrow(/base64/);
   });
 
-  it("never returns pixels from a different source generation", () => {
+  it("rejects a stale generation without evicting current pixels", () => {
     setDesignScreenshot(screenshot("workspace-a", "home.html", "hero"));
 
-    expect(
-      getDesignScreenshot(
-        "workspace-a",
-        "home.html",
-        "hero",
-        "aaaaaaaaaaaaaaaaaaaaaaaa",
-      ),
-    ).toBeDefined();
     expect(
       getDesignScreenshot(
         "workspace-a",
@@ -111,6 +103,6 @@ describe("design screenshot registry", () => {
         "hero",
         "aaaaaaaaaaaaaaaaaaaaaaaa",
       ),
-    ).toBeNull();
+    ).toMatchObject({ sourceVersion: "aaaaaaaaaaaaaaaaaaaaaaaa" });
   });
 });

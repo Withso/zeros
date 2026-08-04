@@ -36,6 +36,9 @@ describe("design runtime protocol", () => {
     expect(DESIGN_RUNTIME_SOURCE).toContain(
       "messageEvent.origin !== trustedParentOrigin",
     );
+    expect(DESIGN_RUNTIME_SOURCE).toContain('message.type !== "handshake"');
+    expect(DESIGN_RUNTIME_SOURCE).toContain("messageEvent.ports.length !== 1");
+    expect(DESIGN_RUNTIME_SOURCE).not.toContain("parent.postMessage");
     expect(DESIGN_RUNTIME_SOURCE).not.toContain("</script");
     expect(() => new Function(DESIGN_RUNTIME_SOURCE)).not.toThrow();
   });
@@ -78,9 +81,12 @@ describe("design runtime protocol", () => {
     const browser = await chromium.launch({ headless: true });
     try {
       const page = await browser.newPage();
-      const payload = await page.evaluate(
+      const result = await page.evaluate(
         ({ source }) =>
-          new Promise<Record<string, unknown>>((resolve, reject) => {
+          new Promise<{
+            leakedBeforeHandshake: boolean;
+            payload: Record<string, unknown>;
+          }>((resolve, reject) => {
             document.body.innerHTML =
               '<section data-oid="hero"><h1 data-oid="heading">Hello</h1></section>';
             (
@@ -92,7 +98,36 @@ describe("design runtime protocol", () => {
               () => reject(new Error("ready snapshot timed out")),
               2_000,
             );
+            let leakedBeforeHandshake = false;
             window.addEventListener("message", (event) => {
+              if (
+                event.source !== window ||
+                event.origin !== window.location.origin
+              ) {
+                return;
+              }
+              const message = event.data as {
+                protocol?: string;
+                type?: string;
+                event?: string;
+              };
+              if (
+                message.protocol === "zeros-design-runtime" &&
+                message.type === "event" &&
+                message.event === "ready"
+              ) {
+                leakedBeforeHandshake = true;
+              }
+            });
+            try {
+              new Function(source)();
+            } catch (error) {
+              window.clearTimeout(timeout);
+              reject(error);
+              return;
+            }
+            const channel = new MessageChannel();
+            channel.port1.onmessage = (event) => {
               const message = event.data as {
                 protocol?: string;
                 type?: string;
@@ -108,19 +143,34 @@ describe("design runtime protocol", () => {
                 return;
               }
               window.clearTimeout(timeout);
-              resolve(message.payload);
-            });
-            try {
-              new Function(source)();
-            } catch (error) {
-              window.clearTimeout(timeout);
-              reject(error);
-            }
+              resolve({ leakedBeforeHandshake, payload: message.payload });
+            };
+            channel.port1.start();
+            window.setTimeout(() => {
+              window.postMessage(
+                {
+                  protocol: "zeros-design-runtime",
+                  version: 1,
+                  type: "handshake",
+                },
+                "*",
+                [channel.port2],
+              );
+              channel.port1.postMessage({
+                protocol: "zeros-design-runtime",
+                version: 1,
+                type: "request",
+                requestId: "initial-snapshot",
+                method: "getSnapshot",
+                args: {},
+              });
+            }, 0);
           }),
         { source: DESIGN_RUNTIME_SOURCE },
       );
 
-      expect(payload).toMatchObject({
+      expect(result.leakedBeforeHandshake).toBe(false);
+      expect(result.payload).toMatchObject({
         tree: [{ oid: "hero", tag: "section" }],
         frame: { oid: "", tag: "body", selector: "body" },
       });
@@ -133,73 +183,89 @@ describe("design runtime protocol", () => {
     const browser = await chromium.launch({ headless: true });
     try {
       const page = await browser.newPage();
-      const pixels = await page.evaluate(async ({ source }) => {
-        document.documentElement.style.margin = "0";
-        document.body.style.margin = "0";
-        const seed = document.createElement("canvas");
-        seed.width = 10;
-        seed.height = 10;
-        const seedContext = seed.getContext("2d")!;
-        seedContext.fillStyle = "rgb(0, 0, 255)";
-        seedContext.fillRect(0, 0, 10, 10);
-        document.body.innerHTML =
-          '<main data-oid="target" style="width:40px;height:20px;background:rgb(255,0,0)">' +
-          `<img alt="Blue" src="${seed.toDataURL("image/png")}" style="display:block;width:10px;height:10px">` +
-          `<span style="position:absolute;left:20px;top:10px;width:10px;height:10px;background-image:url(${seed.toDataURL("image/png")});background-size:100% 100%"></span>` +
-          "</main>";
-        await (document.querySelector("img") as HTMLImageElement).decode();
-        (
-          window as Window & { __zerosDesignSourceVersion?: string }
-        ).__zerosDesignSourceVersion = "c".repeat(24);
-        const requestId = "capture-self-contained";
-        const response = new Promise<{ dataUrl: string }>((resolve, reject) => {
-          const timeout = window.setTimeout(
-            () => reject(new Error("capture response timed out")),
-            5_000,
+      const pixels = await page.evaluate(
+        async ({ source }) => {
+          document.documentElement.style.margin = "0";
+          document.body.style.margin = "0";
+          const seed = document.createElement("canvas");
+          seed.width = 10;
+          seed.height = 10;
+          const seedContext = seed.getContext("2d")!;
+          seedContext.fillStyle = "rgb(0, 0, 255)";
+          seedContext.fillRect(0, 0, 10, 10);
+          document.body.innerHTML =
+            '<main data-oid="target" style="width:40px;height:20px;background:rgb(255,0,0)">' +
+            `<img alt="Blue" src="${seed.toDataURL("image/png")}" style="display:block;width:10px;height:10px">` +
+            `<span style="position:absolute;left:20px;top:10px;width:10px;height:10px;background-image:url(${seed.toDataURL("image/png")});background-size:100% 100%"></span>` +
+            "</main>";
+          await (document.querySelector("img") as HTMLImageElement).decode();
+          (
+            window as Window & { __zerosDesignSourceVersion?: string }
+          ).__zerosDesignSourceVersion = "c".repeat(24);
+          const requestId = "capture-self-contained";
+          const channel = new MessageChannel();
+          const response = new Promise<{ dataUrl: string }>(
+            (resolve, reject) => {
+              const timeout = window.setTimeout(
+                () => reject(new Error("capture response timed out")),
+                5_000,
+              );
+              channel.port1.onmessage = (event) => {
+                const message = event.data as {
+                  type?: string;
+                  requestId?: string;
+                  ok?: boolean;
+                  result?: { dataUrl: string };
+                  error?: string;
+                };
+                if (
+                  message.type !== "response" ||
+                  message.requestId !== requestId
+                ) {
+                  return;
+                }
+                window.clearTimeout(timeout);
+                if (message.ok && message.result) resolve(message.result);
+                else reject(new Error(message.error ?? "capture failed"));
+              };
+            },
           );
-          window.addEventListener("message", (event) => {
-            const message = event.data as {
-              type?: string;
-              requestId?: string;
-              ok?: boolean;
-              result?: { dataUrl: string };
-              error?: string;
-            };
-            if (message.type !== "response" || message.requestId !== requestId) {
-              return;
-            }
-            window.clearTimeout(timeout);
-            if (message.ok && message.result) resolve(message.result);
-            else reject(new Error(message.error ?? "capture failed"));
-          });
-        });
-        new Function(source)();
-        window.postMessage(
-          {
+          new Function(source)();
+          channel.port1.start();
+          window.postMessage(
+            {
+              protocol: "zeros-design-runtime",
+              version: 1,
+              type: "handshake",
+            },
+            "*",
+            [channel.port2],
+          );
+          channel.port1.postMessage({
             protocol: "zeros-design-runtime",
             version: 1,
             type: "request",
             requestId,
             method: "captureScreenshot",
             args: { nodeId: "target", scale: 1 },
-          },
-          "*",
-        );
-        const screenshot = await response;
-        const image = new Image();
-        image.src = screenshot.dataUrl;
-        await image.decode();
-        const canvas = document.createElement("canvas");
-        canvas.width = image.width;
-        canvas.height = image.height;
-        const context = canvas.getContext("2d")!;
-        context.drawImage(image, 0, 0);
-        return {
-          image: Array.from(context.getImageData(5, 5, 1, 1).data),
-          cssImage: Array.from(context.getImageData(25, 15, 1, 1).data),
-          background: Array.from(context.getImageData(30, 10, 1, 1).data),
-        };
-      }, { source: DESIGN_RUNTIME_SOURCE });
+          });
+          const screenshot = await response;
+          const image = new Image();
+          image.src = screenshot.dataUrl;
+          await image.decode();
+          const canvas = document.createElement("canvas");
+          canvas.width = image.width;
+          canvas.height = image.height;
+          const context = canvas.getContext("2d")!;
+          context.drawImage(image, 0, 0);
+          return {
+            image: Array.from(context.getImageData(5, 5, 1, 1).data),
+            cssImage: Array.from(context.getImageData(25, 15, 1, 1).data),
+            background: Array.from(context.getImageData(30, 10, 1, 1).data),
+          };
+        },
+        { source: DESIGN_RUNTIME_SOURCE },
+      );
 
       expect(pixels.image).toEqual([0, 0, 255, 255]);
       expect(pixels.cssImage).toEqual([0, 0, 255, 255]);

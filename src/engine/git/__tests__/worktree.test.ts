@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import {
   mkdtemp,
   mkdir,
+  chmod,
   realpath,
   rm,
   writeFile,
@@ -230,6 +231,50 @@ describe("worktree lifecycle (integration)", () => {
       included: ["Zeros Design"],
     });
     expect(tracked.stdout).toContain("Zeros Design/tokens.css");
+    expect(
+      (
+        await execFileAsync("git", ["log", "-1", "--format=%s"], {
+          cwd: created.path,
+        })
+      ).stdout.trim(),
+    ).toBe("Initialize Zeros Design");
+
+    await deleteWorkspace({
+      workspaceId: created.workspaceId,
+      includeBranch: true,
+    });
+  });
+
+  it("commits a complete design bootstrap created untracked by checkout hooks", async () => {
+    const hook = path.join(repoRoot, ".git", "hooks", "post-checkout");
+    await writeFile(
+      hook,
+      `#!/bin/sh
+mkdir -p "Zeros Design/assets" "Zeros Design/components"
+: > "Zeros Design/tokens.css"
+echo '{"version":1,"frames":{}}' > "Zeros Design/.zeros-canvas.json"
+: > "Zeros Design/assets/.gitkeep"
+: > "Zeros Design/components/.gitkeep"
+`,
+      "utf8",
+    );
+    await chmod(hook, 0o755);
+
+    const created = await createWorkspace({ repoRoot, kind: "design" });
+    const tracked = await execFileAsync(
+      "git",
+      ["ls-files", "--", "Zeros Design"],
+      { cwd: created.path },
+    );
+
+    expect(tracked.stdout.trim().split("\n")).toEqual(
+      expect.arrayContaining([
+        "Zeros Design/tokens.css",
+        "Zeros Design/.zeros-canvas.json",
+        "Zeros Design/assets/.gitkeep",
+        "Zeros Design/components/.gitkeep",
+      ]),
+    );
     expect(
       (
         await execFileAsync("git", ["log", "-1", "--format=%s"], {
@@ -3076,7 +3121,9 @@ describe("worktree lifecycle (integration)", () => {
     let prevUserSettingsDir: string | undefined;
     beforeEach(async () => {
       prevUserSettingsDir = process.env.ZEROS_USER_SETTINGS_DIR;
-      userSettingsDir = await mkdtemp(path.join(tmpdir(), "zeros-ws-settings-"));
+      userSettingsDir = await mkdtemp(
+        path.join(tmpdir(), "zeros-ws-settings-"),
+      );
       process.env.ZEROS_USER_SETTINGS_DIR = userSettingsDir;
     });
     afterEach(async () => {

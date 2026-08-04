@@ -57,3 +57,10 @@ export function lintReviewBadgeLabel(
 ): string {
   return `Review ${groups.length} ${groups.length === 1 ? "rule" : "rules"}`;
 }
+
+/** Name the first exact blocking location in compact button/alert copy. */
+export function blockingDesignLintReason(
+  violation: DesignLintViolationWire,
+): string {
+  return `${violation.file}:${violation.line} · ${violation.ruleId}`;
+}

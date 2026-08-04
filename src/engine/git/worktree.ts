@@ -1585,18 +1585,27 @@ async function createWorkspaceInner(
 
     if (kind === "design") {
       // Design workspaces deliberately skip every repo ritual. Seed only the
-      // portable design document, commit the app-owned bootstrap when anything
-      // was missing, then make the tracked design directory the sole sparse
-      // cone. Root files remain because that is Git cone-mode semantics.
-      const initialized = await initializeDesignDocument(workspacePath);
-      if (initialized.created.length > 0) {
-        await runGit(workspacePath, [
-          "add",
-          "-f",
-          "-A",
-          "--",
-          DESIGN_DIRECTORY_NAME,
-        ]);
+      // portable design document, force-stage the whole app-owned directory,
+      // then commit only when that produced a tree delta. The unconditional
+      // add covers files a checkout hook created untracked (including ignored
+      // files), where initialization correctly reports no writes but the
+      // sparse cone still requires a tracked top-level directory.
+      await initializeDesignDocument(workspacePath);
+      await runGit(workspacePath, [
+        "add",
+        "-f",
+        "-A",
+        "--",
+        DESIGN_DIRECTORY_NAME,
+      ]);
+      const stagedDesign = await runGit(workspacePath, [
+        "diff",
+        "--cached",
+        "--name-only",
+        "--",
+        DESIGN_DIRECTORY_NAME,
+      ]);
+      if (stagedDesign.stdout.trim()) {
         await runGit(workspacePath, [
           "-c",
           "user.name=Zeros",

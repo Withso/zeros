@@ -199,7 +199,7 @@ export async function readDesignProtocolResource(
       renderSource.sourceVersion,
     );
     return response(200, rendered.html, "text/html; charset=utf-8", {
-      ...cacheHeaders(renderSource.sourceVersion),
+      ...cacheHeaders(sourceVersion),
       "Content-Security-Policy": rendered.csp,
     });
   }

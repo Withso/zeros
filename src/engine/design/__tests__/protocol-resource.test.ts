@@ -185,6 +185,18 @@ describe("design protocol resources", () => {
     expect(escaped.status).toBe(404);
   });
 
+  it("never marks a versionless frame URL immutable", async () => {
+    const frame = await createDesignFrame(root, { title: "Unversioned" });
+
+    const response = await readDesignProtocolResource(root, {
+      path: frame.file,
+      sourceVersion: null,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers["Cache-Control"]).toBe("private, no-store");
+  });
+
   it("expands bounded zd components only in the served document", async () => {
     await mkdir(path.join(root, DESIGN_DIRECTORY_NAME, "components"), {
       recursive: true,

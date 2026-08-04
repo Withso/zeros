@@ -47,9 +47,7 @@ import { appendSecurityAudit } from "./auth/audit-log";
 import { MessageRouter } from "./transport/router";
 import { WorkspaceService } from "./workspace/service";
 import { readDesignProtocolResource } from "./design/protocol-resource";
-import {
-  filterDesignWorkspaceDirectories,
-} from "./design/agent-boundary";
+import { filterDesignWorkspaceDirectories } from "./design/agent-boundary";
 import {
   dbChangedIncludesOriginator,
   dbChangedKinds,
@@ -394,10 +392,7 @@ export class ZerosEngine {
   >();
   /** Agent sessionId → the authoritative provider turn currently recording.
    *  A mid-turn steer uses this owner instead of opening a second turn row. */
-  private readonly activeTurnSnapshots = new Map<
-    string,
-    TurnSnapshotContext
-  >();
+  private readonly activeTurnSnapshots = new Map<string, TurnSnapshotContext>();
   /** Workspace process/session starts and checkout mutations that have crossed
    *  the caller-side gate but have not settled. Archive/delete wait for these
    *  promises before enumerating processes and snapshotting. Without this
@@ -2404,9 +2399,7 @@ export class ZerosEngine {
             // error path — so a failed turn never leaves a stale marker.
             // Record this turn: snapshot the work tree BEFORE the agent runs.
             turnCtx = await this.beginTurn(msg.sessionId, msg.userMessageId);
-            this.assertAgentWorkspaceProcessStartAllowed(
-              lifecycleWorkspaceId,
-            );
+            this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
             this.enterPrompt();
             this.promptSessions.add(msg.sessionId);
             if (turnCtx) {
@@ -2714,10 +2707,7 @@ export class ZerosEngine {
             undefined,
             msg.cwd,
           );
-          this.assertAgentWorkspaceProcessStartAllowed(
-            listWorkspaceId,
-            msg.cwd,
-          );
+          this.assertAgentWorkspaceNotDesign(listWorkspaceId, msg.cwd);
           // A relay (untrusted) client must not enumerate sessions — or boot
           // an adapter's session-store lookup — at an arbitrary host cwd.
           // Clamp to the managed-workspace allowlist; drop anything else (the
@@ -2777,7 +2767,10 @@ export class ZerosEngine {
               const sessionWorkspaceId = this.sessionWorkspace.get(
                 msg.sessionId,
               );
-              if (sessionWorkspaceId && sessionWorkspaceId !== msg.workspaceId) {
+              if (
+                sessionWorkspaceId &&
+                sessionWorkspaceId !== msg.workspaceId
+              ) {
                 throw new AgentFailureError({
                   kind: "protocol-error",
                   message:
@@ -3036,6 +3029,13 @@ export class ZerosEngine {
     ...targets: Array<string | null | undefined>
   ): void {
     this.assertWorkspaceProcessStartAllowed(workspaceId);
+    this.assertAgentWorkspaceNotDesign(workspaceId, ...targets);
+  }
+
+  private assertAgentWorkspaceNotDesign(
+    workspaceId: string | null | undefined,
+    ...targets: Array<string | null | undefined>
+  ): void {
     if (
       ![workspaceId, ...targets].some((target) =>
         this.isDesignWorkspaceProcessTarget(target),

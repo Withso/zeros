@@ -148,8 +148,8 @@ describe("design document", () => {
       "<!doctype html><html><body><main data-oid=shared><p data-oid=shared>Copy</p></main></body></html>";
 
     const healed = healDesignOids(source);
-    const ids = [...healed.html.matchAll(/data-oid=([^\s>]+)/g)].map(
-      (match) => match[1]?.replace(/["']/g, ""),
+    const ids = [...healed.html.matchAll(/data-oid=([^\s>]+)/g)].map((match) =>
+      match[1]?.replace(/["']/g, ""),
     );
 
     expect(healed.changed).toBe(true);
@@ -159,6 +159,75 @@ describe("design document", () => {
       changed: false,
       fixed: [],
     });
+  });
+
+  it("rewrites a blank data-oid in place and stays idempotent", () => {
+    const source =
+      '<!doctype html><html><body><div data-oid></div><span data-oid="   ">Copy</span></body></html>';
+
+    const first = healDesignOids(source);
+    const second = healDesignOids(first.html);
+
+    expect(first.changed).toBe(true);
+    expect(first.fixed).toEqual([
+      expect.objectContaining({ kind: "missing" }),
+      expect.objectContaining({ kind: "missing" }),
+    ]);
+    expect(first.html.match(/\bdata-oid\b/g)).toHaveLength(2);
+    expect(first.html).not.toMatch(/data-oid(?:\s|>)/);
+    expect(second).toEqual({ html: first.html, changed: false, fixed: [] });
+  });
+
+  it("reports a blank data-oid exactly once before healing", async () => {
+    await initializeDesignDocument(root);
+    const target = path.join(root, DESIGN_DIRECTORY_NAME, "blank-oid.html");
+    await writeFile(
+      target,
+      "<!doctype html><html><body><div data-oid></div></body></html>",
+      "utf8",
+    );
+
+    const report = await lintDesignDocument(root, "blank-oid.html", {
+      healOids: false,
+    });
+
+    expect(
+      report.violations.filter((violation) =>
+        ["oid-missing", "oid-duplicate"].includes(violation.ruleId),
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        ruleId: "oid-missing",
+        message: "<div> is missing a stable data-oid.",
+      }),
+    ]);
+  });
+
+  it("returns post-heal oid lint while preserving the healed count", async () => {
+    await initializeDesignDocument(root);
+    const target = path.join(root, DESIGN_DIRECTORY_NAME, "healed-report.html");
+    await writeFile(
+      target,
+      '<!doctype html><html><body><main data-oid="same"><h1>Missing</h1><p data-oid="same">Duplicate</p></main></body></html>',
+      "utf8",
+    );
+
+    const before = await lintDesignDocument(root, "healed-report.html", {
+      healOids: false,
+    });
+    expect(
+      before.violations.filter((violation) =>
+        ["oid-missing", "oid-duplicate"].includes(violation.ruleId),
+      ),
+    ).toHaveLength(2);
+
+    const after = await lintDesignDocument(root, "healed-report.html");
+    expect(after.healedOids).toBe(2);
+    expect(
+      after.violations.filter((violation) =>
+        ["oid-missing", "oid-duplicate"].includes(violation.ruleId),
+      ),
+    ).toEqual([]);
   });
 
   it("requires stable ids only on rendered elements inside the body", async () => {
@@ -325,6 +394,11 @@ describe("design document", () => {
     });
     expect(
       (await lintDesignDocument(root, frame.file)).violations.map(
+        (violation) => violation.ruleId,
+      ),
+    ).toContain("contrast");
+    expect(
+      (await readDesignWorkspaceSnapshot(root)).lint.violations.map(
         (violation) => violation.ruleId,
       ),
     ).toContain("contrast");

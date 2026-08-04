@@ -29,8 +29,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   check(
     "design workspace mounts no coding-agent chat",
     (await page.getByRole("region", { name: "Agent chat preview" }).count()) ===
-      0 &&
-      (await page.getByLabel("Agent Workspace").count()) === 0,
+      0 && (await page.getByLabel("Agent Workspace").count()) === 0,
   );
 
   await page.getByLabel("Search layers").fill("Layer");
@@ -108,6 +107,40 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       .getByRole("button", { name: "Export PNG" })
       .isEnabled()
       .catch(() => false),
+  );
+
+  const fillInput = page.getByLabel("Fill");
+  const homeRuntime = homeFrame.locator("iframe").contentFrame();
+  const selectedHeading = homeRuntime.locator('[data-oid="home-heading"]');
+  const authoredFill = await selectedHeading.evaluate((element) =>
+    element.style.getPropertyValue("background"),
+  );
+  await fillInput.fill("rgb(1, 2, 3)");
+  await waitFor(
+    () =>
+      selectedHeading
+        .evaluate(
+          (element) =>
+            element.style.getPropertyValue("background") === "rgb(1, 2, 3)",
+        )
+        .catch(() => false),
+    "design-style-preview-applied",
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(100);
+  check(
+    "Escape clears inspector-only inline style previews",
+    await waitFor(
+      () =>
+        selectedHeading
+          .evaluate(
+            (element, expected) =>
+              element.style.getPropertyValue("background") === expected,
+            authoredFill,
+          )
+          .catch(() => false),
+      "design-style-preview-escape",
+    ),
   );
   check(
     "design inspector reuses the pull request affordance",

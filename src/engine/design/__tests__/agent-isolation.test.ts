@@ -24,9 +24,9 @@ describe("design workspace agent isolation", () => {
   });
 
   it("keeps the retired design MCP absent and blocks coding-agent access", () => {
-    expect(
-      existsSync(resolve(root, "src/engine/design/mcp-server.ts")),
-    ).toBe(false);
+    expect(existsSync(resolve(root, "src/engine/design/mcp-server.ts"))).toBe(
+      false,
+    );
     const engine = read("src/engine/index.ts");
     expect(engine).not.toContain("DesignMcpServer");
     expect(engine).not.toContain("ZEROS_DESIGN_MCP_TOKEN");
@@ -39,8 +39,12 @@ describe("design workspace agent isolation", () => {
     expect(engine).toMatch(
       /isDesignWorkspaceProcessTarget\(msg\.workspaceId\)[\s\S]{0,120}isDesignWorkspaceProcessTarget\(msg\.cwd\)/,
     );
-    expect(engine).toMatch(
-      /case "AGENT_LIST_SESSIONS":[\s\S]{0,600}assertAgentWorkspaceProcessStartAllowed/,
+    const listSessionsCase = engine.match(
+      /case "AGENT_LIST_SESSIONS":([\s\S]*?)case "AGENT_LOAD_SESSION":/,
+    )?.[1];
+    expect(listSessionsCase).toContain("assertAgentWorkspaceNotDesign");
+    expect(listSessionsCase).not.toContain(
+      "assertAgentWorkspaceProcessStartAllowed",
     );
   });
 
@@ -58,14 +62,10 @@ describe("design workspace agent isolation", () => {
     );
 
     const appShell = read("src/app-shell.tsx");
-    expect(appShell).toContain(
-      'useInternalFeatureActive("designWorkspaces")',
-    );
+    expect(appShell).toContain('useInternalFeatureActive("designWorkspaces")');
     expect(appShell).toContain("<DesignWorkspaceSidebar");
     expect(appShell).toContain("useNewTabHotkeys(!designWorkspaceRequested)");
-    expect(appShell).toContain(
-      "shouldLeaveBlockedDesignWorkspace({",
-    );
+    expect(appShell).toContain("shouldLeaveBlockedDesignWorkspace({");
     expect(appShell).toContain(
       "useWorkspacePrSync(designWorkspaceRequested ? null : activeWorkspace)",
     );
@@ -77,9 +77,7 @@ describe("design workspace agent isolation", () => {
 
   it("gates design creation and discovery on the effective Internal feature", () => {
     const creation = read("src/shell/create-workspace.ts");
-    expect(creation).toContain(
-      'isInternalFeatureActive("designWorkspaces")',
-    );
+    expect(creation).toContain('isInternalFeatureActive("designWorkspaces")');
     const archiveActions = read("src/zeros/store/archive-actions.ts");
     expect(archiveActions).toContain(
       'isInternalFeatureActive("designWorkspaces")',
@@ -92,16 +90,12 @@ describe("design workspace agent isolation", () => {
     );
 
     const topBar = read("src/shell/top-bar.tsx");
-    expect(topBar).toContain(
-      'useInternalFeatureActive("designWorkspaces")',
-    );
+    expect(topBar).toContain('useInternalFeatureActive("designWorkspaces")');
     expect(topBar).toMatch(
       /designWorkspacesInternalActive\s*&&\s*\(nativeRuntime\.ready\s*\|\|\s*nativeRuntime\.expectedElectron\)/,
     );
     expect(topBar).toContain("if (activeFolderBlockedDesign) return;");
-    expect(topBar).toMatch(
-      /\{designWorkspacesActive \? \(\s*<DropdownMenu>/,
-    );
+    expect(topBar).toMatch(/\{designWorkspacesActive \? \(\s*<DropdownMenu>/);
     expect(topBar).toContain(
       'onClick={() => void handleCreateWorkspace("code")}',
     );
@@ -111,9 +105,7 @@ describe("design workspace agent isolation", () => {
     expect(settings).toContain('label="Design workspaces"');
 
     const addProject = read("src/shell/add-project-provider.tsx");
-    expect(addProject).toContain(
-      'isInternalFeatureActive("designWorkspaces")',
-    );
+    expect(addProject).toContain('isInternalFeatureActive("designWorkspaces")');
     const repositories = read("src/zeros/panels/repositories-panel.tsx");
     expect(repositories).toMatch(
       /workspaceList\(\{\s*repoSlug:\s*project\.repoSlug,\s*includeDesign:\s*true,?\s*\}\)/,

@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   fitDesignRects,
   retainLiveDesignFrameFiles,
   selectLiveDesignFrameFiles,
+  settleDesignFrameGesture,
   zoomDesignViewportAtPoint,
 } from "../design-canvas-math";
 
@@ -89,5 +90,15 @@ describe("design canvas viewport math", () => {
 
     expect([...retained]).toEqual(["frame-0.html", "frame-1.html"]);
     expect(retained.size).toBeLessThanOrEqual(2);
+  });
+
+  it("repaints the committed geometry even when clamping returns the start", async () => {
+    const start = { x: 1_000_000, y: 0, w: 400, h: 300, z: 0 };
+    const paint = vi.fn();
+
+    await expect(
+      settleDesignFrameGesture(Promise.resolve(start), start, paint),
+    ).resolves.toEqual(start);
+    expect(paint).toHaveBeenCalledWith(start);
   });
 });

@@ -72,6 +72,8 @@ export function DesignFrameRuntimeIframe({
 }: DesignFrameRuntimeIframeProps) {
   // Owns the exact WindowProxy request connection for this iframe instance.
   const connectionRef = useRef<DesignFrameRuntimeConnection | null>(null);
+  // The loaded node creates a fresh private MessagePort on every navigation.
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
   // Prevents duplicate raster work for the same source/runtime revision.
   const captureKeyRef = useRef<string | null>(null);
   // Cancels a queued idle capture when the frame becomes inactive or reloads.
@@ -135,34 +137,12 @@ export function DesignFrameRuntimeIframe({
     });
   }, []);
 
-  /** Callback refs attach before load, so the runtime's ready event cannot race us. */
-  const setIframe = useCallback(
-    (node: HTMLIFrameElement | null) => {
-      connectionRef.current?.destroy();
-      connectionRef.current = null;
-      if (!node) return;
-      connectionRef.current = connectDesignFrameRuntime(
-        workspaceId,
-        frame.file,
-        node,
-        { onSnapshot: handleSnapshot },
-      );
-      const connection = connectionRef.current;
-      queueMicrotask(() => {
-        if (connectionRef.current !== connection || !latestRef.current.active) {
-          return;
-        }
-        void connection
-          .getSnapshot()
-          .then(handleSnapshot)
-          .catch(() => {
-            // Initial documents may not have installed their listener yet;
-            // their primary ready event follows once the runtime boots.
-          });
-      });
-    },
-    [frame.file, handleSnapshot, workspaceId],
-  );
+  /** The runtime withholds ready until onLoad transfers its private channel. */
+  const setIframe = useCallback((node: HTMLIFrameElement | null) => {
+    connectionRef.current?.destroy();
+    connectionRef.current = null;
+    iframeRef.current = node;
+  }, []);
 
   // Navigation/collapse tears down pending requests and idle raster work.
   useEffect(
@@ -171,6 +151,7 @@ export function DesignFrameRuntimeIframe({
       cancelCaptureRef.current = null;
       connectionRef.current?.destroy();
       connectionRef.current = null;
+      iframeRef.current = null;
     },
     [],
   );
@@ -208,13 +189,23 @@ export function DesignFrameRuntimeIframe({
       className="bg-bg1 pointer-events-none block size-full border-0"
       aria-label={`${frame.title} design frame`}
       onLoad={() => {
+        const node = iframeRef.current;
+        if (!node) return;
+        connectionRef.current?.destroy();
+        const connection = connectDesignFrameRuntime(
+          workspaceId,
+          frame.file,
+          node,
+          { onSnapshot: handleSnapshot },
+        );
+        connectionRef.current = connection;
         if (!latestRef.current.active) return;
-        void connectionRef.current
-          ?.getSnapshot()
+        void connection
+          .getSnapshot()
           .then(handleSnapshot)
           .catch(() => {
-            // The injected ready event is primary; onLoad revalidation is a
-            // missed-event fallback and can harmlessly fail during reload.
+            // A source navigation can replace this exact connection while its
+            // first snapshot is queued; the next load owns the new channel.
           });
       }}
     />

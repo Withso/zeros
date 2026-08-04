@@ -60,7 +60,6 @@ export {
   worktreesRoot,
   zerosStateRoot,
   setWorkspaceRemoteRestricted,
-  isWorkspaceRemoteRestricted,
   listRemoteRestrictedWorkspaceIds,
   getWorkspaceById,
   updateWorkspace,

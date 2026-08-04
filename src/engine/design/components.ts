@@ -162,6 +162,10 @@ async function loadDefinitions(workspacePath: string): Promise<{
     const styles = elements(document)
       .filter((element) => element.tagName === "style")
       .map((element) => innerSource(source, element));
+    // Keep the safe remainder previewable even when lint found an invalid
+    // definition. The composed-frame sanitizer and CSP remain the rendering
+    // boundary, while component-invalid stays a blocking save/PR diagnostic;
+    // dropping the whole definition here would hide useful repair context.
     definitions.set(name, {
       name,
       body: body ? stripDefinitionOids(innerSource(source, body)) : "",

@@ -32,17 +32,8 @@ function snapshot(revision: number): DesignRuntimeSnapshot {
 
 describe("design frame runtime client", () => {
   it("routes exact-source responses and versioned snapshot events", async () => {
-    const listenerRef: {
-      current: ((event: MessageEvent) => void) | null;
-    } = { current: null };
     const source = { postMessage: vi.fn() };
     const host = {
-      addEventListener: vi.fn(
-        (_type: "message", next: (event: MessageEvent) => void) => {
-          listenerRef.current = next;
-        },
-      ),
-      removeEventListener: vi.fn(),
       setTimeout: vi.fn(() => 7),
       clearTimeout: vi.fn(),
     };
@@ -54,56 +45,41 @@ describe("design frame runtime client", () => {
       { onSnapshot },
       host,
     );
+    const handshake = source.postMessage.mock.calls[0];
+    expect(handshake?.[0]).toEqual({
+      protocol: DESIGN_RUNTIME_PROTOCOL,
+      version: DESIGN_RUNTIME_VERSION,
+      type: "handshake",
+    });
+    expect(handshake?.[1]).toMatchObject({ targetOrigin: "*" });
+    const framePort = handshake?.[1]?.transfer?.[0] as MessagePort;
+    const requests: Array<Record<string, unknown>> = [];
+    framePort.onmessage = (event) => {
+      requests.push(event.data as Record<string, unknown>);
+    };
+    framePort.start();
 
     const pending = connection.getSnapshot();
-    const request = source.postMessage.mock.calls[0]?.[0] as {
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    const request = requests[0] as {
       requestId: string;
     };
-    listenerRef.current?.({
-      source: {},
-      origin: "null",
-      data: {
-        protocol: DESIGN_RUNTIME_PROTOCOL,
-        version: DESIGN_RUNTIME_VERSION,
-        type: "response",
-        requestId: request.requestId,
-        ok: true,
-        result: snapshot(1),
-      },
-    } as unknown as MessageEvent);
+    framePort.postMessage({
+      protocol: DESIGN_RUNTIME_PROTOCOL,
+      version: DESIGN_RUNTIME_VERSION,
+      type: "response",
+      requestId: request.requestId,
+      ok: true,
+      result: snapshot(2),
+    });
     expect(source.postMessage).toHaveBeenCalledTimes(1);
-
-    listenerRef.current?.({
-      source,
-      origin: "https://untrusted.invalid",
-      data: {
-        protocol: DESIGN_RUNTIME_PROTOCOL,
-        version: DESIGN_RUNTIME_VERSION,
-        type: "response",
-        requestId: request.requestId,
-        ok: true,
-        result: snapshot(99),
-      },
-    } as unknown as MessageEvent);
-
-    listenerRef.current?.({
-      source,
-      origin: "null",
-      data: {
-        protocol: DESIGN_RUNTIME_PROTOCOL,
-        version: DESIGN_RUNTIME_VERSION,
-        type: "response",
-        requestId: request.requestId,
-        ok: true,
-        result: snapshot(2),
-      },
-    } as unknown as MessageEvent);
     await expect(pending).resolves.toMatchObject({ revision: 2 });
 
     const preview = connection.previewStyles("frame", {
       "background-color": "var(--bg1)",
     });
-    const previewRequest = source.postMessage.mock.calls[1]?.[0] as {
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
+    const previewRequest = requests[1] as {
       requestId: string;
       method: string;
       args: Record<string, unknown>;
@@ -115,37 +91,31 @@ describe("design frame runtime client", () => {
         styles: { "background-color": "var(--bg1)" },
       },
     });
-    listenerRef.current?.({
-      source,
-      origin: "null",
-      data: {
-        protocol: DESIGN_RUNTIME_PROTOCOL,
-        version: DESIGN_RUNTIME_VERSION,
-        type: "response",
-        requestId: previewRequest.requestId,
-        ok: true,
-        result: snapshot(2).frame,
-      },
-    } as unknown as MessageEvent);
+    framePort.postMessage({
+      protocol: DESIGN_RUNTIME_PROTOCOL,
+      version: DESIGN_RUNTIME_VERSION,
+      type: "response",
+      requestId: previewRequest.requestId,
+      ok: true,
+      result: snapshot(2).frame,
+    });
     await expect(preview).resolves.toMatchObject({ oid: "frame" });
 
-    listenerRef.current?.({
-      source,
-      origin: "null",
-      data: {
-        protocol: DESIGN_RUNTIME_PROTOCOL,
-        version: DESIGN_RUNTIME_VERSION,
-        type: "event",
-        event: "mutation",
-        payload: snapshot(3),
-      },
-    } as unknown as MessageEvent);
-    expect(onSnapshot).toHaveBeenCalledWith(
-      expect.objectContaining({ revision: 3 }),
-      "mutation",
+    framePort.postMessage({
+      protocol: DESIGN_RUNTIME_PROTOCOL,
+      version: DESIGN_RUNTIME_VERSION,
+      type: "event",
+      event: "mutation",
+      payload: snapshot(3),
+    });
+    await vi.waitFor(() =>
+      expect(onSnapshot).toHaveBeenCalledWith(
+        expect.objectContaining({ revision: 3 }),
+        "mutation",
+      ),
     );
 
     connection.destroy();
-    expect(host.removeEventListener).toHaveBeenCalledOnce();
+    framePort.close();
   });
 });

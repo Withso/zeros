@@ -22,8 +22,18 @@ describe("shared PR status row placement", () => {
 describe("Create PR routing", () => {
   it("sends the primary action to the agent and labels the engine path explicitly", () => {
     const button = source("src/shell/pr/create-pr-button.tsx");
-    expect(button).toContain("onClick={() => void askAgentToCreate(false)}");
+    expect(button).toMatch(
+      /directOnly\s*\?\s*createDirect\(false\)\s*:\s*askAgentToCreate\(false\)/,
+    );
     expect(button).toContain("<span>Create PR directly</span>");
+  });
+
+  it("uses the direct engine action when a design workspace has no chat", () => {
+    const button = source("src/shell/pr/create-pr-button.tsx");
+    expect(button).toContain('workspace.kind === "design"');
+    expect(button).toMatch(
+      /directOnly\s*\?\s*createDirect\(false\)\s*:\s*askAgentToCreate\(false\)/,
+    );
   });
 });
 

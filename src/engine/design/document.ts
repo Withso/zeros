@@ -763,9 +763,11 @@ export function healDesignOids(source: string): {
     const location = record.element.sourceCodeLocation;
     const startTag = location?.startTag;
     if (!startTag) continue;
-    const duplicate = record.oid !== null && used.has(record.oid);
-    if (record.oid && !duplicate) {
-      used.add(record.oid);
+    const usableOid =
+      record.oid !== null && record.oid.trim().length > 0 ? record.oid : null;
+    const duplicate = usableOid !== null && used.has(usableOid);
+    if (usableOid !== null && !duplicate) {
+      used.add(usableOid);
       continue;
     }
     const oidBase = oidForElement(source, record.element);
@@ -774,14 +776,26 @@ export function healDesignOids(source: string): {
       oid = `${oidBase}-${suffix}`;
     }
     used.add(oid);
-    if (duplicate) {
-      const attrLocation = location?.attrs?.["data-oid"];
-      if (!attrLocation) continue;
+    const attrLocation = location?.attrs?.["data-oid"];
+    if (attrLocation) {
       const original = source.slice(
         attrLocation.startOffset,
         attrLocation.endOffset,
       );
       const equalsAt = original.indexOf("=");
+      if (equalsAt < 0) {
+        edits.push({
+          start: attrLocation.startOffset,
+          end: attrLocation.endOffset,
+          text: `${original}="${oid}"`,
+        });
+        fixed.push({
+          kind: duplicate ? "duplicate" : "missing",
+          line: attrLocation.startLine,
+          oid,
+        });
+        continue;
+      }
       let valueStart = equalsAt + 1;
       while (/\s/.test(original[valueStart] ?? "")) valueStart += 1;
       const quote = original[valueStart];
@@ -797,7 +811,7 @@ export function healDesignOids(source: string): {
           valueEnd += 1;
         }
       }
-      if (equalsAt < 0 || valueEnd < valueStart) continue;
+      if (valueEnd < valueStart) continue;
       const replacement = `${original.slice(0, valueStart)}${oid}${original.slice(valueEnd)}`;
       edits.push({
         start: attrLocation.startOffset,
@@ -805,7 +819,7 @@ export function healDesignOids(source: string): {
         text: replacement,
       });
       fixed.push({
-        kind: "duplicate",
+        kind: duplicate ? "duplicate" : "missing",
         line: attrLocation.startLine,
         oid,
       });
@@ -1928,16 +1942,12 @@ async function inlineCssUrlValue(
   directory: string,
   value: string,
 ): Promise<string> {
-  const matches = [
-    ...value.matchAll(/url\(\s*(["']?)([^"')]+)\1\s*\)/gi),
-  ];
+  const matches = [...value.matchAll(/url\(\s*(["']?)([^"')]+)\1\s*\)/gi)];
   let result = value;
   for (const match of matches.reverse()) {
     const reference = match[2] ?? "";
     const mimeType = designAssetMimeType(reference);
-    const resolved = mimeType
-      ? safeLocalReference(directory, reference)
-      : null;
+    const resolved = mimeType ? safeLocalReference(directory, reference) : null;
     if (!resolved || !mimeType) continue;
     const data = await readSafeDesignBuffer(directory, resolved);
     if (!data || data.length > MAX_ASSET_BYTES) continue;
@@ -1963,10 +1973,7 @@ async function inlineCssLocalAssets(
     declarations.push(declaration);
   });
   for (const declaration of declarations) {
-    declaration.value = await inlineCssUrlValue(
-      directory,
-      declaration.value,
-    );
+    declaration.value = await inlineCssUrlValue(directory, declaration.value);
   }
   return root.toString();
 }
@@ -2403,6 +2410,7 @@ export async function readDesignWorkspaceSnapshot(
   const writeBack = options.writeBack !== false;
   const lint = await lintDesignDocument(workspacePath, undefined, {
     healOids: writeBack,
+    includeRuntimeAudits: false,
   });
   const summaries = await listDesignFrames(workspacePath, { writeBack });
   const [frames, tokensDocument, assets] = await Promise.all([
@@ -2414,12 +2422,21 @@ export async function readDesignWorkspaceSnapshot(
     readDesignTokensDocument(workspacePath),
     listDesignAssets(workspacePath),
   ]);
+  const runtimeViolations = frames.flatMap((frame) =>
+    getDesignRuntimeAudit(workspacePath, frame.file, frame.sourceVersion),
+  );
   return {
     frames,
     tokens: tokensDocument.tokens,
     tokenSourceVersion: tokensDocument.sourceVersion,
     assets,
-    lint,
+    lint: {
+      ...lint,
+      violations: sortDesignLintViolations([
+        ...lint.violations,
+        ...runtimeViolations,
+      ]),
+    },
   };
 }
 
@@ -2653,11 +2670,25 @@ async function lintFrame(
     assertFrameFile(file),
   );
   let source = sourceOverride ?? (await readFile(target, "utf8"));
-  const parseErrors: ParserError[] = [];
-  let document = parse(source, {
-    sourceCodeLocationInfo: true,
-    onParseError: (error) => parseErrors.push(error),
-  });
+  let parseErrors: ParserError[] = [];
+  const parseSource = (): DefaultTreeAdapterTypes.Document => {
+    parseErrors = [];
+    return parse(source, {
+      sourceCodeLocationInfo: true,
+      onParseError: (error) => parseErrors.push(error),
+    });
+  };
+  let document = parseSource();
+  let healedOids = 0;
+  if (options.healOids && sourceOverride === undefined) {
+    const healed = healDesignOids(source);
+    if (healed.changed) {
+      source = healed.html;
+      healedOids = healed.fixed.length;
+      await writeFile(target, source, "utf8");
+      document = parseSource();
+    }
+  }
   const violations: DesignLintViolation[] = parseErrors.map((error) =>
     violationAt(
       file,
@@ -2750,7 +2781,7 @@ async function lintFrame(
       }
     }
     if (!isDesignNodeElement(element)) continue;
-    if (!oid) {
+    if (!oid || oid.trim().length === 0) {
       violations.push(
         violationAt(
           file,
@@ -2779,17 +2810,6 @@ async function lintFrame(
       );
     } else {
       seen.add(oid);
-    }
-  }
-
-  let healedOids = 0;
-  if (options.healOids && sourceOverride === undefined) {
-    const healed = healDesignOids(source);
-    if (healed.changed) {
-      source = healed.html;
-      healedOids = healed.fixed.length;
-      await writeFile(target, source, "utf8");
-      document = parse(source, { sourceCodeLocationInfo: true });
     }
   }
 
@@ -2868,7 +2888,7 @@ async function lintFrame(
 async function lintDesignDocumentUnlocked(
   workspacePath: string,
   frame?: string,
-  options: { healOids?: boolean } = {},
+  options: { healOids?: boolean; includeRuntimeAudits?: boolean } = {},
 ): Promise<DesignLintReport> {
   const files = frame
     ? [(await designFrameTarget(workspacePath, frame)).file]
@@ -2885,21 +2905,17 @@ async function lintDesignDocumentUnlocked(
     );
     violations.push(...result.violations);
     healedOids += result.healedOids;
-    const identity = await readDesignFrameRenderIdentity(workspacePath, file);
-    violations.push(
-      ...getDesignRuntimeAudit(workspacePath, file, identity.sourceVersion),
-    );
+    if (options.includeRuntimeAudits !== false) {
+      const identity = await readDesignFrameRenderIdentity(workspacePath, file);
+      violations.push(
+        ...getDesignRuntimeAudit(workspacePath, file, identity.sourceVersion),
+      );
+    }
   }
   return {
     workspacePath: path.resolve(workspacePath),
     checkedFiles: files,
-    violations: violations.sort(
-      (left, right) =>
-        left.file.localeCompare(right.file) ||
-        left.line - right.line ||
-        left.column - right.column ||
-        left.ruleId.localeCompare(right.ruleId),
-    ),
+    violations: sortDesignLintViolations(violations),
     healedOids,
   };
 }
@@ -2907,12 +2923,24 @@ async function lintDesignDocumentUnlocked(
 export function lintDesignDocument(
   workspacePath: string,
   frame?: string,
-  options: { healOids?: boolean } = {},
+  options: { healOids?: boolean; includeRuntimeAudits?: boolean } = {},
 ): Promise<DesignLintReport> {
   const lint = () => lintDesignDocumentUnlocked(workspacePath, frame, options);
   return options.healOids === false
     ? lint()
     : withDocumentWrite(workspacePath, lint);
+}
+
+function sortDesignLintViolations(
+  violations: DesignLintViolation[],
+): DesignLintViolation[] {
+  return violations.sort(
+    (left, right) =>
+      left.file.localeCompare(right.file) ||
+      left.line - right.line ||
+      left.column - right.column ||
+      left.ruleId.localeCompare(right.ruleId),
+  );
 }
 
 function designThemeName(selector: string): string | null {

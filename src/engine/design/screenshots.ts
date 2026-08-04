@@ -91,10 +91,7 @@ export function getDesignScreenshot(
   const key = screenshotKey(workspaceId, frame, nodeId);
   const screenshot = screenshots.get(key) ?? null;
   if (!screenshot) return null;
-  if (screenshot.sourceVersion !== sourceVersion) {
-    screenshots.delete(key);
-    return null;
-  }
+  if (screenshot.sourceVersion !== sourceVersion) return null;
   screenshots.delete(key);
   screenshots.set(key, screenshot);
   return screenshot;

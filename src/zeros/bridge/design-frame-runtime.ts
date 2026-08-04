@@ -3,15 +3,16 @@
 // ──────────────────────────────────────────────────────────
 //
 // Every iframe has an opaque origin (`sandbox="allow-scripts"`), so the host
-// never reaches into contentDocument. One window-level hub routes versioned
-// postMessage responses by exact WindowProxy identity and keeps requests,
-// reloads, and retained canvases isolated.
+// never reaches into contentDocument. A one-time, protocol-validated parent
+// handshake transfers a private MessagePort; all document data and subsequent
+// requests stay on that per-document channel.
 
 import {
   DESIGN_RUNTIME_PROTOCOL,
   DESIGN_RUNTIME_VERSION,
   isDesignRuntimeFrameMessage,
   type DesignRuntimeFrameMessage,
+  type DesignRuntimeHostHandshake,
   type DesignRuntimeHostRequest,
   type DesignRuntimeMethod,
   type DesignRuntimeNodeDetails,
@@ -23,14 +24,6 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 const SCREENSHOT_REQUEST_TIMEOUT_MS = 12_000;
 
 interface RuntimeHostWindow {
-  addEventListener(
-    type: "message",
-    listener: (event: MessageEvent) => void,
-  ): void;
-  removeEventListener(
-    type: "message",
-    listener: (event: MessageEvent) => void,
-  ): void;
   setTimeout(handler: () => void, timeout: number): number;
   clearTimeout(handle: number): void;
 }
@@ -122,59 +115,9 @@ function isRuntimeScreenshot(value: unknown): value is DesignRuntimeScreenshot {
   );
 }
 
-class DesignRuntimeHub {
-  private readonly connections = new Map<
-    MessageEventSource,
-    DesignRuntimeConnectionImpl
-  >();
-  private listening = false;
-
-  constructor(private readonly host: RuntimeHostWindow) {}
-
-  register(connection: DesignRuntimeConnectionImpl): void {
-    this.connections.set(connection.source, connection);
-    if (this.listening) return;
-    this.listening = true;
-    this.host.addEventListener("message", this.handleMessage);
-  }
-
-  unregister(connection: DesignRuntimeConnectionImpl): void {
-    if (this.connections.get(connection.source) === connection) {
-      this.connections.delete(connection.source);
-    }
-    if (!this.listening || this.connections.size > 0) return;
-    this.listening = false;
-    this.host.removeEventListener("message", this.handleMessage);
-  }
-
-  private readonly handleMessage = (event: MessageEvent): void => {
-    // Every connected design iframe is sandboxed without allow-same-origin,
-    // so its serialized origin must remain opaque for the connection lifetime.
-    if (
-      event.origin !== "null" ||
-      !event.source ||
-      !isDesignRuntimeFrameMessage(event.data)
-    ) {
-      return;
-    }
-    this.connections.get(event.source)?.receive(event.data);
-  };
-}
-
-const hubs = new WeakMap<object, DesignRuntimeHub>();
-
-function hubFor(host: RuntimeHostWindow): DesignRuntimeHub {
-  const key = host as object;
-  const existing = hubs.get(key);
-  if (existing) return existing;
-  const hub = new DesignRuntimeHub(host);
-  hubs.set(key, hub);
-  return hub;
-}
-
 class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   readonly source: MessageEventSource;
-  private readonly hub: DesignRuntimeHub;
+  private readonly channel = new MessageChannel();
   private readonly pending = new Map<string, PendingRequest>();
   private destroyed = false;
 
@@ -184,9 +127,22 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     private readonly callbacks: DesignFrameRuntimeCallbacks,
   ) {
     this.source = source;
-    this.hub = hubFor(host);
-    this.hub.register(this);
+    this.channel.port1.addEventListener("message", this.handleMessage);
+    this.channel.port1.start();
+    const handshake: DesignRuntimeHostHandshake = {
+      protocol: DESIGN_RUNTIME_PROTOCOL,
+      version: DESIGN_RUNTIME_VERSION,
+      type: "handshake",
+    };
+    (this.source as WindowProxy).postMessage(handshake, {
+      targetOrigin: "*",
+      transfer: [this.channel.port2],
+    });
   }
+
+  private readonly handleMessage = (event: MessageEvent): void => {
+    if (isDesignRuntimeFrameMessage(event.data)) this.receive(event.data);
+  };
 
   receive(message: DesignRuntimeFrameMessage): void {
     if (this.destroyed) return;
@@ -232,9 +188,7 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
           : DEFAULT_REQUEST_TIMEOUT_MS,
       );
       this.pending.set(requestId, { resolve, reject, timeout });
-      (this.source as WindowProxy).postMessage(message, {
-        targetOrigin: "*",
-      });
+      this.channel.port1.postMessage(message);
     });
   }
 
@@ -316,7 +270,8 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
-    this.hub.unregister(this);
+    this.channel.port1.removeEventListener("message", this.handleMessage);
+    this.channel.port1.close();
     for (const pending of this.pending.values()) {
       this.host.clearTimeout(pending.timeout);
       pending.reject(runtimeError("disconnected"));

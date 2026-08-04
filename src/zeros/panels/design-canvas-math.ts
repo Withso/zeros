@@ -22,6 +22,24 @@ export interface DesignCanvasFrameRect extends DesignCanvasRect {
   file: string;
 }
 
+/** Reconcile a direct-DOM drag preview with the engine's authoritative result.
+ * Even a commit equal to the pre-drag geometry must repaint: React sees no prop
+ * change in that clamp case and therefore cannot repair the preview itself. */
+export async function settleDesignFrameGesture<T>(
+  commit: Promise<T>,
+  start: T,
+  paint: (geometry: T) => void,
+): Promise<T> {
+  try {
+    const committed = await commit;
+    paint(committed);
+    return committed;
+  } catch (error) {
+    paint(start);
+    throw error;
+  }
+}
+
 /** Keep the world point beneath a screen-space pointer fixed while zooming. */
 export function zoomDesignViewportAtPoint(
   viewport: DesignViewport,

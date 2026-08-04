@@ -814,10 +814,6 @@ export function setWorkspaceRemoteRestricted(
   }
 }
 
-export function isWorkspaceRemoteRestricted(workspaceId: string): boolean {
-  return listRemoteRestrictedWorkspaceIds().has(workspaceId);
-}
-
 /** The set of workspace ids the owner has hidden from remote (relay) clients.
  *  Design workspaces are always local-only while their product surface is an
  *  Internal feature; they join the owner's explicit opt-outs in the same set
@@ -825,10 +821,7 @@ export function isWorkspaceRemoteRestricted(workspaceId: string): boolean {
  *  One query keeps the remote list filter O(1) per row. */
 export function listRemoteRestrictedWorkspaceIds(): Set<string> {
   const rows = open()
-    .prepare<
-      [],
-      { workspace_id: string }
-    >(
+    .prepare<[], { workspace_id: string }>(
       `SELECT workspace_id FROM remote_restricted_workspaces
        UNION
        SELECT id AS workspace_id FROM workspaces WHERE kind = 'design'`,

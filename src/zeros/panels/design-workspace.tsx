@@ -45,6 +45,7 @@ import {
 } from "../../native/git";
 import { isEditableHotkeyTarget } from "../../shell/editable-target";
 import {
+  blockingDesignLintReason,
   groupDesignLintViolations,
   lintReviewBadgeLabel,
 } from "./design-lint-summary";
@@ -105,6 +106,7 @@ import {
   fitDesignRects,
   retainLiveDesignFrameFiles,
   selectLiveDesignFrameFiles,
+  settleDesignFrameGesture,
   zoomDesignViewportAtPoint,
   type DesignViewport,
 } from "./design-canvas-math";
@@ -733,12 +735,11 @@ function DesignCanvas({
         document.body.style.userSelect = "";
         gestureCancelRef.current = null;
         if (!moved) return;
-        void updateDesignFrameGeometryCached(
-          workspaceId,
-          frame.file,
-          latest,
+        void settleDesignFrameGesture(
+          updateDesignFrameGeometryCached(workspaceId, frame.file, latest),
+          start,
+          (geometry) => paintFrameGeometry(element, geometry),
         ).catch((geometryError) => {
-          paintFrameGeometry(element, start);
           toast.error("Couldn't update the frame geometry", {
             description: errorMessage(geometryError),
           });
@@ -921,9 +922,9 @@ function DesignCanvas({
         return;
       }
       if (startPan(event)) return;
-      if (event.target === event.currentTarget) publishSelection(null);
+      if (event.target === event.currentTarget) publishSelection(selectedFrame);
     },
-    [publishSelection, startPan],
+    [publishSelection, selectedFrame, startPan],
   );
 
   const handleWheel = useCallback(
@@ -1389,6 +1390,7 @@ interface InspectorEditFieldProps {
   value: string | number;
   disabled?: boolean;
   onPreview?: (value: string) => Promise<unknown> | void;
+  onCancelPreview?: () => Promise<unknown> | void;
   onCommit: (value: string) => Promise<unknown>;
 }
 
@@ -1397,6 +1399,7 @@ function InspectorEditField({
   value,
   disabled = false,
   onPreview,
+  onCancelPreview,
   onCommit,
 }: InspectorEditFieldProps) {
   const id = useId();
@@ -1404,6 +1407,9 @@ function InspectorEditField({
   const baselineRef = useRef(String(value));
   const skipCommitRef = useRef(false);
   const previewFrameRef = useRef<number | null>(null);
+  const previewDirtyRef = useRef(false);
+  const cancelPreviewRef = useRef(onCancelPreview);
+  cancelPreviewRef.current = onCancelPreview;
   const [draft, setDraft] = useState(String(value));
   const [saving, setSaving] = useState(false);
 
@@ -1419,12 +1425,27 @@ function InspectorEditField({
       if (previewFrameRef.current !== null) {
         window.cancelAnimationFrame(previewFrameRef.current);
       }
+      if (previewDirtyRef.current) {
+        previewDirtyRef.current = false;
+        void Promise.resolve(cancelPreviewRef.current?.()).catch(() => {});
+      }
     },
     [],
   );
 
+  const cancelPreview = () => {
+    if (previewFrameRef.current !== null) {
+      window.cancelAnimationFrame(previewFrameRef.current);
+      previewFrameRef.current = null;
+    }
+    if (!previewDirtyRef.current) return;
+    previewDirtyRef.current = false;
+    void Promise.resolve(cancelPreviewRef.current?.()).catch(() => {});
+  };
+
   const preview = (next: string) => {
     if (!onPreview) return;
+    previewDirtyRef.current = true;
     if (previewFrameRef.current !== null) {
       window.cancelAnimationFrame(previewFrameRef.current);
     }
@@ -1437,17 +1458,23 @@ function InspectorEditField({
   const commit = async () => {
     if (skipCommitRef.current) {
       skipCommitRef.current = false;
+      cancelPreview();
       return;
     }
     const baseline = baselineRef.current;
-    if (draft === baseline || saving) return;
+    if (saving) return;
+    if (draft === baseline) {
+      cancelPreview();
+      return;
+    }
     setSaving(true);
     try {
       await onCommit(draft);
       baselineRef.current = draft;
+      cancelPreview();
     } catch (fieldError) {
       setDraft(baseline);
-      preview(baseline);
+      cancelPreview();
       toast.error(`Couldn't update ${label.toLowerCase()}`, {
         description: errorMessage(fieldError),
       });
@@ -1484,7 +1511,7 @@ function InspectorEditField({
             event.preventDefault();
             skipCommitRef.current = true;
             setDraft(baselineRef.current);
-            preview(baselineRef.current);
+            cancelPreview();
             event.currentTarget.blur();
           }
         }}
@@ -1527,19 +1554,15 @@ function InspectorStyleField({
           styles: { [property]: next || null },
         })
       }
-      onCommit={async (next) => {
-        try {
-          await updateDesignNodeStylesCached(workspaceId, {
-            frame: frame.file,
-            nodeId,
-            sourceVersion: frame.sourceVersion,
-            styles: { [property]: next || null },
-          });
-        } catch (styleError) {
-          await clearDesignNodeStylePreview(previewInput).catch(() => {});
-          throw styleError;
-        }
-      }}
+      onCancelPreview={() => clearDesignNodeStylePreview(previewInput)}
+      onCommit={(next) =>
+        updateDesignNodeStylesCached(workspaceId, {
+          frame: frame.file,
+          nodeId,
+          sourceVersion: frame.sourceVersion,
+          styles: { [property]: next || null },
+        })
+      }
     />
   );
 }
@@ -1564,6 +1587,9 @@ function DesignInspector({
     lint?.violations.filter((violation) => violation.severity === "warning") ??
     [];
   const warningGroups = groupDesignLintViolations(warnings);
+  const firstBlockingReason = errors[0]
+    ? blockingDesignLintReason(errors[0])
+    : null;
   const themes = useMemo(
     () =>
       [
@@ -1669,7 +1695,7 @@ function DesignInspector({
   const styleField = (label: string, property: string, value: string) =>
     styleContext ? (
       <InspectorStyleField
-        key={property}
+        key={`${styleContext.frame.file}:${styleContext.frame.sourceVersion}:${styleContext.nodeId}:${property}`}
         {...styleContext}
         label={label}
         property={property}
@@ -1765,8 +1791,8 @@ function DesignInspector({
                         originUrl={null}
                         disabled={errors.length > 0 || frameAction !== null}
                         disabledReason={
-                          errors.length > 0
-                            ? "Fix design errors before creating a pull request"
+                          firstBlockingReason
+                            ? `Fix ${firstBlockingReason} before creating a pull request`
                             : undefined
                         }
                       />
@@ -1791,7 +1817,7 @@ function DesignInspector({
                         {errors.length === 1 ? "error" : "errors"}
                       </AlertTitle>
                       <AlertDescription>
-                        {errors[0]?.ruleId}: {errors[0]?.message}
+                        {firstBlockingReason}: {errors[0]?.message}
                       </AlertDescription>
                     </Alert>
                   </section>

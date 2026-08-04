@@ -88,6 +88,12 @@ export interface DesignRuntimeHostRequest {
   args: Record<string, unknown>;
 }
 
+export interface DesignRuntimeHostHandshake {
+  protocol: typeof DESIGN_RUNTIME_PROTOCOL;
+  version: typeof DESIGN_RUNTIME_VERSION;
+  type: "handshake";
+}
+
 export type DesignRuntimeFrameMessage =
   | {
       protocol: typeof DESIGN_RUNTIME_PROTOCOL;
@@ -176,6 +182,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   var visibilityOverridesByOid = new Map();
   var previewStyleOverridesByOid = new Map();
   var mutationTimer = null;
+  var parentPort = null;
   var trustedParentOrigin = null;
   try {
     trustedParentOrigin = document.referrer
@@ -186,12 +193,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function post(message) {
-    parent.postMessage(
-      message,
-      trustedParentOrigin && trustedParentOrigin !== "null"
-        ? trustedParentOrigin
-        : "*"
-    );
+    if (parentPort) parentPort.postMessage(message);
   }
 
   function event(name, payload) {
@@ -746,13 +748,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }
   }
 
-  window.addEventListener("message", function (messageEvent) {
-    if (messageEvent.source !== parent) return;
-    // Sandboxed frames may have an opaque origin, so pin the trusted parent
-    // from the referrer when available and otherwise from its first request.
-    if (trustedParentOrigin === null) trustedParentOrigin = messageEvent.origin;
-    if (messageEvent.origin !== trustedParentOrigin) return;
-    var message = messageEvent.data;
+  function receiveRequest(message) {
     if (
       !message ||
       message.protocol !== PROTOCOL ||
@@ -769,6 +765,30 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         function (result) { response(message.requestId, true, result); },
         function (error) { response(message.requestId, false, error); }
       );
+  }
+
+  window.addEventListener("message", function (messageEvent) {
+    if (messageEvent.source !== parent || parentPort !== null) return;
+    var message = messageEvent.data;
+    if (
+      !message ||
+      message.protocol !== PROTOCOL ||
+      message.version !== VERSION ||
+      message.type !== "handshake" ||
+      messageEvent.ports.length !== 1
+    ) {
+      return;
+    }
+    // Sandboxed frames may have an opaque origin. Validate a real protocol
+    // handshake first, then pin its exact parent origin for this document.
+    if (trustedParentOrigin === null) trustedParentOrigin = messageEvent.origin;
+    if (messageEvent.origin !== trustedParentOrigin) return;
+    parentPort = messageEvent.ports[0];
+    parentPort.onmessage = function (portEvent) {
+      receiveRequest(portEvent.data);
+    };
+    parentPort.start();
+    event("ready", snapshot());
   });
 
   function publishMutation() {
@@ -787,6 +807,4 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     childList: true,
     subtree: true
   });
-
-  event("ready", snapshot());
 })();`;
