@@ -89,6 +89,7 @@ export function GitDefaultsSection() {
     | { git?: { branch_prefix_type?: unknown; branch_prefix?: unknown } }
     | undefined;
   const savedType = readType(effective?.git?.branch_prefix_type);
+  const previewType = readPreviewType(effective?.git?.branch_prefix_type);
   const savedPrefix =
     typeof effective?.git?.branch_prefix === "string"
       ? effective.git.branch_prefix
@@ -193,7 +194,13 @@ export function GitDefaultsSection() {
         </SettingsField>
       </SettingsList>
       <p className="text-fg2 text-xs">
-        {previewFor(selected, selected === "custom" ? draft : savedPrefix, login)}
+        {/* An optimistic pick owns the line the moment it's clicked; otherwise
+            describe the effective value, including the unrenderable `zeros`. */}
+        {previewFor(
+          pending ?? previewType,
+          selected === "custom" ? draft : savedPrefix,
+          login,
+        )}
       </p>
     </SettingsSection>
   );
@@ -288,11 +295,25 @@ function CustomPrefixInput({
  *
  *  Honest for every value the app itself can produce, since this pane only ever
  *  writes the three OPTIONS and unset is genuinely `github`. A settings.toml or
- *  team layer that pins "zeros" by hand is the one case where the shown row
- *  (GitHub username) outruns what the engine will do (`zeros/`) — accepted, and
- *  the reason the "zeros" arm of previewFor is kept rather than deleted. */
+ *  team layer that pins "zeros" by hand is the one case where the shown ROW
+ *  (GitHub username) can't match what the engine will do (`zeros/`) — the radio
+ *  has nowhere else to put it. The preview line is not folded, so it still
+ *  reports `zeros/` honestly; that is what the "zeros" arm of previewFor is
+ *  for, and why it is kept rather than deleted. */
 export function readType(value: unknown): BranchPrefixType {
   return value === "custom" || value === "none" ? value : "github";
+}
+
+/** What the PREVIEW line describes — which is not always the selected row.
+ *
+ *  The fold above exists for the RADIO's sake: it must always have a row to put
+ *  the dot on. The preview sentence has no such constraint, and folding it too
+ *  is what let the pane contradict the engine: a repo/team layer pinning
+ *  `branch_prefix_type = "zeros"` had the line promising `<login>/Cream` while
+ *  `zeros/Cream` landed on disk. Every other value resolves identically to
+ *  readType, so this only ever differs where the radio genuinely cannot follow. */
+export function readPreviewType(value: unknown): BranchPrefixType {
+  return value === "zeros" ? "zeros" : readType(value);
 }
 
 function labelFor(

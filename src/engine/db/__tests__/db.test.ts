@@ -33,6 +33,7 @@ import { headRev, tombstonesSince } from "../sync";
 import {
   WINDOW_MAX_ROWS,
   TURN_START_ORD_SQL,
+  TURN_START_ORD_ANY_USER_SQL,
   upsertChatMessage,
   upsertChatMessagesBulk,
   windowChatMessages,
@@ -696,6 +697,19 @@ describe("Zeros DB (unified engine store)", () => {
       payload: JSON.stringify({ id, kind: "text", role: "agent", text: "ans" }),
       createdAt: 1,
     });
+    /** A mid-turn steer: a user row that did NOT open a turn. */
+    const steer = (id: string, owner: string) => ({
+      msgId: id,
+      kind: "text",
+      payload: JSON.stringify({
+        id,
+        kind: "text",
+        role: "user",
+        text: "actually",
+        steeredTurnId: owner,
+      }),
+      createdAt: 1,
+    });
 
     it("extends back to the prompt that opened the turn it landed in", () => {
       setZerosDbPathForTesting(tmpDbFile());
@@ -719,6 +733,47 @@ describe("Zeros DB (unified engine store)", () => {
         "t5",
         "a1",
       ]);
+    });
+
+    it("reaches past a mid-turn steer to the prompt that opened the turn", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      upsertChatMessagesBulk("c1", [
+        user("u1"),
+        tool("t1"),
+        steer("s1", "u1"),
+        tool("t2"),
+        agent("a1"),
+      ]);
+
+      // Newest 2 would cut at t2. A steer is a user row, so the snap used to
+      // stop there and present the interjection as the turn's opening prompt,
+      // with the real prompt (and everything before the steer) off-window.
+      expect(windowChatMessages("c1", 2).map((m) => m.msgId)).toEqual([
+        "u1",
+        "t1",
+        "s1",
+        "t2",
+        "a1",
+      ]);
+    });
+
+    it("falls back to a steer when the real opening is past the budget", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      upsertChatMessagesBulk("c1", [
+        user("u1"),
+        ...Array.from({ length: WINDOW_MAX_ROWS + 100 }, (_, i) =>
+          tool(`t${i}`),
+        ),
+        steer("s1", "u1"),
+        agent("a1"),
+      ]);
+
+      // Unreachable opening + reachable steer: a boundary the renderer splits
+      // on still beats a headless turn, so skipping steers must not cost the
+      // snap entirely.
+      const window = windowChatMessages("c1", 2);
+      expect(window[0]?.msgId).toBe("s1");
+      expect(window.map((m) => m.msgId)).toEqual(["s1", "a1"]);
     });
 
     it("leaves a window that already starts on a prompt alone", () => {
@@ -789,27 +844,32 @@ describe("Zeros DB (unified engine store)", () => {
       setZerosDbPathForTesting(tmpDbFile());
       upsertChatMessagesBulk("c1", [user("u1"), tool("t1")]);
 
-      const details = (
-        openZerosDb()
-          .prepare(`EXPLAIN QUERY PLAN ${TURN_START_ORD_SQL}`)
-          .all("c1", 0, 2) as { detail: string }[]
-      ).map((r) => r.detail);
+      // Both queries: the steer-skipping primary (whose extra json_extract term
+      // must not cost the index) and the any-user fallback it degrades to.
+      for (const sql of [TURN_START_ORD_SQL, TURN_START_ORD_ANY_USER_SQL]) {
+        const details = (
+          openZerosDb()
+            .prepare(`EXPLAIN QUERY PLAN ${sql}`)
+            .all("c1", 0, 2) as { detail: string }[]
+        ).map((r) => r.detail);
 
-      // Both ord bounds have to reach the index: the lower one is what caps the
-      // reverse walk at the rows the window could actually absorb. Losing it
-      // still returns the right row, just after walking the chat to its start.
-      expect(
-        details.some(
-          (d) =>
-            d.includes("SEARCH chat_messages") &&
-            d.includes("idx_chat_messages_chat_ord") &&
-            d.includes("ord>?") &&
-            d.includes("ord<?"),
-        ),
-      ).toBe(true);
-      expect(details.some((d) => /SCAN chat_messages\b(?! USING)/.test(d))).toBe(
-        false,
-      );
+        // Both ord bounds have to reach the index: the lower one is what caps
+        // the reverse walk at the rows the window could actually absorb. Losing
+        // it still returns the right row, just after walking the chat to its
+        // start.
+        expect(
+          details.some(
+            (d) =>
+              d.includes("SEARCH chat_messages") &&
+              d.includes("idx_chat_messages_chat_ord") &&
+              d.includes("ord>?") &&
+              d.includes("ord<?"),
+          ),
+        ).toBe(true);
+        expect(
+          details.some((d) => /SCAN chat_messages\b(?! USING)/.test(d)),
+        ).toBe(false);
+      }
     });
   });
 

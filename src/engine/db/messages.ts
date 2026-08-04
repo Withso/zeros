@@ -159,8 +159,13 @@ export function upsertChatMessagesBulk(chatId: string, messages: PersistedMessag
  *  would only be trimmed back off the front on the next streamed message. */
 export const WINDOW_MAX_ROWS = 1000;
 
-/** The `ord` of the newest user prompt in an `ord` range — i.e. the row that
- *  opened the turn the range's top belongs to.
+/** The `ord` of the newest TURN-OPENING user prompt in an `ord` range — i.e. the
+ *  row that opened the turn the range's top belongs to. A mid-turn steer is also
+ *  a user row (persisted with `steeredTurnId` by persistSteeredUserPrompt) but it
+ *  opened no turn, so it is excluded: snapping to one would start the window on
+ *  an interjection presented as though it were the reader's prompt, with the
+ *  owning turn's opening still off-window. TURN_START_ORD_ANY_USER_SQL is the
+ *  fallback when the real opening is out of budget.
  *
  *  `ORDER BY ord DESC LIMIT 1` rather than `MAX(ord)`: both get the same
  *  idx_chat_messages_chat_ord range search, but LIMIT 1 makes the early exit
@@ -173,6 +178,20 @@ export const WINDOW_MAX_ROWS = 1000;
  *  on every chat open, and the difference between a bounded index search and a
  *  scan of the chat is invisible in the rows returned. */
 export const TURN_START_ORD_SQL = `SELECT ord FROM chat_messages
+        WHERE chat_id = ? AND ord >= ? AND ord <= ?
+          AND kind = 'text' AND json_extract(payload, '$.role') = 'user'
+          AND json_extract(payload, '$.steeredTurnId') IS NULL
+        ORDER BY ord DESC LIMIT 1`;
+
+/** Fallback for TURN_START_ORD_SQL: the newest user row of ANY kind, steers
+ *  included. A mid-turn steer is a user row that did NOT open a turn, so the
+ *  durable opening is the right anchor and the query above skips steers to find
+ *  it — but when that opening sits past the row budget, snapping to a steer
+ *  still lands the window on a boundary the renderer splits turns on, which
+ *  beats handing back a headless turn. Steers persisted by older builds carry no
+ *  `steeredTurnId` (they are inferred at the read boundary, after the window),
+ *  so for those this query and the one above agree — best-effort by design. */
+export const TURN_START_ORD_ANY_USER_SQL = `SELECT ord FROM chat_messages
         WHERE chat_id = ? AND ord >= ? AND ord <= ?
           AND kind = 'text' AND json_extract(payload, '$.role') = 'user'
         ORDER BY ord DESC LIMIT 1`;
@@ -238,9 +257,10 @@ function snapToTurnStart(chatId: string, rows: MsgDbRow[]): MsgDbRow[] {
   // gaps, which only makes the floor more conservative — never unbounded.
   const floor = oldest.ord - budget;
   const db = openZerosDb();
-  const start = db.prepare(TURN_START_ORD_SQL).get(chatId, floor, oldest.ord) as
-    | { ord: number }
-    | undefined;
+  const start = (db.prepare(TURN_START_ORD_SQL).get(chatId, floor, oldest.ord) ??
+    db
+      .prepare(TURN_START_ORD_ANY_USER_SQL)
+      .get(chatId, floor, oldest.ord)) as { ord: number } | undefined;
   if (!start) return rows;
   const fill = db
     .prepare(

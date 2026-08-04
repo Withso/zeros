@@ -1124,6 +1124,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
         logTag: `codex-app-server:${zerosSessionId.slice(0, 8)}`,
         onApprovalRequest: (request) =>
           this.handleApprovalRequest(session, request),
+        onApprovalSettled: (permissionId) =>
+          this.handleApprovalSettled(session, permissionId),
         onUserInputRequest: (request) =>
           this.handleUserInputRequest(session, request),
         onUserInputSettled: (questionId) =>
@@ -1564,6 +1566,30 @@ export class CodexAppServerAdapter implements AgentAdapter {
       request.permissionId,
       canonical,
     );
+  }
+
+  /** An approval settled inside the runtime WITHOUT a respondToPermission (its
+   *  response timeout auto-cancelled the codex side). Twin of
+   *  handleUserInputSettled: evict the pending entry and emit the settled echo
+   *  so the renderer drops the parked card and the engine stops replaying it to
+   *  a reloaded renderer as a gate whose resolver is already gone. */
+  private handleApprovalSettled(
+    session: CodexSession,
+    permissionId: string,
+  ): void {
+    if (!session?.pendingApprovals?.delete(permissionId)) return;
+    try {
+      this.ctx.emit.onPermissionSettled?.(
+        this.agentId,
+        permissionId,
+        session.zerosSessionId,
+      );
+    } catch (err) {
+      this.ctx.emit.onAgentStderr(
+        this.agentId,
+        `[zeros] permission settle emit failed for ${permissionId}: ${String(err)}`,
+      );
+    }
   }
 
   /** A blocking user-input question (item/tool/requestUserInput). Twin of

@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   loadedSessionStatus,
   markPrebindDirty,
+  queueReleaseAction,
   shouldQueuePrompt,
   takePrebindDirty,
 } from "../session-reload-lifecycle";
@@ -85,6 +86,25 @@ describe("session reload lifecycle", () => {
     ).toBe(false);
   });
 
+  it("releases a queue parked behind a warm that never became ready", () => {
+    // `warming` is a park reason, so every warm outcome needs a release. A warm
+    // that ends unhealthy used to leave the queue parked with nothing left to
+    // drain it, and the composer froze: each later send parked behind it too.
+    expect(queueReleaseAction({ status: "ready", queueHeld: false })).toBe(
+      "drain",
+    );
+    for (const status of ["failed", "auth-required", "reconnecting"] as const) {
+      expect(
+        queueReleaseAction({ status, queueHeld: false }),
+        `for ${status}`,
+      ).toBe("drop");
+    }
+    // A queued-message edit still owns its queue through an unhealthy settle.
+    expect(queueReleaseAction({ status: "failed", queueHeld: true })).toBe(
+      "hold",
+    );
+  });
+
   it("clears a stale failure when the engine confirms the turn is running", () => {
     const store = useSessionsStore.getState();
     store.setSession("chat-1", {
@@ -147,6 +167,64 @@ describe("session reload lifecycle", () => {
       status: "ready",
       error: null,
       failure: null,
+    });
+  });
+
+  it("a locally classified auth-required failure survives the engine's terminal turn_state", () => {
+    const store = useSessionsStore.getState();
+    // What sendPrompt leaves behind after AGENT_PROMPT_FAILED classifies the
+    // turn. The engine's terminal turn_state for the SAME turn arrives a frame
+    // later on the rAF-buffered update path, and used to wipe this clean —
+    // taking the footer's Sign-in button (footerLabelForFailure reads
+    // session.failure) with it.
+    store.setSession("chat-1", {
+      ...BLANK,
+      agentId: "claude",
+      sessionId: "session-1",
+      status: "auth-required",
+      error: "Please sign in to Claude",
+      failure: {
+        kind: "auth-required",
+        stage: "prompt",
+        message: "Please sign in to Claude",
+      },
+      activeTurnStartedAt: 1_234,
+    });
+
+    store.applyBridgeUpdate(turnState("session-1", "failed"));
+
+    expect(useSessionsStore.getState().sessions["chat-1"]).toMatchObject({
+      status: "auth-required",
+      error: "Please sign in to Claude",
+      failure: { kind: "auth-required" },
+      // Still settled: the turn is over even though its failure is preserved.
+      activeTurnStartedAt: null,
+    });
+  });
+
+  it("keeps a hard prompt failure visible after the turn settles", () => {
+    const store = useSessionsStore.getState();
+    store.setSession("chat-1", {
+      ...BLANK,
+      agentId: "claude",
+      sessionId: "session-1",
+      status: "failed",
+      error: "Agent crashed",
+      failure: {
+        kind: "protocol-error",
+        stage: "prompt",
+        message: "Agent crashed",
+      },
+    });
+
+    store.applyBridgeUpdate(
+      turnState("session-1", "failed", { stopReason: "refusal" }),
+    );
+
+    expect(useSessionsStore.getState().sessions["chat-1"]).toMatchObject({
+      status: "failed",
+      error: "Agent crashed",
+      lastStopReason: "refusal",
     });
   });
 

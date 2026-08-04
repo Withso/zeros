@@ -188,6 +188,9 @@ interface ActivePromptContext {
   chatId: string | null;
   turnId: string;
   startedAt: number;
+  /** Last sign of life from the adapter (stream chunk, gate opened/settled) or
+   *  from the user answering a gate. Read only by the staleness bound below. */
+  lastActivityAt: number;
 }
 
 const VERSION = "0.0.5";
@@ -214,6 +217,22 @@ const SLOW_WORKSPACE_OP_MS = 2_000;
  *  cleared, so the reconnecting desktop wins the re-adopt over a connected
  *  relay. */
 const LOCAL_REOWN_GRACE_MS = 30_000;
+
+/** How long an accepted prompt may show NO sign of life — no adapter output and
+ *  no blocking gate parked on the user — before the engine stops treating it as
+ *  the session's live turn.
+ *
+ *  Only reachable when an adapter's prompt promise neither resolves nor rejects,
+ *  because that promise settling is what normally retires the record. The
+ *  renderer's own watchdogs abort its request at that point, but an abort is
+ *  client-side only — the engine is never told — so without this bound the ghost
+ *  record outlives the process and the concurrency guard refuses EVERY later send
+ *  for the chat as "already responding", recoverable only by closing the chat.
+ *
+ *  Deliberately longer than the renderer's PROMPT_INACTIVITY_TIMEOUT_MS (30 min)
+ *  so the renderer always gives up first: the engine is the backstop, never the
+ *  one to declare a turn dead while a client still waits on it. */
+const PROMPT_STALE_AFTER_MS = 45 * 60_000;
 
 /** Return only durable, opaque workspace-row ids for DB_CHANGED scoping.
  * Local-main requests use a host path as their workspaceId; rejecting anything
@@ -851,6 +870,7 @@ export class ZerosEngine {
           // Route the stream to the client that owns this session — not every
           // device. (Falls back to broadcast for an unowned session.)
           const sessionId = notification.sessionId;
+          this.touchActivePrompt(sessionId);
           if (notification.update.sessionUpdate === "current_mode_update") {
             const cached = this.sessionLoadResponses.get(sessionId);
             if (cached?.modes) {
@@ -889,6 +909,7 @@ export class ZerosEngine {
           request: RequestPermissionRequest,
         ) => {
           const sessionId = request.sessionId;
+          this.touchActivePrompt(sessionId);
           this.pendingPermissionRequests.set(permissionId, {
             agentId,
             request,
@@ -913,6 +934,7 @@ export class ZerosEngine {
           permissionId: string,
           sessionId: string,
         ) => {
+          this.touchActivePrompt(sessionId);
           this.permissionOwner.delete(permissionId);
           // Twin of onQuestionSettled: this hook fires for EVERY way a resolver
           // dies (response, timeout, abort, rebuilt-SDK re-arm), so it is what
@@ -937,6 +959,7 @@ export class ZerosEngine {
           request: QuestionRequest,
         ) => {
           const sessionId = request.sessionId;
+          this.touchActivePrompt(sessionId);
           this.pendingQuestionRequests.set(questionId, { agentId, request });
           const owner = this.router.ownerOf(sessionId);
           if (owner) this.questionOwner.set(questionId, owner);
@@ -957,6 +980,7 @@ export class ZerosEngine {
           sessionId: string,
           outcome: QuestionOutcome,
         ) => {
+          this.touchActivePrompt(sessionId);
           // The engine resolver is gone (timeout / abort / answered elsewhere) —
           // any late AGENT_QUESTION_RESPONSE for this id is a no-op, so the
           // owner entry is dead weight either way.
@@ -2173,6 +2197,12 @@ export class ZerosEngine {
               this.sessionWorkspace.delete(priorSessionId);
               this.sessionMessages.delete(priorSessionId);
               this.sessionLoadResponses.delete(priorSessionId);
+              // The predecessor's turn is abandoned by definition here, and its
+              // prompt promise may never settle after endSession — so its own
+              // finally may never run. Retire the record with the rest of the
+              // session's bookkeeping (the identity checks in that finally keep
+              // a late settle from touching anything that outlived it).
+              this.activePromptContexts.delete(priorSessionId);
               this.clearPendingAgentInteractions(priorSessionId);
               void this.agents
                 .endSession(priorAgentId, priorSessionId)
@@ -2236,18 +2266,32 @@ export class ZerosEngine {
           // concurrency invariant at the engine too so an older renderer (or
           // another client) cannot open a phantom second durable turn while
           // the provider is already responding on this session.
-          if (this.activePromptContexts.has(msg.sessionId)) {
-            client.send(
-              createMessage({
-                type: "AGENT_PROMPT_FAILED",
-                source: "engine",
-                requestId: msg.id,
-                agentId: msg.agentId,
-                sessionId: msg.sessionId,
-                error: "The agent is already responding to this chat.",
-              }),
+          const inFlight = this.activePromptContexts.get(msg.sessionId);
+          if (inFlight) {
+            if (this.activePromptIsLive(inFlight)) {
+              client.send(
+                createMessage({
+                  type: "AGENT_PROMPT_FAILED",
+                  source: "engine",
+                  requestId: msg.id,
+                  agentId: msg.agentId,
+                  sessionId: msg.sessionId,
+                  error: "The agent is already responding to this chat.",
+                }),
+              );
+              return;
+            }
+            // A record with no sign of life left is a ghost: the adapter's
+            // prompt promise never settled, so its own cleanup will never run.
+            // Release it instead of refusing this send — otherwise the guard
+            // wedges the chat permanently (see PROMPT_STALE_AFTER_MS).
+            console.warn(
+              `[agents] releasing a stale in-flight prompt for session ` +
+                `${msg.sessionId}: no activity for ` +
+                `${Math.round((Date.now() - inFlight.lastActivityAt) / 1000)}s`,
             );
-            return;
+            this.activePromptContexts.delete(msg.sessionId);
+            this.promptSessions.delete(msg.sessionId);
           }
           const lifecycleWorkspaceId = this.workspaceIdForAgentSession(
             msg.sessionId,
@@ -2261,6 +2305,7 @@ export class ZerosEngine {
             chatId: this.sessionChat.get(msg.sessionId) ?? null,
             turnId: msg.userMessageId ?? `turn-${msg.id}`,
             startedAt: Date.now(),
+            lastActivityAt: Date.now(),
           };
           this.activePromptContexts.set(msg.sessionId, activePrompt);
           // Keep a start barrier registered from before the first await until
@@ -2397,12 +2442,20 @@ export class ZerosEngine {
             if (this.activeTurnSnapshots.get(msg.sessionId) === turnCtx) {
               this.activeTurnSnapshots.delete(msg.sessionId);
             }
-            if (this.activePromptContexts.get(msg.sessionId) === activePrompt) {
+            // The rest of this state is keyed by SESSION, not by turn, so it is
+            // released whenever this turn ends — unless a later prompt has
+            // already taken the session over (only possible after a stale
+            // release above). Stripping the start barrier or dropping the
+            // unanswered gates of THAT live turn is the failure this guards.
+            const promptOwner = this.activePromptContexts.get(msg.sessionId);
+            if (promptOwner === activePrompt) {
               this.activePromptContexts.delete(msg.sessionId);
             }
-            this.promptSessions.delete(msg.sessionId);
-            this.cancelRequested.delete(msg.sessionId);
-            this.clearPendingAgentInteractions(msg.sessionId);
+            if (!promptOwner || promptOwner === activePrompt) {
+              this.promptSessions.delete(msg.sessionId);
+              this.cancelRequested.delete(msg.sessionId);
+              this.clearPendingAgentInteractions(msg.sessionId);
+            }
             this.exitPrompt();
           }
           return;
@@ -2623,6 +2676,52 @@ export class ZerosEngine {
           // the exact turn we are trying to recover.
           const activePrompt = this.activePromptContexts.get(msg.sessionId);
           if (activePrompt) {
+            // Nothing is spawned here, so cwd/env/cliBinary are moot — but
+            // agentSpawnOpts is ALSO the choke point that refuses a remote
+            // (untrusted) client naming no resolvable managed workspace, and
+            // this path hands the caller a live turn: stream ownership, every
+            // unresolved permission/question card (replayed below), and the
+            // session→chat binding the transcript is written under. Skipping
+            // the check would make re-adoption a way around it, so enforce the
+            // remote half here. Local clients own the machine.
+            //
+            // All of it runs BEFORE any mutation: a refusal must not have
+            // already moved ownership off the client that legitimately holds it.
+            if (client.kind !== "local") {
+              this.assertRemoteWorkspaceOperable(
+                msg.workspaceId,
+                "loadSession",
+              );
+              // …and it must be THIS session's workspace. Satisfying the clamp
+              // with any workspace the caller can reach would otherwise let it
+              // adopt a live turn belonging to a different one.
+              const sessionWorkspaceId = this.sessionWorkspace.get(
+                msg.sessionId,
+              );
+              if (sessionWorkspaceId && sessionWorkspaceId !== msg.workspaceId) {
+                throw new AgentFailureError({
+                  kind: "protocol-error",
+                  message:
+                    "This session belongs to a different workspace than the one requested.",
+                  stage: "loadSession",
+                });
+              }
+              // Re-binding session→chat mid-turn redirects where the running
+              // turn's transcript is persisted and where its pushes are routed.
+              // A local renderer legitimately re-states the binding it already
+              // owns after a reload; an untrusted client may only CONFIRM the
+              // existing one (or establish one where none exists) — never move
+              // a live turn onto a chat of its choosing.
+              const boundChatId = this.sessionChat.get(msg.sessionId);
+              if (msg.chatId && boundChatId && boundChatId !== msg.chatId) {
+                throw new AgentFailureError({
+                  kind: "protocol-error",
+                  message:
+                    "This session is already bound to a different chat; a remote client cannot rebind a running turn.",
+                  stage: "loadSession",
+                });
+              }
+            }
             this.router.setOwner(msg.sessionId, client.id);
             this.sessionAgent.set(msg.sessionId, msg.agentId);
             if (msg.chatId) {
@@ -2780,8 +2879,26 @@ export class ZerosEngine {
         cliBinary: msg.cliBinary,
       };
     }
+    return {
+      cwd: this.assertRemoteWorkspaceOperable(msg.workspaceId, stage),
+      env: undefined,
+      workspaceId: msg.workspaceId,
+      cliBinary: undefined,
+    };
+  }
+
+  /** The remote (untrusted) half of the spawn clamp, split out so the paths that
+   *  do NOT spawn — re-adopting a live session — can enforce the same trust
+   *  boundary without asking for spawn inputs they have no use for. Returns the
+   *  server-resolved cwd for the named workspace; throws AgentFailureError
+   *  (→ AGENT_ERROR) for a remote caller that named no resolvable, operable,
+   *  allowlisted managed workspace. */
+  private assertRemoteWorkspaceOperable(
+    workspaceId: string | undefined,
+    stage: "newSession" | "loadSession",
+  ): string {
     // Remote (untrusted): never trust a client-supplied cwd / env / cliBinary.
-    if (!msg.workspaceId) {
+    if (!workspaceId) {
       throw new AgentFailureError({
         kind: "protocol-error",
         message:
@@ -2795,7 +2912,7 @@ export class ZerosEngine {
     // (it runs for new AND load, before the session exists), so a relay device
     // can never get a restricted session into a runnable state; combined with the
     // chat-list redaction it also can't discover one. Fails closed.
-    if (listRemoteRestrictedWorkspaceIds().has(msg.workspaceId)) {
+    if (listRemoteRestrictedWorkspaceIds().has(workspaceId)) {
       throw new AgentFailureError({
         kind: "protocol-error",
         message: "This workspace is restricted from remote access.",
@@ -2805,7 +2922,7 @@ export class ZerosEngine {
     // Server-side resolution (throws GitError for an unknown id) + allowlist
     // clamp — the resolved path is the engine root or a managed worktree, both
     // inside the PTY allowlist; reject anything else (fails closed).
-    const cwd = this.workspace.resolveCwd(msg.workspaceId);
+    const cwd = this.workspace.resolveCwd(workspaceId);
     if (!this.pty.isWithinAllowed(cwd)) {
       throw new AgentFailureError({
         kind: "protocol-error",
@@ -2813,12 +2930,7 @@ export class ZerosEngine {
         stage,
       });
     }
-    return {
-      cwd,
-      env: undefined,
-      workspaceId: msg.workspaceId,
-      cliBinary: undefined,
-    };
+    return cwd;
   }
 
   /** Sanitize a relay (untrusted) client's AGENT_UPDATE_CONFIG env before it
@@ -3674,6 +3786,32 @@ export class ZerosEngine {
         }),
       );
     }
+  }
+
+  /** Record a sign of life for a session's in-flight prompt. Feeds only the
+   *  staleness bound — cheap enough to call from every adapter push. */
+  private touchActivePrompt(sessionId: string): void {
+    const prompt = this.activePromptContexts.get(sessionId);
+    if (prompt) prompt.lastActivityAt = Date.now();
+  }
+
+  /** Whether an accepted prompt still looks like the session's live turn: recent
+   *  adapter activity, OR an unanswered permission/question gate — a gate can
+   *  legitimately sit idle for hours while the user is away, and its resolver is
+   *  proof the turn is alive. */
+  private activePromptIsLive(prompt: ActivePromptContext): boolean {
+    if (Date.now() - prompt.lastActivityAt < PROMPT_STALE_AFTER_MS) return true;
+    return this.hasPendingAgentInteraction(prompt.sessionId);
+  }
+
+  private hasPendingAgentInteraction(sessionId: string): boolean {
+    for (const pending of this.pendingPermissionRequests.values()) {
+      if (pending.request.sessionId === sessionId) return true;
+    }
+    for (const pending of this.pendingQuestionRequests.values()) {
+      if (pending.request.sessionId === sessionId) return true;
+    }
+    return false;
   }
 
   private clearPendingAgentInteractions(sessionId: string): void {

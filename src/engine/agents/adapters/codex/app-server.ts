@@ -161,6 +161,12 @@ export interface CodexAppServerBootOptions {
    *  `respondToPermission(permissionId, response)` is called. If unset,
    *  every approval is auto-denied with a stderr log line. */
   onApprovalRequest?: (request: CodexApprovalRequest) => void;
+  /** A pending approval settled WITHOUT a respondToPermission call — its
+   *  response timeout fired and the codex side was auto-cancelled. Twin of
+   *  onUserInputSettled: lets the adapter evict its own pending entry, drop the
+   *  renderer's parked card, and keep the engine's re-adoption replay set from
+   *  re-presenting a gate nothing can answer. */
+  onApprovalSettled?: (permissionId: string) => void;
   /** Server-initiated blocking user-input question received (item/tool/
    *  requestUserInput). Fired synchronously; the response is deferred until
    *  `respondToUserInput(questionId, response)`. If unset, answers empty. */
@@ -513,6 +519,11 @@ export async function bootCodexAppServerRuntime(
           // suggests an active rejection by the user, which would be
           // misleading).
           resolve(defaultCancelResponse(method));
+          // Twin of onUserInputSettled below: the renderer's card is still
+          // parked on this id, and the engine keeps it in its replay set until
+          // told otherwise — so a reload would re-present a card whose resolver
+          // is already gone.
+          opts.onApprovalSettled?.(permissionId);
         }, APPROVAL_TIMEOUT_MS);
         timer.unref?.();
         pendingApprovals.set(permissionId, { resolve, method, timer });

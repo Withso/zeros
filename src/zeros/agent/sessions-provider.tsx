@@ -53,7 +53,6 @@ import {
   type AgentMessage,
   type AgentTextMessage,
   type AgentUsage,
-  type SessionStatus,
 } from "./use-agent-session";
 import {
   BLANK,
@@ -92,7 +91,9 @@ import { ActionsCtx, type SessionsActions } from "./sessions-context";
 import {
   loadedSessionStatus,
   markPrebindDirty,
+  queueReleaseAction,
   shouldQueuePrompt,
+  statusForFailure,
   takePrebindDirty,
 } from "./session-reload-lifecycle";
 import {
@@ -304,13 +305,6 @@ function failureFromAgentError(
   });
 }
 
-/** Map a failure classification to the UI session status. */
-function statusForFailure(failure: AgentFailure): SessionStatus {
-  if (failure.kind === "auth-required") return "auth-required";
-  if (failureIsRecoverable(failure)) return "reconnecting";
-  return "failed";
-}
-
 // SessionsActions / SessionsCtx / StartForChatOptions / ActionsCtx all
 // live in ./sessions-context now — splitting them out kept Vite Fast
 // Refresh's "this file exports only components" boundary clean
@@ -331,8 +325,8 @@ export function AgentSessionsProvider({
 
   // Turn-state pushes can settle a prompt that began before this renderer was
   // loaded. The local send promise/finally does not exist in that case, so the
-  // bridge listener reaches the normal FIFO drain through this late-bound ref.
-  const drainNextQueuedRef = useRef<(chatId: string) => void>(() => {});
+  // bridge listener reaches the normal queue release through this late-bound ref.
+  const releaseQueueRef = useRef<(chatId: string) => void>(() => {});
   const reconcileChatMessagesRef = useRef<(chatId: string) => Promise<void>>(
     async () => {},
   );
@@ -584,7 +578,11 @@ export function AgentSessionsProvider({
           s.applyBridgeUpdate(n);
           if (terminalTurn && exactSession && chatId) {
             s.clearStrandedPlanReview(chatId);
-            drainNextQueuedRef.current(chatId);
+            // Release, not just drain: for a turn this renderer did not issue
+            // there is no sendPrompt finally to resolve a queue parked behind
+            // it, and drainNextQueued alone would leave it stuck whenever the
+            // settle left the chat unhealthy.
+            releaseQueueRef.current(chatId);
             if (
               takePrebindDirty(
                 prebindDirtySessionsRef.current,
@@ -921,7 +919,58 @@ export function AgentSessionsProvider({
     },
     [getStore],
   );
-  drainNextQueuedRef.current = drainNextQueued;
+  /** Resolve a chat's send queue once whatever it was parked behind has
+   *  finished: drain the head if the chat came back healthy, otherwise DROP the
+   *  queue with a toast.
+   *
+   *  Dropping (not draining) into a broken chat is deliberate — draining
+   *  spawn-storms, and keeping the queue freezes the composer, because every
+   *  later send parks behind a queue that can no longer drain (drainNextQueued
+   *  requires `ready`). Every path that can leave a chat parked has to call this
+   *  or the queue is stranded: the turn-completion finally, and the two warm
+   *  paths (ensureSession / loadIntoChat), which sends now park behind while
+   *  `warming` (shouldQueuePrompt) and which can end in
+   *  failed/auth-required/reconnecting. */
+  const drainOrDropQueue = useCallback(
+    (chatId: string): void => {
+      const queued = sendQueueRef.current.get(chatId);
+      if (!queued || queued.length === 0) return;
+      const settled = getStore().sessions[chatId];
+      const action = queueReleaseAction({
+        status: settled?.status ?? "idle",
+        queueHeld: queueHeldRef.current.has(chatId),
+      });
+      if (action === "hold") return;
+      if (action === "drain") {
+        drainNextQueued(chatId);
+        return;
+      }
+      // Dropping SILENTLY meant the user's typed follow-ups just vanished with
+      // no trace (field report) — hence the toast, so they know to resend once
+      // the chat is healthy again.
+      const ids = new Set(queued.map((e) => e.bubbleId));
+      sendQueueRef.current.delete(chatId);
+      if (settled) {
+        getStore().patchSession(chatId, {
+          messages: settled.messages.filter(
+            (m) => !(m.kind === "text" && ids.has(m.id)),
+          ),
+        });
+      }
+      const n = queued.length;
+      toast.warning(
+        n === 1
+          ? "A queued message wasn’t sent"
+          : `${n} queued messages weren’t sent`,
+        {
+          description:
+            "This chat hit an error before your follow-up could go out — resend once it reconnects.",
+        },
+      );
+    },
+    [getStore, drainNextQueued],
+  );
+  releaseQueueRef.current = drainOrDropQueue;
 
   const ensureSession = useCallback<SessionsActions["ensureSession"]>(
     async (chatId, agentId, options) => {
@@ -1130,16 +1179,27 @@ export function AgentSessionsProvider({
           error: failure.message,
           failure,
         });
+        // A send that arrived during this warm parked in the queue
+        // (shouldQueuePrompt treats `warming` as busy) and nothing else will
+        // ever come back for it: drainNextQueued only fires on `ready`, so
+        // without this the composer freezes behind an un-drainable queue.
+        drainOrDropQueue(chatId);
       })();
 
       ensureInFlightRef.current.set(chatId, work);
       try {
         await work;
       } finally {
-        ensureInFlightRef.current.delete(chatId);
+        // Identity-checked, like loadIntoChat's: a loadSession that installed
+        // its own deferred here while this ensure was running owns the entry
+        // now, and clearing it would close the dedupe window early — letting a
+        // concurrent ensureSession mint a second session mid-adoption.
+        if (ensureInFlightRef.current.get(chatId) === work) {
+          ensureInFlightRef.current.delete(chatId);
+        }
       }
     },
-    [bridge, getStore, drainNextQueued],
+    [bridge, getStore, drainNextQueued, drainOrDropQueue],
   );
 
   useEffect(() => {
@@ -2002,48 +2062,10 @@ export function AgentSessionsProvider({
         // When the turn didn't recover, STOP draining: drop the pending
         // queue and remove its greyed placeholders (mirrors cancel()) so the
         // user resends deliberately once the chat is healthy again.
-        const settled = getStore().sessions[chatId];
-        const queued = sendQueueRef.current.get(chatId);
-        if (queued && queued.length > 0) {
-          if (queueHeldRef.current.has(chatId)) {
-            // Parked mid-edit: leave the queue (and its card rows) exactly as
-            // they are — releaseQueue() drains once the edit resolves. Held
-            // queues survive an unhealthy settle too; they only drain through
-            // drainNextQueued, which re-checks status === "ready".
-          } else if (settled?.status === "ready") {
-            drainNextQueued(chatId);
-          } else {
-            // Turn settled UNHEALTHY (failed / reconnecting / auth-required) with
-            // sends still queued behind it. Dropping (not draining) is deliberate:
-            // draining into a broken chat spawn-storms, and KEEPING the queue would
-            // freeze the composer (every fresh send parks behind an un-drainable
-            // queue). But dropping SILENTLY meant the user's typed follow-ups just
-            // vanished with no trace (field report). Same drop as before — now with
-            // a toast so it's visible and the user knows to resend once healthy.
-            const ids = new Set(queued.map((e) => e.bubbleId));
-            sendQueueRef.current.delete(chatId);
-            if (settled) {
-              getStore().patchSession(chatId, {
-                messages: settled.messages.filter(
-                  (m) => !(m.kind === "text" && ids.has(m.id)),
-                ),
-              });
-            }
-            const n = queued.length;
-            toast.warning(
-              n === 1
-                ? "A queued message wasn’t sent"
-                : `${n} queued messages weren’t sent`,
-              {
-                description:
-                  "This chat hit an error before your follow-up could go out — resend once it reconnects.",
-              },
-            );
-          }
-        }
+        drainOrDropQueue(chatId);
       }
     },
-    [bridge, getStore, drainNextQueued],
+    [bridge, getStore, drainNextQueued, drainOrDropQueue],
   );
   sendPromptRef.current = sendPrompt;
 
@@ -2891,6 +2913,9 @@ export function AgentSessionsProvider({
             error: failure.message,
             failure,
           });
+          // Same reasoning as ensureSession's failure tail: a send parked during
+          // this adoption has no other path back to the user.
+          drainOrDropQueue(chatId);
           return;
         }
         getStore().patchSession(chatId, {
@@ -2957,6 +2982,7 @@ export function AgentSessionsProvider({
           error: failure.message,
           failure,
         });
+        drainOrDropQueue(chatId);
       } finally {
         resolveLoadFlight();
         if (ensureInFlightRef.current.get(chatId) === loadFlight) {
@@ -2964,7 +2990,13 @@ export function AgentSessionsProvider({
         }
       }
     },
-    [bridge, getStore, drainNextQueued, reconcileChatMessages],
+    [
+      bridge,
+      getStore,
+      drainNextQueued,
+      drainOrDropQueue,
+      reconcileChatMessages,
+    ],
   );
 
   const getSession = useCallback<SessionsActions["getSession"]>(

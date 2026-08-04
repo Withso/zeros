@@ -1,6 +1,11 @@
 import { describe, it, expect } from "vitest";
 
-import { OPTIONS, previewFor, readType } from "../git-defaults-section";
+import {
+  OPTIONS,
+  previewFor,
+  readPreviewType,
+  readType,
+} from "../git-defaults-section";
 import {
   BRANCH_PREFIX_TYPES,
   DEFAULT_BRANCH_PREFIX_TYPE,
@@ -221,6 +226,27 @@ describe("readType", () => {
     expect(readType("github")).toBe("github");
     expect(readType("custom")).toBe("custom");
     expect(readType("none")).toBe("none");
+  });
+
+  it("does not let the fold reach the preview line", () => {
+    // The fold is for the RADIO — it must have a row for the dot. Applying it to
+    // the preview too made the pane contradict the engine for the one value that
+    // has no row: a repo/team layer pinning "zeros" showed the GitHub row (the
+    // radio can't do better) AND promised `<login>/Cream`, while the engine kept
+    // creating `zeros/`. The row still folds; the sentence tells the truth.
+    expect(readType("zeros")).toBe("github");
+    expect(readPreviewType("zeros")).toBe("zeros");
+    expect(previewFor(readPreviewType("zeros"), "", "jordan")).toContain(
+      "zeros/Cream",
+    );
+    // Everything else must resolve exactly as the radio does, or the line and
+    // the dot would disagree for values the pane itself writes.
+    for (const value of [undefined, null, "github", "custom", "none", "wat"]) {
+      expect(
+        readPreviewType(value),
+        `for ${JSON.stringify(value) ?? "undefined"}`,
+      ).toBe(readType(value));
+    }
   });
 
   it("never leaves the group unselected, whatever the tree holds", () => {

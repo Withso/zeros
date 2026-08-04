@@ -56,6 +56,7 @@ import {
   type ChatScrollPosition,
 } from "./chat-scroll-anchor";
 import { isPlanReviewRequest } from "./renderers/plan-body";
+import { settledTurnStatus } from "./session-reload-lifecycle";
 import { loadPolicies, savePolicies, type PolicyRule } from "./policies";
 import { effortAdoptedEnvKey } from "./model-catalog";
 import { useWorkspaceStore } from "../store/workspace-store";
@@ -665,12 +666,13 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         });
       } else {
         get().patchSession(chatId, {
-          // A re-adopted failure has no live RPC response from which to recover
-          // a specific classification. Keep the session usable and let the
-          // durable failed turn row render the honest AGENT STOPPED history.
-          status: "ready",
-          error: null,
-          failure: null,
+          // Deliberately NOT resetting error/failure: the engine emits this for
+          // locally-issued prompts too, a frame after sendPrompt recorded the
+          // real classification, so clearing here erased it (see
+          // settledTurnStatus). A re-adopted failure has nothing recorded and
+          // still settles to `ready`, letting the durable failed turn row
+          // render the honest AGENT STOPPED history.
+          status: settledTurnStatus(slot),
           lastStopReason:
             upd.state === "cancelled"
               ? "cancelled"
