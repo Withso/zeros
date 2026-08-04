@@ -908,6 +908,29 @@ export class ZerosEngine {
             }),
           );
         },
+        onPermissionSettled: (
+          agentId: string,
+          permissionId: string,
+          sessionId: string,
+        ) => {
+          this.permissionOwner.delete(permissionId);
+          // Twin of onQuestionSettled: this hook fires for EVERY way a resolver
+          // dies (response, timeout, abort, rebuilt-SDK re-arm), so it is what
+          // keeps the replay set honest. Without it a timed-out permission would
+          // be re-sent to the next renderer as a card nothing can answer — the
+          // exact failure replayPendingAgentInteractions exists to prevent.
+          this.pendingPermissionRequests.delete(permissionId);
+          this.routeSessionScoped(
+            sessionId,
+            createMessage({
+              type: "AGENT_PERMISSION_SETTLED",
+              source: "engine",
+              agentId,
+              permissionId,
+              sessionId,
+            }),
+          );
+        },
         onQuestionRequest: (
           agentId: string,
           questionId: string,

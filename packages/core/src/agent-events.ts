@@ -344,6 +344,31 @@ export interface BackgroundTask {
   lastToolName?: string;
 }
 
+// ── Foreground workflows ─────────────────────────────────
+
+/** Compact, provider-neutral progress for one phase of a foreground workflow.
+ * The renderer deliberately receives counts only — never token/cost telemetry
+ * or helper transcripts — so the hover surface stays a simple progress view. */
+export interface WorkflowPhaseProgress {
+  index: number;
+  title: string;
+  completed: number;
+  total: number;
+  status: "queued" | "running" | "completed" | "failed";
+}
+
+/** One foreground workflow owned by an exact agent session. These snapshots
+ * are ephemeral session state; narration that belongs in history is emitted as
+ * ordinary completed tool calls instead. */
+export interface WorkflowProgress {
+  taskId: string;
+  name: string;
+  status: "running" | "paused" | "completed" | "failed" | "killed";
+  startedAt: number;
+  updatedAt: number;
+  phases: WorkflowPhaseProgress[];
+}
+
 // ── Session updates (the streaming notification payload) ────
 //
 // Engine adapters emit these over the bridge as the chat unfolds.
@@ -358,7 +383,9 @@ export type SessionUpdate =
   | AvailableCommandsUpdate
   | AvailableSubagentsUpdate
   | BackgroundTasksUpdate
+  | WorkflowProgressUpdate
   | CurrentModeUpdate
+  | CurrentEffortUpdate
   | ModeSwitchUpdate
   | ErrorNoticeUpdate
   | UsageUpdateNotification
@@ -367,7 +394,15 @@ export type SessionUpdate =
 
 /** Engine-authored lifecycle notification for a provider turn. Unlike the
  * AGENT_PROMPT RPC response, this survives renderer reload/re-adoption because
- * it is routed as a session-scoped push to the current client. */
+ * it is routed as a session-scoped push to the current client.
+ *
+ * Purely additive and wire-compatible in both directions, so it deliberately
+ * does NOT bump PROTOCOL_VERSION (same reasoning as PTY_LIST_RESULT's
+ * `processPids`): applyUpdate ignores an unrecognised `sessionUpdate`, so an old
+ * client simply keeps its RPC-response-only behaviour, and a new client against
+ * an older engine sees no `promptActive` on AGENT_SESSION_LOADED and resolves to
+ * `ready` exactly as it does today. Bumping would strand a phone/web peer
+ * against a desktop engine that has not shipped yet. */
 export interface TurnStateUpdateNotification {
   sessionUpdate: "turn_state";
   /** Opening user-message id; identical to the durable turn-row key. */
@@ -437,9 +472,23 @@ export interface BackgroundTasksUpdate {
   waiting: boolean;
 }
 
+/** Full REPLACE snapshot of foreground workflows for one exact session. */
+export interface WorkflowProgressUpdate {
+  sessionUpdate: "workflow_progress_update";
+  workflows: WorkflowProgress[];
+}
+
 export interface CurrentModeUpdate {
   sessionUpdate: "current_mode_update";
   currentModeId: SessionModeId;
+}
+
+/** Provider-originated effort drift (for example Codex autonomously moving to
+ * Ultra). The renderer persists this into the owning chat so the existing
+ * composer picker and the next turn stay in sync. */
+export interface CurrentEffortUpdate {
+  sessionUpdate: "current_effort_update";
+  effort: string;
 }
 
 /** Stage 4.4 — timeline-visible record of a mode change. Distinct from
@@ -542,6 +591,15 @@ export interface RequestPermissionRequest {
   sessionId: SessionId;
   toolCall: ToolCall;
   options: PermissionOption[];
+  /** Optional provider-authored question copy. This changes only the title of
+   * the existing PermissionCard; it never selects a different renderer. */
+  title?: string;
+  /** Optional compact context pills inside the existing card (workflow phases
+   * today). Their presence replaces the ordinary icon/target detail row. */
+  contextItems?: string[];
+  /** Render the engine-supplied option names verbatim while retaining the
+   * existing PermissionCard rows, shortcuts, colors, and response semantics. */
+  useOptionNames?: boolean;
   /** Vendor correlation id (SDK control request_id / Codex RequestId).
    *  Used by the renderer to dedupe a replayed request on reconnect — the
    *  SDK re-arms in-flight requests on initialize and the adapter mints a

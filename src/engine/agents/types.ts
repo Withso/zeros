@@ -101,6 +101,13 @@ export interface AgentGatewayEvents {
     permissionId: string,
     request: RequestPermissionRequest,
   ) => void;
+  /** A pending permission no longer has a live engine resolver. This receipt
+   * lets the renderer evict/advance its single-card helper approval queue. */
+  onPermissionSettled?: (
+    agentId: string,
+    permissionId: string,
+    sessionId: string,
+  ) => void;
   /** A blocking user-input question (twin of onPermissionRequest). */
   onQuestionRequest: (
     agentId: string,
