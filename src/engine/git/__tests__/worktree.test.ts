@@ -1106,6 +1106,33 @@ describe("worktree lifecycle (integration)", () => {
     expect(ws.archiveSnapshot).toBe(result.archiveSnapshot);
   });
 
+  it("preserves disk-backed chat images across archive and restore", async () => {
+    const created = await createWorkspace({ repoRoot });
+    const relativeImage = ".context/attachments/chat-1/att-1-shot.png";
+    await mkdir(path.join(created.path, ".context/attachments/chat-1"), {
+      recursive: true,
+    });
+    await writeFile(path.join(created.path, ".context/.gitignore"), "*\n");
+    await writeFile(
+      path.join(created.path, relativeImage),
+      "full-resolution-image",
+    );
+
+    await archiveWorkspace({
+      workspaceId: created.workspaceId,
+      stashUncommitted: true,
+    });
+    expect(existsSync(created.path)).toBe(false);
+
+    await restoreWorkspace(created.workspaceId);
+    expect(await readFile(path.join(created.path, relativeImage), "utf8")).toBe(
+      "full-resolution-image",
+    );
+    expect(
+      await readFile(path.join(created.path, ".context/.gitignore"), "utf8"),
+    ).toBe("*\n");
+  });
+
   it("awaits exact watcher retirement before moving an archived checkout", async () => {
     const created = await createWorkspace({ repoRoot });
     const order: string[] = [];
@@ -2887,7 +2914,9 @@ describe("worktree lifecycle (integration)", () => {
     let prevUserSettingsDir: string | undefined;
     beforeEach(async () => {
       prevUserSettingsDir = process.env.ZEROS_USER_SETTINGS_DIR;
-      userSettingsDir = await mkdtemp(path.join(tmpdir(), "zeros-ws-settings-"));
+      userSettingsDir = await mkdtemp(
+        path.join(tmpdir(), "zeros-ws-settings-"),
+      );
       process.env.ZEROS_USER_SETTINGS_DIR = userSettingsDir;
     });
     afterEach(async () => {

@@ -27,9 +27,12 @@
 //     attachments root before fs.writeFile is called.
 // ──────────────────────────────────────────────────────────
 
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
+import path from "node:path";
+
 import type { CommandHandler } from "../router";
+import { writeAgentAttachment } from "../../../src/engine/files/agent-attachment";
+import { zerosWorkspacesRoot } from "../../../src/engine/db/paths";
+import { currentRoot } from "../../sidecar";
 
 function requireString(args: Record<string, unknown>, key: string): string {
   const v = args[key];
@@ -39,26 +42,15 @@ function requireString(args: Record<string, unknown>, key: string): string {
   return v;
 }
 
-const ID_OK = /^[a-zA-Z0-9_-]+$/;
-
-function safeFilename(raw: string): string {
-  // Strip directory parts; keep extension. Hard cap to 80 chars.
-  const base = path.basename(raw);
-  const cleaned = base.replace(/[^a-zA-Z0-9._-]+/g, "_");
-  return cleaned.length <= 80 ? cleaned : cleaned.slice(0, 80);
-}
-
-/** Drop a `.gitignore` (`*`) into `.context` on first use so attachments — and
- *  anything else Zeros stages there — never surface in the user's `git status`.
- *  `*` ignores the entire dir, the `.gitignore` included. Idempotent; the caller
- *  has already created `contextDir`. */
-async function ensureContextGitignore(contextDir: string): Promise<void> {
-  const ignore = path.join(contextDir, ".gitignore");
-  try {
-    await fs.access(ignore);
-  } catch {
-    await fs.writeFile(ignore, "*\n");
-  }
+function cwdIsTrusted(cwd: string): boolean {
+  const resolved = path.resolve(cwd);
+  const roots = [currentRoot(), zerosWorkspacesRoot()].filter(
+    (value): value is string => typeof value === "string" && value.length > 0,
+  );
+  return roots.some((root) => {
+    const trusted = path.resolve(root);
+    return resolved === trusted || resolved.startsWith(trusted + path.sep);
+  });
 }
 
 /** agent_attachment_write — persist a base64-encoded attachment to
@@ -76,50 +68,17 @@ export const agentAttachmentWrite: CommandHandler = async (args) => {
   const mimeType = requireString(args, "mimeType");
   const filename = requireString(args, "filename");
 
-  if (!ID_OK.test(chatId)) {
-    throw new Error("agent_attachment: invalid chatId");
-  }
-  if (!ID_OK.test(attachmentId)) {
-    throw new Error("agent_attachment: invalid attachmentId");
-  }
-  if (!path.isAbsolute(cwd)) {
-    throw new Error("agent_attachment: cwd must be absolute");
+  if (!cwdIsTrusted(cwd)) {
+    throw new Error(
+      "agent_attachment: refusing to write outside the workspace",
+    );
   }
 
-  // Attachments live in the repo's `.context/` (gitignored), NOT `.zeros/`
-  // (which is being retired from the repo / freed for a future use). The
-  // `.context/.gitignore` keeps every staged artifact out of `git status`.
-  const contextDir = path.join(cwd, ".context");
-  const attachmentsRoot = path.join(contextDir, "attachments", chatId);
-  await fs.mkdir(attachmentsRoot, { recursive: true });
-  await ensureContextGitignore(contextDir);
-
-  const safeName = safeFilename(filename);
-  // Prefix with the attachment id so two files with the same source
-  // basename don't clobber each other when dropped together.
-  const finalName = `${attachmentId}-${safeName}`;
-  const finalPath = path.join(attachmentsRoot, finalName);
-
-  // Belt: ensure the resolved write path stays inside the chat's
-  // attachments root. path.basename + ID_OK + the join above already
-  // make this true, but the check protects against future regressions
-  // (e.g. someone bypasses safeFilename and lets `..` slip through).
-  if (!finalPath.startsWith(attachmentsRoot + path.sep)) {
-    throw new Error("agent_attachment: refusing to write outside chat root");
-  }
-
-  const buf = Buffer.from(base64, "base64");
-  await fs.writeFile(finalPath, buf);
-
-  // The renderer needs both the absolute path (for tool-call paths
-  // like Read("/abs/path")) and the cwd-relative path (for @-mentions
-  // like @.zeros/attachments/...). Ship both so the prompt builder
-  // can pick whichever the active agent prefers.
-  const relativePath = path.relative(cwd, finalPath);
-  return {
-    absolutePath: finalPath,
-    relativePath,
+  return writeAgentAttachment(cwd, {
+    chatId,
+    attachmentId,
+    base64,
     mimeType,
-    bytes: buf.length,
-  };
+    filename,
+  });
 };

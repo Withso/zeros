@@ -227,6 +227,10 @@ function capMessages(messages: AgentMessage[]): AgentMessage[] {
   return messages.slice(-MAX_MESSAGES_PER_CHAT);
 }
 
+function hasDurableMessages(messages: AgentMessage[]): boolean {
+  return messages.some((message) => message.kind !== "text" || !message.queued);
+}
+
 export const BLANK: AgentSessionState = {
   agentId: null,
   agentName: null,
@@ -235,6 +239,9 @@ export const BLANK: AgentSessionState = {
   initialize: null,
   session: null,
   status: "idle",
+  transcriptState: "resident",
+  transcriptDirty: false,
+  hasTranscript: false,
   messages: [],
   pendingPermission: null,
   pendingPermissions: [],
@@ -305,6 +312,10 @@ export interface SessionsStoreState {
   // ── Pure mutators ───────────────────────────────────────
   setSession: (chatId: string, slot: AgentSessionState) => void;
   patchSession: (chatId: string, patch: Partial<AgentSessionState>) => void;
+  /** Release only the heavyweight transcript payload for a chat that left the
+   *  bounded retained-view deck. The live runtime shell and reverse routing
+   *  index stay intact so turns, gates and scheduled work keep functioning. */
+  evictTranscript: (chatId: string) => void;
   /** Phase 2 chat overhaul (2026-05-07): drop the message with
    *  fromMsgId and every later message in this chat from the in-memory
    *  store. Used by the click-to-edit flow before re-sending the edited
@@ -498,7 +509,11 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
   },
   setSession: (chatId, slot) => {
     set((state) => {
-      const next = { ...state.sessions, [chatId]: slot };
+      const normalized =
+        !slot.hasTranscript && hasDurableMessages(slot.messages)
+          ? { ...slot, hasTranscript: true }
+          : slot;
+      const next = { ...state.sessions, [chatId]: normalized };
       return {
         sessions: next,
         sessionToChatId: rebuildIndex(next),
@@ -509,7 +524,21 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
   patchSession: (chatId, patch) => {
     set((state) => {
       const existing = state.sessions[chatId] ?? BLANK;
-      const updated = { ...existing, ...patch };
+      let normalizedPatch = patch;
+      if (patch.messages !== undefined) {
+        const hasTranscript =
+          existing.hasTranscript || hasDurableMessages(patch.messages);
+        normalizedPatch = {
+          ...patch,
+          hasTranscript,
+          // Message mutations made by local UI actions operate on a complete
+          // transcript. Bridge deltas for cold/loading slots are handled in
+          // applyBridgeUpdate and never reach this path with message arrays.
+          transcriptState: patch.transcriptState ?? "resident",
+          transcriptDirty: patch.transcriptDirty ?? false,
+        };
+      }
+      const updated = { ...existing, ...normalizedPatch };
       const next = { ...state.sessions, [chatId]: updated };
       // Only rebuild the reverse index if sessionId changed — saves work
       // on the common path (token chunks don't touch sessionId).
@@ -519,6 +548,39 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         sessionToChatId: indexNeedsUpdate
           ? rebuildIndex(next)
           : state.sessionToChatId,
+      };
+    });
+  },
+
+  evictTranscript: (chatId) => {
+    set((state) => {
+      const slot = state.sessions[chatId];
+      if (!slot) return state;
+      const hasTranscript =
+        slot.hasTranscript || hasDurableMessages(slot.messages);
+      if (
+        slot.transcriptState === "cold" &&
+        slot.messages.length === 0 &&
+        slot.stderrLog.length === 0 &&
+        slot.historyExpanded !== true &&
+        slot.hasTranscript === hasTranscript &&
+        !slot.transcriptDirty
+      ) {
+        return state;
+      }
+      return {
+        sessions: {
+          ...state.sessions,
+          [chatId]: {
+            ...slot,
+            transcriptState: "cold",
+            transcriptDirty: false,
+            hasTranscript,
+            messages: [],
+            historyExpanded: false,
+            stderrLog: [],
+          },
+        },
       };
     });
   },
@@ -675,9 +737,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           // render the honest AGENT STOPPED history.
           status: settledTurnStatus(slot),
           lastStopReason:
-            upd.state === "cancelled"
-              ? "cancelled"
-              : (upd.stopReason ?? null),
+            upd.state === "cancelled" ? "cancelled" : (upd.stopReason ?? null),
           activeTurnStartedAt: null,
         });
       }
@@ -833,6 +893,26 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
     set((state) => {
       const slot = state.sessions[chatId];
       if (!slot) return state;
+      if (slot.transcriptState !== "resident") {
+        // SQLite is authoritative while this payload is absent. Folding a raw
+        // chunk into [] would manufacture a partial transcript and, worse,
+        // repopulate every evicted chat as background turns stream. Remember
+        // only that an exact re-window is required when the chat is retained.
+        const producesMessage = applyUpdate([], notification).length > 0;
+        if (slot.transcriptDirty && (slot.hasTranscript || !producesMessage)) {
+          return state;
+        }
+        return {
+          sessions: {
+            ...state.sessions,
+            [chatId]: {
+              ...slot,
+              transcriptDirty: true,
+              hasTranscript: slot.hasTranscript || producesMessage,
+            },
+          },
+        };
+      }
       // Cap suspended while the user has paged older history in
       // (historyExpanded) — trimming mid-read would pull the transcript
       // out from under them. agent-chat re-arms the cap at bottom.
@@ -847,7 +927,12 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       return {
         sessions: {
           ...state.sessions,
-          [chatId]: { ...slot, messages: nextMessages },
+          [chatId]: {
+            ...slot,
+            messages: nextMessages,
+            hasTranscript:
+              slot.hasTranscript || hasDurableMessages(nextMessages),
+          },
         },
       };
     });
@@ -1057,7 +1142,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       let changed = false;
       const next: Record<string, AgentSessionState> = {};
       for (const [chatId, slot] of Object.entries(state.sessions)) {
-        if (slot.agentId === agentId) {
+        if (slot.agentId === agentId && slot.transcriptState === "resident") {
           next[chatId] = {
             ...slot,
             stderrLog: [...slot.stderrLog.slice(-(MAX_STDERR_LINES - 1)), line],

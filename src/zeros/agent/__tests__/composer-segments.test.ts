@@ -29,7 +29,7 @@ describe("toMessageSegments", () => {
     ]);
   });
 
-  it("attaches an image thumbnail data URL from the matching attachment", () => {
+  it("persists an image disk reference without copying its base64", () => {
     const segs: ComposerSegment[] = [
       {
         type: "attachment",
@@ -50,18 +50,32 @@ describe("toMessageSegments", () => {
         validation: { ok: true },
       },
     ];
-    expect(toMessageSegments(segs, atts)).toEqual([
+    const bubbleById = new Map([
+      [
+        "a1",
+        {
+          name: "shot.png",
+          mimeType: "image/png",
+          kind: "image" as const,
+          diskPath: ".context/attachments/chat-1/a1-shot.png",
+        },
+      ],
+    ]);
+    expect(toMessageSegments(segs, atts, bubbleById)).toEqual([
       {
         type: "attachment",
         name: "shot.png",
         mimeType: "image/png",
         kind: "image",
-        thumbnailUri: "data:image/png;base64,BASE64",
+        diskPath: ".context/attachments/chat-1/a1-shot.png",
       },
     ]);
+    expect(
+      JSON.stringify(toMessageSegments(segs, atts, bubbleById)),
+    ).not.toContain("BASE64");
   });
 
-  it("omits the inline thumbnail for an oversized image (keeps the pill)", () => {
+  it("never falls back to an inline thumbnail when storage metadata is absent", () => {
     const segs: ComposerSegment[] = [
       {
         type: "attachment",
@@ -71,26 +85,27 @@ describe("toMessageSegments", () => {
         kind: "image",
       },
     ];
-    // > 1 MiB of base64 — a pathological paste we refuse to inline into SQLite.
     const atts: ComposerAttachment[] = [
       {
         id: "big",
         name: "huge.png",
         mimeType: "image/png",
         kind: "image",
-        data: "A".repeat(1024 * 1024 + 1),
-        size: 1024 * 1024,
+        data: "A".repeat(128),
+        size: 96,
         validation: { ok: true },
       },
     ];
     const [seg] = toMessageSegments(segs, atts);
-    // The attachment pill still renders (name + kind), just no inline data URL.
+    // The attachment pill still renders (name + kind), but transcript JSON
+    // never gets image bytes regardless of image size.
     expect(seg).toMatchObject({
       type: "attachment",
       name: "huge.png",
       kind: "image",
     });
     expect(seg).not.toHaveProperty("thumbnailUri");
+    expect(JSON.stringify(seg)).not.toContain("AAAA");
   });
 
   it("omits the thumbnail for text attachments and missing bytes", () => {

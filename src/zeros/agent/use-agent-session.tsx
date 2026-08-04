@@ -114,6 +114,20 @@ export interface AgentSessionState {
   initialize: InitializeResponse | null;
   session: NewSessionResponse | null;
   status: SessionStatus;
+  /** Whether this chat's heavyweight transcript window is currently held in
+   *  renderer memory. The bounded retained-view deck keeps recent chats
+   *  `resident`; older chats become `cold` while their lightweight live
+   *  session shell (routing, turn state, gates and background work) remains.
+   *  `loading` is an explicit cold-read state so an empty array can never be
+   *  mistaken for a genuinely new chat while SQLite is being rehydrated. */
+  transcriptState: "resident" | "cold" | "loading";
+  /** A durable transcript update arrived while the payload was cold/loading.
+   *  Raw streaming deltas are deliberately not folded into an empty array;
+   *  reopening performs an exact SQLite window read instead. */
+  transcriptDirty: boolean;
+  /** Durable-history hint retained after the message array is evicted. Used by
+   *  close/discard and empty-state UI without keeping message objects alive. */
+  hasTranscript: boolean;
   messages: AgentMessage[];
   /** True while the user has paged older history into memory (scroll-up
    *  auto-load). Suspends the live-append MAX_MESSAGES_PER_CHAT trim so a

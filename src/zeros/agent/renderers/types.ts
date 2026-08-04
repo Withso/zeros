@@ -118,13 +118,18 @@ export interface RendererContext {
     messageId: string,
     editedText: string,
     attachments: import("../composer-attachments").ComposerAttachment[],
-    segments?: import("../use-agent-session").MessageContentSegment[],
+    segments?: import("../composer-editor").ComposerSegment[],
   ) => void;
   /** Phase D3 (2026-05-08): open a full-screen image preview overlay
    *  for a sent user-bubble image attachment. Same lightbox the
    *  composer uses; lifted to the chat level so any sent image is
    *  clickable for preview without entering edit mode. */
   previewImage?: (src: string) => void;
+  /** Workspace root used to resolve disk-backed transcript image paths. */
+  attachmentCwd?: string | null;
+  /** False while a retained chat surface is hidden; invisible transcripts must
+   *  release full-resolution blob URLs until they are surfaced again. */
+  attachmentImagesActive?: boolean;
   /** Open a workspace-relative file in the row-1 viewer (the same preview
    *  tab the Source tree drives). Wired by agent-chat; used by clickable
    *  file-path chips / links in the agent's output markdown. Undefined on

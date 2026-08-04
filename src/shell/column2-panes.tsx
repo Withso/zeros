@@ -84,7 +84,10 @@ import {
   usePaneLayout,
 } from "../zeros/store/chat-panes-store";
 import { Column2ChatTabs } from "./column2-chat-tabs";
-import { isChatDiscardableOnClose } from "./column2-chat-close";
+import {
+  isChatDiscardableOnClose,
+  messageCountForChatClose,
+} from "./column2-chat-close";
 import {
   captureScrollWithin,
   preserveScrollGeometryWithin,
@@ -345,13 +348,13 @@ export function Column2Panes({
         replacement = paneChats[idx + 1] ?? paneChats[idx - 1] ?? null;
       }
 
-      // Snapshot the message count BEFORE reaping — closeSession()
-      // synchronously removes sessions[chat.id] (via removeSession), so a
-      // read after it would always be 0 and mis-route a just-started chat
-      // (first prompt sent, auto-title not yet landed) to DELETE_CHAT
-      // instead of ARCHIVE_CHAT. See the discard decision below.
-      const messageCount =
-        useSessionsStore.getState().sessions[chat.id]?.messages.length ?? 0;
+      // Snapshot transcript use BEFORE reaping. Older chats may have released
+      // their message objects after leaving the bounded 12-view deck, so the
+      // retained `hasTranscript` hint is just as authoritative as a non-empty
+      // resident array. Missing it would DELETE a used-but-still-Untitled chat
+      // instead of archiving it.
+      const sessionSlot = useSessionsStore.getState().sessions[chat.id];
+      const messageCount = messageCountForChatClose(sessionSlot);
 
       // Reap the backing resource (see column2-chat-tabs history: a
       // terminal tab's PTY must be EXPLICITLY killed; a chat tab reaps

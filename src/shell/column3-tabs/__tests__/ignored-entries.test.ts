@@ -9,6 +9,7 @@ import {
   emptyState,
   ignoredGitStatus,
   ignoredPathDelta,
+  planIgnoredPathDelta,
   isDirEntry,
   knownIgnoredDirs,
   mergeIgnoredPaths,
@@ -58,7 +59,9 @@ describe("mergeIgnoredPaths", () => {
       ["node_modules/", "packages/core/node_modules/"],
       map([["packages/core", ["packages/core/node_modules/"]]]),
     );
-    expect(merged.filter((p) => p === "packages/core/node_modules/")).toHaveLength(1);
+    expect(
+      merged.filter((p) => p === "packages/core/node_modules/"),
+    ).toHaveLength(1);
   });
 
   it("is empty when nothing is ignored", () => {
@@ -151,9 +154,9 @@ describe("state transitions — a workspace switch must not mix worktrees", () =
   });
 
   it("re-listing with NO change is a no-op, identity included", () => {
-    expect(withRefreshedDir(opened, A, "node_modules", ["node_modules/react/"])).toBe(
-      opened,
-    );
+    expect(
+      withRefreshedDir(opened, A, "node_modules", ["node_modules/react/"]),
+    ).toBe(opened);
     // …and a result for a workspace we've already left is dropped.
     expect(withRefreshedDir(opened, B, "node_modules", ["x/"])).toBe(opened);
   });
@@ -258,7 +261,9 @@ describe("state transitions — a workspace switch must not mix worktrees", () =
     // an unrecorded one would be re-fetched on every tick.
     const withEmpty = withLoadedDir(opened, A, "dist", []);
     expect(withEmpty.loaded.has("dist")).toBe(true);
-    expect(pendingIgnoredDirs(["dist/"], withEmpty.loaded)).not.toContain("dist");
+    expect(pendingIgnoredDirs(["dist/"], withEmpty.loaded)).not.toContain(
+      "dist",
+    );
   });
 });
 
@@ -314,9 +319,9 @@ describe("warmState — a workspace switch must not re-lay-out the tree", () => 
 
 describe("pendingIgnoredDirs", () => {
   it("lists unloaded directories, skipping files", () => {
-    expect(pendingIgnoredDirs(["node_modules/", ".env"], map([])).sort()).toEqual(
-      ["node_modules"],
-    );
+    expect(
+      pendingIgnoredDirs(["node_modules/", ".env"], map([])).sort(),
+    ).toEqual(["node_modules"]);
   });
 
   it("drops a directory once its children are loaded", () => {
@@ -365,7 +370,9 @@ describe("ignoredPathDelta", () => {
   it("is empty when nothing moved", () => {
     // The common case on an idle refresh — no ops means no tree mutation at
     // all, so no chance of disturbing what the user has open.
-    expect(ignoredPathDelta(set("node_modules/"), set("node_modules/"))).toEqual([]);
+    expect(
+      ignoredPathDelta(set("node_modules/"), set("node_modules/")),
+    ).toEqual([]);
     expect(ignoredPathDelta(set(), set())).toEqual([]);
   });
 
@@ -420,5 +427,34 @@ describe("ignoredPathDelta", () => {
       { path: "dist/new.js", type: "add" },
       { path: "dist/old.js", type: "remove" },
     ]);
+  });
+
+  it("removes an ignored file before adding a directory at the same path", () => {
+    expect(ignoredPathDelta(set("cache"), set("cache/"))).toEqual([
+      { path: "cache", type: "remove" },
+      { path: "cache/", type: "add" },
+    ]);
+  });
+
+  it("defers a disappearing directory while a staggered child listing survives", () => {
+    // Refresh publishes roots first, then each expanded directory. If `dist/`
+    // vanishes, there is one render where the old loaded child is still in
+    // `next`. Recursively removing the parent at that point deletes the child
+    // too, while appliedRef claims it survived; the child refresh then tries to
+    // remove a path the store no longer has and logs the incremental-update
+    // failure. Keep the parent in the effective applied snapshot until the
+    // child listing catches up, then remove the whole branch once.
+    const first = planIgnoredPathDelta(
+      set("dist/", "dist/old.js"),
+      set("dist/old.js"),
+    );
+    expect(first.operations).toEqual([]);
+    expect(first.applied).toEqual(set("dist/", "dist/old.js"));
+
+    const settled = planIgnoredPathDelta(first.applied, set());
+    expect(settled.operations).toEqual([
+      { path: "dist/", type: "remove", recursive: true },
+    ]);
+    expect(settled.applied).toEqual(set());
   });
 });

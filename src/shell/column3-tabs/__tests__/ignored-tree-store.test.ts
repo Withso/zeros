@@ -16,7 +16,11 @@
 import { describe, it, expect } from "vitest";
 import { FileTree } from "@pierre/trees";
 
-import { ignoredPathDelta, mergeIgnoredPaths } from "../ignored-entries";
+import {
+  ignoredPathDelta,
+  mergeIgnoredPaths,
+  planIgnoredPathDelta,
+} from "../ignored-entries";
 import { ancestorDirPrefixes } from "../tree-paths";
 
 /** A headless controller with the same options WorkspaceFileTree uses. */
@@ -51,7 +55,12 @@ describe("the store accepts every op ignoredPathDelta produces", () => {
     // `rm -rf dist` while dist/ was expanded: the ~6ms roots listing lands
     // first, so `dist/` leaves `next` while its children are still in it. Ops
     // come out parent-first, so the parent's own removal is what used to throw.
-    const applied = set("dist/", "dist/app.js", "dist/assets/", "dist/assets/x.css");
+    const applied = set(
+      "dist/",
+      "dist/app.js",
+      "dist/assets/",
+      "dist/assets/x.css",
+    );
     const tree = makeTree(["src/a.ts", ...applied]);
     const ops = ignoredPathDelta(applied, set());
     expect(() => tree.batch(ops)).not.toThrow();
@@ -106,7 +115,10 @@ describe("the store accepts every op ignoredPathDelta produces", () => {
       applied = next;
     };
     step(["node_modules/", ".env"], []);
-    step(["node_modules/", ".env"], [["node_modules", ["node_modules/react/"]]]);
+    step(
+      ["node_modules/", ".env"],
+      [["node_modules", ["node_modules/react/"]]],
+    );
     step(
       ["node_modules/", ".env"],
       [
@@ -125,6 +137,35 @@ describe("the store accepts every op ignoredPathDelta produces", () => {
     step([], []); // everything gone
     expect(tree.getItem("src/a.ts")).not.toBeNull();
     expect(tree.getItem("node_modules/")).toBeNull();
+  });
+
+  it("survives the roots-first deletion race without a fallback rebuild", () => {
+    const tree = makeTree(["src/a.ts", "dist/", "dist/old.js"]);
+    let applied = set("dist/", "dist/old.js");
+
+    // Roots have refreshed (dist/ gone), but the expanded-dir request has not.
+    const rootsPass = planIgnoredPathDelta(applied, set("dist/old.js"));
+    expect(() => tree.batch(rootsPass.operations)).not.toThrow();
+    applied = new Set(rootsPass.applied);
+    expect(tree.getItem("dist/old.js")).not.toBeNull();
+
+    // The child request catches up. One recursive remove now clears both the
+    // explicit directory and its old child without ever desynchronising the
+    // model from the applied snapshot.
+    const childPass = planIgnoredPathDelta(applied, set());
+    expect(() => tree.batch(childPass.operations)).not.toThrow();
+    expect(tree.getItem("dist/")).toBeNull();
+    expect(tree.getItem("dist/old.js")).toBeNull();
+    expect(tree.getItem("src/a.ts")).not.toBeNull();
+  });
+
+  it("accepts ignored file-to-directory kind changes incrementally", () => {
+    const tree = makeTree(["src/a.ts", "cache"]);
+    const ops = ignoredPathDelta(set("cache"), set("cache/", "cache/x.bin"));
+    expect(ops[0]).toEqual({ path: "cache", type: "remove" });
+    expect(() => tree.batch(ops)).not.toThrow();
+    expect(tree.getItem("cache/")?.isDirectory()).toBe(true);
+    expect(tree.getItem("cache/x.bin")).not.toBeNull();
   });
 });
 

@@ -9,14 +9,17 @@
 // write path for transcripts (appendMessages is a vestigial no-op).
 //
 // Per-client UI state (scroll offsets, plan snapshots, policies) lives in
-// device-local.ts, not here. Image attachments still use a dedicated Electron
-// file-write IPC (writeImageAttachment) — unrelated to chat storage.
+// device-local.ts, not here. Image attachments use the workspace bridge's
+// validated binary writer (with a native fallback during bridge startup).
 // ──────────────────────────────────────────────────────────
 
 import { nativeInvoke } from "../../native/runtime";
+import { readWorkspaceFile } from "../../native/files";
 import type { AgentMessage } from "./use-agent-session";
 import { getActiveBridge } from "../bridge/active-bridge";
+import { resolveBridgeWorkspaceIdForCwd } from "../bridge/workspace-id-resolver";
 import {
+  bridgeAttachmentWrite,
   bridgeChatList,
   bridgeChatSnapshot,
   bridgeChatDelete,
@@ -210,7 +213,10 @@ export async function loadFullTranscript(
   while (page.length > 0) {
     pages.unshift(page);
     for (const r of page) chars += r.payload.length;
-    if (pages.length >= TRANSCRIPT_MAX_PAGES || chars >= TRANSCRIPT_CHAR_BUDGET) {
+    if (
+      pages.length >= TRANSCRIPT_MAX_PAGES ||
+      chars >= TRANSCRIPT_CHAR_BUDGET
+    ) {
       // Hitting a bound is not the same as leaving history behind, and the
       // difference is user-visible: `complete: false` is what turns an
       // otherwise silent success into "Attached the most recent part of X —
@@ -322,10 +328,24 @@ export interface AttachmentWriteResult {
   bytes: number;
 }
 
-/** Phase D2 (2026-05-07): persist a base64-encoded image attachment to the chat's
- *  working directory so non-vision agents can reference it by path. The engine
- *  writes to `<cwd>/.context/attachments/<chatId>/` and returns both the absolute
- *  and cwd-relative paths. Unrelated to chat storage — a dedicated file-write IPC. */
+export interface AttachmentReadResult {
+  base64: string;
+  mimeType: string;
+  bytes: number;
+}
+
+/** Only paths minted by writeAgentAttachment are valid transcript references.
+ * A transcript can arrive over sync/import, so never let a forged `diskPath`
+ * turn edit-resend into an arbitrary workspace-file reader. */
+export function isAgentAttachmentDiskPath(value: string): boolean {
+  return /^\.context\/attachments\/[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/.test(
+    value,
+  );
+}
+
+/** Persist full-resolution image bytes to the chat's working directory. Every
+ * agent kind uses this storage reference for transcript rendering/edit-resend;
+ * non-vision agents additionally receive the returned path in their prompt. */
 export async function writeImageAttachment(args: {
   cwd: string;
   chatId: string;
@@ -334,7 +354,54 @@ export async function writeImageAttachment(args: {
   mimeType: string;
   filename: string;
 }): Promise<AttachmentWriteResult> {
+  const bridge = getActiveBridge();
+  if (bridge) {
+    let workspaceId = args.cwd;
+    try {
+      workspaceId =
+        (await resolveBridgeWorkspaceIdForCwd(bridge, args.cwd)) ?? args.cwd;
+    } catch {
+      // A registered primary checkout has no workspace row. Local bridge ops
+      // accept its trusted root; remote workspaces resolve above.
+    }
+    return bridgeAttachmentWrite(bridge, workspaceId, {
+      chatId: args.chatId,
+      attachmentId: args.attachmentId,
+      base64: args.base64,
+      mimeType: args.mimeType,
+      filename: args.filename,
+    });
+  }
   return nativeInvoke<AttachmentWriteResult>("agent_attachment_write", args);
+}
+
+/** Resolve a persisted disk reference back to prompt bytes for edit-resend.
+ * The base64 exists only for this read/send call; it is never copied into the
+ * message or composer document. Legacy data-URL messages bypass this path in
+ * reconstruct.ts and remain editable. */
+export async function readImageAttachment(args: {
+  cwd: string;
+  diskPath: string;
+  mimeType: string;
+}): Promise<AttachmentReadResult> {
+  if (!isAgentAttachmentDiskPath(args.diskPath)) {
+    throw new Error("invalid image attachment path");
+  }
+  const result = await readWorkspaceFile(args.cwd, args.diskPath);
+  if (result?.kind !== "image" || !result.dataUrl) {
+    throw new Error(
+      result?.kind === "too-large"
+        ? "saved image is too large to re-send"
+        : "saved image is no longer available",
+    );
+  }
+  const match = /^data:([^;]+);base64,(.+)$/.exec(result.dataUrl);
+  if (!match) throw new Error("saved image data is invalid");
+  return {
+    base64: match[2],
+    mimeType: match[1] || args.mimeType,
+    bytes: result.bytes,
+  };
 }
 
 // ── Chat list (sidebar metadata) — engine-backed over the bridge ──────────

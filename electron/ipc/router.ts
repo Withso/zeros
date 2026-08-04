@@ -123,8 +123,7 @@ const commandTable: Record<string, CommandHandler> = {
   process_relaunch: notImpl("process_relaunch", 8),
 
   // ── Agent image-attachment write (Phase D2) ───────────────
-  // Persists base64 image attachments to the chat folder so non-vision
-  // agents can reference them by path. A file-write, not chat storage.
+  // Startup fallback for the engine's disk-backed attachment protocol.
   agent_attachment_write: notImpl("agent_attachment_write", 8),
 
   // (Phase 2c) agent transcript + chat-list channels removed — that storage

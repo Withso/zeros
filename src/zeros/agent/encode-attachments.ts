@@ -26,7 +26,10 @@
 // ──────────────────────────────────────────────────────────
 
 import { imageReferenceBlock } from "./agent-attachments";
-import { writeImageAttachment } from "./agent-history-client";
+import {
+  readImageAttachment,
+  writeImageAttachment,
+} from "./agent-history-client";
 import type { ComposerAttachment } from "./composer-attachments";
 import type { ContentBlock } from "../bridge/agent-events";
 import type { AgentTextMessageAttachment } from "@zeros/core/agent-messages";
@@ -49,6 +52,9 @@ export interface EncodeAttachmentsContext {
 export interface EncodedAttachments {
   blocks: ContentBlock[];
   bubbleAttachments: AgentTextMessageAttachment[];
+  /** Ephemeral composer-id lookup used to stamp disk references onto ordered
+   *  message segments. IDs themselves are not persisted. */
+  bubbleAttachmentById: Map<string, AgentTextMessageAttachment>;
   /** Attachments that will NOT reach the agent, with why.
    *
    *  Returned rather than logged because dropping silently is the bug this
@@ -99,6 +105,7 @@ export async function encodeAttachments(
 ): Promise<EncodedAttachments> {
   const blocks: ContentBlock[] = [];
   const bubbleAttachments: AgentTextMessageAttachment[] = [];
+  const bubbleAttachmentById = new Map<string, AgentTextMessageAttachment>();
   const skipped: { name: string; reason: string }[] = [];
 
   for (const a of attachments) {
@@ -128,28 +135,59 @@ export async function encodeAttachments(
         type: "text" as const,
         text: textAttachmentBlock(a.name, a.text),
       });
-      bubbleAttachments.push({
+      const bubbleAttachment: AgentTextMessageAttachment = {
         name: a.name,
         mimeType: a.mimeType,
         kind: "text",
+      };
+      bubbleAttachments.push(bubbleAttachment);
+      bubbleAttachmentById.set(a.id, bubbleAttachment);
+      continue;
+    }
+
+    let imageBase64 = a.data;
+    let imageMimeType = a.mimeType;
+    if (!imageBase64 && a.diskPath && ctx.cwd) {
+      try {
+        const restored = await readImageAttachment({
+          cwd: ctx.cwd,
+          diskPath: a.diskPath,
+          mimeType: a.mimeType,
+        });
+        imageBase64 = restored.base64;
+        imageMimeType = restored.mimeType;
+      } catch {
+        skipped.push({
+          name: a.name,
+          reason: "its saved copy isn't available — attach it again",
+        });
+        continue;
+      }
+    }
+    if (!imageBase64) {
+      skipped.push({
+        name: a.name,
+        reason: "its image bytes aren't available — attach it again",
       });
       continue;
     }
 
-    // Inline image block: the vision path, or the no-cwd/no-chat fallback
-    // (which the adapter may drop — at least we tried).
-    if (ctx.supportsImage || !ctx.cwd || !ctx.chatId) {
+    // A chat without a cwd cannot own a durable file. Preserve the wire send,
+    // but keep transcript metadata byte-free; edit-resend will explicitly ask
+    // the user to attach it again rather than pretending an empty image exists.
+    if (!ctx.cwd || !ctx.chatId) {
       blocks.push({
         type: "image" as const,
-        mimeType: a.mimeType,
-        data: a.data,
+        mimeType: imageMimeType,
+        data: imageBase64,
       });
-      bubbleAttachments.push({
+      const bubbleAttachment: AgentTextMessageAttachment = {
         name: a.name,
-        mimeType: a.mimeType,
+        mimeType: imageMimeType,
         kind: "image",
-        thumbnailUri: `data:${a.mimeType};base64,${a.data}`,
-      });
+      };
+      bubbleAttachments.push(bubbleAttachment);
+      bubbleAttachmentById.set(a.id, bubbleAttachment);
       continue;
     }
 
@@ -158,30 +196,36 @@ export async function encodeAttachments(
         cwd: ctx.cwd,
         chatId: ctx.chatId,
         attachmentId: a.id,
-        base64: a.data,
-        mimeType: a.mimeType,
+        base64: imageBase64,
+        mimeType: imageMimeType,
         filename: a.name,
       });
-      blocks.push({
-        type: "text" as const,
-        text: imageReferenceBlock({
-          agentId: ctx.agentId,
-          filename: a.name,
-          absolutePath: written.absolutePath,
-          relativePath: written.relativePath,
-          mimeType: a.mimeType,
-        }),
-      });
-      bubbleAttachments.push({
+      if (ctx.supportsImage) {
+        blocks.push({
+          type: "image" as const,
+          mimeType: imageMimeType,
+          data: imageBase64,
+        });
+      } else {
+        blocks.push({
+          type: "text" as const,
+          text: imageReferenceBlock({
+            agentId: ctx.agentId,
+            filename: a.name,
+            absolutePath: written.absolutePath,
+            relativePath: written.relativePath,
+            mimeType: imageMimeType,
+          }),
+        });
+      }
+      const bubbleAttachment: AgentTextMessageAttachment = {
         name: a.name,
-        mimeType: a.mimeType,
+        mimeType: imageMimeType,
         kind: "image",
-        // Even on the disk-persisted path the BUBBLE thumbnail uses the
-        // in-memory base64 as a data: URL — Electron's renderer
-        // (webSecurity: true) blocks file:// in <img src=…>.
-        thumbnailUri: `data:${a.mimeType};base64,${a.data}`,
         diskPath: written.relativePath,
-      });
+      };
+      bubbleAttachments.push(bubbleAttachment);
+      bubbleAttachmentById.set(a.id, bubbleAttachment);
     } catch (err) {
       console.warn(
         `[Zeros agent-chat] failed to persist image ${a.name}:`,
@@ -191,5 +235,5 @@ export async function encodeAttachments(
     }
   }
 
-  return { blocks, bubbleAttachments, skipped };
+  return { blocks, bubbleAttachments, bubbleAttachmentById, skipped };
 }

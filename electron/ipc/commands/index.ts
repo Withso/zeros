@@ -189,10 +189,8 @@ export function registerAllCommands(): void {
   // unified Zeros DB (reached over the bridge); the electron/db.ts handlers are
   // gone. Image attachments stay here — a file-write, unrelated to chat storage.
   //
-  // Phase D2 (2026-05-07): persist image attachments to the chat folder so
-  // non-vision agents can reference them via @path / Read("/abs/path") instead
-  // of inline base64. The renderer calls this once per image attachment when the
-  // active agent's promptCapabilities.image is false.
+  // Native startup fallback for the engine bridge's attachment writer. Normal
+  // sends use attachment.write so desktop and relay clients share one protocol.
   setCommand("agent_attachment_write", agentAttachmentWrite);
 
   // Roadmap 03a — Git + GitHub integration layer, phase 1: workspace

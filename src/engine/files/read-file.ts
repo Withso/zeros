@@ -16,7 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const MAX_TEXT_BYTES = 2_000_000; // 2 MB
-const MAX_IMAGE_BYTES = 5_000_000; // 5 MB
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // same boundary as composer images
 
 const IMAGE_MIME: Record<string, string> = {
   ".png": "image/png",

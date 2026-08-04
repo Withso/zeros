@@ -9,7 +9,7 @@
 // The deck is globally bounded; closed chats leave immediately.
 // ──────────────────────────────────────────────────────────
 
-import React, { useMemo } from "react";
+import React, { useEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useShallow } from "zustand/react/shallow";
 
@@ -25,10 +25,12 @@ import { Column2ChatView } from "./column2-chat-view";
 import { usePanePortalsStore } from "./column2-pane-stores";
 import { useRetainedViewKeySet } from "./use-retained-view-keys";
 import { usePreparedColumn2ChatId } from "./column2-chat-intent";
+import { useAgentSessions } from "../zeros/agent/sessions-hooks";
 
 const MAX_RETAINED_CHAT_VIEWS = 12;
 
 export function Column2ChatDeck() {
+  const sessions = useAgentSessions();
   const chats = useWorkspaceStore(
     useShallow((state) =>
       state.chats.filter((chat) => chat.kind !== "terminal" && !chat.archived),
@@ -81,6 +83,15 @@ export function Column2ChatDeck() {
     [chats],
   );
 
+  // Publish only the COMMITTED deck. The eviction action runs in a passive
+  // effect, after removed ChatViews have flushed drafts/queue holds and after
+  // newly-retained views exist. Recent switching remains the exact same 12-view
+  // DOM deck; this merely bounds the transcript arrays behind older slots.
+  useEffect(() => {
+    sessions.setRetainedChatIds(retainedChatIds);
+  }, [retainedChatIds, sessions]);
+  useEffect(() => () => sessions.setRetainedChatIds([]), [sessions]);
+
   return (
     <>
       {retainedChatIds.map((chatId) => {
@@ -113,7 +124,9 @@ export function Column2ChatDeck() {
             // but a seam drag must not re-wrap 11 invisible transcripts per
             // frame — the freeze pin rides the same conditional as `inert`.
             // See resize-gesture-freeze.ts.
-            {...(!isActive ? { inert: "", "data-zeros-resize-freeze": "" } : {})}
+            {...(!isActive
+              ? { inert: "", "data-zeros-resize-freeze": "" }
+              : {})}
             data-zeros-root=""
             className={cn(
               // --pane-bg is the chat-WINDOW fill, inherited from the pane

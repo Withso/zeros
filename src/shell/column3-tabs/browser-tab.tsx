@@ -67,6 +67,7 @@ import {
 } from "../../zeros/ui/primitives";
 import { toast } from "../../zeros/ui/primitives/elements";
 import { ZerosSpinner } from "@/loaders";
+import type { ComposerAttachment } from "@/zeros/agent/composer-attachments";
 
 // URL normalization lives in ./localhost-url. Browser navigation accepts
 // ordinary http(s) sites; Design/Canvas are gated separately to loopback URLs.
@@ -1546,30 +1547,27 @@ function submitElementsToChat({
           .join("\n\n");
   const body = userText ? `${userText}\n\n${header}` : header;
 
-  // One ImageContent attachment per element with a screenshot. The
-  // agent's vision pass picks them up in order matching the
-  // numbered list in the text body.
-  const attachments: Array<{ type: "image"; data: string; mimeType: string }> = [];
-  // Parallel bubbleAttachments — these surface as chips above the
-  // user's text in the chat panel. Different shape (the text-message
-  // renderer needs name/mimeType/kind/thumbnailUri). Without these
-  // the screenshots silently submit-but-don't-render.
-  const bubbleAttachments: Array<{
-    name: string;
-    mimeType: string;
-    kind: "image";
-    thumbnailUri: string;
-  }> = [];
+  // Browser captures enter the SAME staged-attachment pipeline as paste/drop.
+  // It writes the full-resolution bytes to the active chat's disk namespace,
+  // sends them as vision content, and persists only the returned path.
+  const composerAttachments: ComposerAttachment[] = [];
   elements.forEach((el, i) => {
     if (!el.screenshot) return;
     const m = el.screenshot.match(/^data:([^;]+);base64,(.+)$/);
     if (!m) return;
-    attachments.push({ type: "image", data: m[2], mimeType: m[1] });
-    bubbleAttachments.push({
+    composerAttachments.push({
+      // The id is part of the durable filename. Include entropy so two
+      // submissions in the same millisecond cannot overwrite an older chat
+      // image and silently change what that older message renders.
+      id: `browser-${Date.now().toString(36)}-${i + 1}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}`,
       name: `${el.tag}-${i + 1}.jpg`,
       mimeType: m[1],
       kind: "image",
-      thumbnailUri: el.screenshot,
+      data: m[2],
+      size: Math.floor((m[2].length * 3) / 4),
+      validation: { ok: true },
     });
   });
 
@@ -1579,8 +1577,8 @@ function submitElementsToChat({
       id: `elem-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
       text: body,
       source: "manual",
-      attachments: attachments.length ? attachments : undefined,
-      bubbleAttachments: bubbleAttachments.length ? bubbleAttachments : undefined,
+      composerAttachments:
+        composerAttachments.length > 0 ? composerAttachments : undefined,
     },
   });
 }

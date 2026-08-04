@@ -110,6 +110,17 @@ import {
   trackAgentFailed,
   trackAiGeneration,
 } from "../analytics/agent-events";
+import {
+  messageSnapshotsEqual,
+  seedPersistedMessageRefs,
+  updatePersistedMessageRefs,
+} from "./message-persistence-tracker";
+import {
+  invalidateTranscriptRequest,
+  isCurrentTranscriptRequest,
+  releaseTranscriptRequest,
+  shouldEvictTranscriptPayload,
+} from "./transcript-retention";
 
 // 2026-06-09: reconcile now runs on EVERY bind (new session, respawn, resume).
 // It used to run at most once per chat to avoid clobbering a mode the user
@@ -371,6 +382,16 @@ export function AgentSessionsProvider({
   // Warm retained chats reconcile against durable history in the background.
   // Hover intent followed by selection must share that same window read.
   const reconcileInFlightRef = useRef(new Map<string, Promise<void>>());
+  // Message-object identity bookkeeping must be bounded by the same resident
+  // transcript window as the store. Keeping this at provider scope also lets a
+  // disk hydrate seed refs BEFORE its synchronous Zustand publication.
+  const persistedMessageRefsRef = useRef(
+    new Map<string, Map<string, AgentMessage>>(),
+  );
+  // Exact chat ids owned by the committed 12-view renderer deck. This is
+  // intentionally published by a passive effect in Column2ChatDeck, never by
+  // an abandoned concurrent render.
+  const retainedChatIdsRef = useRef<ReadonlySet<string>>(new Set());
 
   // Phase 1 audit fix #8 — atomic guard against concurrent sendPrompt.
   // The Zustand `status === "streaming"` check is a read-then-act
@@ -587,8 +608,7 @@ export function AgentSessionsProvider({
               ? n.update.state !== "running"
               : false;
           const chatId =
-            (n as { chatId?: string }).chatId ??
-            s.sessionToChatId[n.sessionId];
+            (n as { chatId?: string }).chatId ?? s.sessionToChatId[n.sessionId];
           const exactSession =
             !!chatId && s.sessions[chatId]?.sessionId === n.sessionId;
           s.applyBridgeUpdate(n);
@@ -961,6 +981,76 @@ export function AgentSessionsProvider({
    *  out from under the user mid-edit. releaseQueue drains if idle+ready. */
   const queueHeldRef = useRef(new Set<string>());
 
+  /** Release payloads that are outside the committed deck and no longer owned
+   *  by a local operation. The slot itself stays: session routing, active-turn
+   *  status, gates, questions, task wake-ups and config updates remain live. */
+  const evictUnretainedTranscripts = useCallback((): void => {
+    const store = getStore();
+    const openChatIds = new Set(
+      useWorkspaceStore
+        .getState()
+        .chats.filter((chat) => !chat.archived)
+        .map((chat) => chat.id),
+    );
+    for (const [chatId, slot] of Object.entries(store.sessions)) {
+      if (!openChatIds.has(chatId)) {
+        pendingHydratesRef.current.delete(chatId);
+        invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
+        invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
+        persistedMessageRefsRef.current.delete(chatId);
+        store.detachSession(chatId);
+        continue;
+      }
+      const queued = (sendQueueRef.current.get(chatId)?.length ?? 0) > 0;
+      if (
+        !shouldEvictTranscriptPayload({
+          retained: retainedChatIdsRef.current.has(chatId),
+          sending: sendingChatsRef.current.has(chatId),
+          queued,
+          queueHeld: queueHeldRef.current.has(chatId) && queued,
+          ensuring: ensureInFlightRef.current.has(chatId),
+        })
+      ) {
+        continue;
+      }
+
+      // Invalidate, rather than await, cold reads that belonged to the view
+      // which just left the deck. Identity guards below prevent their late
+      // results from resurrecting the evicted payload; a later reopen starts a
+      // fresh exact read immediately.
+      pendingHydratesRef.current.delete(chatId);
+      invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
+      invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
+      persistedMessageRefsRef.current.delete(chatId);
+
+      if (
+        slot.transcriptState === "cold" &&
+        slot.messages.length === 0 &&
+        slot.stderrLog.length === 0 &&
+        slot.historyExpanded !== true
+      ) {
+        continue;
+      }
+      store.evictTranscript(chatId);
+    }
+  }, [getStore]);
+
+  const setRetainedChatIds = useCallback<SessionsActions["setRetainedChatIds"]>(
+    (chatIds) => {
+      const previous = retainedChatIdsRef.current;
+      const next = new Set(chatIds);
+      if (
+        previous.size === next.size &&
+        [...next].every((chatId) => previous.has(chatId))
+      ) {
+        return;
+      }
+      retainedChatIdsRef.current = next;
+      evictUnretainedTranscripts();
+    },
+    [evictUnretainedTranscripts],
+  );
+
   /** Flush the HEAD of a chat's send queue if (and only if) it may fire now:
    *  not held, nothing in flight, session ready. The single drain entry point
    *  — the turn-completion finally, releaseQueue, and a send parked behind an
@@ -1078,6 +1168,9 @@ export function AgentSessionsProvider({
           agentName: options?.agentName ?? agentId,
           cwd: resolvedCwd,
           status: "warming",
+          transcriptState: existing?.transcriptState ?? BLANK.transcriptState,
+          transcriptDirty: existing?.transcriptDirty ?? false,
+          hasTranscript: existing?.hasTranscript ?? false,
           messages: existing?.messages ?? [],
           // Carry the context-gauge reading across a rebuild of the SAME
           // agent (model/effort swap force-respawn, silent retry). The old
@@ -1257,9 +1350,16 @@ export function AgentSessionsProvider({
         if (ensureInFlightRef.current.get(chatId) === work) {
           ensureInFlightRef.current.delete(chatId);
         }
+        evictUnretainedTranscripts();
       }
     },
-    [bridge, getStore, drainNextQueued, drainOrDropQueue],
+    [
+      bridge,
+      getStore,
+      drainNextQueued,
+      drainOrDropQueue,
+      evictUnretainedTranscripts,
+    ],
   );
 
   useEffect(() => {
@@ -1303,8 +1403,7 @@ export function AgentSessionsProvider({
         shouldQueuePrompt({
           status: entryStatus,
           hasLocalSend: sendingChatsRef.current.has(chatId),
-          hasQueuedSends:
-            (sendQueueRef.current.get(chatId)?.length ?? 0) > 0,
+          hasQueuedSends: (sendQueueRef.current.get(chatId)?.length ?? 0) > 0,
           queueHeld: queueHeldRef.current.has(chatId),
           flushing: !!flushBubbleId,
         })
@@ -2123,9 +2222,16 @@ export function AgentSessionsProvider({
         // queue and remove its greyed placeholders (mirrors cancel()) so the
         // user resends deliberately once the chat is healthy again.
         drainOrDropQueue(chatId);
+        evictUnretainedTranscripts();
       }
     },
-    [bridge, getStore, drainNextQueued, drainOrDropQueue],
+    [
+      bridge,
+      getStore,
+      drainNextQueued,
+      drainOrDropQueue,
+      evictUnretainedTranscripts,
+    ],
   );
   sendPromptRef.current = sendPrompt;
 
@@ -2148,6 +2254,7 @@ export function AgentSessionsProvider({
         }
       }
       sendQueueRef.current.delete(chatId);
+      evictUnretainedTranscripts();
       const current = getStore().sessions[chatId];
       if (!current?.agentId || !current.sessionId) return;
       // Optimistic state transition: cancel is intentional, the chat
@@ -2180,7 +2287,7 @@ export function AgentSessionsProvider({
         sessionId: current.sessionId,
       });
     },
-    [bridge, getStore],
+    [bridge, getStore, evictUnretainedTranscripts],
   );
 
   const respondToPermission = useCallback<
@@ -2486,8 +2593,9 @@ export function AgentSessionsProvider({
           messages: slot.messages.filter((m) => m.id !== messageId),
         });
       }
+      evictUnretainedTranscripts();
     },
-    [getStore],
+    [getStore, evictUnretainedTranscripts],
   );
 
   const editQueued = useCallback<SessionsActions["editQueued"]>(
@@ -2568,8 +2676,9 @@ export function AgentSessionsProvider({
       // The turn may have settled while the queue was parked (the finally
       // skipped its drain) — pick the flush back up if the chat is idle.
       drainNextQueued(chatId);
+      evictUnretainedTranscripts();
     },
-    [drainNextQueued],
+    [drainNextQueued, evictUnretainedTranscripts],
   );
 
   const steerQueued = useCallback<SessionsActions["steerQueued"]>(
@@ -2700,6 +2809,16 @@ export function AgentSessionsProvider({
   const reset = useCallback<SessionsActions["reset"]>(
     (chatId) => {
       prebindDirtySessionsRef.current.delete(chatId);
+      pendingHydratesRef.current.delete(chatId);
+      invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
+      invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
+      persistedMessageRefsRef.current.delete(chatId);
+      sendQueueRef.current.delete(chatId);
+      queueHeldRef.current.delete(chatId);
+      flushBubbleRef.current.delete(chatId);
+      turnProducedOutputRef.current.delete(chatId);
+      announcedDirsRef.current.delete(chatId);
+      promptActivityRef.current.delete(chatId);
       getStore().removeSession(chatId);
       // Drop on-disk transcript too so a "reset" really starts clean.
       void persistClearChat(chatId).catch((err) => {
@@ -2720,37 +2839,81 @@ export function AgentSessionsProvider({
       if (!chatId) return Promise.resolve();
       const existingRequest = reconcileInFlightRef.current.get(chatId);
       if (existingRequest) return existingRequest;
-      const request = (async () => {
+      // Assigned immediately after declaration; `let` is required because the
+      // request's post-await race guard compares against its own identity.
+      let request!: Promise<void>;
+      // eslint-disable-next-line prefer-const
+      request = (async () => {
         const store = getStore();
         const slot = store.sessions[chatId];
         if (!slot) return; // not open here → hydrates fresh when opened
+        if (slot.transcriptState !== "resident") {
+          // A DB_CHANGED nudge for an evicted chat must not pull its payload
+          // back into memory. Preserve a conservative durable-history hint so
+          // close can never discard a remotely-started Untitled chat; the exact
+          // answer replaces it on the next retained hydrate.
+          if (!slot.transcriptDirty || !slot.hasTranscript) {
+            store.patchSession(chatId, {
+              transcriptDirty: true,
+              hasTranscript: true,
+            });
+          }
+          return;
+        }
         if (slot.status === "streaming") return; // live turn here is canonical
         try {
           const windowed = dedupeConsecutiveMessages(
             await persistWindowMessages(chatId, HYDRATE_WINDOW),
           );
-          const fresh = store.sessions[chatId];
-          if (!fresh || fresh.status === "streaming") return; // re-check post-await
-          const cur = fresh.messages;
-          // No-op guard: same count + same last id → nothing new, skip re-render.
+          // The committed deck may have evicted this chat while the DB request
+          // was in flight. Eviction deletes the exact request identity; never
+          // let a late result resurrect the payload.
           if (
-            cur.length === windowed.length &&
-            cur[cur.length - 1]?.id === windowed[windowed.length - 1]?.id
+            !isCurrentTranscriptRequest(
+              reconcileInFlightRef.current,
+              chatId,
+              request,
+            )
           ) {
             return;
           }
+          const fresh = getStore().sessions[chatId];
+          if (fresh && fresh.transcriptState !== "resident") {
+            getStore().patchSession(chatId, {
+              transcriptDirty: true,
+              hasTranscript: true,
+            });
+            return;
+          }
+          if (!fresh || fresh.status === "streaming") return; // re-check post-await
+          const cur = fresh.messages;
           // Merge the engine's authoritative window into the local slot: keep
           // scrolled-up history, drop a remotely-truncated tail, and don't let a
           // transient empty read wipe the slot. See mergeWindowedTail.
           const next: AgentMessage[] = mergeWindowedTail(cur, windowed);
-          store.setSession(chatId, { ...fresh, messages: next });
+          if (messageSnapshotsEqual(cur, next)) {
+            if (fresh.transcriptDirty) {
+              getStore().patchSession(chatId, { transcriptDirty: false });
+            }
+            return;
+          }
+          let refs = persistedMessageRefsRef.current.get(chatId);
+          if (!refs) {
+            refs = new Map();
+            persistedMessageRefsRef.current.set(chatId, refs);
+          }
+          seedPersistedMessageRefs(refs, next);
+          getStore().setSession(chatId, {
+            ...fresh,
+            messages: next,
+            transcriptState: "resident",
+            transcriptDirty: false,
+          });
         } catch (err) {
           console.warn("[Zeros agent-history] message reconcile failed:", err);
         }
       })().finally(() => {
-        if (reconcileInFlightRef.current.get(chatId) === request) {
-          reconcileInFlightRef.current.delete(chatId);
-        }
+        releaseTranscriptRequest(reconcileInFlightRef.current, chatId, request);
       });
       reconcileInFlightRef.current.set(chatId, request);
       return request;
@@ -2763,7 +2926,10 @@ export function AgentSessionsProvider({
     (chatId) => {
       const existingRequest = hydrateInFlightRef.current.get(chatId);
       if (existingRequest) return existingRequest;
-      const request = (async () => {
+      // Same self-identity guard as reconcileChatMessages above.
+      let request!: Promise<void>;
+      // eslint-disable-next-line prefer-const
+      request = (async () => {
         // Fix #2 — refresh the device-local policy slice alongside message
         // hydration. The store mutator preserves its reference when unchanged.
         void getStore().hydrateChatPolicies(chatId);
@@ -2773,9 +2939,23 @@ export function AgentSessionsProvider({
         // another device while this slot sits idle. Reconcile against the engine
         // (a no-op when already current; skips a live in-flight turn) instead of
         // blindly trusting the in-memory snapshot, so re-opening shows the latest.
-        if (slot && slot.messages.length > 0) {
+        if (slot?.transcriptState === "resident") {
           void reconcileChatMessages(chatId);
           return;
+        }
+        // Publish an explicit cold-read state before any await. `messages: []`
+        // alone means "genuinely new chat" elsewhere in the UI; loading must
+        // never flash provenance/attach affordances for an evicted conversation.
+        if (slot) {
+          getStore().patchSession(chatId, {
+            transcriptState: "loading",
+            transcriptDirty: false,
+          });
+        } else {
+          getStore().setSession(chatId, {
+            ...BLANK,
+            transcriptState: "loading",
+          });
         }
         // The slot is cold, so this read DECIDES what the user sees. An empty
         // result is only trustworthy on a connected bridge — transport absence
@@ -2788,8 +2968,16 @@ export function AgentSessionsProvider({
         }
         try {
           const messages = await persistWindowMessages(chatId, HYDRATE_WINDOW);
+          if (
+            !isCurrentTranscriptRequest(
+              hydrateInFlightRef.current,
+              chatId,
+              request,
+            )
+          ) {
+            return;
+          }
           pendingHydratesRef.current.delete(chatId);
-          if (messages.length === 0) return;
           // Pre-fix builds (before 2026-04-26) wrote agent replay events
           // to disk on every reopen, so existing chats have stacked
           // duplicates. Collapse runs of identical consecutive messages
@@ -2801,22 +2989,54 @@ export function AgentSessionsProvider({
           // Re-read the slot after the await — the user may have started
           // typing while we were fetching, in which case live state wins.
           const fresh = getStore().sessions[chatId];
-          if (fresh && fresh.messages.length > 0) return;
+          if (!fresh) return;
+          if (
+            fresh.transcriptState === "resident" &&
+            fresh.messages.length > 0
+          ) {
+            return;
+          }
+          if (fresh.transcriptState !== "loading") return;
+          const changedWhileLoading = fresh.transcriptDirty;
+          let refs = persistedMessageRefsRef.current.get(chatId);
+          if (!refs) {
+            refs = new Map();
+            persistedMessageRefsRef.current.set(chatId, refs);
+          }
+          seedPersistedMessageRefs(refs, deduped);
           getStore().setSession(chatId, {
             ...BLANK,
-            ...(fresh ?? {}),
+            ...fresh,
             messages: deduped,
+            transcriptState: "resident",
+            transcriptDirty: false,
+            // A connected authoritative empty read is the one place allowed
+            // to clear the conservative hint retained across eviction.
+            hasTranscript: deduped.some(
+              (message) => message.kind !== "text" || !message.queued,
+            ),
           });
+          // A live chunk/DB nudge may have landed after the window read began.
+          // Re-window once more rather than trying to merge raw deltas into a
+          // partial transcript. The in-flight reconcile map dedupes nudges.
+          if (changedWhileLoading) void reconcileChatMessages(chatId);
         } catch (err) {
+          if (
+            !isCurrentTranscriptRequest(
+              hydrateInFlightRef.current,
+              chatId,
+              request,
+            )
+          ) {
+            return;
+          }
           // Rejected read (timeout / engine swap mid-request) — same rule as the
           // disconnected case above: retry on the next connected edge.
           pendingHydratesRef.current.add(chatId);
           console.warn("[Zeros agent-history] hydrate failed:", err);
         }
       })().finally(() => {
-        if (hydrateInFlightRef.current.get(chatId) === request) {
-          hydrateInFlightRef.current.delete(chatId);
-        }
+        releaseTranscriptRequest(hydrateInFlightRef.current, chatId, request);
       });
       hydrateInFlightRef.current.set(chatId, request);
       return request;
@@ -2835,9 +3055,9 @@ export function AgentSessionsProvider({
     pendingHydratesRef.current.clear();
     const chats = useWorkspaceStore.getState().chats;
     for (const id of parked) {
-      if (!chats.some((c) => c.id === id)) continue;
+      if (!chats.some((c) => c.id === id && !c.archived)) continue;
       const slot = getStore().sessions[id];
-      if (slot && slot.messages.length > 0) continue;
+      if (slot?.transcriptState === "resident") continue;
       void hydrateChat(id);
     }
   }, [bridgeStatus, hydrateChat, getStore]);
@@ -2908,6 +3128,9 @@ export function AgentSessionsProvider({
         sessionId,
         cwd: resolvedCwd,
         status: "warming",
+        transcriptState: existing?.transcriptState ?? BLANK.transcriptState,
+        transcriptDirty: existing?.transcriptDirty ?? false,
+        hasTranscript: existing?.hasTranscript ?? false,
         messages: existing?.messages ?? [],
       });
       // Share loadSession with an Enter pressed during the warming window.
@@ -2993,8 +3216,7 @@ export function AgentSessionsProvider({
           // this resumed session was actually loaded with.
           appliedChatEnvKey: chatEnvDriftKey(options?.env),
         });
-        const prebindDirtySession =
-          prebindDirtySessionsRef.current.get(chatId);
+        const prebindDirtySession = prebindDirtySessionsRef.current.get(chatId);
         if (prebindDirtySession && prebindDirtySession !== resp.sessionId) {
           prebindDirtySessionsRef.current.delete(chatId);
         }
@@ -3048,6 +3270,7 @@ export function AgentSessionsProvider({
         if (ensureInFlightRef.current.get(chatId) === loadFlight) {
           ensureInFlightRef.current.delete(chatId);
         }
+        evictUnretainedTranscripts();
       }
     },
     [
@@ -3056,6 +3279,7 @@ export function AgentSessionsProvider({
       drainNextQueued,
       drainOrDropQueue,
       reconcileChatMessages,
+      evictUnretainedTranscripts,
     ],
   );
 
@@ -3067,6 +3291,10 @@ export function AgentSessionsProvider({
   const disposeAll = useCallback<SessionsActions["disposeAll"]>(() => {
     getStore().clearAll();
     prebindDirtySessionsRef.current.clear();
+    pendingHydratesRef.current.clear();
+    hydrateInFlightRef.current.clear();
+    reconcileInFlightRef.current.clear();
+    persistedMessageRefsRef.current.clear();
     // Note: we deliberately do NOT clear the disk transcript here.
     // disposeAll is called on engine respawn (in-place project swap),
     // when the in-memory sessionIds become stale but the user still
@@ -3076,24 +3304,32 @@ export function AgentSessionsProvider({
   const closeSession = useCallback<SessionsActions["closeSession"]>(
     (chatId) => {
       prebindDirtySessionsRef.current.delete(chatId);
-      if (!bridge) return;
+      pendingHydratesRef.current.delete(chatId);
+      invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
+      invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
+      persistedMessageRefsRef.current.delete(chatId);
+      sendQueueRef.current.delete(chatId);
+      queueHeldRef.current.delete(chatId);
+      flushBubbleRef.current.delete(chatId);
+      turnProducedOutputRef.current.delete(chatId);
+      announcedDirsRef.current.delete(chatId);
+      promptActivityRef.current.delete(chatId);
       const slot = getStore().sessions[chatId];
       // Only sessions the engine actually started have something to tear
       // down. The on-disk transcript is untouched, so reopening the chat
       // re-resumes via loadSession.
-      if (slot?.agentId && slot.sessionId) {
+      if (bridge && slot?.agentId && slot.sessionId) {
         bridge.send({
           type: "AGENT_CLOSE_SESSION",
           agentId: slot.agentId,
           sessionId: slot.sessionId,
         });
-        // Drop the now-stale in-memory slot. Without this, reopening the
-        // chat sees a populated `sessionId` and skips loadSession, leaving
-        // the renderer pointed at a session the engine just tore down. The
-        // on-disk transcript is untouched, so reopen re-resumes via
-        // loadSession (the persisted-sessionId path).
-        getStore().removeSession(chatId);
       }
+      // Always detach locally — including while the bridge is disconnected or
+      // before a session id exists. Otherwise closed/archived cold slots are
+      // themselves an unbounded map. Detach deliberately preserves the scroll
+      // anchor and policies; only explicit reset/delete removes those.
+      getStore().detachSession(chatId);
     },
     [bridge, getStore],
   );
@@ -3125,6 +3361,7 @@ export function AgentSessionsProvider({
       listSessionsFor,
       loadIntoChat,
       hydrateChat,
+      setRetainedChatIds,
       closeSession,
       disposeAll,
     }),
@@ -3151,6 +3388,7 @@ export function AgentSessionsProvider({
       listSessionsFor,
       loadIntoChat,
       hydrateChat,
+      setRetainedChatIds,
       closeSession,
       disposeAll,
     ],
@@ -3169,7 +3407,6 @@ export function AgentSessionsProvider({
   // before any diffing.
   useEffect(() => {
     let prevSessions = useSessionsStore.getState().sessions;
-    const lastWritten = new Map<string, Map<string, AgentMessage>>();
 
     const unsubscribe = useSessionsStore.subscribe((state) => {
       if (state.sessions === prevSessions) return;
@@ -3177,27 +3414,18 @@ export function AgentSessionsProvider({
 
       for (const [chatId, slot] of Object.entries(nextSessions)) {
         if (slot === prevSessions[chatId]) continue; // unchanged
-        let chatMap = lastWritten.get(chatId);
+        if (slot.transcriptState !== "resident") {
+          // Eviction must release the second, less-visible owner of historical
+          // message objects too. The next disk hydrate seeds its exact refs.
+          persistedMessageRefsRef.current.delete(chatId);
+          continue;
+        }
+        let chatMap = persistedMessageRefsRef.current.get(chatId);
         if (!chatMap) {
           chatMap = new Map();
-          lastWritten.set(chatId, chatMap);
+          persistedMessageRefsRef.current.set(chatId, chatMap);
         }
-        const toWrite: AgentMessage[] = [];
-        for (const m of slot.messages) {
-          // Never persist a still-queued send — it's an ephemeral greyed
-          // placeholder; it becomes a real (persisted) message only once it
-          // flushes. Without this, a reload could resurrect a queued bubble
-          // with no live queue behind it (greyed forever).
-          if (m.kind === "text" && m.queued) continue;
-          // Reference identity tells us if this message was touched.
-          // The store does immutable updates: a streaming chunk produces
-          // a new message object, completed cards produce a new tool
-          // object. Pristine messages keep the same ref → no write.
-          if (chatMap.get(m.id) !== m) {
-            toWrite.push(m);
-            chatMap.set(m.id, m);
-          }
-        }
+        const toWrite = updatePersistedMessageRefs(chatMap, slot.messages);
         if (toWrite.length > 0) {
           void persistAppendMessages(chatId, toWrite).catch((err) => {
             console.warn(
@@ -3213,12 +3441,12 @@ export function AgentSessionsProvider({
         // persistence mirrors via dbUpsertChat.
       }
 
-      // Drop entries from lastWritten for chats that disappeared (reset).
+      // Drop entries for chats that disappeared (reset/close).
       // Lets the next ensureSession/hydrate write a full transcript again
       // instead of relying on stale diff state.
-      for (const chatId of lastWritten.keys()) {
+      for (const chatId of persistedMessageRefsRef.current.keys()) {
         if (!(chatId in nextSessions)) {
-          lastWritten.delete(chatId);
+          persistedMessageRefsRef.current.delete(chatId);
         }
       }
 

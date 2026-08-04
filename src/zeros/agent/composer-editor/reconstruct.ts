@@ -5,9 +5,8 @@
 // Editing a user message rebuilds the WHOLE message as inline editor content:
 // text + mention pills + attachment pills, exactly where they were composed
 // (no separate "originals" chip row). Image bytes are recovered from the
-// persisted thumbnail data: URL; text-file bodies weren't stored, so they
-// reconstruct empty (the resubmit's <file> block is then empty — same as the
-// pre-editor behavior, which never re-sent original text bodies either).
+// persisted disk reference (legacy messages still decode their data URL);
+// text-file bodies weren't stored, so they reconstruct empty.
 // ──────────────────────────────────────────────────────────
 
 import type {
@@ -34,6 +33,7 @@ function reconstructAttachment(
     mimeType: string;
     kind: "image" | "text";
     thumbnailUri?: string;
+    diskPath?: string;
   },
   id: string,
 ): ComposerAttachment {
@@ -51,6 +51,7 @@ function reconstructAttachment(
     text: seg.kind === "text" ? "" : undefined,
     size: data ? approxBytes(data) : 0,
     validation: { ok: true },
+    ...(seg.diskPath ? { diskPath: seg.diskPath } : {}),
   };
 }
 
@@ -74,6 +75,7 @@ export function messageToEditorContent(opts: {
               mimeType: a.mimeType,
               kind: a.kind,
               thumbnailUri: a.thumbnailUri,
+              diskPath: a.diskPath,
             }),
           ),
         ];

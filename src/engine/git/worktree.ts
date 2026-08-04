@@ -102,6 +102,10 @@ import type {
 
 const PROVISION_PATHS_META_KEY = "create.provision-paths.v1";
 const WORKTREE_REMOVE_TIMEOUT_MS = 30_000;
+const INTERNAL_ATTACHMENT_ARCHIVE_PATHS = [
+  ".context/.gitignore",
+  ".context/attachments",
+] as const;
 
 /** A repo with no commits (unborn HEAD — e.g. freshly `git init`'d) can't host
  *  a worktree: there's no base commit to fork from, and resolveWorktreeBase
@@ -2536,6 +2540,12 @@ async function archiveWorkspaceInner(
         // settings. Keep them durable for the workspace's whole lifetime so a
         // later archive never drops an ignored provisioned file.
         ...readProvisionPaths(ws.id),
+        // Transcript rows now keep only these disk references. `.context` is
+        // intentionally ignored, so add the app-owned image subtree explicitly
+        // or archive/restore would leave otherwise-valid chats with dead images.
+        ...(existsSync(path.join(ws.path, ".context/attachments"))
+          ? INTERNAL_ATTACHMENT_ARCHIVE_PATHS
+          : []),
       ]),
     ];
     const archiveSnapshot = await snapshotWorkingTree(

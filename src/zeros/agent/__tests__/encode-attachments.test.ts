@@ -16,9 +16,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const writeImageAttachment = vi.fn();
+const readImageAttachment = vi.fn();
 
 vi.mock("../agent-history-client", () => ({
   writeImageAttachment: (...args: unknown[]) => writeImageAttachment(...args),
+  readImageAttachment: (...args: unknown[]) => readImageAttachment(...args),
 }));
 
 import {
@@ -68,7 +70,10 @@ const VISION: EncodeAttachmentsContext = {
   chatId: "chat-1",
   agentId: "claude",
 };
-const NON_VISION: EncodeAttachmentsContext = { ...VISION, supportsImage: false };
+const NON_VISION: EncodeAttachmentsContext = {
+  ...VISION,
+  supportsImage: false,
+};
 const NO_CWD: EncodeAttachmentsContext = {
   ...NON_VISION,
   cwd: null,
@@ -92,6 +97,7 @@ describe("textAttachmentBlock", () => {
 describe("encodeAttachments — text attachments reach the agent", () => {
   beforeEach(() => {
     writeImageAttachment.mockReset();
+    readImageAttachment.mockReset();
     writeImageAttachment.mockResolvedValue({
       absolutePath: "/repo/.context/attachments/chat-1/shot.png",
       relativePath: ".context/attachments/chat-1/shot.png",
@@ -162,7 +168,10 @@ describe("encodeAttachments — text attachments reach the agent", () => {
 });
 
 describe("encodeAttachments — validation", () => {
-  beforeEach(() => writeImageAttachment.mockReset());
+  beforeEach(() => {
+    writeImageAttachment.mockReset();
+    readImageAttachment.mockReset();
+  });
 
   it("excludes an invalid attachment — and reports it", async () => {
     // agent-attachments.ts documents that "submission filters out anything not
@@ -206,6 +215,7 @@ describe("encodeAttachments — validation", () => {
 describe("encodeAttachments — image branches still work", () => {
   beforeEach(() => {
     writeImageAttachment.mockReset();
+    readImageAttachment.mockReset();
     writeImageAttachment.mockResolvedValue({
       absolutePath: "/repo/.context/attachments/chat-1/shot.png",
       relativePath: ".context/attachments/chat-1/shot.png",
@@ -214,12 +224,25 @@ describe("encodeAttachments — image branches still work", () => {
     });
   });
 
-  it("inlines the image for a vision agent", async () => {
-    const { blocks } = await encodeAttachments([imageAttachment()], VISION);
+  it("persists a vision image and keeps full base64 out of bubble metadata", async () => {
+    const { blocks, bubbleAttachments } = await encodeAttachments(
+      [imageAttachment()],
+      VISION,
+    );
     expect(blocks).toEqual([
       { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
     ]);
-    expect(writeImageAttachment).not.toHaveBeenCalled();
+    expect(writeImageAttachment).toHaveBeenCalledTimes(1);
+    expect(bubbleAttachments).toEqual([
+      {
+        name: "shot.png",
+        mimeType: "image/png",
+        kind: "image",
+        diskPath: ".context/attachments/chat-1/shot.png",
+      },
+    ]);
+    expect(JSON.stringify(bubbleAttachments)).not.toContain("aGVsbG8=");
+    expect(JSON.stringify(bubbleAttachments)).not.toContain("data:image");
   });
 
   it("persists to disk and references it for a non-vision agent", async () => {
@@ -235,11 +258,55 @@ describe("encodeAttachments — image branches still work", () => {
   });
 
   it("falls back to the inline block when there is no cwd", async () => {
-    const { blocks } = await encodeAttachments([imageAttachment()], NO_CWD);
+    const { blocks, bubbleAttachments } = await encodeAttachments(
+      [imageAttachment()],
+      NO_CWD,
+    );
     expect(blocks).toEqual([
       { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
     ]);
     expect(writeImageAttachment).not.toHaveBeenCalled();
+    expect(bubbleAttachments).toEqual([
+      { name: "shot.png", mimeType: "image/png", kind: "image" },
+    ]);
+    expect(JSON.stringify(bubbleAttachments)).not.toContain("aGVsbG8=");
+  });
+
+  it("rehydrates a disk-backed transcript image before edit-resend", async () => {
+    readImageAttachment.mockResolvedValue({
+      base64: "cmVsb2FkZWQ=",
+      mimeType: "image/png",
+      bytes: 8,
+    });
+    const { blocks, bubbleAttachments, skipped } = await encodeAttachments(
+      [
+        imageAttachment({
+          id: "att-edit",
+          data: "",
+          size: 0,
+          diskPath: ".context/attachments/chat-1/original-shot.png",
+        }),
+      ],
+      VISION,
+    );
+    expect(readImageAttachment).toHaveBeenCalledWith({
+      cwd: "/repo",
+      diskPath: ".context/attachments/chat-1/original-shot.png",
+      mimeType: "image/png",
+    });
+    expect(blocks).toEqual([
+      { type: "image", mimeType: "image/png", data: "cmVsb2FkZWQ=" },
+    ]);
+    expect(writeImageAttachment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attachmentId: "att-edit",
+        base64: "cmVsb2FkZWQ=",
+      }),
+    );
+    expect(bubbleAttachments[0]).toMatchObject({
+      diskPath: ".context/attachments/chat-1/shot.png",
+    });
+    expect(skipped).toEqual([]);
   });
 
   it("drops an image whose disk write fails, without losing the others", async () => {
@@ -261,6 +328,12 @@ describe("encodeAttachments — image branches still work", () => {
 describe("encodeAttachments — ordering", () => {
   it("preserves composer order across mixed kinds", async () => {
     writeImageAttachment.mockReset();
+    writeImageAttachment.mockResolvedValue({
+      absolutePath: "/repo/.context/attachments/chat-1/att-img-shot.png",
+      relativePath: ".context/attachments/chat-1/att-img-shot.png",
+      mimeType: "image/png",
+      bytes: 5,
+    });
     const { blocks } = await encodeAttachments(
       [
         textAttachment({ id: "a", name: "one.txt", text: "1" }),

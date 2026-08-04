@@ -926,8 +926,9 @@ export function useComposerEditor(
     () => ({
       getAttachment: (id: string) => attachmentMapRef.current.get(id),
       onPreviewImage: openPreview,
+      cwd,
     }),
-    [openPreview],
+    [openPreview, cwd],
   );
 
   const editorContent = (

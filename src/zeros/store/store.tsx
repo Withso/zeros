@@ -364,8 +364,12 @@ export type PendingChatSubmission = {
    *  src/zeros/bridge/agent-events.ts) — kept as `unknown[]` here to
    *  avoid pulling the bridge type into the store layer. */
   attachments?: unknown[];
+  /** Staged composer attachment records whose image bytes still need to pass
+   *  through the canonical encoder/disk writer. Used by browser captures so
+   *  their full-resolution base64 never becomes bubble metadata. */
+  composerAttachments?: unknown[];
   /** Phase D2 iter 4: metadata to stamp on the user-message bubble
-   *  when the new chat opens — names + thumbnails for the chip row
+   *  when the new chat opens — names + disk references for the chip row
    *  the renderer paints above the user's text. Shape mirrors
    *  `AgentTextMessageAttachment` from
    *  src/zeros/agent/use-agent-session.tsx; kept as `unknown[]` here

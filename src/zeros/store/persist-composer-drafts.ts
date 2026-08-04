@@ -122,11 +122,10 @@ export function loadPersistedDrafts(): PersistedDrafts {
  *    OVERWRITES a previously-good snapshot, so anything it strips
  *    unnecessarily is data the old catch-and-swallow would have preserved.
  *
- *  • `keptOriginals` goes too. Those are the ORIGINAL attachments of a message
- *    being edited, and their `thumbnailUri` is a full base64 data: URL up to
- *    MAX_IMAGE_BYTES. Keeping them was the biggest payload in the snapshot, so
- *    the "degraded" retry could still be megabytes and throw again — leaving
- *    nothing written at all, which is the exact outcome this exists to prevent.
+ *  • `keptOriginals` goes too. New transcript images carry small disk paths,
+ *    but a draft restored from an unmigrated legacy row can still contain a
+ *    full base64 `thumbnailUri`. Keeping that exceptional payload can make the
+ *    degraded retry throw again and leave nothing written at all.
  *
  *  • `json` goes with the bytes. The attachment NODE lives in that document,
  *    so keeping it while dropping the bytes restores a chip with nothing

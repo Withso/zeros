@@ -810,6 +810,35 @@ export async function bridgeFileWrite(
   })) as WriteFileResult;
 }
 
+/** Persist full-resolution image bytes under a chat-scoped, gitignored path.
+ * Transcript payloads retain the returned relative path, never the base64. */
+export async function bridgeAttachmentWrite(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  args: {
+    chatId: string;
+    attachmentId: string;
+    base64: string;
+    mimeType: string;
+    filename: string;
+  },
+): Promise<{
+  absolutePath: string;
+  relativePath: string;
+  mimeType: string;
+  bytes: number;
+}> {
+  return (await workspaceOp(bridge, "attachment.write", {
+    workspaceId,
+    ...args,
+  })) as {
+    absolutePath: string;
+    relativePath: string;
+    mimeType: string;
+    bytes: number;
+  };
+}
+
 // ── Git (read) ──────────────────────────────────────────────
 
 export async function bridgeGitStatus(
