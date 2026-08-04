@@ -27,8 +27,16 @@ packages:
 # read by pnpm. The following keys were ignored: pnpm.onlyBuiltDependencies").
 # `onlyBuiltDependencies` is an allowlist of packages whose postinstall scripts
 # we trust to run. Keep this list tight: native-binding packages
-# (better-sqlite3, node-pty, electron) need it; everything else stays
-# script-blocked for supply-chain safety.
+# (better-sqlite3, node-pty) need it; everything else stays script-blocked for
+# supply-chain safety.
+#
+# `electron` is KEPT here but is now a no-op, on purpose. Electron 42 removed its
+# postinstall binary download (npm postinstall being a favoured supply-chain
+# attack vector) — `electron@43`'s package.json has NO `scripts` field at all.
+# The binary is fetched lazily on the first `electron` run instead, or eagerly by
+# the new `install-electron` bin. The entry stays so that (a) this comment exists
+# where someone would look, and (b) nothing changes if upstream ever reintroduces
+# a build step. See scripts/electron-rebuild-sqlite.cjs for the ABI half.
 onlyBuiltDependencies:
   - better-sqlite3
   - electron
@@ -44,3 +52,26 @@ onlyBuiltDependencies:
   # cursor-sdk adapter points CURSOR_RIPGREP_PATH at it so @cursor/sdk's
   # codebase search / ignore-mapping works (it doesn't bundle ripgrep).
   - "@vscode/ripgrep"
+
+# ──────────────────────────────────────────────────────────
+# overrides — floors that a transitive range is too loose to guarantee
+# ──────────────────────────────────────────────────────────
+#
+# node-abi is a LOOKUP TABLE mapping runtime version → Node ABI number, and it
+# only knows the Electron majors that existed when it was published. Every
+# Electron major bump therefore needs a node-abi new enough to contain the new
+# row, or `pnpm electron:rebuild` dies with:
+#
+#   Could not detect abi for version 43.2.0 and runtime electron
+#
+# which is what happened on the 33 → 43 bump: @electron/rebuild declares
+# `node-abi: ^4.2.0`, a range wide enough to ALLOW a current version but not to
+# require one, so the lockfile happily sat on 4.28.0 (last Electron it knows: 42).
+# A floor here makes the requirement explicit rather than a lockfile accident.
+# 4.33.0 maps electron 43 → ABI 148, which matches node_modules/electron/abi_version.
+#
+# WHEN BUMPING ELECTRON: raise this floor in the same commit. Renovate cannot do
+# it for you — renovate.json disables every package except the three agent CLIs,
+# so node-abi will never be auto-updated and the next major will hit this again.
+overrides:
+  node-abi: "^4.33.0"
