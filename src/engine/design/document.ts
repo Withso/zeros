@@ -2262,7 +2262,8 @@ async function composeFrameSrcDoc(
     `<meta http-equiv="Content-Security-Policy" ` +
     `content="default-src 'none'; script-src ${runtime.cspSource}; ` +
     `style-src 'unsafe-inline'; img-src data: blob:; font-src data:; ` +
-    `connect-src 'none'; object-src 'none'; base-uri 'none';">`;
+    `connect-src 'none'; worker-src 'none'; frame-src 'none'; ` +
+    `object-src 'none'; base-uri 'none'; form-action 'none';">`;
   const withPolicy = insertDesignHeadMarkup(sanitized, csp);
   return {
     sourceVersion,

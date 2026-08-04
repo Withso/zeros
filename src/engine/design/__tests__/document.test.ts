@@ -511,6 +511,17 @@ describe("design document", () => {
     expect(snapshot.lint.checkedFiles).toEqual([created.file]);
   });
 
+  it("blocks forms, nested frames, and workers in inline frame documents", async () => {
+    await initializeDesignDocument(root);
+    await createDesignFrame(root, { title: "Restricted frame" });
+
+    const srcDoc = (await readDesignWorkspaceSnapshot(root)).frames[0]!.srcDoc;
+
+    expect(srcDoc).toContain("form-action 'none'");
+    expect(srcDoc).toContain("frame-src 'none'");
+    expect(srcDoc).toContain("worker-src 'none'");
+  });
+
   it("maps stable oids to exact parse5 source ranges for future surgical writes", async () => {
     await initializeDesignDocument(root);
     await writeFile(
