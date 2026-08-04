@@ -330,6 +330,7 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
           onCancel={exitEdit}
           editToolbarPills={editToolbarPills}
           agentContext={editAgentContext}
+          surfaceActive={surfaceActive}
         />
       </div>
     );
@@ -605,6 +606,7 @@ function TurnPromptEditor({
   onCancel,
   editToolbarPills,
   agentContext,
+  surfaceActive,
 }: {
   originalText: string;
   originalAttachments?: AgentTextMessageAttachment[];
@@ -620,6 +622,7 @@ function TurnPromptEditor({
   onCancel: () => void;
   editToolbarPills?: React.ReactNode;
   agentContext?: EditAgentContext;
+  surfaceActive: boolean;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -659,6 +662,7 @@ function TurnPromptEditor({
     agentSupportsImage: agentContext?.agentSupportsImage,
     modelId: agentContext?.modelId ?? null,
     cwd: agentContext?.cwd ?? null,
+    attachmentImagesActive: surfaceActive,
     originUrl: agentContext?.originUrl ?? null,
     availableCommands: agentContext?.availableCommands ?? [],
     placeholder: "Edit your message…",

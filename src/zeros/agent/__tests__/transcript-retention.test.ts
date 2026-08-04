@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -54,5 +56,19 @@ describe("transcript retention safety", () => {
     expect(isCurrentTranscriptRequest(requests, "chat-a", newA)).toBe(true);
     releaseTranscriptRequest(requests, "chat-a", newA);
     expect(requests.has("chat-a")).toBe(false);
+  });
+
+  it("clears the retained deck only on unmount, not on context identity churn", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "src/shell/column2-chat-deck.tsx"),
+      "utf8",
+    );
+    expect(source).toContain("setRetainedChatIdsRef");
+    expect(source).toMatch(
+      /useEffect\(\(\) => \(\) => setRetainedChatIdsRef\.current\(\[\]\), \[\]\)/,
+    );
+    expect(source).not.toContain(
+      "useEffect(() => () => sessions.setRetainedChatIds([]), [sessions])",
+    );
   });
 });

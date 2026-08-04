@@ -52,6 +52,8 @@
 
 import React from "react";
 
+import { isElementActuallyVisible } from "@/zeros/utils/element-visibility";
+
 import { cn } from "@/zeros/ui/cn";
 
 // ── Shared tuning (all variants, all sizes) ───────────────
@@ -325,10 +327,7 @@ export function ZerosSpinner({
         // panels) stay mounted; skip the re-render while invisible. The phase
         // derives from the shared clock, so the first visible frame lands on
         // the exact right pose — no drift from skipped frames.
-        if (
-          typeof origin.checkVisibility === "function" &&
-          !origin.checkVisibility()
-        ) {
+        if (!isElementActuallyVisible(origin)) {
           raf = window.requestAnimationFrame(tick);
           return;
         }
@@ -358,13 +357,7 @@ export function ZerosSpinner({
       // Same hidden-deck guard as the synced path: a free-running spinner
       // resumes from its prior pose, which is fine for an orbit.
       const el = restOriginRef.current;
-      if (
-        el &&
-        typeof el.checkVisibility === "function" &&
-        !el.checkVisibility()
-      ) {
-        return;
-      }
+      if (el && !isElementActuallyVisible(el)) return;
       setShapeIndex((i) => (i + 1) % shapes.length);
     }, stepMs);
     return () => window.clearInterval(id);

@@ -583,6 +583,11 @@ export const WorkspaceFileTree = React.forwardRef<
     const ignoredSet = new Set(appliedIgnored);
     if (applied && applied.tracked === trackedPaths) {
       const plan = planIgnoredPathDelta(applied.ignored, ignoredSet);
+      if (plan.requiresReset) {
+        resetPathsSafely(paths, expandedDirsRef.current);
+        appliedRef.current = { tracked: trackedPaths, ignored: ignoredSet };
+        return;
+      }
       if (plan.operations.length > 0) {
         try {
           model.batch(plan.operations);

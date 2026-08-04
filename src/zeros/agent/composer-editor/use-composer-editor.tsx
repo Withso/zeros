@@ -117,6 +117,9 @@ export interface UseComposerEditorOpts {
   modelId: string | null;
   /** cwd the @-file list is read from. */
   cwd: string | null;
+  /** False while a retained chat is hidden, so reconstructed image pills do
+   *  not acquire and pin full-resolution disk blobs. Defaults true. */
+  attachmentImagesActive?: boolean;
   /** Default true: attachments stage into `<cwd>/.context-graph/` the moment
    *  they're added, and unstage when their chip is removed (the Context tab's
    *  attach-time sync). Set false on surfaces whose cwd is NOT the workspace
@@ -261,6 +264,7 @@ export function useComposerEditor(
   // agentName / agentSupportsImage / modelId are read at call time via optsRef
   // (so the once-built editor always validates against the current agent/model).
   const { agentId, cwd, originUrl, availableCommands, placeholder } = opts;
+  const attachmentImagesActive = opts.attachmentImagesActive !== false;
 
   // ── latest-value refs (read by stable closures + the once-built editor) ──
   const optsRef = useRef(opts);
@@ -1053,8 +1057,9 @@ export function useComposerEditor(
       getAttachment: (id: string) => attachmentMapRef.current.get(id),
       onPreviewImage: openPreview,
       cwd,
+      attachmentImagesActive,
     }),
-    [openPreview, cwd],
+    [openPreview, cwd, attachmentImagesActive],
   );
 
   const editorContent = (
