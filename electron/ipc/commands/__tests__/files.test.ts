@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   mkdtempSync,
   mkdirSync,
+  realpathSync,
   writeFileSync,
   rmSync,
   symlinkSync,
@@ -9,6 +10,15 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+
+// macOS's tmpdir() is itself a symlink (/var/folders/… → /private/var/folders/…),
+// so an un-resolved mkdtemp path never equals what read_image_thumbnail hands to
+// Electron — it deliberately passes the realpath'd target so a symlink swap
+// cannot redirect the decode after validation. Resolve every fixture root here
+// instead: on Linux this is a no-op, and on the shipping platform it keeps the
+// assertions comparing real paths to real paths.
+const realTempDir = (prefix: string): string =>
+  realpathSync(mkdtempSync(path.join(tmpdir(), prefix)));
 
 // H3: read_file now anchors the renderer-supplied cwd to the engine's
 // currentRoot() (the open project / a worktree) so it can't read arbitrary host
@@ -95,7 +105,7 @@ function rotatedJpegFixture(width: number, height: number): Buffer {
 describe("read_file", () => {
   let dir = "";
   beforeEach(() => {
-    dir = mkdtempSync(path.join(tmpdir(), "zeros-files-"));
+    dir = realTempDir("zeros-files-");
     sidecarMock.root = dir; // engine "rooted" at the test dir → reads are in-workspace
     nativeImageMock.thumbnail.isEmpty.mockReset().mockReturnValue(false);
     nativeImageMock.thumbnail.getSize
@@ -158,7 +168,7 @@ describe("read_file", () => {
   it("refuses a relative path that escapes the workspace", () => {
     // A real file just outside cwd, so the gate (not a missing-file error)
     // is what rejects it.
-    const outsideDir = mkdtempSync(path.join(tmpdir(), "zeros-file-outside-"));
+    const outsideDir = realTempDir("zeros-file-outside-");
     const escape = path.join(outsideDir, "escape.ts");
     writeFileSync(escape, "secret");
     try {
@@ -451,9 +461,7 @@ describe("read_file", () => {
   });
 
   it("refuses a thumbnail symlink that resolves outside the workspace", async () => {
-    const outsideDir = mkdtempSync(
-      path.join(tmpdir(), "zeros-thumbnail-outside-"),
-    );
+    const outsideDir = realTempDir("zeros-thumbnail-outside-");
     const outside = path.join(outsideDir, "outside.png");
     writeFileSync(outside, "outside");
     symlinkSync(outside, path.join(dir, "outside-linked.png"));
