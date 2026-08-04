@@ -38,6 +38,7 @@ afterEach(async () => {
 async function startTransport(opts: {
   token?: string;
   allowedOrigins?: string[];
+  handleHttp?: ConstructorParameters<typeof LocalTransport>[0]["handleHttp"];
 }): Promise<LocalTransport> {
   const t = new LocalTransport({ port: nextBasePort, ...opts });
   nextBasePort += 10; // disjoint base per transport so the port walk never collides
@@ -102,12 +103,16 @@ function httpRequest(
     origin?: string;
     host?: string;
     token?: string;
+    engineToken?: string;
   },
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const headers: Record<string, string> = {};
     if (opts.origin !== undefined) headers["Origin"] = opts.origin;
     if (opts.host !== undefined) headers["Host"] = opts.host;
+    if (opts.engineToken !== undefined) {
+      headers["X-Zeros-Engine-Token"] = opts.engineToken;
+    }
     const reqPath = opts.token ? `${opts.path}?token=${opts.token}` : opts.path;
     const req = http.request(
       {
@@ -251,6 +256,50 @@ describe("LocalTransport — C1 HTTP route gate", () => {
       host: "attacker.example",
     });
     expect(res.status).toBe(403);
+  });
+
+  it("keeps design resources behind the host-only launch token", async () => {
+    const t = await startTransport({
+      token: TOKEN,
+      allowedOrigins: [DEV_ORIGIN],
+      handleHttp: async ({ url }) =>
+        url.pathname === "/design/ws-a/home.html"
+          ? {
+              status: 200,
+              headers: { "Content-Type": "text/html" },
+              body: Buffer.from("<h1>Design</h1>"),
+            }
+          : null,
+    });
+    expect(
+      (
+        await httpRequest(t.actualPort, {
+          path: "/design/ws-a/home.html",
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await httpRequest(t.actualPort, {
+          path: "/design/ws-a/home.html",
+          engineToken: "wrong",
+        })
+      ).status,
+    ).toBe(403);
+    const ok = await httpRequest(t.actualPort, {
+      path: "/design/ws-a/home.html",
+      engineToken: TOKEN,
+    });
+    expect(ok).toEqual({ status: 200, body: "<h1>Design</h1>" });
+    expect(
+      (
+        await httpRequest(t.actualPort, {
+          path: "/design/ws-a/home.html",
+          engineToken: TOKEN,
+          origin: "https://evil.example",
+        })
+      ).status,
+    ).toBe(403);
   });
 });
 

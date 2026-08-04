@@ -6,8 +6,9 @@
 //   │ ⑃ Create PR   │ ▾ │
 //   └───────────────┴───┘
 //
-// Left segment (primary): sends a complete create-PR brief to the active agent,
-// which reviews the full change set and decides the commit/title/description.
+// Left segment (primary): sends a complete create-PR brief to the active agent
+// for code workspaces. Design workspaces have no coding chat, so their primary
+// segment uses the deterministic direct path.
 // Dropdown:
 //   • Create draft PR      — the same agent path, with draft=true.
 //   • Create PR directly   — deterministic engine path; auto-commits if dirty.
@@ -129,13 +130,15 @@ export function CreatePrButton({
   const sendToChat = useSendToActiveChat();
   const dispatch = useWorkspaceDispatch();
   const busy = usePrCreateActionClaimed(workspace.id);
+  const directOnly = workspace.kind === "design";
   // The repo's configured push/PR remote — the brief must name the same
   // remote the engine's own git ops use.
   const remote = useGitRemote(workspace.repoRoot);
   // Parked while the agent has a turn in flight: the prompt would queue
   // behind the very turn still reshaping the branch, and the PR brief's
   // uncommitted/upstream counts would describe a half-done tree.
-  const agentWorking = useWorkspaceAgentWorking(workspace);
+  const workspaceAgentWorking = useWorkspaceAgentWorking(workspace);
+  const agentWorking = !directOnly && workspaceAgentWorking;
   const inert = busy || disabled === true || agentWorking;
   // Guards read LIVE state through a ref, not through a captured render.
   // "Ask agent" is reachable from a toast that outlives the click that raised
@@ -346,10 +349,14 @@ export function CreatePrButton({
           const message = describeAutoCommitBlock(err.blocker);
           toast.error(message.title, {
             description: message.description,
-            action: {
-              label: "Ask agent",
-              onClick: () => void askAgentToCreate(draft),
-            },
+            ...(directOnly
+              ? {}
+              : {
+                  action: {
+                    label: "Ask agent",
+                    onClick: () => void askAgentToCreate(draft),
+                  },
+                }),
           });
           return;
         }
@@ -364,7 +371,7 @@ export function CreatePrButton({
           });
           toast.error(message.title, {
             description: message.description,
-            ...(message.canAskAgent
+            ...(message.canAskAgent && !directOnly
               ? {
                   action: {
                     label: "Ask agent",
@@ -400,6 +407,7 @@ export function CreatePrButton({
       workspace.repoSlug,
       workspace.path,
       askAgentToCreate,
+      directOnly,
     ],
   );
 
@@ -443,7 +451,9 @@ export function CreatePrButton({
             ? AGENT_WORKING_REASON
             : disabled && disabledReason
               ? disabledReason
-              : "Send PR creation to the agent"
+              : directOnly
+                ? "Create the pull request directly"
+                : "Send PR creation to the agent"
         }
       >
         {/* span keeps the tooltip live over a disabled button (disabled
@@ -453,7 +463,9 @@ export function CreatePrButton({
             type="button"
             className={MAIN_BTN_CLS}
             disabled={inert}
-            onClick={() => void askAgentToCreate(false)}
+            onClick={() =>
+              void (directOnly ? createDirect(false) : askAgentToCreate(false))
+            }
           >
             {busy ? (
               <ZerosSpinner size={14} />
@@ -482,14 +494,18 @@ export function CreatePrButton({
           sideOffset={4}
           className="min-w-[190px]"
         >
-          <DropdownMenuItem onSelect={() => void askAgentToCreate(true)}>
-            <GitPullRequestDraft className={cn("text-fg2 size-3.5")} />
-            <span>Create draft PR</span>
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => void createDirect(false)}>
-            <GitPullRequestCreate className="text-fg2 size-3.5" />
-            <span>Create PR directly</span>
-          </DropdownMenuItem>
+          {!directOnly ? (
+            <>
+              <DropdownMenuItem onSelect={() => void askAgentToCreate(true)}>
+                <GitPullRequestDraft className={cn("text-fg2 size-3.5")} />
+                <span>Create draft PR</span>
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => void createDirect(false)}>
+                <GitPullRequestCreate className="text-fg2 size-3.5" />
+                <span>Create PR directly</span>
+              </DropdownMenuItem>
+            </>
+          ) : null}
           <DropdownMenuItem onSelect={() => void createDirect(true)}>
             <GitPullRequestDraft className="text-fg2 size-3.5" />
             <span>Create draft directly</span>

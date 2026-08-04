@@ -167,6 +167,34 @@ import {
   type WritableLayer,
 } from "../settings/ops";
 import { getTeamContextMeta, setTeamContext } from "../settings/team-context";
+import {
+  createDesignFrame,
+  deleteDesignFrame,
+  DESIGN_DIRECTORY_NAME,
+  duplicateDesignFrame,
+  insertDesignAsset,
+  lintDesignDocument,
+  listDesignFrames,
+  readDesignFrame,
+  readDesignElementOffsetMap,
+  readDesignFrameRenderIdentity,
+  readDesignFrameSelectionIdentity,
+  readDesignWorkspaceSnapshot,
+  readDesignTokens,
+  renameDesignFrame,
+  setDesignNodeText,
+  updateDesignFrameGeometry,
+  updateDesignNodeStyles,
+  updateDesignToken,
+  writeDesignNodeHtml,
+  type DesignLintViolation,
+} from "../design/document";
+import { setDesignRuntimeAudit } from "../design/runtime-audits";
+import {
+  forgetDesignScreenshots,
+  setDesignScreenshot,
+} from "../design/screenshots";
+import { forgetDesignSelection, setDesignSelection } from "../design/selection";
 import { scanNativeMcpConfigs } from "../agents/mcp-scan";
 import { resolveMcpServers } from "../agents/mcp-registry";
 import type { McpGateway } from "../agents/gateway/server";
@@ -452,11 +480,22 @@ const WRITE_OPS = new Set<string>([
 const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "file.write",
   "attachment.write",
-  // These are normally reads, but a window containing a legacy data-URL image
-  // externalizes it into `.context-graph` before returning. Register the whole
+  // These are normally reads, but a window containing a legacy transcript
+  // image copies it into `.context-graph` before returning. Register the whole
   // operation so archive/delete cannot move the checkout mid-migration.
   "messages.window",
   "messages.windowOlder",
+  "design.frame.create",
+  "design.frame.rename",
+  "design.frame.duplicate",
+  "design.frame.delete",
+  "design.canvas.update",
+  "design.node.styles",
+  "design.node.text",
+  "design.node.html",
+  "design.asset.insert",
+  "design.token.update",
+  "design.save",
   // Create/move files under `.context-graph/` — archive's snapshot force-adds
   // that tree, so a mid-flight scaffold or share-toggle must drain first.
   "context.graph.scaffold",
@@ -503,6 +542,46 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "workspace.continueOnNewBranch",
   "workspace.proposeBranchName",
   "detach.start",
+]);
+
+/** Design workspaces have a dedicated document mutation/save path. Generic
+ * checkout/index writers could otherwise make Git partially rewrite an
+ * ACL-locked tree (Git may still exit zero), so reject them before dispatch.
+ * Fetch/push and target-branch metadata remain separate, non-checkout actions. */
+const DESIGN_WORKSPACE_BLOCKED_MUTATIONS = new Set<string>([
+  "file.write",
+  "context.graph.scaffold",
+  "context.graph.setShared",
+  "workspace.setWorkingDirectories",
+  "git.stage",
+  "git.unstage",
+  "git.discard",
+  "git.clean",
+  "git.commit",
+  "git.pull",
+  "git.rebase",
+  "git.stashSave",
+  "git.stashPop",
+  "git.checkoutBranch",
+  "git.createBranch",
+  "git.renameBranch",
+  "git.reset",
+  "git.restore",
+  "git.merge",
+  "git.cherryPick",
+  "git.revert",
+  "git.continue",
+  "git.abort",
+  "git.stashApply",
+  "git.stashDrop",
+  "git.deleteBranch",
+  "git.stageHunk",
+  "git.unstageHunk",
+  "git.discardHunk",
+  "git.tagCreate",
+  "git.tagDelete",
+  "turns.reset",
+  "turns.undoReset",
 ]);
 
 /** Read (non-mutating) ops a RELAY client is permitted to invoke — the
@@ -671,6 +750,163 @@ const optNum = (p: Params, k: string): number | undefined =>
     : undefined;
 const optBool = (p: Params, k: string): boolean | undefined =>
   typeof p[k] === "boolean" ? (p[k] as boolean) : undefined;
+
+function hasAsciiControl(value: string, allowTextWhitespace = false): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code === 127) return true;
+    if (
+      code < 32 &&
+      (!allowTextWhitespace || (code !== 9 && code !== 10 && code !== 13))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function designSelectionStrings(
+  value: unknown,
+  label: string,
+  limit: number,
+  maxLength: number,
+  keepMostSpecific = false,
+): string[] {
+  if (!Array.isArray(value) || (!keepMostSpecific && value.length > limit)) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: `${label} must be an array of at most ${limit} strings`,
+    });
+  }
+  const candidates = keepMostSpecific ? value.slice(-limit) : value;
+  const strings = candidates.filter(
+    (item): item is string =>
+      typeof item === "string" &&
+      item.length > 0 &&
+      item.trim().length > 0 &&
+      item.length <= maxLength &&
+      !hasAsciiControl(item),
+  );
+  if (strings.length !== candidates.length) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: `${label} contains an invalid string`,
+    });
+  }
+  return strings;
+}
+
+function designSelectionRects(
+  value: unknown,
+): Array<{ x: number; y: number; width: number; height: number }> {
+  if (!Array.isArray(value) || value.length > 16) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: "rects must be an array of at most 16 rectangles",
+    });
+  }
+  return value.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message: "rects contains an invalid rectangle",
+      });
+    }
+    const rect = item as Record<string, unknown>;
+    const values = [rect.x, rect.y, rect.width, rect.height];
+    if (
+      !values.every(
+        (entry) => typeof entry === "number" && Number.isFinite(entry),
+      ) ||
+      (rect.width as number) < 0 ||
+      (rect.height as number) < 0
+    ) {
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message: "rects contains non-finite or negative geometry",
+      });
+    }
+    return {
+      x: rect.x as number,
+      y: rect.y as number,
+      width: rect.width as number,
+      height: rect.height as number,
+    };
+  });
+}
+
+function designSelectionStyles(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const entries = Object.entries(value);
+  if (entries.length > 64) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: "keyComputedStyles contains too many properties",
+    });
+  }
+  const styles: Record<string, string> = {};
+  for (const [key, item] of entries) {
+    if (
+      !/^[A-Za-z][A-Za-z0-9-]{0,63}$/.test(key) ||
+      typeof item !== "string" ||
+      item.length > 512 ||
+      hasAsciiControl(item, true)
+    ) {
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message: "keyComputedStyles contains an invalid property",
+      });
+    }
+    styles[key] = item;
+  }
+  return styles;
+}
+
+function designMutationStyles(value: unknown): Record<string, string | null> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: "styles must be an object",
+    });
+  }
+  const entries = Object.entries(value);
+  if (entries.length === 0 || entries.length > 64) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: "styles must contain between 1 and 64 properties",
+    });
+  }
+  const styles: Record<string, string | null> = {};
+  for (const [property, item] of entries) {
+    if (
+      property.length === 0 ||
+      property.length > 128 ||
+      (typeof item !== "string" && item !== null) ||
+      (typeof item === "string" &&
+        (item.length > 2_048 || hasAsciiControl(item, true)))
+    ) {
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message: "styles contains an invalid property or value",
+      });
+    }
+    styles[property] = item;
+  }
+  return styles;
+}
+
+const workspaceKind = (
+  p: Params,
+  key = "kind",
+): "code" | "design" | undefined => {
+  const value = p[key];
+  if (value === undefined || value === null || value === "") return undefined;
+  if (value === "code" || value === "design") return value;
+  throw new GitError({
+    code: "VALIDATION_FAILED",
+    message: `'${key}' must be "code" or "design"`,
+  });
+};
 const strArr = (p: Params, k: string): string[] =>
   Array.isArray(p[k])
     ? (p[k] as unknown[]).filter((x): x is string => typeof x === "string")
@@ -691,6 +927,16 @@ export class WorkspaceService {
   private gatewayAccessor: (() => McpGateway | null) | null = null;
   setGatewayAccessor(fn: () => McpGateway | null): void {
     this.gatewayAccessor = fn;
+  }
+  /** Per-launch capability used only by the local Electron custom protocol.
+   * Remote renderers use srcDoc and never receive this host-local authority. */
+  private designProtocolCapabilityProvider:
+    | ((workspaceId: string) => string)
+    | null = null;
+  setDesignProtocolCapabilityProvider(
+    fn: (workspaceId: string) => string,
+  ): void {
+    this.designProtocolCapabilityProvider = fn;
   }
   /** Why the gateway isn't running when it should be (start failure) — for the
    *  "Gateway unavailable" status (P0-3). null = healthy / not expected. */
@@ -1032,6 +1278,43 @@ export class WorkspaceService {
     }
   }
 
+  /** Resolve and kind-check a design workspace from its opaque id. This is the
+   * shared trust boundary for renderer design reads/writes: a caller can never
+   * point a design operation at an arbitrary host directory or a code
+   * workspace. */
+  private resolveDesignWorkspace(
+    workspaceId: string,
+    remote: boolean,
+  ): Workspace {
+    if (remote) {
+      throw new GitError({
+        code: "REMOTE_RESTRICTED",
+        message: "Design workspaces are available only in the desktop app.",
+      });
+    }
+    const cwd = this.resolveReadCwd(workspaceId, remote);
+    const workspace = getWorkspaceById(workspaceId);
+    if (!workspace || workspace.kind !== "design" || workspace.path !== cwd) {
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message: "This operation requires a design workspace.",
+      });
+    }
+    return workspace;
+  }
+
+  private async readDesignSnapshot(workspace: Workspace, remote: boolean) {
+    const snapshot = await readDesignWorkspaceSnapshot(workspace.path, {
+      writeBack: !remote,
+    });
+    return {
+      ...snapshot,
+      protocolCapability: remote
+        ? null
+        : (this.designProtocolCapabilityProvider?.(workspace.id) ?? null),
+    };
+  }
+
   /** Canonicalize a pty/agent cwd token to its managed workspace id. The token
    *  may be a workspace ID (the web's opaque form) OR a real host PATH — the
    *  relaxed redaction sends real paths to trusted devices, and the desktop
@@ -1167,12 +1450,16 @@ export class WorkspaceService {
    *  SAME mapping the list redaction uses (no drift). Unknown chat / no
    *  restrictions → false (allowed). Local clients never reach this. */
   private remoteChatRestricted(chatId: string): boolean {
-    const restricted = listRemoteRestrictedWorkspaceIds();
-    if (restricted.size === 0) return false;
     const chat = listChats().find((c) => c.id === chatId);
     if (!chat) return false;
+    return this.remoteFolderRestricted(chat.folder);
+  }
+
+  private remoteFolderRestricted(folder: string): boolean {
+    const restricted = listRemoteRestrictedWorkspaceIds();
+    if (restricted.size === 0) return false;
     return restricted.has(
-      this.redactChatFolderForRemote(chat.folder, listWorkspaces({})),
+      this.redactChatFolderForRemote(folder, listWorkspaces({})),
     );
   }
 
@@ -1221,15 +1508,26 @@ export class WorkspaceService {
     );
     if (lifecycleMutationWorkspaceId) {
       const workspace = getWorkspaceById(lifecycleMutationWorkspaceId);
-      // Transcript windows remain readable while archived. Only their optional
-      // legacy-image rewrite needs a live checkout, and the handler below skips
-      // that rewrite when legacyImageMigrationCwd returns null.
-      if (
-        workspace &&
-        op !== "messages.window" &&
-        op !== "messages.windowOlder"
-      ) {
-        this.assertWorkspaceProcessStartAllowed(workspace);
+      if (workspace) {
+        // Transcript windows remain readable while archived. Only their
+        // optional legacy-image rewrite needs a live checkout, and the handler
+        // below skips that rewrite when legacyImageMigrationCwd returns null.
+        const isTranscriptWindow =
+          op === "messages.window" || op === "messages.windowOlder";
+        if (!isTranscriptWindow) {
+          this.assertWorkspaceProcessStartAllowed(workspace);
+        }
+        if (
+          workspace.kind === "design" &&
+          DESIGN_WORKSPACE_BLOCKED_MUTATIONS.has(op)
+        ) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: `${op} is unavailable in a design workspace.`,
+            remediation:
+              "Edit under Zeros Design/ and use Save designs; change the target branch as metadata in its separate picker.",
+          });
+        }
       }
     }
     // H3: a remote client may freely edit its OWN chat metadata, but it must not
@@ -1237,17 +1535,53 @@ export class WorkspaceService {
     // chat is hidden from its list, so its data must be non-destroyable too).
     // Gate the destructive metadata ops on the target chat's workspace before the
     // switch reaches them. (chats.upsert/bulkUpsert add/move the client's own
-    // rows and carry no existing-chat target, so they're not gated here.)
+    // rows, so their requested destination folders are checked separately.)
     if (remote) {
+      const restricted = listRemoteRestrictedWorkspaceIds();
+      const targetWorkspaceId = optStr(params, "workspaceId");
+      if (targetWorkspaceId && restricted.has(targetWorkspaceId)) {
+        throw new GitError({
+          code: "REMOTE_RESTRICTED",
+          message: "This workspace is restricted from remote access.",
+        });
+      }
       const targetChatId =
         op === "chats.delete"
           ? optStr(params, "id")
-          : op === "messages.clear" ||
-              op === "messages.truncateFrom" ||
-              op === "messages.import"
-            ? optStr(params, "chatId")
-            : undefined;
+          : optStr(params, "chatId");
       if (targetChatId && this.remoteChatRestricted(targetChatId)) {
+        throw new GitError({
+          code: "REMOTE_RESTRICTED",
+          message: "This chat is in a workspace restricted from remote access.",
+        });
+      }
+      const directFolder =
+        op === "chats.summariesForFolder" || op === "messages.search"
+          ? optStr(params, "folder")
+          : undefined;
+      const chatInputs =
+        op === "chats.upsert"
+          ? [params.chat]
+          : op === "chats.bulkUpsert" && Array.isArray(params.chats)
+            ? params.chats
+            : [];
+      const targetsRestrictedFolder = chatInputs.some((input) => {
+        if (!input || typeof input !== "object") return false;
+        const folder = (input as Record<string, unknown>).folder;
+        return (
+          typeof folder === "string" && this.remoteFolderRestricted(folder)
+        );
+      });
+      const targetsRestrictedChat = chatInputs.some((input) => {
+        if (!input || typeof input !== "object") return false;
+        const id = (input as Record<string, unknown>).id;
+        return typeof id === "string" && this.remoteChatRestricted(id);
+      });
+      if (
+        (directFolder && this.remoteFolderRestricted(directFolder)) ||
+        targetsRestrictedFolder ||
+        targetsRestrictedChat
+      ) {
         throw new GitError({
           code: "REMOTE_RESTRICTED",
           message: "This chat is in a workspace restricted from remote access.",
@@ -1300,6 +1634,508 @@ export class WorkspaceService {
           params.restricted === true || params.restricted === "true",
         );
         return { ok: true };
+      }
+      // ── Design document ────────────────────────────────────
+      // Renderer and first-party MCP calls share this exact interpretation.
+      // Every operation starts from an opaque workspace id and kind check; no
+      // caller-supplied host path can escape into the filesystem layer.
+      case "design.frames": {
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          remote,
+        );
+        return {
+          frames: await listDesignFrames(workspace.path, {
+            writeBack: !remote,
+          }),
+        };
+      }
+      case "design.frame": {
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          remote,
+        );
+        return {
+          frame: await readDesignFrame(
+            workspace.path,
+            reqStr(params, "frame"),
+            optNum(params, "depth") ?? 4,
+            { writeBack: !remote },
+          ),
+        };
+      }
+      case "design.snapshot": {
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          remote,
+        );
+        return {
+          snapshot: await this.readDesignSnapshot(workspace, remote),
+        };
+      }
+      case "design.tokens": {
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          remote,
+        );
+        return { tokens: await readDesignTokens(workspace.path) };
+      }
+      case "design.token.update": {
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          remote,
+        );
+        const theme = params.theme;
+        if (theme !== null && typeof theme !== "string") {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "Design token theme must be a string or null.",
+          });
+        }
+        const mutation = await updateDesignToken(workspace.path, {
+          name: reqStr(params, "name"),
+          theme,
+          value: reqStr(params, "value"),
+          sourceVersion: reqStr(params, "sourceVersion"),
+        });
+        return {
+          mutation,
+          snapshot: await this.readDesignSnapshot(workspace, remote),
+        };
+      }
+      case "design.lint": {
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          remote,
+        );
+        return {
+          report: await lintDesignDocument(
+            workspace.path,
+            optStr(params, "frame"),
+            { healOids: !remote },
+          ),
+        };
+      }
+      case "design.selection.set": {
+        if (remote) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "Canvas selection is local to the desktop.",
+          });
+        }
+        const workspaceId = reqStr(params, "workspaceId");
+        const workspace = this.resolveDesignWorkspace(workspaceId, false);
+        const selectionVersion = reqNum(params, "selectionVersion");
+        if (!Number.isSafeInteger(selectionVersion) || selectionVersion <= 0) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "selectionVersion must be a positive safe integer.",
+          });
+        }
+        const frameFile = optStr(params, "frame");
+        if (!frameFile) {
+          setDesignSelection(workspaceId, null, selectionVersion);
+          return { ok: true };
+        }
+        const frame = await readDesignFrameSelectionIdentity(
+          workspace.path,
+          frameFile,
+        );
+        const sourceVersion = reqStr(params, "sourceVersion");
+        if (
+          !/^[a-f0-9]{24}$/.test(sourceVersion) ||
+          sourceVersion !== frame.sourceVersion
+        ) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: `Design selection source changed before publication: ${frame.file}`,
+          });
+        }
+        const nodeIds = designSelectionStrings(
+          params.nodeIds ?? [],
+          "nodeIds",
+          16,
+          256,
+        );
+        if (nodeIds.length > 0) {
+          const validNodeIds = new Set(frame.nodeIds);
+          const missing = nodeIds.find((nodeId) => !validNodeIds.has(nodeId));
+          if (missing) {
+            throw new GitError({
+              code: "VALIDATION_FAILED",
+              message: `Design element not found in ${frame.file}: ${missing}`,
+            });
+          }
+        }
+        const breadcrumb = designSelectionStrings(
+          params.breadcrumb ?? [],
+          "breadcrumb",
+          16,
+          160,
+          true,
+        );
+        const rects = designSelectionRects(params.rects ?? []);
+        const updatedAt = reqNum(params, "updatedAt");
+        if (!Number.isSafeInteger(updatedAt) || updatedAt <= 0) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "updatedAt must be a positive safe integer.",
+          });
+        }
+        if (nodeIds.length > 0 && rects.length !== nodeIds.length) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "Element selections require one rectangle per nodeId.",
+          });
+        }
+        setDesignSelection(
+          workspaceId,
+          {
+            frame: frame.file,
+            filePath: `${DESIGN_DIRECTORY_NAME}/${frame.file}`,
+            sourceVersion,
+            nodeIds,
+            breadcrumb: breadcrumb.length > 0 ? breadcrumb : [frame.title],
+            rects:
+              rects.length > 0
+                ? rects
+                : [
+                    {
+                      x: frame.x,
+                      y: frame.y,
+                      width: frame.width,
+                      height: frame.height,
+                    },
+                  ],
+            keyComputedStyles: designSelectionStyles(params.keyComputedStyles),
+            updatedAt,
+          },
+          selectionVersion,
+        );
+        return { ok: true };
+      }
+      case "design.screenshot.set": {
+        if (remote) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "Design screenshots are local to the desktop canvas.",
+          });
+        }
+        const workspaceId = reqStr(params, "workspaceId");
+        const workspace = this.resolveDesignWorkspace(workspaceId, false);
+        const frameFile = reqStr(params, "frame");
+        const frame = await readDesignFrameRenderIdentity(
+          workspace.path,
+          frameFile,
+        );
+        const sourceVersion = reqStr(params, "sourceVersion");
+        if (
+          !/^[a-f0-9]{24}$/.test(sourceVersion) ||
+          sourceVersion !== frame.sourceVersion
+        ) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: `Design screenshot source changed before capture completed: ${frame.file}`,
+          });
+        }
+        const nodeId = optStr(params, "nodeId") ?? null;
+        if (nodeId) {
+          const validNodeIds = new Set(
+            (await readDesignElementOffsetMap(workspace.path, frame.file)).map(
+              (offset) => offset.oid,
+            ),
+          );
+          if (!validNodeIds.has(nodeId)) {
+            throw new GitError({
+              code: "VALIDATION_FAILED",
+              message: `Design element not found in ${frame.file}: ${nodeId}`,
+            });
+          }
+        }
+        const mimeType = reqStr(params, "mimeType");
+        if (
+          mimeType !== "image/png" &&
+          mimeType !== "image/jpeg" &&
+          mimeType !== "image/webp"
+        ) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: `Unsupported design screenshot type: ${mimeType}`,
+          });
+        }
+        setDesignScreenshot({
+          workspaceId,
+          frame: frame.file,
+          nodeId,
+          mimeType,
+          data: reqStr(params, "data"),
+          width: reqNum(params, "width"),
+          height: reqNum(params, "height"),
+          scale: reqNum(params, "scale"),
+          capturedAt: Date.now(),
+          sourceVersion,
+        });
+        return { ok: true };
+      }
+      case "design.runtime.audit": {
+        if (remote) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "Design runtime audits are local to the desktop canvas.",
+          });
+        }
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          false,
+        );
+        const frame = await readDesignFrameRenderIdentity(
+          workspace.path,
+          reqStr(params, "frame"),
+        );
+        const sourceVersion = reqStr(params, "sourceVersion");
+        if (sourceVersion !== frame.sourceVersion) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: `Design runtime audit source changed before publication: ${frame.file}`,
+          });
+        }
+        if (!Array.isArray(params.warnings) || params.warnings.length > 128) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "Design runtime warnings must be a bounded array.",
+          });
+        }
+        const offsets = new Map(
+          (await readDesignElementOffsetMap(workspace.path, frame.file)).map(
+            (offset) => [offset.oid, offset],
+          ),
+        );
+        const allowed = new Set(["contrast", "overflow", "spacing-scale"]);
+        const warnings: DesignLintViolation[] = [];
+        for (const rawWarning of params.warnings) {
+          if (
+            !rawWarning ||
+            typeof rawWarning !== "object" ||
+            Array.isArray(rawWarning)
+          ) {
+            throw new GitError({
+              code: "VALIDATION_FAILED",
+              message: "Design runtime warning is malformed.",
+            });
+          }
+          const warning = rawWarning as Record<string, unknown>;
+          const ruleId = reqStr(warning, "ruleId");
+          const oid = reqStr(warning, "oid");
+          const message = reqStr(warning, "message");
+          const fix = reqStr(warning, "fix");
+          if (
+            !allowed.has(ruleId) ||
+            message.length > 1_000 ||
+            fix.length > 1_000
+          ) {
+            throw new GitError({
+              code: "VALIDATION_FAILED",
+              message: "Design runtime warning is invalid.",
+            });
+          }
+          const offset = offsets.get(oid);
+          if (!offset) continue;
+          warnings.push({
+            ruleId: ruleId as DesignLintViolation["ruleId"],
+            severity: "warning",
+            message,
+            file: frame.file,
+            line: offset.startLine,
+            column: offset.startColumn,
+            oid,
+            fix,
+          });
+        }
+        setDesignRuntimeAudit({
+          workspacePath: workspace.path,
+          frame: frame.file,
+          sourceVersion,
+          warnings,
+        });
+        return { ok: true };
+      }
+      case "design.frame.create": {
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          remote,
+        );
+        const frame = await createDesignFrame(workspace.path, {
+          title: optStr(params, "title"),
+        });
+        return {
+          frame,
+          snapshot: await this.readDesignSnapshot(workspace, remote),
+        };
+      }
+      case "design.frame.rename": {
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          remote,
+        );
+        const frame = await renameDesignFrame(
+          workspace.path,
+          reqStr(params, "frame"),
+          reqStr(params, "title"),
+        );
+        return {
+          frame,
+          snapshot: await this.readDesignSnapshot(workspace, remote),
+        };
+      }
+      case "design.frame.duplicate": {
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          remote,
+        );
+        const frame = await duplicateDesignFrame(
+          workspace.path,
+          reqStr(params, "frame"),
+        );
+        return {
+          frame,
+          snapshot: await this.readDesignSnapshot(workspace, remote),
+        };
+      }
+      case "design.frame.delete": {
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          remote,
+        );
+        const deleted = await deleteDesignFrame(
+          workspace.path,
+          reqStr(params, "frame"),
+        );
+        return {
+          deleted,
+          snapshot: await this.readDesignSnapshot(workspace, remote),
+        };
+      }
+      case "design.canvas.update": {
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          remote,
+        );
+        const geometry = await updateDesignFrameGeometry(
+          workspace.path,
+          reqStr(params, "frame"),
+          {
+            x: reqNum(params, "x"),
+            y: reqNum(params, "y"),
+            w: reqNum(params, "w"),
+            h: reqNum(params, "h"),
+            z: reqNum(params, "z"),
+          },
+        );
+        return {
+          geometry,
+          snapshot: await this.readDesignSnapshot(workspace, remote),
+        };
+      }
+      case "design.node.styles": {
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          remote,
+        );
+        const mutation = await updateDesignNodeStyles(workspace.path, {
+          frame: reqStr(params, "frame"),
+          nodeId: reqStr(params, "nodeId"),
+          sourceVersion: reqStr(params, "sourceVersion"),
+          styles: designMutationStyles(params.styles),
+        });
+        return {
+          mutation,
+          snapshot: await this.readDesignSnapshot(workspace, remote),
+        };
+      }
+      case "design.node.text": {
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          remote,
+        );
+        const mutation = await setDesignNodeText(workspace.path, {
+          frame: reqStr(params, "frame"),
+          nodeId: reqStr(params, "nodeId"),
+          sourceVersion: reqStr(params, "sourceVersion"),
+          text:
+            typeof params.text === "string"
+              ? params.text
+              : reqStr(params, "text"),
+        });
+        return {
+          mutation,
+          snapshot: await this.readDesignSnapshot(workspace, remote),
+        };
+      }
+      case "design.node.html": {
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          remote,
+        );
+        const mode = optStr(params, "mode");
+        if (mode && mode !== "append" && mode !== "replace-inner") {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: `Unsupported design HTML write mode: ${mode}`,
+          });
+        }
+        const mutation = await writeDesignNodeHtml(workspace.path, {
+          frame: reqStr(params, "frame"),
+          nodeId: reqStr(params, "nodeId"),
+          sourceVersion: reqStr(params, "sourceVersion"),
+          html: reqStr(params, "html"),
+          mode: mode as "append" | "replace-inner" | undefined,
+        });
+        return {
+          mutation,
+          snapshot: await this.readDesignSnapshot(workspace, remote),
+        };
+      }
+      case "design.asset.insert": {
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          remote,
+        );
+        const mutation = await insertDesignAsset(workspace.path, {
+          frame: reqStr(params, "frame"),
+          sourceVersion: reqStr(params, "sourceVersion"),
+          assetPath: reqStr(params, "assetPath"),
+          x: reqNum(params, "x"),
+          y: reqNum(params, "y"),
+        });
+        return {
+          mutation,
+          snapshot: await this.readDesignSnapshot(workspace, remote),
+        };
+      }
+      case "design.save": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const workspace = this.resolveDesignWorkspace(workspaceId, remote);
+        const report = await lintDesignDocument(workspace.path);
+        const errors = report.violations.filter(
+          (violation) => violation.severity === "error",
+        );
+        if (errors.length > 0) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: `Fix ${errors.length} design ${errors.length === 1 ? "error" : "errors"} before saving: ${errors[0]!.ruleId}`,
+            remediation: errors[0]!.message,
+          });
+        }
+        await stagePaths({
+          workspaceId,
+          paths: [DESIGN_DIRECTORY_NAME],
+          force: true,
+        });
+        return commit({
+          workspaceId,
+          message: optStr(params, "message") ?? "Save designs",
+          files: [DESIGN_DIRECTORY_NAME],
+        });
       }
       // ── Working directories (per-worktree sparse-checkout) ──
       // LOCAL-ONLY for the same reason as the restriction list above: applying
@@ -1401,6 +2237,7 @@ export class WorkspaceService {
         }
         return createWorkspace({
           repoRoot,
+          kind: workspaceKind(params),
           repoSlug: optStr(params, "repoSlug"),
           baseBranch: optStr(params, "baseBranch"),
           prompt: optStr(params, "prompt"),
@@ -1436,6 +2273,7 @@ export class WorkspaceService {
         }
         return prepareWorkspaceCreate({
           repoRoot: reqStr(params, "repoRoot"),
+          kind: workspaceKind(params),
           repoSlug: optStr(params, "repoSlug"),
           prompt: optStr(params, "prompt"),
         });
@@ -2965,7 +3803,7 @@ export class WorkspaceService {
       }
       case "workspace.archive": {
         const workspaceId = reqStr(params, "workspaceId");
-        return archiveWorkspace(
+        const result = await archiveWorkspace(
           {
             workspaceId,
             stashUncommitted: optBool(params, "stashUncommitted") ?? false,
@@ -2982,6 +3820,9 @@ export class WorkspaceService {
           },
           this.workspaceCheckoutWatchSuspender ?? undefined,
         );
+        forgetDesignSelection(workspaceId);
+        forgetDesignScreenshots(workspaceId);
+        return result;
       }
       // "Continue" after a merged PR — same worktree + chats, fresh generated
       // branch, PR fields cleared. Desktop-only (absent from every remote
@@ -3031,6 +3872,8 @@ export class WorkspaceService {
           },
           this.workspaceCheckoutWatchSuspender ?? undefined,
         );
+        forgetDesignSelection(workspaceId);
+        forgetDesignScreenshots(workspaceId);
         return { ok: true };
       }
       case "workspace.createFromBranch": {

@@ -12,6 +12,11 @@ import {
   type WorkspaceNavigationTarget,
 } from "../../shell/prefetch-workspace-surface";
 import { prepareColumn2ChatView } from "../../shell/column2-chat-intent";
+import { resolveWorkspacePresentationKind } from "./workspace-resolution";
+import {
+  isInternalFeatureActive,
+  useInternalFeatureActive,
+} from "../settings/internal-features";
 
 /** Open a workspace: switch to the workspace view and land on the chat the user
  *  last had there (else any chat at that path, else auto-spawn the starred
@@ -23,16 +28,42 @@ export function useOpenWorkspace(): (
 ) => void {
   const dispatch = useWorkspaceDispatch();
   const sessions = useAgentSessions();
+  const designWorkspacesActive =
+    useInternalFeatureActive("designWorkspaces");
   return useCallback(
     (workspace: WorkspaceNavigationTarget) => {
+      const presentationKind = resolveWorkspacePresentationKind({
+        confirmedKind: workspace.kind,
+        folder: workspace.path,
+      });
+      if (
+        presentationKind === "design" &&
+        (!designWorkspacesActive ||
+          !isInternalFeatureActive("designWorkspaces"))
+      ) {
+        return;
+      }
+      // Pointer/focus intent normally starts these reads earlier; repeat here
+      // for keyboard/programmatic navigation. Both paths dedupe by exact key.
+      prefetchWorkspaceSurface(workspace);
+      if (presentationKind === "design") {
+        // A previous build may have persisted coding chats for this path.
+        // Keep those rows dormant and publish the design destination without a
+        // chat identity so opening it can never resume the coding harness.
+        dispatch({
+          type: "OPEN_WORKSPACE",
+          folder: workspace.path,
+          repoRoot: workspace.repoRoot,
+          chatId: null,
+          validationPending: workspace.validationPending,
+        });
+        return;
+      }
       // Last-viewed chat there (validated), else the most-recent live one.
       const fallbackId = selectChatToRestoreForFolder(
         useWorkspaceStore.getState(),
         workspace.path,
       );
-      // Pointer/focus intent normally starts these reads earlier; repeat here
-      // for keyboard/programmatic navigation. Both paths dedupe by exact key.
-      prefetchWorkspaceSurface(workspace);
       if (fallbackId) {
         void sessions.hydrateChat(fallbackId);
         prepareColumn2ChatView(fallbackId);
@@ -60,6 +91,6 @@ export function useOpenWorkspace(): (
         dispatch,
       });
     },
-    [dispatch, sessions],
+    [designWorkspacesActive, dispatch, sessions],
   );
 }

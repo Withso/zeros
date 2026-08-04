@@ -66,6 +66,7 @@ export {
   TooltipProvider,
 } from "./tooltip";
 export { Tabs, TabsList, TabsTrigger, TabsContent } from "./tabs";
+export { Toolbar } from "./toolbar";
 export { ScrollArea, ScrollBar } from "./scroll-area";
 export { Switch } from "./switch";
 export { Slider } from "./slider";

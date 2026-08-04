@@ -39,6 +39,8 @@ import {
 // The engine's zerosWorkspacesRoot() (src/engine/db/paths.ts) names the visible
 // root `zeros-<channel>[-<instance>]` — e.g. `zeros-dev`, `zeros-beta`, and for a
 // per-worktree dev instance `zeros-dev-<slug>` (like `zeros-dev-mogadishu-5486`).
+// Design workspaces use the sibling `design workspaces` segment under that same
+// root; both layouts carry the same repository/workspace owner segments.
 // The suffix after `zeros-` / `.zeros-` is intentionally treated as the rest of
 // the path segment, so per-worktree dev roots resolve without a backtracking
 // regex. Keep in sync with zerosWorkspacesRoot() / legacyWorktreesRoot().
@@ -52,9 +54,11 @@ function matchesRootSegment(
   );
 }
 
-function worktreePathParts(
-  folder: string,
-): { repositoryDirectory: string; workspaceDirectory: string } | null {
+function worktreePathParts(folder: string): {
+  repositoryDirectory: string;
+  workspaceDirectory: string;
+  kind: "code" | "design";
+} | null {
   const parts = folder.split("/").filter(Boolean);
   for (let i = 0; i + 3 < parts.length; i += 1) {
     const root = parts[i] ?? "";
@@ -62,15 +66,44 @@ function worktreePathParts(
     const matchesLegacyRoot =
       matchesRootSegment(root, ".zeros") && layout === "worktrees";
     const matchesVisibleRoot =
-      matchesRootSegment(root, "zeros") && layout === "workspaces";
+      matchesRootSegment(root, "zeros") &&
+      (layout === "workspaces" || layout === "design workspaces");
     if (matchesLegacyRoot || matchesVisibleRoot) {
       return {
         repositoryDirectory: parts[i + 2] ?? "",
         workspaceDirectory: parts[i + 3] ?? "",
+        kind:
+          matchesVisibleRoot && layout === "design workspaces"
+            ? "design"
+            : "code",
       };
     }
   }
   return null;
+}
+
+/** Synchronous presentation identity for a cold remembered managed path. */
+export function workspaceKindFromManagedPath(
+  folder: string | null | undefined,
+): "code" | "design" | null {
+  if (!folder) return null;
+  return worktreePathParts(folder)?.kind ?? null;
+}
+
+/** A confirmed Workspace row is authoritative. Pending/path hints exist only
+ * to paint a prepared destination before that row arrives; they must
+ * never turn a confirmed code workspace into a design surface. */
+export function resolveWorkspacePresentationKind(input: {
+  confirmedKind?: "code" | "design" | null;
+  pendingKind?: "code" | "design" | null;
+  folder?: string | null;
+}): "code" | "design" {
+  if (input.confirmedKind) return input.confirmedKind;
+  return (
+    input.pendingKind ??
+    workspaceKindFromManagedPath(input.folder) ??
+    "code"
+  );
 }
 
 /** Extract a repoSlug from a Zeros-managed worktree path.

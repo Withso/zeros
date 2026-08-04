@@ -16,6 +16,45 @@ import type { PendingWorkspaceCreate } from "./pending-workspaces";
 
 const EMPTY_PENDING: PendingWorkspaceCreate[] = [];
 
+/** Remove internal design rows before they reach any shared workspace surface.
+ * Returns the bridge-owned array unchanged whenever possible so turning the
+ * gate on does not add churn to hot navigation selectors. */
+export function filterWorkspacesForDesignAccess(
+  rows: readonly Workspace[],
+  designWorkspacesActive: boolean,
+): Workspace[] {
+  if (designWorkspacesActive) return rows as Workspace[];
+  let anyFiltered = false;
+  const out: Workspace[] = [];
+  for (const workspace of rows) {
+    if (workspace.kind === "design") {
+      anyFiltered = true;
+      continue;
+    }
+    out.push(workspace);
+  }
+  return anyFiltered ? out : (rows as Workspace[]);
+}
+
+/** Pending design creates are internal state too: hiding only confirmed rows
+ * would briefly leak a "Setting up" tab and inflate repository counts. */
+export function filterPendingCreatesForDesignAccess(
+  rows: readonly PendingWorkspaceCreate[],
+  designWorkspacesActive: boolean,
+): PendingWorkspaceCreate[] {
+  if (designWorkspacesActive) return rows as PendingWorkspaceCreate[];
+  let anyFiltered = false;
+  const out: PendingWorkspaceCreate[] = [];
+  for (const pending of rows) {
+    if (pending.kind === "design") {
+      anyFiltered = true;
+      continue;
+    }
+    out.push(pending);
+  }
+  return anyFiltered ? out : (rows as PendingWorkspaceCreate[]);
+}
+
 /** The single visibility filter: drop only rows the server has confirmed
  * archived. Deliberately KEEPS `present === false` (orphaned worktree) rows so
  * every surface's SET — and therefore its count — agrees; each surface still

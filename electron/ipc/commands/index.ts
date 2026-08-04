@@ -54,6 +54,7 @@ import { discoverLocalhostServices } from "./localhost";
 import { notifySend } from "./notifications";
 import { processMetricsSnapshot } from "./process-metrics";
 import { agentAttachmentWrite } from "./agent-attachments";
+import { designExportPng } from "./design-export";
 import {
   processRelaunch,
   updaterCheck,
@@ -193,6 +194,7 @@ export function registerAllCommands(): void {
   // Native startup fallback for the engine bridge's attachment writer. Normal
   // sends use attachment.write so desktop and relay clients share one protocol.
   setCommand("agent_attachment_write", agentAttachmentWrite);
+  setCommand("design_export_png", designExportPng);
 
   // Roadmap 03a — Git + GitHub integration layer, phase 1: workspace
   // lifecycle. Engine logic lives in src/engine/git/; these handlers

@@ -18,7 +18,7 @@
 // Selection is the store's `activePage` (+ `activeRepoId` for repo rows), so
 // it survives reloads and stays in sync with the top bar.
 
-import { useRef } from "react";
+import { useMemo, useRef } from "react";
 import {
   Blocks,
   FolderOpen,
@@ -38,7 +38,11 @@ import {
   useLiveWorkspaces,
   useProjects,
 } from "../zeros/store/use-projects";
-import { countLiveVisibleBySlug } from "../zeros/store/live-workspace-selectors";
+import {
+  countLiveVisibleBySlug,
+  filterPendingCreatesForDesignAccess,
+  filterWorkspacesForDesignAccess,
+} from "../zeros/store/live-workspace-selectors";
 import { usePendingCreatesAll } from "../zeros/store/pending-workspaces";
 import type { Project } from "../zeros/store/projects-store";
 import { useAuth } from "../zeros/auth";
@@ -61,6 +65,7 @@ import {
 } from "./home-sidebar-width";
 import { useHomeSidebarResizeDrag } from "./use-home-sidebar-drag";
 import { useResizeHint } from "./use-resize-hint";
+import { useInternalFeatureActive } from "../zeros/settings/internal-features";
 
 // One shared row shape, mirroring the settings sidebar entry (settings-page.tsx
 // SIDEBAR_ENTRY_CLS) so both nav rails read as the same control: fg2 at rest,
@@ -150,7 +155,22 @@ export function HomeSidebar() {
   // Same single live source the top bar + Dashboard read (the per-repo cache
   // union), so a repo badge can never disagree with that repo's tab count.
   const { workspaces } = useLiveWorkspaces();
-  const allPending = usePendingCreatesAll();
+  const rawPending = usePendingCreatesAll();
+  const designWorkspacesActive =
+    useInternalFeatureActive("designWorkspaces");
+  const accessibleWorkspaces = useMemo(
+    () =>
+      filterWorkspacesForDesignAccess(workspaces, designWorkspacesActive),
+    [designWorkspacesActive, workspaces],
+  );
+  const allPending = useMemo(
+    () =>
+      filterPendingCreatesForDesignAccess(
+        rawPending,
+        designWorkspacesActive,
+      ),
+    [designWorkspacesActive, rawPending],
+  );
   const { openProject, openGithubProject, quickStart } = useAddProject();
   const { session, email } = useAuth();
 
@@ -167,7 +187,10 @@ export function HomeSidebar() {
   // Dashboard uses — badge == that repo's top-bar tab count, including during
   // the optimistic-create and confirmed-archive transition window. A workspace
   // remains counted while its destructive operation is visibly in progress.
-  const countBySlug = countLiveVisibleBySlug(workspaces, allPending);
+  const countBySlug = countLiveVisibleBySlug(
+    accessibleWorkspaces,
+    allPending,
+  );
 
   return (
     <div

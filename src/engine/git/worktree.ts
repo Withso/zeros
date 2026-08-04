@@ -52,11 +52,21 @@ import {
   updateWorkspaceLifecycleDetails,
   updateWorkspaceLifecyclePhase,
   updateWorkspace,
+  designWorktreesRoot,
   worktreesRoot,
   legacyWorktreesRoot,
   isManagedWorktreePath,
   WORKSPACE_OWNERSHIP_META_KEY,
 } from "./state";
+import {
+  DESIGN_DIRECTORY_NAME,
+  initializeDesignDocument,
+} from "../design/document";
+import {
+  lockDesignWorkspaceRoot,
+  unlockDesignWorkspaceRoot,
+} from "../design/workspace-lock";
+import { setWorkingDirectories } from "./sparse-checkout";
 import {
   runSetupHooks,
   runInlineScript,
@@ -102,6 +112,7 @@ import type {
   DeleteOptions,
   RestoreResult,
   Workspace,
+  WorkspaceKind,
   WorkspaceStatus,
 } from "./types";
 
@@ -622,13 +633,16 @@ function workspaceDirectorySegment(value: string, fallback: string): string {
 function managedRepositoryDirectory(
   repoRoot: string,
   repoSlug: string,
+  kind: WorkspaceKind = "code",
 ): string {
   const preferred = workspaceDirectorySegment(
     path.basename(repoRoot),
     repoSlug,
   );
   const normalizedRoot = path.resolve(repoRoot);
-  const managedRoot = path.resolve(worktreesRoot());
+  const managedRoot = path.resolve(
+    kind === "design" ? designWorktreesRoot() : worktreesRoot(),
+  );
   // Once an owner has any managed workspace, its repository directory is
   // durable identity. A second same-basename repository registered later must
   // not make future workspaces jump from `<basename>/…` to `<repoSlug>/…`.
@@ -679,15 +693,18 @@ export function managedWorkspacePath(
   repoRoot: string,
   repoSlug: string,
   branch: string,
+  kind: WorkspaceKind = "code",
 ): string {
   const displayBranch = branchDisplayName(branch);
-  const repoDirectory = managedRepositoryDirectory(repoRoot, repoSlug);
+  const repoDirectory = managedRepositoryDirectory(repoRoot, repoSlug, kind);
   const workspaceDirectory = workspaceDirectorySegment(
     displayBranch,
     "workspace",
   );
-  const target = path.join(worktreesRoot(), repoDirectory, workspaceDirectory);
-  const root = path.resolve(worktreesRoot());
+  const managedRoot =
+    kind === "design" ? designWorktreesRoot() : worktreesRoot();
+  const target = path.join(managedRoot, repoDirectory, workspaceDirectory);
+  const root = path.resolve(managedRoot);
   const resolved = path.resolve(target);
   if (resolved === root || !resolved.startsWith(root + path.sep)) {
     throw new GitError({
@@ -1176,6 +1193,7 @@ export async function prepareWorkspaceCreate(input: {
   repoRoot: string;
   repoSlug?: string;
   prompt?: string;
+  kind?: WorkspaceKind;
 }): Promise<PreparedWorkspaceCreate> {
   if (!(await isRepo(input.repoRoot))) {
     throw new GitError({
@@ -1220,6 +1238,7 @@ export async function prepareWorkspaceCreate(input: {
   // Reserve the branch name too — it IS the workspace's display name. Avoid a
   // stale filesystem occupant as well as a DB collision; a leaked folder from
   // an older build must never be silently overwritten.
+  const kind: WorkspaceKind = input.kind === "design" ? "design" : "code";
   let branch = "";
   let workspacePath = "";
   for (let attempt = 0; attempt < 20; attempt++) {
@@ -1230,6 +1249,7 @@ export async function prepareWorkspaceCreate(input: {
       input.repoRoot,
       repoSlug,
       candidate,
+      kind,
     );
     if (
       !getWorkspaceByBranch(repoSlug, candidate) &&
@@ -1316,6 +1336,7 @@ async function createWorkspaceInner(
       message: `createWorkspace: invalid repoSlug "${repoSlug}" (expected ^[a-z0-9][a-z0-9-]*$)`,
     });
   }
+  const kind: WorkspaceKind = input.kind === "design" ? "design" : "code";
   // Phase timings, logged on success below. Create sits on a renderer RPC with
   // a finite budget; when it runs long in the field, this line in the log store
   // says WHICH phase ate the time (fetch/base, checkout, seed scan, file hooks)
@@ -1366,7 +1387,12 @@ async function createWorkspaceInner(
   } else {
     workspaceId = generateWorkspaceId(input.prompt);
   }
-  const workspacePath = managedWorkspacePath(input.repoRoot, repoSlug, branch);
+  const workspacePath = managedWorkspacePath(
+    input.repoRoot,
+    repoSlug,
+    branch,
+    kind,
+  );
 
   // Sanity: branch should be unique. The 4-char hex suffix means a
   // collision is ~1/65k per adj-noun pair — vanishingly rare, but
@@ -1402,7 +1428,7 @@ async function createWorkspaceInner(
   // Resolve the background setup command before mutating Git. A settings/read
   // failure therefore cannot strand an unregistered linked worktree.
   const setupCommand =
-    input.runRepoScripts === false
+    kind === "design" || input.runRepoScripts === false
       ? null
       : await resolveSetupCommand({
           repoRoot: input.repoRoot,
@@ -1439,6 +1465,7 @@ async function createWorkspaceInner(
   const now = Date.now();
   const workspace: Workspace = {
     id: workspaceId,
+    kind,
     repoSlug,
     repoRoot: input.repoRoot,
     branch,
@@ -1453,7 +1480,10 @@ async function createWorkspaceInner(
     prNumber: null,
     prState: null,
     prUrl: null,
-    agentId: input.agentId ?? null,
+    // Design workspaces intentionally have no coding-agent owner. Ignore stale
+    // or external callers that still submit the old optimistic-chat fields;
+    // a future native design harness will own a separate identity contract.
+    agentId: kind === "code" ? (input.agentId ?? null) : null,
     lastActiveAt: now,
     setupState: setupCommand ? "running" : null,
   };
@@ -1472,8 +1502,8 @@ async function createWorkspaceInner(
     payload: {
       copyPaths: input.copyPaths ?? [],
       symlinkPaths: input.symlinkPaths ?? [],
-      seedFiles: input.runRepoScripts !== false,
-      ...(input.optimisticChatId
+      seedFiles: kind === "code" && input.runRepoScripts !== false,
+      ...(kind === "code" && input.optimisticChatId
         ? { optimisticChatId: input.optimisticChatId }
         : {}),
     },
@@ -1543,7 +1573,7 @@ async function createWorkspaceInner(
   let seedScanComplete = true;
   let tSeeds = tAdd;
   try {
-    if (input.runRepoScripts !== false) {
+    if (kind === "code" && input.runRepoScripts !== false) {
       const ftc = await resolveFilesToCopy(input.repoRoot);
       for (const w of ftc.warnings) console.warn(`[worktree] ${w}`);
       const explicit = new Set(input.copyPaths ?? []);
@@ -1562,36 +1592,81 @@ async function createWorkspaceInner(
     }
     tSeeds = Date.now();
 
-    // Run post-create FILE provisioning ONLY (copy / symlink / seed). The
-    // setup command runs in the background. Explicit provisioning remains
-    // transactional: failure rolls back the hidden checkout.
-    await runSetupHooks({
-      workspaceId,
-      worktreePath: workspacePath,
-      repoRoot: input.repoRoot,
-      baseBranch,
-      copyPaths: input.copyPaths,
-      seedPaths,
-      symlinkPaths: input.symlinkPaths,
-    });
-    // Durably record what we seeded, so archive force-adds these even if the
-    // patterns that chose them are edited away before the workspace is
-    // archived. Superset-safe: a path the hooks skipped (already present from
-    // the branch checkout, or a vanished source) is simply one more entry for
-    // `git add -f`, which no-ops when the file isn't there.
-    addProvisionPaths(workspaceId, seedPaths);
-    // Every workspace gets its `.context-graph/` skeleton (Context tab canvas
-    // + composer-attachment store). Best-effort and quiet: the scaffold is
-    // self-gitignoring, and a failure here must never roll back the worktree —
-    // the attachment IPC and the Context tab both re-scaffold lazily.
-    const graph = await ensureContextGraph(workspacePath);
-    if (!graph.ok) {
-      console.warn(
-        `[worktree] context-graph scaffold skipped for ${workspaceId}: ${graph.error}`,
-      );
+    if (kind === "design") {
+      // Design workspaces deliberately skip every repo ritual. Seed only the
+      // portable design document, force-stage the whole app-owned directory,
+      // then commit only when that produced a tree delta. The unconditional
+      // add covers files a checkout hook created untracked (including ignored
+      // files), where initialization correctly reports no writes but the
+      // sparse cone still requires a tracked top-level directory.
+      await initializeDesignDocument(workspacePath);
+      await runGit(workspacePath, [
+        "add",
+        "-f",
+        "-A",
+        "--",
+        DESIGN_DIRECTORY_NAME,
+      ]);
+      const stagedDesign = await runGit(workspacePath, [
+        "diff",
+        "--cached",
+        "--name-only",
+        "--",
+        DESIGN_DIRECTORY_NAME,
+      ]);
+      if (stagedDesign.stdout.trim()) {
+        await runGit(workspacePath, [
+          "-c",
+          "user.name=Zeros",
+          "-c",
+          "user.email=zeros@localhost",
+          "commit",
+          "--no-verify",
+          "-m",
+          "Initialize Zeros Design",
+        ]);
+      }
+      await setWorkingDirectories(workspacePath, [DESIGN_DIRECTORY_NAME], {
+        forceSparse: true,
+      });
+      await lockDesignWorkspaceRoot(workspacePath);
+    } else {
+      // Run post-create FILE provisioning ONLY (copy / symlink / seed). The
+      // setup command runs in the background. Explicit provisioning remains
+      // transactional: failure rolls back the hidden checkout.
+      await runSetupHooks({
+        workspaceId,
+        worktreePath: workspacePath,
+        repoRoot: input.repoRoot,
+        baseBranch,
+        copyPaths: input.copyPaths,
+        seedPaths,
+        symlinkPaths: input.symlinkPaths,
+      });
+      // Durably record what we seeded, so archive force-adds these even if the
+      // patterns that chose them are edited away before the workspace is
+      // archived. Superset-safe: a path the hooks skipped (already present from
+      // the branch checkout, or a vanished source) is simply one more entry for
+      // `git add -f`, which no-ops when the file isn't there.
+      addProvisionPaths(workspaceId, seedPaths);
+      // Code workspaces get a `.context-graph/` skeleton (Context tab canvas +
+      // composer-attachment store). Design workspaces deliberately expose only
+      // `Zeros Design/`, so they skip this repo-root scaffold with every other
+      // code-workspace ritual above. Best-effort and quiet: the scaffold is
+      // self-gitignoring, and a failure here must never roll back the worktree —
+      // the attachment IPC and the Context tab both re-scaffold lazily.
+      const graph = await ensureContextGraph(workspacePath);
+      if (!graph.ok) {
+        console.warn(
+          `[worktree] context-graph scaffold skipped for ${workspaceId}: ${graph.error}`,
+        );
+      }
     }
     updateWorkspaceLifecyclePhase(workspaceId, "work-applied");
   } catch (err) {
+    if (kind === "design" && existsSync(workspacePath)) {
+      await unlockDesignWorkspaceRoot(workspacePath).catch(() => {});
+    }
     const rolledBack = await safeRollback(
       input.repoRoot,
       workspacePath,
@@ -1617,6 +1692,7 @@ async function createWorkspaceInner(
   // back workspace never gets a late pass. The setup script / run-on-create
   // actions gate on whenSeedingSettled(), so they still see the complete set.
   if (
+    kind === "code" &&
     input.runRepoScripts !== false &&
     (!seedScanComplete || seedDeferred.length > 0)
   ) {
@@ -1950,13 +2026,25 @@ async function safeRollback(
         return false;
       }
     }
+    if (workspace.kind === "design" && existsSync(worktreePath)) {
+      try {
+        await unlockDesignWorkspaceRoot(worktreePath);
+      } catch {
+        return false;
+      }
+    }
     try {
       await runGit(repoRoot, ["worktree", "remove", "--force", worktreePath]);
     } catch {
       // A checkout folder can disappear after Git registered it. Verify only
       // this operation's exact registration below; never repository-wide prune
       // entries owned by another Zeros/dev/tool instance.
-      if (existsSync(worktreePath)) return false;
+      if (existsSync(worktreePath)) {
+        if (workspace.kind === "design") {
+          await lockDesignWorkspaceRoot(worktreePath).catch(() => {});
+        }
+        return false;
+      }
     }
   }
   // Retain the hidden row + journal unless Git proved ownership and the owned
@@ -2364,9 +2452,15 @@ async function removeManagedWorktreeForLifecycle(
   const observation = await beforeCheckoutEviction?.(ws.id, ws.path);
   let staged: PreparedDirectoryEviction;
   try {
+    if (ws.kind === "design") {
+      await unlockDesignWorkspaceRoot(ws.path);
+    }
     staged = await prepareWorktreeDirectoryEviction(ws.path);
   } catch (cause) {
     observation?.resume();
+    if (ws.kind === "design" && existsSync(ws.path)) {
+      await lockDesignWorkspaceRoot(ws.path).catch(() => {});
+    }
     throw new GitError({
       code: "GIT_COMMAND_FAILED",
       message: `Workspace directory could not be staged for removal: ${ws.path}`,
@@ -3535,6 +3629,15 @@ async function restoreWorkspaceInner(
 
   // 5. Persist the (possibly adapted) state and refresh the recovery seed.
   const restoredAt = Date.now();
+  if (ws.kind === "design") {
+    // Sparse metadata is worktree-local and was removed with the archived
+    // checkout. Reapply the one design cone before publishing the restored row,
+    // then reinstate the root-file ACL boundary.
+    await setWorkingDirectories(targetPath, [DESIGN_DIRECTORY_NAME], {
+      forceSparse: true,
+    });
+    await lockDesignWorkspaceRoot(targetPath);
+  }
   // Folder-keyed chats, the live workspace row, and journal removal share one
   // SQLite transaction. A stop can therefore observe either the old archived
   // identity or the fully rebound live identity, never chats stranded on an

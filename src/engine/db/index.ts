@@ -68,5 +68,10 @@ export function closeZerosDb(): void {
   }
 }
 
-export { zerosDataDir, zerosDbPath, zerosWorkspacesRoot } from "./paths";
+export {
+  zerosDataDir,
+  zerosDbPath,
+  zerosDesignWorkspacesRoot,
+  zerosWorkspacesRoot,
+} from "./paths";
 export { latestSchemaVersion } from "./migrations";

@@ -5,6 +5,8 @@ import type { PendingWorkspaceCreate } from "../pending-workspaces";
 import {
   countLiveVisibleBySlug,
   dedupePendingCreates,
+  filterPendingCreatesForDesignAccess,
+  filterWorkspacesForDesignAccess,
   selectLiveVisible,
 } from "../live-workspace-selectors";
 
@@ -62,6 +64,43 @@ describe("selectLiveVisible", () => {
   it("returns the SAME array reference when nothing is filtered", () => {
     const rows = [ws({ id: "a" }), ws({ id: "b", present: false })];
     expect(selectLiveVisible(rows)).toBe(rows);
+  });
+});
+
+describe("internal design-workspace visibility", () => {
+  it("removes design rows and pending creates while preserving code identity", () => {
+    const code = ws({ id: "code", kind: "code" });
+    const design = ws({ id: "design", kind: "design" });
+    const codePending = pending({ token: "code-pending", kind: "code" });
+    const designPending = pending({
+      token: "design-pending",
+      kind: "design",
+    });
+
+    expect(
+      filterWorkspacesForDesignAccess([code, design], false).map((row) =>
+        row.id,
+      ),
+    ).toEqual(["code"]);
+    expect(
+      filterPendingCreatesForDesignAccess(
+        [codePending, designPending],
+        false,
+      ).map((row) => row.token),
+    ).toEqual(["code-pending"]);
+  });
+
+  it("returns the original references when enabled or when no design rows exist", () => {
+    const rows = [ws({ id: "code", kind: "code" })];
+    const pendingRows = [pending({ token: "code-pending", kind: "code" })];
+    expect(filterWorkspacesForDesignAccess(rows, false)).toBe(rows);
+    expect(filterWorkspacesForDesignAccess(rows, true)).toBe(rows);
+    expect(filterPendingCreatesForDesignAccess(pendingRows, false)).toBe(
+      pendingRows,
+    );
+    expect(filterPendingCreatesForDesignAccess(pendingRows, true)).toBe(
+      pendingRows,
+    );
   });
 });
 

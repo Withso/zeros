@@ -51,14 +51,24 @@ import {
   watchTimedOutWorkspaceCreate,
 } from "../zeros/store/use-projects";
 import { toast } from "../zeros/ui/primitives/elements";
+import { isInternalFeatureActive } from "../zeros/settings/internal-features";
+import { isExpectedElectron, isNativeRuntime } from "../native/runtime";
 
 type Dispatch = ReturnType<typeof useWorkspaceDispatch>;
 
 export async function createWorkspaceForProject(args: {
   project: Project;
   dispatch: Dispatch;
+  kind?: "code" | "design";
 }): Promise<boolean> {
   const { project, dispatch } = args;
+  const kind = args.kind === "design" ? "design" : "code";
+  const designCreationAllowed = () =>
+    isInternalFeatureActive("designWorkspaces") &&
+    (isNativeRuntime() || isExpectedElectron());
+  if (kind === "design" && !designCreationAllowed()) {
+    return false;
+  }
   // Every call is an independent exact reservation. Do not serialize even the
   // cheap prepare phase: users intentionally fan out several workspaces while
   // prior creates and archives continue in parallel.
@@ -67,6 +77,7 @@ export async function createWorkspaceForProject(args: {
     prepared = await workspacePrepareCreate({
       repoRoot: project.repoRoot,
       repoSlug: project.repoSlug,
+      ...(kind === "design" ? { kind } : {}),
     });
   } catch (error: unknown) {
     if (isGitErrorShape(error)) {
@@ -79,9 +90,16 @@ export async function createWorkspaceForProject(args: {
     }
     return false;
   }
+  // Staff role or the per-channel switch can change while prepare crosses the
+  // bridge. Prepare is metadata-only, so stop before publishing pending state,
+  // navigation, or the filesystem-mutating create request.
+  if (kind === "design" && !designCreationAllowed()) {
+    return false;
+  }
   const pendingToken = beginPendingCreate({
     repoRoot: project.repoRoot,
     repoSlug: project.repoSlug,
+    kind,
     path: prepared.path,
     branch: prepared.branch,
   });
@@ -90,36 +108,51 @@ export async function createWorkspaceForProject(args: {
   // Marked BEFORE navigation so the workspace-list validation effect knows not
   // to bounce the not-yet-listed folder back to main.
   markWorkspaceSettling(prepared.path);
-  // Publish the exact folder destination AND its first Untitled chat in one
-  // transition. The composer is usable now; its session remains gated on the
-  // create lifecycle and any early Send is queued by exact chat id.
-  const chat = spawnPreparedDefaultChat({
-    folder: prepared.path,
-    repoRoot: project.repoRoot,
-    dispatch,
-  });
+  // Coding workspaces retain their existing optimistic-chat flow. Design
+  // workspaces publish only route + destination identity: their native canvas
+  // is usable immediately, while the coding-agent harness remains untouched.
+  const chat =
+    kind === "code"
+      ? spawnPreparedDefaultChat({
+          folder: prepared.path,
+          repoRoot: project.repoRoot,
+          dispatch,
+        })
+      : null;
+  if (!chat) {
+    dispatch({
+      type: "OPEN_WORKSPACE",
+      folder: prepared.path,
+      repoRoot: project.repoRoot,
+      chatId: null,
+      validationPending: true,
+    });
+  }
   const rollbackOptimisticChat = () => {
     clearWorkspaceSettling(prepared.path);
-    dispatch({ type: "CONSUME_AUTO_SEND", chatId: chat.id });
-    dispatch({ type: "DELETE_CHAT", id: chat.id });
-    void dbDeleteChat(chat.id).catch(() => {});
+    if (chat) {
+      dispatch({ type: "CONSUME_AUTO_SEND", chatId: chat.id });
+      dispatch({ type: "DELETE_CHAT", id: chat.id });
+      void dbDeleteChat(chat.id).catch(() => {});
+    }
     finishPendingCreate(pendingToken);
   };
   const settleArchivedOptimisticChat = () => {
     // Archive keeps this chat/draft for a later restore; only its queued first
     // turn is no longer runnable because the worktree was removed.
     clearWorkspaceSettling(prepared.path);
-    dispatch({ type: "CONSUME_AUTO_SEND", chatId: chat.id });
+    if (chat) dispatch({ type: "CONSUME_AUTO_SEND", chatId: chat.id });
     finishPendingCreate(pendingToken);
   };
   try {
     const created = await workspaceCreate({
       repoRoot: project.repoRoot,
       repoSlug: project.repoSlug,
-      ...(chat.agentId ? { agentId: chat.agentId } : {}),
+      ...(kind === "design" ? { kind } : {}),
+      ...(chat?.agentId ? { agentId: chat.agentId } : {}),
       preparedId: prepared.workspaceId,
       preparedBranch: prepared.branch,
-      optimisticChatId: chat.id,
+      ...(chat ? { optimisticChatId: chat.id } : {}),
     });
     trackWorkspaceOpened({ isWorktree: true, status: created.status });
     notifyWorkspacesChanged(project.repoSlug);
@@ -219,7 +252,11 @@ export async function repoNeedsFirstWorkspace(
   repoSlug: string,
 ): Promise<boolean> {
   const noneLive = (rows: readonly { archivedAt: number | null }[]) =>
-    !rows.some((row) => row.archivedAt == null);
+    !rows.some(
+      (row) =>
+        row.archivedAt == null &&
+        (row as { kind?: "code" | "design" }).kind !== "design",
+    );
   const warm = peekWorkspacesFor(repoSlug);
   if (warm) return noneLive(warm);
   for (let attempt = 0; attempt < 3; attempt++) {

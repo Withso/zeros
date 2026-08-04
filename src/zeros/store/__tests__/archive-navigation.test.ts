@@ -76,4 +76,16 @@ describe("previousWorkspaceInOrder", () => {
       }),
     ).toBe(predecessor);
   });
+
+  it("skips a hidden Design predecessor when Design access is disabled", () => {
+    const code = workspace("code", 1);
+    const design = workspace("design", 2, { kind: "design" });
+    const leaving = workspace("leaving", 3);
+
+    expect(
+      previousWorkspaceInOrder(leaving, [code, design, leaving], {}, {
+        allowDesignWorkspaces: false,
+      }),
+    ).toBe(code);
+  });
 });

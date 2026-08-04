@@ -37,4 +37,11 @@ describe("resolveNewTabShortcut", () => {
     expect(resolveNewTabShortcut(key({ altKey: true }), true)).toBeNull();
     expect(resolveNewTabShortcut(key({ code: "KeyN" }), true)).toBeNull();
   });
+
+  it("disables both agent-backed tab shortcuts outside a coding workspace", () => {
+    expect(resolveNewTabShortcut(key(), true, false)).toBeNull();
+    expect(
+      resolveNewTabShortcut(key({ shiftKey: true }), true, false),
+    ).toBeNull();
+  });
 });

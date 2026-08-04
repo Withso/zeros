@@ -32,6 +32,7 @@ import { useWorkspaceDispatch } from "../zeros/store/store";
 import { useOpenWorkspace } from "../zeros/store/use-open-workspace";
 import { useAgentSessions } from "../zeros/agent/sessions-hooks";
 import { isExperimentalEnabled } from "../zeros/settings/experimental-features";
+import { isInternalFeatureActive } from "../zeros/settings/internal-features";
 import {
   deriveProjectName,
   loadProjects,
@@ -44,6 +45,7 @@ import {
   peekWorkspacesFor,
   useProjects,
 } from "../zeros/store/use-projects";
+import { filterWorkspacesForDesignAccess } from "../zeros/store/live-workspace-selectors";
 import {
   workspaceInspectFolder,
   type InspectFolderResult,
@@ -240,7 +242,10 @@ export function AddProjectProvider({
       const land = (registered: Project) => {
         if (!isExperimentalEnabled("workInLocalMain")) {
           const alternative = leftmostLiveWorkspace(
-            peekWorkspacesFor(registered.repoSlug),
+            filterWorkspacesForDesignAccess(
+              peekWorkspacesFor(registered.repoSlug) ?? [],
+              isInternalFeatureActive("designWorkspaces"),
+            ),
           );
           if (alternative) {
             openWorkspace(alternative);

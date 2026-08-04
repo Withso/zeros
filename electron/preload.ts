@@ -43,6 +43,7 @@ const ALLOWED_COMMANDS = new Set<string>([
   "auth_redeem_handoff",
   "auth_sign_out_everywhere",
   "detect_open_apps",
+  "design_export_png",
   "dialog_pick_folder",
   "engine_reset_to_default",
   "get_engine_port",

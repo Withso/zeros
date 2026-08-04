@@ -111,6 +111,14 @@ import {
 // this cannot read ZEROS_CHANNEL before the seeding block below sets it.
 import { CHANNELS, isChannel, type Channel } from "../src/engine/runtime";
 import { migrateElectronIdentity } from "./migrate-identity";
+import {
+  installDesignProtocol,
+  registerDesignProtocolPrivileges,
+} from "./design-protocol";
+
+// Custom schemes must be privileged before Electron reaches ready. The handler
+// itself is installed after ready, before the first renderer window loads.
+registerDesignProtocolPrivileges();
 
 // Release channel baked at electron:compile time by electron/tsup.config.ts's
 // `define`. "" in a normal dev compile; "beta" when the beta release workflow
@@ -1142,6 +1150,7 @@ app.whenReady().then(async () => {
   // finds a registered handler instead of "No handler for 'zeros:invoke'".
   registerIpcHandlers();
   registerAllCommands();
+  installDesignProtocol();
 
   // PATH repair and engine startup are critical background work, not a window
   // creation prerequisite. Register a spawn barrier so the child still inherits

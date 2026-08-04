@@ -94,6 +94,38 @@ import {
 } from "../zeros/bridge/workspace-bridge";
 import { resolveBridgeWorkspaceIdForCwd } from "../zeros/bridge/workspace-id-resolver";
 import { isKnownProjectRoot } from "../zeros/store/projects-store";
+import {
+  bridgeDesignCreateFrame,
+  bridgeDesignDeleteFrame,
+  bridgeDesignDuplicateFrame,
+  bridgeDesignFrame,
+  bridgeDesignFrames,
+  bridgeDesignLint,
+  bridgeDesignRenameFrame,
+  bridgeDesignSave,
+  bridgeDesignSetText,
+  bridgeDesignSetScreenshot,
+  bridgeDesignSetRuntimeAudit,
+  bridgeDesignSetSelection,
+  bridgeDesignSnapshot,
+  bridgeDesignTokens,
+  bridgeDesignUpdateToken,
+  bridgeDesignUpdateCanvas,
+  bridgeDesignUpdateStyles,
+  bridgeDesignWriteHtml,
+  bridgeDesignInsertAsset,
+  type DesignFrameDocumentWire,
+  type DesignFrameGeometryWire,
+  type DesignFrameSummaryWire,
+  type DesignLintReportWire,
+  type DesignMutationReplyWire,
+  type DesignScreenshotInputWire,
+  type DesignRuntimeWarningWire,
+  type DesignSelectionInputWire,
+  type DesignTokenWire,
+  type DesignTokenMutationWire,
+  type DesignWorkspaceSnapshotWire,
+} from "../zeros/bridge/design-bridge";
 
 // Re-export the publish types so the publish dialog consumes them via the
 // native/git façade rather than reaching into the bridge module.
@@ -106,6 +138,22 @@ export type {
   WorkingDirectoriesWire,
   WorkingDirectoriesUnsupportedReason,
 } from "../zeros/bridge/workspace-bridge";
+export type {
+  DesignAssetWire,
+  DesignFrameDocumentWire,
+  DesignFrameGeometryWire,
+  DesignFrameSummaryWire,
+  DesignFrameTreeNodeWire,
+  DesignLintReportWire,
+  DesignLintViolationWire,
+  DesignMutationReplyWire,
+  DesignMutationResultWire,
+  DesignScreenshotInputWire,
+  DesignSelectionInputWire,
+  DesignTokenWire,
+  DesignTokenMutationWire,
+  DesignWorkspaceSnapshotWire,
+} from "../zeros/bridge/design-bridge";
 export { WORKING_DIRECTORIES_UNSUPPORTED_COPY } from "../zeros/bridge/workspace-bridge";
 
 // ── Types ────────────────────────────────────────────────
@@ -144,6 +192,9 @@ export type ConflictState =
 
 export interface Workspace {
   id: string;
+  /** Optional for rolling compatibility with an older engine. Missing means
+   * code; current engines always return an explicit kind. */
+  kind?: "code" | "design";
   repoSlug: string;
   repoRoot: string;
   branch: string;
@@ -261,6 +312,7 @@ export interface CreatedWorkspace {
 
 export type CreateWorkspaceArgs = {
   repoRoot: string;
+  kind?: "code" | "design";
   repoSlug?: string;
   baseBranch?: string;
   prompt?: string;
@@ -319,6 +371,7 @@ export interface PreparedWorkspaceCreate {
  *  a request disconnects. Pass both identity fields to workspaceCreate. */
 export async function workspacePrepareCreate(args: {
   repoRoot: string;
+  kind?: "code" | "design";
   repoSlug?: string;
   prompt?: string;
 }): Promise<PreparedWorkspaceCreate> {
@@ -343,6 +396,252 @@ export async function workspaceCreate(
   return created;
 }
 
+export async function designFrames(
+  workspaceId: string,
+): Promise<DesignFrameSummaryWire[]> {
+  return bridgeDesignFrames(requireBridge("load design frames"), workspaceId);
+}
+
+export async function designFrame(
+  workspaceId: string,
+  frame: string,
+  depth = 4,
+): Promise<DesignFrameDocumentWire> {
+  return bridgeDesignFrame(
+    requireBridge("load a design frame"),
+    workspaceId,
+    frame,
+    depth,
+  );
+}
+
+export async function designSnapshot(
+  workspaceId: string,
+): Promise<DesignWorkspaceSnapshotWire> {
+  return bridgeDesignSnapshot(
+    requireBridge("load the design workspace"),
+    workspaceId,
+  );
+}
+
+export async function designTokens(
+  workspaceId: string,
+): Promise<DesignTokenWire[]> {
+  return bridgeDesignTokens(requireBridge("load design tokens"), workspaceId);
+}
+
+export async function designUpdateToken(
+  workspaceId: string,
+  input: {
+    name: string;
+    theme: string | null;
+    value: string;
+    sourceVersion: string;
+  },
+): Promise<{
+  mutation: DesignTokenMutationWire;
+  snapshot: DesignWorkspaceSnapshotWire;
+}> {
+  return bridgeDesignUpdateToken(
+    requireBridge("update a design token"),
+    workspaceId,
+    input,
+  );
+}
+
+export async function designLint(
+  workspaceId: string,
+  frame?: string,
+): Promise<DesignLintReportWire> {
+  return bridgeDesignLint(requireBridge("lint the design"), workspaceId, frame);
+}
+
+export async function designSetSelection(
+  workspaceId: string,
+  selection: DesignSelectionInputWire | null,
+  selectionVersion: number,
+): Promise<void> {
+  await bridgeDesignSetSelection(
+    requireBridge("update design selection"),
+    workspaceId,
+    selection,
+    selectionVersion,
+  );
+}
+
+export async function designSetScreenshot(
+  workspaceId: string,
+  screenshot: DesignScreenshotInputWire,
+): Promise<void> {
+  await bridgeDesignSetScreenshot(
+    requireBridge("publish a design screenshot"),
+    workspaceId,
+    screenshot,
+  );
+}
+
+export async function designSetRuntimeAudit(
+  workspaceId: string,
+  input: {
+    frame: string;
+    sourceVersion: string;
+    warnings: DesignRuntimeWarningWire[];
+  },
+): Promise<void> {
+  return bridgeDesignSetRuntimeAudit(
+    requireBridge("publish design runtime audit"),
+    workspaceId,
+    input,
+  );
+}
+
+export async function designCreateFrame(
+  workspaceId: string,
+  title?: string,
+): Promise<{
+  frame: DesignFrameSummaryWire;
+  snapshot: DesignWorkspaceSnapshotWire;
+}> {
+  return bridgeDesignCreateFrame(
+    requireBridge("create a design frame"),
+    workspaceId,
+    title,
+  );
+}
+
+export async function designRenameFrame(
+  workspaceId: string,
+  frame: string,
+  title: string,
+): Promise<{
+  frame: DesignFrameSummaryWire;
+  snapshot: DesignWorkspaceSnapshotWire;
+}> {
+  return bridgeDesignRenameFrame(
+    requireBridge("rename a design frame"),
+    workspaceId,
+    frame,
+    title,
+  );
+}
+
+export async function designUpdateCanvas(
+  workspaceId: string,
+  frame: string,
+  geometry: DesignFrameGeometryWire,
+): Promise<{
+  geometry: DesignFrameGeometryWire;
+  snapshot: DesignWorkspaceSnapshotWire;
+}> {
+  return bridgeDesignUpdateCanvas(
+    requireBridge("move a design frame"),
+    workspaceId,
+    frame,
+    geometry,
+  );
+}
+
+export async function designDuplicateFrame(
+  workspaceId: string,
+  frame: string,
+): Promise<{
+  frame: DesignFrameSummaryWire;
+  snapshot: DesignWorkspaceSnapshotWire;
+}> {
+  return bridgeDesignDuplicateFrame(
+    requireBridge("duplicate a design frame"),
+    workspaceId,
+    frame,
+  );
+}
+
+export async function designDeleteFrame(
+  workspaceId: string,
+  frame: string,
+): Promise<{
+  deleted: { file: string };
+  snapshot: DesignWorkspaceSnapshotWire;
+}> {
+  return bridgeDesignDeleteFrame(
+    requireBridge("delete a design frame"),
+    workspaceId,
+    frame,
+  );
+}
+
+export async function designUpdateStyles(
+  workspaceId: string,
+  input: {
+    frame: string;
+    nodeId: string;
+    sourceVersion: string;
+    styles: Record<string, string | null>;
+  },
+): Promise<DesignMutationReplyWire> {
+  return bridgeDesignUpdateStyles(
+    requireBridge("update design styles"),
+    workspaceId,
+    input,
+  );
+}
+
+export async function designSetText(
+  workspaceId: string,
+  input: {
+    frame: string;
+    nodeId: string;
+    sourceVersion: string;
+    text: string;
+  },
+): Promise<DesignMutationReplyWire> {
+  return bridgeDesignSetText(
+    requireBridge("edit design text"),
+    workspaceId,
+    input,
+  );
+}
+
+export async function designWriteHtml(
+  workspaceId: string,
+  input: {
+    frame: string;
+    nodeId: string;
+    sourceVersion: string;
+    html: string;
+    mode: "append" | "replace-inner";
+  },
+): Promise<DesignMutationReplyWire> {
+  return bridgeDesignWriteHtml(
+    requireBridge("write design HTML"),
+    workspaceId,
+    input,
+  );
+}
+
+export async function designInsertAsset(
+  workspaceId: string,
+  input: {
+    frame: string;
+    sourceVersion: string;
+    assetPath: string;
+    x: number;
+    y: number;
+  },
+): Promise<DesignMutationReplyWire> {
+  return bridgeDesignInsertAsset(
+    requireBridge("insert a design asset"),
+    workspaceId,
+    input,
+  );
+}
+
+export async function designSave(
+  workspaceId: string,
+  message?: string,
+): Promise<{ sha: string; branch: string }> {
+  return bridgeDesignSave(requireBridge("save designs"), workspaceId, message);
+}
+
 export async function workspaceList(
   args: {
     repoSlug?: string;
@@ -353,14 +652,23 @@ export async function workspaceList(
     /** true → engine stamps `hasChanges` per live row (git probes). The Dashboard
      *  opts in; the sidebar does not, to keep its refetches git-free. */
     withChanges?: boolean;
+    /** Local façade option. Existing/code-only consumers stay isolated from
+     *  Design rows; the shared workspace store opts in and applies its Internal
+     *  runtime gate at each Design-capable surface. Never sent to the engine. */
+    includeDesign?: boolean;
   } = {},
 ): Promise<Workspace[]> {
   const bridge = requireBridge("list workspaces");
-  const list = await bridgeWorkspaceList(bridge, args);
+  const { includeDesign = false, ...bridgeArgs } = args;
+  const list = await bridgeWorkspaceList(bridge, bridgeArgs);
   // The engine prepends the synthetic `local-main` entry (the web list needs
   // it); the desktop list returned real worktrees only, so strip it to preserve
   // behavior — it's the sole entry with an empty repoSlug.
-  return list.filter((w) => w.repoSlug !== "");
+  return list.filter(
+    (workspace) =>
+      workspace.repoSlug !== "" &&
+      (includeDesign || workspace.kind !== "design"),
+  );
 }
 
 /** Exact local-engine workspace lookup. Unlike workspace.list, this can see a

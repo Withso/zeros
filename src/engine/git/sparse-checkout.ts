@@ -358,13 +358,17 @@ function withSaveLock<T>(cwd: string, fn: () => Promise<T>): Promise<T> {
 export function setWorkingDirectories(
   cwd: string,
   included: string[],
+  options: { forceSparse?: boolean } = {},
 ): Promise<SetWorkingDirectoriesResult> {
-  return withSaveLock(cwd, () => applyWorkingDirectories(cwd, included));
+  return withSaveLock(cwd, () =>
+    applyWorkingDirectories(cwd, included, options),
+  );
 }
 
 async function applyWorkingDirectories(
   cwd: string,
   included: string[],
+  options: { forceSparse?: boolean },
 ): Promise<SetWorkingDirectoriesResult> {
   const state = await getWorkingDirectories(cwd);
   if (!state.supported) {
@@ -387,7 +391,7 @@ async function applyWorkingDirectories(
   }
 
   // Everything selected → return to the non-sparse default.
-  if (wanted.length === state.all.length) {
+  if (wanted.length === state.all.length && !options.forceSparse) {
     if (state.sparse) await runGit(cwd, ["sparse-checkout", "disable"]);
     return { ...(await getWorkingDirectories(cwd)), leftBehind: [] };
   }

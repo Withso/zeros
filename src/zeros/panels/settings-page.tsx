@@ -1595,16 +1595,28 @@ function ExperimentalPanel() {
 // Production, compare.
 function InternalPanel() {
   const [copyLogs, setCopyLogs] = useInternalFeature("copyLogs");
+  const [designWorkspaces, setDesignWorkspaces] =
+    useInternalFeature("designWorkspaces");
   return (
     <div className="flex flex-col gap-6">
       <p className={HINT_CLS}>
-        Internal-only features, visible to allowlisted team accounts.{" "}
+        Internal-only features, visible to staff accounts.{" "}
         <span className="text-fg1 font-medium">
           Switches apply to this app (channel) only
         </span>{" "}
         — Zeros, Zeros Beta, and Zeros Dev each keep their own state.
       </p>
       <SettingsList>
+        <SettingsRow
+          label="Design workspaces"
+          hint="Shows the Design workspace option and enables the internal native design-workspace experience in this app channel."
+        >
+          <Switch
+            checked={designWorkspaces}
+            onCheckedChange={setDesignWorkspaces}
+            aria-label="Enable design workspaces"
+          />
+        </SettingsRow>
         <SettingsRow
           label="Copy logs"
           hint="⇧⌘L copies the recent app logs to the clipboard — the same scrubbed ~500 KB JSONL tail a feedback submission attaches."

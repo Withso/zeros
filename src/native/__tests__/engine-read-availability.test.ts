@@ -7,6 +7,7 @@ import {
   gitStatus,
   listWorkspaceFiles,
   workspaceList,
+  type Workspace,
 } from "../git";
 import { readWorkspaceFile, writeWorkspaceFile } from "../files";
 import { turnDiff, turnsList } from "../turns";
@@ -84,5 +85,33 @@ describe("engine-backed native façades", () => {
 
     await expect(ptyTerminals("workspace-a")).resolves.toBeNull();
     expect(request).toHaveBeenCalledOnce();
+  });
+
+  it("makes generic workspace lists code-only unless a Design surface opts in", async () => {
+    const code = {
+      id: "code",
+      kind: "code",
+      repoSlug: "zeros",
+    } as Workspace;
+    const design = {
+      id: "design",
+      kind: "design",
+      repoSlug: "zeros",
+    } as Workspace;
+    const request = vi.fn().mockResolvedValue({
+      type: "WORKSPACE_RESPONSE",
+      op: "workspace.list",
+      result: { workspaces: [code, design] },
+    });
+    setActiveBridge({ request } as unknown as RuntimeClient);
+
+    await expect(workspaceList()).resolves.toEqual([code]);
+    await expect(workspaceList({ includeDesign: true })).resolves.toEqual([
+      code,
+      design,
+    ]);
+    expect(request.mock.calls[1]?.[0]?.params).not.toHaveProperty(
+      "includeDesign",
+    );
   });
 });

@@ -34,6 +34,8 @@ import { branchDisplayName } from "../lib/branch-name";
 import { trackGitOp } from "../analytics/agent-events";
 import { toast } from "../ui/primitives/elements";
 import { clearChatPaneFolders, moveChatPaneFolder } from "./chat-panes-store";
+import { forgetDesignWorkspaceView } from "./design-workspace-ui";
+import { forgetDesignRuntimeWorkspace } from "./design-runtime-store";
 import { isLocalMainWorkspace } from "./local-main-workspace";
 import { loadProjects, type Project } from "./projects-store";
 import {
@@ -61,6 +63,7 @@ import {
   folderIsWithinRoot,
 } from "./workspace-resolution";
 import { previousWorkspaceInOrder } from "./archive-navigation";
+import { isInternalFeatureActive } from "../settings/internal-features";
 
 type Dispatch = ReturnType<typeof useWorkspaceDispatch>;
 
@@ -93,7 +96,9 @@ function pickRepointTarget(leaving: Workspace): {
   // Exclude rows whose confirmed mutation is pending — a burst-archive must
   // never repoint onto a workspace that is itself on its way out.
   const archivingIds = usePendingWorkspacesStore.getState().archivingIds;
-  const previous = previousWorkspaceInOrder(leaving, cached, archivingIds);
+  const previous = previousWorkspaceInOrder(leaving, cached, archivingIds, {
+    allowDesignWorkspaces: isInternalFeatureActive("designWorkspaces"),
+  });
   return previous
     ? { folder: previous.path, repoRoot: previous.repoRoot }
     : { folder: leaving.repoRoot, repoRoot: leaving.repoRoot };
@@ -121,6 +126,7 @@ function detachWorkspaceRuntimeState(
     }
   }
   clearTerminalFolders([workspace.path], project?.id);
+  forgetDesignRuntimeWorkspace(workspace.id);
 }
 
 /** If we just archived/deleted the workspace whose chat is the active target,
@@ -182,6 +188,7 @@ function commitConfirmedDeletion(
   // the Changes snapshots. Archive intentionally does NOT purge: restore
   // reuses the id, and the retained caches repaint the restored PR instantly.
   forgetPrCachesForWorkspace(workspace.id);
+  forgetDesignWorkspaceView(workspace.id);
   const project = findProjectForFolder(workspace.repoRoot, loadProjects());
   clearTerminalFolders([workspace.path], project?.id);
   clearChatPaneFolders([workspace.path], project?.id);
@@ -594,6 +601,9 @@ function commitConfirmedRestore(
   opts?: RestoreFeedbackOptions,
 ): void {
   const restored = result.workspace;
+  const mayPublishNavigation =
+    restored.kind !== "design" ||
+    isInternalFeatureActive("designWorkspaces");
   unstable_batchedUpdates(() => {
     if (restored.path !== original.path) {
       moveChatPaneFolder(original.path, restored.path, original.repoRoot);
@@ -605,7 +615,7 @@ function commitConfirmedRestore(
       });
     }
     commitWorkspaceRestored(restored);
-    opts?.onRestored?.(result);
+    if (mayPublishNavigation) opts?.onRestored?.(result);
   });
   notifyWorkspacesChanged(original.repoSlug);
 }
@@ -761,6 +771,13 @@ export async function restoreWorkspaceWithFeedback(
   workspace: Workspace,
   opts?: RestoreFeedbackOptions,
 ): Promise<void> {
+  if (
+    workspace.kind === "design" &&
+    !isInternalFeatureActive("designWorkspaces")
+  ) {
+    opts?.onSettled?.();
+    return;
+  }
   if (restoringIds.has(workspace.id)) {
     opts?.onSettled?.(); // another restore owns this id — clear the caller's spinner
     return;
