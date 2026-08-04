@@ -6,7 +6,6 @@ import {
   rmSync,
   symlinkSync,
   truncateSync,
-  unlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -159,14 +158,15 @@ describe("read_file", () => {
   it("refuses a relative path that escapes the workspace", () => {
     // A real file just outside cwd, so the gate (not a missing-file error)
     // is what rejects it.
-    const escape = path.join(path.dirname(dir), "zeros-escape-test.ts");
+    const outsideDir = mkdtempSync(path.join(tmpdir(), "zeros-file-outside-"));
+    const escape = path.join(outsideDir, "escape.ts");
     writeFileSync(escape, "secret");
     try {
-      const res = call({ cwd: dir, path: "../zeros-escape-test.ts" });
+      const res = call({ cwd: dir, path: path.relative(dir, escape) });
       expect(res.kind).toBe("error");
       expect(res.error).toMatch(/outside the workspace/);
     } finally {
-      unlinkSync(escape);
+      rmSync(outsideDir, { recursive: true, force: true });
     }
   });
 
@@ -384,9 +384,30 @@ describe("read_file", () => {
     expect(res).toMatchObject({ kind: "image", width: 256, height: 144 });
   });
 
-  it("never squeezes an EXIF-oriented JPEG returned by the native decoder", async () => {
+  it("trusts the platform provider to orient square EXIF JPEGs exactly once", async () => {
+    const imagePath = path.join(dir, "square-oriented.jpg");
+    writeFileSync(imagePath, rotatedJpegFixture(800, 800));
+    nativeImageMock.thumbnail.getSize.mockReturnValue({
+      width: 256,
+      height: 256,
+    });
+
+    const res = await callThumbnail({ cwd: dir, path: "square-oriented.jpg" });
+
+    expect(res).toMatchObject({
+      kind: "image",
+      width: 256,
+      height: 256,
+    });
+    expect("orientation" in res ? res.orientation : undefined).toBeUndefined();
+  });
+
+  it("never squeezes raw EXIF pixels returned by the direct decoder", async () => {
     const imagePath = path.join(dir, "oriented.jpg");
     writeFileSync(imagePath, rotatedJpegFixture(800, 600));
+    nativeImageMock.createThumbnailFromPath.mockRejectedValueOnce(
+      new Error("thumbnail service unavailable"),
+    );
     nativeImageMock.thumbnail.getSize.mockReturnValue({
       width: 256,
       height: 192,
@@ -403,6 +424,24 @@ describe("read_file", () => {
     });
   });
 
+  it("uses the requested extension when an in-workspace image symlink resolves to an extensionless file", async () => {
+    const sourcePath = path.join(dir, "image-bytes");
+    writeFileSync(sourcePath, pngFixture(32, 640, 360));
+    symlinkSync(sourcePath, path.join(dir, "linked.png"));
+
+    const res = await callThumbnail({ cwd: dir, path: "linked.png" });
+
+    expect(res).toMatchObject({
+      kind: "image",
+      sourceWidth: 640,
+      sourceHeight: 360,
+    });
+    expect(nativeImageMock.createThumbnailFromPath).toHaveBeenCalledWith(
+      sourcePath,
+      { width: 256, height: 144 },
+    );
+  });
+
   it("refuses thumbnail reads that escape the trusted workspace", async () => {
     const res = await callThumbnail({ cwd: dir, path: "/etc/hosts" });
 
@@ -412,17 +451,23 @@ describe("read_file", () => {
   });
 
   it("refuses a thumbnail symlink that resolves outside the workspace", async () => {
-    const outside = path.join(tmpdir(), `zeros-thumbnail-${process.pid}.png`);
+    const outsideDir = mkdtempSync(
+      path.join(tmpdir(), "zeros-thumbnail-outside-"),
+    );
+    const outside = path.join(outsideDir, "outside.png");
     writeFileSync(outside, "outside");
-    symlinkSync(outside, path.join(dir, "linked.png"));
+    symlinkSync(outside, path.join(dir, "outside-linked.png"));
     try {
-      const res = await callThumbnail({ cwd: dir, path: "linked.png" });
+      const res = await callThumbnail({
+        cwd: dir,
+        path: "outside-linked.png",
+      });
 
       expect(res.kind).toBe("error");
       expect("error" in res ? res.error : "").toMatch(/symlink outside/);
       expect(nativeImageMock.createThumbnailFromPath).not.toHaveBeenCalled();
     } finally {
-      unlinkSync(outside);
+      rmSync(outsideDir, { recursive: true, force: true });
     }
   });
 

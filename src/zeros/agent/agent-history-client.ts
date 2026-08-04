@@ -321,6 +321,8 @@ export interface AttachmentWriteResult {
   relativePath: string;
   mimeType: string;
   bytes: number;
+  /** True when the exact bytes were already staged and disk did not change. */
+  skipped?: boolean;
 }
 
 /** Persist a base64-encoded attachment into the workspace's context graph
@@ -345,8 +347,9 @@ export async function writeContextAttachment(args: {
   );
   // The write is a plain IPC (no bridge op → no DB_CHANGED), and the git
   // refresh bus for this path only bumps at turn end — nudge the Context tab
-  // directly so the card appears the moment the file lands, not minutes later.
-  notifyContextGraphChanged(args.cwd);
+  // when disk changed so the card appears immediately. The send-time exact-byte
+  // safety net stays quiet instead of revalidating every Git surface.
+  if (!result.skipped) notifyContextGraphChanged(args.cwd);
   return result;
 }
 

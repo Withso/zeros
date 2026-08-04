@@ -63,10 +63,10 @@ graph itself is NOT gitignored — only its private half is.
   append-only (2026-08-03(3), see §7):** removing a chip (×, Backspace,
   select-all delete, transcript untoggle) leaves the staged record in place —
   only the user deleting the file on disk removes it. Undo of a removal
-  re-runs the write, which the engine skips as a same-size no-op.
+  re-runs the write, which the engine skips as a byte-identical no-op.
   `encodeAttachments` (the single staged-attachment → wire-content
   chokepoint) keeps its write as an idempotent send-time safety net — the
-  engine skips same-size re-writes so mtimes (and canvas slots) hold — and
+  engine skips byte-identical re-writes so mtimes (and canvas slots) hold — and
   the non-vision image path still treats the write as load-bearing (the
   prompt references the path). Writes are scope-pinned: an id already in
   `shared/` is re-written THERE, never duplicated back into `local/`.
@@ -194,7 +194,7 @@ yet"; Files tab showing a compacted `local/attachments` row):
   byte-less chips) of the whole document (a) on seed mounts (`onCreate`) and
   seed swaps (`setContent`), and (b) the moment `useWorkspaceProvisioning`
   flips false for the composer's cwd. Writes are idempotent (same id ⇒ same
-  bytes; engine skips same-size re-writes without touching mtime), so
+  bytes; engine skips byte-identical re-writes without touching mtime), so
   re-sweeping a restored draft is a no-op that doubles as self-heal.
 - **Provisioning writes are refused at the source.** `executeGraphSync` now
   drops the whole plan while `isWorkspaceProvisioning(cwd)` — a stage write
@@ -273,7 +273,7 @@ What was DELETED to enforce this (2026-08-02(2)'s unstage machinery):
 - the `unstage` half of the composer diff (`GraphSyncPlan` is stage-only)
   and its per-id write/remove ordering chain, which only existed so a
   remove→undo flurry couldn't interleave — writes alone are idempotent
-  (same id ⇒ same bytes) in any order;
+  (byte-identical re-stages are no-ops) in any order;
 - queued-message deletion's graph cleanup (`deleteQueued`).
 
 This also dissolves the old "orphan record" edge cases (mid-edit attach then

@@ -9,6 +9,7 @@ import {
   ContextGraphCanvas,
   contextGraphImageOrientationTransform,
   contextGraphShareControlCompensation,
+  contextGraphThumbnailFailureIsPermanent,
   contextGraphThumbnailDimension,
   computeContextGraphLayout,
   computeDiamondRowCounts,
@@ -67,13 +68,34 @@ describe("computeContextGraphLayout", () => {
 
     expect(
       computeContextGraphLayout(localItems).placed.map(
-        ({ x, y, depthPlane }) => [x, y, depthPlane],
+        ({ x, y, depthPlane, itemKey }) => [x, y, depthPlane, itemKey],
       ),
     ).toEqual(
       computeContextGraphLayout(sharedItems).placed.map(
-        ({ x, y, depthPlane }) => [x, y, depthPlane],
+        ({ x, y, depthPlane, itemKey }) => [x, y, depthPlane, itemKey],
       ),
     );
+  });
+
+  it("gives manually duplicated local/shared attachment ids distinct jitter", () => {
+    const duplicate = item({
+      attachmentId: "duplicate",
+      name: "same.png",
+      relPath: ".context-graph/local/attachments/duplicate/same.png",
+    });
+    const layout = computeContextGraphLayout([
+      item({ attachmentId: "first", name: "first.png" }),
+      duplicate,
+      {
+        ...duplicate,
+        scope: "shared",
+        relPath: ".context-graph/shared/attachments/duplicate/same.png",
+      },
+    ]);
+
+    expect(layout.placed[1]?.row).toBe(layout.placed[2]?.row);
+    expect(layout.placed[1]?.itemKey).not.toBe(layout.placed[2]?.itemKey);
+    expect(layout.placed[1]?.y).not.toBe(layout.placed[2]?.y);
   });
 
   it("merges every graph file into one centered diamond", () => {
@@ -252,6 +274,26 @@ describe("computeContextGraphLayout", () => {
     expect(contextGraphImageOrientationTransform(6)).toBe("rotate(90deg)");
     expect(contextGraphImageOrientationTransform(8)).toBe("rotate(-90deg)");
     expect(contextGraphImageOrientationTransform()).toBeUndefined();
+  });
+
+  it("retries thumbnail errors but caches a size-limit rejection", () => {
+    expect(
+      contextGraphThumbnailFailureIsPermanent({
+        kind: "error",
+        path: "a.png",
+        bytes: 10,
+        error: "temporarily missing",
+      }),
+    ).toBe(false);
+    expect(
+      contextGraphThumbnailFailureIsPermanent({
+        kind: "too-large",
+        path: "a.png",
+        bytes: 100_000_001,
+        error: "too large",
+      }),
+    ).toBe(true);
+    expect(contextGraphThumbnailFailureIsPermanent(null)).toBe(false);
   });
 
   it("keeps the Shared control usable at overview zoom and lets it grow close-up", () => {

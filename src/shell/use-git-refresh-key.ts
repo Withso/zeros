@@ -363,8 +363,9 @@ export function triggerGitRefresh(changedCwd?: string): void {
 // bridge it onto this refresh bus so the Files tab's tracked AND ignored
 // listings pick the new folder up the moment the write lands, exactly like a
 // row-1 editor save. Coalesced on a short trailing timer per workspace — a
-// multi-file drop stages one write per file, and each already notifies
-// individually — so one gesture costs one refresh.
+// multi-file drop stages one real write per file, and each notifies
+// individually — so one gesture costs one refresh. Send-time byte-identical
+// safety-net writes do not emit this signal.
 const GRAPH_REFRESH_COALESCE_MS = 150;
 const graphRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
 subscribeContextGraphChanged((cwd) => {

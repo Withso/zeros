@@ -29,7 +29,7 @@
 // — the store the Context tab canvas renders. Since attach-time staging
 // (composer-editor/context-graph-staging.ts) the graph copy normally already
 // exists by the time a send encodes; the write here is an idempotent safety
-// net (the engine skips same-size re-writes), kept because the send is the
+// net (the engine skips byte-identical re-writes), kept because the send is the
 // last moment the bytes are certainly in memory. For text and vision-image
 // sends it is a best-effort side-effect: a failed graph write (web client,
 // read-only disk) never skips the attachment, because the inline block

@@ -28,16 +28,16 @@
 //      force-added into the archive snapshot), so a workspace's context
 //      record outlives any one chat and even the worktree itself.
 //
-// Path safety lives in src/engine/files/context-graph.ts (the ONE
-// implementation, shared with the engine bridge ops): ids validated as
-// a-zA-Z0-9_-, filenames reduced to a sanitised basename, and every resolved
-// path confined to the workspace lexically + by realpath. These handlers only
-// validate arg SHAPES and translate structured failures into throws.
+// The IPC boundary first anchors cwd with the same trusted-root helper as the
+// Files commands. Path safety inside that root lives in
+// src/engine/files/context-graph.ts (the ONE implementation shared with the
+// engine bridge ops): ids are validated, filenames reduced to a sanitised
+// basename, and every resolved path confined lexically + by realpath.
 // ──────────────────────────────────────────────────────────
 
-import * as path from "node:path";
 import { stageContextGraphAttachment } from "../../../src/engine/files/context-graph";
 import type { CommandHandler } from "../router";
+import { cwdIsTrusted } from "./workspace-root-trust";
 
 function requireString(args: Record<string, unknown>, key: string): string {
   const v = args[key];
@@ -77,8 +77,10 @@ export const agentAttachmentWrite: CommandHandler = async (args) => {
   if (!ID_OK.test(attachmentId)) {
     throw new Error("agent_attachment: invalid attachmentId");
   }
-  if (!path.isAbsolute(cwd)) {
-    throw new Error("agent_attachment: cwd must be absolute");
+  if (!cwdIsTrusted(cwd)) {
+    throw new Error(
+      "agent_attachment: refusing to write outside the workspace",
+    );
   }
 
   const staged = await stageContextGraphAttachment(cwd, {
@@ -101,5 +103,6 @@ export const agentAttachmentWrite: CommandHandler = async (args) => {
     relativePath: staged.relativePath,
     mimeType,
     bytes: staged.bytes,
+    ...(staged.skipped ? { skipped: true } : {}),
   };
 };

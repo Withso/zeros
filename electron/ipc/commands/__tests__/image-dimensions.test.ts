@@ -1,9 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import {
   containedThumbnailSize,
   parseImageDimensions,
+  probeImageDimensions,
 } from "../image-dimensions";
+
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 function png(width: number, height: number): Buffer {
   const buffer = Buffer.alloc(24);
@@ -141,6 +153,33 @@ describe("parseImageDimensions", () => {
     expect(parseImageDimensions(ico, ".ico")).toEqual({
       width: 256,
       height: 256,
+    });
+  });
+});
+
+describe("probeImageDimensions", () => {
+  it("finds a JPEG frame after more than 256 KiB of leading metadata", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zeros-image-probe-"));
+    tempDirs.push(dir);
+    const metadata = Array.from({ length: 5 }, () => {
+      const segment = Buffer.alloc(60_004);
+      segment.set([0xff, 0xe2]);
+      segment.writeUInt16BE(60_002, 2);
+      return segment;
+    });
+    const sof = Buffer.alloc(19);
+    sof.set([0xff, 0xc0]);
+    sof.writeUInt16BE(17, 2);
+    sof[4] = 8;
+    sof.writeUInt16BE(900, 5);
+    sof.writeUInt16BE(1_600, 7);
+    const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8]), ...metadata, sof]);
+    const file = path.join(dir, "large-metadata.jpg");
+    writeFileSync(file, jpeg);
+
+    expect(probeImageDimensions(file, jpeg.length, ".jpg")).toEqual({
+      width: 1_600,
+      height: 900,
     });
   });
 });

@@ -125,8 +125,8 @@ export function planGraphSync(
  *  whose graph record doesn't exist yet — above all the new-workspace
  *  dispatcher's seed, whose surface deliberately never stages (its cwd is the
  *  trunk) and whose send may be minutes away behind setup + agent spawn. The
- *  graph write is idempotent (same id ⇒ same bytes; the engine skips
- *  same-size re-writes without touching mtime), so re-sweeping an
+ *  graph write is idempotent (the engine skips byte-identical re-writes
+ *  without touching mtime), so re-sweeping an
  *  already-staged draft is a cheap no-op, and it doubles as self-heal for a
  *  record lost to a crashed write or an externally pruned folder. */
 export function planSeedStage(

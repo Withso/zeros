@@ -8,8 +8,10 @@
 // thumbnail without decoding the full source image in the main process.
 
 import fs from "node:fs";
+import path from "node:path";
 
-const MAX_PROBE_BYTES = 256 * 1024;
+const INITIAL_PROBE_BYTES = 256 * 1024;
+const MAX_PROBE_BYTES = 4 * 1024 * 1024;
 const MAX_DIMENSION = 1_000_000;
 
 export interface ImageDimensions {
@@ -283,22 +285,34 @@ export function parseImageDimensions(
   return null;
 }
 
-/** Read at most 256 KiB, regardless of source size. */
+/** Read a small prefix, expanding only JPEG probes whose frame may sit behind
+ * large ICC/XMP segments. The 4 MiB ceiling keeps hostile metadata bounded. */
 export function probeImageDimensions(
   filePath: string,
   sourceBytes: number,
+  extension: string = path.extname(filePath),
 ): ImageDimensions | null {
-  const length = Math.min(MAX_PROBE_BYTES, Math.max(0, sourceBytes));
-  if (length === 0) return null;
-  const buffer = Buffer.allocUnsafe(length);
+  const maximumLength = Math.min(MAX_PROBE_BYTES, Math.max(0, sourceBytes));
+  if (maximumLength === 0) return null;
+  const ext = extension.toLowerCase();
+  let length = Math.min(INITIAL_PROBE_BYTES, maximumLength);
   let handle: number | null = null;
   try {
     handle = fs.openSync(filePath, "r");
-    const bytesRead = fs.readSync(handle, buffer, 0, length, 0);
-    return parseImageDimensions(
-      buffer.subarray(0, bytesRead),
-      filePath.slice(filePath.lastIndexOf(".")).toLowerCase(),
-    );
+    for (;;) {
+      const buffer = Buffer.allocUnsafe(length);
+      const bytesRead = fs.readSync(handle, buffer, 0, length, 0);
+      const result = parseImageDimensions(buffer.subarray(0, bytesRead), ext);
+      if (result) return result;
+      if (
+        (ext !== ".jpg" && ext !== ".jpeg") ||
+        bytesRead < length ||
+        length >= maximumLength
+      ) {
+        return null;
+      }
+      length = Math.min(maximumLength, length * 2);
+    }
   } catch {
     return null;
   } finally {

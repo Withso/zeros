@@ -9,10 +9,10 @@
 //
 // H3 — the renderer supplies `cwd`. Left unchecked it was an arbitrary-file
 // read primitive (`read_file({cwd:"~/.ssh", path:"id_rsa"})`). The fix is
-// `cwdIsTrusted()` below: `cwd` MUST be the open project root OR live under the
-// Zeros worktrees tree — every legitimate Files-tab cwd — and readWorkspaceFile
-// then lexically + realpath-confines the read inside that root. Together those
-// fully close the arbitrary-read hole.
+// `cwdIsTrusted()` in workspace-root-trust.ts requires `cwd` to be the open
+// project root OR live under the Zeros worktrees tree — every legitimate
+// Files-tab cwd — and readWorkspaceFile then lexically + realpath-confines the
+// read inside that root. Together those fully close the arbitrary-read hole.
 //
 // This is a LOCAL read on the owner's OWN machine, so it runs with `remote:false`
 // (full access). The secret/credential denylist is the REMOTE boundary ONLY
@@ -40,13 +40,12 @@ import {
   writeWorkspaceFile,
   type WriteFileResult,
 } from "../../../src/engine/files/write-file";
-import { zerosWorkspacesRoot } from "../../../src/engine/db/paths";
-import { currentRoot } from "../../sidecar";
 import type { CommandHandler } from "../router";
 import {
   containedThumbnailSize,
   probeImageDimensions,
 } from "./image-dimensions";
+import { cwdIsTrusted } from "./workspace-root-trust";
 
 export type { ReadFileKind, ReadFileResult, WriteFileResult };
 
@@ -91,19 +90,6 @@ export type ReadImageThumbnailResult =
       bytes: number;
       error: string;
     };
-
-/** The renderer-supplied cwd must be the open project root or live under the
- *  Zeros worktrees tree — never an arbitrary host path. */
-function cwdIsTrusted(cwd: string): boolean {
-  const resolved = path.resolve(cwd);
-  const roots = [currentRoot(), zerosWorkspacesRoot()].filter(
-    (r): r is string => typeof r === "string" && r.length > 0,
-  );
-  return roots.some((root) => {
-    const r = path.resolve(root);
-    return resolved === r || resolved.startsWith(r + path.sep);
-  });
-}
 
 function thumbnailFailure(
   relPath: string,
@@ -182,7 +168,11 @@ export const readImageThumbnail: CommandHandler = async (args) => {
   // Probe only a bounded prefix. Supplying the source aspect ratio to the
   // macOS thumbnail service prevents it from baking a square stretch into the
   // bitmap; CSS object-fit cannot repair pixels that arrived distorted.
-  const sourceSize = probeImageDimensions(realTarget, bytes);
+  const sourceSize = probeImageDimensions(
+    realTarget,
+    bytes,
+    path.extname(target),
+  );
   if (!sourceSize) {
     return thumbnailFailure(
       rel,
@@ -277,23 +267,19 @@ export const readImageThumbnail: CommandHandler = async (args) => {
     }
     const requestedRatio = requestedSize.width / requestedSize.height;
     const initialRatio = initialSize.width / initialSize.height;
-    // A decoded JPEG whose EXIF orientation swaps its axes has the reciprocal
-    // ratio. Electron documents that NativeImage itself does not apply EXIF;
-    // forcing that bitmap into the display-oriented width AND height would
-    // visibly squeeze it. Preserve those pixels and let the contained card
-    // present the decoder's honest ratio.
-    const reciprocalRatio = 1 / requestedRatio;
-    const isReciprocalOrientation =
+    // The platform thumbnail provider owns EXIF orientation. Aspect ratios
+    // cannot reveal whether it did so for square sources or for orientations
+    // 2–4. Electron's direct NativeImage decoder is the one explicit raw-pixel
+    // path, so only that path asks the renderer to apply the EXIF transform.
+    const directDecoderSwapsAxes =
+      usedDirectDecoder &&
       sourceSize.orientation != null &&
       sourceSize.orientation >= 5 &&
-      sourceSize.orientation <= 8 &&
-      Number.isFinite(initialRatio) &&
-      Math.abs(initialRatio - reciprocalRatio) / reciprocalRatio <= 0.01;
+      sourceSize.orientation <= 8;
     const needsCssOrientation =
-      sourceSize.orientation != null &&
-      (usedDirectDecoder || isReciprocalOrientation);
+      usedDirectDecoder && sourceSize.orientation != null;
     if (
-      !isReciprocalOrientation &&
+      !directDecoderSwapsAxes &&
       (initialSize.width > requestedSize.width ||
         initialSize.height > requestedSize.height ||
         !Number.isFinite(initialRatio) ||

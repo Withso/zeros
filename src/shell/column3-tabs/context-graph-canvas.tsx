@@ -45,6 +45,8 @@ interface ContextGraphCanvasProps {
 /** One placed card: the item plus its canvas-space slot. */
 interface PlacedItem {
   item: ContextGraphItemWire;
+  /** Scope-independent normally; scope-qualified only for an on-disk duplicate. */
+  itemKey: string;
   x: number;
   y: number;
   /** Logical diamond row, exposed so layout invariants stay testable. */
@@ -308,9 +310,16 @@ function jitterFor(seed: string): { dx: number; dy: number } {
   };
 }
 
-/** Scope-independent identity for layout, React, and thumbnail caching. */
+/** Scope-independent identity for layout. A normal share move keeps its seed,
+ * while a duplicate present in both scopes is disambiguated below. */
 function stableItemKey(item: ContextGraphItemWire): string {
   return item.attachmentId ? `${item.attachmentId}/${item.name}` : item.relPath;
+}
+
+/** Scope-aware identity for React and thumbnail data. Two divergent on-disk
+ * copies must never reuse one component or decoded bitmap. */
+function scopedItemKey(item: ContextGraphItemWire): string {
+  return `${item.scope}|${stableItemKey(item)}`;
 }
 
 /** Split `count` across a compact diamond envelope. A full envelope has row
@@ -368,6 +377,11 @@ export function computeContextGraphLayout(
   const placed: PlacedItem[] = [];
   const widestRow = Math.max(1, ...rowCounts);
   let itemIndex = 0;
+  const identityCounts = new Map<string, number>();
+  for (const item of items) {
+    const key = stableItemKey(item);
+    identityCounts.set(key, (identityCounts.get(key) ?? 0) + 1);
+  }
 
   rowCounts.forEach((rowSize, row) => {
     const rowOffset = ((widestRow - rowSize) * SLOT_X) / 2;
@@ -375,9 +389,15 @@ export function computeContextGraphLayout(
       const index = itemIndex;
       const item = items[itemIndex++];
       if (!item) break;
-      const { dx, dy } = jitterFor(stableItemKey(item));
+      const stableKey = stableItemKey(item);
+      const itemKey =
+        (identityCounts.get(stableKey) ?? 0) > 1
+          ? scopedItemKey(item)
+          : stableKey;
+      const { dx, dy } = jitterFor(itemKey);
       placed.push({
         item,
+        itemKey,
         x: rowOffset + column * SLOT_X + dx,
         y: row * SLOT_Y + dy,
         row,
@@ -421,7 +441,7 @@ interface CachedImageThumbnail {
 }
 
 const imageUrlCache = new Map<string, CachedImageThumbnail | null>();
-const IMAGE_THUMBNAIL_CACHE_VERSION = 4;
+const IMAGE_THUMBNAIL_CACHE_VERSION = 5;
 const IMAGE_CACHE_MAX = 160;
 const IMAGE_CACHE_MAX_URL_CHARS = 24_000_000;
 
@@ -453,8 +473,16 @@ function cacheImageUrl(key: string, value: CachedImageThumbnail | null): void {
 
 interface QueuedImageLoad {
   cancelled: boolean;
-  run: () => Promise<CachedImageThumbnail | null>;
+  run: () => Promise<CachedImageThumbnail | null | undefined>;
   resolve: (value: CachedImageThumbnail | null | undefined) => void;
+}
+
+/** Only a deterministic size-policy refusal is permanent for an exact mtime.
+ * Missing/rewritten files and decode failures get another chance on re-entry. */
+export function contextGraphThumbnailFailureIsPermanent(
+  result: ReadImageThumbnailResult | null,
+): boolean {
+  return result?.kind === "too-large";
 }
 
 const imageLoadQueue: QueuedImageLoad[] = [];
@@ -963,6 +991,7 @@ export function ContextGraphCanvas({
   // pill's text child, while newly mounted depth groups need the current
   // matrices without resetting the user's viewport.
   useEffect(() => {
+    if (!active) return;
     apply();
   });
 
@@ -1008,22 +1037,25 @@ export function ContextGraphCanvas({
             // Runtime-computed canvas extent; transform is written directly.
             style={{ width: layout.width, height: layout.height }}
           >
-            {placedByDepth[depthPlane]!.map(({ item, x, y, row, column }) => (
-              <ContextGraphCard
-                key={`${stableItemKey(item)}|${row}:${column}`}
-                cwd={cwd}
-                item={item}
-                x={x}
-                y={y}
-                thumbnailDimension={thumbnailDimension}
-                observeImage={observeImage}
-                imageThumbnailLoader={imageThumbnailLoader}
-                onToggleShared={onToggleShared}
-                togglePending={
-                  !!item.attachmentId && pendingToggles.has(item.attachmentId)
-                }
-              />
-            ))}
+            {placedByDepth[depthPlane]!.map(
+              ({ item, itemKey, x, y, row, column }) => (
+                <ContextGraphCard
+                  key={`${itemKey}|${row}:${column}`}
+                  cwd={cwd}
+                  item={item}
+                  itemKey={itemKey}
+                  x={x}
+                  y={y}
+                  thumbnailDimension={thumbnailDimension}
+                  observeImage={observeImage}
+                  imageThumbnailLoader={imageThumbnailLoader}
+                  onToggleShared={onToggleShared}
+                  togglePending={
+                    !!item.attachmentId && pendingToggles.has(item.attachmentId)
+                  }
+                />
+              ),
+            )}
           </div>
         ))}
         <Button
@@ -1048,6 +1080,8 @@ export function ContextGraphCanvas({
 interface CardProps {
   cwd: string;
   item: ContextGraphItemWire;
+  /** Stable render/cache key, scope-qualified only for duplicate identities. */
+  itemKey: string;
   x: number;
   y: number;
   thumbnailDimension: ContextGraphThumbnailDimension;
@@ -1060,6 +1094,7 @@ interface CardProps {
 const ContextGraphCard = React.memo(function ContextGraphCard({
   cwd,
   item,
+  itemKey,
   x,
   y,
   thumbnailDimension,
@@ -1123,9 +1158,10 @@ const ContextGraphCard = React.memo(function ContextGraphCard({
       {shareControl}
       {isImage ? (
         <ImageCardMedia
-          key={`${cwd}|${stableItemKey(item)}|${item.mtimeMs}`}
+          key={`${cwd}|${itemKey}|${item.mtimeMs}`}
           cwd={cwd}
           item={item}
+          itemKey={itemKey}
           thumbnailDimension={thumbnailDimension}
           observeImage={observeImage}
           imageThumbnailLoader={imageThumbnailLoader}
@@ -1183,11 +1219,12 @@ function DocumentCardBody({ item }: { item: ContextGraphItemWire }) {
 function ImageCardMedia({
   cwd,
   item,
+  itemKey,
   thumbnailDimension,
   observeImage,
   imageThumbnailLoader,
 }: Omit<CardProps, "x" | "y" | "onToggleShared" | "togglePending">) {
-  const baseCacheKey = `${IMAGE_THUMBNAIL_CACHE_VERSION}|${cwd}|${stableItemKey(item)}|${item.mtimeMs}`;
+  const baseCacheKey = `${IMAGE_THUMBNAIL_CACHE_VERSION}|${cwd}|${itemKey}|${item.mtimeMs}`;
   // Keep the last confirmed preview visible while a sharper bucket loads.
   const [thumbnail, setThumbnail] = useState<CachedImageThumbnail | null>(() =>
     bestCachedImage(baseCacheKey, thumbnailDimension),
@@ -1219,7 +1256,13 @@ function ImageCardMedia({
           item.relPath,
           thumbnailDimension,
         );
-        if (!res || !(await decodeThumbnail(res)) || !res.dataUrl) return null;
+        if (!res) return undefined;
+        if (res.kind !== "image") {
+          return contextGraphThumbnailFailureIsPermanent(res)
+            ? null
+            : undefined;
+        }
+        if (!(await decodeThumbnail(res)) || !res.dataUrl) return undefined;
         return {
           dataUrl: res.dataUrl,
           requestedDimension: res.fullResolution

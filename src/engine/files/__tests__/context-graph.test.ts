@@ -2,7 +2,7 @@
 // gitignore split (local private / shared committed), bounded listing with
 // previews, the share toggle's move semantics, and the path-safety refusals.
 
-import { beforeEach, afterEach, describe, expect, it } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import { mkdtempSync } from "node:fs";
 import os from "node:os";
@@ -230,6 +230,18 @@ describe("contextGraphHasContent", () => {
     await seedAttachment("local", "att-1", "notes.md", "hi");
     expect(await contextGraphHasContent(root)).toBe(true);
   });
+
+  it("short-circuits without opening text files for previews", async () => {
+    await ensureContextGraph(root);
+    await seedAttachment("local", "att-1", "notes.md", "hi");
+    const open = vi.spyOn(fs, "open");
+    try {
+      expect(await contextGraphHasContent(root)).toBe(true);
+      expect(open).not.toHaveBeenCalled();
+    } finally {
+      open.mockRestore();
+    }
+  });
 });
 
 describe("stageContextGraphAttachment", () => {
@@ -290,6 +302,26 @@ describe("stageContextGraphAttachment", () => {
     expect(second.skipped).toBe(true);
     const after = await fs.stat(file);
     expect(after.mtimeMs).toBe(before.mtimeMs);
+  });
+
+  it("refreshes an existing same-length file when its bytes differ", async () => {
+    await stageContextGraphAttachment(root, {
+      attachmentId: "att-1",
+      base64: Buffer.from("hello").toString("base64"),
+      filename: "notes.txt",
+    });
+    const file = graph("local", "attachments", "att-1", "notes.txt");
+    await fs.writeFile(file, "jello");
+
+    const refreshed = await stageContextGraphAttachment(root, {
+      attachmentId: "att-1",
+      base64: Buffer.from("hello").toString("base64"),
+      filename: "notes.txt",
+    });
+
+    expect(refreshed.ok).toBe(true);
+    expect(refreshed.skipped).toBeUndefined();
+    expect(await fs.readFile(file, "utf8")).toBe("hello");
   });
 
   it("sanitises hostile filenames into the attachment folder", async () => {
@@ -372,4 +404,3 @@ describe("stageContextGraphAttachment", () => {
     ).toBe("local copy");
   });
 });
-

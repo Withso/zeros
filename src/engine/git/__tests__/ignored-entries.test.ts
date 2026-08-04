@@ -143,6 +143,26 @@ describe("listIgnoredEntries", () => {
     expect(roots).toContain("dist/"); // …and a non-empty one still shows
   });
 
+  it("gives later empty roots a probe after one deep root spends its sub-budget", async () => {
+    let deep = path.join(workdir, "a-deep-empty");
+    for (let index = 0; index < 40; index += 1) {
+      deep = path.join(deep, `level-${index}`);
+      await mkdir(deep, { recursive: true });
+    }
+    await mkdir(path.join(workdir, "z-shallow-empty"));
+    await writeFile(
+      path.join(workdir, ".gitignore"),
+      "node_modules/\ndist/\n.env\na-deep-empty/\nz-shallow-empty/\n",
+    );
+
+    const roots = await listIgnoredEntries(workdir);
+
+    // The deep root safely remains visible once its own bounded proof expires;
+    // it must not consume the shared allowance needed to suppress the later row.
+    expect(roots).toContain("a-deep-empty/");
+    expect(roots).not.toContain("z-shallow-empty/");
+  });
+
   it("suppresses an ignored dir whose only content is a nested .git", async () => {
     // The tree never shows `.git` at any depth (readIgnoredDir drops it), so
     // a vendored checkout cleaned down to its object store would render as a

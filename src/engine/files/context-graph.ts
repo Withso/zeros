@@ -27,6 +27,8 @@
 // ──────────────────────────────────────────────────────────
 
 import fs from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 export const CONTEXT_GRAPH_DIR = ".context-graph";
@@ -160,23 +162,23 @@ export async function ensureContextGraph(
     let created = false;
     for (const scope of [CONTEXT_GRAPH_LOCAL, CONTEXT_GRAPH_SHARED]) {
       const dir = path.join(root, scope, ATTACHMENTS_DIR);
-      const before = await fs.access(dir).then(
-        () => true,
-        () => false,
-      );
-      if (!before) {
-        await fs.mkdir(dir, { recursive: true });
-        created = true;
+      if (!(await isConfined(dir, workspaceRoot))) {
+        return { ok: false, created, error: "graph scope escapes workspace" };
+      }
+      const made = await fs.mkdir(dir, { recursive: true });
+      if (made !== undefined) created = true;
+      if (!(await isConfined(dir, workspaceRoot))) {
+        return { ok: false, created, error: "graph scope escapes workspace" };
       }
     }
     const ignorePath = path.join(root, ".gitignore");
-    const haveIgnore = await fs.access(ignorePath).then(
-      () => true,
-      () => false,
-    );
-    if (!haveIgnore) {
-      await fs.writeFile(ignorePath, GITIGNORE_BODY);
+    try {
+      // Exclusive creation preserves a user-edited file and closes the
+      // access-then-write race without ever following a planted symlink.
+      await fs.writeFile(ignorePath, GITIGNORE_BODY, { flag: "wx" });
       created = true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     }
     return { ok: true, created };
   } catch (err) {
@@ -359,6 +361,84 @@ export interface ContextGraphStageResult {
   error?: string;
 }
 
+/** Read and compare through one no-follow handle. A stable inode check keeps a
+ * concurrent replacement from being mistaken for the bytes we inspected. */
+async function existingFileMatches(
+  filePath: string,
+  expected: Buffer,
+): Promise<boolean> {
+  let handle: fs.FileHandle | null = null;
+  try {
+    handle = await fs.open(
+      filePath,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+    );
+    const openedStat = await handle.stat();
+    if (!openedStat.isFile() || openedStat.size !== expected.length)
+      return false;
+    const actual = await handle.readFile();
+    if (!actual.equals(expected)) return false;
+    const currentStat = await fs.lstat(filePath).catch(() => null);
+    return (
+      currentStat?.isFile() === true &&
+      currentStat.dev === openedStat.dev &&
+      currentStat.ino === openedStat.ino
+    );
+  } catch {
+    return false;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+/** Write beside the destination and rename into place. Rename replaces a
+ * symlink entry itself instead of following it, eliminating the lstat/write
+ * race at the predictable attachment filename. */
+async function atomicWriteAttachment(
+  filePath: string,
+  contents: Buffer,
+): Promise<void> {
+  const temporaryPath = path.join(
+    path.dirname(filePath),
+    `.${path.basename(filePath)}.${randomUUID()}.staging`,
+  );
+  let handle: fs.FileHandle | null = null;
+  try {
+    handle = await fs.open(
+      temporaryPath,
+      fsConstants.O_WRONLY |
+        fsConstants.O_CREAT |
+        fsConstants.O_EXCL |
+        fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+    await handle.writeFile(contents);
+    await handle.close();
+    handle = null;
+    try {
+      await fs.rename(temporaryPath, filePath);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (
+        code !== "EISDIR" &&
+        code !== "ENOTDIR" &&
+        code !== "ENOTEMPTY" &&
+        code !== "EPERM"
+      ) {
+        throw err;
+      }
+      // The destination is a directory-shaped squatter. Remove the entry and
+      // retry the rename; rename itself still replaces any file/symlink planted
+      // in the gap rather than following it.
+      await fs.rm(filePath, { recursive: true, force: true });
+      await fs.rename(temporaryPath, filePath);
+    }
+  } finally {
+    await handle?.close().catch(() => {});
+    await fs.rm(temporaryPath, { force: true }).catch(() => {});
+  }
+}
+
 /** Strip directory parts, replace shell-hostile characters, cap the length.
  *  The one filename sanitiser for attachment writes — the IPC used to own a
  *  copy; it lives here so every writer and every test agree on the layout. */
@@ -381,9 +461,8 @@ export function safeAttachmentFilename(raw: string): string {
  *      would re-create `local/<id>` after the user shared the attachment,
  *      leaving divergent copies in both scopes — the state setShared refuses
  *      to touch.
- *    • A same-size existing file is left alone (same id ⇒ same bytes; the id
- *      is minted per staged attachment and its content never changes), so
- *      re-writes don't bump mtime and reshuffle the canvas.
+ *    • An existing file is left alone only after its bytes compare equal, so
+ *      re-writes don't bump mtime while an external same-size edit is repaired.
  *
  *  Never throws; callers get a structured result like the other mutations. */
 export async function stageContextGraphAttachment(
@@ -421,6 +500,9 @@ export async function stageContextGraphAttachment(
       return { ok: false, error: "path escapes workspace" };
     }
     await fs.mkdir(dir, { recursive: true });
+    if (!(await isConfined(dir, workspaceRoot))) {
+      return { ok: false, error: "path escapes workspace" };
+    }
     const safeName = safeAttachmentFilename(args.filename);
     const finalPath = path.join(dir, safeName);
     // Belt: ID_OK + safeAttachmentFilename already make this true; the check
@@ -436,18 +518,10 @@ export async function stageContextGraphAttachment(
       scope,
       bytes: buf.length,
     };
-    const existing = await fs.lstat(finalPath).catch(() => null);
-    if (existing?.isFile() && existing.size === buf.length) {
+    if (await existingFileMatches(finalPath, buf)) {
       return { ...result, skipped: true };
     }
-    if (existing && !existing.isFile()) {
-      // A non-file squatting at the write path — the attachment location is
-      // predictable, so a hostile in-worktree process could plant a symlink
-      // here and writeFile would follow it out of the folder. Remove the
-      // ENTRY itself (rm unlinks a link, never its target) and write fresh.
-      await fs.rm(finalPath, { recursive: true, force: true });
-    }
-    await fs.writeFile(finalPath, buf);
+    await atomicWriteAttachment(finalPath, buf);
     // A share toggle can move this id between the scope pin above and the
     // write — the rename lands in the OTHER scope and the write re-creates
     // the folder the move just emptied, the divergent two-scope state the
@@ -538,6 +612,63 @@ export async function setContextGraphAttachmentShared(
 export async function contextGraphHasContent(
   workspaceRoot: string,
 ): Promise<boolean> {
-  const { items } = await listContextGraph(workspaceRoot);
-  return items.length > 0;
+  const root = graphRoot(workspaceRoot);
+  try {
+    if (!(await isConfined(root, workspaceRoot))) return false;
+    const rootStat = await fs.lstat(root).catch(() => null);
+    if (!rootStat?.isDirectory()) return false;
+
+    const scopeHasContent = async (
+      scope: ContextGraphScope,
+    ): Promise<boolean> => {
+      const scopeAbs = path.join(root, scope);
+      const attachmentsAbs = path.join(scopeAbs, ATTACHMENTS_DIR);
+      for (const idEntry of await readDirBounded(attachmentsAbs)) {
+        if (!idEntry.isDirectory() || !ID_OK.test(idEntry.name)) continue;
+        for (const fileEntry of await readDirBounded(
+          path.join(attachmentsAbs, idEntry.name),
+        )) {
+          if (
+            fileEntry.isFile() &&
+            fileEntry.name !== ".gitignore" &&
+            fileEntry.name !== ".DS_Store"
+          ) {
+            return true;
+          }
+        }
+      }
+
+      const docsHaveContent = async (
+        absDir: string,
+        depth: number,
+      ): Promise<boolean> => {
+        if (depth > MAX_DEPTH) return false;
+        for (const entry of await readDirBounded(absDir)) {
+          if (entry.name === ATTACHMENTS_DIR && depth === 0) continue;
+          if (entry.isDirectory()) {
+            if (
+              await docsHaveContent(path.join(absDir, entry.name), depth + 1)
+            ) {
+              return true;
+            }
+          } else if (
+            entry.isFile() &&
+            entry.name !== ".gitignore" &&
+            entry.name !== ".DS_Store"
+          ) {
+            return true;
+          }
+        }
+        return false;
+      };
+      return docsHaveContent(scopeAbs, 0);
+    };
+
+    return (
+      (await scopeHasContent(CONTEXT_GRAPH_LOCAL)) ||
+      (await scopeHasContent(CONTEXT_GRAPH_SHARED))
+    );
+  } catch {
+    return false;
+  }
 }

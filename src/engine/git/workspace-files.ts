@@ -238,6 +238,7 @@ async function listIgnoredRoots(
   cwd: string,
   limit: number,
 ): Promise<string[]> {
+  if (limit <= 0) return [];
   try {
     // ONE git query. We want `--directory`'s collapsing (a wholly-ignored dir
     // → one row) AND we want empty ignored dirs suppressed (an unexpandable
@@ -264,29 +265,45 @@ async function listIgnoredRoots(
     //   now eating a directory instead of a file.
     //
     // So emptiness is decided here instead, with a bounded readdir probe per
-    // directory entry. The roots set is ~a dozen entries, each probe usually
-    // answers on its first readdir, and the probes run concurrently — cheaper
-    // than the second git process it replaces.
+    // directory entry. The roots set is ~a dozen entries and each probe usually
+    // answers on its first readdir — cheaper than the second git process it
+    // replaces.
     const all = await ignoredLsFiles(cwd);
-    const out: string[] = [];
+    const kept: string[] = [];
     const collapsed = new Set<string>();
+    const sharedBudget = { remaining: EMPTINESS_PROBE_DIR_BUDGET };
+    const root = path.resolve(cwd);
     // `all` is byte-sorted by git, so a collapsed directory always precedes its
     // own descendants — one forward pass can therefore suppress them as it goes
     // (git shouldn't emit both, but a duplicated row throws in the tree store,
     // so this stays defensive).
     for (const p of all) {
+      if (isUnderCollapsedDir(p, collapsed)) continue;
       if (p.endsWith("/")) {
         collapsed.add(p);
-      } else if (isUnderCollapsedDir(p, collapsed)) {
-        continue;
+        const entryBudget = {
+          remaining: Math.min(
+            EMPTINESS_PROBE_ENTRY_BUDGET,
+            sharedBudget.remaining,
+          ),
+        };
+        if (
+          !(await ignoredDirHasContent(
+            path.join(root, p),
+            sharedBudget,
+            entryBudget,
+          ))
+        ) {
+          continue;
+        }
       }
-      out.push(p);
+      kept.push(p);
+      // Stop as soon as the returned prefix is full. This keeps the scan and
+      // allocations proportional to the UI cap even when git reports tens of
+      // thousands of ignored files from mixed directories.
+      if (kept.length >= limit) break;
     }
-    // Empties are dropped BEFORE the cap so they never consume its slots, and
-    // the cap is applied before the per-entry symlink stats so those stay
-    // bounded by `limit` rather than by the raw listing.
-    const kept = await dropEmptyIgnoredDirs(cwd, out);
-    return await markSymlinkedDirs(cwd, kept.slice(0, limit));
+    return await markSymlinkedDirs(cwd, kept);
   } catch {
     return []; // not a git repo → the non-git walk above already shows files
   }
@@ -297,30 +314,13 @@ async function listIgnoredRoots(
  *  Real empty subtrees are tiny (they hold nothing but directories), so a
  *  healthy listing uses a handful; the shared budget exists so a pathological
  *  all-directory repo can't multiply a per-entry bound by thousands of
- *  entries on every refresh. Erring on "non-empty" shows a row the user can
- *  open, which beats hiding real files. */
+ *  entries on every refresh. Each entry also gets a smaller sub-budget so one
+ *  deep empty tree cannot starve later probes. Erring on "non-empty" shows a
+ *  row the user can open, which beats hiding real files. */
 const EMPTINESS_PROBE_DIR_BUDGET = 256;
-
-/** Drop the DIRECTORY entries whose subtree holds no actual entries — the
- *  dead rows `--no-empty-directory` was for. Files pass through untouched, as
- *  do symlinks (git classifies them as files, so they never carry the slash
- *  here). Probes run concurrently against one shared budget. */
-async function dropEmptyIgnoredDirs(
-  cwd: string,
-  entries: string[],
-): Promise<string[]> {
-  const root = path.resolve(cwd);
-  const budget = { remaining: EMPTINESS_PROBE_DIR_BUDGET };
-  const kept = await Promise.all(
-    entries.map(async (p) => {
-      if (!p.endsWith("/")) return p;
-      return (await ignoredDirHasContent(path.join(root, p), budget))
-        ? p
-        : null;
-    }),
-  );
-  return kept.filter((p): p is string => p !== null);
-}
+/** One pathological root cannot consume the entire listing's allowance before
+ * later roots get a deterministic chance to prove that they are empty. */
+const EMPTINESS_PROBE_ENTRY_BUDGET = 32;
 
 /** True when `absDir` contains anything a tree row could show: a file, a
  *  symlink, a socket — anything that is not a plain directory. Iterative and
@@ -333,12 +333,16 @@ async function dropEmptyIgnoredDirs(
  *  empty, the row would expand to nothing, so suppressing it stays correct. */
 async function ignoredDirHasContent(
   absDir: string,
-  budget: { remaining: number },
+  sharedBudget: { remaining: number },
+  entryBudget: { remaining: number },
 ): Promise<boolean> {
   const stack = [absDir];
   while (stack.length > 0) {
-    if (budget.remaining <= 0) return true; // budget spent — assume content
-    budget.remaining -= 1;
+    if (sharedBudget.remaining <= 0 || entryBudget.remaining <= 0) {
+      return true; // budget spent — assume content
+    }
+    sharedBudget.remaining -= 1;
+    entryBudget.remaining -= 1;
     const dir = stack.pop()!;
     let entries: import("node:fs").Dirent[];
     try {
