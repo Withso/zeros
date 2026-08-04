@@ -3811,6 +3811,12 @@ export function AgentChat({
                       }
                       showActivity={isVisualTail}
                       activityEvents={turn.providerEvents}
+                      activityStartedAt={
+                        isVisualTail
+                          ? (session.activeTurnStartedAt ??
+                            turn.recordedStartedAt)
+                          : turn.recordedStartedAt
+                      }
                       ctx={messageCtx}
                       footer={
                         turn.userPrompt && chatId && ownsProviderFooter ? (

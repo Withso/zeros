@@ -175,6 +175,7 @@ export const BLANK: AgentSessionState = {
   error: null,
   failure: null,
   lastStopReason: null,
+  activeTurnStartedAt: null,
   availableModes: [],
   currentModeId: null,
   usage: BLANK_USAGE,
@@ -566,7 +567,45 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       availableSubagents?: AvailableSubagent[];
       tasks?: BackgroundTask[];
       waiting?: boolean;
+      state?: "running" | "completed" | "failed" | "cancelled";
+      stopReason?: AgentSessionState["lastStopReason"];
+      startedAt?: number;
     };
+
+    // Lifecycle is exact-session state. Content may legitimately arrive with
+    // an engine-stamped chatId during a bind race, but a terminal event from a
+    // superseded session must never settle the replacement session.
+    if (upd.sessionUpdate === "turn_state" && upd.state) {
+      const slot = get().sessions[chatId];
+      if (!slot || slot.sessionId !== notification.sessionId) return;
+      if (upd.state === "running") {
+        get().patchSession(chatId, {
+          status: "streaming",
+          error: null,
+          failure: null,
+          lastStopReason: null,
+          activeTurnStartedAt:
+            typeof upd.startedAt === "number"
+              ? upd.startedAt
+              : slot.activeTurnStartedAt,
+        });
+      } else {
+        get().patchSession(chatId, {
+          // A re-adopted failure has no live RPC response from which to recover
+          // a specific classification. Keep the session usable and let the
+          // durable failed turn row render the honest AGENT STOPPED history.
+          status: "ready",
+          error: null,
+          failure: null,
+          lastStopReason:
+            upd.state === "cancelled"
+              ? "cancelled"
+              : (upd.stopReason ?? null),
+          activeTurnStartedAt: null,
+        });
+      }
+      return;
+    }
 
     // usage_update → context window accounting. Keep cumulative counters
     // from prompt-response usage; overwrite size/used. Stage 5.2 adds

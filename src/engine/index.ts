@@ -119,6 +119,8 @@ import type {
   QuestionOutcome,
   QuestionRequest,
   ContentBlock,
+  LoadSessionResponse,
+  StopReason,
   TurnUsage,
 } from "@zeros/core/agent-events";
 import {
@@ -175,6 +177,17 @@ interface TurnSnapshotContext {
   /** Pre-turn whole-tree snapshot OID, or null (non-git / snapshot skipped). */
   pre: string | null;
   isGit: boolean;
+}
+
+/** Renderer-independent ownership for an accepted prompt. Local renderer
+ * reloads deliberately do not cancel agent work, so this record is the source
+ * of truth used to re-adopt the still-running turn. */
+interface ActivePromptContext {
+  sessionId: string;
+  agentId: string;
+  chatId: string | null;
+  turnId: string;
+  startedAt: number;
 }
 
 const VERSION = "0.0.5";
@@ -339,6 +352,19 @@ export class ZerosEngine {
    *  into (the renderer's footer does the same, but a reset arriving from any
    *  other device/caller must not race a live stream into zombie rows). */
   private readonly promptSessions = new Set<string>();
+  /** Accepted prompts, including the pre-snapshot window before
+   * `promptSessions` becomes visible. Survives a local renderer disconnect. */
+  private readonly activePromptContexts = new Map<
+    string,
+    ActivePromptContext
+  >();
+  /** Last session metadata returned by new/load. An active session cannot be
+   * handed to adapter.loadSession again (Codex would dispose its live thread),
+   * so re-adoption replies from this engine-owned cache. */
+  private readonly sessionLoadResponses = new Map<
+    string,
+    LoadSessionResponse
+  >();
   /** Agent sessionId → the authoritative provider turn currently recording.
    *  A mid-turn steer uses this owner instead of opening a second turn row. */
   private readonly activeTurnSnapshots = new Map<
@@ -375,6 +401,19 @@ export class ZerosEngine {
   /** Agent questionId → owning clientId (twin of permissionOwner) — only the
    *  session owner may answer a blocking user-input question. */
   private readonly questionOwner = new Map<string, string>();
+  /** Blocking interactions must be replayed to a replacement renderer. The
+   * adapter resolver remains live while the desktop reloads. */
+  private readonly pendingPermissionRequests = new Map<
+    string,
+    {
+      agentId: string;
+      request: RequestPermissionRequest;
+    }
+  >();
+  private readonly pendingQuestionRequests = new Map<
+    string,
+    { agentId: string; request: QuestionRequest }
+  >();
   /** Agent sessionId → ms timestamp when its LOCAL owner last disconnected.
    *  Within LOCAL_REOWN_GRACE_MS a relay client may not adopt the session. */
   private readonly recentlyLocalOwned = new Map<string, number>();
@@ -636,6 +675,9 @@ export class ZerosEngine {
           this.router.clearOwner(sessionId);
           this.sessionAgent.delete(sessionId);
           this.sessionMessages.delete(sessionId);
+          this.sessionLoadResponses.delete(sessionId);
+          this.activePromptContexts.delete(sessionId);
+          this.clearPendingAgentInteractions(sessionId);
         }
         if (endedAgents.some(({ ended }) => !ended)) {
           throw new GitError({
@@ -809,6 +851,18 @@ export class ZerosEngine {
           // Route the stream to the client that owns this session — not every
           // device. (Falls back to broadcast for an unowned session.)
           const sessionId = notification.sessionId;
+          if (notification.update.sessionUpdate === "current_mode_update") {
+            const cached = this.sessionLoadResponses.get(sessionId);
+            if (cached?.modes) {
+              this.sessionLoadResponses.set(sessionId, {
+                ...cached,
+                modes: {
+                  ...cached.modes,
+                  currentModeId: notification.update.currentModeId,
+                },
+              });
+            }
+          }
           this.routeSessionScoped(
             sessionId,
             createMessage({
@@ -835,6 +889,10 @@ export class ZerosEngine {
           request: RequestPermissionRequest,
         ) => {
           const sessionId = request.sessionId;
+          this.pendingPermissionRequests.set(permissionId, {
+            agentId,
+            request,
+          });
           // Record which client owns this prompt so only it (or a local host)
           // can answer — a relay client must not approve another's tool call.
           const owner = this.router.ownerOf(sessionId);
@@ -856,6 +914,7 @@ export class ZerosEngine {
           request: QuestionRequest,
         ) => {
           const sessionId = request.sessionId;
+          this.pendingQuestionRequests.set(questionId, { agentId, request });
           const owner = this.router.ownerOf(sessionId);
           if (owner) this.questionOwner.set(questionId, owner);
           this.routeSessionScoped(
@@ -879,6 +938,7 @@ export class ZerosEngine {
           // any late AGENT_QUESTION_RESPONSE for this id is a no-op, so the
           // owner entry is dead weight either way.
           this.questionOwner.delete(questionId);
+          this.pendingQuestionRequests.delete(questionId);
           this.routeSessionScoped(
             sessionId,
             createMessage({
@@ -2027,6 +2087,10 @@ export class ZerosEngine {
               // concurrently-starting reaper can discover and dispose it.
               this.router.setOwner(session.sessionId, client.id);
               this.sessionAgent.set(session.sessionId, msg.agentId);
+              this.sessionLoadResponses.set(session.sessionId, {
+                ...(session.modes ? { modes: session.modes } : {}),
+                ...(session.models ? { models: session.models } : {}),
+              });
               if (msg.chatId)
                 this.sessionChat.set(session.sessionId, msg.chatId);
               if (lifecycleWorkspaceId) {
@@ -2049,6 +2113,8 @@ export class ZerosEngine {
                 this.sessionChat.delete(session.sessionId);
                 this.sessionWorkspace.delete(session.sessionId);
                 this.sessionMessages.delete(session.sessionId);
+                this.sessionLoadResponses.delete(session.sessionId);
+                this.clearPendingAgentInteractions(session.sessionId);
                 throw err;
               }
               return { initialize, session };
@@ -2083,6 +2149,8 @@ export class ZerosEngine {
               this.sessionChat.delete(priorSessionId);
               this.sessionWorkspace.delete(priorSessionId);
               this.sessionMessages.delete(priorSessionId);
+              this.sessionLoadResponses.delete(priorSessionId);
+              this.clearPendingAgentInteractions(priorSessionId);
               void this.agents
                 .endSession(priorAgentId, priorSessionId)
                 .catch((err) =>
@@ -2141,12 +2209,37 @@ export class ZerosEngine {
             this.refuseSessionAccess(msg.id, msg.agentId, client);
             return;
           }
+          // Renderer-local send locks disappear on reload. Keep the hard
+          // concurrency invariant at the engine too so an older renderer (or
+          // another client) cannot open a phantom second durable turn while
+          // the provider is already responding on this session.
+          if (this.activePromptContexts.has(msg.sessionId)) {
+            client.send(
+              createMessage({
+                type: "AGENT_PROMPT_FAILED",
+                source: "engine",
+                requestId: msg.id,
+                agentId: msg.agentId,
+                sessionId: msg.sessionId,
+                error: "The agent is already responding to this chat.",
+              }),
+            );
+            return;
+          }
           const lifecycleWorkspaceId = this.workspaceIdForAgentSession(
             msg.sessionId,
           );
           this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
           this.router.setOwner(msg.sessionId, client.id);
           this.sessionAgent.set(msg.sessionId, msg.agentId);
+          const activePrompt: ActivePromptContext = {
+            sessionId: msg.sessionId,
+            agentId: msg.agentId,
+            chatId: this.sessionChat.get(msg.sessionId) ?? null,
+            turnId: msg.userMessageId ?? `turn-${msg.id}`,
+            startedAt: Date.now(),
+          };
+          this.activePromptContexts.set(msg.sessionId, activePrompt);
           // Keep a start barrier registered from before the first await until
           // promptSessions is visible. Archive/delete either waits for this
           // preparation or sees the live prompt and cancels it; there is no
@@ -2182,6 +2275,7 @@ export class ZerosEngine {
             if (turnCtx) {
               this.activeTurnSnapshots.set(msg.sessionId, turnCtx);
             }
+            this.emitTurnState(activePrompt, "running");
           } catch (err) {
             // A lifecycle that acquired the workspace while the pre-snapshot
             // was being built must leave no forever-"running" turn row. Do not
@@ -2195,6 +2289,10 @@ export class ZerosEngine {
                 files: [],
                 usage: null,
               });
+            }
+            this.emitTurnState(activePrompt, "failed");
+            if (this.activePromptContexts.get(msg.sessionId) === activePrompt) {
+              this.activePromptContexts.delete(msg.sessionId);
             }
             throw err;
           } finally {
@@ -2218,6 +2316,11 @@ export class ZerosEngine {
                 response.usage ?? null,
               );
             }
+            this.emitTurnState(
+              activePrompt,
+              response.stopReason === "cancelled" ? "cancelled" : "completed",
+              response.stopReason ?? null,
+            );
             client.send(
               createMessage({
                 type: "AGENT_PROMPT_COMPLETE",
@@ -2230,19 +2333,24 @@ export class ZerosEngine {
               }),
             );
           } catch (err) {
+            const wasCancelled = this.cancelRequested.has(msg.sessionId);
             if (turnCtx) {
               // A user cancel can surface as a rejection instead of a clean
               // stopReason:"cancelled" (e.g. the SIGTERM'd subprocess tears
               // the stream down before the adapter can settle the turn).
               // Record what the user DID — cancelled — so a reloaded chat
               // shows STOPPED BY USER, not AGENT STOPPED.
-              const wasCancelled = this.cancelRequested.has(msg.sessionId);
               await this.finishTurn(
                 turnCtx,
                 wasCancelled ? "cancelled" : "failed",
                 wasCancelled ? "cancelled" : null,
               );
             }
+            this.emitTurnState(
+              activePrompt,
+              wasCancelled ? "cancelled" : "failed",
+              wasCancelled ? "cancelled" : null,
+            );
             // Forward the structured failure when the adapter raised
             // AgentFailureError — without this, the renderer has to
             // regex-match `error` and any wording drift drops
@@ -2266,8 +2374,12 @@ export class ZerosEngine {
             if (this.activeTurnSnapshots.get(msg.sessionId) === turnCtx) {
               this.activeTurnSnapshots.delete(msg.sessionId);
             }
+            if (this.activePromptContexts.get(msg.sessionId) === activePrompt) {
+              this.activePromptContexts.delete(msg.sessionId);
+            }
             this.promptSessions.delete(msg.sessionId);
             this.cancelRequested.delete(msg.sessionId);
+            this.clearPendingAgentInteractions(msg.sessionId);
             this.exitPrompt();
           }
           return;
@@ -2343,6 +2455,9 @@ export class ZerosEngine {
           this.sessionChat.delete(msg.sessionId);
           this.sessionWorkspace.delete(msg.sessionId);
           this.sessionMessages.delete(msg.sessionId);
+          this.sessionLoadResponses.delete(msg.sessionId);
+          this.activePromptContexts.delete(msg.sessionId);
+          this.clearPendingAgentInteractions(msg.sessionId);
           await this.agents.endSession(msg.agentId, msg.sessionId);
           return;
         }
@@ -2354,6 +2469,7 @@ export class ZerosEngine {
             if (owner !== client.id) return;
           }
           this.permissionOwner.delete(msg.permissionId);
+          this.pendingPermissionRequests.delete(msg.permissionId);
           this.agents.answerPermission(msg.permissionId, msg.response);
           return;
         }
@@ -2365,6 +2481,7 @@ export class ZerosEngine {
             if (owner !== client.id) return;
           }
           this.questionOwner.delete(msg.questionId);
+          this.pendingQuestionRequests.delete(msg.questionId);
           this.agents.answerQuestion(
             msg.questionId,
             msg.response,
@@ -2378,6 +2495,13 @@ export class ZerosEngine {
             return;
           }
           await this.agents.setMode(msg.agentId, msg.sessionId, msg.modeId);
+          const cached = this.sessionLoadResponses.get(msg.sessionId);
+          if (cached?.modes) {
+            this.sessionLoadResponses.set(msg.sessionId, {
+              ...cached,
+              modes: { ...cached.modes, currentModeId: msg.modeId },
+            });
+          }
           client.send(
             createMessage({
               type: "AGENT_MODE_CHANGED",
@@ -2470,6 +2594,34 @@ export class ZerosEngine {
             this.refuseSessionAccess(msg.id, msg.agentId, client);
             return;
           }
+          // A local renderer reload does not stop its provider prompt. Re-own
+          // the live session without calling adapter.loadSession: several
+          // adapters implement load as replacement/disposal, which would kill
+          // the exact turn we are trying to recover.
+          const activePrompt = this.activePromptContexts.get(msg.sessionId);
+          if (activePrompt) {
+            this.router.setOwner(msg.sessionId, client.id);
+            this.sessionAgent.set(msg.sessionId, msg.agentId);
+            if (msg.chatId) {
+              this.sessionChat.set(msg.sessionId, msg.chatId);
+              activePrompt.chatId = msg.chatId;
+            }
+            client.send(
+              createMessage({
+                type: "AGENT_SESSION_LOADED",
+                source: "engine",
+                requestId: msg.id,
+                agentId: msg.agentId,
+                sessionId: msg.sessionId,
+                response: this.sessionLoadResponses.get(msg.sessionId) ?? {},
+                promptActive: true,
+                activeTurnStartedAt: activePrompt.startedAt,
+              }),
+            );
+            this.emitTurnState(activePrompt, "running");
+            this.replayPendingAgentInteractions(msg.sessionId, client);
+            return;
+          }
           const loadOpts = await this.agentSpawnOpts(
             msg,
             client,
@@ -2504,6 +2656,7 @@ export class ZerosEngine {
             })(),
           );
           this.assertWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+          this.sessionLoadResponses.set(msg.sessionId, response);
           client.send(
             createMessage({
               type: "AGENT_SESSION_LOADED",
@@ -2512,8 +2665,10 @@ export class ZerosEngine {
               agentId: msg.agentId,
               sessionId: msg.sessionId,
               response,
+              promptActive: false,
             }),
           );
+          this.replayPendingAgentInteractions(msg.sessionId, client);
           return;
         }
         default:
@@ -3433,6 +3588,84 @@ export class ZerosEngine {
     return !!(wsId && listRemoteRestrictedWorkspaceIds().has(wsId));
   }
 
+  /** Publish prompt lifecycle independently of the request/response socket.
+   * The current owner may be a renderer that adopted the session after the
+   * prompt began, which is precisely why the original RPC response is not
+   * sufficient. */
+  private emitTurnState(
+    prompt: ActivePromptContext,
+    state: "running" | "completed" | "failed" | "cancelled",
+    stopReason: StopReason | null = null,
+  ): void {
+    this.routeSessionScoped(
+      prompt.sessionId,
+      createMessage({
+        type: "AGENT_SESSION_UPDATE",
+        source: "engine",
+        agentId: prompt.agentId,
+        ...(prompt.chatId ? { chatId: prompt.chatId } : {}),
+        notification: {
+          sessionId: prompt.sessionId,
+          update: {
+            sessionUpdate: "turn_state",
+            turnId: prompt.turnId,
+            state,
+            startedAt: prompt.startedAt,
+            ...(stopReason ? { stopReason } : {}),
+          },
+        },
+      }),
+    );
+  }
+
+  /** Re-send unresolved permission/question gates after renderer replacement.
+   * The adapter-side promises never went away, so hiding these cards would
+   * strand an otherwise healthy turn behind an invisible interaction. */
+  private replayPendingAgentInteractions(
+    sessionId: string,
+    client: TransportClient,
+  ): void {
+    for (const [permissionId, pending] of this.pendingPermissionRequests) {
+      if (pending.request.sessionId !== sessionId) continue;
+      this.permissionOwner.set(permissionId, client.id);
+      client.send(
+        createMessage({
+          type: "AGENT_PERMISSION_REQUEST",
+          source: "engine",
+          agentId: pending.agentId,
+          permissionId,
+          request: pending.request as never,
+        }),
+      );
+    }
+    for (const [questionId, pending] of this.pendingQuestionRequests) {
+      if (pending.request.sessionId !== sessionId) continue;
+      this.questionOwner.set(questionId, client.id);
+      client.send(
+        createMessage({
+          type: "AGENT_QUESTION_REQUEST",
+          source: "engine",
+          agentId: pending.agentId,
+          questionId,
+          request: pending.request as never,
+        }),
+      );
+    }
+  }
+
+  private clearPendingAgentInteractions(sessionId: string): void {
+    for (const [permissionId, pending] of this.pendingPermissionRequests) {
+      if (pending.request.sessionId !== sessionId) continue;
+      this.pendingPermissionRequests.delete(permissionId);
+      this.permissionOwner.delete(permissionId);
+    }
+    for (const [questionId, pending] of this.pendingQuestionRequests) {
+      if (pending.request.sessionId !== sessionId) continue;
+      this.pendingQuestionRequests.delete(questionId);
+      this.questionOwner.delete(questionId);
+    }
+  }
+
   private remoteMayNotActOnSession(
     sessionId: string,
     client: TransportClient,
@@ -3935,11 +4168,14 @@ export class ZerosEngine {
           this.recentlyLocalOwned.delete(sid);
       }
     }
-    // Purge ownership bookkeeping for any disconnecting client
-    // so dead-client entries can't accumulate — each reconnect mints a fresh
-    // client id. A still-live local session re-registers on its next
-    // prompt/load; the only consumer of sessionAgent is the relay-cancel above.
-    for (const sessionId of owned) this.sessionAgent.delete(sessionId);
+    // A local renderer is only the VIEW onto an engine-owned session. Preserve
+    // session→agent identity across its reload so workspace cleanup, cancel,
+    // and prompt re-adoption can still address the live adapter. Remote-owned
+    // sessions are deliberately cancelled above, so their ownership metadata
+    // can be released with that client.
+    if (client.kind !== "local") {
+      for (const sessionId of owned) this.sessionAgent.delete(sessionId);
+    }
     for (const [permissionId, owner] of this.permissionOwner) {
       if (owner === client.id) this.permissionOwner.delete(permissionId);
     }

@@ -26,6 +26,7 @@ import {
   turnFooterStatusLabel,
 } from "../turn-footer";
 import { TooltipProvider } from "@/zeros/ui/primitives/tooltip";
+import { pickStartedAt } from "../activity-hud";
 
 describe("TurnFilePill cache ownership", () => {
   beforeEach(() => useWorkspaceFileDiffSnapshot.mockClear());
@@ -77,6 +78,12 @@ describe("turnFooterFiles", () => {
       },
     ];
     expect(turnFooterFiles({ files })).toBe(files);
+  });
+});
+
+describe("pickStartedAt", () => {
+  it("keeps the original turn clock while a re-adopted turn has no new events", () => {
+    expect(pickStartedAt([], 1234)).toBe(1234);
   });
 });
 
