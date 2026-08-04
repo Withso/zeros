@@ -16,7 +16,10 @@ import type { AgentMessage } from "./use-agent-session";
  *  Walks backwards from the events to find the most recent
  *  in_progress/pending tool; falls back to the turn's earliest event
  *  start time, then to Date.now(). */
-export function pickStartedAt(events: AgentMessage[]): number {
+export function pickStartedAt(
+  events: AgentMessage[],
+  fallbackStartedAt?: number,
+): number {
   for (let i = events.length - 1; i >= 0; i--) {
     const m = events[i];
     if (
@@ -31,7 +34,7 @@ export function pickStartedAt(events: AgentMessage[]): number {
   if (events.length > 0) {
     return events[0].createdAt;
   }
-  return Date.now();
+  return fallbackStartedAt ?? Date.now();
 }
 
 interface ActivityHUDProps {

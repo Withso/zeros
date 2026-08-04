@@ -11,7 +11,11 @@
 
 import { normalizeBranchPrefix } from "../git/naming";
 import { opSettingsResolve } from "./ops";
-import { BRANCH_PREFIX_TYPES, type BranchPrefixType } from "./schema";
+import {
+  BRANCH_PREFIX_TYPES,
+  DEFAULT_BRANCH_PREFIX_TYPE,
+  type BranchPrefixType,
+} from "./schema";
 
 export interface RepoGitConfig {
   /** Remote to fetch + branch from (default "origin"). */
@@ -22,8 +26,12 @@ export interface RepoGitConfig {
    *  than the built-in default — an explicit value overrides `origin/HEAD`
    *  auto-detection (resolved decision 2026-06-13). */
   baseBranchExplicit: boolean;
-  /** How to prefix a NEW workspace branch (Settings → Git). "zeros" is the
-   *  default and the historical behaviour. Only affects branches created from
+  /** How to prefix a NEW workspace branch (Settings → Git). "github" is the
+   *  default: a branch is a person's working namespace, so the connected login
+   *  is the answer that needs no configuring, and Settings → Git has no
+   *  unselected state as a result. "zeros" remains the FALLBACK prefix for
+   *  every path that can't produce a namespace (no login, unusable custom
+   *  string) — see resolveNewBranchPrefix. Only affects branches created from
    *  now on — existing workspaces keep the prefix they were born with. */
   branchPrefixType: BranchPrefixType;
   /** The literal prefix for `branchPrefixType === "custom"`, already
@@ -35,7 +43,7 @@ const DEFAULTS: RepoGitConfig = {
   remote: "origin",
   baseBranch: "main",
   baseBranchExplicit: false,
-  branchPrefixType: "zeros",
+  branchPrefixType: DEFAULT_BRANCH_PREFIX_TYPE,
   branchPrefix: null,
 };
 
@@ -43,7 +51,7 @@ function readBranchPrefixType(value: unknown): BranchPrefixType {
   return typeof value === "string" &&
     (BRANCH_PREFIX_TYPES as readonly string[]).includes(value)
     ? (value as BranchPrefixType)
-    : "zeros";
+    : DEFAULT_BRANCH_PREFIX_TYPE;
 }
 
 export function resolveRepoGit(repoRoot: string): RepoGitConfig {

@@ -47,6 +47,9 @@ interface TurnEventListProps {
    *  timer. After a steer the newest visual segment can still be empty while
    *  a tool from the preceding segment is running. */
   activityEvents?: AgentMessage[];
+  /** Provider-turn start fallback for an adopted live turn whose newest visual
+   * segment has not received an event yet. */
+  activityStartedAt?: number;
   /** Newest foreground workflow for this exact session. It renders only at
    * the live visual tail, directly above the ordinary agent shimmer. */
   workflow?: WorkflowProgress | null;
@@ -65,6 +68,7 @@ export const TurnEventList = memo(function TurnEventList({
   isStreaming,
   showActivity = true,
   activityEvents,
+  activityStartedAt,
   workflow,
   onStopWorkflow,
   footer,
@@ -151,7 +155,12 @@ export const TurnEventList = memo(function TurnEventList({
           (pickStartedAt anchors the timer to the most recent in-flight tool —
           for a running subagent that's the subagent's own start time). */}
       {showShimmer && (
-        <ActivityShimmer startedAt={pickStartedAt(activityEvents ?? events)} />
+        <ActivityShimmer
+          startedAt={pickStartedAt(
+            activityEvents ?? events,
+            activityStartedAt,
+          )}
+        />
       )}
       {/* Per-turn footer, in-lane so it hugs the answer (see prop doc). */}
       {footer}

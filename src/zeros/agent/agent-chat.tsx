@@ -3817,6 +3817,12 @@ export function AgentChat({
                       }
                       showActivity={isVisualTail}
                       activityEvents={turn.providerEvents}
+                      activityStartedAt={
+                        isVisualTail
+                          ? (session.activeTurnStartedAt ??
+                            turn.recordedStartedAt)
+                          : turn.recordedStartedAt
+                      }
                       workflow={activeWorkflow}
                       onStopWorkflow={session.stopBackgroundTask}
                       ctx={messageCtx}

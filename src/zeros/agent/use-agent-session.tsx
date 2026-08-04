@@ -139,6 +139,9 @@ export interface AgentSessionState {
    *  whenever the session is warming/ready/streaming. */
   failure: import("../bridge/failure").AgentFailure | null;
   lastStopReason: StopReason | null;
+  /** Engine-owned active-turn start. Restored by loadSession after a renderer
+   * reload so an empty live tail does not restart its elapsed clock at 0s. */
+  activeTurnStartedAt: number | null;
   /** Modes advertised by the agent at session creation, if any. */
   availableModes: SessionMode[];
   /** Currently active mode id (echoed back by session/set_mode and

@@ -643,6 +643,11 @@ export interface AgentSessionLoadedMessage extends BaseMessage {
   agentId: string;
   sessionId: string;
   response: LoadSessionResponse;
+  /** Engine-owned prompt state at the exact moment this session was adopted.
+   * Optional for compatibility with older engines. */
+  promptActive?: boolean;
+  /** Original engine prompt start, used to preserve the live elapsed clock. */
+  activeTurnStartedAt?: number;
 }
 
 export interface AgentAgentsListMessage extends BaseMessage {
