@@ -31,6 +31,23 @@ export interface ReadFileResult {
   error?: string;
 }
 
+export interface ReadImageThumbnailResult {
+  kind: "image" | "too-large" | "error";
+  /** Echo of the requested repo-relative path. */
+  path: string;
+  /** Source byte size; managed-worktree data URLs are bounded previews. */
+  bytes: number;
+  width?: number;
+  height?: number;
+  sourceWidth?: number;
+  sourceHeight?: number;
+  orientation?: number;
+  /** True when this is already the original bounded source, not a preview. */
+  fullResolution?: boolean;
+  dataUrl?: string;
+  error?: string;
+}
+
 export type WriteFileKind = "success" | "too-large" | "error";
 
 export interface WriteFileResult {
@@ -107,6 +124,55 @@ export async function readWorkspaceFile(
     );
     return bridgeFileRead(bridge, workspaceId, relPath);
   }
+}
+
+function fileReadAsThumbnail(
+  result: ReadFileResult | null,
+): ReadImageThumbnailResult | null {
+  if (!result) return null;
+  if (result.kind === "image") {
+    return {
+      kind: "image",
+      path: result.path,
+      bytes: result.bytes,
+      dataUrl: result.dataUrl,
+      fullResolution: true,
+    };
+  }
+  if (result.kind === "too-large") {
+    return {
+      kind: "too-large",
+      path: result.path,
+      bytes: result.bytes,
+      error: result.error ?? "image is too large to preview",
+    };
+  }
+  return {
+    kind: "error",
+    path: result.path,
+    bytes: result.bytes,
+    error: result.error ?? "file could not be rendered as an image",
+  };
+}
+
+/** Read a bounded native thumbnail for a managed worktree image. The synthetic
+ *  Local main checkout has no workspace row and is intentionally outside the
+ *  Electron allowlist, so it preserves readWorkspaceFile's trusted engine
+ *  route (and that route's existing full-file byte cap). */
+export async function readWorkspaceImageThumbnail(
+  cwd: string,
+  relPath: string,
+  maxDimension: 256 | 512 | 1024 | 1536 = 256,
+): Promise<ReadImageThumbnailResult | null> {
+  if (!cwd || !relPath || !isNativeRuntime()) return null;
+  if (isKnownProjectRoot(cwd)) {
+    return fileReadAsThumbnail(await readWorkspaceFile(cwd, relPath));
+  }
+  return nativeInvoke<ReadImageThumbnailResult>("read_image_thumbnail", {
+    cwd,
+    path: relPath,
+    maxDimension,
+  });
 }
 
 /** Write `content` to one file under `cwd`. `relPath` is the repo-relative POSIX

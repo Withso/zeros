@@ -48,7 +48,7 @@ import {
 import { agentContextFiles } from "./agent-context";
 import { agentMemoryFiles } from "./agent-memory";
 import { pickCssFile, readCssFile, writeCssFile } from "./css-files";
-import { readFile, writeFile } from "./files";
+import { readFile, readImageThumbnail, writeFile } from "./files";
 import { skillsList } from "./skills";
 import { discoverLocalhostServices } from "./localhost";
 import { notifySend } from "./notifications";
@@ -173,6 +173,7 @@ export function registerAllCommands(): void {
   setCommand("read_css_file", readCssFile);
   setCommand("write_css_file", writeCssFile);
   setCommand("read_file", readFile);
+  setCommand("read_image_thumbnail", readImageThumbnail);
   setCommand("write_file", writeFile);
   setCommand("skills_list", skillsList);
   setCommand("discover_localhost_services", discoverLocalhostServices);

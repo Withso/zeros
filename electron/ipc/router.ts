@@ -103,6 +103,7 @@ const commandTable: Record<string, CommandHandler> = {
   read_css_file: notImpl("read_css_file", 5),
   write_css_file: notImpl("write_css_file", 5),
   read_file: notImpl("read_file", 5),
+  read_image_thumbnail: notImpl("read_image_thumbnail", 5),
   write_file: notImpl("write_file", 5),
   skills_list: notImpl("skills_list", 5),
   discover_localhost_services: notImpl("discover_localhost_services", 5),
