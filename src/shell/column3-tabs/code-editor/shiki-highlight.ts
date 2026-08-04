@@ -8,16 +8,26 @@
 // color layer on top — Shiki's inline `style="color:…"` overrides any base
 // HighlightStyle. Built to the verified spec:
 //   • whole-doc tokenization (occasional manual edits, not heavy typing),
-//   • StateField holds the DecorationSet and maps it through every edit so
-//     colors stay positioned during the async tokenize gap,
+//   • the StateField's `create` tokenizes SYNCHRONOUSLY off the warm shared
+//     highlighter, so the FIRST painted frame already wears the code theme —
+//     opening or switching files must never flash unthemed text and repaint
+//     (@uiw/react-codemirror builds the state in a layout effect, i.e. before
+//     paint, so decorations produced here are in that first frame),
+//   • the field also maps its decorations through every edit so colors stay
+//     positioned during an async tokenize gap,
 //   • a StateEffect installs fresh tokens,
 //   • a ViewPlugin drives the async work with a DEBOUNCE + a GENERATION counter
-//     (stale results from edits/theme/lang switches mid-flight are dropped),
+//     (stale results from edits/theme/lang switches mid-flight are dropped), and
+//     SKIPS it entirely when `create` already produced a complete paint,
 //   • all dispatches happen in a deferred task (never inside CM's update cycle),
-//   • a large-file guard skips Shiki (editor still works, no color),
+//   • a large-file guard skips Shiki (editor still works, no color); a file that
+//     is merely too big to tokenize synchronously still gets its LEADING lines
+//     themed on first paint, with the complete pass swapping in right after,
 //   • the editor BACKGROUND is always the app surface (--bg1) regardless
 //     of code theme; only the base/token text colors come from the theme, so the
-//     editor matches the transparent-on-app-bg diff + code-block surfaces.
+//     editor matches the transparent-on-app-bg diff + code-block surfaces. The
+//     base foreground is applied by the chrome theme (see theme.ts) rather than
+//     imperatively here, so it too lands on the first paint.
 //
 // We hand-roll this instead of depending on @cmshiki/* (experimental, 1
 // maintainer) — see project_files_tab_editor memory.
@@ -28,6 +38,7 @@ import {
   RangeSetBuilder,
   StateEffect,
   StateField,
+  type EditorState,
   type Extension,
 } from "@codemirror/state";
 import {
@@ -38,7 +49,11 @@ import {
   type ViewUpdate,
 } from "@codemirror/view";
 import type { ThemedToken } from "shiki";
-import { highlightToTokens } from "@/zeros/agent/renderers/syntax";
+import {
+  highlightToTokens,
+  tokenizeSync,
+  type TokenizedCode,
+} from "@/zeros/agent/renderers/syntax";
 
 // Shiki FontStyle bitmask (shikijs/vscode-textmate): Italic=1, Bold=2,
 // Underline=4, Strikethrough=8.
@@ -52,12 +67,20 @@ const FS_STRIKE = 8;
 const MAX_LINES = 5_000;
 const MAX_CHARS = 300_000;
 const DEBOUNCE_MS = 75;
+// Files too big to tokenize synchronously still theme this many leading lines on
+// the first paint (~5ms) — more than a viewport — while the full pass runs.
+const FIRST_PAINT_HEAD_LINES = 240;
 
 export interface ShikiConfig {
   /** Shiki bundled language id, or null → no color (plain + Lezer structure). */
   lang: string | null;
   /** Shiki theme name. */
   theme: string;
+  /** False for an editor that mounts OFFSCREEN (the file viewer keeps one behind
+   *  the Diff / Markdown-preview surface so drafts survive view switches). There
+   *  is no first paint to get right, so skip the synchronous tokenize and let the
+   *  deferred pass do the work — the toggle into Edit is themed either way. */
+  syncFirstPaint?: boolean;
 }
 
 const DEFAULT_CONFIG: ShikiConfig = {
@@ -69,18 +92,78 @@ const shikiConfig = Facet.define<ShikiConfig, ShikiConfig>({
   combine: (vals) => vals[vals.length - 1] ?? DEFAULT_CONFIG,
 });
 
-const setDecos = StateEffect.define<DecorationSet>();
+/** The field's value: the decorations plus the config they are a COMPLETE paint
+ *  of. `complete` is null when nothing is painted, when only the head lines are
+ *  (a big file's first paint), or when the doc changed under the paint — i.e.
+ *  exactly when the async pass still owes the editor a result. */
+interface ShikiPaint {
+  decos: DecorationSet;
+  complete: ShikiConfig | null;
+}
 
-const shikiField = StateField.define<DecorationSet>({
-  create: () => Decoration.none,
-  update(decos, tr) {
-    // Keep colors positioned during the async tokenize gap.
-    decos = decos.map(tr.changes);
-    for (const e of tr.effects) if (e.is(setDecos)) decos = e.value;
-    return decos;
+const NO_PAINT: ShikiPaint = { decos: Decoration.none, complete: null };
+
+const setPaint = StateEffect.define<ShikiPaint>();
+
+const shikiField = StateField.define<ShikiPaint>({
+  create: (state) => firstPaint(state),
+  update(paint, tr) {
+    let decos = paint.decos;
+    let complete = paint.complete;
+    // Keep colors positioned during the async tokenize gap; an edit also
+    // invalidates "complete" so the plugin re-tokenizes.
+    if (tr.docChanged) {
+      decos = decos.map(tr.changes);
+      complete = null;
+    }
+    for (const e of tr.effects) {
+      if (e.is(setPaint)) {
+        decos = e.value.decos;
+        complete = e.value.complete;
+      }
+    }
+    return decos === paint.decos && complete === paint.complete
+      ? paint
+      : { decos, complete };
   },
-  provide: (f) => EditorView.decorations.from(f),
+  provide: (f) => EditorView.decorations.from(f, (paint) => paint.decos),
 });
+
+/** Tokenize the initial document on the spot when the shared highlighter can
+ *  answer synchronously. NB: only `create` may read facets like this — a
+ *  StateField's `update` must never touch `tr.state` (it would re-enter state
+ *  construction), which is why a lang/theme switch is handled by the plugin
+ *  below instead. That's the right split anyway: a switch repaints from already
+ *  correct colors, whereas a fresh mount would otherwise start unthemed. */
+function firstPaint(state: EditorState): ShikiPaint {
+  const cfg = state.facet(shikiConfig);
+  const doc = state.doc;
+  if (
+    cfg.syncFirstPaint === false ||
+    !cfg.lang ||
+    doc.lines > MAX_LINES ||
+    doc.length > MAX_CHARS
+  ) {
+    return NO_PAINT;
+  }
+  const res = tokenizeSync(doc.toString(), cfg.lang, cfg.theme, {
+    headLines: FIRST_PAINT_HEAD_LINES,
+  });
+  if (!res) return NO_PAINT;
+  return {
+    decos: buildShikiDecorations(res.tokens, doc.length),
+    complete: res.partial ? null : cfg,
+  };
+}
+
+/** Whether a stored complete-paint marker still describes `cfg`. */
+function paintMatches(complete: ShikiConfig | null, cfg: ShikiConfig): boolean {
+  return (
+    complete !== null &&
+    complete.lang === cfg.lang &&
+    complete.theme === cfg.theme
+  );
+}
 
 // Cache identical Decoration objects so the RangeSet can structure-share.
 const markCache = new Map<string, Decoration>();
@@ -160,47 +243,44 @@ const shikiPlugin = ViewPlugin.fromClass(
       const cfg = view.state.facet(shikiConfig);
       const doc = view.state.doc;
 
-      // No language, or too big → clear color + base style overrides.
+      // The synchronous first paint (or an earlier async pass) already covers
+      // this exact config — nothing to redo, and no redundant dispatch.
+      if (paintMatches(view.state.field(shikiField).complete, cfg)) return;
+
+      // No language, or too big → clear color (the base foreground stays the
+      // theme's, supplied by the chrome theme).
       if (!cfg.lang || doc.lines > MAX_LINES || doc.length > MAX_CHARS) {
         if (myGen === this.gen) {
-          this.applyBase(view, null);
-          view.dispatch({ effects: setDecos.of(Decoration.none) });
+          view.dispatch({
+            effects: setPaint.of({ decos: Decoration.none, complete: cfg }),
+          });
         }
         return;
       }
 
       const code = doc.toString(); // the EXACT string we map tokens back onto
-      const res = await highlightToTokens(code, cfg.lang, cfg.theme);
+      const res: TokenizedCode | null = await highlightToTokens(
+        code,
+        cfg.lang,
+        cfg.theme,
+      );
 
-      // Drop stale: a newer run started, or the doc changed under us.
-      if (myGen !== this.gen || view.state.doc.toString() !== code) return;
+      // Drop stale: a newer run started, or the doc changed under us. CM's Text
+      // is immutable and only replaced by a doc-changing transaction, so
+      // identity IS "the doc changed" — and it costs nothing, unlike
+      // re-stringifying a 300k-char document on every completion.
+      if (myGen !== this.gen || view.state.doc !== doc) return;
 
-      if (!res) {
-        this.applyBase(view, null);
-        view.dispatch({ effects: setDecos.of(Decoration.none) });
-        return;
-      }
-      this.applyBase(view, res);
       view.dispatch({
-        effects: setDecos.of(
-          buildShikiDecorations(res.tokens, view.state.doc.length),
-        ),
+        effects: setPaint.of({
+          decos: res
+            ? buildShikiDecorations(res.tokens, doc.length)
+            : Decoration.none,
+          // A missing grammar is settled, not pending: mark it complete so a
+          // plain file doesn't re-tokenize on every keystroke.
+          complete: cfg,
+        }),
       });
-    }
-
-    // Base (non-token / Shiki-uncolored) text uses the THEME foreground so it
-    // matches exactly (Shiki tokens override per-token on top). The BACKGROUND is
-    // always the app surface (the editor chrome's --bg1) regardless of
-    // code theme — every code surface keeps ONE consistent bg; only the text
-    // colors change. Cleared so an earlier theme's paint never lingers and so the
-    // foreground resets (→ chrome defaults) when there's no result.
-    private applyBase(
-      view: EditorView,
-      res: { fg?: string } | null,
-    ) {
-      view.contentDOM.style.color = res?.fg ?? "";
-      view.dom.style.backgroundColor = "";
-      view.scrollDOM.style.backgroundColor = "";
     }
 
     destroy() {

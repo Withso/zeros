@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   MAX_RECENT_BROWSERS,
+  blankFixedFilesTab,
   createBrowserTab,
   createChangesTab,
   createEmptyFilesTab,
   createFilesTab,
   defaultScopeFor,
   defaultTabs,
+  findBlankFilesTab,
   MAX_PERSISTED_COLUMN3_SCOPES,
   migrateScopes,
   normalizeRecentBrowsers,
@@ -15,6 +17,7 @@ import {
   orderRow1Tabs,
   planRow1Open,
   recordRecentBrowser,
+  row1TabIconPath,
   shouldMountRow1Tab,
   type Column3ScopeMap,
   type Column3ScopeState,
@@ -29,10 +32,44 @@ describe("tab factories", () => {
       title: "index.html",
       filePath: "src/app/index.html",
       diff: true,
+      fileTreeVisible: false,
     });
     expect(createEmptyFilesTab()).toMatchObject({
       type: "files",
       title: "Open file",
+      fileTreeVisible: true,
+    });
+  });
+
+  it("reverts the fixed home to the exact fresh blank state", () => {
+    const home: Column3Tab = {
+      ...createFilesTab("src/deep/openapi.yaml", {
+        diff: true,
+        diffScope: "commit",
+        diffSha: "abc123",
+        discardable: true,
+        isNewFile: true,
+      }),
+      fixed: true,
+      viewerMode: "edit",
+      contentRevision: 3,
+    };
+    expect(blankFixedFilesTab(home)).toEqual({
+      id: home.id,
+      type: "files",
+      fixed: true,
+      title: "Open file",
+      filePath: undefined,
+      fileTreeVisible: true,
+      diff: false,
+      diffScope: undefined,
+      diffSha: undefined,
+      turnChatId: undefined,
+      turnId: undefined,
+      discardable: false,
+      isNewFile: false,
+      viewerMode: undefined,
+      contentRevision: undefined,
     });
   });
 
@@ -85,6 +122,16 @@ describe("planRow1Open", () => {
     expect(
       planRow1Open([file("dirty", "draft.ts")], "dirty", "new.ts", true),
     ).toEqual({ kind: "new" });
+    // A blank (never dirty — it has no editor) still absorbs the open, so the
+    // draft survives without allocating a duplicate surface.
+    expect(
+      planRow1Open(
+        [file("dirty", "draft.ts"), { ...file("home"), fixed: true }],
+        "dirty",
+        "new.ts",
+        true,
+      ),
+    ).toEqual({ kind: "replace", id: "home" });
   });
 
   it("focuses an existing path, then consumes a blank tab before adding", () => {
@@ -98,6 +145,53 @@ describe("planRow1Open", () => {
     expect(planRow1Open([browser("b")], "b", "new.ts")).toEqual({
       kind: "new",
     });
+  });
+
+  it("prefers the blank fixed home over an earlier extra blank", () => {
+    const extraBlank = file("extra");
+    const home: Column3Tab = { ...file("home"), fixed: true };
+    expect(planRow1Open([browser("b"), extraBlank, home], "b", "n.ts")).toEqual(
+      { kind: "replace", id: "home" },
+    );
+    expect(findBlankFilesTab([extraBlank, home])?.id).toBe("home");
+    // A filled home no longer counts as a direct-open destination.
+    expect(
+      findBlankFilesTab([{ ...home, filePath: "a.ts" }, extraBlank])?.id,
+    ).toBe("extra");
+  });
+});
+
+describe("row1TabIconPath", () => {
+  it("resolves a File tab's icon from its open file", () => {
+    expect(row1TabIconPath(createFilesTab("site/README.md"))).toBe(
+      "site/README.md",
+    );
+    expect(row1TabIconPath(createFilesTab("scripts/install.sh"))).toBe(
+      "scripts/install.sh",
+    );
+    expect(row1TabIconPath(createFilesTab("package.json"))).toBe("package.json");
+  });
+
+  it("keeps the generic glyph for blank File tabs and non-File tabs", () => {
+    expect(row1TabIconPath(createEmptyFilesTab())).toBeNull();
+    expect(row1TabIconPath(createChangesTab())).toBeNull();
+    expect(row1TabIconPath(createBrowserTab({ url: "http://a.test/" }))).toBe(
+      null,
+    );
+    // Changes tabs carry a filePath (their sidebar selection) but the pill is
+    // still the "Changes" home, not that file.
+    expect(
+      row1TabIconPath({
+        ...createChangesTab(),
+        filePath: "src/index.ts",
+      }),
+    ).toBeNull();
+  });
+
+  it("treats a whitespace-only path as no file", () => {
+    expect(
+      row1TabIconPath({ ...createEmptyFilesTab(), filePath: "   " }),
+    ).toBeNull();
   });
 });
 
@@ -146,6 +240,8 @@ describe("defaultTabs", () => {
       "Review",
     ]);
     expect(tabs.map((tab) => Boolean(tab.pinned))).toEqual([false, true, true]);
+    // The seeded blank File tab is THE permanent Files home.
+    expect(tabs[0].fixed).toBe(true);
     expect(activeId).toBe(tabs[0].id);
     expect(recentBrowsers).toEqual([]);
   });
@@ -162,13 +258,21 @@ describe("defaultTabs", () => {
 });
 
 describe("normalizeRow1Tabs", () => {
-  it("does not resurrect a File or Browser the user removed", () => {
+  it("seeds the permanent surfaces, and only those, into an empty slice", () => {
     const out = normalizeRow1Tabs([]);
-    expect(out.map((tab) => tab.type)).toEqual(["changes", "review"]);
-    expect(out.every((tab) => tab.pinned)).toBe(true);
+    // Browsers and EXTRA File tabs stay gone, but the fixed Files home is
+    // permanent now — a persisted slice without one is legacy state.
+    expect(out.map((tab) => tab.type)).toEqual(["files", "changes", "review"]);
+    expect(out[0]).toMatchObject({
+      title: "Open file",
+      fixed: true,
+      fileTreeVisible: true,
+    });
+    expect(Boolean(out[0].pinned)).toBe(false);
+    expect(out.slice(1).every((tab) => tab.pinned)).toBe(true);
   });
 
-  it("migrates a legacy Files home into a closable Open file first tab", () => {
+  it("migrates a legacy Files home into the fixed Open file first tab", () => {
     const out = normalizeRow1Tabs([
       { id: "legacy-files", type: "files", title: "Files", pinned: true },
     ]);
@@ -177,6 +281,7 @@ describe("normalizeRow1Tabs", () => {
       type: "files",
       title: "Open file",
       pinned: false,
+      fixed: true,
     });
   });
 
@@ -197,11 +302,104 @@ describe("normalizeRow1Tabs", () => {
     ]);
     expect(out.filter((tab) => tab.type === "browser")).toHaveLength(2);
     expect(out.find((tab) => tab.id === "b2")?.title).toBe("Browser");
+    // The first File tab of a pre-flag slice is promoted to the fixed home.
+    expect(out.find((tab) => tab.id === "blank")?.fixed).toBe(true);
+    expect(out.find((tab) => tab.id === "f1")?.fixed).toBeUndefined();
     expect(
       out
         .filter((tab) => tab.type === "files" || tab.type === "browser")
         .every((tab) => !tab.pinned),
     ).toBe(true);
+  });
+
+  it("keeps exactly one fixed Files home and ignores non-File fixed flags", () => {
+    const out = normalizeRow1Tabs([
+      {
+        id: "stray",
+        type: "browser",
+        title: "B",
+        url: "",
+        fixed: true,
+      } as Column3Tab,
+      { id: "f1", type: "files", title: "a.ts", filePath: "a.ts" },
+      {
+        id: "home",
+        type: "files",
+        title: "b.ts",
+        filePath: "b.ts",
+        fixed: true,
+      },
+      {
+        id: "dupe",
+        type: "files",
+        title: "c.ts",
+        filePath: "c.ts",
+        fixed: true,
+      },
+    ]);
+    // The first PERSISTED flag wins (not merely the first File tab), extra
+    // flags are stripped, and the home leads the strip.
+    expect(out[0].id).toBe("home");
+    expect(
+      out
+        .filter((tab) => tab.type === "files")
+        .map((tab) => [tab.id, tab.fixed]),
+    ).toEqual([
+      ["home", true],
+      ["f1", undefined],
+      ["dupe", undefined],
+    ]);
+    expect(out.find((tab) => tab.id === "stray")?.fixed).toBeUndefined();
+  });
+
+  it("restores each File tab's tree visibility and repairs invalid defaults", () => {
+    const out = normalizeRow1Tabs([
+      {
+        id: "expanded",
+        type: "files",
+        title: "a.ts",
+        filePath: "src/a.ts",
+        fileTreeVisible: true,
+      },
+      {
+        id: "collapsed",
+        type: "files",
+        title: "b.ts",
+        filePath: "src/b.ts",
+        fileTreeVisible: false,
+      },
+      {
+        id: "legacy",
+        type: "files",
+        title: "c.ts",
+        filePath: "src/c.ts",
+      },
+      {
+        id: "corrupt",
+        type: "files",
+        title: "d.ts",
+        filePath: "src/d.ts",
+        fileTreeVisible: "yes" as unknown as boolean,
+      },
+      {
+        id: "blank",
+        type: "files",
+        title: "Open file",
+        fileTreeVisible: false,
+      },
+    ]);
+
+    expect(
+      out
+        .filter((tab) => tab.type === "files")
+        .map((tab) => [tab.id, tab.fileTreeVisible]),
+    ).toEqual([
+      ["expanded", true],
+      ["collapsed", false],
+      ["legacy", false],
+      ["corrupt", false],
+      ["blank", true],
+    ]);
   });
 
   it("repairs duplicate/malformed persisted ids without dropping valid tabs", () => {
@@ -300,6 +498,39 @@ describe("normalizeRow1Tabs", () => {
 });
 
 describe("per-worktree scope bounds", () => {
+  it("restores independent File-tab tree choices after serialized reload", () => {
+    const expanded = {
+      ...createFilesTab("src/a.ts"),
+      id: "expanded-after-reload",
+      fileTreeVisible: true,
+    };
+    const collapsed = {
+      ...createFilesTab("src/b.ts"),
+      id: "collapsed-after-reload",
+      fileTreeVisible: false,
+    };
+    const serialized = JSON.parse(
+      JSON.stringify({
+        "/repo/reload": {
+          tabs: [expanded, collapsed],
+          activeId: collapsed.id,
+          recentBrowsers: [],
+        },
+      }),
+    ) as Column3ScopeMap;
+
+    const restored = migrateScopes(serialized)["/repo/reload"];
+    expect(
+      restored.tabs
+        .filter((tab) => tab.type === "files")
+        .map((tab) => [tab.id, tab.fileTreeVisible]),
+    ).toEqual([
+      ["expanded-after-reload", true],
+      ["collapsed-after-reload", false],
+    ]);
+    expect(restored.activeId).toBe("collapsed-after-reload");
+  });
+
   it("keeps only the newest persisted scope window", () => {
     const scopes = Object.fromEntries(
       Array.from({ length: MAX_PERSISTED_COLUMN3_SCOPES + 12 }, (_, index) => [
@@ -327,6 +558,22 @@ describe("orderRow1Tabs", () => {
     ]);
     expect(out.map((tab) => tab.id)).toEqual(["f2", "c", "r", "b", "f1"]);
     expect(out.find((tab) => tab.id === "b")?.pinned).toBe(false);
+  });
+
+  it("keeps the fixed home leading even when listed after other File tabs", () => {
+    const out = orderRow1Tabs([
+      { id: "f2", type: "files", title: "b.ts", filePath: "b.ts" },
+      { id: "c", type: "changes", title: "Changes", pinned: true },
+      { id: "r", type: "review", title: "Review", pinned: true },
+      {
+        id: "home",
+        type: "files",
+        title: "a.ts",
+        filePath: "a.ts",
+        fixed: true,
+      },
+    ]);
+    expect(out.map((tab) => tab.id)).toEqual(["home", "c", "r", "f2"]);
   });
 });
 
@@ -410,14 +657,17 @@ describe("migrateScopes", () => {
     ).toHaveLength(2);
     expect(out["/repo/main"].activeId).toBe("b2");
     expect(out["/repo/main"].recentBrowsers[0].url).toBe("https://x.dev/");
-    // Persisted absence remains absence: only non-removable system tabs return.
+    // Browsers/extra Files stay gone, but the permanent surfaces return —
+    // including the fixed Files home a pre-flag slice couldn't have kept.
     expect(out["/repo/feature"].tabs.map((tab) => tab.type)).toEqual([
+      "files",
       "changes",
       "review",
     ]);
+    expect(out["/repo/feature"].tabs[0].fixed).toBe(true);
   });
 
-  it("falls back to Changes for a removed/stale active id and drops malformed slices", () => {
+  it("falls back to the Files home for a removed/stale active id and drops malformed slices", () => {
     const out = migrateScopes({
       "/stale": {
         tabs: [],
@@ -432,7 +682,7 @@ describe("migrateScopes", () => {
       "/null": null as unknown as Column3ScopeState,
     });
     expect(out["/stale"].activeId).toBe(out["/stale"].tabs[0].id);
-    expect(out["/stale"].tabs[0].type).toBe("changes");
+    expect(out["/stale"].tabs[0]).toMatchObject({ type: "files", fixed: true });
     expect(out["/bad"]).toBeUndefined();
     expect(out["/null"]).toBeUndefined();
   });

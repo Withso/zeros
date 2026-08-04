@@ -495,7 +495,13 @@ function ClampedUserPrompt({
             fadeFrom,
           )}
         >
-          <span className="text-fg2 group-hover/more:bg-bg1-hover group-hover/more:text-fg1 group-focus-visible/more:ring-highlighted-bright inline-flex items-center gap-0.5 rounded-sm px-1.5 py-0.5 text-xs font-medium transition-colors group-focus-visible/more:ring-1">
+          {/* Hover chip is bg2-hover, NOT bg1-hover: this pill sits ON the
+              bubble (--highlighted-bg), not on the bg1 canvas, and dark
+              highlighted-bg is 12% L — the same lightness as bg1-hover, so a
+              bg1-hover chip would paint the bubble's own color and vanish.
+              bg2-hover (15%) is the ghost-button hover from the foundation
+              doc and clears the fill in both themes. */}
+          <span className="text-fg2 group-hover/more:bg-bg2-hover group-hover/more:text-fg1 group-focus-visible/more:ring-highlighted-bright inline-flex items-center gap-0.5 rounded-sm px-1.5 py-0.5 text-xs font-medium transition-colors group-focus-visible/more:ring-1">
             More
             <ChevronDown className="size-3.5" strokeWidth={2} />
           </span>

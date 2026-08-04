@@ -32,6 +32,10 @@ interface SourceEditorProps {
   path: string;
   /** The latest on-disk content (the viewer re-reads this on gitRefresh). */
   content: string;
+  /** True while the viewer shows Diff / Markdown preview instead of this editor
+   *  — it stays mounted only to keep its draft, so it skips the synchronous
+   *  first-paint highlight it wouldn't be painting anyway. */
+  offscreen?: boolean;
 }
 
 export function SourceEditor({
@@ -39,6 +43,7 @@ export function SourceEditor({
   cwd,
   path,
   content,
+  offscreen,
 }: SourceEditorProps) {
   const [draft, setDraft] = useState(content);
   const baselineRef = useRef(content); // last on-disk content we're in sync with
@@ -143,6 +148,7 @@ export function SourceEditor({
           filePath={path}
           onChange={changeDraft}
           onSave={save}
+          offscreen={offscreen}
           scrollMemoryKey={JSON.stringify(["editor", cwd, editorId, path])}
         />
       </div>

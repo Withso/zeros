@@ -248,7 +248,20 @@ export function WorkingDirectoriesPopover({
           </Button>
         </PopoverTrigger>
       </Tooltip>
-      <PopoverContent align="end" sideOffset={4} className="w-[300px] p-0">
+      {/* Opens RIGHTWARD from the trigger (align start), and only slides back
+          left when the window edge would clip it — Radix's collision shift,
+          which is on by default. `align="end"` was correct while the trigger
+          lived at the right end of the expanded tree's filter row (flush with
+          the seam), but the collapsed header puts it at the LEFT of a
+          full-width viewer row, where an end-aligned panel hangs off the
+          trigger and spills over the chat column. collisionPadding keeps a
+          gutter so the flipped position never kisses the window edge. */}
+      <PopoverContent
+        align="start"
+        sideOffset={4}
+        collisionPadding={8}
+        className="w-[300px] p-0"
+      >
         <Command>
           <CommandInput placeholder="Search folders to include or exclude…" />
           <CommandList className="max-h-[280px]">

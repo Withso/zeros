@@ -399,8 +399,14 @@
    * right over a dark UI but crushing over a light one (see light block). */
   --scrim: hsl(0 0% 0% / 0.8);
 
-  /* ── HIGHLIGHTED (warm bg + cool blue accent) ── */
-  --highlighted-bg:               hsl(25 5% 15%);   /* #282624 — user msg bg (text on it: fg1/fg2) (comment hex corrected 2026-07-12) */
+  /* ── HIGHLIGHTED (canvas-hue bg + warm-grey accent) ── */
+  /* User-message bubble. Sits in bg0/bg1's hue family (5) rather than the old
+   * warm 25 and one step darker (15% → 12%), so the bubble reads as a quiet
+   * inset on the canvas instead of a raised warm slab. Its 12% L is now just
+   * BELOW border1 (14%), which is what gives the bubble its faint outline —
+   * keep any hover chip painted on this surface at bg2-hover (15%) or above,
+   * or it disappears into the fill (turn-container.tsx "More" pill). */
+  --highlighted-bg:               hsl(5 8% 12%);    /* #211D1C — user msg bg (text on it: fg1/fg2) (2026-08-02) */
   --highlighted-bright:           hsl(25 5% 65%);    /* #AAA5A1 — input focus border, brighter accents */
 
   /* ── INVERTED (polarity-flipping pair) ──
