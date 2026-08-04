@@ -37,13 +37,44 @@ try {
       ? a.replace(/([?#]).*$/, "$1<redacted>")
       : a,
   );
-  require("node:fs").writeFileSync(
-    "/tmp/zeros-boot.log",
-    `[${new Date().toISOString()}] main.cjs loaded, argv=${JSON.stringify(safeArgv)}\n`,
-    { flag: "a" },
+  // SECURITY: a hardcoded "/tmp/zeros-boot.log" opened for APPEND is the classic
+  // insecure-temp-file shape (CodeQL js/insecure-temporary-file). /tmp is shared
+  // and world-writable, so on a multi-user machine any other local account can
+  // pre-create that exact path as a SYMLINK and this append lands wherever the
+  // link points — with the app's privileges. Three changes close it without
+  // losing the trace:
+  //   • O_NOFOLLOW  — refuse a path that is a symlink, instead of following it.
+  //   • per-uid name — two accounts no longer contend for one file at all.
+  //   • mode 0600    — the argv line (redacted, but still paths) stops being
+  //                    world-readable, which it was under the default 0666&~umask.
+  // os.tmpdir() replaces the literal /tmp so this is also correct off-macOS.
+  // O_NOFOLLOW is POSIX-only and undefined on Windows; `?? 0` degrades to the
+  // old behaviour there rather than throwing on the constant lookup.
+  const fs = require("node:fs") as typeof import("node:fs");
+  const os = require("node:os") as typeof import("node:os");
+  const bootLog = require("node:path").join(
+    os.tmpdir(),
+    `zeros-boot-${os.userInfo().uid}.log`,
   );
+  const fd = fs.openSync(
+    bootLog,
+    fs.constants.O_WRONLY |
+      fs.constants.O_CREAT |
+      fs.constants.O_APPEND |
+      (fs.constants.O_NOFOLLOW ?? 0),
+    0o600,
+  );
+  try {
+    fs.writeSync(
+      fd,
+      `[${new Date().toISOString()}] main.cjs loaded, argv=${JSON.stringify(safeArgv)}\n`,
+    );
+  } finally {
+    fs.closeSync(fd);
+  }
 } catch {
-  // ignore — can't even write to /tmp
+  // ignore — can't even write to the temp dir, or the path was a symlink we
+  // refused to follow. Either way a boot trace is not worth failing launch over.
 }
 
 import {

@@ -44,11 +44,21 @@ function makeLoginSessionId(ownerId: string): string {
   try {
     random = crypto.randomUUID();
   } catch {
-    random = `${Date.now().toString(36)}-${Math.floor(
-      Math.random() * 1e9,
-    ).toString(36)}`;
+    // Fallback uses getRandomValues, not Math.random: randomUUID is the only
+    // part of WebCrypto that needs a secure context, so if it throws, the CSPRNG
+    // is still there. Math.random here made this a flagged weak-randomness site
+    // (CodeQL js/insecure-randomness) for no reason — the strong primitive was
+    // available the whole time in the one branch that claimed it wasn't.
+    random = randomHex();
   }
   return `provider-login:${ownerId}:${random}`;
+}
+
+/** 16 bytes of CSPRNG as hex — the degraded path for makeLoginSessionId. */
+function randomHex(): string {
+  const buf = new Uint8Array(16);
+  crypto.getRandomValues(buf);
+  return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /** Shared inline login terminal used by provider and GitHub authentication. */

@@ -49,13 +49,18 @@ function shellQuoteIfNeeded(p: string): string {
 }
 
 /** A collision-resistant ephemeral PTY session id. crypto.randomUUID is
- *  available in the renderer's secure context; degrade if it ever isn't. */
+ *  available in the renderer's secure context; degrade if it ever isn't.
+ *  The degraded path uses getRandomValues rather than Math.random: randomUUID
+ *  is the only WebCrypto member gated on a secure context, so the CSPRNG is
+ *  still present in the exact branch that assumed it wasn't. */
 function makeSessionId(command: string): string {
   let rand: string;
   try {
     rand = crypto.randomUUID();
   } catch {
-    rand = `${Date.now().toString(36)}-${Math.floor(Math.random() * 1e9).toString(36)}`;
+    const buf = new Uint8Array(16);
+    crypto.getRandomValues(buf);
+    rand = Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
   }
   return `ephemeral-term:${command}:${rand}`;
 }
