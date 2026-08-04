@@ -51,6 +51,7 @@ import {
 import type { ThemedToken } from "shiki";
 import {
   highlightToTokens,
+  SYNC_TOKENIZE_MAX,
   tokenizeSync,
   type TokenizedCode,
 } from "@/zeros/agent/renderers/syntax";
@@ -146,13 +147,29 @@ function firstPaint(state: EditorState): ShikiPaint {
   ) {
     return NO_PAINT;
   }
-  const res = tokenizeSync(doc.toString(), cfg.lang, cfg.theme, {
-    headLines: FIRST_PAINT_HEAD_LINES,
-  });
+  const partial = doc.length > SYNC_TOKENIZE_MAX;
+  // For a large document, materialize only the head we will tokenize. Calling
+  // doc.toString() here used to allocate all 60–300k characters merely so
+  // tokenizeSync could scan back to the 240th newline and discard the tail.
+  const headLine = partial
+    ? doc.line(Math.min(FIRST_PAINT_HEAD_LINES, doc.lines))
+    : null;
+  let code = headLine ? doc.sliceString(0, headLine.to) : doc.toString();
+  // Preserve tokenizeSync's long-line guard: when the first 240 lines alone
+  // exceed its budget, include only their terminating line break so its
+  // headLines path can find the same boundary it found in the whole document.
+  const headOptions =
+    headLine && code.length > SYNC_TOKENIZE_MAX && headLine.number < doc.lines
+      ? { headLines: FIRST_PAINT_HEAD_LINES }
+      : undefined;
+  if (headOptions && headLine) {
+    code += doc.sliceString(headLine.to, doc.line(headLine.number + 1).from);
+  }
+  const res = tokenizeSync(code, cfg.lang, cfg.theme, headOptions);
   if (!res) return NO_PAINT;
   return {
     decos: buildShikiDecorations(res.tokens, doc.length),
-    complete: res.partial ? null : cfg,
+    complete: partial ? null : cfg,
   };
 }
 

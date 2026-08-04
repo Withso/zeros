@@ -789,10 +789,28 @@ try {
     `height ${reopened?.height} for body ${reopened?.clientHeight}`,
   );
 
-  await page.keyboard.type("zzz");
+  await page.keyboard.type("readme");
   check(
     "Typing lands in the locked filter input",
-    (await treePanelInput.inputValue().catch(() => "")) === "zzz",
+    (await treePanelInput.inputValue().catch(() => "")) === "readme",
+  );
+  check(
+    "Header-driven tree search keeps matches and filters unrelated rows",
+    await waitFor(
+      async () => {
+        const match = page.locator(
+          '[data-testid="files-tree-panel"] [data-item-path="lib/readme.md"]',
+        );
+        const unrelated = page.locator(
+          '[data-testid="files-tree-panel"] [data-item-path="package.json"]',
+        );
+        return (
+          (await match.isVisible().catch(() => false)) &&
+          !(await unrelated.isVisible().catch(() => true))
+        );
+      },
+      "tree-panel-search-filter",
+    ),
   );
   await page.keyboard.press("Escape");
   check(

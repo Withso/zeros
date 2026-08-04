@@ -375,8 +375,9 @@ export const WorkspaceFileTree = React.forwardRef<
       () => ({
         paths: initialPathsRef.current,
         // The filter bar is per-surface: the row-1 sidebar shows it (the
-        // reference design's "Filter files" header); the launcher mode
-        // stays bare — a dedicated workspace search is its own surface.
+        // reference design's "Filter files" header); launcher surfaces keep
+        // the library's input disabled and drive its live controller through
+        // the imperative bridge below.
         search: searchRef.current,
         initialExpansion: "closed" as const,
         flattenEmptyDirectories: true,
@@ -726,7 +727,10 @@ export const WorkspaceFileTree = React.forwardRef<
       ref={treeRootRef}
       className={cn(
         "relative h-full min-h-0 overflow-hidden",
-        surface === "overlay" ? "bg-bg3" : "bg-bg1",
+        // The overlay's owning FilesTreePanel already paints bg3 around this
+        // child; keeping the shared tree root transparent avoids granting this
+        // whole dual-surface file a file-granular bg3 lint exemption.
+        surface === "overlay" ? "bg-transparent" : "bg-bg1",
         className,
       )}
       style={surface === "overlay" ? TREE_OVERLAY_THEME_VARS : TREE_THEME_VARS}

@@ -4,8 +4,8 @@
 // themed" is exactly "EditorState.create already carries color decorations".
 // These tests assert that against the real shiki highlighter.
 
-import { describe, it, expect, beforeAll } from "vitest";
-import { EditorState } from "@codemirror/state";
+import { describe, it, expect, beforeAll, vi } from "vitest";
+import { EditorState, Text } from "@codemirror/state";
 import { EditorView, type DecorationSet } from "@codemirror/view";
 
 import { prewarmSyntax } from "@/zeros/agent/renderers/syntax";
@@ -22,7 +22,10 @@ export function Counter({ start = 0 }: { start?: number }) {
 `;
 
 /** Total decorations the state hands the view on its FIRST paint. */
-function firstPaintDecorationCount(doc: string, lang: string | null): number {
+function firstPaintDecorationCount(
+  doc: string | Text,
+  lang: string | null,
+): number {
   const state = EditorState.create({
     doc,
     extensions: [shikiColors({ lang, theme: THEME })],
@@ -75,6 +78,22 @@ describe("Shiki first paint", () => {
     // Head-only: far fewer marks than the whole file would produce.
     const wholeFileEstimate = firstPaintDecorationCount(SOURCE, "tsx") * 400;
     expect(head).toBeLessThan(wholeFileEstimate / 2);
+  });
+
+  it("does not stringify the whole large document for its head-only paint", () => {
+    const doc = Text.of(
+      Array.from(
+        { length: 1_000 },
+        (_, index) =>
+          `export const value${index} = "${"head-only ".repeat(8)}";`,
+      ),
+    );
+    expect(doc.length).toBeGreaterThan(60_000);
+    expect(doc.length).toBeLessThan(300_000);
+    const toString = vi.spyOn(doc, "toString");
+
+    expect(firstPaintDecorationCount(doc, "tsx")).toBeGreaterThan(10);
+    expect(toString).not.toHaveBeenCalled();
   });
 
   it("skips color entirely past the large-file cutoff", () => {

@@ -562,7 +562,9 @@ export function normalizeRow1Tabs(parsed: Column3Tab[]): Column3Tab[] {
           fileTreeVisible: filePath
             ? typeof tab.fileTreeVisible === "boolean"
               ? tab.fileTreeVisible
-              : false
+              : tab.fileTreeVisible === undefined
+                ? true
+                : false
             : true,
           viewerMode: filePath ? validViewerMode(tab.viewerMode) : undefined,
           title: filePath

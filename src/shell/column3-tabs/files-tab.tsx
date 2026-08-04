@@ -300,7 +300,7 @@ export const FilesTab = React.memo(function FilesTab({
     <div
       ref={containerRef}
       data-testid="files-tab"
-      className="bg-bg1 relative flex h-full min-h-0"
+      className="bg-bg1 relative flex h-full min-h-0 overflow-hidden"
     >
       {fileTreeVisible && (
         <div

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { buildDirectFileOpenAction } from "../direct-file-open";
+import {
+  buildDirectFileOpenAction,
+  chatFileOpenCwd,
+} from "../direct-file-open";
 import type { Column3Tab } from "../column3-tab-manager";
 
 const file = (
@@ -111,5 +114,20 @@ describe("buildDirectFileOpenAction", () => {
     expect(
       buildDirectFileOpenAction([], "src/mcp/tools.ts", { scope }),
     ).toMatchObject({ type: "ADD_COLUMN3_TAB", scope });
+  });
+});
+
+describe("chatFileOpenCwd", () => {
+  it("uses the chat's workspace owner when a session cwd diverges", () => {
+    expect(
+      chatFileOpenCwd("/repo/worktree", "/repo/worktree/packages/app"),
+    ).toBe("/repo/worktree");
+  });
+
+  it("falls back to the session cwd before the chat thread resolves", () => {
+    expect(chatFileOpenCwd(undefined, "/repo/worktree")).toBe(
+      "/repo/worktree",
+    );
+    expect(chatFileOpenCwd(null, null)).toBeUndefined();
   });
 });

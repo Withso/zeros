@@ -396,7 +396,9 @@ describe("normalizeRow1Tabs", () => {
     ).toEqual([
       ["expanded", true],
       ["collapsed", false],
-      ["legacy", false],
+      // Pre-flag tabs came from the always-split UI, so migration preserves
+      // that visible state. Only newly created direct-open tabs default closed.
+      ["legacy", true],
       ["corrupt", false],
       ["blank", true],
     ]);

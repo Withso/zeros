@@ -733,7 +733,8 @@ export const CheckpointRail = memo(function CheckpointRail({
               // away"). It used --highlighted-bg, which rendered within 1/255
               // of bg2-hover, but that token is the user-bubble surface and
               // dropped to 12% L on 2026-08-02: the selected row would have
-              // sat DARKER than any hovered row.
+              // sat DARKER than any hovered row. This card is bg2, so its
+              // bg2-hover row clears that surface in both theme palettes.
               i === activeIndex
                 ? "bg-bg2-hover text-fg1"
                 : "text-fg2 hover:bg-bg2-hover",

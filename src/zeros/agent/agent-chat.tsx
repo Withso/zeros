@@ -18,6 +18,7 @@ import React, {
   useState,
 } from "react";
 import { useOpenChatFileInRow1 } from "@/shell/use-open-file-in-row1";
+import { chatFileOpenCwd } from "@/shell/direct-file-open";
 import {
   materializeScrollGeometryWithin,
   registerScrollRestore,
@@ -783,11 +784,12 @@ export function AgentChat({
       }
     });
   }, [nativeReady, signInAgentId, session]);
-  // Keep the ref the chat file-open closure reads in sync with the active
-  // chat's working dir (the running session's cwd, or the bound folder before
-  // it starts).
+  // Keep the ref the chat file-open closure reads in sync with the chat's
+  // workspace owner. The session cwd is only a pre-hydration fallback: if an
+  // engine ever reports a nested cwd, its file link still belongs to the
+  // Column-3 slice keyed by the chat's bound folder.
   useEffect(() => {
-    const cwd = session.cwd ?? chatThread?.folder ?? undefined;
+    const cwd = chatFileOpenCwd(chatThread?.folder, session.cwd);
     chatCwdRef.current = cwd;
     // Prime the workspace file list so the FIRST file-chip click resolves
     // synchronously (instant open) instead of waiting on git ls-files.

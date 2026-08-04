@@ -15,6 +15,17 @@ function baseName(path: string): string {
   return index === -1 ? path : path.slice(index + 1);
 }
 
+/** Resolve the workspace owner for a file link rendered inside a chat. The
+ * chat's bound folder owns its Column-3 slice; an engine session cwd is only a
+ * pre-hydration fallback and must not redirect UI state into a subdirectory
+ * scope the user is not viewing. */
+export function chatFileOpenCwd(
+  chatFolder: string | null | undefined,
+  sessionCwd: string | null | undefined,
+): string | undefined {
+  return chatFolder || sessionCwd || undefined;
+}
+
 /** Build the complete atomic transition for a file opened outside its own
  * tree (agent-chat link or the + quick-open palette).
  *
