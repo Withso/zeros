@@ -204,6 +204,11 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      - name: Install Playwright Chromium headless shell
+        # The Vitest suite contains real-browser design-runtime protocol tests.
+        # pnpm installs Playwright's API package but intentionally not its browser.
+        run: pnpm exec playwright install --with-deps --only-shell chromium
+
       - name: Run Vitest suite
         run: pnpm test:git
 
