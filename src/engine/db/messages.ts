@@ -151,28 +151,118 @@ export function upsertChatMessagesBulk(chatId: string, messages: PersistedMessag
   tx(messages);
 }
 
-/** Last `limit` messages for a chat, oldest-first. `before` (an ord) paginates
- *  older history. Mirrors electron/db.ts windowMessages. */
+/** Ceiling on the rows one window read may return, so `windowChatMessages`
+ *  cannot materialize a whole transcript into memory even when it extends a
+ *  window back to a turn boundary (below). `messages.window` clamps its
+ *  caller-supplied limit to the same number, and it is also the renderer's
+ *  in-memory cap per chat (MAX_MESSAGES_PER_CHAT) — a window bigger than that
+ *  would only be trimmed back off the front on the next streamed message. */
+export const WINDOW_MAX_ROWS = 1000;
+
+/** The `ord` of the newest user prompt in an `ord` range — i.e. the row that
+ *  opened the turn the range's top belongs to.
+ *
+ *  `ORDER BY ord DESC LIMIT 1` rather than `MAX(ord)`: both get the same
+ *  idx_chat_messages_chat_ord range search, but LIMIT 1 makes the early exit
+ *  part of the query's meaning, so the walk provably stops at the first user row
+ *  instead of depending on whether SQLite applies its min/max optimization
+ *  through the json_extract term. Bounded at BOTH ends, so the reverse walk
+ *  costs at most the rows the caller was already willing to read.
+ *
+ *  Exported as text only so db.test.ts can EXPLAIN the query that ships: it runs
+ *  on every chat open, and the difference between a bounded index search and a
+ *  scan of the chat is invisible in the rows returned. */
+export const TURN_START_ORD_SQL = `SELECT ord FROM chat_messages
+        WHERE chat_id = ? AND ord >= ? AND ord <= ?
+          AND kind = 'text' AND json_extract(payload, '$.role') = 'user'
+        ORDER BY ord DESC LIMIT 1`;
+
+const WINDOW_COLUMNS =
+  "SELECT msg_id, ord, kind, payload, created_at FROM chat_messages";
+
+/** Newest-first, so the window can be extended from its older end before the
+ *  caller-facing reverse. */
+function newestRows(chatId: string, limit: number, before?: number): MsgDbRow[] {
+  const db = openZerosDb();
+  return (
+    before
+      ? db
+          .prepare(
+            `${WINDOW_COLUMNS} WHERE chat_id = ? AND ord < ? ORDER BY ord DESC LIMIT ?`,
+          )
+          .all(chatId, before, limit)
+      : db
+          .prepare(
+            `${WINDOW_COLUMNS} WHERE chat_id = ? ORDER BY ord DESC LIMIT ?`,
+          )
+          .all(chatId, limit)
+  ) as MsgDbRow[];
+}
+
+function isUserTextRow(row: MsgDbRow): boolean {
+  if (row.kind !== "text") return false;
+  try {
+    return (JSON.parse(row.payload) as { role?: unknown }).role === "user";
+  } catch {
+    return false;
+  }
+}
+
+/** A tail window must not begin mid-turn. `ORDER BY ord DESC LIMIT n` cuts at
+ *  an arbitrary row, and one turn is easily hundreds of rows — every tool call
+ *  and every reasoning block is its own row — so a tool-heavy turn pushes its
+ *  own opening prompt out of the window. The renderer derives turns by
+ *  splitting on user rows (turn-grouping.ts), so a window starting mid-turn
+ *  renders that turn with no prompt bubble, no footer and no checkpoint, and
+ *  nothing marks the cut: scrolling up looks like the top of the chat, and the
+ *  reader concludes their message was lost (field report 2026-08-03, a 193-tool
+ *  turn against the 200-row hydrate window).
+ *
+ *  The extension is CONTIGUOUS with the window it grows, so it never leaves a
+ *  hole: the renderer's older-page cursor is `messages[0]`, and everything
+ *  before that is still reachable by scroll-up paging.
+ *
+ *  Capped at WINDOW_MAX_ROWS in total, so a pathological turn degrades to the
+ *  unsnapped window rather than an unbounded read — which also means a caller
+ *  already asking for the ceiling gets no extension, keeping that clamp's
+ *  guarantee exact. */
+function snapToTurnStart(chatId: string, rows: MsgDbRow[]): MsgDbRow[] {
+  const oldest = rows[rows.length - 1];
+  if (!oldest || isUserTextRow(oldest)) return rows;
+  const budget = WINDOW_MAX_ROWS - rows.length;
+  if (budget <= 0) return rows;
+  // `ord` is assigned MAX+1 per chat, so ord-distance is row-distance and this
+  // floor caps the lookup's reverse walk at the rows we could actually add. A
+  // prompt further back than the budget is deliberately not found: it could not
+  // be reached contiguously anyway. Deletes (truncateChatMessagesFrom) leave ord
+  // gaps, which only makes the floor more conservative — never unbounded.
+  const floor = oldest.ord - budget;
+  const db = openZerosDb();
+  const start = db.prepare(TURN_START_ORD_SQL).get(chatId, floor, oldest.ord) as
+    | { ord: number }
+    | undefined;
+  if (!start) return rows;
+  const fill = db
+    .prepare(
+      `${WINDOW_COLUMNS} WHERE chat_id = ? AND ord >= ? AND ord < ? ORDER BY ord DESC LIMIT ?`,
+    )
+    .all(chatId, start.ord, oldest.ord, budget) as MsgDbRow[];
+  return rows.concat(fill);
+}
+
+/** Last `limit` messages for a chat, oldest-first — extended back to the prompt
+ *  that opened the turn the window landed in (see snapToTurnStart), so a tail
+ *  read never hands the renderer a headless turn. `before` (an ord) paginates
+ *  older history and is returned unsnapped: a page walking backwards is already
+ *  anchored to rows the caller holds. Mirrors electron/db.ts windowMessages. */
 export function windowChatMessages(
   chatId: string,
   limit: number,
   before?: number,
 ): PersistedMessage[] {
-  const db = openZerosDb();
-  const rows = (
-    before
-      ? db
-          .prepare(
-            "SELECT msg_id, ord, kind, payload, created_at FROM chat_messages WHERE chat_id = ? AND ord < ? ORDER BY ord DESC LIMIT ?",
-          )
-          .all(chatId, before, limit)
-      : db
-          .prepare(
-            "SELECT msg_id, ord, kind, payload, created_at FROM chat_messages WHERE chat_id = ? ORDER BY ord DESC LIMIT ?",
-          )
-          .all(chatId, limit)
-  ) as MsgDbRow[];
-  return annotateLegacySteers(chatId, rows.reverse()).map((r) => ({
+  const rows = newestRows(chatId, limit, before);
+  const windowed = before ? rows : snapToTurnStart(chatId, rows);
+  return annotateLegacySteers(chatId, windowed.reverse()).map((r) => ({
     msgId: r.msg_id,
     kind: r.kind,
     payload: r.payload,

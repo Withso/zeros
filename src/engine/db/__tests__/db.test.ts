@@ -31,6 +31,8 @@ import {
 } from "../chats";
 import { headRev, tombstonesSince } from "../sync";
 import {
+  WINDOW_MAX_ROWS,
+  TURN_START_ORD_SQL,
   upsertChatMessage,
   upsertChatMessagesBulk,
   windowChatMessages,
@@ -668,6 +670,147 @@ describe("Zeros DB (unified engine store)", () => {
     // unknown chat / unknown cursor → []
     expect(windowChatMessages("nope", 10)).toEqual([]);
     expect(windowOlderChatMessages("c1", 10, "missing")).toEqual([]);
+  });
+
+  // A turn is one user row followed by however many tool/reasoning/text rows the
+  // agent produced — hundreds, for a tool-heavy run. `LIMIT n` newest-first cuts
+  // at an arbitrary row, so without snapping, a tail window can open in the
+  // middle of a turn and the renderer (which derives turns by splitting on user
+  // rows) shows that turn with no prompt bubble, no footer and no checkpoint.
+  describe("chat_messages: a tail window never begins mid-turn", () => {
+    const user = (id: string) => ({
+      msgId: id,
+      kind: "text",
+      payload: JSON.stringify({ id, kind: "text", role: "user", text: "ask" }),
+      createdAt: 1,
+    });
+    const tool = (id: string) => ({
+      msgId: id,
+      kind: "tool",
+      payload: JSON.stringify({ id, kind: "tool" }),
+      createdAt: 1,
+    });
+    const agent = (id: string) => ({
+      msgId: id,
+      kind: "text",
+      payload: JSON.stringify({ id, kind: "text", role: "agent", text: "ans" }),
+      createdAt: 1,
+    });
+
+    it("extends back to the prompt that opened the turn it landed in", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      upsertChatMessagesBulk("c1", [
+        user("u1"),
+        tool("t1"),
+        tool("t2"),
+        tool("t3"),
+        tool("t4"),
+        tool("t5"),
+        agent("a1"),
+      ]);
+
+      // Newest 3 alone would be t4/t5/a1 — a headless turn.
+      expect(windowChatMessages("c1", 3).map((m) => m.msgId)).toEqual([
+        "u1",
+        "t1",
+        "t2",
+        "t3",
+        "t4",
+        "t5",
+        "a1",
+      ]);
+    });
+
+    it("leaves a window that already starts on a prompt alone", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      upsertChatMessagesBulk("c1", [
+        user("u1"),
+        agent("a1"),
+        user("u2"),
+        agent("a2"),
+      ]);
+
+      expect(windowChatMessages("c1", 2).map((m) => m.msgId)).toEqual([
+        "u2",
+        "a2",
+      ]);
+    });
+
+    it("does not snap an older page — it is anchored to rows the caller holds", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      upsertChatMessagesBulk("c1", [
+        user("u1"),
+        tool("t1"),
+        tool("t2"),
+        agent("a1"),
+      ]);
+
+      expect(
+        windowOlderChatMessages("c1", 2, "a1").map((m) => m.msgId),
+      ).toEqual(["t1", "t2"]);
+    });
+
+    it("leaves the window untouched when the prompt is past the row budget", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      upsertChatMessagesBulk("c1", [
+        user("u1"),
+        ...Array.from({ length: WINDOW_MAX_ROWS + 100 }, (_, i) =>
+          tool(`t${i}`),
+        ),
+      ]);
+
+      // A turn longer than WINDOW_MAX_ROWS can't be snapped without blowing the
+      // ceiling, so this degrades to the pre-snap window — all of it, and
+      // nothing extra. Growing partway would cost 800 rows of transcript and
+      // still render a headless turn, so it buys the reader nothing.
+      expect(windowChatMessages("c1", 200)).toHaveLength(200);
+    });
+
+    it("a caller asking for the ceiling gets no extension", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      upsertChatMessagesBulk("c1", [
+        user("u1"),
+        ...Array.from({ length: WINDOW_MAX_ROWS + 100 }, (_, i) =>
+          tool(`t${i}`),
+        ),
+      ]);
+
+      // loadFullTranscript pages at exactly this limit; the clamp's "cannot
+      // materialize a whole transcript" guarantee has to stay exact.
+      expect(windowChatMessages("c1", WINDOW_MAX_ROWS)).toHaveLength(
+        WINDOW_MAX_ROWS,
+      );
+    });
+
+    // This lookup runs on every chat open, and the difference between a bounded
+    // index search and a scan of the chat is invisible in the rows returned — so
+    // pin the PLAN, the same way CHAT_SUMMARIES_SQL does.
+    it("the turn-start lookup is an index search bounded at both ends", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      upsertChatMessagesBulk("c1", [user("u1"), tool("t1")]);
+
+      const details = (
+        openZerosDb()
+          .prepare(`EXPLAIN QUERY PLAN ${TURN_START_ORD_SQL}`)
+          .all("c1", 0, 2) as { detail: string }[]
+      ).map((r) => r.detail);
+
+      // Both ord bounds have to reach the index: the lower one is what caps the
+      // reverse walk at the rows the window could actually absorb. Losing it
+      // still returns the right row, just after walking the chat to its start.
+      expect(
+        details.some(
+          (d) =>
+            d.includes("SEARCH chat_messages") &&
+            d.includes("idx_chat_messages_chat_ord") &&
+            d.includes("ord>?") &&
+            d.includes("ord<?"),
+        ),
+      ).toBe(true);
+      expect(details.some((d) => /SCAN chat_messages\b(?! USING)/.test(d))).toBe(
+        false,
+      );
+    });
   });
 
   it("FTS: cross-chat search over transcript content, hyphen-safe, follows updates", () => {

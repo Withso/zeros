@@ -184,6 +184,7 @@ import {
 } from "../db/chats";
 import { headRev, tombstonesSince } from "../db/sync";
 import {
+  WINDOW_MAX_ROWS,
   windowChatMessages,
   windowOlderChatMessages,
   upsertChatMessagesBulk,
@@ -2093,15 +2094,17 @@ export class WorkspaceService {
       // ── Transcripts (Phase 2b) — reads; the engine persists on emit. ──
       case "messages.window": {
         // Clamp a caller-controlled limit so a remote `limit:1e9` can't
-        // materialize a whole transcript into memory.
-        const limit = Math.min(optNum(params, "limit") ?? 200, 1000);
+        // materialize a whole transcript into memory. WINDOW_MAX_ROWS is also
+        // the ceiling windowChatMessages honours when it extends a tail window
+        // back to a turn boundary, so the two stay one number.
+        const limit = Math.min(optNum(params, "limit") ?? 200, WINDOW_MAX_ROWS);
         const before = optNum(params, "before");
         return {
           messages: windowChatMessages(reqStr(params, "chatId"), limit, before),
         };
       }
       case "messages.windowOlder": {
-        const limit = Math.min(optNum(params, "limit") ?? 200, 1000);
+        const limit = Math.min(optNum(params, "limit") ?? 200, WINDOW_MAX_ROWS);
         return {
           messages: windowOlderChatMessages(
             reqStr(params, "chatId"),
