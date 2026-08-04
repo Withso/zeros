@@ -9,12 +9,13 @@
 // write path for transcripts (appendMessages is a vestigial no-op).
 //
 // Per-client UI state (scroll offsets, plan snapshots, policies) lives in
-// device-local.ts, not here. Image attachments use the workspace bridge's
-// validated binary writer (with a native fallback during bridge startup).
+// device-local.ts, not here. Attachments use the workspace bridge's validated
+// context-graph writer, with a native fallback during bridge startup.
 // ──────────────────────────────────────────────────────────
 
 import { nativeInvoke } from "../../native/runtime";
 import { readWorkspaceFile } from "../../native/files";
+import { notifyContextGraphChanged } from "../../native/context-graph";
 import type { AgentMessage } from "./use-agent-session";
 import { getActiveBridge } from "../bridge/active-bridge";
 import { resolveBridgeWorkspaceIdForCwd } from "../bridge/workspace-id-resolver";
@@ -326,6 +327,8 @@ export interface AttachmentWriteResult {
   relativePath: string;
   mimeType: string;
   bytes: number;
+  /** True when the exact bytes were already staged and disk did not change. */
+  skipped?: boolean;
 }
 
 export interface AttachmentReadResult {
@@ -334,27 +337,36 @@ export interface AttachmentReadResult {
   bytes: number;
 }
 
-/** Only paths minted by writeAgentAttachment are valid transcript references.
- * A transcript can arrive over sync/import, so never let a forged `diskPath`
- * turn edit-resend into an arbitrary workspace-file reader. */
+/** Only context-graph paths minted by the attachment writer (plus the previous
+ *  chat-scoped layout during migration) are valid transcript references. A
+ *  transcript can arrive over sync/import, so never let a forged `diskPath`
+ *  turn edit-resend into an arbitrary workspace-file reader. */
 export function isAgentAttachmentDiskPath(value: string): boolean {
-  return /^\.context\/attachments\/[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/.test(
-    value,
+  return (
+    /^\.context-graph\/(?:local|shared)\/attachments\/[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/.test(
+      value,
+    ) || /^\.context\/attachments\/[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/.test(value)
   );
 }
 
-/** Persist full-resolution image bytes to the chat's working directory. Every
- * agent kind uses this storage reference for transcript rendering/edit-resend;
- * non-vision agents additionally receive the returned path in their prompt. */
-export async function writeImageAttachment(args: {
+/** Persist a base64-encoded attachment into the workspace's context graph
+ *  (`<cwd>/.context-graph/<scope>/attachments/<attachmentId>/<file>`) and
+ *  return both the absolute and cwd-relative paths. Every composer attachment
+ *  lands here the moment it is staged — images so non-vision agents can
+ *  reference them by path, text files / transcripts so the Context tab canvas
+ *  shows what was attached. `chatId` is provenance only and optional: staging
+ *  happens before the first prompt creates the chat. Unrelated to chat
+ *  storage — a dedicated file-write IPC. */
+export async function writeContextAttachment(args: {
   cwd: string;
-  chatId: string;
+  chatId?: string | null;
   attachmentId: string;
   base64: string;
   mimeType: string;
   filename: string;
 }): Promise<AttachmentWriteResult> {
   const bridge = getActiveBridge();
+  let result: AttachmentWriteResult;
   if (bridge) {
     let workspaceId = args.cwd;
     try {
@@ -364,21 +376,24 @@ export async function writeImageAttachment(args: {
       // A registered primary checkout has no workspace row. Local bridge ops
       // accept its trusted root; remote workspaces resolve above.
     }
-    return bridgeAttachmentWrite(bridge, workspaceId, {
-      chatId: args.chatId,
-      attachmentId: args.attachmentId,
-      base64: args.base64,
-      mimeType: args.mimeType,
-      filename: args.filename,
-    });
+    result = await bridgeAttachmentWrite(bridge, workspaceId, args);
+  } else {
+    result = await nativeInvoke<AttachmentWriteResult>(
+      "agent_attachment_write",
+      args,
+    );
   }
-  return nativeInvoke<AttachmentWriteResult>("agent_attachment_write", args);
+  // Neither transport produces the renderer's filesystem intent signal at the
+  // exact write boundary. Nudge the Context tab only when bytes changed; the
+  // send-time idempotent safety net stays quiet.
+  if (!result.skipped) notifyContextGraphChanged(args.cwd);
+  return result;
 }
 
 /** Resolve a persisted disk reference back to prompt bytes for edit-resend.
- * The base64 exists only for this read/send call; it is never copied into the
- * message or composer document. Legacy data-URL messages bypass this path in
- * reconstruct.ts and remain editable. */
+ *  The base64 exists only for this read/send call; it is never copied into the
+ *  message or composer document. Legacy data-URL messages bypass this path in
+ *  reconstruct.ts and remain editable. */
 export async function readImageAttachment(args: {
   cwd: string;
   diskPath: string;
@@ -403,6 +418,10 @@ export async function readImageAttachment(args: {
     bytes: result.bytes,
   };
 }
+
+// There is deliberately NO remove counterpart: the context graph is
+// append-only from the app (context-graph-staging.ts) — a record leaves the
+// graph only when the user deletes it on disk.
 
 // ── Chat list (sidebar metadata) — engine-backed over the bridge ──────────
 

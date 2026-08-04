@@ -18,6 +18,7 @@ import React, {
   useState,
 } from "react";
 import { useOpenChatFileInRow1 } from "@/shell/use-open-file-in-row1";
+import { chatFileOpenCwd } from "@/shell/direct-file-open";
 import {
   materializeScrollGeometryWithin,
   registerScrollRestore,
@@ -461,10 +462,12 @@ export function AgentChat({
     foregroundStreaming,
     taskCount: session.backgroundTasks.length,
   };
-  const showBackgroundTasksCard =
-    shouldShowBackgroundTasksCard(backgroundTaskOptions);
-  const backgroundContinuationActive =
-    shouldKeepTurnLiveForBackgroundTasks(backgroundTaskOptions);
+  const showBackgroundTasksCard = shouldShowBackgroundTasksCard(
+    backgroundTaskOptions,
+  );
+  const backgroundContinuationActive = shouldKeepTurnLiveForBackgroundTasks(
+    backgroundTaskOptions,
+  );
   // A quiet Claude background continuation is still part of the active turn:
   // keep its working stripe/shimmer and withhold the final answer/footer until
   // the provider's authoritative active-task set becomes empty.
@@ -803,11 +806,12 @@ export function AgentChat({
       }
     });
   }, [nativeReady, signInAgentId, session]);
-  // Keep the ref the chat file-open closure reads in sync with the active
-  // chat's working dir (the running session's cwd, or the bound folder before
-  // it starts).
+  // Keep the ref the chat file-open closure reads in sync with the chat's
+  // workspace owner. The session cwd is only a pre-hydration fallback: if an
+  // engine ever reports a nested cwd, its file link still belongs to the
+  // Column-3 slice keyed by the chat's bound folder.
   useEffect(() => {
-    const cwd = session.cwd ?? chatThread?.folder ?? undefined;
+    const cwd = chatFileOpenCwd(chatThread?.folder, session.cwd);
     chatCwdRef.current = cwd;
     // Prime the workspace file list so the FIRST file-chip click resolves
     // synchronously (instant open) instead of waiting on git ls-files.
@@ -2899,13 +2903,13 @@ export function AgentChat({
     !composerEmpty;
 
   // Phase D2 (2026-05-07) iter 3: image attachments are universal —
-  // every image is first persisted to <cwd>/.context/attachments/…;
-  // vision-capable agents (Claude) also get the inline ImageContent block;
-  // everyone else gets a text reference to that path
-  // and a text block referencing the path (their models still Read the
-  // file). End of "silent drop" era. Shared by handleSend and the
-  // queued-message edit save, so an edited queued send re-encodes its
-  // attachments exactly like a fresh one.
+  // every image is persisted to
+  // <cwd>/.context-graph/<scope>/attachments/…; vision-capable agents also get
+  // the transient inline ImageContent block, while everyone else gets a text
+  // block referencing the path (their models still Read the file). Transcript
+  // payloads retain only that path, never the full-resolution base64.
+  // Shared by handleSend and the queued-message edit save, so an edited
+  // queued send re-encodes its attachments exactly like a fresh one.
   //
   // 2026-07-30: the loop moved to encode-attachments.ts, shared with
   // editAndResubmit. It used to be a second, divergent copy with no
@@ -3330,6 +3334,10 @@ export function AgentChat({
     const idx = queuedMessages.findIndex((m) => m.id === id);
     if (editingQueuedRef.current === id) exitQueuedEdit();
     session.removeQueued?.(id);
+    // The row's staged files deliberately STAY in the context graph — the
+    // graph is append-only (context-graph-staging.ts): deleting the message
+    // withdraws the prompt, not the workspace's record of its files. Only
+    // the user deleting them on disk removes them.
     // Keyboard flow: keep the selection on the neighbouring row so repeated
     // ⌫ walks the list; deleting the last row returns to the composer.
     if (queueSelectedRef.current === id) {

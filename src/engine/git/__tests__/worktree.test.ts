@@ -1106,33 +1106,6 @@ describe("worktree lifecycle (integration)", () => {
     expect(ws.archiveSnapshot).toBe(result.archiveSnapshot);
   });
 
-  it("preserves disk-backed chat images across archive and restore", async () => {
-    const created = await createWorkspace({ repoRoot });
-    const relativeImage = ".context/attachments/chat-1/att-1-shot.png";
-    await mkdir(path.join(created.path, ".context/attachments/chat-1"), {
-      recursive: true,
-    });
-    await writeFile(path.join(created.path, ".context/.gitignore"), "*\n");
-    await writeFile(
-      path.join(created.path, relativeImage),
-      "full-resolution-image",
-    );
-
-    await archiveWorkspace({
-      workspaceId: created.workspaceId,
-      stashUncommitted: true,
-    });
-    expect(existsSync(created.path)).toBe(false);
-
-    await restoreWorkspace(created.workspaceId);
-    expect(await readFile(path.join(created.path, relativeImage), "utf8")).toBe(
-      "full-resolution-image",
-    );
-    expect(
-      await readFile(path.join(created.path, ".context/.gitignore"), "utf8"),
-    ).toBe("*\n");
-  });
-
   it("awaits exact watcher retirement before moving an archived checkout", async () => {
     const created = await createWorkspace({ repoRoot });
     const order: string[] = [];
@@ -1700,6 +1673,59 @@ describe("worktree lifecycle (integration)", () => {
 
     expect(await readFile(workspaceOnly, "utf8")).toBe(
       "workspace-only=secret\n",
+    );
+  });
+
+  it("scaffolds the context graph at create without dirtying git status", async () => {
+    const created = await createWorkspace({ repoRoot });
+    const ignore = await readFile(
+      path.join(created.path, ".context-graph", ".gitignore"),
+      "utf8",
+    );
+    expect(ignore).toContain("/local/");
+    expect(
+      existsSync(
+        path.join(created.path, ".context-graph", "local", "attachments"),
+      ),
+    ).toBe(true);
+    expect(
+      existsSync(
+        path.join(created.path, ".context-graph", "shared", "attachments"),
+      ),
+    ).toBe(true);
+    // The scaffold is self-ignoring: a fresh workspace still reads clean.
+    const { stdout } = await execFileAsync("git", [
+      "-C",
+      created.path,
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+    ]);
+    expect(stdout.trim()).toBe("");
+  });
+
+  it("round-trips private context-graph attachments through archive/restore", async () => {
+    const created = await createWorkspace({ repoRoot });
+    // A composer attachment staged into the PRIVATE (gitignored) scope — the
+    // exact material `git add -A` alone would drop from the snapshot.
+    const attachmentDir = path.join(
+      created.path,
+      ".context-graph",
+      "local",
+      "attachments",
+      "att-test-1",
+    );
+    await mkdir(attachmentDir, { recursive: true });
+    await writeFile(path.join(attachmentDir, "notes.md"), "# keep me\n");
+
+    await archiveWorkspace({
+      workspaceId: created.workspaceId,
+      stashUncommitted: true,
+    });
+    await restoreWorkspace(created.workspaceId);
+
+    expect(await readFile(path.join(attachmentDir, "notes.md"), "utf8")).toBe(
+      "# keep me\n",
     );
   });
 

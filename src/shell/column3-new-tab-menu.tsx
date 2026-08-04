@@ -11,6 +11,7 @@ import {
   useRecentColumn3Browsers,
   useWorkspaceDispatch,
 } from "@/zeros/store/store";
+import { FileTypeIcon } from "@/zeros/agent/composer-editor/file-type-icon";
 import { Button } from "@/zeros/ui/primitives/button";
 import {
   Command,
@@ -24,11 +25,8 @@ import {
   PopoverTrigger,
   Tooltip,
 } from "@/zeros/ui/primitives";
-import {
-  createBrowserTab,
-  createEmptyFilesTab,
-  createFilesTab,
-} from "./column3-tab-manager";
+import { createBrowserTab, createEmptyFilesTab } from "./column3-tab-manager";
+import { buildDirectFileOpenAction } from "./direct-file-open";
 import {
   searchRecentBrowsers,
   searchWorkspaceFiles,
@@ -155,32 +153,15 @@ export function Column3NewTabMenu() {
     close();
   };
 
-  /** Focus an existing path; otherwise consume a blank before allocating one. */
-  const openFile = (path: string, name: string) => {
-    const existing = tabs.find(
-      (tab) => tab.type === "files" && tab.filePath === path,
+  /** Focus an existing path; otherwise consume the active blank before the
+   * fixed home, allocating a collapsed File tab only when neither exists. */
+  const openFile = (path: string) => {
+    dispatch(
+      buildDirectFileOpenAction(tabs, path, {
+        preferredExistingTabId: activeId,
+        preferredBlankId: activeId,
+      }),
     );
-    if (existing) {
-      dispatch({ type: "ACTIVATE_COLUMN3_TAB", id: existing.id });
-      close();
-      return;
-    }
-    // A blank tab is an explicit placeholder, so consume it before allocating a
-    // duplicate surface. This also makes the fresh workspace's Open file tab do
-    // useful work when the user searches immediately.
-    const empty =
-      tabs.find(
-        (tab) => tab.id === activeId && tab.type === "files" && !tab.filePath,
-      ) ?? tabs.find((tab) => tab.type === "files" && !tab.filePath);
-    if (empty) {
-      dispatch({
-        type: "OPEN_COLUMN3_TAB",
-        id: empty.id,
-        updates: { filePath: path, title: name, viewerMode: undefined },
-      });
-    } else {
-      dispatch({ type: "ADD_COLUMN3_TAB", tab: createFilesTab(path) });
-    }
     close();
   };
 
@@ -271,9 +252,11 @@ export function Column3NewTabMenu() {
                   <CommandItem
                     key={file.path}
                     value={`file:${file.path}`}
-                    onSelect={() => openFile(file.path, file.name)}
+                    onSelect={() => openFile(file.path)}
                   >
-                    <File className="size-4" />
+                    {/* The file's own type glyph — the tab this row opens will
+                        carry the same one (row1TabIconPath). */}
+                    <FileTypeIcon name={file.path} size={16} />
                     <div className="min-w-0 flex-1">
                       <div className="truncate">{file.name}</div>
                       {file.directory && (

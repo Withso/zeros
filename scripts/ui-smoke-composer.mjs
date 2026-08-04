@@ -31,6 +31,21 @@
 //      support keyboard focus, and never attach themselves to Read rows.
 //   9. File/diff reading surfaces wrap long lines, keep 450×350 hover geometry,
 //      and never expose horizontal scrolling.
+//  10. File Edit mode hangs soft-wrapped continuation rows at the line's own
+//      indentation instead of dropping them to column 0.
+//  11. The Files-tab tree keeps its indent guides visible without hover and
+//      nests ~15.5px per level.
+//  12. The collapsed Files tab's floating tree popup wears the popover recipe
+//      (inset + rounded + shadow, quick-open search row, padded list),
+//      freezes its open-time height across container resizes, re-measures on
+//      reopen, keeps its filter input focused through tree clicks, and
+//      dismisses on file-open / double Escape / outside pointerdown while the
+//      trigger stays a toggle.
+//  13. A file editor is ALREADY syntax-colored on its first painted frame, with
+//      the code theme's own base foreground — the "opens white, then repaints"
+//      flash. Only a real browser can prove this: the editor is mounted inside
+//      flushSync (CodeMirror's creating layout effect runs before paint) and the
+//      DOM is inspected in that same task, so no paint can have intervened.
 //
 // Usage:  node scripts/ui-smoke-composer.mjs   (pnpm test:ui-smoke)
 // ============================================================
@@ -404,11 +419,417 @@ try {
       .evaluate((el) => el.scrollWidth <= el.clientWidth + 1)
       .catch(() => false),
   );
+  // Hanging indent for soft-wrapped lines: every continuation row of an
+  // indented line must start at the line's own indent, not at column 0
+  // (the wrapped-JSON-description regression). The fixture's second line is
+  // indented 6 spaces and long enough to wrap in the 450px host.
+  const hang = await page
+    .locator('[data-testid="file-editor-host"] .cm-line')
+    .nth(1)
+    .evaluate((line) => {
+      const cs = getComputedStyle(line);
+      const paddingLeft = parseFloat(cs.paddingLeft);
+      const textIndent = parseFloat(cs.textIndent);
+      // One rect per (span × visual row) fragment; the minimum left per row is
+      // where that visual row's text actually starts.
+      const range = document.createRange();
+      range.selectNodeContents(line);
+      const rows = [];
+      for (const rect of range.getClientRects()) {
+        if (rect.width <= 0) continue;
+        const row = rows.find((r) => Math.abs(r.top - rect.top) < 2);
+        if (row) row.left = Math.min(row.left, rect.left);
+        else rows.push({ top: rect.top, left: rect.left });
+      }
+      rows.sort((a, b) => a.top - b.top);
+      return { paddingLeft, textIndent, rowLefts: rows.map((r) => r.left) };
+    })
+    .catch(() => null);
+  check(
+    "File Edit fixture's indented line wraps",
+    (hang?.rowLefts.length ?? 0) >= 2,
+    `${hang?.rowLefts.length ?? 0} visual rows`,
+  );
+  check(
+    "Wrapped rows hang at the line's own indent",
+    hang !== null &&
+      hang.textIndent < 0 &&
+      Math.abs(hang.paddingLeft + hang.textIndent - 6) < 0.5,
+    `padding-left ${hang?.paddingLeft}px, text-indent ${hang?.textIndent}px`,
+  );
+  check(
+    "Continuation rows align with row 1's indent point",
+    hang !== null &&
+      hang.rowLefts.length >= 2 &&
+      Math.abs(hang.rowLefts[1] - (hang.rowLefts[0] - hang.textIndent)) < 1,
+    `row lefts ${hang?.rowLefts.map((x) => x.toFixed(1)).join(", ")}`,
+  );
+  // FIRST PAINT in the code theme. The reported bug was a file opening with
+  // chrome-white text that then repainted into the theme. The fixture mounts the
+  // real editor inside flushSync and we read the DOM in that same task — the
+  // browser cannot have painted in between, so what we see here IS the first
+  // frame the user would see.
+  const firstPaint = await page
+    .evaluate(async () => {
+      const themeFg = await window.__zerosFirstPaintEditor();
+      const host = document.querySelector(
+        '[data-testid="file-editor-first-paint-host"]',
+      );
+      const content = host?.querySelector(".cm-content") ?? null;
+      const colored = host
+        ? host.querySelectorAll('.cm-content span[style*="color"]')
+        : [];
+      const distinct = new Set();
+      for (const span of colored) {
+        const declared = /color:\s*([^;]+)/.exec(span.getAttribute("style"));
+        if (declared) distinct.add(declared[1].trim().toLowerCase());
+      }
+      const expected = themeFg
+        ? (() => {
+            const probe = document.createElement("span");
+            probe.style.color = themeFg;
+            document.body.appendChild(probe);
+            const resolved = getComputedStyle(probe).color;
+            probe.remove();
+            return resolved;
+          })()
+        : "";
+      return {
+        mounted: content !== null,
+        coloredSpans: colored.length,
+        distinctColors: distinct.size,
+        baseColor: content ? getComputedStyle(content).color : "",
+        expectedBaseColor: expected,
+      };
+    })
+    .catch((err) => ({ error: String(err) }));
+  check(
+    "File editor exists on its first paint (mounted before the browser paints)",
+    firstPaint?.mounted === true,
+    firstPaint?.error ?? "",
+  );
+  check(
+    "File editor is syntax-colored on its FIRST paint (no unthemed flash)",
+    (firstPaint?.coloredSpans ?? 0) > 5,
+    `${firstPaint?.coloredSpans ?? 0} colored spans`,
+  );
+  check(
+    "First paint carries real token variety, not one flat color",
+    (firstPaint?.distinctColors ?? 0) >= 3,
+    `${firstPaint?.distinctColors ?? 0} distinct token colors`,
+  );
+  check(
+    "Editor base foreground is the code theme's own, not the app --fg1",
+    Boolean(firstPaint?.expectedBaseColor) &&
+      firstPaint.baseColor === firstPaint.expectedBaseColor,
+    `${firstPaint?.baseColor} vs theme ${firstPaint?.expectedBaseColor}`,
+  );
+
   check(
     "Markdown Preview wraps unbroken text and code",
     await page
       .getByTestId("markdown-preview-host")
       .evaluate((el) => el.scrollWidth <= el.clientWidth + 1),
+  );
+
+  // The Files-tab tree (real WorkspaceFileTree over a primed listing). Park
+  // the pointer far from the tree first: the library only paints indent
+  // guides under :host(:hover), so measuring them un-hovered is the contract.
+  await page.mouse.move(880, 10);
+  await page
+    .locator(
+      '[data-testid="file-tree-host"] [data-item-path="artifacts/api-server/src/index.ts"]',
+    )
+    .waitFor({ state: "visible", timeout: 10_000 });
+  const tree = await page
+    .getByTestId("file-tree-host")
+    .evaluate((host) => {
+      let shadow = null;
+      for (const el of host.querySelectorAll("*")) {
+        if (el.shadowRoot) {
+          shadow = el.shadowRoot;
+          break;
+        }
+      }
+      if (!shadow) return null;
+      const iconLeft = (path) => {
+        const icon = shadow.querySelector(
+          `[data-item-path="${path}"] > [data-item-section='icon']`,
+        );
+        return icon ? icon.getBoundingClientRect().left : null;
+      };
+      // The pre-selected depth-3 file keeps this chain expanded: one icon
+      // x-position per depth, so consecutive deltas are the per-level step.
+      const chain = [
+        "artifacts/",
+        "artifacts/api-server/",
+        "artifacts/api-server/src/",
+        "artifacts/api-server/src/index.ts",
+      ];
+      const lefts = chain.map(iconLeft);
+      const guide = shadow.querySelector("[data-item-section='spacing-item']");
+      return {
+        lefts,
+        steps: lefts
+          .slice(1)
+          .map((left, i) =>
+            left !== null && lefts[i] !== null ? left - lefts[i] : null,
+          ),
+        guideOpacity: guide ? getComputedStyle(guide).opacity : null,
+      };
+    })
+    .catch(() => null);
+  check(
+    "File tree renders the expanded fixture chain",
+    tree !== null && tree.lefts.every((x) => x !== null),
+    `icon lefts ${tree?.lefts.map((x) => x?.toFixed(1)).join(", ")}`,
+  );
+  check(
+    "File tree nests ~15.5px per level (tightened from ~21.5px)",
+    tree !== null && tree.steps.every((s) => s !== null && s >= 13 && s <= 17),
+    `steps ${tree?.steps.map((s) => s?.toFixed(1)).join(", ")}`,
+  );
+  check(
+    "File tree indent guides stay visible without hover",
+    tree?.guideOpacity === "0.75",
+    `opacity ${tree?.guideOpacity}`,
+  );
+
+  // The collapsed Files tab's floating tree POPUP (FilesTreePanel over the
+  // same primed listing). Real-browser contract: popover geometry captured at
+  // open time, focus locked to the filter input across shadow-DOM tree
+  // clicks, and the popup's dismissal surface (file open, Escape, outside
+  // pointerdown, trigger toggle).
+  const treePanelTrigger = page.getByTestId("tree-panel-trigger");
+  const treePanel = page.locator('[data-testid="files-tree-panel"]');
+  const treePanelInput = page.locator(
+    '[data-testid="files-tree-panel"] input[aria-label="Search workspace files"]',
+  );
+  const treePanelVisible = () => treePanel.isVisible().catch(() => false);
+  const treePanelHidden = () =>
+    treePanel
+      .isVisible()
+      .then((v) => !v)
+      .catch(() => true);
+  const treePanelInputFocused = () =>
+    treePanelInput
+      .evaluate((el) => el === document.activeElement)
+      .catch(() => false);
+
+  await treePanelTrigger.click();
+  check(
+    "Tree panel opens from its trigger",
+    await waitFor(treePanelVisible, "tree-panel-open"),
+  );
+  const panelGeo = await page
+    .evaluate(() => {
+      const container = document.querySelector(
+        '[data-testid="tree-panel-container"]',
+      );
+      const panel = document.querySelector('[data-testid="files-tree-panel"]');
+      if (!container || !panel) return null;
+      const c = container.getBoundingClientRect();
+      const p = panel.getBoundingClientRect();
+      const cs = getComputedStyle(panel);
+      const row = panel.firstElementChild;
+      const list = panel.lastElementChild;
+      const input = row?.querySelector("input");
+      return {
+        clientHeight: container.clientHeight,
+        clientWidth: container.clientWidth,
+        topInset: p.top - (c.top + container.clientTop),
+        leftInset: p.left - (c.left + container.clientLeft),
+        height: p.height,
+        width: p.width,
+        bottomGap:
+          c.top +
+          container.clientTop +
+          container.clientHeight -
+          (p.top + p.height),
+        radius: parseFloat(cs.borderRadius),
+        shadow: cs.boxShadow,
+        borderWidth: cs.borderTopWidth,
+        rowHeight: row ? row.getBoundingClientRect().height : null,
+        rowBorderBottom: row ? getComputedStyle(row).borderBottomWidth : null,
+        rowHasIcon: !!row?.querySelector("svg"),
+        inputBorder: input ? getComputedStyle(input).borderTopWidth : null,
+        listPadding: list ? getComputedStyle(list).padding : null,
+      };
+    })
+    .catch(() => null);
+  check(
+    "Tree panel floats inset below the header band",
+    panelGeo !== null &&
+      Math.abs(panelGeo.topInset - 40) < 1 &&
+      Math.abs(panelGeo.leftInset - 8) < 1,
+    `top inset ${panelGeo?.topInset}, left inset ${panelGeo?.leftInset}`,
+  );
+  check(
+    "Tree panel height is the open-time tab body minus header + bottom gap",
+    panelGeo !== null &&
+      Math.abs(panelGeo.height - (panelGeo.clientHeight - 48)) < 1 &&
+      Math.abs(panelGeo.bottomGap - 8) < 1,
+    `height ${panelGeo?.height}, bottom gap ${panelGeo?.bottomGap}`,
+  );
+  check(
+    "Tree panel takes 80% of the tab width",
+    panelGeo !== null &&
+      Math.abs(panelGeo.width - panelGeo.clientWidth * 0.8) < 1.5,
+    `width ${panelGeo?.width} of ${panelGeo?.clientWidth}`,
+  );
+  check(
+    "Tree panel wears the popover recipe (rounded + border + shadow)",
+    panelGeo !== null &&
+      panelGeo.radius >= 6 &&
+      panelGeo.shadow !== "none" &&
+      panelGeo.borderWidth === "1px",
+    `radius ${panelGeo?.radius}, border ${panelGeo?.borderWidth}`,
+  );
+  check(
+    "Tree panel search row matches the quick-open recipe",
+    panelGeo !== null &&
+      panelGeo.rowHeight === 36 &&
+      panelGeo.rowBorderBottom === "1px" &&
+      panelGeo.rowHasIcon &&
+      panelGeo.inputBorder === "0px",
+    `row ${panelGeo?.rowHeight}px, separator ${panelGeo?.rowBorderBottom}, borderless input ${panelGeo?.inputBorder}`,
+  );
+  check(
+    "Tree panel list is padded on all sides",
+    panelGeo?.listPadding === "4px",
+    `padding ${panelGeo?.listPadding}`,
+  );
+  check(
+    "Tree panel focuses its search on open",
+    await waitFor(treePanelInputFocused, "tree-panel-input-focus"),
+  );
+
+  // The trigger stays a TOGGLE while the popup is open (it is exempt from the
+  // outside-pointerdown dismissal — without the exemption this click would
+  // dismiss-then-reopen and the panel would appear stuck open).
+  await treePanelTrigger.click();
+  check(
+    "Trigger click closes the open panel (toggle, not dismiss-then-reopen)",
+    await waitFor(treePanelHidden, "tree-panel-toggle-close"),
+  );
+
+  await treePanelTrigger.click();
+  await treePanel.waitFor({ state: "visible", timeout: 10_000 });
+  await page
+    .locator('[data-testid="files-tree-panel"] [data-item-path="lib/"]')
+    .click();
+  check(
+    "Tree panel folder click expands the folder",
+    await waitFor(
+      () =>
+        page
+          .locator(
+            '[data-testid="files-tree-panel"] [data-item-path="lib/readme.md"]',
+          )
+          .isVisible()
+          .catch(() => false),
+      "tree-panel-folder-expand",
+    ),
+  );
+  check(
+    "Tree panel search keeps focus through tree clicks",
+    await waitFor(treePanelInputFocused, "tree-panel-focus-lock"),
+  );
+
+  // A popup keeps its size: shrinking the tab body must not reflow it.
+  const frozenHeight = await treePanel.evaluate(
+    (el) => el.getBoundingClientRect().height,
+  );
+  await page.getByTestId("tree-panel-container").evaluate((el) => {
+    el.style.height = "300px";
+  });
+  const shrunkHeight = await treePanel.evaluate(
+    (el) => el.getBoundingClientRect().height,
+  );
+  check(
+    "Tree panel keeps its open-time height when the tab body resizes",
+    Math.abs(shrunkHeight - frozenHeight) < 0.5,
+    `${shrunkHeight} after shrink vs ${frozenHeight} at open`,
+  );
+
+  await page
+    .locator(
+      '[data-testid="files-tree-panel"] [data-item-path="lib/readme.md"]',
+    )
+    .click();
+  check(
+    "Tree panel closes on file open",
+    await waitFor(treePanelHidden, "tree-panel-file-close"),
+  );
+  check(
+    "Tree panel routed the opened file",
+    consoleLines.some((l) => l.includes("[harness] panel open lib/readme.md")),
+  );
+
+  // Reopening measures the CURRENT tab body — the freeze is per open.
+  await treePanelTrigger.click();
+  await treePanel.waitFor({ state: "visible", timeout: 10_000 });
+  const reopened = await page
+    .evaluate(() => {
+      const container = document.querySelector(
+        '[data-testid="tree-panel-container"]',
+      );
+      const panel = document.querySelector('[data-testid="files-tree-panel"]');
+      if (!container || !panel) return null;
+      return {
+        height: panel.getBoundingClientRect().height,
+        clientHeight: container.clientHeight,
+      };
+    })
+    .catch(() => null);
+  check(
+    "Reopening re-measures the resized tab body",
+    reopened !== null &&
+      Math.abs(reopened.height - (reopened.clientHeight - 48)) < 1,
+    `height ${reopened?.height} for body ${reopened?.clientHeight}`,
+  );
+
+  await page.keyboard.type("readme");
+  check(
+    "Typing lands in the locked filter input",
+    (await treePanelInput.inputValue().catch(() => "")) === "readme",
+  );
+  check(
+    "Header-driven tree search keeps matches and filters unrelated rows",
+    await waitFor(
+      async () => {
+        const match = page.locator(
+          '[data-testid="files-tree-panel"] [data-item-path="lib/readme.md"]',
+        );
+        const unrelated = page.locator(
+          '[data-testid="files-tree-panel"] [data-item-path="package.json"]',
+        );
+        return (
+          (await match.isVisible().catch(() => false)) &&
+          !(await unrelated.isVisible().catch(() => true))
+        );
+      },
+      "tree-panel-search-filter",
+    ),
+  );
+  await page.keyboard.press("Escape");
+  check(
+    "Escape clears a live filter without dismissing",
+    (await treePanelInput.inputValue().catch(() => null)) === "" &&
+      (await treePanelVisible()),
+  );
+  await page.keyboard.press("Escape");
+  check(
+    "Escape on an empty filter dismisses the panel",
+    await waitFor(treePanelHidden, "tree-panel-escape-close"),
+  );
+
+  await treePanelTrigger.click();
+  await treePanel.waitFor({ state: "visible", timeout: 10_000 });
+  await page.getByTestId("parking-lot").click();
+  check(
+    "Outside pointerdown dismisses the panel",
+    await waitFor(treePanelHidden, "tree-panel-outside-close"),
   );
 
   // 5. The GitHub settings overflow and disconnect dialog use Radix focus

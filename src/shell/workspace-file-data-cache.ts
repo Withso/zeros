@@ -12,6 +12,11 @@
 // primes the per-file diff cache from that response, avoiding a second git
 // process on row click. Hover/intent prefetch primes file content before the
 // corresponding viewer becomes visible.
+//
+// Reading a file for display also warms its SYNTAX grammar (prewarmFileSyntax),
+// so the grammar import races the read instead of following it — that is what
+// lets the viewer's editor paint its first frame already in the code theme
+// instead of flashing chrome-colored text.
 // ──────────────────────────────────────────────────────────
 
 import { useCallback, useSyncExternalStore } from "react";
@@ -23,6 +28,7 @@ import {
   KeyedAsyncCache,
   type AsyncCacheSnapshot,
 } from "@/zeros/lib/keyed-async-cache";
+import { prewarmFileSyntax } from "./column3-tabs/code-editor/prewarm-file-syntax";
 
 export interface WorkspaceFileReadQuery {
   cwd: string;
@@ -139,6 +145,10 @@ export function loadWorkspaceFileRead(
   query: WorkspaceFileReadQuery,
   options: { force?: boolean; maxAgeMs?: number } = {},
 ): Promise<ReadFileResult> {
+  // Every read is a file about to be shown: start its grammar import now so it
+  // finishes with (not after) the read. Deduplicated, so the revalidation calls
+  // on a git refresh cost a map lookup.
+  prewarmFileSyntax(query.path);
   return fileReadCache.load(
     workspaceFileReadKey(query),
     () => fetchWorkspaceFileRead(query),

@@ -8,10 +8,16 @@ import {
   Globe,
   File as FileIcon,
   GitPullRequestArrow,
+  Shapes,
   type LucideIcon,
 } from "lucide-react";
 
-export type Column3TabType = "changes" | "review" | "browser" | "files";
+export type Column3TabType =
+  | "changes"
+  | "review"
+  | "context"
+  | "browser"
+  | "files";
 export type ReviewSubtab =
   | "changes"
   | "description"
@@ -25,9 +31,16 @@ export interface Column3Tab {
   id: string;
   type: Column3TabType;
   title: string;
-  /** Only Changes and Review are pinned. File and Browser tabs are always
-   *  removable, including a blank File tab ("Open file") or Browser tab. */
+  /** Only Changes and Review are pinned. Browser tabs and EXTRA File tabs are
+   *  always removable (including a blank "Open file" from + → File); the one
+   *  `fixed` Files home is permanent too, but via its own flag below. */
   pinned?: boolean;
+  /** Files only: THE workspace's permanent Files home. Exactly one per
+   *  workspace (normalizeRow1Tabs enforces and seeds it) and it owns the
+   *  leading tab slot. It can never be removed: closing it closes its FILE,
+   *  reverting the tab to the blank "Open file" tree — so direct opens always
+   *  have a stable first destination (see blankFixedFilesTab). */
+  fixed?: boolean;
   /** Files + Changes tabs: the currently-open file (repo-relative POSIX path).
    *  Drives the right-pane viewer AND (Files only) the tab label. On the
    *  Changes tab it's the change selected in its sidebar; on File tabs it's
@@ -72,6 +85,10 @@ export interface Column3Tab {
   /** Explicit File/Changes viewer choice. New path intents clear it so the
    * entry point's Diff/Preview/Edit default remains authoritative. */
   viewerMode?: ViewerMode;
+  /** File tab only: whether this tab's workspace tree is visible beside its
+   * viewer. Owned by the individual tab so A → B → A restores independently.
+   * Blank tabs are always visible/tree-only; direct path tabs start collapsed. */
+  fileTreeVisible?: boolean;
   url?: string;
   canvasMode?: boolean;
   viewportWidth?: number;
@@ -165,6 +182,7 @@ export function createFilesTab(
     type: "files",
     title: baseName(filePath),
     filePath,
+    fileTreeVisible: false,
     ...(opts?.diff ? { diff: true } : {}),
     ...(opts?.diffScope ? { diffScope: opts.diffScope } : {}),
     ...(opts?.diffSha ? { diffSha: opts.diffSha } : {}),
@@ -175,14 +193,49 @@ export function createFilesTab(
   };
 }
 
-/** Build the blank, closable File surface shown on every fresh workspace and
- *  created by + → File. Selecting a file fills this tab in place. */
+/** Build a blank File surface. + → File creates these as EXTRA, closable
+ *  tabs; the workspace's permanent Files home is the same shape promoted to
+ *  `fixed` by normalizeRow1Tabs. Selecting a file fills the tab in place. */
 export function createEmptyFilesTab(): Column3Tab {
   return {
     id: nextId("files"),
     type: "files",
     title: "Open file",
+    fileTreeVisible: true,
   };
+}
+
+/** The blank "Open file" state the FIXED Files home reverts to when its file
+ *  closes. Keeps the tab identity (same id, so the strip pill and per-tab
+ *  scroll memory survive) while clearing every per-file field — including the
+ *  direct-open collapsed-tree preference, so the reverted home is the same
+ *  full-width tree a fresh workspace starts with. */
+export function blankFixedFilesTab(tab: Column3Tab): Column3Tab {
+  return {
+    ...tab,
+    title: "Open file",
+    filePath: undefined,
+    fileTreeVisible: true,
+    diff: false,
+    diffScope: undefined,
+    diffSha: undefined,
+    turnChatId: undefined,
+    turnId: undefined,
+    discardable: false,
+    isNewFile: false,
+    viewerMode: undefined,
+    contentRevision: undefined,
+  };
+}
+
+/** Where a direct open (agent chat, quick open, Changes advance) lands when
+ *  the file isn't open anywhere: the FIXED home first — the user's stable
+ *  first destination — then any extra blank, then the caller opens a new tab. */
+export function findBlankFilesTab(tabs: Column3Tab[]): Column3Tab | undefined {
+  return (
+    tabs.find((t) => t.type === "files" && !t.filePath && t.fixed === true) ??
+    tabs.find((t) => t.type === "files" && !t.filePath)
+  );
 }
 
 /** How a row-1 file open resolves against the current tabs + the ACTIVE tab.
@@ -204,9 +257,10 @@ export type Row1OpenPlan =
   | { kind: "new" };
 
 /** Keep expensive File surfaces lazy unless they are active or own an unsaved
- * draft. Browsers preserve iframe state; the two pinned source views preserve
- * their resolved lists and PR state. The terminal panel is mounted separately
- * below row 1. Clean, inactive File tabs remain the only lazy surface. */
+ * draft. Browsers preserve iframe state; the pinned home views preserve
+ * their resolved lists, PR state, and canvas viewport + decoded images. The
+ * terminal panel is mounted separately below row 1. Clean, inactive File tabs
+ * remain the only lazy surface. */
 export function shouldMountRow1Tab(
   tab: Column3Tab,
   activeId: string | null,
@@ -216,6 +270,7 @@ export function shouldMountRow1Tab(
     tab.type === "browser" ||
     tab.type === "changes" ||
     tab.type === "review" ||
+    tab.type === "context" ||
     tab.id === activeId ||
     dirtyEditorIds.has(tab.id)
   );
@@ -235,23 +290,27 @@ export function planRow1Open(
   // Active File tab → ordinarily reuse it in place, even if `path` is open
   // elsewhere. A dirty editor is the one exception: replacing it with ANOTHER
   // path would unmount its path-keyed SourceEditor and lose unsaved work. Since
-  // dirty inactive File tabs remain mounted, focus an existing target or open a
-  // new tab while the draft stays alive in its original tab.
+  // dirty inactive File tabs remain mounted, focus an existing target — or land
+  // in a blank (home first; a blank is never the dirty tab, it has no editor)
+  // or a new tab — while the draft stays alive in its original tab.
   const active = tabs.find((t) => t.id === activeId);
   if (active && active.type === "files") {
     if (activeFileDirty && active.filePath !== path) {
       const existing = tabs.find(
         (t) => t.id !== active.id && t.type === "files" && t.filePath === path,
       );
-      return existing ? { kind: "focus", id: existing.id } : { kind: "new" };
+      if (existing) return { kind: "focus", id: existing.id };
+      const blank = findBlankFilesTab(tabs);
+      return blank ? { kind: "replace", id: blank.id } : { kind: "new" };
     }
     return { kind: "replace", id: active.id };
   }
   // No active File tab to reuse (active is a Browser/non-File, or row 1 empty):
-  // focus the file if it's already open, else open a fresh tab.
+  // focus the file if it's already open, else fill a blank (the fixed Files
+  // home first) before allocating a fresh tab.
   const existing = tabs.find((t) => t.type === "files" && t.filePath === path);
   if (existing) return { kind: "focus", id: existing.id };
-  const empty = tabs.find((t) => t.type === "files" && !t.filePath);
+  const empty = findBlankFilesTab(tabs);
   if (empty) return { kind: "replace", id: empty.id };
   return { kind: "new" };
 }
@@ -295,6 +354,29 @@ export function createReviewTab(): Column3Tab {
   };
 }
 
+/** The path a row-1 tab's strip icon should be resolved FROM, or null to use the
+ *  tab type's own lucide glyph. A File tab showing a file wears that file's
+ *  colored type glyph — the same one the Files tree, the viewer breadcrumb, and
+ *  @-mention pills use — so a `.md`, `.json`, or `.sh` tab is identifiable at a
+ *  glance instead of every tab reading as the same generic page. A blank
+ *  "Open file" tab has no file to describe, so it keeps the generic glyph. */
+export function row1TabIconPath(tab: Column3Tab): string | null {
+  if (tab.type !== "files") return null;
+  const path = tab.filePath?.trim();
+  return path ? path : null;
+}
+
+/** Build THE Context tab — the pinned canvas over the workspace's
+ *  `.context-graph/` (composer attachments + shared docs, auto-laid-out,
+ *  pan/zoom only). One per worktree, can't be closed. */
+export function createContextTab(): Column3Tab {
+  return {
+    id: nextId("context"),
+    type: "context",
+    title: "Context",
+  };
+}
+
 export const TAB_TYPE_META: Record<Column3TabType, TabTypeMeta> = {
   changes: {
     label: "Changes",
@@ -303,6 +385,10 @@ export const TAB_TYPE_META: Record<Column3TabType, TabTypeMeta> = {
   review: {
     label: "Review",
     icon: GitPullRequestArrow,
+  },
+  context: {
+    label: "Context",
+    icon: Shapes,
   },
   browser: {
     label: "Browser",
@@ -342,6 +428,7 @@ const REMOVED_TAB_TYPES = new Set([
 const CURRENT_TAB_TYPES = new Set<Column3TabType>([
   "changes",
   "review",
+  "context",
   "browser",
   "files",
 ]);
@@ -374,26 +461,37 @@ function validViewerMode(raw: unknown): ViewerMode | undefined {
     : undefined;
 }
 
-/** Canonical row-1 order: the first File tab (when one exists), then the pinned
- *  Changes and Review homes, followed by all other closable File/Browser tabs
- *  in their relative order. This keeps "Open file" first without making it
- *  permanent. */
+/** Canonical row-1 order: the FIXED Files home (falling back to the first File
+ *  tab in lists that predate the flag), then the pinned Changes, Review, and
+ *  Context homes, followed by all other closable File/Browser tabs in their
+ *  relative order. The leading slot is stable: extra File tabs never migrate
+ *  into it while the home exists. */
 export function orderRow1Tabs(tabs: Column3Tab[]): Column3Tab[] {
   const changes = tabs.find((t) => t.type === "changes");
   const review = tabs.find((t) => t.type === "review");
+  const context = tabs.find((t) => t.type === "context");
   const systemIds = new Set(
-    [changes?.id, review?.id].filter((id): id is string => Boolean(id)),
+    [changes?.id, review?.id, context?.id].filter((id): id is string =>
+      Boolean(id),
+    ),
   );
   const closable = tabs
     .filter((t) => !systemIds.has(t.id))
     .map((t) => (t.pinned ? { ...t, pinned: false } : t));
-  const firstFileIndex = closable.findIndex((t) => t.type === "files");
+  const fixedIndex = closable.findIndex(
+    (t) => t.type === "files" && t.fixed === true,
+  );
+  const firstFileIndex =
+    fixedIndex >= 0
+      ? fixedIndex
+      : closable.findIndex((t) => t.type === "files");
   const firstFile = firstFileIndex >= 0 ? closable[firstFileIndex] : null;
   const rest = closable.filter((_, index) => index !== firstFileIndex);
   return [
     ...(firstFile ? [firstFile] : []),
     ...(changes ? [{ ...changes, pinned: true }] : []),
     ...(review ? [{ ...review, pinned: true }] : []),
+    ...(context ? [{ ...context, pinned: true }] : []),
     ...rest,
   ];
 }
@@ -404,13 +502,20 @@ export function orderRow1Tabs(tabs: Column3Tab[]): Column3Tab[] {
  *     Changes tab (its sidebar selection survives), or one is seeded;
  *   • exactly ONE Review tab — the first persisted one is promoted, or one is
  *     seeded (always visible; its body renders an empty state without a PR);
- *   • every persisted File tab survives, including blank "Open file" tabs, and
- *     is closable (legacy pins are stripped);
+ *   • exactly ONE Context tab — promoted or seeded the same way (pre-Context
+ *     persisted slices gain it here, no storage-key bump needed);
+ *   • exactly ONE fixed Files home — the first persisted `fixed` File tab
+ *     keeps the flag, else the first File tab is promoted (pre-flag slices),
+ *     else a blank home is seeded: the Files surface is permanent now, so its
+ *     absence can only be legacy state;
+ *   • every persisted File tab survives, including blank "Open file" tabs;
+ *     extra File tabs stay closable (legacy pins are stripped);
  *   • every persisted Browser tab survives and is closable (legacy pins are
  *     stripped), enabling the multi-browser policy;
  *   • persisted row-1 Terminal tabs are removed (the terminal surface is row 2);
- *   • order is [first File, Changes, Review, ...other closable tabs].
- *  Result never becomes empty because Changes and Review remain. */
+ *   • order is [fixed Files home, Changes, Review, Context, ...other closable
+ *     tabs].
+ *  Result never becomes empty because the home tabs remain. */
 export function normalizeRow1Tabs(parsed: Column3Tab[]): Column3Tab[] {
   // Persistence is user-editable and old builds could leave duplicate ids.
   // Validate the small structural core here so one corrupt entry cannot break
@@ -454,6 +559,7 @@ export function normalizeRow1Tabs(parsed: Column3Tab[]): Column3Tab[] {
         filePath: changesFilePath,
         reviewSubtab: undefined,
         changesView: validChangesView(firstChanges.changesView),
+        fileTreeVisible: undefined,
         viewerMode: changesFilePath
           ? validViewerMode(firstChanges.viewerMode)
           : undefined,
@@ -467,8 +573,21 @@ export function normalizeRow1Tabs(parsed: Column3Tab[]): Column3Tab[] {
         reviewSubtab: validReviewSubtab(firstReview.reviewSubtab),
         changesView: undefined,
         viewerMode: undefined,
+        fileTreeVisible: undefined,
       }
     : { ...createReviewTab(), pinned: true };
+  const firstContext = tabs.find((t) => t.type === "context");
+  const homeContext: Column3Tab = firstContext
+    ? {
+        ...firstContext,
+        title: "Context",
+        pinned: true,
+        filePath: undefined,
+        reviewSubtab: undefined,
+        changesView: undefined,
+        viewerMode: undefined,
+      }
+    : { ...createContextTab(), pinned: true };
   const closable = tabs
     .filter((t) => t.type === "files" || t.type === "browser")
     .map((tab) => {
@@ -483,6 +602,13 @@ export function normalizeRow1Tabs(parsed: Column3Tab[]): Column3Tab[] {
           filePath,
           reviewSubtab: undefined,
           changesView: undefined,
+          fileTreeVisible: filePath
+            ? typeof tab.fileTreeVisible === "boolean"
+              ? tab.fileTreeVisible
+              : tab.fileTreeVisible === undefined
+                ? true
+                : false
+            : true,
           viewerMode: filePath ? validViewerMode(tab.viewerMode) : undefined,
           title: filePath
             ? tab.title.trim().slice(0, 512) || baseName(filePath)
@@ -504,6 +630,7 @@ export function normalizeRow1Tabs(parsed: Column3Tab[]): Column3Tab[] {
       return {
         ...tab,
         pinned: false,
+        fixed: undefined,
         title: url ? tab.title.trim().slice(0, 512) || "Browser" : "Browser",
         url,
         canvasMode: url ? tab.canvasMode : false,
@@ -511,9 +638,24 @@ export function normalizeRow1Tabs(parsed: Column3Tab[]): Column3Tab[] {
         reviewSubtab: undefined,
         changesView: undefined,
         viewerMode: undefined,
+        fileTreeVisible: undefined,
       };
     });
-  return orderRow1Tabs([homeChanges, homeReview, ...closable]);
+  // Exactly one fixed Files home: honor the first persisted flag (coerced —
+  // persistence is user-editable), promote the first File tab of a pre-flag
+  // slice, and seed a blank home when no File tab survived at all.
+  const filesTabs = closable.filter((t) => t.type === "files");
+  const fixedId = (filesTabs.find((t) => t.fixed === true) ?? filesTabs[0])?.id;
+  const withHome: Column3Tab[] = closable.map((t) =>
+    t.type === "files" ? { ...t, fixed: t.id === fixedId || undefined } : t,
+  );
+  if (!fixedId) withHome.unshift({ ...createEmptyFilesTab(), fixed: true });
+  return orderRow1Tabs([
+    { ...homeChanges, fixed: undefined },
+    { ...homeReview, fixed: undefined },
+    { ...homeContext, fixed: undefined },
+    ...withHome,
+  ]);
 }
 
 // ── Per-worktree persistence ───────────────────────────────
@@ -533,7 +675,7 @@ export interface Column3ScopeState {
 /** Per-worktree tab state, keyed by the worktree's folder path. */
 export type Column3ScopeMap = Record<string, Column3ScopeState>;
 
-/** The default slice for a fresh worktree: one closable blank File tab first,
+/** The default slice for a fresh worktree: the fixed blank Files home first,
  *  then pinned Changes and Review. Row 2 owns Setup / Run / Terminal. */
 export function defaultTabs(): Column3ScopeState {
   const tabs = normalizeRow1Tabs([createEmptyFilesTab()]);

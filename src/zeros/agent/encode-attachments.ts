@@ -11,7 +11,7 @@
 //     (handleSend and the queued-edit save) — had neither. Every text
 //     attachment was emitted as `{type:"image", data:""}`, which the vision
 //     path drops silently (falsy base64 → no source.url), the non-vision path
-//     throws on (requireString in writeImageAttachment), and Codex turns into
+//     throws on (requireString in writeContextAttachment), and Codex turns into
 //     a zero-byte temp file. So dragging a .md into the composer rendered a
 //     chip, sent successfully, and the agent never saw the file.
 //
@@ -23,13 +23,26 @@
 // — there is no disk round-trip and no @path indirection. That is deliberate:
 // "the agent knows what happened" must not degrade to "the agent could find
 // out" (agents routinely skim or skip a referenced file).
+//
+// 2026-08-02: every valid attachment is ADDITIONALLY persisted into the
+// workspace's context graph (`.context-graph/<scope>/attachments/<id>/<file>`)
+// — the store the Context tab canvas renders. Since attach-time staging
+// (composer-editor/context-graph-staging.ts) the graph copy normally already
+// exists by the time a send encodes; the write here is an idempotent safety
+// net (the engine skips byte-identical re-writes), kept because the send is the
+// last moment the bytes are certainly in memory. Text copies remain a
+// best-effort side effect because their prompt block already carries the body.
+// Image copies are awaited for every agent: transcript JSON keeps only the
+// returned disk path, never a full-resolution data URL. Vision agents still
+// receive the transient inline block; non-vision agents receive the path.
 // ──────────────────────────────────────────────────────────
 
 import { imageReferenceBlock } from "./agent-attachments";
 import {
   readImageAttachment,
-  writeImageAttachment,
+  writeContextAttachment,
 } from "./agent-history-client";
+import { RECONSTRUCTED_ATTACHMENT_ID_PREFIX } from "./composer-editor/reconstruct";
 import type { ComposerAttachment } from "./composer-attachments";
 import type { ContentBlock } from "../bridge/agent-events";
 import type { AgentTextMessageAttachment } from "@zeros/core/agent-messages";
@@ -44,6 +57,8 @@ export interface EncodeAttachmentsContext {
   supportsImage: boolean;
   /** Working directory to persist non-vision images under. */
   cwd: string | null;
+  /** Provenance only — the graph is workspace-scoped, so encoding (and its
+   *  graph writes) works before the first prompt creates the chat. */
   chatId: string | null;
   /** Chooses the @-mention vs absolute-path form of an image reference. */
   agentId: string | null;
@@ -53,7 +68,7 @@ export interface EncodedAttachments {
   blocks: ContentBlock[];
   bubbleAttachments: AgentTextMessageAttachment[];
   /** Ephemeral composer-id lookup used to stamp disk references onto ordered
-   *  message segments. IDs themselves are not persisted. */
+   *  message segments. Composer ids themselves are not persisted there. */
   bubbleAttachmentById: Map<string, AgentTextMessageAttachment>;
   /** Attachments that will NOT reach the agent, with why.
    *
@@ -72,6 +87,75 @@ export interface EncodedAttachments {
  *  XML-ish attribute is likelier to confuse than a `'`. */
 export function textAttachmentBlock(name: string, body: string): string {
   return `<file name="${name.replace(/"/g, "'")}">\n${body}\n</file>`;
+}
+
+/** UTF-8 → base64 without Node's Buffer (this runs in the renderer). Chunked
+ *  so a multi-MB text attachment doesn't blow the argument-spread limit.
+ *  Exported for the composer's attach-time staging, which encodes the same
+ *  text bodies for the same IPC. */
+export function utf8ToBase64(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+/** Best-effort copy of an attachment into the workspace's context graph.
+ *  Fire-and-forget BY DESIGN, on both axes: the inline block already carries
+ *  the bytes, so a failed copy (web clients have no IPC) is a cosmetic gap on
+ *  the canvas, not a dropped attachment — and awaiting N additive disk writes
+ *  would put avoidable latency on the send path. Only the non-vision image
+ *  path awaits its write, because there the PATH is the delivery. */
+function stageInContextGraph(
+  ctx: EncodeAttachmentsContext,
+  a: { id: string; name: string; mimeType: string },
+  base64: string,
+): void {
+  if (!ctx.cwd) return;
+  // A reconstructed chip (edit-in-place rebuilds sent messages with fresh
+  // ids — reconstruct.ts) is the SAME file the original send already
+  // recorded under its original id. Re-staging it would add a duplicate
+  // card to the canvas on every edit-resubmit.
+  if (a.id.startsWith(RECONSTRUCTED_ATTACHMENT_ID_PREFIX)) return;
+  // Promise.resolve also absorbs a SYNCHRONOUS throw from the IPC façade —
+  // fire-and-forget must never take the send down with it.
+  void Promise.resolve()
+    .then(() =>
+      writeContextAttachment({
+        cwd: ctx.cwd!,
+        chatId: ctx.chatId ?? undefined,
+        attachmentId: a.id,
+        base64,
+        mimeType: a.mimeType,
+        filename: a.name,
+      }),
+    )
+    .catch((err) => {
+      // Additive — the inline block already carries the bytes — but never
+      // silent: a rejected copy here is the same signal the attach-time
+      // reporter surfaces, and the log line is what makes a stale-main or
+      // read-only-disk outage diagnosable from app.jsonl.
+      console.warn(
+        `[Zeros] context-graph copy failed for "${a.name}":`,
+        err instanceof Error ? err.message : err,
+      );
+    });
+}
+
+/** Edit-in-place gives a reconstructed chip a fresh composer id, but its image
+ *  already owns a durable graph record. Reuse that record's id for the
+ *  idempotent send-time write instead of creating a duplicate canvas card. */
+function durableAttachmentId(attachment: ComposerAttachment): string {
+  const match =
+    typeof attachment.diskPath === "string"
+      ? /^\.context-graph\/(?:local|shared)\/attachments\/([a-zA-Z0-9_-]+)\//.exec(
+          attachment.diskPath,
+        )
+      : null;
+  return match?.[1] ?? attachment.id;
 }
 
 /** Hand `skipped` to the user, one warning per attachment.
@@ -139,9 +223,13 @@ export async function encodeAttachments(
         name: a.name,
         mimeType: a.mimeType,
         kind: "text",
+        attachmentId: a.id,
       };
       bubbleAttachments.push(bubbleAttachment);
       bubbleAttachmentById.set(a.id, bubbleAttachment);
+      // The prompt carries the body inline; the graph copy is what makes the
+      // attachment visible on the Context tab canvas.
+      stageInContextGraph(ctx, a, utf8ToBase64(a.text));
       continue;
     }
 
@@ -172,10 +260,10 @@ export async function encodeAttachments(
       continue;
     }
 
-    // A chat without a cwd cannot own a durable file. Preserve the wire send,
-    // but keep transcript metadata byte-free; edit-resend will explicitly ask
-    // the user to attach it again rather than pretending an empty image exists.
-    if (!ctx.cwd || !ctx.chatId) {
+    // Without an owning workspace there is nowhere safe to keep a transcript
+    // image. Preserve the wire send but keep the persisted metadata byte-free;
+    // a later edit will explicitly ask the user to attach it again.
+    if (!ctx.cwd) {
       blocks.push({
         type: "image" as const,
         mimeType: imageMimeType,
@@ -185,6 +273,7 @@ export async function encodeAttachments(
         name: a.name,
         mimeType: imageMimeType,
         kind: "image",
+        attachmentId: a.id,
       };
       bubbleAttachments.push(bubbleAttachment);
       bubbleAttachmentById.set(a.id, bubbleAttachment);
@@ -192,10 +281,11 @@ export async function encodeAttachments(
     }
 
     try {
-      const written = await writeImageAttachment({
+      const attachmentId = durableAttachmentId(a);
+      const written = await writeContextAttachment({
         cwd: ctx.cwd,
-        chatId: ctx.chatId,
-        attachmentId: a.id,
+        chatId: ctx.chatId ?? undefined,
+        attachmentId,
         base64: imageBase64,
         mimeType: imageMimeType,
         filename: a.name,
@@ -223,6 +313,7 @@ export async function encodeAttachments(
         mimeType: imageMimeType,
         kind: "image",
         diskPath: written.relativePath,
+        attachmentId,
       };
       bubbleAttachments.push(bubbleAttachment);
       bubbleAttachmentById.set(a.id, bubbleAttachment);

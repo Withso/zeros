@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 vi.mock("../agent-history-client", () => ({
-  writeImageAttachment: vi.fn(),
+  writeContextAttachment: vi.fn(),
 }));
 
 import { setZerosDbPathForTesting } from "../../../engine/db";
@@ -209,12 +209,14 @@ describe("attach a chat transcript — the whole path", () => {
     // self-describing and lets the chip's filename stay short.
     expect(payload).toContain("# Rework the tab strip");
     expect(payload).toContain("Why is the tab strip re-mounting?");
-    // The sent bubble must call it text, not an image.
+    // The sent bubble must call it text, not an image — and carry the id
+    // that links it back to its context-graph record.
     expect(bubbleAttachments).toEqual([
       {
         name: "rework-the-tab-strip.concise.txt",
         mimeType: "text/plain",
         kind: "text",
+        attachmentId: "att-1",
       },
     ]);
   });

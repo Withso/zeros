@@ -8,19 +8,20 @@ describe("AttachmentImageSourceCache", () => {
     const revoke = vi.fn();
     const cache = new AttachmentImageSourceCache(load, revoke);
 
-    const a = cache.acquire("/repo-a", ".context/attachments/c/a.png");
-    const same = cache.acquire("/repo-a", ".context/attachments/c/a.png");
-    const other = cache.acquire("/repo-b", ".context/attachments/c/a.png");
+    const path = ".context-graph/local/attachments/c/a.png";
+    const a = cache.acquire("/repo-a", path);
+    const same = cache.acquire("/repo-a", path);
+    const other = cache.acquire("/repo-b", path);
 
-    expect(await a.source).toBe("/repo-a:.context/attachments/c/a.png");
-    expect(await same.source).toBe("/repo-a:.context/attachments/c/a.png");
-    expect(await other.source).toBe("/repo-b:.context/attachments/c/a.png");
+    expect(await a.source).toBe(`/repo-a:${path}`);
+    expect(await same.source).toBe(`/repo-a:${path}`);
+    expect(await other.source).toBe(`/repo-b:${path}`);
     expect(load).toHaveBeenCalledTimes(2);
 
     a.release();
     expect(revoke).not.toHaveBeenCalled();
     same.release();
-    expect(revoke).toHaveBeenCalledWith("/repo-a:.context/attachments/c/a.png");
+    expect(revoke).toHaveBeenCalledWith(`/repo-a:${path}`);
     other.release();
   });
 
@@ -34,7 +35,10 @@ describe("AttachmentImageSourceCache", () => {
     );
     const revoke = vi.fn();
     const cache = new AttachmentImageSourceCache(load, revoke);
-    const lease = cache.acquire("/repo", ".context/attachments/chat/a.png");
+    const lease = cache.acquire(
+      "/repo",
+      ".context-graph/local/attachments/chat/a.png",
+    );
     lease.release();
     resolve("blob:late");
     expect(await lease.source).toBe("blob:late");

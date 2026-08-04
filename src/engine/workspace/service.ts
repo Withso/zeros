@@ -140,8 +140,13 @@ import {
 } from "../git";
 import { readWorkspaceFile, isSensitiveRepoPath } from "../files/read-file";
 import { writeWorkspaceFile } from "../files/write-file";
-import { writeAgentAttachment } from "../files/agent-attachment";
 import { externalizeLegacyMessageImages } from "../files/legacy-attachment-migration";
+import {
+  ensureContextGraph,
+  listContextGraph,
+  setContextGraphAttachmentShared,
+  stageContextGraphAttachment,
+} from "../files/context-graph";
 import {
   opSettingsMigrateLegacy,
   opSettingsRead,
@@ -445,10 +450,14 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "file.write",
   "attachment.write",
   // These are normally reads, but a window containing a legacy data-URL image
-  // externalizes it into `.context/attachments` before returning. Register the
-  // whole operation so archive/delete cannot move the checkout mid-migration.
+  // externalizes it into `.context-graph` before returning. Register the whole
+  // operation so archive/delete cannot move the checkout mid-migration.
   "messages.window",
   "messages.windowOlder",
+  // Create/move files under `.context-graph/` — archive's snapshot force-adds
+  // that tree, so a mid-flight scaffold or share-toggle must drain first.
+  "context.graph.scaffold",
+  "context.graph.setShared",
   // Rewrites the checkout AND the index (sparse patterns + skip-worktree
   // bits), so it belongs on the barrier for the same reason checkoutBranch
   // does: archive/delete drains in-flight work before snapshotting or removing
@@ -755,12 +764,9 @@ export class WorkspaceService {
   }
   /** Starts a run-action PTY (RunManager). Wired by the engine; driven by the
    *  LOCAL-ONLY workspace.startRun op. */
-  private runStarter:
-    | ((args: RunStartArgs) => Promise<RunStartResult>)
-    | null = null;
-  setRunStarter(
-    fn: (args: RunStartArgs) => Promise<RunStartResult>,
-  ): void {
+  private runStarter: ((args: RunStartArgs) => Promise<RunStartResult>) | null =
+    null;
+  setRunStarter(fn: (args: RunStartArgs) => Promise<RunStartResult>): void {
     this.runStarter = fn;
   }
   /** Stops a live run (records "stopped", not "failed"). Wired by the engine;
@@ -2317,7 +2323,9 @@ export class WorkspaceService {
           });
         }
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
-        return { entries: await listIgnoredEntries(cwd, optStr(params, "dir")) };
+        return {
+          entries: await listIgnoredEntries(cwd, optStr(params, "dir")),
+        };
       }
       case "file.read": {
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
@@ -2358,13 +2366,77 @@ export class WorkspaceService {
       }
       case "attachment.write": {
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
-        return writeAgentAttachment(cwd, {
-          chatId: reqStr(params, "chatId"),
+        const mimeType = reqStr(params, "mimeType");
+        const staged = await stageContextGraphAttachment(cwd, {
           attachmentId: reqStr(params, "attachmentId"),
           base64: reqStr(params, "base64"),
-          mimeType: reqStr(params, "mimeType"),
           filename: reqStr(params, "filename"),
         });
+        if (!staged.ok) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message:
+              staged.error ??
+              "Couldn't stage the attachment in the context graph",
+          });
+        }
+        return {
+          absolutePath: staged.absolutePath,
+          relativePath: staged.relativePath,
+          mimeType,
+          bytes: staged.bytes,
+          ...(staged.skipped ? { skipped: true } : {}),
+        };
+      }
+
+      // ── Context graph (the Context tab's canvas) ──────────
+      // DESKTOP-ONLY for now, and by explicit refusal like `file.ignored`, not
+      // omission: the graph's `local/` scope is gitignored private material,
+      // exactly the boundary the remote read allowlist exists to keep. A future
+      // remote surface would filter to `shared/` — do that deliberately, not by
+      // widening these cases.
+      case "context.graph.list": {
+        if (remote) {
+          throw new GitError({
+            code: "REMOTE_RESTRICTED",
+            message: "The context graph can only be read from the desktop app.",
+          });
+        }
+        const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
+        return listContextGraph(cwd);
+      }
+      case "context.graph.scaffold": {
+        if (remote) {
+          throw new GitError({
+            code: "REMOTE_RESTRICTED",
+            message:
+              "The context graph can only be scaffolded from the desktop app.",
+          });
+        }
+        const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
+        return ensureContextGraph(cwd);
+      }
+      case "context.graph.setShared": {
+        if (remote) {
+          throw new GitError({
+            code: "REMOTE_RESTRICTED",
+            message:
+              "Context attachments can only be shared from the desktop app.",
+          });
+        }
+        const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
+        const result = await setContextGraphAttachmentShared(
+          cwd,
+          reqStr(params, "attachmentId"),
+          params.shared === true,
+        );
+        if (!result.ok) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: result.error ?? "Couldn't move the attachment",
+          });
+        }
+        return result;
       }
 
       // ── Read: git ─────────────────────────────────────────

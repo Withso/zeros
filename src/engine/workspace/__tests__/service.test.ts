@@ -123,7 +123,7 @@ describe("WorkspaceService", () => {
     }
   });
 
-  it("writes an image attachment under the chat-scoped .context directory", async () => {
+  it("writes an image attachment into the workspace context graph", async () => {
     const result = (await svc.handle("attachment.write", {
       workspaceId: LOCAL_MAIN_WORKSPACE_ID,
       chatId: "chat-1",
@@ -138,15 +138,15 @@ describe("WorkspaceService", () => {
     };
 
     expect(result.relativePath).toBe(
-      ".context/attachments/chat-1/att-1-shot.png",
+      ".context-graph/local/attachments/att-1/shot.png",
     );
     expect(result.absolutePath).toBe(path.join(dir, result.relativePath));
     expect(fs.readFileSync(result.absolutePath, "utf8")).toBe(
       "full-resolution-image",
     );
-    expect(fs.readFileSync(path.join(dir, ".context/.gitignore"), "utf8")).toBe(
-      "*\n",
-    );
+    expect(
+      fs.readFileSync(path.join(dir, ".context-graph/.gitignore"), "utf8"),
+    ).toContain("/local/");
   });
 
   it("externalizes legacy transcript data URLs on first window read", async () => {
@@ -219,7 +219,7 @@ describe("WorkspaceService", () => {
       segments: Array<{ diskPath?: string; thumbnailUri?: string }>;
     };
     expect(payload.attachments[0].diskPath).toMatch(
-      /^\.context\/attachments\/legacy-images\//,
+      /^\.context-graph\/local\/attachments\/legacy_[a-f0-9]+\//,
     );
     expect(payload.segments[1].diskPath).toBe(payload.attachments[0].diskPath);
     expect(payload.attachments[0].thumbnailUri).toBeUndefined();

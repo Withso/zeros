@@ -57,7 +57,7 @@ describe("toMessageSegments", () => {
           name: "shot.png",
           mimeType: "image/png",
           kind: "image" as const,
-          diskPath: ".context/attachments/chat-1/a1-shot.png",
+          diskPath: ".context-graph/local/attachments/a1/shot.png",
         },
       ],
     ]);
@@ -67,7 +67,7 @@ describe("toMessageSegments", () => {
         name: "shot.png",
         mimeType: "image/png",
         kind: "image",
-        diskPath: ".context/attachments/chat-1/a1-shot.png",
+        diskPath: ".context-graph/local/attachments/a1/shot.png",
       },
     ]);
     expect(

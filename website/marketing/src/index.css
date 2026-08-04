@@ -114,7 +114,7 @@
 
   --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.35);
 
-  --highlighted-bg:     hsl(25 5% 15%);  /* #282624 — user bubble */
+  --highlighted-bg:     hsl(5 8% 12%);   /* #211D1C — user bubble (mirrors styles/zeros-tokens.css) */
   --highlighted-bright: hsl(25 5% 65%);  /* #AAA5A1 */
 
   --inverted-bg: hsl(0 2% 92%);   /* #EBEAEA */

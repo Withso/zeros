@@ -22,7 +22,13 @@
 import { memo, useEffect, useMemo, useState } from "react";
 
 import { cn } from "@/zeros/ui/cn";
-import { highlightCode, highlightSync, plainCode, warmHighlighter } from "./syntax";
+import {
+  highlightCode,
+  highlightSync,
+  nthNewlineIndex,
+  plainCode,
+  warmHighlighter,
+} from "./syntax";
 import { useCodeTheme } from "@/zeros/appearance/use-code-theme";
 import { resolveCodeTheme } from "@/zeros/appearance/code-themes";
 
@@ -43,17 +49,6 @@ interface HighlightedCodeProps {
 // file. A few hundred lines highlight in a few ms; the full file would block the
 // main thread for hundreds.
 const HEAD_HL_LINES = 240;
-
-/** Index of the `n`-th `\n` in `s`, or -1 if there are fewer than `n`. Slices
- *  the leading lines without splitting the whole (possibly huge) string. */
-function nthNewlineIndex(s: string, n: number): number {
-  let idx = -1;
-  for (let i = 0; i < n; i++) {
-    idx = s.indexOf("\n", idx + 1);
-    if (idx === -1) return -1;
-  }
-  return idx;
-}
 
 /** Colour just the leading `n` lines (cheap) and keep the remainder as escaped
  *  plain text — so a large file paints an instantly-coloured viewport with the

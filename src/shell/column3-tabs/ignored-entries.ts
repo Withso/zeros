@@ -31,13 +31,17 @@
 // (model/gitStatus.js), so we never build a 60k-entry status map; ignored FILES
 // inside a known ignored directory inherit and are left out.
 //
-// Roots alone are NOT enough, because this tree sets `flattenEmptyDirectories`.
-// The library only propagates from an ancestor that is a VISIBLE ROW
-// (`row.ancestorPaths`), and a flattened chain's head is not one: a fresh
+// Roots alone are NOT enough while `flattenEmptyDirectories` is on: the
+// library only propagates from an ancestor that is a VISIBLE ROW
+// (`row.ancestorPaths`), and a flattened chain's head is not one — a fresh
 // `node_modules/` whose only child is `.pnpm/` renders as a single flattened row
 // keyed on the TERMINAL, so a roots-only entry left it painted like tracked
 // code. Flattening only ever chains directory→directory (path-store/flatten.js),
 // so covering every known ignored directory covers every possible terminal.
+// The tree runs UNFLATTENED since 2026-08-03 (Finder-style nesting), which
+// makes roots-only propagation sufficient again — the child coverage is kept
+// because it is already bounded by what is open and it keeps this module
+// correct under either tree configuration.
 //
 // MEMORY: `loaded` is pruned when a branch is collapsed (see withCollapsed), so
 // everything above is bounded by what is actually on screen rather than by the
@@ -96,9 +100,9 @@ export function mergeIgnoredPaths(
  *  them to inherit from). Files nested inside a known ignored directory are
  *  omitted; the library propagates `ignored` down to them.
  *
- *  Directory children matter and not just roots because of
- *  `flattenEmptyDirectories` — see the header. Bounded by what is open, because
- *  collapsing prunes `loaded`. */
+ *  Directory children are covered and not just roots so this stays correct
+ *  even under `flattenEmptyDirectories` — see the header. Bounded by what is
+ *  open, because collapsing prunes `loaded`. */
 export function ignoredGitStatus(
   roots: readonly string[],
   loaded?: ReadonlyMap<string, readonly string[]>,

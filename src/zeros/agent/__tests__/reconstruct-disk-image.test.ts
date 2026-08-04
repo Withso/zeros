@@ -13,7 +13,7 @@ describe("messageToEditorContent — disk-backed images", () => {
           name: "shot.png",
           mimeType: "image/png",
           kind: "image",
-          diskPath: ".context/attachments/chat-1/a1-shot.png",
+          diskPath: ".context-graph/local/attachments/a1/shot.png",
         },
       ],
     });
@@ -23,7 +23,7 @@ describe("messageToEditorContent — disk-backed images", () => {
       name: "shot.png",
       kind: "image",
       data: "",
-      diskPath: ".context/attachments/chat-1/a1-shot.png",
+      diskPath: ".context-graph/local/attachments/a1/shot.png",
     });
   });
 

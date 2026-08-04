@@ -1,6 +1,7 @@
-// Column-3 reducer invariants: a fresh workspace starts with one closable
-// Open file tab followed by permanent Changes and Review homes. File and
-// Browser tabs are multi-instance, closable, and scoped to their worktree.
+// Column-3 reducer invariants: a fresh workspace starts with the FIXED Open
+// file home (permanent — closing it only closes its file) followed by the
+// permanent Changes and Review homes. Extra File and Browser tabs are
+// multi-instance, closable, and scoped to their worktree.
 import { describe, expect, it } from "vitest";
 
 // The node test env has no DOM, but the store persistence subscriber runs on
@@ -54,7 +55,7 @@ describe("column3 default slice", () => {
     expect(column3ScopeForFolder(null)).toBe("__ambient__");
   });
 
-  it("seeds exactly Open file, Changes, Review with Open file active", () => {
+  it("seeds exactly Open file, Changes, Review, Context with Open file active", () => {
     freshScope();
     const { tabs, activeId, recentBrowsers } = slice();
 
@@ -62,8 +63,15 @@ describe("column3 default slice", () => {
       ["files", "Open file"],
       ["changes", "Changes"],
       ["review", "Review"],
+      ["context", "Context"],
     ]);
-    expect(tabs.map((tab) => Boolean(tab.pinned))).toEqual([false, true, true]);
+    expect(tabs.map((tab) => Boolean(tab.pinned))).toEqual([
+      false,
+      true,
+      true,
+      true,
+    ]);
+    expect(tabs[0].fixed).toBe(true);
     expect(activeId).toBe(tabs[0].id);
     expect(recentBrowsers).toEqual([]);
   });
@@ -82,6 +90,7 @@ describe("column3 default slice", () => {
       "Open file",
       "Changes",
       "Review",
+      "Context",
     ]);
     expect(slice().activeId).toBe(slice().tabs[0].id);
     expect(slice().recentBrowsers).toEqual([]);
@@ -144,20 +153,24 @@ describe("ADD_COLUMN3_TAB", () => {
     expect(slice().activeId).toBe(secondBrowser.id);
   });
 
-  it("puts the first re-created File before the permanent system tabs", () => {
+  it("keeps the fixed home leading; extra blanks append after the system tabs", () => {
     freshScope();
-    const initialFile = slice().tabs.find((tab) => tab.type === "files")!;
-    dispatch({ type: "REMOVE_COLUMN3_TAB", id: initialFile.id });
-    const replacement = createEmptyFilesTab();
+    const home = slice().tabs.find((tab) => tab.type === "files")!;
+    const extra = createEmptyFilesTab();
 
-    dispatch({ type: "ADD_COLUMN3_TAB", tab: replacement });
+    dispatch({ type: "ADD_COLUMN3_TAB", tab: extra });
 
     expect(slice().tabs.map((tab) => tab.type)).toEqual([
       "files",
       "changes",
       "review",
+      "context",
+      "files",
     ]);
-    expect(slice().tabs[0].id).toBe(replacement.id);
+    expect(slice().tabs[0].id).toBe(home.id);
+    expect(slice().tabs[4].id).toBe(extra.id);
+    expect(slice().tabs[4].fixed).toBeUndefined();
+    expect(slice().activeId).toBe(extra.id);
   });
 
   it("treats a duplicate id as an idempotent no-op", () => {
@@ -169,6 +182,33 @@ describe("ADD_COLUMN3_TAB", () => {
     dispatch({ type: "ADD_COLUMN3_TAB", tab: browser });
 
     expect(useWorkspaceStore.getState()).toBe(before);
+  });
+
+  it("adds to its exact workspace after the active workspace changes", () => {
+    const folderA = freshScope();
+    const scopeA = column3ScopeForFolder(folderA);
+    const homeA = slice().tabs[0];
+
+    const folderB = freshScope();
+    const scopeB = column3ScopeForFolder(folderB);
+    const beforeB = slice();
+    const fileA = createFilesTab("src/late-agent-open.ts");
+
+    dispatch({ type: "ADD_COLUMN3_TAB", scope: scopeA, tab: fileA });
+
+    const state = useWorkspaceStore.getState();
+    expect(state.column3ByScope[scopeA]).toMatchObject({
+      activeId: fileA.id,
+      tabs: [
+        { id: homeA.id },
+        { type: "changes" },
+        { type: "review" },
+        { type: "context" },
+        { id: fileA.id, fileTreeVisible: false },
+      ],
+    });
+    expect(selectColumn3(state)).toBe(beforeB);
+    expect(column3ScopeForFolder(folderB)).toBe(scopeB);
   });
 });
 
@@ -241,12 +281,44 @@ describe("REMOVE/UPDATE/ACTIVATE_COLUMN3_TAB", () => {
     ).toBe("reviews");
   });
 
-  it("protects Changes/Review but closes blank File, filled File, and Browser", () => {
+  it("keeps file-tree visibility isolated by File tab across A → B → A", () => {
+    freshScope();
+    const tabA = slice().tabs.find((tab) => tab.type === "files")!;
+    const tabB = createFilesTab("src/b.ts");
+    dispatch({ type: "ADD_COLUMN3_TAB", tab: tabB });
+
+    dispatch({
+      type: "UPDATE_COLUMN3_TAB",
+      id: tabA.id,
+      updates: { fileTreeVisible: true },
+    });
+    dispatch({
+      type: "UPDATE_COLUMN3_TAB",
+      id: tabB.id,
+      updates: { fileTreeVisible: false },
+    });
+
+    dispatch({ type: "ACTIVATE_COLUMN3_TAB", id: tabA.id });
+    expect(
+      slice().tabs.find((tab) => tab.id === tabA.id)?.fileTreeVisible,
+    ).toBe(true);
+    dispatch({ type: "ACTIVATE_COLUMN3_TAB", id: tabB.id });
+    expect(
+      slice().tabs.find((tab) => tab.id === tabB.id)?.fileTreeVisible,
+    ).toBe(false);
+    dispatch({ type: "ACTIVATE_COLUMN3_TAB", id: tabA.id });
+    expect(
+      slice().tabs.find((tab) => tab.id === tabA.id)?.fileTreeVisible,
+    ).toBe(true);
+  });
+
+  it("protects Changes/Review/Context and the fixed home; extras close fully", () => {
     freshScope();
     const initial = slice().tabs;
-    const blank = initial.find((tab) => tab.type === "files")!;
+    const home = initial.find((tab) => tab.type === "files")!;
     const changes = initial.find((tab) => tab.type === "changes")!;
     const review = initial.find((tab) => tab.type === "review")!;
+    const context = initial.find((tab) => tab.type === "context")!;
 
     dispatch({
       type: "UPDATE_COLUMN3_TAB",
@@ -255,15 +327,19 @@ describe("REMOVE/UPDATE/ACTIVATE_COLUMN3_TAB", () => {
     });
     dispatch({ type: "REMOVE_COLUMN3_TAB", id: changes.id });
     dispatch({ type: "REMOVE_COLUMN3_TAB", id: review.id });
+    dispatch({ type: "REMOVE_COLUMN3_TAB", id: context.id });
     expect(slice().tabs.some((tab) => tab.id === changes.id)).toBe(true);
     expect(slice().tabs.some((tab) => tab.id === review.id)).toBe(true);
+    expect(slice().tabs.some((tab) => tab.id === context.id)).toBe(true);
     expect(slice().tabs.find((tab) => tab.id === changes.id)?.pinned).toBe(
       true,
     );
 
-    dispatch({ type: "REMOVE_COLUMN3_TAB", id: blank.id });
-    expect(slice().tabs.map((tab) => tab.type)).toEqual(["changes", "review"]);
-    expect(slice().activeId).toBe(changes.id);
+    // Closing the BLANK home is a no-op — there's no file to close and the
+    // tab itself is permanent.
+    const before = useWorkspaceStore.getState();
+    dispatch({ type: "REMOVE_COLUMN3_TAB", id: home.id });
+    expect(useWorkspaceStore.getState()).toBe(before);
 
     const file = createFilesTab("src/a.ts");
     const browser = createBrowserTab();
@@ -271,31 +347,88 @@ describe("REMOVE/UPDATE/ACTIVATE_COLUMN3_TAB", () => {
     dispatch({ type: "ADD_COLUMN3_TAB", tab: browser });
     dispatch({ type: "REMOVE_COLUMN3_TAB", id: file.id });
     dispatch({ type: "REMOVE_COLUMN3_TAB", id: browser.id });
-    expect(slice().tabs.map((tab) => tab.type)).toEqual(["changes", "review"]);
+    expect(slice().tabs.map((tab) => tab.type)).toEqual([
+      "files",
+      "changes",
+      "review",
+      "context",
+    ]);
   });
 
-  it("fills a blank File tab and closes the whole tab when its file closes", () => {
+  it("reverts the fixed home to Open file when its file closes via ✕", () => {
     freshScope();
-    const blank = slice().tabs.find((tab) => tab.type === "files")!;
+    const home = slice().tabs.find((tab) => tab.type === "files")!;
+    dispatch({
+      type: "OPEN_COLUMN3_TAB",
+      id: home.id,
+      updates: {
+        filePath: "src/a.ts",
+        title: "a.ts",
+        diff: true,
+        diffScope: "uncommitted",
+        discardable: true,
+        fileTreeVisible: false,
+      },
+    });
+
+    dispatch({ type: "REMOVE_COLUMN3_TAB", id: home.id });
+
+    // Same tab, same slot, still active — only the FILE closed. The revert
+    // also resets the direct-open collapsed tree back to the full-width blank.
+    expect(slice().tabs[0]).toMatchObject({
+      id: home.id,
+      type: "files",
+      fixed: true,
+      title: "Open file",
+      filePath: undefined,
+      fileTreeVisible: true,
+      diff: false,
+      discardable: false,
+    });
+    expect(slice().activeId).toBe(home.id);
+  });
+
+  it("fills a blank File tab; closing the file reverts the home but removes extras", () => {
+    freshScope();
+    const home = slice().tabs.find((tab) => tab.type === "files")!;
 
     dispatch({
       type: "UPDATE_COLUMN3_TAB",
-      id: blank.id,
+      id: home.id,
       updates: { filePath: "src/a.ts", title: "a.ts" },
     });
-    expect(slice().tabs.find((tab) => tab.id === blank.id)).toMatchObject({
+    expect(slice().tabs.find((tab) => tab.id === home.id)).toMatchObject({
       filePath: "src/a.ts",
       title: "a.ts",
+      // Selecting inside the blank tab keeps its full-width tree expanded;
+      // only direct-open entry points explicitly publish `false`.
+      fileTreeVisible: true,
     });
 
     dispatch({
       type: "UPDATE_COLUMN3_TAB",
-      id: blank.id,
+      id: home.id,
       updates: { filePath: undefined },
     });
-    expect(slice().tabs.some((tab) => tab.id === blank.id)).toBe(false);
+    expect(slice().tabs.find((tab) => tab.id === home.id)).toMatchObject({
+      title: "Open file",
+      filePath: undefined,
+      fileTreeVisible: true,
+    });
+    expect(slice().activeId).toBe(home.id);
+
+    const extra = createFilesTab("src/b.ts");
+    dispatch({ type: "ADD_COLUMN3_TAB", tab: extra });
+    dispatch({
+      type: "UPDATE_COLUMN3_TAB",
+      id: extra.id,
+      updates: { filePath: undefined },
+    });
+    // Extras close entirely; the close-neighbor policy picks the next tab
+    // (Context now sits between Review and the extra).
+    expect(slice().tabs.some((tab) => tab.id === extra.id)).toBe(false);
     expect(slice().activeId).toBe(
-      slice().tabs.find((tab) => tab.type === "changes")!.id,
+      slice().tabs.find((tab) => tab.type === "context")!.id,
     );
   });
 
@@ -450,6 +583,30 @@ describe("CLOSE_COLUMN3_FILE_IF_MATCHES", () => {
       discardable: false,
     });
   });
+
+  it("reverts the fixed home instead of removing it when its file vanishes", () => {
+    const folder = freshScope();
+    const home = slice().tabs.find((tab) => tab.type === "files")!;
+    dispatch({
+      type: "UPDATE_COLUMN3_TAB",
+      id: home.id,
+      updates: { filePath: "src/gone.ts", fileTreeVisible: false },
+    });
+
+    dispatch({
+      type: "CLOSE_COLUMN3_FILE_IF_MATCHES",
+      scope: column3ScopeForFolder(folder),
+      id: home.id,
+      path: "src/gone.ts",
+    });
+
+    expect(slice().tabs[0]).toMatchObject({
+      id: home.id,
+      title: "Open file",
+      filePath: undefined,
+      fileTreeVisible: true,
+    });
+  });
 });
 
 describe("RECONCILE_COLUMN3_FILE_DISCARD", () => {
@@ -487,10 +644,9 @@ describe("RECONCILE_COLUMN3_FILE_DISCARD", () => {
     });
   });
 
-  it("closes every File tab for a removed path and clears Changes selection", () => {
+  it("closes every extra File tab for a removed path and clears Changes selection", () => {
     const folder = freshScope();
-    const blank = slice().tabs.find((tab) => tab.type === "files")!;
-    dispatch({ type: "REMOVE_COLUMN3_TAB", id: blank.id });
+    const home = slice().tabs.find((tab) => tab.type === "files")!;
     const changes = slice().tabs.find((tab) => tab.type === "changes")!;
     const first = createFilesTab("scratch.txt", { isNewFile: true });
     const second = createFilesTab("scratch.txt", { isNewFile: true });
@@ -521,12 +677,49 @@ describe("RECONCILE_COLUMN3_FILE_DISCARD", () => {
       false,
     );
     expect(slice().activeId).toBe(neighbor.id);
+    // The untouched blank home is not a discard target and survives as-is.
+    expect(slice().tabs[0]).toMatchObject({ id: home.id, filePath: undefined });
     expect(slice().tabs.find((tab) => tab.id === changes.id)).toMatchObject({
       filePath: undefined,
       diff: false,
       discardable: false,
       isNewFile: false,
     });
+  });
+
+  it("reverts the fixed home to Open file when its path is removed", () => {
+    const folder = freshScope();
+    const home = slice().tabs.find((tab) => tab.type === "files")!;
+    dispatch({
+      type: "OPEN_COLUMN3_TAB",
+      id: home.id,
+      updates: {
+        filePath: "scratch.txt",
+        title: "scratch.txt",
+        diff: true,
+        discardable: true,
+        isNewFile: true,
+        fileTreeVisible: false,
+      },
+    });
+
+    dispatch({
+      type: "RECONCILE_COLUMN3_FILE_DISCARD",
+      scope: folder,
+      path: "scratch.txt",
+      outcome: "removed",
+    });
+
+    expect(slice().tabs[0]).toMatchObject({
+      id: home.id,
+      fixed: true,
+      title: "Open file",
+      filePath: undefined,
+      fileTreeVisible: true,
+      diff: false,
+      isNewFile: false,
+    });
+    expect(slice().activeId).toBe(home.id);
   });
 
   it("targets the operation's workspace after the active workspace changes", () => {
@@ -559,7 +752,7 @@ describe("RECONCILE_COLUMN3_FILE_DISCARD", () => {
 });
 
 describe("REORDER_COLUMN3_TABS", () => {
-  it("keeps the first requested File first and Changes/Review immediately next", () => {
+  it("keeps the fixed home first and Changes/Review immediately next", () => {
     freshScope();
     const first = createFilesTab("a.ts");
     const second = createFilesTab("b.ts");
@@ -585,13 +778,17 @@ describe("REORDER_COLUMN3_TABS", () => {
       ],
     });
 
+    // The fixed home owns the leading slot no matter where the caller put it;
+    // the other closable tabs keep the requested relative order.
+    const context = slice().tabs.find((tab) => tab.type === "context")!;
     expect(slice().tabs.map((tab) => tab.id)).toEqual([
-      second.id,
+      initialBlank.id,
       changes.id,
       review.id,
+      context.id,
       browser.id,
+      second.id,
       first.id,
-      initialBlank.id,
     ]);
   });
 });

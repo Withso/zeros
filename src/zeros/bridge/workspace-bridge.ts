@@ -38,6 +38,10 @@ import type {
 } from "../../native/git";
 import type { ReadFileResult, WriteFileResult } from "../../native/files";
 import type {
+  ContextGraphItemWire,
+  ContextGraphListWire,
+} from "../../native/context-graph";
+import type {
   TurnInfo,
   TurnResetResult,
   TurnUndoResult,
@@ -810,13 +814,15 @@ export async function bridgeFileWrite(
   })) as WriteFileResult;
 }
 
-/** Persist full-resolution image bytes under a chat-scoped, gitignored path.
- * Transcript payloads retain the returned relative path, never the base64. */
+/** Persist attachment bytes in the workspace context graph. Transcript
+ *  payloads retain the returned relative path, never the base64. Unlike the
+ *  context-canvas read/move APIs below, this write is available to paired
+ *  clients so remote composer sends can materialize their own attachments. */
 export async function bridgeAttachmentWrite(
   bridge: RuntimeClient,
   workspaceId: string,
   args: {
-    chatId: string;
+    chatId?: string | null;
     attachmentId: string;
     base64: string;
     mimeType: string;
@@ -827,6 +833,7 @@ export async function bridgeAttachmentWrite(
   relativePath: string;
   mimeType: string;
   bytes: number;
+  skipped?: boolean;
 }> {
   return (await workspaceOp(bridge, "attachment.write", {
     workspaceId,
@@ -836,7 +843,55 @@ export async function bridgeAttachmentWrite(
     relativePath: string;
     mimeType: string;
     bytes: number;
+    skipped?: boolean;
   };
+}
+
+// ── Context graph (the Context tab's canvas) ────────────────
+// DESKTOP ONLY, same posture as `file.ignored`: the graph's `local/` scope is
+// gitignored private material, so the engine refuses remote callers outright.
+// The renderer façade (native/context-graph.ts) short-circuits web clients
+// before a round-trip is spent.
+
+/** Everything in the workspace's `.context-graph/`, both scopes merged. */
+export async function bridgeContextGraphList(
+  bridge: RuntimeClient,
+  workspaceId: string,
+): Promise<ContextGraphListWire> {
+  const r = (await workspaceOp(bridge, "context.graph.list", {
+    workspaceId,
+  })) as Partial<ContextGraphListWire> | undefined;
+  return {
+    exists: r?.exists === true,
+    items: Array.isArray(r?.items) ? (r.items as ContextGraphItemWire[]) : [],
+    truncated: r?.truncated === true,
+  };
+}
+
+/** Idempotently create the `.context-graph/` skeleton for a workspace. */
+export async function bridgeContextGraphScaffold(
+  bridge: RuntimeClient,
+  workspaceId: string,
+): Promise<{ ok: boolean; created: boolean }> {
+  const r = (await workspaceOp(bridge, "context.graph.scaffold", {
+    workspaceId,
+  })) as { ok?: boolean; created?: boolean } | undefined;
+  return { ok: r?.ok === true, created: r?.created === true };
+}
+
+/** Move one attachment folder between the private and shared scopes. */
+export async function bridgeContextGraphSetShared(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  attachmentId: string,
+  shared: boolean,
+): Promise<{ ok: boolean; moved: boolean }> {
+  const r = (await workspaceOp(bridge, "context.graph.setShared", {
+    workspaceId,
+    attachmentId,
+    shared,
+  })) as { ok?: boolean; moved?: boolean } | undefined;
+  return { ok: r?.ok === true, moved: r?.moved === true };
 }
 
 // ── Git (read) ──────────────────────────────────────────────

@@ -4,9 +4,10 @@
 //
 // Pre-disk-protocol user messages persisted a full data URL in both the flat
 // attachment list and the ordered segment list. Window reads migrate only the
-// rows being opened: write each unique message image once, replace both copies
-// with the same diskPath, and upsert the compact payload. A failed write leaves
-// that legacy URI untouched so old chats remain viewable/editable.
+// rows being opened: write each unique message image once into the workspace
+// context graph, replace both copies with the same diskPath, and upsert the
+// compact payload. A failed write leaves that legacy URI untouched so old chats
+// remain viewable/editable.
 // ──────────────────────────────────────────────────────────
 
 import { createHash } from "node:crypto";
@@ -14,7 +15,7 @@ import path from "node:path";
 
 import type { PersistedMessage } from "../db/messages";
 import { upsertChatMessagesBulk } from "../db/messages";
-import { writeAgentAttachment } from "./agent-attachment";
+import { stageContextGraphAttachment } from "./context-graph";
 
 interface LegacyImageRef {
   name?: unknown;
@@ -101,22 +102,24 @@ export async function externalizeLegacyMessageImages(args: {
       let write = writes.get(source);
       if (!write) {
         const digest = createHash("sha256")
+          .update(args.chatId)
+          .update("\0")
           .update(row.msgId)
           .update("\0")
           .update(source)
           .digest("hex")
           .slice(0, 20);
-        write = writeAgentAttachment(args.cwd, {
-          chatId: args.chatId,
+        write = stageContextGraphAttachment(args.cwd, {
           attachmentId: `legacy_${digest}`,
           base64: parts.base64,
-          mimeType: parts.mimeType,
           filename:
             typeof ref.name === "string" && ref.name
               ? ref.name
               : `legacy-${digest}`,
         })
-          .then((written) => written.relativePath)
+          .then((written) =>
+            written.ok && written.relativePath ? written.relativePath : null,
+          )
           .catch(() => null);
         writes.set(source, write);
       }
