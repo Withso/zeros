@@ -105,6 +105,12 @@ const POST_CANCEL_INTERRUPT_MS = 15_000;
  *  practice; 1.5s is a comfortable margin that only collab turns ever pay. */
 const COLLAB_GRACE_MS = 1_500;
 
+/** Fail-closed response used whenever lifecycle teardown abandons a parked
+ * approval without a user choice. */
+const CANCELLED_PERMISSION_RESPONSE = {
+  outcome: { outcome: "cancelled" },
+} as RequestPermissionResponse;
+
 const CODEX_MODES: SessionMode[] = [
   {
     id: "ask",
@@ -632,6 +638,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
       // child exit is now an idle crash, not a mid-turn one.
       session.turnActive = false;
       session.cancelRequested = false;
+      // A completed/failed turn cannot still service one of its approval
+      // resolvers. Fail closed and receipt every straggler before a later turn
+      // can enqueue behind a dead renderer card.
+      this.drainPendingApprovals(session, session.runtimeAlive);
     }
   }
 
@@ -742,6 +752,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
     if (!session) return;
     session.cancelRequested = true;
     session.postCancelInterruptUntil = Date.now() + POST_CANCEL_INTERRUPT_MS;
+    // Release approval RPCs as part of Stop itself. Interrupting the turn does
+    // not guarantee the app-server will settle every server→client request.
+    this.drainPendingApprovals(session, session.runtimeAlive);
     // Sweep EVERY live turn, not just the parent's. turn/interrupt is
     // per-(thread, turn), and collab subagent threads keep running —
     // streaming tool calls into the timeline — if only the parent turn
@@ -820,12 +833,11 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // bounded by active chats (single digits); the per-session Map
     // keeps the lookup itself O(1).
     for (const session of this.sessions.values()) {
-      const pending = session.pendingApprovals.get(opts.permissionId);
-      if (!pending) continue;
-      session.pendingApprovals.delete(opts.permissionId);
-      const codexResponse = mapResponseToCodexDecision(pending, opts.response);
-      pending.runtime.respondToPermission(opts.permissionId, codexResponse);
-      return;
+      if (
+        this.settlePendingApproval(session, opts.permissionId, opts.response)
+      ) {
+        return;
+      }
     }
     // Unknown permissionId — already responded or session was disposed.
     // No throw; the gateway pipeline tolerates this.
@@ -1038,8 +1050,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
   async disposeSession(sessionId: string): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
+    this.drainPendingApprovals(s, s.runtimeAlive);
     this.sessions.delete(sessionId);
-    s.pendingApprovals.clear();
     s.pendingQuestions.clear();
     this.disposing.add(sessionId);
     try {
@@ -1063,7 +1075,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         // map before disposing the runtime. The runtime's own dispose
         // also auto-cancels its in-flight approval promises, so this
         // is belt-and-braces — but it keeps the adapter map clean.
-        s.pendingApprovals.clear();
+        this.drainPendingApprovals(s, s.runtimeAlive);
         s.pendingQuestions.clear();
         await s.runtime.dispose();
         // Best-effort session dir removal.
@@ -1331,7 +1343,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
     //     codex side is gone.
     session.activeTurnId = null;
     session.activeTurns.clear();
-    session.pendingApprovals.clear();
+    // The runtime is already dead, so only drop local resolver handles and
+    // emit their receipts; there is no JSON-RPC peer left to answer.
+    this.drainPendingApprovals(session, false);
     session.pendingQuestions.clear();
     session.fileEditPathsByItemId.clear();
 
@@ -1569,26 +1583,75 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 
   /** An approval settled inside the runtime WITHOUT a respondToPermission (its
-   *  response timeout auto-cancelled the codex side). Twin of
-   *  handleUserInputSettled: evict the pending entry and emit the settled echo
-   *  so the renderer drops the parked card and the engine stops replaying it to
-   *  a reloaded renderer as a gate whose resolver is already gone. */
+   *  response timeout, or dispose's cancel-all sweep, auto-cancelled the codex
+   *  side). Twin of handleUserInputSettled: evict the pending entry and emit the
+   *  settled echo so the renderer drops the parked card and the engine stops
+   *  replaying it to a reloaded renderer as a gate whose resolver is already
+   *  gone. No response argument — the codex side is already answered. */
   private handleApprovalSettled(
-    session: CodexSession,
+    session: CodexSession | undefined,
     permissionId: string,
   ): void {
-    if (!session?.pendingApprovals?.delete(permissionId)) return;
+    if (!session) return;
+    this.settlePendingApproval(session, permissionId);
+  }
+
+  /** Settle one adapter-owned approval exactly once. When `response` is
+   *  present, this path also resolves the live app-server JSON-RPC request;
+   *  runtime-owned settlement callbacks omit it because that resolver is
+   *  already gone. Deleting before either side effect makes re-entrant or
+   *  duplicate lifecycle notifications harmless. */
+  private settlePendingApproval(
+    session: CodexSession,
+    permissionId: string,
+    response?: RequestPermissionResponse,
+  ): boolean {
+    const pending = session.pendingApprovals.get(permissionId);
+    if (!pending || !session.pendingApprovals.delete(permissionId)) {
+      return false;
+    }
     try {
-      this.ctx.emit.onPermissionSettled?.(
-        this.agentId,
-        permissionId,
-        session.zerosSessionId,
-      );
-    } catch (err) {
-      this.ctx.emit.onAgentStderr(
-        this.agentId,
-        `[zeros] permission settle emit failed for ${permissionId}: ${String(err)}`,
-      );
+      if (response) {
+        const codexResponse = mapResponseToCodexDecision(pending, response);
+        pending.runtime.respondToPermission(permissionId, codexResponse);
+      }
+    } finally {
+      try {
+        this.ctx.emit.onPermissionSettled?.(
+          this.agentId,
+          permissionId,
+          session.zerosSessionId,
+        );
+      } catch (err) {
+        this.ctx.emit.onAgentStderr(
+          this.agentId,
+          `[zeros] permission settle emit failed for ${permissionId}: ${String(err)}`,
+        );
+      }
+    }
+    return true;
+  }
+
+  /** Drain a stable snapshot because responding can synchronously advance the
+   *  Codex turn and mutate the pending map. */
+  private drainPendingApprovals(
+    session: CodexSession,
+    resolveRuntime: boolean,
+  ): void {
+    for (const permissionId of [...session.pendingApprovals.keys()]) {
+      try {
+        this.settlePendingApproval(
+          session,
+          permissionId,
+          resolveRuntime ? CANCELLED_PERMISSION_RESPONSE : undefined,
+        );
+      } catch (err) {
+        // One malformed resolver must not keep the rest of the queue alive.
+        this.ctx.emit.onAgentStderr(
+          this.agentId,
+          `[zeros] permission drain failed for ${permissionId}: ${String(err)}`,
+        );
+      }
     }
   }
 
