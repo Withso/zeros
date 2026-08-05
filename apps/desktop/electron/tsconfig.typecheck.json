@@ -1,0 +1,32 @@
+{
+  // Type-check-only variant of apps/desktop/electron/tsconfig.json — used by
+  // `pnpm typecheck:electron` (a Preflight CI gate). The Electron main + preload
+  // are COMPILED by tsup (esbuild), which strips types WITHOUT checking them, so
+  // this is the only real type gate for apps/desktop/electron/.
+  //
+  // Two overrides vs the base config:
+  //   • noEmit — we only want diagnostics, never output.
+  //   • rootDir ".." — the main process imports shared engine code from ../src
+  //     (apps/desktop/src/engine/git, apps/desktop/src/engine/settings, …). The
+  //     base config's rootDir "." constrains optional direct `tsc` output; under
+  //     this full typecheck program those cross-directory imports trip TS6059
+  //     ("not under rootDir"). Widening
+  //     rootDir to the desktop app root keeps the "all inputs under rootDir" invariant
+  //     satisfied with no other effect (noEmit ⇒ no output layout to constrain).
+  //
+  // `include` is restated (not inherited) so the glob resolves against apps/desktop/electron/.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "..",
+    // The base config compiles to CommonJS (tsup's emit target). For TYPE
+    // CHECKING we override to ESM module settings so the shared engine code this
+    // pulls in from ../src (written for moduleResolution:bundler, using
+    // import.meta) checks consistently — exactly as it does under
+    // tsconfig.typecheck.json. Emit is off, so the runtime CJS target is
+    // unaffected (tsup still owns the build).
+    "module": "ESNext",
+    "moduleResolution": "bundler"
+  },
+  "include": ["**/*.ts"]
+}

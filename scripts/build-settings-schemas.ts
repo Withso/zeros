@@ -1,5 +1,5 @@
 // Build the published settings JSON-schema artifacts from the zod source of
-// truth (src/engine/settings/schema.ts). Output is committed into the
+// truth (apps/desktop/src/engine/settings/schema.ts). Output is committed into the
 // marketing site so the files serve from zeros.build/schemas/ — the URLs
 // every settings.toml references via "$schema".
 //
@@ -16,12 +16,12 @@ import {
   SCHEMA_URL_REPO,
   SCHEMA_URL_USER,
   userSettingsSchema,
-} from "../src/engine/settings/schema";
+} from "../apps/desktop/src/engine/settings/schema";
 
 // `import.meta.dir` is bun-only; derive the script dir portably so this runs
 // under tsx/node too.
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const OUT_DIR = path.join(HERE, "..", "website", "marketing", "public", "schemas");
+const OUT_DIR = path.join(HERE, "..", "apps", "marketing", "public", "schemas");
 
 function emit(fileName: string, schema: z.ZodType, id: string, title: string, description: string) {
   const json = z.toJSONSchema(schema, { target: "draft-7", io: "input" }) as Record<string, unknown>;

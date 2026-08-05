@@ -1,0 +1,17 @@
+{
+  "name": "@zeros/feedback-worker",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "Authenticated Cloudflare Worker for forwarding in-app feedback to configured support and issue-tracking destinations.",
+  "dependencies": {
+    "jose": "^6.0.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "dev": "npx wrangler@4 dev",
+    "deploy": "npx wrangler@4 deploy",
+    "tail": "npx wrangler@4 tail"
+  }
+}

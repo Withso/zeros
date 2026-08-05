@@ -66,9 +66,10 @@ A useful report includes:
 
 ## What is out of scope
 
-- **Third-party agent CLIs the user installs** — Claude Code, Codex, Cursor,
-  and their SDKs. Report those to their vendors. Bugs in how *Zeros* invokes or
-  sandboxes them are in scope; bugs inside them are not.
+- **Third-party agent runtimes and SDKs** — some are bundled with the desktop
+  release and others may be resolved from the user's machine. Report defects
+  inside those components to their vendors. Bugs in how *Zeros* packages,
+  invokes, authenticates, or isolates them are in scope.
 - **The user's own API keys and agent credentials**, including keys they paste
   into an agent or commit to their own repository.
 - Self-inflicted configuration: permission modes deliberately loosened,

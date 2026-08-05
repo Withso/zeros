@@ -1,8 +1,10 @@
 # Zeros Foundation — design language + usage rules
 
-**Status:** 2026-05-26. Active. The single canonical sheet for color, typography, spacing, motion, and component recipes in the Zeros Mac app.
+**Status:** Living reference. Canonical guidance for color, typography, spacing,
+motion, and component recipes in the Zeros desktop app.
 
-Every UI task in `src/zeros/**` and `src/shell/**` follows these rules. The **Zeros Foundation skill** (`~/.claude/skills/zeros-foundation/SKILL.md`) auto-loads this doc at the start of every UI request.
+Every UI task under `apps/desktop/src/renderer/` follows this reference together
+with the binding repository rules in `RULES.md`.
 
 If you only want one thing: **§3 has the surface map** (which token paints what), **§4 has the component recipes**, **§5 has the anti-patterns most likely to slip**.
 
@@ -10,17 +12,17 @@ If you only want one thing: **§3 has the surface map** (which token paints what
 
 ## §1 — File map
 
-The Zeros design system lives in five files:
+The Zeros design system is organized through these public files:
 
-| # | File | Role |
-|---|---|---|
-| 1 | `styles/zeros-tokens.css` | The token implementation — primitive HSL values |
-| 2 | `styles/zeros-foundation.md` | **This doc** — rules, recipes, anti-patterns |
-| 3 | `styles/theme-system-tour.md` | Higher-level tour — where colors come from |
-| 4 | `styles/globals.css` | Markdown CSS + scrollbars + global focus outline |
-| 5 | `~/.claude/skills/zeros-foundation/SKILL.md` | Auto-loaded skill that fires on every UI task |
+| #   | File                                    | Role                                                      |
+| --- | --------------------------------------- | --------------------------------------------------------- |
+| 1   | `styles/zeros-tokens.css`               | Primitive values, core aliases, and Tailwind theme wiring |
+| 2   | `styles/semantic-tokens.css`            | Feature-specific aliases over primitives                  |
+| 3   | `styles/globals.css` + `styles/global/` | Ordered cross-boundary cascade modules                    |
+| 4   | `styles/zeros-foundation.md`            | **This document** — recipes and anti-patterns             |
+| 5   | `styles/theme-system-tour.md`           | Runtime load order and maintenance tour                   |
 
-`website/**` is out of scope — that subtree has its own token system.
+`apps/marketing/` is out of scope and owns its own web design system.
 
 ---
 
@@ -55,7 +57,7 @@ The token system has **one layer of primitives** (in `zeros-tokens.css`) plus a 
 --muted-fg         placeholder text in inputs, empty-state icons.
 ```
 
-**Sidebar (workspace col 1 ONLY — NOT settings sidebar):**
+**Repository navigation (not the settings sidebar):**
 
 ```
 --sidebar-bg          sidebar background
@@ -120,7 +122,7 @@ Six explicit HSL families beyond the neutral system: **red · green · yellow ·
 
 ### 2.5 Diff renderer (separate visual identity)
 
-The `@pierre/diffs` renderer (Changes/Review tabs, file-tab diff mode, chat EditCards) is themed to the Zeros palette in `src/zeros/appearance/diff-theme.ts`. Its shadow root gets a warm surface (`--diffs-bg` → `--sidebar-bg` in column 3, `--bg1` in chat EditCards) plus three base overrides: `--diffs-addition-color-override` → `--green-primary`, `--diffs-deletion-color-override` → `--red-primary`, `--diffs-modified-color-override` → `--highlighted-bright` (neutral — no navy selection). @pierre derives the row wash, changed-word emphasis, edge bars, and line numbers from those three bases; syntax colors come from the Shiki code theme.
+The `@pierre/diffs` renderer (Changes/Review tabs, file-tab diff mode, chat EditCards) is themed to the Zeros palette in `apps/desktop/src/renderer/shared/theme/diff-theme.ts`. Its shadow root gets a warm surface (`--diffs-bg` → `--sidebar-bg` in the workbench, `--bg1` in chat EditCards) plus three base overrides: `--diffs-addition-color-override` → `--green-primary`, `--diffs-deletion-color-override` → `--red-primary`, `--diffs-modified-color-override` → `--highlighted-bright` (neutral — no navy selection). @pierre derives the row wash, changed-word emphasis, edge bars, and line numbers from those three bases; syntax colors come from the Shiki code theme.
 
 ---
 
@@ -128,51 +130,51 @@ The `@pierre/diffs` renderer (Changes/Review tabs, file-tab diff mode, chat Edit
 
 ### 3.1 Backgrounds
 
-| Surface | Token | Tailwind | Used for |
-|---|---|---|---|
-| Canvas / chat window | `--bg1` | `bg-bg1` | Main app body, markdown body, column 2 body |
-| Canvas hover state | `--bg1-hover` | `bg-bg1-hover` | Tool call row hover, tab hover on bg1 |
-| Lifted content on bg1 | `--bg1-highlight` | `bg-bg1-highlight` | Callouts, highlighted blocks above bg1 |
-| Composer | `--bg2` | `bg-bg2` | Composer pill, raised pane above bg1 |
-| Composer hover | `--bg2-hover` | `bg-bg2-hover` | Icon button hover inside composer |
-| Popover / dropdown / menu | `--bg3` | `bg-bg3` | Floating menus/popovers ONLY (dark = `--sidebar-bg`, light = `--bg1`). Never a fill — dialogs/sheets use `--bg1`, hover-cards `--bg2` |
-| Popover hover | `--bg3-hover` | `bg-bg3-hover` | Menu item hover inside a popover |
-| Rare / reserved | `--bg4`, `--bg5` | `bg-bg4`, `bg-bg5` | Don't reach without a specific case |
+| Surface                   | Token             | Tailwind           | Used for                                                                                                                              |
+| ------------------------- | ----------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Canvas / chat window      | `--bg1`           | `bg-bg1`           | Main app body, markdown body, conversation pane                                                                                       |
+| Canvas hover state        | `--bg1-hover`     | `bg-bg1-hover`     | Tool call row hover, tab hover on bg1                                                                                                 |
+| Lifted content on bg1     | `--bg1-highlight` | `bg-bg1-highlight` | Callouts, highlighted blocks above bg1                                                                                                |
+| Composer                  | `--bg2`           | `bg-bg2`           | Composer pill, raised pane above bg1                                                                                                  |
+| Composer hover            | `--bg2-hover`     | `bg-bg2-hover`     | Icon button hover inside composer                                                                                                     |
+| Popover / dropdown / menu | `--bg3`           | `bg-bg3`           | Floating menus/popovers ONLY (dark = `--sidebar-bg`, light = `--bg1`). Never a fill — dialogs/sheets use `--bg1`, hover-cards `--bg2` |
+| Popover hover             | `--bg3-hover`     | `bg-bg3-hover`     | Menu item hover inside a popover                                                                                                      |
+| Rare / reserved           | `--bg4`, `--bg5`  | `bg-bg4`, `bg-bg5` | Don't reach without a specific case                                                                                                   |
 
-### 3.2 Sidebar (workspace col 1 ONLY)
+### 3.2 Repository navigation
 
-| Surface | Token | Tailwind |
-|---|---|---|
-| Sidebar background | `--sidebar-bg` | `bg-sidebar-bg` |
+| Surface                      | Token                | Tailwind              |
+| ---------------------------- | -------------------- | --------------------- |
+| Sidebar background           | `--sidebar-bg`       | `bg-sidebar-bg`       |
 | Sidebar row hover / selected | `--sidebar-bg-hover` | `bg-sidebar-bg-hover` |
 
 The **settings sidebar** is NOT this surface — it uses default tokens (`bg-bg1` or `bg-bg2`).
 
 ### 3.3 Foregrounds (text + icons)
 
-| Tier | Token | Tailwind | Used for |
-|---|---|---|---|
-| Highlighted | `--fg1` | `text-fg1` | Markdown body, settings titles, active row labels, focal text, icons on selected rows |
-| Default | `--fg2` | `text-fg2` | All default text + icons across the app |
-| Placeholder / empty | `--muted-fg` | `text-muted-fg` | Input placeholders, empty-state icons |
+| Tier                | Token        | Tailwind        | Used for                                                                              |
+| ------------------- | ------------ | --------------- | ------------------------------------------------------------------------------------- |
+| Highlighted         | `--fg1`      | `text-fg1`      | Markdown body, settings titles, active row labels, focal text, icons on selected rows |
+| Default             | `--fg2`      | `text-fg2`      | All default text + icons across the app                                               |
+| Placeholder / empty | `--muted-fg` | `text-muted-fg` | Input placeholders, empty-state icons                                                 |
 
 **The default is `fg2`.** Reach for `fg1` only when text/icon should pop (selected, highlighted, output text).
 
 ### 3.4 Borders
 
-| Tier | Token | Tailwind | Used for |
-|---|---|---|---|
-| Default | `--border1` | `border-border1` | Default border on bg1 surfaces |
+| Tier                                | Token       | Tailwind         | Used for                                                                       |
+| ----------------------------------- | ----------- | ---------------- | ------------------------------------------------------------------------------ |
+| Default                             | `--border1` | `border-border1` | Default border on bg1 surfaces                                                 |
 | Sidebar / composer / bg2 / popovers | `--border2` | `border-border2` | Sidebar borders, composer focus, dividers on bg2, floating popover/menu panels |
-| Component default | `--border3` | `border-border3` | Secondary button, dropdown trigger, input field |
-| Component highlighted | `--border4` | `border-border4` | Highlighted state of border3 consumers |
+| Component default                   | `--border3` | `border-border3` | Secondary button, dropdown trigger, input field                                |
+| Component highlighted               | `--border4` | `border-border4` | Highlighted state of border3 consumers                                         |
 
 ### 3.5 Highlighted (brand accent)
 
-| Token | Tailwind | Used for |
-|---|---|---|
-| `--highlighted-bg` | `bg-highlighted-bg` | User message bubble, anchor selected state (text on it: `text-fg1`/`text-fg2`) |
-| `--highlighted-bright` | `bg-highlighted-bright` / `border-highlighted-bright` / `ring-highlighted-bright` | Input focus, settings provider tab indicator, brighter accent borders |
+| Token                  | Tailwind                                                                          | Used for                                                                       |
+| ---------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `--highlighted-bg`     | `bg-highlighted-bg`                                                               | User message bubble, anchor selected state (text on it: `text-fg1`/`text-fg2`) |
+| `--highlighted-bright` | `bg-highlighted-bright` / `border-highlighted-bright` / `ring-highlighted-bright` | Input focus, settings provider tab indicator, brighter accent borders          |
 
 ---
 
@@ -180,13 +182,13 @@ The **settings sidebar** is NOT this surface — it uses default tokens (`bg-bg1
 
 ### 4.1 Buttons
 
-| Variant | When | Recipe |
-|---|---|---|
-| **Primary** | The ONE focal CTA per visible screen | `bg-primary-button-bg text-primary-button-fg hover:bg-primary-button-hover` |
-| **Secondary** | Most common variant — actions next to text | `bg-bg1 border border-border3 text-fg1 hover:bg-bg2 hover:border-border4` *(use `bg-bg2` if on bg2 surface)* |
-| **Tertiary** | Subtle — toolbar actions on bg1 | `bg-bg1-hover text-fg2 hover:bg-bg2-hover` *(no border)* |
-| **Ghost** | Repeating toolbar / "More" triggers | `text-fg2 hover:bg-bg2-hover hover:text-fg1` |
-| **Destructive** | Solid delete action | `bg-red-secondary text-red-secondary-fg hover:bg-red-secondary/90` |
+| Variant         | When                                       | Recipe                                                                                                       |
+| --------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| **Primary**     | The ONE focal CTA per visible screen       | `bg-primary-button-bg text-primary-button-fg hover:bg-primary-button-hover`                                  |
+| **Secondary**   | Most common variant — actions next to text | `bg-bg1 border border-border3 text-fg1 hover:bg-bg2 hover:border-border4` _(use `bg-bg2` if on bg2 surface)_ |
+| **Tertiary**    | Subtle — toolbar actions on bg1            | `bg-bg1-hover text-fg2 hover:bg-bg2-hover` _(no border)_                                                     |
+| **Ghost**       | Repeating toolbar / "More" triggers        | `text-fg2 hover:bg-bg2-hover hover:text-fg1`                                                                 |
+| **Destructive** | Solid delete action                        | `bg-red-secondary text-red-secondary-fg hover:bg-red-secondary/90`                                           |
 
 Default text/icon for all variants: `fg2`. Highlighted/active state: `fg1`.
 
@@ -203,6 +205,7 @@ focus: border-highlighted-bright + ring-highlighted-bright/50
 ### 4.3 Dropdowns
 
 **Trigger:**
+
 ```
 bg-bg1 (or bg-bg2 if on bg2 surface)
 border-border3
@@ -211,6 +214,7 @@ hover: bg-bg2-hover + border-border4
 ```
 
 **Popover:**
+
 ```
 bg-bg3 + border-border2   (outer border AND every separator: bg-border2)
 items: 32px tall — px-2 py-1.5, idle text-fg1, hover bg-bg3-hover + text-fg1
@@ -227,7 +231,7 @@ Send button:    bg-primary-button-bg + text-primary-button-fg
 Empty hint:     text-muted-fg
 ```
 
-### 4.5 Sidebar (workspace col 1)
+### 4.5 Repository navigation
 
 ```
 Outer:        bg-sidebar-bg
@@ -246,7 +250,7 @@ Selected: bg-bg1-hover + text-fg1
 
 ### 4.7 Popovers / menus (floating surfaces)
 
-`--bg3` is a **floating-surface-only** token — the panel always sits *on top of*
+`--bg3` is a **floating-surface-only** token — the panel always sits _on top of_
 a background (dark = `--sidebar-bg`, one subtle step above `--bg1`; light =
 `--bg1` itself). Its lift is `border-border2` + `--shadow-dropdown`, never a
 heavier fill.
@@ -262,7 +266,7 @@ Shortcut chip: <Kbd> — border-border1 + text-fg2 + text-2xxs (11px)
 Hints:         text-muted-fg
 ```
 
-**Menu chips (`<Kbd>`, `@/zeros/ui/primitives`).** Every keyboard-shortcut chip
+**Menu chips (`<Kbd>`, `@/renderer/shared/ui/primitives`).** Every keyboard-shortcut chip
 (`⌘T`, `⌘R`, `⌘1`) is ONE style: `border-border1` + `text-fg2` + `text-2xxs`
 (11px) + `rounded-sm`. Use `<Kbd>` for shortcuts, and only for shortcuts —
 non-shortcut small labels (`Beta`) match the same border/color tokens but stay
@@ -283,7 +287,7 @@ Semantic status maps to the color families (§2.4): error→red, success→green
 
 ### 4.9 Diff renderer
 
-Separate identity for the `@pierre/diffs` renderer (Changes/Review tabs, file-tab diff mode, chat EditCards), themed via `src/zeros/appearance/diff-theme.ts`: a warm surface (`--diffs-bg` = `--sidebar-bg` in column 3, `--bg1` in EditCards) + three `--diffs-*-color-override` bases (addition → `--green-primary`, deletion → `--red-primary`, modified/selection → `--highlighted-bright`). @pierre derives the row wash, word emphasis, edge bars, and line numbers; syntax colors come from the Shiki theme.
+Separate identity for the `@pierre/diffs` renderer (Changes/Review tabs, file-tab diff mode, chat EditCards), themed via `apps/desktop/src/renderer/shared/theme/diff-theme.ts`: a warm surface (`--diffs-bg` = `--sidebar-bg` in the workbench, `--bg1` in EditCards) + three `--diffs-*-color-override` bases (addition → `--green-primary`, deletion → `--red-primary`, modified/selection → `--highlighted-bright`). @pierre derives the row wash, word emphasis, edge bars, and line numbers; syntax colors come from the Shiki theme.
 
 ---
 
@@ -292,7 +296,7 @@ Separate identity for the `@pierre/diffs` renderer (Changes/Review tabs, file-ta
 1. **Never use a foreground token as a border.** `--fg*` are for text + icons only.
 2. **Never use a background token as text.** `--bg*` are for surfaces only.
 3. **Never use a border token for backgrounds or text.** `--border*` are for borders only.
-4. **`bg3` is a FLOATING-SURFACE-ONLY token; hover states are SURFACE-SCOPED.** `bg-bg3` paints ONLY a floating panel (popover / dropdown / menu / select / command) that sits on top of a background with `border-border2` + `--shadow-dropdown` — **NEVER a fill, chip, selected state, or resting background on any surface, in EITHER theme.** In light `bg3 == bg1` (white) so a fill vanishes; in dark `bg3 == sidebar-bg` (barely above bg1) so a fill vanishes on bg1 and *inverts* (goes darker) on bg2. Correct alternatives: hover on a bg1 surface → `bg-bg1-hover`; on bg2 → `bg-bg2-hover`; a menu item inside a popover → `bg-bg3-hover`; chips/pills → `bg-bg2-hover`; selected sidebar row → `bg-sidebar-bg-hover`; lifted content / callouts on bg1 → `bg-bg1-highlight`. Enforced by `check:ui` (`BG3_FILL_RE` for classes, `BG3_CSS_FILL_RE` for raw CSS `background:`); the only files allowed a `bg-bg3` fill are the floating panels listed in `BG3_SURFACE_FILES`.
+4. **`bg3` is a FLOATING-SURFACE-ONLY token; hover states are SURFACE-SCOPED.** `bg-bg3` paints ONLY a floating panel (popover / dropdown / menu / select / command) that sits on top of a background with `border-border2` + `--shadow-dropdown` — **NEVER a fill, chip, selected state, or resting background on any surface, in EITHER theme.** In light `bg3 == bg1` (white) so a fill vanishes; in dark `bg3 == sidebar-bg` (barely above bg1) so a fill vanishes on bg1 and _inverts_ (goes darker) on bg2. Correct alternatives: hover on a bg1 surface → `bg-bg1-hover`; on bg2 → `bg-bg2-hover`; a menu item inside a popover → `bg-bg3-hover`; chips/pills → `bg-bg2-hover`; selected sidebar row → `bg-sidebar-bg-hover`; lifted content / callouts on bg1 → `bg-bg1-highlight`. Enforced by `check:ui` (`BG3_FILL_RE` for classes, `BG3_CSS_FILL_RE` for raw CSS `background:`); the only files allowed a `bg-bg3` fill are the floating panels listed in `BG3_SURFACE_FILES`.
 5. **Selected state = the row's hover state.** "Selected" is the hover that doesn't go away.
 6. **One primary button per visible screen.** If you find yourself reaching for a second `bg-primary-button-bg`, demote it to secondary or ghost.
 7. **`--highlighted-bg` is for anchor moments** (user messages, code-file-link highlights, selected states where the colour cue is load-bearing). Don't spray it across chrome.
@@ -310,14 +314,14 @@ Separate identity for the `@pierre/diffs` renderer (Changes/Review tabs, file-ta
 
 Previously the theme used `color-mix()` in a handful of places. As of 2026-05-26, these are flat tokens:
 
-| Before | After | Where |
-|---|---|---|
-| `color-mix(in oklch, var(--muted-foreground) 40%, transparent)` | `var(--border3)` | Scrollbar thumb |
-| `color-mix(in oklch, var(--muted-foreground) 60%, transparent)` | `var(--border4)` | Scrollbar thumb hover |
-| `color-mix(in oklch, var(--muted-foreground) 35%, transparent)` | `var(--border3)` | `scrollbar-color` shorthand |
-| `color-mix(in oklch, var(--muted) 30%, transparent)` | `var(--bg1-hover)` | "Thinking…" shimmer overlay |
-| `color-mix(in oklch, var(--warning) 18%, transparent)` | `var(--bg1-highlight)` + `var(--border1)` | Markdown `<mark>` highlight — now a neutral tag, not blue (2026-07-08) |
-| `color-mix(in oklch, var(--ring) 50%, transparent)` | `var(--highlighted-bright)` | Global focus outline |
+| Before                                                          | After                                     | Where                                                                  |
+| --------------------------------------------------------------- | ----------------------------------------- | ---------------------------------------------------------------------- |
+| `color-mix(in oklch, var(--muted-foreground) 40%, transparent)` | `var(--border3)`                          | Scrollbar thumb                                                        |
+| `color-mix(in oklch, var(--muted-foreground) 60%, transparent)` | `var(--border4)`                          | Scrollbar thumb hover                                                  |
+| `color-mix(in oklch, var(--muted-foreground) 35%, transparent)` | `var(--border3)`                          | `scrollbar-color` shorthand                                            |
+| `color-mix(in oklch, var(--muted) 30%, transparent)`            | `var(--bg1-hover)`                        | "Thinking…" shimmer overlay                                            |
+| `color-mix(in oklch, var(--warning) 18%, transparent)`          | `var(--bg1-highlight)` + `var(--border1)` | Markdown `<mark>` highlight — now a neutral tag, not blue (2026-07-08) |
+| `color-mix(in oklch, var(--ring) 50%, transparent)`             | `var(--highlighted-bright)`               | Global focus outline                                                   |
 
 **Implicit color-mix from Tailwind opacity modifiers** (`bg-bg1/50`, `hover:bg-bg3/40`, etc.) is fine — Tailwind v4 handles those automatically with HSL token values. No need to migrate.
 
@@ -334,7 +338,8 @@ text-xs             (12 px):             captions, timestamps, badges, numeric m
 text-xs tabular-nums:                    counts, timers, numeric metadata
 ```
 
-Markdown body (`.zeros-agent-md`) uses its own scale — see `styles/globals.css`.
+Markdown body (`.zeros-agent-md`) uses its own scale — see
+`styles/global/runtime-content.css`.
 
 **Fonts**: `Geist Variable` (sans) and `Geist Mono Variable` (mono). These are Vercel-published typography assets, imported as npm packages; they are not the design system reference (which is **Zeros Foundation**).
 
@@ -347,6 +352,7 @@ Markdown body (`.zeros-agent-md`) uses its own scale — see `styles/globals.css
 **Radius**: a fixed 3-step scale (2026-07-12) — `rounded-sm` **4** (ALL buttons + icon buttons, pills/chips/badges, kbd, checkboxes, menu items, inputs, user messages), `rounded-md` **6** (tabs + segmented tracks, model/composer pills, sidebar + settings nav rows, small cards, tool-call rows, markdown img/table, tooltips), `rounded-lg` **8** (composer shell, dialogs, popovers, menus, cards, code blocks, toasts). Plus `rounded-full` (true circles only: avatars, spinner, switch, slider, dots, scrollbars) and `rounded-none` (nested resets). `rounded-xl/2xl/3xl/xs` and bare `rounded` no longer compile — those tokens were removed. Nesting: inner radius = outer radius − inset (8px menu, 4px padding → 4px items).
 
 **Motion**:
+
 - Hover bg/color: `duration-120 ease-out`
 - Popover / sidebar: `duration-180 ease-out`
 - Dialog enter: `duration-240 cubic-bezier(0.16, 1, 0.3, 1)`

@@ -1,42 +1,22 @@
 packages:
+  - "apps/feedback-worker"
+  - "apps/marketing"
   - "packages/*"
-  - "website/marketing"
 
-# Note: a sibling app, the legacy `website/accounts` site and its
-# `packages/auth-client` — all on the retired Supabase project — were removed in
-# the 2026-06 cleanup. An empty, untracked `apps/` husk may remain on disk; it
-# no longer participates in this workspace and is gitignored.
+# Independent deployment boundaries:
 #
-# Note: website/web-app (Cloudflare Pages project `zeros-web` — app.zeros.build
-# hub/auth/handoff AND zeros.build marketing, assembled at build time) is
-# intentionally excluded from this workspace. It has its own package.json /
-# package-lock.json so Cloudflare can `npm install` Functions deps without
-# touching the root pnpm-lock.yaml. Marketing source stays a workspace member
-# (`website/marketing`) but ALSO commits its own pnpm-lock.yaml: zeros-web's
-# assemble-marketing.mjs runs `pnpm install --ignore-workspace
-# --frozen-lockfile` inside website/marketing during the Pages build, so CF
-# never installs the monorepo's Electron/native deps (`--filter` can't narrow
-# a workspace install — pnpm/pnpm#8318). After changing marketing's
-# package.json, regenerate that lockfile:
-#   cd website/marketing && pnpm install --ignore-workspace --lockfile-only
-# (The retired website/auth-app was folded into web-app on 2026-07-06.)
+# - apps/web uses npm and its own lockfile because Cloudflare Pages installs
+#   Functions dependencies from that directory. Its build installs and assembles
+#   apps/marketing without resolving the desktop/native dependency graph.
+# - apps/control-plane uses its own pnpm lockfile and deploys independently on
+#   Railway. Root scripts enter that directory explicitly for control-plane checks.
+#
+# After changing apps/marketing/package.json, refresh the deployment lockfile:
+#   pnpm --dir apps/marketing install --ignore-workspace --lockfile-only
 
-# pnpm v10 moved package-level "pnpm" settings to the workspace yaml. The
-# previous home in package.json's `"pnpm": { ... }` block prints a deprecation
-# warning on every install ("The 'pnpm' field in package.json is no longer
-# read by pnpm. The following keys were ignored: pnpm.onlyBuiltDependencies").
-# `onlyBuiltDependencies` is an allowlist of packages whose postinstall scripts
-# we trust to run. Keep this list tight: native-binding packages
-# (better-sqlite3, node-pty) need it; everything else stays script-blocked for
-# supply-chain safety.
-#
-# `electron` is KEPT here but is now a no-op, on purpose. Electron 42 removed its
-# postinstall binary download (npm postinstall being a favoured supply-chain
-# attack vector) — `electron@43`'s package.json has NO `scripts` field at all.
-# The binary is fetched lazily on the first `electron` run instead, or eagerly by
-# the new `install-electron` bin. The entry stays so that (a) this comment exists
-# where someone would look, and (b) nothing changes if upstream ever reintroduces
-# a build step. See scripts/electron-rebuild-sqlite.cjs for the ABI half.
+# pnpm permits dependency lifecycle scripts only for this reviewed allowlist.
+# Native bindings and downloaded runtime tools require their install steps;
+# everything else remains blocked by default for supply-chain safety.
 onlyBuiltDependencies:
   - better-sqlite3
   - electron
@@ -44,34 +24,63 @@ onlyBuiltDependencies:
   - esbuild
   - "@parcel/watcher"
   - node-pty
-  # @cursor/sdk eagerly imports `sqlite3` (its default local checkpoint
-  # store) at the top of its bundle, so the native binding must build for
-  # the SDK to import at all — even when we pass a JsonlLocalAgentStore.
   - sqlite3
-  # @vscode/ripgrep downloads a prebuilt `rg` binary in postinstall; the
-  # cursor-sdk adapter points CURSOR_RIPGREP_PATH at it so @cursor/sdk's
-  # codebase search / ignore-mapping works (it doesn't bundle ripgrep).
   - "@vscode/ripgrep"
 
-# ──────────────────────────────────────────────────────────
-# overrides — floors that a transitive range is too loose to guarantee
-# ──────────────────────────────────────────────────────────
-#
-# node-abi is a LOOKUP TABLE mapping runtime version → Node ABI number, and it
-# only knows the Electron majors that existed when it was published. Every
-# Electron major bump therefore needs a node-abi new enough to contain the new
-# row, or `pnpm electron:rebuild` dies with:
-#
-#   Could not detect abi for version 43.2.0 and runtime electron
-#
-# which is what happened on the 33 → 43 bump: @electron/rebuild declares
-# `node-abi: ^4.2.0`, a range wide enough to ALLOW a current version but not to
-# require one, so the lockfile happily sat on 4.28.0 (last Electron it knows: 42).
-# A floor here makes the requirement explicit rather than a lockfile accident.
-# 4.33.0 maps electron 43 → ABI 148, which matches node_modules/electron/abi_version.
-#
-# WHEN BUMPING ELECTRON: raise this floor in the same commit. Renovate cannot do
-# it for you — renovate.json disables every package except the three agent CLIs,
-# so node-abi will never be auto-updated and the next major will hit this again.
+# @electron/rebuild accepts a broad node-abi range, but each Electron major
+# requires a node-abi release that knows its ABI mapping. Raise this floor in the
+# same change as an Electron major-version update.
 overrides:
   node-abi: "^4.33.0"
+  # Transitive security floors. Each version stays within the consuming
+  # package's supported range; keep the override until its parent lock entry
+  # naturally resolves to an equal or newer release.
+  "@hono/node-server": "2.1.0"
+  body-parser: "2.3.0"
+  fast-uri: "3.1.5"
+  hono: "4.13.0"
+  ip-address: "10.3.1"
+  js-yaml: "4.3.0"
+  qs: "6.15.2"
+
+# Accepted advisories — reviewed 2026-08-05. Every entry below is the same
+# story: the ONLY undici in the production graph is
+#   @cursor/sdk 1.0.26 → @connectrpc/connect-node 1.7.0 → undici 5.29.0
+# (`pnpm audit --prod` / `pnpm why undici`). The fixes land in undici >= 6.24
+# and 6.27 — a different major than connect-node 1.x's declared `^5.28.4`, with
+# no patched 5.x release and no newer SDK to move to (1.0.26 is the latest and
+# pins @connectrpc v1). Forcing undici 6 through an override would run a vendor
+# SDK on an untested major on the agent-run path, a worse trade than the
+# exposure — which is nil in practice: connect-node's only undici import is the
+# `Headers` polyfill in node-headers-polyfill.js, applied ONLY when Node < 18,
+# and the app always runs it on far newer Node (Electron's embedded Node 24 in
+# the packaged app, Node >= 22 in dev). None of the vulnerable undici code —
+# WebSocket client, fetch, the HTTP client — ever executes.
+# Drop these entries once `pnpm why undici` shows the production path off 5.x
+# (a future @cursor/sdk on @connectrpc v2 removes undici entirely).
+auditConfig:
+  ignoreGhsas:
+    # high — WebSocket permessage-deflate unbounded memory (fixed 6.24.0)
+    - GHSA-vrm6-8vpv-qv8q
+    # high — WebSocket server_max_window_bits unhandled exception (fixed 6.24.0)
+    - GHSA-v9p9-hfj2-hcw8
+    # high — WebSocket fragment-count bypass DoS (fixed 6.27.0)
+    - GHSA-vxpw-j846-p89q
+    # moderate — fetch unbounded Content-Encoding decompression chain
+    - GHSA-g9mf-h72j-4rw9
+    # moderate — HTTP request/response smuggling
+    - GHSA-2mjp-6q6p-2qxm
+    # moderate — CRLF injection via `upgrade` option
+    - GHSA-4992-7rv2-5pvq
+    # moderate — HTTP header injection
+    - GHSA-p88m-4jfj-68fv
+    # moderate — downstream response mixing
+    - GHSA-8xcm-r25x-g524
+    # moderate — CRLF injection via blob-like body
+    - GHSA-m8rv-5g2x-5cg5
+    # moderate — cookie attribute injection
+    - GHSA-v3r7-h72x-cjcm
+    # low — HTTP response queue poisoning
+    - GHSA-35p6-xmwp-9g52
+    # low — Set-Cookie SameSite handling
+    - GHSA-g8m3-5g58-fq7m

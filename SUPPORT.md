@@ -1,36 +1,33 @@
 # Support
 
-**There is no support commitment for this repository.** Zeros is published as
-source-available under the [MIT License](LICENSE) so it can be read, audited,
-and forked — not as a supported open-source product. Nothing here is a promise
-of a reply.
+The public repository is provided under the [MIT License](LICENSE) without a
+support or response-time commitment.
 
-## Where to look first
+## Product feedback
 
-- **[README.md](README.md)** — what the app is, the three-process architecture,
-  and how to run it from source.
-- **The app's own help surfaces** — the shortcuts palette (⌘/) lists what the
-  app can do, and **Send feedback** (⌥⌘F) is the only channel that actually
-  reaches the maintainer. Feedback attaches the app version and recent scrubbed
-  logs, which is usually the difference between a bug being fixable and not.
+For an official Zeros build, use **Send feedback** (`⌥⌘F`) in the app. It sends
+the version and recent scrubbed diagnostics needed to investigate most product
+issues. Check [README.md](README.md) first for platform requirements, development
+commands, and architecture.
 
-## What is not supported here
+## Unsupported requests
 
-- Builds you compiled yourself, and anything running from a fork.
-- The Alpha and Beta channels — those are validation channels; report against
-  the latest Production build.
-- The agent CLIs themselves. Problems inside Claude Code, Codex, or Cursor go to
-  their vendors; only how *Zeros* drives them is this project's business.
-- Code changes. Pull requests are closed unmerged — see
-  [CONTRIBUTING.md](CONTRIBUTING.md).
+- Self-built copies and forks
+- Alpha or Beta builds as production environments
+- Changes or support for third-party agent runtimes themselves
+- External pull requests; see [CONTRIBUTING.md](CONTRIBUTING.md)
+- Guaranteed responses through GitHub Issues
+
+Issues in how Zeros integrates a supported runtime are in scope for product
+feedback. Issues within that runtime should be reported to its publisher.
 
 ## Security
 
-Vulnerabilities are the exception: they are welcome, and they are read. Do not
-report them here or through the feedback form — use the private channel in
-[SECURITY.md](SECURITY.md).
+Do not post a vulnerability in an issue, discussion, log excerpt, or feedback
+submission. Use the private reporting process in [SECURITY.md](SECURITY.md).
 
 ## Conduct
 
-If the issue tracker is open, be civil in it. Abusive or spam issues are locked
-and the account blocked, without discussion.
+Keep public reports factual and respectful. Spam, harassment, and disclosure of
+personal or sensitive information may be removed or locked. Participation is
+governed by [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).

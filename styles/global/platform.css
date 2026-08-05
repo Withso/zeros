@@ -1,0 +1,74 @@
+/* ──────────────────────────────────────────────────────────
+   Lucide icon defaults
+   ──────────────────────────────────────────────────────────
+   Every lucide-react icon uses a 1px stroke for the product's thin chrome.
+   Component call sites set size; only stroke behavior is reset globally.
+   Lucide draws in a 24×24 viewBox, so a raw `stroke-width`
+   SCALES with the rendered size — `visual = stroke-width × size ÷ 24`. At our
+   chrome sizes a bare `stroke-width: 1` painted ~0.67px (16px icon) / ~0.5px
+   (12px icon): a faint hairline, and thinner than the same glyph imported at
+   lucide's own default (2 → ~1.33px @16px). `vector-effect: non-scaling-stroke`
+   pins the stroke to the FINAL pixel grid, so `stroke-width: 1` now paints a
+   TRUE, constant 1px at EVERY size — the CSS form of lucide's
+   `absoluteStrokeWidth`, and the standard trick for crisp 1px icons.
+   It must sit on the drawn shapes (`.lucide *`), not the <svg> root: vector-
+   effect only applies to geometry.
+
+   Notes:
+     • This unlayered global rule is authoritative over layered Tailwind stroke
+       utilities. A heavier icon requires a deliberate component-level rule.
+     • SVG presentation attributes like `stroke-width="2"` are
+       lower priority than CSS, so the lucide default attribute
+       is overridden silently. */
+.lucide {
+  stroke-width: 1;
+}
+.lucide * {
+  vector-effect: non-scaling-stroke;
+}
+
+/* ──────────────────────────────────────────────────────────
+   macOS window drag region
+   ──────────────────────────────────────────────────────────
+   Elements tagged with `data-tauri-drag-region` are the
+   top-header strips that act as the app's title bar:
+   draggable to move the window, double-clickable to zoom
+   (respecting macOS' AppleActionOnDoubleClick preference —
+   "Maximize" / "Minimize" / "None"). Electron 23+ handles
+   both behaviours automatically once `-webkit-app-region:
+   drag` is set; that's all this rule does.
+
+   The attribute name itself is Tauri-era nomenclature kept
+   stable so existing JSX (conversation tabs/header,
+   workspace toolbar, settings navigation, etc.) doesn't
+   need a rename. Buttons inside a drag region opt back out
+   with their own `-webkit-app-region: no-drag` style (handled
+   on the React side via inline style). */
+[data-tauri-drag-region] {
+  -webkit-app-region: drag;
+}
+
+/* Interactive descendants inside a drag region opt back out so native window
+   dragging never consumes their pointer input. */
+[data-tauri-drag-region] button,
+[data-tauri-drag-region] a,
+[data-tauri-drag-region] input {
+  -webkit-app-region: no-drag;
+}
+
+/* ──────────────────────────────────────────────────────────
+   Stacking layers — semantic z-index tokens
+   ──────────────────────────────────────────────────────────
+   Components claiming a global layer
+   reference a semantic token, not a magic number. Local
+   stacking contexts (z-1/z-2 inside a card) can stay raw.
+   Tiers: panel (chrome overlays like the floating terminal)
+   < chrome (window and panel toggles) < dropdown/modal/toast
+   (owned by their primitives). */
+:root {
+  --z-panel: 30;
+  --z-chrome: 40;
+  --z-dropdown: 50;
+  --z-modal: 60;
+  --z-toast: 70;
+}

@@ -4,7 +4,10 @@
 
 Zeros should feel like a local IDE: a warm tab, file, chat, workspace, or settings destination appears in the next paint as one complete surface. At 60 Hz that means targeting a single 16.7 ms frame, not a literal 10 ms opacity animation.
 
-This standard follows the central lesson from [The Conductor Rewrite](https://performance.dev/the-conductor-rewrite): once local/network reads are no longer the dominant cost, unstable React identities, unnecessary commits, repeated parsing/highlighting, and work left on the interaction path become the bottleneck.
+Once local and network reads are no longer the dominant cost, unstable React
+identities, unnecessary commits, repeated parsing/highlighting, and work left on
+the interaction path become the bottleneck. This standard addresses those costs
+directly.
 
 ## Required architecture
 
@@ -22,8 +25,8 @@ round trip to restore it. Key it by the smallest semantic owner that can vary:
 | Home destination or app-wide presentation preference             | app                                  |
 | Repository hub tab                                               | project id                           |
 | Selected workspace                                               | repository root                      |
-| Active chat, Column 3 tabs, Changes/Review choices, terminal tab | workspace folder                     |
-| Open file and explicit viewer mode                               | Column 3 tab id inside the workspace |
+| Active chat, workbench tabs, Changes/Review choices, terminal tab | workspace folder                    |
+| Open file and explicit viewer mode                                | workbench tab id inside the workspace |
 | Dialog step or unsaved “new item” draft                          | ephemeral; do not persist            |
 
 Restore durable selections synchronously from the destination's first store
@@ -53,12 +56,12 @@ Bridge, native IPC, Git, SQLite, and future cloud/sandbox reads are shared serve
 - Preserve collection references when refreshed values are equal.
 - Bound inactive entries and define invalidation events.
 
-`src/zeros/lib/keyed-async-cache.ts` is the renderer primitive for this pattern. Feature caches choose keys, fetchers, freshness, and invalidation. For a popover/dialog/settings surface, mount a shared cache key with `src/zeros/store/use-cached-read.ts` against a cache declared in `src/zeros/store/read-caches.ts` — never the clear-then-fetch shape (`setLoading(true)` + fetch in an on-open effect), which blanks rows the user already saw and refetches data fetched seconds ago.
+`apps/desktop/src/renderer/shared/lib/keyed-async-cache.ts` is the renderer primitive for this pattern. Feature caches choose keys, fetchers, freshness, and invalidation. For a popover/dialog/settings surface, mount a shared cache key with `apps/desktop/src/renderer/state/use-cached-read.ts` against a cache declared in `apps/desktop/src/renderer/state/read-caches.ts` — never the clear-then-fetch shape (`setLoading(true)` + fetch in an on-open effect), which blanks rows the user already saw and refetches data fetched seconds ago.
 
 Two rules that pattern enforces:
 
 - **Opening a surface is not an invalidation.** A dropdown open, tab switch, or component remount reads the cached snapshot and revalidates only past the key's freshness window. Only real change signals (DB change bus, `notifyWorkspacesChanged`, an explicit user Refresh, a bridge *re*connect) force a read. `onActiveBridgeConnected` reports `initial: true` for its subscribe-time fire — treat that as "revalidate if stale", never "force".
-- **Results that survive restarts should be persisted.** Expensive, rarely-changing detections (e.g. the automatic repository icon in `src/zeros/store/repository-icons.ts`) persist to settings storage and revalidate at most once per app session, so a cold start renders them with zero fetches.
+- **Results that survive restarts should be persisted.** Expensive, rarely-changing detections (e.g. the automatic repository icon in `apps/desktop/src/renderer/features/repositories/repository-icons.ts`) persist to settings storage and revalidate at most once per app session, so a cold start renders them with zero fetches.
 
 ### 2.1 Preserve Git's index/worktree semantics
 
@@ -115,7 +118,7 @@ Finished transcript, editor, xterm, iframe, and virtualized-diff trees can be mo
 - Give every deck a hard entry bound. Eviction is the cold-path fallback.
 - Do not retain cheap or unbounded surfaces merely for consistency.
 
-Current deck helpers live in `src/shell/retained-view-keys.ts` and `src/shell/use-retained-view-keys.ts`.
+Current deck helpers live in `apps/desktop/src/renderer/shell/retained-view-keys.ts` and `apps/desktop/src/renderer/shell/use-retained-view-keys.ts`.
 
 ### 5. Preserve identities through hot renders
 
@@ -133,26 +136,26 @@ A busy indicator may be delayed roughly 100–120 ms to avoid a flash for a fast
 
 ## Zeros implementation map
 
-- Workspace route + target: `OPEN_WORKSPACE` in `src/zeros/store/workspace-store.ts`.
+- Workspace route + target: `OPEN_WORKSPACE` in `apps/desktop/src/renderer/state/workspace-store.ts`.
 - Scoped navigation memory: `lastWorkspaceByRepoRoot`,
-  `repoPageViewByProject`, `lastHomePage`, and per-worktree `Column3Tab` fields
-  in `src/zeros/store/workspace-store.ts` / `src/shell/column3-tab-manager.ts`.
-- Shared workspace/settings caches: `src/zeros/store/use-projects.ts` and `src/zeros/settings/use-settings.ts`.
-- Picker/dialog read caches (branches, PRs, workspaces, GitHub auth/owners): `src/zeros/store/read-caches.ts` mounted via `src/zeros/store/use-cached-read.ts`.
-- Persisted repository-icon cache (restart-proof, once-per-session revalidate): `src/zeros/store/repository-icons.ts`.
-- Exact Git scope rows/counts + coalesced generations: `src/engine/git/diff.ts` and `src/shell/column3-tabs/changes-tab.tsx`.
-- External worktree/index/shared-ref invalidation: `src/engine/git/watch.ts` feeding the exact-key bus in `src/shell/use-git-refresh-key.ts`.
-- PR-status island freshness gate + active-only resume/poll refresh: `src/shell/pr/pr-status-island.tsx`.
-- File list cache: `src/shell/workspace-files-cache.ts`.
-- File content/diff cache: `src/shell/workspace-file-data-cache.ts`.
-- Workspace intent warming: `src/shell/prefetch-workspace-surface.ts`.
-- Chat retention: `src/shell/column2-chat-deck.tsx` with store-owned pane hosts.
-- Changes file retention/prefetch: `src/shell/column3-tabs/changes-row1-tab.tsx`.
-- Browser retention: the bounded, cross-workspace iframe deck in `src/shell/column3.tsx`; retained browser updates carry their original workspace scope.
-- Terminal retention: the bounded folder deck in `src/shell/column3-tabs/terminal-tab.tsx`.
-- Settings/repository retention: bounded visited-section decks in `src/zeros/panels/settings-page.tsx` and `src/zeros/panels/repo-page.tsx`.
-- One-paint transition suppression: `src/zeros/ui/use-instant-view-switch.ts`.
-- Chat structural sharing: `src/zeros/agent/stable-turns.ts`.
+  `repoPageViewByProject`, `lastHomePage`, and per-worktree `WorkbenchTab` fields
+  in `apps/desktop/src/renderer/state/workspace-store.ts` / `apps/desktop/src/renderer/shell/workbench/tab-model.ts`.
+- Shared workspace/settings caches: `apps/desktop/src/renderer/state/use-projects.ts` and `apps/desktop/src/renderer/features/settings/use-settings.ts`.
+- Picker/dialog read caches (branches, PRs, workspaces, GitHub auth/owners): `apps/desktop/src/renderer/state/read-caches.ts` mounted via `apps/desktop/src/renderer/state/use-cached-read.ts`.
+- Persisted repository-icon cache (restart-proof, once-per-session revalidate): `apps/desktop/src/renderer/features/repositories/repository-icons.ts`.
+- Exact Git scope rows/counts + coalesced generations: `apps/desktop/src/engine/git/diff.ts` and `apps/desktop/src/renderer/shell/workbench/tabs/changes-tab.tsx`.
+- External worktree/index/shared-ref invalidation: `apps/desktop/src/engine/git/watch.ts` feeding the exact-key bus in `apps/desktop/src/renderer/shell/use-git-refresh-key.ts`.
+- PR-status island freshness gate + active-only resume/poll refresh: `apps/desktop/src/renderer/shell/pr/pr-status-island.tsx`.
+- File list cache: `apps/desktop/src/renderer/shell/workspace-files-cache.ts`.
+- File content/diff cache: `apps/desktop/src/renderer/shell/workspace-file-data-cache.ts`.
+- Workspace intent warming: `apps/desktop/src/renderer/shell/prefetch-workspace-surface.ts`.
+- Chat retention: `apps/desktop/src/renderer/shell/conversation/chat-deck.tsx` with store-owned pane hosts.
+- Changes file retention/prefetch: `apps/desktop/src/renderer/shell/workbench/tabs/changes-surface.tsx`.
+- Browser retention: the bounded, cross-workspace iframe deck in `apps/desktop/src/renderer/shell/workbench/workbench-pane.tsx`; retained browser updates carry their original workspace scope.
+- Terminal retention: the bounded folder deck in `apps/desktop/src/renderer/shell/workbench/tabs/terminal-tab.tsx`.
+- Settings/repository retention: bounded visited-section decks in `apps/desktop/src/renderer/features/settings/settings-page.tsx` and `apps/desktop/src/renderer/features/repositories/repo-page.tsx`.
+- One-paint transition suppression: `apps/desktop/src/renderer/shared/ui/use-instant-view-switch.ts`.
+- Chat structural sharing: `apps/desktop/src/renderer/features/agent/stable-turns.ts`.
 
 ## Review checklist
 

@@ -1,52 +1,43 @@
-# Contributing
+# Contributing to Zeros
 
-Zeros is **source-available, closed to contribution**.
+Zeros is open source under the [MIT License](LICENSE), but the maintainer is not
+currently accepting external pull requests.
 
-The full source of the Mac app, the local engine sidecar, and the web surfaces is
-published under the [MIT License](LICENSE) so you can read it, audit it, learn
-from it, and fork it. What the project does **not** do is accept changes back:
+This is a capacity and release-ownership policy, not a restriction in the
+license. You may inspect, modify, and redistribute a fork under the MIT terms.
+Please do not invest time preparing a pull request for this repository: it will
+be closed without review, including documentation and dependency-only changes.
 
-- **Pull requests are closed unmerged.** This includes typo fixes, dependency
-  bumps, and one-line patches. No review is performed, so please don't invest
-  the time.
-- **Issues are not a support channel.** See [SUPPORT.md](SUPPORT.md).
-- **Security reports are the one exception.** They are welcome and read. See
-  [SECURITY.md](SECURITY.md).
+## Why pull requests are currently closed
 
-## Why
+Zeros is maintained through an Alpha → Beta → Production release train. Desktop
+builds are code-signed, notarized, and delivered through an auto-updater. The
+maintainer must be able to review, support, and establish provenance for every
+change included in those binaries. The project cannot yet provide that review
+capacity for external patches, so stating the limit up front is more respectful
+than leaving contributions pending.
 
-Zeros is a single-maintainer product with a release train: every change flows
-through Alpha → Beta → Production, each build is code-signed and notarized under
-one Apple identity, and users receive it automatically through the in-app
-updater. Merging outside code puts a third party's work into a binary the
-project signs and ships to other people's machines — that carries review,
-provenance, and long-term support obligations the project cannot honestly commit
-to right now. Rather than leave PRs open for months, the policy is stated up
-front.
+This policy may change as the maintenance model grows.
 
-This is a window, not a door. The code is genuinely open to read; the release
-train is not open to push to.
+## Ways to help
 
-## What you can do
+- Review and learn from the source.
+- Build or maintain a fork under the MIT License. Use a distinct product name,
+  bundle identifier, update feed, authentication tenant, and signing identity so
+  users can distinguish it from official Zeros releases.
+- Send reproducible product feedback through the app's **Send feedback** command
+  (`⌥⌘F`).
+- Report security vulnerabilities privately using
+  [SECURITY.md](SECURITY.md). Security reports are actively welcomed.
 
-- **Read it.** [README.md](README.md) covers the three-process architecture.
-  The interesting parts are the agent adapter layer (`src/engine/agents/`), the
-  wire-event vocabulary (`src/zeros/bridge/`), and the Electron main/renderer
-  split (`electron/`).
-- **Fork it.** MIT permits use, modification, and redistribution — commercial
-  included — provided the copyright notice and license text travel with the
-  copy. Your fork is yours; you do not need permission and you do not need to
-  tell anyone. Please don't ship it under the name "Zeros" or with the app
-  identifier `com.zeros`, so users can tell the builds apart.
-- **Report a vulnerability privately.** [SECURITY.md](SECURITY.md) explains how.
-- **Tell us it's broken.** The app has a built-in **Send feedback** command
-  (⌥⌘F) that attaches the app version and recent logs. It reaches the
-  maintainer far more reliably than a GitHub issue does.
+GitHub Issues are not a guaranteed support channel. See
+[SUPPORT.md](SUPPORT.md) for supported routes and scope.
 
-## If you opened a PR anyway
+## Maintainer workflow
 
-No hard feelings — the policy isn't obvious from a fork button. The PR will be
-closed with a pointer to this file, and the branch stays in your fork where you
-can keep using it. If your change fixes something real, describe the problem in
-the in-app feedback form (or, for a vulnerability, through the private channel)
-and it can be fixed here directly.
+Maintainer changes must follow [AGENTS.md](AGENTS.md) and [RULES.md](RULES.md),
+include adjacent regression coverage, and pass the applicable commands documented
+in `package.json`. Changes to a public dependency, generated source, or bundled
+asset must also update [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), run
+`pnpm licenses:generate`, and commit the resulting
+[license bundle](THIRD-PARTY-LICENSES.txt).

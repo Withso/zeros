@@ -11,11 +11,11 @@
     "prefix": ""
   },
   "aliases": {
-    "components": "@/zeros/ui/primitives",
-    "utils": "@/zeros/ui/cn",
-    "ui": "@/zeros/ui/primitives",
-    "lib": "@/zeros/lib",
-    "hooks": "@/zeros/lib"
+    "components": "@/renderer/shared/ui/primitives",
+    "utils": "@/renderer/shared/ui/cn",
+    "ui": "@/renderer/shared/ui/primitives",
+    "lib": "@/renderer/shared/lib",
+    "hooks": "@/renderer/shared/lib"
   },
   "iconLibrary": "lucide"
 }

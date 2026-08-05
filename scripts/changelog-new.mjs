@@ -29,8 +29,8 @@
 //   pnpm changelog:new --version 0.1.0 --count 30       # last N commits instead
 //
 // Then: edit the highlights in your own words, drop media into
-//   website/marketing/public/changelog/<version>/  and embed it, commit + push.
-// Cloudflare Pages auto-deploys website/marketing → the entry goes live.
+//   apps/marketing/public/changelog/<version>/  and embed it, commit + push.
+// Cloudflare Pages auto-deploys apps/marketing → the entry goes live.
 // ──────────────────────────────────────────────────────────
 
 import { execFileSync, execSync } from "node:child_process";
@@ -41,13 +41,13 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CONTENT_DIR = join(
   ROOT,
-  "website",
+  "apps",
   "marketing",
   "src",
   "content",
   "changelog",
 );
-const MEDIA_ROOT = join(ROOT, "website", "marketing", "public", "changelog");
+const MEDIA_ROOT = join(ROOT, "apps", "marketing", "public", "changelog");
 
 function arg(name) {
   const i = process.argv.indexOf(name);
@@ -324,7 +324,7 @@ summary: ""
   entry still renders: replace "title" with a real headline, and fill
   "summary" with the one sentence shown in the changelog index (an empty
   summary renders as no summary — it is never a placeholder string).
-  Add media under  website/marketing/public/changelog/${version}/  and embed:
+  Add media under  apps/marketing/public/changelog/${version}/  and embed:
     ![Alt text](/changelog/${version}/screenshot.png)
     <video src="/changelog/${version}/demo.mp4" controls playsinline width="100%"></video>
   Delete this comment + the reference block below before publishing.
@@ -360,7 +360,7 @@ ${renderGroupedReference(groups) || "- (no commits found in range — pass --sin
   console.log(`\nNext:`);
   console.log(`  1. Edit the title, summary + highlights in your own words.`);
   console.log(
-    `  2. Drop images/videos into website/marketing/public/changelog/${version}/ and embed them.`,
+    `  2. Drop images/videos into apps/marketing/public/changelog/${version}/ and embed them.`,
   );
   console.log(
     `  3. Push to a branch → Cloudflare preview, then merge to main → live at zeros.build/changelog.`,

@@ -48,7 +48,7 @@
         --blue-bg: hsl(213 60% 15%);
         --violet-primary: hsl(271 80% 73%);
         --brown-primary: hsl(9 46% 72%);
-        /* Agent brand marks — src/zeros/agent/agent-brands.ts */
+        /* Agent brand marks — apps/desktop/src/renderer/features/agent/agent-brands.ts */
         --brand-claude: #d97757;
         --brand-codex: #10a37f;
         --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
@@ -420,8 +420,8 @@
   <body>
     <style>
       /* ============================================================
-         Frame chrome — a Column-2 chat pane. Geometry mirrors the real
-         call sites: tab strip (column2-chat-tabs.tsx), transcript
+         Frame chrome — a conversation pane. Geometry mirrors the real
+         call sites: tab strip (shell/conversation/chat-tabs.tsx), transcript
          column max-w-[1152px] px-7 pt-3 (agent-chat.tsx:3476), composer
          column px-7 pb-4 + card rounded-lg bg-bg2 px-3.5 py-3 (:3890).
          ============================================================ */
@@ -1754,7 +1754,7 @@ ORDER BY <b>chats.created_at DESC, chats.rowid DESC</b></pre>
               <p class="case-copy">
                 <code>Copy full transcript</code> / <code>Copy concise transcript</code> already
                 exist on the chat tab's context menu
-                (<code>column2-chat-tabs.tsx:848</code>) and already read the complete
+                (<code>shell/conversation/chat-tabs.tsx</code>) and already read the complete
                 transcript from the engine, so they work on a tab that was never hydrated. The
                 gap is purely the last mile: the clipboard.
               </p>
@@ -1862,7 +1862,7 @@ ORDER BY <b>chats.created_at DESC, chats.rowid DESC</b></pre>
                 </tr>
                 <tr>
                   <td><strong>The row itself</strong></td>
-                  <td>new — <code>src/zeros/agent/chat-transcript-pills.tsx</code></td>
+                  <td>new — <code>apps/desktop/src/renderer/features/agent/chat-transcript-pills.tsx</code></td>
                   <td>The only new component. Mounts next to <code>ChatProvenance</code>.</td>
                 </tr>
               </tbody>
@@ -2042,7 +2042,7 @@ ORDER BY <b>chats.created_at DESC, chats.rowid DESC</b></pre>
             </div>
             <div class="legend">
               <div><i>1</i><span><b>Agent mark, 14px, <code>--fg3</code>.</b> <code>&lt;AgentIcon size={14} monochrome /&gt;</code>. Override the button base's <code>[&amp;_svg]:size-4</code> down to 14px — RULES pairs a 14px icon with 13px text.</span></div>
-              <div><i>2</i><span><b>Title, 13px medium, <code>--fg1</code>, ellipsis.</b> Pill <code>max-width: 232px</code> so three fit a narrow Column 2 and the longest still shows ~26 characters.</span></div>
+              <div><i>2</i><span><b>Title, 13px medium, <code>--fg1</code>, ellipsis.</b> Pill <code>max-width: 232px</code> so three fit a narrow the conversation pane and the longest still shows ~26 characters.</span></div>
               <div><i>3</i><span><b>Message count, 11px tabular, <code>--fg3</code>.</b> The count, not a byte size — it is exact and free (<a href="#b2">B2</a>), where a raw-payload byte figure would over-state the formatted result and then disagree with the chip. It is also the <em>only</em> number on the pill; everything else moved into the preview.</span></div>
               <div><i>4</i><span><b>6px internal gap</b> (the button base's <code>gap-2</code> = 8px is too airy once a third element joins; <code>gap-1.5</code> keeps the count reading as an annotation, not a word).</span></div>
               <div><i>5</i><span><b>Row gap 6px, wrap on.</b> Sits at a 22px left indent so pills line up with the provenance rows' text column (14px icon + 8px gap).</span></div>
@@ -2320,7 +2320,7 @@ ORDER BY <b>chats.created_at DESC, chats.rowid DESC</b></pre>
               <div class="cap" style="margin-top: 10px">
                 The agent-working shimmer replaces the mark:
                 <code>&lt;ZerosSpinner size={14} variant="agent" label="Agent working" /&gt;</code>
-                — the identical swap <code>column2-chat-tabs.tsx:789</code> already makes on the
+                — the identical swap <code>shell/conversation/chat-tabs.tsx</code> already makes on the
                 source chat's own tab, so one animation means one thing in both places. The
                 count keeps ticking as messages land (<a href="#c9">C9</a>).
               </div>
@@ -2546,7 +2546,7 @@ title !== "Untitled" &amp;&amp; title.trim()
               <h2>Overflow — six pills, then one search field over every chat in the workspace</h2>
               <p class="case-copy">
                 Six is a deterministic cap, not a measured one: no layout reads, no resize
-                observer, and at any Column-2 width it lands as one or two rows. A workspace with
+                observer, and at any conversation-pane width it lands as one or two rows. A workspace with
                 thirty chats gets a bounded row and a real way to find the thirty-first — where
                 the reference would get seven wrapped rows and no search.
               </p>
@@ -2713,7 +2713,7 @@ title !== "Untitled" &amp;&amp; title.trim()
                 chat tab's own context menu already offers
                 <code>Copy concise transcript</code> and <code>Copy full transcript</code>, in
                 that order, under a separator
-                (<code>column2-chat-tabs.tsx:857-864</code>). Same gesture, same two words, same
+                (<code>shell/conversation/chat-tabs.tsx</code>). Same gesture, same two words, same
                 order, one surface over — a user who has ever copied a transcript already knows
                 where full lives.
               </p>
@@ -2757,7 +2757,7 @@ title !== "Untitled" &amp;&amp; title.trim()
                   <strong>Same two words, same order, same icons as the tab menu.</strong> Not
                   "detailed", not "brief"; concise above full; <code>ClipboardList</code> and
                   <code>Copy</code>, lifted straight from
-                  <code>column2-chat-tabs.tsx</code>. A second vocabulary for one existing pair
+                  <code>shell/conversation/chat-tabs.tsx</code>. A second vocabulary for one existing pair
                   of modes is how two mental models start.
                 </li>
                 <li>
@@ -3561,13 +3561,13 @@ title !== "Untitled" &amp;&amp; title.trim()
               <div class="name">Trap 2 — brand marks in light</div>
               <ul>
                 <li>
-                  Claude terracotta and OpenAI teal are fixed hexes with sanctioned
-                  <code>check:ui ignore-line</code> markers; they hold up on both canvases, in
-                  the added pill and in the preview's header row.
+                  Fixed brand accents carry sanctioned <code>check:ui ignore-line</code>
+                  markers; they hold up on both canvases, in the added pill and in the
+                  preview's header row.
                 </li>
                 <li>
-                  Cursor and opencode ship monochrome marks that follow
-                  <code>--fg1</code> — so on those the "brand unlock" in the added state is a
+                  Monochrome marks follow <code>--fg1</code> — so on those the "brand unlock"
+                  in the added state is a
                   <em>contrast</em> shift (<code>fg3</code> → <code>fg1</code>) rather than a hue
                   shift. That is why the added state carries three signals and not just colour.
                 </li>
@@ -3608,7 +3608,7 @@ title !== "Untitled" &amp;&amp; title.trim()
                 <li>
                   <s>The body scrolls, so it needs the app's <code>&lt;ScrollArea&gt;</code>
                   rather than raw <code>overflow-y: auto</code> — otherwise the panel ships a
-                  native scrollbar that looks nothing like the rest of Column 2 and changes
+                  native scrollbar that looks nothing like the rest of the conversation pane and changes
                   width between platforms.</s>
                   <br /><strong>Wrong, and it shipped — corrected 2026-07-30.</strong>
                   <code>&lt;ScrollArea&gt;</code> here could not scroll <em>at all</em>. Radix

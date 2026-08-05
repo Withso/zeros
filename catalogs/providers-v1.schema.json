@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://withso.github.io/zeros/catalogs/providers-v1.schema.json",
   "title": "Zeros Provider Manifest",
-  "description": "Hot-updatable subset of AGENT_MANIFEST. Code-side factories live in src/engine/agents/adapters/<id>/index.ts and are matched by `id`. Anything in this file can change without an app release; anything in the factories cannot.",
+  "description": "Hot-updatable subset of AGENT_MANIFEST. Code-side factories live in apps/desktop/src/engine/agents/adapters/<id>/index.ts and are matched by `id`. Anything in this file can change without an app release; anything in the factories cannot.",
   "type": "object",
   "required": ["version", "updatedAt", "providers"],
   "additionalProperties": false,
@@ -22,7 +22,14 @@
   "definitions": {
     "provider": {
       "type": "object",
-      "required": ["name", "description", "cliBinary", "source", "authProbe", "loginCommand"],
+      "required": [
+        "name",
+        "description",
+        "cliBinary",
+        "source",
+        "authProbe",
+        "loginCommand"
+      ],
       "additionalProperties": false,
       "properties": {
         "name": { "type": "string" },
@@ -95,7 +102,11 @@
           "additionalProperties": false,
           "properties": {
             "kind": { "const": "file" },
-            "paths": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+            "paths": {
+              "type": "array",
+              "items": { "type": "string" },
+              "minItems": 1
+            }
           }
         },
         {
@@ -124,7 +135,11 @@
           "properties": {
             "kind": { "const": "file-with-expiry" },
             "path": { "type": "string" },
-            "expiryFieldPath": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+            "expiryFieldPath": {
+              "type": "array",
+              "items": { "type": "string" },
+              "minItems": 1
+            },
             "expiryUnit": { "enum": ["ms", "s"] }
           }
         },
@@ -134,7 +149,11 @@
           "additionalProperties": false,
           "properties": {
             "kind": { "const": "any-of" },
-            "probes": { "type": "array", "items": { "$ref": "#/definitions/authProbe" }, "minItems": 1 }
+            "probes": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/authProbe" },
+              "minItems": 1
+            }
           }
         }
       ]

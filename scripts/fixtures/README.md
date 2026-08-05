@@ -19,14 +19,14 @@ early-warning system for "Codex shipped a new event type".
 
 The live fixture suite is **Claude-only** — `claude-basic.jsonl` is the
 sole checked-in fixture, exercising the `ClaudeStreamTranslator`
-(`src/engine/agents/adapters/claude/translator.ts`), which is the live
+(`apps/desktop/src/engine/agents/adapters/claude/translator.ts`), which is the live
 translator the Agent SDK adapter (`claude-sdk/`) reuses.
 
 The other agents are not stream-json-fixture-tested here:
 
 - **Codex** uses the long-lived `codex app-server` JSON-RPC transport,
   not `codex exec --json`. Its coverage lives in
-  `src/engine/agents/adapters/codex/__tests__/` (translator unit + live
+  `apps/desktop/src/engine/agents/adapters/codex/__tests__/` (translator unit + live
   `initialize` smoke). The `codex exec --json` flow is retained only for
   ephemeral one-shots (PR titles / classifiers) and is not fixture-tested.
 - **Cursor** runs through the bundled `@cursor/sdk` in-process

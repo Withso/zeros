@@ -24,7 +24,7 @@
     },
     "defaultFavorites": {
       "type": "object",
-      "description": "family → the model value new chats fall back to when the user hasn't starred a favorite (2026-07 spec: claude=Opus 4.8 1M, codex=5.6 Sol, cursor=Composer 2.5). Must name a curated model of that family.",
+      "description": "family → the curated model value new chats use when no favorite is selected. Must name a model in that family.",
       "additionalProperties": { "type": "string", "minLength": 1 }
     },
     "aliases": {

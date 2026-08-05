@@ -5,7 +5,7 @@
 //
 // The obvious canary (diff the /assets/index-<hash>.js on zeros.build) is WRONG
 // and has already misled us once: Vite hashes bundle CONTENT, so any commit that
-// touches no file under website/ produces a byte-identical bundle — the hash
+// touches no file under apps/web or apps/marketing produces a byte-identical bundle — the hash
 // stays put even after a perfect deploy. It also can't distinguish zeros-web from
 // the leftover `zeros` Pages project, which builds the same marketing source.
 //
@@ -21,14 +21,14 @@
 // Exit 1 only when a signal positively contradicts origin/main.
 //
 //   pnpm check:web-deploy
-//   CLOUDFLARE_API_TOKEN=… pnpm check:web-deploy     # adds the live check
+//   CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… pnpm check:web-deploy
+//                                                     # adds the live check
 // ──────────────────────────────────────────────────────────
 
 import { execFileSync } from "node:child_process";
 
 const PROJECT = process.env.CF_PAGES_PROJECT || "zeros-web";
-const ACCOUNT =
-  process.env.CLOUDFLARE_ACCOUNT_ID || "680a69511e9a65c5e862f812d349a6a2";
+const ACCOUNT = (process.env.CLOUDFLARE_ACCOUNT_ID || "").trim();
 const CHECK_NAME = `Cloudflare Pages: ${PROJECT}`;
 
 function git(...args) {
@@ -83,7 +83,17 @@ function githubCheck(slug, sha) {
     return { state: "unavailable", note: why.split("\n")[0] };
   }
 
-  const run = (JSON.parse(raw).check_runs || []).find(
+  let payload;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    return {
+      state: "unavailable",
+      note: "GitHub CLI returned no usable API response — authenticate `gh` and retry",
+    };
+  }
+
+  const run = (payload.check_runs || []).find(
     (r) => r.name === CHECK_NAME,
   );
   if (!run)
@@ -106,6 +116,11 @@ async function cloudflareLive(sha) {
     return {
       state: "skipped",
       note: "CLOUDFLARE_API_TOKEN not set — build status checked, live status not.",
+    };
+  if (!ACCOUNT)
+    return {
+      state: "unavailable",
+      note: "CLOUDFLARE_ACCOUNT_ID not set — live status not checked.",
     };
 
   let body;
@@ -203,9 +218,19 @@ if (build.state === "building") {
 // Only claim "serving" when the live signal actually confirmed it. A green build
 // proves Cloudflare compiled the commit, NOT that it is the deployment on the
 // custom domains — overstating that is the exact mistake this script exists to stop.
-console.log(
-  live.state === "ok"
-    ? `\n✓ check:web-deploy — ${PROJECT} is serving origin/main (${sha.slice(0, 8)}).`
-    : `\n✓ check:web-deploy — ${PROJECT} BUILT origin/main (${sha.slice(0, 8)}) successfully.\n` +
-        `   Live status unverified (${live.note}) — set CLOUDFLARE_API_TOKEN to confirm what zeros.build is actually serving.`,
-);
+if (live.state === "ok") {
+  console.log(
+    `\n✓ check:web-deploy — ${PROJECT} is serving origin/main (${sha.slice(0, 8)}).`,
+  );
+} else if (build.state === "ok") {
+  console.log(
+    `\n✓ check:web-deploy — ${PROJECT} built origin/main (${sha.slice(0, 8)}) successfully.\n` +
+      `   Live status unverified (${live.note}) — set CLOUDFLARE_API_TOKEN to confirm what zeros.build is actually serving.`,
+  );
+} else {
+  console.log(
+    `\nℹ check:web-deploy — deployment status is unverified for origin/main (${sha.slice(0, 8)}).\n` +
+      `   Build signal: ${build.note}\n` +
+      `   Live signal: ${live.note}`,
+  );
+}

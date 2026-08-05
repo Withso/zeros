@@ -5,7 +5,7 @@ package-lock.json
 yarn.lock
 # ...but the standalone Cloudflare Pages app DO commit its lockfile so CF can
 # `npm ci` (reproducible Functions builds).
-!website/web-app/package-lock.json
+!apps/web/package-lock.json
 # Auth/registry config — can carry a real npm token. Never tracked.
 .npmrc
 
@@ -38,7 +38,7 @@ yarn-error.log*
 # Environment variables — every .env variant, at any depth, is machine-local.
 # `.env.example` is the ONE exception: the templates are tracked on purpose
 # (scripts/check-vite-env-sync.mjs reads .env.example to prove the VITE_* set
-# is documented, and backend/README tells you to `cp .env.example .env`), so
+# is documented, and apps/control-plane/README tells you to `cp .env.example .env`), so
 # they are negated back in. The `.env.*` wildcard is what catches the variants
 # an enumerated list keeps missing — .env.production, .env.development, .env.test.
 .env
@@ -104,33 +104,11 @@ testing/
 snapshots/current/
 snapshots/diff/
 
-# `docs/` is deliberately NOT here: the engineering journal is TRACKED as of
-# 2026-07-28. It reads as local-only scratch — analyses, audits and plans that
-# are superseded as fast as they are written — but AGENTS.md and RULES.md send
-# agents into it, so it has to reach every worktree, and tracking is the only
-# way to do that without seeding it through `.worktreeinclude` (a 2.3 MiB copy
-# set that 413'd every cloud workspace create; see that file's header).
-#
 # `styles/Artifacts/` is deliberately NOT here either: the design lab is
 # tracked. It is a build-free tree of hand-written HTML served only by the vite
 # dev middleware (vite.config.ts) and scripts/serve-loaders.mjs, never bundled
 # into a production build, but it IS the design record and two of its files
 # carry third-party licences (THIRD-PARTY-NOTICES.md).
-
-# website/ — sibling frontends vendored for Cloudflare Pages deploy (marketing + web-app)
-# Same pattern: node_modules + dist + build + logs never tracked. (Env files are
-# already covered by the global .env rules above.)
-# website/web-app/dist is the unified Pages output (marketing assemble + static).
-website/*/node_modules/
-website/**/node_modules/
-website/*/dist/
-website/**/dist/
-website/*/build/
-website/**/build/
-website/**/.cache/
-website/**/*.log
-website/*/tmp/
-website/**/tmp/
 
 # Claude Code runtime artifacts (locks, scheduled-task state)
 .claude/
@@ -166,6 +144,6 @@ website/**/tmp/
 # Codex protocol codegen cache (sparse clone of openai/codex pinned
 # to package.json#codexProtocolVersion). Holds the Rust workspace +
 # cargo target dir — multi-GB, fully reproducible. The GENERATED TS
-# output at src/engine/agents/adapters/codex/generated/ IS committed
+# output at apps/desktop/src/engine/agents/adapters/codex/generated/ IS committed
 # so machines without a Rust toolchain can still build.
 .codex-protocol-cache/

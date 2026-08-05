@@ -810,7 +810,7 @@
       /* ── The global toast (sonner) ──
          The only transient feedback this pane produces. It is NOT part of the
          pane: it is a fixed 350px card at the bottom-right of the window,
-         painted by src/zeros/ui/primitives/elements/toast.tsx. Reproduced here
+         painted by apps/desktop/src/renderer/shared/ui/primitives/elements/toast.tsx. Reproduced here
          because the pane's inline yellow callouts were retired and this is
          what is left. */
       .toast-stage {
@@ -1643,7 +1643,7 @@
               </h3>
               <div class="adv" style="margin-top: 0">
                 <div class="ta focus">.env*
-backend/.env*
+apps/control-plane/.env*
 .mcp.json
 certs/*.pem
 !.env.production</div>
@@ -1654,8 +1654,8 @@ certs/*.pem
                   </div>
                   <div class="patrow">
                     <span class="pcount ok">1</span
-                    ><span class="pt">backend/.env*</span
-                    ><span class="pm">backend/.env</span>
+                    ><span class="pt">apps/control-plane/.env*</span
+                    ><span class="pm">apps/control-plane/.env</span>
                   </div>
                   <div class="patrow">
                     <span class="pcount ok">1</span><span class="pt">.mcp.json</span
@@ -2264,7 +2264,7 @@ certs/*.pem</div>
                 <div class="grow">
                   <span class="cb on"><svg><use href="#i-check" /></svg></span
                   ><span class="tgap"></span><span class="tgap"></span>
-                  <span class="fp">backend/.env</span>
+                  <span class="fp">apps/control-plane/.env</span>
                 </div>
               </div>
               <div class="sum">
@@ -2317,7 +2317,7 @@ certs/*.pem</div>
                 <div class="grow">
                   <span class="cb on"><svg><use href="#i-check" /></svg></span
                   ><span class="tgap"></span><span class="tgap"></span>
-                  <span class="fp">backend/.env</span>
+                  <span class="fp">apps/control-plane/.env</span>
                 </div>
               </div>
               <div class="sum">
@@ -2366,7 +2366,7 @@ certs/*.pem</div>
               </p>
             </div>
             <div class="meta">
-              <code>src/zeros/ui/primitives/elements/toast.tsx</code> ·
+              <code>apps/desktop/src/renderer/shared/ui/primitives/elements/toast.tsx</code> ·
               bottom-right, 24&nbsp;px offset, 3 visible, errors 6&nbsp;s.
             </div>
           </div>
@@ -2623,7 +2623,7 @@ certs/*.pem</div>
             <li>
               <b>Does simple mode write filenames or patterns?</b>
               <i>Exact names.</i> Ticking writes the anchored literal
-              <code>/backend/.env</code>, one line per file — including when you
+              <code>/apps/control-plane/.env</code>, one line per file — including when you
               tick a folder. It is what makes every row underneath independently
               untickable afterwards, which a folder-wide <code>/lib</code> would
               not be. A <code>.env*</code> that keeps working as you add

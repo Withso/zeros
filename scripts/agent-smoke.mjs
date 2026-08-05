@@ -9,7 +9,7 @@
 // trigger it by hand, and the AI must ask before running it.
 //
 // It drives the engine's AgentGateway in-process (same construction as
-// src/engine/index.ts) and, for every installed+authed agent, runs a small
+// apps/desktop/src/engine/zeros-engine.ts) and, for every installed+authed agent, runs a small
 // capability matrix so you can see — right now — which agents actually work.
 //
 //   Spawn+prompt   newSession → "reply PINGOK"          (auth / wiring / 401s)
@@ -29,7 +29,7 @@
 // "live agents OK" forever, which is strictly worse than no job at all.
 //
 // That is not hypothetical. NO agent here authenticates from an env var — the
-// AuthProbe union in src/engine/agents/registry.ts has no env-var kind, and
+// AuthProbe union in apps/desktop/src/engine/agents/registry.ts has no env-var kind, and
 // evaluateAuthProbe reads process.env only for ZEROS_SECRETS_FILE:
 //   • claude — macOS keychain `Claude Code-credentials`, or an UNEXPIRED
 //     ~/.claude/.credentials.json, or ~/.claude/auth.json. So
@@ -37,7 +37,7 @@
 //   • codex  — the exit code of `codex login status`, i.e. whatever that CLI
 //     decides. No codex on PATH ⇒ installed:false as well.
 //   • cursor — reads secrets.json[cursor-api-key] via ZEROS_SECRETS_FILE, which
-//     ONLY electron/sidecar.ts sets. This harness drives the gateway standalone
+//     ONLY apps/desktop/electron/sidecar.ts sets. This harness drives the gateway standalone
 //     (no Electron), so cursor is STRUCTURALLY always skipped here — never put
 //     it in --require. Use `pnpm cursor:smoke` for the Cursor host instead.
 // Net: `ANTHROPIC_API_KEY: ${{ secrets.* }}` does not make this test anything.
@@ -148,8 +148,8 @@ function supportsEffort(agentId) {
  *  runtime from ./node_modules — but BUNDLE the `@zeros/*` workspace packages.
  *
  *  This replaces a plain `packages: "external"`, which externalized those too and
- *  made this whole harness unrunnable: @zeros/core's exports map points at RAW
- *  .ts sources, so an external `import "@zeros/core/system-instructions"`
+ *  made this whole harness unrunnable: @zeros/protocol's exports map points at RAW
+ *  .ts sources, so an external `import "@zeros/protocol/system-instructions"`
  *  resolved to index.ts, whose `from "./templates"` is extensionless — something
  *  plain Node ESM cannot resolve. Every invocation died with ERR_MODULE_NOT_FOUND
  *  before listing a single agent (gateway.ts:51 is the importer).
@@ -175,7 +175,7 @@ async function compileGateway() {
   fs.mkdirSync(TMP, { recursive: true });
   const out = path.join(TMP, "gateway.mjs");
   await build({
-    entryPoints: [path.join(ROOT, "src/engine/agents/gateway.ts")],
+    entryPoints: [path.join(ROOT, "apps/desktop/src/engine/agents/gateway.ts")],
     outfile: out,
     format: "esm",
     platform: "node",

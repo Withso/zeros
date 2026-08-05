@@ -7,7 +7,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   // bridge-backed writes are covered by the engine suites.
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(
-    `${new URL(page.url()).origin}/harness-design-workspace.html`,
+    `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
     { waitUntil: "networkidle" },
   );
 

@@ -1,7 +1,7 @@
 // Type declarations for models-verify.mjs (plain Node ESM, no types of its own).
 //
 // The unit suite imports the validator from this script
-// (src/zeros/agent/__tests__/models-catalog-validity.test.ts) so a bad catalog
+// (apps/desktop/src/renderer/features/agent/__tests__/models-catalog-validity.test.ts) so a bad catalog
 // edit fails the suite. Under the strict typecheck (tsconfig.typecheck.json) that
 // import otherwise errors TS7016 ("implicitly has an 'any' type") and the
 // downstream `.some((w) => ...)` callback param errors TS7006. These declarations

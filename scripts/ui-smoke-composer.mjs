@@ -3,7 +3,7 @@
 // Composer + GitHub settings UI smoke — real-browser interaction contract
 //
 // Boots the Vite dev server, opens the ModelPill harness page
-// (harness-model-menu.html + src/harness-model-menu.tsx — the real
+// (the colocated harness-model-menu HTML/TSX entry pair — the real
 // ModelPill/AgentModelMenu tree with the agent-chat "always focused
 // composer" guardian wired in), then the real GitHub settings section, and
 // drives both with headless Chromium.
@@ -114,7 +114,8 @@ vite.stderr.on("data", (d) => process.stderr.write(`[vite] ${d}`));
 
 let browser = null;
 try {
-  const pageUrl = `http://127.0.0.1:${port}/harness-model-menu.html`;
+  const harnessBase = `http://127.0.0.1:${port}/apps/desktop/src/renderer/harnesses`;
+  const pageUrl = `${harnessBase}/harness-model-menu.html`;
   await waitForHttp(pageUrl);
 
   browser = await chromium.launch();
@@ -191,7 +192,7 @@ try {
   // 4. Diff previews use a hover portal around an already-clickable row/pill.
   // Drive the real components so Slot handler composition and pointer travel
   // into the portal cannot regress unnoticed.
-  await page.goto(`http://127.0.0.1:${port}/harness-diff-preview.html`, {
+  await page.goto(`${harnessBase}/harness-diff-preview.html`, {
     waitUntil: "networkidle",
   });
   const preview = page.locator("[data-agent-diff-preview]");
@@ -844,7 +845,7 @@ try {
   //    scopes. Exercise the real component: unit tests cannot reproduce the
   //    event ordering between portal mount, auto-focus, Escape, and focus
   //    return.
-  await page.goto(`http://127.0.0.1:${port}/harness-github-settings.html`, {
+  await page.goto(`${harnessBase}/harness-github-settings.html`, {
     waitUntil: "networkidle",
   });
   const cliRadio = page.getByRole("radio", { name: "gh CLI auth" });
@@ -931,7 +932,7 @@ try {
   //    ordinary OAuth. Exercise the real Settings CTA and inspect the native
   //    boundary payload emitted by the harness bridge.
   await page.goto(
-    `http://127.0.0.1:${port}/harness-github-settings.html?state=not-installed`,
+    `${harnessBase}/harness-github-settings.html?state=not-installed`,
     { waitUntil: "networkidle" },
   );
   const installApp = page.getByRole("button", { name: "Install GitHub App" });

@@ -50,7 +50,7 @@ const OVERRIDES = {
     // latest-mac.yml and release-beta.yml's "beta-mac.yml not found" guard fails.
     "-c.publish.channel=beta",
     // Beta's feed is the rolling `beta` release tag, not electron-builder.yml's
-    // /releases/latest/download URL. Runtime setFeedURL in electron/updater.ts
+    // /releases/latest/download URL. Runtime setFeedURL in apps/desktop/electron/updater.ts
     // points at the same base; this keeps the baked app-update.yml truthful too.
     // `?static=1` pins electron-updater's per-poll noCache query off (see the
     // publish block comment in electron-builder.yml).

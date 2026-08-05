@@ -3,11 +3,11 @@
 // check-protocol-version — remind to bump PROTOCOL_VERSION when the wire changes
 // ──────────────────────────────────────────────────────────
 //
-// The engine serves desktop and optional cloud clients over @zeros/core's wire
+// The engine serves desktop and optional cloud clients over @zeros/protocol's wire
 // contract. Version skew can happen between separately-built clients, and the
 // handshake only protects you if PROTOCOL_VERSION actually changed when a
 // message shape did. This ADVISORY guard flags the case where a wire message
-// file changed vs origin/main but packages/core/src/version.ts PROTOCOL_VERSION
+// file changed vs origin/main but packages/protocol/src/version.ts PROTOCOL_VERSION
 // did NOT — a prompt to think, not a precise gate (the file-touch heuristic is
 // coarse on purpose). Wired continue-on-error. Needs origin/main fetched; if
 // absent, it no-ops.
@@ -16,13 +16,17 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
+import { protocolSourceSignature } from "./protocol-source-signature.mjs";
+
 const SCHEMA_FILES = [
-  "packages/core/src/messages.ts",
-  "packages/core/src/agent-events.ts",
-  "packages/core/src/agent-messages.ts",
-  "packages/core/src/schemas.ts",
+  "packages/protocol/src/messages.ts",
+  "packages/protocol/src/agent-events.ts",
+  "packages/protocol/src/agent-messages.ts",
+  "packages/protocol/src/schemas.ts",
 ];
-const VERSION_FILE = "packages/core/src/version.ts";
+const VERSION_FILE = "packages/protocol/src/version.ts";
+const LEGACY_PACKAGE_DIR = "packages/core/";
+const PACKAGE_DIR = "packages/protocol/";
 
 function mainAvailable() {
   try {
@@ -35,20 +39,40 @@ function mainAvailable() {
   }
 }
 
-function changedVsMain(file) {
+function pathAtRef(ref, file) {
   try {
-    execFileSync("git", ["diff", "--quiet", "origin/main", "--", file], {
+    execFileSync("git", ["cat-file", "-e", `${ref}:${file}`], {
       stdio: "ignore",
     });
-    return false; // exit 0 = no diff
-  } catch (e) {
-    return e.status === 1; // exit 1 = diff; other codes → treat as unchanged
+    return file;
+  } catch {
+    // Keep the guard useful across the one-time core → protocol package rename.
+    // Once origin/main contains the new path, this fallback becomes dormant.
+    return file.startsWith(PACKAGE_DIR)
+      ? file.replace(PACKAGE_DIR, LEGACY_PACKAGE_DIR)
+      : file;
+  }
+}
+
+function changedVsMain(file) {
+  try {
+    const base = execFileSync(
+      "git",
+      ["show", `origin/main:${pathAtRef("origin/main", file)}`],
+      { encoding: "utf8" },
+    );
+    return (
+      protocolSourceSignature(base) !==
+      protocolSourceSignature(readFileSync(file, "utf8"))
+    );
+  } catch {
+    return false;
   }
 }
 
 function protocolVersion(ref) {
   const src = ref
-    ? execFileSync("git", ["show", `${ref}:${VERSION_FILE}`], {
+    ? execFileSync("git", ["show", `${ref}:${pathAtRef(ref, VERSION_FILE)}`], {
         encoding: "utf8",
       })
     : readFileSync(VERSION_FILE, "utf8");

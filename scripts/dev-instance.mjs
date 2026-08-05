@@ -48,7 +48,7 @@ const RUN_ONLY =
 // pnpm runs package scripts from the repo root, so cwd is the worktree root.
 const REPO_ROOT = process.cwd();
 
-// Engine port grid — must match src/engine/runtime.ts. Instance blocks are laid
+// Engine port grid — must match apps/desktop/src/engine/runtime.ts. Instance blocks are laid
 // on a stride wider than the walk span so the walk range AND the MCP gateway
 // ports (base+8 / base+9) of adjacent instances never overlap.
 const ENGINE_BASE_DEV = 24293;
@@ -111,7 +111,7 @@ function resolveInstance() {
   // Append a short realpath hash to the SLUG (identity only — never shown) so two
   // worktrees whose branch tails (or basenames) COLLIDE never resolve to the same
   // userData — otherwise the second to launch loses the single-instance lock
-  // (keyed off userData, see electron/deep-link.ts) and silently quits. The human
+  // (keyed off userData, see apps/desktop/electron/deep-link.ts) and silently quits. The human
   // name stays clean ("san-francisco") for the "zeros-<worktree>" Dock name.
   const slug = slugify(`${human}-${shortPathHash(REPO_ROOT)}`).slice(0, 40);
   return { slug, human };
@@ -195,7 +195,7 @@ const binPath = prepareBundle();
 
 // Every var below describes THIS app instance, not the worktree it was launched
 // from — so none of it may be inherited by shells the app itself spawns.
-// buildPtyEnv (src/engine/pty/shell-setup.ts) deletes them by name for exactly
+// buildPtyEnv (apps/desktop/src/engine/pty/shell-setup.ts) deletes them by name for exactly
 // that reason: a terminal inside the app inherits the full env, and a nested
 // `pnpm electron:dev` that finds ZEROS_INSTANCE set takes the "caller owns
 // uniqueness" branch of resolveInstance() below and adopts the PARENT's identity
@@ -219,7 +219,7 @@ if (RUN_ONLY && env.ZEROS_NO_ENGINE_HMR == null) env.ZEROS_NO_ENGINE_HMR = "1";
 
 // A named instance launches its own bundle binary (for a distinct Dock/Cmd-Tab
 // identity — dev-electron-bundle.cjs), so it can't hand off to electronmon the
-// way the primary does. That's the historical reason editing electron/** left a
+// way the primary does. That's the historical reason editing apps/desktop/electron/** left a
 // worktree instance with a STALE main ("unknown command" until you re-run) while
 // renderer HMR + engine HMR kept working. Under --watch we now wrap that binary
 // in scripts/dev-main-supervisor.mjs, which watches dist-electron and restarts
@@ -257,7 +257,7 @@ const jobs = RUN_ONLY
   : [
       ["vite", "cyan", "pnpm dev"],
       ["engine", "yellow", "tsup --watch"],
-      ["main", "magenta", "tsup --config electron/tsup.config.ts --watch"],
+      ["main", "magenta", "tsup --config apps/desktop/electron/tsup.config.ts --watch"],
       ["app", "green", appCmd],
     ];
 

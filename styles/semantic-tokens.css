@@ -2,10 +2,10 @@
    ZEROS SEMANTIC TOKENS — the intent layer over the primitives
    ============================================================
 
-   Two-tier token architecture (adopted 2026-07-17):
+   Two-tier token architecture:
 
-     1. styles/zeros-tokens.css  → PRIMITIVES. The raw palette + the
-        @theme inline wiring. Answers "what colour/size is this?".
+     1. styles/zeros-tokens.css  → PRIMITIVES and core system aliases. The raw
+        palette plus @theme inline wiring. Answers "what color/size is this?".
      2. styles/semantic-tokens.css (this file) → SEMANTICS. Feature /
         component aliases that resolve to different primitives per
         theme. Answers "what should THIS feature use, per theme?".
@@ -14,20 +14,15 @@
    between Shade (dark) and Light with NO per-theme conditional in the
    component — the token carries the theme logic.
 
-   Load order (src/main.tsx): zeros-tokens.css → semantic-tokens.css →
+   Load order (apps/desktop/src/renderer/main.tsx): zeros-tokens.css → semantic-tokens.css →
    globals.css. Semantics are plain CSS var definitions on :root /
    [data-theme="light"]; they reference primitives defined in
    zeros-tokens.css, which resolve at runtime regardless of file.
 
-   RULES (see RULES.md §1.5): do NOT add a semantic token here on your
-   own initiative. An AI agent asks first; add one only on explicit
-   request, alongside its first real caller.
-
-   MIGRATION STATUS — this is Phase 1 (the file + the PR-status set).
-   Phase 2 (its own app-verified PR): move the existing component
-   aliases (--primary-button-*) out of zeros-tokens.css into here, and
-   settle the primitive/semantic boundary for --bg1..5 / --fg1..3 /
-   the status families. Not done blind — it touches the @theme wiring.
+   Add a semantic token only with its first real caller. Core aliases that need
+   Tailwind utility generation (for example --primary-button-*) remain in
+   zeros-tokens.css beside their @theme wiring; feature-specific aliases live
+   here.
    ============================================================ */
 
 /* ── Shade (default dark theme) ── */
@@ -35,25 +30,35 @@
   /* PR status island — open-PR (brown) states.
      Action button flips polarity per theme so its icon never vanishes:
      the white primary button in Shade, a solid --brown-fg in Light. */
-  --pr-status-surface:      var(--brown-bg);          /* brown container surface (the raw --brown-bg, per design) */
-  --pr-status-action-bg:    var(--primary-button-bg); /* white primary button */
-  --pr-status-action-fg:    var(--primary-button-fg); /* dark text + icon on it */
+  --pr-status-surface: var(
+    --brown-bg
+  ); /* brown container surface (the raw --brown-bg, per design) */
+  --pr-status-action-bg: var(--primary-button-bg); /* white primary button */
+  --pr-status-action-fg: var(--primary-button-fg); /* dark text + icon on it */
   --pr-status-action-hover: var(--primary-button-hover);
-  --pr-status-merge-fg:     var(--inverted-fg);       /* dark text/icon on the bright-green Merge button */
+  --pr-status-merge-fg: var(
+    --inverted-fg
+  ); /* dark text/icon on the bright-green Merge button */
 
   /* #N chip outline — a muted per-tone ramp shade so the pill reads as a
      quiet outline, not a bright accent. Theme-static: the 50–950 ramps don't
      flip, so no [data-theme="light"] override is needed. */
-  --pr-status-chip-border-active:  var(--brown-800);  /* open-PR (brown) states */
-  --pr-status-chip-border-success: var(--green-700);  /* ready-to-merge (green) */
-  --pr-status-chip-border-merged:  var(--violet-750); /* merged (violet) */
-  --pr-status-chip-border-closed:  var(--red-750);    /* closed (red) — muted brick outline in Shade */
+  --pr-status-chip-border-active: var(--brown-800); /* open-PR (brown) states */
+  --pr-status-chip-border-success: var(
+    --green-700
+  ); /* ready-to-merge (green) */
+  --pr-status-chip-border-merged: var(--violet-750); /* merged (violet) */
+  --pr-status-chip-border-closed: var(
+    --red-750
+  ); /* closed (red) — muted brick outline in Shade */
 
   /* Merged-row "Continue" button — filled violet, label flips per theme. */
-  --pr-status-continue-bg:  var(--violet-fg);
-  --pr-status-continue-fg:  var(--inverted-fg);       /* dark label on the light-violet button in Shade */
+  --pr-status-continue-bg: var(--violet-fg);
+  --pr-status-continue-fg: var(
+    --inverted-fg
+  ); /* dark label on the light-violet button in Shade */
 
-  /* Loader (ZerosSpinner — the Orbit/Agent shimmer, src/loaders/
+  /* Loader (ZerosSpinner — the Orbit/Agent shimmer, apps/desktop/src/renderer/shared/ui/loading/
      zeros-spinner.tsx). The app's DEFAULT loader colors: the lit piece
      dots and the faint resting grid behind them. Both aliases resolve to
      primitives that already flip per theme, so no [data-theme="light"]
@@ -73,30 +78,39 @@
      island's theme-flipping actions) use the spinner's `tone="inherit"`
      (currentColor) instead — the button's own text color already carries
      the per-theme logic. */
-  --loader-active:          var(--fg2);
-  --loader-rest:            var(--fg3);
+  --loader-active: var(--fg2);
+  --loader-rest: var(--fg3);
   --loader-active-inverted: var(--primary-button-fg);
-  --loader-rest-inverted:   var(--primary-button-fg);
+  --loader-rest-inverted: var(--primary-button-fg);
 
   /* Selected-state fill on GLASS surfaces (frosted overlays — first caller:
      the shortcuts palette's tabs + category/Kbd chips). A translucent wash
      that reads as "selected" without going opaque on a blurred panel; reuse
      it for any glass-morphism selected/raised state. Consume via
-     `bg-[var(--selected-glass)]` (not wired into @theme — see the Phase 2
-     note above). Per-theme mix: a light-gray lift in Shade, a white lift
-     in Light. */
+     `bg-[var(--selected-glass)]`. Per-theme mix: a light-gray lift in Shade,
+     a white lift in Light. */
   --selected-glass: color-mix(in oklab, var(--bg5) 25%, transparent);
 }
 
 /* ── Light theme ── */
 [data-theme="light"] {
-  --pr-status-surface:      var(--brown-bg);          /* light-pink surface reads fine as-is */
-  --pr-status-action-bg:    var(--brown-fg);          /* solid mauve button */
-  --pr-status-action-fg:    var(--inverted-fg);       /* white text + icon on the mauve button */
-  --pr-status-action-hover: var(--brown-800);         /* darker mauve */
-  --pr-status-merge-fg:     var(--inverted-fg);       /* white text/icon on the green Merge button */
-  --pr-status-continue-fg:  var(--inverted-fg);       /* white label on the mauve Continue button */
-  --pr-status-chip-border-closed: var(--red-300);     /* softer pink outline on the light salmon closed row */
+  --pr-status-surface: var(
+    --brown-bg
+  ); /* light-pink surface reads fine as-is */
+  --pr-status-action-bg: var(--brown-fg); /* solid mauve button */
+  --pr-status-action-fg: var(
+    --inverted-fg
+  ); /* white text + icon on the mauve button */
+  --pr-status-action-hover: var(--brown-800); /* darker mauve */
+  --pr-status-merge-fg: var(
+    --inverted-fg
+  ); /* white text/icon on the green Merge button */
+  --pr-status-continue-fg: var(
+    --inverted-fg
+  ); /* white label on the mauve Continue button */
+  --pr-status-chip-border-closed: var(
+    --red-300
+  ); /* softer pink outline on the light salmon closed row */
 
   /* Selected-state fill on glass — bg3 (= white in Light) at 30%. */
   --selected-glass: color-mix(in oklab, var(--bg3) 30%, transparent);

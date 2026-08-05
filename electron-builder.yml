@@ -2,16 +2,10 @@
 # electron-builder config — Zeros macOS .app + .dmg
 # ──────────────────────────────────────────────────────────
 #
-# Unsigned build path. Because we don't have an Apple Developer
-# cert, macOS flags the downloaded .app with the com.apple.quarantine
-# xattr and Gatekeeper blocks it with "damaged" / "unidentified
-# developer" errors. User runs this once after install:
-#
-#   xattr -cr /Applications/Zeros.app
-#
-# to strip the quarantine flag. After that the app launches
-# normally. Once we have a Developer ID cert, flip mac.identity
-# back on and drop this workaround.
+# Signing mode is credential-driven. Protected production builds supply the
+# Developer ID and notarization credentials; local or credentialless builds use
+# the afterPack ad-hoc fallback and are not public distribution artifacts. The
+# macOS section below documents both paths and the required safeguards.
 #
 # ──────────────────────────────────────────────────────────
 
@@ -22,13 +16,13 @@
 appId: com.zeros
 productName: Zeros
 # Bundle metadata only (Finder "Get Info"). The visible "About Zeros" panel
-# copyright is blanked via app.setAboutPanelOptions() in electron/main.ts — this
+# copyright is blanked via app.setAboutPanelOptions() in apps/desktop/electron/main.ts — this
 # value is the no-stale-brand fallback, never "Zeros Design".
 copyright: © 2026 Zeros
 
-# Deep ad-hoc re-sign after packaging — electron-builder's default
-# identity:null sign is incomplete on arm64 and macOS Gatekeeper
-# rejects it silently. See scripts/electron-after-pack.cjs.
+# Credentialless-build ad-hoc signing fallback. The hook self-skips when a
+# protected build supplies a real Developer ID identity. See
+# scripts/electron-after-pack.cjs.
 afterPack: ./scripts/electron-after-pack.cjs
 # Source the version from package.json at build time.
 
@@ -63,14 +57,14 @@ files:
   # `codex` + a 44 MiB codex-code-mode-host + a vendored ripgrep), the auto-walk
   # pulls it into app.asar, macOS cannot exec it there, and the packaged app
   # resolves Codex from the user's PATH regardless (see the `fallback` tier in
-  # src/engine/agents/adapters/codex/binary-resolver.ts). It was pure shipped
+  # apps/desktop/src/engine/agents/adapters/codex/binary-resolver.ts). It was pure shipped
   # weight. Excluding it changes no runtime behaviour — dev is unaffected,
   # because `files:` only governs packaging.
   - "!**/node_modules/@openai/codex-*/**"
 
 # The bun-compiled engine binary sits outside dist-electron, so bundle
 # it as an extra resource. Renderer code at runtime reaches it via
-# process.resourcesPath/zeros-engine (handled in electron/sidecar.ts).
+# process.resourcesPath/zeros-engine (handled in apps/desktop/electron/sidecar.ts).
 extraResources:
   - from: binaries/zeros-engine-aarch64-apple-darwin
     to: zeros-engine
@@ -80,12 +74,12 @@ extraResources:
   # broken) and drives node-pty from this Node subprocess instead. The sidecar
   # hands the engine this path via ZEROS_PTY_HOST_SCRIPT; node-pty itself ships
   # via the auto-walked dependency tree + asarUnpack below.
-  - from: src/engine/pty/pty-host.cjs
+  - from: apps/desktop/src/engine/pty/pty-host.cjs
     to: pty-host.cjs
   # Runtime-safe node-pty copy. On current macOS, the signed spawn-helper is
   # rejected with `posix_spawnp failed` when it lives below app.asar.unpacked,
-  # even though the same signed bytes work elsewhere under Contents/Resources
-  # (Cursor uses the latter layout too). The host is pointed at this copy.
+  # even though the same signed bytes work under Contents/Resources. The host is
+  # pointed at this copy.
   # Include only JS + the one architecture we ship; the dependency auto-walked
   # copy remains as a compatibility fallback but is not the primary runtime.
   - from: node_modules/node-pty
@@ -98,7 +92,7 @@ extraResources:
   # Node subprocess instead. The sidecar hands the engine this path via
   # ZEROS_CURSOR_HOST_SCRIPT; @cursor/sdk + its deps ship via the auto-walked
   # dependency tree + asarUnpack below.
-  - from: src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs
+  - from: apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs
     to: cursor-host.cjs
   # The Claude Code CLI — the runtime `query()` actually spawns.
   #
@@ -109,12 +103,13 @@ extraResources:
   # sdk.mjs is bundled in, import.meta.url points into bun's $bunfs, and no
   # node_modules exists on disk. The SDK then throws "Native CLI binary for
   # darwin-arm64 not found" and the user sees "AGENT RESPONSE FAILURE" on every
-  # send. In dev the engine is `bun <repo>/src/cli.ts` and the same lookup works,
-  # which is why this only ever broke Beta + Production (field report: 0.0.14).
+  # send. In development the engine is `bun <repo>/apps/desktop/src/cli.ts`,
+  # where the same lookup succeeds, so local runs cannot validate this packaged
+  # runtime boundary.
   #
   # scripts/stage-claude-cli.mjs (run from beforePack) hardlinks the resolved
   # platform binary to binaries/claude and writes its claude-code version beside
-  # it; electron/sidecar.ts passes both to the engine as ZEROS_CLAUDE_CLI_PATH /
+  # it; apps/desktop/electron/sidecar.ts passes both to the engine as ZEROS_CLAUDE_CLI_PATH /
   # ZEROS_CLAUDE_CLI_VERSION. It MUST live here in plain Resources rather than
   # under asar: it is exec'd directly, and `files:` above excludes the npm copy so
   # the blob ships exactly once. `pnpm check:packaging-paths` name-matches these
@@ -123,6 +118,19 @@ extraResources:
     to: claude
   - from: binaries/claude-cli-version.txt
     to: claude-cli-version.txt
+  # Repository and third-party terms must travel with every binary release.
+  # The generated bundle contains the exact locked production inventory and
+  # license/NOTICE texts; `pnpm check:licenses` rejects drift before packaging.
+  - from: LICENSE
+    to: LICENSE.txt
+  - from: THIRD-PARTY-NOTICES.md
+    to: THIRD-PARTY-NOTICES.md
+  - from: THIRD-PARTY-LICENSES.txt
+    to: THIRD-PARTY-LICENSES.txt
+  - from: third_party
+    to: third_party
+    filter:
+      - "**/LICENSE"
 
 # ── macOS ────────────────────────────────────────────────
 mac:
@@ -140,7 +148,8 @@ mac:
   category: public.app-category.developer-tools
   # ── Developer ID signing + notarization (PRODUCTION) ──
   # electron-builder signs with the Developer ID cert from CSC_LINK (a base64
-  # .p12 in the CSC_LINK repo secret, unlocked with CSC_KEY_PASSWORD), then
+  # .p12 in the protected-environment CSC_LINK secret, unlocked with
+  # CSC_KEY_PASSWORD), then
   # notarizes + staples via Apple's notarytool using APPLE_ID /
   # APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID. release.yml forwards all five
   # secrets; scripts/electron-after-pack.cjs self-skips its ad-hoc re-sign when
@@ -215,11 +224,11 @@ dmg:
 #
 # `provider: generic`, NOT `github` — electron-updater's GitHub provider accepts
 # stable tags through its channel filter, which breaks the pre-release channels
-# (see electron/updater.ts UPDATER_FEED_BY_CHANNEL).
+# (see apps/desktop/electron/updater.ts UPDATER_FEED_BY_CHANNEL).
 #
 # This block is baked into the bundle's app-update.yml at package time — it is
 # what the STABLE updater actually uses at runtime (alpha/beta override via
-# setFeedURL in electron/updater.ts). The generic provider fetches
+# setFeedURL in apps/desktop/electron/updater.ts). The generic provider fetches
 # <url>/latest-mac.yml and resolves the zip filenames inside it against the
 # same base.
 #

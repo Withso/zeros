@@ -1,15 +1,15 @@
 {
-  // Type-check-ONLY config (no emit) for the whole app under src/.
+  // Type-check-only config (no emit) for apps/desktop/src/.
   //
   // The app is built by Vite (renderer) and tsup (engine + Electron main), and
   // BOTH esbuild-strip types WITHOUT checking them — so nothing actually
-  // type-checks src/ at build time. This config is that missing gate: it runs
-  // `tsc --noEmit` over all of src/ under the repo's strict settings
+  // type-checks desktop source at build time. This config is that missing gate:
+  // it runs `tsc --noEmit` over apps/desktop/src/ under the repo's strict settings
   // (inherited via ./tsconfig.json → ./tsconfig.build.json), wired as
   // `pnpm typecheck:app` and run as a blocking Preflight CI check.
   //
   // It widens `lib` beyond tsconfig.build.json (which is engine-oriented):
-  // DOM/DOM.Iterable because the renderer half of src/ uses browser globals,
+  // DOM/DOM.Iterable because the renderer uses browser globals,
   // and `types: ["node"]` so the engine half resolves Node APIs deterministically
   // (otherwise node imports silently degrade to `any` under moduleResolution:bundler).
   "extends": "./tsconfig.json",
@@ -19,5 +19,5 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": ["node"]
   },
-  "include": ["src"]
+  "include": ["apps/desktop/src"]
 }

@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 // ──────────────────────────────────────────────────────────
-// check-preload-allowlist — keep electron/preload.ts ALLOWED_COMMANDS in sync
+// check-preload-allowlist — keep apps/desktop/electron/preload.ts ALLOWED_COMMANDS in sync
 // with the main-process commands the renderer actually invokes.
 // ──────────────────────────────────────────────────────────
 //
-// H1 narrowed the preload bridge so a renderer XSS can only reach an allowlist
+// The preload bridge allows a renderer XSS to reach only an explicit allowlist
 // of commands. That list is hand-maintained, so it drifts two ways:
 //   • MISSING  — the renderer calls a command that's NOT allowlisted. The call
 //     is rejected at preload ("command not permitted") and the feature silently
 //     breaks. This is the gap that shipped four broken browser/design-mode
 //     commands. Treated as a HARD ERROR (exit 1).
 //   • STALE    — a command is allowlisted but never invoked. It widens the
-//     XSS-reachable surface H1 set out to shrink, so it is a HARD ERROR too.
+//     XSS-reachable surface, so it is a hard error too.
 //
 // The preload gate is reachable ONLY via window.__ZEROS_NATIVE__.invoke, which
 // the renderer always calls through the `nativeInvoke(...)` wrapper — so the
@@ -24,8 +24,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const PRELOAD = path.join(ROOT, "electron/preload.ts");
-const SRC_DIR = path.join(ROOT, "src");
+const PRELOAD = path.join(ROOT, "apps/desktop/electron/preload.ts");
+const SRC_DIR = path.join(ROOT, "apps", "desktop", "src");
 
 // Commands intentionally allowlisted ahead of their renderer call sites. Add a
 // command here (with a comment) to silence the STALE warning on purpose; leave
@@ -37,7 +37,9 @@ function readAllowlist() {
   const src = fs.readFileSync(PRELOAD, "utf8");
   const anchor = src.indexOf("ALLOWED_COMMANDS");
   if (anchor === -1)
-    throw new Error("ALLOWED_COMMANDS not found in electron/preload.ts");
+    throw new Error(
+      "ALLOWED_COMMANDS not found in apps/desktop/electron/preload.ts",
+    );
   const open = src.indexOf("[", anchor);
   const close = src.indexOf("])", open);
   if (open === -1 || close === -1)
@@ -130,7 +132,9 @@ if (missing.length > 0) {
   for (const c of missing) {
     console.error(`     "${c}"  ← ${invokedSites.get(c).join(", ")}`);
   }
-  console.error(`\n  Add them to ALLOWED_COMMANDS in electron/preload.ts.`);
+  console.error(
+    `\n  Add them to ALLOWED_COMMANDS in apps/desktop/electron/preload.ts.`,
+  );
   process.exit(1);
 }
 

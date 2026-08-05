@@ -23,13 +23,13 @@ import { execFileSync } from "node:child_process";
 
 // Required in EVERY production build — a missing one breaks the shipped app.
 // Auth has no entry here: the desktop never talks to Auth0 directly, only to
-// app.zeros.build (see electron/ipc/commands/auth-session.ts).
+// app.zeros.build (see apps/desktop/electron/ipc/commands/auth-session.ts).
 const PROD_REQUIRED = ["VITE_POSTHOG_KEY_PROD", "VITE_FEEDBACK_URL"];
 // Injected but allowed to resolve to "" (code falls back to a default).
 //
 // VITE_ZEROS_CHANNEL: release.yml does NOT inject it — Production's renderer channel
 // comes from the `import.meta.env.DEV ? "dev" : "stable"` fallback in
-// src/zeros/flags.ts. (An earlier version of this comment claimed release.yml
+// apps/desktop/src/renderer/config/release-channel.ts. (An earlier version of this comment claimed release.yml
 // injected "stable". It never did.) The alpha + beta workflows DO inject it
 // explicitly, and CHANNEL_WORKFLOWS below asserts that.
 //
@@ -66,7 +66,7 @@ const names = (text) => [...text.matchAll(/VITE_[A-Z0-9_]+/g)].map((m) => m[0]);
 // 1. VITE_ vars actually referenced in src/.
 const used = new Set(
   names(
-    execFileSync("grep", ["-rhoE", "import\\.meta\\.env\\.VITE_[A-Z0-9_]+", "src/"], {
+    execFileSync("grep", ["-rhoE", "import\\.meta\\.env\\.VITE_[A-Z0-9_]+", "apps/desktop/src/"], {
       encoding: "utf8",
     }),
   ),

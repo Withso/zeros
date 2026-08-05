@@ -17,7 +17,7 @@
   /* ── FOREGROUNDS (text + icons only) ── */
   --fg1:hsl(0 2% 92%); --fg2:hsl(20 4% 66%); --fg3:hsl(15 1% 44%); --muted-fg:hsl(15 4% 44%);
 
-  /* ── SIDEBAR (workspace col 1 only) ── */
+  /* ── SIDEBAR (repository navigation) ── */
   --sidebar-bg:hsl(25 5% 9%); --sidebar-bg-hover:hsl(25 2% 15%);
 
   /* ── BORDERS (borders only) ── */
@@ -357,7 +357,7 @@ textarea.inp{resize:vertical;min-height:60px;line-height:1.5}
   <h1>Zeros — Design System</h1>
   <p class="lede">The complete token reference for the Zeros Mac app: every primitive in
   <code>styles/zeros-tokens.css</code>, how each one is used, the usage rules &amp; anti-patterns, and a live
-  component library (mirroring <code>src/zeros/ui/primitives/</code>). Two themes ship: <em>Zeros Shade</em>
+  component library (mirroring <code>apps/desktop/src/renderer/shared/ui/primitives/</code>). Two themes ship: <em>Zeros Shade</em>
   (dark — muted warm-gray, HSL) and <em>Light</em> (warm off-whites, added 2026-07-11) — flip this page with the
   toggle (top right), which swaps <code>data-theme="light"</code> on <code>&lt;html&gt;</code> exactly like the app's
   appearance store. Rendered on the real app canvas (<code>--bg1</code>). For semantic color
@@ -410,7 +410,7 @@ textarea.inp{resize:vertical;min-height:60px;line-height:1.5}
 </section>
 
 <section id="sidebar">
-  <div class="h2">Sidebar <small>workspace column 1 ONLY — not the settings sidebar</small></div>
+  <div class="h2">Repository navigation <small>not the settings sidebar</small></div>
   <p class="secintro">The workspace sidebar gets its own surface pair. The settings sidebar uses the default tokens
   (<code>bg-bg1</code> / <code>bg-bg2</code>).</p>
   <div class="tokens">
@@ -654,7 +654,7 @@ textarea.inp{resize:vertical;min-height:60px;line-height:1.5}
 
   <h3>Surface &amp; foreground map</h3>
   <div class="rules">
-    <div class="rule-card"><b>Depth ladder.</b> Canvas <code>bg-bg1</code> → composer <code>bg-bg2</code> → popover/dropdown/card <code>bg-bg3</code>. Dialog content is the exception (<code>bg-bg1</code>). Workspace sidebar (col 1) <code>bg-sidebar-bg</code>.</div>
+    <div class="rule-card"><b>Depth ladder.</b> Canvas <code>bg-bg1</code> → composer <code>bg-bg2</code> → popover/dropdown/card <code>bg-bg3</code>. Dialog content is the exception (<code>bg-bg1</code>). Repository navigation <code>bg-sidebar-bg</code>.</div>
     <div class="rule-card"><b>Hover is surface-scoped.</b> bg1 → <code>bg-bg1-hover</code>, bg2 → <code>bg-bg2-hover</code>, bg3 → <code>bg-bg3-hover</code>, sidebar → <code>bg-sidebar-bg-hover</code>. Never jump two tiers.</div>
     <div class="rule-card"><b>Foregrounds.</b> Default <code>text-fg2</code>; highlighted/selected/focal <code>text-fg1</code>; placeholder <code>text-muted-fg</code>.</div>
     <div class="rule-card"><b>Selected = the sticky hover.</b> A selected row uses that surface's hover token, just persistently.</div>
@@ -686,7 +686,7 @@ textarea.inp{resize:vertical;min-height:60px;line-height:1.5}
 
 <!-- ═══════════ COMPONENTS ═══════════ -->
 <section id="components">
-  <div class="h2">Components <small>mirroring <code>src/zeros/ui/primitives/</code> — hover them, they're live</small></div>
+  <div class="h2">Components <small>mirroring <code>apps/desktop/src/renderer/shared/ui/primitives/</code> — hover them, they're live</small></div>
   <p class="secintro">Basic components and their real variants. Default text/icon color is <code>fg2</code>; highlighted/active is <code>fg1</code>.
   Focus: most controls use a 3px <code>ring-highlighted-bright/50</code>; inputs &amp; selects focus with a border swap only.</p>
 
@@ -758,7 +758,7 @@ textarea.inp{resize:vertical;min-height:60px;line-height:1.5}
       </div>
     </div>
   </div>
-  <p class="cap"><b>h-7 rounded-md px-2.5</b> pills on a <b>transparent</b> track · active <code>bg-bg3 + text-fg1</code> · idle <code>text-fg2</code>, hover <code>bg-sidebar-bg-hover</code> (col-3 / source strip) or <code>bg-bg1-hover</code> (chat). Instances: <b>Column-3 home tabs</b> Terminal/Browser/Files (<code>column3-tab-strip.tsx</code>) · <b>chat session tabs</b> (<code>column2-chat-tabs.tsx</code>) · <b>Source strip</b> All&nbsp;Files/Changes/PR (<code>source-tab-strip.tsx</code>) · <b>Review sub-nav</b> on a <code>border-b</code> bar, hover <code>bg-bg3/50</code> (<code>review-tab.tsx</code>).</p>
+  <p class="cap"><b>h-7 rounded-md px-2.5</b> pills on a <b>transparent</b> track · active <code>bg-bg3 + text-fg1</code> · idle <code>text-fg2</code>, hover <code>bg-sidebar-bg-hover</code> (workbench / source strip) or <code>bg-bg1-hover</code> (chat). Instances: <b>workbench tabs</b> Terminal/Browser/Files (<code>shell/workbench/tab-strip.tsx</code>) · <b>chat session tabs</b> (<code>shell/conversation/chat-tabs.tsx</code>) · <b>Source strip</b> All&nbsp;Files/Changes/PR (<code>source-tab-strip.tsx</code>) · <b>Review sub-nav</b> on a <code>border-b</code> bar, hover <code>bg-bg3/50</code> (<code>review-tab.tsx</code>).</p>
 
   <!-- FAMILY 2 — underline tabs -->
   <div class="demo" style="margin-top:14px">

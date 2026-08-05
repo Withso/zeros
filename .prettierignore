@@ -9,15 +9,15 @@
 # 1,001 files exported from openai/codex by scripts/codegen-codex.mjs, every one
 # stamped "GENERATED CODE! DO NOT MODIFY BY HAND!". Formatting them produces a
 # diff that the next codegen run reverts.
-src/engine/agents/adapters/codex/generated/
+apps/desktop/src/engine/agents/adapters/codex/generated/
 
 # ──────────────────────────────────────────────────────────
 # Lockfiles
 # ──────────────────────────────────────────────────────────
 pnpm-lock.yaml
-backend/pnpm-lock.yaml
-website/marketing/pnpm-lock.yaml
-website/web-app/package-lock.json
+apps/control-plane/pnpm-lock.yaml
+apps/marketing/pnpm-lock.yaml
+apps/web/package-lock.json
 
 # ──────────────────────────────────────────────────────────
 # Build output and installed trees
@@ -36,12 +36,8 @@ coverage/
 # The design labs are single-file HTML documents that open straight off
 # file://; their indentation encodes the structure of the mock, and Prettier's
 # HTML printer rewraps it into something no one can read as a design.
-# `styles/Artifacts/` and `docs/` are TRACKED — the former is the design record,
-# `docs/` the engineering journal — so this list is the only thing keeping the
-# changed-file `prettier --check` off them. `docs/` earns it on the same ground:
-# 13 of its files are hand-laid-out HTML reports whose indentation is the
-# document. (`docs/` was gitignored until 2026-07-28, when it became tracked;
-# only `.context/` is still a local-only tree on disk.)
-docs/
+# `styles/Artifacts/` is the tracked design record. `.context/` is local-only
+# working material. Durable Markdown under `docs/` is intentionally formatted
+# and therefore is not exempted here.
 styles/Artifacts/
 .context/

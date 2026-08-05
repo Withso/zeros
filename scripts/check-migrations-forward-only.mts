@@ -3,7 +3,7 @@
 // ──────────────────────────────────────────────────────────
 //
 // The shipped zeros.db is advanced by an ORDERED, append-only list of migrations
-// (src/engine/db/migrations.ts). runMigrations() skips versions already recorded
+// (apps/desktop/src/engine/db/migrations.ts). runMigrations() skips versions already recorded
 // in schema_migrations, so EDITING or REORDERING an already-released migration
 // NEVER re-runs on existing users — their on-disk DB silently diverges from a
 // fresh install (wrong schema, FTS/trigger drift, unrecoverable loss of chats).
@@ -35,7 +35,8 @@ interface Migration {
   up: string;
 }
 
-const MIG_PATH = "src/engine/db/migrations.ts";
+const MIG_PATH = "apps/desktop/src/engine/db/migrations.ts";
+const LEGACY_MIG_PATH = "src/engine/db/migrations.ts";
 
 async function importMigrations(fileUrl: string): Promise<Migration[]> {
   const mod = (await import(fileUrl)) as { MIGRATIONS?: Migration[] };
@@ -52,10 +53,19 @@ function headMigrations(): Promise<Migration[]> {
 async function mainMigrations(): Promise<Migration[] | null> {
   let src: string;
   try {
-    src = execFileSync("git", ["show", `origin/main:${MIG_PATH}`], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
+    try {
+      src = execFileSync("git", ["show", `origin/main:${MIG_PATH}`], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+    } catch {
+      // One-time repository move: compare the new working-tree location with
+      // the legacy path until origin/main contains apps/desktop/.
+      src = execFileSync("git", ["show", `origin/main:${LEGACY_MIG_PATH}`], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+    }
   } catch {
     return null; // origin/main not fetched, or the file is absent there
   }

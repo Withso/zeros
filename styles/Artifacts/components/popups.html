@@ -160,7 +160,7 @@ td b{color:var(--fg1);font-weight:600}
 .btn.focusring{outline:none;border-color:var(--highlighted-bright);
   box-shadow:0 0 0 3px color-mix(in srgb,var(--highlighted-bright) 50%,transparent)}
 
-/* Kbd chip — src/zeros/ui/primitives/kbd.tsx */
+/* Kbd chip — apps/desktop/src/renderer/shared/ui/primitives/kbd.tsx */
 .kbd{display:inline-flex;flex:none;user-select:none;align-items:center;border-radius:var(--radius-sm);
   border:1px solid var(--border1);padding:1px 4px;font:500 var(--text-2xxs)/1 "Geist Variable",system-ui;
   font-variant-numeric:tabular-nums;color:var(--fg2);background:transparent}
@@ -179,7 +179,7 @@ td b{color:var(--fg1);font-weight:600}
 .inp.mono,.ta.mono{font-family:"Geist Mono Variable",ui-monospace,Menlo,monospace;font-size:12px}
 .ta{resize:none;min-height:70px;line-height:1.5}
 
-/* select trigger — src/zeros/ui/primitives/select.tsx */
+/* select trigger — apps/desktop/src/renderer/shared/ui/primitives/select.tsx */
 .seltrig{display:inline-flex;align-items:center;justify-content:space-between;gap:8px;height:32px;
   background:transparent;border:1px solid var(--border3);border-radius:var(--radius-sm);color:var(--fg1);
   font:14px "Geist Variable",system-ui;padding:0 12px;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.1);min-width:150px}
@@ -367,7 +367,7 @@ td b{color:var(--fg1);font-weight:600}
   background:color-mix(in srgb,var(--bg2) 30%,transparent);
   -webkit-backdrop-filter:blur(28px) saturate(1.2);backdrop-filter:blur(28px) saturate(1.2)}
 .sc-tabs{display:flex;flex-wrap:wrap;gap:4px;padding:8px;flex:none}
-/* the app-wide tab pill (chat / terminal / column-3 strips) — no border; fill + fg1 when
+/* the app-wide tab pill (chat / terminal / workbench strips) — no border; fill + fg1 when
    active/hovered, but the fill is the translucent --selected-glass token so it stays glassy. */
 .sc-tab{display:flex;align-items:center;height:28px;border:0;border-radius:var(--radius-md);padding:0 10px;
   font:500 var(--text-xs) "Geist Variable",system-ui;color:var(--fg2);background:transparent;cursor:pointer}
@@ -490,7 +490,7 @@ td b{color:var(--fg1);font-weight:600}
   <p class="lede">Every UI in the Zeros Mac app that opens in a <em>floating layer</em> — modal dialogs on a dimmed scrim,
   the create-workspace composer, the command &amp; keyboard-shortcut palettes, the image lightbox, and every anchored
   <em>dropdown</em>, <em>context menu</em>, <em>select</em>, <em>popover</em> and <em>hover card</em>. All are built from
-  the Radix / cmdk primitives in <code>src/zeros/ui/primitives/</code>. Two layers make an overlay: a full-screen
+  the Radix / cmdk primitives in <code>apps/desktop/src/renderer/shared/ui/primitives/</code>. Two layers make an overlay: a full-screen
   <em>scrim</em> (dialogs only) and a floating <em>panel</em>. Demos are static reproductions of the shipped components —
   flip dark / light with the toggle (top-right).</p>
 </header>
@@ -585,7 +585,7 @@ td b{color:var(--fg1);font-weight:600}
     <div class="pin"><b>Footer</b> <span><code>flex justify-end gap-2</code> — primary on the right, ghost/secondary “Cancel” to its left.</span></div>
     <div class="pin"><b>Close ×</b> <span><code>absolute right-4 top-4</code>, opacity 70→100; gated by <code>showCloseButton</code> (default on).</span></div>
   </div>
-  <p class="cap">Source <code>src/zeros/ui/primitives/dialog.tsx</code>. No separate <code>AlertDialog</code> exists — destructive confirms are just a Dialog with a red button (see <a href="#confirm">Confirmations</a>).</p>
+  <p class="cap">Source <code>apps/desktop/src/renderer/shared/ui/primitives/dialog.tsx</code>. No separate <code>AlertDialog</code> exists — destructive confirms are just a Dialog with a red button (see <a href="#confirm">Confirmations</a>).</p>
 </section>
 
 <!-- ═══════════════════════ CREATE WORKSPACE (HERO) ═══════════════════════ -->
@@ -775,7 +775,7 @@ td b{color:var(--fg1);font-weight:600}
       <tr><td class="mono" style="color:var(--fg3)">CreateFromPicker</td><td style="color:var(--fg3)">defined but <b style="color:var(--fg3)">never mounted</b> — dispatcher uses the “Create from…” popover instead</td><td style="color:var(--fg3)">—</td><td class="mono" style="color:var(--fg3)">—</td><td style="color:var(--fg3)">—</td></tr>
     </table>
   </div>
-  <p class="cap">All in <code>src/shell/dialogs/</code>, <code>src/zeros/panels/</code>, and <code>repository-icon-dialog.tsx</code>. Save/loading states swap the primary label for a spinner; <code>⌘↩</code> submits the ones marked <code>⌘↵</code>.</p>
+  <p class="cap">All in <code>apps/desktop/src/renderer/shell/dialogs/</code>, <code>apps/desktop/src/renderer/features/</code>, and <code>repository-icon-dialog.tsx</code>. Save/loading states swap the primary label for a spinner; <code>⌘↩</code> submits the ones marked <code>⌘↵</code>.</p>
 </section>
 
 <!-- ═══════════════════════ COMMAND PALETTE ═══════════════════════ -->
@@ -814,7 +814,7 @@ td b{color:var(--fg1);font-weight:600}
   </div>
   <p class="cap"><b>WorkspaceDirectoryPicker</b> (<code>workspace-directory-picker.tsx</code>) — title “Link a workspace or directory”, 560px. Group “Directories” (Browse… + linked dirs with Unlink), then one group per repo (branch label bold + worktree basename, <code>✓</code> = linked). Opened from the composer <code>+</code> menu / <code>/add-dir</code>. The <code>CommandDialog</code> shell (<code>command.tsx</code>) defaults to title “Command Palette”; in-dialog rows are roomier (<code>py-3</code>, 20px icons) and expose an <code>⌘…</code> shortcut slot on the right.</p>
 
-  <div class="cap" style="margin-top:12px">Also cmdk-powered but <b>anchored popovers</b> (no scrim), covered under <a href="#popover">Popover</a>: Column-3 new-tab menu (“Open any file or URL…”, P-8), archived-workspaces search (P-9), model menu (P-1), branch / remote / target pickers (P-7, P-10, P-11), icon picker (P-5).</p>
+  <div class="cap" style="margin-top:12px">Also cmdk-powered but <b>anchored popovers</b> (no scrim), covered under <a href="#popover">Popover</a>: workbench new-tab menu (“Open any file or URL…”, P-8), archived-workspaces search (P-9), model menu (P-1), branch / remote / target pickers (P-7, P-10, P-11), icon picker (P-5).</p>
 </section>
 
 <!-- ═══════════════════════ SHORTCUTS PALETTE ═══════════════════════ -->
@@ -974,7 +974,7 @@ td b{color:var(--fg1);font-weight:600}
       <tr><td class="mono">P-5</td><td><b>Icon picker</b></td><td>current-icon ghost button</td><td><code>Command</code> “Search icons” over a 6-col Lucide grid</td></tr>
       <tr><td class="mono">P-6</td><td><b>“Create from…” source</b></td><td>dispatcher pill</td><td>search + repo badge · Tabs PRs / Branches / Issues(soon) · rows</td></tr>
       <tr><td class="mono">P-7</td><td><b>Target / base branch</b></td><td>PR row branch button (<code>ChevronsUpDown</code>)</td><td><code>Command</code> “Select target branch…”, <code>✓</code> on current</td></tr>
-      <tr><td class="mono">P-8</td><td><b>New-tab quick-open</b> (Col 3)</td><td><code>+</code> “New tab”</td><td><code>Command</code> “Open any file or URL…” — File / Browser / recents / files</td></tr>
+      <tr><td class="mono">P-8</td><td><b>New-tab quick-open</b> (Workbench)</td><td><code>+</code> “New tab”</td><td><code>Command</code> “Open any file or URL…” — File / Browser / recents / files</td></tr>
       <tr><td class="mono">P-9</td><td><b>Archived workspaces</b></td><td><code>Archive</code> icon in top bar</td><td><code>Command</code> “Search archived workspaces…”, display-only rows</td></tr>
       <tr><td class="mono">P-10</td><td><b>Repo branch source</b></td><td>“Branch new workspaces from” button</td><td><code>Command</code> “Search branches…”, <code>✓</code> + “default” badge</td></tr>
       <tr><td class="mono">P-11</td><td><b>Remote origin</b></td><td>“Remote origin” button</td><td>remote rows: <code>✓</code> + GitHub/Globe icon + URL</td></tr>
@@ -1030,8 +1030,8 @@ td b{color:var(--fg1);font-weight:600}
   <div class="demo" style="margin-top:16px">
     <table>
       <tr><th style="width:44px">#</th><th style="width:210px">Menu</th><th>Trigger</th><th>Items</th></tr>
-      <tr><td class="mono">D-1</td><td><b>New-tab (Chat/Terminal)</b></td><td>Col-2 “+”</td><td>Chat <span class="kbd">⌘T</span> · Terminal <span class="kbd">⌘⇧T</span></td></tr>
-      <tr><td class="mono">D-2</td><td><b>“Open in…”</b></td><td>Col-2 split-button caret</td><td>Finder · {IDEs} · Terminal · sep · Copy path <span class="kbd">⌘C</span></td></tr>
+      <tr><td class="mono">D-1</td><td><b>New-tab (Chat/Terminal)</b></td><td>Conversation “+”</td><td>Chat <span class="kbd">⌘T</span> · Terminal <span class="kbd">⌘⇧T</span></td></tr>
+      <tr><td class="mono">D-2</td><td><b>“Open in…”</b></td><td>Conversation split-button caret</td><td>Finder · {IDEs} · Terminal · sep · Copy path <span class="kbd">⌘C</span></td></tr>
       <tr><td class="mono">D-3</td><td><b>Help menu</b></td><td>“?” icon</td><td>Documentation · Send feedback · <span class="mono">Zeros v{version}</span></td></tr>
       <tr><td class="mono">D-4</td><td><b>Pane options</b></td><td>“⋯” pane</td><td>Split Down · Split Right · sep · Open in (submenu)</td></tr>
       <tr><td class="mono">D-5</td><td><b>Changes-scope</b></td><td>scope pill</td><td>All / Uncommitted / Staged / Unstaged + per-commit rows</td></tr>
@@ -1092,7 +1092,7 @@ td b{color:var(--fg1);font-weight:600}
       <tr><th style="width:44px">#</th><th style="width:220px">Menu</th><th>Trigger</th><th>Items</th></tr>
       <tr><td class="mono">A-1</td><td><b>Workspace</b> (shared)</td><td>right-click a workspace tab / card / row</td><td>Set status → (Backlog · In progress · In review · Done · Cancelled, <code>✓</code>) · sep · Archive</td></tr>
       <tr><td class="mono">A-2</td><td><b>Project (repo) — right-click</b></td><td>right-click top-bar repo button</td><td>Change icon · Repository Settings</td></tr>
-      <tr><td class="mono">A-3</td><td><b>Chat tab</b></td><td>right-click a Col-2 tab</td><td>Rename · sep · Close Tab</td></tr>
+      <tr><td class="mono">A-3</td><td><b>Chat tab</b></td><td>right-click a Conversation tab</td><td>Rename · sep · Close Tab</td></tr>
       <tr><td class="mono">A-4</td><td><b>File-tree row</b> <span class="tag">custom</span></td><td>right-click a file / folder</td><td>Open in new tab · Copy path · Reveal in Finder</td></tr>
     </table>
   </div>
@@ -1203,7 +1203,7 @@ td b{color:var(--fg1);font-weight:600}
     <div class="x yes"><i>✓</i> <b>Use <code>Kbd</code> for shortcut chips</b> (<code>border1</code>, 11px, <code>fg2</code>) and the inline <code>tracking-widest opacity-60</code> variant only where a menu row needs a lighter hint.</div>
     <div class="x yes"><i>✓</i> <b>Trust <code>overlay-focus</code>.</b> Closing an anchored overlay with the mouse drops the focus ring; closing with the keyboard restores it. Don’t hand-manage trigger focus.</div>
   </div>
-  <p class="cap">Primitives: <code>src/zeros/ui/primitives/{dialog,popover,dropdown-menu,context-menu,select,hover-card,sheet,command,alert,kbd}.tsx</code> · overlay focus <code>src/zeros/ui/overlay-focus.ts</code>.</p>
+  <p class="cap">Primitives: <code>apps/desktop/src/renderer/shared/ui/primitives/{dialog,popover,dropdown-menu,context-menu,select,hover-card,sheet,command,alert,kbd}.tsx</code> · overlay focus <code>apps/desktop/src/renderer/shared/ui/overlay-focus.ts</code>.</p>
 </section>
 
 </main>

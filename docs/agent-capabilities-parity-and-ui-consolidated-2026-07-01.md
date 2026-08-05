@@ -2,15 +2,22 @@
 
 **Updated 2026-08-03.** Checked tasks are implemented; unchecked tasks remain open. Each task says what the user gets, in plain language. Re-verified against the repository's pinned agent platforms on 2026-08-03 (Claude Agent SDK 0.3.220 · Codex 0.146.0 · Cursor SDK 1.0.26).
 
+> **Retention:** This is the actively maintained agent-capability backlog, not a
+> completed historical plan. Keep it until every remaining item is implemented,
+> rejected, or moved to another tracked roadmap. Update its status and code
+> anchors whenever the implementation changes.
+
 **Tags:** `Claude` / `Codex` / `Cursor` / `All` = which agent · **P1** do first · **P2** next · **P3** later · 🎨 = new/changed screen · 🔍 = wiring, confirm on screen · ⚙️ = invisible plumbing.
 
-**Design file:** `styles/Artifacts/Designs/design-open-tasks-consolidated-2026-07-30.html` (one catalog for every task here that touches the UI — replaces design-3.8 and design-3.9).
+**UI design references:** Supporting visual references live in
+`styles/Artifacts/Designs/`. This Markdown checklist is authoritative; the former
+consolidated private delivery ledger is not a dependency of this roadmap.
 
 ---
 
 ## 1. Background tasks & waiting states
 
-*Background work is now session-owned server state: Claude and Codex publish bounded, replace-style snapshots into one shared card, and completed work becomes a durable transcript record. Refreshes retain the last confirmed exact-session snapshot instead of blanking the UI.*
+_Background work is now session-owned server state: Claude and Codex publish bounded, replace-style snapshots into one shared card, and completed work becomes a durable transcript record. Refreshes retain the last confirmed exact-session snapshot instead of blanking the UI._
 
 - [x] **Show every background task as a labeled chip in the chat** — Claude's native task membership and lifecycle events now drive one "Background Task" card above the composer, with the task name, live elapsed time, and Stop. `Claude · P1 · 🎨`
 - [x] **Show a "Waiting for N background tasks" line with a live timer** — the line appears only when Claude reports the parent session idle while active work remains; it sits directly above the composer and uses the standard spinner. `Claude · P1 · 🎨`
@@ -23,11 +30,11 @@
 - [x] **List Codex's background terminals** — the experimental app-server list is read for the exact thread with opaque-cursor pagination, refreshed from lifecycle invalidations, rendered in the same card, and stopped with the terminal-specific terminate endpoint. CPU/memory and provider-specific Kill chrome are intentionally omitted per the consolidated design. `Codex · P2 · 🎨`
 - [x] **Never present a background notification as human input** — live Claude `user` envelopes remain tool-result transport only; prompt echoes, subagent turns, scheduled wakes, and task notifications cannot become human-authored chat bubbles. `Claude · P1 · ⚙️`
 
-Implementation anchors: shared contracts and bridge validation live in `packages/core/src/agent-events.ts`, `packages/core/src/messages.ts`, and `packages/core/src/schemas.ts`; provider lifecycle wiring is in `src/engine/agents/adapters/claude/translator.ts`, `src/engine/agents/adapters/claude-sdk/adapter.ts`, and `src/engine/agents/adapters/codex/background-terminals.ts`; the keyed renderer state and UI are in `src/zeros/agent/sessions-store.ts`, `src/zeros/agent/background-tasks-card.tsx`, and `src/zeros/agent/renderers/background-task-record.tsx`. Exact-session isolation, stale-refresh races, authoritative empty snapshots, process-exit cleanup, edge/level reordering (including a missed start edge), duplicate completion, per-wake-up reason isolation, opaque pagination, task-scoped termination, and message-attribution regressions have automated coverage.
+Implementation anchors: shared contracts and bridge validation live in `packages/protocol/src/agent-events.ts`, `packages/protocol/src/messages.ts`, and `packages/protocol/src/schemas.ts`; provider lifecycle wiring is in `apps/desktop/src/engine/agents/adapters/claude/translator.ts`, `apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts`, and `apps/desktop/src/engine/agents/adapters/codex/background-terminals.ts`; the keyed renderer state and UI are in `apps/desktop/src/renderer/features/agent/sessions-store.ts`, `apps/desktop/src/renderer/features/agent/background-tasks-card.tsx`, and `apps/desktop/src/renderer/features/agent/renderers/background-task-record.tsx`. Exact-session isolation, stale-refresh races, authoritative empty snapshots, process-exit cleanup, edge/level reordering (including a missed start edge), duplicate completion, per-wake-up reason isolation, opaque pagination, task-scoped termination, and message-attribution regressions have automated coverage.
 
 ## 2. Subagents & multi-agent workflows
 
-*The 2026-08-03 pass deliberately reuses Zeros' current permission, composer, and tool-call components without visual overrides. It adds one compact workflow hover detail, not a second background-card or helper-card system. Seven items are implemented and verified below; nine items are skipped for now.*
+_The 2026-08-03 pass deliberately reuses Zeros' current permission, composer, and tool-call components without visual overrides. It adds one compact workflow hover detail, not a second background-card or helper-card system. Seven items are implemented and verified below; nine items are skipped for now._
 
 - [ ] **Show each subagent's model (and effort) on its card** — **Skipped for now (2026-08-03).** Do not design or implement a dedicated model/effort treatment in this pass. `Claude · P1 · 🎨`
 - [ ] **Handle background subagents (they're the default now)** — **Skipped for now (2026-08-03).** Background-helper lifecycle UI will be handled in a separate iteration. `Claude · P1 · 🎨`
@@ -46,11 +53,11 @@ Implementation anchors: shared contracts and bridge validation live in `packages
 - [ ] **Show when a Cursor task went to the background and why** — **Skipped for now (2026-08-03).** Do not add a Cursor-specific background card or background-reason banner. `Cursor · P3 · 🎨`
 - [ ] **Let users define their own helpers** — **Skipped for now (2026-08-03).** Do not design or implement a helper roster, helper editor, automatic-selection UI, or composer picker in this pass; revisit it as a separate custom-subagent project. `Claude+Cursor · P3 · 🎨`
 
-Implementation anchors: shared workflow, effort, permission-copy, and permission-settled wire contracts are in `packages/core/src/agent-events.ts`, `packages/core/src/messages.ts`, and `packages/core/src/schemas.ts`; Claude approval/progress translation is in `src/engine/agents/adapters/claude-sdk/adapter.ts` and `src/engine/agents/adapters/claude/translator.ts`; exact-session state and the reused permission/tool-call surfaces are in `src/zeros/agent/sessions-store.ts`, `src/zeros/agent/permission-card.tsx`, `src/zeros/agent/workflow-activity.tsx`, and `src/zeros/agent/turn-event-list.tsx`; Codex effort synchronization and Cursor Task disclosure are in `src/engine/agents/adapters/codex/app-server-adapter.ts` and `src/zeros/agent/renderers/tool-cursor-task.tsx`. Automated coverage includes exact-session isolation, concurrent/replayed/aborted approvals, request-and-settle ordering in one render frame, out-of-order workflow lifecycle edges, cumulative-agent and narration deduplication, fixed progress projection, stable replacement snapshots, parent-thread-only Ultra updates, and sticky Cursor Task disclosure.
+Implementation anchors: shared workflow, effort, permission-copy, and permission-settled wire contracts are in `packages/protocol/src/agent-events.ts`, `packages/protocol/src/messages.ts`, and `packages/protocol/src/schemas.ts`; Claude approval/progress translation is in `apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts` and `apps/desktop/src/engine/agents/adapters/claude/translator.ts`; exact-session state and the reused permission/tool-call surfaces are in `apps/desktop/src/renderer/features/agent/sessions-store.ts`, `apps/desktop/src/renderer/features/agent/permission-card.tsx`, `apps/desktop/src/renderer/features/agent/workflow-activity.tsx`, and `apps/desktop/src/renderer/features/agent/turn-event-list.tsx`; Codex effort synchronization and Cursor Task disclosure are in `apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts` and `apps/desktop/src/renderer/features/agent/renderers/tool-cursor-task.tsx`. Automated coverage includes exact-session isolation, concurrent/replayed/aborted approvals, request-and-settle ordering in one render frame, out-of-order workflow lifecycle edges, cumulative-agent and narration deduplication, fixed progress projection, stable replacement snapshots, parent-thread-only Ultra updates, and sticky Cursor Task disclosure.
 
 ## 3. Seeing everything the agent does (tool output & streaming)
 
-*If the agent saw it, the user should see it — while it happens, not after.*
+_If the agent saw it, the user should see it — while it happens, not after._
 
 - [ ] **Show images the agent's tools return** — a screenshot from a browser tool renders as a picture; today it's silently dropped. `Claude · P1 · 🎨`
 - [ ] **Long command output grows instead of flickering** — while a Codex command streams, the log appends line by line; today only the latest fragment shows until the end. `Codex · P1 · 🔍`
@@ -107,7 +114,7 @@ Implementation anchors: shared workflow, effort, permission-copy, and permission
 ## 8. Sessions & reliability
 
 - [ ] **Reopening a brand-new Codex chat never loses memory** — persist Codex's real thread id as the chat's id so an immediate reopen resumes with full context instead of a blank thread. `Codex · P1 · 🔍`
-- [ ] **Keep listening after the answer ends** — Claude can send a suggested next prompt *after* the result; keep reading so it isn't lost, and show it as a tappable suggestion chip. `Claude · P2 · 🎨`
+- [ ] **Keep listening after the answer ends** — Claude can send a suggested next prompt _after_ the result; keep reading so it isn't lost, and show it as a tappable suggestion chip. `Claude · P2 · 🎨`
 - [ ] **Mark keyboard input as human** — stamp real user messages as human-origin so trust-gated features (like the ultracode keyword) work; forwarded/scheduled content must not count as human. `Claude · P1 · ⚙️`
 - [ ] **Show "needs your input" on the chat** — the session now reports idle / running / waiting-for-you; badge the chat tab so a waiting question is never missed. `Claude+Cursor · P2 · 🎨`
 - [ ] **Map the new end-of-turn reasons** — turns can now end for new reasons (structured-output retries exhausted, deferred tools, background requested); show a named pill instead of a generic error. `Claude · P2 · 🔍`

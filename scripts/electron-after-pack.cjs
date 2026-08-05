@@ -14,8 +14,8 @@
 // to strip the quarantine flag on first install, but once that's
 // done the app launches normally.
 //
-// When we buy an Apple Developer cert (P4), set CSC_LINK + flip the signing
-// keys in electron-builder.yml — this hook self-skips (see the CSC_LINK guard
+// When Apple Developer signing credentials are configured, set CSC_LINK and
+// enable the signing keys in electron-builder.yml. This hook self-skips (see the CSC_LINK guard
 // below) so it never clobbers the real Developer ID signature / notarization.
 // ──────────────────────────────────────────────────────────
 
@@ -35,8 +35,8 @@ const PLIST_BUDDY = "/usr/libexec/PlistBuddy";
  *  array). Fail LOUD if the expected entry is missing — silently shipping a
  *  non-stable channel on zeros:// would resurrect the collision this exists to fix.
  *
- *  Keep the scheme/name pairs in lockstep with src/engine/runtime.ts's
- *  schemeForChannel() + electron/main.ts's CHANNEL_DISPLAY_NAME. Stable is absent
+ *  Keep the scheme/name pairs in lockstep with apps/desktop/src/engine/runtime.ts's
+ *  schemeForChannel() + apps/desktop/electron/main.ts's CHANNEL_DISPLAY_NAME. Stable is absent
  *  on purpose: it IS the base plist, so it needs no patch. */
 const CHANNEL_PLIST = {
   alpha: { scheme: "zeros-alpha", name: "Zeros Alpha" },

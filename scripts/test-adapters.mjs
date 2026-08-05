@@ -42,16 +42,17 @@ const WRITE = process.argv.includes("--write");
 // is the exported class the fixture runner will instantiate.
 //
 // Codex used to live here as `CodexStreamTranslator` against the
-// per-turn `codex exec --json` stream. As of B4 (2026-05-24) Codex
+// per-turn `codex exec --json` stream. Codex now
 // runs through `codex app-server` JSON-RPC instead, and its event
 // translator (`CodexAppServerTranslator`) is exercised by vitest unit
-// tests at src/engine/agents/adapters/codex/__tests__/. The fixture
+// tests at apps/desktop/src/engine/agents/adapters/codex/__tests__/. The fixture
 // format here (newline-delimited stream JSON) doesn't map cleanly to
 // JSON-RPC notifications, so we kept the vitest path instead of
 // converting fixtures.
 const TRANSLATORS = {
   ClaudeStreamTranslator: {
-    translatorPath: "src/engine/agents/adapters/claude/translator.ts",
+    translatorPath:
+      "apps/desktop/src/engine/agents/adapters/claude/translator.ts",
     className: "ClaudeStreamTranslator",
     terminalFlag: "sawResult",
   },
@@ -96,9 +97,7 @@ async function runFixture(fixtureBase) {
   const mod = await import(pathToFileURL(outFile).href);
   const Translator = mod[spec.className];
   if (!Translator) {
-    throw new Error(
-      `translator bundle has no export named ${spec.className}`,
-    );
+    throw new Error(`translator bundle has no export named ${spec.className}`);
   }
 
   const actualUpdates = [];
@@ -148,9 +147,7 @@ async function runFixture(fixtureBase) {
 
   const mismatches = [];
 
-  if (
-    expected.expectedUpdates.join(",") !== actualUpdates.join(",")
-  ) {
+  if (expected.expectedUpdates.join(",") !== actualUpdates.join(",")) {
     mismatches.push(
       `updates mismatch:\n  expected: ${JSON.stringify(expected.expectedUpdates)}\n  actual:   ${JSON.stringify(actualUpdates)}`,
     );
@@ -186,7 +183,9 @@ async function main() {
     .map((f) => f.replace(/\.jsonl$/, ""));
 
   if (entries.length === 0) {
-    console.log("No fixtures found in scripts/fixtures/. See the README there.");
+    console.log(
+      "No fixtures found in scripts/fixtures/. See the README there.",
+    );
     return;
   }
 
@@ -202,14 +201,14 @@ async function main() {
         failures += 1;
         console.log(`  ✗ ${name}`);
         for (const m of result.mismatches ?? []) {
-          console.log(
-            `      ${m.replace(/\n/g, "\n      ")}`,
-          );
+          console.log(`      ${m.replace(/\n/g, "\n      ")}`);
         }
       }
     } catch (err) {
       failures += 1;
-      console.log(`  ✗ ${name}: ${err instanceof Error ? err.message : String(err)}`);
+      console.log(
+        `  ✗ ${name}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
@@ -217,7 +216,9 @@ async function main() {
     console.log(`\n${failures} fixture${failures === 1 ? "" : "s"} failed`);
     process.exit(1);
   }
-  console.log(`\n${entries.length} fixture${entries.length === 1 ? "" : "s"} passed`);
+  console.log(
+    `\n${entries.length} fixture${entries.length === 1 ? "" : "s"} passed`,
+  );
 }
 
 main().catch((err) => {

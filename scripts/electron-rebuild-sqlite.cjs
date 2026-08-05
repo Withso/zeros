@@ -7,12 +7,11 @@
 // is NOT enough):
 //
 //   • The Electron MAIN process opens the workspace DB in-process via
-//     better-sqlite3 (electron/ipc/commands/git.ts → src/engine/git/state.ts
-//     → src/engine/db/sqlite.ts). So the binding MUST be compiled for
-//     Electron's ABI (NODE_MODULE_VERSION 130 on Electron 33), NOT the host
-//     Node's (127 on Node 22). If it isn't, the FIRST DB open throws
-//     "NODE_MODULE_VERSION 127 … requires 130", which the user sees as
-//     "Couldn't create workspace".
+//     better-sqlite3 (apps/desktop/electron/ipc/commands/git.ts → apps/desktop/src/engine/git/state.ts
+//     → apps/desktop/src/engine/db/sqlite.ts). So the binding MUST be compiled for
+//     the installed Electron runtime's ABI, NOT the host Node runtime's ABI. If
+//     they differ, the FIRST DB open throws a NODE_MODULE_VERSION mismatch,
+//     which the user sees as "Couldn't create workspace".
 //
 //   • Every `pnpm install` / `pnpm rebuild` runs under Node and drops a
 //     Node-ABI binary via better-sqlite3's `prebuild-install` — and crucially
@@ -53,7 +52,7 @@ const rebuildBin = path.join(root, "node_modules", ".bin", "electron-rebuild");
  *  (lib/database.js), so a bare `require('better-sqlite3')` never touches the
  *  binding and would "succeed" even on a wrong-ABI build — masking the very
  *  failure we're guarding against (the app dies at `new BetterSqlite3(file)`
- *  in src/engine/db/sqlite.ts, i.e. construction). An in-memory DB forces the
+ *  in apps/desktop/src/engine/db/sqlite.ts, i.e. construction). An in-memory DB forces the
  *  dlopen without creating any file. */
 function loadsUnderElectron() {
   try {

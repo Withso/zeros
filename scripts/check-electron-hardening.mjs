@@ -16,8 +16,8 @@
 
 import { readFileSync } from "node:fs";
 
-const main = readFileSync("electron/main.ts", "utf8");
-const preload = readFileSync("electron/preload.ts", "utf8");
+const main = readFileSync("apps/desktop/electron/main.ts", "utf8");
+const preload = readFileSync("apps/desktop/electron/preload.ts", "utf8");
 
 const errs = [];
 
@@ -31,11 +31,11 @@ const required = [
   [/Content-Security-Policy/, "Content-Security-Policy injection"],
 ];
 for (const [re, label] of required) {
-  if (!re.test(main)) errs.push(`electron/main.ts: missing hardening — ${label}`);
+  if (!re.test(main)) errs.push(`apps/desktop/electron/main.ts: missing hardening — ${label}`);
 }
 // Preload must only bridge via contextBridge.
 if (!/contextBridge\.exposeInMainWorld/.test(preload)) {
-  errs.push("electron/preload.ts: missing contextBridge.exposeInMainWorld (the only safe renderer bridge)");
+  errs.push("apps/desktop/electron/preload.ts: missing contextBridge.exposeInMainWorld (the only safe renderer bridge)");
 }
 
 // Banned anti-patterns anywhere in main.ts.
@@ -48,7 +48,7 @@ const banned = [
   [/sandbox:\s*false/, "sandbox: false"],
 ];
 for (const [re, label] of banned) {
-  if (re.test(main)) errs.push(`electron/main.ts: BANNED setting present — ${label}`);
+  if (re.test(main)) errs.push(`apps/desktop/electron/main.ts: BANNED setting present — ${label}`);
 }
 
 if (errs.length > 0) {

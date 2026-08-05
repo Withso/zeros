@@ -4,16 +4,17 @@
 
 ## This project does not accept external pull requests
 
-Thanks for the interest, and sorry for the wall you just walked into.
+Thanks for your interest in Zeros.
 
-Zeros is **source-available, closed to contribution**. Pull requests from
-outside the maintainers are closed unmerged without review — including typo
-fixes, dependency bumps, and one-line patches. The reasoning is in
+Zeros is **open source under MIT**, but external pull requests are not currently
+reviewed. They are closed unmerged, including typo fixes, dependency bumps, and
+one-line patches. The reasoning is in
 [CONTRIBUTING.md](https://github.com/withso/zeros/blob/main/CONTRIBUTING.md): it's a single-maintainer product on a
 release train, and every build is signed and auto-shipped to users' machines.
 
-Your work isn't lost. It stays on your fork, and the [MIT
-License](https://github.com/withso/zeros/blob/main/LICENSE) lets you keep, modify, and ship it there.
+Your work remains in your fork, and the [MIT
+License](https://github.com/withso/zeros/blob/main/LICENSE) permits you to keep,
+modify, and distribute it there.
 
 **Instead:**
 

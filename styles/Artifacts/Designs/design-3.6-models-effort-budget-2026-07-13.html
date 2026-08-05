@@ -719,8 +719,7 @@
             §3.6 is greenfield: nothing in it has shipped yet. This catalog gives each
             row its user story, the exact surface it touches (composer pills, turn
             footer, system-notice rows, Settings → Models), and a before / after
-            mockup on the real Zeros tokens. Verified against code 2026-07-13; the
-            user decisions of the same day are baked in — no reasoning-token readout
+            mockup on the real Zeros tokens. The interaction decisions include no reasoning-token readout
             anywhere, R2/R3 render as tool calls, and R1 re-examined (Grok 4.5's ladder
             is reopenable).
           </p>
@@ -877,8 +876,8 @@
                       <span class="file-pill"><svg><use href="#i-file" /></svg>migration-v13.md <span class="add">+214</span></span>
                     </div>
                     <!-- Continue lives on its own row BELOW the footer, not inline
-                      with the time/copy/file pills (user spec 2026-07-13). -->
-                    <!-- Continue uses the lucide play glyph (user spec 2026-07-13). -->
+                      with the time/copy/file pills. -->
+                    <!-- Continue uses the lucide play glyph. -->
                     <div class="tf-actions">
                       <button class="tf-action" type="button"><svg><use href="#i-play" /></svg>Continue</button>
                       <span class="tf-actions-hint">Resends “Continue” to the same session — full context is kept, so the answer picks up exactly where the token cap cut it off.</span>
@@ -921,7 +920,7 @@
             </div>
             <div class="vocab-note">
               The footer stop-pill vocabulary after R5 — <b>text only, no severity dot</b>
-              (user spec 2026-07-13). Every terminal state reads in one glance from the label
+              Every terminal state reads in one glance from the label
               alone, matching the two that ship today. First two are live
               (<code>turnFooterStatusLabel</code>); the three new ones reuse the identical
               chrome (<code>border-border3 bg-bg1 rounded-sm text-xs</code>). <b>Continue</b>
@@ -1173,7 +1172,7 @@
                     <!-- Fallback renders as a tool call in the transcript, not a
                       toast: it can fire mid-turn, so it lives inline like any other
                       tool call — collapsible, part of the working group. Header is
-                      the EventRow + StatusChip recipe. User spec 2026-07-13. -->
+                      the EventRow + StatusChip recipe. -->
                     <div class="toolcall">
                       <div class="tc-head">
                         <span class="tc-glyph"><svg width="13" height="13"><use href="#i-repeat" /></svg></span>
@@ -1303,7 +1302,7 @@
                 </div>
                 <div class="chat-body" style="height: 480px">
                   <div class="transcript">
-                    <div class="u-msg">Fix every type error in packages/core</div>
+                    <div class="u-msg">Fix every type error in packages/protocol</div>
                     <div class="event-row">
                       <span class="ev-icon spin"><svg width="13" height="13"><use href="#i-loader" /></svg></span>
                       <span><span class="ev-label">Bash</span> <span class="ev-sub">pnpm typecheck — attempt 23…</span></span>
@@ -1347,7 +1346,7 @@
                 </div>
                 <div class="chat-body" style="height: 480px">
                   <div class="transcript">
-                    <div class="u-msg">Fix every type error in packages/core</div>
+                    <div class="u-msg">Fix every type error in packages/protocol</div>
                     <span class="work-chip"><svg><use href="#i-wrench" /></svg>48 tool calls, 6 messages</span>
                     <div class="a-msg">
                       Progress so far: 31 of 47 errors fixed (all of <code>db/</code> and
@@ -1357,8 +1356,7 @@
                       fallback. Wallet glyph, "Turn stopped" label, a BUDGET status pill + a
                       muted "Claude" scope pill (budget caps are Claude-only for now). Expand
                       for the cap detail. It replaces the footer status pill — the tool call
-                      sits right above the footer and already names the ending. User spec
-                      2026-07-13. -->
+                      sits right above the footer and already names the ending. -->
                     <div class="toolcall">
                       <div class="tc-head">
                         <span class="tc-glyph"><svg width="13" height="13"><use href="#i-wallet" /></svg></span>
@@ -1378,7 +1376,7 @@
                       <span class="file-pill"><svg><use href="#i-file" /></svg>turns.ts <span class="add">+38</span> <span class="del">−12</span></span>
                       <span class="file-pill">+6 more</span>
                     </div>
-                    <!-- Continue uses the lucide play glyph (user spec 2026-07-13), on its
+                    <!-- Continue uses the lucide play glyph, on its
                       own row below the footer — same as R5. -->
                     <div class="tf-actions">
                       <button class="tf-action" type="button"><svg><use href="#i-play" /></svg>Continue</button>
@@ -1638,8 +1636,7 @@
                     <div class="u-msg">Audit the checkpoint system for edge cases</div>
                     <span class="work-chip"><svg><use href="#i-wrench" /></svg>23 tool calls, 4 messages, 3 agents</span>
                     <div class="a-msg">
-                      Audit complete — three edge cases documented in
-                      <code>docs/native-checkpoint-audit.md</code>: crash-mid-turn,
+                      Audit complete — three edge cases documented: crash-mid-turn,
                       gitignored paths, and the 100-turn prune window.
                     </div>
                     <div class="tf">
@@ -1692,8 +1689,7 @@
                     <div class="u-msg">Audit the checkpoint system for edge cases</div>
                     <span class="work-chip"><svg><use href="#i-wrench" /></svg>23 tool calls, 4 messages, 3 agents</span>
                     <div class="a-msg">
-                      Audit complete — three edge cases documented in
-                      <code>docs/native-checkpoint-audit.md</code>: a crash mid-turn that
+                      Audit complete — three edge cases documented: a crash mid-turn that
                       leaves a dangling pre-snapshot, gitignored paths silently skipped by the
                       diff, and the 100-turn prune window dropping recoverable history. Each
                       now has repro steps and a proposed guard.
@@ -1705,7 +1701,7 @@
                       <button class="tf-icon" type="button"><svg><use href="#i-more" /></svg></button>
                       <span class="file-pill"><svg><use href="#i-file" /></svg>native-checkpoint-audit.md <span class="add">+167</span></span>
                       <!-- Popover opens ABOVE the icon (bottom-anchored), flipping below
-                        only when there's no room above — responsive. User spec 2026-07-13. -->
+                        only when there's no room above — responsive. -->
                       <div class="popover" style="left: 0; bottom: 30px">
                         <div class="pop-head"><b>Turn usage</b><span>$1.87</span></div>
                         <div class="pop-bar"><i style="width: 71%"></i></div>

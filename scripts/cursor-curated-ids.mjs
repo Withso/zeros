@@ -19,7 +19,7 @@
  *  A curated id is not required to BE a live id. The catalog curates `grok-4.5` as
  *  a LEVEL-FREE base so the Effort pill can choose the level, and the adapter
  *  completes such a base against this same live catalog BEFORE anything spawns:
- *  applyCursorReasoning (adapter.ts §3.6 R1) tries `<base>-<level>`,
+ *  applyCursorReasoning in the adapter tries `<base>-<level>`,
  *  `<base>-thinking-<level>` and `<base>-fast…`, falling back to the `-xhigh` top
  *  tier, and only when `available.has(base)` is false. So the question this gate
  *  must ask is "can the adapter still resolve this pick to something the account
@@ -29,8 +29,8 @@
  *
  *  ACCURACY NOTE, so nobody over-reads this: as of 2026-07-31 the live catalog
  *  DOES offer a bare `grok-4.5` (34 ids, and it is the only `grok*` id), so the
- *  "exact" arm is what actually fires and R1 is dormant. The suffixed arm is not
- *  fixing a failure observed today — it is what keeps the gate honest for the
+ *  "exact" arm is what actually fires and the suffixed fallback is dormant.
+ *  That fallback is not fixing a failure observed today — it keeps the gate honest for the
  *  catalog shape the adapter already handles, since a base going suffixed-only
  *  bumps no version number and would otherwise read here as "retired".
  *

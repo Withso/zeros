@@ -1,30 +1,46 @@
 # Zeros
 
-Zeros is a local-first macOS app for agent-led development on real codebases: your repo, your agent CLIs, your machine.
+Zeros is an open-source, local-first macOS app for running coding agents against
+real repositories. Each workspace is an isolated Git worktree with its own
+conversation, terminal, preview, and review surface.
 
-## What it does
+Zeros is licensed under MIT. The public source is suitable for review, learning,
+and forks; the maintainer does not currently review external pull requests. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the project policy.
 
-- **Parallel workspaces.** Each workspace is a git worktree, so several agents can work on the same repo at once without stepping on each other.
-- **Three agents, bring your own CLI.** Claude Code (`@anthropic-ai/claude-agent-sdk`), Codex (`codex app-server`) and Cursor (`@cursor/sdk`). Agent credentials stay on your machine; Zeros never hosts them.
-- **Review before you merge.** A Changes / Review / Files / Browser tab row over the workspace, with diff review and pull-request metadata inline.
-- **Embedded browser.** Preview the app you are building, pick an element to send it to the agent, and fork variants for side-by-side comparison.
-- **Setup, Run and Terminal, docked.** A real `node-pty` terminal and per-workspace setup/run commands sit beneath the tab row.
-- **Durable local state.** Chats and workspaces live in one engine-owned SQLite file, `zeros.db`, under the app-data directory (`~/Library/Application Support/com.zeros/`). Settings are TOML at `~/.zeros/settings.toml`. Each release channel gets its own pair.
+## Capabilities
 
-## Sign-in is required
+- **Parallel workspaces:** run independent agent tasks in separate worktrees
+  without switching or stashing the primary checkout.
+- **Local agent runtimes:** use Claude Code, Codex, or Cursor. Credentials are
+  stored locally; prompts, code context, and model traffic go directly to the
+  provider selected by the user rather than through Zeros.
+- **Integrated review:** inspect all, staged, unstaged, and uncommitted changes,
+  repository files, and pull-request metadata in the workbench.
+- **Browser and design workflows:** preview a local app, select page context for
+  an agent, and compare visual variants.
+- **Workspace automation:** keep setup and run commands, terminal sessions, and
+  agent conversations attached to each workspace.
+- **Durable local state:** store workspaces and conversations in the local
+  engine database and preferences in `~/.zeros/settings.toml`.
 
-Zeros will not start without an account. The first screen hands off to a browser
-for Auth0 sign-in via `app.zeros.build`, and that gate sits above the engine
-bridge — so a fresh clone of this repository **cannot get past the login
-screen** without access to the hosted auth tenant. The source is published to be
-read, audited and learned from, not to be run standalone.
+## Platform status
+
+The shipping desktop target is macOS on Apple silicon (`dmg` and `zip`). Windows,
+Linux, iOS, and Android applications are not present in this repository yet;
+their app directories will be added when implementation begins.
+
+Development of the desktop login flow depends on the hosted Zeros authentication
+service. A clone can build and reach the sign-in surface, but a fully self-hosted
+identity setup is not currently documented or supported.
 
 ## Requirements
 
-- macOS on Apple silicon (arm64 is the only shipping target: `dmg` + `zip`).
-- Node.js >= 20 and pnpm 10.28.
-- [Bun](https://bun.sh) — required by `electron:dev` and `electron:build`, which compile the engine sidecar with it.
-- Xcode Command Line Tools, for the `node-gyp` rebuild of `better-sqlite3` against Electron.
+- macOS on Apple silicon
+- Node.js 22.18 or newer
+- pnpm 10.28
+- [Bun](https://bun.sh) for the packaged engine sidecar
+- Xcode Command Line Tools for Electron native-module rebuilds
 
 ## Getting started
 
@@ -33,52 +49,78 @@ pnpm install
 pnpm electron:dev
 ```
 
-Other commands:
+Useful checks:
 
 ```bash
-pnpm electron:build   # package the macOS app with electron-builder
-pnpm test:git         # engine git/worktree tests
-pnpm lint             # ESLint over src/ and electron/
-pnpm typecheck        # app, Electron and package projects
+pnpm typecheck       # desktop, Electron, and workspace packages
+pnpm lint            # desktop renderer, engine, and Electron main
+pnpm test:git        # local engine and renderer test suite
+pnpm check:ui        # design-system and UI consistency rules
+pnpm electron:build  # signed/notarized only when release credentials exist
 ```
 
-## Architecture
+Copy `.env.example` to `.env` only when a development integration needs an
+override. `.env` is ignored. Never place server secrets in a `VITE_*` variable;
+Vite values are shipped in the renderer bundle.
 
-Three processes. The renderer draws, Electron main owns the native surface, and a
-local Node engine sidecar owns git, SQLite, PTY and agent transport.
+## Repository map
+
+| Path                    | Purpose                                                 | Deployment/runtime             |
+| ----------------------- | ------------------------------------------------------- | ------------------------------ |
+| `apps/desktop/`         | Electron main/preload, local engine, and React renderer | macOS desktop app              |
+| `apps/control-plane/`   | Authenticated API and database migrations               | Railway                        |
+| `apps/web/`             | Auth handoff, web hub, and edge functions               | Cloudflare Pages               |
+| `apps/marketing/`       | Public website source assembled by `apps/web`           | Cloudflare Pages               |
+| `apps/feedback-worker/` | Authenticated feedback delivery                         | Cloudflare Workers             |
+| `packages/protocol/`    | Shared messages, schemas, validation, and redaction     | Internal workspace package     |
+| `catalogs/`             | Versioned provider and model metadata                   | Bundled data                   |
+| `scripts/`              | Build, audit, release, and maintenance tooling          | Repository automation          |
+| `styles/`               | Design tokens and cross-boundary style entrypoints      | Desktop renderer               |
+| `third_party/`          | License texts for copied and adapted source             | Source-distribution compliance |
+
+The root package owns desktop build orchestration and the root lockfile.
+`apps/web` intentionally uses npm and an independent lockfile for its Cloudflare
+build boundary; `apps/marketing` remains a pnpm workspace package and also keeps
+the lockfile consumed by that deployment.
+
+## Desktop architecture
+
+The desktop product has three privilege-separated processes. The renderer owns
+presentation, Electron owns native capabilities and the allowlisted preload
+bridge, and the local engine owns Git, worktrees, agents, SQLite, and PTY
+sessions.
 
 ```mermaid
-flowchart TB
-  subgraph renderer["Renderer (React)"]
-    R["src/ — shell, agent UI, browser"]
-  end
-  subgraph main["Electron main"]
-    M["electron/ — windows, IPC, Keychain, updater"]
-  end
-  subgraph engine["Local engine (Node)"]
-    E["src/engine/ — git, agents, zeros.db"]
-  end
-  R <-->|"preload bridge (invoke / events)"| M
-  R <-->|"WebSocket on 127.0.0.1"| E
-  M -->|spawns + supervises| E
+flowchart LR
+  R["React renderer\napps/desktop/src/renderer"]
+  M["Electron main + preload\napps/desktop/electron"]
+  E["Local engine sidecar\napps/desktop/src/engine"]
+
+  R <-->|"allowlisted IPC"| M
+  R <-->|"authenticated loopback WebSocket"| E
+  M -->|"spawn and supervise"| E
 ```
 
-Releases ship on three auto-updating channels — alpha, beta and stable — served
-from GitHub Releases.
+See [REPOSITORY-ARCHITECTURE.md](REPOSITORY-ARCHITECTURE.md) for ownership,
+dependency boundaries, deployment roots, and the migration report.
 
-## Telemetry
+## Data, telemetry, and security
 
-Zeros sends anonymous, metadata-only product analytics to PostHog — feature
-usage, agent success/failure, performance timings. It is **on by default** and
-can be turned off under Settings → Profile → Usage data. No code, prompts, file
-paths, API keys or account identifiers are ever sent.
+The engine database is stored below the macOS application-support directory;
+release channels use isolated data. Agent credentials use their native provider
+storage or the macOS credential store and are not hosted by Zeros. Agent inputs
+and outputs are still processed under the selected provider's terms and privacy
+policy.
 
-## Contributing
+Metadata-only product analytics can be disabled in Settings → Profile → Usage
+data. The analytics contract excludes code, prompts, file paths, credentials,
+and account identifiers. Please report vulnerabilities privately through
+[SECURITY.md](SECURITY.md).
 
-Zeros is source-available but **closed to outside contributions**. Pull requests
-are closed unmerged. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the reasoning,
-and report vulnerabilities through [SECURITY.md](SECURITY.md).
+## License and third-party software
 
-## Licence
-
-MIT — see [LICENSE](LICENSE).
+Zeros is available under the [MIT License](LICENSE). Bundled, generated, and
+vendored dependencies retain their own licenses; material notices and provenance
+are recorded in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), with the full
+locked inventory and texts in
+[THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt).

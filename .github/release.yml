@@ -23,9 +23,7 @@ changelog:
       labels:
         - agents
         - agent
-    # No `relay` label: packages/relay has no tracked source, so a category named
-    # after it advertised a subsystem a reader can't find. Remote/cloud transport
-    # is real (src/engine/transport/), so that half of the category stays.
+    # Remote/cloud transport is owned by apps/desktop/src/engine/transport/.
     - title: 🌐 Remote & Cloud
       labels:
         - remote

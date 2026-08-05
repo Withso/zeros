@@ -536,8 +536,7 @@
             collaboration is <b>org-only for now</b> (teams deferred — later they're just named subsets of org members),
             and every repo setting is managed on the repo, not in a global tree. v3 (pre-H1): <b>no sharing UI for now</b> —
             the UI writes personal layers only; hand-committed <code>.zeros/settings.toml</code> keeps working; future sharing is
-            cloud-DB-primary with opt-in repo materialization, and <b>env vars are never shared</b>. Companion narrative:
-            <code>docs/home-tab-and-settings-ia-2026-07-15.md</code>.
+            cloud-DB-primary with opt-in repo materialization, and <b>env vars are never shared</b>.
           </p>
         </div>
         <div class="hero-aside">
@@ -1278,11 +1277,9 @@ transport = <span class="ts">"http"</span></pre>
       <!-- ═════════ Footer ═════════ -->
       <p class="footer-note">
         <b>Sources:</b> four parallel codebase audits (2026-07-15) over the shell (<code>app-shell.tsx</code>, <code>home-sidebar.tsx</code>,
-        <code>top-bar.tsx</code>), settings (<code>settings-page.tsx</code>, <code>src/engine/settings/*</code>), the cloud control plane
-        (<code>backend/</code>, <code>src/zeros/org/*</code>), and repos/env/MCP storage — plus <code>docs/teams.md</code>,
-        <code>docs/settings-toml-architecture-audit-2026-06-20.md</code>, and the <code>docs/cloud-workspace/</code> pack.
-        Open founder questions (settings entry redundancy, raw-editor fate, who may share a repo, offline org cache, repo-page default tab,
-        pre-billing plan label) are listed in the companion .md, Part 6. v2 revised same day after founder review:
+        <code>top-bar.tsx</code>), settings (<code>settings-page.tsx</code>, <code>apps/desktop/src/engine/settings/*</code>), the cloud control plane
+        (<code>apps/control-plane/</code>, <code>apps/desktop/src/renderer/features/team/*</code>), and repository/environment/MCP storage.
+        v2 revised the same day after founder review:
         Dashboard untouched, org-only collaboration (teams deferred as future subsets of org members), repo page owns workspaces + settings.
       </p>
     </div>

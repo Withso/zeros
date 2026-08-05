@@ -888,7 +888,7 @@
                         <span class="etarget">pnpm test --run</span>
                       </div>
                       <div class="edetail">
-                        <span class="dim">✓ src/engine/agents/__tests__/adapter.test.ts (49 tests) 4.2s</span>
+                        <span class="dim">✓ apps/desktop/src/engine/agents/__tests__/adapter.test.ts (49 tests) 4.2s</span>
                       </div>
                       <p class="edetail-note">…a moment later this single line is REPLACED by the next fragment — earlier output is gone until completion.</p>
                     </div>
@@ -920,11 +920,11 @@
                         <span class="etarget">pnpm test --run</span>
                       </div>
                       <div class="edetail">
-                        <span class="dim">✓ src/engine/agents/__tests__/adapter.test.ts (49) 4.2s</span><br />
-                        <span class="dim">✓ src/engine/agents/__tests__/translator.test.ts (61) 2.8s</span><br />
-                        <span class="err">✗ src/zeros/agent/__tests__/turn-footer.test.tsx (12) 1.9s</span><br />
+                        <span class="dim">✓ apps/desktop/src/engine/agents/__tests__/adapter.test.ts (49) 4.2s</span><br />
+                        <span class="dim">✓ apps/desktop/src/engine/agents/__tests__/translator.test.ts (61) 2.8s</span><br />
+                        <span class="err">✗ apps/desktop/src/renderer/features/agent/__tests__/turn-footer.test.tsx (12) 1.9s</span><br />
                         <span class="dim">&nbsp;&nbsp;× shows usage popover when perModel present</span><br />
-                        <span>✓ src/zeros/agent/__tests__/event-summary.test.ts (23) 0.9s</span><br />
+                        <span>✓ apps/desktop/src/renderer/features/agent/__tests__/event-summary.test.ts (23) 0.9s</span><br />
                         <span>Test Files&nbsp;&nbsp;3 passed | 1 failed (4)</span>
                       </div>
                       <p class="edetail-note">accumulated log, capped at ~8 lines and scrollable — the tail stays pinned while output streams in.</p>
@@ -1458,7 +1458,7 @@
                 doesn't declare the fields. <b>After:</b> a quiet <b>OUTPUT TRUNCATED</b> pill on the
                 tool row (so the user knows the log is incomplete rather than short) and a
                 <code>12s</code> duration on the thinking row. Bonus: <code>DurationChip</code>
-                already exists unused in <code>src/loaders/live-duration.tsx</code>.
+                already exists unused in <code>apps/desktop/src/renderer/shared/ui/loading/live-duration.tsx</code>.
               </p>
             </div>
             <div class="meta">
@@ -1489,9 +1489,9 @@
                       </div>
                       <div class="edetail capped">
                         <span class="dim">commit 91c2f1a — feat(shell): proportional column resizing</span><br />
-                        <span class="dim">&nbsp;src/shell/columns.tsx | 84 ++++++++----</span><br />
+                        <span class="dim">&nbsp;apps/desktop/src/renderer/shell/columns.tsx | 84 ++++++++----</span><br />
                         <span class="dim">commit b0416ea — persist window state</span><br />
-                        <span class="dim">&nbsp;src/shell/window-state.ts | 112 +++++++++++</span><br />
+                        <span class="dim">&nbsp;apps/desktop/src/renderer/shell/window-state.ts | 112 +++++++++++</span><br />
                         <span class="dim">commit fddace0 — workspace interactions instant…</span>
                       </div>
                       <p class="edetail-note">the SDK clipped this output (<code>truncated: true</code>) — but the card looks complete; conclusions get drawn from half a log</p>
@@ -1524,9 +1524,9 @@
                       </div>
                       <div class="edetail capped">
                         <span class="dim">commit 91c2f1a — feat(shell): proportional column resizing</span><br />
-                        <span class="dim">&nbsp;src/shell/columns.tsx | 84 ++++++++----</span><br />
+                        <span class="dim">&nbsp;apps/desktop/src/renderer/shell/columns.tsx | 84 ++++++++----</span><br />
                         <span class="dim">commit b0416ea — persist window state</span><br />
-                        <span class="dim">&nbsp;src/shell/window-state.ts | 112 +++++++++++</span><br />
+                        <span class="dim">&nbsp;apps/desktop/src/renderer/shell/window-state.ts | 112 +++++++++++</span><br />
                         <span class="dim">commit fddace0 — workspace interactions instant…</span>
                       </div>
                     </div>
@@ -1714,7 +1714,7 @@
             <td>14 · Cursor cheap wins <span class="uichip ui" style="margin-left:4px">🎨</span></td>
             <td><span class="st miss">❌→✅</span></td>
             <td><b>Both (case B5):</b> declare <code>truncated</code> + <code>thinking_duration_ms</code> on <code>SdkMsg</code>; render an <b>OUTPUT TRUNCATED</b> pill in the tool row's trailing slot and a duration on the thinking row (resurrect the unused <code>DurationChip</code>).</td>
-            <td><code>cursor-sdk/translator.ts:40-60, 224-235</code><br /><code>src/loaders/live-duration.tsx</code></td>
+            <td><code>cursor-sdk/translator.ts:40-60, 224-235</code><br /><code>apps/desktop/src/renderer/shared/ui/loading/live-duration.tsx</code></td>
           </tr>
         </tbody>
       </table>
@@ -1730,9 +1730,8 @@
         shipped. All mockups render on the verbatim Zeros tokens (toggle the theme in the header);
         event rows, detail bodies, shimmer, footer and composer mirror the real components
         (<code>event-row.tsx</code>, <code>event-row-renderer.tsx</code>, <code>activity-hud.tsx</code>,
-        <code>turn-footer.tsx</code>). <b>Sources:</b> §3.9 table of
-        <code>docs/agent-capabilities-parity-and-ui-consolidated-2026-07-01.md</code>; design language
-        from <code>design-3.8-auth-and-providers</code> / <code>design-3.6-models-effort-budget</code>.
+        <code>turn-footer.tsx</code>). <b>Design references:</b>
+        <code>design-3.8-auth-and-providers</code> / <code>design-3.6-models-effort-budget</code>.
       </p>
     </main>
 

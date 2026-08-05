@@ -2,7 +2,7 @@
 // imported.
 //
 // Why this exists: several renderer modules now under test transitively import
-// `@pierre/diffs` (the agent EditCard via src/zeros/agent/renderers/tool-edit.tsx;
+// `@pierre/diffs` (the agent EditCard via apps/desktop/src/renderer/features/agent/renderers/tool-edit.tsx;
 // the Changes/Review tabs use it too). Its `CodeView` reads
 // `globalThis.navigator.userAgent` (and `.platform`) at MODULE-LOAD time:
 //

@@ -1,7 +1,7 @@
-import { defineConfig, loadEnv } from 'vite'
-import path from 'path'
-import tailwindcss from '@tailwindcss/vite'
-import react from '@vitejs/plugin-react'
+import { defineConfig, loadEnv } from "vite";
+import path from "path";
+import tailwindcss from "@tailwindcss/vite";
+import react from "@vitejs/plugin-react";
 
 // Strict CSP for the PACKAGED Electron renderer (loaded from file://). Injected
 // ONLY by `vite build` — dev (serve) needs HMR's ws+eval. connect-src enumerates
@@ -13,7 +13,7 @@ import react from '@vitejs/plugin-react'
 //
 // The feedback-worker origin is NOT hardcoded: it's derived from
 // VITE_FEEDBACK_URL — the same env var the renderer actually posts feedback to
-// (src/zeros/feedback/submit-feedback.ts) — so this allowlist always tracks
+// (apps/desktop/src/renderer/features/feedback/submit-feedback.ts) — so this allowlist always tracks
 // wherever feedback goes. Unset → feedback is disabled and no origin is added.
 // (A hardcoded, account-specific worker subdomain here used to silently
 // CSP-block any build that pointed VITE_FEEDBACK_URL elsewhere.)
@@ -105,7 +105,9 @@ function loadersShowcasePlugin() {
           return next();
         }
 
-        let rel = url.replace(/^\/loaders\/?/i, "").replace(/^\/Loaders\/?/i, "");
+        let rel = url
+          .replace(/^\/loaders\/?/i, "")
+          .replace(/^\/Loaders\/?/i, "");
         if (!rel || rel === "/") rel = "loaders-preview.html";
 
         const filePath = path.join(loadersDir, rel);
@@ -115,17 +117,22 @@ function loadersShowcasePlugin() {
           return;
         }
 
-        import("node:fs").then(({ existsSync, readFileSync }) => {
-          if (!existsSync(filePath)) {
-            res.statusCode = 404;
-            res.end("Not found");
-            return;
-          }
-          const ext = path.extname(filePath);
-          res.setHeader("Content-Type", mime[ext] ?? "application/octet-stream");
-          res.setHeader("Cache-Control", "no-store");
-          res.end(readFileSync(filePath));
-        }).catch(next);
+        import("node:fs")
+          .then(({ existsSync, readFileSync }) => {
+            if (!existsSync(filePath)) {
+              res.statusCode = 404;
+              res.end("Not found");
+              return;
+            }
+            const ext = path.extname(filePath);
+            res.setHeader(
+              "Content-Type",
+              mime[ext] ?? "application/octet-stream",
+            );
+            res.setHeader("Cache-Control", "no-store");
+            res.end(readFileSync(filePath));
+          })
+          .catch(next);
       });
     },
   };
@@ -142,9 +149,9 @@ export default defineConfig(({ command, mode }) => ({
   // changed" line that diagnosed the problem in the first place.
   clearScreen: false,
   server: {
-    // Pinned Mac-app dev port. Distinct from the website cluster
-    // (3000-3002) so the Vite running for Electron never collides
-    // with `pnpm dev` in website/marketing/ — which used to silently
+    // Pinned desktop-renderer port. Distinct from the marketing site (3000)
+    // and the Wrangler web hub (8788), so Electron's Vite never collides
+    // with `pnpm dev` in apps/marketing/ — which used to silently
     // grab 5173 and leave Electron loading the marketing home page.
     // strictPort: true makes the collision fail loudly instead of
     // letting Vite fall back to 5174.
@@ -203,10 +210,12 @@ export default defineConfig(({ command, mode }) => ({
         "**/*.swp",
         "**/*~",
         "**/.DS_Store",
-        // Sibling roots that ship their own Vite/build: never let
-        // their churn restart the Mac-app dev server.
-        "**/apps/**",
-        "**/website/**",
+        // Sibling deployables own separate build loops. Ignore them without
+        // swallowing apps/desktop, which is this Vite server's source tree.
+        "**/apps/control-plane/**",
+        "**/apps/web/**",
+        "**/apps/marketing/**",
+        "**/apps/feedback-worker/**",
         "**/docs/**",
         // pnpm/npm lockfile churn: spurious mtime touches happen
         // when pnpm normalises ordering with no semantic change.
@@ -224,7 +233,7 @@ export default defineConfig(({ command, mode }) => ({
   ],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      "@": path.resolve(__dirname, "./apps/desktop/src"),
     },
     // CodeMirror requires a SINGLE instance of its state/view core. Two copies —
     // one pre-bundled into @uiw/react-codemirror, one from our direct
@@ -234,19 +243,19 @@ export default defineConfig(({ command, mode }) => ({
     // deps are listed — @lezer/common is transitive (pnpm already pins one
     // version), and listing it makes Rollup fail to resolve it from the root.
     dedupe: [
-      '@codemirror/state',
-      '@codemirror/view',
-      '@codemirror/language',
-      '@lezer/highlight',
+      "@codemirror/state",
+      "@codemirror/view",
+      "@codemirror/language",
+      "@lezer/highlight",
     ],
   },
-  // Phase 2 §2.11.2 — module workers (syntax.worker.ts) need ESM
-  // output for code-splitting. Shiki has dynamic imports internally
+  // Module workers (syntax.worker.ts) need ESM output for code-splitting.
+  // Shiki has dynamic imports internally
   // for grammars/themes; the default "iife" worker format rejects
   // the build with "UMD and IIFE output formats are not supported
   // for code-splitting builds".
   worker: {
-    format: 'es',
+    format: "es",
   },
   // Pre-bundle the statically-imported xterm.js stack so a freshly-
   // installed dev server doesn't have to optimize them on first
@@ -258,17 +267,17 @@ export default defineConfig(({ command, mode }) => ({
   optimizeDeps: {
     // Pin the dependency pre-scan to the Mac app's own entry. Without
     // this, Vite's scanner globs every **/*.html under the repo root —
-    // pulling in sibling Vite roots (website/) and the
-    // standalone dot.html spinner preview. The log from the black-
+    // pulling in sibling app roots and standalone design artifacts. The log
+    // from the black-
     // screen session shows it crawling all of them, then failing with
     // "Failed to run dependency scan … server is being restarted":
     // the scan is async and a config restart mid-crawl aborts it. The
     // Mac-app deps are all reachable from index.html, so scoping the
     // scan here is both correct and far cheaper.
-    entries: ['index.html'],
+    entries: ["index.html"],
     include: [
-      '@xterm/xterm',
-      '@xterm/addon-fit',
+      "@xterm/xterm",
+      "@xterm/addon-fit",
       // @pierre/trees ships its React surface as a subpath export
       // (`@pierre/trees/react`). The dep pre-scan above is scoped to
       // index.html via `entries`, and Vite's dev server doesn't
@@ -278,8 +287,8 @@ export default defineConfig(({ command, mode }) => ({
       // build resolves it fine. Pre-bundling it here (same treatment
       // as the xterm stack) fixes dev resolution. The Files tab is a
       // static import and pinned, so it mounts at startup anyway.
-      '@pierre/trees/react',
+      "@pierre/trees/react",
     ],
   },
-  assetsInclude: ['**/*.svg', '**/*.csv'],
-}))
+  assetsInclude: ["**/*.svg", "**/*.csv"],
+}));

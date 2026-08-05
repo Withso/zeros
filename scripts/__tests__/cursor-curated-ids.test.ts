@@ -5,7 +5,7 @@
 // The check used to compare each curated id VERBATIM against `Cursor.models.list`.
 // That is wrong in principle, because a curated id need not be a live id: the
 // catalog curates `grok-4.5` as a level-free base so the Effort pill can pick the
-// level, and applyCursorReasoning (adapter.ts §3.6 R1) completes such a base
+// level, and applyCursorReasoning completes such a base
 // against the same live catalog before anything spawns. A base whose suffixed
 // variants are live therefore works fine for users, and failing on it would be a
 // false red in a job that runs weekly with a secret.
@@ -25,13 +25,9 @@ const ROOT = path.resolve(__dirname, "..", "..");
 
 /** The catalog as the account actually reports it today: `grok-4.5` bare, with no
  *  suffixed grok ids at all. Verified against a real key on 2026-07-31. */
-const LIVE_TODAY = new Set([
-  "composer-2",
-  "composer-2.5",
-  "grok-4.5",
-]);
+const LIVE_TODAY = new Set(["composer-2", "composer-2.5", "grok-4.5"]);
 
-/** The shape the adapter's R1 branch exists for: the base is gone and only
+/** The shape the adapter's suffixed fallback exists for: the base is gone and only
  *  level-suffixed variants remain. HYPOTHETICAL today — kept because the switch
  *  from one shape to the other bumps no version number. */
 const LIVE_SUFFIXED_ONLY = new Set([
