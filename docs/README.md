@@ -9,12 +9,21 @@ contributors after the change that introduced them has shipped.
   owner-keyed selection and cleanup behavior.
 - [Color names](color-names.md) records the stable workspace-name palette used
   by the local engine.
+- [Agent capability roadmap](agent-capabilities-parity-and-ui-consolidated-2026-07-01.md)
+  is the actively maintained parity and product-work checklist for supported
+  agent integrations. It remains tracked until every item is resolved or moved
+  to another owned roadmap.
+- [Cloud workspaces](cloud-workspace/README.md) contains the current product,
+  architecture, data, security, operations, enterprise, and delivery contracts
+  for the pre-production remote-workspace program.
 
-Dated implementation plans, competitive research, incident notes, account
-details, and deployment investigations do not belong in the public repository.
-Keep that material in the team's private planning system. A durable rule or
-decision that affects the code should be written here without private context
-and enforced by tests where possible.
+Completed dated plans, competitive research, incident notes, account details,
+and deployment investigations do not belong in the public repository. Keep that
+material in the team's private planning system. An active public roadmap may
+remain when it has an explicit retention rule, current implementation anchors,
+and no private operational or competitive material. A durable rule or decision
+that affects the code should be written here without private context and
+enforced by tests where possible.
 
 Repository ownership, deploy boundaries, and the restructure migration record
 live in [REPOSITORY-ARCHITECTURE.md](../REPOSITORY-ARCHITECTURE.md).

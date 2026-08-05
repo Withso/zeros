@@ -320,6 +320,54 @@ describe("repository layout contracts", () => {
     ).toBe(false);
   });
 
+  it("keeps the active agent capability roadmap indexed and current", () => {
+    const roadmapPath =
+      "docs/agent-capabilities-parity-and-ui-consolidated-2026-07-01.md";
+    const roadmap = read(roadmapPath);
+    const docsIndex = read("docs/README.md");
+
+    expect(existsSync(roadmapPath)).toBe(true);
+    expect(docsIndex).toContain(
+      "agent-capabilities-parity-and-ui-consolidated-2026-07-01.md",
+    );
+    expect(roadmap).toContain("actively maintained agent-capability backlog");
+    expect(roadmap).toContain("packages/protocol/src/agent-events.ts");
+    expect(roadmap).toContain(
+      "apps/desktop/src/renderer/features/agent/sessions-store.ts",
+    );
+    expect(roadmap).not.toContain("packages/core/");
+    expect(roadmap).not.toContain("`src/zeros/");
+    expect(roadmap).not.toContain("design-open-tasks-consolidated");
+  });
+
+  it("keeps cloud workspace guidance current without restoring research dumps", () => {
+    const cloudDocs = "docs/cloud-workspace";
+    const expected = [
+      "README.md",
+      "architecture.md",
+      "data-and-sync.md",
+      "engineering-reference.md",
+      "enterprise-and-self-hosting.md",
+      "implementation-roadmap.md",
+      "infrastructure-and-operations.md",
+      "product-contract.md",
+      "security.md",
+    ];
+
+    expect(readdirSync(cloudDocs).sort()).toEqual(expected);
+    expect(read(`${cloudDocs}/README.md`)).toContain(
+      "Cloud workspaces are **pre-production**",
+    );
+    expect(read(`${cloudDocs}/implementation-roadmap.md`)).toContain(
+      "scripts/cloud-workspace-validation/",
+    );
+    expect(read(`${cloudDocs}/engineering-reference.md`)).toContain(
+      "apps/desktop/src/engine/transport/cloud.ts",
+    );
+    expect(existsSync(`${cloudDocs}/02-how-conductor-does-it.md`)).toBe(false);
+    expect(existsSync(`${cloudDocs}/research`)).toBe(false);
+  });
+
   it("keeps public runtime requirements and deployment identifiers explicit", () => {
     const rootPackage = JSON.parse(read("package.json")) as {
       engines: { node: string };

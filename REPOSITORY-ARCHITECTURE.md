@@ -216,6 +216,9 @@ non-production provider-validation harness remains isolated in
 in release packages. Its bridge probe imports the current shared protocol
 version, image construction fails closed through native SQLite rebuilding, and
 bearer-bearing state is owner-only and removed with successful sandbox cleanup.
+The current product contract, target architecture, security model, and phased
+delivery checklist live in `docs/cloud-workspace/`; the prior dated competitive
+research pack is not authoritative.
 
 When the product is implemented, use existing boundaries before creating new
 ones:
@@ -359,7 +362,8 @@ stay component-owned.
 - Simplified `AGENTS.md` and `RULES.md` now define architecture, compatibility,
   UI, security, public-repository, and test invariants without depending on
   dated internal plans.
-- `docs/` contains four durable public engineering documents; dated internal
+- `docs/` contains curated durable engineering contracts plus explicitly
+  retained, actively owned agent and cloud-workspace roadmaps. Completed dated
   audits, private operational plans, and competitive research were removed.
 - The tracked-file secret checker no longer embeds reversible maintainer or
   product identities and no longer blanket-exempts lockfiles, examples, or
@@ -562,6 +566,27 @@ Create environments named exactly `alpha`, `beta`, and `production`:
 - Confirm the Railway and Cloudflare dashboards use the moved application roots
   and rebuild successfully before deleting any legacy deployment configuration.
 
+## Post-migration documentation correction
+
+Repository-owner review on 2026-08-05 identified one deleted document that was
+still an active product backlog rather than completed historical research. The
+agent-capability roadmap was restored under its original filename, updated to
+the current `apps/desktop` and `packages/protocol` paths, indexed from
+`docs/README.md`, and protected by the repository-layout regression test.
+
+The former cloud-workspace research pack was not restored verbatim. Its durable
+requirements were rewritten as current product, architecture, data, security,
+operations, enterprise, roadmap, and engineering-reference documents under
+`docs/cloud-workspace/`. The dated vendor comparisons, generated HTML copies,
+reverse-engineering notes, and obsolete repository paths remain historical and
+non-authoritative.
+
+Existing worktrees that installed dependencies before `packages/core` moved to
+`packages/protocol` must rerun `pnpm install --frozen-lockfile`; otherwise their
+stale `node_modules/@zeros/core` link cannot resolve the new protocol imports.
+The shared workspace setup script already performs that install for new
+workspaces.
+
 ## Verification record
 
 The final Linux verification pass produced the following results:
@@ -596,3 +621,9 @@ The final Linux verification pass produced the following results:
 Build-size and dynamic/static import messages from Vite remain advisory; no
 build failed. A failed, skipped, platform-bound, credential-bound, or
 vendor-blocked command is not represented here as a pass.
+
+The documentation correction separately passed 32 focused layout, remote
+transport, and validation-harness tests; the complete 453-file, 5,046-test
+baseline; TypeScript; ESLint; UI consistency; Prettier; a 12-file local-link
+check; `git diff --check`; and a secret scan of the resulting 2,627 tracked
+files.
