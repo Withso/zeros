@@ -27,3 +27,28 @@ These instructions apply to the entire repository.
 - Backend (backend/) changes require `pnpm test:backend` and `cd backend && pnpm typecheck` before handoff. The control plane has no manual QA pass behind it, so a red backend test is a release blocker, not a follow-up.
 - When fixing a bug, first write the failing test (or smoke-harness assertion) that reproduces it, then fix it, then keep the test. A bug without a regression test will come back.
 - Internal-only features (Settings → Internal) must gate every runtime surface on `useInternalFeatureActive(...)` — the account allowlist AND the flag, never the raw flag alone — and attach hotkey listeners only while that gate holds. A flag alone is a UI-level hide, not an access control. They are separate from Experimental (user-visible opt-ins) and from PostHog flags (not used for this).
+
+## Cursor Cloud specific instructions
+
+### Environment overview
+
+This is a macOS Electron app (Zeros) with a backend control plane. The Cloud Agent VM runs Linux, so Electron-native features (app launch, `pnpm electron:dev`) cannot be tested here. The testable surface includes:
+
+- **Renderer (Vite):** `pnpm dev` → http://localhost:5193 (serves the React renderer; shows auth gate without the desktop app)
+- **Engine tests:** `pnpm test:git` (vitest, ~5000 tests covering engine/git/agents/transport/store/bridge)
+- **Backend:** `cd backend && pnpm dev` (Hono on port 8080; requires Postgres via `DATABASE_URL`)
+- **Backend tests:** `pnpm test:backend` (no DB required for unit-only; set `TEST_DATABASE_URL` for integration)
+- **Lint / typecheck / build:** `pnpm lint`, `pnpm typecheck`, `pnpm build:ui`
+
+### Critical gotchas
+
+1. **GPG commit signing:** The Cloud Agent VM has `commit.gpgsign=true` globally. Engine tests create temp git repos and call `git commit`, which hangs if the signing key isn't in the ssh-agent. Run tests with signing disabled:
+   ```bash
+   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null pnpm test:git
+   ```
+2. **Backend is a separate pnpm root:** `backend/` has its own `pnpm-workspace.yaml` and lockfile. Always `cd backend && pnpm install` separately.
+3. **Bun is required** by `electron:dev` and `electron:build` scripts. Installed at `~/.bun/bin/bun`; add to PATH with `export PATH="$HOME/.bun/bin:$PATH"`.
+4. **Playwright browsers** are needed for `packages/core` design-runtime tests. Install with `pnpm exec playwright install chromium`.
+5. **Git watcher tests** (`src/engine/git/__tests__/watch.test.ts`) are timing-sensitive and may flake in virtualized environments — not a code defect.
+6. **`website/web-app`** is intentionally NOT a pnpm workspace member (uses npm + its own lockfile for Cloudflare Pages deployment).
+7. **The app requires Auth0 sign-in** — the renderer cannot get past the login screen without access to the hosted auth tenant. UI development is verified via `pnpm dev` + `pnpm build:ui` rather than interactive use.
