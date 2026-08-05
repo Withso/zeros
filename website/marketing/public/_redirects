@@ -1,8 +1,0 @@
-# Marketing SPA deep links for standalone marketing deploys / vite preview.
-# KEEP IN SYNC with src/routes.tsx (only real client routes belong here).
-# The unified zeros-web assemble step (website/web-app/scripts/assemble-marketing.mjs)
-# REWRITES this to an explicit path list — do NOT use a blanket `/*` rule in the
-# unified dist, or app.zeros.build unknown paths would serve the marketing homepage.
-/changelog  /index.html  200
-/privacy    /index.html  200
-/terms      /index.html  200

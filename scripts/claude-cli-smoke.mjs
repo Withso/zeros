@@ -14,7 +14,7 @@
 // spawns the CLI with its own control protocol, and that seam has already
 // broken in production once. binary-resolver.ts's header documents the bug
 // class in full — the SDK locates its ~245 MiB platform binary *relative to
-// sdk.mjs's own on-disk location*, which works in dev (`bun src/cli.ts`) and is
+// sdk.mjs's own on-disk location*, which works in dev (`bun apps/desktop/src/cli.ts`) and is
 // IMPOSSIBLE in the packaged app (bun-compiled single-file engine: sdk.mjs
 // lives in $bunfs, no node_modules on disk). Every send failed with an opaque
 // "AGENT RESPONSE FAILURE", in Beta/Production only.
@@ -49,7 +49,7 @@ import { build } from "esbuild";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TMP_DIR = path.join(ROOT, ".zeros", "claude-smoke");
-const RESOLVER = "src/engine/agents/adapters/claude-sdk/binary-resolver.ts";
+const RESOLVER = "apps/desktop/src/engine/agents/adapters/claude-sdk/binary-resolver.ts";
 const TIMEOUT_MS = 90_000;
 
 /** Errors that mean the CLI never got far enough to be rejected by the server —

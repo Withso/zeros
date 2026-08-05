@@ -17,7 +17,7 @@
 // is no node_modules on disk to walk. The SDK then throws
 // "Native CLI binary for darwin-arm64 not found …", which surfaces to the user
 // as "AGENT RESPONSE FAILURE" on every send. In dev the engine is
-// `bun <repo>/src/cli.ts`, sdk.mjs is a real file, and the lookup succeeds —
+// `bun <repo>/apps/desktop/src/cli.ts`, sdk.mjs is a real file, and the lookup succeeds —
 // which is exactly why this only ever broke Beta and Production.
 //
 // So we stage the binary to a STABLE, version-free path that
@@ -26,7 +26,7 @@
 //   binaries/claude                  → Contents/Resources/claude
 //   binaries/claude-cli-version.txt  → Contents/Resources/claude-cli-version.txt
 //
-// electron/sidecar.ts then hands both to the engine as ZEROS_CLAUDE_CLI_PATH /
+// apps/desktop/electron/sidecar.ts then hands both to the engine as ZEROS_CLAUDE_CLI_PATH /
 // ZEROS_CLAUDE_CLI_VERSION, the same handoff shape as the PTY and Cursor hosts'
 // ZEROS_*_HOST_SCRIPT. `binaries/` is gitignored and already the home of the
 // bun-compiled engine, so this adds no new packaging concept.
@@ -72,7 +72,7 @@ export const STAGED_VERSION_FILE = "binaries/claude-cli-version.txt";
 
 /** Candidate platform packages, in the SAME order the SDK's own resolver tries
  *  them (sdk.mjs `FU`). Keep in lockstep with
- *  src/engine/agents/adapters/claude-sdk/binary-resolver.ts. */
+ *  apps/desktop/src/engine/agents/adapters/claude-sdk/binary-resolver.ts. */
 function platformPackages(platform = process.platform, arch = process.arch) {
   if (platform === "android") return [`${PKG_BASE}-linux-${arch}-android`];
   if (platform === "linux") {

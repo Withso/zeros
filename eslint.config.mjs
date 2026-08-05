@@ -2,8 +2,9 @@
 // ESLint flat config
 // ──────────────────────────────────────────────────────────
 //
-// Scope: src/ + electron/ TypeScript files. Built dirs (dist*) and
-// node_modules are ignored. The ruleset is deliberately thin — this
+// Scope: TypeScript/TSX files selected by the caller; `pnpm lint` targets
+// apps/desktop/src/ and apps/desktop/electron/. Built and installed directories
+// are ignored. The ruleset is deliberately thin — this
 // config exists primarily to catch the failure modes that have bitten
 // us at runtime (hooks-order violations that blank the renderer), not
 // to enforce broad style. Style is owned by Prettier.
@@ -17,7 +18,15 @@ import tseslint from "typescript-eslint";
 import reactHooks from "eslint-plugin-react-hooks";
 
 export default [
-  { ignores: ["dist/**", "dist-electron/**", "dist-engine/**", "node_modules/**", "binaries/**"] },
+  {
+    ignores: [
+      "dist/**",
+      "dist-electron/**",
+      "dist-engine/**",
+      "node_modules/**",
+      "binaries/**",
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
@@ -36,7 +45,7 @@ export default [
       "react-hooks/exhaustive-deps": "warn",
 
       // Codebase already names intentionally-unused args with `_`
-      // (see column1.tsx's _newBranch). Match that convention.
+      // (see the repository-navigation workspace action). Match that convention.
       "@typescript-eslint/no-unused-vars": [
         "warn",
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
@@ -47,7 +56,7 @@ export default [
       // legacy chat records). Don't fight it.
       "@typescript-eslint/no-explicit-any": "off",
 
-      // v0 / shadcn component files declare empty prop interfaces as
+      // Shared component files declare empty prop interfaces as
       // `interface Foo extends BaseProps {}` so future additions don't
       // require a churn-y refactor. That's a deliberate pattern, not a
       // mistake.
@@ -87,8 +96,8 @@ export default [
   {
     // Standalone Node CJS host scripts run as their OWN Node subprocesses,
     // outside the bundle (the engine spawns them because bun can't do node-pty
-    // I/O / @cursor/sdk's http2): src/engine/pty/pty-host.cjs and
-    // src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs — plus the
+    // I/O / @cursor/sdk's http2): apps/desktop/src/engine/pty/pty-host.cjs and
+    // apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs — plus the
     // Electron preload. They legitimately use require() + the Node global
     // environment, which the .ts/.tsx block above doesn't cover. Give them the
     // Node globals so `process`/`require`/etc. aren't flagged as undefined.

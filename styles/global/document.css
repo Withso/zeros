@@ -1,0 +1,61 @@
+/* ──────────────────────────────────────────────────────────
+   7. THEME-SWAP TRANSITION SUPPRESSION
+   ──────────────────────────────────────────────────────────
+   Applied as a single-frame class on <html> by the appearance
+   store during theme flips so the new colors land instantly
+   instead of animating every background + border across the
+   entire app at once. Removed via requestAnimationFrame next
+   tick. Hue/intensity slider drags benefit too. */
+
+.zeros-no-transitions,
+.zeros-instant-context-switch,
+.zeros-no-transitions *,
+.zeros-instant-context-switch *,
+.zeros-no-transitions *::before,
+.zeros-instant-context-switch *::before,
+.zeros-no-transitions *::after,
+.zeros-instant-context-switch *::after {
+  transition: none !important;
+}
+
+.zeros-no-transitions,
+.zeros-no-transitions *,
+.zeros-no-transitions *::before,
+.zeros-no-transitions *::after {
+  animation-duration: 0s !important;
+}
+
+/* ──────────────────────────────────────────────────────────
+   8. DOCUMENT BASE STYLES
+   ──────────────────────────────────────────────────────────
+   html / body defaults so any element that doesn't explicitly
+   set typography/bg inherits the shared token surface. Geist Sans
+   body, mono for code/kbd/pre/samp. */
+
+/* IMPORTANT: do NOT set font-size on html — it changes the rem base
+   and breaks every Tailwind text-* utility (text-sm becomes 12.25px
+   instead of 14px because 0.875rem of 14px = 12.25). html stays at
+   the browser default 16px so text-sm = 14px, text-base = 16px, etc.
+   Body uses 14px as the app's default reading size. */
+html,
+body {
+  background: var(--bg1);
+  color: var(--fg1);
+  font-family: var(--font-sans);
+  line-height: 1.375;
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-size: 0.875rem;
+}
+
+code,
+kbd,
+pre,
+samp {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}

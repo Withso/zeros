@@ -3,17 +3,14 @@
 [scripts]
 # Keep in step with .conductor/settings.local.toml, which overrides this file.
 #
-# backend/ is a SEPARATE pnpm root — it has its own pnpm-workspace.yaml and
-# lockfile, and the root workspace globs are `packages/*` and
-# `website/marketing`, so a root install never reaches it. Without the second
-# line, `pnpm test:backend` fails in every fresh workspace with
-# `vitest: command not found`.
+# apps/control-plane/ and apps/web/ are independent install roots with their own
+# lockfiles. The root pnpm workspace deliberately does not install either one,
+# so workspace setup must hydrate all three dependency graphs.
 #
-# Deliberately NOT here: a `cp -R "$CONDUCTOR_ROOT_PATH/docs/." docs/` step.
-# docs/ has been TRACKED since 2026-07-28, so `git worktree add` materialises it
-# for free; copying over it would overwrite the branch's own docs with the main
-# checkout's working-tree version. See .worktreeinclude for the full history.
+# docs/ is tracked, so each worktree receives the curated public engineering
+# documentation directly from Git.
 setup = '''
-pnpm install
-pnpm --dir backend install
+pnpm install --frozen-lockfile
+pnpm --dir apps/control-plane install --frozen-lockfile
+npm --prefix apps/web ci
 '''

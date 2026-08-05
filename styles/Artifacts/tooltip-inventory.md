@@ -7,7 +7,7 @@ delete/mark any line you want removed, or rewrite the label text — then tell m
 - `⚠` = candidate you may want to remove next (tab-like · segmented control · raw path/name reveal)
 - `{…}` = dynamic label (value shown at runtime)
 - Behavior now: **open delay 500ms**, no insta-pop while sweeping (`skipDelayDuration=0`).
-  Glass = `bg2/40` + `blur(10px)` + `saturate(1.7)`, 12px text. Primitive: `src/zeros/ui/primitives/tooltip.tsx`.
+  Glass = `bg2/40` + `blur(10px)` + `saturate(1.7)`, 12px text. Primitive: `apps/desktop/src/renderer/shared/ui/primitives/tooltip.tsx`.
 - **Focus guard**: tooltips never open from focus while the user is mousing (`getLastInputModality()`
   check in `TooltipTrigger`). Fixes the "stuck tooltip on overlay open" class — Radix focus-scope
   focuses the first tabbable inside a Popover/Dialog on open, and if that's a tooltip trigger the
@@ -15,35 +15,35 @@ delete/mark any line you want removed, or rewrite the label text — then tell m
   dispatcher-modal "Choose project"). Keyboard focus (Tab/arrows) still shows tooltips.
 
 Already removed this pass: repo/project path hover (sidebar + topbar + settings), Code/Design toggle,
-Dashboard, Create, Setup/Run/Terminal subtabs, Column-3 row-1 tabs, chat tabs, All Files/Changes/PR
+Dashboard, Create, Setup/Run/Terminal subtabs, workbench tabs, chat tabs, All Files/Changes/PR
 tabs, settings sidebar tabs, workspace rows (earlier).
 
 ---
 
-## Column 1 · sidebar rail
-- `Hide sidebar` / `Show sidebar` · ⌘B — `column-toggle-buttons.tsx:46` — collapse toggle
-- `Show panel` / `Hide panel` · ⌥⌘B — `column-toggle-buttons.tsx:70` — column-3 toggle
-- `Add repository` — `column1.tsx:438` — icon button
-- `Archive workspace` — `column1.tsx:570` — workspace-row hover action
-- `Publish to GitHub` — `column1.tsx:811` — project-header action
-- `Repo settings` — `column1.tsx:826` — project-header action
-- `Create from…` · ⌘⇧N — `column1.tsx:840` — project-header action
-- `New workspace` / `Creating…` — `column1.tsx:854` — project-header "+"
-- `Filter projects` — `column1.tsx:1451` — section-header icon
-- `Settings` — `column1.tsx:1512` — bottom rail icon
+## Repository navigation · sidebar rail
+- `Hide sidebar` / `Show sidebar` · ⌘B — `shell/workbench/toggle-button.tsx` — collapse toggle
+- `Show panel` / `Hide panel` · ⌥⌘B — `shell/workbench/toggle-button.tsx` — workbench toggle
+- `Add repository` — `shell/home-sidebar.tsx` — icon button
+- `Archive workspace` — `shell/home-sidebar.tsx` — workspace-row hover action
+- `Publish to GitHub` — `shell/home-sidebar.tsx` — project-header action
+- `Repo settings` — `shell/home-sidebar.tsx` — project-header action
+- `Create from…` · ⌘⇧N — `shell/home-sidebar.tsx` — project-header action
+- `New workspace` / `Creating…` — `shell/home-sidebar.tsx` — project-header "+"
+- `Filter projects` — `shell/home-sidebar.tsx` — section-header icon
+- `Settings` — `shell/home-sidebar.tsx` — bottom rail icon
 - `Toggle Sidebar` — `sidebar.tsx:286` — primitive SidebarTrigger
 
-## Column 2 · topbar + tabs
-- `Target branch locked` / `Change target branch` — `column2-topbar.tsx:322` — branch popover trigger
-- `Open in…` — `column2-topbar.tsx:396` — open-in-app dropdown
-- `Click to rename` / `Project main checkout` — `column2-topbar.tsx:550` — workspace name
-- `New chat or terminal` — `column2-new-chat-menu.tsx:232` — "+" menu
-- `{terminal agent name}` — `column2-new-chat-menu.tsx:263` — quick terminal button
-- `Default agent` / `Set as default` — `column2-new-chat-menu.tsx:488` — star toggle
-- `Rename chat` — `column2-chat-tabs.tsx:681` — chat-tab hover icon
-- `Close chat` — `column2-chat-tabs.tsx:691` — chat-tab hover icon
+## Conversation pane · top bar + tabs
+- `Target branch locked` / `Change target branch` — `shell/top-bar.tsx` — branch popover trigger
+- `Open in…` — `shell/top-bar.tsx` — open-in-app dropdown
+- `Click to rename` / `Project main checkout` — `shell/top-bar.tsx` — workspace name
+- `New chat or terminal` — `shell/conversation/new-chat-menu.tsx` — "+" menu
+- `{terminal agent name}` — `shell/conversation/new-chat-menu.tsx` — quick terminal button
+- `Default agent` / `Set as default` — `shell/conversation/new-chat-menu.tsx` — star toggle
+- `Rename chat` — `shell/conversation/chat-tabs.tsx` — chat-tab hover icon
+- `Close chat` — `shell/conversation/chat-tabs.tsx` — chat-tab hover icon
 
-## Column 3 · terminal / browser / changes / files / review
+## Workbench · terminal / browser / changes / files / review
 - `Run · {command}` — `terminal-tab.tsx:355`, `run-control.tsx:30` — run button
 - `New terminal` — `terminal-tab.tsx:427` — "+" icon
 - `Back` — `browser-tab.tsx:946` · `Forward` — `:958`

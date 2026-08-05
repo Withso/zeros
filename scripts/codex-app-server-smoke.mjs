@@ -67,7 +67,7 @@
 // tier cannot fire and it falls through to whatever `codex` is on the user's
 // PATH — a different, unpinned CLI. The tier that would fix that
 // (ZEROS_CODEX_CLI_PATH) exists but is wired to nothing: there is no
-// stage-codex-cli.mjs, and electron/sidecar.ts forwards only the Claude pair.
+// stage-codex-cli.mjs, and apps/desktop/electron/sidecar.ts forwards only the Claude pair.
 // This gate runs in a source checkout, so it exercises the BUNDLED tier — the
 // one dev uses. Point ZEROS_CODEX_CLI_PATH at a staged binary to check the
 // packaged one (the resolver's comment reserves that tier for exactly this).
@@ -88,7 +88,7 @@ import { build } from "esbuild";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TMP_DIR = path.join(ROOT, ".zeros", "codex-smoke");
-const ENTRY = "src/engine/agents/adapters/codex/app-server.ts";
+const ENTRY = "apps/desktop/src/engine/agents/adapters/codex/app-server.ts";
 
 function die(msg, detail) {
   console.error(`\n✗ FAIL — ${msg}`);

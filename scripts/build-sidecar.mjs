@@ -13,7 +13,7 @@
 // source location means cross-compiling to x64 from an arm Mac
 // can drop both binaries side by side without overwriting.
 //
-// electron/sidecar.ts resolves the correct file at runtime by
+// apps/desktop/electron/sidecar.ts resolves the correct file at runtime by
 // reading process.arch.
 // ──────────────────────────────────────────────────────────
 
@@ -35,8 +35,7 @@ const archMap = {
 const platform = process.platform;
 if (platform !== "darwin") {
   console.error(
-    `build-sidecar: currently only macOS is supported (got ${platform}). ` +
-      "Windows/Linux builds land in a later phase per the plan.",
+    `build-sidecar: currently only macOS is supported (got ${platform}).`,
   );
   process.exit(1);
 }
@@ -47,7 +46,7 @@ if (!mapping) {
   process.exit(1);
 }
 
-const entry = resolve(repoRoot, "src/cli.ts");
+const entry = resolve(repoRoot, "apps/desktop/src/cli.ts");
 if (!existsSync(entry)) {
   console.error(`build-sidecar: entry not found at ${entry}`);
   process.exit(1);

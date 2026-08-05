@@ -39,12 +39,12 @@
 # them from language stats — they're ~118k lines of "DO NOT MODIFY BY HAND".
 # Provenance for the same tree is recorded in THIRD-PARTY-NOTICES.md: the mark
 # is about diff noise, not about obscuring where the code came from.
-src/engine/agents/adapters/codex/generated/** linguist-generated=true
+apps/desktop/src/engine/agents/adapters/codex/generated/** linguist-generated=true
 
 # JSON Schemas emitted by scripts/build-settings-schemas.ts and published from
 # the marketing site. Tracked so Cloudflare Pages can serve them, but they are
 # build output, not hand-written JSON.
-website/marketing/public/schemas/*.json linguist-generated=true
+apps/marketing/public/schemas/*.json linguist-generated=true
 
 # ──────────────────────────────────────────────────────────
 # Vendored / non-source trees — keep the language bar honest
@@ -53,6 +53,6 @@ website/marketing/public/schemas/*.json linguist-generated=true
 # distort GitHub's language bar and misrepresent what the repo is.
 styles/Artifacts/** linguist-documentation=true
 
-# Local dev harness page (paired with src/harness-model-menu.tsx), not app
-# source and not part of the production bundle.
-harness-model-menu.html linguist-documentation=true
+# Local development harnesses, not application source or production bundle
+# entry points.
+apps/desktop/src/renderer/harnesses/*.html linguist-documentation=true

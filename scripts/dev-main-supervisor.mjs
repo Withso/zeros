@@ -9,7 +9,7 @@
 // scripts/dev-electron-bundle.cjs), so it forgoes electronmon. Result: the
 // renderer hot-reloads (Vite) and the engine hot-reloads (source watcher), but
 // the Electron MAIN process keeps the stale main.cjs it launched with. Edit
-// anything under electron/ — add an IPC command, change preload — and the
+// anything under apps/desktop/electron/ — add an IPC command, change preload — and the
 // renderer calls it while the stale main answers "unknown command" until you
 // manually quit and re-run. (That exact trap produced the "Couldn't copy the app
 // logs" failure: logs_recent was added to main, the renderer picked it up, the

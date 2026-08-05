@@ -43,5 +43,5 @@ one authored script, no dependencies, no fetches, and works directly from
 ## Promoting to production
 
 This remains an exploration study. A production port would live under
-`src/loaders/`, preserve the same SVG strokes and CSS-only motion, and expose
+`apps/desktop/src/renderer/shared/ui/loading/`, preserve the same SVG strokes and CSS-only motion, and expose
 size, label, and class-name props like the existing loader primitives.

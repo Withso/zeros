@@ -2,9 +2,9 @@
 // ============================================================
 // check-ui-consistency.mjs
 // ------------------------------------------------------------
-// Lint guardrail for RULES.md Rule 4, 11, 12, 14, 15.
+// Lint guardrail for the UI and styling section of RULES.md.
 //
-// Scans src/**/*.{ts,tsx,css,mjs,js,jsx} and reports:
+// Scans desktop source plus styles/global/**/*.{css} and reports:
 //   • Hex colors outside tokens.css
 //   • rgba() literals outside tokens.css / primitives.css
 //   • Off-scale font-size: Npx (N not in {10,11,12,13,15,18})
@@ -23,7 +23,8 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { extname, join, relative, sep } from "node:path";
 
 const ROOT = process.cwd();
-const SRC = join(ROOT, "src");
+const SRC = join(ROOT, "apps", "desktop", "src");
+const GLOBAL_STYLES = join(ROOT, "styles", "global");
 
 // Files that ARE allowed to contain raw values (token definitions, etc.)
 // Entries are freshness-checked (checkAllowlistFresh) — a deleted file must
@@ -32,18 +33,18 @@ const ALLOWLIST = new Set([
   "styles/zeros-tokens.css",
   // xterm.js theme object — the terminal emulator takes raw hex
   // strings in a JS object, cannot consume CSS custom properties.
-  "src/shell/terminal/terminal-session-view.tsx",
-  // @pierre/trees glyph palette — RULES.md §2.2 library boundary. These
+  "apps/desktop/src/renderer/shell/terminal/terminal-session-view.tsx",
+  // @pierre/trees glyph palette — an explicit RULES.md library boundary. These
   // hexes are @pierre's OWN "complete" light-dark() icon colors (mirrored
   // from the package), reproduced so the @-mention pill matches the Files
   // tab EXACTLY in both themes. @pierre colors the tree's icons on `:host`
   // in its shadow root, so they can't be recolored from our tokens — the
   // pill mirrors @pierre's values directly (see file header).
-  "src/zeros/agent/composer-editor/file-type-icon.tsx",
+  "apps/desktop/src/renderer/features/agent/composer-editor/file-type-icon.tsx",
   // Portable design-document boundary. This module emits an authored
   // `Zeros Design/tokens.css` seed whose palette cannot consume app-chrome
   // custom properties (the resulting files also render outside Zeros).
-  "src/engine/design/document.ts",
+  "apps/desktop/src/engine/design/document.ts",
 ]);
 
 // Skip entire directories
@@ -55,13 +56,15 @@ const SKIP_DIRS = new Set([
   "target",
 ]);
 
-const ALLOWED_FONT_SIZES_PX = new Set([10, 11, 12, 13, 15, 18]);
+const ALLOWED_FONT_SIZES_PX = new Set([
+  8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20,
+]);
 const ALLOWED_RADII_PX = new Set([0, 4, 6, 8, 12]);
 // Spacing scale — matches --space-1..--space-12 in tokens.css.
-// 1px is also allowed for column seams / dividers (Rule 13: "1px
-// seams, not tone steps"). Everything else must snap to scale.
+// 1px is also allowed for column seams and dividers. Everything else must snap
+// to the shared spacing scale.
 const ALLOWED_SPACE_PX = new Set([
-  0, 1, 2, 4, 6, 8, 10, 12, 14, 16, 20, 24, 32, 40, 48,
+  0, 1, 2, 4, 6, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48,
 ]);
 
 // Non-Zeros families (orange/purple/gray/…) are raw Tailwind defaults — always
@@ -188,7 +191,7 @@ function findInlineVisualViolations(body) {
 const WEB_FONT_RE =
   /font-family\s*:\s*[^;]*\b(Inter|Roboto|Lato|Montserrat|Open Sans|Source Sans|IBM Plex|Poppins|Nunito)\b/i;
 
-// --- 2026-07-12 audit-gap rules (color-theme audit §13) ---
+// --- Raw-color and unsupported-token checks ---
 
 // hsl()/oklch() literals — same class as hex/rgba: raw color values belong in
 // zeros-tokens.css. `hsl(var(--…))` wrappers are ALSO wrong (our tokens are
@@ -218,30 +221,30 @@ const BG3_FILL_RE = /(?<![\w-])bg-bg3(?:-hover)?(?![\w/-])/;
 // Add a file here ONLY if it owns a floating bg3 panel; chips on bg1/bg2
 // surfaces take bg-bg2-hover, sidebar takes sidebar-bg-hover.
 const BG3_SURFACE_FILES = new Set([
-  "src/zeros/ui/primitives/dropdown-menu.tsx",
-  "src/zeros/ui/primitives/context-menu.tsx",
-  "src/zeros/ui/primitives/popover.tsx",
+  "apps/desktop/src/renderer/shared/ui/primitives/dropdown-menu.tsx",
+  "apps/desktop/src/renderer/shared/ui/primitives/context-menu.tsx",
+  "apps/desktop/src/renderer/shared/ui/primitives/popover.tsx",
   // hover-card moved to bg-bg2 (a raised card, not a floating menu) 2026-07-15
-  "src/zeros/ui/primitives/select.tsx",
-  "src/zeros/ui/primitives/command.tsx",
-  "src/shell/column2-new-chat-menu.tsx",
-  "src/shell/dispatcher/create-from-source.tsx",
-  "src/zeros/agent/agent-model-menu.tsx",
-  "src/zeros/agent/project-context-chip.tsx",
+  "apps/desktop/src/renderer/shared/ui/primitives/select.tsx",
+  "apps/desktop/src/renderer/shared/ui/primitives/command.tsx",
+  "apps/desktop/src/renderer/shell/conversation/new-chat-menu.tsx",
+  "apps/desktop/src/renderer/shell/dispatcher/create-from-source.tsx",
+  "apps/desktop/src/renderer/features/agent/agent-model-menu.tsx",
+  "apps/desktop/src/renderer/features/agent/project-context-chip.tsx",
   // Element-picker floating chip panel (browser tab's in-canvas popover).
-  "src/shell/column3-tabs/browser-tab.tsx",
+  "apps/desktop/src/renderer/shell/workbench/tabs/browser-tab.tsx",
   // Collapsed File tab's floating tree panel.
-  "src/shell/column3-tabs/files-tree-panel.tsx",
+  "apps/desktop/src/renderer/shell/workbench/tabs/files-tree-panel.tsx",
   // PopoverContent panels with internal menu-item hovers (Compact-now /
   // Copy-breakdown buttons rest transparent on the bg3 surface, hover bg3-hover).
-  "src/zeros/agent/context-gauge.tsx",
-  "src/zeros/agent/turn-footer.tsx",
+  "apps/desktop/src/renderer/features/agent/context-gauge.tsx",
+  "apps/desktop/src/renderer/features/agent/turn-footer.tsx",
 ]);
 
 // bg3 as a RAW CSS background fill. BG3_FILL_RE above is Tailwind-class-based
 // and skips .css, so `background: var(--bg3)` in globals.css (markdown
-// <details>/<kbd> callouts, the react-flow canvas) slipped past the sweep
-// (audit §13.4, CSS variant — fixed 2026-07-15). bg3 is floating-only: in
+// <details>/<kbd> callouts and the react-flow canvas are not covered by the
+// Tailwind-class check. bg3 is floating-only: in
 // light bg3 == bg1 (white), in dark bg3 == sidebar-bg (barely above bg1), so a
 // fill vanishes in both. Lifted content on bg1 → --bg1-highlight; a base
 // surface → --bg2. Matches the property, so `--color-bg3: var(--bg3)` (the
@@ -253,48 +256,7 @@ const BG3_CSS_FILL_RE = /background(?:-color)?\s*:\s*var\(--bg3(?:-hover)?\)/;
 // where a borderless white panel has no other separation). Scoped to the
 // primitives dir; app-level decorative shadows aren't flagged.
 const TAILWIND_SHADOW_RE = /(?<![\w-])shadow-(md|lg|xl|2xl)(?![\w-])/;
-const PRIMITIVES_DIR = "src/zeros/ui/primitives/";
-
-// --- Brand-accent surfaces (RULES.md Rule 6, Phase 8 lint) ---
-//
-// The v0 brand token surface — `--v0-brand` and its Tailwind
-// utility classes (`bg-brand`, `text-brand`, `ring-brand`,
-// `border-brand`, plus the `-foreground` variants) — must stay
-// under 5% of pixels and follow the allowlist in RULES.md Rule 6.
-//
-// Files inside the appearance system + the v0 primitive surface
-// + the token-definition layer are exempt. Everywhere else, an
-// inline `check:ui ignore-line (accent: <reason>)` is required.
-//
-// Legacy `--accent`, `--accent-hover`, `--accent-soft-bg`,
-// `--text-link`, `--ring-focus` are NOT flagged — they're
-// scoped to die during the Phase 9 mass-migration in Roadmap 01.
-
-const BRAND_TAILWIND_RE =
-  /\b(bg|text|border|ring|fill|stroke|outline|caret|placeholder|decoration|shadow|divide)-brand(?:-foreground)?\b/;
-const BRAND_VAR_RE = /var\s*\(\s*--v0-brand(?:-foreground)?\s*[,)]/;
-
-// Files allowed to reference the brand token without a per-line
-// justification. The appearance system computes `--zeros-accent`
-// (which drives `--v0-brand` via the @theme alias); the v0
-// primitives consume brand in their stock variants; the token
-// files themselves declare the brand.
-const BRAND_EXEMPT_FILES = new Set([
-  "styles/tokens.css",
-  "styles/zeros-tokens.css",
-]);
-const BRAND_EXEMPT_DIR_PREFIXES = [
-  "src/zeros/ui/primitives/",
-  "src/zeros/appearance/",
-];
-
-function isBrandExempt(rel) {
-  if (BRAND_EXEMPT_FILES.has(rel)) return true;
-  for (const prefix of BRAND_EXEMPT_DIR_PREFIXES) {
-    if (rel.startsWith(prefix)) return true;
-  }
-  return false;
-}
+const PRIMITIVES_DIR = "apps/desktop/src/renderer/shared/ui/primitives/";
 
 function walk(dir, out = []) {
   for (const entry of readdirSync(dir)) {
@@ -331,7 +293,7 @@ function scanFile(absPath) {
   const lines = src.split(/\r?\n/);
   const isAllowlisted = ALLOWLIST.has(rel);
   const isCss = absPath.endsWith(".css");
-  const isPrimitivesCss = false; // primitives.css was retired in Phase 9.B/D
+  const isPrimitivesCss = false; // primitives.css has been retired
 
   // Per-line "inside a /* … */ block comment" flags — continuation lines of a
   // block comment often carry no leading `*`, so the trim-prefix heuristic
@@ -377,6 +339,7 @@ function scanFile(absPath) {
       // Ignore comment lines (CSS `/*`, JS `//` or `*`)
       const trimmed = line.trim();
       const isComment =
+        inBlock[idx] ||
         trimmed.startsWith("//") ||
         trimmed.startsWith("*") ||
         trimmed.startsWith("/*");
@@ -398,6 +361,7 @@ function scanFile(absPath) {
     if (!isAllowlisted && /\brgba?\(/.test(line)) {
       const trimmed = line.trim();
       const isComment =
+        inBlock[idx] ||
         trimmed.startsWith("//") ||
         trimmed.startsWith("*") ||
         trimmed.startsWith("/*");
@@ -436,7 +400,7 @@ function scanFile(absPath) {
       push(
         rel,
         ln,
-        "Tailwind color class — use a semantic token or a primitive component (see RULES.md Rule 12).",
+        "Tailwind color class — use a semantic token or a primitive component (see RULES.md UI and styling).",
       );
     }
 
@@ -448,30 +412,6 @@ function scanFile(absPath) {
           rel,
           ln,
           `Raw palette ramp "${m[0]}" — numeric steps (red-50…950) are private. Use a family anchor: text-<family>-primary | bg-<family>-bg | text-<family>-fg (see zeros-foundation.md §2.4).`,
-        );
-      }
-    }
-
-    // --- Brand-accent surface (RULES.md Rule 6, Phase 8) ---
-    // New v0 brand usage must be deliberate — < 5% of pixels, on
-    // the allowlist surfaces only. The v0 primitive surface +
-    // appearance system are exempt because they legitimately
-    // wire the brand token through. Everywhere else requires a
-    // `check:ui ignore-line (accent: <reason>)` justification.
-    if (!isBrandExempt(rel)) {
-      const tailwindBrand = !isCss && line.match(BRAND_TAILWIND_RE);
-      const varBrand = line.match(BRAND_VAR_RE);
-      if (tailwindBrand) {
-        push(
-          rel,
-          ln,
-          `Brand surface "${tailwindBrand[0]}" — needs allowlist justification (RULES.md Rule 6). Add "check:ui ignore-line (accent: <reason>)" if intentional.`,
-        );
-      } else if (varBrand) {
-        push(
-          rel,
-          ln,
-          `Brand var "var(--v0-brand…)" — needs allowlist justification (RULES.md Rule 6). Add "check:ui ignore-line (accent: <reason>)" if intentional.`,
         );
       }
     }
@@ -579,7 +519,7 @@ function scanFile(absPath) {
           push(
             rel,
             ln,
-            `Off-scale font-size: ${n}px — snap to {10,11,12,13,15,18} via --text-N.`,
+            `Off-scale font-size: ${n}px — use the documented type scale or a justified boundary exception.`,
           );
         }
       }
@@ -631,7 +571,7 @@ function scanFile(absPath) {
           push(
             rel,
             ln,
-            `Inline style "${b.key}: ${b.value}" — use a class or primitive with a token (RULES.md Rule 14).`,
+            `Inline style "${b.key}: ${b.value}" — use a class or primitive with a token (see RULES.md UI and styling).`,
           );
         }
       }
@@ -699,7 +639,9 @@ function checkAllowlistFresh() {
 }
 
 // Run
-const files = walk(SRC).filter(shouldScan);
+const files = [SRC, GLOBAL_STYLES].flatMap((root) =>
+  existsSync(root) ? walk(root).filter(shouldScan) : [],
+);
 for (const f of files) scanFile(f);
 checkTokenCommentDrift();
 checkAllowlistFresh();

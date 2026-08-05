@@ -28,7 +28,7 @@ name: Release (beta)
 # data dir (com.zeros.beta), dot-dir (~/.zeros-beta), workspaces root
 # (~/zeros-beta/workspaces), engine port block (24203+) and deep-link scheme
 # (zeros-beta://) — so it coexists with Alpha AND Production and never shares state.
-# Channel-gated features (src/zeros/flags.ts) promote along the ladder:
+# Channel-gated features (apps/desktop/src/renderer/config/release-channel.ts) promote along the ladder:
 # ["dev","alpha"] → +"beta" → +"stable".
 #
 # SERVING: installed betas auto-update straight from the rolling "beta" GitHub
@@ -46,7 +46,6 @@ name: Release (beta)
 on:
   push:
     branches: ["release/**"]
-  workflow_dispatch:
 
 # One beta per release branch. Scoped to the ref (unlike Alpha's single global group)
 # so stabilizing 0.0.6 while 0.0.7 is already cut doesn't cancel either build.
@@ -69,6 +68,9 @@ jobs:
     # transfer cannot silently disable the beta release job again.
     if: github.event.repository.fork == false
     runs-on: macos-latest
+    # Store signing and release credentials in this protected environment and
+    # restrict deployment branches to release/** in repository settings.
+    environment: beta
     # Publishes the rolling "beta" prerelease and retargets its tag.
     permissions:
       contents: write
@@ -220,6 +222,7 @@ jobs:
         run: |
           pnpm models:verify --strict
           pnpm check:cursor-asar
+          pnpm check:licenses
           pnpm check:packaging-paths
           pnpm check:vite-env
           pnpm check:codex-pin

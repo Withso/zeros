@@ -102,7 +102,7 @@ The mockup below uses the <b>same <code>color-mix</code> formulas @pierre uses</
 
 <h2>Plan (once you approve)</h2>
 <ol class="note">
-  <li>In <code>src/zeros/appearance/diff-theme.ts</code> → <code>DIFF_SHADOW_CSS</code>, add the 3 <code>--diffs-*-color-override</code> vars (green/red + chosen modified). They inherit into the diff shadow root and win because @pierre leaves the <code>-override</code> slots unset.</li>
+  <li>In <code>apps/desktop/src/renderer/shared/theme/diff-theme.ts</code> → <code>DIFF_SHADOW_CSS</code>, add the 3 <code>--diffs-*-color-override</code> vars (green/red + chosen modified). They inherit into the diff shadow root and win because @pierre leaves the <code>-override</code> slots unset.</li>
   <li>@pierre derives row wash + word emphasis + edge bars + line numbers from them — no per-tint work needed.</li>
   <li>Optional fine-tune: if the wash reads too strong/soft vs. these mocks, set <code>--diffs-bg-addition-override</code> / <code>--diffs-bg-addition-emphasis-override</code> (and deletion) explicitly.</li>
   <li>Applies everywhere the renderer is used: Changes tab, Review tab, file-tab diff mode, chat EditCards.</li>

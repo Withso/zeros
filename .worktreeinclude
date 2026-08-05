@@ -7,7 +7,7 @@
 # notes. This file lists the paths Zeros copies out of the MAIN checkout into
 # each new worktree at creation time.
 #
-# Implementation: src/engine/git/files-to-copy.ts.
+# Implementation: apps/desktop/src/engine/git/files-to-copy.ts.
 #
 # Three things about the syntax are worth knowing before you edit this:
 #
@@ -72,19 +72,20 @@
 #                               baselines it compares against are tracked.
 #   testing/                    a dead ignore rule — nothing in the tree reads
 #                               or writes that path, so there is nothing to seed.
-#   website/**/.env*            no website code reads a local env file (the
-#                               Pages deploys take their config from Cloudflare)
-#                               and no such file exists. Add it if that changes.
+#   apps/{web,marketing}/.env*  neither Cloudflare app reads a local env file;
+#                               deployments receive configuration from
+#                               Cloudflare. Add an explicit pattern only if that
+#                               boundary changes.
 #   .zeros/settings.local.toml  the repo-local settings layer already resolves
 #                               from the main checkout for a linked worktree;
 #                               the workspace-local layer is meant to start
-#                               empty (src/engine/settings/ops.ts).
+#                               empty (apps/desktop/src/engine/settings/ops.ts).
 
 # Machine-local environment. `/.env*` is the anchored form of the built-in
 # default: the root `.env` plus `.env.local` and friends — and nothing from a
 # sibling directory that happens to keep an env file of its own.
 /.env*
-/backend/.env*
+/apps/control-plane/.env*
 
 # Cloudflare Workers local secrets, read by `wrangler dev` from the worker's own
 # directory. THE ONE UNANCHORED PATTERN: which package owns a worker changes
@@ -92,7 +93,7 @@
 # today, including inside node_modules).
 **/.dev.vars
 
-# Project-scoped MCP servers. Gitignored, but src/engine/agents/mcp-scan.ts
+# Project-scoped MCP servers. Gitignored, but apps/desktop/src/engine/agents/mcp-scan.ts
 # reads `<repo>/.mcp.json` per repo root — so without this a new workspace
 # silently loses every project-level MCP server.
 /.mcp.json

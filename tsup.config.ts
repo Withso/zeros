@@ -12,7 +12,7 @@ const VERSION = pkg.version;
 // extraResources). See electron-builder.yml.
 export default defineConfig([
   {
-    entry: ["src/cli.ts"],
+    entry: ["apps/desktop/src/cli.ts"],
     format: ["cjs"],
     dts: false,
     splitting: false,
@@ -42,12 +42,12 @@ export default defineConfig([
     // electron config. (Under bun the require would work, but node/electron paths
     // must not hit ERR_REQUIRE_ESM.)
     //
-    // @zeros/core's exports map points at RAW .ts sources — an external
-    // `require("@zeros/core/…")` only works on runtimes with TS type
+    // @zeros/protocol's exports map points at RAW .ts sources — an external
+    // `require("@zeros/protocol/…")` only works on runtimes with TS type
     // stripping (bun; Node ≥22.18). Force-bundle it so `node dist-engine/cli.js`
     // runs on ANY Node — matches the electron config, where the raw-TS
     // require crashed app boot.
-    noExternal: ["@decimalturn/toml-patch", /^@zeros\/core/],
+    noExternal: ["@decimalturn/toml-patch", /^@zeros\/protocol/],
     define: {
       __VERSION__: JSON.stringify(VERSION),
     },

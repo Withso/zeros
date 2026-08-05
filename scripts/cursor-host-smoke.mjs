@@ -8,16 +8,17 @@
 // requests WITHOUT a module-resolution failure or a runtime-capability failure.
 //
 // RUN IT UNDER THE RUNTIME THAT SHIPS (`--electron`).
-// This gate existed before and was green while Cursor was completely dead in
-// the shipped app, because it only ever ran under plain `node`:
+// The original regression was green under the development Node runtime while
+// the shipped app failed under Electron:
 //
 //   • The engine spawns this host under the ELECTRON binary
-//     (electron/sidecar.ts sets ZEROS_PTY_HOST_RUNTIME=process.execPath +
-//     ELECTRON_RUN_AS_NODE=1). Electron 33 bundles Node 20.18.
+//     (apps/desktop/electron/sidecar.ts sets ZEROS_PTY_HOST_RUNTIME=process.execPath +
+//     ELECTRON_RUN_AS_NODE=1). The exact Electron/Node pair changes with the
+//     lockfile and is therefore exercised rather than copied into this comment.
 //   • @cursor/sdk 1.0.26's default local store needs the `node:sqlite` builtin,
-//     which landed in Node 22.5 — so it exists on every CI runner's Node and on
-//     NO Electron 33. `pnpm cursor:smoke` passed; the DMG threw on every
-//     Agent.create.
+//     which landed in Node 22.5. The older shipping Electron runtime did not
+//     provide it, so `pnpm cursor:smoke` passed while every packaged
+//     `Agent.create` failed.
 //
 // A runtime the app never uses cannot prove the app works. `--electron` runs
 // the host under the repo's own Electron binary, which is the runtime the
@@ -54,7 +55,7 @@
 //
 // "Resolves", not "is offered verbatim": the catalog curates `grok-4.5` as a
 // LEVEL-FREE base, and the adapter completes such a base against this same live
-// catalog before spawning (applyCursorReasoning, §3.6 R1), so a suffixed
+// catalog before spawning (applyCursorReasoning), so a suffixed
 // `grok-4.5-…` counts as resolvable. Today the bare id IS offered, so nothing is
 // completed in practice — see resolvesAgainst in ./cursor-curated-ids.mjs for the
 // rule and for why the gate must not depend on that staying true.
@@ -87,7 +88,8 @@ import { resolvesAgainst } from "./cursor-curated-ids.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TIMEOUT_MS = 30000;
-const MODULE_ERR_RX = /Cannot find module|MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND/i;
+const MODULE_ERR_RX =
+  /Cannot find module|MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND/i;
 // The runtime-capability failures this gate exists to catch. The TDZ pattern is
 // here because it is what the SDK actually reports once its first store load
 // has failed — the real cause appears only on the very first attempt in a host
@@ -102,7 +104,7 @@ const requireModels = process.argv.includes("--require-models");
  *
  *  Deliberately NOT read from the app's secret store: `<userData>/secrets.json`
  *  is JSON, but every value in it is a `safeStorage.encryptString(...)` base64
- *  blob (electron/secret-store.ts), decryptable only inside Electron with the
+ *  blob (apps/desktop/electron/secret-store.ts), decryptable only inside Electron with the
  *  OS keychain. The engine itself never decrypts it — `secret-account` probes
  *  check key PRESENCE and nothing else, on purpose. A script that JSON.parsed
  *  that file would hand an encrypted blob to models.list and report a bogus
@@ -132,7 +134,9 @@ function curatedCursorIds() {
     );
     return (cat.families?.cursor ?? []).map((m) => m.value).filter(Boolean);
   } catch (err) {
-    problems.push(`could not read catalogs/models-v1.json: ${err?.message ?? err}`);
+    problems.push(
+      `could not read catalogs/models-v1.json: ${err?.message ?? err}`,
+    );
     return null;
   }
 }
@@ -153,10 +157,15 @@ function resolveElectronBinary() {
 
 const script =
   process.env.ZEROS_CURSOR_HOST_SCRIPT ||
-  path.join(ROOT, "src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs");
+  path.join(
+    ROOT,
+    "apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs",
+  );
 if (!existsSync(script)) {
   console.error(`✗ cursor-host script not found: ${script}`);
-  console.error("  Set ZEROS_CURSOR_HOST_SCRIPT (packaged app) or run from the repo.");
+  console.error(
+    "  Set ZEROS_CURSOR_HOST_SCRIPT (packaged app) or run from the repo.",
+  );
   process.exit(2);
 }
 
@@ -167,8 +176,12 @@ if (useElectron && !process.env.ZEROS_PTY_HOST_RUNTIME) {
   if (!bin) {
     // A hard failure, never a skip: --electron was asked for precisely because
     // the other runtime cannot prove anything about the shipped app.
-    console.error("✗ --electron: could not resolve the Electron binary from node_modules.");
-    console.error("  Run `pnpm install` (electron's postinstall stages the binary), or set");
+    console.error(
+      "✗ --electron: could not resolve the Electron binary from node_modules.",
+    );
+    console.error(
+      "  Run `pnpm install` (electron's postinstall stages the binary), or set",
+    );
     console.error("  ZEROS_PTY_HOST_RUNTIME to an Electron binary explicitly.");
     process.exit(2);
   }
@@ -180,10 +193,18 @@ if (requireModels && !cursorKey) {
   // Explicitly demanded, and impossible — fail NOW rather than after a green
   // run that verified no model ids at all.
   console.error("✗ --require-models: CURSOR_API_KEY is not set.");
-  console.error("  Cursor's catalog is server-side, so there is no offline way to check");
-  console.error("  curated ids. In CI, map a repo secret onto the step's env; locally,");
-  console.error("  export it in your shell. The app's secrets.json will NOT work — its");
-  console.error("  values are safeStorage-encrypted and only Electron can read them.");
+  console.error(
+    "  Cursor's catalog is server-side, so there is no offline way to check",
+  );
+  console.error(
+    "  curated ids. In CI, map a repo secret onto the step's env; locally,",
+  );
+  console.error(
+    "  export it in your shell. The app's secrets.json will NOT work — its",
+  );
+  console.error(
+    "  values are safeStorage-encrypted and only Electron can read them.",
+  );
   process.exit(2);
 }
 
@@ -192,7 +213,9 @@ if (asNode) env.ELECTRON_RUN_AS_NODE = "1";
 
 console.log(`▸ host:    ${script}`);
 console.log(`▸ runtime: ${cmd}${asNode ? " (ELECTRON_RUN_AS_NODE)" : ""}`);
-console.log(`▸ sdk:     ${process.env.ZEROS_CURSOR_SDK_ENTRY || "@cursor/sdk (default resolution)"}\n`);
+console.log(
+  `▸ sdk:     ${process.env.ZEROS_CURSOR_SDK_ENTRY || "@cursor/sdk (default resolution)"}\n`,
+);
 
 // A stable dir, not a pid-suffixed one: the state root the host derives from
 // this cwd is reused across runs instead of littering a fresh tree each time.
@@ -218,46 +241,70 @@ function errText(m) {
 
 function finish(passed, reason) {
   clearTimeout(timer);
-  try { child.kill("SIGTERM"); } catch {}
+  try {
+    child.kill("SIGTERM");
+  } catch {}
   const moduleErr = MODULE_ERR_RX.test(stderr);
   const runtimeErr = RUNTIME_ERR_RX.test(stderr);
-  const ok = passed && !moduleErr && !runtimeErr && !fatal && problems.length === 0;
+  const ok =
+    passed && !moduleErr && !runtimeErr && !fatal && problems.length === 0;
   console.log("");
   if (ok) {
-    console.log("✓ PASS — host loaded and served: store.open returned a live store,");
-    console.log("  agent.create reached auth (not a runtime failure), models.list resolved.");
+    console.log(
+      "✓ PASS — host loaded and served: store.open returned a live store,",
+    );
+    console.log(
+      "  agent.create reached auth (not a runtime failure), models.list resolved.",
+    );
     console.log(
       cursorKey
         ? `  Curated cursor model ids verified — ${modelNote}.`
         : "  Curated cursor model ids NOT verified: CURSOR_API_KEY is unset\n" +
-          "  (pass --require-models to make that a failure instead of a skip).",
+            "  (pass --require-models to make that a failure instead of a skip).",
     );
   } else {
     console.error(`✗ FAIL — ${reason || "host did not come up cleanly"}.`);
     if (fatal) console.error(`  fatal: ${fatal}`);
     for (const p of problems) console.error(`  ${p}`);
     if (moduleErr) {
-      console.error(`  A module failed to resolve — a transitive @cursor/sdk dep is missing from`);
-      console.error(`  electron-builder.yml asarUnpack. Offending stderr line(s):`);
+      console.error(
+        `  A module failed to resolve — a transitive @cursor/sdk dep is missing from`,
+      );
+      console.error(
+        `  electron-builder.yml asarUnpack. Offending stderr line(s):`,
+      );
       for (const l of stderr.split("\n").filter((l) => MODULE_ERR_RX.test(l))) {
         console.error(`    ${l.trim()}`);
       }
     }
     if (runtimeErr) {
-      console.error(`  The runtime lacks a capability @cursor/sdk needs. Offending stderr line(s):`);
-      for (const l of stderr.split("\n").filter((l) => RUNTIME_ERR_RX.test(l))) {
+      console.error(
+        `  The runtime lacks a capability @cursor/sdk needs. Offending stderr line(s):`,
+      );
+      for (const l of stderr
+        .split("\n")
+        .filter((l) => RUNTIME_ERR_RX.test(l))) {
         console.error(`    ${l.trim()}`);
       }
     }
     if (stderr.trim() && !moduleErr && !runtimeErr) {
-      console.error(`  stderr:\n${stderr.split("\n").map((l) => "    " + l).join("\n")}`);
+      console.error(
+        `  stderr:\n${stderr
+          .split("\n")
+          .map((l) => "    " + l)
+          .join("\n")}`,
+      );
     }
   }
   process.exit(ok ? 0 : 1);
 }
 
 const timer = setTimeout(
-  () => finish(false, `timed out after ${TIMEOUT_MS}ms (ready=${ready}, responses=${[...got.keys()].join(",") || "none"})`),
+  () =>
+    finish(
+      false,
+      `timed out after ${TIMEOUT_MS}ms (ready=${ready}, responses=${[...got.keys()].join(",") || "none"})`,
+    ),
   TIMEOUT_MS,
 );
 
@@ -271,10 +318,19 @@ child.stdout.on("data", (chunk) => {
     nl = outBuf.indexOf("\n");
     if (!line.trim()) continue;
     let m;
-    try { m = JSON.parse(line); } catch { continue; }
+    try {
+      m = JSON.parse(line);
+    } catch {
+      continue;
+    }
     if (m.k === "ready") {
       ready = true;
-      send({ k: "req", id: 1, op: "store.open", args: { workspaceRef: tmp, stateRoot: tmp } });
+      send({
+        k: "req",
+        id: 1,
+        op: "store.open",
+        args: { workspaceRef: tmp, stateRoot: tmp },
+      });
       // With a real key this doubles as the curated-id gate; without one it is
       // still the undici/fetch module-resolution probe it always was.
       send({
@@ -306,17 +362,23 @@ child.stdout.on("data", (chunk) => {
         if (!m.ok) {
           problems.push(`store.open failed: ${errText(m) || "(no message)"}`);
         } else if (!m.result || m.result.storeId == null) {
-          problems.push("store.open returned no store (storeId: null) — the host could not build a local agent store.");
+          problems.push(
+            "store.open returned no store (storeId: null) — the host could not build a local agent store.",
+          );
         }
       }
       if (m.id === 2 && cursorKey) {
         // Only meaningful with a real key — a bogus one returns nothing, which
         // must not read as "every curated model was retired".
         if (!m.ok) {
-          problems.push(`models.list failed with the ${cursorKey.from} key: ${errText(m) || "(no message)"}`);
+          problems.push(
+            `models.list failed with the ${cursorKey.from} key: ${errText(m) || "(no message)"}`,
+          );
         } else {
           const live = new Set(
-            (Array.isArray(m.result) ? m.result : []).map((x) => x?.id).filter(Boolean),
+            (Array.isArray(m.result) ? m.result : [])
+              .map((x) => x?.id)
+              .filter(Boolean),
           );
           if (live.size === 0) {
             problems.push(
@@ -375,8 +437,13 @@ child.stdout.on("data", (chunk) => {
   }
 });
 child.stderr.setEncoding("utf8");
-child.stderr.on("data", (c) => { stderr += c; });
-child.on("error", (err) => finish(false, `could not spawn runtime "${cmd}": ${err.message}`));
+child.stderr.on("data", (c) => {
+  stderr += c;
+});
+child.on("error", (err) =>
+  finish(false, `could not spawn runtime "${cmd}": ${err.message}`),
+);
 child.on("exit", (code) => {
-  if (!ready) finish(false, `host exited (code ${code}) before signalling ready`);
+  if (!ready)
+    finish(false, `host exited (code ${code}) before signalling ready`);
 });

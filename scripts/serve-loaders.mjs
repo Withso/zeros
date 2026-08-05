@@ -2,9 +2,9 @@
 /**
  * Start the Loaders showcase static server with clear preview instructions.
  *
- * In cloud agents, localhost:8080 is not auto-forwarded unless the port is
- * exposed. For a zero-setup preview, open the artifact directly from the file
- * tree in your browser.
+ * In remote development environments, localhost:8080 may need explicit port
+ * forwarding. For a zero-setup preview, open the artifact directly from the
+ * file tree in a browser.
  */
 import { spawn } from "node:child_process";
 import net from "node:net";
@@ -42,7 +42,7 @@ async function main() {
   console.log("  Zeros Loaders Showcase");
   console.log("═══════════════════════════════════════════════════════════");
   console.log("");
-  console.log("  OPTION A — no server (recommended in cloud agents):");
+  console.log("  OPTION A — no server (recommended for remote development):");
   console.log(`    Open this file in your browser:`);
   console.log(`    ${previewPath}`);
   console.log("");
@@ -51,11 +51,12 @@ async function main() {
     `    http://localhost:${PORT}/styles/Artifacts/loaders-preview.html`,
   );
   console.log("");
-  console.log("  In Cursor: open the Ports panel → forward port", PORT);
-  console.log("  (background tmux servers are not auto-detected).");
+  console.log("  If needed, forward port", PORT, "from your development tool.");
   console.log("");
   console.log("  OPTION C — via Vite dev server (port 5193):");
-  console.log("    pnpm dev   then  http://localhost:5193/Loaders/");
+  console.log(
+    "    pnpm dev   then  http://localhost:5193/styles/Artifacts/loaders-preview.html",
+  );
   console.log("");
   console.log("═══════════════════════════════════════════════════════════");
   console.log("");

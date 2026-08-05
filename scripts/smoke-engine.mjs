@@ -12,7 +12,7 @@
 // engine exited before binding, and the app sat forever on "did not bind".
 //
 // This gate closes that hole: it spawns the real binary exactly as
-// electron/sidecar.ts does (`serve --port <free> --root <tmp>`) and FAILS if it
+// apps/desktop/electron/sidecar.ts does (`serve --port <free> --root <tmp>`) and FAILS if it
 // doesn't sustain external exact-identity /health responses or complete a
 // create → archive → restore round trip — catching native-module crashes,
 // event-loop deadlocks, and bridge/lifecycle failures before they ship.
@@ -41,7 +41,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
 
 // Match build-sidecar.mjs's arch → host-triple mapping so we boot the same file
-// it wrote. (electron/sidecar.ts resolves the runtime binary the same way.)
+// it wrote. (apps/desktop/electron/sidecar.ts resolves the runtime binary the same way.)
 const TRIPLE = { arm64: "aarch64-apple-darwin", x64: "x86_64-apple-darwin" }[
   process.arch
 ];
@@ -385,7 +385,7 @@ process.once("SIGTERM", () => {
 // Surface the historical failure mode (and any boot crash) with a precise message.
 function crashMarker() {
   if (/watcher\.node|Cannot require module/i.test(output))
-    return "engine crashed loading a native module (watcher.node / 'Cannot require module') — a native addon that can't be loaded from inside the `bun --compile` binary. Move it to a pure-JS equivalent (see src/engine/git/detach.ts → chokidar).";
+    return "engine crashed loading a native module (watcher.node / 'Cannot require module') — a native addon that can't be loaded from inside the `bun --compile` binary. Move it to a pure-JS equivalent (see apps/desktop/src/engine/git/detach.ts → chokidar).";
   if (/unhandledRejection|uncaughtException/i.test(output))
     return "engine threw during startup (unhandledRejection / uncaughtException).";
   return null;

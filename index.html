@@ -30,7 +30,7 @@
           } else if (window.__ZEROS_APPEARANCE_MODE__) {
             // localStorage empty (fresh window OR the OS purged the
             // Caches-backed sessionData) — fall back to the userData-persisted
-            // mode the preload exposed (see electron/preload.ts).
+            // mode the preload exposed (see apps/desktop/electron/preload.ts).
             mode = window.__ZEROS_APPEARANCE_MODE__;
           }
           var variant =
@@ -49,6 +49,6 @@
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <script type="module" src="/apps/desktop/src/renderer/main.tsx"></script>
   </body>
 </html>

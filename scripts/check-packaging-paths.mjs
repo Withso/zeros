@@ -48,6 +48,12 @@ const ENGINE_BINARY = "binaries/zeros-engine-aarch64-apple-darwin";
 // The Claude Code runtime is staged at pack time too (gitignored). Keep in sync
 // with scripts/stage-claude-cli.mjs's STAGED_BINARY / STAGED_VERSION_FILE.
 const CLAUDE_STAGED = ["binaries/claude", "binaries/claude-cli-version.txt"];
+const LEGAL_RESOURCES = [
+  "LICENSE",
+  "THIRD-PARTY-NOTICES.md",
+  "THIRD-PARTY-LICENSES.txt",
+  "third_party",
+];
 const beforePackSource = readFileSync(
   "scripts/electron-before-pack.cjs",
   "utf8",
@@ -79,7 +85,7 @@ const requireWorkflowToken = (workflow, label, token, minimum = 1) => {
 
 // electron-builder emits these alongside the macOS zip. They must survive every
 // handoff: build artifact → GitHub Release, which IS the update origin now that
-// the repo is public (electron/updater.ts UPDATER_FEED_BY_CHANNEL).
+// the repo is public (apps/desktop/electron/updater.ts UPDATER_FEED_BY_CHANNEL).
 requireWorkflowToken(
   stableReleaseWorkflow,
   "stable release workflow",
@@ -102,7 +108,7 @@ requireWorkflowToken(
   '"release/latest-mac.yml"',
 );
 // The constant-named dmg the website Download button points at
-// (website/marketing/src/lib/site.ts DOWNLOAD_URL).
+// (apps/marketing/src/lib/site.ts DOWNLOAD_URL).
 requireWorkflowToken(
   stableReleaseWorkflow,
   "stable release workflow",
@@ -162,7 +168,7 @@ for (const from of froms) {
 //
 // The packaged engine is a `bun build --compile` single-file binary with NO
 // node_modules on disk, so ANY runtime it locates via require.resolve is
-// unreachable there — while resolving perfectly in dev (`bun src/cli.ts`) and in
+// unreachable there — while resolving perfectly in dev (`bun apps/desktop/src/cli.ts`) and in
 // vitest. That asymmetry shipped a Claude that threw "Native CLI binary for
 // darwin-arm64 not found" on every send in Beta + Production while dev was
 // flawless (0.0.14), and nothing failed at build time: the app just booted into a
@@ -175,6 +181,13 @@ for (const staged of CLAUDE_STAGED) {
         `fail with "AGENT RESPONSE FAILURE" (the engine cannot require.resolve it: ` +
         `bun-compiled binary, no node_modules). Keep this in sync with ` +
         `scripts/stage-claude-cli.mjs.`,
+    );
+  }
+}
+for (const legalResource of LEGAL_RESOURCES) {
+  if (!froms.includes(legalResource)) {
+    errs.push(
+      `electron-builder.yml has no extraResources \`from: ${legalResource}\` — binary releases must include repository and third-party terms`,
     );
   }
 }
@@ -191,7 +204,9 @@ if (!/stage-claude-cli\.mjs/.test(beforePackSource)) {
 // The npm copy of the ~250 MiB platform package must stay OUT of the asar: it is
 // exec'd directly (impossible from inside an archive) and would otherwise double
 // the blob's contribution to the download.
-if (!/!\*\*\/node_modules\/@anthropic-ai\/claude-agent-sdk-\*\/\*\*/.test(yml)) {
+if (
+  !/!\*\*\/node_modules\/@anthropic-ai\/claude-agent-sdk-\*\/\*\*/.test(yml)
+) {
   errs.push(
     "electron-builder.yml `files:` must exclude **/node_modules/@anthropic-ai/claude-agent-sdk-*/** — " +
       "otherwise the ~250 MiB Claude Code binary is ALSO packed inside app.asar, where it " +
@@ -216,9 +231,9 @@ if (icon && !existsSync(unquote(icon))) {
 // visually indistinguishable from Production (the one thing the badge exists to
 // prevent).
 const builderRun = readFileSync("scripts/electron-builder-run.mjs", "utf8");
-const channelIcons = [
-  ...builderRun.matchAll(/-c\.mac\.icon=([^"']+)/g),
-].map((m) => m[1]);
+const channelIcons = [...builderRun.matchAll(/-c\.mac\.icon=([^"']+)/g)].map(
+  (m) => m[1],
+);
 if (channelIcons.length === 0) {
   errs.push(
     "no `-c.mac.icon=` overrides parsed from scripts/electron-builder-run.mjs — " +

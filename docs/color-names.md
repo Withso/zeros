@@ -2,7 +2,7 @@
 
 A dictionary of 350 distinct colour names, each with a hue family and a hex
 value. This is the live dictionary that names workspaces and branches — it
-replaced the `FLOWERS` list in `src/engine/git/naming.ts` on 2026-07-29, so
+replaced the `FLOWERS` list in `apps/desktop/src/engine/git/naming.ts` on 2026-07-29, so
 every entry here is a branch the app can actually produce (`zeros/Coquelicot`).
 The names in this file and the `COLOURS` array in `naming.ts` must stay in
 step; `naming.test.ts` asserts the invariants below.

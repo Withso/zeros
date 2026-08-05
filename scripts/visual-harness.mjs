@@ -4,8 +4,7 @@
 //
 // Boots the Vite dev server, drives a headless Chromium to a
 // set of known routes/states, and writes PNG screenshots to
-// /snapshots/. Use alongside Cursor 3 reference images to do
-// a side-by-side visual QA.
+// /snapshots/. Compare current captures with the committed baselines.
 //
 // Usage:
 //   node scripts/visual-harness.mjs
@@ -30,10 +29,12 @@ const ROOT = resolve(__dirname, "..");
 // (snapshots/baseline/); the default run writes fresh captures
 // (snapshots/current/, gitignored) for side-by-side comparison.
 const UPDATE = process.argv.includes("--update");
-const OUT_DIR = resolve(ROOT, UPDATE ? "snapshots/baseline" : "snapshots/current");
+const OUT_DIR = resolve(
+  ROOT,
+  UPDATE ? "snapshots/baseline" : "snapshots/current",
+);
 
-// Viewport sized to match a Cursor 3 Agents window docked
-// to the right third of a 16" MBP. Adjust as needed.
+// Stable desktop viewport for repeatable side-by-side captures.
 const VIEWPORT = { width: 1280, height: 800 };
 
 // Routes / app states we want to capture. Each entry is a named
@@ -79,8 +80,12 @@ async function waitForPort(port, timeoutMs = 30_000) {
         const s = net.connect({ port, host });
         const onDone = (v) => {
           s.removeAllListeners();
-          try { s.end(); } catch {}
-          try { s.destroy(); } catch {}
+          try {
+            s.end();
+          } catch {}
+          try {
+            s.destroy();
+          } catch {}
           resolvePort(v);
         };
         s.once("connect", () => onDone(true));

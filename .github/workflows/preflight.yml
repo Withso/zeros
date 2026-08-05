@@ -73,18 +73,23 @@ jobs:
           cache: pnpm
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
+      - name: Install web hub dependencies
+        # apps/web is an independent npm deployment root, outside pnpm.
+        run: npm --prefix apps/web ci
 
       # Separate typecheck steps (not the &&-chained `pnpm typecheck`) so a red
       # run tells you exactly which surface broke. Vite + tsup esbuild-strip types
       # without checking them, so this is the only real type gate for the app.
-      - name: Typecheck — app (src/, renderer + engine)
+      - name: Typecheck — desktop source (renderer + engine)
         run: pnpm typecheck:app
       - name: Typecheck — Electron main + preload
         run: pnpm typecheck:electron
       - name: Typecheck — packages + marketing
         run: pnpm typecheck:packages
+      - name: Typecheck — web hub + Pages Functions
+        run: npm --prefix apps/web run typecheck
 
-      - name: Lint (eslint src + electron)
+      - name: Lint (desktop source + Electron)
         run: pnpm lint
 
       - name: Design-token consistency
@@ -105,7 +110,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           changed=$(git diff --name-only --diff-filter=ACMR "$BASE_SHA"...HEAD \
-            -- 'src/' 'electron/' 'packages/' 'scripts/' '*.json' '*.mjs' '*.mts' '*.ts' || true)
+            -- 'apps/desktop/src/' 'apps/desktop/electron/' 'packages/' 'scripts/' '*.json' '*.mjs' '*.mts' '*.ts' || true)
           if [ -n "$changed" ]; then
             echo "Changed files to format-check:"
             printf '%s\n' "$changed"
@@ -175,16 +180,12 @@ jobs:
         run: pnpm cursor:smoke
 
       - name: Cursor SDK host actually works (real spawn, SHIPPED runtime)
-        # THE one that matters, and the one that was missing. The packaged app
-        # runs the host under the ELECTRON binary (electron/sidecar.ts sets
-        # ZEROS_PTY_HOST_RUNTIME=process.execPath + ELECTRON_RUN_AS_NODE=1), and
-        # Electron 33 bundles Node 20.18. @cursor/sdk 1.0.26's default local
-        # store needs the node:sqlite builtin, which exists on every CI runner's
-        # Node (>= 22.5) and on NO Electron 33 — so the step above passed green
-        # while Cursor was dead in the DMG for every user. A runtime the app
-        # never uses cannot prove the app works. Worth blocking on: per
-        # renovate.json, @cursor/sdk IS the entire Cursor backend with no
-        # CLI/ACP fallback.
+        # The packaged app runs the host under the installed Electron binary
+        # (apps/desktop/electron/sidecar.ts sets ZEROS_PTY_HOST_RUNTIME to
+        # process.execPath with ELECTRON_RUN_AS_NODE=1). @cursor/sdk's default
+        # local store depends on node:sqlite, whose availability can differ
+        # between the CI Node runtime and Electron's bundled runtime. Exercise
+        # the runtime the app actually ships.
         run: pnpm cursor:smoke:electron
 
       - name: Claude CLI actually launches under the Agent SDK
@@ -219,6 +220,9 @@ jobs:
       - name: Secret scan (tracked files)
         run: pnpm check:secrets
 
+      - name: Third-party license inventory is current
+        run: pnpm check:licenses
+
       - name: Prod VITE_* env-set is wired into release.yml
         # A VITE_ var the app uses but release.yml doesn't inject ships a DMG
         # without it (analytics/feedback go dark). Names only, never values.
@@ -246,11 +250,11 @@ jobs:
         run: pnpm check:packaging-paths
 
       - name: Control-plane migrations naming + forward-only
-        # backend/migrations/ is the third ladder and was the only unguarded
+        # apps/control-plane/migrations/ is the third ladder and was the only unguarded
         # one. runMigrations records applied files by FILENAME with no
         # checksum, so editing a released migration never re-runs — the file
         # just stops describing the deployed schema.
-        run: pnpm check:backend-migrations
+        run: pnpm check:control-plane-migrations
 
       - name: Desktop ↔ web deep-link schemes in lockstep
         # The desktop sends its channel's scheme to app.zeros.build; the hub only
@@ -260,10 +264,12 @@ jobs:
         # and silently, so it needs a guard rather than a reviewer.
         run: pnpm check:deep-link-schemes
 
-      - name: Web-app hub unit tests (schemes + host routing)
+      - name: Install web hub dependencies
+        run: npm --prefix apps/web ci
+
+      - name: Web hub unit tests (schemes + host routing)
         # Standalone npm package outside the pnpm workspace — its own runner.
-        working-directory: website/web-app
-        run: npm test
+        run: npm --prefix apps/web test
 
       - name: Agent stream-translator contract (offline fixtures)
         # Replays committed fixtures through the Claude translator and diffs the
@@ -271,7 +277,7 @@ jobs:
         run: pnpm test:adapters
 
       - name: Wire-protocol version-bump reminder (advisory)
-        # Flags a @zeros/core wire-message change without a PROTOCOL_VERSION bump.
+        # Flags a @zeros/protocol wire-message change without a PROTOCOL_VERSION bump.
         # Coarse file-touch heuristic → advisory.
         continue-on-error: true
         run: pnpm check:protocol
@@ -280,12 +286,11 @@ jobs:
         # Proves the zod settings source + generator are valid (schema.ts compiles
         # and z.toJSONSchema succeeds). Deliberately does NOT byte-compare to the
         # committed output: zod v4's z.toJSONSchema is environment-non-deterministic
-        # (Node version / platform produce different serializations — verified:
-        # macOS Node 25, Linux Node 20 amd64/arm64 all differ), so a byte-exact
+        # (Node version and platform can produce different serializations), so a byte-exact
         # cross-environment match can't be a reliable gate. Schema VALIDITY is
         # covered deterministically by the static-configs-validity vitest test
         # (valid JSON + catalogs validate); genuine source↔published drift is caught
-        # in PR diff review (regenerate under Node 20 when changing schema.ts).
+        # in PR diff review (regenerate with the repository toolchain when changing schema.ts).
         run: pnpm schemas:build
 
   build:
@@ -326,13 +331,21 @@ jobs:
         # cross-compiles the shipped single-file engine binary from ubuntu. This
         # is a LINK check (the arm64 binary can't run here) proving it bundles —
         # the exact artifact electron-builder drops into the DMG.
-        run: bun build src/cli.ts --compile --target=bun-darwin-arm64 --outfile binaries/zeros-engine-aarch64-apple-darwin
+        run: bun build apps/desktop/src/cli.ts --compile --target=bun-darwin-arm64 --outfile binaries/zeros-engine-aarch64-apple-darwin
 
       - name: Build marketing site
-        # website/marketing deploys continuously from main via Cloudflare Pages, so
-        # this is the gate that keeps a build break off the public homepage. `tsc -b`
-        # here also type-checks it (the one build gate that catches type errors).
+        # Focused workspace diagnostic. The standalone web assembly below rebuilds
+        # it from apps/marketing's independent deployment lock as the definitive gate.
         run: pnpm --filter @zeros/marketing build
+
+      - name: Install web hub dependencies
+        run: npm --prefix apps/web ci
+
+      - name: Assemble web hub production build
+        # Forces apps/marketing's independent lockfile install even though the
+        # root graph is present, then verifies marketing, hub assets, and Functions
+        # coexist exactly as they do in the unified Pages deployment.
+        run: npm --prefix apps/web run build:standalone
 
   source-sync:
     name: source-sync (macOS)
@@ -366,10 +379,9 @@ jobs:
         # agents is linux-x64 only, because the platform packages that ship
         # (@anthropic-ai/claude-agent-sdk-darwin-arm64, @openai/codex-darwin-arm64)
         # and the Electron that hosts @cursor/sdk install on NO Linux runner.
-        # Cursor is the one that matters most here: the packaged app runs its
-        # SDK under the Electron binary, and Electron 33 bundles Node 20.18 —
-        # which is how a node:sqlite dependency got all the way to users with
-        # every ubuntu gate green. None of these need credentials.
+        # The packaged app runs the Cursor SDK under Electron, so this catches
+        # dependencies such as node:sqlite that may exist in the Linux job's
+        # Node runtime but not Electron's bundled runtime. None need credentials.
         run: pnpm agents:smoke:offline
 
       - name: Packaged engine health + workspace lifecycle
@@ -392,37 +404,37 @@ jobs:
         # rather than relying only on the broad Linux Vitest job.
         run: >-
           pnpm exec vitest run --config vitest.config.ts
-          electron/__tests__/cross-process-lock.test.ts
-          electron/__tests__/deep-link-github.test.ts
-          electron/__tests__/github-app-client.test.ts
-          electron/__tests__/github-app-controller.test.ts
-          electron/__tests__/github-credential-store.test.ts
-          electron/__tests__/github-engine-credential.test.ts
-          electron/__tests__/github-pat-undo.test.ts
-          packages/core/src/__tests__/github-auth.test.ts
-          src/zeros/bridge/__tests__/github-app-notifications.test.ts
-          src/zeros/panels/__tests__/github-section-helpers.test.ts
-          src/shell/pr/__tests__/create-pr-action.test.ts
-          src/shell/pr/__tests__/review-provider-routing.test.ts
+          apps/desktop/electron/__tests__/cross-process-lock.test.ts
+          apps/desktop/electron/__tests__/deep-link-github.test.ts
+          apps/desktop/electron/__tests__/github-app-client.test.ts
+          apps/desktop/electron/__tests__/github-app-controller.test.ts
+          apps/desktop/electron/__tests__/github-credential-store.test.ts
+          apps/desktop/electron/__tests__/github-engine-credential.test.ts
+          apps/desktop/electron/__tests__/github-pat-undo.test.ts
+          packages/protocol/src/__tests__/github-auth.test.ts
+          apps/desktop/src/renderer/platform/bridge/__tests__/github-app-notifications.test.ts
+          apps/desktop/src/renderer/features/settings/__tests__/github-connection-model.test.ts
+          apps/desktop/src/renderer/shell/pr/__tests__/create-pr-action.test.ts
+          apps/desktop/src/renderer/shell/pr/__tests__/review-provider-routing.test.ts
 
       - name: Changes / Review contracts
         # Runs exact AD/index semantics, selection recovery,
         # stale-while-revalidate races, and the real socket error envelope.
         run: >-
           pnpm exec vitest run --config vitest.config.ts
-          src/engine/git/__tests__/diff.test.ts
-          src/engine/git/__tests__/ops.test.ts
-          src/zeros/bridge/__tests__/ws-client-errors.test.ts
-          src/shell/column3-tabs/__tests__/changes-selection.test.ts
-          src/shell/column3-tabs/__tests__/changes-scope-files.test.ts
-          src/shell/column3-tabs/__tests__/changes-snapshot-cache.test.ts
-          src/shell/column3-tabs/__tests__/file-lifecycle.test.ts
-          src/shell/column3-tabs/__tests__/review-data-race.test.ts
-          src/shell/pr/__tests__/pr-status-refresh.test.ts
-          src/shell/pr/__tests__/use-workspace-pr-sync.test.ts
-          src/shell/__tests__/use-git-refresh-key.test.ts
-          src/shell/__tests__/workspace-file-data-cache.test.ts
-          src/zeros/store/__tests__/read-caches.test.ts
+          apps/desktop/src/engine/git/__tests__/diff.test.ts
+          apps/desktop/src/engine/git/__tests__/ops.test.ts
+          apps/desktop/src/renderer/platform/bridge/__tests__/ws-client-errors.test.ts
+          apps/desktop/src/renderer/shell/workbench/tabs/__tests__/changes-selection.test.ts
+          apps/desktop/src/renderer/shell/workbench/tabs/__tests__/changes-scope-files.test.ts
+          apps/desktop/src/renderer/shell/workbench/tabs/__tests__/changes-snapshot-cache.test.ts
+          apps/desktop/src/renderer/shell/workbench/tabs/__tests__/file-lifecycle.test.ts
+          apps/desktop/src/renderer/shell/workbench/tabs/__tests__/review-data-race.test.ts
+          apps/desktop/src/renderer/shell/pr/__tests__/pr-status-refresh.test.ts
+          apps/desktop/src/renderer/shell/pr/__tests__/use-workspace-pr-sync.test.ts
+          apps/desktop/src/renderer/shell/__tests__/use-git-refresh-key.test.ts
+          apps/desktop/src/renderer/shell/__tests__/workspace-file-data-cache.test.ts
+          apps/desktop/src/renderer/state/__tests__/read-caches.test.ts
 
       - name: Files tab read + thumbnail contracts
         # These gates are realpath-shaped: read_file and read_image_thumbnail
@@ -433,11 +445,11 @@ jobs:
         # merged green and then blocked every alpha release on the macOS build.
         run: >-
           pnpm exec vitest run --config vitest.config.ts
-          electron/ipc/commands/__tests__/files.test.ts
-          electron/ipc/commands/__tests__/image-dimensions.test.ts
+          apps/desktop/electron/ipc/commands/__tests__/files.test.ts
+          apps/desktop/electron/ipc/commands/__tests__/image-dimensions.test.ts
 
-  backend:
-    name: backend (control plane)
+  control-plane:
+    name: control plane
     runs-on: ubuntu-latest
     # A real Postgres, because the DB suite self-skips without one and that
     # silence reads as "green" — a destructive migration can reach review having
@@ -467,17 +479,17 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
-      - name: Install backend dependencies
-        # backend/ is its own pnpm workspace with its own lockfile, and the control
-        # plane deploys continuously from main, so this job is where a type or
+      - name: Install control-plane dependencies
+        # apps/control-plane/ is its own pnpm workspace with its own lockfile,
+        # and it deploys continuously from main, so this job is where a type or
         # contract break has to be caught.
-        working-directory: backend
+        working-directory: apps/control-plane
         run: pnpm install --frozen-lockfile
-      - name: Typecheck backend
-        working-directory: backend
+      - name: Typecheck control plane
+        working-directory: apps/control-plane
         run: pnpm typecheck
-      - name: Backend test suite (migrations + auth / invites contracts)
-        working-directory: backend
+      - name: Control-plane tests (migrations + auth/invite contracts)
+        working-directory: apps/control-plane
         env:
           # Presence of this is what un-skips the DB suites. If it is ever
           # unset here, the migration tests go quiet rather than red — so the
@@ -489,13 +501,13 @@ jobs:
         # `pnpm test` still exits 0 with everything skipped — a green check
         # that proves nothing. Re-run just the migration file and require a
         # non-zero pass count.
-        working-directory: backend
+        working-directory: apps/control-plane
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
         run: |
           set -euo pipefail
           npx vitest run src/migrations.test.ts --reporter=json --outputFile=/tmp/mig.json
-          # readFileSync, not require(): backend/ is "type": "module", and a
+          # readFileSync, not require(): apps/control-plane/ is "type": "module", and a
           # missing file must read as 0 rather than throwing past the check.
           passed=$(node -e '
             const fs = require("node:fs");
@@ -528,10 +540,9 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium
       - name: Composer model-menu interaction contract
         # Real-browser event-timing coverage the unit suite structurally cannot
-        # provide: the 2026-07-24 "model dropdown flashes open and instantly
-        # closes" regression came from a document-capture click listener racing
-        # Radix's open/focus sequence — invisible to pure-helper tests, fatal in
-        # the app. Drives the actual ModelPill/AgentModelMenu tree headlessly.
+        # provide: a document-capture click listener can race Radix's open/focus
+        # sequence, making the model dropdown flash open and instantly close.
+        # Drives the actual ModelPill/AgentModelMenu tree headlessly.
         run: pnpm test:ui-smoke
 
   secret-scan:
@@ -547,20 +558,12 @@ jobs:
     # exists, and why `fetch-depth: 0` is load-bearing — gitleaks needs the real
     # commit graph to walk `base..HEAD`.
     #
-    # It deliberately does NOT re-scan all history on every PR. That was measured
-    # and it is unshippable: a full walk of this repo reports ~189 findings, of
-    # which only a handful are real — pre-publication blobs from retired sibling
-    # projects and an old build-flag file, all addressed by the one-time history
-    # rewrite. The rest are historical REVISIONS of files whose CURRENT version
-    # is annotated `gitleaks:allow`: localStorage key names, the RFC 6455 §1.3
-    # example nonce, and redaction-test fixtures. An inline allow comment applies
-    # to the line it sits on, so it can never retroactively clear an old blob —
-    # meaning a full-history gate would be red on every PR forever, and a gate
-    # that is always red is one everybody learns to click past.
-    #
-    # FULL HISTORY IS AUDITED ONCE, out of band, as part of publication:
+    # It deliberately does NOT re-scan all history on every PR: the existing
+    # history is a fixed publication baseline, while this gate must answer the
+    # review question "did this PR add a credential in any commit?" Full history
+    # is audited out of band before publication and after importing or rewriting
+    # refs:
     #     gitleaks git . --redact --no-banner --verbose
-    # Re-run that after the history rewrite and before flipping the repo public.
     #
     # Non-zero exit on a finding fails the job — no `continue-on-error`. A secret
     # scanner that reports and passes trains everyone to ignore it.
@@ -610,7 +613,7 @@ jobs:
         #
         # `git .` walks history from the checked-out repo (mounted at
         # /github/workspace); `--log-opts` narrows that walk to the commits this
-        # PR actually adds. `--redact` keeps a matched credential out of the
+        # change actually adds. `--redact` keeps a matched credential out of the
         # public build log — the alert is the finding, not the value.
         #
         # The container runs as root while the checkout is owned by the runner

@@ -7,25 +7,25 @@
 // hub and the invite page only echo it back if it is allow-listed. Those two
 // sides live in different build systems (Electron app vs Cloudflare Pages) and
 // ship on different cadences, so nothing linked them — and they silently drifted:
-// `zeros-alpha` was added to src/engine/runtime.ts when the Alpha channel was
+// `zeros-alpha` was added to apps/desktop/src/engine/runtime.ts when the Alpha channel was
 // created, but never to the web allow-list. Result: Alpha users got no "Launch
 // Zeros" button, and every Alpha invite link opened the PRODUCTION app instead.
 //
 // A missing scheme fails closed (no button / wrong app), never loudly — so it
 // survives until a human notices. This guard is the missing link.
 //
-//   DeepLinkScheme union in src/engine/runtime.ts
+//   DeepLinkScheme union in apps/desktop/src/engine/runtime.ts
 //     ===
-//   SCHEMES in website/web-app/lib/schemes.mjs
+//   SCHEMES in apps/web/lib/schemes.mjs
 //
-// Textual on purpose: the web-app is a standalone npm package outside the pnpm
+// Textual on purpose: the web hub is a standalone npm package outside the pnpm
 // workspace, so this script cannot import across that boundary.
 // ──────────────────────────────────────────────────────────
 
 import { readFileSync } from "node:fs";
 
-const DESKTOP = "src/engine/runtime.ts";
-const WEB = "website/web-app/lib/schemes.mjs";
+const DESKTOP = "apps/desktop/src/engine/runtime.ts";
+const WEB = "apps/web/lib/schemes.mjs";
 
 function fail(msg) {
   console.error(`✗ check:deep-link-schemes — ${msg}`);

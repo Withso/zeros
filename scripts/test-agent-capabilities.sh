@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────
-# Stage 10 — re-runnable capability probe
+# Re-runnable agent capability probe
 # ──────────────────────────────────────────────────────────
 #
 # Captures the deterministic subset of the agent-capability
@@ -24,7 +24,7 @@ AGENTS=(claude codex cursor-agent)
 TMP="$(mktemp -d)"
 trap "rm -rf '$TMP'" EXIT
 
-echo "Stage 10 capability probe — $(date '+%Y-%m-%d %H:%M:%S')"
+echo "Agent capability probe — $(date '+%Y-%m-%d %H:%M:%S')"
 echo
 
 # ── Versions ──────────────────────────────────────────────
@@ -98,4 +98,4 @@ if command -v cursor-agent >/dev/null 2>&1; then
 fi
 
 echo
-echo "Done. Re-check the adapter capability flags in src/engine/agents/ if anything regressed."
+echo "Done. Re-check the adapter capability flags in apps/desktop/src/engine/agents/ if anything regressed."

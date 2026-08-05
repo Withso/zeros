@@ -9,7 +9,7 @@
 // Codex defines its JSON-RPC wire format in Rust (serde + ts-rs +
 // schemars derives on every protocol struct/enum). Until 2026-05-28
 // Zeros hand-transcribed those types into TypeScript at
-// `src/engine/agents/adapters/codex/app-server.ts`. Every Codex bump
+// `apps/desktop/src/engine/agents/adapters/codex/app-server.ts`. Every Codex bump
 // risked silent drift — and twice in three days we shipped wrong
 // casing for SandboxPolicy / SandboxMode that the server only
 // rejected at runtime. This script eliminates that bug class.
@@ -19,7 +19,7 @@
 //
 //   1. Read the pinned protocol version from
 //        package.json → "codexProtocolVersion".
-//   2. Check whether `src/engine/agents/adapters/codex/generated/.version`
+//   2. Check whether `apps/desktop/src/engine/agents/adapters/codex/generated/.version`
 //      already matches that pin. If yes, exit early — codegen output
 //      is committed, so a fresh `git pull` already has the right
 //      bindings and there's no reason to redo work.
@@ -28,7 +28,7 @@
 //      (cached across runs; only the protocol crate is checked out).
 //   4. Run the official upstream export binary:
 //        cargo run --release -p codex-app-server-protocol --bin export \
-//          -- --out <repo>/src/engine/agents/adapters/codex/generated --experimental
+//          -- --out <repo>/apps/desktop/src/engine/agents/adapters/codex/generated --experimental
 //   5. Write the .version stamp.
 //
 // Failure modes
@@ -61,6 +61,7 @@
 
 import { spawnSync } from "node:child_process";
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -76,6 +77,8 @@ const REPO_ROOT = resolve(SCRIPT_DIR, "..");
 const PACKAGE_JSON = join(REPO_ROOT, "package.json");
 const GENERATED_DIR = join(
   REPO_ROOT,
+  "apps",
+  "desktop",
   "src",
   "engine",
   "agents",
@@ -217,16 +220,6 @@ function ensureCache(version) {
 }
 
 function runExport(cloneDir, outDir) {
-  if (!commandExists("cargo")) {
-    log(
-      "ERROR: `cargo` is not on PATH. Install Rust (https://rustup.rs) or " +
-        "pull the latest generated bindings via git on a machine that has " +
-        "Rust installed. Skipping codegen so the build can continue with " +
-        "whatever bindings are already committed.",
-    );
-    return false;
-  }
-
   mkdirSync(outDir, { recursive: true });
 
   log(
@@ -249,7 +242,16 @@ function runExport(cloneDir, outDir) {
     ],
     { cwd: join(cloneDir, "codex-rs") },
   );
-  return true;
+}
+
+function copyUpstreamLegalFiles(cloneDir) {
+  for (const name of ["LICENSE", "NOTICE"]) {
+    const source = join(cloneDir, name);
+    if (!existsSync(source)) {
+      throw new Error(`openai/codex checkout is missing its ${name} file`);
+    }
+    copyFileSync(source, join(GENERATED_DIR, name));
+  }
 }
 
 function writeStamp(version) {
@@ -383,21 +385,26 @@ function main() {
   if (!commandExists("git")) {
     throw new Error("`git` not on PATH — required to fetch Codex source.");
   }
-
-  const cloneDir = ensureCache(version);
-
-  // Wipe the previous generated/ so removed types don't linger.
-  // Preserve only the .version stamp (which we'll rewrite at the end).
-  rmSync(GENERATED_DIR, { recursive: true, force: true });
-
-  const ran = runExport(cloneDir, GENERATED_DIR);
-  if (!ran) {
-    // Build can continue against committed bindings — leave the
-    // existing tree intact and bail without writing the stamp.
+  if (!commandExists("cargo")) {
+    log(
+      "ERROR: `cargo` is not on PATH. Install Rust (https://rustup.rs) or " +
+        "pull the latest generated bindings via git on a machine that has " +
+        "Rust installed. Keeping the committed generated tree unchanged.",
+    );
     return;
   }
 
+  const cloneDir = ensureCache(version);
+
+  // Wipe the previous generated/ so removed types don't linger. The toolchain
+  // checks above happen first so an unavailable generator never destroys the
+  // committed fallback tree.
+  rmSync(GENERATED_DIR, { recursive: true, force: true });
+
+  runExport(cloneDir, GENERATED_DIR);
+
   pruneRetiredPairingBindings();
+  copyUpstreamLegalFiles(cloneDir);
   writeStamp(version);
   log(`bindings written to ${GENERATED_DIR}`);
 }

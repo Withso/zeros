@@ -1,5 +1,5 @@
 # ──────────────────────────────────────────────────────────
-# Issue routing — source-available, closed to contribution
+# Issue routing — open source, maintainer-managed contributions
 # ──────────────────────────────────────────────────────────
 #
 # `blank_issues_enabled: false` removes the free-text "Open a blank issue"
@@ -30,7 +30,7 @@ contact_links:
   - name: Contribution policy — this project does not accept pull requests
     url: https://github.com/withso/zeros/blob/main/CONTRIBUTING.md
     about: >-
-      Zeros is source-available under MIT for reading, auditing, and forking.
+      Zeros is open source under MIT for reading, auditing, and forking.
       Pull requests are closed unmerged. Read this before you start work.
 
   - name: Using Zeros — send feedback from inside the app

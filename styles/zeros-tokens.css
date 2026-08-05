@@ -8,15 +8,13 @@
    family. Component aliases (primary-button-*) are thin
    aliases over the primitives.
 
-   THEMES: dark default — "Zeros Shade" (2026-07-07) — plus a
-   light theme (2026-07-11). Zeros Shade is a muted warm-gray
+   THEMES: dark default — "Zeros Shade" — plus a light theme.
+   Zeros Shade is a muted warm-gray
    palette (hues 5-25°, chroma 0-7%); it lives directly in
    `:root` and is what every mode other than light renders.
-   The light theme is a `[data-theme="light"]` override block
-   (§2b below) — warm off-whites over the same taxonomy. The
-   appearance store writes `data-theme` on <html>. (The retired
-   variants — pure-black Dark, Orka Night, Neutral, Zeros Blue —
-   are in git history if ever needed.)
+   The light theme is a `[data-theme="light"]` override block —
+   warm off-whites over the same taxonomy. The
+   appearance store writes `data-theme` on <html>.
 
    ─── STRUCTURE ──────────────────────────────────────────────
    1. Imports + setup (Tailwind, Geist Variable font, @source, dark variant)
@@ -57,7 +55,7 @@
      --fg2                  default text + icon color across the app
      --muted-fg             placeholder text + empty-state icons
 
-   SIDEBAR (workspace col 1 only — NOT settings sidebar):
+   REPOSITORY NAVIGATION (not the settings sidebar):
      --sidebar-bg           workspace sidebar background
      --sidebar-bg-hover     sidebar item hover + selected state
 
@@ -86,7 +84,7 @@
 
    Default page bg = --bg1. Composer = --bg2. Popover/dropdown/menu = --bg3
    (floating surfaces only — dialogs/sheets are --bg1, hover-cards --bg2).
-   Workspace sidebar (col 1 only) = --sidebar-bg.
+   Repository navigation = --sidebar-bg.
 
    Hover states (surface-scoped):
      hover on bg1 surface → --bg1-hover
@@ -119,11 +117,10 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
-/* Engine subtree — make Tailwind v4 compile utilities used inside
- * [data-Zeros-root] React components (design canvas, agent panel,
- * themes editor). Without @source the compiled CSS skips classes
- * that don't appear in normal JSX scan. */
-@source "../src/zeros/engine";
+/* Explicit renderer source for utilities that appear in dynamically composed
+ * class lists. Tailwind also discovers imported modules automatically; this
+ * path keeps the intended application boundary visible and testable. */
+@source "../apps/desktop/src/renderer";
 
 /* Geist Variable + Geist Mono Variable — self-hosted offline fonts.
  * Family names "Geist Variable" / "Geist Mono Variable" come from
@@ -135,9 +132,9 @@
 @import "@fontsource-variable/geist-mono";
 
 /* Zeros uses [data-theme="dark"] on <html>. This rebinds Tailwind's
- * `dark:` variant against that convention. The light theme shipped
- * 2026-07-11 as the [data-theme="light"] override block (§2b), so
- * `dark:` styles apply everywhere except light. */
+ * `dark:` variant against that convention. The light theme uses the
+ * [data-theme="light"] override block, so `dark:` styles apply everywhere
+ * except light. */
 @custom-variant dark (&:is([data-theme="dark"] *));
 
 
@@ -175,7 +172,7 @@
   --text-3xxs: 0.75rem;
   --text-xs: 0.8125rem;
 
-  /* ── RADII — fixed 3-step scale (2026-07-12) ──
+  /* ── RADII — fixed 3-step scale ──
    * The whole app uses exactly three corner radii; pick by use case,
    * never by taste:
    *   --radius-sm 4px — ALL buttons + icon buttons, pills/chips/badges,
@@ -187,9 +184,8 @@
    *   --radius-lg 8px — composer shell, dialogs, popovers, menus,
    *                     cards, code blocks, toasts, panels
    * Plus rounded-full (circles/scrollbars/switch) and rounded-none
-   * (nested resets). The shadcn calc chain (base 10px → 6/8/10/14/
-   * 18/22/26) was retired 2026-07-12; xs/xl/2xl/3xl/4xl are reset to
-   * `initial` below ON PURPOSE so `rounded-xl` etc. no longer exist —
+   * (nested resets). xs/xl/2xl/3xl/4xl are reset to `initial` below
+   * ON PURPOSE so `rounded-xl` etc. no longer exist —
    * a class that won't compile beats a fourth radius sneaking in.
    * Nesting rule: inner radius = outer radius − inset (8px menu with
    * 4px padding → 4px items). */
@@ -218,7 +214,7 @@
   --color-fg3: var(--fg3);
   --color-muted-fg: var(--muted-fg);
 
-  /* ── SIDEBAR (workspace col 1 only) ── */
+  /* ── REPOSITORY NAVIGATION ── */
   --color-sidebar-bg: var(--sidebar-bg);
   --color-sidebar-bg-hover: var(--sidebar-bg-hover);
 
@@ -339,11 +335,8 @@
    2. PRIMITIVE TOKENS — Zeros Shade (the default dark theme)
    ──────────────────────────────────────────────────────────
    `:root` is Zeros Shade — a muted warm-gray palette (hues
-   5-25°, chroma 0-10%) with a cool blue accent, promoted from
-   its former `[data-theme="zeros-shade"]` variant block on
-   2026-07-07 when all other variants were retired. The light
-   theme overrides these values in the `[data-theme="light"]`
-   block (§2b below). */
+   5-25°, chroma 0-10%) with a cool blue accent. The light theme
+   overrides these values in the `[data-theme="light"]` block. */
 
 :root {
   /* Native UA hint — form controls, scrollbars, selection.
@@ -380,7 +373,7 @@
   --fg3:        hsl(15 1% 44%);  /* #71706F — third-tier foreground (alias of --muted-fg) */
   --muted-fg:   hsl(15 4% 44%);  /* #756E6C — placeholder + empty-state icons */
 
-  /* ── SIDEBAR (workspace col 1 only — NOT settings sidebar) ── */
+  /* ── REPOSITORY NAVIGATION (not the settings sidebar) ── */
   --sidebar-bg:       hsl(25 5% 9%);   /* #151413 */
   --sidebar-bg-hover: hsl(25 2% 15%);  /* #272625 */
 
@@ -406,7 +399,7 @@
    * BELOW border1 (14%), which is what gives the bubble its faint outline —
    * keep any hover chip painted on this surface at bg2-hover (15%) or above,
    * or it disappears into the fill (turn-container.tsx "More" pill). */
-  --highlighted-bg:               hsl(5 8% 12%);    /* #211D1C — user msg bg (text on it: fg1/fg2) (2026-08-02) */
+  --highlighted-bg:               hsl(5 8% 12%);    /* #211D1C — user msg bg (text on it: fg1/fg2) */
   --highlighted-bright:           hsl(25 5% 65%);    /* #AAA5A1 — input focus border, brighter accents */
 
   /* ── INVERTED (polarity-flipping pair) ──
@@ -434,7 +427,7 @@
    * accents (counts, icons, borders) on the app canvas.
    * red also has --red-secondary (deep red 700) for SOLID delete button
    * fills + delete icons. Full 50–950 ramps live in the palette preview
-   * (.context/color-palette-preview.html); add a shade here only if a
+   * (styles/Artifacts/color-palette-preview.html); add a shade here only if a
    * specific step is actually needed. */
   --red-primary:    hsl(0 91% 71%);    /* #F87272 — −N counts, error accents */
   --red-secondary:  hsl(7 83% 39%);    /* #B72311 — solid delete fills + delete icons */
@@ -552,7 +545,7 @@
 
 
 /* ──────────────────────────────────────────────────────────
-   2b. LIGHT THEME — [data-theme="light"] overrides (2026-07-11)
+   2b. LIGHT THEME — [data-theme="light"] overrides
    ──────────────────────────────────────────────────────────
    Warm off-whites over the same taxonomy. Same specificity as
    `:root` (both target <html>), later in the file, so it wins
@@ -563,7 +556,7 @@
      • bg4/bg5 continue the neutral ramp as deeper chip greys
        (fg text must stay readable on them — no polarity flip;
        the inverted pair is the only surface that flips).
-     • The 50–950 color ramps are theme-static (see §2) and are
+     • The 50–950 color ramps are theme-static and are
        deliberately NOT overridden here. */
 
 [data-theme="light"] {
@@ -585,8 +578,8 @@
 
   /* ── FOREGROUNDS ── */
   --fg1:        hsl(20 7% 16%);   /* #2C2826 — selected/highlighted text + icons */
-  --fg2:        hsl(20 4% 37%);   /* #625D5B — default text + icon across app (comment hex corrected 2026-07-12 — the old #8E8885 note would read ~3.2:1 on white; the shipped value passes AA at 6.5:1) */
-  --fg3:        hsl(20 4% 56%);   /* #938D8A — third-tier foreground (comment hex corrected 2026-07-12; #B0ACAA was --muted-fg's hex, copy-paste drift) */
+  --fg2:        hsl(20 4% 37%);   /* #625D5B — default text + icon across app; passes AA on white at 6.5:1 */
+  --fg3:        hsl(20 4% 56%);   /* #938D8A — third-tier foreground */
   --muted-fg:   hsl(20 4% 68%);   /* #B1ACAA — placeholder + empty-state icons */
 
   /* ── SIDEBAR ── */
@@ -640,9 +633,9 @@
   --violet-bg:      hsl(274 93% 94%);  /* #F2E2FE — done container surface */
   --violet-fg:      hsl(263 61% 46%);  /* #642EBB — text/icon on --violet-bg */
 
-  --brown-primary:  hsl(5 35% 50%);    /* #AC5A53 — file paths · warm accents (comment hex corrected 2026-07-12) */
+  --brown-primary:  hsl(5 35% 50%);    /* #AC5A53 — file paths · warm accents */
   --brown-bg:       hsl(5 74% 91%);    /* #F9DAD7 — brown container surface */
-  --brown-fg:       hsl(0 20% 40%);    /* #7A5252 — text/icon on --brown-bg (comment hex corrected 2026-07-12) */
+  --brown-fg:       hsl(0 20% 40%);    /* #7A5252 — text/icon on --brown-bg */
 }
 
 

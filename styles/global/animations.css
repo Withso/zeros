@@ -1,0 +1,77 @@
+/* ──────────────────────────────────────────────────────────
+   1. KEYFRAMES (global — must be at root scope)
+   ────────────────────────────────────────────────────────── */
+
+/* "Opening browser…" button label — the three dots fade in sequence (a typing
+ * ellipsis) while the system browser opens and the sign-in handoff is in flight.
+ * Each dot runs this with a +0.2s staggered delay (set in the `animation`
+ * shorthand). Consumer: apps/desktop/src/renderer/features/auth/login-screen.tsx (OpeningDots). */
+@keyframes zeros-ellipsis-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.25;
+  }
+  40% {
+    opacity: 1;
+  }
+}
+
+@keyframes ocAgentJumpPillIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes ocAgentLiveDurationPulse {
+  0%,
+  100% {
+    opacity: 0.65;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Effort battery pill — the label drops in gently from the top on each toggle
+ * (its own keyed remount). The charge FILL is a hover affordance driven by a
+ * `transition` on width (not a keyframe), so it sweeps left→right 0→level on
+ * hover-enter AND retracts symmetrically level→0 on hover-leave — see the
+ * `group-hover:[width:…]` utility in EffortPill. Timing is slow + smooth (calm
+ * deceleration ease). Consumer: apps/desktop/src/renderer/features/agent/composer-pills.tsx (EffortPill) */
+@keyframes zeros-effort-label-in {
+  from {
+    opacity: 0;
+    transform: translateY(-35%);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ZerosSpinner (apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx) — resting-grid fade.
+ * The faint --fg3 dots behind the orbit fade one-directionally on a
+ * TL→BR diagonal sweep: each rests at --zeros-grid-fade-peak (--fg3 @
+ * 40%), fades to --zeros-grid-fade-trough (0) by mid-cycle and HOLDS
+ * there, then snaps back only at the loop boundary — it never fades
+ * back in mid-loop. Per-dot animation-delays (set inline, ∝ x+y) make
+ * the sweep travel TL → BR; the period is synced to the orbit lap. */
+@keyframes zeros-grid-fade {
+  0%        { opacity: var(--zeros-grid-fade-peak); }
+  50%, 100% { opacity: var(--zeros-grid-fade-trough); }
+}
+
+/* Reduced motion: freeze the fade — the resting dots hold at their
+ * static --fg3 @ 40% (inline `opacity` on each dot) and the orbit
+ * rests on the Z tetromino. */
+@media (prefers-reduced-motion: reduce) {
+  .zeros-spinner span {
+    animation: none !important;
+  }
+}

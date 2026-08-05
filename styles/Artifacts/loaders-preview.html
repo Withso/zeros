@@ -277,7 +277,7 @@
     }
 
     /* ── Demo buttons — minimal mirrors of the app's Button recipes
-       (src/zeros/ui/primitives/button.tsx), for the in-button spinner
+       (apps/desktop/src/renderer/shared/ui/primitives/button.tsx), for the in-button spinner
        demos below. Disabled = the recipe's `disabled:opacity-50`; the
        spinner dims with the button, nothing extra needed. ── */
     .demo-btn {
@@ -424,7 +424,7 @@
     <!-- ── 1. ActivityShimmer ── -->
     <section>
       <h2>ActivityShimmer — active agent turn</h2>
-      <p class="source">src/loaders/activity-shimmer.tsx · src/loaders/zeros-spinner.tsx · src/loaders/live-duration.tsx</p>
+      <p class="source">apps/desktop/src/renderer/shared/ui/loading/activity-shimmer.tsx · apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx · apps/desktop/src/renderer/shared/ui/loading/live-duration.tsx</p>
       <div class="demo-grid">
         <div class="demo-card wide">
           <h3>ActivityShimmer — active agent turn tail</h3>
@@ -471,7 +471,7 @@
     <!-- ── 3. ZerosSpinner — Orbit (the DEFAULT loader) ── -->
     <section>
       <h2>ZerosSpinner — Orbit Shimmer (default loader)</h2>
-      <p class="source">src/loaders/zeros-spinner.tsx · styles/globals.css · styles/semantic-tokens.css (--loader-*)</p>
+      <p class="source">apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx · styles/globals.css · styles/semantic-tokens.css (--loader-*)</p>
       <div class="demo-grid">
         <div class="demo-card">
           <h3>12px — small raw controls</h3>
@@ -499,7 +499,7 @@
     <!-- ── 3b. ZerosSpinner — Agent Shimmer ── -->
     <section>
       <h2>ZerosSpinner — Agent Shimmer</h2>
-      <p class="source">src/loaders/zeros-spinner.tsx · styles/globals.css</p>
+      <p class="source">apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx · styles/globals.css</p>
       <div class="demo-grid">
         <div class="demo-card">
           <h3>14px — tool rows (subagent / task)</h3>
@@ -524,7 +524,7 @@
     <section>
       <h2>Orbit in buttons — tones</h2>
       <p class="source">tone="default" | "inverted" | "inherit" · semantic tokens in styles/semantic-tokens.css</p>
-      <p class="source">The old Lucide-Loader2 Spinner is RETIRED (src/loaders/spinner.tsx deleted) — Orbit is the app-wide default loader.</p>
+      <p class="source">The old Lucide-Loader2 Spinner is RETIRED (apps/desktop/src/renderer/shared/ui/loading/spinner.tsx deleted) — Orbit is the app-wide default loader.</p>
       <div class="demo-grid">
         <div class="demo-card">
           <h3>Primary button — tone="inverted"</h3>
@@ -607,7 +607,7 @@
     <!-- ── 5. Duration feedback ── -->
     <section>
       <h2>LiveDuration &amp; DurationChip</h2>
-      <p class="source">src/loaders/live-duration.tsx · .zeros-agent-live-duration</p>
+      <p class="source">apps/desktop/src/renderer/shared/ui/loading/live-duration.tsx · .zeros-agent-live-duration</p>
       <div class="demo-grid">
         <div class="demo-card">
           <h3>LiveDuration — ticking counter</h3>
@@ -649,7 +649,7 @@
     const reducedMotion = window.matchMedia
       && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-    // ── ZerosSpinner — mirrors src/loaders/zeros-spinner.tsx ──
+    // ── ZerosSpinner — mirrors apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx ──
     //
     // 4×4 dot-matrix tetromino orbit + wave. The full board stays faintly
     // visible as a --fg3 grid; the active piece lights up on top in --fg1.
@@ -751,7 +751,7 @@
       agent: { shapes: AGENT_SHAPES, restIndex: 6, sync: true },
     };
 
-    // Tone → dot colors, mirroring TONE_COLORS in src/loaders/zeros-spinner.tsx
+    // Tone → dot colors, mirroring TONE_COLORS in apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx
     // (semantic --loader-* tokens with primitive fallbacks; "inherit" rides
     // currentColor for buttons with bespoke fills).
     const TONES = {
@@ -777,7 +777,7 @@
       const stepMs = LAP_MS / SHAPES.length;
       const gridFadePeriod = LAP_MS;
       // Per-instance phase jitter — mirrors phaseOffsetMs in
-      // src/loaders/zeros-spinner.tsx. One random entry point into the lap per
+      // apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx. One random entry point into the lap per
       // spinner, applied to the grid-fade delay AND the synced shape loop's
       // elapsed time (the same amount to both, so they stay phase-locked).
       // Spinners mounted on the same frame would otherwise march in lockstep.

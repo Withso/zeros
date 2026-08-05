@@ -8,7 +8,8 @@
 // internally self-consistent):
 //   a. the INSTALLED @openai/codex version
 //   b. package.json#codexProtocolVersion (the pin)
-//   c. src/engine/agents/adapters/codex/generated/.version (the committed bindings)
+//   c. apps/desktop/src/engine/agents/adapters/codex/generated/.version (the committed bindings)
+// The generated tree must also retain the upstream Apache LICENSE and NOTICE.
 //
 // The failure mode: Renovate bumps @openai/codex without re-running
 // `pnpm codegen:codex`; codegen early-exits because .version still matches the
@@ -25,10 +26,8 @@ import { existsSync, readFileSync } from "node:fs";
  *  readFileSync turns each into an ENOENT stack trace whose top frame is
  *  `node:fs` — a CI failure that names the wrong cause, which is the exact
  *  anti-pattern the exports-map note below is about. The generated/ directory in
- *  particular goes missing for a mundane reason: codegen-codex.mjs WIPES it
- *  before regenerating, so any failure mid-run (no cargo, no OpenSSL headers, a
- *  network drop during the sparse clone) leaves the tree in precisely this state.
- *  Restore with `git checkout -- src/engine/agents/adapters/codex/generated/`. */
+ *  particular may be absent after a manually interrupted regeneration. Restore
+ *  it from Git or rerun the generator with its required Rust toolchain. */
 function readOrDie(path, whatItIs, fix) {
   if (!existsSync(path)) {
     console.error(`✖ check:codex-pin — ${whatItIs} is missing:\n  ${path}\n\nFix: ${fix}`);
@@ -62,15 +61,33 @@ const pinned = JSON.parse(
   readOrDie("package.json", "the repo manifest", "run this from the repo root."),
 ).codexProtocolVersion;
 const generated = readOrDie(
-  "src/engine/agents/adapters/codex/generated/.version",
+  "apps/desktop/src/engine/agents/adapters/codex/generated/.version",
   "the generated-bindings version stamp",
   "run `pnpm codegen:codex` (needs a Rust toolchain), or restore the committed " +
-    "bindings with `git checkout -- src/engine/agents/adapters/codex/generated/` " +
+    "bindings with `git checkout -- apps/desktop/src/engine/agents/adapters/codex/generated/` " +
     "if a codegen run failed partway and left the directory wiped.",
 )
   .split("\n")
   .map((l) => l.trim())
   .find((l) => l && !l.startsWith("//") && !l.startsWith("#"));
+const generatedLicense = readOrDie(
+  "apps/desktop/src/engine/agents/adapters/codex/generated/LICENSE",
+  "the generated-bindings upstream license",
+  "run `pnpm codegen:codex` and commit the copied upstream LICENSE file.",
+);
+const generatedNotice = readOrDie(
+  "apps/desktop/src/engine/agents/adapters/codex/generated/NOTICE",
+  "the generated-bindings upstream notice",
+  "run `pnpm codegen:codex` and commit the copied upstream NOTICE file.",
+);
+
+if (!generatedLicense.includes("Apache License") || !generatedNotice.includes("OpenAI Codex")) {
+  console.error(
+    "✖ check:codex-pin — generated/LICENSE or generated/NOTICE is not the expected upstream legal material.\n\n" +
+      "Fix: rerun `pnpm codegen:codex` from the pinned openai/codex tag and commit both files.",
+  );
+  process.exit(1);
+}
 
 if (installed === pinned && pinned === generated) {
   console.log(`✓ check:codex-pin — installed = pin = bindings = ${installed}`);
@@ -82,6 +99,6 @@ console.error(`  • installed @openai/codex     : ${installed}`);
 console.error(`  • package.json codexProtocol  : ${pinned}`);
 console.error(`  • generated/.version          : ${generated}`);
 console.error(
-  "\nFix: run `pnpm codegen:codex` to regenerate the bindings against the installed Codex, then commit src/engine/agents/adapters/codex/generated/ + the updated pin.",
+  "\nFix: run `pnpm codegen:codex` to regenerate the bindings against the installed Codex, then commit apps/desktop/src/engine/agents/adapters/codex/generated/ + the updated pin.",
 );
 process.exit(1);

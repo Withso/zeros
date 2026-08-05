@@ -41,7 +41,7 @@ const YML = path.join(ROOT, "electron-builder.yml");
 // plus node-pty which is unpacked for the SEPARATE PTY host. Keeps the STALE
 // warning meaningful instead of noisy. Add with a reason; don't blanket-ignore.
 const ALLOW_UNUSED = new Set([
-  "node-pty", // PTY host (src/engine/pty/pty-host.cjs), not Cursor
+  "node-pty", // PTY host (apps/desktop/src/engine/pty/pty-host.cjs), not Cursor
   "@statsig", // SDK telemetry — flushed lazily on a real run
   "ajv", // response-schema validation — lazy
   "ajv-formats",

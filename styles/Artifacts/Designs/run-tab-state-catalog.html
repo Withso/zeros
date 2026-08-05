@@ -1179,7 +1179,7 @@
       }
 
       .run-shape {
-        /* Finalized tempo: a brisk ~2.2s/turn (was 5s) per user review. */
+        /* Finalized tempo: a brisk ~2.2s/turn (was 5s). */
         --sh-spin: 2.2s;
         --sh-color: 6.6s;
         --sh-shimmer: 3.3s;
@@ -1829,7 +1829,7 @@
             <div class="changes-label">Changes</div>
             <ul>
               <li>Adopt the Setup empty-state rhythm: <b>1px-stroke illustration → 24px secondary “Start run” (no icon) → one-line description</b> (was: opacity-40 glyph + inline “Start Run · ⌘R” + “Test your changes here.”).</li>
-              <li><b>Drop the cosmetic “⌘R”</b> until a real shortcut is bound — OR wire Cmd+R for real (it’s currently <code>preventDefault</code>’d in <code>electron/main.ts</code>). Showing a shortcut that does nothing is worse than none.</li>
+              <li><b>Drop the cosmetic “⌘R”</b> until a real shortcut is bound — OR wire Cmd+R for real (it’s currently <code>preventDefault</code>’d in <code>apps/desktop/electron/main.ts</code>). Showing a shortcut that does nothing is worse than none.</li>
               <li>With multiple actions (B1) the description names the action: <em>“Start Dev — <code>pnpm dev</code>.”</em></li>
             </ul>
           </div>
@@ -1938,7 +1938,7 @@
                 <div class="term-log"><span class="c-dim">~/project (feat) $</span> pnpm test
 <span class="c-dim">&gt; vitest run</span>
 
- <span class="c-err">FAIL</span>  src/engine/run/service.test.ts <span class="c-dim">&gt;</span> spawns concurrent runs
+ <span class="c-err">FAIL</span>  apps/desktop/src/engine/run/service.test.ts <span class="c-dim">&gt;</span> spawns concurrent runs
  <span class="c-err">AssertionError</span>: expected 2 sessions, got 1
 Tests  <span class="c-err">1 failed</span> | <span class="c-ok">42 passed</span> (43)
 
@@ -1967,7 +1967,7 @@ Tests  <span class="c-err">1 failed</span> | <span class="c-ok">42 passed</span>
               </div>
               <h2>Header “Run” button — one command, no state</h2>
               <p class="case-copy">
-                At the right of Column 3’s header sits a single stateless button:
+                At the right of the workbench header sits a single stateless button:
                 a play glyph + the literal word “Run” (never the script’s name).
                 It launches <code>scripts.run</code> and jumps to the Run sub-tab.
                 It looks <b>exactly the same whether the dev server is stopped or
@@ -2096,7 +2096,7 @@ Tests  <span class="c-err">1 failed</span> | <span class="c-ok">42 passed</span>
                     <div class="term-log"><span class="c-dim">~/project (feat) $</span> pnpm dev
   <span class="c-ok">VITE v6.0.3</span>  ready in <span class="c-info">412</span> ms
   ➜  Local:   <span class="c-info">http://localhost:5173/</span>
-<span class="c-dim">hmr update</span> <span class="c-path">/src/shell/run-tab.tsx</span><span class="cursor"></span></div>
+<span class="c-dim">hmr update</span> <span class="c-path">/apps/desktop/src/renderer/shell/run-tab.tsx</span><span class="cursor"></span></div>
                   </div>
                 </div>
               </div>
