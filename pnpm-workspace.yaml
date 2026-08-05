@@ -42,3 +42,45 @@ overrides:
   ip-address: "10.3.1"
   js-yaml: "4.3.0"
   qs: "6.15.2"
+
+# Accepted advisories — reviewed 2026-08-05. Every entry below is the same
+# story: the ONLY undici in the production graph is
+#   @cursor/sdk 1.0.26 → @connectrpc/connect-node 1.7.0 → undici 5.29.0
+# (`pnpm audit --prod` / `pnpm why undici`). The fixes land in undici >= 6.24
+# and 6.27 — a different major than connect-node 1.x's declared `^5.28.4`, with
+# no patched 5.x release and no newer SDK to move to (1.0.26 is the latest and
+# pins @connectrpc v1). Forcing undici 6 through an override would run a vendor
+# SDK on an untested major on the agent-run path, a worse trade than the
+# exposure — which is nil in practice: connect-node's only undici import is the
+# `Headers` polyfill in node-headers-polyfill.js, applied ONLY when Node < 18,
+# and the app always runs it on far newer Node (Electron's embedded Node 24 in
+# the packaged app, Node >= 22 in dev). None of the vulnerable undici code —
+# WebSocket client, fetch, the HTTP client — ever executes.
+# Drop these entries once `pnpm why undici` shows the production path off 5.x
+# (a future @cursor/sdk on @connectrpc v2 removes undici entirely).
+auditConfig:
+  ignoreGhsas:
+    # high — WebSocket permessage-deflate unbounded memory (fixed 6.24.0)
+    - GHSA-vrm6-8vpv-qv8q
+    # high — WebSocket server_max_window_bits unhandled exception (fixed 6.24.0)
+    - GHSA-v9p9-hfj2-hcw8
+    # high — WebSocket fragment-count bypass DoS (fixed 6.27.0)
+    - GHSA-vxpw-j846-p89q
+    # moderate — fetch unbounded Content-Encoding decompression chain
+    - GHSA-g9mf-h72j-4rw9
+    # moderate — HTTP request/response smuggling
+    - GHSA-2mjp-6q6p-2qxm
+    # moderate — CRLF injection via `upgrade` option
+    - GHSA-4992-7rv2-5pvq
+    # moderate — HTTP header injection
+    - GHSA-p88m-4jfj-68fv
+    # moderate — downstream response mixing
+    - GHSA-8xcm-r25x-g524
+    # moderate — CRLF injection via blob-like body
+    - GHSA-m8rv-5g2x-5cg5
+    # moderate — cookie attribute injection
+    - GHSA-v3r7-h72x-cjcm
+    # low — HTTP response queue poisoning
+    - GHSA-35p6-xmwp-9g52
+    # low — Set-Cookie SameSite handling
+    - GHSA-g8m3-5g58-fq7m
