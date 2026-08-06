@@ -2,19 +2,21 @@
 // Stale per-worktree dev cache pruning (macOS)
 // ──────────────────────────────────────────────────────────
 //
-// Every named dev instance gets its own Chromium cache at
-// ~/Library/Caches/com.zeros.dev.<slug> — and nothing ever deleted them. Dead
-// worktrees left ~200-300MB each behind forever: 30+ dirs / 8.9GB found
+// Every named dev instance gets its own Chromium session profile at
+// ~/Library/Caches/com.zeros.dev.<slug> — and nothing ever pruned it. Dead
+// worktrees left ~200-300MB each behind forever: 30+ profiles / 8.9GB found
 // 2026-08-04 with only two live worktrees, and the 2026-08-06 recurrence filled
 // the disk far enough that the installed ALPHA app could no longer stage its
 // auto-update (Squirrel's extraction died with ENOSPC on every 5-minute retry).
 //
-// Caches are regenerable by definition, so `pnpm electron:dev` reclaims any
-// instance cache that hasn't been touched in STALE_DEV_CACHE_MS. Never touched:
-// the primary `com.zeros.dev` dir (no trailing dot-segment — the everyday dev
-// loop), the launching worktree's own cache, non-directories (symlinks are not
-// followed), and anything outside the `com.zeros.dev.` prefix — the installed
-// com.zeros / com.zeros.alpha / com.zeros.beta caches never match it.
+// These profiles also hold durable renderer state (Local Storage, IndexedDB,
+// Cookies, composer drafts, theme and permission choices). `pnpm electron:dev`
+// therefore removes ONLY the known-regenerable Chromium entries from profiles
+// untouched for STALE_DEV_CACHE_MS; the profile root and every unrecognized or
+// durable entry survive. Never touched: the primary `com.zeros.dev` profile (no
+// trailing dot-segment — the everyday dev loop), the launching worktree's own
+// profile, non-directories (symlinks are not followed), and anything outside
+// the `com.zeros.dev.` prefix — installed channel profiles never match it.
 //
 // Lives in its own module (like ./dev-ports.mjs) because dev-instance.mjs
 // spawns the dev stack at import time and can't be imported by a test.
@@ -25,10 +27,23 @@ import os from "node:os";
 import path from "node:path";
 
 /** Instance caches untouched for this long belong to worktrees that are gone
- *  or dormant; either way the cache rebuilds on the next launch. */
+ *  or dormant; their regenerable entries rebuild on the next launch. */
 export const STALE_DEV_CACHE_MS = 14 * 24 * 60 * 60 * 1000;
 
 const DEV_CACHE_PREFIX = "com.zeros.dev.";
+
+// Keep this conservative allowlist in sync with relocateChromiumCache()'s
+// REGENERABLE list in apps/desktop/electron/main.ts. A missing entry only leaves
+// cache behind; an extra entry could erase durable browser state.
+const REGENERABLE_CHROMIUM_ENTRIES = [
+  "Cache",
+  "Code Cache",
+  "GPUCache",
+  "DawnWebGPUCache",
+  "DawnGraphiteCache",
+  "Shared Dictionary",
+  "VideoDecodeStats",
+];
 
 /** Newest mtime across the dir and its immediate children. Chromium doesn't
  *  reliably touch the top-level cache dir itself on every run, but each run
@@ -46,8 +61,9 @@ function lastActivityMs(dir) {
 }
 
 /**
- * Delete stale per-worktree dev instance caches. Returns the pruned dir names.
- * Never throws — cache hygiene must not be able to block a dev launch.
+ * Prune regenerable data from stale per-worktree Chromium profiles. Returns the
+ * names of profiles where at least one entry was removed. Never throws — cache
+ * hygiene must not be able to block a dev launch.
  *
  * @param {object} [options]
  * @param {string} [options.cachesRoot] override for tests (defaults to
@@ -81,8 +97,20 @@ export function pruneStaleDevCaches({
     try {
       if (!fs.lstatSync(dir).isDirectory()) continue;
       if (now - lastActivityMs(dir) < staleMs) continue;
-      fs.rmSync(dir, { recursive: true, force: true });
-      pruned.push(entry);
+      let removed = false;
+      for (const child of REGENERABLE_CHROMIUM_ENTRIES) {
+        const target = path.join(dir, child);
+        try {
+          // Be conservative when a profile contains an unexpected symlink:
+          // never follow it or remove the link under the guise of cache data.
+          if (fs.lstatSync(target).isSymbolicLink()) continue;
+          fs.rmSync(target, { recursive: true, force: true });
+          removed = true;
+        } catch {
+          /* missing/locked/raced entry — preserve it and keep scanning */
+        }
+      }
+      if (removed) pruned.push(entry);
     } catch {
       /* permission/race — skip this dir, keep scanning */
     }

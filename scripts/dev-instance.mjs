@@ -126,10 +126,10 @@ const { slug: SLUG, human: HUMAN } = resolveInstance();
 // Reclaim caches left behind by dead worktrees (each ~200-300MB, previously
 // leaked forever — far enough gone on 2026-08-06 to ENOSPC the installed
 // alpha's auto-update staging). See scripts/dev-cache-prune.mjs.
-const prunedCaches = pruneStaleDevCaches({ currentSlug: SLUG });
-if (prunedCaches.length) {
+const prunedProfiles = pruneStaleDevCaches({ currentSlug: SLUG });
+if (prunedProfiles.length) {
   console.log(
-    `[dev-instance] pruned ${prunedCaches.length} stale dev instance cache dir(s) under ~/Library/Caches`,
+    `[dev-instance] pruned regenerable Chromium data from ${prunedProfiles.length} stale dev instance profile(s)`,
   );
 }
 // The Dock/window name: "zeros-<worktree>" for a linked worktree; the primary
