@@ -13,7 +13,7 @@ function tmpFile(name: string): string {
   return path.join(dir, name);
 }
 
-/** Build a fixture matching the legacy apps/desktop/electron/db.ts schema (chats + agent_messages). */
+/** Build a fixture matching the legacy electron/db.ts schema (chats + agent_messages). */
 function makeLegacyDb(): string {
   const file = tmpFile("zeros-agent-history.db");
   const db = new Database(file);

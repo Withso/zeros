@@ -25,7 +25,11 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-import { isElectron, nativeInvoke, nativeListen } from "@/renderer/platform/runtime";
+import {
+  isElectron,
+  nativeInvoke,
+  nativeListen,
+} from "@/renderer/platform/runtime";
 import { useUpdater } from "@/renderer/platform/updater";
 import { useAnyAgentRunning } from "@/renderer/features/agent/sessions-store";
 import {
@@ -61,6 +65,12 @@ export function UpdateNotifications(): null {
   // 0 = not suppressed. Otherwise the epoch-ms until which the toast is hidden.
   const [suppressedUntil, setSuppressedUntil] = useState(0);
   const [restartWhenIdle, setRestartWhenIdle] = useState(false);
+  // Last error-status message already toasted. Main publishes `error` only for
+  // failures worth acting on (a user-initiated install that failed, or staging
+  // aborted because the disk is full — which recurs on every retry until space
+  // is freed, and used to loop invisibly forever). Show each distinct message
+  // once, not once per 5-minute retry.
+  const [shownError, setShownError] = useState("");
 
   const ready = status.kind === "ready";
   const version = "version" in status ? status.version : "";
@@ -71,6 +81,9 @@ export function UpdateNotifications(): null {
     let unlisten: (() => void) | null = null;
     void nativeListen("menu-check-for-updates", () => {
       void (async () => {
+        // An explicit menu click means "show me the state now": let a still-
+        // persisting failure toast again with this fresh attempt.
+        setShownError("");
         try {
           const meta = await nativeInvoke<{ version: string } | null>(
             "updater_check",
@@ -144,6 +157,15 @@ export function UpdateNotifications(): null {
     handleRestartWhenIdle,
     handleDismiss,
   ]);
+
+  // ── Surface persistent, actionable update failures (e.g. disk full) ──
+  useEffect(() => {
+    if (status.kind !== "error" || status.message === shownError) return;
+    setShownError(status.message);
+    toast.warning("Couldn't install the update", {
+      description: status.message,
+    });
+  }, [status, shownError]);
 
   // ── Re-surface once the suppression window elapses ──
   useEffect(() => {

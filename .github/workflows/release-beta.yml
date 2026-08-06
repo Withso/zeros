@@ -40,7 +40,7 @@ name: Release (beta)
 # which existed only because the repo was private and anonymous clients get 404 on
 # a private repo's release assets.
 #
-# GATED: typecheck · lint · vitest · the six ship guards · engine smoke · packaged-PTY
+# GATED: typecheck · lint · vitest · the ship guards · engine smoke · packaged-PTY
 # smoke · signature verification. See the "Gates" block below.
 
 on:
@@ -218,7 +218,8 @@ jobs:
         # The same set the stable release job runs. Each guards a concrete way the
         # shipped app breaks: a downgrading model catalog, a dead packaged Cursor, a
         # missing extraResources path, a build shipped without its VITE_* set, a
-        # desynced Codex protocol, a regressed Electron security posture.
+        # desynced Codex protocol, a regressed Electron security posture, a
+        # cross-channel deep-link scheme collision.
         run: |
           pnpm models:verify --strict
           pnpm check:cursor-asar
@@ -227,6 +228,7 @@ jobs:
           pnpm check:vite-env
           pnpm check:codex-pin
           pnpm check:electron-hardening
+          pnpm check:deep-link-schemes
 
       - name: Build engine sidecar (bun → binaries/zeros-engine-*)
         run: pnpm build:sidecar

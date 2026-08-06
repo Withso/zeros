@@ -2,7 +2,7 @@
 // Legacy agent-history migration — one-time, engine-side
 // ──────────────────────────────────────────────────────────
 //
-// Retiring apps/desktop/electron/db.ts means the engine must hold a COMPLETE copy of the
+// Retiring electron/db.ts means the engine must hold a COMPLETE copy of the
 // user's chat history before the renderer stops reading the legacy store. This
 // migrates the legacy Electron-main DB (zeros-agent-history.db: `chats` +
 // `agent_messages`) into the unified Zeros DB — engine-side, so it's guaranteed
@@ -10,7 +10,7 @@
 //
 // Safety:
 //  • Reads the legacy file READ-ONLY; never writes or deletes it. The file stays
-//    on disk as a recovery net even after the apps/desktop/electron/db.ts code is removed.
+//    on disk as a recovery net even after the electron/db.ts code is removed.
 //  • INSERT-IF-ABSENT by chat id: a chat already in the engine (live persist or a
 //    prior import) is skipped wholesale, so newer engine data is never clobbered.
 //  • Idempotent: a flag row in the engine's `settings` makes it run at most once.

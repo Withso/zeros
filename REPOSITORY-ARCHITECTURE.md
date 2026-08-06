@@ -123,12 +123,13 @@ flowchart LR
   ENGINE --> LOCAL
 ```
 
-- `electron/` owns windows, menus, updater, credential store, deep links,
-  preload IPC, native integration, and engine supervision.
-- `src/engine/` owns headless Git/worktree behavior, local workspace lifecycle,
-  SQLite, PTY sessions, agent execution, settings, and transport.
-- `src/renderer/` owns presentation and client state. It has no direct Node
-  authority.
+- `apps/desktop/electron/` owns windows, menus, updater, credential store, deep
+  links, preload IPC, native integration, and engine supervision.
+- `apps/desktop/src/engine/` owns headless Git/worktree behavior, local
+  workspace lifecycle, SQLite, PTY sessions, agent execution, settings, and
+  transport.
+- `apps/desktop/src/renderer/` owns presentation and client state. It has no
+  direct Node authority.
 
 This separation is a security boundary, not only a directory preference.
 

@@ -19,11 +19,16 @@ name: Preflight
 #             error contracts, and the compiled sidecar runtime on macOS.
 #   secret-scan — gitleaks over every commit the PR adds, not just its net diff,
 #             so a credential added and then removed within the PR is still caught.
+#   control-plane — typecheck + vitest for apps/control-plane (its own pnpm
+#             workspace and lockfile) against a real Postgres service container.
+#   ui-smoke — the Playwright-driven renderer smoke pass (real browser, real CSS).
 #
-# Heavier/secret macOS work (live-agent smoke, full electron-builder pack, native
-# ABI rebuild) remains in the scheduled workflow, not on the per-PR path. The pnpm
-# + Node setup mirrors release.yml so the two stay consistent (pnpm via
-# packageManager, Node 22, pnpm cache).
+# Heavier/secret macOS work (full electron-builder pack, native ABI rebuild, live
+# model-catalog drift) remains in the scheduled workflow, not on the per-PR path.
+# The credentialed live-agent smoke (`pnpm agents:smoke`) is NOT wired into any
+# workflow yet — only the offline variant runs here. The pnpm + Node setup mirrors
+# release.yml so the two stay consistent (pnpm via packageManager, Node 22, pnpm
+# cache).
 
 on:
   pull_request:
@@ -479,6 +484,10 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+          cache: pnpm
+          # This job installs from the control plane's own lockfile, not the
+          # root workspace's — key the store cache off the file that drives it.
+          cache-dependency-path: apps/control-plane/pnpm-lock.yaml
       - name: Install control-plane dependencies
         # apps/control-plane/ is its own pnpm workspace with its own lockfile,
         # and it deploys continuously from main, so this job is where a type or

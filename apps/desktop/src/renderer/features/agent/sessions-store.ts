@@ -487,7 +487,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
   hydrateChatPolicies: async (chatId) => {
     // Re-read this chat's rules from localStorage on open, so a change made in
     // another window/tab since boot is picked up. localStorage is the sole store
-    // now that the apps/desktop/electron/db.ts backstop is gone. Async signature kept
+    // now that the retired electron/db.ts backstop is gone. Async signature kept
     // for callers.
     const rules = loadPolicies().byChat[chatId] ?? [];
     set((state) => {

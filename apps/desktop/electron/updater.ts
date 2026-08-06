@@ -157,6 +157,25 @@ export type UpdaterStatusSnapshot = UpdaterStatusState & { revision: number };
 let statusRevision = 0;
 let currentStatus: UpdaterStatusSnapshot = { kind: "idle", revision: 0 };
 
+/** Main-process observers of the status stream (the app menu's dynamic
+ *  "Check for Updates" item). The renderer gets the same stream via emitEvent;
+ *  this exists because main-side consumers have no IPC event bus to listen on. */
+const statusListeners = new Set<(status: UpdaterStatusSnapshot) => void>();
+
+/** Subscribe a main-process listener to updater status changes. Returns an
+ *  unsubscribe function. Pair with getUpdaterStatus() for the initial state. */
+export function subscribeUpdaterStatus(
+  listener: (status: UpdaterStatusSnapshot) => void,
+): () => void {
+  statusListeners.add(listener);
+  return () => statusListeners.delete(listener);
+}
+
+/** Current status snapshot for main-process consumers. */
+export function getUpdaterStatus(): UpdaterStatusSnapshot {
+  return currentStatus;
+}
+
 /** Set once electron-updater has fully downloaded an update and staged it for
  *  install. Lets updater_install choose "download" vs "restart now". */
 let updateDownloaded = false;
@@ -195,10 +214,7 @@ function parseVersion(value: string): ParsedVersion | null {
   const core = corePart.split(".").map((part) => Number(part));
   if (
     core.length === 0 ||
-    core.some(
-      (part) =>
-        !Number.isSafeInteger(part) || part < 0,
-    )
+    core.some((part) => !Number.isSafeInteger(part) || part < 0)
   ) {
     return null;
   }
@@ -211,7 +227,10 @@ function parseVersion(value: string): ParsedVersion | null {
   return { core, prerelease };
 }
 
-function compareIdentifiers(left: number | string, right: number | string): number {
+function compareIdentifiers(
+  left: number | string,
+  right: number | string,
+): number {
   if (left === right) return 0;
   if (typeof left === "number" && typeof right === "string") return -1;
   if (typeof left === "string" && typeof right === "number") return 1;
@@ -258,6 +277,7 @@ export function parseFeedVersion(metadata: string): string | null {
 function publish(status: UpdaterStatusState): void {
   currentStatus = { ...status, revision: ++statusRevision };
   emitEvent("updater-status", currentStatus);
+  for (const listener of statusListeners) listener(currentStatus);
 }
 
 function publishUnlessReady(status: UpdaterStatusState): void {
@@ -329,7 +349,10 @@ function checkForNewerThanStaged(reason: string): void {
     try {
       const result = await checkForUpdatesShared();
       const nextVersion = result?.updateInfo?.version ?? "";
-      if (!result?.isUpdateAvailable || !isVersionNewer(nextVersion, previousVersion)) {
+      if (
+        !result?.isUpdateAvailable ||
+        !isVersionNewer(nextVersion, previousVersion)
+      ) {
         // Feed/provider disagreement: preserve the known-good staged update.
         stagedVersion = previousVersion;
         updateDownloaded = true;
@@ -393,6 +416,30 @@ function checkAutomatically(reason: string): void {
   });
 }
 
+/** True when an updater failure is the staging extraction running out of disk
+ *  space. electron-updater surfaces Squirrel's ditto failure as a plain Error
+ *  whose message ends in macOS's "No space left on device"; Node-level ENOSPC
+ *  carries the code instead. Exported for tests. */
+export function isDiskFullError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const { code, message } = err as { code?: unknown; message?: unknown };
+  if (code === "ENOSPC") return true;
+  return (
+    typeof message === "string" &&
+    (message.includes("ENOSPC") || message.includes("No space left on device"))
+  );
+}
+
+/** Apply an already-staged update now (quit → replace → relaunch). Returns
+ *  false when nothing is staged — callers with a UI affordance (the app menu's
+ *  "Restart to Update" item) only appear in the ready state, so false means a
+ *  stale click raced a state change and should do nothing. */
+export function installStagedUpdate(): boolean {
+  if (!updateDownloaded) return false;
+  applyAndRelaunch();
+  return true;
+}
+
 /** Run quitAndInstall off the current event-loop tick (electron-updater's own
  *  guidance — calling it synchronously inside an event handler can race the
  *  download cleanup). isForceRunAfter relaunches into the new version. */
@@ -439,7 +486,10 @@ export function setupUpdater(): void {
     info: (m) => console.log("[updater]", m),
     warn: (m) => console.error("[updater] WARN", m),
     error: (m) =>
-      console.error("[updater]", m instanceof Error ? (m.stack ?? m.message) : m),
+      console.error(
+        "[updater]",
+        m instanceof Error ? (m.stack ?? m.message) : m,
+      ),
     debug: (m) => console.log("[updater:debug]", m),
   };
 
@@ -538,6 +588,19 @@ export function setupUpdater(): void {
         stagedReplacementFallback = "";
         updateDownloaded = true;
         publish({ kind: "ready", version: stagedVersion });
+      } else if (isDiskFullError(err)) {
+        // The one background failure that is NOT transient noise: Squirrel's
+        // staging extraction hit ENOSPC. It recurs on every retry until the
+        // user frees disk space, and swallowing it as `idle` left installs
+        // stranded on old builds for days with zero signal (field incident,
+        // 2026-08-06). Publish an actionable error so the renderer can say
+        // "free up disk space" once; the scheduler keeps retrying regardless.
+        publish({
+          kind: "error",
+          message:
+            "There isn't enough free disk space to install it. " +
+            "Free up some space and the update will retry automatically.",
+        });
       } else {
         publish({ kind: "idle" });
       }
@@ -615,7 +678,10 @@ export const updaterInstall: CommandHandler = async () => {
   } catch (err) {
     // A download already in progress rejects here — that's fine, the latch
     // still fires on update-downloaded. Only surface genuine failures.
-    console.warn("[updater] downloadUpdate:", err instanceof Error ? err.message : err);
+    console.warn(
+      "[updater] downloadUpdate:",
+      err instanceof Error ? err.message : err,
+    );
   }
 };
 

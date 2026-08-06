@@ -29,6 +29,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { portFree } from "./dev-ports.mjs";
+import { pruneStaleDevCaches } from "./dev-cache-prune.mjs";
 
 const require = createRequire(import.meta.url);
 const bundle = require("./dev-electron-bundle.cjs");
@@ -59,7 +60,10 @@ const VITE_BASE = 5193;
 
 function sh(cmd, args) {
   try {
-    return execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return execFileSync(cmd, args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
   } catch {
     return "";
   }
@@ -118,6 +122,16 @@ function resolveInstance() {
 }
 
 const { slug: SLUG, human: HUMAN } = resolveInstance();
+
+// Reclaim caches left behind by dead worktrees (each ~200-300MB, previously
+// leaked forever — far enough gone on 2026-08-06 to ENOSPC the installed
+// alpha's auto-update staging). See scripts/dev-cache-prune.mjs.
+const prunedProfiles = pruneStaleDevCaches({ currentSlug: SLUG });
+if (prunedProfiles.length) {
+  console.log(
+    `[dev-instance] pruned regenerable Chromium data from ${prunedProfiles.length} stale dev instance profile(s)`,
+  );
+}
 // The Dock/window name: "zeros-<worktree>" for a linked worktree; the primary
 // checkout stays the plain "Zeros Dev" bundle (NAME empty → no rename). A leading
 // "zeros" in the branch is dropped so a branch literally named "zeros-*" doesn't
@@ -182,7 +196,9 @@ function prepareBundle() {
       // fall through to the shared "Zeros Dev" bundle on any failure
     }
   } catch (err) {
-    console.warn(`[dev-instance] bundle prep failed: ${err && err.message ? err.message : err}`);
+    console.warn(
+      `[dev-instance] bundle prep failed: ${err && err.message ? err.message : err}`,
+    );
   }
   return null;
 }
@@ -229,7 +245,8 @@ if (RUN_ONLY && env.ZEROS_NO_ENGINE_HMR == null) env.ZEROS_NO_ENGINE_HMR = "1";
 // direct launch even under --watch (mirrors ZEROS_NO_ENGINE_HMR). The primary
 // (no binPath) still uses electronmon under --watch.
 const NO_MAIN_HMR = process.env.ZEROS_NO_MAIN_HMR === "1";
-const useMainSupervisor = Boolean(binPath) && WATCH && !RUN_ONLY && !NO_MAIN_HMR;
+const useMainSupervisor =
+  Boolean(binPath) && WATCH && !RUN_ONLY && !NO_MAIN_HMR;
 const launchBin = binPath ? `"${binPath}"` : WATCH ? "electronmon" : "electron";
 const launchExpr = useMainSupervisor
   ? `node scripts/dev-main-supervisor.mjs "${binPath}"`
@@ -257,7 +274,11 @@ const jobs = RUN_ONLY
   : [
       ["vite", "cyan", "pnpm dev"],
       ["engine", "yellow", "tsup --watch"],
-      ["main", "magenta", "tsup --config apps/desktop/electron/tsup.config.ts --watch"],
+      [
+        "main",
+        "magenta",
+        "tsup --config apps/desktop/electron/tsup.config.ts --watch",
+      ],
       ["app", "green", appCmd],
     ];
 

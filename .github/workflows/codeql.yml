@@ -1,10 +1,12 @@
 name: CodeQL
 
 # Static taint/dataflow analysis (injection, path-traversal, prototype-pollution,
-# unsafe-deserialization, command-injection, hardcoded-credentials) for the JS/TS
-# in apps/desktop/src/ + apps/desktop/electron/. Relevant as the app goes
+# unsafe-deserialization, command-injection, hardcoded-credentials) for ALL JS/TS
+# in the repo — no paths filter, so alongside the desktop app (apps/desktop/src/ +
+# apps/desktop/electron/) it also covers the control plane, the Pages Functions
+# under apps/web/, the marketing site and scripts/. Relevant as the app goes
 # multi-user: the engine spawns child processes, reads/writes by path, runs Git,
-# and bridges renderer ↔ main IPC.
+# bridges renderer ↔ main IPC, and the control plane terminates network input.
 #
 # ADVISORY by nature: findings surface as Code Scanning alerts, NOT job failures,
 # so this never blocks a PR (don't make it a required check — a per-PR CodeQL gate
