@@ -10,7 +10,7 @@
 //
 // Wire shape = PersistedMessage (mirrors the renderer's PersistedMessageWire:
 // msgId / kind / payload=JSON(AgentMessage) / createdAt). Storage/ordering mirror
-// apps/desktop/electron/db.ts agent_messages exactly (upsert by (chat_id, msg_id); `ord` =
+// the retired electron/db.ts agent_messages exactly (upsert by (chat_id, msg_id); `ord` =
 // MAX+1 on first insert; window newest-by-ord then reversed to chronological).
 // ──────────────────────────────────────────────────────────
 
@@ -290,7 +290,7 @@ function snapToTurnStart(chatId: string, rows: MsgDbRow[]): MsgDbRow[] {
  *  that opened the turn the window landed in (see snapToTurnStart), so a tail
  *  read never hands the renderer a headless turn. `before` (an ord) paginates
  *  older history and is returned unsnapped: a page walking backwards is already
- *  anchored to rows the caller holds. Mirrors apps/desktop/electron/db.ts windowMessages. */
+ *  anchored to rows the caller holds. Mirrors the retired electron/db.ts windowMessages. */
 export function windowChatMessages(
   chatId: string,
   limit: number,

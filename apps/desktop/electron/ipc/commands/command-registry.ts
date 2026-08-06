@@ -188,7 +188,7 @@ export function registerAllCommands(): void {
   setCommand("process_relaunch", processRelaunch);
 
   // Agent transcript and chat-list persistence moved to the engine's
-  // unified Zeros DB (reached over the bridge); the apps/desktop/electron/db.ts handlers are
+  // unified Zeros DB (reached over the bridge); the retired electron/db.ts handlers are
   // gone. Image attachments stay here — a file-write, unrelated to chat storage.
   //
   // Native startup fallback for the engine bridge's attachment writer. Normal

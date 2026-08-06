@@ -129,7 +129,8 @@ jobs:
         # fast, deterministic, secret-free, and each guards a way the shipped app
         # breaks: a downgrading model catalog, a dead packaged Cursor, a missing
         # extraResources path, a prod build shipped without its VITE_* secret-set,
-        # a desynced Codex protocol, or a regressed Electron security posture.
+        # a desynced Codex protocol, a regressed Electron security posture, or a
+        # cross-channel deep-link scheme collision.
         run: |
           pnpm models:verify --strict
           pnpm check:cursor-asar
@@ -138,6 +139,7 @@ jobs:
           pnpm check:vite-env
           pnpm check:codex-pin
           pnpm check:electron-hardening
+          pnpm check:deep-link-schemes
 
   build:
     name: Build + sign + submit to notary (macOS arm64)

@@ -199,7 +199,8 @@ jobs:
         # The same set the stable release job runs. Each guards a concrete way the
         # shipped app breaks: a downgrading model catalog, a dead packaged Cursor, a
         # missing extraResources path, a build shipped without its VITE_* set, a
-        # desynced Codex protocol, a regressed Electron security posture.
+        # desynced Codex protocol, a regressed Electron security posture, a
+        # cross-channel deep-link scheme collision.
         run: |
           pnpm models:verify --strict
           pnpm check:cursor-asar
@@ -208,6 +209,7 @@ jobs:
           pnpm check:vite-env
           pnpm check:codex-pin
           pnpm check:electron-hardening
+          pnpm check:deep-link-schemes
 
       - name: Build engine sidecar (bun → binaries/zeros-engine-*)
         run: pnpm build:sidecar

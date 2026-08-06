@@ -1323,7 +1323,7 @@ app.on("before-quit", () => {
   // and the engine reaps them on its own shutdown (Engine.stop → pty.killAll).
   // Killing the sidecar above tears the engine down, so there are no
   // renderer-process node-pty children left to reap here.
-  // The legacy agent-history SQLite handle (apps/desktop/electron/db.ts) is gone —
+  // The legacy agent-history SQLite handle (the retired electron/db.ts) is gone —
   // chats + transcripts live in the engine's Zeros DB, which the engine closes.
   //
   // Last: write out any coalesced-repeat summary the log store is still

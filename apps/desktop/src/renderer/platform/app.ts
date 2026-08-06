@@ -78,7 +78,7 @@ export async function loadAgentContextFiles(args: {
 
 // The per-chat policies and plan IPC wrappers were removed: those
 // surfaces now live in renderer localStorage (device-local.ts / policies.ts),
-// and the apps/desktop/electron/db.ts store backing them is gone.
+// and the retired electron/db.ts store backing them is gone.
 
 // ── Skills ───────────────────────────────────────────────
 

@@ -1471,7 +1471,7 @@ export class ZerosEngine {
     // 1c. One-time migration of the legacy Electron-main agent-history DB
     // (zeros-agent-history.db) into the unified Zeros DB. Idempotent and
     // best-effort; reads the legacy file READ-ONLY and never deletes it, so it
-    // remains a recovery net even after apps/desktop/electron/db.ts is removed. No-op without
+    // remains a recovery net even after the retired electron/db.ts is removed. No-op without
     // ZEROS_LEGACY_AGENT_DB (for example, outside the Electron sidecar).
     try {
       const { migrateLegacyAgentHistory } = await import("./db/legacy-import");

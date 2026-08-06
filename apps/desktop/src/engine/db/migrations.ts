@@ -256,7 +256,7 @@ CREATE INDEX idx_chats_updated ON chats(updated_at DESC);
  *  IT STREAMS them (engine-persists-on-emit; it's the source — works even for a
  *  running agent whose client is disconnected). One row per coalesced AgentMessage,
  *  keyed by (chat_id, msg_id) so a streaming message upserts a single row as its
- *  chunks arrive (mirrors apps/desktop/electron/db.ts agent_messages). `payload` is the
+ *  chunks arrive (mirrors the retired electron/db.ts agent_messages). `payload` is the
  *  JSON AgentMessage; `ord` drives pagination; aggregation is by chat_id so a
  *  chat that spans multiple sessions (model-swap forks) reads as one transcript. */
 const MIGRATION_4_MESSAGES = `
