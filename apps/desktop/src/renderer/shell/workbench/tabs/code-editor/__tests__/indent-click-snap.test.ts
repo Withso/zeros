@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   indentEndOffset,
   isPlainPointerClick,
+  remapGestureAfterChange,
   snapClickOutOfIndent,
 } from "../indent-click-snap";
 
@@ -80,6 +81,57 @@ describe("snapClickOutOfIndent", () => {
 
   it("ignores a position that is not on the line", () => {
     expect(snapClickOutOfIndent(line, 99)).toBe(99);
+  });
+});
+
+describe("remapGestureAfterChange", () => {
+  // A file is rewritten (agent turn, Git checkout) while the button is held.
+  // The caret CodeMirror holds was mapped through that change; `reselect` is
+  // the only way a freshly derived target reaches it, so it has to be true
+  // exactly when mapping alone would leave the caret in the wrong place.
+  const shiftBy = (delta: number) => (pos: number) => pos + delta;
+
+  it("asks for a re-select when the edit deepened the line's indentation", () => {
+    // Pressed column 0 of `  x`, snapped to its content at 102. The rewrite
+    // re-indents the line to 6 spaces, so 102 is now INSIDE the indentation —
+    // the stranded caret this exists to prevent.
+    const next = remapGestureAfterChange(
+      { pressed: 100, target: 102 },
+      shiftBy(0),
+      () => ({ from: 100, text: '      "!docs/**",' }),
+    );
+    expect(next).toEqual({ pressed: 100, target: 106, reselect: true });
+  });
+
+  it("asks for a re-select when the edit removed the indentation", () => {
+    const next = remapGestureAfterChange(
+      { pressed: 100, target: 106 },
+      shiftBy(0),
+      () => ({ from: 100, text: '"!docs/**",' }),
+    );
+    expect(next).toEqual({ pressed: 100, target: 100, reselect: true });
+  });
+
+  it("stays quiet when mapping already lands the caret at the content start", () => {
+    // An insert above the line shifts everything by 20; the indentation is
+    // untouched, so CodeMirror's own mapped caret is already correct.
+    const next = remapGestureAfterChange(
+      { pressed: 100, target: 106 },
+      shiftBy(20),
+      () => ({ from: 120, text: '      "!docs/**",' }),
+    );
+    expect(next).toEqual({ pressed: 120, target: 126, reselect: false });
+  });
+
+  it("re-derives from the new text rather than mapping the old target", () => {
+    // Mapping alone would say 126; the line now has 2 spaces, so 122 is right.
+    const next = remapGestureAfterChange(
+      { pressed: 100, target: 106 },
+      shiftBy(20),
+      () => ({ from: 120, text: '  "!docs/**",' }),
+    );
+    expect(next.target).toBe(122);
+    expect(next.reselect).toBe(true);
   });
 });
 

@@ -439,6 +439,11 @@ try {
       const cs = getComputedStyle(line);
       const paddingLeft = parseFloat(cs.paddingLeft);
       const textIndent = parseFloat(cs.textIndent);
+      // `text-indent: <n>ch hanging` — the keyword is the whole mechanism, so
+      // read it rather than inferring it from the sign.
+      const hanging = cs.textIndent.includes("hanging");
+      // Where the line's own content box starts: row 1 must begin exactly here.
+      const contentLeft = line.getBoundingClientRect().left + paddingLeft;
       // One rect per (span × visual row) fragment; the minimum left per row is
       // where that visual row's text actually starts.
       const range = document.createRange();
@@ -451,7 +456,13 @@ try {
         else rows.push({ top: rect.top, left: rect.left });
       }
       rows.sort((a, b) => a.top - b.top);
-      return { paddingLeft, textIndent, rowLefts: rows.map((r) => r.left) };
+      return {
+        paddingLeft,
+        textIndent,
+        hanging,
+        contentLeft,
+        rowLefts: rows.map((r) => r.left),
+      };
     })
     .catch(() => null);
   check(
@@ -461,16 +472,26 @@ try {
   );
   check(
     "Wrapped rows hang at the line's own indent",
+    hang !== null && hang.hanging && hang.textIndent > 0,
+    `text-indent ${hang?.textIndent}px${hang?.hanging ? " hanging" : ""}`,
+  );
+  // Row 1 stays inside the content box. The classic `padding-left: Nch;
+  // text-indent: -Nch` pair hung the same rows but pulled row 1 OUT of it,
+  // which drags the CSS tab-stop origin along and renders leading tabs short.
+  check(
+    "Row 1 is not pulled out of the line's content box (tab stops intact)",
     hang !== null &&
-      hang.textIndent < 0 &&
-      Math.abs(hang.paddingLeft + hang.textIndent - 6) < 0.5,
-    `padding-left ${hang?.paddingLeft}px, text-indent ${hang?.textIndent}px`,
+      hang.paddingLeft === 6 &&
+      Math.abs(hang.rowLefts[0] - hang.contentLeft) < 0.5,
+    `row 1 at ${hang?.rowLefts[0]?.toFixed(1)}, content box at ${hang?.contentLeft?.toFixed(1)}, padding-left ${hang?.paddingLeft}px`,
   );
   check(
     "Continuation rows align with row 1's indent point",
     hang !== null &&
       hang.rowLefts.length >= 2 &&
-      Math.abs(hang.rowLefts[1] - (hang.rowLefts[0] - hang.textIndent)) < 1,
+      hang.rowLefts
+        .slice(1)
+        .every((l) => Math.abs(l - (hang.rowLefts[0] + hang.textIndent)) < 1),
     `row lefts ${hang?.rowLefts.map((x) => x.toFixed(1)).join(", ")}`,
   );
   // FIRST PAINT in the code theme. The reported bug was a file opening with

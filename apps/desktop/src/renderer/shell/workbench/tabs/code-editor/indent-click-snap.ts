@@ -74,44 +74,76 @@ export function isPlainPointerClick(
   );
 }
 
+/** Re-derive a held gesture after the document changed underneath it (an agent
+ *  or Git write adopted mid-click). The press is MAPPED — it names a place in
+ *  the text the user pointed at — while the target is RE-DERIVED from the new
+ *  line, because the edit may have changed how much indentation that line has.
+ *
+ *  `reselect` is CodeMirror's `MouseSelectionStyle.update` contract: the caret
+ *  CM already holds was mapped through the change, and returning true is the
+ *  only way a newly derived target reaches it (CM answers by calling `get`
+ *  again). So it asks for that re-dispatch exactly when the mapped caret is no
+ *  longer where the new text says the caret belongs. */
+export function remapGestureAfterChange(
+  gesture: { pressed: number; target: number },
+  mapPos: (pos: number) => number,
+  lineAt: (pos: number) => { from: number; text: string },
+): { pressed: number; target: number; reselect: boolean } {
+  const pressed = mapPos(gesture.pressed);
+  const target = snapClickOutOfIndent(lineAt(pressed), pressed);
+  return { pressed, target, reselect: target !== mapPos(gesture.target) };
+}
+
 /** Plain clicks in a line's indentation land at its content start. Pair with
  *  indentationMarkers() — the guides are the click target this exists for. */
 export function indentGuideClickSnap(): Extension {
   return EditorView.mouseSelectionStyle.of((view, event) => {
     if (!isPlainPointerClick(event)) return null;
-    const coords = { x: event.clientX, y: event.clientY };
+    const press = { x: event.clientX, y: event.clientY };
     // Not precise: a press below the last line still resolves to a position,
     // same as the default mouse selection.
-    let pressed = view.posAtCoords(coords, false);
-    let target = snapClickOutOfIndent(view.state.doc.lineAt(pressed), pressed);
+    const pressed = view.posAtCoords(press, false);
+    let gesture = {
+      pressed,
+      target: snapClickOutOfIndent(view.state.doc.lineAt(pressed), pressed),
+    };
     // Nothing to redirect (unindented line, or the press was already at/after
     // the content) → null hands the gesture back to CodeMirror untouched.
-    if (target === pressed) return null;
+    if (gesture.target === gesture.pressed) return null;
     return {
       get(moveEvent: MouseEvent) {
-        const head = view.posAtCoords(
-          { x: moveEvent.clientX, y: moveEvent.clientY },
-          false,
-        );
-        // Moved off the press → this is a drag, an explicit range request: both
-        // ends stay raw so an indent can still be selected by dragging it.
-        if (head !== pressed) return EditorSelection.single(pressed, head);
+        // Whether the POINTER moved is checked before where it resolves to: on
+        // the re-run that follows a mid-gesture edit, CM replays the original
+        // mousedown event, and the text under those same coordinates may have
+        // shifted — resolving them again would read as a drag and select to it.
+        const moved =
+          moveEvent.clientX !== press.x || moveEvent.clientY !== press.y;
+        if (moved) {
+          const head = view.posAtCoords(
+            { x: moveEvent.clientX, y: moveEvent.clientY },
+            false,
+          );
+          // Off the press by a whole position → a drag, an explicit range
+          // request: both ends stay raw so an indent can still be selected by
+          // dragging it. Within it (a click's pixel of jitter) → still a click.
+          if (head !== gesture.pressed)
+            return EditorSelection.single(gesture.pressed, head);
+        }
         // assoc 1 keeps the caret with the content it precedes rather than with
         // the whitespace behind it.
-        return EditorSelection.create([EditorSelection.cursor(target, 1)]);
+        return EditorSelection.create([
+          EditorSelection.cursor(gesture.target, 1),
+        ]);
       },
       update(update) {
-        // The document can change under a held button (an agent or Git write is
-        // adopted mid-gesture). Re-derive the target from the new text rather
-        // than mapping the old one, so an edit that changed this line's
-        // indentation can't leave the caret stranded inside it.
-        if (update.docChanged) {
-          pressed = update.changes.mapPos(pressed);
-          target = snapClickOutOfIndent(
-            update.state.doc.lineAt(pressed),
-            pressed,
-          );
-        }
+        if (!update.docChanged) return false;
+        const next = remapGestureAfterChange(
+          gesture,
+          (pos) => update.changes.mapPos(pos),
+          (pos) => update.state.doc.lineAt(pos),
+        );
+        gesture = { pressed: next.pressed, target: next.target };
+        return next.reselect;
       },
     };
   });
