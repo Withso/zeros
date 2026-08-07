@@ -423,7 +423,9 @@ export async function seedWorktreeFiles(args: {
     // then writes through it, outside the worktree.
     if (pathExists(path.join(args.worktreePath, rel))) continue;
     try {
-      await copyFromRepo(args.repoRoot, args.worktreePath, rel);
+      await copyFromRepo(args.repoRoot, args.worktreePath, rel, {
+        rejectNestedGitCheckout: true,
+      });
       seeded.push(rel);
     } catch (err) {
       console.warn(
@@ -509,7 +511,9 @@ export function scheduleLateSeedPass(args: LateSeedPassArgs): void {
           continue;
         }
         try {
-          await copyFromRepo(args.repoRoot, args.worktreePath, rel);
+          await copyFromRepo(args.repoRoot, args.worktreePath, rel, {
+            rejectNestedGitCheckout: true,
+          });
           seeded.push(rel);
         } catch (err) {
           console.warn(

@@ -40,7 +40,7 @@
 // `<main>/.git/worktrees/<name>` — resolveGitDir() handles both shapes.
 // ──────────────────────────────────────────────────────────
 
-import { type Dirent } from "node:fs";
+import { lstatSync, type Dirent } from "node:fs";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import chokidar, { type ChokidarOptions, type FSWatcher } from "chokidar";
@@ -61,6 +61,63 @@ const COMMON_GIT_STATE_FILES = ["FETCH_HEAD", "packed-refs"] as const;
  *  the per-tick directory walk. */
 const COMMON_GIT_STATE_DIRS = ["refs/heads", "refs/remotes"] as const;
 const MAX_COMMON_GIT_STATE_PATHS = 4_096;
+
+/**
+ * Agent tools may place linked Git worktrees below the checkout they came
+ * from (`.claude/worktrees/<name>`, `.codex/worktrees/<name>`, …). Watching
+ * the parent must stop at each inner checkout boundary: otherwise Chokidar
+ * recursively indexes another complete repository (and its generated output)
+ * as if it belonged to the parent workspace.
+ *
+ * The path convention alone is not enough — a repository may legitimately
+ * track similarly named fixtures. Require the child itself to contain a
+ * `.git` marker, so ordinary source below these names remains observable.
+ */
+const TOOL_STATE_DIRS = new Set([
+  ".claude",
+  ".codex",
+  ".conductor",
+  ".opencode",
+  ".t3code",
+]);
+const TOOL_WORKTREE_CONTAINERS = new Set(["worktrees", "workspaces"]);
+
+function nestedToolWorktreeBoundary(
+  watchedRoot: string,
+  candidatePath: string,
+): string | null {
+  const root = resolve(watchedRoot);
+  const candidate = resolve(candidatePath);
+  const rel = relative(root, candidate);
+  if (!rel || isAbsolute(rel) || rel === ".." || rel.startsWith(`..${sep}`)) {
+    return null;
+  }
+  const parts = rel.split(sep);
+  for (let i = 0; i + 2 < parts.length; i++) {
+    if (
+      TOOL_STATE_DIRS.has(parts[i]) &&
+      TOOL_WORKTREE_CONTAINERS.has(parts[i + 1]) &&
+      parts[i + 2]
+    ) {
+      return join(root, ...parts.slice(0, i + 3));
+    }
+  }
+  return null;
+}
+
+function isInsideNestedToolWorktree(
+  watchedRoot: string,
+  candidatePath: string,
+): boolean {
+  const boundary = nestedToolWorktreeBoundary(watchedRoot, candidatePath);
+  if (!boundary) return false;
+  try {
+    lstatSync(join(boundary, ".git"));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 interface FileSig {
   mtimeMs: number;
@@ -297,7 +354,10 @@ export function startGitWatcher(
   const pendingWorktreeTargets = new Map<string, GitWatchTarget>();
   let pendingWorktreeCoarse = false;
 
-  const watcherOptions = (usePolling: boolean): ChokidarOptions => ({
+  const watcherOptions = (
+    watchedRoot: string,
+    usePolling: boolean,
+  ): ChokidarOptions => ({
     // Never exclude a directory merely because it LOOKS generated. Published
     // libraries legitimately track dist/, repositories can contain src/build/
     // source, and Git status must invalidate for every tracked path. Dependency
@@ -307,6 +367,8 @@ export function startGitWatcher(
       /(?:^|[\\/])\.zeros(?:[\\/]|$)/,
       /(?:^|[\\/])node_modules(?:[\\/]|$)/,
       /\.zeros-tmp$/,
+      (candidatePath: string) =>
+        isInsideNestedToolWorktree(watchedRoot, candidatePath),
     ],
     ignoreInitial: true,
     persistent: true,
@@ -386,7 +448,10 @@ export function startGitWatcher(
     invalidateWhenReady = false,
   ): Promise<void> => {
     const key = rootKey(target.root);
-    const native = chokidar.watch(target.root, watcherOptions(polling));
+    const native = chokidar.watch(
+      target.root,
+      watcherOptions(target.root, polling),
+    );
     const entry: RootWatcher = { watcher: native, target, polling };
     rootWatchers.set(key, entry);
     const becameReady = new Promise<void>((resolveRootReady) => {
