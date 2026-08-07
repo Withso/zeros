@@ -42,17 +42,18 @@ export default defineConfig([
     // electron config. (Under bun the require would work, but node/electron paths
     // must not hit ERR_REQUIRE_ESM.)
     //
-    // @zeros/protocol's exports map points at RAW .ts sources — an external
-    // `require("@zeros/protocol/…")` only works on runtimes with TS type
-    // stripping (bun; Node ≥22.18). Force-bundle it so `node dist-engine/cli.js`
-    // runs on ANY Node — matches the electron config, where the raw-TS
-    // require crashed app boot.
-    noExternal: ["@decimalturn/toml-patch", /^@zeros\/protocol/],
+    // The @zeros workspace libraries export RAW .ts sources. An external
+    // require only works on runtimes with TS type stripping. Force-bundle them
+    // so the engine runs on every supported Node runtime.
+    noExternal: [
+      "@decimalturn/toml-patch",
+      /^@zeros\/(?:design-core|design-web|protocol)/,
+    ],
     define: {
       __VERSION__: JSON.stringify(VERSION),
     },
     banner: {
-      js: '#!/usr/bin/env node',
+      js: "#!/usr/bin/env node",
     },
   },
 ]);

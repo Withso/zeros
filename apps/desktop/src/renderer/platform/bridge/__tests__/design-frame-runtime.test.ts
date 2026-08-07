@@ -6,16 +6,40 @@ import {
   type DesignRuntimeSnapshot,
 } from "@zeros/protocol/design-runtime";
 
-import { connectDesignFrameRuntime } from "../design-frame-runtime";
+import {
+  connectDesignFrameRuntime,
+  DesignFrameRuntimeError,
+} from "../design-frame-runtime";
+
+const SOURCE_VERSION = "111111111111111111111111";
+
+const capabilities = {
+  methods: [
+    "getSnapshot",
+    "getElementAtLoc",
+    "getNodeDetails",
+    "getMatchedStyles",
+    "setNodeVisibility",
+    "previewStyles",
+    "clearPreviewStyles",
+    "captureScreenshot",
+  ] as const,
+  cancellation: true as const,
+  typedErrors: true as const,
+  sourcePinned: true as const,
+  maxStyleProperties: 64,
+  maxMatchedDeclarations: 256,
+  maxCapturePixels: 2_000_000,
+};
 
 function snapshot(revision: number): DesignRuntimeSnapshot {
   return {
-    sourceVersion: "111111111111111111111111",
+    sourceVersion: SOURCE_VERSION,
     revision,
     tree: [],
     warnings: [],
     frame: {
-      sourceVersion: "111111111111111111111111",
+      sourceVersion: SOURCE_VERSION,
       oid: "frame",
       tag: "main",
       name: "Frame",
@@ -38,11 +62,13 @@ describe("design frame runtime client", () => {
       clearTimeout: vi.fn(),
     };
     const onSnapshot = vi.fn();
+    const onReady = vi.fn();
     const connection = connectDesignFrameRuntime(
       "workspace-a",
       "home.html",
+      SOURCE_VERSION,
       { contentWindow: source } as unknown as HTMLIFrameElement,
-      { onSnapshot },
+      { onSnapshot, onReady },
       host,
     );
     const handshake = source.postMessage.mock.calls[0];
@@ -50,6 +76,7 @@ describe("design frame runtime client", () => {
       protocol: DESIGN_RUNTIME_PROTOCOL,
       version: DESIGN_RUNTIME_VERSION,
       type: "handshake",
+      sourceVersion: SOURCE_VERSION,
     });
     expect(handshake?.[1]).toMatchObject({ targetOrigin: "*" });
     const framePort = handshake?.[1]?.transfer?.[0] as MessagePort;
@@ -59,11 +86,31 @@ describe("design frame runtime client", () => {
     };
     framePort.start();
 
+    framePort.postMessage({
+      protocol: DESIGN_RUNTIME_PROTOCOL,
+      version: DESIGN_RUNTIME_VERSION,
+      type: "event",
+      event: "ready",
+      payload: {
+        sourceVersion: SOURCE_VERSION,
+        capabilities,
+        snapshot: snapshot(1),
+      },
+    });
+    await vi.waitFor(() => {
+      expect(onReady).toHaveBeenCalledWith(capabilities);
+      expect(onSnapshot).toHaveBeenCalledWith(
+        expect.objectContaining({ revision: 1 }),
+        "ready",
+      );
+    });
+
     const pending = connection.getSnapshot();
     await vi.waitFor(() => expect(requests).toHaveLength(1));
     const request = requests[0] as {
       requestId: string;
     };
+    expect(requests[0]).toMatchObject({ sourceVersion: SOURCE_VERSION });
     framePort.postMessage({
       protocol: DESIGN_RUNTIME_PROTOCOL,
       version: DESIGN_RUNTIME_VERSION,
@@ -115,6 +162,73 @@ describe("design frame runtime client", () => {
       ),
     );
 
+    connection.destroy();
+    await vi.waitFor(() =>
+      expect(requests.at(-1)).toMatchObject({
+        type: "teardown",
+        sourceVersion: SOURCE_VERSION,
+      }),
+    );
+    framePort.close();
+  });
+
+  it("cancels an abandoned request and preserves typed runtime errors", async () => {
+    const source = { postMessage: vi.fn() };
+    const host = {
+      setTimeout: vi.fn(() => 9),
+      clearTimeout: vi.fn(),
+    };
+    const connection = connectDesignFrameRuntime(
+      "workspace-a",
+      "cancel.html",
+      SOURCE_VERSION,
+      { contentWindow: source } as unknown as HTMLIFrameElement,
+      {},
+      host,
+    );
+    const framePort = source.postMessage.mock.calls[0]?.[1]
+      ?.transfer?.[0] as MessagePort;
+    const messages: Array<Record<string, unknown>> = [];
+    framePort.onmessage = (event) => {
+      messages.push(event.data as Record<string, unknown>);
+    };
+    framePort.start();
+
+    const controller = new AbortController();
+    const cancelled = connection.getSnapshot(controller.signal);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    controller.abort();
+    await expect(cancelled).rejects.toMatchObject({ code: "CANCELLED" });
+    await vi.waitFor(() =>
+      expect(messages[1]).toMatchObject({
+        type: "cancel",
+        requestId: messages[0]?.requestId,
+        sourceVersion: SOURCE_VERSION,
+      }),
+    );
+
+    const failed = connection.getNodeDetails("missing");
+    await vi.waitFor(() => expect(messages).toHaveLength(3));
+    framePort.postMessage({
+      protocol: DESIGN_RUNTIME_PROTOCOL,
+      version: DESIGN_RUNTIME_VERSION,
+      type: "response",
+      requestId: messages[2]?.requestId,
+      ok: false,
+      error: {
+        code: "NODE_NOT_FOUND",
+        message: "Element not found: missing",
+        retryable: false,
+      },
+    });
+    await expect(failed).rejects.toEqual(
+      expect.objectContaining({
+        name: "DesignFrameRuntimeError",
+        code: "NODE_NOT_FOUND",
+        retryable: false,
+      }),
+    );
+    await expect(failed).rejects.toBeInstanceOf(DesignFrameRuntimeError);
     connection.destroy();
     framePort.close();
   });

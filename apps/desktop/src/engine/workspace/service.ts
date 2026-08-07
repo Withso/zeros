@@ -18,7 +18,7 @@
 // Deferred (follow-ups): artifacts/canvas (renderer-owned persistence).
 // ──────────────────────────────────────────────────────────
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
@@ -91,6 +91,7 @@ import {
 } from "../git";
 import { resolveRepoScript, resolveRunActions } from "../settings/repo-scripts";
 import { isRunSessionId, runActionOneShot } from "@zeros/protocol/run-actions";
+import type { DesignOperation } from "@zeros/design-core";
 import type {
   RunActionStatus,
   RunStartArgs,
@@ -168,25 +169,28 @@ import {
 } from "../settings/ops";
 import { getTeamContextMeta, setTeamContext } from "../settings/team-context";
 import {
+  designDocumentIdForFrame,
+  forgetWorkspaceDesignApi,
+  getWorkspaceDesignApi,
+} from "../design/design-api";
+import {
   createDesignFrame,
   deleteDesignFrame,
   DESIGN_DIRECTORY_NAME,
+  DESIGN_TOKENS_FILE,
   duplicateDesignFrame,
-  insertDesignAsset,
   lintDesignDocument,
   listDesignFrames,
   readDesignFrame,
+  readDesignMutationResult,
   readDesignElementOffsetMap,
   readDesignFrameRenderIdentity,
   readDesignFrameSelectionIdentity,
   readDesignWorkspaceSnapshot,
   readDesignTokens,
+  readDesignTokensDocument,
+  prepareDesignAssetInsertion,
   renameDesignFrame,
-  setDesignNodeText,
-  updateDesignFrameGeometry,
-  updateDesignNodeStyles,
-  updateDesignToken,
-  writeDesignNodeHtml,
   type DesignLintViolation,
 } from "../design/document";
 import { setDesignRuntimeAudit } from "../design/runtime-audits";
@@ -492,6 +496,9 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "design.node.styles",
   "design.node.text",
   "design.node.html",
+  "design.transaction.apply",
+  "design.history.undo",
+  "design.history.redo",
   "design.asset.insert",
   "design.token.update",
   "design.save",
@@ -859,6 +866,104 @@ function designSelectionStyles(value: unknown): Record<string, string> {
   return styles;
 }
 
+function designMatchedDeclarations(value: unknown): Array<{
+  property: string;
+  value: string;
+  important?: boolean;
+  selector?: string;
+  sourceFile?: string;
+  sourceLine?: number;
+  inherited?: boolean;
+  active?: boolean;
+}> {
+  if (!Array.isArray(value) || value.length > 256) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: "matched must contain at most 256 declarations",
+    });
+  }
+  return value.map((candidate) => {
+    if (
+      !candidate ||
+      typeof candidate !== "object" ||
+      Array.isArray(candidate)
+    ) {
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message: "matched contains an invalid declaration",
+      });
+    }
+    const declaration = candidate as Record<string, unknown>;
+    const property = declaration.property;
+    const declarationValue = declaration.value;
+    if (
+      typeof property !== "string" ||
+      property.length > 128 ||
+      !/^(?:--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(property) ||
+      typeof declarationValue !== "string" ||
+      declarationValue.length > 2_048 ||
+      hasAsciiControl(declarationValue, true)
+    ) {
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message: "matched contains an invalid declaration",
+      });
+    }
+    const optionalString = (key: "selector" | "sourceFile", max: number) => {
+      const item = declaration[key];
+      if (item === undefined) return undefined;
+      if (
+        typeof item !== "string" ||
+        item.length < 1 ||
+        item.length > max ||
+        hasAsciiControl(item, true)
+      ) {
+        throw new GitError({
+          code: "VALIDATION_FAILED",
+          message: `matched contains an invalid ${key}`,
+        });
+      }
+      return item;
+    };
+    const optionalBoolean = (key: "important" | "inherited" | "active") => {
+      const item = declaration[key];
+      if (item === undefined) return undefined;
+      if (typeof item !== "boolean") {
+        throw new GitError({
+          code: "VALIDATION_FAILED",
+          message: `matched contains an invalid ${key}`,
+        });
+      }
+      return item;
+    };
+    const sourceLine = declaration.sourceLine;
+    if (
+      sourceLine !== undefined &&
+      (!Number.isSafeInteger(sourceLine) || (sourceLine as number) < 1)
+    ) {
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message: "matched contains an invalid sourceLine",
+      });
+    }
+    const selector = optionalString("selector", 1_024);
+    const sourceFile = optionalString("sourceFile", 512);
+    const important = optionalBoolean("important");
+    const inherited = optionalBoolean("inherited");
+    const active = optionalBoolean("active");
+    return {
+      property,
+      value: declarationValue,
+      ...(selector ? { selector } : {}),
+      ...(sourceFile ? { sourceFile } : {}),
+      ...(sourceLine !== undefined ? { sourceLine: sourceLine as number } : {}),
+      ...(important !== undefined ? { important } : {}),
+      ...(inherited !== undefined ? { inherited } : {}),
+      ...(active !== undefined ? { active } : {}),
+    };
+  });
+}
+
 function designMutationStyles(value: unknown): Record<string, string | null> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new GitError({
@@ -890,6 +995,31 @@ function designMutationStyles(value: unknown): Record<string, string | null> {
     styles[property] = item;
   }
   return styles;
+}
+
+async function applyDesktopDesignOperation(
+  workspacePath: string,
+  frame: string,
+  intent: string,
+  operation: DesignOperation,
+  coalesceKey?: string,
+  expectedRevision?: string,
+) {
+  const api = getWorkspaceDesignApi(workspacePath);
+  const documentId = designDocumentIdForFrame(frame);
+  const baseRevision =
+    expectedRevision ?? (await api.open(documentId)).revision;
+  return api.apply({
+    schemaVersion: 1,
+    transactionId: `desktop:${randomUUID()}`,
+    documentId,
+    baseRevision,
+    actor: { kind: "human", id: "desktop" },
+    intent,
+    createdAt: Date.now(),
+    ...(coalesceKey ? { coalesceKey } : {}),
+    operations: [operation],
+  });
 }
 
 const workspaceKind = (
@@ -1634,6 +1764,125 @@ export class WorkspaceService {
       // Renderer and first-party MCP calls share this exact interpretation.
       // Every operation starts from an opaque workspace id and kind check; no
       // caller-supplied host path can escape into the filesystem layer.
+      case "design.foundation.open": {
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          remote,
+        );
+        const documentId = designDocumentIdForFrame(reqStr(params, "frame"));
+        const api = getWorkspaceDesignApi(workspace.path);
+        const summary = await api.open(documentId);
+        return {
+          summary,
+          foundation: await api.readFoundation({
+            documentId,
+            expectedRevision: summary.revision,
+          }),
+        };
+      }
+      case "design.projection": {
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          remote,
+        );
+        const documentId = designDocumentIdForFrame(reqStr(params, "frame"));
+        return {
+          projection: await getWorkspaceDesignApi(
+            workspace.path,
+          ).readProjection({
+            documentId,
+            expectedRevision: optStr(params, "expectedRevision"),
+            cursor: optStr(params, "cursor"),
+            limit: optNum(params, "limit"),
+            maxDepth: optNum(params, "maxDepth"),
+          }),
+        };
+      }
+      case "design.provenance": {
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          remote,
+        );
+        const documentId = designDocumentIdForFrame(reqStr(params, "frame"));
+        return {
+          provenance: await getWorkspaceDesignApi(
+            workspace.path,
+          ).readProvenance({
+            documentId,
+            nodeId: reqStr(params, "nodeId"),
+            property: reqStr(params, "property"),
+            expectedRevision: optStr(params, "expectedRevision"),
+            computedValue:
+              params.computedValue === null
+                ? null
+                : optStr(params, "computedValue"),
+            ...(params.matched === undefined
+              ? {}
+              : { matched: designMatchedDeclarations(params.matched) }),
+          }),
+        };
+      }
+      case "design.source": {
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          remote,
+        );
+        const documentId = designDocumentIdForFrame(reqStr(params, "frame"));
+        return {
+          source: await getWorkspaceDesignApi(workspace.path).readSource({
+            documentId,
+            file: reqStr(params, "file"),
+            expectedRevision: optStr(params, "expectedRevision"),
+          }),
+        };
+      }
+      case "design.transaction.apply": {
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          remote,
+        );
+        const documentId = designDocumentIdForFrame(reqStr(params, "frame"));
+        if (
+          !params.transaction ||
+          typeof params.transaction !== "object" ||
+          Array.isArray(params.transaction) ||
+          (params.transaction as Record<string, unknown>).documentId !==
+            documentId
+        ) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "Design transaction does not target the selected frame.",
+          });
+        }
+        const dryRun = params.dryRun === true;
+        const result = await getWorkspaceDesignApi(workspace.path).apply(
+          params.transaction,
+          { dryRun },
+        );
+        return {
+          result,
+          ...(dryRun
+            ? {}
+            : { snapshot: await this.readDesignSnapshot(workspace, remote) }),
+        };
+      }
+      case "design.history.undo":
+      case "design.history.redo": {
+        const workspace = this.resolveDesignWorkspace(
+          reqStr(params, "workspaceId"),
+          remote,
+        );
+        const documentId = designDocumentIdForFrame(reqStr(params, "frame"));
+        const api = getWorkspaceDesignApi(workspace.path);
+        const result =
+          op === "design.history.undo"
+            ? await api.undo(documentId)
+            : await api.redo(documentId);
+        return {
+          result,
+          snapshot: await this.readDesignSnapshot(workspace, remote),
+        };
+      }
       case "design.frames": {
         const workspace = this.resolveDesignWorkspace(
           reqStr(params, "workspaceId"),
@@ -1687,12 +1936,58 @@ export class WorkspaceService {
             message: "Design token theme must be a string or null.",
           });
         }
-        const mutation = await updateDesignToken(workspace.path, {
-          name: reqStr(params, "name"),
-          theme,
-          value: reqStr(params, "value"),
-          sourceVersion: reqStr(params, "sourceVersion"),
-        });
+        const requestedFrame = optStr(params, "frame");
+        const frame =
+          requestedFrame ??
+          (
+            await listDesignFrames(workspace.path, {
+              writeBack: !remote,
+            })
+          )[0]?.file;
+        if (!frame) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "A design frame is required to own token history.",
+          });
+        }
+        const api = getWorkspaceDesignApi(workspace.path);
+        const documentId = designDocumentIdForFrame(frame);
+        const summary = await api.open(documentId);
+        const current = await readDesignTokensDocument(workspace.path);
+        if (current.sourceVersion !== reqStr(params, "sourceVersion")) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message:
+              "Design tokens changed before the mutation. Re-read them and retry.",
+          });
+        }
+        const name = reqStr(params, "name");
+        if (!current.tokens.some((token) => token.name === name)) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: `Design token not found: ${name}`,
+          });
+        }
+        const operationId = randomUUID();
+        const applied = await applyDesktopDesignOperation(
+          workspace.path,
+          frame,
+          `Change ${name}${theme ? ` for ${theme}` : ""}`,
+          {
+            operationId,
+            type: "token.set",
+            file: DESIGN_TOKENS_FILE,
+            name,
+            theme,
+            value: reqStr(params, "value"),
+          },
+          `token:${theme ?? "base"}:${name}`,
+          summary.revision,
+        );
+        const mutation = {
+          changed: applied.receipt.status === "applied",
+          document: await readDesignTokensDocument(workspace.path),
+        };
         return {
           mutation,
           snapshot: await this.readDesignSnapshot(workspace, remote),
@@ -2015,16 +2310,32 @@ export class WorkspaceService {
           reqStr(params, "workspaceId"),
           remote,
         );
-        const geometry = await updateDesignFrameGeometry(
+        const frame = reqStr(params, "frame");
+        const geometry = {
+          x: Math.min(1_000_000, Math.max(-1_000_000, reqNum(params, "x"))),
+          y: Math.min(1_000_000, Math.max(-1_000_000, reqNum(params, "y"))),
+          w: Math.min(16_384, Math.max(120, reqNum(params, "w"))),
+          h: Math.min(16_384, Math.max(80, reqNum(params, "h"))),
+          z: Math.round(Math.min(256, Math.max(0, reqNum(params, "z")))),
+        };
+        const operationId = randomUUID();
+        await applyDesktopDesignOperation(
           workspace.path,
-          reqStr(params, "frame"),
+          frame,
+          `Move or resize ${frame}`,
           {
-            x: reqNum(params, "x"),
-            y: reqNum(params, "y"),
-            w: reqNum(params, "w"),
-            h: reqNum(params, "h"),
-            z: reqNum(params, "z"),
+            operationId,
+            type: "frame.set-geometry",
+            frame,
+            geometry: {
+              x: geometry.x,
+              y: geometry.y,
+              width: geometry.w,
+              height: geometry.h,
+              z: geometry.z,
+            },
           },
+          `frame-geometry:${frame}`,
         );
         return {
           geometry,
@@ -2036,12 +2347,48 @@ export class WorkspaceService {
           reqStr(params, "workspaceId"),
           remote,
         );
-        const mutation = await updateDesignNodeStyles(workspace.path, {
-          frame: reqStr(params, "frame"),
-          nodeId: reqStr(params, "nodeId"),
-          sourceVersion: reqStr(params, "sourceVersion"),
-          styles: designMutationStyles(params.styles),
-        });
+        const frame = reqStr(params, "frame");
+        const sourceVersion = reqStr(params, "sourceVersion");
+        const api = getWorkspaceDesignApi(workspace.path);
+        const documentId = designDocumentIdForFrame(frame);
+        // The authored revision (files, manifest, and geometry) and rendered
+        // sourceVersion (composed HTML/CSS/assets/viewport) are distinct CAS
+        // identities. Compatibility mutation handlers must validate both before
+        // adapting the request into a Foundation transaction.
+        const summary = await api.open(documentId);
+        const render = await readDesignFrameRenderIdentity(
+          workspace.path,
+          frame,
+        );
+        if (render.sourceVersion !== sourceVersion) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: `Design frame changed before the mutation: ${render.file}. Re-read it and retry.`,
+          });
+        }
+        const operationId = randomUUID();
+        const nodeId = reqStr(params, "nodeId");
+        const applied = await applyDesktopDesignOperation(
+          workspace.path,
+          frame,
+          `Change styles on ${nodeId}`,
+          {
+            operationId,
+            type: "node.set-styles",
+            nodeId,
+            styles: designMutationStyles(params.styles),
+            scope: "auto",
+            responsiveContext: "base",
+            stateContext: "default",
+          },
+          undefined,
+          summary.revision,
+        );
+        const mutation = await readDesignMutationResult(
+          workspace.path,
+          frame,
+          applied.receipt.status === "applied",
+        );
         return {
           mutation,
           snapshot: await this.readDesignSnapshot(workspace, remote),
@@ -2052,15 +2399,51 @@ export class WorkspaceService {
           reqStr(params, "workspaceId"),
           remote,
         );
-        const mutation = await setDesignNodeText(workspace.path, {
-          frame: reqStr(params, "frame"),
-          nodeId: reqStr(params, "nodeId"),
-          sourceVersion: reqStr(params, "sourceVersion"),
-          text:
-            typeof params.text === "string"
-              ? params.text
-              : reqStr(params, "text"),
-        });
+        const frame = reqStr(params, "frame");
+        const sourceVersion = reqStr(params, "sourceVersion");
+        const api = getWorkspaceDesignApi(workspace.path);
+        const documentId = designDocumentIdForFrame(frame);
+        const summary = await api.open(documentId);
+        const render = await readDesignFrameRenderIdentity(
+          workspace.path,
+          frame,
+        );
+        if (render.sourceVersion !== sourceVersion) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: `Design frame changed before the mutation: ${render.file}. Re-read it and retry.`,
+          });
+        }
+        const text =
+          typeof params.text === "string"
+            ? params.text
+            : reqStr(params, "text");
+        if (text.length > 10_000) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "Design text is too long.",
+          });
+        }
+        const operationId = randomUUID();
+        const nodeId = reqStr(params, "nodeId");
+        const applied = await applyDesktopDesignOperation(
+          workspace.path,
+          frame,
+          `Change text on ${nodeId}`,
+          {
+            operationId,
+            type: "node.set-text",
+            nodeId,
+            text,
+          },
+          undefined,
+          summary.revision,
+        );
+        const mutation = await readDesignMutationResult(
+          workspace.path,
+          frame,
+          applied.receipt.status === "applied",
+        );
         return {
           mutation,
           snapshot: await this.readDesignSnapshot(workspace, remote),
@@ -2078,13 +2461,50 @@ export class WorkspaceService {
             message: `Unsupported design HTML write mode: ${mode}`,
           });
         }
-        const mutation = await writeDesignNodeHtml(workspace.path, {
-          frame: reqStr(params, "frame"),
-          nodeId: reqStr(params, "nodeId"),
-          sourceVersion: reqStr(params, "sourceVersion"),
-          html: reqStr(params, "html"),
-          mode: mode as "append" | "replace-inner" | undefined,
-        });
+        const writeMode = mode === "append" ? "append" : "replace-inner";
+        const frame = reqStr(params, "frame");
+        const sourceVersion = reqStr(params, "sourceVersion");
+        const api = getWorkspaceDesignApi(workspace.path);
+        const documentId = designDocumentIdForFrame(frame);
+        const summary = await api.open(documentId);
+        const render = await readDesignFrameRenderIdentity(
+          workspace.path,
+          frame,
+        );
+        if (render.sourceVersion !== sourceVersion) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: `Design frame changed before the mutation: ${render.file}. Re-read it and retry.`,
+          });
+        }
+        const html = reqStr(params, "html");
+        if (!html || html.length > 200_000) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "html must contain between 1 and 200000 characters.",
+          });
+        }
+        const operationId = randomUUID();
+        const nodeId = reqStr(params, "nodeId");
+        const applied = await applyDesktopDesignOperation(
+          workspace.path,
+          frame,
+          `${writeMode === "append" ? "Append" : "Replace"} HTML on ${nodeId}`,
+          {
+            operationId,
+            type: "node.set-html",
+            nodeId,
+            html,
+            mode: writeMode,
+          },
+          undefined,
+          summary.revision,
+        );
+        const mutation = await readDesignMutationResult(
+          workspace.path,
+          frame,
+          applied.receipt.status === "applied",
+        );
         return {
           mutation,
           snapshot: await this.readDesignSnapshot(workspace, remote),
@@ -2095,13 +2515,48 @@ export class WorkspaceService {
           reqStr(params, "workspaceId"),
           remote,
         );
-        const mutation = await insertDesignAsset(workspace.path, {
-          frame: reqStr(params, "frame"),
-          sourceVersion: reqStr(params, "sourceVersion"),
+        const frame = reqStr(params, "frame");
+        const sourceVersion = reqStr(params, "sourceVersion");
+        const api = getWorkspaceDesignApi(workspace.path);
+        const documentId = designDocumentIdForFrame(frame);
+        const summary = await api.open(documentId);
+        const render = await readDesignFrameRenderIdentity(
+          workspace.path,
+          frame,
+        );
+        if (render.sourceVersion !== sourceVersion) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: `Design frame changed before the mutation: ${render.file}. Re-read it and retry.`,
+          });
+        }
+        const prepared = await prepareDesignAssetInsertion(workspace.path, {
+          frame,
+          sourceVersion,
           assetPath: reqStr(params, "assetPath"),
           x: reqNum(params, "x"),
           y: reqNum(params, "y"),
         });
+        const operationId = randomUUID();
+        const applied = await applyDesktopDesignOperation(
+          workspace.path,
+          frame,
+          `Insert ${reqStr(params, "assetPath")}`,
+          {
+            operationId,
+            type: "node.set-html",
+            nodeId: prepared.nodeId,
+            html: prepared.html,
+            mode: "append",
+          },
+          undefined,
+          summary.revision,
+        );
+        const mutation = await readDesignMutationResult(
+          workspace.path,
+          frame,
+          applied.receipt.status === "applied",
+        );
         return {
           mutation,
           snapshot: await this.readDesignSnapshot(workspace, remote),
@@ -3815,6 +4270,7 @@ export class WorkspaceService {
           },
           this.workspaceCheckoutWatchSuspender ?? undefined,
         );
+        forgetWorkspaceDesignApi(result.workspace.path);
         forgetDesignSelection(workspaceId);
         forgetDesignScreenshots(workspaceId);
         return result;
@@ -3853,6 +4309,7 @@ export class WorkspaceService {
       }
       case "workspace.delete": {
         const workspaceId = reqStr(params, "workspaceId");
+        const workspacePath = getWorkspaceById(workspaceId)?.path;
         await deleteWorkspace(
           {
             workspaceId,
@@ -3867,6 +4324,7 @@ export class WorkspaceService {
           },
           this.workspaceCheckoutWatchSuspender ?? undefined,
         );
+        if (workspacePath) forgetWorkspaceDesignApi(workspacePath);
         forgetDesignSelection(workspaceId);
         forgetDesignScreenshots(workspaceId);
         return { ok: true };

@@ -4,6 +4,7 @@ import postcss from "postcss";
 
 import {
   DESIGN_DIRECTORY_NAME,
+  DesignRenderBudgetError,
   insertDesignRuntimeScript,
   readDesignFrameRenderSourceFromSource,
 } from "./document";
@@ -11,6 +12,7 @@ import { readSafeRegularFile } from "./safe-files";
 
 const MAX_TEXT_RESOURCE_BYTES = 2 * 1024 * 1024;
 const MAX_BINARY_RESOURCE_BYTES = 10 * 1024 * 1024;
+const MAX_COMPOSED_FRAME_BYTES = 16 * 1024 * 1024;
 
 const MIME_TYPES = Object.freeze<Record<string, string>>({
   ".avif": "image/avif",
@@ -183,11 +185,21 @@ export async function readDesignProtocolResource(
 
   if (topLevelHtml) {
     const authored = safe.body.toString("utf8");
-    const renderSource = await readDesignFrameRenderSourceFromSource(
-      workspacePath,
-      topLevelHtml,
-      authored,
-    ).catch(() => null);
+    let renderSource;
+    try {
+      renderSource = await readDesignFrameRenderSourceFromSource(
+        workspacePath,
+        topLevelHtml,
+        authored,
+      );
+    } catch (error) {
+      if (error instanceof DesignRenderBudgetError) {
+        return response(413, error.message, undefined, {
+          "Cache-Control": "private, no-store",
+        });
+      }
+      return response(404, "Not found.");
+    }
     if (!renderSource) return response(404, "Not found.");
     if (sourceVersion && sourceVersion !== renderSource.sourceVersion) {
       return response(409, "Design frame generation changed.", undefined, {
@@ -198,6 +210,16 @@ export async function readDesignProtocolResource(
       renderSource.html,
       renderSource.sourceVersion,
     );
+    if (Buffer.byteLength(rendered.html, "utf8") > MAX_COMPOSED_FRAME_BYTES) {
+      return response(
+        413,
+        "Runtime-enabled frame HTML is too large.",
+        undefined,
+        {
+          "Cache-Control": "private, no-store",
+        },
+      );
+    }
     return response(200, rendered.html, "text/html; charset=utf-8", {
       ...cacheHeaders(sourceVersion),
       "Content-Security-Policy": rendered.csp,

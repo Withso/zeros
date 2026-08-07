@@ -13,12 +13,14 @@ import type {
   DesignRuntimeSnapshot,
   DesignRuntimeTreeNode,
 } from "@zeros/protocol/design-runtime";
+import type { DesignStyleProvenance } from "@zeros/design-web";
 
 import {
   designSetScreenshot,
   designSetSelection,
   designSetRuntimeAudit,
-  type DesignFrameDocumentWire,
+  designProvenance,
+  type DesignCanvasFrameWire,
 } from "../../../platform/git";
 import { designFrameRuntime } from "../../../platform/bridge/design-frame-runtime";
 import {
@@ -72,7 +74,7 @@ function selectionIsCurrent(
   );
 }
 
-function frameSelection(frame: DesignFrameDocumentWire) {
+function frameSelection(frame: DesignCanvasFrameWire) {
   return {
     frame: frame.file,
     sourceVersion: frame.sourceVersion,
@@ -92,7 +94,7 @@ function frameSelection(frame: DesignFrameDocumentWire) {
 }
 
 function elementSelection(
-  frame: DesignFrameDocumentWire,
+  frame: DesignCanvasFrameWire,
   details: DesignRuntimeNodeDetails,
 ) {
   return {
@@ -156,7 +158,7 @@ export async function captureDesignRuntimeScreenshot(
 
 export async function selectDesignFrame(
   workspaceId: string,
-  frame: DesignFrameDocumentWire | null,
+  frame: DesignCanvasFrameWire | null,
 ): Promise<void> {
   nextGeneration(selectionGenerationByWorkspace, workspaceId);
   const version = nextSelectionVersion();
@@ -179,7 +181,7 @@ export async function selectDesignFrame(
 export async function selectDesignNode(input: {
   workspaceId: string;
   folder: string;
-  frame: DesignFrameDocumentWire;
+  frame: DesignCanvasFrameWire;
   nodeId: string;
   details?: DesignRuntimeNodeDetails;
 }): Promise<DesignRuntimeNodeDetails | null> {
@@ -250,7 +252,7 @@ export async function selectDesignNode(input: {
 export async function selectDesignNodeAtLocation(input: {
   workspaceId: string;
   folder: string;
-  frame: DesignFrameDocumentWire;
+  frame: DesignCanvasFrameWire;
   x: number;
   y: number;
 }): Promise<DesignRuntimeNodeDetails | null> {
@@ -380,6 +382,40 @@ export async function previewDesignNodeStyles(input: {
   return details;
 }
 
+/** Gesture-only preview. It intentionally avoids Zustand publication so raw
+ * pointer movement cannot rerender Layers/inspector; the canvas paints its one
+ * overlay directly and publishes only the committed transaction. */
+export async function previewDesignNodeStylesTransient(input: {
+  workspaceId: string;
+  frame: string;
+  sourceVersion: string;
+  nodeId: string;
+  styles: Record<string, string | null>;
+}): Promise<DesignRuntimeNodeDetails> {
+  const runtime = designFrameRuntime(input.workspaceId, input.frame);
+  if (!runtime) throw new Error("The design frame is not ready.");
+  const details = await runtime.previewStyles(input.nodeId, input.styles);
+  if (details.sourceVersion !== input.sourceVersion) {
+    throw new Error("The design frame changed before the preview was applied.");
+  }
+  return details;
+}
+
+export async function clearDesignNodeStylePreviewTransient(input: {
+  workspaceId: string;
+  frame: string;
+  sourceVersion: string;
+  nodeId: string;
+}): Promise<DesignRuntimeNodeDetails> {
+  const runtime = designFrameRuntime(input.workspaceId, input.frame);
+  if (!runtime) throw new Error("The design frame is not ready.");
+  const details = await runtime.clearPreviewStyles(input.nodeId);
+  if (details.sourceVersion !== input.sourceVersion) {
+    throw new Error("The design frame changed before the preview was cleared.");
+  }
+  return details;
+}
+
 export async function clearDesignNodeStylePreview(input: {
   workspaceId: string;
   folder: string;
@@ -405,13 +441,46 @@ export async function clearDesignNodeStylePreview(input: {
   return details;
 }
 
+/** Correlate browser-observed matched rules with exact authored source. CSSOM
+ * does not expose a trustworthy cascade winner, so the source adapter keeps
+ * ambiguity explicit instead of guessing from enumeration order. */
+export async function inspectDesignNodeStyleProvenance(input: {
+  workspaceId: string;
+  frame: string;
+  sourceVersion: string;
+  expectedRevision: string;
+  nodeId: string;
+  property: string;
+  computedValue?: string | null;
+  signal?: AbortSignal;
+}): Promise<DesignStyleProvenance> {
+  const runtime = designFrameRuntime(input.workspaceId, input.frame);
+  const runtimeStyles = runtime
+    ? await runtime.getMatchedStyles(input.nodeId, input.property, input.signal)
+    : null;
+  if (runtimeStyles && runtimeStyles.sourceVersion !== input.sourceVersion) {
+    throw new Error("The design frame changed before provenance was resolved.");
+  }
+  if (input.signal?.aborted) {
+    throw input.signal.reason ?? new Error("Provenance inspection cancelled.");
+  }
+  return designProvenance(input.workspaceId, {
+    frame: input.frame,
+    nodeId: input.nodeId,
+    property: runtimeStyles?.property ?? input.property,
+    expectedRevision: input.expectedRevision,
+    computedValue: runtimeStyles?.computedValue ?? input.computedValue ?? null,
+    ...(runtimeStyles ? { matched: runtimeStyles.matched } : {}),
+  });
+}
+
 /** Apply one authoritative runtime tree without clearing same-key readback.
  * A remembered node is invalid only after this exact frame snapshot proves it
  * absent; surviving selections are re-read so geometry/styles follow mutations. */
 export function reconcileDesignRuntimeSnapshot(input: {
   workspaceId: string;
   folder: string;
-  frame: DesignFrameDocumentWire;
+  frame: DesignCanvasFrameWire;
   snapshot: DesignRuntimeSnapshot;
 }): void {
   const { workspaceId, folder, frame, snapshot } = input;

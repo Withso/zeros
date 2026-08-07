@@ -862,7 +862,7 @@ function createMainWindow(): BrowserWindow {
       "media-src 'self' blob: data:",
       "connect-src 'self' https: wss: ws://127.0.0.1:* ws://localhost:*",
       "worker-src 'self' blob:",
-      "frame-src 'self' https: http: data: blob: about:",
+      "frame-src 'self' https: http: data: blob: about: zeros-design:",
       "child-src 'self' https: http: blob:",
       "object-src 'none'",
       "base-uri 'none'",

@@ -1,11 +1,38 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const platformMocks = vi.hoisted(() => ({
+  applyTransaction: vi.fn(),
+  frame: vi.fn(),
+  history: vi.fn(),
+  updateToken: vi.fn(),
+  updateCanvas: vi.fn(),
+}));
+
+vi.mock("../../../platform/git", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../platform/git")>()),
+  designApplyTransaction: platformMocks.applyTransaction,
+  designFrame: platformMocks.frame,
+  designHistory: platformMocks.history,
+  designUpdateToken: platformMocks.updateToken,
+  designUpdateCanvas: platformMocks.updateCanvas,
+}));
 
 import type { DesignWorkspaceSnapshotWire } from "../../../platform/git";
 import {
   applyDesignWorkspaceRefreshVersion,
+  applyDesignHistoryCached,
+  applyDesignTransactionCached,
+  designFrameDocumentCache,
+  designFrameDocumentKey,
+  designFoundationCache,
+  designFoundationKey,
   designWorkspaceSnapshotCache,
+  invalidateDesignWorkspaceSnapshot,
   resetDesignWorkspaceCacheForTests,
   stabilizeDesignWorkspaceSnapshot,
+  updateDesignTokenCached,
+  updateDesignFrameGeometryCached,
+  warmDesignFrameDocument,
 } from "../state/design-workspace-cache";
 
 function snapshot(
@@ -24,16 +51,6 @@ function snapshot(
       nodeCount: 1,
       modifiedAt: 10,
       sourceVersion: `${index}`.padStart(24, "0"),
-      source: `<!doctype html><body data-oid="${file}"></body>`,
-      srcDoc: `<!doctype html><body data-oid="${file}"></body>`,
-      tree: [
-        {
-          tag: "html",
-          oid: file,
-          text: null,
-          children: [],
-        },
-      ],
     })),
     tokens: [
       {
@@ -69,6 +86,11 @@ function snapshot(
 
 describe("design workspace cache", () => {
   beforeEach(() => {
+    platformMocks.applyTransaction.mockReset();
+    platformMocks.frame.mockReset();
+    platformMocks.history.mockReset();
+    platformMocks.updateToken.mockReset();
+    platformMocks.updateCanvas.mockReset();
     resetDesignWorkspaceCacheForTests();
   });
 
@@ -156,5 +178,127 @@ describe("design workspace cache", () => {
     expect(
       designWorkspaceSnapshotCache.getSnapshot("ws_design").invalidationVersion,
     ).toBe(initial + 1);
+  });
+
+  it("invalidates every frame foundation after a geometry transaction", async () => {
+    const workspaceId = "ws_design";
+    const frame = "home.html";
+    const current = snapshot([{ file: frame }, { file: "pricing.html" }]);
+    const keys = current.frames.map((candidate) =>
+      designFoundationKey(workspaceId, candidate.file, candidate.sourceVersion),
+    );
+    for (const key of keys) {
+      designFoundationCache.setData(key, {
+        summary: { revision: "old" },
+      } as never);
+    }
+    const before = keys.map(
+      (key) => designFoundationCache.getSnapshot(key).invalidationVersion,
+    );
+    const geometry = { x: 40, y: 20, w: 1_440, h: 900, z: 0 };
+    platformMocks.updateCanvas.mockResolvedValue({
+      geometry,
+      snapshot: current,
+    });
+
+    await updateDesignFrameGeometryCached(workspaceId, frame, geometry);
+
+    expect(
+      keys.map(
+        (key) => designFoundationCache.getSnapshot(key).invalidationVersion,
+      ),
+    ).toEqual(before.map((version) => version + 1));
+  });
+
+  it("invalidates sibling foundations after every Foundation mutation path", async () => {
+    const workspaceId = "ws_design";
+    const current = snapshot([{ file: "home.html" }, { file: "pricing.html" }]);
+    platformMocks.applyTransaction.mockResolvedValue({
+      result: null,
+      snapshot: current,
+    });
+    platformMocks.history.mockResolvedValue({
+      result: null,
+      snapshot: current,
+    });
+    platformMocks.updateToken.mockResolvedValue({ snapshot: current });
+    const mutations = [
+      () => applyDesignTransactionCached(workspaceId, "home.html", {} as never),
+      () => applyDesignHistoryCached(workspaceId, "home.html", "undo"),
+      () =>
+        updateDesignTokenCached(workspaceId, {
+          frame: "home.html",
+          name: "--accent",
+          theme: null,
+          value: "orchid",
+          sourceVersion: current.tokenSourceVersion,
+        }),
+    ];
+
+    for (const mutate of mutations) {
+      resetDesignWorkspaceCacheForTests();
+      const keys = current.frames.map((frame) =>
+        designFoundationKey(workspaceId, frame.file, frame.sourceVersion),
+      );
+      for (const key of keys) {
+        designFoundationCache.setData(key, {
+          summary: { revision: "old" },
+        } as never);
+      }
+      const before = keys.map(
+        (key) => designFoundationCache.getSnapshot(key).invalidationVersion,
+      );
+
+      await mutate();
+
+      expect(
+        keys.map(
+          (key) => designFoundationCache.getSnapshot(key).invalidationVersion,
+        ),
+      ).toEqual(before.map((version) => version + 1));
+    }
+  });
+
+  it("warms one exact frame document and deduplicates intent reads", async () => {
+    const current = snapshot();
+    const frame = current.frames[0]!;
+    const document = {
+      ...frame,
+      source: "<!doctype html><html></html>",
+      srcDoc: "<!doctype html><html></html>",
+      tree: [],
+    };
+    platformMocks.frame.mockResolvedValue(document);
+
+    warmDesignFrameDocument("ws_design", frame.file, frame.sourceVersion);
+    warmDesignFrameDocument("ws_design", frame.file, frame.sourceVersion);
+
+    await vi.waitFor(() =>
+      expect(platformMocks.frame).toHaveBeenCalledTimes(1),
+    );
+    expect(
+      designFrameDocumentCache.getSnapshot(
+        designFrameDocumentKey("ws_design", frame.file, frame.sourceVersion),
+      ).data,
+    ).toBe(document);
+  });
+
+  it("invalidates retained foundations when external workspace state changes", () => {
+    const workspaceId = "ws_design";
+    const key = designFoundationKey(
+      workspaceId,
+      "home.html",
+      snapshot().frames[0]!.sourceVersion,
+    );
+    designFoundationCache.setData(key, {
+      summary: { revision: "old" },
+    } as never);
+    const before = designFoundationCache.getSnapshot(key).invalidationVersion;
+
+    invalidateDesignWorkspaceSnapshot(workspaceId);
+
+    expect(designFoundationCache.getSnapshot(key).invalidationVersion).toBe(
+      before + 1,
+    );
   });
 });

@@ -17,6 +17,9 @@ describe("design runtime protocol", () => {
     expect(DESIGN_RUNTIME_SOURCE).toContain("captureScreenshot");
     expect(DESIGN_RUNTIME_SOURCE).toContain("previewStyles");
     expect(DESIGN_RUNTIME_SOURCE).toContain("clearPreviewStyles");
+    expect(DESIGN_RUNTIME_SOURCE).toContain("getMatchedStyles");
+    expect(DESIGN_RUNTIME_SOURCE).toContain('message.type === "teardown"');
+    expect(DESIGN_RUNTIME_SOURCE).toContain('message.type === "cancel"');
     expect(DESIGN_RUNTIME_SOURCE).toContain("previewStyleOverridesByOid");
     expect(DESIGN_RUNTIME_SOURCE).toContain("auditWarnings");
     expect(DESIGN_RUNTIME_SOURCE).toContain("contrastRatio");
@@ -43,7 +46,7 @@ describe("design runtime protocol", () => {
     expect(() => new Function(DESIGN_RUNTIME_SOURCE)).not.toThrow();
   });
 
-  it("accepts only versioned response and event messages", () => {
+  it("accepts only bounded, versioned response and event messages", () => {
     const response: DesignRuntimeFrameMessage = {
       protocol: DESIGN_RUNTIME_PROTOCOL,
       version: DESIGN_RUNTIME_VERSION,
@@ -73,7 +76,21 @@ describe("design runtime protocol", () => {
         event: "ready",
         payload: {},
       }),
-    ).toBe(true);
+    ).toBe(false);
+    expect(
+      isDesignRuntimeFrameMessage({
+        protocol: DESIGN_RUNTIME_PROTOCOL,
+        version: DESIGN_RUNTIME_VERSION,
+        type: "response",
+        requestId: "request-1",
+        ok: false,
+        error: {
+          code: "NOT_A_REAL_CODE",
+          message: "bad",
+          retryable: false,
+        },
+      }),
+    ).toBe(false);
     expect(isDesignRuntimeFrameMessage({ type: "response" })).toBe(false);
   });
 
@@ -150,16 +167,18 @@ describe("design runtime protocol", () => {
               window.postMessage(
                 {
                   protocol: "zeros-design-runtime",
-                  version: 1,
+                  version: 2,
                   type: "handshake",
+                  sourceVersion: "a".repeat(24),
                 },
                 "*",
                 [channel.port2],
               );
               channel.port1.postMessage({
                 protocol: "zeros-design-runtime",
-                version: 1,
+                version: 2,
                 type: "request",
+                sourceVersion: "a".repeat(24),
                 requestId: "initial-snapshot",
                 method: "getSnapshot",
                 args: {},
@@ -171,9 +190,207 @@ describe("design runtime protocol", () => {
 
       expect(result.leakedBeforeHandshake).toBe(false);
       expect(result.payload).toMatchObject({
-        tree: [{ oid: "hero", tag: "section" }],
-        frame: { oid: "", tag: "body", selector: "body" },
+        sourceVersion: "a".repeat(24),
+        capabilities: {
+          sourcePinned: true,
+          cancellation: true,
+          typedErrors: true,
+        },
+        snapshot: {
+          tree: [{ oid: "hero", tag: "section" }],
+          frame: { oid: "", tag: "body", selector: "body" },
+        },
       });
+    } finally {
+      await browser.close();
+    }
+  }, 20_000);
+
+  it("preserves case-sensitive custom properties and restores previews on teardown", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      const result = await page.evaluate(
+        ({ source }) =>
+          new Promise<{
+            property: string;
+            computedValue: string;
+            previewWidth: string;
+            restoredWidth: string;
+          }>((resolve, reject) => {
+            document.body.innerHTML =
+              '<main data-oid="target" style="--BrandColor: rgb(1, 2, 3)"></main>';
+            (
+              window as Window & { __zerosDesignSourceVersion?: string }
+            ).__zerosDesignSourceVersion = "b".repeat(24);
+            const element = document.querySelector(
+              '[data-oid="target"]',
+            ) as HTMLElement;
+            const channel = new MessageChannel();
+            let matched: { property: string; computedValue: string } | null =
+              null;
+            const timeout = window.setTimeout(
+              () => reject(new Error("runtime lifecycle timed out")),
+              3_000,
+            );
+            channel.port1.onmessage = (event) => {
+              const message = event.data as {
+                type?: string;
+                event?: string;
+                requestId?: string;
+                ok?: boolean;
+                result?: { property?: string; computedValue?: string };
+              };
+              if (message.type === "event" && message.event === "ready") {
+                channel.port1.postMessage({
+                  protocol: "zeros-design-runtime",
+                  version: 2,
+                  type: "request",
+                  sourceVersion: "b".repeat(24),
+                  requestId: "matched",
+                  method: "getMatchedStyles",
+                  args: { nodeId: "target", property: "--BrandColor" },
+                });
+                return;
+              }
+              if (
+                message.type === "response" &&
+                message.requestId === "matched" &&
+                message.ok &&
+                message.result
+              ) {
+                matched = {
+                  property: message.result.property ?? "",
+                  computedValue: message.result.computedValue ?? "",
+                };
+                channel.port1.postMessage({
+                  protocol: "zeros-design-runtime",
+                  version: 2,
+                  type: "request",
+                  sourceVersion: "b".repeat(24),
+                  requestId: "preview",
+                  method: "previewStyles",
+                  args: { nodeId: "target", styles: { width: "37px" } },
+                });
+                return;
+              }
+              if (
+                message.type === "response" &&
+                message.requestId === "preview" &&
+                message.ok &&
+                matched
+              ) {
+                const previewWidth = element.style.width;
+                channel.port1.postMessage({
+                  protocol: "zeros-design-runtime",
+                  version: 2,
+                  type: "teardown",
+                  sourceVersion: "b".repeat(24),
+                });
+                window.setTimeout(() => {
+                  window.clearTimeout(timeout);
+                  resolve({
+                    ...matched!,
+                    previewWidth,
+                    restoredWidth: element.style.width,
+                  });
+                }, 0);
+              }
+            };
+            channel.port1.start();
+            new Function(source)();
+            window.postMessage(
+              {
+                protocol: "zeros-design-runtime",
+                version: 2,
+                type: "handshake",
+                sourceVersion: "b".repeat(24),
+              },
+              "*",
+              [channel.port2],
+            );
+          }),
+        { source: DESIGN_RUNTIME_SOURCE },
+      );
+      expect(result).toEqual({
+        property: "--BrandColor",
+        computedValue: "rgb(1, 2, 3)",
+        previewWidth: "37px",
+        restoredWidth: "",
+      });
+    } finally {
+      await browser.close();
+    }
+  }, 20_000);
+
+  it("answers layout-sensitive requests when animation frames are suspended", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      const width = await page.evaluate(
+        ({ source }) =>
+          new Promise<string>((resolve, reject) => {
+            document.body.innerHTML = '<main data-oid="target"></main>';
+            (
+              window as Window & { __zerosDesignSourceVersion?: string }
+            ).__zerosDesignSourceVersion = "e".repeat(24);
+            window.requestAnimationFrame = () => 1;
+            const target = document.querySelector(
+              '[data-oid="target"]',
+            ) as HTMLElement;
+            const channel = new MessageChannel();
+            const timeout = window.setTimeout(
+              () => reject(new Error("preview response timed out")),
+              500,
+            );
+            channel.port1.onmessage = (event) => {
+              const message = event.data as {
+                type?: string;
+                event?: string;
+                requestId?: string;
+                ok?: boolean;
+                error?: { message?: string };
+              };
+              if (message.type === "event" && message.event === "ready") {
+                channel.port1.postMessage({
+                  protocol: "zeros-design-runtime",
+                  version: 2,
+                  type: "request",
+                  sourceVersion: "e".repeat(24),
+                  requestId: "suspended-preview",
+                  method: "previewStyles",
+                  args: { nodeId: "target", styles: { width: "41px" } },
+                });
+                return;
+              }
+              if (
+                message.type !== "response" ||
+                message.requestId !== "suspended-preview"
+              ) {
+                return;
+              }
+              window.clearTimeout(timeout);
+              if (message.ok) resolve(target.style.width);
+              else
+                reject(new Error(message.error?.message ?? "preview failed"));
+            };
+            channel.port1.start();
+            new Function(source)();
+            window.postMessage(
+              {
+                protocol: "zeros-design-runtime",
+                version: 2,
+                type: "handshake",
+                sourceVersion: "e".repeat(24),
+              },
+              "*",
+              [channel.port2],
+            );
+          }),
+        { source: DESIGN_RUNTIME_SOURCE },
+      );
+
+      expect(width).toBe("41px");
     } finally {
       await browser.close();
     }
@@ -216,7 +433,7 @@ describe("design runtime protocol", () => {
                   requestId?: string;
                   ok?: boolean;
                   result?: { dataUrl: string };
-                  error?: string;
+                  error?: { message?: string };
                 };
                 if (
                   message.type !== "response" ||
@@ -226,7 +443,8 @@ describe("design runtime protocol", () => {
                 }
                 window.clearTimeout(timeout);
                 if (message.ok && message.result) resolve(message.result);
-                else reject(new Error(message.error ?? "capture failed"));
+                else
+                  reject(new Error(message.error?.message ?? "capture failed"));
               };
             },
           );
@@ -235,16 +453,18 @@ describe("design runtime protocol", () => {
           window.postMessage(
             {
               protocol: "zeros-design-runtime",
-              version: 1,
+              version: 2,
               type: "handshake",
+              sourceVersion: "c".repeat(24),
             },
             "*",
             [channel.port2],
           );
           channel.port1.postMessage({
             protocol: "zeros-design-runtime",
-            version: 1,
+            version: 2,
             type: "request",
+            sourceVersion: "c".repeat(24),
             requestId,
             method: "captureScreenshot",
             args: { nodeId: "target", scale: 1 },

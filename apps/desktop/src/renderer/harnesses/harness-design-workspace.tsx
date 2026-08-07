@@ -127,14 +127,16 @@ async function main() {
     await import("../features/design-workspace/design-workspace");
   const { DesignWorkspaceSidebar } =
     await import("../features/design-workspace/design-workspace-sidebar");
-  const { designWorkspaceSnapshotCache } =
-    await import("../features/design-workspace/state/design-workspace-cache");
+  const {
+    designFrameDocumentCache,
+    designFrameDocumentKey,
+    designWorkspaceSnapshotCache,
+  } = await import("../features/design-workspace/state/design-workspace-cache");
   const { useDesignWorkspaceUiStore } =
     await import("../features/design-workspace/state/design-workspace-ui");
   const { useDesignRuntimeStore } =
     await import("../features/design-workspace/state/design-runtime-store");
-  const { setWorkspaceRowsForTesting } =
-    await import("../state/use-projects");
+  const { setWorkspaceRowsForTesting } = await import("../state/use-projects");
   const { useWorkspaceStore } = await import("../state/store");
 
   setWorkspaceRowsForTesting(workspace.repoSlug, [workspace]);
@@ -166,9 +168,6 @@ async function main() {
         nodeCount: 12,
         modifiedAt: 1,
         sourceVersion: HOME_SOURCE_VERSION,
-        source: homeSource,
-        srcDoc: withDesignRuntime(homeSource, HOME_SOURCE_VERSION),
-        tree: [],
       },
       {
         file: "pricing.html",
@@ -181,9 +180,6 @@ async function main() {
         nodeCount: 18,
         modifiedAt: 2,
         sourceVersion: PRICING_SOURCE_VERSION,
-        source: pricingSource,
-        srcDoc: withDesignRuntime(pricingSource, PRICING_SOURCE_VERSION),
-        tree: [],
       },
     ],
     tokens: [
@@ -207,6 +203,42 @@ async function main() {
       healedOids: 0,
     },
   });
+  designFrameDocumentCache.setData(
+    designFrameDocumentKey(workspaceId, "home.html", HOME_SOURCE_VERSION),
+    {
+      file: "home.html",
+      title: "Launch home",
+      width: 1_440,
+      height: 900,
+      x: 0,
+      y: 0,
+      z: 0,
+      nodeCount: 12,
+      modifiedAt: 1,
+      sourceVersion: HOME_SOURCE_VERSION,
+      source: homeSource,
+      srcDoc: withDesignRuntime(homeSource, HOME_SOURCE_VERSION),
+      tree: [],
+    },
+  );
+  designFrameDocumentCache.setData(
+    designFrameDocumentKey(workspaceId, "pricing.html", PRICING_SOURCE_VERSION),
+    {
+      file: "pricing.html",
+      title: "Pricing",
+      width: 1_440,
+      height: 900,
+      x: 1_560,
+      y: 0,
+      z: 1,
+      nodeCount: 18,
+      modifiedAt: 2,
+      sourceVersion: PRICING_SOURCE_VERSION,
+      source: pricingSource,
+      srcDoc: withDesignRuntime(pricingSource, PRICING_SOURCE_VERSION),
+      tree: [],
+    },
+  );
   const frameDetails = {
     sourceVersion: HOME_SOURCE_VERSION,
     oid: "home-main",

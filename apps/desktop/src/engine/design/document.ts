@@ -18,7 +18,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
   mkdir,
-  readFile,
+  realpath,
   readdir,
   rename,
   stat,
@@ -27,6 +27,18 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 
+import {
+  DESIGN_FOUNDATION_SCHEMA_VERSION,
+  migrateDesignFoundationManifest,
+  type DesignFoundationManifest,
+} from "@zeros/design-core";
+import {
+  createDesignWebDocumentState,
+  DESIGN_WEB_MAX_FILES,
+  DESIGN_WEB_MAX_TOTAL_BYTES,
+  designTokenThemeName,
+  type DesignWebDocumentState,
+} from "@zeros/design-web";
 import { DESIGN_RUNTIME_SOURCE } from "@zeros/protocol/design-runtime";
 import { withDesignDocumentWrite as withDocumentWrite } from "./document-write-lock";
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
@@ -40,6 +52,7 @@ import { inspectSafeRegularFile, readSafeRegularFile } from "./safe-files";
 export const DESIGN_DIRECTORY_NAME = "Zeros Design";
 export const DESIGN_CANVAS_FILE = ".zeros-canvas.json";
 export const DESIGN_TOKENS_FILE = "tokens.css";
+export const DESIGN_TRANSACTION_JOURNAL_FILE = ".zeros-transaction.json";
 
 const FRAME_MIN_WIDTH = 120;
 const FRAME_MIN_HEIGHT = 80;
@@ -53,6 +66,12 @@ const MAX_DESIGN_ASSETS = 128;
 const MAX_ASSET_DEPTH = 4;
 const MAX_ASSET_BYTES = 10 * 1024 * 1024;
 const MAX_DESIGN_TEXT_BYTES = 2 * 1024 * 1024;
+const MAX_DESIGN_METADATA_BYTES = 16 * 1024 * 1024;
+const MAX_DESIGN_JOURNAL_BYTES = 32 * 1024 * 1024;
+const MAX_INLINE_ASSET_BYTES_PER_FRAME = 12 * 1024 * 1024;
+const MAX_STYLESHEETS_PER_FRAME = 128;
+const MAX_SANITIZED_RENDER_BYTES = 15 * 1024 * 1024;
+const MAX_COMPOSED_FRAME_BYTES = 16 * 1024 * 1024;
 const MAX_ASSET_PREVIEW_BYTES = 512 * 1024;
 const MAX_ASSET_PREVIEW_TOTAL_BYTES = 4 * 1024 * 1024;
 const NON_DESIGN_NODE_TAGS = new Set([
@@ -78,6 +97,29 @@ const DESIGN_ASSET_MIME_TYPES = Object.freeze<Record<string, string>>({
   ".webp": "image/webp",
 });
 
+export class DesignRenderBudgetError extends Error {
+  readonly code = "DESIGN_RENDER_BUDGET_EXCEEDED";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "DesignRenderBudgetError";
+  }
+}
+
+function utf8Bytes(value: string): number {
+  return Buffer.byteLength(value, "utf8");
+}
+
+function assertRenderByteLimit(
+  value: string,
+  maximum: number,
+  message: string,
+): void {
+  if (utf8Bytes(value) > maximum) {
+    throw new DesignRenderBudgetError(message);
+  }
+}
+
 export type DesignLintSeverity = "error" | "warning";
 
 export interface DesignLintViolation {
@@ -92,6 +134,7 @@ export interface DesignLintViolation {
     | "no-external-url"
     | "component-undefined"
     | "component-invalid"
+    | "render-budget"
     | "contrast"
     | "overflow"
     | "spacing-scale";
@@ -129,6 +172,13 @@ export interface DesignFrameSummary {
   z: number;
   nodeCount: number;
   modifiedAt: number;
+}
+
+/** Lightweight canvas record. Render/source payloads are hydrated only for
+ * the bounded live-frame window through readDesignFrame(). */
+export interface DesignCanvasFrame extends DesignFrameSummary {
+  /** Hash of the rendered HTML, linked CSS/assets, and viewport dimensions. */
+  sourceVersion: string;
 }
 
 export interface DesignFrameTreeNode {
@@ -221,9 +271,9 @@ export interface DesignMutationResult {
 }
 
 export interface DesignWorkspaceSnapshot {
-  /** Complete frame documents in canvas z-order; one bridge read can render the
-   * whole warm canvas without a frames → per-frame request waterfall. */
-  frames: DesignFrameDocument[];
+  /** Lightweight frames in canvas z-order. The custom protocol hydrates only
+   * the bounded live-frame set, avoiding an all-frame HTML/srcDoc IPC payload. */
+  frames: DesignCanvasFrame[];
   tokens: DesignTokenSummary[];
   tokenSourceVersion: string;
   assets: DesignAssetSummary[];
@@ -237,8 +287,9 @@ interface DesignReadOptions {
 }
 
 interface CanvasDocument {
-  version: 1;
+  version: 2;
   frames: Record<string, DesignFrameGeometry>;
+  foundation: DesignFoundationManifest;
   view?: {
     x: number;
     y: number;
@@ -258,8 +309,14 @@ interface ElementRecord {
 }
 
 const DEFAULT_CANVAS: CanvasDocument = Object.freeze({
-  version: 1,
+  version: 2,
   frames: Object.freeze({}),
+  foundation: {
+    schemaVersion: DESIGN_FOUNDATION_SCHEMA_VERSION,
+    parameters: [],
+    variants: [],
+    components: [],
+  },
 });
 
 const TOKENS_SEED = `@layer reset {
@@ -400,6 +457,65 @@ function designDirectory(workspacePath: string): string {
   return path.join(path.resolve(workspacePath), DESIGN_DIRECTORY_NAME);
 }
 
+async function ensureSafeDesignRoot(workspacePath: string): Promise<string> {
+  const workspaceRoot = await realpath(path.resolve(workspacePath));
+  const directory = designDirectory(workspacePath);
+  await mkdir(directory, { recursive: true });
+  const canonicalDirectory = await realpath(directory);
+  const expectedDirectory = path.join(workspaceRoot, DESIGN_DIRECTORY_NAME);
+  if (canonicalDirectory !== expectedDirectory) {
+    throw new Error("Refusing an unsafe design write directory.");
+  }
+  return canonicalDirectory;
+}
+
+async function assertSafeDesignWriteTarget(
+  workspacePath: string,
+  target: string,
+): Promise<void> {
+  const directory = designDirectory(workspacePath);
+  const resolvedTarget = path.resolve(target);
+  const relative = path.relative(directory, resolvedTarget);
+  if (
+    !relative ||
+    path.isAbsolute(relative) ||
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`)
+  ) {
+    throw new Error("Refusing an unsafe design write directory.");
+  }
+  const canonicalDirectory = await ensureSafeDesignRoot(workspacePath);
+  const relativeParent = path.dirname(relative);
+  const expectedParent = path.join(
+    canonicalDirectory,
+    relativeParent === "." ? "" : relativeParent,
+  );
+  let canonicalParent = canonicalDirectory;
+  if (relativeParent !== ".") {
+    for (const segment of relativeParent.split(path.sep)) {
+      const candidate = path.join(canonicalParent, segment);
+      try {
+        await mkdir(candidate);
+      } catch (error: unknown) {
+        const code =
+          error && typeof error === "object" && "code" in error
+            ? String(error.code)
+            : "";
+        if (code !== "EEXIST") throw error;
+      }
+      const resolved = await realpath(candidate).catch(() => null);
+      const info = resolved ? await stat(resolved).catch(() => null) : null;
+      if (resolved !== candidate || !info?.isDirectory()) {
+        throw new Error("Refusing an unsafe design write directory.");
+      }
+      canonicalParent = resolved;
+    }
+  }
+  if (canonicalParent !== expectedParent) {
+    throw new Error("Refusing an unsafe design write directory.");
+  }
+}
+
 function canvasPath(workspacePath: string): string {
   return path.join(designDirectory(workspacePath), DESIGN_CANVAS_FILE);
 }
@@ -417,6 +533,10 @@ function assertFrameFile(value: string): string {
     throw new Error(`Invalid design frame file: ${value}`);
   }
   return value;
+}
+
+function comparePortableNames(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function finiteBetween(
@@ -444,36 +564,75 @@ function normalizeGeometry(
 }
 
 async function readCanvas(workspacePath: string): Promise<CanvasDocument> {
-  try {
-    const raw = JSON.parse(
-      await readFile(canvasPath(workspacePath), "utf8"),
-    ) as {
-      version?: unknown;
-      frames?: unknown;
-      view?: unknown;
-    };
-    const sourceFrames =
-      raw.frames && typeof raw.frames === "object"
-        ? (raw.frames as Record<string, Partial<DesignFrameGeometry>>)
-        : {};
-    const frames: Record<string, DesignFrameGeometry> = {};
-    for (const [file, geometry] of Object.entries(sourceFrames).slice(
-      0,
-      MAX_FRAME_COUNT,
-    )) {
-      if (!isFrameFile(file)) continue;
-      frames[file] = normalizeGeometry(geometry, {
-        x: 0,
-        y: 0,
-        w: DEFAULT_FRAME_WIDTH,
-        h: DEFAULT_FRAME_HEIGHT,
-        z: 0,
-      });
+  const directory = designDirectory(workspacePath);
+  const target = canvasPath(workspacePath);
+  const safe = await readSafeRegularFile(
+    directory,
+    target,
+    MAX_DESIGN_METADATA_BYTES,
+  );
+  if (!safe) {
+    if (existsSync(target)) {
+      throw new Error(
+        "Design canvas metadata is unsafe or exceeds the 16 MiB limit.",
+      );
     }
-    return { version: 1, frames };
-  } catch {
-    return { version: 1, frames: {} };
+    return {
+      version: 2,
+      frames: {},
+      foundation: migrateDesignFoundationManifest(undefined),
+    };
   }
+  let raw: {
+    version?: unknown;
+    frames?: unknown;
+    view?: unknown;
+    foundation?: unknown;
+  };
+  try {
+    raw = JSON.parse(safe.body.toString("utf8")) as typeof raw;
+  } catch {
+    throw new Error("Design canvas metadata contains invalid JSON.");
+  }
+  if (raw.version !== undefined && raw.version !== 1 && raw.version !== 2) {
+    throw new Error(`Unsupported design canvas version: ${raw.version}`);
+  }
+  const sourceFrames =
+    raw.frames && typeof raw.frames === "object"
+      ? (raw.frames as Record<string, Partial<DesignFrameGeometry>>)
+      : {};
+  const frames: Record<string, DesignFrameGeometry> = {};
+  for (const [file, geometry] of Object.entries(sourceFrames).slice(
+    0,
+    MAX_FRAME_COUNT,
+  )) {
+    if (!isFrameFile(file)) continue;
+    frames[file] = normalizeGeometry(geometry, {
+      x: 0,
+      y: 0,
+      w: DEFAULT_FRAME_WIDTH,
+      h: DEFAULT_FRAME_HEIGHT,
+      z: 0,
+    });
+  }
+  const view =
+    raw.view && typeof raw.view === "object"
+      ? (raw.view as Partial<NonNullable<CanvasDocument["view"]>>)
+      : null;
+  return {
+    version: 2,
+    frames,
+    foundation: migrateDesignFoundationManifest(raw.foundation),
+    ...(view
+      ? {
+          view: {
+            x: finiteBetween(view.x, 0, -1_000_000, 1_000_000),
+            y: finiteBetween(view.y, 0, -1_000_000, 1_000_000),
+            zoom: finiteBetween(view.zoom, 1, 0.02, 64),
+          },
+        }
+      : {}),
+  };
 }
 
 async function writeCanvas(
@@ -481,9 +640,13 @@ async function writeCanvas(
   canvas: CanvasDocument,
 ): Promise<void> {
   const target = canvasPath(workspacePath);
-  await mkdir(path.dirname(target), { recursive: true });
+  await assertSafeDesignWriteTarget(workspacePath, target);
   const temporary = `${target}.${process.pid}.${randomUUID()}.zeros-tmp`;
-  await writeFile(temporary, `${JSON.stringify(canvas, null, 2)}\n`, "utf8");
+  const source = `${JSON.stringify(canvas, null, 2)}\n`;
+  if (utf8Bytes(source) > MAX_DESIGN_METADATA_BYTES) {
+    throw new Error("Design canvas metadata exceeds the 16 MiB limit.");
+  }
+  await writeFile(temporary, source, "utf8");
   await rename(temporary, target);
 }
 
@@ -517,6 +680,7 @@ export async function initializeDesignDocument(
 ): Promise<{ created: string[] }> {
   return withDocumentWrite(workspacePath, async () => {
     const directory = designDirectory(workspacePath);
+    await ensureSafeDesignRoot(workspacePath);
     await Promise.all([
       mkdir(path.join(directory, "assets"), { recursive: true }),
       mkdir(path.join(directory, "components"), { recursive: true }),
@@ -608,6 +772,7 @@ async function initializeDesignDocumentUnlocked(
   workspacePath: string,
 ): Promise<void> {
   const directory = designDirectory(workspacePath);
+  await ensureSafeDesignRoot(workspacePath);
   await Promise.all([
     mkdir(path.join(directory, "assets"), { recursive: true }),
     mkdir(path.join(directory, "components"), { recursive: true }),
@@ -894,7 +1059,7 @@ async function discoverFrameFiles(workspacePath: string): Promise<string[]> {
   return entries
     .filter((entry) => entry.isFile() && isFrameFile(entry.name))
     .map((entry) => entry.name)
-    .sort((left, right) => left.localeCompare(right))
+    .sort(comparePortableNames)
     .slice(0, MAX_FRAME_COUNT);
 }
 
@@ -912,6 +1077,25 @@ async function designFrameTarget(
   };
 }
 
+async function readBoundedDesignFrameSource(
+  workspacePath: string,
+  frame: string,
+): Promise<string> {
+  const file = assertFrameFile(frame);
+  const directory = designDirectory(workspacePath);
+  const safe = await readSafeRegularFile(
+    directory,
+    path.join(directory, file),
+    MAX_DESIGN_TEXT_BYTES,
+  );
+  if (!safe) {
+    throw new DesignRenderBudgetError(
+      `Design frame is missing, unsafe, or exceeds 2 MiB: ${file}`,
+    );
+  }
+  return safe.body.toString("utf8");
+}
+
 async function readAndHealFrame(
   workspacePath: string,
   file: string,
@@ -921,11 +1105,59 @@ async function readAndHealFrame(
     designDirectory(workspacePath),
     assertFrameFile(file),
   );
-  const source = await readFile(target, "utf8");
+  const source = await readBoundedDesignFrameSource(workspacePath, file);
   if (!heal) return { source, healed: 0 };
   const healed = healDesignOids(source);
   if (healed.changed) await writeFile(target, healed.html, "utf8");
   return { source: healed.html, healed: healed.fixed.length };
+}
+
+async function listDesignFramesUnlocked(
+  workspacePath: string,
+  writeBack: boolean,
+): Promise<DesignFrameSummary[]> {
+  if (writeBack) await initializeDesignDocumentUnlocked(workspacePath);
+  const files = await discoverFrameFiles(workspacePath);
+  const canvas = await readCanvas(workspacePath);
+  let canvasChanged = false;
+  const summaries: DesignFrameSummary[] = [];
+  for (const file of files) {
+    let source: string;
+    try {
+      ({ source } = await readAndHealFrame(workspacePath, file, writeBack));
+    } catch (error) {
+      if (error instanceof DesignRenderBudgetError) continue;
+      throw error;
+    }
+    const document = parse(source, { sourceCodeLocationInfo: true });
+    const meta = readFrameMeta(document, file);
+    let geometry = canvas.frames[file];
+    if (!geometry) {
+      geometry = nextFrameGeometry(Object.values(canvas.frames), meta);
+      canvas.frames[file] = geometry;
+      canvasChanged = true;
+    }
+    const info = await stat(path.join(designDirectory(workspacePath), file));
+    summaries.push({
+      file,
+      title: meta.title,
+      width: geometry.w,
+      height: geometry.h,
+      x: geometry.x,
+      y: geometry.y,
+      z: geometry.z,
+      nodeCount: designNodeRecords(document).length,
+      modifiedAt: info.mtimeMs,
+    });
+  }
+  const live = new Set(files);
+  for (const file of Object.keys(canvas.frames)) {
+    if (live.has(file)) continue;
+    delete canvas.frames[file];
+    canvasChanged = true;
+  }
+  if (writeBack && canvasChanged) await writeCanvas(workspacePath, canvas);
+  return summaries.sort((left, right) => left.z - right.z);
 }
 
 export async function listDesignFrames(
@@ -933,45 +1165,11 @@ export async function listDesignFrames(
   options: DesignReadOptions = {},
 ): Promise<DesignFrameSummary[]> {
   const writeBack = options.writeBack !== false;
-  const read = async (): Promise<DesignFrameSummary[]> => {
-    if (writeBack) await initializeDesignDocumentUnlocked(workspacePath);
-    const files = await discoverFrameFiles(workspacePath);
-    const canvas = await readCanvas(workspacePath);
-    let canvasChanged = false;
-    const summaries: DesignFrameSummary[] = [];
-    for (const file of files) {
-      const { source } = await readAndHealFrame(workspacePath, file, writeBack);
-      const document = parse(source, { sourceCodeLocationInfo: true });
-      const meta = readFrameMeta(document, file);
-      let geometry = canvas.frames[file];
-      if (!geometry) {
-        geometry = nextFrameGeometry(Object.values(canvas.frames), meta);
-        canvas.frames[file] = geometry;
-        canvasChanged = true;
-      }
-      const info = await stat(path.join(designDirectory(workspacePath), file));
-      summaries.push({
-        file,
-        title: meta.title,
-        width: geometry.w,
-        height: geometry.h,
-        x: geometry.x,
-        y: geometry.y,
-        z: geometry.z,
-        nodeCount: designNodeRecords(document).length,
-        modifiedAt: info.mtimeMs,
-      });
-    }
-    const live = new Set(files);
-    for (const file of Object.keys(canvas.frames)) {
-      if (live.has(file)) continue;
-      delete canvas.frames[file];
-      canvasChanged = true;
-    }
-    if (writeBack && canvasChanged) await writeCanvas(workspacePath, canvas);
-    return summaries.sort((left, right) => left.z - right.z);
-  };
-  return writeBack ? withDocumentWrite(workspacePath, read) : read();
+  return writeBack
+    ? withDocumentWrite(workspacePath, () =>
+        listDesignFramesUnlocked(workspacePath, true),
+      )
+    : listDesignFramesUnlocked(workspacePath, false);
 }
 
 export async function updateDesignFrameGeometry(
@@ -1011,7 +1209,7 @@ export async function renameDesignFrame(
 
   await withDocumentWrite(workspacePath, async () => {
     const { target } = await designFrameTarget(workspacePath, file);
-    const source = await readFile(target, "utf8");
+    const source = await readBoundedDesignFrameSource(workspacePath, file);
     const document = parse(source, { sourceCodeLocationInfo: true });
     const edits: Array<{ start: number; end: number; text: string }> = [];
     let frameMetaFound = false;
@@ -1339,6 +1537,557 @@ async function atomicWriteDesignSource(
   await rename(temporary, target);
 }
 
+interface DesignTransactionJournal {
+  version: 1;
+  documentId: string;
+  entryFile: string;
+  nextRevision: string;
+  files: Array<{ file: string; content: string | null }>;
+  foundation: DesignFoundationManifest;
+  geometry: DesignFrameGeometry;
+}
+
+function designTransactionJournalPath(workspacePath: string): string {
+  return path.join(
+    designDirectory(workspacePath),
+    DESIGN_TRANSACTION_JOURNAL_FILE,
+  );
+}
+
+function isDesignWebSourceFile(file: string, entryFile: string): boolean {
+  return (
+    file === entryFile ||
+    /^[A-Za-z0-9][A-Za-z0-9._-]*\.css$/i.test(file) ||
+    /^components\/[a-z][a-z0-9-]*\.html$/.test(file)
+  );
+}
+
+export function designWebDocumentId(frame: string): string {
+  return `frame:${assertFrameFile(frame)}`;
+}
+
+async function readDesignWebDocumentStateUnlocked(
+  workspacePath: string,
+  frame: string,
+): Promise<DesignWebDocumentState> {
+  const file = assertFrameFile(frame);
+  const directory = designDirectory(workspacePath);
+  const entry = await readSafeRegularFile(
+    directory,
+    path.join(directory, file),
+    MAX_DESIGN_TEXT_BYTES,
+  );
+  if (!entry) throw new Error(`Design frame not found: ${file}`);
+  const files: Record<string, string> = {
+    [file]: entry.body.toString("utf8"),
+  };
+  let totalSourceBytes = entry.size;
+  let retainedSourceFiles = 1;
+  const retainSource = (
+    sourceFile: string,
+    safe: { body: Buffer; size: number },
+  ) => {
+    if (retainedSourceFiles >= DESIGN_WEB_MAX_FILES) {
+      throw new Error(
+        `Design document exceeds the ${DESIGN_WEB_MAX_FILES}-file limit.`,
+      );
+    }
+    if (totalSourceBytes + safe.size > DESIGN_WEB_MAX_TOTAL_BYTES) {
+      throw new Error("Design document exceeds the total source limit.");
+    }
+    totalSourceBytes += safe.size;
+    retainedSourceFiles += 1;
+    files[sourceFile] = safe.body.toString("utf8");
+  };
+  const topLevel = await readdir(directory, { withFileTypes: true }).catch(
+    () => [],
+  );
+  for (const item of topLevel
+    .filter(
+      (candidate) =>
+        candidate.isFile() &&
+        /^[A-Za-z0-9][A-Za-z0-9._-]*\.css$/i.test(candidate.name),
+    )
+    .sort((left, right) => comparePortableNames(left.name, right.name))) {
+    const safe = await readSafeRegularFile(
+      directory,
+      path.join(directory, item.name),
+      MAX_DESIGN_TEXT_BYTES,
+    );
+    if (safe) retainSource(item.name, safe);
+  }
+  const componentDirectory = path.join(directory, "components");
+  const componentEntries = await readdir(componentDirectory, {
+    withFileTypes: true,
+  }).catch(() => []);
+  for (const item of componentEntries
+    .filter(
+      (candidate) =>
+        candidate.isFile() && /^[a-z][a-z0-9-]*\.html$/.test(candidate.name),
+    )
+    .sort((left, right) => comparePortableNames(left.name, right.name))) {
+    const safe = await readSafeRegularFile(
+      componentDirectory,
+      path.join(componentDirectory, item.name),
+      MAX_DESIGN_TEXT_BYTES,
+    );
+    if (safe) {
+      retainSource(`components/${item.name}`, safe);
+    }
+  }
+  const canvas = await readCanvas(workspacePath);
+  const components = [...canvas.foundation.components];
+  const registeredComponentFiles = new Set(
+    components.map((component) => component.file),
+  );
+  const registeredComponentIds = new Set(
+    components.map((component) => component.id),
+  );
+  for (const componentFile of Object.keys(files)
+    .filter((sourceFile) => sourceFile.startsWith("components/"))
+    .sort(comparePortableNames)) {
+    if (registeredComponentFiles.has(componentFile)) continue;
+    const id = path.basename(componentFile, ".html");
+    if (registeredComponentIds.has(id)) {
+      throw new Error(
+        `Legacy design component id conflicts with registered metadata: ${id}`,
+      );
+    }
+    registeredComponentFiles.add(componentFile);
+    registeredComponentIds.add(id);
+    components.push({
+      id,
+      name: id
+        .split("-")
+        .filter(Boolean)
+        .map((part, index) =>
+          index === 0
+            ? `${part[0]?.toUpperCase() ?? ""}${part.slice(1)}`
+            : part,
+        )
+        .join(" "),
+      file: componentFile,
+      props: [],
+      slots: [],
+    });
+  }
+  const foundation = migrateDesignFoundationManifest({
+    ...canvas.foundation,
+    components,
+  });
+  const meta = readFrameMeta(
+    parse(files[file]!, { sourceCodeLocationInfo: true }),
+    file,
+  );
+  const geometry = canvas.frames[file] ?? {
+    x: 0,
+    y: 0,
+    w: meta.width,
+    h: meta.height,
+    z: 0,
+  };
+  return createDesignWebDocumentState({
+    documentId: designWebDocumentId(file),
+    entryFile: file,
+    files,
+    manifest: foundation,
+    frames: {
+      [file]: {
+        x: geometry.x,
+        y: geometry.y,
+        width: geometry.w,
+        height: geometry.h,
+        z: geometry.z,
+      },
+    },
+  });
+}
+
+function parseDesignTransactionJournal(
+  workspacePath: string,
+  input: unknown,
+): DesignTransactionJournal {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("Malformed design transaction journal.");
+  }
+  const journal = input as Partial<DesignTransactionJournal>;
+  const entryFile = assertFrameFile(String(journal.entryFile ?? ""));
+  const documentId = designWebDocumentId(entryFile);
+  if (
+    journal.version !== 1 ||
+    journal.documentId !== documentId ||
+    typeof journal.nextRevision !== "string" ||
+    !/^[a-f0-9]{24}$/.test(journal.nextRevision) ||
+    !Array.isArray(journal.files) ||
+    journal.files.length > DESIGN_WEB_MAX_FILES
+  ) {
+    throw new Error("Malformed design transaction journal.");
+  }
+  const files = journal.files.map((candidate) => {
+    if (
+      !candidate ||
+      typeof candidate !== "object" ||
+      Array.isArray(candidate)
+    ) {
+      throw new Error("Malformed design transaction journal file.");
+    }
+    const record = candidate as { file?: unknown; content?: unknown };
+    const file = String(record.file ?? "");
+    if (!isDesignWebSourceFile(file, entryFile)) {
+      throw new Error(`Invalid design transaction journal path: ${file}`);
+    }
+    if (
+      record.content !== null &&
+      (typeof record.content !== "string" ||
+        Buffer.byteLength(record.content, "utf8") > MAX_DESIGN_TEXT_BYTES)
+    ) {
+      throw new Error(`Invalid design transaction journal content: ${file}`);
+    }
+    if (file === entryFile && record.content === null) {
+      throw new Error("A design transaction cannot delete its entry frame.");
+    }
+    return { file, content: record.content as string | null };
+  });
+  if (new Set(files.map((file) => file.file)).size !== files.length) {
+    throw new Error("Design transaction journal contains duplicate paths.");
+  }
+  const totalSourceBytes = files.reduce(
+    (total, file) =>
+      total + (file.content === null ? 0 : utf8Bytes(file.content)),
+    0,
+  );
+  if (totalSourceBytes > 16 * 1024 * 1024) {
+    throw new Error(
+      "Design transaction journal exceeds the total source limit.",
+    );
+  }
+  const foundation = migrateDesignFoundationManifest(journal.foundation);
+  const geometry = normalizeGeometry(journal.geometry, {
+    x: 0,
+    y: 0,
+    w: DEFAULT_FRAME_WIDTH,
+    h: DEFAULT_FRAME_HEIGHT,
+    z: 0,
+  });
+  return {
+    version: 1,
+    documentId,
+    entryFile,
+    nextRevision: journal.nextRevision,
+    files,
+    foundation,
+    geometry,
+  };
+}
+
+async function applyDesignTransactionJournalUnlocked(
+  workspacePath: string,
+  journal: DesignTransactionJournal,
+): Promise<void> {
+  const directory = designDirectory(workspacePath);
+  await assertSafeDesignWriteTarget(
+    workspacePath,
+    designTransactionJournalPath(workspacePath),
+  );
+  await assertSafeDesignWriteTarget(workspacePath, canvasPath(workspacePath));
+  for (const file of journal.files) {
+    const target = path.join(directory, ...file.file.split("/"));
+    await assertSafeDesignWriteTarget(workspacePath, target);
+    if (file.content === null) {
+      await unlink(target).catch((error: unknown) => {
+        if (
+          !error ||
+          typeof error !== "object" ||
+          !("code" in error) ||
+          String(error.code) !== "ENOENT"
+        ) {
+          throw error;
+        }
+      });
+      continue;
+    }
+    await mkdir(path.dirname(target), { recursive: true });
+    await atomicWriteDesignSource(target, file.content);
+  }
+  const canvas = await readCanvas(workspacePath);
+  canvas.foundation = journal.foundation;
+  canvas.frames[journal.entryFile] = journal.geometry;
+  await writeCanvas(workspacePath, canvas);
+}
+
+async function recoverPendingDesignTransactionUnlocked(
+  workspacePath: string,
+): Promise<boolean> {
+  const target = designTransactionJournalPath(workspacePath);
+  const directory = designDirectory(workspacePath);
+  const safe = await readSafeRegularFile(
+    directory,
+    target,
+    MAX_DESIGN_JOURNAL_BYTES,
+  );
+  if (!safe) {
+    if (existsSync(target)) {
+      throw new Error(
+        "Design transaction journal is unsafe or exceeds the 32 MiB limit.",
+      );
+    }
+    return false;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(safe.body.toString("utf8")) as unknown;
+  } catch {
+    throw new Error("Design transaction journal contains invalid JSON.");
+  }
+  const journal = parseDesignTransactionJournal(workspacePath, parsed);
+  const current = await readDesignWebDocumentStateUnlocked(
+    workspacePath,
+    journal.entryFile,
+  );
+  const files = { ...current.files };
+  for (const change of journal.files) {
+    if (change.content === null) delete files[change.file];
+    else files[change.file] = change.content;
+  }
+  const targetState = createDesignWebDocumentState({
+    documentId: journal.documentId,
+    entryFile: journal.entryFile,
+    files,
+    manifest: journal.foundation,
+    frames: {
+      ...current.frames,
+      [journal.entryFile]: {
+        x: journal.geometry.x,
+        y: journal.geometry.y,
+        width: journal.geometry.w,
+        height: journal.geometry.h,
+        z: journal.geometry.z,
+      },
+    },
+  });
+  if (targetState.revision !== journal.nextRevision) {
+    throw new Error(
+      `Design transaction journal target revision is invalid: expected ${journal.nextRevision}, derived ${targetState.revision}.`,
+    );
+  }
+  await applyDesignTransactionJournalUnlocked(workspacePath, journal);
+  const committed = await readDesignWebDocumentStateUnlocked(
+    workspacePath,
+    journal.entryFile,
+  );
+  if (committed.revision !== journal.nextRevision) {
+    throw new Error(
+      "Recovered design transaction did not reach its target revision.",
+    );
+  }
+  await unlink(target).catch((error: unknown) => {
+    if (
+      !error ||
+      typeof error !== "object" ||
+      !("code" in error) ||
+      String(error.code) !== "ENOENT"
+    ) {
+      throw error;
+    }
+  });
+  return true;
+}
+
+export async function recoverPendingDesignTransaction(
+  workspacePath: string,
+): Promise<boolean> {
+  return withDocumentWrite(workspacePath, () =>
+    recoverPendingDesignTransactionUnlocked(workspacePath),
+  );
+}
+
+export async function readDesignWebDocumentState(
+  workspacePath: string,
+  frame: string,
+): Promise<DesignWebDocumentState> {
+  return withDocumentWrite(workspacePath, async () => {
+    await recoverPendingDesignTransactionUnlocked(workspacePath);
+    return readDesignWebDocumentStateUnlocked(workspacePath, frame);
+  });
+}
+
+export async function commitDesignWebDocumentState(
+  workspacePath: string,
+  frame: string,
+  expectedRevision: string,
+  next: DesignWebDocumentState,
+): Promise<void> {
+  const file = assertFrameFile(frame);
+  await withDocumentWrite(workspacePath, async () => {
+    await recoverPendingDesignTransactionUnlocked(workspacePath);
+    const current = await readDesignWebDocumentStateUnlocked(
+      workspacePath,
+      file,
+    );
+    if (current.revision !== expectedRevision) {
+      throw new Error(
+        `Design document changed: expected ${expectedRevision}, current ${current.revision}.`,
+      );
+    }
+    if (
+      next.documentId !== current.documentId ||
+      next.entryFile !== current.entryFile
+    ) {
+      throw new Error(
+        "Design transaction returned the wrong document identity.",
+      );
+    }
+    const normalized = createDesignWebDocumentState({
+      documentId: next.documentId,
+      entryFile: next.entryFile,
+      files: next.files,
+      manifest: next.manifest,
+      frames: next.frames,
+    });
+    if (normalized.revision !== next.revision) {
+      throw new Error("Design transaction returned an invalid revision.");
+    }
+    const geometry = normalized.frames[file];
+    if (!geometry)
+      throw new Error(`Design transaction removed frame geometry: ${file}`);
+    const componentFiles = new Set(
+      normalized.manifest.components.map((component) => component.file),
+    );
+    for (const sourceFile of Object.keys(normalized.files)) {
+      if (!isDesignWebSourceFile(sourceFile, file)) {
+        throw new Error(
+          `Design transaction returned an invalid source path: ${sourceFile}`,
+        );
+      }
+      if (
+        sourceFile.startsWith("components/") &&
+        !componentFiles.has(sourceFile)
+      ) {
+        throw new Error(
+          `Design component source is not registered: ${sourceFile}`,
+        );
+      }
+    }
+    for (const componentFile of componentFiles) {
+      if (normalized.files[componentFile] === undefined) {
+        throw new Error(
+          `Registered design component source is missing: ${componentFile}`,
+        );
+      }
+    }
+    const nextComponentIds = new Set(
+      normalized.manifest.components.map((component) => component.id),
+    );
+    const removedComponentIds = current.manifest.components
+      .map((component) => component.id)
+      .filter((componentId) => !nextComponentIds.has(componentId));
+    if (removedComponentIds.length > 0) {
+      const remainingHtml = Object.entries(normalized.files).filter(([name]) =>
+        name.toLowerCase().endsWith(".html"),
+      );
+      const otherFrames = (await discoverFrameFiles(workspacePath)).filter(
+        (candidate) => candidate !== file,
+      );
+      for (const otherFrame of otherFrames) {
+        remainingHtml.push([
+          otherFrame,
+          await readBoundedDesignFrameSource(workspacePath, otherFrame),
+        ]);
+      }
+      for (const componentId of removedComponentIds) {
+        const owner = remainingHtml.find(([, source]) =>
+          elementRecords(parse(source)).some(
+            ({ element }) => element.tagName === `zd-${componentId}`,
+          ),
+        );
+        if (owner) {
+          throw new Error(
+            `Design component ${componentId} still has instances in ${owner[0]}.`,
+          );
+        }
+      }
+    }
+    for (const sourceFile of Object.keys(current.files)) {
+      if (
+        sourceFile !== file &&
+        sourceFile.endsWith(".css") &&
+        normalized.files[sourceFile] === undefined
+      ) {
+        throw new Error(
+          `Design transaction cannot delete a stylesheet: ${sourceFile}`,
+        );
+      }
+    }
+    const changedFiles = new Set([
+      ...Object.keys(current.files),
+      ...Object.keys(normalized.files),
+    ]);
+    const journal: DesignTransactionJournal = {
+      version: 1,
+      documentId: normalized.documentId,
+      entryFile: file,
+      nextRevision: normalized.revision,
+      files: [...changedFiles]
+        .sort(comparePortableNames)
+        .filter(
+          (sourceFile) =>
+            current.files[sourceFile] !== normalized.files[sourceFile],
+        )
+        .map((sourceFile) => ({
+          file: sourceFile,
+          content: normalized.files[sourceFile] ?? null,
+        })),
+      foundation: normalized.manifest,
+      geometry: {
+        x: geometry.x,
+        y: geometry.y,
+        w: geometry.width,
+        h: geometry.height,
+        z: geometry.z,
+      },
+    };
+    const journalSource = `${JSON.stringify(journal)}\n`;
+    if (utf8Bytes(journalSource) > MAX_DESIGN_JOURNAL_BYTES) {
+      throw new Error("Design transaction journal exceeds the 32 MiB limit.");
+    }
+    await assertSafeDesignWriteTarget(
+      workspacePath,
+      designTransactionJournalPath(workspacePath),
+    );
+    await assertSafeDesignWriteTarget(workspacePath, canvasPath(workspacePath));
+    for (const change of journal.files) {
+      await assertSafeDesignWriteTarget(
+        workspacePath,
+        path.join(designDirectory(workspacePath), ...change.file.split("/")),
+      );
+    }
+    await atomicWriteDesignSource(
+      designTransactionJournalPath(workspacePath),
+      journalSource,
+    );
+    try {
+      await recoverPendingDesignTransactionUnlocked(workspacePath);
+    } catch (firstError) {
+      // Recovery overlays the journal's complete target state before deriving
+      // its revision, then rewrites every changed file and canvas metadata to
+      // exact contents. Reapplying the same validated journal is therefore
+      // idempotent after a partial first pass and safely retries transient I/O.
+      try {
+        await recoverPendingDesignTransactionUnlocked(workspacePath);
+      } catch {
+        throw firstError;
+      }
+    }
+    const committed = await readDesignWebDocumentStateUnlocked(
+      workspacePath,
+      file,
+    );
+    if (committed.revision !== normalized.revision) {
+      throw new Error("Design transaction did not commit its exact revision.");
+    }
+  });
+}
+
 async function mutationResultUnlocked(
   workspacePath: string,
   file: string,
@@ -1400,6 +2149,21 @@ async function mutationResultUnlocked(
   };
 }
 
+export async function readDesignMutationResult(
+  workspacePath: string,
+  frame: string,
+  changed: boolean,
+): Promise<DesignMutationResult> {
+  const file = assertFrameFile(frame);
+  await designFrameTarget(workspacePath, file);
+  return mutationResultUnlocked(
+    workspacePath,
+    file,
+    await readBoundedDesignFrameSource(workspacePath, file),
+    changed,
+  );
+}
+
 async function mutateDesignFrameSource(
   workspacePath: string,
   input: DesignFrameMutationInput,
@@ -1416,7 +2180,7 @@ async function mutateDesignFrameSource(
   }
   return withDocumentWrite(workspacePath, async () => {
     const { target } = await designFrameTarget(workspacePath, file);
-    const source = await readFile(target, "utf8");
+    const source = await readBoundedDesignFrameSource(workspacePath, file);
     const document = parse(source, { sourceCodeLocationInfo: true });
     const meta = readFrameMeta(document, file);
     const geometry = (await readCanvas(workspacePath)).frames[file];
@@ -1726,8 +2490,11 @@ export async function duplicateDesignFrame(
 ): Promise<DesignFrameSummary> {
   const originalFile = assertFrameFile(frame);
   return withDocumentWrite(workspacePath, async () => {
-    const { target } = await designFrameTarget(workspacePath, originalFile);
-    const original = await readFile(target, "utf8");
+    await designFrameTarget(workspacePath, originalFile);
+    const original = await readBoundedDesignFrameSource(
+      workspacePath,
+      originalFile,
+    );
     const originalMeta = readFrameMeta(
       parse(original, { sourceCodeLocationInfo: true }),
       originalFile,
@@ -1784,14 +2551,14 @@ export async function deleteDesignFrame(
   });
 }
 
-export async function insertDesignAsset(
+export async function prepareDesignAssetInsertion(
   workspacePath: string,
   input: Omit<DesignFrameMutationInput, "nodeId"> & {
     assetPath: string;
     x: number;
     y: number;
   },
-): Promise<DesignMutationResult> {
+): Promise<{ nodeId: string; html: string }> {
   const asset = (await listDesignAssets(workspacePath)).find(
     (candidate) => candidate.path === input.assetPath,
   );
@@ -1808,12 +2575,29 @@ export async function insertDesignAsset(
     .update(`${input.frame}:${asset.path}:${Date.now()}:${randomUUID()}`)
     .digest("hex")
     .slice(0, 9)}`;
+  return {
+    nodeId: root.oid,
+    html: `<img data-oid="${oid}" src="./${escapeAttribute(asset.path)}" alt="${escapeAttribute(path.basename(asset.name, path.extname(asset.name)))}" style="position:absolute; left:${x}px; top:${y}px; max-width:320px; height:auto;">`,
+  };
+}
+
+/** Compatibility wrapper for older callers. New editor and headless writes
+ * route the prepared semantic operation through DesignApi instead. */
+export async function insertDesignAsset(
+  workspacePath: string,
+  input: Omit<DesignFrameMutationInput, "nodeId"> & {
+    assetPath: string;
+    x: number;
+    y: number;
+  },
+): Promise<DesignMutationResult> {
+  const prepared = await prepareDesignAssetInsertion(workspacePath, input);
   return writeDesignNodeHtml(workspacePath, {
     frame: input.frame,
-    nodeId: root.oid,
+    nodeId: prepared.nodeId,
     sourceVersion: input.sourceVersion,
     mode: "append",
-    html: `<img data-oid="${oid}" src="./${escapeAttribute(asset.path)}" alt="${escapeAttribute(path.basename(asset.name, path.extname(asset.name)))}" style="position:absolute; left:${x}px; top:${y}px; max-width:320px; height:auto;">`,
+    html: prepared.html,
   });
 }
 
@@ -1890,8 +2674,8 @@ export async function readDesignElementOffsetMap(
   workspacePath: string,
   frame: string,
 ): Promise<DesignElementOffset[]> {
-  const { target } = await designFrameTarget(workspacePath, frame);
-  const source = await readFile(target, "utf8");
+  await designFrameTarget(workspacePath, frame);
+  const source = await readBoundedDesignFrameSource(workspacePath, frame);
   const document = parse(source, { sourceCodeLocationInfo: true });
   const offsets: DesignElementOffset[] = [];
   for (const { element, oid } of designNodeRecords(document)) {
@@ -1913,24 +2697,54 @@ async function inlineLocalStyles(
   source: string,
 ): Promise<string> {
   const directory = designDirectory(workspacePath);
-  const linkPattern = /<link\b[^>]*\brel\s*=\s*(["'])stylesheet\1[^>]*>/gi;
-  const matches = [...source.matchAll(linkPattern)];
-  let result = source;
-  for (const match of matches.reverse()) {
-    const tag = match[0];
-    const href = /\bhref\s*=\s*(["'])(.*?)\1/i.exec(tag)?.[2] ?? "";
+  const document = parse(source, { sourceCodeLocationInfo: true });
+  const links = elementRecords(document)
+    .map(({ element }) => element)
+    .filter((element) => {
+      if (element.tagName !== "link" || !element.sourceCodeLocation) {
+        return false;
+      }
+      const rel =
+        element.attrs.find((attribute) => attribute.name === "rel")?.value ??
+        "";
+      return rel
+        .split(/\s+/)
+        .some((token) => token.toLowerCase() === "stylesheet");
+    });
+  if (links.length > MAX_STYLESHEETS_PER_FRAME) {
+    throw new DesignRenderBudgetError(
+      `A frame may link at most ${MAX_STYLESHEETS_PER_FRAME} stylesheets.`,
+    );
+  }
+  const edits: DesignSourceEdit[] = [];
+  let resultBytes = utf8Bytes(source);
+  for (const element of links) {
+    const location = element.sourceCodeLocation!;
+    const href =
+      element.attrs.find((attribute) => attribute.name === "href")?.value ?? "";
     const resolved = safeLocalReference(directory, href);
     let replacement = "";
     if (resolved?.toLowerCase().endsWith(".css")) {
       const css = await readSafeDesignText(directory, resolved);
       if (css !== null) {
-        replacement = `<style data-zeros-source="${escapeAttribute(href)}">${css}</style>`;
+        replacement = `<style data-zeros-source="${escapeAttribute(href)}">${css.replace(/<\/style/gi, "<\\/style")}</style>`;
       }
     }
-    const offset = match.index ?? 0;
-    result = `${result.slice(0, offset)}${replacement}${result.slice(offset + tag.length)}`;
+    resultBytes +=
+      utf8Bytes(replacement) -
+      utf8Bytes(source.slice(location.startOffset, location.endOffset));
+    if (resultBytes > MAX_SANITIZED_RENDER_BYTES) {
+      throw new DesignRenderBudgetError(
+        "Linked styles exceeded the 15 MiB per-frame render limit.",
+      );
+    }
+    edits.push({
+      start: location.startOffset,
+      end: location.endOffset,
+      text: replacement,
+    });
   }
-  return result;
+  return applyDesignSourceEdits(source, edits);
 }
 
 function designAssetMimeType(reference: string): string | null {
@@ -1941,9 +2755,11 @@ function designAssetMimeType(reference: string): string | null {
 async function inlineCssUrlValue(
   directory: string,
   value: string,
+  budget: { inlineAssetBytes: number },
 ): Promise<string> {
   const matches = [...value.matchAll(/url\(\s*(["']?)([^"')]+)\1\s*\)/gi)];
   let result = value;
+  let resultBytes = utf8Bytes(value);
   for (const match of matches.reverse()) {
     const reference = match[2] ?? "";
     const mimeType = designAssetMimeType(reference);
@@ -1951,8 +2767,23 @@ async function inlineCssUrlValue(
     if (!resolved || !mimeType) continue;
     const data = await readSafeDesignBuffer(directory, resolved);
     if (!data || data.length > MAX_ASSET_BYTES) continue;
+    if (
+      budget.inlineAssetBytes + data.length >
+      MAX_INLINE_ASSET_BYTES_PER_FRAME
+    ) {
+      throw new DesignRenderBudgetError(
+        "Local assets exceeded the 12 MiB per-frame inline budget.",
+      );
+    }
+    budget.inlineAssetBytes += data.length;
     const start = match.index ?? 0;
     const replacement = `url("data:${mimeType};base64,${data.toString("base64")}")`;
+    resultBytes += utf8Bytes(replacement) - utf8Bytes(match[0]);
+    if (resultBytes > MAX_SANITIZED_RENDER_BYTES) {
+      throw new DesignRenderBudgetError(
+        "Inlined CSS exceeded the 15 MiB per-frame render limit.",
+      );
+    }
     result = `${result.slice(0, start)}${replacement}${result.slice(start + match[0].length)}`;
   }
   return result;
@@ -1961,6 +2792,7 @@ async function inlineCssUrlValue(
 async function inlineCssLocalAssets(
   directory: string,
   source: string,
+  budget: { inlineAssetBytes: number },
 ): Promise<string> {
   let root: postcss.Root;
   try {
@@ -1973,9 +2805,19 @@ async function inlineCssLocalAssets(
     declarations.push(declaration);
   });
   for (const declaration of declarations) {
-    declaration.value = await inlineCssUrlValue(directory, declaration.value);
+    declaration.value = await inlineCssUrlValue(
+      directory,
+      declaration.value,
+      budget,
+    );
   }
-  return root.toString();
+  const result = root.toString();
+  assertRenderByteLimit(
+    result,
+    MAX_SANITIZED_RENDER_BYTES,
+    "Inlined CSS exceeded the 15 MiB per-frame render limit.",
+  );
+  return result;
 }
 
 async function inlineLocalAssets(
@@ -1985,6 +2827,17 @@ async function inlineLocalAssets(
   const directory = designDirectory(workspacePath);
   const document = parse(source, { sourceCodeLocationInfo: true });
   const edits: Array<{ start: number; end: number; text: string }> = [];
+  const budget = { inlineAssetBytes: 0 };
+  let resultBytes = utf8Bytes(source);
+  const reserveEdit = (start: number, end: number, text: string) => {
+    resultBytes += utf8Bytes(text) - utf8Bytes(source.slice(start, end));
+    if (resultBytes > MAX_SANITIZED_RENDER_BYTES) {
+      throw new DesignRenderBudgetError(
+        "Inlined assets exceeded the 15 MiB per-frame render limit.",
+      );
+    }
+    edits.push({ start, end, text });
+  };
   for (const { element } of elementRecords(document)) {
     if (
       element.tagName === "style" &&
@@ -1994,20 +2847,24 @@ async function inlineLocalAssets(
       const start = element.sourceCodeLocation.startTag.endOffset;
       const end = element.sourceCodeLocation.endTag.startOffset;
       const css = source.slice(start, end);
-      const inlined = await inlineCssLocalAssets(directory, css);
-      if (inlined !== css) edits.push({ start, end, text: inlined });
+      const inlined = await inlineCssLocalAssets(directory, css, budget);
+      if (inlined !== css) reserveEdit(start, end, inlined);
     }
     for (const attribute of element.attrs) {
       if (attribute.name === "style") {
         const location = element.sourceCodeLocation?.attrs?.[attribute.name];
         if (!location) continue;
-        const inlined = await inlineCssUrlValue(directory, attribute.value);
+        const inlined = await inlineCssUrlValue(
+          directory,
+          attribute.value,
+          budget,
+        );
         if (inlined !== attribute.value) {
-          edits.push({
-            start: location.startOffset,
-            end: location.endOffset,
-            text: `style="${escapeAttribute(inlined)}"`,
-          });
+          reserveEdit(
+            location.startOffset,
+            location.endOffset,
+            `style="${escapeAttribute(inlined)}"`,
+          );
         }
         continue;
       }
@@ -2020,17 +2877,31 @@ async function inlineLocalAssets(
       if (!resolved || !location || !mimeType) continue;
       const data = await readSafeDesignBuffer(directory, resolved);
       if (!data || data.length > MAX_ASSET_BYTES) continue;
-      edits.push({
-        start: location.startOffset,
-        end: location.endOffset,
-        text: `${attribute.name}="data:${mimeType};base64,${data.toString("base64")}"`,
-      });
+      if (
+        budget.inlineAssetBytes + data.length >
+        MAX_INLINE_ASSET_BYTES_PER_FRAME
+      ) {
+        throw new DesignRenderBudgetError(
+          "Local assets exceeded the 12 MiB per-frame inline budget.",
+        );
+      }
+      budget.inlineAssetBytes += data.length;
+      reserveEdit(
+        location.startOffset,
+        location.endOffset,
+        `${attribute.name}="data:${mimeType};base64,${data.toString("base64")}"`,
+      );
     }
   }
   let result = source;
   for (const edit of edits.sort((left, right) => right.start - left.start)) {
     result = `${result.slice(0, edit.start)}${edit.text}${result.slice(edit.end)}`;
   }
+  assertRenderByteLimit(
+    result,
+    MAX_SANITIZED_RENDER_BYTES,
+    "Inlined assets exceeded the 15 MiB per-frame render limit.",
+  );
   return result;
 }
 
@@ -2106,6 +2977,9 @@ export function sanitizeDesignFrameMarkup(source: string): string {
     const removeElement =
       element.tagName === "script" ||
       element.tagName === "base" ||
+      element.tagName === "iframe" ||
+      element.tagName === "object" ||
+      element.tagName === "embed" ||
       (element.tagName === "meta" &&
         (httpEquiv === "content-security-policy" || httpEquiv === "refresh"));
     if (removeElement) {
@@ -2198,11 +3072,26 @@ async function prepareFrameRenderSource(
   source: string,
   viewport: { width: number; height: number },
 ): Promise<{ sanitized: string; sourceVersion: string }> {
+  assertRenderByteLimit(
+    source,
+    MAX_DESIGN_TEXT_BYTES,
+    "Authored frame HTML exceeded the 2 MiB source limit.",
+  );
   const expanded = await expandDesignComponents(workspacePath, source);
+  assertRenderByteLimit(
+    expanded.html,
+    MAX_SANITIZED_RENDER_BYTES,
+    "Expanded components exceeded the 15 MiB per-frame render limit.",
+  );
   const withStyles = await inlineLocalStyles(workspacePath, expanded.html);
   const inlined = await inlineLocalAssets(workspacePath, withStyles);
   const sanitized = stripNonDesignOidsForRender(
     sanitizeDesignFrameMarkup(inlined),
+  );
+  assertRenderByteLimit(
+    sanitized,
+    MAX_SANITIZED_RENDER_BYTES,
+    "Sanitized frame HTML exceeded the 15 MiB per-frame render limit.",
   );
   const sourceVersion = createHash("sha256")
     .update(sanitized)
@@ -2265,9 +3154,15 @@ async function composeFrameSrcDoc(
     `connect-src 'none'; worker-src 'none'; frame-src 'none'; ` +
     `object-src 'none'; base-uri 'none'; form-action 'none';">`;
   const withPolicy = insertDesignHeadMarkup(sanitized, csp);
+  const srcDoc = insertDesignRuntimeScript(withPolicy, sourceVersion).html;
+  assertRenderByteLimit(
+    srcDoc,
+    MAX_COMPOSED_FRAME_BYTES,
+    "Runtime-enabled frame HTML exceeded the 16 MiB render limit.",
+  );
   return {
     sourceVersion,
-    srcDoc: insertDesignRuntimeScript(withPolicy, sourceVersion).html,
+    srcDoc,
   };
 }
 
@@ -2373,7 +3268,13 @@ export async function readDesignFrame(
   const file = assertFrameFile(frame);
   const summaries = await listDesignFrames(workspacePath, options);
   const summary = summaries.find((candidate) => candidate.file === file);
-  if (!summary) throw new Error(`Design frame not found: ${file}`);
+  if (!summary) {
+    // Aggregate frame discovery intentionally omits an over-budget sibling.
+    // An exact frame read still reports that frame's actionable budget error.
+    await designFrameTarget(workspacePath, file);
+    await readBoundedDesignFrameSource(workspacePath, file);
+    throw new Error(`Design frame not found: ${file}`);
+  }
   return readDesignFrameFromSummary(workspacePath, summary, depth);
 }
 
@@ -2382,9 +3283,9 @@ async function readDesignFrameFromSummary(
   summary: DesignFrameSummary,
   depth: number,
 ): Promise<DesignFrameDocument> {
-  const source = await readFile(
-    path.join(designDirectory(workspacePath), summary.file),
-    "utf8",
+  const source = await readBoundedDesignFrameSource(
+    workspacePath,
+    summary.file,
   );
   const document = parse(source, { sourceCodeLocationInfo: true });
   const composed = await composeFrameSrcDoc(workspacePath, source, {
@@ -2400,45 +3301,100 @@ async function readDesignFrameFromSummary(
   };
 }
 
-/** Aggregate the complete Phase-1 renderer model in one exact-key request.
- * Frame discovery happens once, then every source/srcDoc is composed in
- * parallel. This is the authoritative payload shared by canvas, inspector, and
- * the Layers panel. */
+async function readDesignCanvasFrameFromSummary(
+  workspacePath: string,
+  summary: DesignFrameSummary,
+): Promise<DesignCanvasFrame> {
+  const source = await readBoundedDesignFrameSource(
+    workspacePath,
+    summary.file,
+  );
+  const render = await prepareFrameRenderSource(workspacePath, source, {
+    width: summary.width,
+    height: summary.height,
+  });
+  return { ...summary, sourceVersion: render.sourceVersion };
+}
+
+async function mapDesignFramesBounded<T>(
+  frames: readonly DesignFrameSummary[],
+  mapper: (frame: DesignFrameSummary) => Promise<T>,
+): Promise<T[]> {
+  if (frames.length === 0) return [];
+  const output = new Array<T>(frames.length);
+  let cursor = 0;
+  const workers = Array.from(
+    { length: Math.min(4, frames.length) },
+    async () => {
+      while (cursor < frames.length) {
+        const index = cursor;
+        cursor += 1;
+        output[index] = await mapper(frames[index]!);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return output;
+}
+
+/** Aggregate lightweight canvas metadata in one exact-key request. Exact
+ * render identities are composed with bounded concurrency; full source/srcDoc
+ * payloads remain one-frame reads and never scale with total canvas size.
+ * This exported entry point owns the workspace write turn and must not be
+ * called recursively from another withDesignDocumentWrite callback. */
 export async function readDesignWorkspaceSnapshot(
   workspacePath: string,
   options: DesignReadOptions = {},
 ): Promise<DesignWorkspaceSnapshot> {
   const writeBack = options.writeBack !== false;
-  const lint = await lintDesignDocument(workspacePath, undefined, {
-    healOids: writeBack,
-    includeRuntimeAudits: false,
-  });
-  const summaries = await listDesignFrames(workspacePath, { writeBack });
-  const [frames, tokensDocument, assets] = await Promise.all([
-    Promise.all(
-      summaries.map((summary) =>
-        readDesignFrameFromSummary(workspacePath, summary, 4),
+  return withDocumentWrite(workspacePath, async () => {
+    // Hold one semantic-owner turn from journal recovery through composition;
+    // app-driven transactions cannot interleave lint from one generation with
+    // frame/token payloads from another.
+    await recoverPendingDesignTransactionUnlocked(workspacePath);
+    if (writeBack) await initializeDesignDocumentUnlocked(workspacePath);
+    const lint = await lintDesignDocumentUnlocked(workspacePath, undefined, {
+      healOids: writeBack,
+      includeRuntimeAudits: false,
+    });
+    const summaries = await listDesignFramesUnlocked(workspacePath, writeBack);
+    const renderBudgetViolations: DesignLintViolation[] = [];
+    const [renderedFrames, tokensDocument, assets] = await Promise.all([
+      mapDesignFramesBounded(summaries, (summary) =>
+        readDesignCanvasFrameFromSummary(workspacePath, summary).catch(
+          (error: unknown) => {
+            if (!(error instanceof DesignRenderBudgetError)) throw error;
+            renderBudgetViolations.push(
+              designRenderBudgetViolation(summary.file, error),
+            );
+            return null;
+          },
+        ),
       ),
-    ),
-    readDesignTokensDocument(workspacePath),
-    listDesignAssets(workspacePath),
-  ]);
-  const runtimeViolations = frames.flatMap((frame) =>
-    getDesignRuntimeAudit(workspacePath, frame.file, frame.sourceVersion),
-  );
-  return {
-    frames,
-    tokens: tokensDocument.tokens,
-    tokenSourceVersion: tokensDocument.sourceVersion,
-    assets,
-    lint: {
-      ...lint,
-      violations: sortDesignLintViolations([
-        ...lint.violations,
-        ...runtimeViolations,
-      ]),
-    },
-  };
+      readDesignTokensDocument(workspacePath),
+      listDesignAssets(workspacePath),
+    ]);
+    const frames = renderedFrames.filter(
+      (frame): frame is DesignCanvasFrame => frame !== null,
+    );
+    const runtimeViolations = frames.flatMap((frame) =>
+      getDesignRuntimeAudit(workspacePath, frame.file, frame.sourceVersion),
+    );
+    return {
+      frames,
+      tokens: tokensDocument.tokens,
+      tokenSourceVersion: tokensDocument.sourceVersion,
+      assets,
+      lint: {
+        ...lint,
+        violations: sortDesignLintViolations([
+          ...lint.violations,
+          ...renderBudgetViolations,
+          ...runtimeViolations,
+        ]),
+      },
+    };
+  });
 }
 
 function safeLocalReference(
@@ -2580,6 +3536,16 @@ function violationAt(
   };
 }
 
+function designRenderBudgetViolation(
+  file: string,
+  error: DesignRenderBudgetError,
+): DesignLintViolation {
+  return violationAt(file, "render-budget", error.message, null, {
+    severity: "error",
+    fix: "Reduce the frame HTML, linked stylesheets, or embedded local assets and lint again.",
+  });
+}
+
 async function cssSourceFiles(workspacePath: string): Promise<string[]> {
   let entries;
   try {
@@ -2670,7 +3636,8 @@ async function lintFrame(
     designDirectory(workspacePath),
     assertFrameFile(file),
   );
-  let source = sourceOverride ?? (await readFile(target, "utf8"));
+  let source =
+    sourceOverride ?? (await readBoundedDesignFrameSource(workspacePath, file));
   let parseErrors: ParserError[] = [];
   const parseSource = (): DefaultTreeAdapterTypes.Document => {
     parseErrors = [];
@@ -2898,16 +3865,30 @@ async function lintDesignDocumentUnlocked(
   const violations: DesignLintViolation[] = [];
   let healedOids = 0;
   for (const file of files) {
-    const result = await lintFrame(
-      workspacePath,
-      file,
-      { healOids: options.healOids !== false },
-      knownTokens,
-    );
+    let result: Awaited<ReturnType<typeof lintFrame>>;
+    try {
+      result = await lintFrame(
+        workspacePath,
+        file,
+        { healOids: options.healOids !== false },
+        knownTokens,
+      );
+    } catch (error) {
+      if (!(error instanceof DesignRenderBudgetError)) throw error;
+      violations.push(designRenderBudgetViolation(file, error));
+      continue;
+    }
     violations.push(...result.violations);
     healedOids += result.healedOids;
     if (options.includeRuntimeAudits !== false) {
-      const identity = await readDesignFrameRenderIdentity(workspacePath, file);
+      let identity: DesignFrameRenderIdentity;
+      try {
+        identity = await readDesignFrameRenderIdentity(workspacePath, file);
+      } catch (error) {
+        if (!(error instanceof DesignRenderBudgetError)) throw error;
+        violations.push(designRenderBudgetViolation(file, error));
+        continue;
+      }
       violations.push(
         ...getDesignRuntimeAudit(workspacePath, file, identity.sourceVersion),
       );
@@ -2942,14 +3923,6 @@ function sortDesignLintViolations(
       left.column - right.column ||
       left.ruleId.localeCompare(right.ruleId),
   );
-}
-
-function designThemeName(selector: string): string | null {
-  const match =
-    /^\s*(?::root)?\[data-zd-theme\s*=\s*(["'])([a-z][a-z0-9_-]{0,63})\1\]\s*$/.exec(
-      selector,
-    );
-  return match?.[2] ?? null;
 }
 
 export async function readDesignTokensDocument(
@@ -2997,7 +3970,7 @@ export async function readDesignTokensDocument(
     });
   });
   root.walkRules((rule) => {
-    const theme = designThemeName(rule.selector);
+    const theme = designTokenThemeName(rule.selector);
     const base = rule.selector.trim() === ":root";
     if (!base && !theme) return;
     if (theme) themes.add(theme);
@@ -3111,7 +4084,8 @@ export async function updateDesignToken(
       if (targetRule) return;
       if (
         (input.theme === null && rule.selector.trim() === ":root") ||
-        (input.theme !== null && designThemeName(rule.selector) === input.theme)
+        (input.theme !== null &&
+          designTokenThemeName(rule.selector) === input.theme)
       ) {
         targetRule = rule;
       }
@@ -3144,7 +4118,7 @@ export const DESIGN_GUIDES = Object.freeze({
   layout: `Use normal HTML flow and flexbox for structural layout. Prefer flex containers, gap, padding, alignment, and intrinsic sizing over absolute positioning inside a frame.`,
   tokens: `Use var(--token) from tokens.css whenever a matching color, spacing, radius, or type token exists. Add typed @property declarations before introducing a new token.`,
   workflow: `Inspect the live element selection and frames and make targeted HTML/CSS edits only under Zeros Design/. Call lint_design, re-read the affected frame, use screenshot_frame to visually verify it, then call lint_design again so exact-generation browser contrast, overflow, and spacing checks are included. Resolve errors and review non-blocking advisories. JavaScript and external URLs are not part of design documents.`,
-  components: `Define a reusable component as one direct components/name.html file and instantiate it with <zd-name data-oid="stable-instance">. The definition body expands only at render time; <slot> accepts instance children and <slot data-zd-attr="label"> accepts escaped attributes. Keep scripts, event handlers, external URLs, and data-oid attributes out of definitions—the authored zd-* wrapper owns selection and editing.`,
+  components: `Define a reusable component as one direct components/name.html file and instantiate it with <zd-name data-oid="stable-instance">. Give every selectable definition-body element except <slot> a unique, stable data-zid, for example <article data-zid="surface">. The definition body expands only at render time; <slot> accepts instance children and <slot data-zd-attr="label"> accepts escaped attributes. Keep scripts, event handlers, external URLs, and data-oid attributes out of definitions—the authored zd-* wrapper owns selection and editing. Legacy definitions with no data-zid remain renderable, but new component.create operations require complete definition-local identity.`,
 });
 
 export type DesignGuideTopic = keyof typeof DESIGN_GUIDES;

@@ -231,4 +231,63 @@ describe("design protocol resources", () => {
     expect(rendered).toContain('data-zeros-component="card"');
     expect(await readFile(target, "utf8")).toBe(source);
   });
+
+  it("loads referenced components on demand beyond the first 64 filenames", async () => {
+    const components = path.join(root, DESIGN_DIRECTORY_NAME, "components");
+    await mkdir(components, { recursive: true });
+    await Promise.all(
+      Array.from({ length: 64 }, (_, index) =>
+        writeFile(
+          path.join(components, `a-${String(index).padStart(2, "0")}.html`),
+          "<!doctype html><html><body><span>Unused</span></body></html>",
+        ),
+      ),
+    );
+    await writeFile(
+      path.join(components, "zzz-card.html"),
+      "<!doctype html><html><body><strong>Loaded on demand</strong></body></html>",
+    );
+    const frame = await createDesignFrame(root, { title: "Many components" });
+    const target = path.join(root, DESIGN_DIRECTORY_NAME, frame.file);
+    await writeFile(
+      target,
+      (await readFile(target, "utf8")).replace(
+        "</main>",
+        '<zd-zzz-card data-oid="late-card"></zd-zzz-card></main>',
+      ),
+    );
+    const identity = await readDesignFrameRenderIdentity(root, frame.file);
+    const response = await readDesignProtocolResource(root, {
+      path: frame.file,
+      sourceVersion: identity.sourceVersion,
+    });
+    expect(response.body.toString("utf8")).toContain(
+      "<strong>Loaded on demand</strong>",
+    );
+  });
+
+  it("returns 413 when local assets would exceed the composed-frame budget", async () => {
+    const directory = path.join(root, DESIGN_DIRECTORY_NAME);
+    await writeFile(
+      path.join(directory, "assets", "large.png"),
+      Buffer.alloc(1024 * 1024, 1),
+    );
+    await writeFile(
+      path.join(directory, "oversized.html"),
+      `<!doctype html><html><body><main data-oid="main">${Array.from(
+        { length: 13 },
+        (_, index) =>
+          `<img data-oid="asset-${index}" src="./assets/large.png">`,
+      ).join("")}</main></body></html>`,
+    );
+
+    const response = await readDesignProtocolResource(root, {
+      path: "oversized.html",
+      sourceVersion: null,
+    });
+
+    expect(response.status).toBe(413);
+    expect(response.headers["Cache-Control"]).toBe("private, no-store");
+    expect(response.body.toString("utf8")).toMatch(/per-frame/);
+  });
 });

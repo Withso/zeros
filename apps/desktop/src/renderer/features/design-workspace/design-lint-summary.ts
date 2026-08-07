@@ -19,6 +19,7 @@ const RULE_LABELS: Record<DesignLintViolationWire["ruleId"], string> = {
   "oid-duplicate": "Duplicate layer ids",
   "oid-missing": "Missing layer ids",
   overflow: "Layout overflow",
+  "render-budget": "Render budget",
   "spacing-scale": "Spacing scale",
   "unknown-token": "Unknown tokens",
 };

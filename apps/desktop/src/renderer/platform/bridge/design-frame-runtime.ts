@@ -12,8 +12,12 @@ import {
   DESIGN_RUNTIME_VERSION,
   isDesignRuntimeFrameMessage,
   type DesignRuntimeFrameMessage,
+  type DesignRuntimeCapabilities,
+  type DesignRuntimeHostCancel,
   type DesignRuntimeHostHandshake,
   type DesignRuntimeHostRequest,
+  type DesignRuntimeHostTeardown,
+  type DesignRuntimeMatchedStyles,
   type DesignRuntimeMethod,
   type DesignRuntimeNodeDetails,
   type DesignRuntimeScreenshot,
@@ -32,6 +36,8 @@ interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timeout: number;
+  signal?: AbortSignal;
+  abort?: () => void;
 }
 
 export interface DesignFrameRuntimeCallbacks {
@@ -39,35 +45,66 @@ export interface DesignFrameRuntimeCallbacks {
     snapshot: DesignRuntimeSnapshot,
     event: "ready" | "mutation",
   ) => void;
+  onReady?: (capabilities: DesignRuntimeCapabilities) => void;
 }
 
 export interface DesignFrameRuntimeConnection {
-  getSnapshot(): Promise<DesignRuntimeSnapshot>;
+  getSnapshot(signal?: AbortSignal): Promise<DesignRuntimeSnapshot>;
   getElementAtLoc(
     x: number,
     y: number,
+    signal?: AbortSignal,
   ): Promise<DesignRuntimeNodeDetails | null>;
-  getNodeDetails(nodeId: string): Promise<DesignRuntimeNodeDetails>;
+  getNodeDetails(
+    nodeId: string,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeNodeDetails>;
+  getMatchedStyles(
+    nodeId: string,
+    property: string,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeMatchedStyles>;
   setNodeVisibility(
     nodeId: string,
     visible: boolean,
+    signal?: AbortSignal,
   ): Promise<DesignRuntimeNodeDetails>;
   previewStyles(
     nodeId: string,
     styles: Record<string, string | null>,
+    signal?: AbortSignal,
   ): Promise<DesignRuntimeNodeDetails>;
-  clearPreviewStyles(nodeId: string): Promise<DesignRuntimeNodeDetails>;
+  clearPreviewStyles(
+    nodeId: string,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeNodeDetails>;
   captureScreenshot(
     nodeId?: string | null,
     scale?: number,
+    signal?: AbortSignal,
   ): Promise<DesignRuntimeScreenshot>;
   destroy(): void;
 }
 
 let requestSequence = 0;
 
-function runtimeError(message: string): Error {
-  return new Error(`Design frame runtime: ${message}`);
+export class DesignFrameRuntimeError extends Error {
+  constructor(
+    message: string,
+    readonly code = "INTERNAL_ERROR",
+    readonly retryable = false,
+  ) {
+    super(`Design frame runtime: ${message}`);
+    this.name = "DesignFrameRuntimeError";
+  }
+}
+
+function runtimeError(
+  message: string,
+  code = "INTERNAL_ERROR",
+  retryable = false,
+): DesignFrameRuntimeError {
+  return new DesignFrameRuntimeError(message, code, retryable);
 }
 
 function isRuntimeSnapshot(value: unknown): value is DesignRuntimeSnapshot {
@@ -115,6 +152,35 @@ function isRuntimeScreenshot(value: unknown): value is DesignRuntimeScreenshot {
   );
 }
 
+function isRuntimeCapabilities(
+  value: unknown,
+): value is DesignRuntimeCapabilities {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const capabilities = value as Partial<DesignRuntimeCapabilities>;
+  return (
+    Array.isArray(capabilities.methods) &&
+    capabilities.cancellation === true &&
+    capabilities.typedErrors === true &&
+    capabilities.sourcePinned === true &&
+    typeof capabilities.maxStyleProperties === "number" &&
+    typeof capabilities.maxMatchedDeclarations === "number" &&
+    typeof capabilities.maxCapturePixels === "number"
+  );
+}
+
+function isMatchedStyles(value: unknown): value is DesignRuntimeMatchedStyles {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const matched = value as Partial<DesignRuntimeMatchedStyles>;
+  return (
+    typeof matched.sourceVersion === "string" &&
+    typeof matched.nodeId === "string" &&
+    typeof matched.property === "string" &&
+    typeof matched.computedValue === "string" &&
+    Array.isArray(matched.matched) &&
+    typeof matched.truncated === "boolean"
+  );
+}
+
 class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   readonly source: MessageEventSource;
   private readonly channel = new MessageChannel();
@@ -123,6 +189,7 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
 
   constructor(
     source: MessageEventSource,
+    private readonly expectedSourceVersion: string,
     private readonly host: RuntimeHostWindow,
     private readonly callbacks: DesignFrameRuntimeCallbacks,
   ) {
@@ -133,6 +200,7 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
       protocol: DESIGN_RUNTIME_PROTOCOL,
       version: DESIGN_RUNTIME_VERSION,
       type: "handshake",
+      sourceVersion: this.expectedSourceVersion,
     };
     (this.source as WindowProxy).postMessage(handshake, {
       targetOrigin: "*",
@@ -147,8 +215,23 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   receive(message: DesignRuntimeFrameMessage): void {
     if (this.destroyed) return;
     if (message.type === "event") {
-      if (isRuntimeSnapshot(message.payload)) {
-        this.callbacks.onSnapshot?.(message.payload, message.event);
+      if (message.event === "ready") {
+        if (
+          message.payload.sourceVersion !== this.expectedSourceVersion ||
+          !isRuntimeCapabilities(message.payload.capabilities) ||
+          !isRuntimeSnapshot(message.payload.snapshot) ||
+          message.payload.snapshot.sourceVersion !== this.expectedSourceVersion
+        ) {
+          this.destroy();
+          return;
+        }
+        this.callbacks.onReady?.(message.payload.capabilities);
+        this.callbacks.onSnapshot?.(message.payload.snapshot, "ready");
+      } else if (
+        isRuntimeSnapshot(message.payload) &&
+        message.payload.sourceVersion === this.expectedSourceVersion
+      ) {
+        this.callbacks.onSnapshot?.(message.payload, "mutation");
       }
       return;
     }
@@ -156,45 +239,100 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     if (!pending) return;
     this.pending.delete(message.requestId);
     this.host.clearTimeout(pending.timeout);
+    if (pending.signal && pending.abort) {
+      pending.signal.removeEventListener("abort", pending.abort);
+    }
     if (message.ok) {
       pending.resolve(message.result);
     } else {
-      pending.reject(runtimeError(message.error));
+      pending.reject(
+        runtimeError(
+          message.error.message,
+          message.error.code,
+          message.error.retryable,
+        ),
+      );
     }
+  }
+
+  private cancel(requestId: string): void {
+    if (this.destroyed) return;
+    const cancel: DesignRuntimeHostCancel = {
+      protocol: DESIGN_RUNTIME_PROTOCOL,
+      version: DESIGN_RUNTIME_VERSION,
+      type: "cancel",
+      sourceVersion: this.expectedSourceVersion,
+      requestId,
+    };
+    this.channel.port1.postMessage(cancel);
   }
 
   private request(
     method: DesignRuntimeMethod,
     args: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     if (this.destroyed) return Promise.reject(runtimeError("disconnected"));
+    if (signal?.aborted) {
+      return Promise.reject(
+        runtimeError("request cancelled", "CANCELLED", false),
+      );
+    }
     const requestId = `design-runtime-${++requestSequence}`;
     const message: DesignRuntimeHostRequest = {
       protocol: DESIGN_RUNTIME_PROTOCOL,
       version: DESIGN_RUNTIME_VERSION,
       type: "request",
+      sourceVersion: this.expectedSourceVersion,
       requestId,
       method,
       args,
     };
     return new Promise((resolve, reject) => {
+      const abort = signal
+        ? () => {
+            const pending = this.pending.get(requestId);
+            if (!pending) return;
+            this.pending.delete(requestId);
+            this.host.clearTimeout(timeout);
+            this.cancel(requestId);
+            reject(runtimeError("request cancelled", "CANCELLED", false));
+          }
+        : undefined;
       const timeout = this.host.setTimeout(
         () => {
-          this.pending.delete(requestId);
+          if (!this.pending.delete(requestId)) return;
+          if (signal && abort) signal.removeEventListener("abort", abort);
+          this.cancel(requestId);
           reject(runtimeError(`${method} timed out`));
         },
         method === "captureScreenshot"
           ? SCREENSHOT_REQUEST_TIMEOUT_MS
           : DEFAULT_REQUEST_TIMEOUT_MS,
       );
-      this.pending.set(requestId, { resolve, reject, timeout });
+      this.pending.set(requestId, {
+        resolve,
+        reject,
+        timeout,
+        ...(signal ? { signal } : {}),
+        ...(abort ? { abort } : {}),
+      });
+      if (signal && abort) {
+        signal.addEventListener("abort", abort, { once: true });
+        // Close the race between the entry check and listener registration.
+        if (signal.aborted) abort();
+      }
+      if (!this.pending.has(requestId)) return;
       this.channel.port1.postMessage(message);
     });
   }
 
-  async getSnapshot(): Promise<DesignRuntimeSnapshot> {
-    const result = await this.request("getSnapshot", {});
-    if (!isRuntimeSnapshot(result)) {
+  async getSnapshot(signal?: AbortSignal): Promise<DesignRuntimeSnapshot> {
+    const result = await this.request("getSnapshot", {}, signal);
+    if (
+      !isRuntimeSnapshot(result) ||
+      result.sourceVersion !== this.expectedSourceVersion
+    ) {
       throw runtimeError("getSnapshot returned malformed data");
     }
     return result;
@@ -203,19 +341,48 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   async getElementAtLoc(
     x: number,
     y: number,
+    signal?: AbortSignal,
   ): Promise<DesignRuntimeNodeDetails | null> {
-    const result = await this.request("getElementAtLoc", { x, y });
+    const result = await this.request("getElementAtLoc", { x, y }, signal);
     if (result === null) return null;
-    if (!isNodeDetails(result)) {
+    if (
+      !isNodeDetails(result) ||
+      result.sourceVersion !== this.expectedSourceVersion
+    ) {
       throw runtimeError("getElementAtLoc returned malformed data");
     }
     return result;
   }
 
-  async getNodeDetails(nodeId: string): Promise<DesignRuntimeNodeDetails> {
-    const result = await this.request("getNodeDetails", { nodeId });
-    if (!isNodeDetails(result)) {
+  async getNodeDetails(
+    nodeId: string,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeNodeDetails> {
+    const result = await this.request("getNodeDetails", { nodeId }, signal);
+    if (
+      !isNodeDetails(result) ||
+      result.sourceVersion !== this.expectedSourceVersion
+    ) {
       throw runtimeError("getNodeDetails returned malformed data");
+    }
+    return result;
+  }
+
+  async getMatchedStyles(
+    nodeId: string,
+    property: string,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeMatchedStyles> {
+    const result = await this.request(
+      "getMatchedStyles",
+      { nodeId, property },
+      signal,
+    );
+    if (
+      !isMatchedStyles(result) ||
+      result.sourceVersion !== this.expectedSourceVersion
+    ) {
+      throw runtimeError("getMatchedStyles returned malformed data");
     }
     return result;
   }
@@ -223,12 +390,20 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   async setNodeVisibility(
     nodeId: string,
     visible: boolean,
+    signal?: AbortSignal,
   ): Promise<DesignRuntimeNodeDetails> {
-    const result = await this.request("setNodeVisibility", {
-      nodeId,
-      visible,
-    });
-    if (!isNodeDetails(result)) {
+    const result = await this.request(
+      "setNodeVisibility",
+      {
+        nodeId,
+        visible,
+      },
+      signal,
+    );
+    if (
+      !isNodeDetails(result) ||
+      result.sourceVersion !== this.expectedSourceVersion
+    ) {
       throw runtimeError("setNodeVisibility returned malformed data");
     }
     return result;
@@ -237,17 +412,31 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   async previewStyles(
     nodeId: string,
     styles: Record<string, string | null>,
+    signal?: AbortSignal,
   ): Promise<DesignRuntimeNodeDetails> {
-    const result = await this.request("previewStyles", { nodeId, styles });
-    if (!isNodeDetails(result)) {
+    const result = await this.request(
+      "previewStyles",
+      { nodeId, styles },
+      signal,
+    );
+    if (
+      !isNodeDetails(result) ||
+      result.sourceVersion !== this.expectedSourceVersion
+    ) {
       throw runtimeError("previewStyles returned malformed data");
     }
     return result;
   }
 
-  async clearPreviewStyles(nodeId: string): Promise<DesignRuntimeNodeDetails> {
-    const result = await this.request("clearPreviewStyles", { nodeId });
-    if (!isNodeDetails(result)) {
+  async clearPreviewStyles(
+    nodeId: string,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeNodeDetails> {
+    const result = await this.request("clearPreviewStyles", { nodeId }, signal);
+    if (
+      !isNodeDetails(result) ||
+      result.sourceVersion !== this.expectedSourceVersion
+    ) {
       throw runtimeError("clearPreviewStyles returned malformed data");
     }
     return result;
@@ -256,12 +445,20 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   async captureScreenshot(
     nodeId: string | null = null,
     scale = 1,
+    signal?: AbortSignal,
   ): Promise<DesignRuntimeScreenshot> {
-    const result = await this.request("captureScreenshot", {
-      ...(nodeId ? { nodeId } : {}),
-      scale,
-    });
-    if (!isRuntimeScreenshot(result)) {
+    const result = await this.request(
+      "captureScreenshot",
+      {
+        ...(nodeId ? { nodeId } : {}),
+        scale,
+      },
+      signal,
+    );
+    if (
+      !isRuntimeScreenshot(result) ||
+      result.sourceVersion !== this.expectedSourceVersion
+    ) {
       throw runtimeError("captureScreenshot returned malformed data");
     }
     return result;
@@ -269,11 +466,21 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
 
   destroy(): void {
     if (this.destroyed) return;
+    const teardown: DesignRuntimeHostTeardown = {
+      protocol: DESIGN_RUNTIME_PROTOCOL,
+      version: DESIGN_RUNTIME_VERSION,
+      type: "teardown",
+      sourceVersion: this.expectedSourceVersion,
+    };
+    this.channel.port1.postMessage(teardown);
     this.destroyed = true;
     this.channel.port1.removeEventListener("message", this.handleMessage);
     this.channel.port1.close();
     for (const pending of this.pending.values()) {
       this.host.clearTimeout(pending.timeout);
+      if (pending.signal && pending.abort) {
+        pending.signal.removeEventListener("abort", pending.abort);
+      }
       pending.reject(runtimeError("disconnected"));
     }
     this.pending.clear();
@@ -289,15 +496,24 @@ function frameKey(workspaceId: string, frame: string): string {
 export function connectDesignFrameRuntime(
   workspaceId: string,
   frame: string,
+  sourceVersion: string,
   iframe: HTMLIFrameElement,
   callbacks: DesignFrameRuntimeCallbacks = {},
   host: RuntimeHostWindow = window,
 ): DesignFrameRuntimeConnection {
+  if (!/^[a-f0-9]{24}$/.test(sourceVersion)) {
+    throw runtimeError("invalid source generation", "BAD_REQUEST");
+  }
   const source = iframe.contentWindow;
   if (!source) throw runtimeError("iframe has no content window");
   const key = frameKey(workspaceId, frame);
   connectionsByFrame.get(key)?.destroy();
-  const connection = new DesignRuntimeConnectionImpl(source, host, callbacks);
+  const connection = new DesignRuntimeConnectionImpl(
+    source,
+    sourceVersion,
+    host,
+    callbacks,
+  );
   connectionsByFrame.set(key, connection);
   const destroy = connection.destroy.bind(connection);
   connection.destroy = () => {

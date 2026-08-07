@@ -8,10 +8,14 @@
 // while a disk edit revalidates in the background.
 
 import {
+  designApplyTransaction,
   designCreateFrame,
   designDeleteFrame,
   designDuplicateFrame,
+  designFrame,
   designInsertAsset,
+  designFoundationOpen,
+  designHistory,
   designRenameFrame,
   designSave,
   designSetText,
@@ -20,36 +24,148 @@ import {
   designUpdateCanvas,
   designUpdateStyles,
   type DesignFrameGeometryWire,
+  type DesignFrameDocumentWire,
+  type DesignFoundationOpenWire,
+  type DesignApiMutationReplyWire,
   type DesignFrameSummaryWire,
   type DesignMutationResultWire,
   type DesignWorkspaceSnapshotWire,
 } from "../../../platform/git";
+import type { DesignTransaction } from "@zeros/design-core";
 import { KeyedAsyncCache } from "../../../shared/lib/keyed-async-cache";
 
 export const DESIGN_SNAPSHOT_MAX_AGE_MS = 10_000;
-export const designWorkspaceSnapshotCache =
-  new KeyedAsyncCache<DesignWorkspaceSnapshotWire>(32);
+const DESIGN_SNAPSHOT_CACHE_BYTES = 64 * 1024 * 1024;
+const DESIGN_FRAME_DOCUMENT_CACHE_BYTES = 64 * 1024 * 1024;
+const DESIGN_FOUNDATION_CACHE_BYTES = 32 * 1024 * 1024;
 
-function sameTree(
-  left: DesignWorkspaceSnapshotWire["frames"][number]["tree"],
-  right: DesignWorkspaceSnapshotWire["frames"][number]["tree"],
-): boolean {
-  if (left.length !== right.length) return false;
-  for (let index = 0; index < left.length; index += 1) {
-    const a = left[index];
-    const b = right[index];
-    if (
-      !a ||
-      !b ||
-      a.tag !== b.tag ||
-      a.oid !== b.oid ||
-      a.text !== b.text ||
-      !sameTree(a.children, b.children)
-    ) {
-      return false;
+const retainedMemoryByObject = new WeakMap<object, number>();
+
+/** Approximate immutable wire payload memory without allocating a second full
+ * JSON string. Structural sharing makes unchanged arrays and records O(1) to
+ * remeasure across mutation publications. */
+function retainedMemory(value: unknown): number {
+  if (typeof value === "string") return value.length * 2;
+  if (typeof value === "number" || typeof value === "bigint") return 8;
+  if (typeof value === "boolean") return 4;
+  if (!value || typeof value !== "object") return 0;
+  const cached = retainedMemoryByObject.get(value);
+  if (cached !== undefined) return cached;
+  retainedMemoryByObject.set(value, 0);
+  let total = Array.isArray(value) ? 24 : 32;
+  if (Array.isArray(value)) {
+    for (const item of value) total += retainedMemory(item);
+  } else {
+    for (const [key, item] of Object.entries(value)) {
+      total += key.length * 2 + retainedMemory(item);
     }
   }
-  return true;
+  retainedMemoryByObject.set(value, total);
+  return total;
+}
+
+export const designWorkspaceSnapshotCache =
+  new KeyedAsyncCache<DesignWorkspaceSnapshotWire>({
+    maxEntries: 32,
+    maxWeight: DESIGN_SNAPSHOT_CACHE_BYTES,
+    weightOf: retainedMemory,
+  });
+/** Full authored/srcDoc payloads exist only for non-protocol fallbacks and are
+ * bounded to roughly the same order as the live iframe window. */
+export const designFrameDocumentCache =
+  new KeyedAsyncCache<DesignFrameDocumentWire>({
+    maxEntries: 16,
+    maxWeight: DESIGN_FRAME_DOCUMENT_CACHE_BYTES,
+    weightOf: (document) =>
+      document.source.length * 2 +
+      document.srcDoc.length * 2 +
+      retainedMemory(document.tree),
+  });
+export const designFoundationCache =
+  new KeyedAsyncCache<DesignFoundationOpenWire>({
+    maxEntries: 64,
+    maxWeight: DESIGN_FOUNDATION_CACHE_BYTES,
+    weightOf: retainedMemory,
+  });
+
+const FOUNDATION_KEY_SEPARATOR = "\u0000";
+const FRAME_DOCUMENT_KEY_SEPARATOR = "\u0000";
+export const DESIGN_FRAME_DOCUMENT_MAX_AGE_MS = 60_000;
+
+export function designFrameDocumentKey(
+  workspaceId: string,
+  frame: string,
+  sourceVersion: string,
+): string {
+  return [workspaceId, frame, sourceVersion].join(FRAME_DOCUMENT_KEY_SEPARATOR);
+}
+
+export async function fetchDesignFrameDocument(
+  key: string,
+): Promise<DesignFrameDocumentWire> {
+  const [workspaceId, frame, sourceVersion, ...extra] = key.split(
+    FRAME_DOCUMENT_KEY_SEPARATOR,
+  );
+  if (
+    !workspaceId ||
+    !frame ||
+    !/^[a-f0-9]{24}$/.test(sourceVersion ?? "") ||
+    extra.length > 0
+  ) {
+    throw new Error("Invalid design frame document cache key.");
+  }
+  const document = await designFrame(workspaceId, frame);
+  if (document.sourceVersion !== sourceVersion) {
+    throw new Error("Design frame changed while its fallback was loading.");
+  }
+  return document;
+}
+
+/** Warm one exact rendered source on selection or explicit pointer/focus
+ * intent. Concurrent iframe/code-view consumers share the same request. */
+export function warmDesignFrameDocument(
+  workspaceId: string,
+  frame: string,
+  sourceVersion: string,
+): void {
+  const key = designFrameDocumentKey(workspaceId, frame, sourceVersion);
+  void designFrameDocumentCache
+    .load(key, () => fetchDesignFrameDocument(key), {
+      maxAgeMs: DESIGN_FRAME_DOCUMENT_MAX_AGE_MS,
+    })
+    .catch(() => {});
+}
+
+export function designFoundationKey(
+  workspaceId: string,
+  frame: string,
+  sourceVersion: string,
+): string {
+  return [workspaceId, frame, sourceVersion].join(FOUNDATION_KEY_SEPARATOR);
+}
+
+export async function fetchDesignFoundation(
+  key: string,
+): Promise<DesignFoundationOpenWire> {
+  const [workspaceId, frame, sourceVersion, ...extra] = key.split(
+    FOUNDATION_KEY_SEPARATOR,
+  );
+  if (
+    !workspaceId ||
+    !frame ||
+    !/^[a-f0-9]{24}$/.test(sourceVersion ?? "") ||
+    extra.length > 0
+  ) {
+    throw new Error("Invalid design foundation cache key.");
+  }
+  return designFoundationOpen(workspaceId, frame);
+}
+
+function invalidateWorkspaceDesignFoundations(workspaceId: string): void {
+  const prefix = `${workspaceId}${FOUNDATION_KEY_SEPARATOR}`;
+  for (const key of designFoundationCache.keys()) {
+    if (key.startsWith(prefix)) designFoundationCache.invalidate(key);
+  }
 }
 
 function sameFrame(
@@ -66,10 +182,7 @@ function sameFrame(
     left.z === right.z &&
     left.nodeCount === right.nodeCount &&
     left.modifiedAt === right.modifiedAt &&
-    left.sourceVersion === right.sourceVersion &&
-    left.source === right.source &&
-    left.srcDoc === right.srcDoc &&
-    sameTree(left.tree, right.tree)
+    left.sourceVersion === right.sourceVersion
   );
 }
 
@@ -213,6 +326,9 @@ export function warmDesignWorkspaceSnapshot(workspaceId: string): void {
 
 export function invalidateDesignWorkspaceSnapshot(workspaceId: string): void {
   designWorkspaceSnapshotCache.invalidate(workspaceId);
+  // External canvas/manifest edits can change the authored revision without
+  // changing a frame's rendered sourceVersion, so those exact keys are stale.
+  invalidateWorkspaceDesignFoundations(workspaceId);
 }
 
 export async function refreshDesignWorkspaceSnapshot(
@@ -326,6 +442,7 @@ export async function saveDesigns(
 export async function updateDesignTokenCached(
   workspaceId: string,
   input: {
+    frame: string;
     name: string;
     theme: string | null;
     value: string;
@@ -333,7 +450,9 @@ export async function updateDesignTokenCached(
   },
 ): Promise<DesignWorkspaceSnapshotWire> {
   const result = await designUpdateToken(workspaceId, input);
-  return publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
+  const snapshot = publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
+  invalidateWorkspaceDesignFoundations(workspaceId);
+  return snapshot;
 }
 
 /** Geometry is already complete in the mutation response. Publish it directly
@@ -345,12 +464,41 @@ export async function updateDesignFrameGeometryCached(
 ): Promise<DesignFrameGeometryWire> {
   const result = await designUpdateCanvas(workspaceId, frameFile, geometry);
   publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
+  invalidateWorkspaceDesignFoundations(workspaceId);
   return result.geometry;
+}
+
+export async function applyDesignTransactionCached(
+  workspaceId: string,
+  frame: string,
+  transaction: DesignTransaction,
+): Promise<DesignApiMutationReplyWire> {
+  const result = await designApplyTransaction(workspaceId, frame, transaction);
+  if (result.snapshot) {
+    publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
+  }
+  invalidateWorkspaceDesignFoundations(workspaceId);
+  return result;
+}
+
+export async function applyDesignHistoryCached(
+  workspaceId: string,
+  frame: string,
+  direction: "undo" | "redo",
+): Promise<DesignApiMutationReplyWire> {
+  const result = await designHistory(workspaceId, frame, direction);
+  if (result.snapshot) {
+    publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
+  }
+  invalidateWorkspaceDesignFoundations(workspaceId);
+  return result;
 }
 
 /** Test-only reset for exact-key/reference-stability coverage. */
 export function resetDesignWorkspaceCacheForTests(): void {
   designWorkspaceSnapshotCache.clear();
+  designFrameDocumentCache.clear();
+  designFoundationCache.clear();
   refreshVersionByWorkspace.clear();
 }
 

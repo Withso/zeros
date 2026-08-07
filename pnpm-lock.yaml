@@ -159,6 +159,12 @@ importers:
       '@xterm/xterm':
         specifier: ^6.0.0
         version: 6.0.0
+      '@zeros/design-core':
+        specifier: workspace:*
+        version: link:packages/design-core
+      '@zeros/design-web':
+        specifier: workspace:*
+        version: link:packages/design-web
       '@zeros/protocol':
         specifier: workspace:*
         version: link:packages/protocol
@@ -404,6 +410,35 @@ importers:
       vite:
         specifier: 6.3.5
         version: 6.3.5(@types/node@25.6.0)(jiti@2.6.1)(lightningcss@1.32.0)(tsx@4.22.4)(yaml@2.9.0)
+
+  packages/design-core:
+    dependencies:
+      zod:
+        specifier: ^4.3.6
+        version: 4.3.6
+    devDependencies:
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
+  packages/design-web:
+    dependencies:
+      '@noble/hashes':
+        specifier: ^2.2.0
+        version: 2.2.0
+      '@zeros/design-core':
+        specifier: workspace:*
+        version: link:../design-core
+      parse5:
+        specifier: ^7.3.0
+        version: 7.3.0
+      postcss:
+        specifier: ^8.5.25
+        version: 8.5.25
+    devDependencies:
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
 
   packages/protocol:
     dependencies:

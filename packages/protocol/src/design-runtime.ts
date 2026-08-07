@@ -8,7 +8,21 @@
 // app-owned, nonce-gated, and removed from every screenshot clone.
 
 export const DESIGN_RUNTIME_PROTOCOL = "zeros-design-runtime";
-export const DESIGN_RUNTIME_VERSION = 1;
+export const DESIGN_RUNTIME_VERSION = 2;
+
+export type DesignRuntimeErrorCode =
+  | "BAD_REQUEST"
+  | "SOURCE_VERSION_MISMATCH"
+  | "METHOD_NOT_SUPPORTED"
+  | "NODE_NOT_FOUND"
+  | "CANCELLED"
+  | "INTERNAL_ERROR";
+
+export interface DesignRuntimeError {
+  code: DesignRuntimeErrorCode;
+  message: string;
+  retryable: boolean;
+}
 
 export interface DesignRuntimeRect {
   x: number;
@@ -70,19 +84,76 @@ export interface DesignRuntimeScreenshot {
   nodeId: string | null;
 }
 
+export interface DesignRuntimeMatchedDeclaration {
+  property: string;
+  value: string;
+  important: boolean;
+  selector?: string;
+  sourceFile?: string;
+  inherited: boolean;
+  active: boolean;
+}
+
+export interface DesignRuntimeMatchedStyles {
+  sourceVersion: string;
+  nodeId: string;
+  property: string;
+  computedValue: string;
+  matched: DesignRuntimeMatchedDeclaration[];
+  truncated: boolean;
+}
+
 export type DesignRuntimeMethod =
   | "getSnapshot"
   | "getElementAtLoc"
   | "getNodeDetails"
+  | "getMatchedStyles"
   | "setNodeVisibility"
   | "previewStyles"
   | "clearPreviewStyles"
   | "captureScreenshot";
 
+export interface DesignRuntimeCapabilities {
+  methods: DesignRuntimeMethod[];
+  cancellation: true;
+  typedErrors: true;
+  sourcePinned: true;
+  maxStyleProperties: number;
+  maxMatchedDeclarations: number;
+  maxCapturePixels: number;
+}
+
+export interface DesignRuntimeReadyPayload {
+  sourceVersion: string;
+  capabilities: DesignRuntimeCapabilities;
+  snapshot: DesignRuntimeSnapshot;
+}
+
+const DESIGN_RUNTIME_ERROR_CODES = new Set<DesignRuntimeErrorCode>([
+  "BAD_REQUEST",
+  "SOURCE_VERSION_MISMATCH",
+  "METHOD_NOT_SUPPORTED",
+  "NODE_NOT_FOUND",
+  "CANCELLED",
+  "INTERNAL_ERROR",
+]);
+
+const DESIGN_RUNTIME_METHODS = new Set<DesignRuntimeMethod>([
+  "getSnapshot",
+  "getElementAtLoc",
+  "getNodeDetails",
+  "getMatchedStyles",
+  "setNodeVisibility",
+  "previewStyles",
+  "clearPreviewStyles",
+  "captureScreenshot",
+]);
+
 export interface DesignRuntimeHostRequest {
   protocol: typeof DESIGN_RUNTIME_PROTOCOL;
   version: typeof DESIGN_RUNTIME_VERSION;
   type: "request";
+  sourceVersion: string;
   requestId: string;
   method: DesignRuntimeMethod;
   args: Record<string, unknown>;
@@ -92,7 +163,28 @@ export interface DesignRuntimeHostHandshake {
   protocol: typeof DESIGN_RUNTIME_PROTOCOL;
   version: typeof DESIGN_RUNTIME_VERSION;
   type: "handshake";
+  sourceVersion: string;
 }
+
+export interface DesignRuntimeHostCancel {
+  protocol: typeof DESIGN_RUNTIME_PROTOCOL;
+  version: typeof DESIGN_RUNTIME_VERSION;
+  type: "cancel";
+  sourceVersion: string;
+  requestId: string;
+}
+
+export interface DesignRuntimeHostTeardown {
+  protocol: typeof DESIGN_RUNTIME_PROTOCOL;
+  version: typeof DESIGN_RUNTIME_VERSION;
+  type: "teardown";
+  sourceVersion: string;
+}
+
+export type DesignRuntimeHostMessage =
+  | DesignRuntimeHostRequest
+  | DesignRuntimeHostCancel
+  | DesignRuntimeHostTeardown;
 
 export type DesignRuntimeFrameMessage =
   | {
@@ -109,21 +201,161 @@ export type DesignRuntimeFrameMessage =
       type: "response";
       requestId: string;
       ok: false;
-      error: string;
+      error: DesignRuntimeError;
     }
   | {
       protocol: typeof DESIGN_RUNTIME_PROTOCOL;
       version: typeof DESIGN_RUNTIME_VERSION;
       type: "event";
-      event: "ready" | "mutation";
+      event: "ready";
+      payload: DesignRuntimeReadyPayload;
+    }
+  | {
+      protocol: typeof DESIGN_RUNTIME_PROTOCOL;
+      version: typeof DESIGN_RUNTIME_VERSION;
+      type: "event";
+      event: "mutation";
       payload: DesignRuntimeSnapshot;
     };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function isSourceVersion(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{24}$/.test(value);
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isRuntimeRect(value: unknown): value is DesignRuntimeRect {
+  if (!isRecord(value)) return false;
+  return (
+    isFiniteNumber(value.x) &&
+    isFiniteNumber(value.y) &&
+    isFiniteNumber(value.width) &&
+    isFiniteNumber(value.height)
+  );
+}
+
+function isRuntimeNodeDetails(
+  value: unknown,
+): value is DesignRuntimeNodeDetails {
+  if (!isRecord(value) || !isRecord(value.styles)) return false;
+  return (
+    isSourceVersion(value.sourceVersion) &&
+    typeof value.oid === "string" &&
+    typeof value.tag === "string" &&
+    typeof value.name === "string" &&
+    (value.text === null || typeof value.text === "string") &&
+    typeof value.selector === "string" &&
+    typeof value.visible === "boolean" &&
+    Array.isArray(value.breadcrumb) &&
+    value.breadcrumb.length <= 64 &&
+    value.breadcrumb.every((part) => typeof part === "string") &&
+    isRuntimeRect(value.rect) &&
+    Object.keys(value.styles).length <= 128 &&
+    Object.values(value.styles).every((style) => typeof style === "string")
+  );
+}
+
+function isRuntimeTree(value: unknown): value is DesignRuntimeTreeNode[] {
+  if (!Array.isArray(value)) return false;
+  const pending: Array<{ value: unknown; depth: number }> = value.map(
+    (node) => ({
+      value: node,
+      depth: 0,
+    }),
+  );
+  let count = 0;
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if (!isRecord(current.value) || current.depth > 64) return false;
+    if (
+      typeof current.value.oid !== "string" ||
+      typeof current.value.tag !== "string" ||
+      typeof current.value.name !== "string" ||
+      (current.value.text !== null && typeof current.value.text !== "string") ||
+      typeof current.value.visible !== "boolean" ||
+      !Array.isArray(current.value.children)
+    ) {
+      return false;
+    }
+    count += 1;
+    if (count > 20_000) return false;
+    for (const child of current.value.children) {
+      pending.push({ value: child, depth: current.depth + 1 });
+    }
+  }
+  return true;
+}
+
+function isRuntimeSnapshot(value: unknown): value is DesignRuntimeSnapshot {
+  if (!isRecord(value) || !isRecord(value.viewport)) return false;
+  if (
+    !isSourceVersion(value.sourceVersion) ||
+    !Number.isSafeInteger(value.revision) ||
+    (value.revision as number) < 0 ||
+    !isRuntimeTree(value.tree) ||
+    !isRuntimeNodeDetails(value.frame) ||
+    !Array.isArray(value.warnings) ||
+    value.warnings.length > 128 ||
+    !value.warnings.every(
+      (warning) =>
+        isRecord(warning) &&
+        (warning.ruleId === "contrast" ||
+          warning.ruleId === "overflow" ||
+          warning.ruleId === "spacing-scale") &&
+        typeof warning.message === "string" &&
+        typeof warning.oid === "string" &&
+        typeof warning.fix === "string",
+    )
+  ) {
+    return false;
+  }
+  return (
+    isFiniteNumber(value.viewport.width) &&
+    isFiniteNumber(value.viewport.height) &&
+    isFiniteNumber(value.viewport.scrollX) &&
+    isFiniteNumber(value.viewport.scrollY)
+  );
+}
+
+function isRuntimeCapabilities(
+  value: unknown,
+): value is DesignRuntimeCapabilities {
+  if (!isRecord(value) || !Array.isArray(value.methods)) return false;
+  return (
+    value.methods.length > 0 &&
+    value.methods.length <= DESIGN_RUNTIME_METHODS.size &&
+    new Set(value.methods).size === value.methods.length &&
+    value.methods.every(
+      (method) =>
+        typeof method === "string" &&
+        DESIGN_RUNTIME_METHODS.has(method as DesignRuntimeMethod),
+    ) &&
+    value.cancellation === true &&
+    value.typedErrors === true &&
+    value.sourcePinned === true &&
+    isFiniteNumber(value.maxStyleProperties) &&
+    value.maxStyleProperties >= 1 &&
+    value.maxStyleProperties <= 1_024 &&
+    isFiniteNumber(value.maxMatchedDeclarations) &&
+    value.maxMatchedDeclarations >= 1 &&
+    value.maxMatchedDeclarations <= 10_000 &&
+    isFiniteNumber(value.maxCapturePixels) &&
+    value.maxCapturePixels >= 1 &&
+    value.maxCapturePixels <= 64_000_000
+  );
+}
 
 export function isDesignRuntimeFrameMessage(
   value: unknown,
 ): value is DesignRuntimeFrameMessage {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const message = value as Record<string, unknown>;
+  if (!isRecord(value)) return false;
+  const message = value;
   if (
     message.protocol !== DESIGN_RUNTIME_PROTOCOL ||
     message.version !== DESIGN_RUNTIME_VERSION
@@ -131,16 +363,40 @@ export function isDesignRuntimeFrameMessage(
     return false;
   }
   if (message.type === "response") {
+    if (
+      typeof message.requestId !== "string" ||
+      message.requestId.length < 1 ||
+      message.requestId.length > 128 ||
+      typeof message.ok !== "boolean"
+    ) {
+      return false;
+    }
+    if (message.ok) return "result" in message;
     return (
-      typeof message.requestId === "string" && typeof message.ok === "boolean"
+      isRecord(message.error) &&
+      typeof message.error.code === "string" &&
+      DESIGN_RUNTIME_ERROR_CODES.has(
+        message.error.code as DesignRuntimeErrorCode,
+      ) &&
+      typeof message.error.message === "string" &&
+      message.error.message.length <= 2_048 &&
+      typeof message.error.retryable === "boolean"
     );
   }
+  if (
+    message.type !== "event" ||
+    (message.event !== "ready" && message.event !== "mutation") ||
+    !isRecord(message.payload)
+  ) {
+    return false;
+  }
+  if (message.event === "mutation") return isRuntimeSnapshot(message.payload);
+  const payload = message.payload;
   return (
-    message.type === "event" &&
-    (message.event === "ready" || message.event === "mutation") &&
-    !!message.payload &&
-    typeof message.payload === "object" &&
-    !Array.isArray(message.payload)
+    isSourceVersion(payload.sourceVersion) &&
+    isRuntimeCapabilities(payload.capabilities) &&
+    isRuntimeSnapshot(payload.snapshot) &&
+    payload.snapshot.sourceVersion === payload.sourceVersion
   );
 }
 
@@ -153,22 +409,29 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   "use strict";
 
   var PROTOCOL = "zeros-design-runtime";
-  var VERSION = 1;
+  var VERSION = 2;
   var SOURCE_VERSION = String(window.__zerosDesignSourceVersion || "");
   var MUTATION_DEBOUNCE_MS = 500;
   var MAX_CAPTURE_DIMENSION = 4096;
   var MAX_AUDIT_WARNINGS = 128;
+  var MAX_MATCHED_DECLARATIONS = 256;
+  var MAX_ACTIVE_REQUESTS = 128;
   // Keep worst-case RGBA → PNG base64 within the engine's 12 MB wire cap.
   var MAX_CAPTURE_PIXELS = 2000000;
   var STYLE_PROPERTIES = [
     "position", "left", "top", "right", "bottom", "width", "height",
-    "minWidth", "minHeight", "maxWidth", "maxHeight", "display",
+    "minWidth", "minHeight", "maxWidth", "maxHeight", "boxSizing", "display",
     "flexDirection", "gap", "rowGap", "columnGap",
     "padding", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
     "alignItems", "justifyContent", "background", "backgroundColor",
     "border", "borderWidth", "borderColor", "borderRadius", "color",
     "fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing",
     "textAlign", "overflow", "overflowX", "overflowY", "opacity", "boxShadow"
+  ];
+  var METHODS = [
+    "getSnapshot", "getElementAtLoc", "getNodeDetails", "getMatchedStyles",
+    "setNodeVisibility", "previewStyles", "clearPreviewStyles",
+    "captureScreenshot"
   ];
 
   if (window.__zerosDesignRuntimeVersion === VERSION) return;
@@ -183,6 +446,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   var previewStyleOverridesByOid = new Map();
   var mutationTimer = null;
   var parentPort = null;
+  var observer = null;
+  var observing = false;
+  var disposed = false;
+  var activeRequests = new Set();
+  var cancelledRequests = new Set();
   var trustedParentOrigin = null;
   try {
     trustedParentOrigin = document.referrer
@@ -193,7 +461,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function post(message) {
-    if (parentPort) parentPort.postMessage(message);
+    if (parentPort && !disposed) parentPort.postMessage(message);
   }
 
   function event(name, payload) {
@@ -204,6 +472,25 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       event: name,
       payload: payload
     });
+  }
+
+  function typedError(code, message, retryable) {
+    return { code: code, message: String(message), retryable: retryable === true };
+  }
+
+  function errorPayload(value) {
+    if (value && typeof value === "object" && typeof value.code === "string") {
+      return typedError(value.code, value.message || value.code, value.retryable);
+    }
+    var message = value instanceof Error ? value.message : String(value);
+    if (/not found/i.test(message)) return typedError("NODE_NOT_FOUND", message, false);
+    if (/unknown design runtime method/i.test(message)) {
+      return typedError("METHOD_NOT_SUPPORTED", message, false);
+    }
+    if (/\b(?:invalid|must|missing|no visible geometry)\b/i.test(message)) {
+      return typedError("BAD_REQUEST", message, false);
+    }
+    return typedError("INTERNAL_ERROR", message, false);
   }
 
   function response(requestId, ok, value) {
@@ -222,8 +509,20 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           type: "response",
           requestId: requestId,
           ok: false,
-          error: value instanceof Error ? value.message : String(value)
+          error: errorPayload(value)
         });
+  }
+
+  function capabilities() {
+    return {
+      methods: METHODS.slice(),
+      cancellation: true,
+      typedErrors: true,
+      sourcePinned: true,
+      maxStyleProperties: 64,
+      maxMatchedDeclarations: MAX_MATCHED_DECLARATIONS,
+      maxCapturePixels: MAX_CAPTURE_PIXELS
+    };
   }
 
   function oidOf(element) {
@@ -561,32 +860,71 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return null;
   }
 
+  function withoutObservedMutations(work) {
+    var resume = observer && observing;
+    if (resume) {
+      // Authored scripts are stripped and blocked by CSP, so every mutation
+      // source in this document is runtime-owned. Disconnecting before preview
+      // writes suppresses only ephemeral runtime churn; revisit this if authored
+      // execution is ever introduced.
+      observer.takeRecords();
+      observer.disconnect();
+      observing = false;
+    }
+    try {
+      return work();
+    } finally {
+      if (resume && !disposed) startObserving();
+    }
+  }
+
+  function detailsAfterLayout(element) {
+    return new Promise(function (resolve) {
+      var settled = false;
+      var fallback = null;
+      function finish() {
+        if (settled) return;
+        settled = true;
+        if (fallback !== null) window.clearTimeout(fallback);
+        resolve(detailsOf(element));
+      }
+      fallback = window.setTimeout(finish, 50);
+      if (document.visibilityState !== "visible") {
+        finish();
+        return;
+      }
+      window.requestAnimationFrame(finish);
+    });
+  }
+
   function setNodeVisibility(oid, visible) {
     var element = elementForOid(oid);
-    var prior = visibilityOverridesByOid.get(oid);
-    if (!prior) {
-      prior = {
-        value: element.style.getPropertyValue("display"),
-        priority: element.style.getPropertyPriority("display"),
-        hidden: element.hidden
-      };
-      visibilityOverridesByOid.set(oid, prior);
-    }
-    if (visible) {
-      element.hidden = false;
-      if (prior.value) {
-        element.style.setProperty("display", prior.value, prior.priority);
+    withoutObservedMutations(function () {
+      var prior = visibilityOverridesByOid.get(oid);
+      if (!prior) {
+        prior = {
+          value: element.style.getPropertyValue("display"),
+          priority: element.style.getPropertyPriority("display"),
+          hidden: element.hidden
+        };
+        visibilityOverridesByOid.set(oid, prior);
+      }
+      if (visible) {
+        element.hidden = false;
+        if (prior.value) {
+          element.style.setProperty("display", prior.value, prior.priority);
+        } else {
+          element.style.removeProperty("display");
+        }
+        if (!visibleOf(element)) {
+          element.style.setProperty("display", "revert", "important");
+        }
       } else {
-        element.style.removeProperty("display");
+        element.hidden = prior.hidden;
+        element.style.setProperty("display", "none", "important");
       }
-      if (!visibleOf(element)) {
-        element.style.setProperty("display", "revert", "important");
-      }
-    } else {
-      element.hidden = prior.hidden;
-      element.style.setProperty("display", "none", "important");
-    }
-    return detailsOf(element);
+    });
+    return detailsAfterLayout(element);
   }
 
   function previewStyles(oid, styles) {
@@ -603,41 +941,160 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       priorByProperty = new Map();
       previewStyleOverridesByOid.set(oid, priorByProperty);
     }
-    for (var index = 0; index < entries.length; index += 1) {
-      var property = entries[index][0];
-      var value = entries[index][1];
-      if (
-        !/^(--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(property) ||
-        (typeof value !== "string" && value !== null)
-      ) {
-        throw new Error("Invalid preview style: " + property);
+    withoutObservedMutations(function () {
+      for (var index = 0; index < entries.length; index += 1) {
+        var property = entries[index][0];
+        var value = entries[index][1];
+        if (
+          !/^(--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(property) ||
+          (typeof value !== "string" && value !== null)
+        ) {
+          throw new Error("Invalid preview style: " + property);
+        }
+        if (!priorByProperty.has(property)) {
+          priorByProperty.set(property, {
+            value: element.style.getPropertyValue(property),
+            priority: element.style.getPropertyPriority(property)
+          });
+        }
+        if (value === null) element.style.removeProperty(property);
+        else element.style.setProperty(property, value);
       }
-      if (!priorByProperty.has(property)) {
-        priorByProperty.set(property, {
-          value: element.style.getPropertyValue(property),
-          priority: element.style.getPropertyPriority(property)
-        });
-      }
-      if (value === null) element.style.removeProperty(property);
-      else element.style.setProperty(property, value);
-    }
-    return detailsOf(element);
+    });
+    return detailsAfterLayout(element);
   }
 
   function clearPreviewStyles(oid) {
     var element = elementForOid(oid);
     var priorByProperty = previewStyleOverridesByOid.get(oid);
-    if (priorByProperty) {
-      priorByProperty.forEach(function (prior, property) {
-        if (prior.value) {
-          element.style.setProperty(property, prior.value, prior.priority);
-        } else {
-          element.style.removeProperty(property);
-        }
-      });
-      previewStyleOverridesByOid.delete(oid);
+    withoutObservedMutations(function () {
+      if (priorByProperty) {
+        priorByProperty.forEach(function (prior, property) {
+          if (prior.value) {
+            element.style.setProperty(property, prior.value, prior.priority);
+          } else {
+            element.style.removeProperty(property);
+          }
+        });
+        previewStyleOverridesByOid.delete(oid);
+      }
+    });
+    return detailsAfterLayout(element);
+  }
+
+  function stylesheetSource(sheet) {
+    var owner = sheet.ownerNode;
+    if (owner && owner.getAttribute) {
+      var authored = owner.getAttribute("data-zeros-source") ||
+        owner.getAttribute("data-zeros-component");
+      if (authored) {
+        return String(authored).replace(/^\.\//, "").split(/[?#]/, 1)[0];
+      }
     }
-    return detailsOf(element);
+    if (sheet.href) {
+      try {
+        var url = new URL(sheet.href, document.baseURI);
+        var pieces = url.pathname.split("/");
+        return pieces[pieces.length - 1] || undefined;
+      } catch (_error) {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+
+  function conditionalRuleActive(rule) {
+    if (rule.type === CSSRule.MEDIA_RULE && rule.media) {
+      return window.matchMedia(rule.media.mediaText).matches;
+    }
+    if (
+      typeof CSSRule.SUPPORTS_RULE === "number" &&
+      rule.type === CSSRule.SUPPORTS_RULE &&
+      rule.conditionText && window.CSS && typeof window.CSS.supports === "function"
+    ) {
+      try { return window.CSS.supports(rule.conditionText); } catch (_error) { return false; }
+    }
+    return true;
+  }
+
+  function matchedDeclarationsForElement(element, property, inherited, output) {
+    if (element.style) {
+      var inlineValue = element.style.getPropertyValue(property);
+      if (inlineValue && output.length < MAX_MATCHED_DECLARATIONS) {
+        output.push({
+          property: property,
+          value: inlineValue,
+          important: element.style.getPropertyPriority(property) === "important",
+          inherited: inherited,
+          active: true
+        });
+      }
+    }
+    function visitRules(rules, sourceFile, active) {
+      for (var index = 0; index < rules.length; index += 1) {
+        if (output.length >= MAX_MATCHED_DECLARATIONS) return;
+        var rule = rules[index];
+        if (rule.type === CSSRule.STYLE_RULE && rule.selectorText && rule.style) {
+          var matches = false;
+          try { matches = element.matches(rule.selectorText); } catch (_error) { matches = false; }
+          var value = rule.style.getPropertyValue(property);
+          if (matches && value) {
+            output.push({
+              property: property,
+              value: value,
+              important: rule.style.getPropertyPriority(property) === "important",
+              selector: rule.selectorText,
+              sourceFile: sourceFile,
+              inherited: inherited,
+              active: active
+            });
+          }
+        } else if (rule.cssRules) {
+          visitRules(
+            rule.cssRules,
+            sourceFile,
+            active && conditionalRuleActive(rule)
+          );
+        }
+      }
+    }
+    for (var sheetIndex = 0; sheetIndex < document.styleSheets.length; sheetIndex += 1) {
+      var sheet = document.styleSheets[sheetIndex];
+      try {
+        visitRules(sheet.cssRules || [], stylesheetSource(sheet), true);
+      } catch (_error) {
+        // The design renderer normally owns every stylesheet. If a browser
+        // still marks one inaccessible, omit it instead of inventing source.
+      }
+    }
+  }
+
+  function getMatchedStyles(oid, rawProperty) {
+    var element = elementForOid(oid);
+    var raw = String(rawProperty || "").trim();
+    var property = raw.indexOf("--") === 0 ? raw : raw.toLowerCase();
+    if (!/^(--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(property)) {
+      throw new Error("Invalid matched-style property: " + property);
+    }
+    var matched = [];
+    matchedDeclarationsForElement(element, property, false, matched);
+    if (matched.length === 0) {
+      for (
+        var parent = element.parentElement;
+        parent && matched.length === 0;
+        parent = parent.parentElement
+      ) {
+        matchedDeclarationsForElement(parent, property, true, matched);
+      }
+    }
+    return {
+      sourceVersion: SOURCE_VERSION,
+      nodeId: oid,
+      property: property,
+      computedValue: getComputedStyle(element).getPropertyValue(property),
+      matched: matched,
+      truncated: matched.length >= MAX_MATCHED_DECLARATIONS
+    };
   }
 
   function captureScreenshot(args) {
@@ -735,6 +1192,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         return elementAtLoc(Number(args.x), Number(args.y));
       case "getNodeDetails":
         return detailsOf(elementForOid(args.nodeId));
+      case "getMatchedStyles":
+        return getMatchedStyles(args.nodeId, args.property);
       case "setNodeVisibility":
         return setNodeVisibility(args.nodeId, args.visible === true);
       case "previewStyles":
@@ -748,26 +1207,116 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }
   }
 
-  function receiveRequest(message) {
+  function teardown() {
+    if (disposed) return;
+    disposed = true;
+    if (mutationTimer !== null) {
+      window.clearTimeout(mutationTimer);
+      mutationTimer = null;
+    }
+    if (observer) {
+      observer.takeRecords();
+      observer.disconnect();
+      observing = false;
+    }
+    previewStyleOverridesByOid.forEach(function (properties, oid) {
+      var element = elementsByOid.get(oid);
+      if (!element) return;
+      properties.forEach(function (prior, property) {
+        if (prior.value) element.style.setProperty(property, prior.value, prior.priority);
+        else element.style.removeProperty(property);
+      });
+    });
+    visibilityOverridesByOid.forEach(function (prior, oid) {
+      var element = elementsByOid.get(oid);
+      if (!element) return;
+      element.hidden = prior.hidden;
+      if (prior.value) element.style.setProperty("display", prior.value, prior.priority);
+      else element.style.removeProperty("display");
+    });
+    previewStyleOverridesByOid.clear();
+    visibilityOverridesByOid.clear();
+    activeRequests.clear();
+    cancelledRequests.clear();
+    window.removeEventListener("message", receiveHandshake);
+    if (parentPort) {
+      parentPort.onmessage = null;
+      parentPort.close();
+      parentPort = null;
+    }
+  }
+
+  function receivePortMessage(portEvent) {
+    var message = portEvent.data;
     if (
       !message ||
       message.protocol !== PROTOCOL ||
       message.version !== VERSION ||
+      message.sourceVersion !== SOURCE_VERSION
+    ) {
+      if (message && typeof message.requestId === "string") {
+        response(
+          message.requestId,
+          false,
+          typedError(
+            "SOURCE_VERSION_MISMATCH",
+            "Design runtime request targets another source generation.",
+            true
+          )
+        );
+      }
+      return;
+    }
+    if (message.type === "teardown") {
+      teardown();
+      return;
+    }
+    if (message.type === "cancel") {
+      if (activeRequests.has(message.requestId)) {
+        cancelledRequests.add(message.requestId);
+      }
+      return;
+    }
+    if (
       message.type !== "request" ||
       typeof message.requestId !== "string" ||
-      typeof message.method !== "string"
+      typeof message.method !== "string" ||
+      !message.args ||
+      typeof message.args !== "object" ||
+      Array.isArray(message.args)
     ) {
       return;
     }
-    Promise.resolve()
-      .then(function () { return handle(message.method, message.args || {}); })
-      .then(
-        function (result) { response(message.requestId, true, result); },
-        function (error) { response(message.requestId, false, error); }
+    if (activeRequests.size >= MAX_ACTIVE_REQUESTS) {
+      response(
+        message.requestId,
+        false,
+        typedError("BAD_REQUEST", "Too many active design runtime requests.", true)
       );
+      return;
+    }
+    activeRequests.add(message.requestId);
+    Promise.resolve()
+      .then(function () { return handle(message.method, message.args); })
+      .then(
+        function (result) {
+          if (!cancelledRequests.has(message.requestId)) {
+            response(message.requestId, true, result);
+          }
+        },
+        function (error) {
+          if (!cancelledRequests.has(message.requestId)) {
+            response(message.requestId, false, error);
+          }
+        }
+      )
+      .then(function () {
+        activeRequests.delete(message.requestId);
+        cancelledRequests.delete(message.requestId);
+      });
   }
 
-  window.addEventListener("message", function (messageEvent) {
+  function receiveHandshake(messageEvent) {
     if (messageEvent.source !== parent || parentPort !== null) return;
     var message = messageEvent.data;
     if (
@@ -775,8 +1324,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       message.protocol !== PROTOCOL ||
       message.version !== VERSION ||
       message.type !== "handshake" ||
+      message.sourceVersion !== SOURCE_VERSION ||
       messageEvent.ports.length !== 1
     ) {
+      if (messageEvent.ports.length === 1) messageEvent.ports[0].close();
       return;
     }
     // Sandboxed frames may have an opaque origin. Validate a real protocol
@@ -784,12 +1335,16 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (trustedParentOrigin === null) trustedParentOrigin = messageEvent.origin;
     if (messageEvent.origin !== trustedParentOrigin) return;
     parentPort = messageEvent.ports[0];
-    parentPort.onmessage = function (portEvent) {
-      receiveRequest(portEvent.data);
-    };
+    parentPort.onmessage = receivePortMessage;
     parentPort.start();
-    event("ready", snapshot());
-  });
+    event("ready", {
+      sourceVersion: SOURCE_VERSION,
+      capabilities: capabilities(),
+      snapshot: snapshot()
+    });
+  }
+
+  window.addEventListener("message", receiveHandshake);
 
   function publishMutation() {
     mutationTimer = null;
@@ -797,14 +1352,20 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     event("mutation", snapshot());
   }
 
-  var observer = new MutationObserver(function () {
+  observer = new MutationObserver(function () {
+    if (disposed || !observing) return;
     if (mutationTimer !== null) window.clearTimeout(mutationTimer);
     mutationTimer = window.setTimeout(publishMutation, MUTATION_DEBOUNCE_MS);
   });
-  observer.observe(document.documentElement, {
-    attributes: true,
-    characterData: true,
-    childList: true,
-    subtree: true
-  });
+  function startObserving() {
+    if (disposed || !observer || observing) return;
+    observer.observe(document.documentElement, {
+      attributes: true,
+      characterData: true,
+      childList: true,
+      subtree: true
+    });
+    observing = true;
+  }
+  startObserving();
 })();`;

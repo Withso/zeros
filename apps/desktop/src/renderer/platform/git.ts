@@ -96,12 +96,16 @@ import { resolveBridgeWorkspaceIdForCwd } from "./bridge/workspace-id-resolver";
 import { isKnownProjectRoot } from "../state/projects-store";
 import {
   bridgeDesignCreateFrame,
+  bridgeDesignApplyTransaction,
   bridgeDesignDeleteFrame,
   bridgeDesignDuplicateFrame,
   bridgeDesignFrame,
   bridgeDesignFrames,
+  bridgeDesignFoundationOpen,
+  bridgeDesignHistory,
   bridgeDesignLint,
   bridgeDesignRenameFrame,
+  bridgeDesignProvenance,
   bridgeDesignSave,
   bridgeDesignSetText,
   bridgeDesignSetScreenshot,
@@ -115,6 +119,8 @@ import {
   bridgeDesignWriteHtml,
   bridgeDesignInsertAsset,
   type DesignFrameDocumentWire,
+  type DesignFoundationOpenWire,
+  type DesignApiMutationReplyWire,
   type DesignFrameGeometryWire,
   type DesignFrameSummaryWire,
   type DesignLintReportWire,
@@ -126,6 +132,9 @@ import {
   type DesignTokenMutationWire,
   type DesignWorkspaceSnapshotWire,
 } from "./bridge/design-bridge";
+import type { DesignTransaction } from "@zeros/design-core";
+import type { DesignStyleProvenance } from "@zeros/design-web";
+import type { DesignRuntimeMatchedDeclaration } from "@zeros/protocol/design-runtime";
 
 // Re-export the publish types so the publish dialog consumes them via the
 // native/git façade rather than reaching into the bridge module.
@@ -140,9 +149,12 @@ export type {
 } from "./bridge/workspace-bridge";
 export type {
   DesignAssetWire,
+  DesignCanvasFrameWire,
   DesignFrameDocumentWire,
   DesignFrameGeometryWire,
   DesignFrameSummaryWire,
+  DesignFoundationOpenWire,
+  DesignApiMutationReplyWire,
   DesignFrameTreeNodeWire,
   DesignLintReportWire,
   DesignLintViolationWire,
@@ -402,6 +414,63 @@ export async function designFrames(
   return bridgeDesignFrames(requireBridge("load design frames"), workspaceId);
 }
 
+export async function designFoundationOpen(
+  workspaceId: string,
+  frame: string,
+): Promise<DesignFoundationOpenWire> {
+  return bridgeDesignFoundationOpen(
+    requireBridge("open the design foundation"),
+    workspaceId,
+    frame,
+  );
+}
+
+export async function designProvenance(
+  workspaceId: string,
+  input: {
+    frame: string;
+    nodeId: string;
+    property: string;
+    expectedRevision?: string;
+    computedValue?: string | null;
+    matched?: DesignRuntimeMatchedDeclaration[];
+  },
+): Promise<DesignStyleProvenance> {
+  return bridgeDesignProvenance(
+    requireBridge("inspect authored design provenance"),
+    workspaceId,
+    input,
+  );
+}
+
+export async function designApplyTransaction(
+  workspaceId: string,
+  frame: string,
+  transaction: DesignTransaction,
+  dryRun = false,
+): Promise<DesignApiMutationReplyWire> {
+  return bridgeDesignApplyTransaction(
+    requireBridge("apply a design transaction"),
+    workspaceId,
+    frame,
+    transaction,
+    dryRun,
+  );
+}
+
+export async function designHistory(
+  workspaceId: string,
+  frame: string,
+  direction: "undo" | "redo",
+): Promise<DesignApiMutationReplyWire> {
+  return bridgeDesignHistory(
+    requireBridge(`${direction} a design edit`),
+    workspaceId,
+    frame,
+    direction,
+  );
+}
+
 export async function designFrame(
   workspaceId: string,
   frame: string,
@@ -433,6 +502,7 @@ export async function designTokens(
 export async function designUpdateToken(
   workspaceId: string,
   input: {
+    frame: string;
     name: string;
     theme: string | null;
     value: string;
