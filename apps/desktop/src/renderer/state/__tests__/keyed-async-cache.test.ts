@@ -32,6 +32,27 @@ describe("KeyedAsyncCache", () => {
     expect(cache.peekSnapshot("second").data).toBe("bbbb");
   });
 
+  it("does not remeasure unchanged data for loading or invalidation snapshots", async () => {
+    const weightOf = vi.fn((value: { bytes: number }) => value.bytes);
+    const cache = new KeyedAsyncCache<{ bytes: number }>({
+      maxWeight: 100,
+      weightOf,
+    });
+    const value = { bytes: 4 };
+    cache.setData("design", value);
+
+    cache.invalidate("design");
+    const request = deferred<{ bytes: number }>();
+    const refresh = cache.load("design", () => request.promise, {
+      force: true,
+    });
+
+    expect(weightOf).toHaveBeenCalledTimes(1);
+    request.resolve(value);
+    await refresh;
+    expect(weightOf).toHaveBeenCalledTimes(1);
+  });
+
   it("returns stable snapshots and deduplicates concurrent reads", async () => {
     const cache = new KeyedAsyncCache<string>();
     const request = deferred<string>();

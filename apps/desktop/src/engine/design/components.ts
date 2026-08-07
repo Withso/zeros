@@ -170,16 +170,25 @@ async function loadDefinitions(
         message: `Component zd-${name} must not declare data-oid values; the authored instance owns selection.`,
       });
     }
-    try {
-      assertDesignComponentDefinitionIdentities(source);
-    } catch (error) {
-      errors.push({
-        component: name,
-        message:
-          error instanceof Error
-            ? error.message
-            : `Component zd-${name} has invalid definition-local identity.`,
-      });
+    // Pre-Foundation component files had no definition-local IDs. Preserve
+    // those files as a compatibility shape; once a definition declares any
+    // data-zid (and for every component.create operation), require the complete
+    // all-elements identity contract rather than accepting a partial upgrade.
+    const declaresDefinitionIdentity = elements(document).some((element) =>
+      element.attrs.some((attribute) => attribute.name === "data-zid"),
+    );
+    if (declaresDefinitionIdentity) {
+      try {
+        assertDesignComponentDefinitionIdentities(source);
+      } catch (error) {
+        errors.push({
+          component: name,
+          message:
+            error instanceof Error
+              ? error.message
+              : `Component zd-${name} has invalid definition-local identity.`,
+        });
+      }
     }
     const externalReference = elements(document).some((element) =>
       element.attrs.some(
@@ -356,6 +365,9 @@ export async function expandDesignComponents(
   return {
     html,
     usedComponents: [...used].sort(),
+    // loadDefinitions visits only the frame's bounded transitive dependency
+    // graph. Keep nested diagnostics even when an ancestor is also invalid:
+    // invalid definitions remain previewable and their safe remainder expands.
     errors: [...loaded.errors, ...errors],
   };
 }

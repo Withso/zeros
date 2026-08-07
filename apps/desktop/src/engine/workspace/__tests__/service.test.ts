@@ -13,6 +13,10 @@ import {
   listRemoteRestrictedWorkspaceIds,
 } from "../../git";
 import { getDesignRuntimeAudit } from "../../design/runtime-audits";
+import {
+  getWorkspaceDesignApi,
+  resetWorkspaceDesignApisForTests,
+} from "../../design/design-api";
 import { getDesignSelection } from "../../design/selection";
 import { MAX_CONTEXT_GRAPH_ATTACHMENT_BYTES } from "../../files/context-graph";
 
@@ -32,6 +36,7 @@ describe("WorkspaceService", () => {
     svc = new WorkspaceService(dir);
   });
   afterEach(() => {
+    resetWorkspaceDesignApisForTests();
     closeState();
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -1327,19 +1332,19 @@ describe("WorkspaceService", () => {
     const canvasReply = (await svc.handle("design.canvas.update", {
       workspaceId: workspace.workspaceId,
       frame: frame.file,
-      x: 48,
-      y: 64,
-      w: 1_280,
-      h: 800,
-      z: 0,
+      x: 48.25,
+      y: 64.5,
+      w: 1_280.75,
+      h: 800.125,
+      z: 0.4,
     })) as {
       geometry: { x: number; y: number; w: number; h: number; z: number };
     };
     expect(canvasReply.geometry).toEqual({
-      x: 48,
-      y: 64,
-      w: 1_280,
-      h: 800,
+      x: 48.25,
+      y: 64.5,
+      w: 1_280.75,
+      h: 800.125,
       z: 0,
     });
     const afterCanvasFoundation = (await svc.handle("design.foundation.open", {
@@ -2063,6 +2068,49 @@ describe("WorkspaceService", () => {
     expect(getWorkspaceLifecycleStatus(prepared.workspaceId).active).toBe(
       false,
     );
+  });
+
+  it("releases retained Design API sessions on archive and delete", async () => {
+    fs.writeFileSync(path.join(dir, "README.md"), "# x\n");
+    execFileSync("git", ["add", "."], { cwd: dir });
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-q",
+        "-m",
+        "init",
+      ],
+      { cwd: dir },
+    );
+    const created = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-api-lifecycle",
+      kind: "design",
+    });
+    const activeApi = getWorkspaceDesignApi(created.path);
+
+    await svc.handle("workspace.archive", {
+      workspaceId: created.workspaceId,
+      stashUncommitted: true,
+    });
+
+    expect(getWorkspaceDesignApi(created.path)).not.toBe(activeApi);
+    await svc.handle("workspace.restore", {
+      workspaceId: created.workspaceId,
+    });
+    const restoredApi = getWorkspaceDesignApi(created.path);
+
+    await svc.handle("workspace.delete", {
+      workspaceId: created.workspaceId,
+      includeBranch: false,
+    });
+
+    expect(getWorkspaceDesignApi(created.path)).not.toBe(restoredApi);
   });
 
   it("creates several independently prepared workspaces concurrently", async () => {

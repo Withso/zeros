@@ -39,19 +39,36 @@ const DESIGN_SNAPSHOT_CACHE_BYTES = 64 * 1024 * 1024;
 const DESIGN_FRAME_DOCUMENT_CACHE_BYTES = 64 * 1024 * 1024;
 const DESIGN_FOUNDATION_CACHE_BYTES = 32 * 1024 * 1024;
 
-function serializedMemory(value: unknown): number {
-  try {
-    return JSON.stringify(value).length * 2;
-  } catch {
-    return Number.POSITIVE_INFINITY;
+const retainedMemoryByObject = new WeakMap<object, number>();
+
+/** Approximate immutable wire payload memory without allocating a second full
+ * JSON string. Structural sharing makes unchanged arrays and records O(1) to
+ * remeasure across mutation publications. */
+function retainedMemory(value: unknown): number {
+  if (typeof value === "string") return value.length * 2;
+  if (typeof value === "number" || typeof value === "bigint") return 8;
+  if (typeof value === "boolean") return 4;
+  if (!value || typeof value !== "object") return 0;
+  const cached = retainedMemoryByObject.get(value);
+  if (cached !== undefined) return cached;
+  retainedMemoryByObject.set(value, 0);
+  let total = Array.isArray(value) ? 24 : 32;
+  if (Array.isArray(value)) {
+    for (const item of value) total += retainedMemory(item);
+  } else {
+    for (const [key, item] of Object.entries(value)) {
+      total += key.length * 2 + retainedMemory(item);
+    }
   }
+  retainedMemoryByObject.set(value, total);
+  return total;
 }
 
 export const designWorkspaceSnapshotCache =
   new KeyedAsyncCache<DesignWorkspaceSnapshotWire>({
     maxEntries: 32,
     maxWeight: DESIGN_SNAPSHOT_CACHE_BYTES,
-    weightOf: serializedMemory,
+    weightOf: retainedMemory,
   });
 /** Full authored/srcDoc payloads exist only for non-protocol fallbacks and are
  * bounded to roughly the same order as the live iframe window. */
@@ -62,13 +79,13 @@ export const designFrameDocumentCache =
     weightOf: (document) =>
       document.source.length * 2 +
       document.srcDoc.length * 2 +
-      serializedMemory(document.tree),
+      retainedMemory(document.tree),
   });
 export const designFoundationCache =
   new KeyedAsyncCache<DesignFoundationOpenWire>({
     maxEntries: 64,
     maxWeight: DESIGN_FOUNDATION_CACHE_BYTES,
-    weightOf: serializedMemory,
+    weightOf: retainedMemory,
   });
 
 const FOUNDATION_KEY_SEPARATOR = "\u0000";
@@ -131,6 +148,13 @@ export async function fetchDesignFoundation(
 
 function invalidateDesignFoundation(workspaceId: string, frame: string): void {
   const prefix = `${workspaceId}${FOUNDATION_KEY_SEPARATOR}${frame}${FOUNDATION_KEY_SEPARATOR}`;
+  for (const key of designFoundationCache.keys()) {
+    if (key.startsWith(prefix)) designFoundationCache.invalidate(key);
+  }
+}
+
+function invalidateWorkspaceDesignFoundations(workspaceId: string): void {
+  const prefix = `${workspaceId}${FOUNDATION_KEY_SEPARATOR}`;
   for (const key of designFoundationCache.keys()) {
     if (key.startsWith(prefix)) designFoundationCache.invalidate(key);
   }
@@ -294,6 +318,9 @@ export function warmDesignWorkspaceSnapshot(workspaceId: string): void {
 
 export function invalidateDesignWorkspaceSnapshot(workspaceId: string): void {
   designWorkspaceSnapshotCache.invalidate(workspaceId);
+  // External canvas/manifest edits can change the authored revision without
+  // changing a frame's rendered sourceVersion, so those exact keys are stale.
+  invalidateWorkspaceDesignFoundations(workspaceId);
 }
 
 export async function refreshDesignWorkspaceSnapshot(
@@ -429,6 +456,7 @@ export async function updateDesignFrameGeometryCached(
 ): Promise<DesignFrameGeometryWire> {
   const result = await designUpdateCanvas(workspaceId, frameFile, geometry);
   publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
+  invalidateDesignFoundation(workspaceId, frameFile);
   return result.geometry;
 }
 

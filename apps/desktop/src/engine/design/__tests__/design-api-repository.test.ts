@@ -191,6 +191,58 @@ describe("filesystem Design API repository", () => {
     expect(committed.manifest.components).toHaveLength(129);
   });
 
+  it("recreates a missing components directory for a safe component write", async () => {
+    const frame = await createDesignFrame(root, { title: "Fresh component" });
+    const componentDirectory = path.join(
+      root,
+      DESIGN_DIRECTORY_NAME,
+      "components",
+    );
+    await rm(componentDirectory, { recursive: true, force: true });
+    const current = await readDesignWebDocumentState(root, frame.file);
+    const outcome = applyDesignTransaction(
+      current,
+      {
+        schemaVersion: 1,
+        transactionId: "create-after-components-removed",
+        documentId: current.documentId,
+        baseRevision: current.revision,
+        actor: { kind: "agent", id: "test-agent" },
+        intent: "Create a component in a recovered directory",
+        createdAt: 1,
+        operations: [
+          {
+            operationId: "create-recovered-component",
+            type: "component.create",
+            component: {
+              id: "recovered-card",
+              name: "Recovered card",
+              file: "components/recovered-card.html",
+              props: [],
+              slots: [],
+            },
+            html: '<!doctype html><html><body><article data-zid="root">Recovered</article></body></html>',
+          },
+        ],
+      },
+      designWebTransactionAdapter,
+    );
+
+    await commitDesignWebDocumentState(
+      root,
+      frame.file,
+      current.revision,
+      outcome.state,
+    );
+
+    expect(
+      await readFile(
+        path.join(componentDirectory, "recovered-card.html"),
+        "utf8",
+      ),
+    ).toContain("Recovered");
+  });
+
   it("refuses to write a component through a directory symlink", async () => {
     const frame = await createDesignFrame(root, { title: "Safe component" });
     const componentDirectory = path.join(

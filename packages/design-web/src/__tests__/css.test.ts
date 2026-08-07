@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   DesignStyleAmbiguityError,
+  mutateDesignTokenDeclaration,
   mutateDesignNodeStyles,
   readDesignStyleProvenance,
 } from "../css";
@@ -9,6 +10,18 @@ import { createDesignWebDocumentState } from "../revision";
 import { FRAME_CSS, FRAME_HTML, webState } from "./fixtures";
 
 describe("CSS provenance and mutation", () => {
+  it.each([
+    ':root[data-zd-theme="dark"]',
+    "[data-zd-theme='dark']",
+    ":root[data-zd-theme='dark']",
+  ])("updates the existing %s token theme rule in place", (selector) => {
+    const source = `${selector} {\n  --accent: navy;\n}\n`;
+
+    expect(
+      mutateDesignTokenDeclaration(source, "--accent", "dark", "orchid"),
+    ).toBe(`${selector} {\n  --accent: orchid;\n}\n`);
+  });
+
   it("identifies one exact authored rule without calling it computed", () => {
     const provenance = readDesignStyleProvenance(webState(), {
       nodeId: "card",

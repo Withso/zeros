@@ -170,6 +170,7 @@ import {
 import { getTeamContextMeta, setTeamContext } from "../settings/team-context";
 import {
   designDocumentIdForFrame,
+  forgetWorkspaceDesignApi,
   getWorkspaceDesignApi,
 } from "../design/design-api";
 import {
@@ -2350,6 +2351,10 @@ export class WorkspaceService {
         const sourceVersion = reqStr(params, "sourceVersion");
         const api = getWorkspaceDesignApi(workspace.path);
         const documentId = designDocumentIdForFrame(frame);
+        // The authored revision (files, manifest, and geometry) and rendered
+        // sourceVersion (composed HTML/CSS/assets/viewport) are distinct CAS
+        // identities. Compatibility mutation handlers must validate both before
+        // adapting the request into a Foundation transaction.
         const summary = await api.open(documentId);
         const render = await readDesignFrameRenderIdentity(
           workspace.path,
@@ -4265,6 +4270,7 @@ export class WorkspaceService {
           },
           this.workspaceCheckoutWatchSuspender ?? undefined,
         );
+        forgetWorkspaceDesignApi(result.workspace.path);
         forgetDesignSelection(workspaceId);
         forgetDesignScreenshots(workspaceId);
         return result;
@@ -4303,6 +4309,7 @@ export class WorkspaceService {
       }
       case "workspace.delete": {
         const workspaceId = reqStr(params, "workspaceId");
+        const workspacePath = getWorkspaceById(workspaceId)?.path;
         await deleteWorkspace(
           {
             workspaceId,
@@ -4317,6 +4324,7 @@ export class WorkspaceService {
           },
           this.workspaceCheckoutWatchSuspender ?? undefined,
         );
+        if (workspacePath) forgetWorkspaceDesignApi(workspacePath);
         forgetDesignSelection(workspaceId);
         forgetDesignScreenshots(workspaceId);
         return { ok: true };

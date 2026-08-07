@@ -863,6 +863,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   function withoutObservedMutations(work) {
     var resume = observer && observing;
     if (resume) {
+      // Authored scripts are stripped and blocked by CSP, so every mutation
+      // source in this document is runtime-owned. Disconnecting before preview
+      // writes suppresses only ephemeral runtime churn; revisit this if authored
+      // execution is ever introduced.
       observer.takeRecords();
       observer.disconnect();
       observing = false;
@@ -876,7 +880,20 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
 
   function detailsAfterLayout(element) {
     return new Promise(function (resolve) {
-      window.requestAnimationFrame(function () { resolve(detailsOf(element)); });
+      var settled = false;
+      var fallback = null;
+      function finish() {
+        if (settled) return;
+        settled = true;
+        if (fallback !== null) window.clearTimeout(fallback);
+        resolve(detailsOf(element));
+      }
+      fallback = window.setTimeout(finish, 50);
+      if (document.visibilityState !== "visible") {
+        finish();
+        return;
+      }
+      window.requestAnimationFrame(finish);
     });
   }
 

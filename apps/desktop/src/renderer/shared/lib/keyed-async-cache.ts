@@ -348,8 +348,11 @@ export class KeyedAsyncCache<T> {
     entry: CacheEntry<T>,
     snapshot: AsyncCacheSnapshot<T>,
   ): void {
+    const previousData = entry.snapshot.data;
     entry.snapshot = snapshot;
-    entry.weight = this.snapshotWeight(snapshot.data);
+    if (snapshot.data !== previousData) {
+      entry.weight = this.snapshotWeight(snapshot.data);
+    }
     for (const listener of entry.listeners) {
       try {
         listener();
@@ -392,7 +395,10 @@ export class KeyedAsyncCache<T> {
       );
       if (olderRequestPending) break;
       this.entries.delete(key);
-      totalWeight = this.totalWeight();
+      const remainingWeight = totalWeight - entry.weight;
+      totalWeight = Number.isNaN(remainingWeight)
+        ? this.totalWeight()
+        : Math.max(0, remainingWeight);
     }
   }
 

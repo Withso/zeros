@@ -1,11 +1,24 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const platformMocks = vi.hoisted(() => ({
+  updateCanvas: vi.fn(),
+}));
+
+vi.mock("../../../platform/git", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../platform/git")>()),
+  designUpdateCanvas: platformMocks.updateCanvas,
+}));
 
 import type { DesignWorkspaceSnapshotWire } from "../../../platform/git";
 import {
   applyDesignWorkspaceRefreshVersion,
+  designFoundationCache,
+  designFoundationKey,
   designWorkspaceSnapshotCache,
+  invalidateDesignWorkspaceSnapshot,
   resetDesignWorkspaceCacheForTests,
   stabilizeDesignWorkspaceSnapshot,
+  updateDesignFrameGeometryCached,
 } from "../state/design-workspace-cache";
 
 function snapshot(
@@ -59,6 +72,7 @@ function snapshot(
 
 describe("design workspace cache", () => {
   beforeEach(() => {
+    platformMocks.updateCanvas.mockReset();
     resetDesignWorkspaceCacheForTests();
   });
 
@@ -146,5 +160,46 @@ describe("design workspace cache", () => {
     expect(
       designWorkspaceSnapshotCache.getSnapshot("ws_design").invalidationVersion,
     ).toBe(initial + 1);
+  });
+
+  it("invalidates an exact-frame foundation after a geometry transaction", async () => {
+    const workspaceId = "ws_design";
+    const frame = "home.html";
+    const sourceVersion = snapshot().frames[0]!.sourceVersion;
+    const key = designFoundationKey(workspaceId, frame, sourceVersion);
+    designFoundationCache.setData(key, {
+      summary: { revision: "old" },
+    } as never);
+    const before = designFoundationCache.getSnapshot(key).invalidationVersion;
+    const geometry = { x: 40, y: 20, w: 1_440, h: 900, z: 0 };
+    platformMocks.updateCanvas.mockResolvedValue({
+      geometry,
+      snapshot: snapshot([{ file: frame, x: geometry.x }]),
+    });
+
+    await updateDesignFrameGeometryCached(workspaceId, frame, geometry);
+
+    expect(designFoundationCache.getSnapshot(key).invalidationVersion).toBe(
+      before + 1,
+    );
+  });
+
+  it("invalidates retained foundations when external workspace state changes", () => {
+    const workspaceId = "ws_design";
+    const key = designFoundationKey(
+      workspaceId,
+      "home.html",
+      snapshot().frames[0]!.sourceVersion,
+    );
+    designFoundationCache.setData(key, {
+      summary: { revision: "old" },
+    } as never);
+    const before = designFoundationCache.getSnapshot(key).invalidationVersion;
+
+    invalidateDesignWorkspaceSnapshot(workspaceId);
+
+    expect(designFoundationCache.getSnapshot(key).invalidationVersion).toBe(
+      before + 1,
+    );
   });
 });

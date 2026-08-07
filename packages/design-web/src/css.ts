@@ -1067,6 +1067,17 @@ export function mutateDesignCssRuleDeclaration(
   return `${source.slice(0, ruleEnd)}${insertion}${source.slice(ruleEnd)}`;
 }
 
+/** Return the normalized theme represented by one exact token selector. The
+ * reader and byte-preserving mutator share this matcher so alternate quote and
+ * optional :root spellings cannot diverge. */
+export function designTokenThemeName(selector: string): string | null {
+  const match =
+    /^\s*(?::root)?\[data-zd-theme\s*=\s*(["'])([a-z][a-z0-9_-]{0,63})\1\]\s*$/.exec(
+      selector,
+    );
+  return match?.[2] ?? null;
+}
+
 /** Update one typed design token without reserializing neighboring CSS. A
  * missing theme rule is appended deterministically; undo still restores exact
  * bytes through the transaction adapter's source splice inverse. */
@@ -1089,7 +1100,11 @@ export function mutateDesignTokenDeclaration(
   const root = postcss.parse(source);
   const rules: Rule[] = [];
   root.walkRules((rule) => {
-    if (rule.selector.trim() === selector) rules.push(rule);
+    const matches =
+      theme === null
+        ? rule.selector.trim() === selector
+        : designTokenThemeName(rule.selector) === theme;
+    if (matches) rules.push(rule);
   });
   if (rules.length > 1) {
     throw new DesignStyleAmbiguityError(selector, name, rules.length);

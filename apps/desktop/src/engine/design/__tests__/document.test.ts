@@ -150,6 +150,25 @@ describe("design document", () => {
     });
   });
 
+  it.each(["3", null])(
+    "fails closed for a non-numeric canvas version (%j)",
+    async (version) => {
+      await initializeDesignDocument(root);
+      const target = path.join(
+        root,
+        DESIGN_DIRECTORY_NAME,
+        ".zeros-canvas.json",
+      );
+      const unsupported = `${JSON.stringify({ version, frames: {} })}\n`;
+      await writeFile(target, unsupported, "utf8");
+
+      await expect(readDesignWorkspaceSnapshot(root)).rejects.toThrow(
+        "Unsupported design canvas version",
+      );
+      expect(await readFile(target, "utf8")).toBe(unsupported);
+    },
+  );
+
   it("heals missing and duplicate data-oid values without rewriting the document", () => {
     const source =
       '<!doctype html><html><body><main data-oid="same"><h1>Hello</h1><p data-oid="same">World</p></main></body></html>';
@@ -417,6 +436,36 @@ describe("design document", () => {
         oid: "escape",
       }),
     );
+  });
+
+  it("keeps legacy component definitions without data-zid saveable", async () => {
+    await initializeDesignDocument(root);
+    const components = path.join(root, DESIGN_DIRECTORY_NAME, "components");
+    await writeFile(
+      path.join(components, "legacy-card.html"),
+      "<!doctype html><html><body><article><span>Legacy</span></article></body></html>",
+      "utf8",
+    );
+    const frame = await createDesignFrame(root, { title: "Legacy component" });
+    const target = path.join(root, DESIGN_DIRECTORY_NAME, frame.file);
+    await writeFile(
+      target,
+      (await readFile(target, "utf8")).replace(
+        "</main>",
+        '<zd-legacy-card data-oid="legacy-card"></zd-legacy-card></main>',
+      ),
+      "utf8",
+    );
+
+    const report = await lintDesignDocument(root, frame.file, {
+      healOids: false,
+    });
+
+    expect(
+      report.violations.filter(
+        (violation) => violation.ruleId === "component-invalid",
+      ),
+    ).toEqual([]);
   });
 
   it("merges only exact-generation runtime lint warnings", async () => {

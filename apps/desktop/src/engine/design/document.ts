@@ -36,6 +36,7 @@ import {
   createDesignWebDocumentState,
   DESIGN_WEB_MAX_FILES,
   DESIGN_WEB_MAX_TOTAL_BYTES,
+  designTokenThemeName,
   type DesignWebDocumentState,
 } from "@zeros/design-web";
 import { DESIGN_RUNTIME_SOURCE } from "@zeros/protocol/design-runtime";
@@ -483,13 +484,32 @@ async function assertSafeDesignWriteTarget(
     throw new Error("Refusing an unsafe design write directory.");
   }
   const canonicalDirectory = await ensureSafeDesignRoot(workspacePath);
-  const canonicalParent = await realpath(path.dirname(resolvedTarget)).catch(
-    () => null,
-  );
+  const relativeParent = path.dirname(relative);
   const expectedParent = path.join(
     canonicalDirectory,
-    path.dirname(relative) === "." ? "" : path.dirname(relative),
+    relativeParent === "." ? "" : relativeParent,
   );
+  let canonicalParent = canonicalDirectory;
+  if (relativeParent !== ".") {
+    for (const segment of relativeParent.split(path.sep)) {
+      const candidate = path.join(canonicalParent, segment);
+      try {
+        await mkdir(candidate);
+      } catch (error: unknown) {
+        const code =
+          error && typeof error === "object" && "code" in error
+            ? String(error.code)
+            : "";
+        if (code !== "EEXIST") throw error;
+      }
+      const resolved = await realpath(candidate).catch(() => null);
+      const info = resolved ? await stat(resolved).catch(() => null) : null;
+      if (resolved !== candidate || !info?.isDirectory()) {
+        throw new Error("Refusing an unsafe design write directory.");
+      }
+      canonicalParent = resolved;
+    }
+  }
   if (canonicalParent !== expectedParent) {
     throw new Error("Refusing an unsafe design write directory.");
   }
@@ -573,11 +593,7 @@ async function readCanvas(workspacePath: string): Promise<CanvasDocument> {
   } catch {
     throw new Error("Design canvas metadata contains invalid JSON.");
   }
-  if (
-    typeof raw.version === "number" &&
-    raw.version !== 1 &&
-    raw.version !== 2
-  ) {
+  if (raw.version !== undefined && raw.version !== 1 && raw.version !== 2) {
     throw new Error(`Unsupported design canvas version: ${raw.version}`);
   }
   const sourceFrames =
@@ -2045,6 +2061,10 @@ export async function commitDesignWebDocumentState(
     try {
       await recoverPendingDesignTransactionUnlocked(workspacePath);
     } catch (firstError) {
+      // Recovery overlays the journal's complete target state before deriving
+      // its revision, then rewrites every changed file and canvas metadata to
+      // exact contents. Reapplying the same validated journal is therefore
+      // idempotent after a partial first pass and safely retries transient I/O.
       try {
         await recoverPendingDesignTransactionUnlocked(workspacePath);
       } catch {
@@ -3306,7 +3326,9 @@ async function mapDesignFramesBounded<T>(
 
 /** Aggregate lightweight canvas metadata in one exact-key request. Exact
  * render identities are composed with bounded concurrency; full source/srcDoc
- * payloads remain one-frame reads and never scale with total canvas size. */
+ * payloads remain one-frame reads and never scale with total canvas size.
+ * This exported entry point owns the workspace write turn and must not be
+ * called recursively from another withDesignDocumentWrite callback. */
 export async function readDesignWorkspaceSnapshot(
   workspacePath: string,
   options: DesignReadOptions = {},
@@ -3853,14 +3875,6 @@ function sortDesignLintViolations(
   );
 }
 
-function designThemeName(selector: string): string | null {
-  const match =
-    /^\s*(?::root)?\[data-zd-theme\s*=\s*(["'])([a-z][a-z0-9_-]{0,63})\1\]\s*$/.exec(
-      selector,
-    );
-  return match?.[2] ?? null;
-}
-
 export async function readDesignTokensDocument(
   workspacePath: string,
 ): Promise<DesignTokensDocument> {
@@ -3906,7 +3920,7 @@ export async function readDesignTokensDocument(
     });
   });
   root.walkRules((rule) => {
-    const theme = designThemeName(rule.selector);
+    const theme = designTokenThemeName(rule.selector);
     const base = rule.selector.trim() === ":root";
     if (!base && !theme) return;
     if (theme) themes.add(theme);
@@ -4020,7 +4034,8 @@ export async function updateDesignToken(
       if (targetRule) return;
       if (
         (input.theme === null && rule.selector.trim() === ":root") ||
-        (input.theme !== null && designThemeName(rule.selector) === input.theme)
+        (input.theme !== null &&
+          designTokenThemeName(rule.selector) === input.theme)
       ) {
         targetRule = rule;
       }
@@ -4053,7 +4068,7 @@ export const DESIGN_GUIDES = Object.freeze({
   layout: `Use normal HTML flow and flexbox for structural layout. Prefer flex containers, gap, padding, alignment, and intrinsic sizing over absolute positioning inside a frame.`,
   tokens: `Use var(--token) from tokens.css whenever a matching color, spacing, radius, or type token exists. Add typed @property declarations before introducing a new token.`,
   workflow: `Inspect the live element selection and frames and make targeted HTML/CSS edits only under Zeros Design/. Call lint_design, re-read the affected frame, use screenshot_frame to visually verify it, then call lint_design again so exact-generation browser contrast, overflow, and spacing checks are included. Resolve errors and review non-blocking advisories. JavaScript and external URLs are not part of design documents.`,
-  components: `Define a reusable component as one direct components/name.html file and instantiate it with <zd-name data-oid="stable-instance">. The definition body expands only at render time; <slot> accepts instance children and <slot data-zd-attr="label"> accepts escaped attributes. Keep scripts, event handlers, external URLs, and data-oid attributes out of definitions—the authored zd-* wrapper owns selection and editing.`,
+  components: `Define a reusable component as one direct components/name.html file and instantiate it with <zd-name data-oid="stable-instance">. Give every selectable definition-body element except <slot> a unique, stable data-zid, for example <article data-zid="surface">. The definition body expands only at render time; <slot> accepts instance children and <slot data-zd-attr="label"> accepts escaped attributes. Keep scripts, event handlers, external URLs, and data-oid attributes out of definitions—the authored zd-* wrapper owns selection and editing. Legacy definitions with no data-zid remain renderable, but new component.create operations require complete definition-local identity.`,
 });
 
 export type DesignGuideTopic = keyof typeof DESIGN_GUIDES;

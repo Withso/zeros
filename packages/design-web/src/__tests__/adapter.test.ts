@@ -351,6 +351,24 @@ describe("web transaction adapter", () => {
     ).toThrow("Frame geometry not found");
     expect(() =>
       session.apply(
+        webTransaction(initial, "unidentified-component", [
+          {
+            operationId: "unidentified-component",
+            type: "component.create",
+            component: {
+              id: "plain-card",
+              name: "Plain card",
+              file: "components/plain-card.html",
+              props: [],
+              slots: [],
+            },
+            html: "<!doctype html><html><body><article>Card</article></body></html>",
+          },
+        ]),
+      ),
+    ).toThrow("missing definition-local data-zid");
+    expect(() =>
+      session.apply(
         webTransaction(initial, "mismatched-component-file", [
           {
             operationId: "mismatched-component",
