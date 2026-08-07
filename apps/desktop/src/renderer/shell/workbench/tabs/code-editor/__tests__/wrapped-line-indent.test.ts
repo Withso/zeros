@@ -38,15 +38,40 @@ describe("hangingIndentStyle", () => {
     expect(hangingIndentStyle("", 4, 100)).toBeNull();
   });
 
-  it("pairs padding-left with an equal negative text-indent", () => {
+  it("hangs the indent on every row but the first", () => {
     expect(hangingIndentStyle("      x", 4, 100)).toBe(
-      "padding-left: calc(6ch + 6px); text-indent: -6ch;",
+      "text-indent: 6ch hanging;",
     );
   });
 
   it("measures tab indents in visible columns", () => {
     expect(hangingIndentStyle("\t\tx", 4, 100)).toBe(
-      "padding-left: calc(8ch + 6px); text-indent: -8ch;",
+      "text-indent: 8ch hanging;",
+    );
+  });
+
+  // Regression: the classic `padding-left: Nch; text-indent: -Nch` pair moved
+  // row 1 out of the line's content box, which moves the CSS tab-stop origin
+  // with it. A leading tab on a line whose indent is not a whole number of tab
+  // stops then rendered short — `\t\t "x"` (9 columns at tab-size 4) drew its
+  // content at column 6. A positive hanging indent leaves row 1 alone, so the
+  // tab stops stay where the guides and the continuation rows expect them.
+  it("never shifts row 1 (no negative indent, no padding override)", () => {
+    for (const text of ["\t x", "\t\t x", "\t\t   x", "  \tx", "    x"]) {
+      const style = hangingIndentStyle(text, 4, 100);
+      expect(style).not.toBeNull();
+      expect(style).not.toContain("padding");
+      expect(style).not.toMatch(/:\s*-/); // no negative indent
+      expect(style).toContain("hanging");
+    }
+  });
+
+  it("counts a mixed tab/space indent in visible columns", () => {
+    expect(hangingIndentStyle("\t x", 4, 100)).toBe(
+      "text-indent: 5ch hanging;",
+    );
+    expect(hangingIndentStyle("\t\t x", 4, 100)).toBe(
+      "text-indent: 9ch hanging;",
     );
   });
 
@@ -57,9 +82,9 @@ describe("hangingIndentStyle", () => {
     expect(hangingIndentStyle("        x", 4, 8)).not.toBeNull();
   });
 
-  it("still hangs whitespace-only lines (harmless: workbench is the only row)", () => {
+  it("still hangs whitespace-only lines (harmless: there is no second row)", () => {
     expect(hangingIndentStyle("    ", 4, 100)).toBe(
-      "padding-left: calc(4ch + 6px); text-indent: -4ch;",
+      "text-indent: 4ch hanging;",
     );
   });
 });

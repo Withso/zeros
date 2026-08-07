@@ -40,6 +40,7 @@ import { zerosEditorTheme } from "./theme";
 import { shikiColors } from "./shiki-highlight";
 import { indentationMarkers } from "@replit/codemirror-indentation-markers";
 import { wrappedLineIndent } from "./wrapped-line-indent";
+import { indentGuideClickSnap } from "./indent-click-snap";
 import { shikiLangForPath } from "./shiki-lang";
 import { useCodeThemeFg } from "./use-code-theme-fg";
 import { useCodeTheme } from "@/renderer/shared/theme/use-code-theme";
@@ -104,6 +105,11 @@ const BASE_EXTENSIONS: Extension[] = [
       activeDark: "color-mix(in srgb, var(--fg1) 14%, transparent)",
     },
   }),
+  // Those guides sit on the indentation itself, so clicking one used to drop the
+  // caret INSIDE the indent (the leftmost guide is column 0) and typing broke
+  // the line out of its block. A plain click there now lands at the line's
+  // content start; drag/⇧/⌘/⌥/double-click keep CM's behavior.
+  indentGuideClickSnap(),
   closeBrackets(),
   highlightSelectionMatches(),
   history(),

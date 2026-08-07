@@ -6,21 +6,32 @@
 // 0, so a long indented line visually breaks out of its block: the wrapped
 // text cuts left across the indentation guides instead of staying inside its
 // own nesting level. This extension keeps every visual row of a line at the
-// line's own indentation (VS Code's `wrappingIndent: "same"`), via the classic
-// hanging-indent pair on the line element:
+// line's own indentation (VS Code's `wrappingIndent: "same"`), with one
+// declaration on the line element:
 //
-//   padding-left: calc(<indent>ch + 6px)  → every row starts past the indent
-//   text-indent:  -<indent>ch             → …except row 1, pulled back so its
-//                                           leading whitespace renders exactly
-//                                           where it does today
+//   text-indent: <indent>ch hanging  → every row EXCEPT the first starts past
+//                                      the indent; row 1 is left exactly as
+//                                      CodeMirror lays it out
 //
-// 6px is CM's base `.cm-line` padding-left ("0 2px 0 6px"); the inline value
-// must restate it because inline padding-left replaces the shorthand. `ch`
-// tracks the mono font with no measure pass, and CM's selection layer already
-// reads `paddingLeft + min(0, textIndent)` per line, so this is the exact
-// construction the library accounts for. The indentation-marker guides are
+// `hanging` inverts which rows text-indent applies to, which IS the hanging
+// indent — so, unlike the classic `padding-left: Nch; text-indent: -Nch` pair,
+// row 1 never leaves the line's content box. That matters for TABS: CSS tab
+// stops sit at multiples of tab-size measured from the block's start content
+// edge, so a negative indent moves the tab-stop origin, and a leading tab on a
+// line whose indent is not a whole number of tab stops then renders short. The
+// pair drew `\t\t "x"` (9 columns at tab-size 4) with its content at column 6,
+// three columns left of its own guides and of its continuation rows.
+//
+// `ch` tracks the mono font with no measure pass. CM's selection layer reads
+// `paddingLeft + min(0, textIndent)` per line for the left edge of multi-row
+// selection rectangles; a positive hanging indent leaves that at CM's own
+// `.cm-line` padding, which is what it means. The indentation-marker guides are
 // absolutely-positioned overlays on the line block (out of text flow), so the
 // hanging rows land beside the guides instead of crossing them.
+//
+// Chromium has understood the `hanging` keyword for many majors (the pinned
+// Electron ships 150); where an engine does not, the declaration is dropped and
+// those lines wrap flat — exactly what they did before this extension existed.
 //
 // Only wired into the Files-tab wrap bundle (FILE_LINE_WRAP_EXTENSIONS) —
 // compact command editors don't wrap, so they have nothing to hang.
@@ -35,10 +46,6 @@ import {
   type ViewUpdate,
 } from "@codemirror/view";
 import { RangeSetBuilder, type Extension } from "@codemirror/state";
-
-/** CM base-theme `.cm-line` padding-left, restated because the inline
- *  `padding-left` below replaces the base shorthand. */
-const LINE_BASE_PADDING_LEFT = 6;
 
 /** A hanging indent wider than this fraction of the content is dropped
  *  entirely (Monaco-style fallback): in a narrow pane, a sliver of a text
@@ -71,13 +78,14 @@ export function hangingIndentStyle(
 ): string | null {
   const columns = leadingWhitespaceColumns(text, tabSize);
   if (columns === 0 || columns > maxColumns) return null;
-  return `padding-left: calc(${columns}ch + ${LINE_BASE_PADDING_LEFT}px); text-indent: -${columns}ch;`;
+  return `text-indent: ${columns}ch hanging;`;
 }
 
 function buildDecorations(view: EditorView): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
-  // Hanging indent is an LTR construction (padding-left + negative indent);
-  // in an RTL editor it would indent the wrong edge, so leave flat wrapping.
+  // text-indent follows the writing direction, but the guides this keeps rows
+  // inside are painted physically left-to-right, so an RTL editor has no block
+  // to stay within. Leave those flat.
   if (view.textDirection !== Direction.LTR) return builder.finish();
   const { state } = view;
   const charWidth = view.defaultCharacterWidth;
