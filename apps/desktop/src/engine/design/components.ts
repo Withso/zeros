@@ -1,12 +1,15 @@
-import { readdir, realpath } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
 import path from "node:path";
 
 import { parse, parseFragment, type DefaultTreeAdapterTypes } from "parse5";
 
+import { assertDesignComponentDefinitionIdentities } from "@zeros/design-web";
+
 import { readSafeRegularFile } from "./safe-files";
 
-const MAX_COMPONENTS = 64;
+const MAX_COMPONENTS_PER_FRAME = 1_024;
 const MAX_COMPONENT_BYTES = 512 * 1024;
+const MAX_COMPONENT_SOURCE_BYTES_PER_FRAME = 16 * 1024 * 1024;
 const MAX_EXPANSION_BYTES = 2 * 1024 * 1024;
 const MAX_EXPANSION_DEPTH = 8;
 
@@ -66,7 +69,21 @@ function stripDefinitionOids(source: string): string {
   return source.replace(/\s+data-oid\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "");
 }
 
-async function loadDefinitions(workspacePath: string): Promise<{
+function referencedComponentNames(node: ParentNode): string[] {
+  return [
+    ...new Set(
+      elements(node)
+        .filter((element) => element.tagName.startsWith("zd-"))
+        .map((element) => element.tagName.slice(3))
+        .filter((name) => /^[a-z][a-z0-9-]*$/.test(name)),
+    ),
+  ];
+}
+
+async function loadDefinitions(
+  workspacePath: string,
+  frameSource: string,
+): Promise<{
   definitions: Map<string, ComponentDefinition>;
   errors: DesignComponentExpansionError[];
 }> {
@@ -83,31 +100,49 @@ async function loadDefinitions(workspacePath: string): Promise<{
   if (!canonicalDirectory.startsWith(`${canonicalDesignRoot}${path.sep}`)) {
     return { definitions: new Map(), errors };
   }
-  const entries = (await readdir(canonicalDirectory, { withFileTypes: true }))
-    .filter(
-      (entry) =>
-        entry.isFile() &&
-        /^[a-z][a-z0-9-]*\.html$/.test(entry.name) &&
-        entry.name !== ".gitkeep",
-    )
-    .sort((left, right) => left.name.localeCompare(right.name))
-    .slice(0, MAX_COMPONENTS);
+
+  const frameDocument = parse(frameSource);
+  const pending = referencedComponentNames(frameDocument);
+  const scheduled = new Set(pending);
   const definitions = new Map<string, ComponentDefinition>();
-  for (const entry of entries) {
-    const target = path.join(canonicalDirectory, entry.name);
+  let totalSourceBytes = 0;
+  for (let index = 0; index < pending.length; index += 1) {
+    const name = pending[index]!;
+    if (index >= MAX_COMPONENTS_PER_FRAME) {
+      errors.push({
+        component: name,
+        message: `A frame may reference at most ${MAX_COMPONENTS_PER_FRAME} component definitions.`,
+      });
+      break;
+    }
+    const target = path.join(canonicalDirectory, `${name}.html`);
     const safe = await readSafeRegularFile(
       canonicalDirectory,
       target,
       MAX_COMPONENT_BYTES,
     );
     if (!safe) continue;
+    if (totalSourceBytes + safe.size > MAX_COMPONENT_SOURCE_BYTES_PER_FRAME) {
+      errors.push({
+        component: name,
+        message:
+          "Referenced component source exceeded the 16 MiB per-frame limit.",
+      });
+      break;
+    }
+    totalSourceBytes += safe.size;
     const source = safe.body.toString("utf8");
     const parseErrors: Array<{ code: string }> = [];
     const document = parse(source, {
       sourceCodeLocationInfo: true,
       onParseError: (error) => parseErrors.push(error),
     });
-    const name = entry.name.slice(0, -".html".length);
+    for (const nestedName of referencedComponentNames(document)) {
+      if (!scheduled.has(nestedName)) {
+        scheduled.add(nestedName);
+        pending.push(nestedName);
+      }
+    }
     if (parseErrors.length > 0) {
       errors.push({
         component: name,
@@ -133,6 +168,17 @@ async function loadDefinitions(workspacePath: string): Promise<{
       errors.push({
         component: name,
         message: `Component zd-${name} must not declare data-oid values; the authored instance owns selection.`,
+      });
+    }
+    try {
+      assertDesignComponentDefinitionIdentities(source);
+    } catch (error) {
+      errors.push({
+        component: name,
+        message:
+          error instanceof Error
+            ? error.message
+            : `Component zd-${name} has invalid definition-local identity.`,
       });
     }
     const externalReference = elements(document).some((element) =>
@@ -245,7 +291,7 @@ export async function expandDesignComponents(
   workspacePath: string,
   source: string,
 ): Promise<DesignComponentExpansion> {
-  const loaded = await loadDefinitions(workspacePath);
+  const loaded = await loadDefinitions(workspacePath, source);
   const definitions = loaded.definitions;
   const used = new Set<string>();
   const errors: DesignComponentExpansionError[] = [];
@@ -310,9 +356,6 @@ export async function expandDesignComponents(
   return {
     html,
     usedComponents: [...used].sort(),
-    errors: [
-      ...loaded.errors.filter((error) => used.has(error.component)),
-      ...errors,
-    ],
+    errors: [...loaded.errors, ...errors],
   };
 }

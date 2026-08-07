@@ -42,6 +42,8 @@ interface CacheEntry<T> {
   generation: number;
   /** Recency is used only to evict inactive entries when the bound is reached. */
   accessOrder: number;
+  /** Approximate retained payload weight supplied by the cache owner. */
+  weight: number;
 }
 
 interface PendingRequest<T> {
@@ -54,6 +56,14 @@ export interface AsyncCacheLoadOptions {
   force?: boolean;
   /** Skip a non-forced request while a successful snapshot is this fresh. */
   maxAgeMs?: number;
+}
+
+export interface KeyedAsyncCacheOptions<T> {
+  maxEntries?: number;
+  /** Optional aggregate payload budget. Active/subscribed entries may exceed
+   * it temporarily; inactive LRU entries are pruned as soon as ownership ends. */
+  maxWeight?: number;
+  weightOf?: (value: T) => number;
 }
 
 const INITIAL_SNAPSHOT: AsyncCacheSnapshot<never> = Object.freeze({
@@ -75,8 +85,27 @@ export class KeyedAsyncCache<T> {
   private readonly queuedRefreshes = new Map<string, Promise<T>>();
   /** A logical clock keeps LRU order deterministic inside one millisecond. */
   private accessOrder = 0;
+  private readonly maxEntries: number;
+  private readonly maxWeight: number;
+  private readonly weightOf: ((value: T) => number) | null;
 
-  public constructor(private readonly maxEntries = 64) {}
+  public constructor(options: number | KeyedAsyncCacheOptions<T> = 64) {
+    if (typeof options === "number") {
+      this.maxEntries = Number.isFinite(options)
+        ? Math.max(1, Math.round(options))
+        : 64;
+      this.maxWeight = Number.POSITIVE_INFINITY;
+      this.weightOf = null;
+      return;
+    }
+    this.maxEntries = Number.isFinite(options.maxEntries)
+      ? Math.max(1, Math.round(options.maxEntries!))
+      : 64;
+    this.maxWeight = Number.isFinite(options.maxWeight)
+      ? Math.max(0, options.maxWeight!)
+      : Number.POSITIVE_INFINITY;
+    this.weightOf = options.weightOf ?? null;
+  }
 
   /** Return the stable snapshot for `key`, creating its initial record once. */
   public getSnapshot = (key: string): AsyncCacheSnapshot<T> => {
@@ -305,6 +334,7 @@ export class KeyedAsyncCache<T> {
       stale: true,
       generation: 0,
       accessOrder: ++this.accessOrder,
+      weight: 0,
     };
     this.entries.set(key, entry);
     // The caller may be about to subscribe or start a request. Never evict the
@@ -319,6 +349,7 @@ export class KeyedAsyncCache<T> {
     snapshot: AsyncCacheSnapshot<T>,
   ): void {
     entry.snapshot = snapshot;
+    entry.weight = this.snapshotWeight(snapshot.data);
     for (const listener of entry.listeners) {
       try {
         listener();
@@ -332,7 +363,10 @@ export class KeyedAsyncCache<T> {
   }
 
   private pruneInactiveEntries(protectedKey?: string): void {
-    if (this.entries.size <= this.maxEntries) return;
+    let totalWeight = this.totalWeight();
+    if (this.entries.size <= this.maxEntries && totalWeight <= this.maxWeight) {
+      return;
+    }
     const candidates = [...this.entries.entries()]
       .filter(
         ([key, entry]) =>
@@ -341,7 +375,10 @@ export class KeyedAsyncCache<T> {
           !this.pending.has(key),
       )
       .sort((a, b) => a[1].accessOrder - b[1].accessOrder);
-    while (this.entries.size > this.maxEntries && candidates.length > 0) {
+    while (
+      (this.entries.size > this.maxEntries || totalWeight > this.maxWeight) &&
+      candidates.length > 0
+    ) {
       const [key, entry] = candidates.shift() as [string, CacheEntry<T>];
       // A newer request may settle first. Do not evict that newer snapshot just
       // because the true LRU key is temporarily request-owned; its completion
@@ -355,6 +392,25 @@ export class KeyedAsyncCache<T> {
       );
       if (olderRequestPending) break;
       this.entries.delete(key);
+      totalWeight = this.totalWeight();
     }
+  }
+
+  private snapshotWeight(value: T | undefined): number {
+    if (value === undefined || !this.weightOf) return 0;
+    try {
+      const weight = this.weightOf(value);
+      return Number.isFinite(weight) && weight >= 0
+        ? weight
+        : Number.POSITIVE_INFINITY;
+    } catch {
+      return Number.POSITIVE_INFINITY;
+    }
+  }
+
+  private totalWeight(): number {
+    let total = 0;
+    for (const entry of this.entries.values()) total += entry.weight;
+    return total;
   }
 }

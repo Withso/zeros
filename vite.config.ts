@@ -50,7 +50,7 @@ function buildElectronRendererCsp(feedbackOrigin: string): string {
     "img-src 'self' data: blob: https:",
     "font-src 'self' data:",
     `connect-src ${connectSrc}`,
-    "frame-src https: http: blob: data:",
+    "frame-src https: http: blob: data: zeros-design:",
     "worker-src 'self' blob:",
     "child-src 'self' blob:",
     "media-src 'self' blob: data:",

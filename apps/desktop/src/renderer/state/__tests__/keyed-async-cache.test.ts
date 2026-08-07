@@ -17,6 +17,21 @@ function deferred<T>(): {
 }
 
 describe("KeyedAsyncCache", () => {
+  it("evicts inactive LRU payloads when a byte-style weight budget is exceeded", async () => {
+    const cache = new KeyedAsyncCache<string>({
+      maxEntries: 10,
+      maxWeight: 5,
+      weightOf: (value) => value.length,
+    });
+
+    await cache.load("first", async () => "aaaa");
+    await cache.load("second", async () => "bbbb");
+
+    expect(cache.keys()).toEqual(["second"]);
+    expect(cache.peekSnapshot("first").data).toBeUndefined();
+    expect(cache.peekSnapshot("second").data).toBe("bbbb");
+  });
+
   it("returns stable snapshots and deduplicates concurrent reads", async () => {
     const cache = new KeyedAsyncCache<string>();
     const request = deferred<string>();

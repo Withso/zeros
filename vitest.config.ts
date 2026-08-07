@@ -41,6 +41,10 @@ export default defineConfig({
       "apps/desktop/src/renderer/platform/observability/analytics/__tests__/**/*.test.ts",
       // Shared crypto primitives + EncryptedChannel (kept for the future cloud transport).
       "packages/protocol/src/**/__tests__/**/*.test.ts",
+      // Headless Design Foundation: schemas, transactions, history, and geometry.
+      "packages/design-core/src/**/__tests__/**/*.test.ts",
+      // Pure authored HTML/CSS adapter and provenance engine.
+      "packages/design-web/src/**/__tests__/**/*.test.ts",
       // Engine transport: local + cloud transport end-to-end.
       "apps/desktop/src/engine/transport/__tests__/**/*.test.ts",
       // Bridge protocol: PTY + workspace request/response round-trips over the socket.

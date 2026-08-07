@@ -10,8 +10,8 @@ import React, { useCallback, useEffect, useRef } from "react";
 
 import type { DesignRuntimeSnapshot } from "@zeros/protocol/design-runtime";
 
-import type { DesignFrameDocumentWire } from "../../platform/git";
-import { isElectron } from "../../platform/runtime";
+import type { DesignCanvasFrameWire } from "../../platform/git";
+import { useNativeRuntime } from "../../platform/runtime";
 import {
   connectDesignFrameRuntime,
   type DesignFrameRuntimeConnection,
@@ -21,6 +21,7 @@ import {
   captureDesignRuntimeScreenshot,
   reconcileDesignRuntimeSnapshot,
 } from "./state/design-selection";
+import { useDesignFrameDocument } from "./state/use-design-frame-document";
 
 // --- TYPES ---
 
@@ -31,8 +32,8 @@ interface DesignFrameRuntimeIframeProps {
   protocolCapability: string | null;
   /** Exact folder owner used by the composer selection lookup. */
   folder: string;
-  /** Authored frame document and composed runtime-enabled srcDoc. */
-  frame: DesignFrameDocumentWire;
+  /** Lightweight frame metadata plus its exact composed generation. */
+  frame: DesignCanvasFrameWire;
   /** Hidden retained canvases must not capture or revalidate active readback. */
   active: boolean;
   /** Selected frames receive priority screenshot refreshes. */
@@ -70,6 +71,7 @@ export function DesignFrameRuntimeIframe({
   selected,
   autoCapture,
 }: DesignFrameRuntimeIframeProps) {
+  const nativeRuntime = useNativeRuntime();
   // Owns the exact WindowProxy request connection for this iframe instance.
   const connectionRef = useRef<DesignFrameRuntimeConnection | null>(null);
   // The loaded node creates a fresh private MessagePort on every navigation.
@@ -171,7 +173,7 @@ export function DesignFrameRuntimeIframe({
       });
   }, [active, autoCapture, handleSnapshot, selected]);
 
-  const protocolSource = isElectron()
+  const protocolSource = nativeRuntime.ready
     ? designProtocolFrameUrl({
         workspaceId,
         capability: protocolCapability,
@@ -179,11 +181,22 @@ export function DesignFrameRuntimeIframe({
         sourceVersion: frame.sourceVersion,
       })
     : null;
+  const fallback = useDesignFrameDocument(
+    workspaceId,
+    frame.file,
+    frame.sourceVersion,
+    active && protocolSource === null,
+  );
+  const fallbackSrcDoc =
+    fallback.data?.srcDoc ??
+    '<!doctype html><html><body style="margin:0"></body></html>';
 
   return (
     <iframe
       ref={setIframe}
-      {...(protocolSource ? { src: protocolSource } : { srcDoc: frame.srcDoc })}
+      {...(protocolSource
+        ? { src: protocolSource }
+        : { srcDoc: fallbackSrcDoc })}
       sandbox="allow-scripts"
       tabIndex={-1}
       className="bg-bg1 pointer-events-none block size-full border-0"
@@ -195,6 +208,7 @@ export function DesignFrameRuntimeIframe({
         const connection = connectDesignFrameRuntime(
           workspaceId,
           frame.file,
+          frame.sourceVersion,
           node,
           { onSnapshot: handleSnapshot },
         );

@@ -4,6 +4,19 @@
 // semantics still go through its shared workspaceOp helper, while the design
 // wire vocabulary remains cohesive and cheap for the design shell to import.
 
+import {
+  designFoundationManifestSchema,
+  designTransactionSchema,
+  type DesignFoundationManifest,
+  type DesignTransaction,
+} from "@zeros/design-core";
+import type {
+  DesignApiApplyResult,
+  DesignDocumentSummary,
+  DesignStyleProvenance,
+} from "@zeros/design-web";
+import type { DesignRuntimeMatchedDeclaration } from "@zeros/protocol/design-runtime";
+
 import type { RuntimeClient } from "./ws-client";
 import { workspaceOp } from "./workspace-bridge";
 
@@ -26,8 +39,11 @@ export interface DesignFrameTreeNodeWire {
   children: DesignFrameTreeNodeWire[];
 }
 
-export interface DesignFrameDocumentWire extends DesignFrameSummaryWire {
+export interface DesignCanvasFrameWire extends DesignFrameSummaryWire {
   sourceVersion: string;
+}
+
+export interface DesignFrameDocumentWire extends DesignCanvasFrameWire {
   source: string;
   srcDoc: string;
   tree: DesignFrameTreeNodeWire[];
@@ -91,7 +107,7 @@ export interface DesignAssetWire {
 export interface DesignWorkspaceSnapshotWire {
   /** Host-local resource authority. Null on remote/srcDoc renderers. */
   protocolCapability: string | null;
-  frames: DesignFrameDocumentWire[];
+  frames: DesignCanvasFrameWire[];
   tokens: DesignTokenWire[];
   tokenSourceVersion: string;
   assets: DesignAssetWire[];
@@ -148,6 +164,146 @@ export interface DesignRuntimeWarningWire {
   message: string;
   oid: string;
   fix: string;
+}
+
+export interface DesignFoundationOpenWire {
+  summary: DesignDocumentSummary;
+  foundation: {
+    documentId: string;
+    revision: string;
+    manifest: DesignFoundationManifest;
+  };
+}
+
+export interface DesignApiMutationReplyWire {
+  result: DesignApiApplyResult | null;
+  snapshot?: DesignWorkspaceSnapshotWire;
+}
+
+function designFoundationOpenReply(value: unknown): DesignFoundationOpenWire {
+  const reply = value as Partial<DesignFoundationOpenWire> | null;
+  const manifest = designFoundationManifestSchema.safeParse(
+    reply?.foundation?.manifest,
+  );
+  if (
+    !reply?.summary ||
+    typeof reply.summary.documentId !== "string" ||
+    typeof reply.summary.revision !== "string" ||
+    typeof reply.summary.valid !== "boolean" ||
+    !reply.summary.history ||
+    typeof reply.summary.history.canUndo !== "boolean" ||
+    typeof reply.summary.history.canRedo !== "boolean" ||
+    !reply.foundation ||
+    reply.foundation.documentId !== reply.summary.documentId ||
+    reply.foundation.revision !== reply.summary.revision ||
+    !manifest.success
+  ) {
+    throw new Error("design.foundation.open: malformed engine response");
+  }
+  return {
+    summary: reply.summary,
+    foundation: { ...reply.foundation, manifest: manifest.data },
+  };
+}
+
+function designApiMutationReply(
+  value: unknown,
+  operation: string,
+  requireSnapshot: boolean,
+): DesignApiMutationReplyWire {
+  const reply = value as Partial<DesignApiMutationReplyWire> | null;
+  if (
+    !reply ||
+    !("result" in reply) ||
+    (reply.result !== null &&
+      (typeof reply.result !== "object" ||
+        typeof reply.result.revision !== "string" ||
+        typeof reply.result.receipt?.status !== "string")) ||
+    (requireSnapshot &&
+      (!reply.snapshot ||
+        !validProtocolCapability(reply.snapshot) ||
+        !Array.isArray(reply.snapshot.frames)))
+  ) {
+    throw new Error(`${operation}: malformed engine response`);
+  }
+  return reply as DesignApiMutationReplyWire;
+}
+
+export async function bridgeDesignFoundationOpen(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  frame: string,
+): Promise<DesignFoundationOpenWire> {
+  return designFoundationOpenReply(
+    await workspaceOp(bridge, "design.foundation.open", {
+      workspaceId,
+      frame,
+    }),
+  );
+}
+
+export async function bridgeDesignProvenance(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  input: {
+    frame: string;
+    nodeId: string;
+    property: string;
+    expectedRevision?: string;
+    computedValue?: string | null;
+    matched?: DesignRuntimeMatchedDeclaration[];
+  },
+): Promise<DesignStyleProvenance> {
+  const value = (await workspaceOp(bridge, "design.provenance", {
+    workspaceId,
+    ...input,
+  })) as { provenance?: DesignStyleProvenance };
+  if (
+    !value?.provenance ||
+    typeof value.provenance.nodeId !== "string" ||
+    typeof value.provenance.property !== "string" ||
+    typeof value.provenance.confidence !== "string" ||
+    !Array.isArray(value.provenance.candidates)
+  ) {
+    throw new Error("design.provenance: malformed engine response");
+  }
+  return value.provenance;
+}
+
+export async function bridgeDesignApplyTransaction(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  frame: string,
+  transaction: DesignTransaction,
+  dryRun = false,
+): Promise<DesignApiMutationReplyWire> {
+  const parsed = designTransactionSchema.parse(transaction);
+  return designApiMutationReply(
+    await workspaceOp(bridge, "design.transaction.apply", {
+      workspaceId,
+      frame,
+      transaction: parsed,
+      dryRun,
+    }),
+    "design.transaction.apply",
+    !dryRun,
+  );
+}
+
+export async function bridgeDesignHistory(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  frame: string,
+  direction: "undo" | "redo",
+): Promise<DesignApiMutationReplyWire> {
+  return designApiMutationReply(
+    await workspaceOp(bridge, `design.history.${direction}`, {
+      workspaceId,
+      frame,
+    }),
+    `design.history.${direction}`,
+    true,
+  );
 }
 
 export async function bridgeDesignFrames(
@@ -232,6 +388,7 @@ export async function bridgeDesignUpdateToken(
   bridge: RuntimeClient,
   workspaceId: string,
   input: {
+    frame: string;
     name: string;
     theme: string | null;
     value: string;

@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   designSetSelection: vi.fn(async () => {}),
   designSetScreenshot: vi.fn(async () => {}),
   designSetRuntimeAudit: vi.fn(async () => {}),
+  designProvenance: vi.fn(),
   designFrameRuntime: vi.fn(),
 }));
 
@@ -12,6 +13,7 @@ vi.mock("../../../platform/git", () => ({
   designSetSelection: mocks.designSetSelection,
   designSetScreenshot: mocks.designSetScreenshot,
   designSetRuntimeAudit: mocks.designSetRuntimeAudit,
+  designProvenance: mocks.designProvenance,
 }));
 
 vi.mock("../../../platform/bridge/design-frame-runtime", () => ({
@@ -20,6 +22,7 @@ vi.mock("../../../platform/bridge/design-frame-runtime", () => ({
 
 import {
   hoverDesignNode,
+  inspectDesignNodeStyleProvenance,
   reconcileDesignRuntimeSnapshot,
   resetDesignSelectionWorkflowsForTests,
   selectDesignNode,
@@ -231,6 +234,56 @@ describe("design selection workflows", () => {
         nodeId: "removed",
       }),
     ).resolves.toBeUndefined();
+  });
+
+  it("correlates exact-source runtime matches through authored provenance", async () => {
+    const computedRed = "rgb(255, 0, 0)"; // check:ui ignore-line (CSSOM protocol fixture)
+    mocks.designFrameRuntime.mockReturnValue({
+      getMatchedStyles: vi.fn(async () => ({
+        sourceVersion: FRAME.sourceVersion,
+        nodeId: "heading",
+        property: "color",
+        computedValue: computedRed,
+        matched: [
+          {
+            property: "color",
+            value: "red",
+            important: false,
+            inherited: false,
+            active: true,
+          },
+        ],
+        truncated: false,
+      })),
+    });
+    mocks.designProvenance.mockResolvedValue({
+      nodeId: "heading",
+      property: "color",
+      computedValue: computedRed,
+      winner: null,
+      candidates: [],
+      origin: "computed",
+      confidence: "computed-only",
+      reason: "No authored declaration",
+    });
+
+    await inspectDesignNodeStyleProvenance({
+      workspaceId: "workspace-a",
+      frame: FRAME.file,
+      sourceVersion: FRAME.sourceVersion,
+      expectedRevision: "authored-revision",
+      nodeId: "heading",
+      property: "color",
+    });
+
+    expect(mocks.designProvenance).toHaveBeenCalledWith("workspace-a", {
+      frame: FRAME.file,
+      nodeId: "heading",
+      property: "color",
+      expectedRevision: "authored-revision",
+      computedValue: computedRed,
+      matched: [expect.objectContaining({ value: "red" })],
+    });
   });
 
   it("does not retry a rejected runtime-audit fingerprint on every snapshot", async () => {

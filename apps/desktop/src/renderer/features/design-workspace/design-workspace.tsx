@@ -17,6 +17,7 @@ import React, {
 } from "react";
 import {
   AlertTriangle,
+  Boxes,
   Code2,
   Copy,
   FileCode2,
@@ -25,18 +26,30 @@ import {
   MousePointer2,
   MoveDiagonal2,
   Plus,
+  Redo2,
+  SlidersHorizontal,
   Trash2,
   Type,
+  Undo2,
 } from "lucide-react";
 
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
+import {
+  designParameterDocumentId,
+  type DesignComponentDefinition,
+  type DesignOperation,
+  type DesignParameter,
+  type DesignParameterValue,
+  type DesignTransaction,
+} from "@zeros/design-core";
+import type { DesignStyleProvenance } from "@zeros/design-web";
 
 import { exportDesignPng } from "../../platform/design";
 import { shellOpenUrl } from "../../platform/app";
 import { CreatePrButton } from "../../shell/pr/create-pr-button";
 import { WorkbenchToggleButton } from "../../shell/workbench/toggle-button";
 import {
-  type DesignFrameDocumentWire,
+  type DesignCanvasFrameWire,
   type DesignFrameGeometryWire,
   type DesignLintReportWire,
   type DesignTokenWire,
@@ -54,6 +67,8 @@ import {
   deleteDesignFrameCached,
   duplicateDesignFrameCached,
   insertDesignAssetCached,
+  applyDesignHistoryCached,
+  applyDesignTransactionCached,
   renameDesignFrameAndRefresh,
   saveDesigns,
   setDesignNodeTextCached,
@@ -63,8 +78,11 @@ import {
 } from "./state/design-workspace-cache";
 import {
   clearDesignNodeStylePreview,
+  clearDesignNodeStylePreviewTransient,
   captureDesignRuntimeScreenshot,
+  inspectDesignNodeStyleProvenance,
   previewDesignNodeStyles,
+  previewDesignNodeStylesTransient,
   selectDesignFrame,
   selectDesignNodeAtLocation,
 } from "./state/design-selection";
@@ -75,6 +93,8 @@ import {
   validateDesignWorkspaceSelection,
 } from "./state/design-workspace-ui";
 import { useDesignWorkspaceSnapshot } from "./state/use-design-workspace";
+import { useDesignFoundation } from "./state/use-design-foundation";
+import { useDesignFrameDocument } from "./state/use-design-frame-document";
 import { clearWorkspaceSettling } from "../../state/pending-workspaces";
 import { cn } from "../../shared/ui/cn";
 import {
@@ -94,6 +114,11 @@ import {
   Input,
   Label,
   ScrollArea,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
   Tabs,
   TabsContent,
   TabsList,
@@ -157,7 +182,7 @@ interface DesignInspectorProps {
   workspaceId: string | null;
   folder: string | null;
   /** Selected frame document, or null for an empty canvas selection. */
-  frame: DesignFrameDocumentWire | null;
+  frame: DesignCanvasFrameWire | null;
   /** Browser-computed values for the exact selected frame/element key. */
   details: DesignRuntimeNodeDetails | null;
   /** Stable element identity; null means the frame itself is selected. */
@@ -167,6 +192,7 @@ interface DesignInspectorProps {
   /** Typed token rows and their exact tokens.css generation. */
   tokens: DesignTokenWire[];
   tokenSourceVersion: string | null;
+  active: boolean;
   onToggleWorkbench: () => void;
 }
 
@@ -178,6 +204,39 @@ interface InlineTextEdit {
   nodeId: string;
   sourceVersion: string;
   draft: string;
+}
+
+interface InspectorProvenanceState {
+  ownerKey: string;
+  property: string;
+  loading: boolean;
+  value: DesignStyleProvenance | null;
+  error: string | null;
+}
+
+function designParameterText(value: DesignParameterValue): string {
+  if (value === null) return "";
+  return String(value);
+}
+
+function parseDesignParameterDraft(
+  parameter: DesignParameter,
+  draft: string,
+): DesignParameterValue {
+  if (parameter.type === "number") {
+    const value = Number(draft);
+    if (!Number.isFinite(value)) throw new Error("Enter a finite number.");
+    return value;
+  }
+  if (
+    (parameter.type === "length" || parameter.type === "angle") &&
+    typeof parameter.value === "number"
+  ) {
+    const value = Number(draft);
+    if (!Number.isFinite(value)) throw new Error("Enter a finite number.");
+    return value;
+  }
+  return draft;
 }
 
 // --- CONSTANTS ---
@@ -195,9 +254,7 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "The design could not load.";
 }
 
-function frameGeometry(
-  frame: DesignFrameDocumentWire,
-): DesignFrameGeometryWire {
+function frameGeometry(frame: DesignCanvasFrameWire): DesignFrameGeometryWire {
   return {
     x: frame.x,
     y: frame.y,
@@ -252,7 +309,7 @@ function DesignFrameRenderSurface({
   workspaceId: string;
   protocolCapability: string | null;
   folder: string;
-  frame: DesignFrameDocumentWire;
+  frame: DesignCanvasFrameWire;
   active: boolean;
   selected: boolean;
   live: boolean;
@@ -388,6 +445,7 @@ export function DesignWorkspaceColumn({
         lint={snapshot.data?.lint ?? null}
         tokens={snapshot.data?.tokens ?? []}
         tokenSourceVersion={snapshot.data?.tokenSourceVersion ?? null}
+        active={surfaceActive && !collapsed}
         onToggleWorkbench={onToggleWorkbench}
       />
     </section>
@@ -416,6 +474,12 @@ function DesignCanvas({
     snapshot?.frames.find((frame) => frame.file === view.selectedFrame) ??
     snapshot?.frames[0] ??
     null;
+  const selectedFrameDocument = useDesignFrameDocument(
+    workspaceId ?? "",
+    selectedFrame?.file ?? "",
+    selectedFrame?.sourceVersion ?? "",
+    active && Boolean(workspaceId && selectedFrame && view.codeView),
+  );
   const selectedNodeDetails = useDesignRuntimeStore((state) => {
     if (!workspaceId || !selectedFrame || !view.selectedNodeId) return null;
     return (
@@ -516,7 +580,7 @@ function DesignCanvas({
     };
   }, [liveFrameFiles, liveFrameOwner]);
   const publishSelection = useCallback(
-    (frame: DesignFrameDocumentWire | null) => {
+    (frame: DesignCanvasFrameWire | null) => {
       if (!workspaceId) return;
       void selectDesignFrame(workspaceId, frame).catch((selectionError) => {
         toast.error("Couldn't update the design selection", {
@@ -559,7 +623,7 @@ function DesignCanvas({
 
   /** Fit a stable frame set from current DOM bounds without awaiting data. */
   const fitFrames = useCallback(
-    (frames: readonly DesignFrameDocumentWire[]) => {
+    (frames: readonly DesignCanvasFrameWire[]) => {
       if (!workspaceId || frames.length === 0) return;
       const bounds = viewportRef.current?.getBoundingClientRect();
       if (!bounds) return;
@@ -617,7 +681,7 @@ function DesignCanvas({
 
   /** Title edits are surgical source splices; filenames remain Git-stable. */
   const commitRename = useCallback(
-    async (frame: DesignFrameDocumentWire) => {
+    async (frame: DesignCanvasFrameWire) => {
       const title = renameDraft.trim();
       setRenamingFrame(null);
       if (!workspaceId || !title || title === frame.title) return;
@@ -661,7 +725,7 @@ function DesignCanvas({
 
   const insertAsset = useCallback(
     async (
-      frame: DesignFrameDocumentWire,
+      frame: DesignCanvasFrameWire,
       assetPath: string,
       point: { x: number; y: number },
     ) => {
@@ -687,7 +751,7 @@ function DesignCanvas({
   const startFrameGesture = useCallback(
     (
       event: React.PointerEvent<HTMLElement>,
-      frame: DesignFrameDocumentWire,
+      frame: DesignCanvasFrameWire,
       mode: FrameGestureMode,
     ) => {
       if (!workspaceId || !active || !event.isPrimary || event.button !== 0) {
@@ -767,6 +831,157 @@ function DesignCanvas({
       window.addEventListener("blur", cancel);
     },
     [active, publishSelection, view.zoom, workspaceId],
+  );
+
+  /** Resize one authored HTML element with a runtime-only RAF preview and one
+   * provenance-aware source transaction at pointer release. */
+  const startNodeResize = useCallback(
+    (
+      event: React.PointerEvent<HTMLElement>,
+      frame: DesignCanvasFrameWire,
+      details: DesignRuntimeNodeDetails,
+    ) => {
+      if (!workspaceId || !active || !event.isPrimary || event.button !== 0) {
+        return;
+      }
+      const overlay = event.currentTarget.closest<HTMLElement>(
+        "[data-design-element-overlay]",
+      );
+      if (!overlay) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const pointerOwner = event.currentTarget;
+      const pointerId = event.pointerId;
+      pointerOwner.setPointerCapture?.(pointerId);
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const start = {
+        width: Math.max(1, details.rect.width),
+        height: Math.max(1, details.rect.height),
+      };
+      let latest = start;
+      let moved = false;
+      let stopped = false;
+      let previewFrame: number | null = null;
+      let previewInFlight = false;
+      let previewQueued = false;
+      const previewInput = {
+        workspaceId,
+        frame: frame.file,
+        sourceVersion: frame.sourceVersion,
+        nodeId: details.oid,
+      };
+
+      const requestPreview = () => {
+        if (stopped || previewInFlight) {
+          previewQueued = !stopped;
+          return;
+        }
+        previewInFlight = true;
+        const requested = latest;
+        void previewDesignNodeStylesTransient({
+          ...previewInput,
+          styles: {
+            width: `${Math.round(requested.width)}px`,
+            height: `${Math.round(requested.height)}px`,
+          },
+        })
+          .catch(() => {
+            // Gesture preview is speculative. Commit reports an actionable
+            // error if the exact source generation is no longer writable.
+          })
+          .finally(() => {
+            previewInFlight = false;
+            if (!stopped && previewQueued) {
+              previewQueued = false;
+              requestPreview();
+            }
+          });
+      };
+
+      const schedulePreview = () => {
+        previewQueued = true;
+        if (previewFrame !== null) return;
+        previewFrame = window.requestAnimationFrame(() => {
+          previewFrame = null;
+          previewQueued = false;
+          requestPreview();
+        });
+      };
+
+      const move = (pointerEvent: PointerEvent) => {
+        const dx = (pointerEvent.clientX - startX) / view.zoom;
+        const dy = (pointerEvent.clientY - startY) / view.zoom;
+        if (!moved && Math.hypot(dx, dy) < 3 / view.zoom) return;
+        moved = true;
+        latest = {
+          width: Math.max(1, Math.round(start.width + dx)),
+          height: Math.max(1, Math.round(start.height + dy)),
+        };
+        overlay.style.width = `${latest.width}px`;
+        overlay.style.height = `${latest.height}px`;
+        schedulePreview();
+      };
+
+      const cleanup = () => {
+        stopped = true;
+        previewQueued = false;
+        if (previewFrame !== null) {
+          window.cancelAnimationFrame(previewFrame);
+          previewFrame = null;
+        }
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", finish);
+        window.removeEventListener("pointercancel", cancel);
+        window.removeEventListener("blur", cancel);
+        if (pointerOwner.hasPointerCapture?.(pointerId)) {
+          pointerOwner.releasePointerCapture(pointerId);
+        }
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+        gestureCancelRef.current = null;
+      };
+
+      const restorePreview = () => {
+        overlay.style.width = `${start.width}px`;
+        overlay.style.height = `${start.height}px`;
+        void clearDesignNodeStylePreviewTransient(previewInput).catch(() => {});
+      };
+
+      const finish = () => {
+        cleanup();
+        if (!moved) return;
+        void updateDesignNodeStylesCached(workspaceId, {
+          frame: frame.file,
+          nodeId: details.oid,
+          sourceVersion: frame.sourceVersion,
+          styles: {
+            width: `${Math.round(latest.width)}px`,
+            height: `${Math.round(latest.height)}px`,
+          },
+        }).catch((resizeError) => {
+          restorePreview();
+          toast.error("Couldn't resize the design element", {
+            description: errorMessage(resizeError),
+          });
+        });
+      };
+
+      const cancel = () => {
+        cleanup();
+        restorePreview();
+      };
+
+      gestureCancelRef.current?.();
+      gestureCancelRef.current = cancel;
+      document.body.style.cursor = "nwse-resize";
+      document.body.style.userSelect = "none";
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", finish);
+      window.addEventListener("pointercancel", cancel);
+      window.addEventListener("blur", cancel);
+    },
+    [active, view.zoom, workspaceId],
   );
 
   /** Space-drag pans by directly painting the world, then persists on release. */
@@ -1114,13 +1329,9 @@ function DesignCanvas({
                     live={liveFrameFiles.has(frame.file)}
                   />
                 ) : (
-                  <iframe
-                    srcDoc={frame.srcDoc}
-                    sandbox="allow-scripts"
-                    tabIndex={-1}
-                    className="bg-bg1 pointer-events-none block size-full border-0"
-                    aria-label={`${frame.title} design frame`}
-                  />
+                  <div className="bg-bg2 text-fg3 flex size-full items-center justify-center text-xs">
+                    Preparing {frame.title}…
+                  </div>
                 )}
 
                 {[hoveredElement, selectedElement].map((details, index) =>
@@ -1145,15 +1356,33 @@ function DesignCanvas({
                       }}
                     >
                       {details === selectedElement ? (
-                        <span
-                          className="border-border3 bg-bg1 text-fg1 absolute bottom-full left-0 max-w-56 truncate rounded-sm border px-1.5 py-1 text-xs"
-                          style={{
-                            transform: `scale(${1 / view.zoom})`,
-                            transformOrigin: "bottom left",
-                          }}
-                        >
-                          {details.name} · {details.tag}
-                        </span>
+                        <>
+                          <span
+                            className="border-border3 bg-bg1 text-fg1 absolute bottom-full left-0 max-w-56 truncate rounded-sm border px-1.5 py-1 text-xs"
+                            style={{
+                              transform: `scale(${1 / view.zoom})`,
+                              transformOrigin: "bottom left",
+                            }}
+                          >
+                            {details.name} · {details.tag}
+                          </span>
+                          <Button
+                            data-design-controls
+                            type="button"
+                            variant="secondary"
+                            size="icon-sm"
+                            aria-label={`Resize ${details.name}`}
+                            className="pointer-events-auto absolute right-0 bottom-0 touch-none"
+                            style={{
+                              transform: `translate(50%, 50%) scale(${1 / view.zoom})`,
+                            }}
+                            onPointerDown={(event) =>
+                              startNodeResize(event, frame, details)
+                            }
+                          >
+                            <MoveDiagonal2 />
+                          </Button>
+                        </>
                       ) : null}
                     </div>
                   ) : null,
@@ -1234,7 +1463,12 @@ function DesignCanvas({
                 language="html"
                 filename={`Zeros Design/${selectedFrame.file}`}
               >
-                <pre>{selectedFrame.source}</pre>
+                <pre>
+                  {selectedFrameDocument.data?.source ??
+                    (selectedFrameDocument.error
+                      ? "The frame source could not be loaded."
+                      : "Loading frame source…")}
+                </pre>
               </CodeBlock>
             </ScrollArea>
           </div>
@@ -1389,6 +1623,8 @@ interface InspectorEditFieldProps {
   label: string;
   value: string | number;
   disabled?: boolean;
+  hint?: string;
+  onInspect?: () => void;
   onPreview?: (value: string) => Promise<unknown> | void;
   onCancelPreview?: () => Promise<unknown> | void;
   onCommit: (value: string) => Promise<unknown>;
@@ -1398,6 +1634,8 @@ function InspectorEditField({
   label,
   value,
   disabled = false,
+  hint,
+  onInspect,
   onPreview,
   onCancelPreview,
   onCommit,
@@ -1485,9 +1723,16 @@ function InspectorEditField({
 
   return (
     <div className="flex min-w-0 flex-col gap-1">
-      <Label htmlFor={id} className="text-fg3 text-xs">
-        {label}
-      </Label>
+      <div className="flex min-w-0 items-center justify-between gap-1">
+        <Label htmlFor={id} className="text-fg3 text-xs">
+          {label}
+        </Label>
+        {hint ? (
+          <span className="text-fg3 min-w-0 truncate text-[10px]" title={hint}>
+            {hint}
+          </span>
+        ) : null}
+      </div>
       <Input
         ref={inputRef}
         id={id}
@@ -1496,6 +1741,7 @@ function InspectorEditField({
         className="h-7 min-w-0 font-mono text-xs"
         onFocus={() => {
           baselineRef.current = String(value);
+          onInspect?.();
         }}
         onChange={(event) => {
           const next = event.target.value;
@@ -1528,14 +1774,18 @@ function InspectorStyleField({
   label,
   property,
   value,
+  provenance,
+  onInspect,
 }: {
   workspaceId: string;
   folder: string;
-  frame: DesignFrameDocumentWire;
+  frame: DesignCanvasFrameWire;
   nodeId: string;
   label: string;
   property: string;
   value: string;
+  provenance: InspectorProvenanceState | null;
+  onInspect: (property: string, computedValue: string) => void;
 }) {
   const previewInput = {
     workspaceId,
@@ -1548,6 +1798,16 @@ function InspectorStyleField({
     <InspectorEditField
       label={label}
       value={value}
+      hint={
+        provenance?.property === property
+          ? provenance.loading
+            ? "Resolving…"
+            : provenance.value?.winner
+              ? `${provenance.value.winner.origin} · ${provenance.value.winner.file}`
+              : provenance.value?.origin
+          : undefined
+      }
+      onInspect={() => onInspect(property, value)}
       onPreview={(next) =>
         previewDesignNodeStyles({
           ...previewInput,
@@ -1577,6 +1837,7 @@ function DesignInspector({
   lint,
   tokens,
   tokenSourceVersion,
+  active,
   onToggleWorkbench,
 }: DesignInspectorProps) {
   const elementDetails = selectedNodeId ? details : null;
@@ -1603,7 +1864,271 @@ function DesignInspector({
   >(null);
   const [advancedProperty, setAdvancedProperty] = useState("");
   const [advancedValue, setAdvancedValue] = useState("");
+  const [foundationAction, setFoundationAction] = useState<string | null>(null);
+  const foundationActionRef = useRef(false);
+  const [provenance, setProvenance] = useState<InspectorProvenanceState | null>(
+    null,
+  );
+  const provenanceAbortRef = useRef<AbortController | null>(null);
   const deleteCancelRef = useRef<HTMLButtonElement | null>(null);
+  const foundation = useDesignFoundation(
+    workspaceId,
+    frame?.file,
+    frame?.sourceVersion,
+    active,
+  );
+  const foundationData = foundation.data;
+  const visibleParameters = useMemo(() => {
+    const documentId = foundationData?.summary.documentId;
+    const parameters = (
+      foundationData?.foundation.manifest.parameters ?? []
+    ).filter((parameter) => {
+      const owner = designParameterDocumentId(parameter);
+      return owner === null || owner === documentId;
+    });
+    const byId = new Map(
+      parameters.map((parameter) => [parameter.id, parameter]),
+    );
+    return parameters.filter((parameter) => {
+      if (!parameter.visibleWhen) return true;
+      return Object.is(
+        byId.get(parameter.visibleWhen.parameterId)?.value,
+        parameter.visibleWhen.equals,
+      );
+    });
+  }, [
+    foundationData?.foundation.manifest.parameters,
+    foundationData?.summary.documentId,
+  ]);
+  const provenanceOwnerKey = `${workspaceId ?? ""}\u0000${frame?.file ?? ""}\u0000${frame?.sourceVersion ?? ""}\u0000${foundationData?.summary.revision ?? ""}\u0000${selectedNodeId ?? ""}`;
+
+  useEffect(() => {
+    provenanceAbortRef.current?.abort();
+    provenanceAbortRef.current = null;
+    setProvenance(null);
+    return () => {
+      provenanceAbortRef.current?.abort();
+      provenanceAbortRef.current = null;
+    };
+  }, [provenanceOwnerKey]);
+
+  const inspectStyle = useCallback(
+    (property: string, computedValue: string) => {
+      if (
+        !active ||
+        !workspaceId ||
+        !frame ||
+        !selectedNodeId ||
+        !foundationData
+      ) {
+        return;
+      }
+      provenanceAbortRef.current?.abort();
+      const controller = new AbortController();
+      provenanceAbortRef.current = controller;
+      const ownerKey = provenanceOwnerKey;
+      setProvenance({
+        ownerKey,
+        property,
+        loading: true,
+        value: null,
+        error: null,
+      });
+      void inspectDesignNodeStyleProvenance({
+        workspaceId,
+        frame: frame.file,
+        sourceVersion: frame.sourceVersion,
+        expectedRevision: foundationData.summary.revision,
+        nodeId: selectedNodeId,
+        property,
+        computedValue,
+        signal: controller.signal,
+      })
+        .then((value) => {
+          if (controller.signal.aborted) return;
+          setProvenance((current) =>
+            current?.ownerKey === ownerKey && current.property === property
+              ? { ...current, loading: false, value, error: null }
+              : current,
+          );
+        })
+        .catch((provenanceError) => {
+          if (controller.signal.aborted) return;
+          setProvenance((current) =>
+            current?.ownerKey === ownerKey && current.property === property
+              ? {
+                  ...current,
+                  loading: false,
+                  value: null,
+                  error: errorMessage(provenanceError),
+                }
+              : current,
+          );
+        });
+    },
+    [
+      active,
+      foundationData,
+      frame,
+      provenanceOwnerKey,
+      selectedNodeId,
+      workspaceId,
+    ],
+  );
+
+  const applyFoundationOperations = useCallback(
+    async (
+      action: string,
+      intent: string,
+      operations: DesignOperation[],
+      coalesceKey?: string,
+    ) => {
+      if (
+        !workspaceId ||
+        !frame ||
+        !foundationData ||
+        foundationActionRef.current
+      ) {
+        return;
+      }
+      foundationActionRef.current = true;
+      setFoundationAction(action);
+      try {
+        const transactionId = `desktop:${crypto.randomUUID()}`;
+        const transaction: DesignTransaction = {
+          schemaVersion: 1,
+          transactionId,
+          documentId: foundationData.summary.documentId,
+          baseRevision: foundationData.summary.revision,
+          actor: { kind: "human", id: "desktop" },
+          intent,
+          createdAt: Date.now(),
+          ...(coalesceKey ? { coalesceKey } : {}),
+          operations,
+        };
+        await applyDesignTransactionCached(
+          workspaceId,
+          frame.file,
+          transaction,
+        );
+      } finally {
+        foundationActionRef.current = false;
+        setFoundationAction(null);
+      }
+    },
+    [foundationData, frame, workspaceId],
+  );
+
+  const setParameterValue = useCallback(
+    async (parameter: DesignParameter, value: DesignParameterValue) => {
+      await applyFoundationOperations(
+        `parameter:${parameter.id}`,
+        `Set ${parameter.name}`,
+        [
+          {
+            operationId: `parameter:${crypto.randomUUID()}`,
+            type: "parameter.set",
+            parameterId: parameter.id,
+            value,
+          },
+        ],
+        `parameter:${parameter.id}`,
+      );
+    },
+    [applyFoundationOperations],
+  );
+
+  const chooseParameterValue = useCallback(
+    async (parameter: DesignParameter, value: DesignParameterValue) => {
+      try {
+        await setParameterValue(parameter, value);
+      } catch (parameterError) {
+        toast.error(`Couldn't update ${parameter.name}`, {
+          description: errorMessage(parameterError),
+        });
+      }
+    },
+    [setParameterValue],
+  );
+
+  const insertComponent = useCallback(
+    async (component: DesignComponentDefinition) => {
+      if (!selectedNodeId) return;
+      const props = Object.fromEntries(
+        component.props
+          .filter(
+            (prop) => prop.type !== "slot" && prop.defaultValue !== undefined,
+          )
+          .map((prop) => [prop.name, prop.defaultValue!]),
+      );
+      await applyFoundationOperations(
+        `component:${component.id}`,
+        `Insert ${component.name}`,
+        [
+          {
+            operationId: `instance:${crypto.randomUUID()}`,
+            type: "instance.create",
+            componentId: component.id,
+            parentNodeId: selectedNodeId,
+            instanceNodeId: `instance-${crypto.randomUUID()}`,
+            props,
+            slotHtml: "",
+          },
+        ],
+      );
+    },
+    [applyFoundationOperations, selectedNodeId],
+  );
+
+  const runHistory = useCallback(
+    async (direction: "undo" | "redo") => {
+      if (!workspaceId || !frame || foundationActionRef.current) return;
+      foundationActionRef.current = true;
+      setFoundationAction(direction);
+      try {
+        const result = await applyDesignHistoryCached(
+          workspaceId,
+          frame.file,
+          direction,
+        );
+        if (!result.result) {
+          toast.info(`Nothing to ${direction}`);
+        }
+      } catch (historyError) {
+        toast.error(`Couldn't ${direction} the design edit`, {
+          description: errorMessage(historyError),
+        });
+      } finally {
+        foundationActionRef.current = false;
+        setFoundationAction(null);
+      }
+    },
+    [frame, workspaceId],
+  );
+
+  useEffect(() => {
+    if (!active || !frame) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.key.toLowerCase() !== "z" ||
+        (!event.metaKey && !event.ctrlKey) ||
+        event.altKey ||
+        isEditableHotkeyTarget(event.target)
+      ) {
+        return;
+      }
+      const direction = event.shiftKey ? "redo" : "undo";
+      const allowed =
+        direction === "undo"
+          ? foundationData?.summary.history.canUndo
+          : foundationData?.summary.history.canRedo;
+      if (!allowed) return;
+      event.preventDefault();
+      void runHistory(direction);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [active, foundationData?.summary.history, frame, runHistory]);
 
   const duplicateFrame = async () => {
     if (!workspaceId || !frame || frameAction) return;
@@ -1700,6 +2225,10 @@ function DesignInspector({
         label={label}
         property={property}
         value={value}
+        provenance={
+          provenance?.ownerKey === provenanceOwnerKey ? provenance : null
+        }
+        onInspect={inspectStyle}
       />
     ) : null;
 
@@ -1723,7 +2252,10 @@ function DesignInspector({
                 Prototype
               </TabsTrigger>
             </TabsList>
-            <WorkbenchToggleButton workbenchCollapsed={false} onToggle={onToggleWorkbench} />
+            <WorkbenchToggleButton
+              workbenchCollapsed={false}
+              onToggle={onToggleWorkbench}
+            />
           </div>
 
           <TabsContent
@@ -1761,6 +2293,38 @@ function DesignInspector({
                     >
                       {frameAction === "save" ? "Saving…" : "Save designs"}
                     </Button>
+                    <Tooltip label="Undo" shortcut="⌘Z">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        aria-label="Undo design edit"
+                        aria-keyshortcuts="Meta+Z Control+Z"
+                        disabled={
+                          !foundationData?.summary.history.canUndo ||
+                          foundationAction !== null
+                        }
+                        onClick={() => void runHistory("undo")}
+                      >
+                        <Undo2 />
+                      </Button>
+                    </Tooltip>
+                    <Tooltip label="Redo" shortcut="⇧⌘Z">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        aria-label="Redo design edit"
+                        aria-keyshortcuts="Shift+Meta+Z Shift+Control+Z"
+                        disabled={
+                          !foundationData?.summary.history.canRedo ||
+                          foundationAction !== null
+                        }
+                        onClick={() => void runHistory("redo")}
+                      >
+                        <Redo2 />
+                      </Button>
+                    </Tooltip>
                     <Tooltip label="Duplicate frame">
                       <Button
                         type="button"
@@ -1845,6 +2409,43 @@ function DesignInspector({
                         ))}
                       </AlertDescription>
                     </Alert>
+                  </section>
+                ) : null}
+
+                {elementDetails &&
+                provenance?.ownerKey === provenanceOwnerKey ? (
+                  <section
+                    className="border-border1 flex flex-col gap-1 border-b p-3"
+                    aria-live="polite"
+                  >
+                    <span className="text-fg2 text-xs font-medium">
+                      Authored CSS · {provenance.property}
+                    </span>
+                    {provenance.loading ? (
+                      <span className="text-fg3 text-xs">
+                        Correlating browser styles with authored source…
+                      </span>
+                    ) : provenance.value ? (
+                      <>
+                        <span className="text-fg1 text-xs">
+                          {provenance.value.winner
+                            ? `${provenance.value.winner.origin} · ${provenance.value.winner.file}:${provenance.value.winner.span.startLine}`
+                            : `${provenance.value.origin} · ${provenance.value.confidence}`}
+                        </span>
+                        {provenance.value.winner?.selector ? (
+                          <code className="text-fg3 truncate text-xs">
+                            {provenance.value.winner.selector}
+                          </code>
+                        ) : null}
+                        <span className="text-fg3 text-xs">
+                          {provenance.value.reason}
+                        </span>
+                      </>
+                    ) : provenance.error ? (
+                      <span className="text-red-primary text-xs">
+                        {provenance.error}
+                      </span>
+                    ) : null}
                   </section>
                 ) : null}
 
@@ -2066,6 +2667,260 @@ function DesignInspector({
                 ) : null}
 
                 <section className="border-border1 flex flex-col gap-3 border-b p-3">
+                  <div className="flex items-start gap-2">
+                    <SlidersHorizontal className="text-fg3 mt-0.5 size-3.5 shrink-0" />
+                    <div className="flex min-w-0 flex-1 flex-col gap-1">
+                      <span className="text-fg2 text-xs font-medium">
+                        Tweaks
+                      </span>
+                      <span className="text-fg3 text-xs">
+                        Typed parameters update every binding in this document
+                        in one transaction.
+                      </span>
+                    </div>
+                    {foundationData ? (
+                      <span className="text-fg3 shrink-0 text-[10px]">
+                        {foundationData.foundation.manifest.variants.length}{" "}
+                        variants
+                      </span>
+                    ) : null}
+                  </div>
+                  {foundation.loading && !foundationData ? (
+                    <span className="text-fg3 text-xs">
+                      Loading authored parameters…
+                    </span>
+                  ) : foundation.error && !foundationData ? (
+                    <span className="text-red-primary text-xs">
+                      {foundation.error.message}
+                    </span>
+                  ) : visibleParameters.length > 0 ? (
+                    <div className="flex max-h-80 flex-col gap-3 overflow-auto">
+                      {visibleParameters.map((parameter) => {
+                        const constraints = [
+                          parameter.min !== undefined
+                            ? `min ${parameter.min}`
+                            : null,
+                          parameter.max !== undefined
+                            ? `max ${parameter.max}`
+                            : null,
+                          parameter.step !== undefined
+                            ? `step ${parameter.step}`
+                            : null,
+                          parameter.unit ?? null,
+                        ]
+                          .filter(Boolean)
+                          .join(" · ");
+                        return (
+                          <div
+                            key={parameter.id}
+                            className="border-border1 flex min-w-0 flex-col gap-2 border-b pb-3 last:border-b-0 last:pb-0"
+                          >
+                            <div className="flex min-w-0 items-start justify-between gap-2">
+                              <div className="flex min-w-0 flex-col">
+                                <span className="text-fg1 truncate text-xs font-medium">
+                                  {parameter.name}
+                                </span>
+                                <span
+                                  className="text-fg3 truncate text-[10px]"
+                                  title={parameter.description}
+                                >
+                                  {parameter.type} · {parameter.bindings.length}{" "}
+                                  {parameter.bindings.length === 1
+                                    ? "binding"
+                                    : "bindings"}
+                                </span>
+                              </div>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                disabled={
+                                  Object.is(
+                                    parameter.value,
+                                    parameter.defaultValue,
+                                  ) || foundationAction !== null
+                                }
+                                onClick={() =>
+                                  void chooseParameterValue(
+                                    parameter,
+                                    parameter.defaultValue,
+                                  )
+                                }
+                              >
+                                Reset
+                              </Button>
+                            </div>
+                            {parameter.type === "boolean" ? (
+                              <Button
+                                type="button"
+                                variant={
+                                  parameter.value === true
+                                    ? "secondary-on"
+                                    : "secondary"
+                                }
+                                size="sm"
+                                className="w-full"
+                                aria-pressed={parameter.value === true}
+                                disabled={foundationAction !== null}
+                                onClick={() =>
+                                  void chooseParameterValue(
+                                    parameter,
+                                    parameter.value !== true,
+                                  )
+                                }
+                              >
+                                {parameter.value === true
+                                  ? "Enabled"
+                                  : "Disabled"}
+                              </Button>
+                            ) : parameter.type === "enum" &&
+                              parameter.options ? (
+                              <Select
+                                value={String(
+                                  parameter.options.findIndex((option) =>
+                                    Object.is(option.value, parameter.value),
+                                  ),
+                                )}
+                                disabled={foundationAction !== null}
+                                onValueChange={(index) => {
+                                  const option =
+                                    parameter.options?.[Number(index)];
+                                  if (option) {
+                                    void chooseParameterValue(
+                                      parameter,
+                                      option.value,
+                                    );
+                                  }
+                                }}
+                              >
+                                <SelectTrigger
+                                  size="sm"
+                                  className="h-7 w-full text-xs"
+                                >
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {parameter.options.map((option, index) => (
+                                    <SelectItem
+                                      key={`${parameter.id}:${index}`}
+                                      value={String(index)}
+                                    >
+                                      {option.label}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            ) : (
+                              <InspectorEditField
+                                label={constraints || parameter.type}
+                                value={designParameterText(parameter.value)}
+                                disabled={foundationAction !== null}
+                                onCommit={async (draft) => {
+                                  await setParameterValue(
+                                    parameter,
+                                    parseDesignParameterDraft(parameter, draft),
+                                  );
+                                }}
+                              />
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : foundationData ? (
+                    <span className="text-fg3 text-xs">
+                      No parameters are exposed in .zeros-foundation.json yet.
+                    </span>
+                  ) : (
+                    <span className="text-fg3 text-xs">
+                      Select a frame to inspect its design parameters.
+                    </span>
+                  )}
+                  {foundation.error && foundationData ? (
+                    <span className="text-red-primary text-xs">
+                      Refresh failed: {foundation.error.message}
+                    </span>
+                  ) : foundation.refreshing ? (
+                    <span className="text-fg3 text-[10px]">
+                      Reconciling external source changes…
+                    </span>
+                  ) : null}
+                </section>
+
+                <section className="border-border1 flex flex-col gap-3 border-b p-3">
+                  <div className="flex items-start gap-2">
+                    <Boxes className="text-fg3 mt-0.5 size-3.5 shrink-0" />
+                    <div className="flex min-w-0 flex-col gap-1">
+                      <span className="text-fg2 text-xs font-medium">
+                        Components
+                      </span>
+                      <span className="text-fg3 text-xs">
+                        Instances keep component identity while rendering native
+                        HTML and CSS.
+                      </span>
+                    </div>
+                  </div>
+                  {foundationData?.foundation.manifest.components.length ? (
+                    <div className="flex max-h-72 flex-col gap-2 overflow-auto">
+                      {foundationData.foundation.manifest.components.map(
+                        (component) => (
+                          <div
+                            key={component.id}
+                            className="border-border1 flex min-w-0 items-center gap-2 border-b pb-2 last:border-b-0 last:pb-0"
+                          >
+                            <div className="flex min-w-0 flex-1 flex-col">
+                              <span className="text-fg1 truncate text-xs font-medium">
+                                {component.name}
+                              </span>
+                              <span className="text-fg3 truncate text-[10px]">
+                                {component.props.length} props ·{" "}
+                                {component.slots.length} slots ·{" "}
+                                {component.file}
+                              </span>
+                            </div>
+                            <Button
+                              type="button"
+                              size="sm"
+                              disabled={
+                                !selectedNodeId || foundationAction !== null
+                              }
+                              onClick={() => {
+                                void insertComponent(component).catch(
+                                  (componentError) => {
+                                    toast.error(
+                                      `Couldn't insert ${component.name}`,
+                                      {
+                                        description:
+                                          errorMessage(componentError),
+                                      },
+                                    );
+                                  },
+                                );
+                              }}
+                            >
+                              {foundationAction === `component:${component.id}`
+                                ? "Inserting…"
+                                : "Insert"}
+                            </Button>
+                          </div>
+                        ),
+                      )}
+                    </div>
+                  ) : foundationData ? (
+                    <span className="text-fg3 text-xs">
+                      Add a components/*.html definition to expose reusable
+                      components here.
+                    </span>
+                  ) : null}
+                  {foundationData?.foundation.manifest.components.length &&
+                  !selectedNodeId ? (
+                    <span className="text-fg3 text-xs">
+                      Select an element to use as the instance parent.
+                    </span>
+                  ) : null}
+                </section>
+
+                <section className="border-border1 flex flex-col gap-3 border-b p-3">
                   <div className="flex flex-col gap-1">
                     <span className="text-fg2 text-xs font-medium">Themes</span>
                     <span className="text-fg3 text-xs">
@@ -2073,7 +2928,10 @@ function DesignInspector({
                       checks.
                     </span>
                   </div>
-                  {tokens.length > 0 && workspaceId && tokenSourceVersion ? (
+                  {tokens.length > 0 &&
+                  workspaceId &&
+                  frame &&
+                  tokenSourceVersion ? (
                     <div className="flex max-h-72 flex-col gap-3 overflow-auto">
                       {tokens.map((token) => (
                         <div
@@ -2093,6 +2951,7 @@ function DesignInspector({
                             value={token.value}
                             onCommit={async (value) => {
                               await updateDesignTokenCached(workspaceId, {
+                                frame: frame.file,
                                 name: token.name,
                                 theme: null,
                                 value,
@@ -2107,6 +2966,7 @@ function DesignInspector({
                               value={token.themeValues[theme] ?? token.value}
                               onCommit={async (value) => {
                                 await updateDesignTokenCached(workspaceId, {
+                                  frame: frame.file,
                                   name: token.name,
                                   theme,
                                   value,

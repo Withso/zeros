@@ -23,6 +23,7 @@ import {
   listDesignAssets,
   listDesignFrames,
   readDesignElementOffsetMap,
+  readDesignFrame,
   readDesignFrameRenderIdentity,
   readDesignWorkspaceSnapshot,
   readDesignTokens,
@@ -60,6 +61,21 @@ describe("design document", () => {
         `${DESIGN_DIRECTORY_NAME}/.zeros-canvas.json`,
       ]),
     );
+    const canvasSeed = JSON.parse(
+      await readFile(
+        path.join(root, DESIGN_DIRECTORY_NAME, ".zeros-canvas.json"),
+        "utf8",
+      ),
+    ) as Record<string, unknown>;
+    expect(canvasSeed).toMatchObject({
+      version: 2,
+      foundation: {
+        schemaVersion: 1,
+        parameters: [],
+        variants: [],
+        components: [],
+      },
+    });
 
     const created = await createDesignFrame(root, { title: "Landing page" });
     expect(created.file).toBe("landing-page.html");
@@ -99,6 +115,38 @@ describe("design document", () => {
       width: 1280,
       height: 720,
       z: 3,
+    });
+  });
+
+  it("migrates version-1 canvas metadata forward without losing geometry", async () => {
+    await initializeDesignDocument(root);
+    const directory = path.join(root, DESIGN_DIRECTORY_NAME);
+    await writeFile(
+      path.join(directory, "legacy.html"),
+      '<!doctype html><html><head><meta name="zeros-frame" content="title=Legacy"></head><body><main data-oid="legacy">Legacy</main></body></html>',
+      "utf8",
+    );
+    await writeFile(
+      path.join(directory, ".zeros-canvas.json"),
+      `${JSON.stringify({
+        version: 1,
+        frames: {
+          "legacy.html": { x: 40, y: 50, w: 800, h: 600, z: 2 },
+        },
+      })}\n`,
+      "utf8",
+    );
+
+    await updateDesignFrameGeometry(root, "legacy.html", { x: 75 });
+    const migrated = JSON.parse(
+      await readFile(path.join(directory, ".zeros-canvas.json"), "utf8"),
+    ) as Record<string, unknown>;
+    expect(migrated).toMatchObject({
+      version: 2,
+      frames: {
+        "legacy.html": { x: 75, y: 50, w: 800, h: 600, z: 2 },
+      },
+      foundation: { schemaVersion: 1 },
     });
   });
 
@@ -492,19 +540,22 @@ describe("design document", () => {
       file: created.file,
       title: "Pricing $& plans",
     });
-    expect(snapshot.frames[0]?.source).toContain("<!doctype html>");
-    expect(snapshot.frames[0]?.srcDoc).toContain("Content-Security-Policy");
-    expect(snapshot.frames[0]?.srcDoc).toContain("data-zeros-design-runtime");
-    expect(snapshot.frames[0]?.srcDoc).toContain("script-src 'sha256-");
-    expect(snapshot.frames[0]?.srcDoc).not.toContain("nonce=");
-    expect(snapshot.frames[0]?.srcDoc).toContain(
+    expect(snapshot.frames[0]).not.toHaveProperty("source");
+    expect(snapshot.frames[0]).not.toHaveProperty("srcDoc");
+    expect(snapshot.frames[0]).not.toHaveProperty("tree");
+    const hydrated = await readDesignFrame(root, created.file);
+    expect(hydrated.source).toContain("<!doctype html>");
+    expect(hydrated.sourceVersion).toBe(snapshot.frames[0]?.sourceVersion);
+    expect(hydrated.srcDoc).toContain("Content-Security-Policy");
+    expect(hydrated.srcDoc).toContain("data-zeros-design-runtime");
+    expect(hydrated.srcDoc).toContain("script-src 'sha256-");
+    expect(hydrated.srcDoc).not.toContain("nonce=");
+    expect(hydrated.srcDoc).toContain(
       `window.__zerosDesignSourceVersion="${snapshot.frames[0]!.sourceVersion}"`,
     );
-    expect(snapshot.frames[0]?.srcDoc).toContain(
-      'oid.replace(/["\\\\]/g, "\\\\$&")',
-    );
-    expect(snapshot.frames[0]?.srcDoc).not.toContain("\\</body>");
-    expect(snapshot.frames[0]?.srcDoc).not.toContain("allow-same-origin");
+    expect(hydrated.srcDoc).toContain('oid.replace(/["\\\\]/g, "\\\\$&")');
+    expect(hydrated.srcDoc).not.toContain("\\</body>");
+    expect(hydrated.srcDoc).not.toContain("allow-same-origin");
     expect(snapshot.tokens.some((token) => token.name === "--accent")).toBe(
       true,
     );
@@ -515,7 +566,8 @@ describe("design document", () => {
     await initializeDesignDocument(root);
     await createDesignFrame(root, { title: "Restricted frame" });
 
-    const srcDoc = (await readDesignWorkspaceSnapshot(root)).frames[0]!.srcDoc;
+    const summary = (await readDesignWorkspaceSnapshot(root)).frames[0]!;
+    const srcDoc = (await readDesignFrame(root, summary.file)).srcDoc;
 
     expect(srcDoc).toContain("form-action 'none'");
     expect(srcDoc).toContain("frame-src 'none'");
@@ -605,7 +657,9 @@ describe("design document", () => {
     );
 
     const snapshot = await readDesignWorkspaceSnapshot(root);
-    expect(snapshot.frames[0]?.srcDoc).not.toContain("--outside-secret");
+    expect(
+      (await readDesignFrame(root, snapshot.frames[0]!.file)).srcDoc,
+    ).not.toContain("--outside-secret");
 
     await rm(path.join(directory, "tokens.css"));
     await symlink(outsideStyles, path.join(directory, "tokens.css"));
@@ -663,10 +717,23 @@ describe("design document", () => {
     ).toBe(canvasBefore);
   });
 
+  it("fails closed without replacing malformed canvas metadata", async () => {
+    await initializeDesignDocument(root);
+    const target = path.join(root, DESIGN_DIRECTORY_NAME, ".zeros-canvas.json");
+    const malformed = '{"version":2,"frames":';
+    await writeFile(target, malformed, "utf8");
+
+    await expect(readDesignWorkspaceSnapshot(root)).rejects.toThrow(
+      "invalid JSON",
+    );
+    expect(await readFile(target, "utf8")).toBe(malformed);
+  });
+
   it("surgically updates inline styles and rejects stale or injected declarations", async () => {
     await initializeDesignDocument(root);
     const created = await createDesignFrame(root, { title: "Inspector" });
-    const before = (await readDesignWorkspaceSnapshot(root)).frames[0]!;
+    const beforeSummary = (await readDesignWorkspaceSnapshot(root)).frames[0]!;
+    const before = await readDesignFrame(root, beforeSummary.file);
     const sourceBefore = before.source;
     const main = before.tree[0];
     expect(main?.tag).toBe("main");
@@ -729,11 +796,14 @@ describe("design document", () => {
         "<script>legacy()</script></body>",
       ),
     );
-    const before = (
+    const beforeSummary = (
       await readDesignWorkspaceSnapshot(root, {
         writeBack: false,
       })
     ).frames[0]!;
+    const before = await readDesignFrame(root, beforeSummary.file, 4, {
+      writeBack: false,
+    });
     const main = before.tree[0]!;
 
     const mutation = await updateDesignNodeStyles(root, {
@@ -763,11 +833,14 @@ describe("design document", () => {
         '<a href="https://example.invalid">Legacy link</a></body>',
       ),
     );
-    const before = (
+    const beforeSummary = (
       await readDesignWorkspaceSnapshot(root, {
         writeBack: false,
       })
     ).frames[0]!;
+    const before = await readDesignFrame(root, beforeSummary.file, 4, {
+      writeBack: false,
+    });
     const main = before.tree[0]!;
 
     const mutation = await updateDesignNodeStyles(root, {
@@ -794,18 +867,39 @@ describe("design document", () => {
     );
 
     const rendered = (
-      await readDesignWorkspaceSnapshot(root, {
-        writeBack: false,
-      })
-    ).frames[0]!.srcDoc;
+      await readDesignFrame(root, "encoded.html", 4, { writeBack: false })
+    ).srcDoc;
 
     expect(rendered).not.toMatch(/javascript\s*:/i);
     expect(rendered).not.toMatch(/\sonclick\s*=/i);
     expect(rendered).not.toMatch(/\sxlink:href\s*=/i);
     expect(rendered).not.toMatch(/\ssrcdoc\s*=/i);
+    expect(rendered).not.toMatch(/<iframe\b/i);
     expect(rendered).not.toContain("window.pwned");
     expect(rendered).not.toMatch(/http-equiv=["']?refresh/i);
     expect(rendered.match(/Content-Security-Policy/g)).toHaveLength(1);
+  });
+
+  it("inlines stylesheets independent of attribute order and escapes raw-text closure", async () => {
+    await initializeDesignDocument(root);
+    const fixtureColor = "rgb(1, 2, 3)"; // check:ui ignore-line (authored CSS fixture)
+    await writeFile(
+      path.join(root, DESIGN_DIRECTORY_NAME, "ordered.css"),
+      `.ordered { color: ${fixtureColor}; } /* </style><script>bad()</script> */`,
+      "utf8",
+    );
+    await writeFile(
+      path.join(root, DESIGN_DIRECTORY_NAME, "ordered.html"),
+      '<!doctype html><html><head><link href="./ordered.css" media="all" rel="preload stylesheet"></head><body><main class="ordered" data-oid="root">Styled</main></body></html>',
+      "utf8",
+    );
+
+    const rendered = (
+      await readDesignFrame(root, "ordered.html", 4, { writeBack: false })
+    ).srcDoc;
+    expect(rendered).toContain(`color: ${fixtureColor}`);
+    expect(rendered).toContain("<\\/style><script>bad()");
+    expect(rendered).not.toContain("</style><script>bad()");
   });
 
   it("removes every non-raster data URL while retaining bounded image payloads", async () => {
@@ -821,8 +915,8 @@ describe("design document", () => {
     );
 
     const rendered = (
-      await readDesignWorkspaceSnapshot(root, { writeBack: false })
-    ).frames[0]!.srcDoc;
+      await readDesignFrame(root, "data-urls.html", 4, { writeBack: false })
+    ).srcDoc;
 
     expect(rendered).not.toContain("data:text/plain");
     expect(rendered).not.toMatch(/\bsrc=["']data:image\/svg\+xml/i);
@@ -861,7 +955,8 @@ describe("design document", () => {
   it("edits direct text and appends healed safe HTML without reserializing the frame", async () => {
     await initializeDesignDocument(root);
     const created = await createDesignFrame(root, { title: "Checkout" });
-    const before = (await readDesignWorkspaceSnapshot(root)).frames[0]!;
+    const beforeSummary = (await readDesignWorkspaceSnapshot(root)).frames[0]!;
+    const before = await readDesignFrame(root, beforeSummary.file);
     const main = before.tree[0];
     const heading = main?.children[0];
 
@@ -961,5 +1056,27 @@ describe("design document", () => {
     await writeFile(assetFile, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01]));
     const afterAssetEdit = (await readDesignWorkspaceSnapshot(root)).frames[0]!;
     expect(afterAssetEdit.sourceVersion).not.toBe(versionBeforeAssetEdit);
+  });
+
+  it("bounds repeated asset expansion before it can exhaust renderer memory", async () => {
+    await initializeDesignDocument(root);
+    const directory = path.join(root, DESIGN_DIRECTORY_NAME);
+    await writeFile(
+      path.join(directory, "assets", "large.png"),
+      Buffer.alloc(1024 * 1024, 1),
+    );
+    const images = Array.from(
+      { length: 13 },
+      (_, index) => `<img data-oid="image-${index}" src="./assets/large.png">`,
+    ).join("");
+    await writeFile(
+      path.join(directory, "bounded.html"),
+      `<!doctype html><html><head><meta name="zeros-frame" content="width=800,height=600,title=Bounded"></head><body><main data-oid="main">${images}</main></body></html>`,
+      "utf8",
+    );
+
+    await expect(
+      readDesignFrame(root, "bounded.html", 4, { writeBack: false }),
+    ).rejects.toThrow(/per-frame (?:inline budget|render limit)/);
   });
 });

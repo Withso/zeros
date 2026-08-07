@@ -66,12 +66,14 @@ export default defineConfig({
   // and dependency-free, so force-bundle it (esbuild transpiles ESM→CJS inline)
   // rather than do the dynamic-import() dance the octokit packages use.
   //
-  // @zeros/protocol is the workspace TS package whose exports map points at RAW
-  // .ts sources (./src/*.ts). Left external, a runtime `require("@zeros/protocol/…")`
-  // in the CJS bundle makes Electron's embedded Node parse TypeScript →
+  // @zeros workspace libraries export RAW .ts sources. Left external, a
+  // runtime require in the CJS bundle makes Electron's embedded Node parse TypeScript →
   // `SyntaxError: Unexpected token 'export'` at app boot (a system Node ≥22.18
-  // masks this via type stripping — Electron's does not). Force-bundle it.
-  noExternal: ["@decimalturn/toml-patch", /^@zeros\/protocol/],
+  // masks this via type stripping — Electron's does not). Force-bundle them.
+  noExternal: [
+    "@decimalturn/toml-patch",
+    /^@zeros\/(?:design-core|design-web|protocol)/,
+  ],
   // Banner runs BEFORE any import resolution — lets us log and
   // catch uncaught exceptions even when one of the imported native
   // modules (node-pty) throws on load in packaged builds.

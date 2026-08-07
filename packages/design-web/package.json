@@ -1,0 +1,30 @@
+{
+  "name": "@zeros/design-web",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Pure HTML/CSS source adapter, provenance engine, and transaction adapter for Zeros Design.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./api": "./src/api.ts",
+    "./adapter": "./src/adapter.ts",
+    "./css": "./src/css.ts",
+    "./html": "./src/html.ts",
+    "./model": "./src/model.ts",
+    "./playwright": "./src/playwright.ts",
+    "./revision": "./src/revision.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.2.0",
+    "@zeros/design-core": "workspace:*",
+    "parse5": "^7.3.0",
+    "postcss": "^8.5.25"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

@@ -1309,15 +1309,45 @@ describe("WorkspaceService", () => {
         frames: Array<{
           file: string;
           sourceVersion: string;
-          tree: DesignTreeNode[];
         }>;
       };
     };
     expect(before.snapshot.protocolCapability).toBe(protocolCapability);
     const frame = before.snapshot.frames[0]!;
-    expect(frame.tree.map((node) => node.tag)).toEqual(["main"]);
-    const main = frame.tree.find((node) => node.tag === "main");
+    expect(frame).not.toHaveProperty("tree");
+    const hydrated = (await svc.handle("design.frame", {
+      workspaceId: workspace.workspaceId,
+      frame: frame.file,
+    })) as { frame: { sourceVersion: string; tree: DesignTreeNode[] } };
+    expect(hydrated.frame.sourceVersion).toBe(frame.sourceVersion);
+    expect(hydrated.frame.tree.map((node) => node.tag)).toEqual(["main"]);
+    const main = hydrated.frame.tree.find((node) => node.tag === "main");
     expect(main?.oid).toMatch(/^f-.+-main$/);
+
+    const canvasReply = (await svc.handle("design.canvas.update", {
+      workspaceId: workspace.workspaceId,
+      frame: frame.file,
+      x: 48,
+      y: 64,
+      w: 1_280,
+      h: 800,
+      z: 0,
+    })) as {
+      geometry: { x: number; y: number; w: number; h: number; z: number };
+    };
+    expect(canvasReply.geometry).toEqual({
+      x: 48,
+      y: 64,
+      w: 1_280,
+      h: 800,
+      z: 0,
+    });
+    const afterCanvasFoundation = (await svc.handle("design.foundation.open", {
+      workspaceId: workspace.workspaceId,
+      frame: frame.file,
+    })) as { summary: { history: { canUndo: boolean; undoDepth: number } } };
+    expect(afterCanvasFoundation.summary.history.canUndo).toBe(true);
+    expect(afterCanvasFoundation.summary.history.undoDepth).toBe(1);
 
     await expect(
       svc.handle("git.checkoutBranch", {
@@ -1380,7 +1410,40 @@ describe("WorkspaceService", () => {
       tokenReply.snapshot.tokens.find((token) => token.name === "--accent")
         ?.value,
     ).toBe("royalblue");
-    const refreshedFrame = tokenReply.snapshot.frames.find(
+    const afterTokenFoundation = (await svc.handle("design.foundation.open", {
+      workspaceId: workspace.workspaceId,
+      frame: frame.file,
+    })) as { summary: { history: { undoDepth: number } } };
+    expect(afterTokenFoundation.summary.history.undoDepth).toBe(2);
+    const tokenFrame = tokenReply.snapshot.frames.find(
+      (candidate) => candidate.file === frame.file,
+    )!;
+    const assetDirectory = path.join(workspace.path, "Zeros Design", "assets");
+    fs.mkdirSync(assetDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(assetDirectory, "mark.png"),
+      Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    );
+    const assetReply = (await svc.handle("design.asset.insert", {
+      workspaceId: workspace.workspaceId,
+      frame: frame.file,
+      sourceVersion: tokenFrame.sourceVersion,
+      assetPath: "assets/mark.png",
+      x: 24,
+      y: 32,
+    })) as {
+      mutation: { frame: { source: string; sourceVersion: string } };
+      snapshot: { frames: Array<{ file: string; sourceVersion: string }> };
+    };
+    expect(assetReply.mutation.frame.source).toContain(
+      'src="./assets/mark.png"',
+    );
+    const afterAssetFoundation = (await svc.handle("design.foundation.open", {
+      workspaceId: workspace.workspaceId,
+      frame: frame.file,
+    })) as { summary: { history: { undoDepth: number } } };
+    expect(afterAssetFoundation.summary.history.undoDepth).toBe(3);
+    const refreshedFrame = assetReply.snapshot.frames.find(
       (candidate) => candidate.file === frame.file,
     )!;
 
@@ -1391,13 +1454,101 @@ describe("WorkspaceService", () => {
       sourceVersion: refreshedFrame.sourceVersion,
       styles: { padding: "36px" },
     })) as {
-      mutation: { frame: { sourceVersion: string } };
-      snapshot: { frames: Array<{ source: string; sourceVersion: string }> };
+      mutation: { frame: { source: string; sourceVersion: string } };
+      snapshot: { frames: Array<{ sourceVersion: string }> };
     };
-    expect(response.snapshot.frames[0]?.source).toContain("padding:36px;");
+    expect(response.mutation.frame.source).toContain("padding:36px;");
     expect(response.snapshot.frames[0]?.sourceVersion).toBe(
       response.mutation.frame.sourceVersion,
     );
+
+    const foundation = (await svc.handle("design.foundation.open", {
+      workspaceId: workspace.workspaceId,
+      frame: frame.file,
+    })) as {
+      summary: { documentId: string; revision: string; valid: boolean };
+      foundation: { manifest: { schemaVersion: number } };
+    };
+    expect(foundation.summary).toMatchObject({
+      documentId: `frame:${frame.file}`,
+      valid: true,
+    });
+    expect(foundation.foundation.manifest.schemaVersion).toBe(1);
+    const projection = (await svc.handle("design.projection", {
+      workspaceId: workspace.workspaceId,
+      frame: frame.file,
+      expectedRevision: foundation.summary.revision,
+      limit: 2,
+    })) as {
+      projection: { nodes: Array<{ id: string }>; nextCursor: string | null };
+    };
+    expect(projection.projection.nodes[0]?.id).toBe(main!.oid);
+
+    const transactionReply = (await svc.handle("design.transaction.apply", {
+      workspaceId: workspace.workspaceId,
+      frame: frame.file,
+      transaction: {
+        schemaVersion: 1,
+        transactionId: "service-headless-style",
+        documentId: foundation.summary.documentId,
+        baseRevision: foundation.summary.revision,
+        actor: { kind: "human", id: "desktop-test" },
+        intent: "Adjust the frame gap",
+        createdAt: Date.now(),
+        operations: [
+          {
+            operationId: "set-gap",
+            type: "node.set-styles",
+            nodeId: main!.oid,
+            styles: { gap: "20px" },
+            scope: "auto",
+            responsiveContext: "base",
+            stateContext: "default",
+          },
+        ],
+      },
+    })) as {
+      result: { revision: string; receipt: { status: string } };
+      snapshot: { frames: Array<Record<string, unknown>> };
+    };
+    expect(transactionReply.result.receipt.status).toBe("applied");
+    expect(transactionReply.snapshot.frames[0]).not.toHaveProperty("source");
+    const authored = (await svc.handle("design.source", {
+      workspaceId: workspace.workspaceId,
+      frame: frame.file,
+      file: frame.file,
+      expectedRevision: transactionReply.result.revision,
+    })) as { source: { source: string } };
+    expect(authored.source.source).toContain("gap:20px");
+    const provenance = (await svc.handle("design.provenance", {
+      workspaceId: workspace.workspaceId,
+      frame: frame.file,
+      nodeId: main!.oid,
+      property: "gap",
+      expectedRevision: transactionReply.result.revision,
+      computedValue: "20px",
+      matched: [
+        {
+          property: "gap",
+          value: "20px",
+          inherited: false,
+          active: true,
+        },
+      ],
+    })) as { provenance: { origin: string; winner: { file: string } | null } };
+    expect(provenance.provenance).toMatchObject({
+      origin: "inline",
+      winner: { file: frame.file },
+    });
+    await expect(
+      svc.handle("design.history.undo", {
+        workspaceId: workspace.workspaceId,
+        frame: frame.file,
+      }),
+    ).resolves.toMatchObject({
+      result: { receipt: { status: "applied" } },
+      snapshot: { frames: [expect.any(Object)] },
+    });
 
     const selectedAt = Date.now();
     await svc.handle("design.selection.set", {

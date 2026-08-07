@@ -24,16 +24,6 @@ function snapshot(
       nodeCount: 1,
       modifiedAt: 10,
       sourceVersion: `${index}`.padStart(24, "0"),
-      source: `<!doctype html><body data-oid="${file}"></body>`,
-      srcDoc: `<!doctype html><body data-oid="${file}"></body>`,
-      tree: [
-        {
-          tag: "html",
-          oid: file,
-          text: null,
-          children: [],
-        },
-      ],
     })),
     tokens: [
       {
