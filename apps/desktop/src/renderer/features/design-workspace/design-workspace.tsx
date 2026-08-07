@@ -75,6 +75,7 @@ import {
   updateDesignFrameGeometryCached,
   updateDesignNodeStylesCached,
   updateDesignTokenCached,
+  warmDesignFrameDocument,
 } from "./state/design-workspace-cache";
 import {
   clearDesignNodeStylePreview,
@@ -478,8 +479,16 @@ function DesignCanvas({
     workspaceId ?? "",
     selectedFrame?.file ?? "",
     selectedFrame?.sourceVersion ?? "",
-    active && Boolean(workspaceId && selectedFrame && view.codeView),
+    active && Boolean(workspaceId && selectedFrame),
   );
+  const warmSelectedFrameDocument = useCallback(() => {
+    if (!active || !workspaceId || !selectedFrame) return;
+    warmDesignFrameDocument(
+      workspaceId,
+      selectedFrame.file,
+      selectedFrame.sourceVersion,
+    );
+  }, [active, selectedFrame, workspaceId]);
   const selectedNodeDetails = useDesignRuntimeStore((state) => {
     if (!workspaceId || !selectedFrame || !view.selectedNodeId) return null;
     return (
@@ -1453,7 +1462,9 @@ function DesignCanvas({
           })}
         </div>
 
-        {view.codeView && selectedFrame ? (
+        {view.codeView &&
+        selectedFrame &&
+        (selectedFrameDocument.data || selectedFrameDocument.error) ? (
           <div
             data-design-controls
             className="bg-bg1 absolute inset-0 overflow-hidden p-4"
@@ -1465,9 +1476,7 @@ function DesignCanvas({
               >
                 <pre>
                   {selectedFrameDocument.data?.source ??
-                    (selectedFrameDocument.error
-                      ? "The frame source could not be loaded."
-                      : "Loading frame source…")}
+                    "The frame source could not be loaded."}
                 </pre>
               </CodeBlock>
             </ScrollArea>
@@ -1571,6 +1580,8 @@ function DesignCanvas({
               disabled={!workspaceId || !selectedFrame}
               aria-label="Toggle frame source"
               aria-pressed={view.codeView}
+              onPointerEnter={warmSelectedFrameDocument}
+              onFocus={warmSelectedFrameDocument}
               onClick={() => {
                 if (workspaceId) setCodeView(workspaceId, !view.codeView);
               }}

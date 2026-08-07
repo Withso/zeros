@@ -611,6 +611,42 @@ describe("design document", () => {
     expect(snapshot.lint.checkedFiles).toEqual([created.file]);
   });
 
+  it("keeps healthy frames available when sibling frames exceed render budgets", async () => {
+    await initializeDesignDocument(root);
+    const healthy = await createDesignFrame(root, { title: "Healthy" });
+    const oversized = await createDesignFrame(root, { title: "Oversized" });
+    const stylesheetHeavy = await createDesignFrame(root, {
+      title: "Stylesheet heavy",
+    });
+    const directory = path.join(root, DESIGN_DIRECTORY_NAME);
+    await writeFile(
+      path.join(directory, oversized.file),
+      `<!doctype html><html><head><meta name="zeros-frame" content="title=Oversized"></head><body><main data-oid="oversized">${"x".repeat(2 * 1024 * 1024)}</main></body></html>`,
+      "utf8",
+    );
+    await writeFile(
+      path.join(directory, stylesheetHeavy.file),
+      `<!doctype html><html><head><meta name="zeros-frame" content="title=Stylesheet heavy">${'<link rel="stylesheet" href="./tokens.css">'.repeat(129)}</head><body><main data-oid="stylesheet-heavy">Heavy</main></body></html>`,
+      "utf8",
+    );
+
+    const snapshot = await readDesignWorkspaceSnapshot(root);
+
+    expect(snapshot.frames.map((frame) => frame.file)).toEqual([healthy.file]);
+    expect(
+      snapshot.lint.violations.filter(
+        (violation) => violation.ruleId === "render-budget",
+      ),
+    ).toEqual([
+      expect.objectContaining({ file: oversized.file, severity: "error" }),
+      expect.objectContaining({
+        file: stylesheetHeavy.file,
+        severity: "error",
+      }),
+    ]);
+    expect(snapshot.tokens.length).toBeGreaterThan(0);
+  });
+
   it("blocks forms, nested frames, and workers in inline frame documents", async () => {
     await initializeDesignDocument(root);
     await createDesignFrame(root, { title: "Restricted frame" });

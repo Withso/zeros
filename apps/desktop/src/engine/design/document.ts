@@ -134,6 +134,7 @@ export interface DesignLintViolation {
     | "no-external-url"
     | "component-undefined"
     | "component-invalid"
+    | "render-budget"
     | "contrast"
     | "overflow"
     | "spacing-scale";
@@ -1121,7 +1122,13 @@ async function listDesignFramesUnlocked(
   let canvasChanged = false;
   const summaries: DesignFrameSummary[] = [];
   for (const file of files) {
-    const { source } = await readAndHealFrame(workspacePath, file, writeBack);
+    let source: string;
+    try {
+      ({ source } = await readAndHealFrame(workspacePath, file, writeBack));
+    } catch (error) {
+      if (error instanceof DesignRenderBudgetError) continue;
+      throw error;
+    }
     const document = parse(source, { sourceCodeLocationInfo: true });
     const meta = readFrameMeta(document, file);
     let geometry = canvas.frames[file];
@@ -3261,7 +3268,13 @@ export async function readDesignFrame(
   const file = assertFrameFile(frame);
   const summaries = await listDesignFrames(workspacePath, options);
   const summary = summaries.find((candidate) => candidate.file === file);
-  if (!summary) throw new Error(`Design frame not found: ${file}`);
+  if (!summary) {
+    // Aggregate frame discovery intentionally omits an over-budget sibling.
+    // An exact frame read still reports that frame's actionable budget error.
+    await designFrameTarget(workspacePath, file);
+    await readBoundedDesignFrameSource(workspacePath, file);
+    throw new Error(`Design frame not found: ${file}`);
+  }
   return readDesignFrameFromSummary(workspacePath, summary, depth);
 }
 
@@ -3345,13 +3358,25 @@ export async function readDesignWorkspaceSnapshot(
       includeRuntimeAudits: false,
     });
     const summaries = await listDesignFramesUnlocked(workspacePath, writeBack);
-    const [frames, tokensDocument, assets] = await Promise.all([
+    const renderBudgetViolations: DesignLintViolation[] = [];
+    const [renderedFrames, tokensDocument, assets] = await Promise.all([
       mapDesignFramesBounded(summaries, (summary) =>
-        readDesignCanvasFrameFromSummary(workspacePath, summary),
+        readDesignCanvasFrameFromSummary(workspacePath, summary).catch(
+          (error: unknown) => {
+            if (!(error instanceof DesignRenderBudgetError)) throw error;
+            renderBudgetViolations.push(
+              designRenderBudgetViolation(summary.file, error),
+            );
+            return null;
+          },
+        ),
       ),
       readDesignTokensDocument(workspacePath),
       listDesignAssets(workspacePath),
     ]);
+    const frames = renderedFrames.filter(
+      (frame): frame is DesignCanvasFrame => frame !== null,
+    );
     const runtimeViolations = frames.flatMap((frame) =>
       getDesignRuntimeAudit(workspacePath, frame.file, frame.sourceVersion),
     );
@@ -3364,6 +3389,7 @@ export async function readDesignWorkspaceSnapshot(
         ...lint,
         violations: sortDesignLintViolations([
           ...lint.violations,
+          ...renderBudgetViolations,
           ...runtimeViolations,
         ]),
       },
@@ -3508,6 +3534,16 @@ function violationAt(
     ...(extras.oid ? { oid: extras.oid } : {}),
     ...(extras.fix ? { fix: extras.fix } : {}),
   };
+}
+
+function designRenderBudgetViolation(
+  file: string,
+  error: DesignRenderBudgetError,
+): DesignLintViolation {
+  return violationAt(file, "render-budget", error.message, null, {
+    severity: "error",
+    fix: "Reduce the frame HTML, linked stylesheets, or embedded local assets and lint again.",
+  });
 }
 
 async function cssSourceFiles(workspacePath: string): Promise<string[]> {
@@ -3829,16 +3865,30 @@ async function lintDesignDocumentUnlocked(
   const violations: DesignLintViolation[] = [];
   let healedOids = 0;
   for (const file of files) {
-    const result = await lintFrame(
-      workspacePath,
-      file,
-      { healOids: options.healOids !== false },
-      knownTokens,
-    );
+    let result: Awaited<ReturnType<typeof lintFrame>>;
+    try {
+      result = await lintFrame(
+        workspacePath,
+        file,
+        { healOids: options.healOids !== false },
+        knownTokens,
+      );
+    } catch (error) {
+      if (!(error instanceof DesignRenderBudgetError)) throw error;
+      violations.push(designRenderBudgetViolation(file, error));
+      continue;
+    }
     violations.push(...result.violations);
     healedOids += result.healedOids;
     if (options.includeRuntimeAudits !== false) {
-      const identity = await readDesignFrameRenderIdentity(workspacePath, file);
+      let identity: DesignFrameRenderIdentity;
+      try {
+        identity = await readDesignFrameRenderIdentity(workspacePath, file);
+      } catch (error) {
+        if (!(error instanceof DesignRenderBudgetError)) throw error;
+        violations.push(designRenderBudgetViolation(file, error));
+        continue;
+      }
       violations.push(
         ...getDesignRuntimeAudit(workspacePath, file, identity.sourceVersion),
       );

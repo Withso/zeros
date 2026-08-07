@@ -121,6 +121,21 @@ export async function fetchDesignFrameDocument(
   return document;
 }
 
+/** Warm one exact rendered source on selection or explicit pointer/focus
+ * intent. Concurrent iframe/code-view consumers share the same request. */
+export function warmDesignFrameDocument(
+  workspaceId: string,
+  frame: string,
+  sourceVersion: string,
+): void {
+  const key = designFrameDocumentKey(workspaceId, frame, sourceVersion);
+  void designFrameDocumentCache
+    .load(key, () => fetchDesignFrameDocument(key), {
+      maxAgeMs: DESIGN_FRAME_DOCUMENT_MAX_AGE_MS,
+    })
+    .catch(() => {});
+}
+
 export function designFoundationKey(
   workspaceId: string,
   frame: string,
@@ -144,13 +159,6 @@ export async function fetchDesignFoundation(
     throw new Error("Invalid design foundation cache key.");
   }
   return designFoundationOpen(workspaceId, frame);
-}
-
-function invalidateDesignFoundation(workspaceId: string, frame: string): void {
-  const prefix = `${workspaceId}${FOUNDATION_KEY_SEPARATOR}${frame}${FOUNDATION_KEY_SEPARATOR}`;
-  for (const key of designFoundationCache.keys()) {
-    if (key.startsWith(prefix)) designFoundationCache.invalidate(key);
-  }
 }
 
 function invalidateWorkspaceDesignFoundations(workspaceId: string): void {
@@ -443,7 +451,7 @@ export async function updateDesignTokenCached(
 ): Promise<DesignWorkspaceSnapshotWire> {
   const result = await designUpdateToken(workspaceId, input);
   const snapshot = publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
-  invalidateDesignFoundation(workspaceId, input.frame);
+  invalidateWorkspaceDesignFoundations(workspaceId);
   return snapshot;
 }
 
@@ -456,7 +464,7 @@ export async function updateDesignFrameGeometryCached(
 ): Promise<DesignFrameGeometryWire> {
   const result = await designUpdateCanvas(workspaceId, frameFile, geometry);
   publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
-  invalidateDesignFoundation(workspaceId, frameFile);
+  invalidateWorkspaceDesignFoundations(workspaceId);
   return result.geometry;
 }
 
@@ -469,7 +477,7 @@ export async function applyDesignTransactionCached(
   if (result.snapshot) {
     publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
   }
-  invalidateDesignFoundation(workspaceId, frame);
+  invalidateWorkspaceDesignFoundations(workspaceId);
   return result;
 }
 
@@ -482,7 +490,7 @@ export async function applyDesignHistoryCached(
   if (result.snapshot) {
     publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
   }
-  invalidateDesignFoundation(workspaceId, frame);
+  invalidateWorkspaceDesignFoundations(workspaceId);
   return result;
 }
 
