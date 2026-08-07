@@ -233,6 +233,7 @@ function hasDurableMessages(messages: AgentMessage[]): boolean {
 export const BLANK: AgentSessionState = {
   agentId: null,
   agentName: null,
+  durableSessionId: null,
   sessionId: null,
   cwd: null,
   initialize: null,

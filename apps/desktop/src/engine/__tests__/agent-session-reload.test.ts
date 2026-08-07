@@ -14,6 +14,7 @@ interface ActivePromptRecord {
   agentId: string;
   chatId: string | null;
   turnId: string;
+  promptId: string;
   startedAt: number;
   lastActivityAt: number;
 }
@@ -60,6 +61,7 @@ function activePrompt(
     agentId: "codex",
     chatId: "chat-1",
     turnId: "user-1",
+    promptId: "prompt-reload-1",
     startedAt: 1_234,
     lastActivityAt: Date.now(),
     ...overrides,
@@ -110,6 +112,7 @@ describe("agent session continuity across a local renderer reload", () => {
           type: "AGENT_SESSION_LOADED",
           promptActive: true,
           activeTurnStartedAt: 1_234,
+          promptId: "prompt-reload-1",
         }),
         expect.objectContaining({
           type: "AGENT_SESSION_UPDATE",
@@ -123,6 +126,43 @@ describe("agent session continuity across a local renderer reload", () => {
         expect.objectContaining({
           type: "AGENT_PERMISSION_REQUEST",
           permissionId: "permission-1",
+        }),
+      ]),
+    );
+  });
+
+  it("carries the renderer promptId through re-adoption", async () => {
+    const engine = new ZerosEngine({ root: process.cwd(), port: 29_889 });
+    const state = internals(engine);
+    const { client: owner } = testClient("owner");
+    const { client: reloaded, messages } = testClient("reloaded");
+    state.router.register(owner);
+    state.router.register(reloaded);
+    state.activePromptContexts.set(
+      "session-1",
+      activePrompt({ promptId: "prompt-durable-42" }),
+    );
+    state.sessionLoadResponses.set("session-1", {});
+
+    await state.handleMessage(
+      {
+        type: "AGENT_LOAD_SESSION",
+        id: "load-2",
+        source: "browser",
+        timestamp: 1,
+        agentId: "codex",
+        sessionId: "session-1",
+        chatId: "chat-1",
+      },
+      reloaded,
+    );
+
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "AGENT_SESSION_LOADED",
+          promptActive: true,
+          promptId: "prompt-durable-42",
         }),
       ]),
     );

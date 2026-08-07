@@ -475,6 +475,11 @@ export interface AgentPromptMessage extends BaseMessage {
    *  ignores its own message-changed nudges, so otherwise the ids never converge
    *  in a live session). Older clients omit it → the engine mints an id as before. */
   userMessageId?: string;
+  /** Renderer-authored correlation id for privacy-safe prompt telemetry. The
+   *  engine keeps it on the active-turn record so a reloaded renderer can
+   *  re-attach permission/finish events to the same prompt without replaying
+   *  prompt text or durable chat ids. Older clients omit it. */
+  promptId?: string;
 }
 
 export interface AgentCancelMessage extends BaseMessage {
@@ -648,6 +653,9 @@ export interface AgentSessionLoadedMessage extends BaseMessage {
   promptActive?: boolean;
   /** Original engine prompt start, used to preserve the live elapsed clock. */
   activeTurnStartedAt?: number;
+  /** Correlation id for the still-running prompt, when `promptActive` is true.
+   * Optional for compatibility with older engines/clients. */
+  promptId?: string;
 }
 
 export interface AgentAgentsListMessage extends BaseMessage {

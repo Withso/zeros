@@ -193,10 +193,21 @@ interface ActivePromptContext {
   agentId: string;
   chatId: string | null;
   turnId: string;
+  /** Privacy-safe renderer correlation id for prompt telemetry across reload. */
+  promptId: string;
   startedAt: number;
   /** Last sign of life from the adapter (stream chunk, gate opened/settled) or
    *  from the user answering a gate. Read only by the staleness bound below. */
   lastActivityAt: number;
+}
+
+/** Accept only catalog-shaped correlation ids. Reject paths, emails, spaces,
+ * and free text so a remote client cannot park PII on the active-turn record. */
+function durablePromptId(raw: unknown, fallback: string): string {
+  if (typeof raw !== "string") return fallback;
+  const trimmed = raw.trim();
+  if (!/^[a-z0-9][a-z0-9.:+-]{0,79}$/i.test(trimmed)) return fallback;
+  return trimmed;
 }
 
 const VERSION = "0.0.5";
@@ -2366,6 +2377,7 @@ export class ZerosEngine {
             agentId: msg.agentId,
             chatId: this.sessionChat.get(msg.sessionId) ?? null,
             turnId: msg.userMessageId ?? `turn-${msg.id}`,
+            promptId: durablePromptId(msg.promptId, `prompt-${msg.id}`),
             startedAt: Date.now(),
             lastActivityAt: Date.now(),
           };
@@ -2810,6 +2822,7 @@ export class ZerosEngine {
                 response: this.sessionLoadResponses.get(msg.sessionId) ?? {},
                 promptActive: true,
                 activeTurnStartedAt: activePrompt.startedAt,
+                promptId: activePrompt.promptId,
               }),
             );
             this.emitTurnState(activePrompt, "running");

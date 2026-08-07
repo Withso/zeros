@@ -109,6 +109,13 @@ const CANCELLED_PERMISSION_RESPONSE = {
   outcome: { outcome: "cancelled" },
 } as RequestPermissionResponse;
 
+/** The explicit grant used by Codex's "Approve for me" mode. The adapter
+ * resolves native approval RPCs itself in that mode, so the renderer never
+ * shows a card whose only intended action is approval. */
+const AUTO_APPROVE_PERMISSION_RESPONSE = {
+  outcome: { outcome: "selected", optionId: "accept" },
+} as RequestPermissionResponse;
+
 const CODEX_MODES: SessionMode[] = [
   {
     id: "ask",
@@ -118,7 +125,8 @@ const CODEX_MODES: SessionMode[] = [
   {
     id: "auto-edit",
     name: "Auto-Edit",
-    description: "Auto-approve workspace edits; ask for risky ops.",
+    description:
+      "Approve requested operations automatically while keeping the workspace sandbox.",
   },
   {
     id: "full-access",
@@ -133,6 +141,33 @@ const CODEX_MODES: SessionMode[] = [
 ] as never;
 
 export type CodexModeId = "ask" | "auto-edit" | "full-access" | "read-only";
+
+/** Resolve the renderer's persisted permission posture (plus legacy/native
+ * spellings) before thread/start. AGENT_SET_MODE remains the live update path,
+ * but seeding from env closes the create/resume window in which the first turn
+ * previously ran in `ask` regardless of what the user selected. Unknown values
+ * fail safe to Ask First. */
+export function codexModeFromEnv(
+  env: Record<string, string> | undefined,
+): CodexModeId {
+  switch (env?.ZEROS_PERMISSION_MODE?.trim().toLowerCase()) {
+    case "plan":
+    case "plan-only":
+    case "read-only":
+      return "read-only";
+    case "auto":
+    case "auto-edit":
+      return "auto-edit";
+    case "danger":
+    case "full":
+    case "full-access":
+      return "full-access";
+    case "tool-approval":
+    case "ask":
+    default:
+      return "ask";
+  }
+}
 
 /** Per-pending-approval state. Keyed by Zeros permissionId so
  *  respondToPermission can route the user's decision back to the
@@ -599,6 +634,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       const stopReason = session.cancelRequested
         ? "cancelled"
         : mapStopReason(result.status, session.translator.stopReason);
+      const effectiveModel = model ?? session.threadModel ?? undefined;
       // stopReason rides INSIDE the response too: the gateway returns only
       // the inner response (it discards the outer field), so omitting it here
       // left the engine persisting a NULL stop reason for every Codex turn —
@@ -607,6 +643,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         stopReason,
         response: {
           stopReason,
+          ...(effectiveModel ? { effectiveModel } : {}),
           ...(turnUsage ? { usage: turnUsage } : {}),
         } as PromptResponse,
       };
@@ -1110,10 +1147,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
     const zerosSessionId = opts.zerosSessionId ?? randomUUID();
     await ensureSessionDir(zerosSessionId);
 
-    // Always boot in "ask". The UI's mode pill is the canonical setter;
-    // env-driven overrides would race the pill's persisted value, so
-    // they're rejected.
-    const initialMode: CodexModeId = "ask";
+    // Seed thread/start from the same persisted posture the renderer will
+    // reconcile over AGENT_SET_MODE. This makes the first turn truthful even
+    // when it is dispatched immediately after session creation.
+    const initialMode = codexModeFromEnv(opts.env);
 
     // Boot the runtime first; we pass an onApprovalRequest closure that
     // will mutate `session.pendingApprovals` once the session object
@@ -1565,6 +1602,58 @@ export class CodexAppServerAdapter implements AgentAdapter {
     session: CodexSession,
     request: CodexApprovalRequest,
   ): void {
+    if (session.modeId === "auto-edit") {
+      let approved = false;
+      try {
+        const response = mapResponseToCodexDecision(
+          {
+            runtime: session.runtime,
+            method: request.method,
+            params: request.params,
+          },
+          AUTO_APPROVE_PERMISSION_RESPONSE,
+        );
+        session.runtime.respondToPermission(request.permissionId, response);
+        approved = true;
+      } catch {
+        // Fall through to the normal renderer gate if the native response
+        // shape changes. A failed auto-approval must never silently run or
+        // strand the turn.
+        this.ctx.emit.onAgentStderr(
+          this.agentId,
+          "[zeros] Codex auto-approval failed; requesting user approval",
+        );
+      }
+      if (approved) {
+        // Forward a metadata-only settled gate so the renderer can correlate
+        // the auto decision with the active prompt in logs/PostHog. The marker
+        // makes this observational: it never renders a card or responds twice.
+        try {
+          this.ctx.emit.onPermissionRequest(
+            this.agentId,
+            request.permissionId,
+            {
+              ...mapApprovalToCanonical(session, request),
+              autoResolution: "allow_once",
+            },
+          );
+          this.ctx.emit.onPermissionSettled?.(
+            this.agentId,
+            request.permissionId,
+            session.zerosSessionId,
+          );
+        } catch {
+          this.ctx.emit.onAgentStderr(
+            this.agentId,
+            "[zeros] Codex auto-approval telemetry emit failed",
+          );
+        }
+        console.info(
+          `[codex] auto-approved ${request.method} in mode=auto-edit`,
+        );
+        return;
+      }
+    }
     session.pendingApprovals.set(request.permissionId, {
       runtime: session.runtime,
       method: request.method,

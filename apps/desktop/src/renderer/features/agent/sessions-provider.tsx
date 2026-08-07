@@ -109,6 +109,12 @@ import {
   trackAgentSessionEnded,
   trackAgentFailed,
   trackAiGeneration,
+  trackAgentPromptStarted,
+  trackAgentPromptFinished,
+  adoptAgentPromptCorrelation,
+  peekAgentPromptId,
+  trackAgentPermissionDecided,
+  trackAgentQuestionAnswered,
 } from "../../platform/observability/analytics/agent-events";
 import {
   messageSnapshotsEqual,
@@ -167,6 +173,13 @@ function chatComposerEnv(
 ): Record<string, string> | undefined {
   const chat = useWorkspaceStore.getState().chats.find((c) => c.id === chatId);
   return chat ? envForChat(chat, initialize) : undefined;
+}
+
+function newPromptDiagnosticId(): string {
+  const randomUuid = globalThis.crypto?.randomUUID?.();
+  return randomUuid
+    ? `prompt-${randomUuid}`
+    : `prompt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 /** Resolve the engine `workspaceId` to thread into a spawn/resume RPC for a
@@ -516,6 +529,17 @@ export function AgentSessionsProvider({
         const chatId = sid ? store.sessionToChatId[sid] : undefined;
         const policies = chatId ? (store.chatPolicies[chatId] ?? []) : [];
         const tool = p.request.toolCall;
+        if (p.request.autoResolution) {
+          trackAgentPermissionDecided({
+            chatId: chatId ?? "",
+            agentId: p.agentId,
+            decision: `auto_${p.request.autoResolution}`,
+            toolKind: tool.kind,
+          });
+          // This is an adapter-emitted observation of a gate it already
+          // resolved. Never render a card or send a duplicate response.
+          continue;
+        }
         const match = chatId
           ? findMatchingPolicy(policies, tool.kind ?? undefined, tool.title)
           : null;
@@ -529,10 +553,12 @@ export function AgentSessionsProvider({
               ? ["allow_always", "allow_once"]
               : ["reject_always", "reject_once"];
           let optionId: string | null = null;
+          let optionKind: string | null = null;
           for (const k of wantedKinds) {
             const opt = p.request.options.find((o) => o.kind === k);
             if (opt) {
               optionId = opt.optionId;
+              optionKind = opt.kind;
               break;
             }
           }
@@ -543,6 +569,12 @@ export function AgentSessionsProvider({
               response: {
                 outcome: { outcome: "selected", optionId },
               },
+            });
+            trackAgentPermissionDecided({
+              chatId: chatId ?? "",
+              agentId: p.agentId,
+              decision: `policy_${optionKind ?? "unknown"}`,
+              toolKind: tool.kind,
             });
             if (chatId) promptActivityRef.current.get(chatId)?.();
             // Skip the regular set-pendingPermission path so the UI
@@ -615,6 +647,42 @@ export function AgentSessionsProvider({
             // it, and drainNextQueued alone would leave it stuck whenever the
             // settle left the chat unhealthy.
             releaseQueueRef.current(chatId);
+            // Adopted turns (renderer reloaded mid-prompt) have no sendPrompt
+            // finally. Emit finish from the engine's durable turn_state push;
+            // idempotent with the local-send path when both observe the same id.
+            const turnUpdate = n.update as {
+              sessionUpdate: "turn_state";
+              state: "running" | "completed" | "failed" | "cancelled";
+              startedAt: number;
+              stopReason?: string | null;
+            };
+            // Prefer sendPrompt's finally when this renderer still owns the
+            // in-flight RPC — it has usage/effectiveModel/retry metadata.
+            // Adopted turns have no local send lock, so finish from turn_state.
+            const promptId = peekAgentPromptId(chatId);
+            if (promptId && !sendingChatsRef.current.has(chatId)) {
+              const slot = s.sessions[chatId];
+              trackAgentPromptFinished({
+                promptId,
+                chatId,
+                agentId: slot?.agentId ?? "unknown",
+                outcome:
+                  turnUpdate.state === "cancelled"
+                    ? "cancelled"
+                    : turnUpdate.state === "failed"
+                      ? "failed"
+                      : "completed",
+                durationMs: Math.max(
+                  0,
+                  Date.now() -
+                    (turnUpdate.startedAt ||
+                      slot?.activeTurnStartedAt ||
+                      Date.now()),
+                ),
+                retryCount: 0,
+                stopReason: turnUpdate.stopReason,
+              });
+            }
             if (
               takePrebindDirty(
                 prebindDirtySessionsRef.current,
@@ -1262,7 +1330,12 @@ export function AgentSessionsProvider({
               continue;
             }
             getStore().patchSession(chatId, {
-              status: "ready",
+              // Keep the session non-sendable until its persisted permission
+              // mode has been applied. Publishing ready first allowed an
+              // immediate Enter/auto-send to race AGENT_SET_MODE and run with
+              // the adapter default instead of the user's selection.
+              status: "warming",
+              durableSessionId: resp.session.sessionId,
               sessionId: resp.session.sessionId,
               session: resp.session,
               initialize: resp.initialize,
@@ -1280,11 +1353,10 @@ export function AgentSessionsProvider({
             });
             prebindDirtySessionsRef.current.delete(chatId);
             getStore().setWarmAgent(agentId, true);
-            trackAgentSessionStarted(agentId, chatId);
             // Honour a permission posture picked in the empty composer
             // (before modes existed) now that the session's modes are known.
             if (bridge) {
-              void reconcilePermissionModeAtBind(bridge, getStore, {
+              await reconcilePermissionModeAtBind(bridge, getStore, {
                 chatId,
                 agentId,
                 sessionId: resp.session.sessionId,
@@ -1292,6 +1364,8 @@ export function AgentSessionsProvider({
                 currentModeId: resp.session.modes?.currentModeId ?? null,
               });
             }
+            getStore().patchSession(chatId, { status: "ready" });
+            trackAgentSessionStarted(agentId, chatId);
             // A queue parked while this chat was down — a held queued-edit, or a
             // send stranded because recovery landed via ensureSession rather than
             // a turn-completion — drains now that the session is ready again;
@@ -1458,6 +1532,26 @@ export function AgentSessionsProvider({
         return;
       }
       sendingChatsRef.current.add(chatId);
+      let promptDiagnostics: {
+        promptId: string;
+        agentId: string;
+        startedAt: number;
+      } | null = null;
+      let promptRetryCount = 0;
+      let promptInterruptedAfterOutput:
+        | (Pick<AgentFailure, "kind" | "stage"> &
+            Partial<Pick<AgentFailure, "message">>)
+        | null = null;
+      let promptResult: {
+        stopReason?: string;
+        effectiveModel?: string | null;
+        inputTokens?: number;
+        outputTokens?: number;
+        cacheReadTokens?: number;
+        cacheWriteTokens?: number;
+        reasoningTokens?: number;
+        costUsd?: number;
+      } | null = null;
       try {
         let current = getStore().sessions[chatId];
         if (!current || !current.agentId) return;
@@ -1631,6 +1725,10 @@ export function AgentSessionsProvider({
         // reads it to decide whether a resend would duplicate the turn.
         turnProducedOutputRef.current.set(chatId, false);
 
+        // Minted before runPrompt so the AGENT_PROMPT wire payload and local
+        // telemetry share one durable correlation id across rebuild/retry.
+        const promptId = newPromptDiagnosticId();
+
         // The prompt argument is parameterized
         // so rebuildAndRetry can prepend a <previous_conversation> replay
         // preamble to it on session-expired fallbacks. The prior closure baked
@@ -1704,6 +1802,8 @@ export function AgentSessionsProvider({
                   // Persist the user msg under the renderer's id so turn ids align
                   // (the footer + reset key on it) without a transcript re-window.
                   userMessageId: userMessage.id,
+                  // Durable correlation for PostHog/logs across renderer reload.
+                  promptId,
                   ...(bubble ? { bubble } : {}),
                 },
                 { timeoutMs: 0, signal: controller.signal },
@@ -1740,7 +1840,9 @@ export function AgentSessionsProvider({
               bridge,
               current.cwd ?? null,
             );
+            const composerEnv = chatComposerEnv(chatId, current.initialize);
             const mergedEnv =
+              composerEnv ||
               Object.keys(presetEnv).length > 0 ||
               Object.keys(mcpSecretEnv).length > 0 ||
               Object.keys(envVaultEnv).length > 0
@@ -1748,6 +1850,7 @@ export function AgentSessionsProvider({
                     ...mcpSecretEnv,
                     ...envVaultEnv,
                     ...presetEnv,
+                    ...(composerEnv ?? {}),
                   }
                 : undefined;
             const resumeWorkspaceId = await resolveSpawnWorkspaceId(
@@ -1770,6 +1873,7 @@ export function AgentSessionsProvider({
               60_000,
             );
             if (loaded.type !== "AGENT_SESSION_LOADED") return null;
+            promptRetryCount += 1;
             return await runPrompt(sessionId, prompt);
           } catch {
             return null;
@@ -1838,6 +1942,7 @@ export function AgentSessionsProvider({
             await ensureSessionRef.current?.(chatId, current.agentId!, {
               force: true,
               cwd: current.cwd ?? undefined,
+              env: chatComposerEnv(chatId, current.initialize),
             });
           } catch {
             /* surfaces via store below */
@@ -1885,10 +1990,65 @@ export function AgentSessionsProvider({
             lastStopReason: null,
             messages: messagesAfterRebuild,
           });
+          promptRetryCount += 1;
           return runPrompt(rebuilt.sessionId, promptToSend);
         };
 
         const turnStartedAt = Date.now();
+        const telemetryChat = useWorkspaceStore
+          .getState()
+          .chats.find((chat) => chat.id === chatId);
+        promptDiagnostics = {
+          promptId,
+          agentId: current.agentId!,
+          startedAt: turnStartedAt,
+        };
+        const imageAttachmentCount = Math.max(
+          bubbleAttachments?.filter((attachment) => attachment.kind === "image")
+            .length ?? 0,
+          attachments?.filter((block) => block.type === "image").length ?? 0,
+        );
+        const textAttachmentCount = Math.max(
+          bubbleAttachments?.filter((attachment) => attachment.kind === "text")
+            .length ?? 0,
+          attachments?.filter((block) => block.type === "text").length ?? 0,
+        );
+        trackAgentPromptStarted({
+          promptId,
+          chatId,
+          agentId: current.agentId!,
+          requestedModel: telemetryChat?.model,
+          effort: telemetryChat?.effort,
+          permissionMode: telemetryChat?.permissionMode,
+          nativeMode: current.currentModeId ?? telemetryChat?.lastModeId,
+          fastEnabled: telemetryChat?.fast === true,
+          contentBlockCount: prompt.length,
+          imageAttachmentCount,
+          textAttachmentCount,
+          mentionFileCount:
+            segments?.filter(
+              (segment) =>
+                segment.type === "mention" && segment.kind === "file",
+            ).length ?? 0,
+          mentionFolderCount:
+            segments?.filter(
+              (segment) =>
+                segment.type === "mention" && segment.kind === "folder",
+            ).length ?? 0,
+          mentionSelectionCount:
+            segments?.filter(
+              (segment) =>
+                segment.type === "mention" && segment.kind === "selection",
+            ).length ?? 0,
+          additionalDirectoryCount:
+            telemetryChat?.additionalDirectories?.length ?? 0,
+          isAutoAction: autoAction != null,
+          autoActionKind: autoAction,
+          protocolVersion:
+            typeof current.initialize?.protocolVersion === "number"
+              ? current.initialize.protocolVersion
+              : undefined,
+        });
         // Arm TTFT for this turn — the first streamed chunk (detected in the
         // AGENT_SESSION_UPDATE listener above) emits agent_first_response with
         // the time since now. Covers any rebuild/retry below, so it reflects the
@@ -1920,8 +2080,10 @@ export function AgentSessionsProvider({
             // (forceReconnect / socket close) whose engine-side turn is still
             // alive — it produced its answer, which already landed via
             // AGENT_SESSION_UPDATE. Re-running the prompt on a fresh session
-            // would stream the same turn a second time. Treat it as complete.
+            // would stream the same turn a second time. Keep the chat usable,
+            // but record an interrupted outcome for telemetry.
             if (turnProducedOutputRef.current.get(chatId)) {
+              promptInterruptedAfterOutput = failure;
               getStore().patchSession(chatId, {
                 status: "ready",
                 error: null,
@@ -1962,8 +2124,10 @@ export function AgentSessionsProvider({
             if (failureIsRecoverable(failure)) {
               // Same cursor duplicate-turn guard as the throw path above: a
               // recoverable AGENT_PROMPT_FAILED for a turn that already streamed
-              // content means the answer is in; don't rebuild + resend.
+              // content means the answer is in; don't rebuild + resend. Keep the
+              // chat usable, but preserve the interruption for telemetry.
               if (turnProducedOutputRef.current.get(chatId)) {
+                promptInterruptedAfterOutput = failure;
                 getStore().patchSession(chatId, {
                   status: "ready",
                   error: null,
@@ -2102,32 +2266,47 @@ export function AgentSessionsProvider({
           // Read usage with the CANONICAL TurnUsage field names the engine
           // sends (cacheReadTokens/reasoningTokens), not the store's
           // AgentUsage names used by the folding cast above.
-          const tu = (
-            resp.response as
-              | {
-                  usage?: {
-                    inputTokens?: number;
-                    outputTokens?: number;
-                    cacheReadTokens?: number;
-                    cacheWriteTokens?: number;
-                    reasoningTokens?: number;
-                    totalCostUsd?: number;
-                  };
-                }
-              | undefined
-          )?.usage;
+          const promptResponse = resp.response as
+            | {
+                effectiveModel?: string;
+                usage?: {
+                  inputTokens?: number;
+                  outputTokens?: number;
+                  cacheReadTokens?: number;
+                  cacheWriteTokens?: number;
+                  reasoningTokens?: number;
+                  totalCostUsd?: number;
+                  perModel?: Array<{ model?: string }>;
+                };
+              }
+            | undefined;
+          const tu = promptResponse?.usage;
           const chatModel =
             useWorkspaceStore.getState().chats.find((c) => c.id === chatId)
               ?.model ?? null;
+          // Do not fall back to perModel[0]: Claude sorts that list by cost for
+          // the usage popover, so an expensive subagent would mis-attribute the
+          // whole turn. Adapters that know a better model send effectiveModel.
+          const effectiveModel = promptResponse?.effectiveModel ?? chatModel;
           const completedStopReason =
             resp.type === "AGENT_PROMPT_COMPLETE" ? resp.stopReason : undefined;
           const turnDurationMs = Date.now() - turnStartedAt;
+          promptResult = {
+            stopReason: completedStopReason,
+            effectiveModel,
+            inputTokens: tu?.inputTokens,
+            outputTokens: tu?.outputTokens,
+            cacheReadTokens: tu?.cacheReadTokens,
+            cacheWriteTokens: tu?.cacheWriteTokens,
+            reasoningTokens: tu?.reasoningTokens,
+            costUsd: tu?.totalCostUsd,
+          };
           trackAgentPromptCompleted({
             agentId: current.agentId!,
             chatId,
             stopReason: completedStopReason,
             durationMs: turnDurationMs,
-            model: chatModel,
+            model: effectiveModel,
             inputTokens: tu?.inputTokens,
             outputTokens: tu?.outputTokens,
             costUsd: tu?.totalCostUsd,
@@ -2136,8 +2315,8 @@ export function AgentSessionsProvider({
           // dashboards for every agent that now reports usage.
           trackAiGeneration({
             agentId: current.agentId!,
-            model: chatModel,
-            traceId: slot.sessionId,
+            model: effectiveModel,
+            traceId: promptDiagnostics?.promptId,
             latencyMs: turnDurationMs,
             inputTokens: tu?.inputTokens,
             outputTokens: tu?.outputTokens,
@@ -2167,6 +2346,41 @@ export function AgentSessionsProvider({
           });
         }
       } finally {
+        if (promptDiagnostics) {
+          const terminal = getStore().sessions[chatId];
+          const stopReason =
+            promptResult?.stopReason ?? terminal?.lastStopReason ?? undefined;
+          const cancelled = stopReason === "cancelled";
+          const healthy =
+            !promptInterruptedAfterOutput &&
+            terminal?.status === "ready" &&
+            !terminal.failure;
+          trackAgentPromptFinished({
+            promptId: promptDiagnostics.promptId,
+            chatId,
+            agentId: promptDiagnostics.agentId,
+            outcome: cancelled
+              ? "cancelled"
+              : promptInterruptedAfterOutput
+                ? "interrupted"
+                : healthy
+                  ? "completed"
+                  : "failed",
+            durationMs: Date.now() - promptDiagnostics.startedAt,
+            retryCount: promptRetryCount,
+            stopReason,
+            effectiveModel: promptResult?.effectiveModel,
+            inputTokens: promptResult?.inputTokens,
+            outputTokens: promptResult?.outputTokens,
+            cacheReadTokens: promptResult?.cacheReadTokens,
+            cacheWriteTokens: promptResult?.cacheWriteTokens,
+            reasoningTokens: promptResult?.reasoningTokens,
+            costUsd: promptResult?.costUsd,
+            failure:
+              promptInterruptedAfterOutput ??
+              (healthy ? null : terminal?.failure),
+          });
+        }
         sendingChatsRef.current.delete(chatId);
         // Drop a STRANDED plan-review card. A plan gate BLOCKS its turn, so in
         // the happy path Approve / a typed follow-up cleared pendingPermission
@@ -2297,6 +2511,18 @@ export function AgentSessionsProvider({
         permissionId: current.pendingPermission.permissionId,
         response,
       });
+      const permissionOutcome = response.outcome;
+      trackAgentPermissionDecided({
+        chatId,
+        agentId: current.agentId ?? "unknown",
+        decision:
+          permissionOutcome.outcome === "selected"
+            ? (current.pendingPermission.request.options.find(
+                (option) => option.optionId === permissionOutcome.optionId,
+              )?.kind ?? "selected_unknown")
+            : permissionOutcome.outcome,
+        toolKind: current.pendingPermission.request.toolCall?.kind,
+      });
       promptActivityRef.current.get(chatId)?.();
       getStore().settlePendingPermission(
         chatId,
@@ -2320,6 +2546,14 @@ export function AgentSessionsProvider({
         // questionId went stale (replay / session rebuild minted a fresh one
         // while this client deduped and kept the original).
         nativeRequestId: head.request.nativeRequestId,
+      });
+      trackAgentQuestionAnswered({
+        chatId,
+        agentId: current.agentId ?? "unknown",
+        outcome: response.outcome.outcome,
+        source: head.request.source,
+        questionCount: head.request.questions.length,
+        blocking: head.request.blocking,
       });
       promptActivityRef.current.get(chatId)?.();
       // Durable record: stamp the resolution onto the transcript tool message
@@ -3119,6 +3353,7 @@ export function AgentSessionsProvider({
         ...BLANK,
         agentId,
         agentName: options?.agentName ?? agentId,
+        durableSessionId: sessionId,
         sessionId,
         cwd: resolvedCwd,
         status: "warming",
@@ -3195,8 +3430,18 @@ export function AgentSessionsProvider({
           drainOrDropQueue(chatId);
           return;
         }
+        // Cursor can recover a missing SDK transcript by creating a fresh
+        // provider agent while the current engine keeps routing through the
+        // requested id as an alias. Keep the live alias in `sessionId`, but
+        // expose the real replacement separately for ChatBody's persistence
+        // effect; otherwise that effect immediately overwrites the replacement
+        // with the alias and every reopen retries the permanently stale id.
+        const replacementSessionId = resp.response.replacementSessionId;
         getStore().patchSession(chatId, {
-          status: loadedSessionStatus(resp.promptActive === true),
+          // As on new-session bind, do not expose a sendable state until the
+          // user's persisted native permission mode has reached the adapter.
+          status: "warming",
+          durableSessionId: replacementSessionId ?? resp.sessionId,
           sessionId: resp.sessionId,
           availableModes: resp.response.modes?.availableModes ?? [],
           currentModeId: resp.response.modes?.currentModeId ?? null,
@@ -3210,6 +3455,14 @@ export function AgentSessionsProvider({
           // this resumed session was actually loaded with.
           appliedChatEnvKey: chatEnvDriftKey(options?.env),
         });
+        // Re-attach prompt telemetry correlation for a still-running turn so
+        // permission/finish events after reload keep the original prompt_id.
+        if (resp.promptActive === true && resp.promptId) {
+          adoptAgentPromptCorrelation({
+            chatId,
+            promptId: resp.promptId,
+          });
+        }
         const prebindDirtySession = prebindDirtySessionsRef.current.get(chatId);
         if (prebindDirtySession && prebindDirtySession !== resp.sessionId) {
           prebindDirtySessionsRef.current.delete(chatId);
@@ -3220,7 +3473,7 @@ export function AgentSessionsProvider({
         // without this an app restart would silently drop the user's mode
         // (e.g. plan). reconcile is idempotent — a no-op when already matching.
         if (bridge) {
-          void reconcilePermissionModeAtBind(bridge, getStore, {
+          await reconcilePermissionModeAtBind(bridge, getStore, {
             chatId,
             agentId,
             sessionId: resp.sessionId,
@@ -3228,6 +3481,9 @@ export function AgentSessionsProvider({
             currentModeId: resp.response.modes?.currentModeId ?? null,
           });
         }
+        getStore().patchSession(chatId, {
+          status: loadedSessionStatus(resp.promptActive === true),
+        });
         // Recovery drain (same reasoning as ensureSession): a send parked while
         // this chat was reconnecting flushes now that loadSession restored it to
         // ready. Self-gated + lock-guarded inside drainNextQueued.

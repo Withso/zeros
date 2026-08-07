@@ -229,9 +229,10 @@ function ChatBody({
   // retained transcript is parked. A session created just before a workspace
   // switch must still be linked to its chat even if the chat is never revealed
   // again before application shutdown.
-  const liveSessionId = useSessionsStore(
-    (state) => state.sessions[chatId]?.sessionId ?? null,
-  );
+  const liveSessionId = useSessionsStore((state) => {
+    const slot = state.sessions[chatId];
+    return slot?.durableSessionId ?? slot?.sessionId ?? null;
+  });
   const chat = useChatById(chatId);
 
   // Serialize the env tuple so the effect only fires on a real
@@ -357,8 +358,7 @@ function ChatBody({
   }, [chatId, liveSessionId, chat, dispatch]);
 
   // Respawn when the user changes model/effort — but ONLY for an agent that
-  // cannot absorb the change live (cursor today; see
-  // agent/live-config-support.ts).
+  // cannot absorb the change live (see agent/live-config-support.ts).
   //
   // 2026-07-29: this effect used to fire for EVERY agent, and that was a bug
   // with three faces. Claude and Codex already had the change pushed into the
