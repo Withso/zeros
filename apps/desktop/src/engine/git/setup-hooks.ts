@@ -81,7 +81,9 @@ export async function runSetupHooks(opts: SetupHookOptions): Promise<void> {
       // The from-branch (worktree.ts seedWorktreeFiles) and late-seed passes
       // already skip these; this loop used to be the one that didn't.
       if (pathExists(path.join(opts.worktreePath, rel))) continue;
-      await copyFromRepo(opts.repoRoot, opts.worktreePath, rel);
+      await copyFromRepo(opts.repoRoot, opts.worktreePath, rel, {
+        rejectNestedGitCheckout: true,
+      });
     } catch (err) {
       console.warn(
         `[setup-hooks] files-to-copy: skipped "${rel}": ${err instanceof Error ? err.message : String(err)}`,
@@ -439,6 +441,7 @@ export async function copyFromRepo(
   repoRoot: string,
   worktreePath: string,
   rel: string,
+  options: { rejectNestedGitCheckout?: boolean } = {},
 ): Promise<void> {
   const { src, dst } = resolveContainedPaths(
     repoRoot,
@@ -454,6 +457,20 @@ export async function copyFromRepo(
       code: "VALIDATION_FAILED",
       message: `copyPaths: source "${rel}" does not exist in repo root`,
       cause: err,
+    });
+  }
+  // Automatic files-to-copy discovery must never recurse through another Git
+  // checkout. Git can collapse a nested worktree match to its directory row;
+  // without this gate one `.env.example` inside it copies the entire checkout.
+  // Explicit copyPaths keep their caller-authored behavior for compatibility.
+  if (
+    options.rejectNestedGitCheckout &&
+    st.isDirectory() &&
+    (await lstat(path.join(src, ".git")).catch(() => null)) !== null
+  ) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: `files-to-copy: refusing to recursively copy nested Git checkout "${rel}"`,
     });
   }
   // BEFORE the mkdir, not after: `copyFile` opens with O_CREAT|O_TRUNC and
