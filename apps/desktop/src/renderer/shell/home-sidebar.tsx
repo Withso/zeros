@@ -20,10 +20,10 @@ import { useMemo, useRef } from "react";
 import {
   Blocks,
   FolderOpen,
-  LayoutDashboard,
   Plus,
   Settings,
   Sparkles,
+  SquareKanban,
 } from "lucide-react";
 
 import {
@@ -69,8 +69,15 @@ import { useInternalFeatureActive } from "../features/settings/internal-features
 // SIDEBAR_ENTRY_CLS) so both nav rails read as the same control: fg2 at rest,
 // fg1 + a lifted --sidebar-bg-hover background when selected, hover lifts only
 // the background. Selection is COLOR-only — rows never shift width.
+// ICON SIZE: 14px, set in CSS (`[&_svg]:size-3.5`) rather than per-icon —
+// the Button primitive paints `[&_svg]:size-4` on every button, and CSS
+// width/height beats the width/height ATTRIBUTES lucide's `size` prop emits,
+// so a bare `size={14}` still rendered 16px. Reusing the primitive's exact
+// `[&_svg]:` selector lets twMerge drop the 16px rule instead of leaving two
+// equal-specificity rules to fight on source order. Mirrors the settings rail
+// (settings-page.tsx SIDEBAR_ENTRY_CLS).
 const HOME_ENTRY_CLS =
-  "flex h-auto w-full min-w-0 items-center justify-start gap-2.5 rounded-md border-0 bg-transparent px-2.5 py-1.5 text-left text-sm font-normal text-fg2 transition-colors duration-150 ease-out hover:bg-sidebar-bg-hover hover:text-fg2 data-[state=active]:bg-sidebar-bg-hover data-[state=active]:text-fg1 data-[state=active]:hover:text-fg1 [&>svg]:shrink-0 [&>svg]:text-fg2 data-[state=active]:[&>svg]:text-fg1";
+  "flex h-auto w-full min-w-0 items-center justify-start gap-2.5 rounded-md border-0 bg-transparent px-2.5 py-1.5 text-left text-sm font-normal text-fg2 transition-colors duration-150 ease-out hover:bg-sidebar-bg-hover hover:text-fg2 data-[state=active]:bg-sidebar-bg-hover data-[state=active]:text-fg1 data-[state=active]:hover:text-fg1 [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg2 data-[state=active]:[&>svg]:text-fg1";
 
 // Group label above the repo list — mirrors the settings sidebar's group
 // header (SETTINGS_GROUP_HEADER_CLS) so the two rails share one vocabulary.
@@ -78,9 +85,11 @@ const GROUP_HEADER_CLS =
   "select-none px-2.5 pb-1.5 pt-5 text-xs font-normal text-fg3";
 
 // Repo-icon chip inside a rail row — same recipe as the top bar's project
-// chip (PROJECT_CHIP_CLS), sized to sit where the 16px lucide icons do.
+// chip (PROJECT_CHIP_CLS), sized to sit where the 14px lucide icons do (it
+// tracks HOME_ENTRY_CLS's icon size: a chip left at 16px would push every
+// repo label 2px right of the Dashboard/Customize/Add repo labels).
 const REPO_CHIP_CLS =
-  "inline-flex size-4 shrink-0 items-center justify-center rounded-sm bg-bg2-hover text-[10px] font-medium text-fg2";
+  "inline-flex size-3.5 shrink-0 items-center justify-center rounded-sm bg-bg2-hover text-[10px] font-medium text-fg2";
 
 /** One repo row — icon chip, name, and its live (non-archived) workspace
  *  count. Click opens the repo page; selection tracks activeRepoId. */
@@ -209,7 +218,7 @@ export function HomeSidebar() {
             dispatch({ type: "SET_ACTIVE_PAGE", page: "dashboard" })
           }
         >
-          <LayoutDashboard size={16} strokeWidth={1.5} />
+          <SquareKanban size={14} strokeWidth={1.5} />
           <span className="truncate">Dashboard</span>
         </Button>
 
@@ -232,7 +241,7 @@ export function HomeSidebar() {
             dispatch({ type: "SET_ACTIVE_PAGE", page: "customize" })
           }
         >
-          <Blocks size={16} strokeWidth={1.5} />
+          <Blocks size={14} strokeWidth={1.5} />
           <span className="truncate">Customize</span>
         </Button>
 
@@ -260,7 +269,7 @@ export function HomeSidebar() {
                 className={HOME_ENTRY_CLS}
                 aria-label="Add repository"
               >
-                <Plus size={16} strokeWidth={1.5} />
+                <Plus size={14} strokeWidth={1.5} />
                 <span className="truncate">Add repo</span>
               </Button>
             </DropdownMenuTrigger>

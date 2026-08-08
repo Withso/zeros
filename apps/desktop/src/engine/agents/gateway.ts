@@ -598,7 +598,7 @@ export class AgentGateway {
    *  agent id. Feeds each manifest entry's `runtimeUnavailable` probe.
    *
    *  WHY THIS EXISTS: the missing-runtime message tells the user to set Settings →
-   *  Agent providers → Executable path. Without this the probe never read that
+   *  Agents → Executable path. Without this the probe never read that
    *  value, so setting it changed nothing — `installed`/`authenticated` stayed
    *  false, `isRunnableAgent()` returned false, and every send was refused with
    *  "Not installed". The advice and the code disagreed, leaving no way out.
