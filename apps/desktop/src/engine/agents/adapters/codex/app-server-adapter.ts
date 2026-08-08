@@ -116,6 +116,19 @@ const AUTO_APPROVE_PERMISSION_RESPONSE = {
   outcome: { outcome: "selected", optionId: "accept" },
 } as RequestPermissionResponse;
 
+/** Methods safe to settle without a user card in `auto-edit`. Sandbox
+ * escalations (`item/permissions/requestApproval` — network / arbitrary
+ * filesystem paths) stay on the normal renderer gate so Approve for me keeps
+ * the workspace sandbox. */
+const AUTO_EDIT_AUTO_APPROVE_METHODS = new Set<CodexApprovalMethod>([
+  "item/commandExecution/requestApproval",
+  "item/fileChange/requestApproval",
+]);
+
+function autoEditCanAutoApprove(method: CodexApprovalMethod): boolean {
+  return AUTO_EDIT_AUTO_APPROVE_METHODS.has(method);
+}
+
 const CODEX_MODES: SessionMode[] = [
   {
     id: "ask",
@@ -1602,7 +1615,12 @@ export class CodexAppServerAdapter implements AgentAdapter {
     session: CodexSession,
     request: CodexApprovalRequest,
   ): void {
-    if (session.modeId === "auto-edit") {
+    // Approve for me auto-settles in-sandbox tool gates only. Permission-profile
+    // escalations (network / out-of-workspace paths) still require a user card.
+    if (
+      session.modeId === "auto-edit" &&
+      autoEditCanAutoApprove(request.method)
+    ) {
       let approved = false;
       try {
         const response = mapResponseToCodexDecision(

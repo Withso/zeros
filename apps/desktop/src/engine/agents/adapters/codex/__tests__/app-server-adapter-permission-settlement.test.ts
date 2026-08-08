@@ -190,7 +190,7 @@ describe("codex permission settlement receipts", () => {
     ]);
   });
 
-  it("Approve for me grants a requested permission profile for this turn only", async () => {
+  it("Approve for me still prompts for sandbox-escalation permission profiles", async () => {
     const { adapter, emit } = makeAdapter();
     await adapter.newSession({
       cwd: "/tmp/proj",
@@ -205,16 +205,16 @@ describe("codex permission settlement receipts", () => {
       permissions,
     });
 
+    // Escalations leave the workspace sandbox — Approve for me must not
+    // silently grant network / arbitrary filesystem paths.
+    expect(rt.respondCalls).toEqual([]);
     expect(emit.onPermissionRequest).toHaveBeenCalledTimes(1);
+    expect(emit.onPermissionRequest.mock.calls[0]?.[2]).not.toHaveProperty(
+      "autoResolution",
+    );
     expect(emit.onPermissionRequest.mock.calls[0]?.[2]).toMatchObject({
-      autoResolution: "allow_once",
+      toolCall: expect.objectContaining({ kind: expect.any(String) }),
     });
-    expect(rt.respondCalls).toEqual([
-      {
-        permissionId: "permission-profile",
-        response: { permissions, scope: "turn" },
-      },
-    ]);
   });
 
   it("settles every parked approval when the Codex runtime exits", async () => {
