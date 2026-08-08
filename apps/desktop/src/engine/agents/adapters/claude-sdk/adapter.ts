@@ -1111,9 +1111,18 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       }
       // Clear the PREVIOUS turn's flag, but keep a Stop that arrived while this
       // call was waiting on the teardown seams above — that one is for the turn
-      // about to run, and dropping it let a stopped turn stream to completion.
-      // Only comparable while this is still the same session object: a rebuild
-      // between here and entry mints a fresh one (cancelSeq back at 0).
+      // about to run, and dropping it made a stopped turn settle as `completed`
+      // (AGENT STOPPED, not STOPPED BY USER). LABEL only: the push into
+      // state.input below is unconditional, so the flag decides how the turn is
+      // reported, never whether it runs. What actually spares the provider the
+      // work is the engine's pre-dispatch short-circuit; this is the backstop
+      // for callers that reach prompt() anyway.
+      //
+      // Comparable only while this is still the same session object. A rebuild
+      // across those seams mints a fresh one, and this deliberately clears
+      // rather than re-reads it: the new object's own cancelSeq is on a
+      // different scale, so a Stop recorded against it after the rebuild is
+      // dropped here too. The engine's turn-scoped intent covers that window.
       state.cancelRequested =
         state === entryState && state.cancelSeq !== entryCancelSeq;
       this.ensureQuery(state);

@@ -396,7 +396,7 @@
   --fg2: hsl(0 0% 72%); /* #B8B8B8 — default text + icon across app */
   /* MIDDLE tier — one step below --fg2 (see TOKEN TAXONOMY).
    * Placed 60% of the way from --muted-fg up to --fg2 in log-contrast space:
-   * 6.58:1 on bg1, between fg2's 9.44:1 and muted-fg's 3.78:1. Orka black and
+   * 6.58:1 on bg1, between fg2's 9.41:1 and muted-fg's 3.80:1. Orka black and
    * Light re-derive the SAME relative position in their own bands rather than
    * copying this lightness — in Light a higher L means LESS contrast, so
    * copying `60` there would invert the tier order. */
@@ -685,12 +685,12 @@
   ); /* #625D5B — default text + icon across app; passes AA on white at 6.5:1 */
   /* MIDDLE tier. Light INVERTS the lightness axis: a
    * higher L means LESS contrast on a white canvas, so this sits BELOW
-   * --muted-fg's L (44 vs 56), not above it. 4.95:1 on bg1 — the same relative
+   * --muted-fg's L (44 vs 56), not above it. 4.97:1 on bg1 — the same relative
    * position between muted-fg and fg2 that neutral Dark's L60 holds. */
   --fg3: hsl(20 4% 44%); /* #756F6C — middle tier (one step below fg2) */
   /* Adopts the former --fg3 value (L56, not L68). The ~191 migrated consumers
    * already rendered at L56, so they stay identical; the 25 review-surface
-   * consumers that were already on --muted-fg rise from 2.24:1 to 3.27:1,
+   * consumers that were already on --muted-fg rise from 2.24:1 to 3.26:1,
    * which is the intended fix — L68 was too faint for metadata text. */
   --muted-fg: hsl(20 4% 56%); /* #938D8A — quietest tier (app-wide 3rd tier) */
 

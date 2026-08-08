@@ -41,7 +41,15 @@ interface ActivePromptRecord {
   lastActivityAt: number;
   cancelledByUser?: boolean;
   adapterSettled?: boolean;
+  turnSnapshot?: TurnSnapshotRecord | null;
+  turnRowSettled?: boolean;
   terminalPublished?: boolean;
+}
+
+/** Only the field the watchdog's old id comparison read — the rest of a real
+ *  TurnSnapshotContext is inert here, since finishTurn is stubbed. */
+interface TurnSnapshotRecord {
+  turnId: string;
 }
 
 interface TestEngineInternals {
@@ -54,8 +62,14 @@ interface TestEngineInternals {
   sessionAgent: Map<string, string>;
   promptSessions: Set<string>;
   activePromptContexts: Map<string, ActivePromptRecord>;
+  activeTurnSnapshots: Map<string, TurnSnapshotRecord>;
   sessionLoadResponses: Map<string, LoadSessionResponse>;
   agentSpawnOpts: (...args: unknown[]) => Promise<unknown>;
+  finishTurn(
+    ctx: TurnSnapshotRecord,
+    status: string,
+    stopReason: string | null,
+  ): Promise<void>;
   activePromptIsLive(prompt: ActivePromptRecord): boolean;
   handleMessage(message: EngineMessage, client: TransportClient): Promise<void>;
 }
@@ -283,6 +297,51 @@ describe("an adapter that never acknowledges the cancel", () => {
     expect(record.terminalPublished).toBe(true);
     // …which is what keeps a reload from re-adopting it as a running turn.
     expect(state.activePromptIsLive(record)).toBe(false);
+    // Nothing was recorded here (this session has no chat folder, so there is
+    // no turn row), so the watchdog must NOT claim the durable half — that
+    // claim is what suppresses the prompt handler's own finishTurn.
+    expect(record.turnRowSettled).toBeFalsy();
+  });
+
+  // The record's turn id and the recorded snapshot's are derived SEPARATELY —
+  // `turn-${msg.id}` here, the persisted user message's id there — so they
+  // disagree for any client that omits userMessageId. The watchdog compared
+  // them, found no match, wrote no ending, and then suppressed the prompt
+  // handler's finishTurn anyway: the row stayed `running` with no endedAt, for
+  // good, which is the exact symptom the deadline exists to prevent.
+  it("finalizes the recorded row even when the two turn ids disagree", async () => {
+    vi.useFakeTimers();
+    const { state } = testEngine(29_897);
+    const { client } = testClient();
+    state.router.register(client);
+    state.sessionAgent.set("session-1", "cursor");
+    vi.spyOn(state.agents, "prompt").mockReturnValue(new Promise(() => {}));
+    vi.spyOn(state.agents, "cancel").mockResolvedValue(undefined);
+    const finishTurn = vi
+      .spyOn(state, "finishTurn")
+      .mockResolvedValue(undefined);
+
+    void state.handleMessage(
+      promptMessage({ userMessageId: undefined }),
+      client,
+    );
+    await vi.waitFor(() =>
+      expect(state.promptSessions.has("session-1")).toBe(true),
+    );
+    const record = state.activePromptContexts.get("session-1")!;
+    // What beginTurn records for a prompt with no userMessageId: the id of the
+    // user message the engine just persisted, which is not `turn-${msg.id}`.
+    const snapshot: TurnSnapshotRecord = { turnId: "user-persisted-1" };
+    expect(record.turnId).not.toBe(snapshot.turnId);
+    state.activeTurnSnapshots.set("session-1", snapshot);
+    record.turnSnapshot = snapshot;
+
+    await state.handleMessage(cancelMessage(), client);
+    await vi.advanceTimersByTimeAsync(15_001); // CANCEL_SETTLE_DEADLINE_MS
+
+    expect(finishTurn).toHaveBeenCalledWith(snapshot, "cancelled", "cancelled");
+    expect(record.turnRowSettled).toBe(true);
+    expect(state.activeTurnSnapshots.has("session-1")).toBe(false);
   });
 });
 

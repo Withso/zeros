@@ -215,10 +215,25 @@ interface ActivePromptContext {
    *  post-cancel settle watchdog — finishTurn's post-snapshot can outlast the
    *  deadline, and a force-settle racing it would double-write the turn row. */
   adapterSettled?: boolean;
-  /** This turn's terminal state has already been published (turn row finalized
-   *  + terminal `turn_state` emitted) by the post-cancel watchdog. The prompt
-   *  handler must not publish a second, contradictory ending, and the turn no
-   *  longer counts as live for re-adoption or the concurrency guard. */
+  /** This turn's recorded snapshot, once beginTurn has produced one (null when
+   *  there is nothing to record — no chat binding, no folder). Held by
+   *  REFERENCE, because `turnId` above is NOT a reliable name for it: this
+   *  record falls back to `turn-${msg.id}` while beginTurn falls back to the
+   *  persisted user message's id, so the two disagree for any client that omits
+   *  userMessageId. The settle watchdog matched on that id and silently skipped
+   *  the durable write whenever they diverged. */
+  turnSnapshot?: TurnSnapshotContext | null;
+  /** The post-cancel watchdog has written this turn's ENDING to its durable row.
+   *  Only this suppresses the prompt handler's own finishTurn — never
+   *  `terminalPublished`, which is about the wire event and can be set in
+   *  windows where no row was (or could yet be) closed. Keeping the two apart is
+   *  what stops a suppression outrunning the write it stands for and leaving the
+   *  row recorded as running forever. */
+  turnRowSettled?: boolean;
+  /** This turn's terminal `turn_state` has already been emitted by the
+   *  post-cancel watchdog. The prompt handler must not publish a second,
+   *  contradictory ending, and the turn no longer counts as live for
+   *  re-adoption or the concurrency guard. */
   terminalPublished?: boolean;
   /** Pending post-cancel settle deadline (see CANCEL_SETTLE_DEADLINE_MS). */
   cancelSettleTimer?: ReturnType<typeof setTimeout>;
@@ -2449,6 +2464,10 @@ export class ZerosEngine {
             // error path — so a failed turn never leaves a stale marker.
             // Record this turn: snapshot the work tree BEFORE the agent runs.
             turnCtx = await this.beginTurn(msg.sessionId, msg.userMessageId);
+            // Publish the snapshot itself on the record so the settle watchdog
+            // can recognise THIS turn's row by reference instead of re-deriving
+            // a turn id that can disagree with beginTurn's (see turnSnapshot).
+            activePrompt.turnSnapshot = turnCtx;
             this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
             this.enterPrompt();
             this.promptSessions.add(msg.sessionId);
@@ -2506,7 +2525,11 @@ export class ZerosEngine {
                   .finally(() => {
                     activePrompt.adapterSettled = true;
                   });
-            if (turnCtx && !activePrompt.terminalPublished) {
+            // Gated on the DURABLE fact, not on terminalPublished: the watchdog
+            // can announce a stop in a window where it had no row to close yet
+            // (a pre-snapshot still running past the deadline), and this is the
+            // call that must still close it.
+            if (turnCtx && !activePrompt.turnRowSettled) {
               await this.finishTurn(
                 turnCtx,
                 response.stopReason === "cancelled" ? "cancelled" : "completed",
@@ -2539,7 +2562,7 @@ export class ZerosEngine {
             const wasCancelled =
               activePrompt.cancelledByUser === true ||
               this.cancelRequested.has(msg.sessionId);
-            if (turnCtx && !activePrompt.terminalPublished) {
+            if (turnCtx && !activePrompt.turnRowSettled) {
               // A user cancel can surface as a rejection instead of a clean
               // stopReason:"cancelled" (e.g. the SIGTERM'd subprocess tears
               // the stream down before the adapter can settle the turn).
@@ -4091,10 +4114,18 @@ export class ZerosEngine {
       );
       // finishTurn is self-contained (it never throws) and owns the durable
       // half: the row this chat's footer reads as STOPPED BY USER after a
-      // reload. Taken from the record only when it is still THIS turn's.
+      // reload. Matched by REFERENCE, not by turn id — the record's id and
+      // beginTurn's are derived separately and disagree whenever the client
+      // omitted userMessageId, so an id comparison here skipped the write for
+      // exactly the turns it was meant to close.
       const turnCtx = this.activeTurnSnapshots.get(prompt.sessionId);
-      if (turnCtx && turnCtx.turnId === prompt.turnId) {
+      if (turnCtx && turnCtx === prompt.turnSnapshot) {
         this.activeTurnSnapshots.delete(prompt.sessionId);
+        // Claim the durable half only now that we are performing it. A turn
+        // still being PREPARED has no row here yet (a pre-snapshot can outrun
+        // this deadline on a large repo); leaving this false is what lets the
+        // prompt handler finalize that row instead of skipping it forever.
+        prompt.turnRowSettled = true;
         void this.finishTurn(turnCtx, "cancelled", "cancelled");
       }
       this.emitTurnState(prompt, "cancelled", "cancelled");

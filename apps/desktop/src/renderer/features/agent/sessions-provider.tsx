@@ -2545,13 +2545,15 @@ export function AgentSessionsProvider({
 
   const cancel = useCallback<SessionsActions["cancel"]>(
     async (chatId) => {
-      if (!bridge) return;
-      // FIRST, ahead of every early return below: a send whose AGENT_PROMPT
-      // hasn't gone out yet (still awaiting a session rebuild / resume) must
-      // abort instead of dispatching after the user stopped. That send is
-      // exactly the case where there is no sessionId to address a cancel at, so
-      // recording the intent cannot be conditional on having one.
+      // FIRST, ahead of every early return below — including the bridge guard:
+      // a send whose AGENT_PROMPT hasn't gone out yet (still awaiting a session
+      // rebuild / resume) must abort instead of dispatching after the user
+      // stopped. That send is exactly the case where there is no sessionId — or
+      // even a live bridge — to address a cancel at, so recording the intent
+      // cannot be conditional on having one. It is a local counter bump; no
+      // bridge is needed to make the in-flight send read it.
       bumpCancelGeneration(cancelGenerationsRef.current, chatId);
+      if (!bridge) return;
       // Cancelling the active turn discards any sends queued behind it —
       // the user explicitly stopped, so the follow-ups shouldn't fire. Also
       // drop their greyed placeholder bubbles.

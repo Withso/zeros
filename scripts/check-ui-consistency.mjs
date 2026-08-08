@@ -207,7 +207,8 @@ const WHITE_BLACK_CLASS_RE =
 // these generate NO color; a paired `ring-1`/`ring-2` then paints solid
 // full-opacity currentColor (the ring-foreground/ring-border/ring-accent
 // family of bugs). The lookarounds keep real tokens (border-border1,
-// text-primary-button-fg, bg-muted-fg→fg3) from matching.
+// text-primary-button-fg, text-muted-fg) from matching — `muted` is in the
+// alternation, so only the trailing `(?![\w-])` keeps `muted-fg` out.
 const DEAD_SHADCN_CLASS_RE =
   /(?<![\w-])(bg|text|border|ring|divide|outline|fill|stroke|from|to|via)-(background|foreground|card|popover|muted|accent|destructive|input|ring|border|primary|secondary)(?![\w-])/;
 

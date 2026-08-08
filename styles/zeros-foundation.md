@@ -220,10 +220,12 @@ everywhere. Two rules worth knowing:
   4.09:1 in Dark and 2.67:1 in Light — i.e. it was reaching for `muted-fg` the
   long way round, and landed below it in Light. Use a tier token.
 
-Two inputs deliberately use `placeholder:text-muted-fg` instead: the inline
-rename field in `repositories-panel.tsx` and the follow-up field in
-`question-card.tsx`. Both are transient overlay affordances where the
-placeholder is incidental rather than instructional.
+Two inputs deliberately use `placeholder:text-muted-fg` instead: the raw
+`settings.toml` source editor in `repositories-panel.tsx` (`TomlSourceEditor`)
+and the follow-up field in `question-card.tsx`. In both the placeholder is
+incidental rather than instructional — the editor's is a transparent overlay
+behind highlighted text, and the follow-up field is a transient affordance on
+an inline card.
 
 ### 4.3 Dropdowns
 
