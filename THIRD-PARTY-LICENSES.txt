@@ -30,7 +30,7 @@ TERMS-GOVERNED COMPONENTS — RELEASE REVIEW REQUIRED
 - @anthropic-ai/claude-agent-sdk@0.3.221: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 - @cursor/sdk@1.0.26: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 
-PACKAGE INVENTORY (580 resolved package/version records)
+PACKAGE INVENTORY (579 resolved package/version records)
 -----------------
 
 @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.221
@@ -2321,7 +2321,7 @@ js-tokens@4.0.0
   Source: https://github.com/lydell/js-tokens
   License documents: 2213d91c6062
 
-js-yaml@4.3.0
+js-yaml@4.3.1
   License: MIT
   Surfaces: root pnpm workspace
   Author: Vladimir Zapparov <dervus.grim@gmail.com>
@@ -2813,13 +2813,6 @@ nanoid@3.3.17
   Author: Andrey Sitnik <andrey@sitnik.ru>
   Source: https://github.com/ai/nanoid
   License documents: da4db1480d9b
-
-nanoid@5.1.11
-  License: MIT
-  Surfaces: root pnpm workspace
-  Author: Andrey Sitnik <andrey@sitnik.es>
-  Source: https://github.com/ai/nanoid
-  License documents: 4383cb2c3608
 
 negotiator@1.0.0
   License: MIT
@@ -3925,7 +3918,7 @@ zwitch@2.0.4
   Source: https://github.com/wooorm/zwitch
   License documents: ca4662cb5d1b
 
-LICENSE AND NOTICE TEXTS (259 unique documents)
+LICENSE AND NOTICE TEXTS (258 unique documents)
 ------------------------
 
 ================================================================================
@@ -6864,34 +6857,6 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ================================================================================
-DOCUMENT 4383cb2c3608
-SHA-256: 4383cb2c3608397ce7a4159502614ed66890f8999c2a9c056dd3b1024d6721f0
-Applies to: nanoid@5.1.11
-Source labels: nanoid@5.1.11 — LICENSE
-================================================================================
-
-The MIT License (MIT)
-
-Copyright 2017 Andrey Sitnik <andrey@sitnik.es>
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software is furnished to do so,
-subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
-FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
-COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
-IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
-CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-================================================================================
 DOCUMENT 4495d9f249dc
 SHA-256: 4495d9f249dc5ef38a7c6de31897c4d172d3d9ba7415295fbc753c6d3a1bb4bd
 Applies to: fast-content-type-parse@3.0.0
@@ -9515,8 +9480,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT a07bc24468b9
 SHA-256: a07bc24468b9654ce76a547d47a2db282d07733b715db4c73a98bd63961f9550
-Applies to: js-yaml@4.3.0
-Source labels: js-yaml@4.3.0 — LICENSE
+Applies to: js-yaml@4.3.1
+Source labels: js-yaml@4.3.1 — LICENSE
 ================================================================================
 
 (The MIT License)
