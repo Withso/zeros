@@ -616,7 +616,7 @@ export function DesignWorkspaceSidebarPanels({
           Layers
         </h2>
         <span
-          className="text-fg3 text-xs"
+          className="text-muted-fg text-xs"
           aria-label={`${totalLayerCount} layers`}
         >
           {totalLayerCount}
@@ -847,7 +847,7 @@ export function DesignWorkspaceSidebarPanels({
                                   {displayName}
                                 </span>
                                 {showTag ? (
-                                  <span className="text-fg3 max-w-[32%] shrink-0 truncate font-mono text-[9px]">
+                                  <span className="text-muted-fg max-w-[32%] shrink-0 truncate font-mono text-[9px]">
                                     {layer.node.tag}
                                   </span>
                                 ) : null}
@@ -882,14 +882,14 @@ export function DesignWorkspaceSidebarPanels({
                       })}
                     </div>
                     {!runtimeSnapshot ? (
-                      <span className="text-fg3 px-2 py-2 text-xs">
+                      <span className="text-muted-fg px-2 py-2 text-xs">
                         Connecting to the selected frame…
                       </span>
                     ) : null}
                     {runtimeSnapshot &&
                     query &&
                     flattenedLayers.length === 0 ? (
-                      <span className="text-fg3 px-2 py-2 text-xs">
+                      <span className="text-muted-fg px-2 py-2 text-xs">
                         No layers match “{query}”.
                       </span>
                     ) : null}
@@ -899,11 +899,15 @@ export function DesignWorkspaceSidebarPanels({
             );
           })}
           {!snapshot.data && snapshot.loading ? (
-            <span className="text-fg3 px-2 py-2 text-xs">Loading layers…</span>
+            <span className="text-muted-fg px-2 py-2 text-xs">
+              Loading layers…
+            </span>
           ) : null}
           {!snapshot.data && snapshot.error ? (
             <div className="flex flex-col items-start gap-2 px-2 py-2">
-              <span className="text-fg3 text-xs">Couldn’t load layers.</span>
+              <span className="text-muted-fg text-xs">
+                Couldn’t load layers.
+              </span>
               <Button
                 type="button"
                 variant="secondary"
@@ -915,7 +919,7 @@ export function DesignWorkspaceSidebarPanels({
             </div>
           ) : null}
           {snapshot.data?.frames.length === 0 ? (
-            <span className="text-fg3 px-2 py-2 text-xs">
+            <span className="text-muted-fg px-2 py-2 text-xs">
               Create a frame from the canvas toolbar to start designing.
             </span>
           ) : null}

@@ -90,7 +90,7 @@ export function IconPicker({
                 </Tooltip>
               ))}
               {filtered.length === 0 && (
-                <div className="text-fg3 col-span-6 py-3 text-center text-xs">
+                <div className="text-muted-fg col-span-6 py-3 text-center text-xs">
                   No icons match
                 </div>
               )}

@@ -82,7 +82,7 @@
      (currentColor) instead — the button's own text color already carries
      the per-theme logic. */
   --loader-active: var(--fg2);
-  --loader-rest: var(--fg3);
+  --loader-rest: var(--muted-fg);
   --loader-active-inverted: var(--primary-button-fg);
   --loader-rest-inverted: var(--primary-button-fg);
 

@@ -59,7 +59,7 @@ function NativeNoFolderPanel({ chatId }: { chatId: string }) {
     <div className="bg-bg1 flex h-full w-full items-center justify-center p-6">
       <div className="flex w-full max-w-md flex-col items-center gap-5 text-center">
         <div className="border-border1 bg-bg2 flex size-12 items-center justify-center rounded-sm border">
-          <FolderOpen className="text-fg3 size-6" aria-hidden="true" />
+          <FolderOpen className="text-muted-fg size-6" aria-hidden="true" />
         </div>
         <div className="space-y-1.5">
           <h3 className="text-fg1 text-sm font-medium">No folder selected</h3>

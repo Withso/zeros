@@ -76,13 +76,15 @@ const TREE_THEME_VARS = {
   "--trees-scrollbar-gutter-override": "0px",
   // Text: muted default so the selected row (bright) stands out.
   "--trees-fg-override": "var(--fg2)",
-  "--trees-fg-muted-override": "var(--fg3)",
+  "--trees-fg-muted-override": "var(--muted-fg)",
   "--trees-selected-fg-override": "var(--fg1)",
   // .gitignore'd rows (node_modules/, dist/, .env …) read one step back from
   // the tracked files around them. NOTE this is --fg3, not --fg2: --fg2 is
   // already every ordinary row's colour above, so "ignored = fg2" would render
   // identically to tracked and the distinction would be invisible. --fg3 is
-  // the tree's existing muted step.
+  // EXACTLY one step back from --fg2, which is what "ignored" wants; --muted-fg
+  // (the quietest tier) is two steps back and dimmed these rows further than
+  // intended.
   "--trees-git-ignored-color-override": "var(--fg3)",
   // Filter matches (the `search` surfaces only): matched substrings render
   // brighter + bolder than the muted row text. Inert without a search bar.
@@ -168,9 +170,11 @@ const TREE_SHADOW_CSS = `
   /* An ignored folder's glyph is painted by the mask above, whose colour is a
      LITERAL — the library's git-status rule sets \`color\`, which a mask ignores,
      so without this the row's name dims to --fg3 and its folder icon stays
-     --fg2. The opacity reset matters too: the library already applies
-     \`opacity: .5\` to an ignored row's icon section, and --fg3 at half opacity is
-     a second dimming step on top of the one we asked for. One step, here. */
+     --fg2. MUST track --trees-git-ignored-color-override above: the glyph and
+     the row name sit side by side, so any mismatch reads as a rendering bug.
+     The opacity reset matters too: the library already applies \`opacity: .5\` to
+     an ignored row's icon section, and --fg3 at half opacity is a second
+     dimming step on top of the one we asked for. One step, here. */
   [data-item-git-status='ignored'] > [data-item-section='icon'] {
     opacity: 1;
   }

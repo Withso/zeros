@@ -474,10 +474,10 @@ const SIDEBAR_ENTRY_CLS =
 
 // Group label in the section list ("Personal" / "Agents" / …) — a quiet,
 // non-interactive divider. `pt-5` opens a clear gap above it (the FIRST
-// label overrides to `pt-1`); `text-fg3` keeps it subordinate to
+// label overrides to `pt-1`); `text-muted-fg` keeps it subordinate to
 // the row labels.
 const SETTINGS_GROUP_HEADER_CLS =
-  "select-none px-2.5 pb-1.5 pt-5 text-xs font-normal text-fg3";
+  "select-none px-2.5 pb-1.5 pt-5 text-xs font-normal text-muted-fg";
 
 export function SettingsPage() {
   const pageSurfaceRef = useRef<HTMLDivElement | null>(null);
@@ -950,7 +950,7 @@ function SignInMethodRow({
         // Linking isn't implemented yet (no linkIdentity flow), so we show a
         // plain status label rather than an inert, permanently-disabled
         // "Connect" button that implies an action the user can't take.
-        <span className="text-fg3 shrink-0 text-xs">Not linked</span>
+        <span className="text-muted-fg shrink-0 text-xs">Not linked</span>
       )}
     </SettingsRow>
   );
@@ -1000,7 +1000,7 @@ function AccountPanel() {
               )}
               <div className="text-fg2 truncate text-sm">{email}</div>
               {primaryProvider && (
-                <div className="text-fg3 text-xs">
+                <div className="text-muted-fg text-xs">
                   Signed in with {providerLabel(primaryProvider)}
                 </div>
               )}
@@ -1532,7 +1532,7 @@ function ModelsPanel() {
               hint="The turn ends cleanly when it reaches this amount."
             >
               <div className="flex items-center gap-1.5">
-                <span className="text-fg3 text-xs">$</span>
+                <span className="text-muted-fg text-xs">$</span>
                 <Input
                   type="number"
                   min={0.5}

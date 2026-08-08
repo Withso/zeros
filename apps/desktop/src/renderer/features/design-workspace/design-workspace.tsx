@@ -645,7 +645,7 @@ function DesignFrameRenderSurface({
     );
   }
   return (
-    <div className="bg-bg2 text-fg3 pointer-events-none flex size-full items-center justify-center gap-2 text-xs">
+    <div className="bg-bg2 text-muted-fg pointer-events-none flex size-full items-center justify-center gap-2 text-xs">
       <FileCode2 />
       <span className="max-w-48 truncate">{frame.title}</span>
     </div>
@@ -4066,7 +4066,7 @@ function DesignCanvas({
                       <FileCode2 />
                       <span className="max-w-48 truncate">{frame.title}</span>
                       {selected ? (
-                        <span className="text-fg3 font-mono text-[10px]">
+                        <span className="text-muted-fg font-mono text-[10px]">
                           {Math.round(frame.width)} × {Math.round(frame.height)}
                         </span>
                       ) : null}
@@ -4086,7 +4086,7 @@ function DesignCanvas({
                     theme={view.activeTheme}
                   />
                 ) : (
-                  <div className="bg-bg2 text-fg3 flex size-full items-center justify-center text-xs">
+                  <div className="bg-bg2 text-muted-fg flex size-full items-center justify-center text-xs">
                     Preparing {frame.title}…
                   </div>
                 )}
@@ -4437,13 +4437,13 @@ function DesignCanvas({
         ) : null}
 
         {!snapshot && showColdBusy ? (
-          <div className="text-fg3 pointer-events-none absolute inset-0 flex items-center justify-center text-sm">
+          <div className="text-muted-fg pointer-events-none absolute inset-0 flex items-center justify-center text-sm">
             Loading design…
           </div>
         ) : null}
 
         {!workspaceId && !snapshot ? (
-          <div className="text-fg3 pointer-events-none absolute inset-0 flex items-center justify-center text-sm">
+          <div className="text-muted-fg pointer-events-none absolute inset-0 flex items-center justify-center text-sm">
             Setting up design workspace…
           </div>
         ) : null}
@@ -4505,7 +4505,7 @@ function DesignCanvas({
               items[nextIndex]?.focus();
             }}
           >
-            <div className="text-fg3 flex h-6 items-center px-2 text-[9px] font-medium tracking-wide uppercase">
+            <div className="text-muted-fg flex h-6 items-center px-2 text-[9px] font-medium tracking-wide uppercase">
               Select layer
             </div>
             {hitStackMenu.layers.map((layer, index) => (
@@ -4534,13 +4534,13 @@ function DesignCanvas({
                   });
                 }}
               >
-                <span className="text-fg3 border-border2 shrink-0 rounded-sm border px-1 font-mono text-[8px] uppercase">
+                <span className="text-muted-fg border-border2 shrink-0 rounded-sm border px-1 font-mono text-[8px] uppercase">
                   {layer.tag}
                 </span>
                 <span className="text-fg1 min-w-0 flex-1 truncate text-[11px]">
                   {layer.name}
                 </span>
-                <span className="text-fg3 font-mono text-[9px]">
+                <span className="text-muted-fg font-mono text-[9px]">
                   {index === 0 ? "deep" : `↑${index}`}
                 </span>
               </button>
@@ -4556,7 +4556,7 @@ function DesignCanvas({
                 void selectDesignFrame(workspaceId!, hitStackMenu.frame);
               }}
             >
-              <Frame className="text-fg3 size-3.5" />
+              <Frame className="text-muted-fg size-3.5" />
               <span className="text-fg1 truncate text-[11px]">
                 {hitStackMenu.frame.title}
               </span>
@@ -4888,7 +4888,7 @@ function InspectorEditField({
           type="button"
           disabled={disabled || saving}
           className={cn(
-            "text-fg3 hover:text-fg1 flex h-full shrink-0 cursor-ew-resize items-center justify-center text-[10px] font-medium focus-visible:outline-none disabled:cursor-default",
+            "text-muted-fg hover:text-fg1 flex h-full shrink-0 cursor-ew-resize items-center justify-center text-[10px] font-medium focus-visible:outline-none disabled:cursor-default",
             label.length > 4 ? "max-w-16 min-w-10 px-1.5" : "w-7",
           )}
           title={`Drag to scrub ${label}. Option for decimals; Shift for larger steps.`}
@@ -5608,7 +5608,7 @@ function DesignInspector({
               <div className="flex flex-col">
                 <section className="border-border1 flex flex-col border-b pb-1">
                   <div className="flex h-10 min-w-0 items-center gap-1 px-3">
-                    <span className="bg-bg1-hover text-fg3 shrink-0 rounded-sm px-1.5 py-0.5 font-mono text-[9px] uppercase">
+                    <span className="bg-bg1-hover text-muted-fg shrink-0 rounded-sm px-1.5 py-0.5 font-mono text-[9px] uppercase">
                       {styleNodeIds.length > 1
                         ? "multi"
                         : (elementDetails?.tag ?? (frame ? "frame" : "—"))}
@@ -5667,7 +5667,7 @@ function DesignInspector({
                   </div>
                   <div className="flex h-6 min-w-0 items-center gap-1 px-3">
                     <span
-                      className="text-fg3 min-w-0 flex-1 truncate text-[10px]"
+                      className="text-muted-fg min-w-0 flex-1 truncate text-[10px]"
                       title={
                         styleNodeIds.length > 1
                           ? styleNodeIds.join(", ")
@@ -5725,7 +5725,7 @@ function DesignInspector({
                 ) : null}
 
                 {warnings.length > 0 ? (
-                  <section className="text-fg3 flex min-h-8 items-center gap-2 px-3 py-1.5">
+                  <section className="text-muted-fg flex min-h-8 items-center gap-2 px-3 py-1.5">
                     <AlertTriangle className="size-3.5 shrink-0" />
                     <span
                       className="min-w-0 flex-1 truncate text-[10px]"
@@ -5806,25 +5806,25 @@ function DesignInspector({
               <div className="flex flex-col">
                 <section className="border-border1 flex flex-col gap-3 border-b p-3">
                   <div className="flex items-start gap-2">
-                    <SlidersHorizontal className="text-fg3 mt-0.5 size-3.5 shrink-0" />
+                    <SlidersHorizontal className="text-muted-fg mt-0.5 size-3.5 shrink-0" />
                     <div className="flex min-w-0 flex-1 flex-col gap-1">
                       <span className="text-fg2 text-xs font-medium">
                         Tweaks
                       </span>
-                      <span className="text-fg3 text-xs">
+                      <span className="text-muted-fg text-xs">
                         Typed parameters update every binding in this document
                         in one transaction.
                       </span>
                     </div>
                     {foundationData ? (
-                      <span className="text-fg3 shrink-0 text-[10px]">
+                      <span className="text-muted-fg shrink-0 text-[10px]">
                         {foundationData.foundation.manifest.variants.length}{" "}
                         variants
                       </span>
                     ) : null}
                   </div>
                   {foundation.loading && !foundationData ? (
-                    <span className="text-fg3 text-xs">
+                    <span className="text-muted-fg text-xs">
                       Loading authored parameters…
                     </span>
                   ) : foundation.error && !foundationData ? (
@@ -5859,7 +5859,7 @@ function DesignInspector({
                                   {parameter.name}
                                 </span>
                                 <span
-                                  className="text-fg3 truncate text-[10px]"
+                                  className="text-muted-fg truncate text-[10px]"
                                   title={parameter.description}
                                 >
                                   {parameter.type} · {parameter.bindings.length}{" "}
@@ -5966,11 +5966,11 @@ function DesignInspector({
                       })}
                     </div>
                   ) : foundationData ? (
-                    <span className="text-fg3 text-xs">
+                    <span className="text-muted-fg text-xs">
                       No parameters are exposed in .zeros-foundation.json yet.
                     </span>
                   ) : (
-                    <span className="text-fg3 text-xs">
+                    <span className="text-muted-fg text-xs">
                       Select a frame to inspect its design parameters.
                     </span>
                   )}
@@ -5979,7 +5979,7 @@ function DesignInspector({
                       Refresh failed: {foundation.error.message}
                     </span>
                   ) : foundation.refreshing ? (
-                    <span className="text-fg3 text-[10px]">
+                    <span className="text-muted-fg text-[10px]">
                       Reconciling external source changes…
                     </span>
                   ) : null}
@@ -5987,12 +5987,12 @@ function DesignInspector({
 
                 <section className="border-border1 flex flex-col gap-3 border-b p-3">
                   <div className="flex items-start gap-2">
-                    <Boxes className="text-fg3 mt-0.5 size-3.5 shrink-0" />
+                    <Boxes className="text-muted-fg mt-0.5 size-3.5 shrink-0" />
                     <div className="flex min-w-0 flex-col gap-1">
                       <span className="text-fg2 text-xs font-medium">
                         Components
                       </span>
-                      <span className="text-fg3 text-xs">
+                      <span className="text-muted-fg text-xs">
                         Instances keep component identity while rendering native
                         HTML and CSS.
                       </span>
@@ -6010,7 +6010,7 @@ function DesignInspector({
                               <span className="text-fg1 truncate text-xs font-medium">
                                 {component.name}
                               </span>
-                              <span className="text-fg3 truncate text-[10px]">
+                              <span className="text-muted-fg truncate text-[10px]">
                                 {component.props.length} props ·{" "}
                                 {component.slots.length} slots ·{" "}
                                 {component.file}
@@ -6045,14 +6045,14 @@ function DesignInspector({
                       )}
                     </div>
                   ) : foundationData ? (
-                    <span className="text-fg3 text-xs">
+                    <span className="text-muted-fg text-xs">
                       Add a components/*.html definition to expose reusable
                       components here.
                     </span>
                   ) : null}
                   {foundationData?.foundation.manifest.components.length &&
                   !selectedNodeId ? (
-                    <span className="text-fg3 text-xs">
+                    <span className="text-muted-fg text-xs">
                       Select an element to use as the instance parent.
                     </span>
                   ) : null}

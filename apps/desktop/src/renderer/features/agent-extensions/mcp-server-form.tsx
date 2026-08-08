@@ -610,7 +610,7 @@ export function McpServerFormPage({
         >
           MCP
         </button>
-        <ChevronRight className="text-fg3 size-3.5" aria-hidden="true" />
+        <ChevronRight className="text-muted-fg size-3.5" aria-hidden="true" />
         <span className="text-fg1">
           {editing ? "Edit MCP server" : "Add custom MCP"}
         </span>

@@ -1203,7 +1203,7 @@ function DocumentCardBody({ item }: { item: ContextGraphItemWire }) {
       ) : (
         <div className="flex min-h-0 flex-1 items-center justify-center">
           {noteLike ? (
-            <StickyNote className="text-fg3 size-10" strokeWidth={1.4} />
+            <StickyNote className="text-muted-fg size-10" strokeWidth={1.4} />
           ) : (
             <FileTypeIcon name={item.name} size={44} className="opacity-55" />
           )}
@@ -1324,7 +1324,7 @@ function ImageCardMedia({
         />
       ) : (
         <div className="bg-bg2 border-border1 flex size-full items-center justify-center rounded-lg border">
-          <ImageIcon className="text-fg3 size-8" />
+          <ImageIcon className="text-muted-fg size-8" />
         </div>
       )}
     </div>

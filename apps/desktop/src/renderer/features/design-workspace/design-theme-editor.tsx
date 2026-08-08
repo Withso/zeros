@@ -184,7 +184,7 @@ function ThemeValueField({
         className={cn(
           "h-7 min-w-0 flex-1 font-mono text-xs",
           inherited
-            ? "zd-design-control-quiet text-fg3"
+            ? "zd-design-control-quiet text-muted-fg"
             : "zd-design-control-applied",
         )}
         aria-label={`${token.name} ${theme ?? "base"} ${inherited ? "inherited " : ""}value`}
@@ -543,7 +543,7 @@ export function DesignThemeEditor({
                 }}
                 onKeyDown={moveThemeEditorByKeyboard}
               >
-                <GripHorizontal className="text-fg3 size-4 shrink-0" />
+                <GripHorizontal className="text-muted-fg size-4 shrink-0" />
                 <Palette className="size-4 shrink-0" />
                 <DialogPrimitive.Title className="truncate text-xs font-medium">
                   Theme editor
@@ -560,7 +560,7 @@ export function DesignThemeEditor({
                 </Button>
               </DialogPrimitive.Close>
             </div>
-            <DialogPrimitive.Description className="text-fg3 text-xs">
+            <DialogPrimitive.Description className="text-muted-fg text-xs">
               Edit CSS variables as a mode matrix. Values stay in tokens.css and
               preview immediately on every live canvas frame.
             </DialogPrimitive.Description>
@@ -568,7 +568,7 @@ export function DesignThemeEditor({
 
           <div className="flex flex-wrap items-center gap-2 px-4 pb-3">
             <div className="relative min-w-48 flex-1">
-              <Search className="text-fg3 pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2" />
+              <Search className="text-muted-fg pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2" />
               <Input
                 value={query}
                 className="zd-design-search h-8 pl-7 text-xs"
@@ -641,7 +641,7 @@ export function DesignThemeEditor({
                     <span className="text-fg1 text-xs font-medium">
                       Paste CSS variables
                     </span>
-                    <span className="text-fg3 text-xs">
+                    <span className="text-muted-fg text-xs">
                       Supports :root, html, :host, [data-theme],
                       [data-zd-theme], .dark, and .theme-name blocks.
                     </span>
@@ -649,7 +649,7 @@ export function DesignThemeEditor({
                   <span
                     className={cn(
                       "shrink-0 text-xs",
-                      parsedImport.error ? "text-red-primary" : "text-fg3",
+                      parsedImport.error ? "text-red-primary" : "text-muted-fg",
                     )}
                   >
                     {parsedImport.error ?? importSummary(parsedImport.imports)}
@@ -691,7 +691,7 @@ export function DesignThemeEditor({
               <div className="bg-bg1-highlight mx-4 mb-3 grid grid-cols-[minmax(160px,1fr)_minmax(160px,2fr)_auto] items-end gap-3 rounded-lg p-4">
                 <div className="flex flex-col gap-1">
                   <Label
-                    className="text-fg3 text-xs"
+                    className="text-muted-fg text-xs"
                     htmlFor={newVariableNameId}
                   >
                     Variable
@@ -705,7 +705,7 @@ export function DesignThemeEditor({
                 </div>
                 <div className="flex flex-col gap-1">
                   <Label
-                    className="text-fg3 text-xs"
+                    className="text-muted-fg text-xs"
                     htmlFor={newVariableValueId}
                   >
                     Base value
@@ -744,7 +744,7 @@ export function DesignThemeEditor({
                     gridTemplateColumns: `minmax(260px, 1.35fr) repeat(${themes.length + 1}, minmax(190px, 1fr))`,
                   }}
                 >
-                  <div className="text-fg3 bg-bg1 sticky left-0 z-30 px-4 py-2 text-xs font-medium">
+                  <div className="text-muted-fg bg-bg1 sticky left-0 z-30 px-4 py-2 text-xs font-medium">
                     Variable
                   </div>
                   <div
@@ -774,7 +774,7 @@ export function DesignThemeEditor({
 
                 {groupedTokens.map(([group, rows]) => (
                   <React.Fragment key={group}>
-                    <div className="bg-bg1-highlight text-fg3 sticky left-0 z-10 px-4 py-1.5 text-[10px] font-medium tracking-wide uppercase">
+                    <div className="bg-bg1-highlight text-muted-fg sticky left-0 z-10 px-4 py-1.5 text-[10px] font-medium tracking-wide uppercase">
                       {group}
                     </div>
                     {rows.map((token) => {
@@ -792,12 +792,12 @@ export function DesignThemeEditor({
                           }}
                         >
                           <div className="bg-bg1 group-hover/token:bg-bg1-hover sticky left-0 z-10 flex min-w-0 items-center gap-2 px-4 py-2">
-                            <Variable className="text-fg3 size-3.5 shrink-0" />
+                            <Variable className="text-muted-fg size-3.5 shrink-0" />
                             <div className="flex min-w-0 flex-1 flex-col">
                               <code className="text-fg1 truncate text-xs">
                                 {token.name}
                               </code>
-                              <span className="text-fg3 truncate text-[10px]">
+                              <span className="text-muted-fg truncate text-[10px]">
                                 {type} · {token.usageCount} uses
                               </span>
                             </div>
@@ -848,7 +848,7 @@ export function DesignThemeEditor({
                 ))}
 
                 {tokens.length === 0 ? (
-                  <div className="text-fg3 flex min-h-52 flex-col items-center justify-center gap-2 px-6 text-center text-xs">
+                  <div className="text-muted-fg flex min-h-52 flex-col items-center justify-center gap-2 px-6 text-center text-xs">
                     <Palette className="size-6" />
                     <span>No theme variables yet.</span>
                     <span>
@@ -856,7 +856,7 @@ export function DesignThemeEditor({
                     </span>
                   </div>
                 ) : groupedTokens.length === 0 ? (
-                  <div className="text-fg3 flex min-h-40 items-center justify-center px-6 text-xs">
+                  <div className="text-muted-fg flex min-h-40 items-center justify-center px-6 text-xs">
                     No variables match “{query}”.
                   </div>
                 ) : null}
@@ -893,7 +893,7 @@ export function DesignThemeEditor({
                 {action?.startsWith("theme:") ? "Adding…" : "Add theme"}
               </Button>
             </div>
-            <div className="text-fg3 flex items-center gap-3 text-xs">
+            <div className="text-muted-fg flex items-center gap-3 text-xs">
               <span>
                 {tokens.length} variables · {themes.length + 1} modes
               </span>

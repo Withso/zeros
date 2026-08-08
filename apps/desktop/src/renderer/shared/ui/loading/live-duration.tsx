@@ -31,7 +31,7 @@ import { isElementActuallyVisible } from "@/renderer/shared/lib/element-visibili
 // composing their own className don't have to redefine the base.
 const LIVE_DURATION_CLS =
   "zeros-agent-live-duration text-xs tabular-nums text-blue-primary";
-const FINAL_DURATION_CLS = "text-xs tabular-nums text-fg3";
+const FINAL_DURATION_CLS = "text-xs tabular-nums text-muted-fg";
 
 interface LiveDurationProps {
   startedAt: number;

@@ -42,7 +42,7 @@ export function AgentRemovedPanel({
     <div className="flex h-full w-full items-center justify-center bg-bg1 p-6">
       <div className="flex w-full max-w-md flex-col items-center gap-5 text-center">
         <div className="flex size-12 items-center justify-center rounded-sm border border-border1 bg-bg2">
-          <Bot className="size-6 text-fg3" aria-hidden="true" />
+          <Bot className="size-6 text-muted-fg" aria-hidden="true" />
         </div>
         <div className="space-y-1.5">
           <h3 className="text-sm font-medium text-fg1">

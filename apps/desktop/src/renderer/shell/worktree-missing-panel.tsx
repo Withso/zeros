@@ -81,7 +81,7 @@ function CopyPathButton({ path }: { path: string }) {
         type="button"
         onClick={handleCopy}
         aria-label="Copy path"
-        className="text-fg3 hover:text-fg1 shrink-0 transition-colors"
+        className="text-muted-fg hover:text-fg1 shrink-0 transition-colors"
       >
         {copied ? (
           <Check
@@ -153,7 +153,7 @@ export function WorktreeMissingPanel({
         </div>
         <h3 className="text-fg1 text-sm font-medium">Worktree missing</h3>
         <div className="border-border1 bg-bg2 text-fg2 flex w-full items-center gap-2 rounded-md border px-3 py-2 text-xs">
-          <span className="text-fg3 shrink-0">Path</span>
+          <span className="text-muted-fg shrink-0">Path</span>
           <Tooltip label={workspace.path}>
             <span className="text-fg1 min-w-0 flex-1 truncate text-left font-mono">
               {workspace.path}

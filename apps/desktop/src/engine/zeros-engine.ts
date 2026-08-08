@@ -126,6 +126,7 @@ import type {
   QuestionRequest,
   ContentBlock,
   LoadSessionResponse,
+  PromptResponse,
   StopReason,
   TurnUsage,
 } from "@zeros/protocol/agent-events";
@@ -199,6 +200,43 @@ interface ActivePromptContext {
   /** Last sign of life from the adapter (stream chunk, gate opened/settled) or
    *  from the user answering a gate. Read only by the staleness bound below. */
   lastActivityAt: number;
+  /** A Stop landed for THIS accepted turn (any cancel site — the user's button,
+   *  chat reset, workspace lifecycle, remote-client drop).
+   *
+   *  Turn-scoped on purpose. The session-wide `cancelRequested` set cannot tell
+   *  "stop the turn I just accepted" from "a stale intent left by a previous
+   *  turn", so AGENT_PROMPT clears that set before dispatching — which silently
+   *  swallowed every Stop clicked during the pre-dispatch window (persist user
+   *  message → pre-snapshot → workspace barrier, seconds on a large repo). The
+   *  adapters cannot cover it either: each clears its own cancel flag as it
+   *  enters prompt(). This flag is minted with the turn, so it is unambiguous. */
+  cancelledByUser?: boolean;
+  /** The adapter's prompt promise has settled (either way). Disarms the
+   *  post-cancel settle watchdog — finishTurn's post-snapshot can outlast the
+   *  deadline, and a force-settle racing it would double-write the turn row. */
+  adapterSettled?: boolean;
+  /** This turn's recorded snapshot, once beginTurn has produced one (null when
+   *  there is nothing to record — no chat binding, no folder). Held by
+   *  REFERENCE, because `turnId` above is NOT a reliable name for it: this
+   *  record falls back to `turn-${msg.id}` while beginTurn falls back to the
+   *  persisted user message's id, so the two disagree for any client that omits
+   *  userMessageId. The settle watchdog matched on that id and silently skipped
+   *  the durable write whenever they diverged. */
+  turnSnapshot?: TurnSnapshotContext | null;
+  /** The post-cancel watchdog has written this turn's ENDING to its durable row.
+   *  Only this suppresses the prompt handler's own finishTurn — never
+   *  `terminalPublished`, which is about the wire event and can be set in
+   *  windows where no row was (or could yet be) closed. Keeping the two apart is
+   *  what stops a suppression outrunning the write it stands for and leaving the
+   *  row recorded as running forever. */
+  turnRowSettled?: boolean;
+  /** This turn's terminal `turn_state` has already been emitted by the
+   *  post-cancel watchdog. The prompt handler must not publish a second,
+   *  contradictory ending, and the turn no longer counts as live for
+   *  re-adoption or the concurrency guard. */
+  terminalPublished?: boolean;
+  /** Pending post-cancel settle deadline (see CANCEL_SETTLE_DEADLINE_MS). */
+  cancelSettleTimer?: ReturnType<typeof setTimeout>;
 }
 
 /** Accept only catalog-shaped correlation ids. Reject paths, emails, spaces,
@@ -250,6 +288,21 @@ const LOCAL_REOWN_GRACE_MS = 30_000;
  *  so the renderer always gives up first: the engine is the backstop, never the
  *  one to declare a turn dead while a client still waits on it. */
 const PROMPT_STALE_AFTER_MS = 45 * 60_000;
+
+/** How long after a cancel the engine waits for the adapter's prompt promise to
+ *  settle before it publishes the turn's ending itself.
+ *
+ *  A Stop is a promise to the user, and every adapter settles its turn within a
+ *  second or two of one (abort the run, interrupt the turn, drain the stream).
+ *  When one does NOT — a run whose stream never closes, an interrupt the
+ *  provider never acknowledges — the engine used to keep the accepted prompt as
+ *  the session's live turn for the full PROMPT_STALE_AFTER_MS window. The user
+ *  saw STOPPED BY USER, then reloaded (or switched tabs, which re-loads the
+ *  session) and got the running shimmer back with a timer counting from the
+ *  original prompt. This bound makes the stop durable: bookkeeping only — the
+ *  adapter's own cancel has already been dispatched and its late settle is
+ *  still attributed correctly. */
+const CANCEL_SETTLE_DEADLINE_MS = 15_000;
 
 /** Return only durable, opaque workspace-row ids for DB_CHANGED scoping.
  * Local-main requests use a host path as their workspaceId; rejecting anything
@@ -2411,13 +2464,24 @@ export class ZerosEngine {
             // error path — so a failed turn never leaves a stale marker.
             // Record this turn: snapshot the work tree BEFORE the agent runs.
             turnCtx = await this.beginTurn(msg.sessionId, msg.userMessageId);
+            // Publish the snapshot itself on the record so the settle watchdog
+            // can recognise THIS turn's row by reference instead of re-deriving
+            // a turn id that can disagree with beginTurn's (see turnSnapshot).
+            activePrompt.turnSnapshot = turnCtx;
             this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
             this.enterPrompt();
             this.promptSessions.add(msg.sessionId);
             if (turnCtx) {
               this.activeTurnSnapshots.set(msg.sessionId, turnCtx);
             }
-            this.emitTurnState(activePrompt, "running");
+            // Don't announce a turn as running when a Stop already landed on it
+            // during this preparation: the client flipped its chat to stopped
+            // the moment the user clicked, and `running` would drag the shimmer
+            // and its elapsed timer back for as long as the cancelled settle
+            // takes. The terminal state below is the only event it needs.
+            if (!activePrompt.cancelledByUser) {
+              this.emitTurnState(activePrompt, "running");
+            }
           } catch (err) {
             // A lifecycle that acquired the workspace while the pre-snapshot
             // was being built must leave no forever-"running" turn row. Do not
@@ -2442,15 +2506,30 @@ export class ZerosEngine {
             void promptStartSettled;
           }
           // A cancel intent recorded before this turn began belongs to a
-          // PREVIOUS turn — drop it so it can't mislabel this one.
+          // PREVIOUS turn — drop it so it can't mislabel this one. The intent
+          // for THIS turn rides activePrompt.cancelledByUser, which is minted
+          // with the turn and therefore survives this line.
           this.cancelRequested.delete(msg.sessionId);
           try {
-            const response = await this.agents.prompt(
-              msg.agentId,
-              msg.sessionId,
-              msg.prompt,
-            );
-            if (turnCtx) {
+            // Stop clicked while this turn was still being PREPARED (persisting
+            // the user message, the pre-snapshot, the workspace barrier — all
+            // before any adapter sees the prompt). Never dispatch: handing the
+            // provider work the user already stopped is what made "send, then
+            // Stop a second later" run to completion behind a STOPPED BY USER
+            // pill, and left the engine holding a live turn that reappeared as
+            // a running shimmer on the next reload.
+            const response: PromptResponse = activePrompt.cancelledByUser
+              ? { stopReason: "cancelled" }
+              : await this.agents
+                  .prompt(msg.agentId, msg.sessionId, msg.prompt)
+                  .finally(() => {
+                    activePrompt.adapterSettled = true;
+                  });
+            // Gated on the DURABLE fact, not on terminalPublished: the watchdog
+            // can announce a stop in a window where it had no row to close yet
+            // (a pre-snapshot still running past the deadline), and this is the
+            // call that must still close it.
+            if (turnCtx && !activePrompt.turnRowSettled) {
               await this.finishTurn(
                 turnCtx,
                 response.stopReason === "cancelled" ? "cancelled" : "completed",
@@ -2458,11 +2537,13 @@ export class ZerosEngine {
                 response.usage ?? null,
               );
             }
-            this.emitTurnState(
-              activePrompt,
-              response.stopReason === "cancelled" ? "cancelled" : "completed",
-              response.stopReason ?? null,
-            );
+            if (!activePrompt.terminalPublished) {
+              this.emitTurnState(
+                activePrompt,
+                response.stopReason === "cancelled" ? "cancelled" : "completed",
+                response.stopReason ?? null,
+              );
+            }
             client.send(
               createMessage({
                 type: "AGENT_PROMPT_COMPLETE",
@@ -2475,8 +2556,13 @@ export class ZerosEngine {
               }),
             );
           } catch (err) {
-            const wasCancelled = this.cancelRequested.has(msg.sessionId);
-            if (turnCtx) {
+            // Either signal means the user stopped this turn: the turn-scoped
+            // flag (a Stop for THIS prompt, from any cancel site) or the
+            // session-wide intent recorded while the adapter was running.
+            const wasCancelled =
+              activePrompt.cancelledByUser === true ||
+              this.cancelRequested.has(msg.sessionId);
+            if (turnCtx && !activePrompt.turnRowSettled) {
               // A user cancel can surface as a rejection instead of a clean
               // stopReason:"cancelled" (e.g. the SIGTERM'd subprocess tears
               // the stream down before the adapter can settle the turn).
@@ -2488,11 +2574,13 @@ export class ZerosEngine {
                 wasCancelled ? "cancelled" : null,
               );
             }
-            this.emitTurnState(
-              activePrompt,
-              wasCancelled ? "cancelled" : "failed",
-              wasCancelled ? "cancelled" : null,
-            );
+            if (!activePrompt.terminalPublished) {
+              this.emitTurnState(
+                activePrompt,
+                wasCancelled ? "cancelled" : "failed",
+                wasCancelled ? "cancelled" : null,
+              );
+            }
             // Forward the structured failure when the adapter raised
             // AgentFailureError — without this, the renderer has to
             // regex-match `error` and any wording drift drops
@@ -2513,6 +2601,8 @@ export class ZerosEngine {
               }),
             );
           } finally {
+            activePrompt.adapterSettled = true;
+            this.disarmCancelSettleDeadline(activePrompt);
             if (this.activeTurnSnapshots.get(msg.sessionId) === turnCtx) {
               this.activeTurnSnapshots.delete(msg.sessionId);
             }
@@ -2542,7 +2632,10 @@ export class ZerosEngine {
           // Record the intent BEFORE dispatching: if the cancel kills the
           // subprocess and the in-flight prompt rejects, the AGENT_PROMPT
           // catch still knows this was a user stop (turn row → cancelled).
-          this.cancelRequested.add(msg.sessionId);
+          // markCancelIntent also stamps the accepted turn itself, so a Stop
+          // that lands while the turn is still being prepared is honoured
+          // instead of dispatched-then-forgotten.
+          this.markCancelIntent(msg.sessionId);
           await this.agents.cancel(msg.agentId, msg.sessionId);
           return;
         }
@@ -2755,6 +2848,25 @@ export class ZerosEngine {
           // the live session without calling adapter.loadSession: several
           // adapters implement load as replacement/disposal, which would kill
           // the exact turn we are trying to recover.
+          //
+          // Only for a turn that is actually still LIVE. This used to re-adopt
+          // on the mere existence of the record, so a stopped-but-unsettled or
+          // stale turn answered promptActive:true with its original startedAt —
+          // the reloaded (or tab-switched) chat showed the running shimmer with
+          // a timer counting the whole time since the prompt, for a turn that
+          // was over. A dead record is released here exactly as AGENT_PROMPT
+          // releases it, and this load proceeds as an ordinary resume.
+          const existingPrompt = this.activePromptContexts.get(msg.sessionId);
+          if (existingPrompt && !this.activePromptIsLive(existingPrompt)) {
+            console.warn(
+              `[agents] releasing a dead in-flight prompt for session ` +
+                `${msg.sessionId.slice(0, 8)}… on load: ` +
+                `${existingPrompt.terminalPublished ? "already settled" : "no activity"}`,
+            );
+            this.disarmCancelSettleDeadline(existingPrompt);
+            this.activePromptContexts.delete(msg.sessionId);
+            this.promptSessions.delete(msg.sessionId);
+          }
           const activePrompt = this.activePromptContexts.get(msg.sessionId);
           if (activePrompt) {
             // Nothing is spawned here, so cwd/env/cliBinary are moot — but
@@ -3369,7 +3481,7 @@ export class ZerosEngine {
         if (!agentId) return;
         // Record the intent first so the settling turn row reads "cancelled"
         // (STOPPED BY USER), not "failed" — mirrors the AGENT_CANCEL handler.
-        this.cancelRequested.add(sessionId);
+        this.markCancelIntent(sessionId);
         try {
           await Promise.race([
             this.agents.cancel(agentId, sessionId),
@@ -3957,10 +4069,76 @@ export class ZerosEngine {
   /** Whether an accepted prompt still looks like the session's live turn: recent
    *  adapter activity, OR an unanswered permission/question gate — a gate can
    *  legitimately sit idle for hours while the user is away, and its resolver is
-   *  proof the turn is alive. */
+   *  proof the turn is alive. A turn whose ending the engine has already
+   *  published is never live, however fresh its last chunk was. */
   private activePromptIsLive(prompt: ActivePromptContext): boolean {
+    if (prompt.terminalPublished) return false;
     if (Date.now() - prompt.lastActivityAt < PROMPT_STALE_AFTER_MS) return true;
     return this.hasPendingAgentInteraction(prompt.sessionId);
+  }
+
+  /** Record a cancel for a session, on the SESSION and on the accepted turn.
+   *
+   *  The turn-scoped half is what makes a Stop unconditional: AGENT_PROMPT
+   *  clears the session-wide intent before dispatching (it cannot tell a stale
+   *  intent from one meant for the turn it is about to run), so a Stop clicked
+   *  during the pre-dispatch window used to be lost by the engine AND by the
+   *  adapter, which clears its own cancel flag as it enters prompt(). Also arms
+   *  the settle deadline so the turn cannot stay "live" if the adapter never
+   *  comes back. */
+  private markCancelIntent(sessionId: string): void {
+    this.cancelRequested.add(sessionId);
+    const prompt = this.activePromptContexts.get(sessionId);
+    if (!prompt) return;
+    prompt.cancelledByUser = true;
+    this.armCancelSettleDeadline(prompt);
+  }
+
+  /** Publish a cancelled turn ourselves if the adapter hasn't settled within
+   *  CANCEL_SETTLE_DEADLINE_MS. Bookkeeping only — the adapter's cancel was
+   *  already dispatched; this is what keeps a reload from re-adopting a turn the
+   *  user stopped. */
+  private armCancelSettleDeadline(prompt: ActivePromptContext): void {
+    if (prompt.cancelSettleTimer || prompt.adapterSettled) return;
+    const timer = setTimeout(() => {
+      prompt.cancelSettleTimer = undefined;
+      if (prompt.adapterSettled || prompt.terminalPublished) return;
+      // A later prompt already owns this session (only reachable after a stale
+      // release), so this record no longer speaks for it.
+      if (this.activePromptContexts.get(prompt.sessionId) !== prompt) return;
+      prompt.terminalPublished = true;
+      console.warn(
+        `[agents] cancel not acknowledged within ` +
+          `${Math.round(CANCEL_SETTLE_DEADLINE_MS / 1000)}s for session ` +
+          `${prompt.sessionId.slice(0, 8)}…: settling the turn as cancelled`,
+      );
+      // finishTurn is self-contained (it never throws) and owns the durable
+      // half: the row this chat's footer reads as STOPPED BY USER after a
+      // reload. Matched by REFERENCE, not by turn id — the record's id and
+      // beginTurn's are derived separately and disagree whenever the client
+      // omitted userMessageId, so an id comparison here skipped the write for
+      // exactly the turns it was meant to close.
+      const turnCtx = this.activeTurnSnapshots.get(prompt.sessionId);
+      if (turnCtx && turnCtx === prompt.turnSnapshot) {
+        this.activeTurnSnapshots.delete(prompt.sessionId);
+        // Claim the durable half only now that we are performing it. A turn
+        // still being PREPARED has no row here yet (a pre-snapshot can outrun
+        // this deadline on a large repo); leaving this false is what lets the
+        // prompt handler finalize that row instead of skipping it forever.
+        prompt.turnRowSettled = true;
+        void this.finishTurn(turnCtx, "cancelled", "cancelled");
+      }
+      this.emitTurnState(prompt, "cancelled", "cancelled");
+    }, CANCEL_SETTLE_DEADLINE_MS);
+    // Never hold the engine's event loop open for a stop deadline.
+    timer.unref?.();
+    prompt.cancelSettleTimer = timer;
+  }
+
+  private disarmCancelSettleDeadline(prompt: ActivePromptContext): void {
+    if (!prompt.cancelSettleTimer) return;
+    clearTimeout(prompt.cancelSettleTimer);
+    prompt.cancelSettleTimer = undefined;
   }
 
   private hasPendingAgentInteraction(sessionId: string): boolean {
@@ -4480,7 +4658,7 @@ export class ZerosEngine {
           // Deliberate engine-policy cancel — mark the intent so a turn torn
           // down by it records "cancelled", not "failed" (same race as the
           // user Stop button; see cancelRequested).
-          this.cancelRequested.add(sessionId);
+          this.markCancelIntent(sessionId);
           void this.agents.cancel(agentId, sessionId).catch(() => {});
         }
       }

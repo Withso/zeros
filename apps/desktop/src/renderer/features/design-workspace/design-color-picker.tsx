@@ -286,7 +286,7 @@ export function DesignColorPicker({
       >
         <div className="border-border1 flex h-9 items-center justify-between border-b px-3">
           <span className="text-fg1 text-xs font-medium">{label}</span>
-          <span className="text-fg3 text-[10px]">sRGB</span>
+          <span className="text-muted-fg text-[10px]">sRGB</span>
         </div>
 
         <div className="flex flex-col gap-3 p-3">
@@ -419,7 +419,7 @@ export function DesignColorPicker({
               />
             </button>
 
-            <span className="text-fg3 text-center text-[10px]">A</span>
+            <span className="text-muted-fg text-center text-[10px]">A</span>
             <div
               className="relative h-2.5 rounded-full"
               style={checkerboardBackground()}
