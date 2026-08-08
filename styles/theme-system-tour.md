@@ -87,16 +87,16 @@ repaint when Dark and Orka black switch without changing dark/light polarity.
 
 **One layer of primitives** plus a small set of **component aliases**. Full reference in `styles/zeros-foundation.md` §2.
 
-| Family                    | Tokens                                                                                      | Tailwind prefix                                        |
-| ------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| Backgrounds               | `--bg0` … `--bg5` + `--pane-bg`, `--bg{1,2,3}-hover`, `--bg1-highlight`                     | `bg-bg1`, `bg-bg2-hover`, etc.                         |
-| Foregrounds               | `--fg1`, `--fg2`, `--fg3`, `--muted-fg`                                                     | `text-fg1`, `text-fg2`, `text-muted-fg`                |
-| Repository navigation     | `--sidebar-bg`, `--sidebar-bg-hover`                                                        | `bg-sidebar-bg`, `bg-sidebar-bg-hover`                 |
-| Borders                   | `--border1` … `--border4`                                                                   | `border-border1`, etc.                                 |
-| Highlighted (interaction) | `--highlighted-bg`, `--highlighted-bright`                                                  | `bg-highlighted-bright`, etc.                          |
-| Inverted (polarity pair)  | `--inverted-bg`, `--inverted-fg`                                                            | `bg-inverted-bg`, `text-inverted-fg`                   |
-| Component aliases         | `--primary-button-bg/-hover/-fg`                                                            | `bg-primary-button-bg`, etc.                           |
-| Color palettes (semantic) | `--{red,green,yellow,blue,violet,brown}-{primary,bg,fg}` + red secondary pair                | `text-red-primary`, `bg-red-bg`, `text-green-fg`, etc. |
+| Family                    | Tokens                                                                        | Tailwind prefix                                        |
+| ------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------ |
+| Backgrounds               | `--bg0` … `--bg5` + `--pane-bg`, `--bg{1,2,3}-hover`, `--bg1-highlight`       | `bg-bg1`, `bg-bg2-hover`, etc.                         |
+| Foregrounds               | `--fg1`, `--fg2`, `--fg3`, `--muted-fg`                                       | `text-fg1`, `text-fg2`, `text-fg3`, `text-muted-fg`    |
+| Repository navigation     | `--sidebar-bg`, `--sidebar-bg-hover`                                          | `bg-sidebar-bg`, `bg-sidebar-bg-hover`                 |
+| Borders                   | `--border1` … `--border4`                                                     | `border-border1`, etc.                                 |
+| Highlighted (interaction) | `--highlighted-bg`, `--highlighted-bright`                                    | `bg-highlighted-bright`, etc.                          |
+| Inverted (polarity pair)  | `--inverted-bg`, `--inverted-fg`                                              | `bg-inverted-bg`, `text-inverted-fg`                   |
+| Component aliases         | `--primary-button-bg/-hover/-fg`                                              | `bg-primary-button-bg`, etc.                           |
+| Color palettes (semantic) | `--{red,green,yellow,blue,violet,brown}-{primary,bg,fg}` + red secondary pair | `text-red-primary`, `bg-red-bg`, `text-green-fg`, etc. |
 
 **Tailwind utility naming is verbatim**: `--color-bg1` → class `bg-bg1`. The `bg-bg1` repeat reads slightly odd but it's unambiguous and matches the token name exactly. No shadcn aliases, no canonical depth tokens, no `--tint` family.
 
@@ -214,7 +214,7 @@ When the design direction shifts, here's where each kind of change lands:
 - **Tokens live in `styles/zeros-tokens.css`.** Primitive HSL values; edit the token, not the component.
 - **Only knob: theme mode** (System / Light / Dark / Orka black). Dark is neutral in `:root`; Orka black restores the previous warm-gray dark primitives; Light is the `[data-theme="light"]` override; System follows macOS and uses neutral Dark when macOS is dark.
 - **Backgrounds**: `bg-bg0` (inactive pane), `bg-bg1` (canvas), `bg-bg2` (composer), and `bg-bg3` (floating popover/dropdown/menu only). Hovers are surface-scoped (`bg-bg1-hover`, `bg-bg2-hover`, `bg-bg3-hover`).
-- **Foregrounds**: `text-fg1` (highlighted), `text-fg2` (default), `text-muted-fg` (placeholders).
+- **Foregrounds**: `text-fg1` (highlighted), `text-fg2` (default), then pick the quieter tier by REFERENCE POINT — `text-fg3` when stepping down from the `fg2` text beside it (placeholders, ignored file-tree rows), `text-muted-fg` when the content is incidental to the surface (metadata, disabled, empty states). See foundation §9.1.1.
 - **Borders**: `border-border1` (default) → `border-border3` (component) → `border-border4` (highlighted).
 - **Two "stand-out" tokens**:
   - `bg-primary-button-bg text-primary-button-fg` — inverted focal CTA button. One per screen.

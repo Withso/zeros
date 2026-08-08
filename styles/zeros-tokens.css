@@ -50,10 +50,19 @@
      --bg4                  rare — reserved for specific use cases
      --bg5                  rare — reserved for specific use cases
 
-   FOREGROUNDS (3 tiers — TEXT + ICONS ONLY, never borders):
+   FOREGROUNDS (4 tiers — TEXT + ICONS ONLY, never borders):
      --fg1                  selected / highlighted text (titles, output, agent chat body)
      --fg2                  default text + icon color across the app
-     --muted-fg             placeholder text + empty-state icons
+     --fg3                  MIDDLE tier — exactly ONE step quieter than --fg2.
+                            For content that must read as secondary to the text
+                            beside it while staying comfortably legible: input
+                            placeholders, .gitignore'd rows in the file tree.
+                            Reach for this (not --muted-fg) whenever the
+                            reference point is --fg2 rather than the canvas.
+     --muted-fg             QUIETEST tier — supplemental metadata (timestamps,
+                            counts, SHAs), disabled content, empty-state icons.
+                            Two steps below --fg2; appropriate only where the
+                            content is genuinely incidental.
 
    REPOSITORY NAVIGATION (not the settings sidebar):
      --sidebar-bg           workspace sidebar background
@@ -67,6 +76,8 @@
 
    HIGHLIGHTED (neutral interaction emphasis in both dark palettes):
      --highlighted-bg              user-message bg in chat (text on it: fg1/fg2)
+                                   neutral dark aliases this to --bg2; Orka
+                                   black and light keep their own values
      --highlighted-bright          input focus border, brighter accent borders
 
    INVERTED (polarity-flipping surface — always the OPPOSITE of bg1):
@@ -92,7 +103,11 @@
      hover on bg3 surface → --bg3-hover
      hover on sidebar     → --sidebar-bg-hover
 
-   Foregrounds: default --fg2, selected/highlighted --fg1, placeholder --muted-fg.
+   Foregrounds: default --fg2, selected/highlighted --fg1. Below the default,
+   pick by REFERENCE POINT: --fg3 when the thing it must read quieter than is
+   the --fg2 text beside it (placeholders, ignored file-tree rows); --muted-fg
+   when the content is incidental to the surface itself (timestamps, counts,
+   disabled text, empty-state icons).
 
    Buttons:
      Primary    → bg-primary-button-bg + text-primary-button-fg, hover: bg-primary-button-hover
@@ -107,7 +122,9 @@
 
    Inputs:
      bg-bg{N} (matches parent), border-border3, focus border-highlighted-bright
-     placeholder text-muted-fg, value text-fg1
+     value text-fg1, placeholder:text-fg3 (the composer's ProseMirror
+     placeholder uses var(--fg3) directly — same tier, one weight app-wide).
+     A placeholder at --fg2 reads as a FILLED value; do not go back to it.
 
    Dropdowns:
      trigger: bg-bg{N} + border-border3, hover bg-bg2-hover + border-border4
@@ -332,12 +349,14 @@
    2. PRIMITIVE TOKENS — neutral dark (the default dark theme)
    ──────────────────────────────────────────────────────────
    Structural dark tokens in `:root` are achromatic HSL: hue and
-   saturation are both zero. Most retain their former lightness; bg1,
-   bg2, and sidebar-bg are deliberately one point lighter to strengthen
-   the neutral surface ramp. Meaning-bearing status palettes remain
-   chromatic; see COLOR PALETTES below. Orka black restores the former
-   warm structural values in its override block, and Light overrides the
-   full palette. */
+   saturation are both zero, and every one keeps the former dark
+   palette's lightness EXCEPT bg2, which is deliberately one point
+   lighter (L13) to lift the composer and raised cards off the canvas.
+   Neutral Dark also aliases --highlighted-bg to --bg2 so the
+   user-message bubble and the composer read as one surface family.
+   Meaning-bearing status palettes remain chromatic; see COLOR PALETTES
+   below. Orka black restores the former warm structural values in its
+   override block, and Light overrides the full palette. */
 
 :root {
   /* Native UA hint — form controls, scrollbars, selection.
@@ -347,8 +366,8 @@
   /* ── BACKGROUNDS ── */
   --bg0: hsl(0 0% 5%); /* #0D0D0D — INACTIVE chat window fill (below bg1) */
   --bg1: hsl(
-    0 0% 8%
-  ); /* #141414 — default canvas / app backdrop + active chat window */
+    0 0% 7%
+  ); /* #121212 — default canvas / app backdrop + active chat window */
   /* Contextual chat-window surface. Defaults to bg1 so the ACTIVE window (and
    * any chat chrome rendered outside a pane) looks exactly like the plain app
    * canvas; ChatPane overrides it to bg0 on unfocused panes. Consumers use
@@ -365,7 +384,7 @@
    * border2 + --shadow-dropdown, mirroring the light theme where bg3 == bg1.
    * (--sidebar-bg / --sidebar-bg-hover are defined a few lines below; CSS
    * custom properties resolve var() lazily, so the forward reference is fine.) */
-  --bg3: var(--sidebar-bg); /* = #1A1A1A — floating popover surface */
+  --bg3: var(--sidebar-bg); /* = #171717 — floating popover surface */
   --bg3-hover: var(
     --sidebar-bg-hover
   ); /* = #262626 — hover on bg3 (menu items) */
@@ -373,15 +392,19 @@
   --bg5: hsl(0 0% 37%); /* #5E5E5E — rare */
 
   /* ── FOREGROUNDS (text + icons only — NEVER used for borders) ── */
-  --fg1: hsl(0 0% 92%); /* #EBEBEB — selected/highlighted text + icons */
-  --fg2: hsl(0 0% 66%); /* #A8A8A8 — default text + icon across app */
-  --fg3: hsl(
-    0 0% 44%
-  ); /* #707070 — third-tier foreground (same L as --muted-fg) */
-  --muted-fg: hsl(0 0% 44%); /* #707070 — placeholder + empty-state icons */
+  --fg1: hsl(0 0% 94%); /* #F0F0F0 — selected/highlighted text + icons */
+  --fg2: hsl(0 0% 72%); /* #B8B8B8 — default text + icon across app */
+  /* MIDDLE tier — one step below --fg2 (see TOKEN TAXONOMY).
+   * Placed 60% of the way from --muted-fg up to --fg2 in log-contrast space:
+   * 6.58:1 on bg1, between fg2's 9.44:1 and muted-fg's 3.78:1. Orka black and
+   * Light re-derive the SAME relative position in their own bands rather than
+   * copying this lightness — in Light a higher L means LESS contrast, so
+   * copying `60` there would invert the tier order. */
+  --fg3: hsl(0 0% 60%); /* #999999 — middle tier (one step below fg2) */
+  --muted-fg: hsl(0 0% 44%); /* #707070 — quietest tier (app-wide 3rd tier) */
 
   /* ── REPOSITORY NAVIGATION (not the settings sidebar) ── */
-  --sidebar-bg: hsl(0 0% 10%); /* #1A1A1A */
+  --sidebar-bg: hsl(0 0% 9%); /* #171717 */
   --sidebar-bg-hover: hsl(0 0% 15%); /* #262626 */
 
   /* ── BORDERS ── */
@@ -400,13 +423,14 @@
   --scrim: hsl(0 0% 0% / 0.8);
 
   /* ── HIGHLIGHTED (neutral interaction emphasis) ── */
-  /* User-message bubble. Its 12% L reads as a quiet inset on the canvas and is
-   * just BELOW border1 (14%), which gives the bubble its faint outline —
-   * keep any hover chip painted on this surface at bg2-hover (15%) or above,
-   * or it disappears into the fill (turn-container.tsx "More" pill). */
-  --highlighted-bg: hsl(
-    0 0% 12%
-  ); /* #1F1F1F — user msg bg (text on it: fg1/fg2) */
+  /* User-message bubble. Neutral Dark ALIASES this to bg2 so the bubble reads
+   * as the same raised surface as the composer the message was typed in (Orka
+   * black and Light keep their own literal values, so this alias is
+   * neutral-Dark-only). At 13% L it still sits just BELOW border1 (14%), which
+   * gives the bubble its faint outline — keep any hover chip painted on this
+   * surface at bg2-hover (15%) or above, or it disappears into the fill
+   * (turn-container.tsx "More" pill). */
+  --highlighted-bg: var(--bg2); /* = #212121 — user msg bg (text: fg1/fg2) */
   --highlighted-bright: hsl(
     0 0% 65%
   ); /* #A6A6A6 — input focus border, brighter accents */
@@ -591,8 +615,15 @@
   /* ── FOREGROUNDS ── */
   --fg1: hsl(0 2% 92%); /* #EBEAEA — selected/highlighted text + icons */
   --fg2: hsl(20 4% 66%); /* #ACA7A5 — default text + icon across app */
-  --fg3: hsl(15 1% 44%); /* #71706F — third-tier foreground */
-  --muted-fg: hsl(15 4% 44%); /* #756E6C — placeholder + empty-state icons */
+  /* MIDDLE tier — 5.98:1 on Orka's bg1, the same
+   * relative position between muted-fg and fg2 that neutral Dark's L60 holds.
+   * Orka's --fg2 is L66 (not L72), so copying L60 here would leave a far
+   * tighter fg2/fg3 gap than intended. */
+  --fg3: hsl(15 1% 57%); /* #929190 — middle tier (one step below fg2) */
+  /* Adopts the former --fg3 value (sat 1%, not 4%): every one of the ~191
+   * migrated consumers rendered at that exact color, so this keeps Orka black
+   * pixel-identical for them. */
+  --muted-fg: hsl(15 1% 44%); /* #71706F — quietest tier (app-wide 3rd tier) */
 
   /* ── REPOSITORY NAVIGATION ── */
   --sidebar-bg: hsl(25 5% 9%); /* #181716 */
@@ -652,8 +683,16 @@
   --fg2: hsl(
     20 4% 37%
   ); /* #625D5B — default text + icon across app; passes AA on white at 6.5:1 */
-  --fg3: hsl(20 4% 56%); /* #938D8A — third-tier foreground */
-  --muted-fg: hsl(20 4% 68%); /* #B1ACAA — placeholder + empty-state icons */
+  /* MIDDLE tier. Light INVERTS the lightness axis: a
+   * higher L means LESS contrast on a white canvas, so this sits BELOW
+   * --muted-fg's L (44 vs 56), not above it. 4.95:1 on bg1 — the same relative
+   * position between muted-fg and fg2 that neutral Dark's L60 holds. */
+  --fg3: hsl(20 4% 44%); /* #756F6C — middle tier (one step below fg2) */
+  /* Adopts the former --fg3 value (L56, not L68). The ~191 migrated consumers
+   * already rendered at L56, so they stay identical; the 25 review-surface
+   * consumers that were already on --muted-fg rise from 2.24:1 to 3.27:1,
+   * which is the intended fix — L68 was too faint for metadata text. */
+  --muted-fg: hsl(20 4% 56%); /* #938D8A — quietest tier (app-wide 3rd tier) */
 
   /* ── SIDEBAR ── */
   --sidebar-bg: hsl(60 9% 98%); /* #FAFAF9 */
@@ -661,7 +700,7 @@
 
   /* ── BORDERS ── */
   --border1: hsl(30 9% 91%); /* #EAE8E6 — default for bg1 surfaces */
-  --border2: hsl(30 9% 88%); /* #EAE8E6 — sidebar / composer focus / bg2 */
+  --border2: hsl(30 9% 88%); /* #E3E0DE — sidebar / composer focus / bg2 */
   --border3: hsl(60 3% 85%); /* #DADAD8 — secondary btn / dropdown / input */
   --border4: hsl(0 1% 83%); /* #D5D4D4 — highlighted state of border3 */
 

@@ -167,7 +167,7 @@ export const ContextSurface = React.memo(function ContextSurface({
         pendingToggles={pendingToggles}
       />
       {data.truncated && (
-        <div className="text-fg3 border-border1 bg-bg1 text-xxs border-t px-3 py-1.5">
+        <div className="text-muted-fg border-border1 bg-bg1 text-xxs border-t px-3 py-1.5">
           Showing the first {data.items.length} items — the graph folder holds
           more than the canvas renders.
         </div>

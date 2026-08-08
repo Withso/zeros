@@ -332,7 +332,7 @@ export function AddEnvVariableDialog({
                     {p.value}
                   </span>
                   {existingNames.includes(p.key) && (
-                    <span className="shrink-0 text-xs text-fg3">
+                    <span className="shrink-0 text-xs text-muted-fg">
                       replaces stored
                     </span>
                   )}

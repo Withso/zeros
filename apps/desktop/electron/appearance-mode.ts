@@ -13,19 +13,22 @@ export const APPEARANCE_MODES = [
 export type AppearanceMode = (typeof APPEARANCE_MODES)[number];
 export type NativeThemeSource = Exclude<AppearanceMode, "orka-black">;
 
-export const NEUTRAL_DARK_WINDOW_BACKGROUND = "#141414";
+export const NEUTRAL_DARK_WINDOW_BACKGROUND = "#121212";
 export const ORKA_BLACK_WINDOW_BACKGROUND = "#131111";
 export const LIGHT_WINDOW_BACKGROUND = "#ffffff";
 
-// `#131111` is the rendered value of the former hsl(5 5% 7%) bg1;
-// `#0e0c0c` was the older hard-coded BrowserWindow fallback; and `#121212`
-// was neutral Dark before bg1 moved from L7 to L8. Any can remain in userData
-// after an upgrade and would otherwise paint a stale first frame before the
-// renderer reports the active palette.
+// Every dark first-frame color this app has ever persisted, so a value left in
+// userData by an earlier launch is RE-RESOLVED against the active mode instead
+// of painting a stale frame before the renderer reports its palette:
+// `#121212` is neutral Dark's bg1 and `#131111` is Orka black's (each maps to
+// itself when its own mode is active); `#0e0c0c` was the older hard-coded
+// BrowserWindow fallback; `#141414` was neutral Dark during the brief window
+// when its bg1 sat at L8.
 const LEGACY_DARK_WINDOW_BACKGROUNDS = new Set([
+  "#121212",
   "#131111",
   "#0e0c0c",
-  "#121212",
+  "#141414",
 ]);
 
 const APPEARANCE_MODE_SET = new Set<string>(APPEARANCE_MODES);

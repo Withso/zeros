@@ -57,7 +57,7 @@ function EffectNumberField({
 
   return (
     <label className="zd-design-control-applied flex h-7 min-w-0 items-center overflow-hidden rounded-sm">
-      <span className="text-fg3 flex h-full w-7 shrink-0 items-center justify-center text-[10px]">
+      <span className="text-muted-fg flex h-full w-7 shrink-0 items-center justify-center text-[10px]">
         {label}
       </span>
       <Input
@@ -164,12 +164,12 @@ export function DesignShadowControl({
           <span className="text-fg2 min-w-0 flex-1 truncate text-[11px]">
             {label}
           </span>
-          <span className="text-fg3 max-w-24 truncate font-mono text-[9px]">
+          <span className="text-muted-fg max-w-24 truncate font-mono text-[9px]">
             {value === "none"
               ? "None"
               : `${shadow.x}, ${shadow.y}, ${shadow.blur}`}
           </span>
-          <ChevronRight className="text-fg3 size-3 shrink-0" />
+          <ChevronRight className="text-muted-fg size-3 shrink-0" />
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -185,7 +185,7 @@ export function DesignShadowControl({
       >
         <div className="border-border1 flex h-9 items-center justify-between border-b px-3">
           <div className="flex items-center gap-2">
-            <Sparkles className="text-fg3 size-3.5" />
+            <Sparkles className="text-muted-fg size-3.5" />
             <span className="text-fg1 text-xs font-medium">{label}</span>
           </div>
           {!textShadow ? (
@@ -199,7 +199,7 @@ export function DesignShadowControl({
                   type="button"
                   aria-pressed={shadow.inset === inset}
                   className={cn(
-                    "zd-design-segment text-fg3 h-6 px-2 text-[10px]",
+                    "zd-design-segment text-muted-fg h-6 px-2 text-[10px]",
                     shadow.inset === inset && "bg-bg2 text-fg1",
                   )}
                   onClick={() => {
@@ -284,7 +284,7 @@ export function DesignShadowControl({
             />
           </div>
           <div className="grid grid-cols-[40px_minmax(0,1fr)_40px] items-center gap-2">
-            <span className="text-fg3 text-[10px]">Blur</span>
+            <span className="text-muted-fg text-[10px]">Blur</span>
             <Slider
               min={0}
               max={100}
@@ -408,12 +408,12 @@ export function DesignTransformControl({
               : "zd-design-control-applied",
           )}
         >
-          <Box className="text-fg3 size-3.5" />
+          <Box className="text-muted-fg size-3.5" />
           <span className="text-fg2 flex-1 text-[11px]">Transform</span>
-          <span className="text-fg3 max-w-32 truncate font-mono text-[9px]">
+          <span className="text-muted-fg max-w-32 truncate font-mono text-[9px]">
             {value}
           </span>
-          <ChevronRight className="text-fg3 size-3" />
+          <ChevronRight className="text-muted-fg size-3" />
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -465,7 +465,7 @@ export function DesignTransformControl({
             ))}
           </div>
           <div className="grid grid-cols-[28px_minmax(0,1fr)] items-center gap-2">
-            <span className="text-fg3 text-center text-[10px]">CSS</span>
+            <span className="text-muted-fg text-center text-[10px]">CSS</span>
             <Input
               value={rawTransform}
               className="zd-design-control-applied h-7 min-w-0 font-mono text-[11px]"
@@ -486,7 +486,7 @@ export function DesignTransformControl({
             />
           </div>
           {transform.raw !== undefined ? (
-            <p className="text-fg3 m-0 text-[10px] leading-4">
+            <p className="text-muted-fg m-0 text-[10px] leading-4">
               This transform uses syntax the numeric controls cannot preserve.
               Edit it with the CSS field.
             </p>

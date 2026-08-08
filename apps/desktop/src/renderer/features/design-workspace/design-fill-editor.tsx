@@ -219,10 +219,10 @@ export function DesignFillEditor({
             ) : null}
           </span>
           <span className="text-fg2 flex-1 text-[11px]">Fill</span>
-          <span className="text-fg3 max-w-32 truncate font-mono text-[9px]">
+          <span className="text-muted-fg max-w-32 truncate font-mono text-[9px]">
             {initialType === "solid" ? color : initialType}
           </span>
-          <ChevronRight className="text-fg3 size-3" />
+          <ChevronRight className="text-muted-fg size-3" />
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -238,7 +238,7 @@ export function DesignFillEditor({
       >
         <Tabs value={type} onValueChange={selectType}>
           <div className="border-border1 flex h-10 items-center gap-2 border-b px-2">
-            <PaintBucket className="text-fg3 ml-1 size-3.5" />
+            <PaintBucket className="text-muted-fg ml-1 size-3.5" />
             <TabsList variant="chrome" className="min-w-0 flex-1">
               <TabsTrigger value="solid" variant="chrome">
                 Color
@@ -343,7 +343,9 @@ export function DesignFillEditor({
                       });
                     }}
                   />
-                  <span className="text-fg3 truncate text-[10px]">{label}</span>
+                  <span className="text-muted-fg truncate text-[10px]">
+                    {label}
+                  </span>
                 </div>
               ))}
             </div>
@@ -402,7 +404,7 @@ export function DesignFillEditor({
               />
             </div>
             {unsupportedGradient ? (
-              <p className="text-fg3 m-0 text-[10px] leading-4">
+              <p className="text-muted-fg m-0 text-[10px] leading-4">
                 This authored gradient uses stops or syntax the visual editor
                 cannot preserve. Edit it in code, or choose another fill type
                 before replacing it.
@@ -418,10 +420,12 @@ export function DesignFillEditor({
                 backgroundSize: imageSize,
               }}
             >
-              {!imageUrl ? <ImageIcon className="text-fg3 size-5" /> : null}
+              {!imageUrl ? (
+                <ImageIcon className="text-muted-fg size-5" />
+              ) : null}
             </div>
             <div className="flex flex-col gap-1">
-              <span className="text-fg3 text-[10px]">Image URL</span>
+              <span className="text-muted-fg text-[10px]">Image URL</span>
               <Input
                 value={imageUrl}
                 className="zd-design-control-applied h-7 font-mono text-[11px]"
@@ -435,7 +439,7 @@ export function DesignFillEditor({
                 }}
                 onBlur={() => commitOnBlur({ "background-image": imageCss })}
               />
-              <span className="text-fg3 text-[9px]">
+              <span className="text-muted-fg text-[9px]">
                 You can also drag an asset directly onto the selected frame.
               </span>
             </div>
@@ -452,7 +456,7 @@ export function DesignFillEditor({
                     imageSize === nextSize && imageRepeat === nextRepeat
                   }
                   className={cn(
-                    "zd-design-segment text-fg3 h-7 text-[10px]",
+                    "zd-design-segment text-muted-fg h-7 text-[10px]",
                     imageSize === nextSize &&
                       imageRepeat === nextRepeat &&
                       "bg-bg2 text-fg1",
@@ -496,7 +500,7 @@ export function DesignFillEditor({
                         "absolute top-1/2 left-1/2 size-1 -translate-x-1/2 -translate-y-1/2 rounded-full",
                         imagePosition === nextPosition
                           ? "bg-highlighted-bright"
-                          : "bg-fg3",
+                          : "bg-muted-fg",
                       )}
                     />
                   </button>

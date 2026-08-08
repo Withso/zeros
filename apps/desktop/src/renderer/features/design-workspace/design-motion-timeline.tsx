@@ -576,7 +576,7 @@ export function DesignMotionTimeline({
         <div className="flex h-10 items-center gap-2 px-3">
           <Diamond className="text-highlighted-bright size-3.5" />
           <span className="text-fg1 text-xs font-medium">Motion</span>
-          <span className="text-fg3 text-[11px]">
+          <span className="text-muted-fg text-[11px]">
             Select an element to animate.
           </span>
           <Button
@@ -637,7 +637,7 @@ export function DesignMotionTimeline({
             {playing ? <Pause /> : <Play />}
           </Button>
         </Tooltip>
-        <span className="text-fg3 ml-auto shrink-0 font-mono text-[10px]">
+        <span className="text-muted-fg ml-auto shrink-0 font-mono text-[10px]">
           {Math.round(playhead)}% · {Math.round((playhead / 100) * durationMs)}
           ms
         </span>
@@ -665,7 +665,7 @@ export function DesignMotionTimeline({
       </div>
 
       <div className="border-border1 flex h-9 shrink-0 items-center gap-1.5 overflow-x-auto border-b px-3">
-        <span className="text-fg3 text-[9px] uppercase">Duration</span>
+        <span className="text-muted-fg text-[9px] uppercase">Duration</span>
         <Input
           value={draft.duration}
           aria-label="Animation duration"
@@ -678,7 +678,7 @@ export function DesignMotionTimeline({
             }))
           }
         />
-        <span className="text-fg3 text-[9px] uppercase">Delay</span>
+        <span className="text-muted-fg text-[9px] uppercase">Delay</span>
         <Input
           value={draft.delay}
           aria-label="Animation delay"
@@ -691,7 +691,7 @@ export function DesignMotionTimeline({
             }))
           }
         />
-        <span className="text-fg3 text-[9px] uppercase">Ease</span>
+        <span className="text-muted-fg text-[9px] uppercase">Ease</span>
         <Select
           value={draft.easing}
           disabled={disabled}
@@ -723,7 +723,7 @@ export function DesignMotionTimeline({
             ))}
           </SelectContent>
         </Select>
-        <span className="text-fg3 text-[9px] uppercase">Loop</span>
+        <span className="text-muted-fg text-[9px] uppercase">Loop</span>
         <Input
           value={draft.iterations}
           aria-label="Animation iterations"
@@ -826,7 +826,7 @@ export function DesignMotionTimeline({
             <span
               key={mark}
               className={cn(
-                "text-fg3 absolute top-1/2 -translate-y-1/2 font-mono text-[9px]",
+                "text-muted-fg absolute top-1/2 -translate-y-1/2 font-mono text-[9px]",
                 mark === 0
                   ? "translate-x-0"
                   : mark === 100
@@ -960,7 +960,7 @@ export function DesignMotionTimeline({
         {selectedPoint && selectedValue != null ? (
           <>
             <Diamond className="text-highlighted-bright size-3 fill-current" />
-            <span className="text-fg3 font-mono text-[10px]">
+            <span className="text-muted-fg font-mono text-[10px]">
               {selectedPoint.offset}%
             </span>
             <span className="text-fg2 max-w-28 truncate font-mono text-[10px]">
@@ -1011,11 +1011,11 @@ export function DesignMotionTimeline({
             </Button>
           </>
         ) : (
-          <span className="text-fg3 text-[10px]">
+          <span className="text-muted-fg text-[10px]">
             Double-click a track to add a keyframe. Drag diamonds to retime.
           </span>
         )}
-        <span className="text-fg3 ml-auto font-mono text-[9px]">
+        <span className="text-muted-fg ml-auto font-mono text-[9px]">
           {draft.file} · delay {signedTimeMs(draft.delay)}ms ·{" "}
           {draft.iterations}× · {draft.direction} · {draft.fillMode}
         </span>

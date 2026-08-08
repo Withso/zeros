@@ -279,7 +279,7 @@ export function RepositoryIconDialog({
                 })}
               </div>
               {filteredIcons.length === 0 && filteredEmojis.length === 0 && (
-                <p className="text-fg3 py-8 text-center text-xs">
+                <p className="text-muted-fg py-8 text-center text-xs">
                   No icons or emojis match.
                 </p>
               )}
@@ -300,7 +300,7 @@ export function RepositoryIconDialog({
                   : automaticRepositoryIconLabel(automatic.source)}
               </span>
               {automatic.source?.kind === "repository-file" && (
-                <code className="text-fg3 text-2xxs mt-2 max-w-full truncate">
+                <code className="text-muted-fg text-2xxs mt-2 max-w-full truncate">
                   {automatic.source.path}
                 </code>
               )}

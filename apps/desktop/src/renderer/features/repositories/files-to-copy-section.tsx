@@ -402,7 +402,7 @@ export function FilesToCopySection({
       )}
 
       {firstLoad ? (
-        <div className="text-fg3 flex items-center gap-2 py-4 text-xs">
+        <div className="text-muted-fg flex items-center gap-2 py-4 text-xs">
           <RotateCw className="size-3.5 animate-spin" aria-hidden />
           Scanning {project.name}…
         </div>
@@ -489,7 +489,7 @@ export function FilesToCopySection({
               // The one honest thing left to say when the scan came up short.
               // It replaces a count rather than sitting beside one, so an
               // incomplete scan can never be read as "nothing to copy".
-              <span className="text-fg3">
+              <span className="text-muted-fg">
                 Couldn&rsquo;t work out what would be copied
               </span>
             )}
@@ -555,11 +555,11 @@ export function FilesToCopySection({
                     className={cn(
                       "text-xxs rounded-full px-1.5 py-px font-semibold tabular-nums",
                       p.matchCount === null
-                        ? "bg-bg2 text-fg3"
+                        ? "bg-bg2 text-muted-fg"
                         : p.matchCount === 0
                           ? "bg-red-bg text-red-fg"
                           : p.negate
-                            ? "bg-bg2 text-fg3"
+                            ? "bg-bg2 text-muted-fg"
                             : "bg-green-bg text-green-fg",
                     )}
                   >
@@ -571,7 +571,7 @@ export function FilesToCopySection({
                   </span>
                   <span className="text-fg1 font-mono">{p.raw}</span>
                   {p.matchCount === 0 && !p.negate && (
-                    <span className="text-fg3">matches nothing</span>
+                    <span className="text-muted-fg">matches nothing</span>
                   )}
                 </div>
               ))}
@@ -637,7 +637,7 @@ export const TreeRowView = memo(function TreeRowView({
   const indent = DEPTH_INDENT[Math.min(depth, DEPTH_INDENT.length - 1)];
   const text = cn(
     "min-w-0 truncate font-mono text-2xxs",
-    checked === false ? "text-fg3" : "text-fg1",
+    checked === false ? "text-muted-fg" : "text-fg1",
     locked && "opacity-55",
   );
   const box = (
@@ -673,12 +673,12 @@ export const TreeRowView = memo(function TreeRowView({
           >
             <ChevronRight
               className={cn(
-                "text-fg3 size-3 shrink-0 transition-transform",
+                "text-muted-fg size-3 shrink-0 transition-transform",
                 expanded && "rotate-90",
               )}
               aria-hidden
             />
-            <Folder className="text-fg3 size-3 shrink-0" aria-hidden />
+            <Folder className="text-muted-fg size-3 shrink-0" aria-hidden />
             <span className={text}>{label}/</span>
           </button>
         </>
@@ -696,7 +696,7 @@ export const TreeRowView = memo(function TreeRowView({
               folder shuffled the column its own children line up in. */}
           <span aria-hidden className="w-3 shrink-0" />
           {folder ? (
-            <Folder className="text-fg3 size-3 shrink-0" aria-hidden />
+            <Folder className="text-muted-fg size-3 shrink-0" aria-hidden />
           ) : (
             <span aria-hidden className="w-3 shrink-0" />
           )}

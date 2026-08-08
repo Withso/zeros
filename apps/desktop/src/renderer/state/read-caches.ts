@@ -14,6 +14,7 @@
 import type { Branch, GithubOwner, PR, Workspace } from "../platform/git";
 import type { GithubAuthSnapshot } from "@zeros/protocol/github-auth";
 import type { FilesToCopyPreviewWire } from "../platform/bridge/workspace-bridge";
+import type { TurnInfo } from "../platform/turns";
 import { KeyedAsyncCache } from "../shared/lib/keyed-async-cache";
 
 /** Local git reads (bridge round-trip, no network): branches move often, so
@@ -55,6 +56,36 @@ export const ghOwnersCache = new KeyedAsyncCache<GithubOwner[]>(1);
  *  pane itself never blanks on a cache miss; it holds the last result it got. */
 export const filesToCopyPreviewCache =
   new KeyedAsyncCache<FilesToCopyPreviewWire>(96);
+
+/** Recorded turn rows, keyed by `turnRowKey(chatId, turnId)` — the footer's
+ *  authoritative duration, status/stop reason, usage, and authored file pills.
+ *
+ *  Cached because the footer is REMOUNTED constantly: every chat-tab switch,
+ *  workspace switch, and app reload rebuilds the transcript, and the footer used
+ *  to start each of those from `null` and paint a settled turn with NO status
+ *  pill until its bridge read resolved — so a stopped turn read as an ordinary
+ *  finished one for a beat before "STOPPED BY USER" appeared. A retained
+ *  snapshot paints the truth on the first frame instead.
+ *
+ *  A row is written once (finishTurn, before the client is told the turn ended)
+ *  and afterwards only by reset/undo, which invalidate below.
+ *
+ *  Bounded well above one deck's worth of footers: every turn in a hydrated
+ *  transcript mounts one (content-visibility skips paint, not React), and the
+ *  retained deck holds several chats — a tighter bound would just make two long
+ *  chats evict each other's rows and reintroduce the blank first paint. Rows are
+ *  small (a file list and a usage record). */
+export const turnRowCache = new KeyedAsyncCache<TurnInfo | null>(512);
+
+export function turnRowKey(chatId: string, turnId: string): string {
+  return `${chatId}\u0000${turnId}`;
+}
+
+/** A reset (or its undo) rewrites the target turn's row AND removes/restores
+ *  every later one, so no single key describes the change. */
+export function invalidateTurnRows(): void {
+  turnRowCache.invalidateAll();
+}
 
 /** Preview of the SAVED patterns (`patterns: null`) vs an unsaved draft. The
  *  draft is part of the key so switching back to the saved list repaints from
@@ -149,4 +180,7 @@ export function invalidateAllEngineReadCaches(): void {
   ghAuthStatusCache.invalidateAll();
   ghOwnersCache.invalidateAll();
   filesToCopyPreviewCache.invalidateAll();
+  // Turn rows are engine state too: a reset (or a turn settling) on ANOTHER
+  // device lands while this renderer is deaf to DB_CHANGED.
+  turnRowCache.invalidateAll();
 }

@@ -303,7 +303,7 @@ function TomlSourceEditor({
           autoCapitalize="off"
           placeholder={placeholder}
           className={cn(
-            "caret-fg1 placeholder:text-fg2/50 absolute inset-0 resize-none overflow-hidden border-0 bg-transparent px-3 py-2 break-words whitespace-pre-wrap text-transparent outline-none",
+            "caret-fg1 placeholder:text-muted-fg absolute inset-0 resize-none overflow-hidden border-0 bg-transparent px-3 py-2 break-words whitespace-pre-wrap text-transparent outline-none",
             TEXT,
           )}
         />
@@ -619,7 +619,7 @@ function EnvVarRow({
             >
               {revealed ? (
                 value === "" ? (
-                  <span className="text-fg3 italic">empty</span>
+                  <span className="text-muted-fg italic">empty</span>
                 ) : (
                   value
                 )
@@ -630,7 +630,7 @@ function EnvVarRow({
           </Tooltip>
         </div>
       ) : (
-        <span className="text-fg3 min-w-0 flex-1 truncate text-xs">
+        <span className="text-muted-fg min-w-0 flex-1 truncate text-xs">
           {hint ?? "••••••••"}
         </span>
       )}
@@ -1340,14 +1340,14 @@ function GitSection({
                       )}
                       <span className="truncate">{b.name}</span>
                       {b.missing ? (
-                        <span className="text-fg3 ml-auto shrink-0 text-xs">
+                        <span className="text-muted-fg ml-auto shrink-0 text-xs">
                           {catalog?.listedRemote
                             ? `not on ${catalog.listedRemote}`
                             : "not found"}
                         </span>
                       ) : (
                         b.name === catalog?.detectedDefault && (
-                          <span className="text-fg3 ml-auto shrink-0 text-xs">
+                          <span className="text-muted-fg ml-auto shrink-0 text-xs">
                             default
                           </span>
                         )
@@ -1466,7 +1466,7 @@ function GitSection({
                         />
                       )}
                       <span className="shrink-0">{r.name}</span>
-                      <span className="text-fg3 ml-auto min-w-0 truncate text-xs">
+                      <span className="text-muted-fg ml-auto min-w-0 truncate text-xs">
                         {r.url}
                       </span>
                     </CommandItem>
@@ -1780,7 +1780,7 @@ function PathsSection({ project }: { project: Project }) {
             <span
               className={cn(
                 "text-sm",
-                project.originUrl ? "text-fg2" : "text-fg3 italic",
+                project.originUrl ? "text-fg2" : "text-muted-fg italic",
               )}
             >
               {project.originUrl ?? "Not set"}

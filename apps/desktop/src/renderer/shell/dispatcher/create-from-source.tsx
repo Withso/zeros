@@ -206,7 +206,7 @@ export function CreateFromSource({
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search by name"
-              className="text-fg1 placeholder:text-fg2 flex-1 bg-transparent text-xs outline-none"
+              className="text-fg1 placeholder:text-fg3 flex-1 bg-transparent text-xs outline-none"
               spellCheck={false}
             />
             {project && (

@@ -1043,7 +1043,7 @@ function BrowserChrome({
             autoCorrect="off"
             autoCapitalize="off"
             aria-label="Browser URL"
-            className="text-fg1 placeholder:text-fg2 min-w-0 flex-1 border-0 bg-transparent p-0 text-sm outline-none disabled:cursor-not-allowed"
+            className="text-fg1 placeholder:text-fg3 min-w-0 flex-1 border-0 bg-transparent p-0 text-sm outline-none disabled:cursor-not-allowed"
           />
         </div>
       </form>
@@ -1402,7 +1402,7 @@ function ElementChip({
             }
             spellCheck={false}
             autoFocus
-            className="text-fg1 placeholder:text-fg2 min-w-0 flex-1 bg-transparent text-sm outline-none"
+            className="text-fg1 placeholder:text-fg3 min-w-0 flex-1 bg-transparent text-sm outline-none"
           />
           {onFork && (
             <Tooltip label={forkEnabled ? "Fork variant" : "Canvas mode only"}>

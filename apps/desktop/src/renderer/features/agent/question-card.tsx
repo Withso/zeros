@@ -436,7 +436,7 @@ export function QuestionCard({ request, onRespond }: QuestionCardProps) {
                   value={qs.freeText}
                   onChange={(e) => patch(q.id, { freeText: e.target.value })}
                   {...(q.secret ? { spellCheck: false } : {})}
-                  className="text-fg1 placeholder:text-fg2/60 border-border1 bg-bg1 focus:border-border2 mt-1.5 ml-7 resize-none rounded-sm border px-2 py-1.5 text-sm outline-none"
+                  className="text-fg1 placeholder:text-muted-fg border-border1 bg-bg1 focus:border-border2 mt-1.5 ml-7 resize-none rounded-sm border px-2 py-1.5 text-sm outline-none"
                   placeholder={
                     q.secret ? "Value (hidden from logs)" : "Your answer…"
                   }

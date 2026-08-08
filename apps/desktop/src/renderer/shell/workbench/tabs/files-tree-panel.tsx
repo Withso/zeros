@@ -231,7 +231,7 @@ export function FilesTreePanel({
             value={search}
             onChange={handleSearchChange}
             onKeyDown={handleSearchKeyDown}
-            className="placeholder:text-fg2 text-fg1 h-full min-w-0 flex-1 bg-transparent text-xs outline-hidden"
+            className="placeholder:text-fg3 text-fg1 h-full min-w-0 flex-1 bg-transparent text-xs outline-hidden"
           />
         </div>
         <div

@@ -54,7 +54,13 @@ The token system has **one layer of primitives** (in `zeros-tokens.css`) plus a 
 --fg1              highlighted/selected text + icons. Markdown body output,
                    settings titles, active row labels.
 --fg2              DEFAULT text + icon color across the app.
---muted-fg         placeholder text in inputs, empty-state icons.
+--fg3              MIDDLE tier — exactly ONE step quieter than fg2. For content
+                   that must read secondary to the fg2 text BESIDE it while
+                   staying comfortably legible: input placeholders (every one in
+                   the app), .gitignore'd rows in the file tree.
+--muted-fg         QUIETEST tier — two steps below fg2, for content incidental
+                   to the surface itself: supplemental metadata (timestamps,
+                   counts, SHAs), disabled content, empty-state icons.
 ```
 
 **Repository navigation (not the settings sidebar):**
@@ -152,11 +158,12 @@ The **settings sidebar** is NOT this surface — it uses default tokens (`bg-bg1
 
 ### 3.3 Foregrounds (text + icons)
 
-| Tier                | Token        | Tailwind        | Used for                                                                              |
-| ------------------- | ------------ | --------------- | ------------------------------------------------------------------------------------- |
-| Highlighted         | `--fg1`      | `text-fg1`      | Markdown body, settings titles, active row labels, focal text, icons on selected rows |
-| Default             | `--fg2`      | `text-fg2`      | All default text + icons across the app                                               |
-| Placeholder / empty | `--muted-fg` | `text-muted-fg` | Input placeholders, empty-state icons                                                 |
+| Tier        | Token        | Tailwind        | Used for                                                                                            |
+| ----------- | ------------ | --------------- | --------------------------------------------------------------------------------------------------- |
+| Highlighted | `--fg1`      | `text-fg1`      | Markdown body, settings titles, active row labels, focal text, icons on selected rows               |
+| Default     | `--fg2`      | `text-fg2`      | All default text + icons across the app                                                             |
+| Middle      | `--fg3`      | `text-fg3`      | One step below `fg2`: input placeholders, `.gitignore`'d file-tree rows                             |
+| Quietest    | `--muted-fg` | `text-muted-fg` | Supplemental metadata (timestamps, counts, SHAs), disabled content, placeholders, empty-state icons |
 
 **The default is `fg2`.** Reach for `fg1` only when text/icon should pop (selected, highlighted, output text).
 
@@ -164,17 +171,17 @@ The **settings sidebar** is NOT this surface — it uses default tokens (`bg-bg1
 
 | Tier                                | Token       | Tailwind         | Used for                                                                       |
 | ----------------------------------- | ----------- | ---------------- | ------------------------------------------------------------------------------ |
-| Default                             | `--border1` | `border-border1` | Default border on bg1 surfaces                                                 |
+| Default                             | `--border1` | `border-border1` | Default border on bg1 surfaces, composer at rest, user-message bubble          |
 | Sidebar / composer / bg2 / popovers | `--border2` | `border-border2` | Sidebar borders, composer focus, dividers on bg2, floating popover/menu panels |
 | Component default                   | `--border3` | `border-border3` | Secondary button, dropdown trigger, input field                                |
 | Component highlighted               | `--border4` | `border-border4` | Highlighted state of border3 consumers                                         |
 
 ### 3.5 Highlighted (interaction emphasis)
 
-| Token                  | Tailwind                                                                          | Used for                                                                       |
-| ---------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `--highlighted-bg`     | `bg-highlighted-bg`                                                               | User message bubble, anchor selected state (text on it: `text-fg1`/`text-fg2`) |
-| `--highlighted-bright` | `bg-highlighted-bright` / `border-highlighted-bright` / `ring-highlighted-bright` | Input focus, settings provider tab indicator, brighter accent borders          |
+| Token                  | Tailwind                                                                          | Used for                                                                                                           |
+| ---------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `--highlighted-bg`     | `bg-highlighted-bg`                                                               | User message bubble, anchor selected state (text on it: `text-fg1`/`text-fg2`); neutral Dark aliases it to `--bg2` |
+| `--highlighted-bright` | `bg-highlighted-bright` / `border-highlighted-bright` / `ring-highlighted-bright` | Input focus, settings provider tab indicator, brighter accent borders                                              |
 
 ---
 
@@ -198,9 +205,25 @@ Default text/icon for all variants: `fg2`. Highlighted/active state: `fg1`.
 bg-bg1 (or bg-bg2 if on bg2 surface)
 border-border3
 text-fg1
-placeholder:text-muted-fg
+placeholder:text-fg3
 focus: border-highlighted-bright + ring-highlighted-bright/50
 ```
+
+**Every placeholder in the app is `fg3`.** The shared primitives (`input.tsx`,
+`textarea.tsx`, `command.tsx`) use `placeholder:text-fg3`, and the agent
+composer's ProseMirror placeholder uses `var(--fg3)` — same tier, one weight
+everywhere. Two rules worth knowing:
+
+- **Never `fg2`.** A placeholder in the DEFAULT text color reads as a filled
+  value. This was the old behaviour and it was wrong.
+- **Never approximate with alpha.** `placeholder:text-fg2/60` composites to
+  4.09:1 in Dark and 2.67:1 in Light — i.e. it was reaching for `muted-fg` the
+  long way round, and landed below it in Light. Use a tier token.
+
+Two inputs deliberately use `placeholder:text-muted-fg` instead: the inline
+rename field in `repositories-panel.tsx` and the follow-up field in
+`question-card.tsx`. Both are transient overlay affordances where the
+placeholder is incidental rather than instructional.
 
 ### 4.3 Dropdowns
 
@@ -383,30 +406,98 @@ syntax-theme preference; Light retains its own preference.
 Neutral Dark removes hue and saturation only from **structural primitives**:
 backgrounds, foregrounds, repository navigation, borders, highlighted/focus,
 the inverted pair, and the primary-button hover. Most keep the former dark
-palette's HSL lightness. Three neutral-Dark surfaces are deliberately one point
-lighter; Orka black keeps every former warm value unchanged:
+palette's HSL lightness; the deliberate divergences are listed below, and one
+primitive becomes an alias. Orka black is otherwise preserved byte-for-byte —
+its only two intentional moves are the foreground-tier consolidation (§9.1.1):
 
-| Primitive      | Neutral Dark | Orka black | Propagation                                                                  |
-| -------------- | -----------: | ---------: | ---------------------------------------------------------------------------- |
-| `--bg1`        |           L8 |         L7 | `--pane-bg`, app canvas, active chat, dialogs, first-paint window background |
-| `--bg2`        |          L13 |        L12 | Composer, raised cards, hover cards, active canvas tabs                      |
-| `--sidebar-bg` |          L10 |         L9 | Repository navigation **and `--bg3` floating menus/popovers**                |
+| Primitive          |     Neutral Dark | Orka black | Propagation                                                                                         |
+| ------------------ | ---------------: | ---------: | --------------------------------------------------------------------------------------------------- |
+| `--bg2`            |              L13 |        L12 | Composer, raised cards, hover cards, active canvas tabs — **and neutral Dark's `--highlighted-bg`** |
+| `--highlighted-bg` | `var(--bg2)` L13 |        L12 | User-message bubble, anchor selected states                                                         |
+| `--fg1`            |              L94 |        L92 | Highlighted/selected text + icons                                                                   |
+| `--fg2`            |              L72 |        L66 | Default text + icons app-wide                                                                       |
+| `--fg3`            |              L60 |        L57 | **Reserved — zero consumers** (§9.1.1)                                                              |
+
+`--bg1` (L7 → `#121212`) and `--sidebar-bg` (L9 → `#171717`) are the achromatic
+equivalents of the warm palette's own lightness, so the canvas and repository
+navigation sit exactly where they always have.
 
 Aliases such as `--pane-bg`, `--bg3`, `--bg3-hover`,
 `--primary-button-bg`, and `--primary-button-fg` are not duplicated; they
-resolve lazily from the changed primitives. There is no `--bg2-highlight`
+resolve lazily from the primitives. There is no `--bg2-highlight`
 token: the existing lifted-content primitive is `--bg1-highlight` and remains
 L9.
 
+`--highlighted-bg` is the only structural primitive neutral Dark declares as a
+`var()` alias rather than a literal triple: a sent user message then wears the
+same fill as the composer it was typed in, so the prompt/composer pair reads as
+one surface family. Orka black and Light each keep their own literal bubble
+value, and because both re-declare the token the alias cannot leak into them.
+
 The neutral ramp now has these intentional relationships:
 
-- `--bg1-hover` and `--highlighted-bg` are L12; `--bg2` is L13.
-- `--fg3` and `--muted-fg` are both L44.
-- `--bg1-highlight` is L9 and `--sidebar-bg` / `--bg3` are L10.
+- `--bg1` is L7, `--bg1-hover` is L12, and `--bg2` / `--highlighted-bg` are L13.
+- `--muted-fg` is L44 — the lowest value that still clears the 3:1 non-text
+  floor on `bg1`, `bg2`, AND `bg2-hover`. It is the app-wide quietest tier.
+- `--fg3` is L60 — the middle tier, ~60% of the way from `--muted-fg` up to
+  `--fg2` in log-contrast space. Orka black (L57) and Light (L44) re-derive that
+  same RELATIVE position inside their own bands instead of copying the number —
+  in Light a higher L means LESS contrast, so a copied `60` would invert the tier
+  order. A palette test asserts the ladder in all three palettes.
+- `--bg1-highlight`, `--sidebar-bg`, and `--bg3` are all L9.
 - `--bg2-hover`, `--sidebar-bg-hover`, and `--bg3-hover` share L15.
 
-These tokens are separated by context. The three deliberate lightness changes
-and Orka black's exact preservation are regression-tested theme contracts.
+These tokens are separated by context. The deliberate `--bg2` lift, the
+`--highlighted-bg` alias, Orka black's preservation (minus the two changes in
+§9.1.1), and the four-tier foreground ladder are regression-tested theme
+contracts.
+
+#### 9.1.1 Foreground tier consolidation
+
+`--fg3` and `--muted-fg` used to be **the same color**: both L44 in neutral Dark
+(byte-identical `#707070`), and L44 in Orka black differing only by 3% saturation.
+Only Light distinguished them. The two names were used inconsistently as a
+result — `--fg3` accumulated ~166 consumers app-wide while `--muted-fg` survived
+as a ~25-consumer pocket in the Review/Changes surfaces — and the docs described
+`--muted-fg` as the third tier while the code had converged on `--fg3`.
+
+They are now one tier. Every former `--fg3` consumer moved to `--muted-fg`, and
+`--muted-fg` **adopted the former `--fg3` value in each palette** so the ~191
+migrated sites stayed pixel-identical:
+
+| Palette      | `--muted-fg` before | after (former `--fg3`) | Effect on the 25 pre-existing consumers |
+| ------------ | ------------------- | ---------------------- | --------------------------------------- |
+| Neutral Dark | L44 `#707070`       | L44 `#707070`          | identical                               |
+| Orka black   | `15 4% 44%`         | `15 1% 44%`            | ~3/channel — imperceptible              |
+| Light        | L68 `#B1ACAA`       | L56 `#938D8A`          | 2.24:1 → 3.26:1 (intended fix)          |
+
+`--fg3` is now the **adopted middle tier**, sitting exactly one step below
+`--fg2`. The split that motivated it: some content must read quieter than the
+`fg2` text _beside_ it, which is a different job from content that is incidental
+to the surface. Pick by **reference point** — `fg3` when you are stepping down
+from `fg2`, `muted-fg` when the content is merely supplemental.
+
+| Adopted                                                                                                      | Was                    | Why                                                                                                                                                                               |
+| ------------------------------------------------------------------------------------------------------------ | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Input placeholders (`input.tsx`, `textarea.tsx`, `command.tsx`, `command` bars, browser + dispatcher fields) | `placeholder:text-fg2` | A placeholder in the DEFAULT text color reads as a filled value. In Light `fg3` is 4.95:1, which clears AA where `muted-fg` (3.26:1) does not.                                    |
+| Composer placeholder (`composer-editor.css`)                                                                 | `var(--muted-fg)`      | Same case from the other side — it was one step too quiet. Both ends now meet at `fg3`, so every placeholder in the app is one weight.                                            |
+| `.gitignore`'d rows + their folder glyph (`workspace-file-tree.tsx`)                                         | `var(--muted-fg)`      | Ignored rows read ONE step back from the `fg2` rows around them; `muted-fg` was two steps back. The glyph mask must track the row color or the mismatch reads as a rendering bug. |
+
+Deliberately **left on `muted-fg`**, having been evaluated:
+
+- **Review/Changes metadata** (timestamps, SHAs, counts, durations) and the
+  `size-10` **empty-state icons** — genuinely incidental to their surface.
+- **`--loader-rest`** — the spinner wants a WIDE gap from `--loader-active`
+  (`fg2`), so the faintest tier is correct; `fg3` would flatten the sweep.
+- **Two transient overlay inputs** — the inline rename in `repositories-panel.tsx`
+  and the follow-up field in `question-card.tsx`. Both previously approximated a
+  quiet placeholder with alpha (`text-fg2/60`, `text-fg2/50`, composing to
+  4.09:1 and 3.20:1 in Dark), which is `muted-fg`'s range, not `fg3`'s — so they
+  moved to the token rather than up a tier.
+- **`--trees-fg-muted-override`** — it looks like a text knob but the library
+  uses it for item ICONS and, at 25% alpha, the indent guides. One override,
+  two very different jobs; changing it to brighten icons would also brighten
+  every guide line. Left alone pending a look at the guides on their own.
 
 The six status families remain chromatic: error/red, success/green,
 warning/yellow, info/blue, merged/violet, and file-path/brown. Desaturating them
@@ -426,30 +517,48 @@ surfaces:
 
 | Pair                             | Orka black | Neutral Dark |
 | -------------------------------- | ---------: | -----------: |
-| `fg1` / `bg1`                    |    15.69:1 |      15.34:1 |
-| `fg2` / `bg1`                    |     7.91:1 |       7.75:1 |
-| `fg3` / `muted-fg` on `bg1`      |     3.76:1 |       3.72:1 |
-| `fg1` / `bg2`                    |    13.80:1 |      13.43:1 |
-| `fg2` / `bg2`                    |     6.96:1 |       6.78:1 |
-| `highlighted-bright` / `bg1`     |     7.72:1 |       7.52:1 |
+| `fg1` / `bg1`                    |    15.69:1 |      16.41:1 |
+| `fg2` / `bg1`                    |     7.91:1 |       9.41:1 |
+| `fg3` / `bg1`                    |     5.98:1 |       6.58:1 |
+| `muted-fg` / `bg1`               |     3.80:1 |       3.80:1 |
+| `fg1` / `bg2`                    |    13.80:1 |      14.07:1 |
+| `fg2` / `bg2`                    |     6.96:1 |       8.07:1 |
+| `muted-fg` / `bg2`               |     3.34:1 |       3.26:1 |
+| `muted-fg` / `bg2-hover`         |     3.04:1 |       3.05:1 |
+| `highlighted-bright` / `bg1`     |     7.72:1 |       7.68:1 |
 | inverted foreground / background |    16.28:1 |      16.27:1 |
 
-`border3` and `border4` remain deliberately low-tonal against `bg1` (1.70:1
-and 2.15:1 in neutral Dark). They are quiet separators, not the sole cue for a
+Because `--highlighted-bg` now resolves to `--bg2`, the `fg1`/`bg2` and
+`fg2`/`bg2` rows are also the user-message bubble's text contrast.
+
+Light, for the same pairs: `fg1` 14.63:1, `fg2` 6.48:1, `fg3` 4.97:1,
+`muted-fg` 3.26:1 — all against `bg1`.
+
+`border3` and `border4` remain deliberately low-tonal against `bg1` (1.73:1
+and 2.20:1 in neutral Dark). They are quiet separators, not the sole cue for a
 control or state; interactive components must retain visible labels/icons and
-the much stronger `highlighted-bright` focus treatment. `fg3` and `muted-fg`
-are 3.72:1 against adjusted `bg1` and 3.26:1 against `bg2`, so they remain
+the much stronger `highlighted-bright` focus treatment.
+
+`muted-fg` is 3.80:1 against `bg1` and 3.26:1 against `bg2`, so it remains
 appropriate only for supplemental metadata, disabled content, or decorative
-empty-state treatment. Use `fg2` (7.75:1 on adjusted `bg1`, 6.78:1 on `bg2`)
-whenever small text is required to understand or operate the interface.
+empty-state treatment. Use `fg2` (9.41:1 on `bg1`, 8.07:1 on `bg2`) whenever
+small text is required to understand or operate the interface. L44 is the
+FLOOR for `muted-fg`, not a preference: it is the lowest lightness that still
+clears 3:1 on `bg1`, `bg2`, and `bg2-hover` in both dark palettes, and a
+palette test locks that in. In Light, `muted-fg` clears 3:1 on `bg1` (3.26:1)
+but sits just under it on raised surfaces (2.93:1 on `bg2`) — a long-standing
+shortfall inherited unchanged from the former `--fg3`, called out here rather
+than asserted, so nobody "fixes" it by dimming the token further.
 
 Two very quiet boundaries deserve deliberate treatment. `--bg1-highlight` over
-`--bg1` is 1.02:1, so it is a grouping wash rather than a control/state cue;
+`--bg1` is 1.05:1, so it is a grouping wash rather than a control/state cue;
 components add spacing, dividers, or a stronger border when a boundary matters.
 `--border1` over `--bg2` is 1.03:1, but raised cards are already distinguished
-from `--bg1` by their L13 fill and geometry; interactive composer focus moves to
-`--border2`, and selectable cards move to stronger border/focus tokens. Do not
-use either quiet pairing as the only required visual indicator.
+from `--bg1` by their L13 fill and geometry (1.17:1 — the cue that separates
+both the composer and the user-message bubble from the canvas); interactive
+composer focus moves to `--border2`, and selectable cards move to stronger
+border/focus tokens. Do not use either quiet pairing as the only required
+visual indicator.
 
 ### 9.2 Light-specific shape
 
@@ -460,7 +569,7 @@ use either quiet pairing as the only required visual indicator.
 ### 9.3 Non-CSS consumers and first paint
 
 - The inline stamp in `index.html` restores both theme attributes before bundle evaluation, preventing an incorrect first frame.
-- The Electron window's pre-paint `backgroundColor` tracks resolved `--bg1` via `window_set_background` and persists for the next launch. Upgrade-time warm Dark backgrounds and the former neutral `#121212` value migrate to the active palette before the first frame. Native `themeSource` maps Orka black to dark while persisting the distinct app mode.
+- The Electron window's pre-paint `backgroundColor` tracks resolved `--bg1` via `window_set_background` and persists for the next launch. Every dark first-frame color the app has persisted (`#121212`, `#131111`, `#0e0c0c`, and the short-lived `#141414`) re-resolves against the active palette before the first frame. Native `themeSource` maps Orka black to dark while persisting the distinct app mode.
 - xterm and canvas renderers resolve CSS variables to concrete colors. They subscribe to the concrete theme id (`dark` / `light` / `orka-black`), not only the dark/light variant.
 - Cross-window storage sync, the durable userData fallback, and transition suppression all include palette-only changes.
 

@@ -75,7 +75,7 @@ const HOME_ENTRY_CLS =
 // Group label above the repo list — mirrors the settings sidebar's group
 // header (SETTINGS_GROUP_HEADER_CLS) so the two rails share one vocabulary.
 const GROUP_HEADER_CLS =
-  "select-none px-2.5 pb-1.5 pt-5 text-xs font-normal text-fg3";
+  "select-none px-2.5 pb-1.5 pt-5 text-xs font-normal text-muted-fg";
 
 // Repo-icon chip inside a rail row — same recipe as the top bar's project
 // chip (PROJECT_CHIP_CLS), sized to sit where the 16px lucide icons do.
@@ -123,7 +123,9 @@ function RepoRow({
       </span>
       <span className="min-w-0 flex-1 truncate">{project.name}</span>
       {count > 0 && (
-        <span className="text-fg3 shrink-0 text-xs tabular-nums">{count}</span>
+        <span className="text-muted-fg shrink-0 text-xs tabular-nums">
+          {count}
+        </span>
       )}
     </Button>
   );
@@ -298,7 +300,7 @@ export function HomeSidebar() {
               {displayName ?? email ?? "Not signed in"}
             </span>
             {displayName && email && (
-              <span className="text-fg3 truncate text-xs">{email}</span>
+              <span className="text-muted-fg truncate text-xs">{email}</span>
             )}
           </span>
           <Tooltip label="Settings">

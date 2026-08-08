@@ -26,13 +26,13 @@ describe("appearance modes", () => {
 
   it("migrates stale dark first-frame colors to the active palette", () => {
     expect(migrateLegacyWindowBackground("#131111", "dark", true)).toBe(
-      "#141414",
+      "#121212",
     );
     expect(migrateLegacyWindowBackground("#0E0C0C", null, true)).toBe(
-      "#141414",
+      "#121212",
     );
-    expect(migrateLegacyWindowBackground("#121212", "dark", true)).toBe(
-      "#141414",
+    expect(migrateLegacyWindowBackground("#141414", "dark", true)).toBe(
+      "#121212",
     );
     expect(migrateLegacyWindowBackground("#131111", "system", false)).toBe(
       "#ffffff",
@@ -43,11 +43,19 @@ describe("appearance modes", () => {
     expect(migrateLegacyWindowBackground("#0E0C0C", "orka-black", true)).toBe(
       "#131111",
     );
-    expect(migrateLegacyWindowBackground("#121212", "orka-black", true)).toBe(
+    expect(migrateLegacyWindowBackground("#141414", "orka-black", true)).toBe(
       "#131111",
     );
     expect(migrateLegacyWindowBackground("#242424", "dark", true)).toBe(
       "#242424",
+    );
+    // Each palette's own current value maps to itself under its own mode and
+    // re-resolves under the other's.
+    expect(migrateLegacyWindowBackground("#121212", "dark", true)).toBe(
+      "#121212",
+    );
+    expect(migrateLegacyWindowBackground("#121212", "orka-black", true)).toBe(
+      "#131111",
     );
   });
 });

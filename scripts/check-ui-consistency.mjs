@@ -215,6 +215,12 @@ const DEAD_SHADCN_CLASS_RE =
 // bg1 = pure white, so a bg3 chip/state fill on a lower surface vanishes.
 // Solid `bg-bg3` and `bg-bg3-hover` only; bg-bg3/α veils (75% drag scrims)
 // are excluded — the broken alpha washes were migrated to bg-bg2/60.
+// NOTE: a temporary RESERVED_FG3_RE rule lived here while --fg3 was declared but
+// had zero consumers (the foreground-tier consolidation, foundation §9.1.1). The
+// middle tier has since been adopted — placeholders and the file tree's ignored
+// rows consume it — so the rule was removed as that change's final step. --fg3 is
+// now an ordinary token needing no special guard.
+
 const BG3_FILL_RE = /(?<![\w-])bg-bg3(?:-hover)?(?![\w/-])/;
 // Files whose components ARE popover surfaces (popover/dropdown/menu content
 // panels + their internal chips/hovers) — the one place bg3 fills belong.
@@ -624,6 +630,15 @@ function checkTokenCommentDrift() {
     }
   });
 }
+
+// KNOWN COVERAGE GAP (surfaced by the foreground-tier consolidation, 2026-08):
+// the scan roots are apps/desktop/src and styles/global, so the root-level
+// stylesheets main.tsx imports directly — styles/semantic-tokens.css and
+// styles/globals.css — are reached by NO line rule. They are hand-authored and
+// alias primitives, so they can drift past every check in this file.
+// zeros-tokens.css is different: it is deliberately ALLOWLISTed and covered by
+// checkTokenCommentDrift(). Widening the scan roots to include the other two
+// needs a pass over which rules should legitimately apply there first.
 
 // --- Stale allowlist entries: a deleted file must not keep an exemption ---
 function checkAllowlistFresh() {
