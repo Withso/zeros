@@ -1,4 +1,7 @@
-import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
+import {
+  DESIGN_SELECTION_NODE_LIMIT,
+  type DesignRuntimeNodeDetails,
+} from "@zeros/protocol/design-runtime";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -29,6 +32,7 @@ import {
   selectDesignNode,
   selectDesignNodes,
   selectDesignNodeAtLocation,
+  toggleDesignNodeSelection,
 } from "../state/design-selection";
 import {
   designRuntimeFrameState,
@@ -237,6 +241,56 @@ describe("design selection workflows", () => {
         nodeIds,
         rects: expect.arrayContaining([{ x: 0, y: 0, width: 100, height: 40 }]),
       }),
+      expect.any(Number),
+    );
+  });
+
+  it("keeps a newly toggled primary when an additive selection is at the cap", async () => {
+    const selectedNodeIds = Array.from(
+      { length: DESIGN_SELECTION_NODE_LIMIT },
+      (_, index) => `layer-${index}`,
+    );
+    mocks.designFrameRuntime.mockReturnValue({
+      getNodeDetails: vi.fn(async (nodeId: string) => details(nodeId)),
+      captureScreenshot: vi.fn(async () => {
+        throw new Error("capture unavailable in unit test");
+      }),
+    });
+
+    await selectDesignNodes({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      nodeIds: selectedNodeIds,
+      primaryNodeId: selectedNodeIds[0],
+    });
+    mocks.designSetSelection.mockClear();
+
+    const addedNodeId = `layer-${DESIGN_SELECTION_NODE_LIMIT}`;
+    await expect(
+      toggleDesignNodeSelection({
+        workspaceId: "workspace-a",
+        folder: "/design/a",
+        frame: FRAME,
+        nodeId: addedNodeId,
+        details: details(addedNodeId),
+      }),
+    ).resolves.toHaveLength(DESIGN_SELECTION_NODE_LIMIT);
+
+    const expectedNodeIds = [
+      addedNodeId,
+      ...selectedNodeIds.slice(0, DESIGN_SELECTION_NODE_LIMIT - 1),
+    ];
+    expect(designWorkspaceView("workspace-a")).toMatchObject({
+      selectedNodeId: addedNodeId,
+      selectedNodeIds: expectedNodeIds,
+    });
+    expect(designWorkspaceView("workspace-a").selectedNodeIds).not.toContain(
+      selectedNodeIds.at(-1),
+    );
+    expect(mocks.designSetSelection).toHaveBeenCalledWith(
+      "workspace-a",
+      expect.objectContaining({ nodeIds: expectedNodeIds }),
       expect.any(Number),
     );
   });

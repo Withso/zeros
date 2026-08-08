@@ -380,8 +380,10 @@ export async function selectDesignNode(input: {
 }
 
 /** Publish a primary-first additive selection as one renderer+engine state
- * transition. Runtime reads resolve in parallel and the existing generation
- * guard prevents an older group from replacing a newer click. */
+ * transition. A valid requested primary is retained when the group exceeds the
+ * shared limit; overflow is removed from the tail of the remaining members.
+ * Runtime reads resolve in parallel and the existing generation guard prevents
+ * an older group from replacing a newer click. */
 export async function selectDesignNodes(input: {
   workspaceId: string;
   folder: string;
@@ -392,10 +394,7 @@ export async function selectDesignNodes(input: {
   /** Runtime revisions can change computed values without changing source. */
   forceRuntimeRead?: boolean;
 }): Promise<DesignRuntimeNodeDetails[] | null> {
-  const unique = [...new Set(input.nodeIds.filter(isValidDesignNodeId))].slice(
-    0,
-    DESIGN_SELECTION_NODE_LIMIT,
-  );
+  const unique = [...new Set(input.nodeIds.filter(isValidDesignNodeId))];
   const primary =
     (input.primaryNodeId && unique.includes(input.primaryNodeId)
       ? input.primaryNodeId
@@ -404,7 +403,12 @@ export async function selectDesignNodes(input: {
     await selectDesignFrame(input.workspaceId, input.frame);
     return [];
   }
-  const nodeIds = [primary, ...unique.filter((nodeId) => nodeId !== primary)];
+  const nodeIds = [
+    primary,
+    ...unique
+      .filter((nodeId) => nodeId !== primary)
+      .slice(0, DESIGN_SELECTION_NODE_LIMIT - 1),
+  ];
   const generation = nextGeneration(
     selectionGenerationByWorkspace,
     input.workspaceId,
