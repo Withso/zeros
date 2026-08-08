@@ -9,6 +9,8 @@
 
 import type {
   DesignRuntimeNodeDetails,
+  DesignRuntimeHitMode,
+  DesignRuntimeMotionPreview,
   DesignRuntimeScreenshot,
   DesignRuntimeSnapshot,
   DesignRuntimeTreeNode,
@@ -35,6 +37,73 @@ import {
 const selectionGenerationByWorkspace = new Map<string, number>();
 const hoverGenerationByWorkspace = new Map<string, number>();
 const runtimeAuditFingerprintByFrame = new Map<string, string>();
+const MAX_PERSISTED_KEY_STYLES = 64;
+const PERSISTED_KEY_STYLE_PRIORITY = [
+  "position",
+  "left",
+  "top",
+  "right",
+  "bottom",
+  "width",
+  "height",
+  "minWidth",
+  "minHeight",
+  "maxWidth",
+  "maxHeight",
+  "boxSizing",
+  "zIndex",
+  "display",
+  "visibility",
+  "overflow",
+  "flexDirection",
+  "flexWrap",
+  "flexGrow",
+  "flexShrink",
+  "flexBasis",
+  "order",
+  "gap",
+  "rowGap",
+  "columnGap",
+  "alignItems",
+  "alignSelf",
+  "alignContent",
+  "justifyContent",
+  "justifyItems",
+  "justifySelf",
+  "gridTemplateColumns",
+  "gridTemplateRows",
+  "gridAutoFlow",
+  "gridColumn",
+  "gridRow",
+  "paddingTop",
+  "paddingRight",
+  "paddingBottom",
+  "paddingLeft",
+  "marginTop",
+  "marginRight",
+  "marginBottom",
+  "marginLeft",
+  "backgroundColor",
+  "backgroundImage",
+  "backgroundPosition",
+  "backgroundSize",
+  "backgroundRepeat",
+  "borderWidth",
+  "borderStyle",
+  "borderColor",
+  "borderRadius",
+  "color",
+  "fontFamily",
+  "fontSize",
+  "fontWeight",
+  "lineHeight",
+  "letterSpacing",
+  "textAlign",
+  "opacity",
+  "boxShadow",
+  "transform",
+  "animationName",
+] as const;
 let selectionVersion = 0;
 
 function nextGeneration(map: Map<string, number>, workspaceId: string): number {
@@ -93,6 +162,28 @@ function frameSelection(frame: DesignCanvasFrameWire) {
   };
 }
 
+/** Selection is persisted across the engine trust boundary, whose compact
+ * context contract is intentionally capped at 64 properties. The inspector
+ * keeps the complete runtime details locally; this projection only chooses a
+ * stable, useful summary for integrations and session restoration. */
+function persistedKeyStyles(styles: Record<string, string>) {
+  const projected: Record<string, string> = {};
+  let count = 0;
+  for (const property of PERSISTED_KEY_STYLE_PRIORITY) {
+    const value = styles[property];
+    if (value === undefined) continue;
+    projected[property] = value;
+    count += 1;
+  }
+  for (const [property, value] of Object.entries(styles)) {
+    if (count >= MAX_PERSISTED_KEY_STYLES) break;
+    if (Object.hasOwn(projected, property)) continue;
+    projected[property] = value;
+    count += 1;
+  }
+  return projected;
+}
+
 function elementSelection(
   frame: DesignCanvasFrameWire,
   details: DesignRuntimeNodeDetails,
@@ -104,7 +195,33 @@ function elementSelection(
     nodeIds: [details.oid],
     breadcrumb: details.breadcrumb,
     rects: [details.rect],
-    keyComputedStyles: details.styles,
+    keyComputedStyles: persistedKeyStyles(details.styles),
+  };
+}
+
+function multiElementSelection(
+  frame: DesignCanvasFrameWire,
+  details: readonly DesignRuntimeNodeDetails[],
+) {
+  const primary = details[0]!;
+  const keyComputedStyles = persistedKeyStyles(primary.styles);
+  for (const property of Object.keys(keyComputedStyles)) {
+    if (
+      details.some(
+        (candidate) => candidate.styles[property] !== primary.styles[property],
+      )
+    ) {
+      delete keyComputedStyles[property];
+    }
+  }
+  return {
+    frame: frame.file,
+    sourceVersion: frame.sourceVersion,
+    updatedAt: Date.now(),
+    nodeIds: details.map((candidate) => candidate.oid),
+    breadcrumb: primary.breadcrumb,
+    rects: details.map((candidate) => candidate.rect),
+    keyComputedStyles,
   };
 }
 
@@ -184,6 +301,8 @@ export async function selectDesignNode(input: {
   frame: DesignCanvasFrameWire;
   nodeId: string;
   details?: DesignRuntimeNodeDetails;
+  /** Runtime revisions can change computed values without changing source. */
+  forceRuntimeRead?: boolean;
 }): Promise<DesignRuntimeNodeDetails | null> {
   const { workspaceId, folder, frame, nodeId } = input;
   const generation = nextGeneration(
@@ -194,7 +313,9 @@ export async function selectDesignNode(input: {
   const current = designWorkspaceView(workspaceId);
   if (
     current.selectedFrame !== frame.file ||
-    current.selectedNodeId !== nodeId
+    current.selectedNodeId !== nodeId ||
+    current.selectedNodeIds.length !== 1 ||
+    current.selectedNodeIds[0] !== nodeId
   ) {
     useDesignWorkspaceUiStore
       .getState()
@@ -204,6 +325,7 @@ export async function selectDesignNode(input: {
   const cachedCandidate = designRuntimeFrameState(workspaceId, frame.file)
     ?.detailsByNode[nodeId];
   const cached =
+    !input.forceRuntimeRead &&
     cachedCandidate?.sourceVersion === frame.sourceVersion
       ? cachedCandidate
       : undefined;
@@ -249,12 +371,143 @@ export async function selectDesignNode(input: {
   return details;
 }
 
+/** Publish a primary-first additive selection as one renderer+engine state
+ * transition. Runtime reads resolve in parallel and the existing generation
+ * guard prevents an older group from replacing a newer click. */
+export async function selectDesignNodes(input: {
+  workspaceId: string;
+  folder: string;
+  frame: DesignCanvasFrameWire;
+  nodeIds: readonly string[];
+  primaryNodeId?: string;
+  details?: readonly DesignRuntimeNodeDetails[];
+}): Promise<DesignRuntimeNodeDetails[] | null> {
+  const unique = [...new Set(input.nodeIds.filter(Boolean))].slice(0, 32);
+  const primary =
+    (input.primaryNodeId && unique.includes(input.primaryNodeId)
+      ? input.primaryNodeId
+      : unique[0]) ?? null;
+  if (!primary) {
+    await selectDesignFrame(input.workspaceId, input.frame);
+    return [];
+  }
+  const nodeIds = [primary, ...unique.filter((nodeId) => nodeId !== primary)];
+  const generation = nextGeneration(
+    selectionGenerationByWorkspace,
+    input.workspaceId,
+  );
+  const version = nextSelectionVersion();
+  useDesignWorkspaceUiStore
+    .getState()
+    .setSelection(input.workspaceId, input.frame.file, primary, nodeIds);
+
+  const supplied = new Map(
+    input.details?.map((details) => [details.oid, details]) ?? [],
+  );
+  const runtime = designFrameRuntime(input.workspaceId, input.frame.file);
+  const cached = designRuntimeFrameState(
+    input.workspaceId,
+    input.frame.file,
+  )?.detailsByNode;
+  const resolved = await Promise.all(
+    nodeIds.map(async (nodeId) => {
+      const candidate = supplied.get(nodeId) ?? cached?.[nodeId];
+      if (candidate?.sourceVersion === input.frame.sourceVersion) {
+        return candidate;
+      }
+      if (!runtime) return null;
+      try {
+        return await runtime.getNodeDetails(nodeId);
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const current = designWorkspaceView(input.workspaceId);
+  if (
+    selectionGenerationByWorkspace.get(input.workspaceId) !== generation ||
+    current.selectedFrame !== input.frame.file ||
+    current.selectedNodeId !== primary ||
+    current.selectedNodeIds.join("\u0000") !== nodeIds.join("\u0000") ||
+    resolved.some(
+      (details) =>
+        !details || details.sourceVersion !== input.frame.sourceVersion,
+    )
+  ) {
+    return null;
+  }
+  const details = resolved as DesignRuntimeNodeDetails[];
+  for (const candidate of details) {
+    useDesignRuntimeStore
+      .getState()
+      .publishNodeDetails(
+        input.workspaceId,
+        input.folder,
+        input.frame.file,
+        candidate,
+        input.frame.sourceVersion,
+      );
+  }
+  await designSetSelection(
+    input.workspaceId,
+    multiElementSelection(input.frame, details),
+    version,
+  );
+  if (selectionGenerationByWorkspace.get(input.workspaceId) !== generation) {
+    return null;
+  }
+  void captureDesignRuntimeScreenshot(
+    input.workspaceId,
+    input.folder,
+    input.frame.file,
+    input.frame.sourceVersion,
+    primary,
+    1,
+  ).catch(() => {});
+  return details;
+}
+
+export async function toggleDesignNodeSelection(input: {
+  workspaceId: string;
+  folder: string;
+  frame: DesignCanvasFrameWire;
+  nodeId: string;
+  details?: DesignRuntimeNodeDetails;
+}): Promise<DesignRuntimeNodeDetails[] | null> {
+  const current = designWorkspaceView(input.workspaceId);
+  const existing =
+    current.selectedFrame === input.frame.file ? current.selectedNodeIds : [];
+  const wasSelected = existing.includes(input.nodeId);
+  const nextIds = wasSelected
+    ? existing.filter((nodeId) => nodeId !== input.nodeId)
+    : [...existing, input.nodeId];
+  if (nextIds.length === 0) {
+    await selectDesignFrame(input.workspaceId, input.frame);
+    return [];
+  }
+  const primary = wasSelected
+    ? current.selectedNodeId && nextIds.includes(current.selectedNodeId)
+      ? current.selectedNodeId
+      : nextIds[0]
+    : input.nodeId;
+  return selectDesignNodes({
+    workspaceId: input.workspaceId,
+    folder: input.folder,
+    frame: input.frame,
+    nodeIds: nextIds,
+    primaryNodeId: primary,
+    ...(input.details ? { details: [input.details] } : {}),
+  });
+}
+
 export async function selectDesignNodeAtLocation(input: {
   workspaceId: string;
   folder: string;
   frame: DesignCanvasFrameWire;
   x: number;
   y: number;
+  mode?: DesignRuntimeHitMode;
+  selectedNodeId?: string | null;
 }): Promise<DesignRuntimeNodeDetails | null> {
   const runtime = designFrameRuntime(input.workspaceId, input.frame.file);
   if (!runtime) {
@@ -265,7 +518,10 @@ export async function selectDesignNodeAtLocation(input: {
     selectionGenerationByWorkspace,
     input.workspaceId,
   );
-  const details = await runtime.getElementAtLoc(input.x, input.y);
+  const details = await runtime.getElementAtLoc(input.x, input.y, {
+    mode: input.mode,
+    selectedNodeId: input.selectedNodeId,
+  });
   if (selectionGenerationByWorkspace.get(input.workspaceId) !== generation) {
     return null;
   }
@@ -274,6 +530,95 @@ export async function selectDesignNodeAtLocation(input: {
     return null;
   }
   return selectDesignNode({ ...input, nodeId: details.oid, details });
+}
+
+/** Read the deepest hit for context-stack tooling without mutating selection. */
+export async function inspectDesignNodeAtLocation(input: {
+  workspaceId: string;
+  frame: DesignCanvasFrameWire;
+  x: number;
+  y: number;
+  mode?: DesignRuntimeHitMode;
+  selectedNodeId?: string | null;
+}): Promise<DesignRuntimeNodeDetails | null> {
+  const runtime = designFrameRuntime(input.workspaceId, input.frame.file);
+  if (!runtime) return null;
+  const details = await runtime.getElementAtLoc(input.x, input.y, {
+    mode: input.mode ?? "deepest",
+    selectedNodeId: input.selectedNodeId,
+  });
+  return details?.sourceVersion === input.frame.sourceVersion ? details : null;
+}
+
+export async function inspectDesignNode(input: {
+  workspaceId: string;
+  frame: DesignCanvasFrameWire;
+  nodeId: string;
+}): Promise<DesignRuntimeNodeDetails | null> {
+  const runtime = designFrameRuntime(input.workspaceId, input.frame.file);
+  if (!runtime) return null;
+  const details = await runtime.getNodeDetails(input.nodeId);
+  return details.sourceVersion === input.frame.sourceVersion ? details : null;
+}
+
+export async function inspectDesignNodesInRect(input: {
+  workspaceId: string;
+  frame: DesignCanvasFrameWire;
+  rect: { x: number; y: number; width: number; height: number };
+  scopeNodeId?: string | null;
+}): Promise<DesignRuntimeNodeDetails[]> {
+  const runtime = designFrameRuntime(input.workspaceId, input.frame.file);
+  if (!runtime) return [];
+  const details = await runtime.getElementsInRect(
+    input.rect,
+    input.scopeNodeId,
+  );
+  return details.filter(
+    (candidate) => candidate.sourceVersion === input.frame.sourceVersion,
+  );
+}
+
+/** Resolve canvas hover through the same opaque runtime without changing the
+ * durable selection. Newer pointer samples invalidate older async readback. */
+export async function hoverDesignNodeAtLocation(input: {
+  workspaceId: string;
+  folder: string;
+  frame: DesignCanvasFrameWire;
+  x: number;
+  y: number;
+}): Promise<void> {
+  const generation = nextGeneration(
+    hoverGenerationByWorkspace,
+    input.workspaceId,
+  );
+  const runtime = designFrameRuntime(input.workspaceId, input.frame.file);
+  if (!runtime) return;
+  let details: DesignRuntimeNodeDetails | null = null;
+  try {
+    details = await runtime.getElementAtLoc(input.x, input.y, {
+      mode: "deepest",
+    });
+  } catch {
+    return;
+  }
+  if (hoverGenerationByWorkspace.get(input.workspaceId) !== generation) return;
+  useDesignRuntimeStore
+    .getState()
+    .setHoveredNode(
+      input.workspaceId,
+      details ? input.frame.file : null,
+      details?.oid ?? null,
+    );
+  if (!details || details.sourceVersion !== input.frame.sourceVersion) return;
+  useDesignRuntimeStore
+    .getState()
+    .publishNodeDetails(
+      input.workspaceId,
+      input.folder,
+      input.frame.file,
+      details,
+      input.frame.sourceVersion,
+    );
 }
 
 export async function hoverDesignNode(input: {
@@ -401,6 +746,22 @@ export async function previewDesignNodeStylesTransient(input: {
   return details;
 }
 
+export async function previewDesignNodeMotionTransient(input: {
+  workspaceId: string;
+  frame: string;
+  sourceVersion: string;
+  nodeId: string;
+  motion: DesignRuntimeMotionPreview;
+}): Promise<DesignRuntimeNodeDetails> {
+  const runtime = designFrameRuntime(input.workspaceId, input.frame);
+  if (!runtime) throw new Error("The design frame is not ready.");
+  const details = await runtime.previewMotion(input.nodeId, input.motion);
+  if (details.sourceVersion !== input.sourceVersion) {
+    throw new Error("The design frame changed before motion was previewed.");
+  }
+  return details;
+}
+
 export async function clearDesignNodeStylePreviewTransient(input: {
   workspaceId: string;
   frame: string;
@@ -485,6 +846,10 @@ export function reconcileDesignRuntimeSnapshot(input: {
 }): void {
   const { workspaceId, folder, frame, snapshot } = input;
   if (snapshot.sourceVersion !== frame.sourceVersion) return;
+  const previousRuntimeRevision = designRuntimeFrameState(
+    workspaceId,
+    frame.file,
+  )?.snapshot?.revision;
   useDesignRuntimeStore
     .getState()
     .publishSnapshot(
@@ -531,12 +896,31 @@ export function reconcileDesignRuntimeSnapshot(input: {
     return;
   }
   if (nodeId) {
+    const survivingNodeIds = view.selectedNodeIds.filter(
+      (candidate) =>
+        candidate === snapshot.frame.oid ||
+        treeContainsOid(snapshot.tree, candidate),
+    );
+    if (survivingNodeIds.length > 1) {
+      void selectDesignNodes({
+        workspaceId,
+        folder,
+        frame,
+        nodeIds: survivingNodeIds,
+        primaryNodeId: nodeId,
+        ...(nodeId === snapshot.frame.oid ? { details: [snapshot.frame] } : {}),
+      }).catch(() => {
+        // Last confirmed exact-key group remains visible during revalidation.
+      });
+      return;
+    }
     void selectDesignNode({
       workspaceId,
       folder,
       frame,
       nodeId,
       ...(nodeId === snapshot.frame.oid ? { details: snapshot.frame } : {}),
+      forceRuntimeRead: previousRuntimeRevision !== snapshot.revision,
     }).catch(() => {
       // Last confirmed exact-key details remain visible during revalidation.
     });

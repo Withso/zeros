@@ -96,6 +96,18 @@ export interface DesignWebMutation {
   decisions?: DesignStyleMutationDecision[];
 }
 
+export interface DesignAuthoredKeyframe {
+  offset: number;
+  styles: Readonly<Record<string, string>>;
+}
+
+/** A bounded, source-backed motion definition suitable for an editor timeline. */
+export interface DesignAuthoredKeyframes {
+  file: string;
+  name: string;
+  keyframes: DesignAuthoredKeyframe[];
+}
+
 export type DesignStyleOrigin =
   | "inline"
   | "stylesheet"

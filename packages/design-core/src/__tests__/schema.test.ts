@@ -377,4 +377,45 @@ describe("Design Foundation schemas", () => {
       name: "--accent",
     });
   });
+
+  it("accepts bounded direct-manipulation and keyframe operations", () => {
+    const result = designTransactionSchema.parse({
+      schemaVersion: 1,
+      transactionId: "transaction-canvas",
+      documentId: "document-1",
+      baseRevision: "revision-0",
+      actor: { kind: "human", id: "designer" },
+      intent: "Duplicate and animate a card",
+      createdAt: 0,
+      operations: [
+        {
+          operationId: "duplicate-card",
+          type: "node.duplicate",
+          nodeId: "card",
+          duplicateNodeId: "card-copy",
+        },
+        {
+          operationId: "delete-old-label",
+          type: "node.delete",
+          nodeId: "old-label",
+        },
+        {
+          operationId: "animate-card",
+          type: "keyframes.set",
+          file: "tokens.css",
+          name: "card-enter",
+          keyframes: [
+            { offset: 0, styles: { opacity: "0", transform: "scale(.96)" } },
+            { offset: 100, styles: { opacity: "1", transform: "scale(1)" } },
+          ],
+        },
+      ],
+    });
+
+    expect(result.operations.map((operation) => operation.type)).toEqual([
+      "node.duplicate",
+      "node.delete",
+      "keyframes.set",
+    ]);
+  });
 });

@@ -2,6 +2,7 @@ import { parse, type DefaultTreeAdapterTypes } from "parse5";
 import postcss, { type AtRule, type Declaration, type Rule } from "postcss";
 
 import type {
+  DesignAuthoredKeyframes,
   DesignAuthoredDeclaration,
   DesignRuntimeMatchedDeclaration,
   DesignSourceSpan,
@@ -1143,6 +1144,157 @@ export function mutateDesignTokenDeclaration(
     ? `  ${name}: ${value};\n`
     : ` ${name}: ${value}; `;
   return `${source.slice(0, ruleEnd)}${insertion}${source.slice(ruleEnd)}`;
+}
+
+export interface DesignKeyframeInput {
+  offset: number;
+  styles: Readonly<Record<string, string>>;
+}
+
+const DESIGN_MAX_KEYFRAME_DEFINITIONS = 128;
+const DESIGN_MAX_PROJECTED_KEYFRAMES = 32;
+const DESIGN_MAX_KEYFRAME_STYLES = 64;
+
+function designKeyframeOffset(value: string): number | null {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "from") return 0;
+  if (normalized === "to") return 100;
+  const match = /^(-?\d+(?:\.\d+)?)%$/.exec(normalized);
+  if (!match?.[1]) return null;
+  const offset = Number(match[1]);
+  return Number.isFinite(offset) && offset >= 0 && offset <= 100
+    ? offset
+    : null;
+}
+
+/** Read authored CSS motion into deterministic, bounded timeline data. Complex
+ * or malformed selectors are ignored without hiding the rest of the file. */
+export function readDesignKeyframes(
+  files: Readonly<Record<string, string>>,
+): DesignAuthoredKeyframes[] {
+  const definitions: DesignAuthoredKeyframes[] = [];
+  for (const file of Object.keys(files).sort()) {
+    if (!file.toLowerCase().endsWith(".css")) continue;
+    let root: postcss.Root;
+    try {
+      root = postcss.parse(files[file]!, { from: file });
+    } catch {
+      continue;
+    }
+    root.walkAtRules((atRule) => {
+      if (
+        definitions.length >= DESIGN_MAX_KEYFRAME_DEFINITIONS ||
+        atRule.name.toLowerCase() !== "keyframes"
+      ) {
+        return;
+      }
+      const name = atRule.params.trim();
+      if (!/^[A-Za-z_][A-Za-z0-9_-]{0,127}$/.test(name)) return;
+      const byOffset = new Map<number, Record<string, string>>();
+      for (const child of atRule.nodes ?? []) {
+        if (child.type !== "rule") continue;
+        const styles: Record<string, string> = {};
+        for (const declaration of child.nodes ?? []) {
+          if (
+            declaration.type !== "decl" ||
+            Object.keys(styles).length >= DESIGN_MAX_KEYFRAME_STYLES
+          ) {
+            continue;
+          }
+          try {
+            styles[normalizeDesignCssProperty(declaration.prop)] =
+              declaration.value.trim();
+          } catch {
+            // Preserve other valid declarations in an otherwise usable frame.
+          }
+        }
+        if (Object.keys(styles).length === 0) continue;
+        for (const selector of child.selector.split(",")) {
+          const offset = designKeyframeOffset(selector);
+          if (offset === null) continue;
+          const current = byOffset.get(offset) ?? {};
+          Object.assign(current, styles);
+          byOffset.set(offset, current);
+        }
+      }
+      const keyframes = [...byOffset.entries()]
+        .sort(([left], [right]) => left - right)
+        .slice(0, DESIGN_MAX_PROJECTED_KEYFRAMES)
+        .map(([offset, styles]) => ({ offset, styles }));
+      if (keyframes.length > 0) definitions.push({ file, name, keyframes });
+    });
+  }
+  return definitions;
+}
+
+/** Create or surgically replace one named keyframe block. Neighboring CSS is
+ * byte-preserved; transaction inverses restore the previous block exactly. */
+export function mutateDesignKeyframes(
+  source: string,
+  input: { name: string; keyframes: readonly DesignKeyframeInput[] },
+): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_-]{0,127}$/.test(input.name)) {
+    throw new Error("Design keyframe name is invalid.");
+  }
+  if (input.keyframes.length < 2 || input.keyframes.length > 32) {
+    throw new Error("Design motion requires between 2 and 32 keyframes.");
+  }
+  const offsets = new Set<number>();
+  const keyframes = input.keyframes
+    .map((keyframe) => {
+      if (
+        !Number.isFinite(keyframe.offset) ||
+        keyframe.offset < 0 ||
+        keyframe.offset > 100 ||
+        offsets.has(keyframe.offset)
+      ) {
+        throw new Error(
+          "Design keyframe offsets must be unique from 0 to 100.",
+        );
+      }
+      offsets.add(keyframe.offset);
+      const entries = Object.entries(keyframe.styles);
+      if (entries.length === 0 || entries.length > 64) {
+        throw new Error(
+          "Each design keyframe requires between 1 and 64 styles.",
+        );
+      }
+      const styles = entries.map(([rawProperty, rawValue]) => {
+        const property = normalizeDesignCssProperty(rawProperty);
+        const value = validateDesignCssValue(property, rawValue);
+        return `${property}: ${value};`;
+      });
+      return { offset: keyframe.offset, styles };
+    })
+    .sort((left, right) => left.offset - right.offset);
+  const block = `@keyframes ${input.name} {\n${keyframes
+    .map((keyframe) => `  ${keyframe.offset}% { ${keyframe.styles.join(" ")} }`)
+    .join("\n")}\n}`;
+  const root = postcss.parse(source);
+  const matches: AtRule[] = [];
+  root.walkAtRules((rule) => {
+    if (
+      rule.name.toLowerCase() === "keyframes" &&
+      rule.params.trim() === input.name
+    ) {
+      matches.push(rule);
+    }
+  });
+  if (matches.length > 1) {
+    throw new Error(`Design keyframes are ambiguous: ${input.name}`);
+  }
+  const match = matches[0];
+  if (!match) {
+    const separator =
+      source.length === 0 ? "" : source.endsWith("\n") ? "\n" : "\n\n";
+    return `${source}${separator}${block}\n`;
+  }
+  const start = match.source?.start?.offset;
+  const end = match.source?.end?.offset;
+  if (start === undefined || end === undefined) {
+    throw new Error(`Design keyframes have no authored span: ${input.name}`);
+  }
+  return `${source.slice(0, start)}${block}${source.slice(end)}`;
 }
 
 export function readDesignCssDiagnostics(

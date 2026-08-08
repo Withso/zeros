@@ -10,6 +10,20 @@ const source = readFileSync(
   ),
   "utf8",
 );
+const themeSource = readFileSync(
+  resolve(
+    process.cwd(),
+    "apps/desktop/src/renderer/features/design-workspace/design-theme-editor.tsx",
+  ),
+  "utf8",
+);
+const uiSource = readFileSync(
+  resolve(
+    process.cwd(),
+    "apps/desktop/src/renderer/features/design-workspace/design-workspace-ui.css",
+  ),
+  "utf8",
+);
 
 describe("design workspace interaction wiring", () => {
   it("keeps the selected frame and engine selection aligned on canvas clicks", () => {
@@ -23,9 +37,12 @@ describe("design workspace interaction wiring", () => {
 
   it("clears transient style previews on cancel and no-op blur", () => {
     expect(source).toContain("onCancelPreview");
-    expect(source).toContain("clearDesignNodeStylePreview(previewInput)");
     expect(source).toContain(
-      "key={`${styleContext.frame.file}:${styleContext.frame.sourceVersion}:${styleContext.nodeId}:${property}`}",
+      "clearDesignNodeStylePreview({ ...input, folder })",
+    );
+    expect(source).toContain("clearDesignNodeStylePreviewTransient(input)");
+    expect(source).toContain(
+      'key={`${styleContext.frame.file}:${styleContext.frame.sourceVersion}:${styleNodeIds.join(":")}:${property}`}',
     );
   });
 
@@ -39,5 +56,23 @@ describe("design workspace interaction wiring", () => {
     expect(source).not.toContain(
       "active && Boolean(workspaceId && selectedFrame && view.codeView),",
     );
+  });
+
+  it("keeps the theme editor non-modal, draggable, and isolated from canvas wheel input", () => {
+    expect(themeSource).toContain("modal={false}");
+    expect(themeSource).toContain('data-design-theme-drag-handle=""');
+    expect(themeSource).toContain("onWheelCapture={(event) =>");
+    expect(themeSource).not.toContain("<DialogContent");
+  });
+
+  it("prevents native document selection in editor chrome while preserving editable controls", () => {
+    expect(uiSource).toContain("user-select: none");
+    expect(uiSource).toContain("user-select: text");
+    expect(source).toContain('event.key.toLowerCase() === "a"');
+  });
+
+  it("returns the one-shot text tool to Select after entering or cancelling inline editing", () => {
+    expect(source).toContain("finishInlineTextTool");
+    expect(source).toContain("cancelInlineTextEditing");
   });
 });

@@ -6,7 +6,13 @@
 
 // --- IMPORTS ---
 
-import React, { useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   Box,
   ChevronDown,
@@ -21,16 +27,20 @@ import {
   X,
 } from "lucide-react";
 import type { DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
+import type { DesignOperation, DesignTransaction } from "@zeros/design-core";
 
 import {
   hoverDesignNode,
   selectDesignFrame,
   selectDesignNode,
   setDesignNodeVisibility,
+  toggleDesignNodeSelection,
 } from "./state/design-selection";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { useDesignWorkspaceSnapshot } from "./state/use-design-workspace";
+import { useDesignFoundation } from "./state/use-design-foundation";
+import { applyDesignTransactionCached } from "./state/design-workspace-cache";
 import { useDesignWorkspaceUiStore } from "./state/design-workspace-ui";
 import { usePendingWorkspaceKind } from "../../state/pending-workspaces";
 import { resolveWorkspacePresentationKind } from "../../state/workspace-resolution";
@@ -44,9 +54,11 @@ import {
   Tooltip,
   toast,
 } from "../../shared/ui/primitives";
+import { cn } from "../../shared/ui/cn";
 import {
   collectDesignLayerParentIds,
   designLayerAncestorIds,
+  designLayerVirtualWindow,
   flattenDesignLayerTree,
   type FlatDesignLayer,
 } from "./design-layer-tree";
@@ -68,7 +80,16 @@ interface LayerSearchState {
   value: string;
 }
 
+interface LayerWindowState {
+  ownerKey: string | null;
+  count: number;
+  start: number;
+  end: number;
+}
+
 const EMPTY_LAYER_TREE: readonly DesignRuntimeTreeNode[] = Object.freeze([]);
+const EMPTY_SELECTED_NODE_IDS: readonly string[] = Object.freeze([]);
+const DESIGN_LAYER_ROW_HEIGHT = 28;
 
 // --- WORKFLOWS ---
 
@@ -135,6 +156,12 @@ export function DesignWorkspaceSidebarPanels({
       ? (state.byWorkspace[workspaceId]?.selectedNodeId ?? null)
       : null,
   );
+  const selectedNodeIds = useDesignWorkspaceUiStore((state) =>
+    workspaceId
+      ? (state.byWorkspace[workspaceId]?.selectedNodeIds ??
+        EMPTY_SELECTED_NODE_IDS)
+      : EMPTY_SELECTED_NODE_IDS,
+  );
   const selectedFrame =
     snapshot.data?.frames.find((frame) => frame.file === selectedFrameFile) ??
     snapshot.data?.frames[0] ??
@@ -143,6 +170,12 @@ export function DesignWorkspaceSidebarPanels({
     workspaceId && selectedFrame
       ? state.byWorkspace[workspaceId]?.frames[selectedFrame.file]?.snapshot
       : undefined,
+  );
+  const foundation = useDesignFoundation(
+    workspaceId,
+    selectedFrame?.file,
+    selectedFrame?.sourceVersion,
+    surfaceActive && isDesign && Boolean(selectedFrame),
   );
   const layerTree = runtimeSnapshot?.tree ?? EMPTY_LAYER_TREE;
   const ownerKey =
@@ -159,6 +192,8 @@ export function DesignWorkspaceSidebarPanels({
     ownerKey: null,
     ids: new Set(),
   });
+  const [layerAction, setLayerAction] = useState<string | null>(null);
+  const layerActionRef = useRef(false);
   const parentNodeIds = useMemo(
     () => collectDesignLayerParentIds(layerTree),
     [layerTree],
@@ -187,7 +222,109 @@ export function DesignWorkspaceSidebarPanels({
     [layerTree],
   );
   // One composite tab stop; arrows move among the visible tree rows.
+  const scrollAreaRef = useRef<HTMLDivElement | null>(null);
   const treeRef = useRef<HTMLDivElement | null>(null);
+  const [layerWindowState, setLayerWindowState] = useState<LayerWindowState>({
+    ownerKey: null,
+    count: 0,
+    start: 0,
+    end: 0,
+  });
+  const initialLayerWindow = designLayerVirtualWindow({
+    count: flattenedLayers.length,
+    visibleTop: 0,
+    viewportHeight: 840,
+  });
+  const layerWindow =
+    layerWindowState.ownerKey === ownerKey &&
+    layerWindowState.count === flattenedLayers.length
+      ? layerWindowState
+      : { ownerKey, count: flattenedLayers.length, ...initialLayerWindow };
+  const virtualizedLayers = flattenedLayers.length > 400;
+  const renderedLayers = virtualizedLayers
+    ? flattenedLayers.slice(layerWindow.start, layerWindow.end)
+    : flattenedLayers;
+
+  /** Track only the fixed-height slice intersecting the Radix viewport. */
+  useLayoutEffect(() => {
+    if (!surfaceActive || !ownerKey || !virtualizedLayers) return;
+    const viewport = scrollAreaRef.current?.querySelector<HTMLElement>(
+      "[data-radix-scroll-area-viewport]",
+    );
+    const tree = treeRef.current;
+    if (!viewport || !tree) return;
+    let animationFrame: number | null = null;
+    const updateWindow = () => {
+      animationFrame = null;
+      const viewportRect = viewport.getBoundingClientRect();
+      const treeRect = tree.getBoundingClientRect();
+      const next = designLayerVirtualWindow({
+        count: flattenedLayers.length,
+        visibleTop: viewportRect.top - treeRect.top,
+        viewportHeight: viewport.clientHeight,
+        rowHeight: DESIGN_LAYER_ROW_HEIGHT,
+      });
+      setLayerWindowState((current) =>
+        current.ownerKey === ownerKey &&
+        current.count === flattenedLayers.length &&
+        current.start === next.start &&
+        current.end === next.end
+          ? current
+          : {
+              ownerKey,
+              count: flattenedLayers.length,
+              ...next,
+            },
+      );
+    };
+    const scheduleWindow = () => {
+      if (animationFrame !== null) return;
+      animationFrame = window.requestAnimationFrame(updateWindow);
+    };
+    viewport.addEventListener("scroll", scheduleWindow, { passive: true });
+    const resizeObserver = new ResizeObserver(scheduleWindow);
+    resizeObserver.observe(viewport);
+    updateWindow();
+    return () => {
+      viewport.removeEventListener("scroll", scheduleWindow);
+      resizeObserver.disconnect();
+      if (animationFrame !== null) {
+        window.cancelAnimationFrame(animationFrame);
+      }
+    };
+  }, [flattenedLayers.length, ownerKey, surfaceActive, virtualizedLayers]);
+
+  const revealLayerAtIndex = useCallback(
+    (index: number, focus: boolean) => {
+      const layer = flattenedLayers[index];
+      if (!layer || !ownerKey) return;
+      if (virtualizedLayers) {
+        const next = designLayerVirtualWindow({
+          count: flattenedLayers.length,
+          visibleTop: index * DESIGN_LAYER_ROW_HEIGHT,
+          viewportHeight: DESIGN_LAYER_ROW_HEIGHT,
+          rowHeight: DESIGN_LAYER_ROW_HEIGHT,
+        });
+        setLayerWindowState({
+          ownerKey,
+          count: flattenedLayers.length,
+          ...next,
+        });
+      }
+      window.requestAnimationFrame(() => {
+        const row = Array.from(
+          treeRef.current?.querySelectorAll<HTMLButtonElement>(
+            "[data-design-layer-select]",
+          ) ?? [],
+        ).find(
+          (candidate) => candidate.dataset.designLayerId === layer.node.oid,
+        );
+        row?.scrollIntoView({ block: "nearest" });
+        if (focus) row?.focus();
+      });
+    },
+    [flattenedLayers, ownerKey, virtualizedLayers],
+  );
 
   /** Canvas selection reveals its complete path before the browser paints. */
   useLayoutEffect(() => {
@@ -206,13 +343,18 @@ export function DesignWorkspaceSidebarPanels({
   /** Keep an externally selected canvas layer inside the scroll viewport. */
   useLayoutEffect(() => {
     if (!selectedNodeId) return;
+    const index = flattenedLayers.findIndex(
+      (layer) => layer.node.oid === selectedNodeId,
+    );
+    if (index < 0) return;
     const row = Array.from(
       treeRef.current?.querySelectorAll<HTMLElement>(
         "[data-design-layer-id]",
       ) ?? [],
     ).find((candidate) => candidate.dataset.designLayerId === selectedNodeId);
-    row?.scrollIntoView({ block: "nearest" });
-  }, [flattenedLayers, selectedNodeId]);
+    if (row) row.scrollIntoView({ block: "nearest" });
+    else revealLayerAtIndex(index, false);
+  }, [flattenedLayers, revealLayerAtIndex, selectedNodeId]);
 
   if (!isDesign) return null;
 
@@ -247,14 +389,22 @@ export function DesignWorkspaceSidebarPanels({
   };
 
   /** Select one stable oid using cached details or the exact frame runtime. */
-  const chooseLayer = (layer: FlatDesignLayer) => {
+  const chooseLayer = (layer: FlatDesignLayer, additive = false) => {
     if (!workspaceId || !folder || !selectedFrame) return;
-    void selectDesignNode({
-      workspaceId,
-      folder,
-      frame: selectedFrame,
-      nodeId: layer.node.oid,
-    }).catch((error) => {
+    const selection = additive
+      ? toggleDesignNodeSelection({
+          workspaceId,
+          folder,
+          frame: selectedFrame,
+          nodeId: layer.node.oid,
+        })
+      : selectDesignNode({
+          workspaceId,
+          folder,
+          frame: selectedFrame,
+          nodeId: layer.node.oid,
+        });
+    void selection.catch((error) => {
       toast.error("Couldn't select the design layer", {
         description: errorMessage(error),
       });
@@ -277,27 +427,88 @@ export function DesignWorkspaceSidebarPanels({
     });
   };
 
+  const mutateLayer = async (
+    action: "duplicate" | "delete",
+    layer: FlatDesignLayer,
+  ) => {
+    const data = foundation.data;
+    if (!workspaceId || !selectedFrame || !data || layerActionRef.current) {
+      return;
+    }
+    layerActionRef.current = true;
+    setLayerAction(`${action}:${layer.node.oid}`);
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const duplicateNodeId = `${layer.node.oid.slice(0, Math.max(1, 242 - suffix.length))}-copy-${suffix}`;
+    try {
+      const operation: DesignOperation =
+        action === "duplicate"
+          ? {
+              operationId: `duplicate:${crypto.randomUUID()}`,
+              type: "node.duplicate",
+              nodeId: layer.node.oid,
+              duplicateNodeId,
+            }
+          : {
+              operationId: `delete:${crypto.randomUUID()}`,
+              type: "node.delete",
+              nodeId: layer.node.oid,
+            };
+      const transaction: DesignTransaction = {
+        schemaVersion: 1,
+        transactionId: `desktop:${crypto.randomUUID()}`,
+        documentId: data.summary.documentId,
+        baseRevision: data.summary.revision,
+        actor: { kind: "human", id: "desktop" },
+        intent: `${action === "duplicate" ? "Duplicate" : "Delete"} ${layerDisplayName(layer)}`,
+        createdAt: Date.now(),
+        operations: [operation],
+      };
+      const result = await applyDesignTransactionCached(
+        workspaceId,
+        selectedFrame.file,
+        transaction,
+      );
+      if (action === "duplicate") {
+        useDesignWorkspaceUiStore
+          .getState()
+          .setSelection(workspaceId, selectedFrame.file, duplicateNodeId);
+        toast.success("Layer duplicated");
+      } else {
+        const currentFrame =
+          result.snapshot?.frames.find(
+            (candidate) => candidate.file === selectedFrame.file,
+          ) ?? selectedFrame;
+        await selectDesignFrame(workspaceId, currentFrame);
+        toast.success("Layer deleted");
+      }
+    } catch (error) {
+      toast.error(`Couldn't ${action} the layer`, {
+        description: errorMessage(error),
+      });
+    } finally {
+      layerActionRef.current = false;
+      setLayerAction(null);
+    }
+  };
+
   /** Desktop tree conventions: arrows navigate; Tab exits the composite. */
   const handleLayerKeyDown = (
     event: React.KeyboardEvent<HTMLButtonElement>,
     layer: FlatDesignLayer,
   ) => {
-    const rows = Array.from(
-      treeRef.current?.querySelectorAll<HTMLButtonElement>(
-        "[data-design-layer-select]",
-      ) ?? [],
+    const index = flattenedLayers.findIndex(
+      (candidate) => candidate.node.oid === layer.node.oid,
     );
-    const index = rows.indexOf(event.currentTarget);
-    const focusRow = (next: HTMLButtonElement | undefined) => {
-      if (!next) return;
+    const focusLayer = (nextIndex: number) => {
+      if (nextIndex < 0 || nextIndex >= flattenedLayers.length) return;
       event.preventDefault();
-      next.focus();
+      revealLayerAtIndex(nextIndex, true);
     };
 
-    if (event.key === "ArrowDown") return focusRow(rows[index + 1]);
-    if (event.key === "ArrowUp") return focusRow(rows[index - 1]);
-    if (event.key === "Home") return focusRow(rows[0]);
-    if (event.key === "End") return focusRow(rows.at(-1));
+    if (event.key === "ArrowDown") return focusLayer(index + 1);
+    if (event.key === "ArrowUp") return focusLayer(index - 1);
+    if (event.key === "Home") return focusLayer(0);
+    if (event.key === "End") return focusLayer(flattenedLayers.length - 1);
     const visuallyExpanded =
       layer.hasChildren &&
       (Boolean(query) || !collapsedNodeIds.has(layer.node.oid));
@@ -306,7 +517,7 @@ export function DesignWorkspaceSidebarPanels({
         event.preventDefault();
         toggleExpanded(layer);
       } else {
-        focusRow(rows[index + 1]);
+        focusLayer(index + 1);
       }
       return;
     }
@@ -316,15 +527,34 @@ export function DesignWorkspaceSidebarPanels({
         toggleExpanded(layer);
         return;
       }
-      const parent = rows.find(
-        (candidate) => candidate.dataset.designLayerId === layer.parentOid,
+      const parentIndex = flattenedLayers.findIndex(
+        (candidate) => candidate.node.oid === layer.parentOid,
       );
-      focusRow(parent);
+      focusLayer(parentIndex);
       return;
     }
     if (event.shiftKey && event.key.toLocaleLowerCase() === "h") {
       event.preventDefault();
       toggleVisibility(layer);
+      return;
+    }
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      !event.altKey &&
+      event.key.toLocaleLowerCase() === "d"
+    ) {
+      event.preventDefault();
+      if (!event.repeat) void mutateLayer("duplicate", layer);
+      return;
+    }
+    if (
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      (event.key === "Backspace" || event.key === "Delete")
+    ) {
+      event.preventDefault();
+      if (!event.repeat) void mutateLayer("delete", layer);
       return;
     }
     if (event.key === "Enter" || event.key === " ") {
@@ -347,117 +577,141 @@ export function DesignWorkspaceSidebarPanels({
       className="bg-bg1 flex min-h-0 flex-1 flex-col overflow-hidden"
       aria-labelledby="design-layers-heading"
     >
-        <div className="border-border1 flex h-10 shrink-0 items-center gap-2 border-b px-3">
-          <h2
-            id="design-layers-heading"
-            className="text-fg1 text-xs font-medium"
-          >
-            Layers
-          </h2>
-          <span
-            className="text-fg3 text-xs"
-            aria-label={`${totalLayerCount} layers`}
-          >
-            {totalLayerCount}
-          </span>
-          <Tooltip label="Collapse all layers">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              className="ml-auto"
-              aria-label="Collapse all layers"
-              disabled={parentNodeIds.size === 0}
-              onClick={() => {
-                const selectedPath = new Set(selectedAncestors);
-                updateCollapsed(
-                  () =>
-                    new Set(
-                      [...parentNodeIds].filter(
-                        (nodeId) => !selectedPath.has(nodeId),
-                      ),
+      <div className="flex h-10 shrink-0 items-center gap-2 px-3">
+        <h2 id="design-layers-heading" className="text-fg1 text-xs font-medium">
+          Layers
+        </h2>
+        <span
+          className="text-fg3 text-xs"
+          aria-label={`${totalLayerCount} layers`}
+        >
+          {totalLayerCount}
+        </span>
+        <Tooltip label="Collapse all layers">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="ml-auto"
+            aria-label="Collapse all layers"
+            disabled={parentNodeIds.size === 0}
+            onClick={() => {
+              const selectedPath = new Set(selectedAncestors);
+              updateCollapsed(
+                () =>
+                  new Set(
+                    [...parentNodeIds].filter(
+                      (nodeId) => !selectedPath.has(nodeId),
                     ),
-                );
-              }}
-            >
-              <ListCollapse />
-            </Button>
-          </Tooltip>
-        </div>
+                  ),
+              );
+            }}
+          >
+            <ListCollapse />
+          </Button>
+        </Tooltip>
+      </div>
 
-        <div className="border-border1 shrink-0 border-b p-2">
-          <InputGroup className="h-7">
-            <InputGroupAddon>
-              <Search />
-            </InputGroupAddon>
-            <InputGroupInput
-              value={query}
-              aria-label="Search layers"
-              placeholder="Search layers"
-              onKeyDown={(event) => {
-                if (event.key === "Escape" && query) {
-                  event.preventDefault();
-                  setSearchState({ ownerKey, value: "" });
-                }
-              }}
-              onChange={(event) =>
-                setSearchState({
-                  ownerKey,
-                  value: event.currentTarget.value,
-                })
+      <div className="shrink-0 px-2 pb-2">
+        <InputGroup className="zd-design-search h-7">
+          <InputGroupAddon>
+            <Search />
+          </InputGroupAddon>
+          <InputGroupInput
+            value={query}
+            aria-label="Search layers"
+            placeholder="Search layers"
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && query) {
+                event.preventDefault();
+                setSearchState({ ownerKey, value: "" });
               }
-            />
-            {query ? (
-              <InputGroupAddon align="inline-end">
-                <InputGroupButton
-                  size="icon-xs"
-                  aria-label="Clear layer search"
-                  onClick={() => setSearchState({ ownerKey, value: "" })}
+            }}
+            onChange={(event) =>
+              setSearchState({
+                ownerKey,
+                value: event.currentTarget.value,
+              })
+            }
+          />
+          {query ? (
+            <InputGroupAddon align="inline-end">
+              <InputGroupButton
+                size="icon-xs"
+                aria-label="Clear layer search"
+                onClick={() => setSearchState({ ownerKey, value: "" })}
+              >
+                <X />
+              </InputGroupButton>
+            </InputGroupAddon>
+          ) : null}
+        </InputGroup>
+      </div>
+
+      <ScrollArea ref={scrollAreaRef} className="min-h-0 min-w-0 flex-1">
+        <div className="flex min-w-0 flex-col gap-px px-1 py-1">
+          {snapshot.data?.frames.map((frame) => {
+            const selected = selectedFrame?.file === frame.file;
+            return (
+              <React.Fragment key={frame.file}>
+                <Tooltip
+                  label={`${frame.title} · ${frame.file}`}
+                  side="right"
+                  align="start"
                 >
-                  <X />
-                </InputGroupButton>
-              </InputGroupAddon>
-            ) : null}
-          </InputGroup>
-        </div>
-
-        <ScrollArea className="min-h-0 min-w-0 flex-1">
-          <div className="flex min-w-0 flex-col gap-1 p-1">
-            {snapshot.data?.frames.map((frame) => {
-              const selected = selectedFrame?.file === frame.file;
-              return (
-                <React.Fragment key={frame.file}>
-                  <Tooltip
-                    label={`${frame.title} · ${frame.file}`}
-                    side="right"
-                    align="start"
+                  <Button
+                    type="button"
+                    variant={selected ? "secondary-on" : "ghost"}
+                    size="sm"
+                    className={cn(
+                      "zd-design-control-quiet h-7 w-full min-w-0 justify-start rounded-md px-2",
+                      selected && "zd-design-state-active",
+                    )}
+                    onClick={() => chooseFrame(frame)}
                   >
-                    <Button
-                      type="button"
-                      variant={selected ? "secondary-on" : "ghost"}
-                      size="sm"
-                      className="w-full min-w-0 justify-start"
-                      onClick={() => chooseFrame(frame)}
-                    >
-                      <Frame />
-                      <span className="min-w-0 flex-1 truncate text-left">
-                        {frame.title}
-                      </span>
-                      <span className="text-fg3 max-w-[40%] shrink-0 truncate text-xs">
-                        {frame.file}
-                      </span>
-                    </Button>
-                  </Tooltip>
+                    <Frame />
+                    <span className="min-w-0 flex-1 truncate text-left">
+                      {frame.title}
+                    </span>
+                  </Button>
+                </Tooltip>
 
-                  {selected ? (
+                {selected ? (
+                  <div
+                    ref={treeRef}
+                    role="tree"
+                    aria-label={`${frame.title} layers`}
+                    className={cn(
+                      "min-w-0",
+                      virtualizedLayers ? "relative" : "flex flex-col",
+                    )}
+                    style={
+                      virtualizedLayers
+                        ? {
+                            height:
+                              flattenedLayers.length * DESIGN_LAYER_ROW_HEIGHT,
+                          }
+                        : undefined
+                    }
+                  >
                     <div
-                      ref={treeRef}
-                      role="tree"
-                      aria-label={`${frame.title} layers`}
-                      className="flex min-w-0 flex-col"
+                      role="none"
+                      className={cn(
+                        "flex min-w-0 flex-col",
+                        virtualizedLayers && "absolute inset-x-0 top-0",
+                      )}
+                      style={
+                        virtualizedLayers
+                          ? {
+                              transform: `translateY(${layerWindow.start * DESIGN_LAYER_ROW_HEIGHT}px)`,
+                            }
+                          : undefined
+                      }
                     >
-                      {flattenedLayers.map((layer) => {
-                        const selectedLayer = selectedNodeId === layer.node.oid;
+                      {renderedLayers.map((layer) => {
+                        const selectedLayer = selectedNodeIds.includes(
+                          layer.node.oid,
+                        );
                         const expanded =
                           layer.hasChildren &&
                           (Boolean(query) ||
@@ -470,9 +724,9 @@ export function DesignWorkspaceSidebarPanels({
                           <div
                             key={layer.node.oid}
                             role="none"
-                            className="group flex min-w-0 items-center"
+                            className="group flex h-7 min-w-0 items-center"
                             style={{
-                              paddingLeft: 4 + Math.min(layer.depth, 16) * 12,
+                              paddingLeft: 2 + Math.min(layer.depth, 16) * 12,
                             }}
                             onPointerEnter={() => {
                               if (!workspaceId || !folder) return;
@@ -509,7 +763,10 @@ export function DesignWorkspaceSidebarPanels({
                                   selectedLayer ? "secondary-on" : "ghost"
                                 }
                                 size="sm"
-                                className="min-w-0 flex-1 justify-start"
+                                className={cn(
+                                  "zd-design-control-quiet h-7 min-w-0 flex-1 justify-start rounded-md px-1 text-[11px] [&_svg]:size-3",
+                                  selectedLayer && "zd-design-state-active",
+                                )}
                                 tabIndex={
                                   rovingTabStop === layer.node.oid ? 0 : -1
                                 }
@@ -518,7 +775,7 @@ export function DesignWorkspaceSidebarPanels({
                                 aria-expanded={
                                   layer.hasChildren ? expanded : undefined
                                 }
-                                aria-keyshortcuts="Shift+H"
+                                aria-keyshortcuts="Shift+H Meta+D Control+D Delete Backspace"
                                 onClick={(event) => {
                                   if (
                                     layer.hasChildren &&
@@ -530,7 +787,7 @@ export function DesignWorkspaceSidebarPanels({
                                     toggleExpanded(layer);
                                     return;
                                   }
-                                  chooseLayer(layer);
+                                  chooseLayer(layer, event.shiftKey);
                                 }}
                                 onKeyDown={(event) =>
                                   handleLayerKeyDown(event, layer)
@@ -556,7 +813,7 @@ export function DesignWorkspaceSidebarPanels({
                                   {displayName}
                                 </span>
                                 {showTag ? (
-                                  <span className="text-fg3 max-w-[32%] shrink-0 truncate text-xs">
+                                  <span className="text-fg3 max-w-[32%] shrink-0 truncate font-mono text-[9px]">
                                     {layer.node.tag}
                                   </span>
                                 ) : null}
@@ -573,6 +830,7 @@ export function DesignWorkspaceSidebarPanels({
                                 type="button"
                                 variant="ghost"
                                 size="icon-sm"
+                                disabled={layerAction !== null}
                                 className={
                                   layer.node.visible
                                     ? "invisible shrink-0 group-focus-within:visible group-hover:visible"
@@ -588,48 +846,47 @@ export function DesignWorkspaceSidebarPanels({
                           </div>
                         );
                       })}
-                      {!runtimeSnapshot ? (
-                        <span className="text-fg3 px-2 py-2 text-xs">
-                          Connecting to the selected frame…
-                        </span>
-                      ) : null}
-                      {runtimeSnapshot &&
-                      query &&
-                      flattenedLayers.length === 0 ? (
-                        <span className="text-fg3 px-2 py-2 text-xs">
-                          No layers match “{query}”.
-                        </span>
-                      ) : null}
                     </div>
-                  ) : null}
-                </React.Fragment>
-              );
-            })}
-            {!snapshot.data && snapshot.loading ? (
-              <span className="text-fg3 px-2 py-2 text-xs">
-                Loading layers…
-              </span>
-            ) : null}
-            {!snapshot.data && snapshot.error ? (
-              <div className="flex flex-col items-start gap-2 px-2 py-2">
-                <span className="text-fg3 text-xs">Couldn’t load layers.</span>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  onClick={snapshot.refresh}
-                >
-                  Retry
-                </Button>
-              </div>
-            ) : null}
-            {snapshot.data?.frames.length === 0 ? (
-              <span className="text-fg3 px-2 py-2 text-xs">
-                Create a frame from the canvas toolbar to start designing.
-              </span>
-            ) : null}
-          </div>
-        </ScrollArea>
+                    {!runtimeSnapshot ? (
+                      <span className="text-fg3 px-2 py-2 text-xs">
+                        Connecting to the selected frame…
+                      </span>
+                    ) : null}
+                    {runtimeSnapshot &&
+                    query &&
+                    flattenedLayers.length === 0 ? (
+                      <span className="text-fg3 px-2 py-2 text-xs">
+                        No layers match “{query}”.
+                      </span>
+                    ) : null}
+                  </div>
+                ) : null}
+              </React.Fragment>
+            );
+          })}
+          {!snapshot.data && snapshot.loading ? (
+            <span className="text-fg3 px-2 py-2 text-xs">Loading layers…</span>
+          ) : null}
+          {!snapshot.data && snapshot.error ? (
+            <div className="flex flex-col items-start gap-2 px-2 py-2">
+              <span className="text-fg3 text-xs">Couldn’t load layers.</span>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={snapshot.refresh}
+              >
+                Retry
+              </Button>
+            </div>
+          ) : null}
+          {snapshot.data?.frames.length === 0 ? (
+            <span className="text-fg3 px-2 py-2 text-xs">
+              Create a frame from the canvas toolbar to start designing.
+            </span>
+          ) : null}
+        </div>
+      </ScrollArea>
     </section>
   );
 }

@@ -26,6 +26,7 @@ import {
   reconcileDesignRuntimeSnapshot,
   resetDesignSelectionWorkflowsForTests,
   selectDesignNode,
+  selectDesignNodes,
   selectDesignNodeAtLocation,
 } from "../state/design-selection";
 import {
@@ -79,6 +80,40 @@ describe("design selection workflows", () => {
     vi.clearAllMocks();
   });
 
+  it("bounds persisted key styles without discarding full inspector details", async () => {
+    const computedStyles = Object.fromEntries(
+      Array.from({ length: 96 }, (_, index) => [
+        `computedProperty${index}`,
+        `${index}px`,
+      ]),
+    );
+    const selectedDetails = {
+      ...details("heading"),
+      styles: computedStyles,
+    };
+
+    await selectDesignNode({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      nodeId: "heading",
+      details: selectedDetails,
+    });
+
+    const persistedSelection = (
+      mocks.designSetSelection.mock.calls[0] as unknown as
+        | [string, { keyComputedStyles: Record<string, string> }, number]
+        | undefined
+    )?.[1];
+    expect(
+      Object.keys(persistedSelection?.keyComputedStyles ?? {}),
+    ).toHaveLength(64);
+    expect(
+      designRuntimeFrameState("workspace-a", "home.html")?.detailsByNode.heading
+        ?.styles,
+    ).toEqual(computedStyles);
+  });
+
   it("rejects an old node response after a newer exact selection wins", async () => {
     let resolveFirst!: (value: DesignRuntimeNodeDetails) => void;
     let resolveSecond!: (value: DesignRuntimeNodeDetails) => void;
@@ -128,6 +163,71 @@ describe("design selection workflows", () => {
       expect.objectContaining({ nodeIds: ["second"] }),
       expect.any(Number),
     );
+  });
+
+  it("publishes one atomic bounded selection for multiple runtime nodes", async () => {
+    mocks.designFrameRuntime.mockReturnValue({
+      getNodeDetails: vi.fn(async (nodeId: string) => ({
+        ...details(nodeId),
+        rect: {
+          x: nodeId === "heading" ? 10 : 140,
+          y: 20,
+          width: 100,
+          height: 40,
+        },
+      })),
+    });
+
+    await expect(
+      selectDesignNodes({
+        workspaceId: "workspace-a",
+        folder: "/design/a",
+        frame: FRAME,
+        nodeIds: ["heading", "copy"],
+        primaryNodeId: "copy",
+      }),
+    ).resolves.toMatchObject([{ oid: "copy" }, { oid: "heading" }]);
+
+    expect(designWorkspaceView("workspace-a")).toMatchObject({
+      selectedFrame: "home.html",
+      selectedNodeId: "copy",
+      selectedNodeIds: ["copy", "heading"],
+    });
+    expect(mocks.designSetSelection).toHaveBeenCalledWith(
+      "workspace-a",
+      expect.objectContaining({
+        nodeIds: ["copy", "heading"],
+        rects: [
+          { x: 140, y: 20, width: 100, height: 40 },
+          { x: 10, y: 20, width: 100, height: 40 },
+        ],
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it("collapses an additive selection when its primary layer is clicked", async () => {
+    await selectDesignNodes({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      nodeIds: ["heading", "copy"],
+      primaryNodeId: "heading",
+      details: [details("heading"), details("copy")],
+    });
+
+    await selectDesignNode({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      nodeId: "heading",
+    });
+
+    expect(designWorkspaceView("workspace-a")).toMatchObject({
+      selectedFrame: "home.html",
+      selectedNodeId: "heading",
+      selectedNodeIds: ["heading"],
+    });
   });
 
   it("rejects an old hit-test response after a newer canvas click wins", async () => {
@@ -330,5 +430,80 @@ describe("design selection workflows", () => {
     await Promise.resolve();
 
     expect(mocks.designSetRuntimeAudit).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes selected computed details when the runtime revision changes", async () => {
+    const tree = [
+      {
+        oid: "hero",
+        tag: "main",
+        name: "Hero",
+        text: null,
+        visible: true,
+        children: [
+          {
+            oid: "heading",
+            tag: "h1",
+            name: "Heading",
+            text: "Hello",
+            visible: true,
+            children: [],
+          },
+        ],
+      },
+    ];
+    const snapshot = (revision: number) => ({
+      sourceVersion: FRAME.sourceVersion,
+      revision,
+      tree,
+      frame: details("frame"),
+      warnings: [],
+      viewport: {
+        width: FRAME.width,
+        height: FRAME.height,
+        scrollX: 0,
+        scrollY: 0,
+      },
+    });
+    const refreshed = {
+      ...details("heading"),
+      styles: { fontSize: "40px" },
+    };
+    const getNodeDetails = vi.fn(async () => refreshed);
+    mocks.designFrameRuntime.mockReturnValue({
+      getNodeDetails,
+      captureScreenshot: vi.fn(async () => {
+        throw new Error("capture unavailable in unit test");
+      }),
+    });
+
+    reconcileDesignRuntimeSnapshot({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      snapshot: snapshot(1),
+    });
+    await selectDesignNode({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      nodeId: "heading",
+      details: details("heading"),
+    });
+
+    reconcileDesignRuntimeSnapshot({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      snapshot: snapshot(2),
+    });
+
+    await vi.waitFor(() => expect(getNodeDetails).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() =>
+      expect(
+        designRuntimeFrameState("workspace-a", "home.html")?.detailsByNode
+          .heading?.styles.fontSize,
+      ).toBe("40px"),
+    );
   });
 });
