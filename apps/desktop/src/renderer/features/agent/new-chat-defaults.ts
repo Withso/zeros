@@ -33,11 +33,13 @@ import {
 } from "../settings/default-agent";
 import {
   agentFamily,
+  curatedLegacyFavorites,
   defaultFavoriteModelFor,
   familyForModelValue,
   modelsForAgent,
   nativeModeIdForPosture,
   permissionForAgentMode,
+  soleLegacyFavoriteFamily,
 } from "./model-catalog";
 import {
   effectiveFavoriteModel,
@@ -478,22 +480,24 @@ export function hydrateModelsFromSettings(models: unknown): void {
       !explicitDefaultAgent && typeof m.default === "string" && m.default
         ? familyForModelValue(m.default)
         : "";
-    const fam = explicitFamily || inferredFamily;
     // A current file's bare default is the one global model. A legacy favorites
     // table wins for its selected default family because older mirrors wrote the
     // fallback to `default` and the user's real choice to `favorites.<family>`.
-    const favs =
-      m.favorites && typeof m.favorites === "object"
-        ? (m.favorites as Record<string, unknown>)
-        : null;
+    const curatedFavorites = curatedLegacyFavorites(m.favorites);
+    // A file carrying ONLY a favorites table still has to migrate here, by the
+    // same sole-family rule the localStorage read uses: the old mirror wrote
+    // `default`/`default_agent` only when a default agent existed, so a
+    // star-but-no-agent user's file has favorites alone — and buildModelsTable
+    // deletes that key on the very next mirror write.
+    const fam =
+      explicitFamily ||
+      inferredFamily ||
+      (explicitDefaultAgent ? "" : soleLegacyFavoriteFamily(m.favorites));
     if (fam) {
-      const legacyFavorite = favs?.[fam];
+      const legacyFavorite = curatedFavorites.get(fam);
       const candidate =
-        typeof legacyFavorite === "string" && legacyFavorite
-          ? legacyFavorite
-          : typeof m.default === "string" && m.default
-            ? m.default
-            : null;
+        legacyFavorite ??
+        (typeof m.default === "string" && m.default ? m.default : null);
       const fallback = defaultFavoriteModelFor(fam);
       const rawModel =
         candidate === fallback && !legacyFavorite ? null : candidate;

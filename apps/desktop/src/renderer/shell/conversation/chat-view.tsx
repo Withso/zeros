@@ -47,6 +47,7 @@ import { agentFamily, envForChat } from "../../features/agent/model-catalog";
 import { agentAppliesConfigLive } from "../../features/agent/live-config-support";
 import { useDefaultAgent } from "../../features/settings/default-agent";
 import {
+  hasConfirmedAgents,
   loadAgents,
   useAgentsSnapshot,
 } from "../../features/agent/agents-cache";
@@ -216,9 +217,12 @@ function AutoBindAgent({ chat }: { chat: ChatThread }) {
     if (boundRef.current) return;
     boundRef.current = true;
     const prior = priorIdentityOf(chat);
-    // A cold snapshot means the binding is a guess; record what the chat looked
-    // like BEFORE it so the reconcile pass can re-resolve faithfully.
-    if (agents === null) rememberProvisionalBinding(chat.id, prior);
+    // An UNCONFIRMED snapshot means the binding is a guess; record what the chat
+    // looked like BEFORE it so the reconcile pass can re-resolve faithfully.
+    // Unconfirmed covers more than a cold null: the cache publishes `[]` when a
+    // load fails with nothing on disk, and that array reads exactly like an
+    // authoritative empty registry while being nothing of the sort.
+    if (!hasConfirmedAgents()) rememberProvisionalBinding(chat.id, prior);
     // Several ChatViews are mounted at once in a split workspace. Updating
     // this one chat must not use HYDRATE_CHATS with `activeChatId: chat.id`:
     // an agentless chat in a background pane would steal keyboard/composer
@@ -261,17 +265,24 @@ function useProvisionalBindingReconcile(chat: ChatThread | null): void {
   // dir) nothing else fills the snapshot, so kick the load here. Gated on a
   // connected bridge (same idiom as settings-page) so a boot-time blip doesn't
   // convert into a spurious `[]` registry; the status flip re-runs this.
-  // loadAgents de-dupes concurrent callers and its failure path publishes `[]`,
-  // which reconciles through the same product chain.
+  //
+  // Keyed on CONFIRMATION, not on `agents !== null`: a failed load leaves a
+  // published `[]` behind, and stopping there meant nothing ever asked the
+  // engine again. Re-running is bounded by the snapshot's own reference —
+  // repeated failures keep publishing the same `[]`, which React bails out of —
+  // so this retries when the array actually changes or the bridge reconnects.
   useEffect(() => {
-    if (agents !== null || bridgeStatus !== "connected") return;
+    if (hasConfirmedAgents() || bridgeStatus !== "connected") return;
     void loadAgents((force) => sessions.listAgents(force)).catch(() => {
-      /* snapshot flipped to [] and emitted; the reconcile below takes over */
+      /* still unconfirmed; the next snapshot or bridge flip tries again */
     });
   }, [agents, bridgeStatus, sessions]);
 
   useEffect(() => {
-    if (!agents || !chatId || !boundAgentId) return;
+    if (!agents || !hasConfirmedAgents() || !chatId || !boundAgentId) return;
+    // The provisional record is ONE-SHOT. Reading it against a list the cache
+    // never confirmed would spend a chat's only chance at repair on the very
+    // registry that cannot repair anything.
     const prior = takeProvisionalBinding(chatId);
     if (!prior || hasSession) return;
     const settings = resolveAutoBindChatSettings(

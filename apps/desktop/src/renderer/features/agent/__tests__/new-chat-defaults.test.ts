@@ -280,6 +280,45 @@ describe("favorite models — catalog fallbacks + user stars", () => {
     });
   });
 
+  // The old composer's star deliberately never set `default-agent-id`, so a
+  // user who only ever starred a model has favorites and no agent id. Requiring
+  // the agent id to read the star dropped that choice on upgrade — and the
+  // mirror then deleted the durable copy from settings.toml.
+  it("carries a legacy star that was saved without any default agent", () => {
+    setSetting("favorite-models-by-family", { claude: "claude-sonnet-5[1m]" });
+
+    expect(getFavoriteSelection()).toEqual({
+      agentId: "claude",
+      model: "claude-sonnet-5[1m]",
+    });
+    expect(effectiveFavoriteModel("claude")).toBe("claude-sonnet-5[1m]");
+    expect(getDefaultAgentId()).toBe("claude");
+    expect(newChatBornDefaults("claude").model).toBe("claude-sonnet-5[1m]");
+    expect(migrateDefaultModelSelection()).toBe(true);
+  });
+
+  // Two stars and no recorded default is a real ambiguity: the old model let
+  // all three coexist and nothing in storage says which one was the user's
+  // default. Forging an agent identity out of that would silently move their
+  // provider, so those keep resolving through the catalog fallbacks.
+  it("does not forge an agent from an ambiguous multi-family legacy map", () => {
+    setSetting("favorite-models-by-family", {
+      claude: "claude-sonnet-5[1m]",
+      codex: "gpt-5.5",
+    });
+
+    expect(getFavoriteSelection()).toBeNull();
+    expect(getDefaultAgentId()).toBeNull();
+    expect(effectiveFavoriteModel("claude")).toBe("claude-opus-5[1m]");
+  });
+
+  it("migrates a settings.toml favorites table that carries no default", () => {
+    hydrateModelsFromSettings({ favorites: { cursor: "grok-4.5-xhigh" } });
+
+    expect(getDefaultAgentId()).toBe("cursor");
+    expect(getFavoriteModel("cursor")).toBe("grok-4.5-xhigh");
+  });
+
   it("ignores a stale star for a since-retired model id (catalog update)", () => {
     // A pre-v4-catalog user starred Opus 4.7; the id is gone. New chats must
     // NOT be born with a dead model — resolution falls to the fallback while

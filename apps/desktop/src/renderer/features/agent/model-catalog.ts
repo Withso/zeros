@@ -187,20 +187,53 @@ function sanitizeSelection(value: unknown): FavoriteModelSelection | null {
   return { agentId, model };
 }
 
+/** The curated (family → model) pairs a pre-redesign `favorite-models-by-family`
+ *  map really carries. Keys route through agentFamily, so a wrapper id
+ *  ("claude-code") lands on the same family its model belongs to. */
+export function curatedLegacyFavorites(
+  favorites: unknown,
+): Map<string, string> {
+  const curated = new Map<string, string>();
+  if (!favorites || typeof favorites !== "object" || Array.isArray(favorites)) {
+    return curated;
+  }
+  for (const [key, value] of Object.entries(
+    favorites as Record<string, unknown>,
+  )) {
+    const family = agentFamily(key);
+    if (!family || typeof value !== "string" || !value.trim()) continue;
+    curated.set(family, value.trim());
+  }
+  return curated;
+}
+
+/** The one family a legacy favorites map can speak for on its own.
+ *
+ *  The star is a single global identity now, so a map naming exactly one
+ *  curated family IS that identity — and it has to be read this way, because
+ *  the old composer star deliberately never wrote `default-agent-id`. Anyone
+ *  who starred a model without also visiting Settings has favorites and no
+ *  agent id; requiring the id dropped their choice on upgrade.
+ *
+ *  Two or more entries is a genuine ambiguity: the old model let all three
+ *  coexist and nothing in storage says which was the default. Forging one would
+ *  silently move the user's provider, so those keep resolving through the
+ *  catalog fallbacks. Returns "" when there is no sole family. */
+export function soleLegacyFavoriteFamily(favorites: unknown): string {
+  const curated = curatedLegacyFavorites(favorites);
+  if (curated.size !== 1) return "";
+  return curated.keys().next().value ?? "";
+}
+
 function legacySelection(): FavoriteModelSelection | null {
+  const favorites = getSetting<unknown>(LEGACY_FAVORITE_MODELS_KEY, null);
   const legacyAgent = getSetting<string | null>(LEGACY_DEFAULT_AGENT_KEY, null);
-  const agentId = agentFamily(legacyAgent);
+  const agentId =
+    agentFamily(legacyAgent) || soleLegacyFavoriteFamily(favorites);
   if (!agentId) return null;
-  const favorites = getSetting<Record<string, string> | null>(
-    LEGACY_FAVORITE_MODELS_KEY,
-    null,
-  );
-  const candidate =
-    favorites && typeof favorites === "object" ? favorites[agentId] : null;
   return {
     agentId,
-    model:
-      typeof candidate === "string" && candidate.length > 0 ? candidate : null,
+    model: curatedLegacyFavorites(favorites).get(agentId) ?? null,
   };
 }
 
