@@ -63,6 +63,23 @@ describe("conversation/workbench sizing bounds stay in lockstep with CSS", () =>
     expect(conversation).toContain(`min-w-[${CONVERSATION_MIN_PX}px]`);
   });
 
+  it("raises the rendered conversation and split-child floors for the active tree", () => {
+    const paneLayout = read("../conversation/pane-layout.tsx");
+    expect(conversation).toContain("onMinimumSizeChange={setPaneMinimumSize}");
+    expect(conversation).toContain("minWidth: paneMinimumSize.width");
+    expect(paneLayout).toContain("paneTreeMinimumSize(node.first)");
+    expect(paneLayout).toContain("minWidth: isRow ? firstMinimum.width : 0");
+    expect(paneLayout).toContain("minWidth: isRow ? secondMinimum.width : 0");
+  });
+
+  it("bootstraps the first right split through both menu and drag paths", () => {
+    const paneLayout = read("../conversation/pane-layout.tsx");
+    expect(paneLayout).toContain("data-pane-layout-surface");
+    expect(paneLayout).toContain("canSplitPaneTree({");
+    expect(paneLayout).toContain("canSplitAtCurrentSize");
+    expect(paneLayout).toContain("handleSplit(paneId, dropZone)");
+  });
+
   it("the conversation pane's max-width matches its pixel ceiling and share cap", () => {
     expect(conversation).toContain(
       `max-w-[min(${CONVERSATION_MAX_PX}px,${pct(CONVERSATION_RATIO_MAX)}%)]`,
@@ -143,8 +160,8 @@ describe("conversation/workbench sizing bounds stay in lockstep with CSS", () =>
 
 // ── The workbench expand jerk, guarded ────────────────────────────────────────
 // Collapsing workbench and expanding it again used to snap conversation pane down to
-// its 320px floor and then ease back out to the saved split (measured:
-// 1600 → 320 → 800px). Two independent mistakes combined to produce it, and
+// its 360px floor and then ease back out to the saved split (measured:
+// 1600 → 360 → 800px). Two independent mistakes combined to produce it, and
 // either one alone would bring it back, so both are asserted here.
 describe("collapsing the workbench cannot move the conversation pane", () => {
   const conversation = code("../conversation/conversation-pane.tsx");

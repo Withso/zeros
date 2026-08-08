@@ -732,9 +732,9 @@ function createMainWindow(): BrowserWindow {
     ...(restoredPosition ?? {}),
     // minWidth keeps all three primary surfaces visible at the floor:
     //   repository navigation: 248 px fixed
-    //   conversation: 320 px hard min (renderer/shell/conversation/conversation-pane.tsx)
+    //   conversation: 360 px hard min (renderer/shell/conversation/conversation-pane.tsx)
     //   workbench: 200 px hard min (renderer/shell/workbench/workbench-pane.tsx)
-    //   sum: 768 px + 32 px scrollbar/border breathing room → 800.
+    //   sum: 808 px + 32 px scrollbar/border breathing room → 840.
     // The constants live in window-state.ts so the restored-size clamp
     // and the live window floor can never disagree.
     minWidth: MAIN_WINDOW_MIN_WIDTH,

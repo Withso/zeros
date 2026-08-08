@@ -317,7 +317,9 @@ const claudeModelsSchema = z
   .object({
     default_effort_level: z
       .enum(EFFORT_LEVELS)
-      .describe("Default reasoning effort for Claude models in new chats."),
+      .describe(
+        "Legacy Claude-family effort (migration input for the selected model).",
+      ),
     fallback_model: z
       .string()
       .min(1)
@@ -340,10 +342,48 @@ const codexModelsSchema = z
     default_thinking_level: z
       .enum(EFFORT_LEVELS)
       .describe(
-        "Default reasoning effort for Codex (GPT) models in new chats.",
+        "Legacy Codex-family effort (migration input for the selected model).",
       ),
   })
   .partial();
+
+const modelPreferenceEffortSchema = z
+  .enum(EFFORT_LEVELS)
+  .describe("Last reasoning effort selected for this exact model.");
+const modelPreferenceFastSchema = z
+  .boolean()
+  .describe("Last Fast-mode selection for this exact model.");
+const modelPreferenceBaseSchema = z.object({
+  agent: z
+    .string()
+    .trim()
+    .min(1)
+    .describe(
+      "Canonical agent family, or extension agent id, that owns this model.",
+    ),
+  model: z.string().trim().min(1).describe("Exact provider model identifier."),
+  effort: modelPreferenceEffortSchema.optional(),
+  fast: modelPreferenceFastSchema.optional(),
+});
+const modelPreferenceSchema = z.union([
+  modelPreferenceBaseSchema.extend({ effort: modelPreferenceEffortSchema }),
+  modelPreferenceBaseSchema.extend({ fast: modelPreferenceFastSchema }),
+]);
+
+const permissionPreferenceSchema = z.object({
+  agent: z
+    .string()
+    .trim()
+    .min(1)
+    .describe(
+      "Canonical agent family, or extension agent id, that owns this permission choice.",
+    ),
+  mode: z
+    .string()
+    .trim()
+    .min(1)
+    .describe("Exact native permission-mode identifier."),
+});
 
 const modelsSchema = z
   .object({
@@ -351,14 +391,30 @@ const modelsSchema = z
     default_agent: z
       .string()
       .describe(
-        "Agent the default model belongs to (claude/codex/cursor). Disambiguates a model id that's shared across agents or whose value embeds another family's name.",
+        "Agent the default model belongs to. Disambiguates a model id that's shared across agents or whose value embeds another family's name.",
       ),
     review: z.string().describe("Model used for code reviews."),
-    default_fast_mode: z.boolean().describe("Start new chats in fast mode."),
+    default_fast_mode: z
+      .boolean()
+      .describe(
+        "Legacy global Fast default (migration input for the selected model).",
+      ),
     default_plan_mode: z.boolean().describe("Start new chats in plan mode."),
     favorites: z
       .record(z.string(), z.string())
-      .describe("Favorite model id per agent family."),
+      .describe("Legacy favorite model id per agent family (migration input)."),
+    model_preferences: z
+      .array(modelPreferenceSchema)
+      .max(128)
+      .describe(
+        "Bounded per-model reasoning and Fast-mode memory. Entries are isolated by agent family and exact model id.",
+      ),
+    permission_preferences: z
+      .array(permissionPreferenceSchema)
+      .max(32)
+      .describe(
+        "Bounded per-agent permission-mode memory. Exact native ids preserve modes that share the same coarse posture.",
+      ),
     chat_title_model: z
       .string()
       .describe("Model used to generate chat titles."),
@@ -635,6 +691,69 @@ function sanitizeModels(
         warnings,
       );
       if (favorites) out[key] = favorites;
+      continue;
+    }
+    if (key === "model_preferences") {
+      if (!Array.isArray(entry)) {
+        warnings.push("models.model_preferences: expected an array — ignored");
+        continue;
+      }
+      const newestFirst: Array<Record<string, unknown>> = [];
+      const seen = new Set<string>();
+      let excessValid = 0;
+      for (let index = entry.length - 1; index >= 0; index -= 1) {
+        const candidate = entry[index];
+        const parsed = modelPreferenceSchema.safeParse(candidate);
+        if (!parsed.success) {
+          warnings.push(
+            `models.model_preferences.${index}: ${firstIssue(parsed.error)} — ignored`,
+          );
+          continue;
+        }
+        const identity = `${parsed.data.agent}\u0000${parsed.data.model}`;
+        // The later row is the last user choice and therefore authoritative.
+        if (seen.has(identity)) continue;
+        seen.add(identity);
+        if (newestFirst.length < 128) newestFirst.push(parsed.data);
+        else excessValid += 1;
+      }
+      if (excessValid > 0) {
+        warnings.push(
+          `models.model_preferences: limited to the most recent 128 valid entries — ${excessValid} older entries ignored`,
+        );
+      }
+      out[key] = newestFirst.reverse();
+      continue;
+    }
+    if (key === "permission_preferences") {
+      if (!Array.isArray(entry)) {
+        warnings.push(
+          "models.permission_preferences: expected an array — ignored",
+        );
+        continue;
+      }
+      const newestFirst: Array<Record<string, unknown>> = [];
+      const seen = new Set<string>();
+      let excessValid = 0;
+      for (let index = entry.length - 1; index >= 0; index -= 1) {
+        const parsed = permissionPreferenceSchema.safeParse(entry[index]);
+        if (!parsed.success) {
+          warnings.push(
+            `models.permission_preferences.${index}: ${firstIssue(parsed.error)} — ignored`,
+          );
+          continue;
+        }
+        if (seen.has(parsed.data.agent)) continue;
+        seen.add(parsed.data.agent);
+        if (newestFirst.length < 32) newestFirst.push(parsed.data);
+        else excessValid += 1;
+      }
+      if (excessValid > 0) {
+        warnings.push(
+          `models.permission_preferences: limited to the most recent 32 valid entries — ${excessValid} older entries ignored`,
+        );
+      }
+      out[key] = newestFirst.reverse();
       continue;
     }
     const field = hasOwn(modelShape, key) ? modelShape[key] : undefined;

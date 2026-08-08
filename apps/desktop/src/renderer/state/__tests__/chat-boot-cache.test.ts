@@ -43,7 +43,7 @@ describe("synchronous chat boot cache", () => {
     });
   });
 
-  it("migrates legacy permission and resume-session fields", () => {
+  it("migrates legacy fields without guessing an agent before registry load", () => {
     expect(
       sanitizeCachedChat({
         id: "legacy",
@@ -52,11 +52,29 @@ describe("synchronous chat boot cache", () => {
         resumeSessionId: "session-1",
       }),
     ).toMatchObject({
-      agentId: "claude",
+      agentId: null,
       effort: "max",
       permissionMode: "tool-approval",
       sessionId: "session-1",
     });
+  });
+
+  it("defaults a missing legacy effort to High with Fast off", () => {
+    expect(sanitizeCachedChat({ id: "legacy-defaults" })).toMatchObject({
+      agentId: null,
+      effort: "high",
+      fast: false,
+    });
+  });
+
+  it("treats blank cached agent and model identities as unbound", () => {
+    expect(
+      sanitizeCachedChat({
+        id: "blank-identities",
+        agentId: "   ",
+        model: "",
+      }),
+    ).toMatchObject({ agentId: null, model: null });
   });
 
   it("restores a valid backup only when no intentional-empty tombstone exists", () => {

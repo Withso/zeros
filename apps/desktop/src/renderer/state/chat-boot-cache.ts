@@ -8,7 +8,6 @@
 // post-paint hydration commit. The engine copy revalidates in the background.
 
 import { getSetting, setSetting } from "../platform/settings";
-import { FALLBACK_AGENT_ID } from "../features/agent/default-agent-id";
 import type { ChatEffort, ChatThread } from "./store";
 import { normalizeChatPermissionMode } from "./chat-permission";
 import {
@@ -58,7 +57,7 @@ export function sanitizeCachedChat(value: unknown): ChatThread | null {
   const createdAt = finiteNumber(raw.createdAt, 0);
   const effort = VALID_EFFORTS.has(raw.effort as ChatEffort)
     ? (raw.effort as ChatEffort)
-    : "medium";
+    : "high";
   const legacyResume =
     typeof raw.resumeSessionId === "string" ? raw.resumeSessionId : undefined;
 
@@ -67,13 +66,14 @@ export function sanitizeCachedChat(value: unknown): ChatThread | null {
     folder: typeof raw.folder === "string" ? raw.folder : "",
     kind,
     agentId:
-      typeof raw.agentId === "string"
+      typeof raw.agentId === "string" && raw.agentId.trim().length > 0
         ? raw.agentId
-        : kind === "terminal"
-          ? null
-          : FALLBACK_AGENT_ID,
+        : null,
     agentName: typeof raw.agentName === "string" ? raw.agentName : null,
-    model: typeof raw.model === "string" ? raw.model : null,
+    model:
+      typeof raw.model === "string" && raw.model.trim().length > 0
+        ? raw.model
+        : null,
     effort,
     fast: raw.fast === true,
     additionalDirectories: sanitizeChatDirectories(raw.additionalDirectories),

@@ -796,10 +796,13 @@ function TurnPromptEditor({
                 attachment pills (originals reconstructed in place + any new
                 ones). Enter submits, Esc cancels (via the editor keymap). */}
             {editorContent}
-            <PromptInputToolbar className="min-w-0 gap-1.5 pt-1 pr-0 pb-1 pl-0">
+            <PromptInputToolbar
+              data-permission-feedback-boundary=""
+              className="min-w-0 flex-nowrap gap-1.5 pt-1 pr-0 pb-1 pl-0"
+            >
               {/* gap-0.5: exactly 2px between the + and the pill block, matching
                   the main composer. */}
-              <PromptInputTools className="gap-0.5">
+              <PromptInputTools className="min-w-0 flex-nowrap gap-0.5">
                 <Tooltip label="Attach file">
                   <Button
                     variant="ghost"
@@ -827,6 +830,7 @@ function TurnPromptEditor({
               </PromptInputTools>
               <Tooltip label="Resend" shortcut="↵">
                 <PromptInputSubmit
+                  data-composer-toolbar-actions=""
                   disabled={sendDisabled}
                   aria-label="Resend edited prompt"
                   className="disabled:bg-bg2-hover disabled:text-fg2 size-8 disabled:opacity-100"

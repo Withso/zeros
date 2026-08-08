@@ -2,20 +2,15 @@
 // new-chat-defaults — what a freshly created chat is born with
 // ──────────────────────────────────────────────────────────
 //
-// Two independent preferences drive a new chat:
-//   - The default AGENT ([[default-agent]]) — picked in Settings → Models
-//     (falls back to "claude" when unset). Decides WHICH agent "+" / ⌘T /
-//     new-workspace chats open with.
-//   - The favorite MODEL per agent ([[model-favorites]]) — the ★ in the
-//     composer's model dropdown, exactly one per family, falling back to
-//     the catalog's defaultFavorites (Opus 4.8 / 5.6 Sol / Composer
-//     2.5). Decides WHICH model that agent's new chats open on.
-// Starring a model no longer flips the default agent — the old
-// "default model = default agent + favorite" coupling was retired with
-// the Settings → Default agent picker.
+// One atomic default-model identity drives the agent + model for a new chat.
+// With no user choice, connected agents resolve in Codex → Claude → Cursor
+// order and each family uses its catalog fallback (Opus 5 / GPT-5.6 Sol /
+// Composer 2.5). Exactly one model is starred across the whole picker.
 //
-// This module also owns the remaining new-chat defaults (reasoning effort
-// per family, plan mode, fast mode) and exposes `newChatBornDefaults()` —
+// Effort and Fast are remembered by exact family + model (never globally or
+// per family). Permission mode is remembered as an exact native id per agent
+// family; the global plan default remains an explicit higher-priority override.
+// This module exposes `newChatBornDefaults()` —
 // the single source of truth every spawn path calls to stamp a fresh
 // ChatThread, so the paths can never drift (they used to hardcode
 // conflicting effort: "high" vs "medium").
@@ -38,16 +33,29 @@ import {
 } from "../settings/default-agent";
 import {
   agentFamily,
-  agentSupportsFast,
-  effortLevelsFor,
+  defaultFavoriteModelFor,
   familyForModelValue,
   modelsForAgent,
+  nativeModeIdForPosture,
 } from "./model-catalog";
 import {
   effectiveFavoriteModel,
-  getFavoriteModel,
+  getFavoriteSelection,
   setFavoriteModel,
 } from "./model-favorites";
+import {
+  hasModelPreferenceStorage,
+  replaceModelPreferences,
+  resolveModelConfiguration,
+  serializeModelPreferences,
+  setModelPreference,
+} from "./model-preferences";
+import {
+  replacePermissionPreferences,
+  resolvePermissionConfiguration,
+  serializePermissionPreferences,
+  setPermissionPreference,
+} from "./permission-preferences";
 import {
   DEFAULT_CLAUDE_FALLBACK,
   DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES,
@@ -61,11 +69,12 @@ import {
 } from "./reliability-settings";
 import type { ChatEffort, ChatPermissionMode } from "../../state/store";
 
-/** Per-family default reasoning effort (mirrors the favorite-model map). */
+/** Legacy per-family effort cache. It is read once to migrate the selected
+ * default model, then exact-model records become authoritative. */
 const DEFAULT_EFFORT_KEY = "default-effort-by-family";
 /** Start new chats in plan mode (global, all agents). */
 const DEFAULT_PLAN_KEY = "default-plan-mode";
-/** Start new chats in fast mode (global; applied only when the model supports it). */
+/** Legacy global Fast cache, retained only as a migration input. */
 const DEFAULT_FAST_KEY = "default-fast-mode";
 /** The model used to auto-generate chat titles (Settings → Models → "Custom models"). */
 const CHAT_TITLE_MODEL_KEY = "chat-title-model";
@@ -75,31 +84,6 @@ type EffortMap = Record<string, ChatEffort>;
 function readEffortMap(): EffortMap {
   const raw = getSetting<EffortMap | null>(DEFAULT_EFFORT_KEY, null);
   return raw && typeof raw === "object" ? raw : {};
-}
-
-/** The default reasoning effort for an agent's family, or null if unset. */
-export function getDefaultEffort(
-  agentId: string | null | undefined,
-): ChatEffort | null {
-  const fam = agentFamily(agentId ?? null);
-  if (!fam) return null;
-  const v = readEffortMap()[fam];
-  return typeof v === "string" && v.length > 0 ? (v as ChatEffort) : null;
-}
-
-/** Set (or clear, with null) the default effort for an agent's family. */
-export function setDefaultEffort(
-  agentId: string | null | undefined,
-  effort: ChatEffort | null,
-): void {
-  const fam = agentFamily(agentId ?? null);
-  if (!fam) return;
-  const map = readEffortMap();
-  if (effort) map[fam] = effort;
-  else delete map[fam];
-  setSetting(DEFAULT_EFFORT_KEY, map);
-  notify();
-  mirrorModelsToSettings();
 }
 
 /** Whether new chats start in plan mode. */
@@ -112,12 +96,33 @@ export function setDefaultPlanMode(on: boolean): void {
   mirrorModelsToSettings();
 }
 
-/** Whether new chats start in fast mode (no-op for models that don't support it). */
-export function getDefaultFastMode(): boolean {
+/** Legacy global Fast preference. New behavior resolves Fast per model. */
+function getDefaultFastMode(): boolean {
   return getSetting<boolean>(DEFAULT_FAST_KEY, false) === true;
 }
-export function setDefaultFastMode(on: boolean): void {
-  setSetting(DEFAULT_FAST_KEY, on);
+
+/** Persist a user's effort/Fast choice for one exact model and mirror it to the
+ * durable user settings file. All interactive surfaces route through here. */
+export function rememberModelConfiguration(
+  agentId: string | null | undefined,
+  model: string | null | undefined,
+  next: Partial<{ effort: ChatEffort; fast: boolean }>,
+): void {
+  const exactModel = model ?? effectiveFavoriteModel(agentId);
+  migrateLegacyConfigurationFor(agentId ?? null, exactModel);
+  setModelPreference(agentId, exactModel, next);
+  notify();
+  mirrorModelsToSettings();
+}
+
+/** Persist one exact native permission mode for this agent family and mirror it
+ * into the durable user settings file. Every user-driven permission surface
+ * routes through here so future chats restore the same choice. */
+export function rememberPermissionMode(
+  agentId: string | null | undefined,
+  modeId: string | null | undefined,
+): void {
+  setPermissionPreference(agentId, modeId);
   notify();
   mirrorModelsToSettings();
 }
@@ -223,10 +228,9 @@ export function resolveChatTitleModel(
   return model ? { family: fam, model } : null;
 }
 
-/** Star a model as `agentId`'s favorite (the model its new chats open on)
- *  and mirror the change into settings.toml. This does not change the default
- *  agent; that preference is selected separately in Settings → Models.
- *  Pass null to clear the user star (reverts to the catalog fallback). */
+/** Move the one global default-model star (agent + model atomically) and mirror
+ * the change into settings.toml. Null keeps the agent and restores its catalog
+ * fallback. */
 export function starFavoriteModel(
   agentId: string | null | undefined,
   modelValue: string | null,
@@ -236,40 +240,79 @@ export function starFavoriteModel(
   mirrorModelsToSettings();
 }
 
+/** One-time localStorage migration. The old family effort + global Fast values
+ * cannot truthfully describe every model, so preserve them only on the model
+ * that was selected when the migration happened. Every other model starts at
+ * High/Fast-off, preventing the old cross-model leakage from continuing. */
+function migrateLegacyConfigurationFor(
+  agentId: string | null,
+  model: string | null,
+): void {
+  if (!agentId || !model || hasModelPreferenceStorage()) return;
+  const family = agentFamily(agentId);
+  const legacyEffort = readEffortMap()[family];
+  const legacyFast = getDefaultFastMode();
+  // An absence of local legacy values is not proof that migration is done:
+  // settings.toml hydrates asynchronously and may still contain the durable
+  // legacy copy, or another family's old effort may be waiting for its model.
+  // Writing an empty marker here would mask that later source and lose it.
+  if (!isEffort(legacyEffort) && !legacyFast) return;
+  replaceModelPreferences([
+    {
+      agent: family,
+      model,
+      ...(isEffort(legacyEffort) ? { effort: legacyEffort } : {}),
+      ...(legacyFast ? { fast: true } : {}),
+    },
+  ]);
+  // Clear only after the new marker demonstrably landed. This prevents old
+  // fields from repeatedly re-triggering migration while preserving them if
+  // localStorage rejected the write.
+  if (hasModelPreferenceStorage()) {
+    setSetting(DEFAULT_EFFORT_KEY, {});
+    setSetting(DEFAULT_FAST_KEY, false);
+  }
+}
+
+function legacyMigrationAgentId(): string | null {
+  const explicit = getDefaultAgentId();
+  if (explicit) return explicit;
+  const effort = readEffortMap();
+  // Before provider-priority defaults, an unset agent meant Claude. Preserve
+  // that historical selected-model meaning; a Codex-only effort slot still
+  // identifies Codex unambiguously.
+  if (isEffort(effort.claude) || getDefaultFastMode()) return "claude";
+  if (isEffort(effort.codex)) return "codex";
+  return null;
+}
+
 /** The fields a brand-new chat for `agentId` is born with — the single
  *  source of truth shared by every spawn path (new workspace, "+" → Chat,
- *  ⌘T). Model = the family's effective favorite (the user's ★, else the
- *  catalog fallback: Opus 4.8 / 5.6 Sol / Composer 2.5); effort = the
- *  saved default, clamped to the model's ladder (Sonnet has no
- *  xhigh/ultracode, etc.); permissionMode + fast from the plan/fast toggles. */
+ *  ⌘T). Model = the global default when this agent owns it, otherwise the
+ *  family fallback. Effort/Fast restore this exact model's last user choice. */
 export function newChatBornDefaults(agentId: string | null): {
   model: string | null;
   effort: ChatEffort;
   permissionMode: ChatPermissionMode;
+  lastModeId?: string;
   fast: boolean;
 } {
   const model = effectiveFavoriteModel(agentId);
-  const levels = effortLevelsFor(agentId, model, null);
-  let effort: ChatEffort = getDefaultEffort(agentId) ?? "high";
-  if (levels.length > 0 && !levels.includes(effort)) {
-    effort = levels.includes("high") ? "high" : levels[levels.length - 1];
-  }
-  // Every new chat uses a safe family-aware posture instead of inheriting a
-  // prior chat's selection:
-  //   • Codex → always "tool-approval" / "Ask for approval"
-  //     for every Codex model). Codex's 3-mode menu (Ask / Approve for me / Full
-  //     access) has NO plan/read-only mode, and the Plan pill is inert, so a
-  //     Codex chat must never be born in "plan" — it would be unreachable to exit.
-  //   • Claude / Cursor → "plan" when the global "start in plan" toggle is on,
-  //     else "auto" (Claude's classifier / Cursor's agent mode).
-  const permissionMode: ChatPermissionMode =
-    agentFamily(agentId) === "codex"
-      ? "tool-approval"
-      : getDefaultPlanMode()
-        ? "plan"
-        : "auto";
-  const fast = getDefaultFastMode() && agentSupportsFast(agentId, model, null);
-  return { model, effort, permissionMode, fast };
+  migrateLegacyConfigurationFor(agentId, model);
+  const { effort, fast } = resolveModelConfiguration(agentId, model, null);
+  // Default exact native modes: Claude Auto, Codex Approve for me, Cursor Auto.
+  // A user's last choice wins independently per family. The explicit Settings
+  // "Default to plan mode" switch remains a higher-priority override for agents
+  // that expose Plan; Codex intentionally has no Plan row in its composer menu.
+  const remembered = resolvePermissionConfiguration(agentId);
+  const forcePlan = getDefaultPlanMode() && agentFamily(agentId) !== "codex";
+  const lastModeId = forcePlan
+    ? (nativeModeIdForPosture(agentId, "plan") ?? undefined)
+    : (remembered.modeId ?? undefined);
+  const permissionMode: ChatPermissionMode = forcePlan
+    ? "plan"
+    : remembered.permissionMode;
+  return { model, effort, permissionMode, lastModeId, fast };
 }
 
 // ── settings.toml mirror — the user [models] table ─────
@@ -300,9 +343,6 @@ let suppressMirror = false;
 /** The user `[models]` table built from the cache. A null
  *  leaf deletes that key via applySettingsPatch, so the file mirrors the cache
  *  exactly (off toggles + unset efforts drop out, keeping the file clean). */
-/** The families the favorites table persists (the curated catalog set). */
-const FAVORITE_FAMILIES = ["claude", "codex", "cursor"] as const;
-
 function buildModelsTable(): Record<string, unknown> {
   const defaultAgentId = getDefaultAgentId();
   let defaultModel: string | null = null;
@@ -312,11 +352,15 @@ function buildModelsTable(): Record<string, unknown> {
       modelsForAgent(defaultAgentId, null)[0]?.value ??
       null;
   }
-  const effort = readEffortMap();
-  // Per-family USER stars (raw — the catalog fallback is code, not file
-  // state). null deletes the key, so an un-starred family drops out.
-  const favorites: Record<string, string | null> = {};
-  for (const fam of FAVORITE_FAMILIES) favorites[fam] = getFavoriteModel(fam);
+  const migrationAgentId = defaultAgentId ?? legacyMigrationAgentId();
+  if (migrationAgentId) {
+    migrateLegacyConfigurationFor(
+      migrationAgentId,
+      effectiveFavoriteModel(migrationAgentId),
+    );
+  }
+  const preferences = serializeModelPreferences();
+  const permissionPreferences = serializePermissionPreferences();
   return {
     default: defaultModel,
     // Persist the OWNING agent too: `default` is a bare model value, and a value
@@ -324,9 +368,20 @@ function buildModelsTable(): Record<string, unknown> {
     // / `gpt-5.3-codex`, which embed or share other families' names). Storing the
     // agent makes the hydrate round-trip lossless. null deletes the key.
     default_agent: defaultAgentId,
-    favorites,
+    // Explicit migration cleanup: there is one global default now, represented
+    // by default + default_agent above. The old multi-star table must not keep
+    // rendering as three favorites after a downgrade/re-hydration round trip.
+    favorites: null,
+    // Keep an explicit empty array as the new-schema marker. That lets a
+    // synced/settings-file clear replace stale device-local memory instead of
+    // being mistaken for a legacy file that never had exact-model records.
+    model_preferences: preferences,
+    // Exact native ids are agent-scoped (not model-scoped). Keep an explicit
+    // empty array so a synced settings clear replaces stale device-local memory.
+    permission_preferences: permissionPreferences,
     default_plan_mode: getDefaultPlanMode() ? true : null,
-    default_fast_mode: getDefaultFastMode() ? true : null,
+    // Legacy global Fast was migrated onto the selected exact model.
+    default_fast_mode: null,
     // The Haiku default drops out of the file (null deletes the key) —
     // only a non-default pick persists, keeping the table clean.
     chat_title_model:
@@ -334,7 +389,8 @@ function buildModelsTable(): Record<string, unknown> {
         ? null
         : getChatTitleModel(),
     claude_code: {
-      default_effort_level: effort.claude ?? null,
+      // Legacy family effort was migrated onto the selected exact model.
+      default_effort_level: null,
       // Claude reliability knobs, mirrored losslessly: the fallback
       // writes its resolved value ("none" for explicit fail-fast) so the
       // default never forges a user pick; a null cap (off) drops its key. The
@@ -344,7 +400,7 @@ function buildModelsTable(): Record<string, unknown> {
       budget_cap_usd: getClaudeBudgetCapUsd(),
       idle_timeout_minutes: getClaudeIdleTimeoutMinutes(),
     },
-    codex: { default_thinking_level: effort.codex ?? null },
+    codex: { default_thinking_level: null },
   };
 }
 
@@ -362,11 +418,9 @@ export function mirrorModelsToSettings(): void {
   });
 }
 
-/** Copy a resolved `[models]` table into the localStorage cache. Authoritative
- *  for the plan/fast bools + per-agent effort (the file wins); ADDITIVE for
- *  `default` (a file that omits it never clears a cached default, so an empty
- *  file can't wipe a user mid-migration). Guards skip no-op writes so a refresh
- *  with no real change fires no listeners. */
+/** Copy a resolved `[models]` table into the synchronous cache. The exact-model
+ * array is authoritative when present. Legacy family/global fields migrate only
+ * to the selected default model; they never fan out to every model. */
 export function hydrateModelsFromSettings(models: unknown): void {
   if (!models || typeof models !== "object") return;
   const m = models as Record<string, unknown>;
@@ -379,43 +433,58 @@ export function hydrateModelsFromSettings(models: unknown): void {
     // the agent was persisted). NEVER substring-match the model value here — a
     // Cursor model like `claude-opus-4-8-thinking-high` would misclassify as
     // "claude" and silently switch the user's default agent.
-    const fam =
-      (typeof m.default_agent === "string"
-        ? agentFamily(m.default_agent)
-        : "") ||
-      (typeof m.default === "string" && m.default
+    const explicitDefaultAgent =
+      typeof m.default_agent === "string" && m.default_agent.trim()
+        ? m.default_agent.trim()
+        : null;
+    const explicitFamily = explicitDefaultAgent
+      ? agentFamily(explicitDefaultAgent)
+      : "";
+    // Infer ownership from the bare model only when the file did not provide
+    // an agent. An extension is allowed to use a model id that also appears in
+    // the curated catalog; its explicit identity must still win.
+    const inferredFamily =
+      !explicitDefaultAgent && typeof m.default === "string" && m.default
         ? familyForModelValue(m.default)
-        : "");
-    if (fam && getDefaultAgentId() !== fam) setDefaultAgentId(fam);
-    // Per-family favorite stars. The new-shape `favorites` table wins (it's the
-    // raw star map the mirror writes); a legacy file that only carries `default`
-    // seeds the default agent's family favorite from it instead. ADDITIVE both
-    // ways — an absent key never clears a local star mid-migration.
+        : "";
+    const fam = explicitFamily || inferredFamily;
+    // A current file's bare default is the one global model. A legacy favorites
+    // table wins for its selected default family because older mirrors wrote the
+    // fallback to `default` and the user's real choice to `favorites.<family>`.
     const favs =
       m.favorites && typeof m.favorites === "object"
         ? (m.favorites as Record<string, unknown>)
         : null;
-    if (favs) {
-      for (const family of FAVORITE_FAMILIES) {
-        const v = favs[family];
-        if (typeof v === "string" && v && getFavoriteModel(family) !== v) {
-          setFavoriteModel(family, v);
-        }
+    if (fam) {
+      const legacyFavorite = favs?.[fam];
+      const candidate =
+        typeof legacyFavorite === "string" && legacyFavorite
+          ? legacyFavorite
+          : typeof m.default === "string" && m.default
+            ? m.default
+            : null;
+      const fallback = defaultFavoriteModelFor(fam);
+      const rawModel =
+        candidate === fallback && !legacyFavorite ? null : candidate;
+      const current = getFavoriteSelection();
+      if (current?.agentId !== fam || current.model !== rawModel) {
+        setFavoriteModel(fam, rawModel);
       }
-    } else if (typeof m.default === "string" && m.default && fam) {
-      // Legacy file (no favorites table): seed the star ONLY when the value
-      // differs from what resolution already lands on. The mirror writes
-      // `default` even for users with no explicit star (the effective
-      // favorite — and an all-null favorites table drops out of the file
-      // entirely), so blindly seeding here would forge a durable user star
-      // out of a code-level fallback and pin those users against future
-      // catalog defaultFavorites bumps.
-      if (
-        effectiveFavoriteModel(fam) !== m.default &&
-        getFavoriteModel(fam) !== m.default
-      ) {
-        setFavoriteModel(fam, m.default);
+    } else if (explicitDefaultAgent) {
+      // Preserve extension-provided agent ids even though the curated global
+      // model record is family-scoped to Claude/Codex/Cursor.
+      if (getDefaultAgentId() !== explicitDefaultAgent) {
+        setDefaultAgentId(explicitDefaultAgent);
       }
+    } else if (
+      Array.isArray(m.model_preferences) &&
+      typeof m.default !== "string" &&
+      getDefaultAgentId() !== null
+    ) {
+      // The explicit exact-model array marks a current-format file. With no
+      // default identity in that file, clear a stale device-local choice; old
+      // files without the marker retain their additive migration behavior.
+      setDefaultAgentId(null);
     }
     // Authoritative like the bools: a file without the key means Haiku
     // (the mirror deletes the key for the default, so absence IS the
@@ -426,12 +495,36 @@ export function hydrateModelsFromSettings(models: unknown): void {
     if (getChatTitleModel() !== title) setChatTitleModel(title);
     const plan = m.default_plan_mode === true;
     if (getDefaultPlanMode() !== plan) setDefaultPlanMode(plan);
-    const fast = m.default_fast_mode === true;
-    if (getDefaultFastMode() !== fast) setDefaultFastMode(fast);
     const claude = (m.claude_code as Record<string, unknown> | undefined)
       ?.default_effort_level;
-    if (isEffort(claude) && getDefaultEffort("claude") !== claude) {
-      setDefaultEffort("claude", claude);
+    const codex = (m.codex as Record<string, unknown> | undefined)
+      ?.default_thinking_level;
+
+    if (Array.isArray(m.model_preferences)) {
+      replaceModelPreferences(m.model_preferences);
+      setSetting(DEFAULT_EFFORT_KEY, {});
+      setSetting(DEFAULT_FAST_KEY, false);
+    } else if (!hasModelPreferenceStorage() && fam) {
+      // Loss-minimizing migration: old fields described only the current
+      // default. Preserve them there and leave every other model High/Fast-off.
+      replaceModelPreferences([]);
+      const selectedModel = effectiveFavoriteModel(fam);
+      const legacyEffort =
+        fam === "claude" ? claude : fam === "codex" ? codex : null;
+      const legacyFast = m.default_fast_mode === true;
+      if (selectedModel && (isEffort(legacyEffort) || legacyFast)) {
+        setModelPreference(fam, selectedModel, {
+          ...(isEffort(legacyEffort) ? { effort: legacyEffort } : {}),
+          ...(legacyFast ? { fast: true } : {}),
+        });
+      }
+      if (hasModelPreferenceStorage()) {
+        setSetting(DEFAULT_EFFORT_KEY, {});
+        setSetting(DEFAULT_FAST_KEY, false);
+      }
+    }
+    if (Array.isArray(m.permission_preferences)) {
+      replacePermissionPreferences(m.permission_preferences);
     }
     // Claude reliability knobs. ADDITIVE for the fallback (an absent
     // key keeps the local value — legacy files predate it); the cap follows
@@ -453,11 +546,6 @@ export function hydrateModelsFromSettings(models: unknown): void {
     if (getClaudeIdleTimeoutMinutes() !== idleTimeout) {
       setClaudeIdleTimeoutMinutes(idleTimeout);
     }
-    const codex = (m.codex as Record<string, unknown> | undefined)
-      ?.default_thinking_level;
-    if (isEffort(codex) && getDefaultEffort("codex") !== codex) {
-      setDefaultEffort("codex", codex);
-    }
   } finally {
     suppressMirror = false;
   }
@@ -467,16 +555,21 @@ export function hydrateModelsFromSettings(models: unknown): void {
  *  an empty settings.toml on first boot (so an existing user's choices land in
  *  the file without them having to re-pick). */
 export function hasModelDefaults(): boolean {
-  if (getDefaultAgentId()) return true;
-  if (FAVORITE_FAMILIES.some((fam) => getFavoriteModel(fam))) return true;
-  if (getDefaultPlanMode() || getDefaultFastMode()) return true;
+  if (getFavoriteSelection() || getDefaultAgentId()) return true;
+  if (getDefaultPlanMode()) return true;
+  if (serializeModelPreferences().length > 0) return true;
+  if (serializePermissionPreferences().length > 0) return true;
   if (getChatTitleModel() !== DEFAULT_CHAT_TITLE_MODEL) return true;
   if (getClaudeFallbackModel() !== DEFAULT_CLAUDE_FALLBACK) return true;
   if (getClaudeBudgetCapUsd() != null) return true;
   if (getClaudeIdleTimeoutMinutes() !== DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES)
     return true;
-  const e = readEffortMap();
-  return Boolean(e.claude || e.codex);
+  // Legacy values count only until the exact-model migration marker lands.
+  if (!hasModelPreferenceStorage()) {
+    const effort = readEffortMap();
+    return Boolean(effort.claude || effort.codex || getDefaultFastMode());
+  }
+  return false;
 }
 
 // ── Pub/sub bus (mirrors model-favorites.ts) ─────────────
@@ -492,25 +585,6 @@ function notify(): void {
       /* listeners shouldn't throw; keep going */
     }
   }
-}
-
-/** Hook: the default effort for `agentId`'s family. Re-renders when any
- *  caller of setDefaultEffort() fires (e.g. the Settings dropdown). */
-export function useDefaultEffort(
-  agentId: string | null | undefined,
-): ChatEffort | null {
-  const [effort, setEffort] = useState<ChatEffort | null>(() =>
-    getDefaultEffort(agentId),
-  );
-  useEffect(() => {
-    const sync = () => setEffort(getDefaultEffort(agentId));
-    sync();
-    listeners.add(sync);
-    return () => {
-      listeners.delete(sync);
-    };
-  }, [agentId]);
-  return effort;
 }
 
 /** Hook: `[on, setOn]` for the "start new chats in plan mode" default. */
@@ -545,18 +619,4 @@ export function useChatTitleModel(): [
     [],
   );
   return [choice, set];
-}
-
-/** Hook: `[on, setOn]` for the "start new chats in fast mode" default. */
-export function useDefaultFastMode(): [boolean, (on: boolean) => void] {
-  const [on, setOn] = useState<boolean>(getDefaultFastMode);
-  useEffect(() => {
-    const sync = () => setOn(getDefaultFastMode());
-    listeners.add(sync);
-    return () => {
-      listeners.delete(sync);
-    };
-  }, []);
-  const set = useCallback((next: boolean) => setDefaultFastMode(next), []);
-  return [on, set];
 }

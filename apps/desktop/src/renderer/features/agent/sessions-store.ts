@@ -59,6 +59,7 @@ import { isPlanReviewRequest } from "./renderers/plan-body";
 import { settledTurnStatus } from "./session-reload-lifecycle";
 import { loadPolicies, savePolicies, type PolicyRule } from "./policies";
 import { effortAdoptedEnvKey } from "./model-catalog";
+import { rememberModelConfiguration } from "./new-chat-defaults";
 import { useWorkspaceStore } from "../../state/workspace-store";
 import type { ChatEffort } from "../../state/store";
 
@@ -787,6 +788,10 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       const workspace = useWorkspaceStore.getState();
       const chat = workspace.chats.find((candidate) => candidate.id === chatId);
       if (chat && chat.effort !== effort) {
+        // Native model commands (for example Codex changing its own effort)
+        // are user-visible choices too. Keep the exact model's durable memory
+        // in sync with the chat snapshot the bridge is about to adopt.
+        rememberModelConfiguration(chat.agentId, chat.model, { effort });
         workspace.dispatch({
           type: "UPDATE_CHAT_SETTINGS",
           id: chatId,

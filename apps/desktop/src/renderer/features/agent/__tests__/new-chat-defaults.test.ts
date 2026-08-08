@@ -14,6 +14,7 @@ import {
 } from "../../settings/default-agent";
 import {
   effectiveFavoriteModel,
+  getFavoriteSelection,
   getFavoriteModel,
   setFavoriteModel,
 } from "../model-favorites";
@@ -22,8 +23,11 @@ import {
   getChatTitleModel,
   hydrateModelsFromSettings,
   newChatBornDefaults,
+  rememberModelConfiguration,
+  rememberPermissionMode,
   resolveChatTitleModel,
   setChatTitleModel,
+  setDefaultPlanMode,
 } from "../new-chat-defaults";
 import {
   DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES,
@@ -31,7 +35,12 @@ import {
   isClaudeWakeupBeyondIdleTimeout,
   setClaudeIdleTimeoutMinutes,
 } from "../reliability-settings";
+import {
+  resolveModelConfiguration,
+  setModelPreference,
+} from "../model-preferences";
 import type { BridgeRegistryAgent } from "../../../platform/bridge/messages";
+import { getSetting, setSetting } from "../../../platform/settings";
 
 // The test env is `environment: "node"`; native/settings is localStorage-backed.
 // Install a minimal in-memory Storage so the default-agent / favorite caches work.
@@ -49,7 +58,8 @@ function installLocalStorage(): void {
     key: () => null,
     length: 0,
   };
-  (globalThis as { localStorage?: Storage }).localStorage = fake as unknown as Storage;
+  (globalThis as { localStorage?: Storage }).localStorage =
+    fake as unknown as Storage;
 }
 
 describe("hydrateModelsFromSettings — default agent round-trip", () => {
@@ -95,8 +105,7 @@ describe("hydrateModelsFromSettings — default agent round-trip", () => {
       default_agent: "claude",
     });
     expect(getDefaultAgentId()).toBe("claude");
-    // Opus 4.8 is claude's catalog fallback — resolution lands on it
-    // without forging a raw user star (see the favorites describe below).
+    // A still-supported non-fallback model remains the exact global default.
     expect(effectiveFavoriteModel("claude")).toBe("claude-opus-4-8[1m]");
   });
 });
@@ -149,7 +158,7 @@ describe("chat-title model (Settings → Models → Custom models)", () => {
     expect(resolveChatTitleModel("gemini", new Set())).toBeNull();
   });
 
-  it("hydrates from settings.toml; absence, the retired \"default\", and garbage all mean Haiku", () => {
+  it('hydrates from settings.toml; absence, the retired "default", and garbage all mean Haiku', () => {
     hydrateModelsFromSettings({ chat_title_model: "composer-2.5" });
     expect(getChatTitleModel()).toBe("composer-2.5");
     // The mirror deletes the key for the Haiku default, so absence IS the value.
@@ -211,7 +220,7 @@ describe("Claude idle timeout (Settings → Models → Claude)", () => {
   });
 });
 
-// ── Default agent = Claude; one favorite per agent family ──
+// ── One global default model + per-family product fallbacks ──
 
 describe("favorite models — catalog fallbacks + user stars", () => {
   beforeEach(() => installLocalStorage());
@@ -220,20 +229,27 @@ describe("favorite models — catalog fallbacks + user stars", () => {
   });
 
   it("falls back to the curated defaultFavorites when nothing is starred", () => {
-    expect(defaultFavoriteModelFor("claude")).toBe("claude-opus-4-8[1m]");
+    expect(defaultFavoriteModelFor("claude")).toBe("claude-opus-5[1m]");
     expect(defaultFavoriteModelFor("codex")).toBe("gpt-5.6-sol");
     expect(defaultFavoriteModelFor("cursor")).toBe("composer-2.5");
-    expect(effectiveFavoriteModel("claude")).toBe("claude-opus-4-8[1m]");
+    expect(effectiveFavoriteModel("claude")).toBe("claude-opus-5[1m]");
     expect(effectiveFavoriteModel("codex")).toBe("gpt-5.6-sol");
     expect(effectiveFavoriteModel("cursor")).toBe("composer-2.5");
   });
 
-  it("a user ★ overrides the fallback; clearing it reverts (never 'no favorite')", () => {
+  it("keeps exactly one favorite globally and clearing it reverts to the family fallback", () => {
     setFavoriteModel("claude", "claude-fable-5[1m]");
     expect(effectiveFavoriteModel("claude")).toBe("claude-fable-5[1m]");
+    setFavoriteModel("codex", "gpt-5.6-terra");
+    expect(getFavoriteModel("claude")).toBeNull();
+    expect(getFavoriteModel("codex")).toBe("gpt-5.6-terra");
+    expect(getFavoriteSelection()).toEqual({
+      agentId: "codex",
+      model: "gpt-5.6-terra",
+    });
     setFavoriteModel("claude", null);
     expect(getFavoriteModel("claude")).toBeNull();
-    expect(effectiveFavoriteModel("claude")).toBe("claude-opus-4-8[1m]");
+    expect(effectiveFavoriteModel("claude")).toBe("claude-opus-5[1m]");
   });
 
   it("ignores a stale star for a since-retired model id (catalog update)", () => {
@@ -242,12 +258,12 @@ describe("favorite models — catalog fallbacks + user stars", () => {
     // the raw star stays in storage (a future catalog could revive it).
     setFavoriteModel("claude", "claude-opus-4-7");
     expect(getFavoriteModel("claude")).toBe("claude-opus-4-7");
-    expect(effectiveFavoriteModel("claude")).toBe("claude-opus-4-8[1m]");
-    expect(newChatBornDefaults("claude").model).toBe("claude-opus-4-8[1m]");
+    expect(effectiveFavoriteModel("claude")).toBe("claude-opus-5[1m]");
+    expect(newChatBornDefaults("claude").model).toBe("claude-opus-5[1m]");
   });
 
   it("newChatBornDefaults opens on the effective favorite at High effort", () => {
-    expect(newChatBornDefaults("claude").model).toBe("claude-opus-4-8[1m]");
+    expect(newChatBornDefaults("claude").model).toBe("claude-opus-5[1m]");
     expect(newChatBornDefaults("claude").effort).toBe("high");
     expect(newChatBornDefaults("codex").model).toBe("gpt-5.6-sol");
     expect(newChatBornDefaults("codex").effort).toBe("high");
@@ -256,16 +272,72 @@ describe("favorite models — catalog fallbacks + user stars", () => {
     expect(newChatBornDefaults("codex").model).toBe("gpt-5.5");
   });
 
-  it("round-trips per-family stars through the [models].favorites table", () => {
+  it("uses Auto / Approve for me / Auto as the exact first-use permission defaults", () => {
+    expect(newChatBornDefaults("claude")).toMatchObject({
+      permissionMode: "auto",
+      lastModeId: "auto",
+    });
+    expect(newChatBornDefaults("codex")).toMatchObject({
+      permissionMode: "auto",
+      lastModeId: "auto-edit",
+    });
+    expect(newChatBornDefaults("cursor")).toMatchObject({
+      permissionMode: "auto",
+      lastModeId: "auto",
+    });
+  });
+
+  it("restores each agent's last exact permission choice in future chats", () => {
+    rememberPermissionMode("claude", "accept-edits");
+    rememberPermissionMode("codex", "full-access");
+
+    expect(newChatBornDefaults("claude")).toMatchObject({
+      permissionMode: "auto",
+      lastModeId: "accept-edits",
+    });
+    expect(newChatBornDefaults("codex")).toMatchObject({
+      permissionMode: "danger",
+      lastModeId: "full-access",
+    });
+    expect(newChatBornDefaults("cursor")).toMatchObject({
+      permissionMode: "auto",
+      lastModeId: "auto",
+    });
+  });
+
+  it("lets the explicit plan default override and then reveal remembered modes", () => {
+    rememberPermissionMode("claude", "bypass");
+    rememberPermissionMode("codex", "full-access");
+    setDefaultPlanMode(true);
+
+    expect(newChatBornDefaults("claude")).toMatchObject({
+      permissionMode: "plan",
+      lastModeId: "plan",
+    });
+    // Codex intentionally exposes no Plan mode in the composer.
+    expect(newChatBornDefaults("codex")).toMatchObject({
+      permissionMode: "danger",
+      lastModeId: "full-access",
+    });
+    expect(newChatBornDefaults("cursor")).toMatchObject({
+      permissionMode: "plan",
+      lastModeId: "plan",
+    });
+
+    setDefaultPlanMode(false);
+    expect(newChatBornDefaults("claude")).toMatchObject({
+      permissionMode: "danger",
+      lastModeId: "bypass",
+    });
+  });
+
+  it("migrates legacy per-family stars to only the selected default agent", () => {
     hydrateModelsFromSettings({
+      default_agent: "claude",
       favorites: { claude: "claude-sonnet-5[1m]", cursor: "grok-4.5-xhigh" },
     });
     expect(getFavoriteModel("claude")).toBe("claude-sonnet-5[1m]");
-    expect(getFavoriteModel("cursor")).toBe("grok-4.5-xhigh");
-    // Additive: an absent family never clears a local star mid-migration.
-    setFavoriteModel("codex", "gpt-5.6-terra");
-    hydrateModelsFromSettings({ favorites: { claude: "claude-fable-5[1m]" } });
-    expect(getFavoriteModel("codex")).toBe("gpt-5.6-terra");
+    expect(getFavoriteModel("cursor")).toBeNull();
   });
 
   it("does NOT forge a user star from a legacy `default` that matches the fallback", () => {
@@ -275,12 +347,12 @@ describe("favorite models — catalog fallbacks + user stars", () => {
     // into a durable user star — future defaultFavorites bumps must still
     // reach this user.
     hydrateModelsFromSettings({
-      default: "claude-opus-4-8[1m]",
+      default: "claude-opus-5[1m]",
       default_agent: "claude",
     });
     expect(getDefaultAgentId()).toBe("claude");
     expect(getFavoriteModel("claude")).toBeNull();
-    expect(effectiveFavoriteModel("claude")).toBe("claude-opus-4-8[1m]");
+    expect(effectiveFavoriteModel("claude")).toBe("claude-opus-5[1m]");
     // A legacy default that DIFFERS from the fallback is a real user pick —
     // it still seeds the star.
     hydrateModelsFromSettings({
@@ -299,9 +371,166 @@ describe("favorite models — catalog fallbacks + user stars", () => {
     expect(getDefaultAgentId()).toBe("claude");
     expect(getFavoriteModel("claude")).toBe("claude-fable-5[1m]");
   });
+
+  it("hydrates exact-model effort/Fast memory without leaking it to a sibling", () => {
+    hydrateModelsFromSettings({
+      default: "gpt-5.6-sol",
+      default_agent: "codex",
+      model_preferences: [
+        {
+          agent: "codex",
+          model: "gpt-5.6-sol",
+          effort: "max",
+          fast: true,
+        },
+        {
+          agent: "codex",
+          model: "gpt-5.6-terra",
+          effort: "medium",
+          fast: false,
+        },
+      ],
+    });
+
+    expect(newChatBornDefaults("codex")).toMatchObject({
+      model: "gpt-5.6-sol",
+      effort: "max",
+      fast: true,
+    });
+    expect(resolveModelConfiguration("codex", "gpt-5.6-terra", null)).toEqual({
+      effort: "medium",
+      fast: false,
+    });
+  });
+
+  it("hydrates exact permission memory and treats an explicit empty array as a clear", () => {
+    hydrateModelsFromSettings({
+      permission_preferences: [
+        { agent: "claude", mode: "bypass" },
+        { agent: "codex", mode: "ask" },
+      ],
+    });
+
+    expect(newChatBornDefaults("claude")).toMatchObject({
+      permissionMode: "danger",
+      lastModeId: "bypass",
+    });
+    expect(newChatBornDefaults("codex")).toMatchObject({
+      permissionMode: "tool-approval",
+      lastModeId: "ask",
+    });
+
+    hydrateModelsFromSettings({ permission_preferences: [] });
+    expect(newChatBornDefaults("claude")).toMatchObject({
+      permissionMode: "auto",
+      lastModeId: "auto",
+    });
+    expect(newChatBornDefaults("codex")).toMatchObject({
+      permissionMode: "auto",
+      lastModeId: "auto-edit",
+    });
+  });
+
+  it("treats an explicit empty exact-model array as an authoritative clear", () => {
+    setFavoriteModel("codex", "gpt-5.6-terra");
+    setModelPreference("codex", "gpt-5.6-sol", {
+      effort: "max",
+      fast: true,
+    });
+
+    hydrateModelsFromSettings({ model_preferences: [] });
+
+    expect(getDefaultAgentId()).toBeNull();
+    expect(resolveModelConfiguration("codex", "gpt-5.6-sol", null)).toEqual({
+      effort: "high",
+      fast: false,
+    });
+  });
+
+  it("round-trips an extension-provided default agent even when its model id overlaps a curated family", () => {
+    hydrateModelsFromSettings({
+      default_agent: "extension-agent",
+      default: "gpt-5.6-sol",
+      model_preferences: [],
+    });
+
+    expect(getDefaultAgentId()).toBe("extension-agent");
+  });
+
+  it("migrates legacy family effort/global Fast only onto the selected model", () => {
+    hydrateModelsFromSettings({
+      default: "gpt-5.6-sol",
+      default_agent: "codex",
+      default_fast_mode: true,
+      codex: { default_thinking_level: "max" },
+    });
+
+    expect(newChatBornDefaults("codex")).toMatchObject({
+      model: "gpt-5.6-sol",
+      effort: "max",
+      fast: true,
+    });
+    expect(resolveModelConfiguration("codex", "gpt-5.6-terra", null)).toEqual({
+      effort: "high",
+      fast: false,
+    });
+  });
+
+  it("moves local legacy values once, then clears their migration inputs", () => {
+    setSetting("default-effort-by-family", { codex: "max" });
+    setSetting("default-fast-mode", true);
+
+    expect(newChatBornDefaults("codex")).toMatchObject({
+      model: "gpt-5.6-sol",
+      effort: "max",
+      fast: true,
+    });
+    expect(getSetting("default-effort-by-family", { codex: "stale" })).toEqual(
+      {},
+    );
+    expect(getSetting("default-fast-mode", true)).toBe(false);
+  });
+
+  it("does not let an early default read mask durable legacy settings hydration", () => {
+    expect(newChatBornDefaults("codex")).toMatchObject({
+      effort: "high",
+      fast: false,
+    });
+
+    hydrateModelsFromSettings({
+      default: "gpt-5.6-sol",
+      default_agent: "codex",
+      default_fast_mode: true,
+      codex: { default_thinking_level: "max" },
+    });
+
+    expect(newChatBornDefaults("codex")).toMatchObject({
+      effort: "max",
+      fast: true,
+    });
+  });
+
+  it("does not discard another family's legacy effort before that family migrates", () => {
+    setSetting("default-effort-by-family", { claude: "max" });
+
+    expect(newChatBornDefaults("codex").effort).toBe("high");
+    expect(newChatBornDefaults("claude").effort).toBe("max");
+  });
+
+  it("merges a first interactive change with unmigrated legacy state", () => {
+    setSetting("default-effort-by-family", { codex: "max" });
+    setSetting("default-fast-mode", true);
+
+    rememberModelConfiguration("codex", "gpt-5.6-sol", { fast: false });
+
+    expect(resolveModelConfiguration("codex", "gpt-5.6-sol", null)).toEqual({
+      effort: "max",
+      fast: false,
+    });
+  });
 });
 
-describe("default agent — unset falls back to claude", () => {
+describe("default agent — deterministic connected-provider preference", () => {
   beforeEach(() => installLocalStorage());
   afterEach(() => {
     delete (globalThis as { localStorage?: Storage }).localStorage;
@@ -310,23 +539,60 @@ describe("default agent — unset falls back to claude", () => {
   // authenticated:true is the strongest isRunnableAgent() branch — enough
   // to make the fake pass the runnable filter without provider-prefs state.
   const agent = (id: string): BridgeRegistryAgent =>
-    ({ id, name: id, authenticated: true } as unknown as BridgeRegistryAgent);
+    ({ id, name: id, authenticated: true }) as unknown as BridgeRegistryAgent;
 
-  it("picks claude when nothing is set and claude is runnable", () => {
+  it("prefers Codex over Claude over Cursor regardless of registry order", () => {
     expect(getDefaultAgentId()).toBeNull();
-    expect(pickDefaultAgentId([agent("codex"), agent("claude"), agent("cursor")])).toBe(
+    expect(
+      pickDefaultAgentId([agent("codex"), agent("claude"), agent("cursor")]),
+    ).toBe("codex");
+    expect(pickDefaultAgentId([agent("cursor"), agent("claude")])).toBe(
       "claude",
     );
+    expect(pickDefaultAgentId([agent("cursor"), agent("codex")])).toBe("codex");
+    expect(pickDefaultAgentId([agent("claude"), agent("codex")])).toBe("codex");
+    expect(pickDefaultAgentId([agent("codex")])).toBe("codex");
+    expect(pickDefaultAgentId([agent("cursor")])).toBe("cursor");
+    expect(pickDefaultAgentId([agent("claude")])).toBe("claude");
   });
 
-  it("honors an explicit default over the claude fallback", () => {
+  it("applies provider priority only across agents enabled for chat", () => {
+    localStorage.setItem(
+      "zeros.agent.enabledAgents",
+      JSON.stringify({ ids: ["cursor"] }),
+    );
+
+    expect(
+      pickDefaultAgentId([agent("codex"), agent("claude"), agent("cursor")]),
+    ).toBe("cursor");
+  });
+
+  it("honors an explicit default over provider priority", () => {
     setDefaultAgentId("cursor");
-    expect(pickDefaultAgentId([agent("codex"), agent("claude"), agent("cursor")])).toBe(
-      "cursor",
+    expect(getFavoriteSelection()).toEqual({ agentId: "cursor", model: null });
+    expect(
+      pickDefaultAgentId([agent("codex"), agent("claude"), agent("cursor")]),
+    ).toBe("cursor");
+  });
+
+  it("falls back to provider priority when the explicit default is disconnected", () => {
+    setDefaultAgentId("cursor");
+    expect(pickDefaultAgentId([agent("claude"), agent("codex")])).toBe("codex");
+  });
+
+  it("degrades deterministically for unknown runnable agents", () => {
+    expect(pickDefaultAgentId([agent("other-b"), agent("other-a")])).toBe(
+      "other-b",
     );
   });
 
-  it("degrades to the first runnable agent when claude is missing", () => {
-    expect(pickDefaultAgentId([agent("codex"), agent("cursor")])).toBe("codex");
+  it("does not let an old curated default shadow an extension-provided default", () => {
+    setDefaultAgentId("cursor");
+    setDefaultAgentId("extension-agent");
+
+    expect(getDefaultAgentId()).toBe("extension-agent");
+    expect(pickDefaultAgentId([agent("codex"), agent("extension-agent")])).toBe(
+      "extension-agent",
+    );
   });
 });

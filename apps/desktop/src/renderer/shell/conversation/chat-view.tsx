@@ -13,7 +13,7 @@
 //                                 2026-06-18; replacement lands via the
 //                                 redesign branch on merge to main)
 //   - chat kind w/o agent       → AUTO-BIND to the resolved default
-//                                 (starred → codex → first runnable)
+//                                 (explicit → Codex → Claude → Cursor → first)
 //                                 then re-render as ChatBody. The
 //                                 user never sees a picker; 2026-05-23
 //                                 the legacy NoAgentView path was
@@ -29,7 +29,7 @@
 // subprocess at composer-focus time (handled by AgentChat).
 // ──────────────────────────────────────────────────────────
 
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   useChatById,
   usePendingAutoSend,
@@ -45,18 +45,20 @@ import { useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { AgentChat } from "../../features/agent/agent-chat";
 import { envForChat } from "../../features/agent/model-catalog";
 import { agentAppliesConfigLive } from "../../features/agent/live-config-support";
+import { useDefaultAgent } from "../../features/settings/default-agent";
 import {
-  FALLBACK_AGENT_ID,
-  pickDefaultAgent,
-  useDefaultAgent,
-} from "../../features/settings/default-agent";
-import { useAgentsSnapshot } from "../../features/agent/agents-cache";
+  loadAgents,
+  useAgentsSnapshot,
+} from "../../features/agent/agents-cache";
+import { useEnabledAgents } from "../../features/agent/enabled-agents";
+import { ZerosSpinner } from "../../shared/ui/loading";
 import { isRemovedAgent } from "../../features/agent/agent-runnable";
 import { AgentRemovedPanel } from "../agent-removed-panel";
 import { NoFolderPanel } from "../no-folder-panel";
 import { useChatCwd } from "../use-chat-cwd";
 import { useWorkspaceProvisioning } from "../../state/pending-workspaces";
 import { finishPreparedChatView } from "./chat-intent";
+import { resolveAutoBindChatSettings } from "./auto-bind-chat";
 
 export function ChatView({
   chatId,
@@ -104,7 +106,7 @@ export function ChatView({
   }
 
   // Chat has no agent bound yet — auto-bind to the resolved default
-  // (starred → codex → first runnable) and re-render as ChatBody.
+  // (explicit → Codex → Claude → Cursor → first runnable) and re-render as ChatBody.
   // The hydration step in app-shell.tsx already backfills persisted
   // records, so this branch only catches edge cases (a brand-new
   // chat created elsewhere, a corrupted record bypassing migration).
@@ -161,30 +163,72 @@ export function ChatView({
   );
 }
 
-/** Side-effect-only component: when mounted with a chat that has no
- *  agentId, resolves the default and writes it back to the store. The
- *  parent then re-renders into ChatBody on the very next tick. We
- *  render `null` during the in-flight binding (one paint at most).
+/** Side-effect component: when mounted with a chat that has no agentId,
+ *  resolves the default and writes it back to the store. The parent then
+ *  re-renders into ChatBody on the very next tick. A spinner renders during
+ *  the in-flight binding (one paint against a warm snapshot).
  *
- *  The lookup priority mirrors `pickDefaultAgent` in default-agent.ts:
- *  starred > codex > first runnable. If the registry hasn't loaded
- *  yet we bind to FALLBACK_AGENT_ID directly — the engine's failure
- *  UI will surface a "not installed" error if that's the case, which
- *  is a clearer story than parking the chat in a picker. */
+ *  The lookup priority mirrors `pickAgentForNewChat` in default-agent.ts:
+ *  explicit default > Codex > Claude > Cursor > first, relaxing from
+ *  enabled+runnable down to best-detected so a loaded registry ALWAYS binds —
+ *  a machine with nothing signed in gets the composer's "Sign in required"
+ *  flow, never a dead pane. Binding waits only for the authoritative registry
+ *  and writes the agent, model, effort, Fast, and permission posture in one
+ *  update. */
 function AutoBindAgent({ chat }: { chat: ChatThread }) {
   const dispatch = useWorkspaceDispatch();
   const { agentId: starredId } = useDefaultAgent();
+  const { isEnabled } = useEnabledAgents();
   const agents = useAgentsSnapshot();
+  const sessions = useAgentSessions();
+  const bridgeStatus = useBridgeStatus();
   // Latch so the settings update triggered below cannot make this effect
   // double-write the chat on its immediate re-render.
   const boundRef = useRef(false);
+  // Flips when the registry has taken too long, which downgrades the wait from
+  // "block for the authoritative list" to "bind the product default now".
+  const [waitedOut, setWaitedOut] = useState(false);
+
+  // The cache's only routine loader lives in AgentChat — which never mounts
+  // while this chat is agentless. On a cold cache (fresh install, new dev
+  // data dir) nothing else fills the snapshot, so kick the load here or this
+  // pane sits unbound forever. Gated on a connected bridge (same idiom as
+  // settings-page) so a boot-time blip doesn't convert into a spurious `[]`
+  // registry; the status flip re-runs this. loadAgents de-dupes concurrent
+  // callers, and its failure path publishes `[]` — which the bind effect
+  // below resolves via the product fallback.
+  useEffect(() => {
+    if (agents !== null || bridgeStatus !== "connected") return;
+    void loadAgents((force) => sessions.listAgents(force)).catch(() => {
+      /* snapshot flipped to [] and emitted; the bind effect takes over */
+    });
+  }, [agents, bridgeStatus, sessions]);
+
+  // Hard ceiling on the wait. Every path above assumes the bridge eventually
+  // connects and the registry eventually answers; if neither happens — a dead
+  // engine on a first run, with no persisted snapshot to fall back on — there
+  // is nothing left to re-trigger the effects and the pane would spin forever.
+  // Binding the product default instead gives the user a live composer whose
+  // spawn error names the real problem. Comfortably longer than the
+  // agents-cache 30 s listAgents ceiling so a merely-slow probe still wins.
+  useEffect(() => {
+    if (agents !== null || boundRef.current) return;
+    const timer = setTimeout(() => setWaitedOut(true), 45_000);
+    return () => clearTimeout(timer);
+  }, [agents]);
 
   useEffect(() => {
     if (boundRef.current) return;
+    const settings = resolveAutoBindChatSettings(
+      // An empty list resolves through the same product fallback the
+      // registry-answered-with-nothing case uses.
+      waitedOut ? (agents ?? []) : agents,
+      starredId,
+      isEnabled,
+      { agentName: chat.agentName, sessionId: chat.sessionId },
+    );
+    if (!settings) return;
     boundRef.current = true;
-    const resolved = agents ? pickDefaultAgent(agents, starredId) : null;
-    const agentId = resolved?.id ?? FALLBACK_AGENT_ID;
-    const agentName = resolved?.name ?? null;
     // Several ChatViews are mounted at once in a split workspace. Updating
     // this one chat must not use HYDRATE_CHATS with `activeChatId: chat.id`:
     // an agentless chat in a background pane would steal keyboard/composer
@@ -192,15 +236,26 @@ function AutoBindAgent({ chat }: { chat: ChatThread }) {
     dispatch({
       type: "UPDATE_CHAT_SETTINGS",
       id: chat.id,
-      updates: { agentId, agentName },
+      updates: settings,
     });
-    // We intentionally bind on first render — re-resolving when the
-    // registry loads later would either no-op (same id) or worse,
-    // swap the agent under a chat the user is actively typing in.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [
+    agents,
+    chat.agentName,
+    chat.id,
+    chat.sessionId,
+    dispatch,
+    isEnabled,
+    starredId,
+    waitedOut,
+  ]);
 
-  return null;
+  // Registry still hydrating. Show a quiet spinner rather than a dead-blank
+  // pane so a slow first probe reads as loading, not broken.
+  return (
+    <div className="bg-bg1 flex h-full w-full items-center justify-center">
+      <ZerosSpinner size={20} />
+    </div>
+  );
 }
 
 function ChatBody({

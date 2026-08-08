@@ -59,7 +59,11 @@ import {
 } from "../../state/store";
 import type { ChatThread } from "../../state/store";
 import { newChatId } from "../../state/chat-id";
-import { useAgentsSnapshot } from "../../features/agent/agents-cache";
+import {
+  loadAgents,
+  useAgentsSnapshot,
+} from "../../features/agent/agents-cache";
+import { useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { dbDeleteChat } from "../../features/agent/agent-history-client";
 import { useAgentSessions } from "../../features/agent/sessions-hooks";
 import {
@@ -129,11 +133,24 @@ export function DispatcherModal({
     setBase(null);
   }, [selectedProjectId]);
 
-  // Warm the agent registry + pick the initial project each time the modal
-  // opens (a project may have been added/removed since last time).
+  // Warm the agent registry each time the modal opens (route through
+  // loadAgents — a raw sessions.listAgents() round-trips the engine but never
+  // fills the agents-cache snapshot this modal renders from, so on a cold
+  // cache the model pill would sit in "loading" forever). Gated on a
+  // connected bridge like settings-page; the status flip re-runs it.
+  const bridgeStatus = useBridgeStatus();
+  useEffect(() => {
+    if (!open || bridgeStatus !== "connected") return;
+    void loadAgents((force) => sessions.listAgents(force)).catch(() => {});
+    // `sessions` identity churns with provider state; the ref-free read here
+    // is safe because the effect only fires on open/connect edges.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, bridgeStatus]);
+
+  // Pick the initial project each time the modal opens (a project may have
+  // been added/removed since last time).
   useEffect(() => {
     if (!open) return;
-    void sessions.listAgents().catch(() => {});
     setSelectedProjectId((prev) =>
       initialProjectId && projects.some((p) => p.id === initialProjectId)
         ? initialProjectId

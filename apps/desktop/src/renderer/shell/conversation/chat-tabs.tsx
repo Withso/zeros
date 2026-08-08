@@ -15,9 +15,10 @@
 //     tabs (workspace-wide); restoring one lands in THIS pane.
 //   - "+" is the only new-tab control; new tabs are created in THIS
 //     pane. It stays fixed after the lane while only the tabs scroll.
-//   - The "⋯" menu is pinned at the far right: Split Right / Split
-//     Down (disabled when the pane can't fit two halves or the pane
-//     cap is reached).
+//   - The "⋯" menu is pinned at the far right: the first Split Right can grow
+//     the conversation column to two 360px panes; later splits wait until the
+//     resulting whole tree fits. Split Down follows the corresponding height
+//     check. Both directions still respect the pane cap.
 //   - Tabs are content-sized pills from 70px through 140px, then
 //     truncate. Click → activate. Hover → ×. Right-click → Rename /
 //     Close. Drag a tab onto a pane body to move it there (or onto the
@@ -456,10 +457,7 @@ export function ChatTabs({
   return (
     <div className={STRIP_SHELL_CLS}>
       <div className={HISTORY_CONTROL_CLS}>
-        <ChatHistoryMenu
-          chats={historyChats}
-          onRestoreChat={onRestoreChat}
-        />
+        <ChatHistoryMenu chats={historyChats} onRestoreChat={onRestoreChat} />
       </div>
 
       <div className={TAB_VIEWPORT_CLS}>
@@ -501,30 +499,30 @@ export function ChatTabs({
             while preventing scrolled labels from leaking through. */}
         <div
           ref={outerLeftFadeRef}
-          className="from-(--pane-bg) pointer-events-none absolute inset-y-0 left-0 z-10 w-6 bg-gradient-to-r to-transparent opacity-0"
+          className="pointer-events-none absolute inset-y-0 left-0 z-10 w-6 bg-gradient-to-r from-(--pane-bg) to-transparent opacity-0"
           aria-hidden="true"
         />
         <div
           ref={outerRightFadeRef}
-          className="from-(--pane-bg) pointer-events-none absolute inset-y-0 right-0 z-10 w-6 bg-gradient-to-l to-transparent opacity-0"
+          className="pointer-events-none absolute inset-y-0 right-0 z-10 w-6 bg-gradient-to-l from-(--pane-bg) to-transparent opacity-0"
           aria-hidden="true"
         />
         <div
           ref={afterPinnedLeftFadeRef}
-          className="from-(--pane-bg) pointer-events-none absolute inset-y-0 left-0 z-10 w-6 bg-gradient-to-r to-transparent opacity-0 will-change-transform"
+          className="pointer-events-none absolute inset-y-0 left-0 z-10 w-6 bg-gradient-to-r from-(--pane-bg) to-transparent opacity-0 will-change-transform"
           aria-hidden="true"
         />
         <div
           ref={beforePinnedRightFadeRef}
-          className="from-(--pane-bg) pointer-events-none absolute inset-y-0 left-0 z-10 w-6 bg-gradient-to-l to-transparent opacity-0 will-change-transform"
+          className="pointer-events-none absolute inset-y-0 left-0 z-10 w-6 bg-gradient-to-l from-(--pane-bg) to-transparent opacity-0 will-change-transform"
           aria-hidden="true"
         />
         <div
-          className="bg-(--pane-bg) pointer-events-none absolute inset-y-0 left-0 z-30 w-1"
+          className="pointer-events-none absolute inset-y-0 left-0 z-30 w-1 bg-(--pane-bg)"
           aria-hidden="true"
         />
         <div
-          className="bg-(--pane-bg) pointer-events-none absolute inset-y-0 right-0 z-30 w-1"
+          className="pointer-events-none absolute inset-y-0 right-0 z-30 w-1 bg-(--pane-bg)"
           aria-hidden="true"
         />
       </div>

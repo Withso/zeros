@@ -512,10 +512,9 @@ export function resolveTerminalAgent(
   );
 }
 
-/** Hardcoded terminal-agent fallback when the user hasn't picked a
- *  default yet. Mirrors the chat-side FALLBACK_AGENT_ID in
- *  renderer/features/agent/default-agent-id.ts so the rule "every chat lands with
- *  an agent" applies to both `kind: "chat"` and `kind: "terminal"`. */
+/** Hardcoded terminal-agent fallback when the user hasn't picked a default.
+ * Chat agents instead resolve from connected providers because their
+ * authentication state is available through the live registry. */
 export const FALLBACK_TERMINAL_AGENT_ID = "codex";
 
 /** Idempotently ensure the fallback terminal agent ("codex") is in

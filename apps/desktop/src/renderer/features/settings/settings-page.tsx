@@ -48,8 +48,6 @@ import {
   Settings2,
   ArrowLeft,
   Building2,
-  Check,
-  ChevronDown,
   Plug,
   Plus,
   SquareTerminal,
@@ -135,19 +133,17 @@ import { isRunnableAgent } from "../agent/agent-runnable";
 import {
   agentFamily,
   displayModelLabel,
-  effortLabel,
-  effortLevelsFor,
   modelsForAgent,
 } from "../agent/model-catalog";
-import { useFavoriteModel } from "../agent/model-favorites";
+import {
+  effectiveFavoriteModel,
+  useFavoritesVersion,
+} from "../agent/model-favorites";
 import {
   CHAT_TITLE_MODEL_OPTIONS,
   mirrorModelsToSettings,
-  setDefaultEffort,
   starFavoriteModel,
   useChatTitleModel,
-  useDefaultEffort,
-  useDefaultFastMode,
   useDefaultPlanMode,
 } from "../agent/new-chat-defaults";
 import {
@@ -158,17 +154,8 @@ import {
   useClaudeFallbackModel,
   useClaudeIdleTimeoutMinutes,
 } from "../agent/reliability-settings";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "../../shared/ui/primitives/dropdown-menu";
 import { AgentIcon } from "../agent/agent-icon";
 import { useDefaultAgent, pickDefaultAgentId } from "./default-agent";
-import type { ChatEffort } from "../../state/store";
 
 type SectionId =
   | "general"
@@ -1101,16 +1088,12 @@ function IntegrationsPanel({
 // "coming soon" panel is a step backwards: register the section only once it
 // has something to show.
 
-// ── Models — the default agent + effort + plan/fast for new chats ──
+// ── Models — one global default model + plan posture ──
 //
-// Settings picks the default AGENT (falls back to claude
-// when unset); the MODEL each agent's new chats open on is that family's
-// favorite ★ — starred in the composer's model dropdown, falling back to the
-// catalog's defaultFavorites (Opus 4.8 / 5.6 Sol / Composer 2.5). The row
-// shows the resolved favorite read-only so the user sees exactly what a new
-// chat will use. Effort options follow that model's ladder (Cursor has no
-// effort knob → the dropdown hides). All values feed newChatBornDefaults()
-// at spawn time.
+// Agent + model form one global default identity (and one star across the model
+// menu). With no choice, connected providers resolve Codex → Claude → Cursor;
+// their family fallbacks are GPT-5.6 Sol / Opus 5 / Composer 2.5. Effort and
+// Fast are edited and remembered per exact model in the model menu.
 
 /** The Models tab groups its rows into filled sections: a borderless
  *  subtle-fill card with `--border1` hairlines
@@ -1158,15 +1141,20 @@ function ModelsPanel() {
   // The effective default agent: the user's star if runnable, else the
   // fallback (codex) — so the picker mirrors what new chats actually use.
   const effectiveAgentId =
-    modelAgents.find((a) => a.id === defaultAgentId)?.id ??
+    modelAgents.find(
+      (agent) =>
+        agent.id === defaultAgentId ||
+        agentFamily(agent.id) === agentFamily(defaultAgentId),
+    )?.id ??
     pickDefaultAgentId(agents ?? []) ??
     modelAgents[0]?.id ??
     null;
 
-  const { favorite } = useFavoriteModel(effectiveAgentId);
-  const defaultEffort = useDefaultEffort(effectiveAgentId);
+  // Read the effective model synchronously from the same atomic selection as
+  // the agent. A family switch must never paint one frame with the prior
+  // family's model in the new provider's Select.
+  useFavoritesVersion();
   const [planDefault, setPlanDefault] = useDefaultPlanMode();
-  const [fastDefault, setFastDefault] = useDefaultFastMode();
   const [titleModel, setTitleModel] = useChatTitleModel();
   // Claude reliability knobs (fallback model + per-turn budget).
   const [fallbackModel, setFallbackModel] = useClaudeFallbackModel();
@@ -1202,13 +1190,12 @@ function ModelsPanel() {
   // falls down the Haiku → Luna → Composer chain to a connected one.
   const connectedFamilies = new Set(modelAgents.map((a) => agentFamily(a.id)));
 
-  // The model a new chat of the default agent opens on — the family's
-  // effective favorite (user ★, else the catalog fallback). Shown read-only;
-  // it's changed by starring a model in the composer's model dropdown.
+  // The one model a new chat opens on. Selecting it here moves the global star.
   const agentModels = effectiveAgentId
     ? modelsForAgent(effectiveAgentId, null)
     : [];
-  const currentModel = favorite ?? agentModels[0]?.value ?? null;
+  const currentModel =
+    effectiveFavoriteModel(effectiveAgentId) ?? agentModels[0]?.value ?? null;
   const currentModelLabel = currentModel
     ? displayModelLabel(
         effectiveAgentId,
@@ -1216,16 +1203,6 @@ function ModelsPanel() {
           currentModel,
       )
     : null;
-
-  // Effort options follow the favorite model; clamp a stale saved effort to
-  // the model's ladder (e.g. a favorite change Opus→Sonnet drops "ultracode").
-  const effortLevels = effortLevelsFor(effectiveAgentId, currentModel, null);
-  let effortValue: ChatEffort = defaultEffort ?? "high";
-  if (effortLevels.length > 0 && !effortLevels.includes(effortValue)) {
-    effortValue = effortLevels.includes("high")
-      ? "high"
-      : effortLevels[effortLevels.length - 1];
-  }
 
   const pickAgent = (agentId: string) => {
     if (!agentId) return;
@@ -1270,89 +1247,29 @@ function ModelsPanel() {
                 )}
               </SelectContent>
             </Select>
-            {/* The default-model trigger shows
-                the agent's current favorite; the list is that agent's models
-                (picking one stars it — kept in sync with the composer ★ via
-                the favorites bus) and, after a separator, an "Effort" section
-                that sets the default effort for that default model. One menu,
-                two checkmark groups — a Radix Select can't hold both, so this
-                is a DropdownMenu styled like the Select trigger. */}
+            {/* Picking a model moves the one global favorite star. Effort/Fast
+                stay model-owned and are edited from the composer's model menu. */}
             {effectiveAgentId && currentModel && (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button
-                    type="button"
-                    aria-label="Default model and effort"
-                    className="border-border3 hover:border-border4 hover:bg-bg2 data-[state=open]:border-border4 data-[state=open]:bg-bg2 flex h-8 w-fit min-w-[150px] items-center justify-between gap-2 rounded-sm border bg-transparent px-3 py-2 text-sm whitespace-nowrap shadow-xs outline-none"
-                  >
-                    <span className="truncate">{currentModelLabel}</span>
-                    <ChevronDown className="text-fg2 size-4 shrink-0 opacity-50" />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="min-w-[200px]">
-                  {agentModels.map((m) => {
-                    const isCurrent = m.value === currentModel;
-                    return (
-                      <DropdownMenuItem
-                        key={m.value}
-                        data-selected={isCurrent || undefined}
-                        onSelect={() =>
-                          starFavoriteModel(effectiveAgentId, m.value)
-                        }
-                      >
-                        <span className="flex-1 truncate">
-                          {displayModelLabel(effectiveAgentId, m.label)}
-                        </span>
-                        {isCurrent ? (
-                          <Check className="text-fg1 ml-2 size-3.5 shrink-0" />
-                        ) : (
-                          <span
-                            className="ml-2 size-3.5 shrink-0"
-                            aria-hidden
-                          />
-                        )}
-                      </DropdownMenuItem>
-                    );
-                  })}
-                  {effortLevels.length > 0 && (
-                    <>
-                      {/* Use border3 because the default bg3 separator is
-                          invisible on the bg3 popover. */}
-                      <DropdownMenuSeparator className="bg-border3" />
-                      <DropdownMenuLabel className="text-fg2">
-                        Effort
-                      </DropdownMenuLabel>
-                      {effortLevels.map((lvl) => {
-                        const isCurrent = lvl === effortValue;
-                        return (
-                          <DropdownMenuItem
-                            key={lvl}
-                            data-selected={isCurrent || undefined}
-                            onSelect={() =>
-                              setDefaultEffort(
-                                effectiveAgentId,
-                                lvl as ChatEffort,
-                              )
-                            }
-                          >
-                            <span className="flex-1 truncate">
-                              {effortLabel(effectiveAgentId, lvl)}
-                            </span>
-                            {isCurrent ? (
-                              <Check className="text-fg1 ml-2 size-3.5 shrink-0" />
-                            ) : (
-                              <span
-                                className="ml-2 size-3.5 shrink-0"
-                                aria-hidden
-                              />
-                            )}
-                          </DropdownMenuItem>
-                        );
-                      })}
-                    </>
-                  )}
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <Select
+                value={currentModel}
+                onValueChange={(model) =>
+                  starFavoriteModel(effectiveAgentId, model)
+                }
+              >
+                <SelectTrigger
+                  className="min-w-[150px]"
+                  aria-label="Default model"
+                >
+                  <SelectValue>{currentModelLabel}</SelectValue>
+                </SelectTrigger>
+                <SelectContent className="min-w-[180px]">
+                  {agentModels.map((model) => (
+                    <SelectItem key={model.value} value={model.value}>
+                      {displayModelLabel(effectiveAgentId, model.label)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             )}
           </div>
         </SettingsRow>
@@ -1395,16 +1312,6 @@ function ModelsPanel() {
             checked={planDefault}
             onCheckedChange={setPlanDefault}
             aria-label="Default to plan mode"
-          />
-        </SettingsRow>
-        <SettingsRow
-          label="Default to fast mode"
-          hint="Start new chats in fast mode"
-        >
-          <Switch
-            checked={fastDefault}
-            onCheckedChange={setFastDefault}
-            aria-label="Default to fast mode"
           />
         </SettingsRow>
       </SettingsList>

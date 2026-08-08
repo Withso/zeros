@@ -4,6 +4,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  CONVERSATION_MIN_PX,
   LEGACY_CONVERSATION_WIDTH_KEY,
   CONVERSATION_RATIO_KEY,
   clampConversationRatio,
@@ -12,6 +13,242 @@ import {
   readPersistedConversationRatio,
   sanitizeConversationRatio,
 } from "../pane-sizing";
+import {
+  MIN_PANE_WIDTH,
+  PANE_SPLITTER_PX,
+  canSplitPaneTree,
+  canSplitPaneDimension,
+  clampPaneSplitRatio,
+  paneTreeHasDirection,
+  paneTreeMinimumSize,
+  paneTreeMinimumSizeAfterSplit,
+} from "../pane-portal-store";
+
+describe("chat pane width floors", () => {
+  it("keeps both the conversation column and every split chat pane at 360px", () => {
+    expect(CONVERSATION_MIN_PX).toBe(360);
+    expect(MIN_PANE_WIDTH).toBe(360);
+  });
+
+  it("offers a horizontal split only when two 360px panes and its seam fit", () => {
+    const exact = MIN_PANE_WIDTH * 2 + PANE_SPLITTER_PX;
+    expect(canSplitPaneDimension(exact - 0.01, MIN_PANE_WIDTH)).toBe(false);
+    expect(canSplitPaneDimension(exact, MIN_PANE_WIDTH)).toBe(true);
+    expect(canSplitPaneDimension(Number.NaN, MIN_PANE_WIDTH)).toBe(false);
+  });
+
+  it("reserves the 6px seam while clamping both resized children", () => {
+    const container = 1_000;
+    const available = container - PANE_SPLITTER_PX;
+    const leftFloorPointer = MIN_PANE_WIDTH + PANE_SPLITTER_PX / 2;
+    expect(
+      clampPaneSplitRatio(leftFloorPointer - 100, container, MIN_PANE_WIDTH),
+    ).toBeCloseTo(MIN_PANE_WIDTH / available);
+    expect(
+      clampPaneSplitRatio(
+        container - leftFloorPointer + 100,
+        container,
+        MIN_PANE_WIDTH,
+      ),
+    ).toBeCloseTo(1 - MIN_PANE_WIDTH / available);
+    expect(clampPaneSplitRatio(100, MIN_PANE_WIDTH * 2, MIN_PANE_WIDTH)).toBe(
+      0.5,
+    );
+  });
+
+  it("computes the physical floor for nested row and column split trees", () => {
+    const leaf = (id: string) => ({ type: "leaf" as const, id });
+    const stacked = {
+      type: "split" as const,
+      id: "stacked",
+      direction: "column" as const,
+      ratio: 0.5,
+      first: leaf("a"),
+      second: leaf("b"),
+    };
+    const mixed = {
+      type: "split" as const,
+      id: "mixed",
+      direction: "row" as const,
+      ratio: 0.5,
+      first: stacked,
+      second: leaf("c"),
+    };
+    const threeAcross = {
+      type: "split" as const,
+      id: "three-across",
+      direction: "row" as const,
+      ratio: 0.5,
+      first: {
+        type: "split" as const,
+        id: "left-pair",
+        direction: "row" as const,
+        ratio: 0.5,
+        first: leaf("d"),
+        second: leaf("e"),
+      },
+      second: leaf("f"),
+    };
+
+    expect(paneTreeMinimumSize(leaf("single"))).toEqual({
+      width: 360,
+      height: 160,
+    });
+    expect(paneTreeMinimumSize(stacked)).toEqual({
+      width: 360,
+      height: 326,
+    });
+    expect(paneTreeMinimumSize(mixed)).toEqual({
+      width: 726,
+      height: 326,
+    });
+    expect(paneTreeMinimumSize(threeAcross).width).toBe(1_092);
+  });
+
+  it("clamps asymmetric nested children against each subtree's own floor", () => {
+    const container = 1_200;
+    const available = container - PANE_SPLITTER_PX;
+    expect(clampPaneSplitRatio(0, container, 726, 360)).toBeCloseTo(
+      726 / available,
+    );
+    expect(clampPaneSplitRatio(container, container, 726, 360)).toBeCloseTo(
+      1 - 360 / available,
+    );
+  });
+
+  it("allows the first right split to bootstrap even before 726px is visible", () => {
+    const root = { type: "leaf" as const, id: "only" };
+    expect(paneTreeHasDirection(root, "row")).toBe(false);
+    expect(paneTreeMinimumSizeAfterSplit(root, "only", "row")).toEqual({
+      width: 726,
+      height: 160,
+    });
+    expect(
+      canSplitPaneTree({
+        root,
+        targetPaneId: "only",
+        direction: "row",
+        containerWidth: 500,
+        containerHeight: 800,
+      }),
+    ).toBe(true);
+  });
+
+  it("also bootstraps the first right split from a vertical-only layout", () => {
+    const root = {
+      type: "split" as const,
+      id: "vertical",
+      direction: "column" as const,
+      ratio: 0.5,
+      first: { type: "leaf" as const, id: "top" },
+      second: { type: "leaf" as const, id: "bottom" },
+    };
+    expect(paneTreeHasDirection(root, "row")).toBe(false);
+    expect(
+      canSplitPaneTree({
+        root,
+        targetPaneId: "top",
+        direction: "row",
+        containerWidth: 360,
+        containerHeight: 326,
+      }),
+    ).toBe(true);
+  });
+
+  it("blocks later right splits until the whole post-split tree fits", () => {
+    const root = {
+      type: "split" as const,
+      id: "first-right",
+      direction: "row" as const,
+      ratio: 0.5,
+      first: { type: "leaf" as const, id: "left" },
+      second: { type: "leaf" as const, id: "right" },
+    };
+    expect(paneTreeHasDirection(root, "row")).toBe(true);
+    expect(paneTreeMinimumSizeAfterSplit(root, "left", "row")?.width).toBe(
+      1_092,
+    );
+    expect(
+      canSplitPaneTree({
+        root,
+        targetPaneId: "left",
+        direction: "row",
+        containerWidth: 1_091.99,
+        containerHeight: 800,
+      }),
+    ).toBe(false);
+    expect(
+      canSplitPaneTree({
+        root,
+        targetPaneId: "left",
+        direction: "row",
+        containerWidth: 1_092,
+        containerHeight: 800,
+      }),
+    ).toBe(true);
+  });
+
+  it("uses whole-tree height for down splits and rejects missing targets", () => {
+    const root = { type: "leaf" as const, id: "only" };
+    expect(
+      canSplitPaneTree({
+        root,
+        targetPaneId: "only",
+        direction: "column",
+        containerWidth: 800,
+        containerHeight: 325.99,
+      }),
+    ).toBe(false);
+    expect(
+      canSplitPaneTree({
+        root,
+        targetPaneId: "only",
+        direction: "column",
+        containerWidth: 800,
+        containerHeight: 326,
+      }),
+    ).toBe(true);
+    expect(
+      canSplitPaneTree({
+        root,
+        targetPaneId: "missing",
+        direction: "row",
+        containerWidth: 2_000,
+        containerHeight: 2_000,
+      }),
+    ).toBe(false);
+  });
+
+  it("does not reserve a phantom extra pane when a cross-pane drop empties its source", () => {
+    const root = {
+      type: "split" as const,
+      id: "two-panes",
+      direction: "row" as const,
+      ratio: 0.5,
+      first: { type: "leaf" as const, id: "source" },
+      second: { type: "leaf" as const, id: "target" },
+    };
+    expect(
+      canSplitPaneTree({
+        root,
+        targetPaneId: "target",
+        direction: "row",
+        containerWidth: 726,
+        containerHeight: 800,
+      }),
+    ).toBe(false);
+    expect(
+      canSplitPaneTree({
+        root,
+        targetPaneId: "target",
+        direction: "row",
+        containerWidth: 726,
+        containerHeight: 800,
+        collapsedPaneId: "source",
+      }),
+    ).toBe(true);
+  });
+});
 
 describe("flushPendingConversationRatioPaint", () => {
   it("cancels and paints the latest ratio before pointer-up persists it", () => {
@@ -54,9 +291,14 @@ describe("clampConversationRatio", () => {
     expect(clampConversationRatio(0.5, 1600)).toBe(0.5);
   });
 
-  it("floors at conversation pane's 320px share of the row", () => {
-    // 1600px row: 320px floor = 0.2.
-    expect(clampConversationRatio(0.05, 1600)).toBeCloseTo(0.2);
+  it("floors at conversation pane's 360px share of the row", () => {
+    // 1600px row: 360px floor = 0.225.
+    expect(clampConversationRatio(0.05, 1600)).toBeCloseTo(0.225);
+  });
+
+  it("uses the active split tree's wider physical floor", () => {
+    // Two horizontal 360px panes plus their 6px splitter.
+    expect(clampConversationRatio(0.05, 1600, 726)).toBeCloseTo(726 / 1600);
   });
 
   it("reserves workbench's 200px floor when tighter than the 70% cap", () => {
@@ -134,8 +376,12 @@ describe("readPersistedConversationRatio / persistConversationRatio", () => {
   it("migrates the pixel-era width once, then reads the migrated share", () => {
     window.localStorage.setItem(LEGACY_CONVERSATION_WIDTH_KEY, "480");
     const migrated = readPersistedConversationRatio();
-    expect(migrated).toBeCloseTo(sanitizeConversationRatio(480 / window.innerWidth));
-    expect(window.localStorage.getItem(LEGACY_CONVERSATION_WIDTH_KEY)).toBeNull();
+    expect(migrated).toBeCloseTo(
+      sanitizeConversationRatio(480 / window.innerWidth),
+    );
+    expect(
+      window.localStorage.getItem(LEGACY_CONVERSATION_WIDTH_KEY),
+    ).toBeNull();
     // Idempotent: the boot read and the hook read run back to back and must
     // produce the SAME number, or the second one animates the columns.
     expect(readPersistedConversationRatio()).toBe(migrated);

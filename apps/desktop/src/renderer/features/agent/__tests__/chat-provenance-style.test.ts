@@ -89,23 +89,22 @@ describe("the transcript summaries read the block waits on", () => {
     );
 
   it("settles on FAILURE too, so a dead read can't blank the empty state", () => {
-    // `loaded` used to track only the success path. There is no retry except
-    // the next DB_CHANGED and a down bridge doesn't send those, so a thrown
-    // read left it false forever. Harmless while nothing waited on it; not
-    // harmless now the provenance block does — a new chat tab would render
-    // nothing at all instead of falling back to the workspace rows.
+    // `loaded` used to track only the local success path. The shared async
+    // cache settles `loading` on both resolve and reject while retaining a
+    // confirmed snapshot, so the provenance block can still fall back after a
+    // dead cold read without sacrificing stale-while-revalidate behavior.
     const src = hook();
-    expect(src).toContain("} finally {");
-    expect(src).toContain("setSettledKey(key)");
-    expect(src).toContain("loaded: fresh || settledKey === key,");
+    expect(src).toContain("KeyedAsyncCache");
+    expect(src).toContain("useCachedRead(");
+    expect(src).toContain("loaded: key !== null && !read.loading,");
   });
 
-  it("does not carry a literal NUL byte in its source", () => {
+  it("uses a structured collision-free key without a literal NUL byte", () => {
     // One raw NUL makes git classify the file as BINARY, which silently drops
-    // it from every diff, review and content grep in the repo — the key
-    // separator must be the two-character `\u0000` ESCAPE.
+    // it from every diff, review and content grep in the repo. JSON tuple
+    // encoding also avoids every separator-collision case by construction.
     expect(hook()).not.toContain("\u0000"); // a real NUL, via the escape
-    expect(hook()).toContain("\\u0000");
+    expect(hook()).toContain("JSON.stringify([folder, excludeChatId ?? null])");
   });
 });
 

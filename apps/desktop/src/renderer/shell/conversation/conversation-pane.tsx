@@ -13,12 +13,14 @@ import { TerminalDeck } from "./terminal-deck";
 import { ChatDeck } from "./chat-deck";
 import { ConversationHeader } from "./conversation-header";
 import {
+  CONVERSATION_MIN_PX,
   CONVERSATION_RATIO_VAR,
   clampConversationRatio,
   flushPendingConversationRatioPaint,
   persistConversationRatio,
   readPersistedConversationRatio,
 } from "./pane-sizing";
+import type { PaneTreeMinimumSize } from "./pane-portal-store";
 import { cn } from "../../shared/ui/cn";
 import { useResizeHint } from "../use-resize-hint";
 import { beginContinuousLayoutResize } from "../terminal/continuous-layout-resize";
@@ -46,7 +48,7 @@ const CONVERSATION_BASE_CLS = "flex flex-col bg-bg1 overflow-hidden relative";
 //     delta flowed into workbench alone.
 //   - `flex-basis: 0` so the grow factors alone decide the split;
 //     `flex-shrink: 1` keeps degenerate cases well-defined.
-//   - `min-w-[320px]` is the readability floor when the window gets
+//   - `min-w-[360px]` is the readability floor when the window gets
 //     tiny (workbench floors at 200px on its side).
 //   - `max-w-[min(2400px,70%)]` keeps the historical cap: workbench
 //     always retains at least a 30% strip, and chat never exceeds
@@ -65,9 +67,9 @@ const CONVERSATION_BASE_CLS = "flex flex-col bg-bg1 overflow-hidden relative";
 //       1. Collapsed used to be `flex-1 basis-auto`, i.e. grow 1. On
 //          expand, conversation pane went from grow 1 to grow ratio·100 while workbench
 //          appeared at grow (1−ratio)·100 — so the first frame handed col
-//          2 only 1/(1+50) of the row and it slammed into its 320px floor
+//          2 only 1/(1+50) of the row and it slammed into its 360px floor
 //          before growing back out. With a `transition-[flex-grow]` on
-//          top, that overshoot was *animated*: a measured 1600 → 320 →
+//          top, that overshoot was *animated*: a measured 1600 → 360 →
 //          800px jerk on every expand. Same grow factor in both states =
 //          no overshoot and nothing to animate.
 //       2. `basis-auto` makes the browser compute the max-content width
@@ -77,14 +79,14 @@ const CONVERSATION_BASE_CLS = "flex flex-col bg-bg1 overflow-hidden relative";
 //     that ever changed it were the collapse toggle and the boot-time
 //     variable write, and both were glitches rather than motion design.
 const CONVERSATION_DEFAULT_WIDTH_CLS =
-  "[flex:calc(var(--zeros-column-2-ratio,0.5)*100)_1_0px] min-w-[320px] max-w-[min(2400px,70%)]";
+  "[flex:calc(var(--zeros-column-2-ratio,0.5)*100)_1_0px] min-w-[360px] max-w-[min(2400px,70%)]";
 // Collapsed: conversation pane is the only item in the row, so the grow factor hands
 // it everything — but the 70% share cap would leave a 30% void where workbench
 // used to be, so it is lifted here (and the 2400px ultrawide ceiling with
 // it, matching the previous collapsed behaviour). Everything else is
 // character-for-character CONVERSATION_DEFAULT_WIDTH_CLS; see the note above.
 const CONVERSATION_FULL_WIDTH_CLS =
-  "[flex:calc(var(--zeros-column-2-ratio,0.5)*100)_1_0px] min-w-[320px] max-w-none";
+  "[flex:calc(var(--zeros-column-2-ratio,0.5)*100)_1_0px] min-w-[360px] max-w-none";
 
 // Resize handle — a 6px hit strip at conversation pane's right edge, which now butts
 // directly against workbench (workbench dropped its left padding, so there's
@@ -169,6 +171,18 @@ export function ConversationPane({
   const { ratio: colRatio, persist: persistColRatio } =
     useConversationRatio(sectionRef);
   const { hintHandlers, hint } = useResizeHint("Drag to resize");
+  const [paneMinimumSize, setPaneMinimumSizeState] =
+    useState<PaneTreeMinimumSize>({
+      width: CONVERSATION_MIN_PX,
+      height: 0,
+    });
+  const setPaneMinimumSize = useCallback((next: PaneTreeMinimumSize) => {
+    setPaneMinimumSizeState((current) =>
+      current.width === next.width && current.height === next.height
+        ? current
+        : next,
+    );
+  }, []);
 
   const onResizePointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
@@ -223,8 +237,8 @@ export function ConversationPane({
       // Starting the shared gesture also freezes every hidden retained layer
       // and iframe at its current size (see resize-gesture-freeze.ts), so the
       // per-frame layout below is bounded to the VISIBLE surfaces. The active
-      // transcript and composer re-wrap live and track the seam exactly — no
-      // width floor, no content clipped under workbench mid-drag.
+      // transcript and composer re-wrap live and track the seam exactly until
+      // the active split tree's recursive physical width floor is reached.
       const finishContinuousResize = beginContinuousLayoutResize();
 
       const paintRatio = () => {
@@ -255,6 +269,7 @@ export function ConversationPane({
         lastRatio = clampConversationRatio(
           (ev.clientX - rowLeft) / (rowWidth || 1),
           rowWidth,
+          paneMinimumSize.width,
         );
         if (rafId !== null) return;
         rafId = requestAnimationFrame(paintRatio);
@@ -321,7 +336,7 @@ export function ConversationPane({
       window.addEventListener("pointercancel", finish);
       window.addEventListener("blur", finish);
     },
-    [workbenchCollapsed, colRatio, persistColRatio],
+    [workbenchCollapsed, colRatio, paneMinimumSize.width, persistColRatio],
   );
 
   return (
@@ -333,6 +348,7 @@ export function ConversationPane({
           ? CONVERSATION_FULL_WIDTH_CLS
           : CONVERSATION_DEFAULT_WIDTH_CLS,
       )}
+      style={{ minWidth: paneMinimumSize.width }}
       aria-label="Agent Workspace"
     >
       {/* The per-workspace bar (project › workspace breadcrumb +
@@ -363,6 +379,7 @@ export function ConversationPane({
             <ConversationPaneLayout
               workbenchCollapsed={workbenchCollapsed}
               onToggleWorkbench={onToggleWorkbench}
+              onMinimumSizeChange={setPaneMinimumSize}
             />
           </div>
           <ChatDeck />

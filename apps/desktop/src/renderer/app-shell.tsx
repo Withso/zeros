@@ -46,6 +46,7 @@ import {
 } from "./features/settings/migrate-legacy";
 import { AgentSessionsProvider } from "./features/agent/sessions-provider";
 import { useAgentSessions } from "./features/agent/sessions-hooks";
+import { loadAgents } from "./features/agent/agents-cache";
 import { UpdateNotifications } from "./features/update/update-notifications";
 import { useCopyLogsHotkey } from "./shell/use-copy-logs-hotkey";
 import { useNewTabHotkeys } from "./shell/use-new-chat-hotkey";
@@ -173,7 +174,13 @@ function PreWarmAgents() {
 
   const warmAll = React.useCallback(async () => {
     try {
-      const registry = await sessions.listAgents();
+      // Route the list through loadAgents so this boot-time warm ALSO fills
+      // the shared agents-cache snapshot (a raw sessions.listAgents() reply
+      // never lands in the cache). Every agent-resolution surface — the
+      // AutoBindAgent binder, spawn-default-chat's synchronous born path,
+      // the dispatcher — reads that snapshot, and on a fresh data dir this
+      // is the first (often only) boot-path call that can populate it.
+      const registry = await loadAgents((force) => sessions.listAgents(force));
       const persisted = readEnabledAgentIds();
       // Mirror useEnabledAgents.isEnabled — first-run defaults exclude
       // beta agents so the warmup loop doesn't fire AGENT_INIT_AGENT
