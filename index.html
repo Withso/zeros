@@ -14,7 +14,8 @@
          users. The stylesheet's :root block is DARK; without this stamp the
          document paints dark between stylesheet-apply and the appearance
          store's module-load flush inside the JS bundle. Reads the same
-         zeros.appearance.v2 key the store owns (mode: system|light|dark;
+         zeros.appearance.v2 key the store owns
+         (mode: system|light|dark|orka-black;
          legacy modes fall through to dark, matching the store's migration)
          and resolves "system" via prefers-color-scheme. Must stay inline and
          dependency-free so it runs before ANY bundle bytes evaluate. -->
@@ -26,7 +27,14 @@
           if (raw) {
             var parsed = JSON.parse(raw);
             var m = parsed && parsed.mode;
-            if (m === "light" || m === "system" || m === "high-contrast") mode = m;
+            if (
+              m === "light" ||
+              m === "system" ||
+              m === "dark" ||
+              m === "orka-black" ||
+              m === "high-contrast"
+            )
+              mode = m;
           } else if (window.__ZEROS_APPEARANCE_MODE__) {
             // localStorage empty (fresh window OR the OS purged the
             // Caches-backed sessionData) — fall back to the userData-persisted
@@ -41,6 +49,12 @@
               ? "light"
               : "dark";
           document.documentElement.setAttribute("data-theme", variant);
+          if (mode === "orka-black") {
+            document.documentElement.setAttribute(
+              "data-theme-palette",
+              "orka-black",
+            );
+          }
         } catch (e) {
           document.documentElement.setAttribute("data-theme", "dark");
         }

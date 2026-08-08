@@ -170,7 +170,7 @@ export function RunHorseShimmer({ className }: RunHorseShimmerProps) {
 
     const themeObserver = new MutationObserver(syncColor);
     themeObserver.observe(document.documentElement, {
-      attributeFilter: ["class", "data-theme", "style"],
+      attributeFilter: ["class", "data-theme", "data-theme-palette", "style"],
       attributes: true,
     });
 

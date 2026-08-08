@@ -68,7 +68,7 @@ import { resolveTokenValue } from "../../shared/theme/resolve-tokens";
 import { terminalExitPolicy } from "./terminal-exit-policy";
 import { WheelLineAccumulator } from "./wheel-scroll";
 import { useAppearance } from "../../shared/theme/provider";
-import { useThemeVariant } from "../../shared/theme/use-theme-variant";
+import { useThemeId } from "../../shared/theme/use-theme-variant";
 import { resolveCodeTheme } from "../../shared/theme/code-themes";
 import {
   ensureThemeColors,
@@ -220,10 +220,10 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
   const markExited = useTerminalStore((s) => s.markExited);
   const markAlive = useTerminalStore((s) => s.markAlive);
   const { prefs } = useAppearance();
-  // Resolved "dark"|"light" — flips on an OS appearance change in system mode
-  // (where prefs.mode stays "system"). Drives the theme re-resolve below so the
-  // xterm's concrete bg/fg values never go stale on a live flip.
-  const variant = useThemeVariant();
+  // Concrete visual theme — flips on OS appearance changes in System and on a
+  // neutral Dark ↔ Orka-black switch. Drives the token re-resolve below so the
+  // xterm's concrete bg/fg values never go stale.
+  const themeId = useThemeId();
 
   // Mount xterm once; defer PTY spawn until the host container reports
   // a real size. See the file header for why this is structural —
@@ -699,17 +699,15 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     });
   }, [sessionId, markExited]);
 
-  // Re-apply theme when the app VARIANT flips (a mode change OR an OS appearance
-  // flip in "system" mode) or the code theme / surface token changes, so a live
-  // theme swap (and an HMR prop change) repaints the grid. The background +
+  // Re-apply theme when the concrete app theme flips (including a dark-palette
+  // switch), or the code theme / surface token changes, so a live theme swap
+  // (and an HMR prop change) repaints the grid. The background +
   // foreground are app tokens (--bg1/--fg1) and the ANSI palette comes from the
   // code theme, so both have to be re-resolved on a flip.
   //
-  // Keyed on `variant` (the store's RESOLVED "dark"|"light"), NOT `prefs.mode`:
-  // an OS flip in system mode leaves mode === "system" but flips the variant, so
-  // keying on mode alone would strand the terminal on the old colors. (`codeTheme`
-  // also usually flips with the variant, but only when the two variants resolve
-  // to DIFFERENT theme ids — `variant` is the robust trigger for the bg/fg re-read.)
+  // Keyed on `themeId`, NOT `prefs.mode`: an OS flip in System leaves mode
+  // unchanged, while Dark and Orka black share one appearance variant. Only the
+  // concrete id catches both transitions and guarantees a bg/fg re-read.
   //
   // useLayoutEffect (not useEffect): applyTheme() sets data-theme on <html>
   // synchronously inside the store's refresh(), re-theming the whole app in one
@@ -742,7 +740,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     return () => {
       cancelled = true;
     };
-  }, [variant, prefs.codeTheme, surfaceToken]);
+  }, [themeId, prefs.codeTheme, surfaceToken]);
 
   // Live resize observer (post-spawn). xterm's own API recommends debouncing
   // resize calls: each fit can reflow the complete scrollback buffer and then

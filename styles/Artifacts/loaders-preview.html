@@ -9,32 +9,32 @@
   <title>Zeros — Loaders &amp; Shimmers</title>
   <style>
 /* ── Design tokens — mirrored from styles/zeros-tokens.css ──
-       Dark = Zeros Shade (:root default); light = [data-theme="light"].
-       The app's appearance store writes data-theme on <html>; here the
-       header toggle flips it. Kept in sync with the app so the loaders read
-       true in both themes (note the bg3 gotcha: dark bg3 = sidebar-bg,
-       light bg3 = bg1). */
+       Dark is neutral; Orka black restores the former warm-gray dark
+       palette; Light keeps its warm off-whites. The app keeps data-theme
+       binary and selects Orka with data-theme-palette. The header control
+       cycles all three (note the bg3 rule: dark palettes use sidebar-bg,
+       while Light uses bg1). */
     :root {
       color-scheme: dark;
-      --bg1: hsl(25 5% 7%);
-      --bg1-hover: hsl(8 5% 12%);
-      --bg2: hsl(25 4% 12%);
-      --bg2-hover: hsl(25 3% 15%);
-      --bg3: hsl(25 5% 9%);         /* = --sidebar-bg */
-      --bg3-hover: hsl(25 2% 15%);  /* = --sidebar-bg-hover */
-      --fg1: hsl(0 2% 92%);
-      --fg2: hsl(20 4% 66%);
-      --fg3: hsl(15 1% 44%);
-      --muted-fg: hsl(15 4% 44%);
-      --border1: hsl(8 3% 14%);
-      --border2: hsl(25 1% 18%);
-      --border3: hsl(15 0% 24%);
+      --bg1: hsl(0 0% 8%);
+      --bg1-hover: hsl(0 0% 12%);
+      --bg2: hsl(0 0% 13%);
+      --bg2-hover: hsl(0 0% 15%);
+      --bg3: hsl(0 0% 10%);        /* = --sidebar-bg */
+      --bg3-hover: hsl(0 0% 15%);  /* = --sidebar-bg-hover */
+      --fg1: hsl(0 0% 92%);
+      --fg2: hsl(0 0% 66%);
+      --fg3: hsl(0 0% 44%);
+      --muted-fg: hsl(0 0% 44%);
+      --border1: hsl(0 0% 14%);
+      --border2: hsl(0 0% 18%);
+      --border3: hsl(0 0% 24%);
       --blue-primary: hsl(205 80% 73%);
       --info: var(--blue-primary);
-      --inverted-bg: hsl(0 2% 92%);
-      --inverted-fg: hsl(5 7% 5%);
+      --inverted-bg: hsl(0 0% 92%);
+      --inverted-fg: hsl(0 0% 5%);
       --primary-button-bg: var(--inverted-bg);
-      --primary-button-hover: hsl(25 2% 83%);
+      --primary-button-hover: hsl(0 0% 83%);
       --primary-button-fg: var(--inverted-fg);
       --green-primary: hsl(142 69% 58%);
       --yellow-primary: hsl(37 75% 60%);
@@ -55,6 +55,25 @@
       --loader-rest: var(--fg3);
       --loader-active-inverted: var(--primary-button-fg);
       --loader-rest-inverted: var(--primary-button-fg);
+    }
+
+    :root[data-theme="dark"][data-theme-palette="orka-black"] {
+      --bg1: hsl(5 5% 7%);
+      --bg1-hover: hsl(8 5% 12%);
+      --bg2: hsl(25 4% 12%);
+      --bg2-hover: hsl(25 3% 15%);
+      --bg3: hsl(25 5% 9%);
+      --bg3-hover: hsl(25 2% 15%);
+      --fg1: hsl(0 2% 92%);
+      --fg2: hsl(20 4% 66%);
+      --fg3: hsl(15 1% 44%);
+      --muted-fg: hsl(15 4% 44%);
+      --border1: hsl(8 3% 14%);
+      --border2: hsl(25 1% 18%);
+      --border3: hsl(15 0% 24%);
+      --inverted-bg: hsl(0 2% 92%);
+      --inverted-fg: hsl(5 7% 5%);
+      --primary-button-hover: hsl(25 2% 83%);
     }
 
     [data-theme="light"] {
@@ -404,7 +423,7 @@
   <div id="loaders-error" hidden style="position:fixed;inset:0;z-index:9999;background:#3a1010;color:#fff;padding:24px;margin:0;overflow:auto;font:13px/1.5 monospace;white-space:pre-wrap"></div>
   <div class="page">
     <header>
-      <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle light and dark theme" aria-pressed="false">☾ Dark</button>
+      <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Cycle theme">☾ Dark</button>
       <h1>Zeros Loaders &amp; Shimmers</h1>
       <p style="margin:0 0 12px;padding:10px 12px;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;font-size:12px;color:var(--fg1)">
         <strong>Preview tip:</strong> Open <code>styles/Artifacts/loaders-preview.html</code> from the file
@@ -534,7 +553,7 @@
               Add project
             </button>
           </div>
-          <p class="demo-note">--loader-active/-rest-inverted → the on-inverted fg, so the piece never vanishes on the near-white (Shade) / near-black (Light) fill.</p>
+          <p class="demo-note">--loader-active/-rest-inverted → the on-inverted fg, so the piece never vanishes on the near-white (Dark / Orka black) or near-black (Light) fill.</p>
         </div>
         <div class="demo-card">
           <h3>Primary + disabled while loading</h3>
@@ -989,21 +1008,33 @@
       durationEls.forEach((el) => { el.textContent = text; });
     }, 1000);
 
-    // ── Light / dark theme toggle ──
+    // ── Dark / Orka black / Light theme cycle ──
     // CSS-driven loaders and demo buttons re-theme for free — the spinning disc
     // included: its marks ride currentColor, so a flip needs no JS here.
     const themeToggle = document.getElementById("theme-toggle");
     function applyTheme(theme) {
-      document.documentElement.dataset.theme = theme;
+      document.documentElement.dataset.theme = theme === "light" ? "light" : "dark";
+      if (theme === "orka-black") {
+        document.documentElement.dataset.themePalette = "orka-black";
+      } else {
+        delete document.documentElement.dataset.themePalette;
+      }
       if (themeToggle) {
-        const isLight = theme === "light";
-        themeToggle.textContent = isLight ? "☀ Light" : "☾ Dark";
-        themeToggle.setAttribute("aria-pressed", String(isLight));
+        themeToggle.textContent = theme === "light"
+          ? "☀ Light"
+          : theme === "orka-black"
+            ? "◐ Orka black"
+            : "☾ Dark";
       }
     }
     if (themeToggle) {
       themeToggle.addEventListener("click", () => {
-        const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+        const current = document.documentElement.dataset.theme === "light"
+          ? "light"
+          : document.documentElement.dataset.themePalette === "orka-black"
+            ? "orka-black"
+            : "dark";
+        const next = current === "dark" ? "orka-black" : current === "orka-black" ? "light" : "dark";
         applyTheme(next);
       });
     }

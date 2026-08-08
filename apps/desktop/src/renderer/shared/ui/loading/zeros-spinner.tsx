@@ -182,7 +182,7 @@ export type ZerosSpinnerTone = "default" | "inverted" | "inherit";
  *    inverted — primary-button fills: the on-inverted foreground for
  *               both layers (the 70%/40% opacity split keeps them
  *               distinct) so the piece never vanishes against the
- *               near-white (Shade) / near-black (Light) fill.
+ *               near-white (dark themes) / near-black (Light) fill.
  *    inherit  — currentColor: for bespoke fills (green Merge, red
  *               destructive, tone-flipping PR-island actions) where the
  *               button's own text color already carries the theme logic

@@ -1632,17 +1632,18 @@ function InternalPanel() {
 // history block). Tokens are concrete HSL values in
 // zeros-tokens.css.
 //
-// 2026-07-07: the variant themes (orka-night / neutral /
-// zeros-blue) were retired — "Zeros Shade" in :root is the app's
-// one dark theme.
 // 2026-07-11: the light theme shipped ([data-theme="light"] block
 // in zeros-tokens.css), so Light joins the picker and System now
 // genuinely follows macOS.
+// 2026-08-08: Dark's structural tokens became neutral; bg1, bg2, and
+// sidebar-bg moved one lightness point up. The previous warm palette is
+// preserved unchanged as Orka black.
 
 const THEME_OPTIONS: Array<{ value: ThemeMode; label: string }> = [
   { value: "system", label: "System" },
   { value: "light", label: "Light" },
   { value: "dark", label: "Dark" },
+  { value: "orka-black", label: "Orka black" },
 ];
 
 function AppearancePanel() {
@@ -1659,7 +1660,7 @@ function AppearancePanel() {
       <SettingsList>
         <SettingsRow
           label="Theme"
-          hint="Dark is Zeros Shade, the app's dark theme. System follows the macOS appearance setting."
+          hint="Dark uses a neutral palette. Orka black preserves the previous warm-gray dark palette. System follows macOS."
         >
           <Select
             value={prefs.mode}
@@ -1680,7 +1681,7 @@ function AppearancePanel() {
         <div>
           <SettingsRow
             label="Code theme"
-            hint="Syntax highlighting colors for code blocks, diffs, the editor, and the terminal. Picked per theme — Dark and Light each remember their own."
+            hint="Syntax highlighting for code blocks, diffs, the editor, and the terminal. Dark and Orka black share one dark-theme choice; Light remembers its own."
           >
             <Select
               value={prefs.codeTheme}
