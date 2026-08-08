@@ -16,6 +16,13 @@ function sourceFiles(root: string): string[] {
 }
 
 describe("repository layout contracts", () => {
+  it("runs the required actionlint check for every pull request", () => {
+    const workflowLint = read(".github/workflows/lint-ci.yml");
+
+    expect(workflowLint).toContain("  pull_request:");
+    expect(workflowLint).not.toMatch(/\n  pull_request:\s*\n\s+paths:/);
+  });
+
   it("keeps active automation off retired repository roots", () => {
     expect(existsSync("backend")).toBe(false);
     expect(existsSync("website")).toBe(false);
