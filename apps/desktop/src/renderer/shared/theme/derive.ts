@@ -1,53 +1,63 @@
 // ──────────────────────────────────────────────────────────
-// applyTheme — set data-theme attribute on <html>
+// applyTheme — set appearance + palette attributes on <html>
 // ──────────────────────────────────────────────────────────
 //
-// 2026-05-26: only `data-theme` is written. The hue + intensity
-// primitives (`--theme-hue`, `--theme-chroma-mul`) are gone —
-// tokens in zeros-tokens.css are concrete HSL values, so there
-// is nothing to drive from JS beyond mode switching.
+// `data-theme` remains the resolved appearance contract (dark/light).
+// Orka black is a second DARK palette, selected independently with
+// `data-theme-palette="orka-black"`; this keeps Tailwind's `dark:`
+// variant and every polarity-sensitive consumer binary.
 //
-// Transition suppression on variant change is preserved —
-// switching dark↔light still flashes ugly if every transition
+// Transition suppression on concrete-theme change is preserved —
+// switching palettes still flashes ugly if every transition
 // runs its own duration. We add `.zeros-no-transitions` for
 // one frame on switch.
 // ──────────────────────────────────────────────────────────
 
 import { isElectron, nativeInvoke } from "../../platform/runtime";
-import { resolveVariant, type AppearancePrefs } from "./prefs";
+import {
+  resolveThemeId,
+  themeVariantForId,
+  type AppearancePrefs,
+  type ThemeId,
+} from "./prefs";
 import { resolveTokenValue } from "./resolve-tokens";
 
 export interface ApplyThemeContext {
   systemPrefersDark: boolean;
 }
 
-/** When the variant changes (dark↔light) we suppress transitions for
- *  one frame so the swap lands instantly instead of every component
- *  chasing the new colors over its own duration. */
-let lastVariant: string | null = null;
+/** When the concrete theme changes we suppress transitions for one frame so
+ *  the swap lands instantly instead of every component chasing it. */
+let lastThemeId: ThemeId | null = null;
 
 export function applyTheme(
   prefs: AppearancePrefs,
   ctx: ApplyThemeContext,
   root: HTMLElement = document.documentElement,
 ): void {
-  const variant = resolveVariant(prefs.mode, ctx.systemPrefersDark);
+  const themeId = resolveThemeId(prefs.mode, ctx.systemPrefersDark);
+  const variant = themeVariantForId(themeId);
 
-  const variantChanged = lastVariant !== null && lastVariant !== variant;
-  if (variantChanged) {
+  const themeChanged = lastThemeId !== null && lastThemeId !== themeId;
+  if (themeChanged) {
     root.classList.add("zeros-no-transitions");
   }
 
   root.setAttribute("data-theme", variant);
+  if (themeId === "orka-black") {
+    root.setAttribute("data-theme-palette", themeId);
+  } else {
+    root.removeAttribute("data-theme-palette");
+  }
 
-  if (variantChanged && typeof window !== "undefined") {
+  if (themeChanged && typeof window !== "undefined") {
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
         root.classList.remove("zeros-no-transitions");
       });
     });
   }
-  lastVariant = variant;
+  lastThemeId = themeId;
 
   syncNativeWindowBackground();
   syncNativeThemeMode(prefs.mode);
@@ -55,11 +65,11 @@ export function applyTheme(
 
 /** Report the theme MODE to the main process (`appearance_set_mode`):
  *  it persists the mode to userData (the durable copy localStorage —
- *  relocated under ~/Library/Caches — can't provide) and points
- *  `nativeTheme.themeSource` at it so native context menus/dialogs
- *  follow the app theme. The MODE, not the resolved variant, so
- *  "system" keeps native chrome AND the renderer's matchMedia on the
- *  live OS signal. Deduped — applyTheme also runs on OS flips and
+ *  relocated under ~/Library/Caches — can't provide) and makes
+ *  native chrome follow the app polarity (main maps Orka black to
+ *  native dark). The MODE, not the resolved variant, is sent so System
+ *  keeps native chrome AND the renderer's matchMedia on the live OS
+ *  signal. Deduped — applyTheme also runs on OS flips and
  *  cross-window syncs where the mode hasn't changed. */
 let lastReportedMode: string | null = null;
 function syncNativeThemeMode(mode: AppearancePrefs["mode"]): void {

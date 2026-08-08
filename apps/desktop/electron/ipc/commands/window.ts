@@ -44,6 +44,13 @@ import {
 } from "electron";
 import fs from "node:fs";
 import path from "node:path";
+import {
+  isAppearanceMode,
+  migrateLegacyWindowBackground,
+  nativeThemeSourceForAppearanceMode,
+  NEUTRAL_DARK_WINDOW_BACKGROUND,
+  type AppearanceMode,
+} from "../../appearance-mode";
 import type { CommandHandler } from "../router";
 
 // Drag state is per-window (only one drag at a time per window). The
@@ -182,10 +189,10 @@ export const windowZoomToggle: CommandHandler = async (_args, event) => {
 // launch creates its window with the right pre-paint color.
 
 const WINDOW_BG_FILE = "window-background.json";
-/** Matches the dark theme's --bg1 (#0E0C0C); used until a renderer
+/** Matches neutral Dark's --bg1 (#141414); used until a renderer
  *  reports a theme, and as the fallback when the persisted file is
  *  missing/corrupt. */
-export const DEFAULT_WINDOW_BACKGROUND = "#0e0c0c";
+export const DEFAULT_WINDOW_BACKGROUND = NEUTRAL_DARK_WINDOW_BACKGROUND;
 
 function windowBgPath(): string {
   return path.join(app.getPath("userData"), WINDOW_BG_FILE);
@@ -193,13 +200,20 @@ function windowBgPath(): string {
 
 /** Read the persisted background for createWindow. Sync by design —
  *  it runs once on the create path, before the window exists. */
-export function readPersistedWindowBackground(): string {
+export function readPersistedWindowBackground(
+  appearanceMode: AppearanceMode | null = null,
+  systemUsesDark = true,
+): string {
   try {
     const raw = fs.readFileSync(windowBgPath(), "utf8");
     const parsed = JSON.parse(raw) as { backgroundColor?: unknown };
     const color = parsed?.backgroundColor;
     if (typeof color === "string" && /^#[0-9a-fA-F]{6}$/.test(color)) {
-      return color;
+      return migrateLegacyWindowBackground(
+        color,
+        appearanceMode,
+        systemUsesDark,
+      );
     }
   } catch {
     /* first run / corrupt file — fall through */
@@ -242,14 +256,11 @@ export const windowSetBackground: CommandHandler = async (args, event) => {
 //   • The same report drives `nativeTheme.themeSource`, so native chrome
 //     (context menus, dialogs) follows the APP theme instead of the OS.
 //
-// themeSource gets the MODE ("system" | "light" | "dark"), NEVER the
-// resolved variant: in system mode it must stay "system" or the renderer's
-// matchMedia(prefers-color-scheme) — which the store uses to resolve the
-// variant and follow live OS flips — would be pinned by our own override.
+// Native themeSource gets the mode's POLARITY source. System must remain
+// "system" so live OS flips keep working; Orka black maps to native "dark"
+// while its distinct app mode is still persisted verbatim.
 
 const APPEARANCE_FILE = "appearance.json";
-const APPEARANCE_MODES = new Set(["system", "light", "dark"] as const);
-export type AppearanceMode = "system" | "light" | "dark";
 
 function appearancePath(): string {
   return path.join(app.getPath("userData"), APPEARANCE_FILE);
@@ -262,9 +273,7 @@ export function readPersistedAppearanceMode(): AppearanceMode | null {
   try {
     const raw = fs.readFileSync(appearancePath(), "utf8");
     const mode = (JSON.parse(raw) as { mode?: unknown })?.mode;
-    if (typeof mode === "string" && APPEARANCE_MODES.has(mode as AppearanceMode)) {
-      return mode as AppearanceMode;
-    }
+    if (isAppearanceMode(mode)) return mode;
   } catch {
     /* first run / corrupt file — fall through */
   }
@@ -276,11 +285,10 @@ export function readPersistedAppearanceMode(): AppearanceMode | null {
  *  and syncs nativeTheme so native menus/dialogs match the app. */
 export const appearanceSetMode: CommandHandler = async (args) => {
   const mode = (args as { mode?: unknown } | undefined)?.mode;
-  if (typeof mode !== "string" || !APPEARANCE_MODES.has(mode as AppearanceMode)) {
-    return;
-  }
-  if (nativeTheme.themeSource !== mode) {
-    nativeTheme.themeSource = mode as AppearanceMode;
+  if (!isAppearanceMode(mode)) return;
+  const nativeSource = nativeThemeSourceForAppearanceMode(mode);
+  if (nativeTheme.themeSource !== nativeSource) {
+    nativeTheme.themeSource = nativeSource;
   }
   try {
     fs.writeFileSync(appearancePath(), JSON.stringify({ mode }), "utf8");

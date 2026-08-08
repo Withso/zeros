@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   DesignStyleAmbiguityError,
+  mutateDesignKeyframes,
   mutateDesignTokenDeclaration,
   mutateDesignNodeStyles,
+  readDesignKeyframes,
   readDesignStyleProvenance,
 } from "../css";
 import { createDesignWebDocumentState } from "../revision";
@@ -20,6 +22,68 @@ describe("CSS provenance and mutation", () => {
     expect(
       mutateDesignTokenDeclaration(source, "--accent", "dark", "orchid"),
     ).toBe(`${selector} {\n  --accent: orchid;\n}\n`);
+  });
+
+  it("creates and surgically replaces persisted keyframes", () => {
+    const created = mutateDesignKeyframes(":root { --accent: red; }\n", {
+      name: "card-enter",
+      keyframes: [
+        { offset: 0, styles: { opacity: "0", transform: "translateY(8px)" } },
+        { offset: 100, styles: { opacity: "1", transform: "translateY(0)" } },
+      ],
+    });
+    expect(created).toContain("@keyframes card-enter");
+    expect(created).toContain("0% { opacity: 0; transform: translateY(8px); }");
+
+    const replaced = mutateDesignKeyframes(created, {
+      name: "card-enter",
+      keyframes: [
+        { offset: 0, styles: { opacity: "0.2" } },
+        { offset: 100, styles: { opacity: "1" } },
+      ],
+    });
+    expect(replaced.match(/@keyframes card-enter/g)).toHaveLength(1);
+    expect(replaced).not.toContain("translateY(8px)");
+  });
+
+  it("projects authored keyframes into stable timeline tracks", () => {
+    expect(
+      readDesignKeyframes({
+        "a.css": `
+@keyframes card-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  50%, 75% { opacity: .6; }
+  to { opacity: 1; transform: translateY(0); }
+}`,
+        "b.css": "@keyframes pulse { 0% { scale: .9 } 100% { scale: 1 } }",
+        "index.html": "<main />",
+      }),
+    ).toEqual([
+      {
+        file: "a.css",
+        name: "card-enter",
+        keyframes: [
+          {
+            offset: 0,
+            styles: { opacity: "0", transform: "translateY(8px)" },
+          },
+          { offset: 50, styles: { opacity: ".6" } },
+          { offset: 75, styles: { opacity: ".6" } },
+          {
+            offset: 100,
+            styles: { opacity: "1", transform: "translateY(0)" },
+          },
+        ],
+      },
+      {
+        file: "b.css",
+        name: "pulse",
+        keyframes: [
+          { offset: 0, styles: { scale: ".9" } },
+          { offset: 100, styles: { scale: "1" } },
+        ],
+      },
+    ]);
   });
 
   it("identifies one exact authored rule without calling it computed", () => {

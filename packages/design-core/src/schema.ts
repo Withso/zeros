@@ -545,6 +545,20 @@ const operationBase = z.object({
 });
 
 const styleValueSchema = z.union([z.string().max(2_048), z.null()]);
+const keyframeNameSchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_-]{0,127}$/);
+const designKeyframeSchema = z
+  .object({
+    offset: z.number().finite().min(0).max(100),
+    styles: z
+      .record(z.string().regex(CSS_PROPERTY).max(128), z.string().max(2_048))
+      .refine((styles) => Object.keys(styles).length > 0, {
+        message: "A keyframe must contain at least one style",
+      })
+      .refine((styles) => Object.keys(styles).length <= 64, {
+        message: "A keyframe cannot contain more than 64 styles",
+      }),
+  })
+  .strict();
 
 export const designOperationSchema = z.discriminatedUnion("type", [
   // Internal inverse primitive. Public adapters must not grant callers this
@@ -599,6 +613,19 @@ export const designOperationSchema = z.discriminatedUnion("type", [
     .strict(),
   operationBase
     .extend({
+      type: z.literal("node.duplicate"),
+      nodeId: designNodeIdSchema,
+      duplicateNodeId: designNodeIdSchema,
+    })
+    .strict(),
+  operationBase
+    .extend({
+      type: z.literal("node.delete"),
+      nodeId: designNodeIdSchema,
+    })
+    .strict(),
+  operationBase
+    .extend({
       type: z.literal("frame.set-geometry"),
       frame: designRelativeFileSchema,
       geometry: z
@@ -610,6 +637,23 @@ export const designOperationSchema = z.discriminatedUnion("type", [
           z: z.number().int().nonnegative(),
         })
         .strict(),
+    })
+    .strict(),
+  operationBase
+    .extend({
+      type: z.literal("keyframes.set"),
+      file: designRelativeFileSchema,
+      name: keyframeNameSchema,
+      keyframes: z
+        .array(designKeyframeSchema)
+        .min(2)
+        .max(32)
+        .refine(
+          (keyframes) =>
+            new Set(keyframes.map((keyframe) => keyframe.offset)).size ===
+            keyframes.length,
+          { message: "Keyframe offsets must be unique" },
+        ),
     })
     .strict(),
   operationBase

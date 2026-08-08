@@ -97,6 +97,7 @@ import {
   readPersistedAppearanceMode,
   readPersistedWindowBackground,
 } from "./ipc/commands/window";
+import { nativeThemeSourceForAppearanceMode } from "./appearance-mode";
 import {
   attachWindowStatePersistence,
   boundsVisibleOnAnyDisplay,
@@ -698,16 +699,22 @@ function createMainWindow(): BrowserWindow {
   // Durable theme mode (userData appearance.json — see ipc/commands/window.ts).
   // Two consumers on the create path:
   //   1. nativeTheme.themeSource — native context menus/dialogs follow the APP
-  //      theme from the first frame. Set the MODE (never the resolved variant)
-  //      so "system" keeps following the OS and the renderer's matchMedia-based
-  //      system-mode resolution keeps seeing real OS flips. Left untouched on a
-  //      fresh install (null) — the renderer reports its mode right after boot.
+  //      polarity from the first frame. Preserve "system" so the renderer's
+  //      matchMedia-based resolution keeps seeing real OS flips; map Orka black
+  //      to native dark. Left untouched on a fresh install (null) — the renderer
+  //      reports its mode right after boot.
   //   2. additionalArguments — hands the mode to the preload, which exposes it
   //      to the page so the index.html pre-paint stamp and the appearance store
   //      can restore the theme when the Caches-backed localStorage was purged.
   const persistedMode = readPersistedAppearanceMode();
-  if (persistedMode && nativeTheme.themeSource !== persistedMode) {
-    nativeTheme.themeSource = persistedMode;
+  const persistedNativeThemeSource = persistedMode
+    ? nativeThemeSourceForAppearanceMode(persistedMode)
+    : null;
+  if (
+    persistedNativeThemeSource &&
+    nativeTheme.themeSource !== persistedNativeThemeSource
+  ) {
+    nativeTheme.themeSource = persistedNativeThemeSource;
   }
 
   // Reopen the window the way it was closed (userData window-state.json,
@@ -756,7 +763,10 @@ function createMainWindow(): BrowserWindow {
     // the resolved --bg1 via `window_set_background` on every theme
     // change, and the persisted value is used here so a light-theme
     // user doesn't get a dark flash at launch (and vice versa).
-    backgroundColor: readPersistedWindowBackground(),
+    backgroundColor: readPersistedWindowBackground(
+      persistedMode,
+      nativeTheme.shouldUseDarkColors,
+    ),
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,

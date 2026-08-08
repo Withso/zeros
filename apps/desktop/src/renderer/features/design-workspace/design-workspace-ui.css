@@ -1,0 +1,179 @@
+/* Design-workspace-only visual recipes.
+ *
+ * The editor is information-dense, so a permanent rectangle around every
+ * value makes hierarchy harder to scan. These controls use space and type at
+ * rest, a tonal surface for authored/selected state, and an outline only while
+ * the control is focused. The classes are feature-prefixed because several
+ * editors render their popovers through portals outside the workspace root. */
+
+[data-design-workspace-surface] {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  user-select: none;
+}
+
+[data-design-workspace-surface]
+  :where(input, textarea, [contenteditable="true"]) {
+  user-select: text;
+}
+
+[data-design-workspace-surface]
+  :where(
+    button,
+    input,
+    textarea,
+    select,
+    label,
+    span,
+    div,
+    p,
+    code,
+    h1,
+    h2,
+    h3,
+    h4
+  ),
+[data-design-theme-editor]
+  :where(
+    button,
+    input,
+    textarea,
+    select,
+    label,
+    span,
+    div,
+    p,
+    code,
+    h1,
+    h2,
+    h3,
+    h4
+  ) {
+  font-family: var(--font-sans);
+  font-size: 13px;
+}
+
+/* Radix ScrollArea inserts an inline display:table sizing wrapper. That is
+ * useful for code tables, but lets dense editor rows expand past their panel
+ * after the 13px accessibility scale. Override the vendor wrapper only inside
+ * design-workspace chrome; the theme matrix is portaled and keeps 2D scroll. */
+[data-design-workspace-surface] [data-radix-scroll-area-viewport] > div {
+  display: block !important;
+  width: 100% !important;
+  min-width: 0 !important;
+}
+
+.zd-design-control-quiet {
+  border-width: 0;
+  background-color: transparent;
+  box-shadow: none;
+}
+
+.zd-design-control-quiet:hover {
+  border-color: transparent;
+  background-color: var(--bg1-hover);
+}
+
+.zd-design-control-quiet:focus-visible,
+.zd-design-control-quiet:focus-within,
+.zd-design-control-quiet[data-state="open"] {
+  border-color: transparent;
+  background-color: var(--bg2-hover);
+  outline: 1px solid var(--highlighted-bright);
+  outline-offset: -1px;
+}
+
+.zd-design-control-applied {
+  border-width: 0;
+  background-color: var(--bg1-hover);
+  box-shadow: none;
+}
+
+.zd-design-control-applied:hover,
+.zd-design-control-applied[data-state="open"] {
+  border-color: transparent;
+  background-color: var(--bg2-hover);
+}
+
+.zd-design-control-applied:focus-visible,
+.zd-design-control-applied:focus-within {
+  border-color: transparent;
+  outline: 1px solid var(--highlighted-bright);
+  outline-offset: -1px;
+}
+
+.zd-design-state-active {
+  border-width: 0;
+  border-color: transparent;
+  background-color: var(--bg2-hover);
+  box-shadow: none;
+  color: var(--fg1);
+}
+
+.zd-design-segment-group {
+  gap: 2px;
+  overflow: visible;
+  border-width: 0;
+  background-color: transparent;
+}
+
+.zd-design-segment {
+  border-width: 0;
+  border-radius: var(--radius-sm);
+  background-color: transparent;
+  box-shadow: none;
+}
+
+.zd-design-segment:hover {
+  background-color: var(--bg1-hover);
+}
+
+.zd-design-segment[aria-pressed="true"],
+.zd-design-segment[data-state="active"] {
+  background-color: var(--bg2-hover);
+  color: var(--fg1);
+}
+
+.zd-design-segment:focus-visible {
+  outline: 1px solid var(--highlighted-bright);
+  outline-offset: -1px;
+}
+
+.zd-design-search {
+  border-width: 0;
+  background-color: var(--bg1-hover);
+  box-shadow: none;
+}
+
+.zd-design-search:focus-within,
+.zd-design-search:focus-visible {
+  border-color: transparent;
+  background-color: var(--bg2-hover);
+  outline: 1px solid var(--highlighted-bright);
+  outline-offset: -1px;
+}
+
+.zd-design-floating-toolbar {
+  background-color: var(--bg1-highlight);
+  box-shadow: var(--shadow-dropdown);
+}
+
+.zd-design-floating-toolbar button {
+  border-width: 0;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.zd-design-floating-toolbar button[aria-pressed="true"],
+.zd-design-floating-toolbar button[aria-expanded="true"] {
+  background-color: var(--bg2-hover);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zd-design-control-quiet,
+  .zd-design-control-applied,
+  .zd-design-segment,
+  .zd-design-floating-toolbar button {
+    transition: none;
+  }
+}

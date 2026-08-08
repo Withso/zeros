@@ -109,6 +109,54 @@ function emptyFrame(now: number): DesignRuntimeFrameState {
   };
 }
 
+function sameStringArray(
+  left: readonly string[] | undefined,
+  right: readonly string[] | undefined,
+): boolean {
+  if (left === right) return true;
+  if (!left || !right || left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
+}
+
+function sameStringRecord(
+  left: Readonly<Record<string, string>>,
+  right: Readonly<Record<string, string>>,
+): boolean {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every((key) => left[key] === right[key])
+  );
+}
+
+function sameNodeDetails(
+  left: DesignRuntimeNodeDetails | undefined,
+  right: DesignRuntimeNodeDetails,
+): boolean {
+  return Boolean(
+    left &&
+    left.sourceVersion === right.sourceVersion &&
+    left.oid === right.oid &&
+    left.tag === right.tag &&
+    left.name === right.name &&
+    left.text === right.text &&
+    left.textEditable === right.textEditable &&
+    left.selector === right.selector &&
+    left.visible === right.visible &&
+    left.rect.x === right.rect.x &&
+    left.rect.y === right.rect.y &&
+    left.rect.width === right.rect.width &&
+    left.rect.height === right.rect.height &&
+    sameStringArray(left.breadcrumb, right.breadcrumb) &&
+    sameStringArray(
+      left.authoredStyleProperties,
+      right.authoredStyleProperties,
+    ) &&
+    sameStringRecord(left.styles, right.styles),
+  );
+}
+
 function updateWorkspace(
   state: DesignRuntimeStore,
   workspaceId: string,
@@ -185,31 +233,49 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
 
   publishNodeDetails(workspaceId, folder, frame, details, sourceVersion) {
     if (details.sourceVersion !== sourceVersion) return;
-    set((state) =>
-      updateWorkspace(state, workspaceId, folder, frame, (current, now) => {
-        if (
-          current.sourceVersion !== undefined &&
-          current.sourceVersion !== sourceVersion
-        ) {
-          return current;
-        }
-        const detailOrder = touchOrder(
-          current.detailOrder,
-          details.oid,
-          MAX_DETAILS_PER_FRAME,
-        );
-        return {
-          ...current,
-          sourceVersion: current.sourceVersion ?? sourceVersion,
-          detailsByNode: keepKeys(
-            { ...current.detailsByNode, [details.oid]: details },
+    set((state) => {
+      const existing = state.byWorkspace[workspaceId]?.frames[frame];
+      const existingWorkspace = state.byWorkspace[workspaceId];
+      if (
+        existing &&
+        existingWorkspace?.folder === folder &&
+        existing.detailOrder.at(-1) === details.oid &&
+        (existing.sourceVersion === undefined ||
+          existing.sourceVersion === sourceVersion) &&
+        sameNodeDetails(existing.detailsByNode[details.oid], details)
+      ) {
+        return state;
+      }
+      return updateWorkspace(
+        state,
+        workspaceId,
+        folder,
+        frame,
+        (current, now) => {
+          if (
+            current.sourceVersion !== undefined &&
+            current.sourceVersion !== sourceVersion
+          ) {
+            return current;
+          }
+          const detailOrder = touchOrder(
+            current.detailOrder,
+            details.oid,
+            MAX_DETAILS_PER_FRAME,
+          );
+          return {
+            ...current,
+            sourceVersion: current.sourceVersion ?? sourceVersion,
+            detailsByNode: keepKeys(
+              { ...current.detailsByNode, [details.oid]: details },
+              detailOrder,
+            ),
             detailOrder,
-          ),
-          detailOrder,
-          updatedAt: now,
-        };
-      }),
-    );
+            updatedAt: now,
+          };
+        },
+      );
+    });
   },
 
   publishScreenshot(workspaceId, folder, frame, screenshot, sourceVersion) {

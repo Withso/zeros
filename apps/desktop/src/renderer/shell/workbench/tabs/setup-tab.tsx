@@ -59,7 +59,7 @@ import { useActiveWorkspace } from "../../../state/use-active-workspace";
 import { isLocalMainWorkspace } from "../../../state/local-main-workspace";
 import { useProjects } from "../../../state/use-projects";
 import { repoPageViewForSection } from "../../../features/repositories/repo-page";
-import { useThemeVariant } from "../../../shared/theme/use-theme-variant";
+import { useThemeId } from "../../../shared/theme/use-theme-variant";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { createTerminalResizeScheduler } from "../../terminal/terminal-resize-scheduler";
 import { isUsableTerminalDimensions } from "../../terminal/terminal-dimensions";
@@ -309,10 +309,10 @@ function WorkspaceSetup({
     resizeSchedulerRef.current?.flush();
   }, [visible, refetch]);
 
-  // Re-resolve the xterm colors when the app variant flips (mode change OR an
-  // OS flip in system mode) — xterm holds concrete values, not CSS vars, so the
-  // mount-time resolve goes stale without this. Runs once at mount too, which
-  // is a harmless re-set of the same values.
+  // Re-resolve the xterm colors when the concrete app theme flips (including
+  // neutral Dark ↔ Orka black). xterm holds concrete values, not CSS vars, so
+  // the mount-time resolve goes stale without this. Runs once at mount too,
+  // which is a harmless re-set of the same values.
   //
   // useLayoutEffect (not useEffect): applyTheme() sets data-theme on <html>
   // synchronously inside the store's refresh(), so the whole app re-themes in
@@ -320,7 +320,7 @@ function WorkspaceSetup({
   // frame LATER — a visible flash of the old background against the flipped app
   // (the "switches very lately" report). Running pre-paint (the token values are
   // already live) lands it in the same frame; refresh() repaints the grid now.
-  const variant = useThemeVariant();
+  const themeId = useThemeId();
   useLayoutEffect(() => {
     const term = xtermRef.current;
     if (!term) return;
@@ -333,7 +333,7 @@ function WorkspaceSetup({
     } catch {
       /* not laid out yet — the mount effect paints the initial theme */
     }
-  }, [variant]);
+  }, [themeId]);
 
   const run = useCallback(async () => {
     if (busy) return;

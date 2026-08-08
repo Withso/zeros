@@ -20,8 +20,13 @@ import {
   designWebTransactionAdapter,
   readDesignWebProjection,
 } from "./adapter";
-import { readDesignCssDiagnostics, readDesignStyleProvenance } from "./css";
+import {
+  readDesignCssDiagnostics,
+  readDesignKeyframes,
+  readDesignStyleProvenance,
+} from "./css";
 import type {
+  DesignAuthoredKeyframes,
   DesignRuntimeMatchedDeclaration,
   DesignStyleProvenance,
   DesignWebDiagnostic,
@@ -451,6 +456,7 @@ export class DesignApi {
     documentId: string;
     revision: string;
     manifest: DesignFoundationManifest;
+    keyframes: DesignAuthoredKeyframes[];
   }> {
     const documentId = validatedDocumentId(input.documentId);
     const expectedRevision = validatedExpectedRevision(input.expectedRevision);
@@ -462,6 +468,7 @@ export class DesignApi {
         documentId: state.documentId,
         revision: state.revision,
         manifest: structuredClone(state.manifest),
+        keyframes: readDesignKeyframes(state.files),
       };
     });
   }

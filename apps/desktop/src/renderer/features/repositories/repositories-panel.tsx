@@ -995,9 +995,9 @@ export function EnvironmentSection({
 
       {/* Provider API keys — injected into every agent's env at spawn, so
           they belong in this picture, but they're MANAGED in Settings →
-          Providers and stored encrypted: read-only, presence-only rows. */}
+          Agents and stored encrypted: read-only, presence-only rows. */}
       {layer === "user" && providerKeyVars.length > 0 && (
-        <EnvVarGroup label="Provider API keys — managed in Settings → Agent providers">
+        <EnvVarGroup label="Provider API keys — managed in Settings → Agents">
           {providerKeyVars.map((p) => (
             <EnvVarRow
               key={p.envVar}

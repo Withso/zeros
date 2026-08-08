@@ -25,7 +25,7 @@
 //     options.pathToClaudeCodeExecutable.
 //
 // …which `ensureQuery` wraps as a protocol-error, so the user sees
-// "AGENT RESPONSE FAILURE" on EVERY send while Settings → Agent providers still
+// "AGENT RESPONSE FAILURE" on EVERY send while Settings → Agents still
 // shows a green "Connected" badge (the auth probe only checks that a credential
 // file/keychain item EXISTS — it never asks whether the runtime can start).
 //
@@ -55,7 +55,7 @@
 //
 // Resolution order (first hit wins):
 //
-//   1. **override**    a `cliBinary` from Settings → Agent providers →
+//   1. **override**    a `cliBinary` from Settings → Agents →
 //      Executable path. The user pointed us at a specific claude-code.
 //   2. **staged**      ZEROS_CLAUDE_CLI_PATH from Electron main. THE packaged
 //      path; also the documented knob for the packaged smoke harness.
@@ -261,7 +261,7 @@ export function resolveClaudeCli(
   const env = deps.env ?? process.env;
   const isExec = deps.isExecutable ?? isExecutableFileSync;
 
-  // 1. Explicit per-session override (Settings → Agent providers).
+  // 1. Explicit per-session override (Settings → Agents).
   const override = opts.override?.trim();
   if (override) {
     if (isExec(override)) return { path: override, source: "override" };
@@ -294,7 +294,7 @@ export function resolveClaudeCli(
 export function claudeCliMissingMessage(): string {
   return (
     "Claude Code runtime is missing from this build — the bundled `claude` " +
-    "binary could not be found. Set Settings → Agent providers → Claude Code → " +
+    "binary could not be found. Set Settings → Agents → Claude Code → " +
     "Executable path to a Claude Code binary, or reinstall Zeros. " +
     `(no ${CLAUDE_CLI_PATH_ENV}, no platform package, and no \`claude\` on PATH)`
   );

@@ -778,7 +778,7 @@ export function AgentChat({
         }
       } else {
         toast.error("Sign in failed", {
-          description: `${res.error ?? "Unknown error."} You can also sign in from Settings → Agent providers.`,
+          description: `${res.error ?? "Unknown error."} You can also sign in from Settings → Agents.`,
         });
       }
     });
@@ -2536,7 +2536,7 @@ export function AgentChat({
         // instead of stacking identical copies.
         id: `agent-error-${chatId ?? agentLabel}`,
         description: isAuth
-          ? `Open Settings → Agent providers to sign in to ${agentLabel}.`
+          ? `Open Settings → Agents to sign in to ${agentLabel}.`
           : advice,
       });
     }
@@ -3011,11 +3011,11 @@ export function AgentChat({
         const agentLabel = targetAgent.name ?? targetAgent.id;
         if (!targetAgent.installed) {
           toast.error(`${agentLabel}: Not installed`, {
-            description: `Open Settings → Agent providers to install ${agentLabel}.`,
+            description: `Open Settings → Agents to install ${agentLabel}.`,
           });
         } else {
           toast.error(`${agentLabel}: Sign in required`, {
-            description: `Open Settings → Agent providers to sign in to ${agentLabel}.`,
+            description: `Open Settings → Agents to sign in to ${agentLabel}.`,
           });
         }
         return;

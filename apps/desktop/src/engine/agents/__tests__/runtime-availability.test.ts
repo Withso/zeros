@@ -6,7 +6,7 @@
 // keychain item (matched by existence alone: no `-w`, no expiry, no validity) or
 // `~/.claude/.credentials.json`. Those survive token revocation, uninstalling the
 // CLI, and — critically — a build that never shipped the Claude Code runtime at
-// all. So Settings → Agent providers showed:
+// all. So Settings → Agents showed:
 //
 //     [Connected]   Provider Anthropic / Plan — / Org — / Account —
 //
@@ -101,7 +101,7 @@ describe("toBridgeAgents — runtime availability gates 'Connected'", () => {
   });
 
   it("honours the persisted Executable-path override, clearing the missing state", () => {
-    // The missing-runtime message tells the user to set Settings → Agent providers →
+    // The missing-runtime message tells the user to set Settings → Agents →
     // Executable path. Before this the probe ignored that value, so setting it
     // changed nothing: installed/authenticated stayed false, isRunnableAgent()
     // returned false, and every send was refused with "Not installed" — a DEAD END

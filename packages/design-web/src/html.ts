@@ -270,6 +270,93 @@ export function mutateDesignNodeTextSource(
   return `${source.slice(0, location.startTag.endOffset)}${escapeText(text)}${source.slice(location.endTag.startOffset)}`;
 }
 
+function duplicateIdentity(
+  rootId: string,
+  originalId: string,
+  index: number,
+  used: ReadonlySet<string>,
+): string {
+  const safeOriginal =
+    originalId.replace(/[^A-Za-z0-9._:-]+/g, "-").replace(/^-+|-+$/g, "") ||
+    `node-${index}`;
+  const prefix = `${rootId}-${safeOriginal}`.slice(0, 248);
+  let candidate = prefix;
+  let suffix = 2;
+  while (used.has(candidate)) {
+    const ending = `-${suffix}`;
+    candidate = `${prefix.slice(0, 256 - ending.length)}${ending}`;
+    suffix += 1;
+  }
+  return designNodeIdSchema.parse(candidate);
+}
+
+/** Duplicate one authored subtree immediately after itself. Every identity in
+ * the clone is replaced before insertion so the resulting document remains
+ * addressable without a follow-up healing pass. */
+export function mutateDesignNodeDuplicateSource(
+  source: string,
+  nodeId: string,
+  rawDuplicateNodeId: string,
+): string {
+  const duplicateNodeId = designNodeIdSchema.parse(rawDuplicateNodeId);
+  const existingIds = new Set(
+    elements(parse(source))
+      .map(oid)
+      .filter((id): id is string => Boolean(id)),
+  );
+  if (existingIds.has(duplicateNodeId)) {
+    throw new Error(`Design element already exists: ${duplicateNodeId}`);
+  }
+  const element = elementForMutation(source, nodeId);
+  const location = element.sourceCodeLocation;
+  if (!location)
+    throw new Error(`Design element has no authored span: ${nodeId}`);
+  const cloneSource = source.slice(location.startOffset, location.endOffset);
+  const fragment = parseFragment(cloneSource, { sourceCodeLocationInfo: true });
+  const records = fragmentElements(fragment);
+  if (records.length === 0) {
+    throw new Error(`Design element cannot be duplicated: ${nodeId}`);
+  }
+  const used = new Set(existingIds);
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  records.forEach((record, index) => {
+    const originalId = oid(record);
+    if (!originalId) return;
+    const nextId =
+      index === 0
+        ? duplicateNodeId
+        : duplicateIdentity(duplicateNodeId, originalId, index, used);
+    used.add(nextId);
+    const attribute = record.sourceCodeLocation?.attrs?.["data-oid"];
+    if (!attribute) {
+      throw new Error(`Design identity has no authored span: ${originalId}`);
+    }
+    edits.push({
+      start: attribute.startOffset,
+      end: attribute.endOffset,
+      text: `data-oid="${escapeAttribute(nextId, '"')}"`,
+    });
+  });
+  let duplicate = cloneSource;
+  for (const edit of edits.sort((left, right) => right.start - left.start)) {
+    duplicate = `${duplicate.slice(0, edit.start)}${edit.text}${duplicate.slice(edit.end)}`;
+  }
+  return `${source.slice(0, location.endOffset)}${duplicate}${source.slice(location.endOffset)}`;
+}
+
+/** Remove exactly one authored element subtree, preserving all neighboring
+ * whitespace and bytes. */
+export function mutateDesignNodeDeleteSource(
+  source: string,
+  nodeId: string,
+): string {
+  const element = elementForMutation(source, nodeId);
+  const location = element.sourceCodeLocation;
+  if (!location)
+    throw new Error(`Design element has no authored span: ${nodeId}`);
+  return `${source.slice(0, location.startOffset)}${source.slice(location.endOffset)}`;
+}
+
 function fragmentElements(
   fragment: DefaultTreeAdapterTypes.DocumentFragment,
 ): Element[] {

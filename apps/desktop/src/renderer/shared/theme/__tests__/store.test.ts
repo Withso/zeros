@@ -18,6 +18,7 @@ const KEY = "zeros.appearance.v2";
 function installDom(opts: { prefersDark?: boolean; stored?: unknown } = {}) {
   const systemListeners: Array<() => void> = [];
   const storage = new Map<string, string>();
+  const attributes = new Map<string, string>();
   if (opts.stored !== undefined) storage.set(KEY, JSON.stringify(opts.stored));
   const mql = {
     matches: opts.prefersDark ?? true,
@@ -40,11 +41,14 @@ function installDom(opts: { prefersDark?: boolean; stored?: unknown } = {}) {
   });
   vi.stubGlobal("document", {
     documentElement: {
-      setAttribute: () => {},
+      setAttribute: (name: string, value: string) =>
+        void attributes.set(name, value),
+      removeAttribute: (name: string) => void attributes.delete(name),
       classList: { add: () => {}, remove: () => {} },
     },
   });
   return {
+    attributes,
     storage,
     /** Simulate a macOS appearance flip (prefers-color-scheme change). */
     flipSystem(dark: boolean) {
@@ -73,6 +77,22 @@ describe("codeTheme resolution follows the variant", () => {
     store = await freshStore();
     expect(store.getPrefs().codeTheme).toBe("catppuccin-latte");
     expect(store.getVariant()).toBe("light");
+  });
+
+  it("keeps Orka black dark for code themes but distinct for token repainting", async () => {
+    const dom = installDom({ stored: { mode: "orka-black" } });
+    const store = await freshStore();
+    expect(store.getPrefs().mode).toBe("orka-black");
+    expect(store.getPrefs().codeTheme).toBe("default");
+    expect(store.getVariant()).toBe("dark");
+    expect(store.getThemeId()).toBe("orka-black");
+    expect(dom.attributes.get("data-theme")).toBe("dark");
+    expect(dom.attributes.get("data-theme-palette")).toBe("orka-black");
+
+    store.setPrefs({ mode: "dark" });
+    expect(store.getThemeId()).toBe("dark");
+    expect(dom.attributes.get("data-theme")).toBe("dark");
+    expect(dom.attributes.has("data-theme-palette")).toBe(false);
   });
 
   it("re-resolves live on a mode change — the old bug froze it at load", async () => {
@@ -152,6 +172,18 @@ describe("durable-mode fallback (localStorage purged)", () => {
     const store = await freshStore();
     expect(store.getPrefs().mode).toBe("dark");
   });
+
+  it("restores the durable Orka-black palette without changing its dark polarity", async () => {
+    const dom = installDom();
+    (globalThis.window as unknown as Record<string, unknown>)[
+      "__ZEROS_APPEARANCE_MODE__"
+    ] = "orka-black";
+    const store = await freshStore();
+    expect(store.getPrefs().mode).toBe("orka-black");
+    expect(store.getVariant()).toBe("dark");
+    expect(store.getThemeId()).toBe("orka-black");
+    expect(dom.attributes.get("data-theme-palette")).toBe("orka-black");
+  });
 });
 
 describe("legacy storage migration", () => {
@@ -176,5 +208,12 @@ describe("legacy storage migration", () => {
     const store = await freshStore();
     expect(store.getPrefs().mode).toBe("system");
     expect(store.getVariant()).toBe("dark");
+  });
+
+  it("does not repurpose the retired orka-night id for the new palette", async () => {
+    installDom({ stored: { mode: "orka-night" } });
+    const store = await freshStore();
+    expect(store.getPrefs().mode).toBe("dark");
+    expect(store.getThemeId()).toBe("dark");
   });
 });

@@ -24,7 +24,9 @@ describe("design workspace UI memory", () => {
       normalizeDesignWorkspaceView({
         selectedFrame: "../outside.html",
         selectedNodeId: "\u0000not-an-oid",
+        selectedNodeIds: ["valid", "valid", "\u0000invalid"],
         panel: "unknown",
+        activeTheme: "Not valid!",
         codeView: "yes",
         zoom: Number.POSITIVE_INFINITY,
         panX: Number.NaN,
@@ -34,7 +36,9 @@ describe("design workspace UI memory", () => {
     ).toEqual({
       selectedFrame: null,
       selectedNodeId: null,
+      selectedNodeIds: [],
       panel: "layers",
+      activeTheme: null,
       codeView: false,
       zoom: 0.25,
       panX: 64,
@@ -48,6 +52,7 @@ describe("design workspace UI memory", () => {
     store.setSelection("workspace-a", "home.html", "hero-heading");
     store.setViewport("workspace-a", { zoom: 0.8, panX: 12, panY: 24 });
     store.setPanel("workspace-b", "assets");
+    store.setActiveTheme("workspace-b", "dark");
     store.setSelectedFrame("workspace-b", "pricing.html");
 
     expect(designWorkspaceView("workspace-a")).toMatchObject({
@@ -61,6 +66,24 @@ describe("design workspace UI memory", () => {
     expect(designWorkspaceView("workspace-b")).toMatchObject({
       selectedFrame: "pricing.html",
       panel: "assets",
+      activeTheme: "dark",
+    });
+  });
+
+  it("normalizes a bounded unique multi-selection around its primary node", () => {
+    const normalized = normalizeDesignWorkspaceView({
+      selectedFrame: "home.html",
+      selectedNodeId: "heading",
+      selectedNodeIds: ["copy", "heading", "copy", "cta"],
+    });
+    expect(normalized.selectedNodeIds).toEqual(["heading", "copy", "cta"]);
+
+    useDesignWorkspaceUiStore
+      .getState()
+      .setSelection("workspace-a", "home.html", "copy", ["heading", "copy"]);
+    expect(designWorkspaceView("workspace-a")).toMatchObject({
+      selectedNodeId: "copy",
+      selectedNodeIds: ["copy", "heading"],
     });
   });
 
