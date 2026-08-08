@@ -179,21 +179,35 @@ export interface PaneTreeSplitRequest {
   direction: SplitDirection;
   containerWidth: number;
   containerHeight: number;
+  /** The widest the pane surface can BECOME without resizing the window —
+   *  its current width plus the room Workbench can legitimately give up. Only
+   *  the first horizontal split is allowed to consume it; omit it (or pass a
+   *  non-finite value) and the current width is the only budget. */
+  growableWidth?: number;
   /** A different source leaf that this split/drop will empty and collapse. */
   collapsedPaneId?: string;
 }
 
 /** Split availability is based on the whole resulting tree, not the current
  * leaf's width. The first horizontal split is the deliberate exception: the
- * conversation column may grow to the resulting intrinsic width, borrowing
+ * conversation column may grow toward the resulting intrinsic width, borrowing
  * room from Workbench. Once any horizontal split exists, another is offered
- * only after the current conversation surface already fits the next tree. */
+ * only after the current conversation surface already fits the next tree.
+ *
+ * That exception is bounded by what is actually REACHABLE. Growth stops at
+ * Workbench's own 200px floor (repository navigation is a fixed 248px and the
+ * window itself floors at 840px), so an unconditional "the first right split
+ * always fits" offered a split that no layout can honor: two 360px leaves plus
+ * their seam need 726px, and a minimum-width window can only ever hand the
+ * conversation column 392px. Accepting it produced a clipped row that
+ * `clampConversationRatio` then refused to drag back. */
 export function canSplitPaneTree({
   root,
   targetPaneId,
   direction,
   containerWidth,
   containerHeight,
+  growableWidth,
   collapsedPaneId,
 }: PaneTreeSplitRequest): boolean {
   const nextMinimum = paneTreeMinimumSizeAfterSplit(
@@ -203,11 +217,34 @@ export function canSplitPaneTree({
     collapsedPaneId,
   );
   if (!nextMinimum) return false;
-  if (direction === "row" && !paneTreeHasDirection(root, "row")) return true;
+  if (direction !== "row") {
+    return (
+      Number.isFinite(containerHeight) && containerHeight >= nextMinimum.height
+    );
+  }
+  const budgets = [containerWidth];
+  if (!paneTreeHasDirection(root, "row")) budgets.push(growableWidth ?? NaN);
+  const available = Math.max(
+    ...budgets.filter((value) => Number.isFinite(value)),
+  );
+  return Number.isFinite(available) && available >= nextMinimum.width;
+}
 
-  const available = direction === "row" ? containerWidth : containerHeight;
-  const required = direction === "row" ? nextMinimum.width : nextMinimum.height;
-  return Number.isFinite(available) && available >= required;
+/** The widest the pane surface can get without resizing the window: its own
+ * width plus whatever Workbench can surrender above its floor. A collapsed
+ * Workbench (width 0) contributes nothing because the conversation column
+ * already owns the whole row. Non-finite input yields NaN so the caller's gate
+ * falls back to the measured width alone rather than an invented budget. */
+export function growablePaneSurfaceWidth(
+  surfaceWidth: number,
+  workbenchWidth: number,
+  workbenchMinWidth: number,
+): number {
+  if (!Number.isFinite(surfaceWidth)) return Number.NaN;
+  if (!Number.isFinite(workbenchWidth) || !Number.isFinite(workbenchMinWidth)) {
+    return surfaceWidth;
+  }
+  return surfaceWidth + Math.max(0, workbenchWidth - workbenchMinWidth);
 }
 
 export function canSplitPaneDimension(

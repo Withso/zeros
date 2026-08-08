@@ -19,6 +19,7 @@ import {
   DEFAULT_MODEL_SELECTION_KEY,
   LEGACY_DEFAULT_AGENT_KEY,
   LEGACY_FAVORITE_MODELS_KEY,
+  legacyFavoriteSelection,
   type FavoriteModelSelection,
 } from "./model-catalog";
 
@@ -55,6 +56,23 @@ export function setFavoriteModel(
     selection.model ? { [family]: selection.model } : {},
   );
   notify();
+}
+
+/** Move a pre-redesign `default-agent-id` + `favorite-models-by-family` pair
+ * into the one atomic record. Idempotent, cheap, and safe to call from a boot
+ * effect: resolution already answers correctly from the legacy keys, so this
+ * only normalizes storage.
+ *
+ * It lives here — a write path called once at boot — rather than inside
+ * `getFavoriteSelection`, because that read runs during render on every model
+ * surface, and a render-phase storage write is a side effect React is entitled
+ * to double-invoke or discard. Returns whether anything moved. */
+export function migrateDefaultModelSelection(): boolean {
+  const legacy = legacyFavoriteSelection();
+  if (!legacy) return false;
+  setSetting(DEFAULT_MODEL_SELECTION_KEY, legacy);
+  notify();
+  return true;
 }
 
 export function clearFavoriteSelection(): void {

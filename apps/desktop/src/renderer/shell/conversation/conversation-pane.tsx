@@ -15,6 +15,8 @@ import { ConversationHeader } from "./conversation-header";
 import {
   CONVERSATION_MIN_PX,
   CONVERSATION_RATIO_VAR,
+  WORKBENCH_COLUMN_ATTR,
+  WORKBENCH_MIN_PX,
   clampConversationRatio,
   flushPendingConversationRatioPaint,
   persistConversationRatio,
@@ -210,7 +212,7 @@ export function ConversationPane({
       const row = sectionRef.current?.parentElement;
       const conversationPane = sectionRef.current;
       const workbenchPane = row?.querySelector<HTMLElement>(
-        "[data-zeros-column-3]",
+        `[${WORKBENCH_COLUMN_ATTR}]`,
       );
       const rect = row?.getBoundingClientRect();
       const rowLeft = rect?.left ?? 0;
@@ -342,13 +344,25 @@ export function ConversationPane({
   return (
     <section
       ref={sectionRef}
+      data-zeros-column-2=""
       className={cn(
         CONVERSATION_BASE_CLS,
         workbenchCollapsed
           ? CONVERSATION_FULL_WIDTH_CLS
           : CONVERSATION_DEFAULT_WIDTH_CLS,
       )}
-      style={{ minWidth: paneMinimumSize.width }}
+      // The active split tree's physical floor, capped by what the row can
+      // actually hand over. A tree minimum wider than that (the window shrank
+      // after the split was made) would otherwise beat the max-width cap and
+      // push Workbench off the edge; `min()` lets CSS re-resolve the cap on
+      // every resize with no measurement of our own. Panes below their own
+      // floor degrade through the composer's responsive breakpoints, which is
+      // strictly better than a clipped row.
+      style={{
+        minWidth: workbenchCollapsed
+          ? `min(${paneMinimumSize.width}px, 100%)`
+          : `min(${paneMinimumSize.width}px, calc(100% - ${WORKBENCH_MIN_PX}px))`,
+      }}
       aria-label="Agent Workspace"
     >
       {/* The per-workspace bar (project › workspace breadcrumb +

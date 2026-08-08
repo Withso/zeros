@@ -425,6 +425,32 @@ describe("updateSettingsFile", () => {
     ).toBe("a");
   });
 
+  it("keeps comment-preserving writes for a float the round trip reformats", () => {
+    // The guard compares the PARSED patch against the plain JS doc, so a
+    // faithful representation change must still compare equal — otherwise a
+    // correct patch is discarded and this write loses the file's comments.
+    // `2` written into a float field comes back as `2` from a `2.0` literal.
+    const file = path.join(dir, "settings.toml");
+    writeFileSync(
+      file,
+      ["# keep me", "[models.claude_code]", "budget_cap_usd = 1.5", ""].join(
+        "\n",
+      ),
+      "utf8",
+    );
+    updateSettingsFile(
+      file,
+      { models: { claude_code: { budget_cap_usd: 2 } } },
+      { schemaUrl: null },
+    );
+    const text = readFileSync(file, "utf8");
+    expect(text).toContain("# keep me");
+    expect(
+      (readSettingsFile(file).doc.models as { claude_code: unknown })
+        .claude_code,
+    ).toEqual({ budget_cap_usd: 2 });
+  });
+
   it("falls back to a full rewrite when existingText can't be patched (never throws)", () => {
     const file = path.join(dir, "settings.toml");
     expect(() =>

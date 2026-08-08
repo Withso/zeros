@@ -19,10 +19,12 @@ import {
   canSplitPaneTree,
   canSplitPaneDimension,
   clampPaneSplitRatio,
+  growablePaneSurfaceWidth,
   paneTreeHasDirection,
   paneTreeMinimumSize,
   paneTreeMinimumSizeAfterSplit,
 } from "../pane-portal-store";
+import { WORKBENCH_MIN_PX } from "../pane-sizing";
 
 describe("chat pane width floors", () => {
   it("keeps both the conversation column and every split chat pane at 360px", () => {
@@ -116,13 +118,15 @@ describe("chat pane width floors", () => {
     );
   });
 
-  it("allows the first right split to bootstrap even before 726px is visible", () => {
+  it("lets the first right split grow into workbench's surrenderable width", () => {
     const root = { type: "leaf" as const, id: "only" };
     expect(paneTreeHasDirection(root, "row")).toBe(false);
     expect(paneTreeMinimumSizeAfterSplit(root, "only", "row")).toEqual({
       width: 726,
       height: 160,
     });
+    // 500px surface today, workbench sitting at 500 of which 300 is surrenderable
+    // above its 200px floor → 800px reachable, so the 726px tree fits.
     expect(
       canSplitPaneTree({
         root,
@@ -130,8 +134,61 @@ describe("chat pane width floors", () => {
         direction: "row",
         containerWidth: 500,
         containerHeight: 800,
+        growableWidth: growablePaneSurfaceWidth(500, 500, WORKBENCH_MIN_PX),
       }),
     ).toBe(true);
+  });
+
+  // The bootstrap exception is bounded by REACHABLE space. On a minimum-width
+  // window (840 − 248px repository nav = 592px row) workbench is already at its
+  // 200px floor, so the conversation column can never reach 726px: offering the
+  // split there produced a clipped row that the seam then refused to drag back.
+  it("refuses the first right split when the row can never fit the result", () => {
+    const root = { type: "leaf" as const, id: "only" };
+    expect(
+      canSplitPaneTree({
+        root,
+        targetPaneId: "only",
+        direction: "row",
+        containerWidth: 392,
+        containerHeight: 800,
+        growableWidth: growablePaneSurfaceWidth(392, 200, WORKBENCH_MIN_PX),
+      }),
+    ).toBe(false);
+    // A collapsed workbench has nothing to surrender either — the conversation
+    // column already owns the whole row.
+    expect(
+      canSplitPaneTree({
+        root,
+        targetPaneId: "only",
+        direction: "row",
+        containerWidth: 592,
+        containerHeight: 800,
+        growableWidth: growablePaneSurfaceWidth(592, 0, WORKBENCH_MIN_PX),
+      }),
+    ).toBe(false);
+    // Unmeasured geometry proves nothing, so it cannot authorize a split.
+    expect(
+      canSplitPaneTree({
+        root,
+        targetPaneId: "only",
+        direction: "row",
+        containerWidth: Number.NaN,
+        containerHeight: Number.NaN,
+      }),
+    ).toBe(false);
+  });
+
+  it("counts only workbench's slack above its own floor as growth room", () => {
+    expect(growablePaneSurfaceWidth(400, 600, WORKBENCH_MIN_PX)).toBe(800);
+    expect(growablePaneSurfaceWidth(400, 200, WORKBENCH_MIN_PX)).toBe(400);
+    expect(growablePaneSurfaceWidth(400, 120, WORKBENCH_MIN_PX)).toBe(400);
+    expect(growablePaneSurfaceWidth(400, Number.NaN, WORKBENCH_MIN_PX)).toBe(
+      400,
+    );
+    expect(
+      growablePaneSurfaceWidth(Number.NaN, 600, WORKBENCH_MIN_PX),
+    ).toBeNaN();
   });
 
   it("also bootstraps the first right split from a vertical-only layout", () => {
@@ -151,6 +208,7 @@ describe("chat pane width floors", () => {
         direction: "row",
         containerWidth: 360,
         containerHeight: 326,
+        growableWidth: growablePaneSurfaceWidth(360, 566, WORKBENCH_MIN_PX),
       }),
     ).toBe(true);
   });

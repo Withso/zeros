@@ -29,7 +29,7 @@
 // subprocess at composer-focus time (handled by AgentChat).
 // ──────────────────────────────────────────────────────────
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef } from "react";
 import {
   useChatById,
   usePendingAutoSend,
@@ -43,7 +43,7 @@ import {
 import { useSessionsStore } from "../../features/agent/sessions-store";
 import { useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { AgentChat } from "../../features/agent/agent-chat";
-import { envForChat } from "../../features/agent/model-catalog";
+import { agentFamily, envForChat } from "../../features/agent/model-catalog";
 import { agentAppliesConfigLive } from "../../features/agent/live-config-support";
 import { useDefaultAgent } from "../../features/settings/default-agent";
 import {
@@ -51,14 +51,18 @@ import {
   useAgentsSnapshot,
 } from "../../features/agent/agents-cache";
 import { useEnabledAgents } from "../../features/agent/enabled-agents";
-import { ZerosSpinner } from "../../shared/ui/loading";
 import { isRemovedAgent } from "../../features/agent/agent-runnable";
 import { AgentRemovedPanel } from "../agent-removed-panel";
 import { NoFolderPanel } from "../no-folder-panel";
 import { useChatCwd } from "../use-chat-cwd";
 import { useWorkspaceProvisioning } from "../../state/pending-workspaces";
 import { finishPreparedChatView } from "./chat-intent";
-import { resolveAutoBindChatSettings } from "./auto-bind-chat";
+import {
+  rememberProvisionalBinding,
+  resolveAutoBindChatSettings,
+  takeProvisionalBinding,
+  type PriorChatIdentity,
+} from "./auto-bind-chat";
 
 export function ChatView({
   chatId,
@@ -87,6 +91,9 @@ export function ChatView({
   // the folder the user is actually in (not the engine root — that footgun
   // is avoided because newAgentFolder is the user's selected worktree).
   const resolvedCwd = useChatCwd();
+  // A binding made before the registry answered is a guess. Correct it here —
+  // this hook outlives AutoBindAgent, which unmounts the instant it binds.
+  useProvisionalBindingReconcile(active);
 
   if (!active) {
     // EmptyComposer (the no-chat "start a new chat" landing) no longer exists
@@ -163,72 +170,55 @@ export function ChatView({
   );
 }
 
+/** The identity a repaired record carries into rebinding: its former agent
+ *  name, its resumable session, and the composer configuration that was written
+ *  in the same update as the `agentId` it lost. */
+function priorIdentityOf(chat: ChatThread): PriorChatIdentity {
+  return {
+    agentName: chat.agentName,
+    sessionId: chat.sessionId,
+    model: chat.model,
+    effort: chat.effort,
+    fast: chat.fast,
+    permissionMode: chat.permissionMode,
+    lastModeId: chat.lastModeId,
+  };
+}
+
 /** Side-effect component: when mounted with a chat that has no agentId,
- *  resolves the default and writes it back to the store. The parent then
- *  re-renders into ChatBody on the very next tick. A spinner renders during
- *  the in-flight binding (one paint against a warm snapshot).
+ *  resolves the default and writes it back to the store. The write happens in a
+ *  LAYOUT effect, so React re-renders into ChatBody before this frame paints —
+ *  the composer is the first thing the user sees, not an intermediate state.
  *
  *  The lookup priority mirrors `pickAgentForNewChat` in default-agent.ts:
  *  explicit default > Codex > Claude > Cursor > first, relaxing from
- *  enabled+runnable down to best-detected so a loaded registry ALWAYS binds —
- *  a machine with nothing signed in gets the composer's "Sign in required"
- *  flow, never a dead pane. Binding waits only for the authoritative registry
- *  and writes the agent, model, effort, Fast, and permission posture in one
- *  update. */
+ *  enabled+runnable down to best-detected so the registry ALWAYS binds — a
+ *  machine with nothing signed in gets the composer's "Sign in required" flow,
+ *  never a dead pane.
+ *
+ *  Binding does NOT wait for the live registry. The agents cache hydrates its
+ *  snapshot from localStorage at module load, so it is usually already warm;
+ *  when it is genuinely cold (true first run) the product chain resolves the
+ *  guess, {@link rememberProvisionalBinding} records it, and
+ *  {@link useProvisionalBindingReconcile} corrects it as soon as the
+ *  authoritative list lands. Holding the pane behind a spinner + timeout
+ *  instead would be exactly the hidden data waterfall AGENTS.md forbids. */
 function AutoBindAgent({ chat }: { chat: ChatThread }) {
   const dispatch = useWorkspaceDispatch();
   const { agentId: starredId } = useDefaultAgent();
   const { isEnabled } = useEnabledAgents();
   const agents = useAgentsSnapshot();
-  const sessions = useAgentSessions();
-  const bridgeStatus = useBridgeStatus();
-  // Latch so the settings update triggered below cannot make this effect
+  // Latch so the settings update this triggers cannot make the effect
   // double-write the chat on its immediate re-render.
   const boundRef = useRef(false);
-  // Flips when the registry has taken too long, which downgrades the wait from
-  // "block for the authoritative list" to "bind the product default now".
-  const [waitedOut, setWaitedOut] = useState(false);
 
-  // The cache's only routine loader lives in AgentChat — which never mounts
-  // while this chat is agentless. On a cold cache (fresh install, new dev
-  // data dir) nothing else fills the snapshot, so kick the load here or this
-  // pane sits unbound forever. Gated on a connected bridge (same idiom as
-  // settings-page) so a boot-time blip doesn't convert into a spurious `[]`
-  // registry; the status flip re-runs this. loadAgents de-dupes concurrent
-  // callers, and its failure path publishes `[]` — which the bind effect
-  // below resolves via the product fallback.
-  useEffect(() => {
-    if (agents !== null || bridgeStatus !== "connected") return;
-    void loadAgents((force) => sessions.listAgents(force)).catch(() => {
-      /* snapshot flipped to [] and emitted; the bind effect takes over */
-    });
-  }, [agents, bridgeStatus, sessions]);
-
-  // Hard ceiling on the wait. Every path above assumes the bridge eventually
-  // connects and the registry eventually answers; if neither happens — a dead
-  // engine on a first run, with no persisted snapshot to fall back on — there
-  // is nothing left to re-trigger the effects and the pane would spin forever.
-  // Binding the product default instead gives the user a live composer whose
-  // spawn error names the real problem. Comfortably longer than the
-  // agents-cache 30 s listAgents ceiling so a merely-slow probe still wins.
-  useEffect(() => {
-    if (agents !== null || boundRef.current) return;
-    const timer = setTimeout(() => setWaitedOut(true), 45_000);
-    return () => clearTimeout(timer);
-  }, [agents]);
-
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (boundRef.current) return;
-    const settings = resolveAutoBindChatSettings(
-      // An empty list resolves through the same product fallback the
-      // registry-answered-with-nothing case uses.
-      waitedOut ? (agents ?? []) : agents,
-      starredId,
-      isEnabled,
-      { agentName: chat.agentName, sessionId: chat.sessionId },
-    );
-    if (!settings) return;
     boundRef.current = true;
+    const prior = priorIdentityOf(chat);
+    // A cold snapshot means the binding is a guess; record what the chat looked
+    // like BEFORE it so the reconcile pass can re-resolve faithfully.
+    if (agents === null) rememberProvisionalBinding(chat.id, prior);
     // Several ChatViews are mounted at once in a split workspace. Updating
     // this one chat must not use HYDRATE_CHATS with `activeChatId: chat.id`:
     // an agentless chat in a background pane would steal keyboard/composer
@@ -236,26 +226,83 @@ function AutoBindAgent({ chat }: { chat: ChatThread }) {
     dispatch({
       type: "UPDATE_CHAT_SETTINGS",
       id: chat.id,
+      updates: resolveAutoBindChatSettings(agents, starredId, isEnabled, prior),
+    });
+    // Bind from the FIRST render's values deliberately. A later registry answer
+    // is applied by useProvisionalBindingReconcile, which knows to leave a
+    // started chat alone; re-running here would restamp the record underneath
+    // a user who is already typing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return null;
+}
+
+/** Replace a binding that was guessed without the registry once the
+ *  authoritative list arrives. Lives on ChatView (not AutoBindAgent, which
+ *  unmounts the moment it binds) and runs at most once per chat.
+ *
+ *  A chat that already minted a session keeps its guess: swapping the agent
+ *  under a live session is worse than an imperfect first pick, and the pill
+ *  lets the user move it. */
+function useProvisionalBindingReconcile(chat: ChatThread | null): void {
+  const dispatch = useWorkspaceDispatch();
+  const { agentId: starredId } = useDefaultAgent();
+  const { isEnabled } = useEnabledAgents();
+  const agents = useAgentsSnapshot();
+  const sessions = useAgentSessions();
+  const bridgeStatus = useBridgeStatus();
+  const chatId = chat?.kind === "chat" ? chat.id : null;
+  const boundAgentId = chat?.agentId ?? null;
+  const hasSession = Boolean(chat?.sessionId);
+
+  // The cache's only routine loader lives in AgentChat, which never mounts
+  // while a chat is agentless. On a cold cache (fresh install, new dev data
+  // dir) nothing else fills the snapshot, so kick the load here. Gated on a
+  // connected bridge (same idiom as settings-page) so a boot-time blip doesn't
+  // convert into a spurious `[]` registry; the status flip re-runs this.
+  // loadAgents de-dupes concurrent callers and its failure path publishes `[]`,
+  // which reconciles through the same product chain.
+  useEffect(() => {
+    if (agents !== null || bridgeStatus !== "connected") return;
+    void loadAgents((force) => sessions.listAgents(force)).catch(() => {
+      /* snapshot flipped to [] and emitted; the reconcile below takes over */
+    });
+  }, [agents, bridgeStatus, sessions]);
+
+  useEffect(() => {
+    if (!agents || !chatId || !boundAgentId) return;
+    const prior = takeProvisionalBinding(chatId);
+    if (!prior || hasSession) return;
+    const settings = resolveAutoBindChatSettings(
+      agents,
+      starredId,
+      isEnabled,
+      prior,
+    );
+    // The guess was right about the provider ⇒ leave the chat's model/effort/
+    // Fast alone rather than restamping identical values. Extension agents have
+    // no family, so they are compared by exact id instead of both resolving to
+    // "" and passing for each other.
+    const resolvedFamily = agentFamily(settings.agentId);
+    const sameAgent =
+      settings.agentId === boundAgentId ||
+      (resolvedFamily !== "" && resolvedFamily === agentFamily(boundAgentId));
+    if (sameAgent) return;
+    dispatch({
+      type: "UPDATE_CHAT_SETTINGS",
+      id: chatId,
       updates: settings,
     });
   }, [
     agents,
-    chat.agentName,
-    chat.id,
-    chat.sessionId,
+    boundAgentId,
+    chatId,
     dispatch,
+    hasSession,
     isEnabled,
     starredId,
-    waitedOut,
   ]);
-
-  // Registry still hydrating. Show a quiet spinner rather than a dead-blank
-  // pane so a slow first probe reads as loading, not broken.
-  return (
-    <div className="bg-bg1 flex h-full w-full items-center justify-center">
-      <ZerosSpinner size={20} />
-    </div>
-  );
 }
 
 function ChatBody({

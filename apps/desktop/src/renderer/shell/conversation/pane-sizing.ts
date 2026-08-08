@@ -39,6 +39,13 @@ export const CONVERSATION_MAX_PX = 2400;
  *  crushed mid-drag. */
 export const WORKBENCH_MIN_PX = 200;
 
+/** Marker attributes on the two columns of the conversation/workbench row.
+ *  The split gate measures Workbench's live width through them (its slack above
+ *  WORKBENCH_MIN_PX is the only room the conversation column can borrow), and
+ *  the seam drag already targets column 3 by the same name. */
+export const CONVERSATION_COLUMN_ATTR = "data-zeros-column-2";
+export const WORKBENCH_COLUMN_ATTR = "data-zeros-column-3";
+
 /** Where the ratio lives across launches. */
 export const CONVERSATION_RATIO_KEY = "zeros.column2.ratio";
 /** Pre-ratio installs persisted a pixel width here — migrated once

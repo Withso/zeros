@@ -56,6 +56,7 @@ import {
   agentSupportsEffort,
   agentSupportsFast,
   displayModelLabel,
+  effectiveEffort,
   effortLabel,
   effortLevelsFor,
   modelsForAgent,
@@ -315,18 +316,17 @@ export function AgentModelMenu({
     ? effectiveFavoriteModel(defaultAgent.id)
     : null;
 
-  const activeConfiguration: ModelConfiguration | null = (() => {
-    if (!value?.agentId || !activeModel) return null;
-    const levels = effortLevelsFor(value.agentId, activeModel, null);
-    const safe = resolveModelConfiguration(value.agentId, activeModel, null);
-    return {
-      effort:
-        levels.length === 0 || levels.includes(value.effort)
-          ? value.effort
-          : safe.effort,
-      fast: value.fast && agentSupportsFast(value.agentId, activeModel, null),
-    };
-  })();
+  // The editor shows what this exact model will actually run: `effectiveEffort`
+  // is the same clamp the composer pill's label and the spawn env apply, so a
+  // stored tier the current ladder no longer advertises reads identically in
+  // all three places instead of "Ultracode" on the pill and "Max" in here.
+  const activeConfiguration: ModelConfiguration | null =
+    value?.agentId && activeModel
+      ? {
+          effort: effectiveEffort(value.agentId, activeModel, value.effort),
+          fast: value.fast && agentSupportsFast(value.agentId, activeModel),
+        }
+      : null;
   const canConfigureActive =
     !!value?.agentId &&
     !!activeModel &&

@@ -33,7 +33,7 @@ import type {
   ChatEffort,
   ChatPermissionMode,
 } from "../../state/store";
-import { getSetting, setSetting } from "../../platform/settings";
+import { getSetting } from "../../platform/settings";
 import {
   getClaudeBudgetCapUsd,
   getClaudeFallbackModel,
@@ -204,16 +204,27 @@ function legacySelection(): FavoriteModelSelection | null {
   };
 }
 
-/** Raw user choice. Null means provider connectivity decides the fallback. */
+/** Raw user choice. Null means provider connectivity decides the fallback.
+ *
+ * PURE by contract. Every model surface calls this during render (the pill's
+ * label, the picker's ✓, Settings → Models), so normalizing the legacy keys
+ * here would make a hot selector write storage inside render. The normalizing
+ * write is one explicit boot step instead — `migrateDefaultModelSelection()` in
+ * model-favorites.ts — and resolution stays correct without it because the
+ * legacy read below is the same answer, just recomputed. */
 export function getFavoriteSelection(): FavoriteModelSelection | null {
-  const current = sanitizeSelection(
-    getSetting<unknown>(DEFAULT_MODEL_SELECTION_KEY, null),
+  return (
+    sanitizeSelection(getSetting<unknown>(DEFAULT_MODEL_SELECTION_KEY, null)) ??
+    legacySelection()
   );
-  if (current) return current;
+}
 
-  const legacy = legacySelection();
-  if (legacy) setSetting(DEFAULT_MODEL_SELECTION_KEY, legacy);
-  return legacy;
+/** The legacy-derived selection, for the one-time boot normalization in
+ * model-favorites.ts. Null when there is nothing to move across. */
+export function legacyFavoriteSelection(): FavoriteModelSelection | null {
+  if (sanitizeSelection(getSetting<unknown>(DEFAULT_MODEL_SELECTION_KEY, null)))
+    return null;
+  return legacySelection();
 }
 
 /** The raw globally selected model only when `agentId` owns it. */
@@ -398,6 +409,54 @@ export function effortLevelsFor(
   return [];
 }
 
+/** Rank of each effort tier (ladder position, low→high). */
+const EFFORT_RANK: Record<ChatEffort, number> = {
+  low: 0,
+  medium: 1,
+  high: 2,
+  xhigh: 3,
+  max: 4,
+  ultracode: 5,
+};
+
+/** High is the product floor. For a ladder without High, its highest advertised
+ * tier is the closest equivalent; a model with no knob still carries an inert
+ * `high` in ChatThread for a stable serialized shape. Re-exported by
+ * model-preferences.ts, which owns the remembered-value side. */
+export function defaultEffortForLevels(levels: ChatEffort[]): ChatEffort {
+  if (levels.includes("high")) return "high";
+  return (
+    levels.reduce<ChatEffort | null>(
+      (highest, level) =>
+        highest === null || EFFORT_RANK[level] > EFFORT_RANK[highest]
+          ? level
+          : highest,
+      null,
+    ) ?? "high"
+  );
+}
+
+/** The effort this exact model can actually run: the stored tier when its
+ * ladder advertises it, else that ladder's default. A model with no knob keeps
+ * the stored value (nothing to clamp to).
+ *
+ * ONE clamp, shared by the composer pill's label, the model menu's editor, and
+ * the spawn env — the same reason `resolveModelOption` owns the null-model
+ * question. A stored tier can go off-ladder without any user action (a catalog
+ * update retires a tier, a hand-edited settings.toml), and the surfaces used to
+ * disagree about it: the pill read `ChatThread.effort` verbatim and rendered
+ * "Ultracode" while the popover it opened showed and applied "Max". */
+export function effectiveEffort(
+  agentId: string | null,
+  model: string | null,
+  effort: ChatEffort,
+  initialize: InitializeResponse | null = null,
+): ChatEffort {
+  const levels = effortLevelsFor(agentId, model, initialize);
+  if (levels.length === 0 || levels.includes(effort)) return effort;
+  return defaultEffortForLevels(levels);
+}
+
 /** Whether the agent+model supports Fast mode (lower-latency inference at
  *  higher token cost). Advertised per-model via the resolved option's
  *  `supportsFast` when present; otherwise the family heuristic: Claude Opus
@@ -445,7 +504,9 @@ export interface ConfiguredModelLabelParts {
 /** The semantic parts of the composer's one model label. Keeping configuration
  * separate lets renderers visually subordinate effort/Fast without splitting
  * them back into independent controls. Capability-gating here prevents stale
- * stored flags from claiming a model supports an option it cannot run. */
+ * stored flags from claiming a model supports an option it cannot run, and the
+ * effort is clamped through `effectiveEffort` so the label names the tier the
+ * menu edits and the engine receives — never a retired one. */
 export function configuredModelLabelParts(
   agentId: string | null,
   model: string | null,
@@ -456,7 +517,9 @@ export function configuredModelLabelParts(
 ): ConfiguredModelLabelParts {
   const metadata: string[] = [];
   if (agentSupportsEffort(agentId, model, initialize)) {
-    metadata.push(effortLabel(agentId, effort));
+    metadata.push(
+      effortLabel(agentId, effectiveEffort(agentId, model, effort, initialize)),
+    );
   }
   if (fast && agentSupportsFast(agentId, model, initialize)) {
     metadata.push("Fast");
@@ -1032,7 +1095,22 @@ export function envForChatSettings(args: {
     resolveModelOption(args.agentId, null, args.initialize)?.value ??
     null;
   if (model && modelEnv) env[modelEnv] = model;
-  env[EFFORT_ENV_VAR] = args.effort;
+  // Send the tier this model can actually run. The pill's label and the menu's
+  // editor apply the same clamp, so a stored tier that went off-ladder (retired
+  // by a catalog update, hand-edited into settings.toml) can never make the
+  // engine run something other than what is on screen. An unknown string is
+  // passed through untouched — an extension agent owns its own vocabulary.
+  env[EFFORT_ENV_VAR] = Object.prototype.hasOwnProperty.call(
+    EFFORT_RANK,
+    args.effort,
+  )
+    ? effectiveEffort(
+        args.agentId,
+        model,
+        args.effort as ChatEffort,
+        args.initialize,
+      )
+    : args.effort;
   // Only emit the fast flag when ON, so an off→off toggle never perturbs the
   // env tuple (the respawn key) for agents that don't support it.
   if (args.fast) env[FAST_MODE_ENV_VAR] = "1";

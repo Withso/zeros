@@ -47,6 +47,7 @@ import {
 import { AgentSessionsProvider } from "./features/agent/sessions-provider";
 import { useAgentSessions } from "./features/agent/sessions-hooks";
 import { loadAgents } from "./features/agent/agents-cache";
+import { migrateDefaultModelSelection } from "./features/agent/model-favorites";
 import { UpdateNotifications } from "./features/update/update-notifications";
 import { useCopyLogsHotkey } from "./shell/use-copy-logs-hotkey";
 import { useNewTabHotkeys } from "./shell/use-new-chat-hotkey";
@@ -697,6 +698,14 @@ function ReloadOnProjectChange() {
     // (e.g. factory-droid after it was removed) — ungated + idempotent.
     void pruneRetiredProviders(bridge);
   }, [bridge]);
+
+  // Normalize the pre-redesign default-agent + per-family favorite pair into
+  // the one atomic model selection. This is the ONLY writer of that migration:
+  // getFavoriteSelection() is read during render by every model surface, so it
+  // stays pure and simply recomputes the legacy answer until this lands.
+  useEffect(() => {
+    migrateDefaultModelSelection();
+  }, []);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;

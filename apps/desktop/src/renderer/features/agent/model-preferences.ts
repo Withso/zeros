@@ -14,10 +14,15 @@ import type { ChatEffort } from "../../state/store";
 import {
   agentFamily,
   agentSupportsFast,
+  defaultEffortForLevels,
   effortLevelsFor,
   modelsForAgent,
 } from "./model-catalog";
 import { effectiveFavoriteModel } from "./model-favorites";
+
+/** Re-exported from model-catalog, which owns it so the label/env clamp
+ * (`effectiveEffort`) and this remembered-value default can never diverge. */
+export { defaultEffortForLevels };
 
 export const MODEL_PREFERENCES_KEY = "model-preferences-by-model";
 export const MAX_MODEL_PREFERENCES = 128;
@@ -44,15 +49,6 @@ const VALID_EFFORTS = new Set<ChatEffort>([
   "max",
   "ultracode",
 ]);
-const EFFORT_RANK: Record<ChatEffort, number> = {
-  low: 0,
-  medium: 1,
-  high: 2,
-  xhigh: 3,
-  max: 4,
-  ultracode: 5,
-};
-
 function preferenceOwner(agentId: string | null | undefined): string {
   const family = agentFamily(agentId ?? null);
   if (family) return family;
@@ -145,22 +141,6 @@ export function getModelPreference(
   if (hit.effort) result.effort = hit.effort;
   if (typeof hit.fast === "boolean") result.fast = hit.fast;
   return result;
-}
-
-/** High is the product floor. For a future ladder without High, its highest
- * advertised tier is the closest equivalent; a model with no knob still
- * carries inert `high` in ChatThread for a stable serialized shape. */
-export function defaultEffortForLevels(levels: ChatEffort[]): ChatEffort {
-  if (levels.includes("high")) return "high";
-  return (
-    levels.reduce<ChatEffort | null>(
-      (highest, level) =>
-        highest === null || EFFORT_RANK[level] > EFFORT_RANK[highest]
-          ? level
-          : highest,
-      null,
-    ) ?? "high"
-  );
 }
 
 /** Resolve a safe configuration from memory and current model capabilities. */

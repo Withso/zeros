@@ -177,7 +177,14 @@ type Listener = () => void;
 const legacyListeners = new Set<Listener>();
 
 function notifyLegacy(): void {
-  for (const listener of legacyListeners) listener();
+  for (const listener of legacyListeners) {
+    try {
+      listener();
+    } catch {
+      // Matches model-favorites/new-chat-defaults: one throwing subscriber must
+      // not strand the remaining mounts un-synced, nor escape setDefaultAgentId.
+    }
+  }
 }
 
 /** React hook returning the current default + a toggle/set helper.

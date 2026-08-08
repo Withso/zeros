@@ -16,6 +16,7 @@ import {
   effectiveFavoriteModel,
   getFavoriteSelection,
   getFavoriteModel,
+  migrateDefaultModelSelection,
   setFavoriteModel,
 } from "../model-favorites";
 import { defaultFavoriteModelFor } from "../model-catalog";
@@ -250,6 +251,33 @@ describe("favorite models — catalog fallbacks + user stars", () => {
     setFavoriteModel("claude", null);
     expect(getFavoriteModel("claude")).toBeNull();
     expect(effectiveFavoriteModel("claude")).toBe("claude-opus-5[1m]");
+  });
+
+  it("reads the legacy pair without writing, then normalizes it once at boot", () => {
+    // Every model surface calls this during render, so the read must be pure —
+    // a render-phase localStorage write is a side effect React may double-run
+    // or discard. The boot step is the only writer.
+    setSetting("default-agent-id", "claude");
+    setSetting("favorite-models-by-family", { claude: "claude-fable-5[1m]" });
+    expect(getFavoriteSelection()).toEqual({
+      agentId: "claude",
+      model: "claude-fable-5[1m]",
+    });
+    expect(getSetting("default-model-selection", null)).toBeNull();
+
+    expect(migrateDefaultModelSelection()).toBe(true);
+    expect(getSetting("default-model-selection", null)).toEqual({
+      agentId: "claude",
+      model: "claude-fable-5[1m]",
+    });
+    // Idempotent, and it never overwrites a real selection.
+    expect(migrateDefaultModelSelection()).toBe(false);
+    setFavoriteModel("codex", "gpt-5.6-terra");
+    expect(migrateDefaultModelSelection()).toBe(false);
+    expect(getFavoriteSelection()).toEqual({
+      agentId: "codex",
+      model: "gpt-5.6-terra",
+    });
   });
 
   it("ignores a stale star for a since-retired model id (catalog update)", () => {

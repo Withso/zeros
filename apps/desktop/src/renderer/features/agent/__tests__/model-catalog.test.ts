@@ -12,6 +12,8 @@ import {
   modelEnvVarForAgent,
   agentSupportsEffort,
   agentSupportsFast,
+  defaultEffortForLevels,
+  effectiveEffort,
   effortLevelsFor,
   effortLabel,
   displayModelLabel,
@@ -322,6 +324,68 @@ describe("configuredModelLabel (single composer model pill)", () => {
         true,
       ),
     ).toBe("Composer 2.5 Fast");
+  });
+
+  // The label used to render ChatThread.effort verbatim while the popover it
+  // opens clamped the same value, so a tier the ladder had dropped read
+  // "Ultracode" on the pill and "High" in the editor.
+  it("names the tier the model can actually run, not a retired one", () => {
+    expect(
+      configuredModelLabel(
+        "codex",
+        "gpt-5.6-luna",
+        "GPT-5.6 Luna",
+        "ultracode",
+        false,
+      ),
+    ).toBe("GPT-5.6 Luna High");
+    expect(
+      configuredModelLabel(
+        "cursor",
+        "grok-4.5",
+        "Cursor Grok 4.5",
+        "max",
+        false,
+      ),
+    ).toBe("Cursor Grok 4.5 High");
+  });
+});
+
+describe("effectiveEffort (the one stale-tier clamp)", () => {
+  it("keeps a tier the ladder advertises", () => {
+    expect(effectiveEffort("codex", "gpt-5.6-sol", "ultracode")).toBe(
+      "ultracode",
+    );
+    expect(effectiveEffort("claude", "claude-opus-5[1m]", "max")).toBe("max");
+  });
+
+  it("falls back to the ladder's own default when the tier is gone", () => {
+    expect(effectiveEffort("codex", "gpt-5.6-luna", "ultracode")).toBe("high");
+    expect(effectiveEffort("codex", "gpt-5.5", "max")).toBe("high");
+    expect(effectiveEffort("cursor", "grok-4.5", "xhigh")).toBe("high");
+  });
+
+  it("leaves a knob-less model's inert value alone", () => {
+    // Haiku advertises an empty ladder: there is no tier to clamp toward, and
+    // ChatThread still carries a value for a stable serialized shape.
+    expect(effectiveEffort("claude", "claude-haiku-4-5", "max")).toBe("max");
+  });
+
+  it("agrees with the remembered-value default for every catalog ladder", () => {
+    // Both sides must resolve "no usable stored tier" identically — the label
+    // clamp and new-chat memory share defaultEffortForLevels for that reason.
+    for (const [agentId, model] of [
+      ["claude", "claude-opus-5[1m]"],
+      ["codex", "gpt-5.6-luna"],
+      ["cursor", "grok-4.5"],
+    ] as const) {
+      const levels = effortLevelsFor(agentId, model, null);
+      expect(effectiveEffort(agentId, model, "ultracode")).toBe(
+        levels.includes("ultracode")
+          ? "ultracode"
+          : defaultEffortForLevels(levels),
+      );
+    }
   });
 });
 
@@ -835,5 +899,35 @@ describe("a null ChatThread.model means ONE model everywhere", () => {
     );
     // Fast capability follows the starred model, not the head.
     expect(agentSupportsFast("claude", null, null)).toBe(true);
+  });
+
+  it("sends the same clamped effort the pill names", () => {
+    // Luna's ladder has no `ultracode`. The label clamps it, so the env must
+    // too — otherwise the fix moves the disagreement instead of removing it.
+    const env = envForChatSettings({
+      agentId: "codex",
+      initialize: null,
+      model: "gpt-5.6-luna",
+      effort: "ultracode",
+    });
+    expect(env[EFFORT_ENV_VAR]).toBe("high");
+    expect(
+      configuredModelLabelParts(
+        "codex",
+        "gpt-5.6-luna",
+        "GPT-5.6 Luna",
+        "ultracode",
+        false,
+      ).metadata,
+    ).toEqual([effortLabel("codex", "high")]);
+    // An extension agent's own vocabulary is passed through untouched.
+    expect(
+      envForChatSettings({
+        agentId: "mystery-agent",
+        initialize: null,
+        model: null,
+        effort: "turbo",
+      })[EFFORT_ENV_VAR],
+    ).toBe("turbo");
   });
 });
