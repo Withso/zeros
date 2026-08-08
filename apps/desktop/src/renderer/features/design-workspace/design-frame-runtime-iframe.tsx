@@ -40,6 +40,8 @@ interface DesignFrameRuntimeIframeProps {
   selected: boolean;
   /** A bounded first window receives speculative thumbnail captures. */
   autoCapture: boolean;
+  /** Workspace-owned token mode applied inside the opaque frame runtime. */
+  theme: string | null;
 }
 
 // --- WORKFLOWS ---
@@ -70,12 +72,16 @@ export function DesignFrameRuntimeIframe({
   active,
   selected,
   autoCapture,
+  theme,
 }: DesignFrameRuntimeIframeProps) {
   const nativeRuntime = useNativeRuntime();
   // Owns the exact WindowProxy request connection for this iframe instance.
   const connectionRef = useRef<DesignFrameRuntimeConnection | null>(null);
   // The loaded node creates a fresh private MessagePort on every navigation.
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  // Tracks the exact load whose onLoad established a usable runtime. React
+  // StrictMode can replay passive-effect cleanup without replaying the DOM ref.
+  const loadedKeyRef = useRef<string | null>(null);
   // Prevents duplicate raster work for the same source/runtime revision.
   const captureKeyRef = useRef<string | null>(null);
   // Cancels a queued idle capture when the frame becomes inactive or reloads.
@@ -88,6 +94,7 @@ export function DesignFrameRuntimeIframe({
     active,
     selected,
     autoCapture,
+    theme,
   });
   latestRef.current = {
     workspaceId,
@@ -96,7 +103,9 @@ export function DesignFrameRuntimeIframe({
     active,
     selected,
     autoCapture,
+    theme,
   };
+  const loadKey = `${workspaceId}\u0000${frame.file}\u0000${frame.sourceVersion}`;
 
   /** Publish authoritative runtime state and schedule bounded real-pixel capture. */
   const handleSnapshot = useCallback((snapshot: DesignRuntimeSnapshot) => {
@@ -144,19 +153,45 @@ export function DesignFrameRuntimeIframe({
     connectionRef.current?.destroy();
     connectionRef.current = null;
     iframeRef.current = node;
+    if (!node) loadedKeyRef.current = null;
   }, []);
 
+  const connectCurrentIframe = useCallback(() => {
+    const node = iframeRef.current;
+    if (!node) return;
+    connectionRef.current?.destroy();
+    const connection = connectDesignFrameRuntime(
+      workspaceId,
+      frame.file,
+      frame.sourceVersion,
+      node,
+      { onSnapshot: handleSnapshot },
+    );
+    connectionRef.current = connection;
+    if (!latestRef.current.active) return;
+    void connection
+      .setTheme(latestRef.current.theme)
+      .then(handleSnapshot)
+      .catch(() => {
+        // A source navigation can replace this exact connection while its
+        // first snapshot is queued; the next load owns the new channel.
+      });
+  }, [frame.file, frame.sourceVersion, handleSnapshot, workspaceId]);
+
   // Navigation/collapse tears down pending requests and idle raster work.
-  useEffect(
-    () => () => {
+  // If StrictMode already delivered onLoad, its second effect setup restores
+  // the connection that the simulated cleanup intentionally destroyed.
+  useEffect(() => {
+    if (loadedKeyRef.current === loadKey && connectionRef.current === null) {
+      connectCurrentIframe();
+    }
+    return () => {
       cancelCaptureRef.current?.();
       cancelCaptureRef.current = null;
       connectionRef.current?.destroy();
       connectionRef.current = null;
-      iframeRef.current = null;
-    },
-    [],
-  );
+    };
+  }, [connectCurrentIframe, loadKey]);
 
   // A retained hidden frame deliberately ignores runtime work. Becoming
   // active—or entering the selected/thumbnail capture set—revalidates its
@@ -172,6 +207,18 @@ export function DesignFrameRuntimeIframe({
         // A source reload racing activation publishes its own ready event.
       });
   }, [active, autoCapture, handleSnapshot, selected]);
+
+  useEffect(() => {
+    if (!active) return;
+    const connection = connectionRef.current;
+    if (!connection) return;
+    void connection
+      .setTheme(theme)
+      .then(handleSnapshot)
+      .catch(() => {
+        // A source navigation racing a theme change is repaired by onLoad.
+      });
+  }, [active, handleSnapshot, theme]);
 
   const protocolSource = nativeRuntime.ready
     ? designProtocolFrameUrl({
@@ -202,25 +249,8 @@ export function DesignFrameRuntimeIframe({
       className="bg-bg1 pointer-events-none block size-full border-0"
       aria-label={`${frame.title} design frame`}
       onLoad={() => {
-        const node = iframeRef.current;
-        if (!node) return;
-        connectionRef.current?.destroy();
-        const connection = connectDesignFrameRuntime(
-          workspaceId,
-          frame.file,
-          frame.sourceVersion,
-          node,
-          { onSnapshot: handleSnapshot },
-        );
-        connectionRef.current = connection;
-        if (!latestRef.current.active) return;
-        void connection
-          .getSnapshot()
-          .then(handleSnapshot)
-          .catch(() => {
-            // A source navigation can replace this exact connection while its
-            // first snapshot is queued; the next load owns the new channel.
-          });
+        loadedKeyRef.current = loadKey;
+        connectCurrentIframe();
       }}
     />
   );

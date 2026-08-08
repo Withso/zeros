@@ -9,6 +9,8 @@
 
 export const DESIGN_RUNTIME_PROTOCOL = "zeros-design-runtime";
 export const DESIGN_RUNTIME_VERSION = 2;
+/** Shared renderer/engine bound for one additive design selection. */
+export const DESIGN_SELECTION_NODE_LIMIT = 32;
 
 export type DesignRuntimeErrorCode =
   | "BAD_REQUEST"
@@ -40,17 +42,28 @@ export interface DesignRuntimeTreeNode {
   children: DesignRuntimeTreeNode[];
 }
 
+export type DesignRuntimeHitMode =
+  | "top-level"
+  | "deepest"
+  | "preserve"
+  | "descend";
+
 export interface DesignRuntimeNodeDetails {
   sourceVersion: string;
   oid: string;
   tag: string;
   name: string;
   text: string | null;
+  /** True only when replacing this node's text cannot discard child layers. */
+  textEditable?: boolean;
   selector: string;
   visible: boolean;
   breadcrumb: string[];
   rect: DesignRuntimeRect;
   styles: Record<string, string>;
+  /** Computed-style keys with a direct active declaration on this element.
+   * Omitted by older runtimes; inspector chrome treats omission as unknown. */
+  authoredStyleProperties?: string[];
 }
 
 export interface DesignRuntimeWarning {
@@ -103,13 +116,33 @@ export interface DesignRuntimeMatchedStyles {
   truncated: boolean;
 }
 
+export interface DesignRuntimeMotionKeyframe {
+  offset: number;
+  styles: Record<string, string>;
+}
+
+export interface DesignRuntimeMotionPreview {
+  keyframes: DesignRuntimeMotionKeyframe[];
+  duration: number;
+  delay: number;
+  easing: string;
+  iterations: number;
+  direction: "normal" | "reverse" | "alternate" | "alternate-reverse";
+  fill: "none" | "forwards" | "backwards" | "both";
+  currentTime: number;
+  playing: boolean;
+}
+
 export type DesignRuntimeMethod =
   | "getSnapshot"
   | "getElementAtLoc"
+  | "getElementsInRect"
   | "getNodeDetails"
   | "getMatchedStyles"
   | "setNodeVisibility"
+  | "setTheme"
   | "previewStyles"
+  | "previewMotion"
   | "clearPreviewStyles"
   | "captureScreenshot";
 
@@ -141,10 +174,13 @@ const DESIGN_RUNTIME_ERROR_CODES = new Set<DesignRuntimeErrorCode>([
 const DESIGN_RUNTIME_METHODS = new Set<DesignRuntimeMethod>([
   "getSnapshot",
   "getElementAtLoc",
+  "getElementsInRect",
   "getNodeDetails",
   "getMatchedStyles",
   "setNodeVisibility",
+  "setTheme",
   "previewStyles",
+  "previewMotion",
   "clearPreviewStyles",
   "captureScreenshot",
 ]);
@@ -250,6 +286,8 @@ function isRuntimeNodeDetails(
     typeof value.tag === "string" &&
     typeof value.name === "string" &&
     (value.text === null || typeof value.text === "string") &&
+    (value.textEditable === undefined ||
+      typeof value.textEditable === "boolean") &&
     typeof value.selector === "string" &&
     typeof value.visible === "boolean" &&
     Array.isArray(value.breadcrumb) &&
@@ -257,7 +295,13 @@ function isRuntimeNodeDetails(
     value.breadcrumb.every((part) => typeof part === "string") &&
     isRuntimeRect(value.rect) &&
     Object.keys(value.styles).length <= 128 &&
-    Object.values(value.styles).every((style) => typeof style === "string")
+    Object.values(value.styles).every((style) => typeof style === "string") &&
+    (value.authoredStyleProperties === undefined ||
+      (Array.isArray(value.authoredStyleProperties) &&
+        value.authoredStyleProperties.length <= 128 &&
+        value.authoredStyleProperties.every(
+          (property) => typeof property === "string" && property.length <= 64,
+        )))
   );
 }
 
@@ -416,21 +460,45 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   var MAX_AUDIT_WARNINGS = 128;
   var MAX_MATCHED_DECLARATIONS = 256;
   var MAX_ACTIVE_REQUESTS = 128;
+  var MAX_TREE_NODES = 20000;
+  // Keep structured-clone payload nesting well below Chromium's IPC depth
+  // ceiling; the outer protocol envelope adds several more object levels.
+  var MAX_TREE_DEPTH = 32;
+  var MAX_AUDIT_ELEMENTS = 5000;
   // Keep worst-case RGBA → PNG base64 within the engine's 12 MB wire cap.
   var MAX_CAPTURE_PIXELS = 2000000;
   var STYLE_PROPERTIES = [
     "position", "left", "top", "right", "bottom", "width", "height",
-    "minWidth", "minHeight", "maxWidth", "maxHeight", "boxSizing", "display",
-    "flexDirection", "gap", "rowGap", "columnGap",
+    "minWidth", "minHeight", "maxWidth", "maxHeight", "boxSizing", "zIndex",
+    "display", "visibility", "float", "clear",
+    "flexDirection", "flexWrap", "flexGrow", "flexShrink", "flexBasis", "order",
+    "gap", "rowGap", "columnGap", "alignItems", "alignSelf", "alignContent",
+    "justifyContent", "justifyItems", "justifySelf",
+    "gridTemplateColumns", "gridTemplateRows", "gridAutoFlow", "gridColumn", "gridRow",
     "padding", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
-    "alignItems", "justifyContent", "background", "backgroundColor",
-    "border", "borderWidth", "borderColor", "borderRadius", "color",
+    "margin", "marginTop", "marginRight", "marginBottom", "marginLeft",
+    "background", "backgroundColor", "backgroundImage", "backgroundPosition",
+    "backgroundSize", "backgroundRepeat", "backgroundBlendMode",
+    "border", "borderWidth", "borderStyle", "borderColor", "borderRadius",
+    "outline", "outlineOffset", "color",
     "fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing",
-    "textAlign", "overflow", "overflowX", "overflowY", "opacity", "boxShadow"
+    "textAlign", "textTransform", "textDecoration", "whiteSpace", "wordBreak",
+    "overflow", "overflowX", "overflowY", "aspectRatio", "objectFit", "objectPosition",
+    "opacity", "mixBlendMode", "boxShadow", "textShadow", "filter", "backdropFilter",
+    "transform", "transformOrigin", "perspective", "perspectiveOrigin",
+    "transition", "transitionProperty", "transitionDuration", "transitionTimingFunction",
+    "transitionDelay", "animation", "animationName", "animationDuration",
+    "animationTimingFunction", "animationDelay", "animationIterationCount",
+    "animationDirection", "animationFillMode", "cursor", "pointerEvents"
   ];
+  var NON_TEXT_EDITABLE_TAGS = new Set([
+    "area", "audio", "base", "br", "canvas", "col", "embed", "hr",
+    "iframe", "img", "input", "link", "meta", "object", "param", "path",
+    "source", "svg", "track", "video", "wbr"
+  ]);
   var METHODS = [
-    "getSnapshot", "getElementAtLoc", "getNodeDetails", "getMatchedStyles",
-    "setNodeVisibility", "previewStyles", "clearPreviewStyles",
+    "getSnapshot", "getElementAtLoc", "getElementsInRect", "getNodeDetails", "getMatchedStyles",
+    "setNodeVisibility", "setTheme", "previewStyles", "previewMotion", "clearPreviewStyles",
     "captureScreenshot"
   ];
 
@@ -444,6 +512,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   var elementsByOid = new Map();
   var visibilityOverridesByOid = new Map();
   var previewStyleOverridesByOid = new Map();
+  var previewAnimationsByOid = new Map();
+  var authoredStylePropertiesCache = new WeakMap();
+  var authoredStyleRuleMetadata = null;
   var mutationTimer = null;
   var parentPort = null;
   var observer = null;
@@ -543,6 +614,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return text ? text.slice(0, 120) : null;
   }
 
+  function textEditableOf(element) {
+    return element.children.length === 0 &&
+      !NON_TEXT_EDITABLE_TAGS.has(element.tagName.toLowerCase());
+  }
+
   function nameOf(element) {
     var explicit =
       element.getAttribute("aria-label") ||
@@ -594,6 +670,105 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return styles;
   }
 
+  function cssPropertyName(property) {
+    if (property.indexOf("--") === 0) return property;
+    return property
+      .replace(/([A-Z])/g, "-$1")
+      .replace(/^ms-/, "-ms-")
+      .toLowerCase();
+  }
+
+  function declarationProperties(style) {
+    var declarations = [];
+    if (!style) return declarations;
+    // CSSOM enumeration may expand authored shorthands into longhands. Parsing
+    // normalized declaration text preserves padding as padding, while a real
+    // background-color cannot turn into a synthetic background shorthand.
+    var text = String(style.cssText || "");
+    var parts = [];
+    var current = "";
+    var depth = 0;
+    var quote = "";
+    for (var textIndex = 0; textIndex < text.length; textIndex += 1) {
+      var character = text[textIndex];
+      if (quote) {
+        current += character;
+        if (character === quote && text[textIndex - 1] !== "\\") quote = "";
+        continue;
+      }
+      if (character === '"' || character === "'") quote = character;
+      if (character === "(") depth += 1;
+      if (character === ")") depth = Math.max(0, depth - 1);
+      if (character === ";" && depth === 0) {
+        if (current.trim()) parts.push(current);
+        current = "";
+      } else {
+        current += character;
+      }
+    }
+    if (current.trim()) parts.push(current);
+    for (var index = 0; index < parts.length; index += 1) {
+      var colon = parts[index].indexOf(":");
+      if (colon < 1) continue;
+      var property = cssPropertyName(parts[index].slice(0, colon).trim());
+      if (
+        property.length <= 64 &&
+        /^(?:--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(property)
+      ) {
+        declarations.push(property);
+      }
+    }
+    return declarations;
+  }
+
+  function styleRuleMetadata() {
+    if (authoredStyleRuleMetadata !== null) return authoredStyleRuleMetadata;
+    var metadata = [];
+    function visitRules(rules, active) {
+      for (var ruleIndex = 0; ruleIndex < rules.length; ruleIndex += 1) {
+        var rule = rules[ruleIndex];
+        if (rule.type === CSSRule.STYLE_RULE && rule.selectorText && rule.style) {
+          metadata.push({
+            selector: rule.selectorText,
+            active: active,
+            declarations: declarationProperties(rule.style)
+          });
+        } else if (rule.cssRules) {
+          visitRules(rule.cssRules, active && conditionalRuleActive(rule));
+        }
+      }
+    }
+    for (var sheetIndex = 0; sheetIndex < document.styleSheets.length; sheetIndex += 1) {
+      try {
+        visitRules(document.styleSheets[sheetIndex].cssRules || [], true);
+      } catch (_error) {
+        // Inaccessible sheets cannot provide trustworthy authored metadata.
+      }
+    }
+    authoredStyleRuleMetadata = metadata;
+    return metadata;
+  }
+
+  function authoredStylePropertiesOf(element) {
+    var cached = authoredStylePropertiesCache.get(element);
+    if (cached) return cached.slice();
+    var authored = new Set(declarationProperties(element.style));
+    var rules = styleRuleMetadata();
+    for (var ruleIndex = 0; ruleIndex < rules.length; ruleIndex += 1) {
+      var rule = rules[ruleIndex];
+      if (!rule.active || rule.declarations.length === 0) continue;
+      var matches = false;
+      try { matches = element.matches(rule.selector); } catch (_error) { matches = false; }
+      if (!matches) continue;
+      for (var propertyIndex = 0; propertyIndex < rule.declarations.length; propertyIndex += 1) {
+        authored.add(rule.declarations[propertyIndex]);
+      }
+    }
+    var result = Array.from(authored).slice(0, 128);
+    authoredStylePropertiesCache.set(element, result);
+    return result.slice();
+  }
+
   function refreshElementMap() {
     var next = new Map();
     var root = document.body || document.documentElement;
@@ -615,12 +790,23 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     });
   }
 
-  function treeNode(element) {
+  function treeNode(element, depth, budget) {
+    if (budget.count >= MAX_TREE_NODES) {
+      budget.truncated = true;
+      return null;
+    }
+    budget.count += 1;
     var oid = oidOf(element);
     var children = [];
-    for (var index = 0; index < element.children.length; index += 1) {
-      var child = element.children[index];
-      if (oidOf(child)) children.push(treeNode(child));
+    if (depth >= MAX_TREE_DEPTH) {
+      if (element.children.length > 0) budget.truncated = true;
+    } else {
+      for (var index = 0; index < element.children.length; index += 1) {
+        var child = element.children[index];
+        if (!oidOf(child)) continue;
+        var childNode = treeNode(child, depth + 1, budget);
+        if (childNode) children.push(childNode);
+      }
     }
     return {
       oid: oid,
@@ -656,11 +842,13 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       tag: element.tagName.toLowerCase(),
       name: nameOf(element),
       text: directText(element),
+      textEditable: textEditableOf(element),
       selector: "[data-oid=\"" + escaped + "\"]",
       visible: visibleOf(element),
       breadcrumb: breadcrumbOf(element),
       rect: rectOf(element),
-      styles: stylesOf(element)
+      styles: stylesOf(element),
+      authoredStyleProperties: authoredStylePropertiesOf(element)
     };
   }
 
@@ -673,11 +861,13 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       tag: element.tagName.toLowerCase(),
       name: nameOf(element),
       text: directText(element),
+      textEditable: false,
       selector: element === document.body ? "body" : "html",
       visible: visibleOf(element),
       breadcrumb: [],
       rect: rectOf(element),
-      styles: stylesOf(element)
+      styles: stylesOf(element),
+      authoredStyleProperties: authoredStylePropertiesOf(element)
     };
   }
 
@@ -745,6 +935,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   function auditWarnings() {
     var warnings = [];
     var seen = new Set();
+    var auditedElements = 0;
     function add(ruleId, oid, message, fix) {
       var key = ruleId + "\u0000" + oid;
       if (seen.has(key) || warnings.length >= MAX_AUDIT_WARNINGS) return;
@@ -752,6 +943,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       warnings.push({ ruleId: ruleId, oid: oid, message: message, fix: fix });
     }
     elementsByOid.forEach(function (element, oid) {
+      if (auditedElements >= MAX_AUDIT_ELEMENTS) return;
+      auditedElements += 1;
       if (!visibleOf(element)) return;
       var computed = getComputedStyle(element);
       if (
@@ -805,27 +998,53 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         }
       }
     });
+    if (elementsByOid.size > MAX_AUDIT_ELEMENTS) {
+      add(
+        "audit-limit",
+        oidOf(frameElement()) || "frame",
+        "The design audit sampled the first " + MAX_AUDIT_ELEMENTS + " authored elements.",
+        "Audit smaller component scopes when reviewing very large documents."
+      );
+    }
     return warnings;
   }
 
   function snapshot() {
+    // A snapshot is the semantic cache generation. Theme changes and observed
+    // DOM/style mutations both arrive through this boundary.
+    authoredStylePropertiesCache = new WeakMap();
+    authoredStyleRuleMetadata = null;
     refreshElementMap();
     var roots = [];
+    var treeBudget = { count: 0, truncated: false };
     var body = document.body;
     if (body && oidOf(body)) {
-      roots.push(treeNode(body));
+      var bodyNode = treeNode(body, 0, treeBudget);
+      if (bodyNode) roots.push(bodyNode);
     } else if (body) {
       for (var index = 0; index < body.children.length; index += 1) {
         var child = body.children[index];
-        if (oidOf(child)) roots.push(treeNode(child));
+        if (!oidOf(child)) continue;
+        var rootNode = treeNode(child, 0, treeBudget);
+        if (rootNode) roots.push(rootNode);
       }
+    }
+    var warnings = auditWarnings();
+    if (treeBudget.truncated && warnings.length < MAX_AUDIT_WARNINGS) {
+      warnings.unshift({
+        ruleId: "layer-tree-limit",
+        oid: oidOf(frameElement()) || "frame",
+        message: "Layers were bounded to " + MAX_TREE_NODES + " nodes and " + MAX_TREE_DEPTH + " nested levels.",
+        fix: "Split this document into smaller frames or components before editing deeper layers."
+      });
+      if (warnings.length > MAX_AUDIT_WARNINGS) warnings.length = MAX_AUDIT_WARNINGS;
     }
     return {
       sourceVersion: SOURCE_VERSION,
       revision: revision,
       tree: roots,
       frame: frameDetailsOf(frameElement()),
-      warnings: auditWarnings(),
+      warnings: warnings,
       viewport: {
         width: document.documentElement.clientWidth || window.innerWidth,
         height: document.documentElement.clientHeight || window.innerHeight,
@@ -845,19 +1064,83 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return element;
   }
 
-  function elementAtLoc(x, y) {
+  function editableOidPath(element) {
+    var path = [];
+    var current = element;
+    while (current && current instanceof Element) {
+      if (oidOf(current)) path.push(current);
+      current = current.parentElement;
+    }
+    path.reverse();
+    // Legacy documents may put a frame oid on <body>. It is an ownership
+    // shell, not the first editable top-level layer when descendants exist.
+    if (path.length > 1 && path[0] === document.body) path.shift();
+    return path;
+  }
+
+  function elementAtLoc(x, y, mode, selectedNodeId) {
     if (!Number.isFinite(x) || !Number.isFinite(y)) {
       throw new Error("x and y must be finite frame coordinates.");
     }
     var stack = document.elementsFromPoint(x, y);
     for (var index = 0; index < stack.length; index += 1) {
-      var current = stack[index];
-      while (current && current instanceof Element) {
-        if (oidOf(current)) return detailsOf(current);
-        current = current.parentElement;
+      var path = editableOidPath(stack[index]);
+      if (path.length === 0) continue;
+      var hitMode = mode === "deepest" || mode === "top-level" ||
+        mode === "preserve" || mode === "descend" ? mode : "deepest";
+      var chosen = hitMode === "deepest" ? path[path.length - 1] : path[0];
+      if (hitMode === "preserve" || hitMode === "descend") {
+        var selectedIndex = -1;
+        for (var pathIndex = 0; pathIndex < path.length; pathIndex += 1) {
+          if (oidOf(path[pathIndex]) === selectedNodeId) selectedIndex = pathIndex;
+        }
+        if (hitMode === "preserve" && selectedIndex >= 0) {
+          chosen = path[selectedIndex];
+        } else if (hitMode === "descend" && selectedIndex >= 0) {
+          chosen = path[Math.min(selectedIndex + 1, path.length - 1)];
+        } else if (typeof selectedNodeId === "string" && selectedNodeId) {
+          refreshElementMap();
+          var selectedElement = elementsByOid.get(selectedNodeId);
+          if (selectedElement) {
+            var selectedDepth = editableOidPath(selectedElement).length;
+            var targetIndex = Math.min(
+              path.length - 1,
+              Math.max(0, selectedDepth - 1 + (hitMode === "descend" ? 1 : 0))
+            );
+            chosen = path[targetIndex];
+          }
+        }
       }
+      return detailsOf(chosen);
     }
     return null;
+  }
+
+  function elementsInRect(x, y, width, height, scopeNodeId) {
+    if (
+      !Number.isFinite(x) || !Number.isFinite(y) ||
+      !Number.isFinite(width) || !Number.isFinite(height) ||
+      width < 0 || height < 0 || width > 100000 || height > 100000
+    ) {
+      throw new Error("Selection rectangle must contain bounded finite coordinates.");
+    }
+    refreshElementMap();
+    var scope = scopeNodeId ? elementForOid(scopeNodeId) : document.body;
+    var right = x + width;
+    var bottom = y + height;
+    var result = [];
+    for (var index = 0; index < scope.children.length; index += 1) {
+      var element = scope.children[index];
+      if (!oidOf(element) || !visibleOf(element)) continue;
+      var rect = rectOf(element);
+      if (rect.width <= 0 || rect.height <= 0) continue;
+      var intersects =
+        rect.x < right && rect.x + rect.width > x &&
+        rect.y < bottom && rect.y + rect.height > y;
+      if (intersects) result.push(detailsOf(element));
+      if (result.length >= 128) break;
+    }
+    return result;
   }
 
   function withoutObservedMutations(work) {
@@ -927,6 +1210,20 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return detailsAfterLayout(element);
   }
 
+  function setTheme(theme) {
+    if (theme !== null && (typeof theme !== "string" || !/^[a-z][a-z0-9_-]{0,63}$/.test(theme))) {
+      throw new Error("theme must be null or a portable theme name.");
+    }
+    var currentTheme = document.documentElement.getAttribute("data-zd-theme");
+    if (currentTheme === theme) return snapshot();
+    withoutObservedMutations(function () {
+      if (theme === null) document.documentElement.removeAttribute("data-zd-theme");
+      else document.documentElement.setAttribute("data-zd-theme", theme);
+    });
+    revision += 1;
+    return snapshot();
+  }
+
   function previewStyles(oid, styles) {
     var element = elementForOid(oid);
     if (!styles || typeof styles !== "object" || Array.isArray(styles)) {
@@ -964,9 +1261,95 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return detailsAfterLayout(element);
   }
 
+  function previewMotion(oid, input) {
+    var element = elementForOid(oid);
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      throw new Error("motion preview must be an object.");
+    }
+    var keyframes = input.keyframes;
+    if (!Array.isArray(keyframes) || keyframes.length < 2 || keyframes.length > 32) {
+      throw new Error("motion preview requires between 2 and 32 keyframes.");
+    }
+    var seenOffsets = new Set();
+    var animationFrames = keyframes.map(function (keyframe) {
+      if (!keyframe || typeof keyframe !== "object" || Array.isArray(keyframe)) {
+        throw new Error("motion preview contains an invalid keyframe.");
+      }
+      var offset = Number(keyframe.offset);
+      var styles = keyframe.styles;
+      if (
+        !Number.isFinite(offset) || offset < 0 || offset > 100 ||
+        seenOffsets.has(offset) || !styles || typeof styles !== "object" ||
+        Array.isArray(styles)
+      ) {
+        throw new Error("motion preview contains an invalid keyframe.");
+      }
+      seenOffsets.add(offset);
+      var entries = Object.entries(styles);
+      if (entries.length < 1 || entries.length > 64) {
+        throw new Error("motion keyframes require between 1 and 64 styles.");
+      }
+      var frame = { offset: offset / 100 };
+      for (var index = 0; index < entries.length; index += 1) {
+        var property = entries[index][0];
+        var value = entries[index][1];
+        if (
+          !/^(--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(property) ||
+          typeof value !== "string" || value.length < 1 || value.length > 2048
+        ) {
+          throw new Error("motion preview contains an invalid style.");
+        }
+        var animationProperty = property.indexOf("--") === 0
+          ? property
+          : property.replace(/-([a-z])/g, function (_match, letter) {
+              return letter.toUpperCase();
+            });
+        frame[animationProperty] = value;
+      }
+      return frame;
+    }).sort(function (left, right) { return left.offset - right.offset; });
+    var duration = Number(input.duration);
+    var delay = Number(input.delay);
+    var iterations = Number(input.iterations);
+    var currentTime = Number(input.currentTime);
+    var directions = ["normal", "reverse", "alternate", "alternate-reverse"];
+    var fills = ["none", "forwards", "backwards", "both"];
+    if (
+      !Number.isFinite(duration) || duration < 1 || duration > 60000 ||
+      !Number.isFinite(delay) || delay < -60000 || delay > 60000 ||
+      !Number.isFinite(iterations) || iterations < 0 || iterations > 1000 ||
+      !Number.isFinite(currentTime) || currentTime < delay || currentTime > delay + duration ||
+      typeof input.easing !== "string" || input.easing.length < 1 || input.easing.length > 256 ||
+      directions.indexOf(input.direction) < 0 || fills.indexOf(input.fill) < 0 ||
+      typeof input.playing !== "boolean"
+    ) {
+      throw new Error("motion preview timing is invalid.");
+    }
+    var prior = previewAnimationsByOid.get(oid);
+    if (prior) prior.cancel();
+    var animation = element.animate(animationFrames, {
+      duration: duration,
+      delay: delay,
+      easing: input.easing,
+      iterations: iterations,
+      direction: input.direction,
+      fill: input.fill
+    });
+    animation.currentTime = currentTime;
+    if (input.playing) animation.play();
+    else animation.pause();
+    previewAnimationsByOid.set(oid, animation);
+    return detailsAfterLayout(element);
+  }
+
   function clearPreviewStyles(oid) {
     var element = elementForOid(oid);
     var priorByProperty = previewStyleOverridesByOid.get(oid);
+    var previewAnimation = previewAnimationsByOid.get(oid);
+    if (previewAnimation) {
+      previewAnimation.cancel();
+      previewAnimationsByOid.delete(oid);
+    }
     withoutObservedMutations(function () {
       if (priorByProperty) {
         priorByProperty.forEach(function (prior, property) {
@@ -1189,15 +1572,24 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       case "getSnapshot":
         return snapshot();
       case "getElementAtLoc":
-        return elementAtLoc(Number(args.x), Number(args.y));
+        return elementAtLoc(Number(args.x), Number(args.y), args.mode, args.selectedNodeId);
+      case "getElementsInRect":
+        return elementsInRect(
+          Number(args.x), Number(args.y), Number(args.width), Number(args.height),
+          typeof args.scopeNodeId === "string" && args.scopeNodeId ? args.scopeNodeId : null
+        );
       case "getNodeDetails":
         return detailsOf(elementForOid(args.nodeId));
       case "getMatchedStyles":
         return getMatchedStyles(args.nodeId, args.property);
       case "setNodeVisibility":
         return setNodeVisibility(args.nodeId, args.visible === true);
+      case "setTheme":
+        return setTheme(args.theme === null ? null : args.theme);
       case "previewStyles":
         return previewStyles(args.nodeId, args.styles);
+      case "previewMotion":
+        return previewMotion(args.nodeId, args);
       case "clearPreviewStyles":
         return clearPreviewStyles(args.nodeId);
       case "captureScreenshot":
@@ -1235,6 +1627,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       else element.style.removeProperty("display");
     });
     previewStyleOverridesByOid.clear();
+    previewAnimationsByOid.forEach(function (animation) { animation.cancel(); });
+    previewAnimationsByOid.clear();
     visibilityOverridesByOid.clear();
     activeRequests.clear();
     cancelledRequests.clear();

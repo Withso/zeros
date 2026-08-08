@@ -11,6 +11,7 @@ import {
   type DesignTransaction,
 } from "@zeros/design-core";
 import type {
+  DesignAuthoredKeyframes,
   DesignApiApplyResult,
   DesignDocumentSummary,
   DesignStyleProvenance,
@@ -172,7 +173,50 @@ export interface DesignFoundationOpenWire {
     documentId: string;
     revision: string;
     manifest: DesignFoundationManifest;
+    keyframes: DesignAuthoredKeyframes[];
   };
+}
+
+function validDesignKeyframes(
+  value: unknown,
+): value is DesignAuthoredKeyframes[] {
+  if (!Array.isArray(value) || value.length > 128) return false;
+  return value.every((definition: unknown) => {
+    if (!definition || typeof definition !== "object") return false;
+    const candidate = definition as {
+      file?: unknown;
+      name?: unknown;
+      keyframes?: unknown;
+    };
+    if (
+      typeof candidate.file !== "string" ||
+      typeof candidate.name !== "string" ||
+      !Array.isArray(candidate.keyframes) ||
+      candidate.keyframes.length > 32
+    ) {
+      return false;
+    }
+    return candidate.keyframes.every((keyframe: unknown) => {
+      if (!keyframe || typeof keyframe !== "object") return false;
+      const frame = keyframe as { offset?: unknown; styles?: unknown };
+      return (
+        typeof frame.offset === "number" &&
+        frame.offset >= 0 &&
+        frame.offset <= 100 &&
+        Boolean(frame.styles) &&
+        typeof frame.styles === "object" &&
+        !Array.isArray(frame.styles) &&
+        Object.keys(frame.styles as object).length <= 64 &&
+        Object.entries(frame.styles as Record<string, unknown>).every(
+          ([property, style]) =>
+            property.length > 0 &&
+            property.length <= 128 &&
+            typeof style === "string" &&
+            style.length <= 2_048,
+        )
+      );
+    });
+  });
 }
 
 export interface DesignApiMutationReplyWire {
@@ -196,13 +240,18 @@ function designFoundationOpenReply(value: unknown): DesignFoundationOpenWire {
     !reply.foundation ||
     reply.foundation.documentId !== reply.summary.documentId ||
     reply.foundation.revision !== reply.summary.revision ||
-    !manifest.success
+    !manifest.success ||
+    !validDesignKeyframes(reply.foundation.keyframes)
   ) {
     throw new Error("design.foundation.open: malformed engine response");
   }
   return {
     summary: reply.summary,
-    foundation: { ...reply.foundation, manifest: manifest.data },
+    foundation: {
+      ...reply.foundation,
+      manifest: manifest.data,
+      keyframes: reply.foundation.keyframes,
+    },
   };
 }
 

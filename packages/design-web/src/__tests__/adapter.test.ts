@@ -247,6 +247,44 @@ describe("web transaction adapter", () => {
     );
   });
 
+  it("round-trips duplicate, delete, and keyframe canvas operations", () => {
+    const initial = webState();
+    const session = new DesignTransactionSession(
+      initial,
+      designWebTransactionAdapter,
+    );
+    const changed = session.apply(
+      webTransaction(initial, "direct-manipulation", [
+        {
+          operationId: "duplicate-card",
+          type: "node.duplicate",
+          nodeId: "card",
+          duplicateNodeId: "card-copy",
+        },
+        {
+          operationId: "delete-label",
+          type: "node.delete",
+          nodeId: "label",
+        },
+        {
+          operationId: "card-motion",
+          type: "keyframes.set",
+          file: "styles.css",
+          name: "card-enter",
+          keyframes: [
+            { offset: 0, styles: { opacity: "0" } },
+            { offset: 100, styles: { opacity: "1" } },
+          ],
+        },
+      ]),
+    ).state;
+
+    expect(changed.files["index.html"]).toContain('data-oid="card-copy"');
+    expect(changed.files["index.html"]).not.toContain('data-oid="label"');
+    expect(changed.files["styles.css"]).toContain("@keyframes card-enter");
+    expect(session.undo()?.state.files).toEqual(initial.files);
+  });
+
   it("executes one component definition and instance transaction", () => {
     const initial = webState();
     const session = new DesignTransactionSession(

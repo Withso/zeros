@@ -3,16 +3,15 @@
 
 export const DESIGN_WORKSPACE_SIDEBAR_RATIO_VAR =
   "--zeros-design-column-2-ratio";
-export const DESIGN_WORKSPACE_SIDEBAR_RATIO_KEY =
-  "zeros.design.column2.ratio";
+export const DESIGN_WORKSPACE_SIDEBAR_RATIO_KEY = "zeros.design.column2.ratio";
 
-export const DESIGN_WORKSPACE_SIDEBAR_RATIO_DEFAULT = 0.3;
+export const DESIGN_WORKSPACE_SIDEBAR_RATIO_DEFAULT = 0.2;
 export const DESIGN_WORKSPACE_SIDEBAR_RATIO_MIN = 0.1;
 export const DESIGN_WORKSPACE_SIDEBAR_RATIO_MAX = 0.5;
-export const DESIGN_WORKSPACE_SIDEBAR_MIN_PX = 320;
+export const DESIGN_WORKSPACE_SIDEBAR_MIN_PX = 240;
 export const DESIGN_WORKSPACE_SIDEBAR_MAX_PX = 1_200;
 export const DESIGN_WORKSPACE_CANVAS_MIN_PX = 456;
-export const DESIGN_WORKSPACE_COMPACT_SIDEBAR_RATIO = 0.42;
+export const DESIGN_WORKSPACE_COMPACT_SIDEBAR_RATIO = 0.34;
 
 export function sanitizeDesignWorkspaceSidebarRatio(value: number): number {
   if (!Number.isFinite(value)) {
@@ -29,9 +28,7 @@ export function readPersistedDesignWorkspaceSidebarRatio(): number {
     return DESIGN_WORKSPACE_SIDEBAR_RATIO_DEFAULT;
   }
   try {
-    const raw = window.localStorage.getItem(
-      DESIGN_WORKSPACE_SIDEBAR_RATIO_KEY,
-    );
+    const raw = window.localStorage.getItem(DESIGN_WORKSPACE_SIDEBAR_RATIO_KEY);
     if (raw != null) {
       return sanitizeDesignWorkspaceSidebarRatio(Number.parseFloat(raw));
     }
@@ -55,7 +52,7 @@ export function persistDesignWorkspaceSidebarRatio(next: number): number {
 }
 
 /** Mirror the CSS floors/caps while dragging so pointer-up never snaps. When
- * the row cannot fit both 320px and 456px, CSS switches to its 42/58 compact
+ * the row cannot fit both 240px and 456px, CSS switches to its 34/66 compact
  * floors; the ratio follows that same deterministic split. */
 export function clampDesignWorkspaceSidebarRatio(
   raw: number,
@@ -67,8 +64,7 @@ export function clampDesignWorkspaceSidebarRatio(
   if (
     Number.isFinite(rowWidth) &&
     rowWidth > 0 &&
-    rowWidth <
-      DESIGN_WORKSPACE_SIDEBAR_MIN_PX + DESIGN_WORKSPACE_CANVAS_MIN_PX
+    rowWidth < DESIGN_WORKSPACE_SIDEBAR_MIN_PX + DESIGN_WORKSPACE_CANVAS_MIN_PX
   ) {
     return DESIGN_WORKSPACE_COMPACT_SIDEBAR_RATIO;
   }
@@ -84,9 +80,7 @@ export function clampDesignWorkspaceSidebarRatio(
     );
   }
   if (max < min) return DESIGN_WORKSPACE_COMPACT_SIDEBAR_RATIO;
-  return sanitizeDesignWorkspaceSidebarRatio(
-    Math.min(Math.max(raw, min), max),
-  );
+  return sanitizeDesignWorkspaceSidebarRatio(Math.min(Math.max(raw, min), max));
 }
 
 export function flushPendingDesignWorkspaceSidebarPaint(

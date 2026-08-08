@@ -145,6 +145,51 @@ separate `sourceVersion` used by iframe, screenshot, and cache protocols.
 Collaboration transports may later carry these operations. A CRDT does not
 replace the semantic transaction contract.
 
+The desktop direct-manipulation surface uses the same contract for subtree
+duplication and deletion and for persisted CSS keyframes. A duplicate receives
+fresh stable identities for its complete subtree, deletion removes exactly one
+authored subtree, and `keyframes.set` creates or surgically replaces one named
+CSS animation. Each operation participates in the existing exact-revision,
+receipt, and byte-exact inverse/undo guarantees; none is a renderer-only edit.
+
+The element Style inspector and workspace Theme editor are deliberately
+separate surfaces. Element fields preview through the exact live-frame runtime
+and publish one authored mutation on commit; CSS declaration paste is bounded
+and rejects selectors or nested rules. The Theme editor owns the Base/named
+mode token matrix, imports bounded custom-property blocks atomically, and keeps
+the active preview mode as workspace UI state rather than element styling. It
+is a persistent, draggable non-modal tool window: no scrim, focus trap, or
+canvas wheel propagation is allowed, and Layers, canvas tools, and the element
+inspector remain interactive until the window is explicitly closed.
+
+Style-field state distinguishes a browser-computed value from an authored
+declaration. Untouched optional fields render a neutral `-` placeholder and no
+fill; directly authored fields render their computed value on a tonal fill.
+Shorthands such as `padding`, `margin`, `background`, `font`, `flex`,
+`transition`, and `animation` mark every affected inspector longhand, including
+the supported logical box-property aliases. The live runtime reports canonical
+CSS property names and the inspector accepts legacy camel-case v2 metadata.
+
+Canvas hit testing is runtime-owned and source-version keyed. A normal click
+preserves the selected ancestor, retains the current nesting depth when moving
+between peers, or enters the top-level authored layer; a double click descends
+one level, and the platform modifier targets the deepest authored layer.
+Enter/Escape traverse child/parent hierarchy without activating native browser
+text selection. Shift-click and marquee selection publish a bounded,
+primary-first group; ancestor/descendant overlap is reduced to top-level owners
+before transform or deletion so descendants are never mutated twice. Frame,
+element, and group gestures paint only their owned overlays during pointer
+movement and publish one transaction on release. Resize modifiers keep aspect
+ratio or center, rotation supports 15-degree snapping, Option exposes exact
+spacing, and runtime hover reads remain single-flight with only the newest
+pointer sample retained.
+
+Authored CSS keyframes are edited in a persistent canvas-bottom timeline rather
+than approximated by transition fields in the inspector. Property tracks,
+offset diamonds, duration, delay, easing, finite/infinite iteration, direction,
+and fill mode preview through Web Animations without changing source. Save
+publishes the keyframe definition and animation declarations atomically.
+
 ## Web source adapter
 
 The adapter parses HTML with source locations and CSS with source nodes. Source
@@ -160,6 +205,8 @@ The projection exposes bounded, paginated data:
 - authored inline declarations;
 - matched authored rules and conditional context when available;
 - computed values supplied by the browser renderer;
+- a bounded optional list of directly authored active style properties for
+  inspector-state feedback (older protocol-v2 runtimes may omit it);
 - component/instance scope; and
 - diagnostics plus the last valid revision.
 
@@ -252,6 +299,9 @@ Concrete Foundation 1.0 ceilings are part of the contract:
   definition, 16 MiB of definition source, depth 8, and 2 MiB expanded output;
 - desktop render preparation: 128 linked stylesheets, 12 MiB of inline raster
   assets, 15 MiB sanitized output, and 16 MiB runtime-enabled output;
+- live DOM projection: 20,000 tree nodes across at most 32 emitted nesting
+  levels, 5,000 audited elements, and a virtualized Layers window for larger
+  trees; truncation is explicit through non-blocking runtime advisories;
 - headless rendering: two concurrent pages by default (four maximum), one
   15-second overall deadline by default (60 seconds maximum), 16,777,216 output
   pixels, and 16 MiB artifacts; and

@@ -19,6 +19,8 @@ import {
   type DesignRuntimeHostTeardown,
   type DesignRuntimeMatchedStyles,
   type DesignRuntimeMethod,
+  type DesignRuntimeHitMode,
+  type DesignRuntimeMotionPreview,
   type DesignRuntimeNodeDetails,
   type DesignRuntimeScreenshot,
   type DesignRuntimeSnapshot,
@@ -53,8 +55,17 @@ export interface DesignFrameRuntimeConnection {
   getElementAtLoc(
     x: number,
     y: number,
+    options?: {
+      mode?: DesignRuntimeHitMode;
+      selectedNodeId?: string | null;
+    },
     signal?: AbortSignal,
   ): Promise<DesignRuntimeNodeDetails | null>;
+  getElementsInRect(
+    rect: { x: number; y: number; width: number; height: number },
+    scopeNodeId?: string | null,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeNodeDetails[]>;
   getNodeDetails(
     nodeId: string,
     signal?: AbortSignal,
@@ -69,9 +80,18 @@ export interface DesignFrameRuntimeConnection {
     visible: boolean,
     signal?: AbortSignal,
   ): Promise<DesignRuntimeNodeDetails>;
+  setTheme(
+    theme: string | null,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeSnapshot>;
   previewStyles(
     nodeId: string,
     styles: Record<string, string | null>,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeNodeDetails>;
+  previewMotion(
+    nodeId: string,
+    motion: DesignRuntimeMotionPreview,
     signal?: AbortSignal,
   ): Promise<DesignRuntimeNodeDetails>;
   clearPreviewStyles(
@@ -129,6 +149,8 @@ function isNodeDetails(value: unknown): value is DesignRuntimeNodeDetails {
     typeof details.sourceVersion === "string" &&
     typeof details.oid === "string" &&
     typeof details.tag === "string" &&
+    (details.textEditable === undefined ||
+      typeof details.textEditable === "boolean") &&
     typeof details.selector === "string" &&
     Array.isArray(details.breadcrumb) &&
     !!details.rect &&
@@ -341,15 +363,57 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   async getElementAtLoc(
     x: number,
     y: number,
+    options: {
+      mode?: DesignRuntimeHitMode;
+      selectedNodeId?: string | null;
+    } = {},
     signal?: AbortSignal,
   ): Promise<DesignRuntimeNodeDetails | null> {
-    const result = await this.request("getElementAtLoc", { x, y }, signal);
+    const result = await this.request(
+      "getElementAtLoc",
+      {
+        x,
+        y,
+        ...(options.mode ? { mode: options.mode } : {}),
+        ...(options.selectedNodeId
+          ? { selectedNodeId: options.selectedNodeId }
+          : {}),
+      },
+      signal,
+    );
     if (result === null) return null;
     if (
       !isNodeDetails(result) ||
       result.sourceVersion !== this.expectedSourceVersion
     ) {
       throw runtimeError("getElementAtLoc returned malformed data");
+    }
+    return result;
+  }
+
+  async getElementsInRect(
+    rect: { x: number; y: number; width: number; height: number },
+    scopeNodeId?: string | null,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeNodeDetails[]> {
+    const result = await this.request(
+      "getElementsInRect",
+      {
+        ...rect,
+        ...(scopeNodeId ? { scopeNodeId } : {}),
+      },
+      signal,
+    );
+    if (
+      !Array.isArray(result) ||
+      result.length > 128 ||
+      result.some(
+        (details) =>
+          !isNodeDetails(details) ||
+          details.sourceVersion !== this.expectedSourceVersion,
+      )
+    ) {
+      throw runtimeError("getElementsInRect returned malformed data");
     }
     return result;
   }
@@ -409,6 +473,20 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     return result;
   }
 
+  async setTheme(
+    theme: string | null,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeSnapshot> {
+    const result = await this.request("setTheme", { theme }, signal);
+    if (
+      !isRuntimeSnapshot(result) ||
+      result.sourceVersion !== this.expectedSourceVersion
+    ) {
+      throw runtimeError("setTheme returned malformed data");
+    }
+    return result;
+  }
+
   async previewStyles(
     nodeId: string,
     styles: Record<string, string | null>,
@@ -424,6 +502,25 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
       result.sourceVersion !== this.expectedSourceVersion
     ) {
       throw runtimeError("previewStyles returned malformed data");
+    }
+    return result;
+  }
+
+  async previewMotion(
+    nodeId: string,
+    motion: DesignRuntimeMotionPreview,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeNodeDetails> {
+    const result = await this.request(
+      "previewMotion",
+      { nodeId, ...motion },
+      signal,
+    );
+    if (
+      !isNodeDetails(result) ||
+      result.sourceVersion !== this.expectedSourceVersion
+    ) {
+      throw runtimeError("previewMotion returned malformed data");
     }
     return result;
   }

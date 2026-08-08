@@ -14,6 +14,11 @@ import { DESIGN_RUNTIME_SOURCE } from "@zeros/protocol/design-runtime";
 
 const HOME_SOURCE_VERSION = "aaaaaaaaaaaaaaaaaaaaaaaa";
 const PRICING_SOURCE_VERSION = "bbbbbbbbbbbbbbbbbbbbbbbb";
+const HARNESS_LAYER_COUNT = new URLSearchParams(window.location.search).has(
+  "denseLayers",
+)
+  ? 10_000
+  : 48;
 
 function withDesignRuntime(source: string, sourceVersion: string): string {
   const runtime =
@@ -46,7 +51,7 @@ const homeSource = `<!doctype html>
         <p data-oid="home-copy">A decisive launch surface for teams building products that deserve attention.</p>
         <span data-oid="home-action" class="button">Explore the system →</span>
         ${Array.from(
-          { length: 48 },
+          { length: HARNESS_LAYER_COUNT },
           (_, index) =>
             `<span data-oid="home-layer-${index + 1}" class="harness-layer">Layer ${index + 1}</span>`,
         ).join("")}
@@ -193,6 +198,16 @@ async function main() {
         usageCount: 2,
         line: 1,
       },
+      ...Array.from({ length: 20 }, (_, index) => ({
+        name: `--space-${index + 1}`,
+        syntax: "<length>",
+        inherits: true,
+        initialValue: `${(index + 1) * 4}px`,
+        value: `${(index + 1) * 4}px`,
+        themeValues: {},
+        usageCount: index % 4,
+        line: index + 2,
+      })),
     ],
     tokenSourceVersion: "tokens-source-version-1",
     assets: [],
@@ -254,10 +269,15 @@ async function main() {
       flexDirection: "column",
       gap: "normal",
       padding: "72px",
+      paddingTop: "72px",
+      paddingRight: "72px",
+      paddingBottom: "72px",
+      paddingLeft: "72px",
       background: "transparent",
       border: "0px none var(--fg1)",
       borderRadius: "0px",
     },
+    authoredStyleProperties: ["padding"],
   };
   const headingDetails = {
     sourceVersion: HOME_SOURCE_VERSION,
@@ -279,6 +299,14 @@ async function main() {
       flexDirection: "row",
       gap: "normal",
       padding: "0px",
+      paddingTop: "0px",
+      paddingRight: "0px",
+      paddingBottom: "0px",
+      paddingLeft: "0px",
+      marginTop: "0px",
+      marginRight: "0px",
+      marginBottom: "0px",
+      marginLeft: "0px",
       alignItems: "normal",
       justifyContent: "normal",
       background: "transparent",
@@ -291,6 +319,13 @@ async function main() {
       letterSpacing: "-5.28px",
       textAlign: "start",
     },
+    authoredStyleProperties: [
+      "margin",
+      "fontSize",
+      "fontWeight",
+      "lineHeight",
+      "letterSpacing",
+    ],
   };
   useDesignRuntimeStore.getState().publishSnapshot(
     workspaceId,
@@ -323,7 +358,7 @@ async function main() {
                   visible: true,
                   children: [],
                 },
-                ...Array.from({ length: 48 }, (_, index) => ({
+                ...Array.from({ length: HARNESS_LAYER_COUNT }, (_, index) => ({
                   oid: `home-layer-${index + 1}`,
                   tag: "span",
                   name: `Layer ${index + 1}`,

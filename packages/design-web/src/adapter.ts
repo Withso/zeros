@@ -16,6 +16,7 @@ import {
 
 import {
   mutateDesignCssRuleDeclaration,
+  mutateDesignKeyframes,
   mutateDesignNodeStyles,
   mutateDesignTokenDeclaration,
 } from "./css";
@@ -26,6 +27,8 @@ import {
   designHtmlUsesComponent,
   healDesignHtmlIdentities,
   mutateDesignNodeAttributeSource,
+  mutateDesignNodeDeleteSource,
+  mutateDesignNodeDuplicateSource,
   mutateDesignNodeHtmlSource,
   mutateDesignNodeTextSource,
   parseDesignWebProjection,
@@ -414,6 +417,30 @@ function applyOperation(
       [operation.nodeId],
     );
   }
+  if (operation.type === "node.duplicate") {
+    const source = state.files[state.entryFile]!;
+    const updated = mutateDesignNodeDuplicateSource(
+      source,
+      operation.nodeId,
+      operation.duplicateNodeId,
+    );
+    return withFiles(
+      state,
+      operation,
+      { ...state.files, [state.entryFile]: updated },
+      [operation.nodeId, operation.duplicateNodeId],
+    );
+  }
+  if (operation.type === "node.delete") {
+    const source = state.files[state.entryFile]!;
+    const updated = mutateDesignNodeDeleteSource(source, operation.nodeId);
+    return withFiles(
+      state,
+      operation,
+      { ...state.files, [state.entryFile]: updated },
+      [operation.nodeId],
+    );
+  }
   if (operation.type === "frame.set-geometry") {
     const previous = state.frames[operation.frame];
     if (!previous) {
@@ -461,6 +488,20 @@ function applyOperation(
         operation.theme,
         operation.value,
       ),
+    };
+    return withFiles(state, operation, files, []);
+  }
+  if (operation.type === "keyframes.set") {
+    if (!operation.file.toLowerCase().endsWith(".css")) {
+      throw new Error(`Design keyframe file is not CSS: ${operation.file}`);
+    }
+    const source = state.files[operation.file];
+    if (source === undefined) {
+      throw new Error(`Design keyframe file is missing: ${operation.file}`);
+    }
+    const files = {
+      ...state.files,
+      [operation.file]: mutateDesignKeyframes(source, operation),
     };
     return withFiles(state, operation, files, []);
   }
