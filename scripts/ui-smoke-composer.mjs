@@ -545,10 +545,10 @@ try {
       (await catalog().getByRole("group", { name: "Cursor" }).count()) === 1,
   );
   check(
-    "catalog agent headings contain no logos",
+    "every catalog agent heading leads with one brand mark",
     (await catalog()
-      .locator('section[role="group"] > div:first-child svg')
-      .count()) === 0,
+      .locator('[data-model-section-heading="agent"] > span:first-child svg')
+      .count()) === (await catalog().locator('section[role="group"]').count()),
   );
   await catalogRow("GPT-5.6 Sol").hover();
   check(
@@ -576,7 +576,8 @@ try {
 
   // Rows are one left-aligned phrase: model, effort, Fast, default star. The
   // right edge is reserved for the active tick or a non-active model's editor.
-  // Agent headings are text-only and align with the model names below them.
+  // An agent heading leads with its brand mark on the model names' left edge,
+  // and its title follows that mark.
   check(
     "model rows have no command-number badges",
     (await page.locator("kbd").count()) === 0,
@@ -585,53 +586,66 @@ try {
     "active model row shows default High effort",
     ((await catalogRow("Opus 5").textContent()) ?? "").includes("High"),
   );
-  const claudeHeadingBox = await catalog()
-    .getByRole("group", { name: "Claude Code" })
-    .getByText("Claude Code", { exact: true })
+  const claudeGroup = catalog().getByRole("group", { name: "Claude Code" });
+  const claudeMarkBox = await claudeGroup
+    .locator('[data-model-section-heading="agent"] > span:first-child')
+    .boundingBox();
+  const claudeHeadingBox = await claudeGroup
+    .locator("[data-model-section-title]")
     .boundingBox();
   const opusNameBox = await catalogRow("Opus 5")
     .getByText("Opus 5", { exact: true })
     .boundingBox();
   check(
-    "agent headings and model names share the same left edge",
-    !!claudeHeadingBox &&
+    "agent brand marks and model names share the same left edge",
+    !!claudeMarkBox &&
       !!opusNameBox &&
-      Math.abs(claudeHeadingBox.x - opusNameBox.x) <= 1,
+      Math.abs(claudeMarkBox.x - opusNameBox.x) <= 1,
+  );
+  check(
+    "agent titles sit directly after their brand mark",
+    !!claudeMarkBox &&
+      !!claudeHeadingBox &&
+      claudeHeadingBox.x - (claudeMarkBox.x + claudeMarkBox.width) <= 8,
   );
   const modelNameFontWeight = await catalogRow("Opus 5")
     .locator("[data-model-name]")
     .evaluate((name) => getComputedStyle(name).fontWeight);
-  const titleFontWeights = await Promise.all([
-    page
-      .getByText("Reasoning", { exact: true })
-      .evaluate((title) => getComputedStyle(title).fontWeight),
-    page
-      .getByText("Options", { exact: true })
-      .evaluate((title) => getComputedStyle(title).fontWeight),
-    modelMenu()
-      .getByText("Model", { exact: true })
-      .evaluate((title) => getComputedStyle(title).fontWeight),
-    catalog()
-      .getByText("Claude Code", { exact: true })
-      .evaluate((title) => getComputedStyle(title).fontWeight),
-  ]);
+  // "Reasoning", "Options", "Model", and every agent title are one label tier:
+  // model-name weight, 12px, on the 28px heading rhythm.
+  const sectionTitles = [
+    page.getByText("Reasoning", { exact: true }),
+    page.getByText("Options", { exact: true }),
+    modelMenu().getByText("Model", { exact: true }),
+    catalog().locator("[data-model-section-title]").first(),
+  ];
+  const titleFontWeights = await Promise.all(
+    sectionTitles.map((title) =>
+      title.evaluate((node) => getComputedStyle(node).fontWeight),
+    ),
+  );
   check(
     "configuration, Model, and agent titles match model-name weight",
     titleFontWeights.every((weight) => weight === modelNameFontWeight),
     `${modelNameFontWeight}/${titleFontWeights.join(",")}`,
   );
+  const titleFontSizes = await Promise.all(
+    sectionTitles.map((title) =>
+      title.evaluate((node) => getComputedStyle(node).fontSize),
+    ),
+  );
+  check(
+    "every model-menu section title is 12px",
+    titleFontSizes.every((size) => size === "12px"),
+    titleFontSizes.join(","),
+  );
   const titleHeights = await Promise.all([
-    page
-      .getByText("Reasoning", { exact: true })
-      .evaluate((title) => title.offsetHeight),
-    page
-      .getByText("Options", { exact: true })
-      .evaluate((title) => title.offsetHeight),
-    modelMenu()
-      .getByText("Model", { exact: true })
-      .evaluate((title) => title.offsetHeight),
+    ...sectionTitles
+      .slice(0, 3)
+      .map((title) => title.evaluate((node) => node.offsetHeight)),
     catalog()
-      .getByText("Claude Code", { exact: true })
+      .locator("[data-model-section-title]")
+      .first()
       .locator("xpath=..")
       .evaluate((title) => title.offsetHeight),
   ]);
@@ -729,17 +743,21 @@ try {
       ),
     `${catalogItemGaps.join(",")}/${reasoningItemGaps.join(",")}`,
   );
+  // A group's separator is the NEXT group's border-top, so its section box top
+  // is the rule itself: the previous group's 2px tail keeps a hovered last row
+  // from painting flush against it.
   const haikuRowBox = await catalogRow("Haiku 4.5").boundingBox();
-  const codexHeadingBox = await catalog()
+  const codexGroupBox = await catalog()
     .getByRole("group", { name: "Codex" })
-    .getByText("Codex", { exact: true })
-    .locator("xpath=..")
     .boundingBox();
   check(
-    "agent group separators add no extra vertical gap",
+    "agent group separators clear the last row by 2px",
     !!haikuRowBox &&
-      !!codexHeadingBox &&
-      codexHeadingBox.y - (haikuRowBox.y + haikuRowBox.height) <= 1,
+      !!codexGroupBox &&
+      Math.abs(codexGroupBox.y - (haikuRowBox.y + haikuRowBox.height) - 2) <= 1,
+    codexGroupBox && haikuRowBox
+      ? `${codexGroupBox.y - haikuRowBox.y - haikuRowBox.height}`
+      : "no box",
   );
   const solNameBox = await catalogRow("GPT-5.6 Sol")
     .getByText("GPT-5.6 Sol", { exact: true })
@@ -985,7 +1003,10 @@ try {
       "favorite-inline-after-resize",
     ),
   );
-  await catalog().getByText("Cursor", { exact: true }).hover();
+  await catalog()
+    .getByRole("group", { name: "Cursor" })
+    .locator("[data-model-section-title]")
+    .hover();
   const cursorName = catalogRow("Cursor Grok 4.5").locator("[data-model-name]");
   const cursorNameAtRest = await cursorName.evaluate((name) => ({
     clientWidth: name.clientWidth,

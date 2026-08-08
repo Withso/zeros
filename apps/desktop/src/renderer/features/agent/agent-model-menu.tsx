@@ -6,9 +6,10 @@
 // The opening surface edits the active model's reasoning/Fast configuration,
 // then keeps an always-focused search above ONE collapsed selected-model row.
 // Typing shows universal results inline. Hovering/focusing the selected row
-// opens the full catalog in a collision-aware sidecar, grouped by agent title;
-// there is no provider-logo rail. Rows show each exact model's remembered
-// effort/Fast state, and one global star matches Settings' default identity.
+// opens the full catalog in a collision-aware sidecar, grouped under a brand
+// mark + agent title; there is no provider-logo rail. Rows show each exact
+// model's remembered effort/Fast state, and one global star matches Settings'
+// default identity.
 //
 // Universal search spans every connected agent. Picking another agent in a
 // started chat redirects to a new chat; a fresh chat/dispatcher switches in
@@ -73,6 +74,7 @@ import {
   type ModelConfiguration,
 } from "./model-preferences";
 import { claimShortcutPriority } from "./shortcut-priority";
+import { AgentIcon } from "./agent-icon";
 import { useAgentsSnapshot } from "./agents-cache";
 import { useEnabledAgents } from "./enabled-agents";
 import { isRunnableAgent } from "./agent-runnable";
@@ -92,8 +94,11 @@ const FAMILY_ORDER: Record<string, number> = { claude: 0, codex: 1, cursor: 2 };
 const FAMILY_TITLES: Record<string, string> = {
   claude: "Claude Code",
   codex: "Codex",
-  cursor: "Cursor Agent",
+  cursor: "Cursor",
 };
+/** Section labels ("Reasoning", "Options", "Model", each agent group) share one
+ *  12px muted line; 28px tall so they keep the control scale's rhythm. */
+const MODEL_SECTION_HEADING = "text-fg2 flex h-7 items-center text-3xxs";
 const MODEL_POPOVER_WIDTH = "w-[230px] max-w-[calc(100vw-1rem)]";
 const MODEL_ROW_ACTION_VISIBILITY =
   "pointer-events-none opacity-0 group-hover/mi:pointer-events-auto group-hover/mi:opacity-100 group-focus-within/mi:pointer-events-auto group-focus-within/mi:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100";
@@ -117,6 +122,14 @@ interface Row {
 
 function agentTitle(agent: BridgeRegistryAgent, family: string): string {
   return agent.name?.trim() || FAMILY_TITLES[family] || family || agent.id;
+}
+
+/** What the picker CALLS an agent. Rows are grouped by curated family, so the
+ *  catalog's own title wins ("Cursor", not the registry's longer "Cursor
+ *  Agent"); a family without one falls back to the registry name. Selection
+ *  still reports `agentTitle` — the host persists the registry's name. */
+function groupTitle(agent: BridgeRegistryAgent, family: string): string {
+  return FAMILY_TITLES[family] || agentTitle(agent, family);
 }
 
 export function AgentModelMenu({
@@ -471,7 +484,7 @@ export function AgentModelMenu({
         >
           <div
             data-model-section-heading="model"
-            className="text-fg2 flex h-7 items-center px-3 text-xs"
+            className={cn(MODEL_SECTION_HEADING, "px-3")}
           >
             Model
           </div>
@@ -605,16 +618,34 @@ export function AgentModelMenu({
                     <section
                       key={group.agent.id}
                       role="group"
-                      aria-label={agentTitle(group.agent, group.family)}
+                      aria-label={groupTitle(group.agent, group.family)}
+                      // 2px below the last row so a hovered/selected row's
+                      // filled background never sits flush against the next
+                      // group's separator.
                       className={cn(
+                        "pb-0.5",
                         groupIndex > 0 && "border-border2 border-t",
                       )}
                     >
                       <div
                         data-model-section-heading="agent"
-                        className="text-fg2 flex h-7 items-center px-2 text-xs"
+                        className={cn(MODEL_SECTION_HEADING, "gap-1.5 px-2")}
                       >
-                        <span>{agentTitle(group.agent, group.family)}</span>
+                        {/* Provider mark in its documented brand color, as in
+                            Settings → Models, so groups are identifiable
+                            before the title is read. */}
+                        <AgentIcon
+                          agentId={group.agent.id}
+                          iconUrl={group.agent.icon ?? null}
+                          size={14}
+                          className="shrink-0"
+                        />
+                        {/* The mark inlines its own <title> ("Cursor"), so the
+                            visible title carries a hook rather than leaving
+                            tests to match ambiguous text. */}
+                        <span data-model-section-title>
+                          {groupTitle(group.agent, group.family)}
+                        </span>
                       </div>
                       <div className={MODEL_ITEM_STACK}>
                         {group.models.map((model) => {
@@ -1044,7 +1075,7 @@ function SearchModelRow({
       data-favorite-placement={placement}
       aria-label={
         redirects
-          ? `Open ${displayModelLabel(row.agent.id, row.model.label)} in a new chat with ${agentTitle(row.agent, row.family)}`
+          ? `Open ${displayModelLabel(row.agent.id, row.model.label)} in a new chat with ${groupTitle(row.agent, row.family)}`
           : `Select ${displayModelLabel(row.agent.id, row.model.label)}`
       }
       className={cn(
@@ -1134,7 +1165,7 @@ function CatalogModelRow({
         type="button"
         aria-label={
           redirects
-            ? `Open ${displayModelLabel(row.agent.id, row.model.label)} in a new chat with ${agentTitle(row.agent, row.family)}`
+            ? `Open ${displayModelLabel(row.agent.id, row.model.label)} in a new chat with ${groupTitle(row.agent, row.family)}`
             : `Select ${displayModelLabel(row.agent.id, row.model.label)}`
         }
         className="absolute inset-0 z-0 rounded-sm text-left outline-none"
@@ -1201,7 +1232,7 @@ function ModelConfigurationEditor({
           <div
             id={reasoningHeadingId}
             data-model-section-heading="reasoning"
-            className="text-fg2 flex h-7 items-center px-3 text-xs"
+            className={cn(MODEL_SECTION_HEADING, "px-3")}
           >
             Reasoning
           </div>
@@ -1242,7 +1273,7 @@ function ModelConfigurationEditor({
           <div
             id={optionsHeadingId}
             data-model-section-heading="options"
-            className="text-fg2 flex h-7 items-center px-3 text-xs"
+            className={cn(MODEL_SECTION_HEADING, "px-3")}
           >
             Options
           </div>
