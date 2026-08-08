@@ -574,6 +574,45 @@ try {
     await waitFor(() => catalog().isVisible(), "catalog-reopen"),
   );
 
+  // An empty query renders NO cmdk rows on purpose — the collapsed selected
+  // model is the only default row. That makes the catalog the sole browse
+  // surface, so it has to be reachable without a pointer: Tab moves from the
+  // always-focused search to the selected-model button (whose focus opens the
+  // sidecar) and then into the grouped rows themselves. Typing remains the
+  // primary path (arrows + Enter over universal results).
+  await searchInput.press("Tab");
+  const browserFocused = await selectedModel().evaluate(
+    (element) => element === document.activeElement,
+  );
+  await page.keyboard.press("Tab");
+  const rowFocus = await page.evaluate(() => {
+    const sidecar = document.querySelector(
+      '[data-testid="model-catalog-sidecar"]',
+    );
+    const active = document.activeElement;
+    return {
+      inside: !!sidecar && !!active && sidecar.contains(active),
+      label: active?.getAttribute("aria-label") ?? "",
+    };
+  });
+  check(
+    "Tab walks from search into the catalog's model rows",
+    browserFocused && rowFocus.inside && /^Select /.test(rowFocus.label),
+    `${browserFocused}/${rowFocus.inside}/${rowFocus.label}`,
+  );
+  // Return to the pointer-driven state the geometry checks below measure: focus
+  // inside the sidecar keeps a row's hover-only actions revealed, and handing
+  // the caret straight back mid-flight makes Radix re-mount the layer under
+  // them. Tear the catalog down and reopen it the same way the checks above do.
+  await page.keyboard.press("Escape");
+  await waitFor(async () => !(await catalog().isVisible()), "catalog-esc-tab");
+  // The pointer never left the selected row during the keyboard probe, so it
+  // has to move away before hovering it can emit pointerenter again.
+  await searchInput.hover();
+  await searchInput.focus();
+  await selectedModel().hover();
+  await waitFor(() => catalog().isVisible(), "catalog-reopen-after-tab");
+
   // Rows are one left-aligned phrase: model, effort, Fast, default star. The
   // right edge is reserved for the active tick or a non-active model's editor.
   // An agent heading leads with its brand mark on the model names' left edge,

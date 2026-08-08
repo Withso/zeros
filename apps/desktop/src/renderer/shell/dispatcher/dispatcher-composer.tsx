@@ -51,7 +51,7 @@ import {
   rememberPermissionMode,
 } from "../../features/agent/new-chat-defaults";
 import { resolveModelConfiguration } from "../../features/agent/model-preferences";
-import { pickDefaultAgent } from "../../features/settings/default-agent";
+import { pickAgentForNewChat } from "../../features/settings/default-agent";
 import { COMPOSER_FILE_ACCEPT } from "../../features/agent/composer-shell";
 import { AddedDirectories } from "../../features/agent/added-directories";
 import { WorkspaceDirectoryPicker } from "../../features/agent/workspace-directory-picker";
@@ -118,10 +118,13 @@ export function DispatcherComposer({
   // Seed the agent/model + pill posture from the default ("starred") agent the
   // first time the registry resolves. newChatBornDefaults is the same source of
   // truth every other spawn path stamps a chat with, so the dispatcher can't
-  // drift from "+" → Chat / ⌘T.
+  // drift from "+" → Chat / ⌘T — and so is pickAgentForNewChat: the dispatcher
+  // CREATES a chat, so it relaxes down the same tiers rather than refusing.
+  // The strict picker returns null once every runnable agent is disabled, which
+  // left this surface with a dead Create button and no explanation.
   useEffect(() => {
     if (selection || !agents) return;
-    const agent = pickDefaultAgent(agents);
+    const agent = pickAgentForNewChat(agents);
     if (!agent) return;
     const born = newChatBornDefaults(agent.id);
     setSelection({

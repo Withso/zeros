@@ -37,6 +37,7 @@ import {
   familyForModelValue,
   modelsForAgent,
   nativeModeIdForPosture,
+  permissionForAgentMode,
 } from "./model-catalog";
 import {
   effectiveFavoriteModel,
@@ -49,6 +50,7 @@ import {
   resolveModelConfiguration,
   serializeModelPreferences,
   setModelPreference,
+  type PersistedModelPreference,
 } from "./model-preferences";
 import {
   replacePermissionPreferences,
@@ -117,11 +119,24 @@ export function rememberModelConfiguration(
 
 /** Persist one exact native permission mode for this agent family and mirror it
  * into the durable user settings file. Every user-driven permission surface
- * routes through here so future chats restore the same choice. */
+ * routes through here so future chats restore the same choice.
+ *
+ * EXCEPT the danger posture (Claude `bypass`, Codex `full-access`, Cursor
+ * `agent`), which stays with the chat that asked for it. Those modes turn off
+ * the prompts standing between an agent and the machine, so letting one chat's
+ * escape hatch become the birth posture of every later chat — indefinitely,
+ * across every workspace, behind an icon-only pill that shows no label until
+ * hovered — is a much bigger promise than the click made. The chat still
+ * switches; only the durable default is left on its last non-danger value. A
+ * user who genuinely wants that default can still write it in settings.toml,
+ * where it is an explicit, visible choice rather than a side effect. */
 export function rememberPermissionMode(
   agentId: string | null | undefined,
   modeId: string | null | undefined,
 ): void {
+  if (modeId && permissionForAgentMode(modeId, agentId ?? null) === "danger") {
+    return;
+  }
   setPermissionPreference(agentId, modeId);
   notify();
   mirrorModelsToSettings();
@@ -242,29 +257,45 @@ export function starFavoriteModel(
 
 /** One-time localStorage migration. The old family effort + global Fast values
  * cannot truthfully describe every model, so preserve them only on the model
- * that was selected when the migration happened. Every other model starts at
- * High/Fast-off, preventing the old cross-model leakage from continuing. */
+ * each family had selected when the migration happened. Every other model starts
+ * at High/Fast-off, preventing the old cross-model leakage from continuing.
+ *
+ * EVERY family migrates in this single pass. The marker written below makes this
+ * a permanent no-op and the clear drops the whole legacy map, so a family left
+ * for "its own turn" would never get one: migrating Codex first used to erase a
+ * Claude Max the user had set, silently reopening every Claude chat at High. */
 function migrateLegacyConfigurationFor(
   agentId: string | null,
   model: string | null,
 ): void {
   if (!agentId || !model || hasModelPreferenceStorage()) return;
   const family = agentFamily(agentId);
-  const legacyEffort = readEffortMap()[family];
+  const legacyEfforts = readEffortMap();
   const legacyFast = getDefaultFastMode();
+  const records: PersistedModelPreference[] = Object.entries(
+    legacyEfforts,
+  ).flatMap(([owner, effort]) => {
+    if (!isEffort(effort)) return [];
+    // The caller's own family keeps the model in hand (which is the model the
+    // user was configuring); every other family lands on its own selection.
+    const target = owner === family ? model : effectiveFavoriteModel(owner);
+    return target ? [{ agent: owner, model: target, effort }] : [];
+  });
+  // Legacy Fast was one global flag, so the model in hand is the only one it can
+  // honestly describe — fanning it across families would recreate exactly the
+  // cross-model leakage this migration exists to end.
+  if (legacyFast) {
+    const own = records.find(
+      (record) => record.agent === family && record.model === model,
+    );
+    if (own) own.fast = true;
+    else records.push({ agent: family, model, fast: true });
+  }
   // An absence of local legacy values is not proof that migration is done:
   // settings.toml hydrates asynchronously and may still contain the durable
-  // legacy copy, or another family's old effort may be waiting for its model.
-  // Writing an empty marker here would mask that later source and lose it.
-  if (!isEffort(legacyEffort) && !legacyFast) return;
-  replaceModelPreferences([
-    {
-      agent: family,
-      model,
-      ...(isEffort(legacyEffort) ? { effort: legacyEffort } : {}),
-      ...(legacyFast ? { fast: true } : {}),
-    },
-  ]);
+  // legacy copy. Writing an empty marker here would mask that later source.
+  if (records.length === 0) return;
+  replaceModelPreferences(records);
   // Clear only after the new marker demonstrably landed. This prevents old
   // fields from repeatedly re-triggering migration while preserving them if
   // localStorage rejected the write.
@@ -505,18 +536,26 @@ export function hydrateModelsFromSettings(models: unknown): void {
       setSetting(DEFAULT_EFFORT_KEY, {});
       setSetting(DEFAULT_FAST_KEY, false);
     } else if (!hasModelPreferenceStorage() && fam) {
-      // Loss-minimizing migration: old fields described only the current
-      // default. Preserve them there and leave every other model High/Fast-off.
+      // Loss-minimizing migration: an old field described only its family's
+      // selected model. Preserve each one there and leave every other model
+      // High/Fast-off. EVERY family migrates here for the same reason the
+      // localStorage pass does — the marker below closes the door behind it,
+      // and buildModelsTable then deletes both legacy keys from the file.
       replaceModelPreferences([]);
-      const selectedModel = effectiveFavoriteModel(fam);
-      const legacyEffort =
-        fam === "claude" ? claude : fam === "codex" ? codex : null;
       const legacyFast = m.default_fast_mode === true;
-      if (selectedModel && (isEffort(legacyEffort) || legacyFast)) {
-        setModelPreference(fam, selectedModel, {
-          ...(isEffort(legacyEffort) ? { effort: legacyEffort } : {}),
-          ...(legacyFast ? { fast: true } : {}),
-        });
+      for (const [owner, legacyEffort] of [
+        ["claude", claude],
+        ["codex", codex],
+      ] as const) {
+        const selectedModel = effectiveFavoriteModel(owner);
+        if (selectedModel && isEffort(legacyEffort)) {
+          setModelPreference(owner, selectedModel, { effort: legacyEffort });
+        }
+      }
+      // Global Fast can only describe the default family's own model.
+      const selectedModel = effectiveFavoriteModel(fam);
+      if (selectedModel && legacyFast) {
+        setModelPreference(fam, selectedModel, { fast: true });
       }
       if (hasModelPreferenceStorage()) {
         setSetting(DEFAULT_EFFORT_KEY, {});

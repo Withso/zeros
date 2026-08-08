@@ -59,7 +59,6 @@ import { isPlanReviewRequest } from "./renderers/plan-body";
 import { settledTurnStatus } from "./session-reload-lifecycle";
 import { loadPolicies, savePolicies, type PolicyRule } from "./policies";
 import { effortAdoptedEnvKey } from "./model-catalog";
-import { rememberModelConfiguration } from "./new-chat-defaults";
 import { useWorkspaceStore } from "../../state/workspace-store";
 import type { ChatEffort } from "../../state/store";
 
@@ -829,10 +828,13 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       const workspace = useWorkspaceStore.getState();
       const chat = workspace.chats.find((candidate) => candidate.id === chatId);
       if (chat && chat.effort !== effort) {
-        // Native model commands (for example Codex changing its own effort)
-        // are user-visible choices too. Keep the exact model's durable memory
-        // in sync with the chat snapshot the bridge is about to adopt.
-        rememberModelConfiguration(chat.agentId, chat.model, { effort });
+        // ONLY the chat snapshot moves. This notification is not a user choice:
+        // Codex raises its own thread to native `ultra` mid-turn (see the
+        // app-server adapter's thread/settings/updated hook), so writing the
+        // exact model's durable memory here would let the model's own behavior
+        // reopen every FUTURE chat at the tier it escalated to — and mirror
+        // that into the user's settings.toml. The composer still follows the
+        // running session, which is what this update is for.
         workspace.dispatch({
           type: "UPDATE_CHAT_SETTINGS",
           id: chatId,

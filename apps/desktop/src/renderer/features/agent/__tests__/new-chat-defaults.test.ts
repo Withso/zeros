@@ -317,15 +317,40 @@ describe("favorite models — catalog fallbacks + user stars", () => {
 
   it("restores each agent's last exact permission choice in future chats", () => {
     rememberPermissionMode("claude", "accept-edits");
-    rememberPermissionMode("codex", "full-access");
+    rememberPermissionMode("codex", "ask");
 
     expect(newChatBornDefaults("claude")).toMatchObject({
       permissionMode: "auto",
       lastModeId: "accept-edits",
     });
     expect(newChatBornDefaults("codex")).toMatchObject({
-      permissionMode: "danger",
-      lastModeId: "full-access",
+      permissionMode: "tool-approval",
+      lastModeId: "ask",
+    });
+    expect(newChatBornDefaults("cursor")).toMatchObject({
+      permissionMode: "auto",
+      lastModeId: "auto",
+    });
+  });
+
+  // Bypass / Full access turn off the prompts that stand between an agent and
+  // the machine. One chat's escape hatch must not silently become the posture
+  // every later chat is born in — the composer's permission pill is icon-only
+  // at rest, so an inherited escalation carries no visible label at all. The
+  // escalation still applies to the chat that asked for it.
+  it("keeps a danger escalation out of every future chat's birth posture", () => {
+    rememberPermissionMode("claude", "accept-edits");
+    rememberPermissionMode("claude", "bypass");
+    rememberPermissionMode("codex", "full-access");
+    rememberPermissionMode("cursor", "agent");
+
+    expect(newChatBornDefaults("claude")).toMatchObject({
+      permissionMode: "auto",
+      lastModeId: "accept-edits",
+    });
+    expect(newChatBornDefaults("codex")).toMatchObject({
+      permissionMode: "auto",
+      lastModeId: "auto-edit",
     });
     expect(newChatBornDefaults("cursor")).toMatchObject({
       permissionMode: "auto",
@@ -334,8 +359,8 @@ describe("favorite models — catalog fallbacks + user stars", () => {
   });
 
   it("lets the explicit plan default override and then reveal remembered modes", () => {
-    rememberPermissionMode("claude", "bypass");
-    rememberPermissionMode("codex", "full-access");
+    rememberPermissionMode("claude", "default");
+    rememberPermissionMode("codex", "ask");
     setDefaultPlanMode(true);
 
     expect(newChatBornDefaults("claude")).toMatchObject({
@@ -344,8 +369,8 @@ describe("favorite models — catalog fallbacks + user stars", () => {
     });
     // Codex intentionally exposes no Plan mode in the composer.
     expect(newChatBornDefaults("codex")).toMatchObject({
-      permissionMode: "danger",
-      lastModeId: "full-access",
+      permissionMode: "tool-approval",
+      lastModeId: "ask",
     });
     expect(newChatBornDefaults("cursor")).toMatchObject({
       permissionMode: "plan",
@@ -354,8 +379,8 @@ describe("favorite models — catalog fallbacks + user stars", () => {
 
     setDefaultPlanMode(false);
     expect(newChatBornDefaults("claude")).toMatchObject({
-      permissionMode: "danger",
-      lastModeId: "bypass",
+      permissionMode: "tool-approval",
+      lastModeId: "default",
     });
   });
 
@@ -543,6 +568,48 @@ describe("favorite models — catalog fallbacks + user stars", () => {
 
     expect(newChatBornDefaults("codex").effort).toBe("high");
     expect(newChatBornDefaults("claude").effort).toBe("max");
+  });
+
+  // Migration is ONE-SHOT: the marker it writes makes every later call a no-op,
+  // and it clears the whole legacy map. A family left unmigrated in that single
+  // pass therefore loses its value permanently — Claude's Max silently became
+  // High for anyone whose default agent was Codex.
+  it("migrates every family's legacy effort in the one pass it gets", () => {
+    setSetting("default-effort-by-family", { claude: "max", codex: "low" });
+
+    expect(newChatBornDefaults("codex").effort).toBe("low");
+    expect(newChatBornDefaults("claude").effort).toBe("max");
+    expect(getSetting("default-effort-by-family", { codex: "stale" })).toEqual(
+      {},
+    );
+  });
+
+  it("migrates every family's durable legacy effort from settings.toml", () => {
+    hydrateModelsFromSettings({
+      default: "gpt-5.6-sol",
+      default_agent: "codex",
+      claude_code: { default_effort_level: "max" },
+      codex: { default_thinking_level: "low" },
+    });
+
+    expect(newChatBornDefaults("codex").effort).toBe("low");
+    expect(newChatBornDefaults("claude").effort).toBe("max");
+  });
+
+  // The legacy effort belongs to the family's own selected model, never to
+  // whichever model the migrating family happened to be on.
+  it("lands each migrated family's effort on that family's own model", () => {
+    setFavoriteModel("claude", "claude-sonnet-5[1m]");
+    setSetting("default-effort-by-family", { claude: "max", codex: "low" });
+
+    newChatBornDefaults("codex");
+
+    expect(
+      resolveModelConfiguration("claude", "claude-sonnet-5[1m]", null),
+    ).toEqual({ effort: "max", fast: false });
+    expect(
+      resolveModelConfiguration("claude", "claude-opus-5[1m]", null),
+    ).toEqual({ effort: "high", fast: false });
   });
 
   it("merges a first interactive change with unmigrated legacy state", () => {
