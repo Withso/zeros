@@ -1,6 +1,8 @@
 import { create } from "zustand";
 
 const MAX_LIVE_NODES = 96;
+let publicationSequence = 0;
+const latestPublicationByOwner = new Map<string, number>();
 
 interface DesignLivePreviewEntry {
   workspaceId: string;
@@ -40,8 +42,10 @@ export function publishDesignLivePreviewStyles(
   frame: string,
   nodeId: string,
   styles: Readonly<Record<string, string | null>>,
-): void {
+): number {
   const key = ownerKey(workspaceId, frame, nodeId);
+  const publication = ++publicationSequence;
+  latestPublicationByOwner.set(key, publication);
   useDesignLivePreviewStore.setState((state) => {
     const current = state.byOwner[key];
     const nextStyles = current
@@ -63,14 +67,27 @@ export function publishDesignLivePreviewStyles(
       ownerOrder,
     };
   });
+  const retained = new Set(useDesignLivePreviewStore.getState().ownerOrder);
+  for (const candidate of latestPublicationByOwner.keys()) {
+    if (!retained.has(candidate)) latestPublicationByOwner.delete(candidate);
+  }
+  return publication;
 }
 
 export function clearDesignLivePreview(
   workspaceId: string,
   frame: string,
   nodeId: string,
+  expectedPublication?: number,
 ): void {
   const key = ownerKey(workspaceId, frame, nodeId);
+  if (
+    expectedPublication !== undefined &&
+    latestPublicationByOwner.get(key) !== expectedPublication
+  ) {
+    return;
+  }
+  latestPublicationByOwner.delete(key);
   useDesignLivePreviewStore.setState((state) => {
     if (!state.byOwner[key]) return state;
     const byOwner = { ...state.byOwner };
@@ -106,5 +123,7 @@ export function useDesignLivePreviewValue(
 }
 
 export function resetDesignLivePreviewForTests(): void {
+  publicationSequence = 0;
+  latestPublicationByOwner.clear();
   useDesignLivePreviewStore.setState({ byOwner: {}, ownerOrder: [] });
 }

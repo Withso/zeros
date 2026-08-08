@@ -36,6 +36,7 @@ import {
 } from "./design-live-preview";
 import {
   designWorkspaceView,
+  isValidDesignNodeId,
   useDesignWorkspaceUiStore,
 } from "./design-workspace-ui";
 
@@ -391,7 +392,7 @@ export async function selectDesignNodes(input: {
   /** Runtime revisions can change computed values without changing source. */
   forceRuntimeRead?: boolean;
 }): Promise<DesignRuntimeNodeDetails[] | null> {
-  const unique = [...new Set(input.nodeIds.filter(Boolean))].slice(
+  const unique = [...new Set(input.nodeIds.filter(isValidDesignNodeId))].slice(
     0,
     DESIGN_SELECTION_NODE_LIMIT,
   );
@@ -754,17 +755,29 @@ export async function previewDesignNodeStylesTransient(input: {
 }): Promise<DesignRuntimeNodeDetails> {
   const runtime = designFrameRuntime(input.workspaceId, input.frame);
   if (!runtime) throw new Error("The design frame is not ready.");
-  publishDesignLivePreviewStyles(
+  const publication = publishDesignLivePreviewStyles(
     input.workspaceId,
     input.frame,
     input.nodeId,
     input.styles,
   );
-  const details = await runtime.previewStyles(input.nodeId, input.styles);
-  if (details.sourceVersion !== input.sourceVersion) {
-    throw new Error("The design frame changed before the preview was applied.");
+  try {
+    const details = await runtime.previewStyles(input.nodeId, input.styles);
+    if (details.sourceVersion !== input.sourceVersion) {
+      throw new Error(
+        "The design frame changed before the preview was applied.",
+      );
+    }
+    return details;
+  } catch (error) {
+    clearDesignLivePreview(
+      input.workspaceId,
+      input.frame,
+      input.nodeId,
+      publication,
+    );
+    throw error;
   }
-  return details;
 }
 
 export async function previewDesignNodeMotionTransient(input: {

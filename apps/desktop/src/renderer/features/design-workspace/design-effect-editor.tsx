@@ -372,7 +372,7 @@ export function DesignTransformControl({
 
   const fields: Array<{
     label: string;
-    key: keyof DesignTransformValue;
+    key: "x" | "y" | "rotate" | "scaleX" | "scaleY" | "skewX" | "skewY";
     step?: number;
   }> = [
     { label: "X", key: "x" },
@@ -458,7 +458,7 @@ export function DesignTransformControl({
                 label={field.label}
                 value={transform[field.key]}
                 step={field.step}
-                disabled={disabled}
+                disabled={disabled || transform.raw !== undefined}
                 onChange={(nextValue) => update({ [field.key]: nextValue })}
                 onCommit={() => commit()}
               />
@@ -485,6 +485,12 @@ export function DesignTransformControl({
               }}
             />
           </div>
+          {transform.raw !== undefined ? (
+            <p className="text-fg3 m-0 text-[10px] leading-4">
+              This transform uses syntax the numeric controls cannot preserve.
+              Edit it with the CSS field.
+            </p>
+          ) : null}
           <Button
             type="button"
             size="sm"

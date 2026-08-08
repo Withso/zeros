@@ -686,6 +686,103 @@ describe("design runtime protocol", () => {
     }
   }, 20_000);
 
+  it("keeps preserve and descend depth aligned below an oid-bearing body", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      const result = await page.evaluate(
+        ({ source }) =>
+          new Promise<{ preserve: string; descend: string }>(
+            (resolve, reject) => {
+              document.head.innerHTML = `<style>
+                body { margin: 0; }
+                [data-oid="left-1"], [data-oid="right-1"] {
+                  position: absolute; top: 0; width: 100px; height: 100px;
+                }
+                [data-oid="left-1"] { left: 0; }
+                [data-oid="right-1"] { left: 120px; }
+                [data-oid$="-2"], [data-oid$="-3"], [data-oid$="-4"] {
+                  position: absolute; inset: 0;
+                }
+              </style>`;
+              document.body.dataset.oid = "frame-body";
+              document.body.innerHTML =
+                '<section data-oid="left-1"><div data-oid="left-2"><div data-oid="left-3"></div></div></section>' +
+                '<section data-oid="right-1"><div data-oid="right-2"><div data-oid="right-3"><div data-oid="right-4"></div></div></div></section>';
+              (
+                window as Window & { __zerosDesignSourceVersion?: string }
+              ).__zerosDesignSourceVersion = "d".repeat(24);
+              const channel = new MessageChannel();
+              const values = { preserve: "", descend: "" };
+              const timeout = window.setTimeout(
+                () => reject(new Error("nested hit requests timed out")),
+                3_000,
+              );
+              const request = (
+                requestId: string,
+                mode: "preserve" | "descend",
+                selectedNodeId: string,
+              ) =>
+                channel.port1.postMessage({
+                  protocol: "zeros-design-runtime",
+                  version: 2,
+                  type: "request",
+                  sourceVersion: "d".repeat(24),
+                  requestId,
+                  method: "getElementAtLoc",
+                  args: { x: 150, y: 50, mode, selectedNodeId },
+                });
+              channel.port1.onmessage = (event) => {
+                const message = event.data as {
+                  type?: string;
+                  event?: string;
+                  requestId?: string;
+                  ok?: boolean;
+                  result?: { oid?: string };
+                  error?: { message?: string };
+                };
+                if (message.type === "event" && message.event === "ready") {
+                  request("preserve", "preserve", "left-3");
+                  return;
+                }
+                if (message.type !== "response") return;
+                if (!message.ok) {
+                  window.clearTimeout(timeout);
+                  reject(new Error(message.error?.message ?? "runtime failed"));
+                  return;
+                }
+                if (message.requestId === "preserve") {
+                  values.preserve = message.result?.oid ?? "";
+                  request("descend", "descend", "left-2");
+                } else if (message.requestId === "descend") {
+                  window.clearTimeout(timeout);
+                  values.descend = message.result?.oid ?? "";
+                  resolve(values);
+                }
+              };
+              channel.port1.start();
+              new Function(source)();
+              window.postMessage(
+                {
+                  protocol: "zeros-design-runtime",
+                  version: 2,
+                  type: "handshake",
+                  sourceVersion: "d".repeat(24),
+                },
+                "*",
+                [channel.port2],
+              );
+            },
+          ),
+        { source: DESIGN_RUNTIME_SOURCE },
+      );
+
+      expect(result).toEqual({ preserve: "right-3", descend: "right-3" });
+    } finally {
+      await browser.close();
+    }
+  }, 20_000);
+
   it("answers layout-sensitive requests when animation frames are suspended", async () => {
     const browser = await chromium.launch({ headless: true });
     try {

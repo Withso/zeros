@@ -24,6 +24,7 @@ import {
   hoverDesignNode,
   inspectDesignNodeStyleProvenance,
   reconcileDesignRuntimeSnapshot,
+  previewDesignNodeStylesTransient,
   resetDesignSelectionWorkflowsForTests,
   selectDesignNode,
   selectDesignNodes,
@@ -33,6 +34,10 @@ import {
   designRuntimeFrameState,
   resetDesignRuntimeStoreForTests,
 } from "../state/design-runtime-store";
+import {
+  designLivePreviewValue,
+  resetDesignLivePreviewForTests,
+} from "../state/design-live-preview";
 import {
   designWorkspaceView,
   resetDesignWorkspaceUiForTests,
@@ -76,6 +81,7 @@ describe("design selection workflows", () => {
   beforeEach(() => {
     resetDesignSelectionWorkflowsForTests();
     resetDesignRuntimeStoreForTests();
+    resetDesignLivePreviewForTests();
     resetDesignWorkspaceUiForTests();
     vi.clearAllMocks();
   });
@@ -233,6 +239,91 @@ describe("design selection workflows", () => {
       }),
       expect.any(Number),
     );
+  });
+
+  it("aligns group node ids with the persisted and engine validation contract", async () => {
+    mocks.designFrameRuntime.mockReturnValue({
+      getNodeDetails: vi.fn(async (nodeId: string) => details(nodeId)),
+      captureScreenshot: vi.fn(async () => {
+        throw new Error("capture unavailable in unit test");
+      }),
+    });
+
+    await expect(
+      selectDesignNodes({
+        workspaceId: "workspace-a",
+        folder: "/design/a",
+        frame: FRAME,
+        nodeIds: ["heading", `invalid\u0000node`, "x".repeat(257)],
+      }),
+    ).resolves.toMatchObject([{ oid: "heading" }]);
+
+    expect(designWorkspaceView("workspace-a").selectedNodeIds).toEqual([
+      "heading",
+    ]);
+    expect(mocks.designSetSelection).toHaveBeenCalledWith(
+      "workspace-a",
+      expect.objectContaining({ nodeIds: ["heading"] }),
+      expect.any(Number),
+    );
+  });
+
+  it("clears an unconfirmed live scalar when its runtime preview rejects", async () => {
+    mocks.designFrameRuntime.mockReturnValue({
+      previewStyles: vi.fn(async () => {
+        throw new Error("Element not found");
+      }),
+    });
+
+    const preview = previewDesignNodeStylesTransient({
+      workspaceId: "workspace-a",
+      frame: FRAME.file,
+      sourceVersion: FRAME.sourceVersion,
+      nodeId: "heading",
+      styles: { left: "48px" },
+    });
+    expect(
+      designLivePreviewValue("workspace-a", FRAME.file, "heading", "left"),
+    ).toBe("48px");
+
+    await expect(preview).rejects.toThrow("Element not found");
+    expect(
+      designLivePreviewValue("workspace-a", FRAME.file, "heading", "left"),
+    ).toBeUndefined();
+  });
+
+  it("does not let an older rejected preview clear a newer live scalar", async () => {
+    let rejectFirst!: (error: Error) => void;
+    const first = new Promise<DesignRuntimeNodeDetails>((_, reject) => {
+      rejectFirst = reject;
+    });
+    mocks.designFrameRuntime.mockReturnValue({
+      previewStyles: vi
+        .fn()
+        .mockReturnValueOnce(first)
+        .mockResolvedValueOnce(details("heading")),
+    });
+
+    const older = previewDesignNodeStylesTransient({
+      workspaceId: "workspace-a",
+      frame: FRAME.file,
+      sourceVersion: FRAME.sourceVersion,
+      nodeId: "heading",
+      styles: { left: "48px" },
+    });
+    await previewDesignNodeStylesTransient({
+      workspaceId: "workspace-a",
+      frame: FRAME.file,
+      sourceVersion: FRAME.sourceVersion,
+      nodeId: "heading",
+      styles: { left: "64px" },
+    });
+    rejectFirst(new Error("stale preview failed"));
+    await expect(older).rejects.toThrow("stale preview failed");
+
+    expect(
+      designLivePreviewValue("workspace-a", FRAME.file, "heading", "left"),
+    ).toBe("64px");
   });
 
   it("collapses an additive selection when its primary layer is clicked", async () => {

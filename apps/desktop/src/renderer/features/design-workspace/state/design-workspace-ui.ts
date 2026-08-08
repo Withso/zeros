@@ -48,7 +48,7 @@ export function clampDesignZoom(value: number): number {
   return Math.min(2, Math.max(0.05, value));
 }
 
-function validDesignNodeId(value: unknown): value is string {
+export function isValidDesignNodeId(value: unknown): value is string {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
@@ -77,7 +77,7 @@ export function normalizeDesignWorkspaceView(
       ? record.selectedFrame
       : null;
   const selectedNodeId =
-    selectedFrame && validDesignNodeId(record.selectedNodeId)
+    selectedFrame && isValidDesignNodeId(record.selectedNodeId)
       ? record.selectedNodeId
       : null;
   const selectedNodeIds = selectedNodeId
@@ -85,7 +85,7 @@ export function normalizeDesignWorkspaceView(
         ...new Set([
           selectedNodeId,
           ...(Array.isArray(record.selectedNodeIds)
-            ? record.selectedNodeIds.filter(validDesignNodeId)
+            ? record.selectedNodeIds.filter(isValidDesignNodeId)
             : []),
         ]),
       ].slice(0, DESIGN_SELECTION_NODE_LIMIT)

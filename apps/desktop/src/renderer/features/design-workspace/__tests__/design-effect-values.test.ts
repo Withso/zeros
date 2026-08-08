@@ -45,6 +45,9 @@ describe("design effect values", () => {
       scaleY: 1,
     });
     expect(
+      parseDesignTransform("matrix(1, 0, 0, 1, 1e-7, -2E+3)"),
+    ).toMatchObject({ x: 0.0000001, y: -2_000 });
+    expect(
       formatDesignTransform({
         x: 12,
         y: -4,
@@ -55,5 +58,26 @@ describe("design effect values", () => {
         skewY: 0,
       }),
     ).toBe("translate(12px, -4px) rotate(30deg) scale(1.2, 0.8)");
+  });
+
+  it("preserves authored length and angle units across structured edits", () => {
+    expect(
+      formatDesignTransform(
+        parseDesignTransform(
+          "translate(-50%, -2rem) rotate(0.25turn) skew(0.5rad, 10grad)",
+        ),
+      ),
+    ).toBe("translate(-50%, -2rem) rotate(0.25turn) skew(0.5rad, 10grad)");
+  });
+
+  it("keeps unsupported or order-sensitive transforms in raw CSS mode", () => {
+    for (const value of [
+      "perspective(20rem) rotateX(0.25turn)",
+      "rotate(0.25turn) translate(-50%, -50%)",
+    ]) {
+      const parsed = parseDesignTransform(value);
+      expect(parsed.raw).toBe(value);
+      expect(formatDesignTransform(parsed)).toBe(value);
+    }
   });
 });

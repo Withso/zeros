@@ -1064,23 +1064,28 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return element;
   }
 
+  function editableOidPath(element) {
+    var path = [];
+    var current = element;
+    while (current && current instanceof Element) {
+      if (oidOf(current)) path.push(current);
+      current = current.parentElement;
+    }
+    path.reverse();
+    // Legacy documents may put a frame oid on <body>. It is an ownership
+    // shell, not the first editable top-level layer when descendants exist.
+    if (path.length > 1 && path[0] === document.body) path.shift();
+    return path;
+  }
+
   function elementAtLoc(x, y, mode, selectedNodeId) {
     if (!Number.isFinite(x) || !Number.isFinite(y)) {
       throw new Error("x and y must be finite frame coordinates.");
     }
     var stack = document.elementsFromPoint(x, y);
     for (var index = 0; index < stack.length; index += 1) {
-      var current = stack[index];
-      var path = [];
-      while (current && current instanceof Element) {
-        if (oidOf(current)) path.push(current);
-        current = current.parentElement;
-      }
+      var path = editableOidPath(stack[index]);
       if (path.length === 0) continue;
-      path.reverse();
-      // Legacy documents may put a frame oid on <body>. It is an ownership
-      // shell, not the first editable top-level layer when descendants exist.
-      if (path.length > 1 && path[0] === document.body) path.shift();
       var hitMode = mode === "deepest" || mode === "top-level" ||
         mode === "preserve" || mode === "descend" ? mode : "deepest";
       var chosen = hitMode === "deepest" ? path[path.length - 1] : path[0];
@@ -1097,14 +1102,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           refreshElementMap();
           var selectedElement = elementsByOid.get(selectedNodeId);
           if (selectedElement) {
-            var selectedDepth = 0;
-            for (
-              var selectedAncestor = selectedElement;
-              selectedAncestor && selectedAncestor instanceof Element;
-              selectedAncestor = selectedAncestor.parentElement
-            ) {
-              if (oidOf(selectedAncestor)) selectedDepth += 1;
-            }
+            var selectedDepth = editableOidPath(selectedElement).length;
             var targetIndex = Math.min(
               path.length - 1,
               Math.max(0, selectedDepth - 1 + (hitMode === "descend" ? 1 : 0))

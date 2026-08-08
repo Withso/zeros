@@ -394,9 +394,10 @@ export function DesignFillEditor({
                 }
                 className="zd-design-control-applied h-7 px-1 text-center font-mono text-[10px]"
                 aria-label="Gradient angle value"
-                onChange={(event) =>
-                  updateGradient({ angle: event.currentTarget.valueAsNumber })
-                }
+                onChange={(event) => {
+                  const angle = event.currentTarget.valueAsNumber;
+                  if (Number.isFinite(angle)) updateGradient({ angle });
+                }}
                 onBlur={() => commitOnBlur({ "background-image": gradientCss })}
               />
             </div>

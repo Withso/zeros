@@ -196,13 +196,18 @@ function number(value: number): string {
 export function formatDesignGradient(gradient: DesignGradientValue): string {
   const prefix = gradient.repeating ? "repeating-" : "";
   const colors = `${gradient.start} ${gradient.startPosition ?? "0%"}, ${gradient.end} ${gradient.endPosition ?? "100%"}`;
+  const angle = Number.isFinite(gradient.angle)
+    ? gradient.angle
+    : gradient.type === "linear"
+      ? DEFAULT_DESIGN_GRADIENT.angle
+      : 0;
   if (gradient.type === "radial") {
     return `${prefix}radial-gradient(circle, ${colors})`;
   }
   if (gradient.type === "conic") {
-    return `${prefix}conic-gradient(from ${number(gradient.angle)}deg, ${colors})`;
+    return `${prefix}conic-gradient(from ${number(angle)}deg, ${colors})`;
   }
-  return `${prefix}linear-gradient(${number(gradient.angle)}deg, ${colors})`;
+  return `${prefix}linear-gradient(${number(angle)}deg, ${colors})`;
 }
 
 export function readDesignImageUrl(value: string): string {

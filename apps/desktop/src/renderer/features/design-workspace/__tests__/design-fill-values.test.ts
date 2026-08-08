@@ -87,6 +87,17 @@ describe("design fill values", () => {
     ).toBeNull();
   });
 
+  it("never formats a non-finite gradient angle into authored CSS", () => {
+    expect(
+      formatDesignGradient({
+        type: "linear",
+        angle: Number.NaN,
+        start: "red",
+        end: "blue",
+      }),
+    ).toBe("linear-gradient(180deg, red 0%, blue 100%)");
+  });
+
   it("reads quoted and unquoted image URLs", () => {
     expect(readDesignImageUrl('url("./hero image.png")')).toBe(
       "./hero image.png",
