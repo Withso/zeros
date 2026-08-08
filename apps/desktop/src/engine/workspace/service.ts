@@ -91,6 +91,7 @@ import {
 } from "../git";
 import { resolveRepoScript, resolveRunActions } from "../settings/repo-scripts";
 import { isRunSessionId, runActionOneShot } from "@zeros/protocol/run-actions";
+import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
 import type { DesignOperation } from "@zeros/design-core";
 import type {
   RunActionStatus,
@@ -803,10 +804,10 @@ function designSelectionStrings(
 function designSelectionRects(
   value: unknown,
 ): Array<{ x: number; y: number; width: number; height: number }> {
-  if (!Array.isArray(value) || value.length > 16) {
+  if (!Array.isArray(value) || value.length > DESIGN_SELECTION_NODE_LIMIT) {
     throw new GitError({
       code: "VALIDATION_FAILED",
-      message: "rects must be an array of at most 16 rectangles",
+      message: `rects must be an array of at most ${DESIGN_SELECTION_NODE_LIMIT} rectangles`,
     });
   }
   return value.map((item) => {
@@ -2044,7 +2045,7 @@ export class WorkspaceService {
         const nodeIds = designSelectionStrings(
           params.nodeIds ?? [],
           "nodeIds",
-          16,
+          DESIGN_SELECTION_NODE_LIMIT,
           256,
         );
         if (nodeIds.length > 0) {

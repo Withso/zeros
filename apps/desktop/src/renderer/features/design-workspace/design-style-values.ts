@@ -447,6 +447,13 @@ export function resolveDesignNumericExpression(
   const prior = parseDesignNumericValue(baseline);
   if (!prior || !source) return input;
   const absolute = parseDesignNumericValue(source);
+  if (
+    absolute &&
+    !absolute.unit &&
+    /^-\s*(?:\d+(?:\.\d*)?|\.\d+)\s*$/.test(source)
+  ) {
+    return `${formatDesignNumber(absolute.number)}${prior.unit}`;
+  }
   if (absolute?.unit || (!/[xX()+*/^]/.test(source) && !/^[+-]/.test(source))) {
     return input;
   }

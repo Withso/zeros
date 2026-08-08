@@ -27,6 +27,7 @@ import { cn } from "../../shared/ui/cn";
 import { DesignColorPicker, DesignColorSwatch } from "./design-color-picker";
 import {
   classifyDesignFill,
+  DEFAULT_DESIGN_GRADIENT,
   formatDesignGradient,
   formatDesignImageUrl,
   parseDesignGradient,
@@ -62,7 +63,12 @@ export function DesignFillEditor({
   const [open, setOpen] = useState(false);
   const [type, setType] = useState<DesignFillType>(initialType);
   const [draftColor, setDraftColor] = useState(color);
-  const [gradient, setGradient] = useState(() => parseDesignGradient(image));
+  const [gradient, setGradient] = useState<DesignGradientValue>(
+    () => parseDesignGradient(image) ?? { ...DEFAULT_DESIGN_GRADIENT },
+  );
+  const [unsupportedGradient, setUnsupportedGradient] = useState(
+    () => initialType === "gradient" && parseDesignGradient(image) === null,
+  );
   const [imageUrl, setImageUrl] = useState(() => readDesignImageUrl(image));
   const [imagePosition, setImagePosition] = useState(position);
   const [imageSize, setImageSize] = useState(size);
@@ -73,14 +79,24 @@ export function DesignFillEditor({
     if (open) return;
     setType(classifyDesignFill(image));
     setDraftColor(color);
-    setGradient(parseDesignGradient(image));
+    const parsedGradient = parseDesignGradient(image);
+    setGradient(parsedGradient ?? { ...DEFAULT_DESIGN_GRADIENT });
+    setUnsupportedGradient(
+      classifyDesignFill(image) === "gradient" && parsedGradient === null,
+    );
     setImageUrl(readDesignImageUrl(image));
     setImagePosition(position);
     setImageSize(size);
     setImageRepeat(repeat);
   }, [color, image, open, position, repeat, size]);
 
-  const gradientCss = useMemo(() => formatDesignGradient(gradient), [gradient]);
+  const gradientCss = useMemo(
+    () =>
+      type === "gradient" && unsupportedGradient
+        ? image
+        : formatDesignGradient(gradient),
+    [gradient, image, type, unsupportedGradient],
+  );
   const imageCss = useMemo(() => formatDesignImageUrl(imageUrl), [imageUrl]);
   const previewStyle =
     type === "solid"
@@ -97,6 +113,10 @@ export function DesignFillEditor({
 
   const selectType = (nextType: string) => {
     const next = nextType as DesignFillType;
+    if (next === "gradient" && type !== "gradient") {
+      setGradient({ ...DEFAULT_DESIGN_GRADIENT });
+      setUnsupportedGradient(false);
+    }
     setType(next);
     if (next === "solid") {
       onPreview?.({
@@ -123,6 +143,7 @@ export function DesignFillEditor({
   };
 
   const commitCurrent = () => {
+    if (type === "gradient" && unsupportedGradient) return;
     if (type === "solid") {
       onCommit({ "background-color": draftColor, "background-image": "none" });
     } else if (type === "gradient") {
@@ -171,7 +192,11 @@ export function DesignFillEditor({
           skipBlurCommitRef.current = false;
           setType(classifyDesignFill(image));
           setDraftColor(color);
-          setGradient(parseDesignGradient(image));
+          const parsedGradient = parseDesignGradient(image);
+          setGradient(parsedGradient ?? { ...DEFAULT_DESIGN_GRADIENT });
+          setUnsupportedGradient(
+            classifyDesignFill(image) === "gradient" && parsedGradient === null,
+          );
           setImageUrl(readDesignImageUrl(image));
         }
         setOpen(next);
@@ -306,7 +331,7 @@ export function DesignFillEditor({
                   <DesignColorPicker
                     value={gradient[key]}
                     label={`${label} stop`}
-                    disabled={disabled}
+                    disabled={disabled || unsupportedGradient}
                     onPreview={(next) => {
                       updateGradient({ [key]: next });
                     }}
@@ -325,6 +350,7 @@ export function DesignFillEditor({
             <div className="grid grid-cols-[88px_minmax(0,1fr)_52px] items-center gap-2">
               <Select
                 value={gradient.type}
+                disabled={disabled || unsupportedGradient}
                 onValueChange={(next) =>
                   updateGradient({ type: next as DesignGradientValue["type"] })
                 }
@@ -346,7 +372,9 @@ export function DesignFillEditor({
                 max={360}
                 step={1}
                 value={[gradient.angle]}
-                disabled={gradient.type === "radial"}
+                disabled={
+                  disabled || unsupportedGradient || gradient.type === "radial"
+                }
                 aria-label="Gradient angle"
                 onValueChange={([angle = 0]) => updateGradient({ angle })}
                 onValueCommit={([angle = 0]) =>
@@ -361,7 +389,9 @@ export function DesignFillEditor({
               <Input
                 type="number"
                 value={gradient.angle}
-                disabled={gradient.type === "radial"}
+                disabled={
+                  disabled || unsupportedGradient || gradient.type === "radial"
+                }
                 className="zd-design-control-applied h-7 px-1 text-center font-mono text-[10px]"
                 aria-label="Gradient angle value"
                 onChange={(event) =>
@@ -370,6 +400,13 @@ export function DesignFillEditor({
                 onBlur={() => commitOnBlur({ "background-image": gradientCss })}
               />
             </div>
+            {unsupportedGradient ? (
+              <p className="text-fg3 m-0 text-[10px] leading-4">
+                This authored gradient uses stops or syntax the visual editor
+                cannot preserve. Edit it in code, or choose another fill type
+                before replacing it.
+              </p>
+            ) : null}
           </TabsContent>
 
           <TabsContent value="image" className="m-0 flex flex-col gap-3 p-3">
@@ -510,6 +547,9 @@ export function DesignFillEditor({
             <Button
               type="button"
               size="sm"
+              disabled={
+                disabled || (type === "gradient" && unsupportedGradient)
+              }
               onClick={() => {
                 commitCurrent();
                 setOpen(false);

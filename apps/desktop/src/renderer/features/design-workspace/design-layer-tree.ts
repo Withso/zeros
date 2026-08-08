@@ -36,6 +36,47 @@ export function designLayerVirtualWindow(input: {
   return { start, end: Math.max(start, end) };
 }
 
+/** Reveal a keyboard target without accidentally collapsing an already-correct
+ * window to the height of one row. The caller supplies the measured viewport;
+ * targets that are already mounted preserve the current window verbatim. */
+export function designLayerRevealWindow(input: {
+  count: number;
+  index: number;
+  viewportHeight: number;
+  current: DesignLayerWindow;
+  rowHeight?: number;
+  overscan?: number;
+}): DesignLayerWindow {
+  const count = Math.max(0, Math.floor(input.count));
+  if (count <= 400) return { start: 0, end: count };
+  const index = Math.min(count - 1, Math.max(0, Math.floor(input.index)));
+  if (index >= input.current.start && index < input.current.end) {
+    return input.current;
+  }
+  const rowHeight = Math.max(1, input.rowHeight ?? 28);
+  return designLayerVirtualWindow({
+    count,
+    visibleTop: index * rowHeight,
+    viewportHeight: input.viewportHeight,
+    rowHeight,
+    overscan: input.overscan,
+  });
+}
+
+/** Keep the composite tree's sole tab stop on a mounted row. */
+export function designLayerRovingTabStop(
+  renderedLayers: readonly FlatDesignLayer[],
+  selectedNodeId: string | null | undefined,
+): string | null {
+  if (
+    selectedNodeId &&
+    renderedLayers.some(({ node }) => node.oid === selectedNodeId)
+  ) {
+    return selectedNodeId;
+  }
+  return renderedLayers[0]?.node.oid ?? null;
+}
+
 interface FlattenDesignLayerTreeOptions {
   /** Parent ids whose descendants are omitted outside an active search. */
   collapsedNodeIds?: ReadonlySet<string>;

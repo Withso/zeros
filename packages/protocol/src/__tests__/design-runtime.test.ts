@@ -390,12 +390,12 @@ describe("design runtime protocol", () => {
                         { offset: 100, styles: { opacity: "1" } },
                       ],
                       duration: 1_000,
-                      delay: 0,
+                      delay: 200,
                       easing: "linear",
                       iterations: 1,
                       direction: "normal",
                       fill: "both",
-                      currentTime: 500,
+                      currentTime: 1_200,
                       playing: false,
                     },
                   });
@@ -450,7 +450,7 @@ describe("design runtime protocol", () => {
           ),
         { source: DESIGN_RUNTIME_SOURCE },
       );
-      expect(result.previewOpacity).toBeCloseTo(0.4, 2);
+      expect(result.previewOpacity).toBeCloseTo(1, 2);
       expect(result.restoredOpacity).toBeCloseTo(0.2, 2);
     } finally {
       await browser.close();
@@ -469,6 +469,8 @@ describe("design runtime protocol", () => {
             deepestDescend: string;
             nestedPeer: string;
             authoredStyleProperties: string[];
+            peerAuthoredStyleProperties: string[];
+            repeatedAuthoredScanStable: boolean;
             parentTextEditable: boolean;
             childTextEditable: boolean;
             marquee: string[];
@@ -483,8 +485,9 @@ describe("design runtime protocol", () => {
               [data-oid="parent"] { position: absolute; inset: 0; width: 200px; height: 100px; }
               [data-oid="child"], [data-oid="peer"] { position: absolute; top: 0; display: block; width: 100px; height: 100px; }
               [data-oid="child"] { left: 0; background: var(--accent); }
-              [data-oid="peer"] { left: 100px; }
+              [data-oid="peer"] { left: 100px; background-color: red; }
             </style>`;
+            document.body.dataset.oid = "frame-body";
             document.body.innerHTML =
               '<main data-oid="parent"><button data-oid="child" style="margin-right: 50px; padding: 10px 32px 32px; inset-inline-start: 4px">Child</button><button data-oid="peer">Peer</button></main>';
             (
@@ -497,11 +500,20 @@ describe("design runtime protocol", () => {
               deepestDescend: "",
               nestedPeer: "",
               authoredStyleProperties: [] as string[],
+              peerAuthoredStyleProperties: [] as string[],
+              repeatedAuthoredScanStable: false,
               parentTextEditable: false,
               childTextEditable: false,
               marquee: [] as string[],
             };
             let firstThemeRevision: number | undefined;
+            let authoredMatchesBeforeRepeat = 0;
+            let authoredMatchCalls = 0;
+            const originalMatches = Element.prototype.matches;
+            Element.prototype.matches = function (selector: string) {
+              authoredMatchCalls += 1;
+              return originalMatches.call(this, selector);
+            };
             const timeout = window.setTimeout(
               () => reject(new Error("theme and hit-mode requests timed out")),
               3_000,
@@ -581,6 +593,8 @@ describe("design runtime protocol", () => {
                 });
               } else if (message.requestId === "peer-preserve") {
                 values.nestedPeer = objectResult?.oid ?? "";
+                values.peerAuthoredStyleProperties =
+                  objectResult?.authoredStyleProperties ?? [];
                 request("child-details", "getNodeDetails", {
                   nodeId: "child",
                 });
@@ -600,6 +614,13 @@ describe("design runtime protocol", () => {
                       item.oid ? [item.oid] : [],
                     )
                   : [];
+                authoredMatchesBeforeRepeat = authoredMatchCalls;
+                request("peer-details-again", "getNodeDetails", {
+                  nodeId: "peer",
+                });
+              } else if (message.requestId === "peer-details-again") {
+                values.repeatedAuthoredScanStable =
+                  authoredMatchesBeforeRepeat === authoredMatchCalls;
                 request("theme", "setTheme", { theme: "dark" });
               } else if (message.requestId === "theme") {
                 firstThemeRevision = objectResult?.revision;
@@ -645,6 +666,10 @@ describe("design runtime protocol", () => {
           "margin-right",
           "padding",
         ]),
+        peerAuthoredStyleProperties: expect.arrayContaining([
+          "background-color",
+        ]),
+        repeatedAuthoredScanStable: true,
         parentTextEditable: false,
         childTextEditable: true,
         marquee: ["child"],
@@ -652,6 +677,10 @@ describe("design runtime protocol", () => {
         background: "rgb(0, 0, 255)",
         repeatedThemeRevisionStable: true,
       });
+      expect(result.peerAuthoredStyleProperties).not.toContain("background");
+      expect(result.peerAuthoredStyleProperties).not.toContain(
+        "background-image",
+      );
     } finally {
       await browser.close();
     }

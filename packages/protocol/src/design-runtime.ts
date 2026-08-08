@@ -9,6 +9,8 @@
 
 export const DESIGN_RUNTIME_PROTOCOL = "zeros-design-runtime";
 export const DESIGN_RUNTIME_VERSION = 2;
+/** Shared renderer/engine bound for one additive design selection. */
+export const DESIGN_SELECTION_NODE_LIMIT = 32;
 
 export type DesignRuntimeErrorCode =
   | "BAD_REQUEST"
@@ -511,6 +513,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   var visibilityOverridesByOid = new Map();
   var previewStyleOverridesByOid = new Map();
   var previewAnimationsByOid = new Map();
+  var authoredStylePropertiesCache = new WeakMap();
+  var authoredStyleRuleMetadata = null;
   var mutationTimer = null;
   var parentPort = null;
   var observer = null;
@@ -666,40 +670,69 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return styles;
   }
 
-  function authoredStylePropertiesOf(element) {
-    var authored = new Set();
-    function cssPropertyName(property) {
-      if (property.indexOf("--") === 0) return property;
-      return property
-        .replace(/([A-Z])/g, "-$1")
-        .replace(/^ms-/, "-ms-")
-        .toLowerCase();
-    }
-    function collect(style) {
-      if (!style) return;
-      // CSSStyleDeclaration enumeration exposes the declaration block's
-      // parsed properties, including logical and newer properties outside the
-      // runtime's bounded computed-style projection.
-      for (var declarationIndex = 0; declarationIndex < style.length; declarationIndex += 1) {
-        var declaration = style.item(declarationIndex);
-        if (declaration) authored.add(cssPropertyName(declaration));
+  function cssPropertyName(property) {
+    if (property.indexOf("--") === 0) return property;
+    return property
+      .replace(/([A-Z])/g, "-$1")
+      .replace(/^ms-/, "-ms-")
+      .toLowerCase();
+  }
+
+  function declarationProperties(style) {
+    var declarations = [];
+    if (!style) return declarations;
+    // CSSOM enumeration may expand authored shorthands into longhands. Parsing
+    // normalized declaration text preserves padding as padding, while a real
+    // background-color cannot turn into a synthetic background shorthand.
+    var text = String(style.cssText || "");
+    var parts = [];
+    var current = "";
+    var depth = 0;
+    var quote = "";
+    for (var textIndex = 0; textIndex < text.length; textIndex += 1) {
+      var character = text[textIndex];
+      if (quote) {
+        current += character;
+        if (character === quote && text[textIndex - 1] !== "\\") quote = "";
+        continue;
       }
-      // Also retain reconstructable shorthands and their known longhands.
-      // Browsers are allowed to enumerate a parsed shorthand as longhands;
-      // both forms are useful to the inspector's applied-state resolver.
-      for (var propertyIndex = 0; propertyIndex < STYLE_PROPERTIES.length; propertyIndex += 1) {
-        var property = STYLE_PROPERTIES[propertyIndex];
-        if (style[property]) authored.add(cssPropertyName(property));
+      if (character === '"' || character === "'") quote = character;
+      if (character === "(") depth += 1;
+      if (character === ")") depth = Math.max(0, depth - 1);
+      if (character === ";" && depth === 0) {
+        if (current.trim()) parts.push(current);
+        current = "";
+      } else {
+        current += character;
       }
     }
-    collect(element.style);
+    if (current.trim()) parts.push(current);
+    for (var index = 0; index < parts.length; index += 1) {
+      var colon = parts[index].indexOf(":");
+      if (colon < 1) continue;
+      var property = cssPropertyName(parts[index].slice(0, colon).trim());
+      if (
+        property.length <= 64 &&
+        /^(?:--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(property)
+      ) {
+        declarations.push(property);
+      }
+    }
+    return declarations;
+  }
+
+  function styleRuleMetadata() {
+    if (authoredStyleRuleMetadata !== null) return authoredStyleRuleMetadata;
+    var metadata = [];
     function visitRules(rules, active) {
       for (var ruleIndex = 0; ruleIndex < rules.length; ruleIndex += 1) {
         var rule = rules[ruleIndex];
         if (rule.type === CSSRule.STYLE_RULE && rule.selectorText && rule.style) {
-          var matches = false;
-          try { matches = element.matches(rule.selectorText); } catch (_error) { matches = false; }
-          if (active && matches) collect(rule.style);
+          metadata.push({
+            selector: rule.selectorText,
+            active: active,
+            declarations: declarationProperties(rule.style)
+          });
         } else if (rule.cssRules) {
           visitRules(rule.cssRules, active && conditionalRuleActive(rule));
         }
@@ -709,16 +742,31 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       try {
         visitRules(document.styleSheets[sheetIndex].cssRules || [], true);
       } catch (_error) {
-        // The renderer owns normal design stylesheets. Inaccessible sheets
-        // cannot provide trustworthy authored-state metadata, so omit them.
+        // Inaccessible sheets cannot provide trustworthy authored metadata.
       }
     }
-    return Array.from(authored)
-      .filter(function (property) {
-        return property.length <= 64 &&
-          /^(?:--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(property);
-      })
-      .slice(0, 128);
+    authoredStyleRuleMetadata = metadata;
+    return metadata;
+  }
+
+  function authoredStylePropertiesOf(element) {
+    var cached = authoredStylePropertiesCache.get(element);
+    if (cached) return cached.slice();
+    var authored = new Set(declarationProperties(element.style));
+    var rules = styleRuleMetadata();
+    for (var ruleIndex = 0; ruleIndex < rules.length; ruleIndex += 1) {
+      var rule = rules[ruleIndex];
+      if (!rule.active || rule.declarations.length === 0) continue;
+      var matches = false;
+      try { matches = element.matches(rule.selector); } catch (_error) { matches = false; }
+      if (!matches) continue;
+      for (var propertyIndex = 0; propertyIndex < rule.declarations.length; propertyIndex += 1) {
+        authored.add(rule.declarations[propertyIndex]);
+      }
+    }
+    var result = Array.from(authored).slice(0, 128);
+    authoredStylePropertiesCache.set(element, result);
+    return result.slice();
   }
 
   function refreshElementMap() {
@@ -962,6 +1010,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function snapshot() {
+    // A snapshot is the semantic cache generation. Theme changes and observed
+    // DOM/style mutations both arrive through this boundary.
+    authoredStylePropertiesCache = new WeakMap();
+    authoredStyleRuleMetadata = null;
     refreshElementMap();
     var roots = [];
     var treeBudget = { count: 0, truncated: false };
@@ -1026,6 +1078,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       }
       if (path.length === 0) continue;
       path.reverse();
+      // Legacy documents may put a frame oid on <body>. It is an ownership
+      // shell, not the first editable top-level layer when descendants exist.
+      if (path.length > 1 && path[0] === document.body) path.shift();
       var hitMode = mode === "deepest" || mode === "top-level" ||
         mode === "preserve" || mode === "descend" ? mode : "deepest";
       var chosen = hitMode === "deepest" ? path[path.length - 1] : path[0];
@@ -1265,7 +1320,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       !Number.isFinite(duration) || duration < 1 || duration > 60000 ||
       !Number.isFinite(delay) || delay < -60000 || delay > 60000 ||
       !Number.isFinite(iterations) || iterations < 0 || iterations > 1000 ||
-      !Number.isFinite(currentTime) || currentTime < 0 || currentTime > duration ||
+      !Number.isFinite(currentTime) || currentTime < delay || currentTime > delay + duration ||
       typeof input.easing !== "string" || input.easing.length < 1 || input.easing.length > 256 ||
       directions.indexOf(input.direction) < 0 || fills.indexOf(input.fill) < 0 ||
       typeof input.playing !== "boolean"

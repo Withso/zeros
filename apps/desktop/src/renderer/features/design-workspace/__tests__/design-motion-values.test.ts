@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   designDurationMs,
   designMotionIterationCount,
+  designMotionPreviewCurrentTime,
+  designMotionTracksAreValid,
   moveDesignMotionPoint,
   removeDesignMotionPoint,
   sampleDesignMotionStyles,
@@ -63,5 +65,20 @@ describe("design motion timeline values", () => {
     expect(designMotionIterationCount("infinite")).toBe(Infinity);
     expect(designMotionIterationCount("-1")).toBeNull();
     expect(designMotionIterationCount("many")).toBeNull();
+  });
+
+  it("maps effect progress through positive and negative animation delays", () => {
+    expect(designMotionPreviewCurrentTime(500, 1_000, 200)).toBe(700);
+    expect(designMotionPreviewCurrentTime(1_500, 1_000, 200)).toBe(1_200);
+    expect(designMotionPreviewCurrentTime(0, 1_000, -250)).toBe(-250);
+  });
+
+  it("requires at least two points on every property track", () => {
+    expect(designMotionTracksAreValid(FRAMES)).toBe(true);
+    expect(
+      designMotionTracksAreValid(
+        removeDesignMotionPoint(FRAMES, "transform", 100),
+      ),
+    ).toBe(false);
   });
 });

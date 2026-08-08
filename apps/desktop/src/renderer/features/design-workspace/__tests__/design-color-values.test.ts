@@ -37,6 +37,8 @@ describe("design color values", () => {
       b: 0,
       a: 0.5,
     });
+    // check:ui ignore-next -- malformed parser fixture must include literal rgb.
+    expect(parseDesignColor("rgb(10 20 30 / 50% / ignored)")).toBeNull();
   });
 
   it("round-trips hue, saturation, value, and alpha without drift", () => {

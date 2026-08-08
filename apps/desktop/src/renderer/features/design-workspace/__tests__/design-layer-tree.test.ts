@@ -7,6 +7,8 @@ import {
   designLayerParentId,
   designLayerPathIds,
   designLayerPeerIds,
+  designLayerRevealWindow,
+  designLayerRovingTabStop,
   designLayerSiblingId,
   designLayerTopLevelSelectionIds,
   designLayerVirtualWindow,
@@ -65,6 +67,45 @@ describe("design layer tree", () => {
         viewportHeight: 560,
       }),
     ).toEqual({ start: 9_988, end: 10_000 });
+  });
+
+  it("keeps a tall viewport window intact while keyboard travel stays inside it", () => {
+    const current = { start: 0, end: 48 };
+    expect(
+      designLayerRevealWindow({
+        count: 10_000,
+        index: 1,
+        viewportHeight: 840,
+        current,
+      }),
+    ).toEqual(current);
+    expect(
+      designLayerRevealWindow({
+        count: 10_000,
+        index: 500,
+        viewportHeight: 840,
+        current,
+      }),
+    ).toEqual({ start: 488, end: 542 });
+  });
+
+  it("keeps one roving tab stop inside the rendered virtual slice", () => {
+    const dense = Array.from({ length: 500 }, (_, index) => ({
+      node: {
+        oid: `layer-${index}`,
+        tag: "div",
+        name: `Layer ${index}`,
+        text: null,
+        visible: true,
+        children: [],
+      },
+      depth: 0,
+      parentOid: null,
+      hasChildren: false,
+    }));
+    const rendered = dense.slice(200, 240);
+    expect(designLayerRovingTabStop(rendered, "layer-220")).toBe("layer-220");
+    expect(designLayerRovingTabStop(rendered, "layer-0")).toBe("layer-200");
   });
 
   it("preserves DOM order, depth, and parent identity for keyboard traversal", () => {

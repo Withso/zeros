@@ -35,14 +35,17 @@ describe("design workspace interaction wiring", () => {
     );
   });
 
-  it("clears transient style previews on cancel and no-op blur", () => {
+  it("keeps style previews transient, scalar-keyed, and stable across source commits", () => {
     expect(source).toContain("onCancelPreview");
-    expect(source).toContain(
-      "clearDesignNodeStylePreview({ ...input, folder })",
-    );
     expect(source).toContain("clearDesignNodeStylePreviewTransient(input)");
+    expect(source).toContain("previewDesignNodeStylesTransient(input)");
+    expect(source).toContain("useDesignLivePreviewValue(");
+    expect(source).toContain("finishCommittedPreview");
     expect(source).toContain(
-      'key={`${styleContext.frame.file}:${styleContext.frame.sourceVersion}:${styleNodeIds.join(":")}:${property}`}',
+      'key={`${styleContext.workspaceId}:${styleContext.frame.file}:${styleNodeIds.join(":")}:${property}`}',
+    );
+    expect(source).not.toContain(
+      "previewDesignNodeStyles({ ...input, folder })",
     );
   });
 

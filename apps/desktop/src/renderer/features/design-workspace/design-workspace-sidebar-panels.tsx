@@ -58,6 +58,8 @@ import { cn } from "../../shared/ui/cn";
 import {
   collectDesignLayerParentIds,
   designLayerAncestorIds,
+  designLayerRevealWindow,
+  designLayerRovingTabStop,
   designLayerVirtualWindow,
   flattenDesignLayerTree,
   type FlatDesignLayer,
@@ -230,11 +232,15 @@ export function DesignWorkspaceSidebarPanels({
     start: 0,
     end: 0,
   });
-  const initialLayerWindow = designLayerVirtualWindow({
-    count: flattenedLayers.length,
-    visibleTop: 0,
-    viewportHeight: 840,
-  });
+  const initialLayerWindow = useMemo(
+    () =>
+      designLayerVirtualWindow({
+        count: flattenedLayers.length,
+        visibleTop: 0,
+        viewportHeight: 840,
+      }),
+    [flattenedLayers.length],
+  );
   const layerWindow =
     layerWindowState.ownerKey === ownerKey &&
     layerWindowState.count === flattenedLayers.length
@@ -299,16 +305,29 @@ export function DesignWorkspaceSidebarPanels({
       const layer = flattenedLayers[index];
       if (!layer || !ownerKey) return;
       if (virtualizedLayers) {
-        const next = designLayerVirtualWindow({
-          count: flattenedLayers.length,
-          visibleTop: index * DESIGN_LAYER_ROW_HEIGHT,
-          viewportHeight: DESIGN_LAYER_ROW_HEIGHT,
-          rowHeight: DESIGN_LAYER_ROW_HEIGHT,
-        });
-        setLayerWindowState({
-          ownerKey,
-          count: flattenedLayers.length,
-          ...next,
+        const viewport = scrollAreaRef.current?.querySelector<HTMLElement>(
+          "[data-radix-scroll-area-viewport]",
+        );
+        const viewportHeight = viewport?.clientHeight || 840;
+        setLayerWindowState((current) => {
+          const currentWindow =
+            current.ownerKey === ownerKey &&
+            current.count === flattenedLayers.length
+              ? current
+              : initialLayerWindow;
+          const next = designLayerRevealWindow({
+            count: flattenedLayers.length,
+            index,
+            viewportHeight,
+            current: currentWindow,
+            rowHeight: DESIGN_LAYER_ROW_HEIGHT,
+          });
+          return current.ownerKey === ownerKey &&
+            current.count === flattenedLayers.length &&
+            current.start === next.start &&
+            current.end === next.end
+            ? current
+            : { ownerKey, count: flattenedLayers.length, ...next };
         });
       }
       window.requestAnimationFrame(() => {
@@ -323,7 +342,7 @@ export function DesignWorkspaceSidebarPanels({
         if (focus) row?.focus();
       });
     },
-    [flattenedLayers, ownerKey, virtualizedLayers],
+    [flattenedLayers, initialLayerWindow, ownerKey, virtualizedLayers],
   );
 
   /** Canvas selection reveals its complete path before the browser paints. */
@@ -432,7 +451,13 @@ export function DesignWorkspaceSidebarPanels({
     layer: FlatDesignLayer,
   ) => {
     const data = foundation.data;
-    if (!workspaceId || !selectedFrame || !data || layerActionRef.current) {
+    if (
+      !workspaceId ||
+      !folder ||
+      !selectedFrame ||
+      !data ||
+      layerActionRef.current
+    ) {
       return;
     }
     layerActionRef.current = true;
@@ -469,9 +494,20 @@ export function DesignWorkspaceSidebarPanels({
         transaction,
       );
       if (action === "duplicate") {
-        useDesignWorkspaceUiStore
-          .getState()
-          .setSelection(workspaceId, selectedFrame.file, duplicateNodeId);
+        const currentFrame =
+          result.snapshot?.frames.find(
+            (candidate) => candidate.file === selectedFrame.file,
+          ) ?? selectedFrame;
+        await selectDesignFrame(workspaceId, currentFrame);
+        void selectDesignNode({
+          workspaceId,
+          folder,
+          frame: currentFrame,
+          nodeId: duplicateNodeId,
+        }).catch(() => {
+          // The ready snapshot retries this semantic selection once the
+          // replacement iframe owns the duplicate's new source generation.
+        });
         toast.success("Layer duplicated");
       } else {
         const currentFrame =
@@ -563,12 +599,10 @@ export function DesignWorkspaceSidebarPanels({
     }
   };
 
-  const selectedIsVisible = flattenedLayers.some(
-    (layer) => layer.node.oid === selectedNodeId,
+  const rovingTabStop = designLayerRovingTabStop(
+    renderedLayers,
+    selectedNodeId,
   );
-  const rovingTabStop = selectedIsVisible
-    ? selectedNodeId
-    : (flattenedLayers[0]?.node.oid ?? null);
 
   return (
     <section

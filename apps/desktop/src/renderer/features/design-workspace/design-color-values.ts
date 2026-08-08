@@ -57,8 +57,10 @@ function percentage(value: string): number | null {
 function parseFunctionalParts(source: string): {
   channels: string[];
   alpha: string | undefined;
-} {
-  const [rawChannels = "", slashAlpha] = source.split("/", 2);
+} | null {
+  const slashParts = source.split("/");
+  if (slashParts.length > 2) return null;
+  const [rawChannels = "", slashAlpha] = slashParts;
   const channels = rawChannels
     .replace(/,/g, " ")
     .trim()
@@ -95,6 +97,7 @@ function parseRgb(source: string): DesignRgbaColor | null {
   const match = /^rgba?\((.*)\)$/i.exec(source);
   if (!match?.[1]) return null;
   const parts = parseFunctionalParts(match[1]);
+  if (!parts) return null;
   if (parts.channels.length !== 3) return null;
   const [rawRed = "", rawGreen = "", rawBlue = ""] = parts.channels;
   const red = channel(rawRed);
@@ -143,6 +146,7 @@ function parseHsl(source: string): DesignRgbaColor | null {
   const match = /^hsla?\((.*)\)$/i.exec(source);
   if (!match?.[1]) return null;
   const parts = parseFunctionalParts(match[1]);
+  if (!parts) return null;
   if (parts.channels.length !== 3) return null;
   const [rawHue = "", rawSaturation = "", rawLightness = ""] = parts.channels;
   const degrees = hue(rawHue);

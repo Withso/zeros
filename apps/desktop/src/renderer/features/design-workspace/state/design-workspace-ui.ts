@@ -6,11 +6,11 @@
 // workspace. They survive A → B → A and reload without leaking one design's
 // state into another. The persisted map is validated, bounded, and LRU-pruned.
 
+import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
 import { create } from "zustand";
 
 const STORAGE_KEY = "zeros:design-workspace-ui-v1";
 const MAX_WORKSPACES = 32;
-const MAX_SELECTED_NODES = 32;
 const PERSIST_DEBOUNCE_MS = 150;
 
 export type DesignBottomPanel = "layers" | "assets";
@@ -88,7 +88,7 @@ export function normalizeDesignWorkspaceView(
             ? record.selectedNodeIds.filter(validDesignNodeId)
             : []),
         ]),
-      ].slice(0, MAX_SELECTED_NODES)
+      ].slice(0, DESIGN_SELECTION_NODE_LIMIT)
     : [];
   return {
     selectedFrame,

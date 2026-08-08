@@ -402,6 +402,21 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         .getByRole("button", { name: "dark", exact: true })
         .count()) === 1,
   );
+  const inheritedThemeValue = themeDialog.locator(
+    '[data-design-theme-inherited="true"]',
+  );
+  check(
+    "named modes distinguish inherited token values from explicit overrides",
+    (await inheritedThemeValue.count()) > 0 &&
+      (await inheritedThemeValue.first().inputValue()) === "" &&
+      (
+        await inheritedThemeValue.first().getAttribute("placeholder")
+      )?.startsWith("Inherited:") === true &&
+      (await inheritedThemeValue
+        .first()
+        .evaluate((element) => getComputedStyle(element).backgroundColor)) ===
+        "rgba(0, 0, 0, 0)",
+  );
   const themeValue = themeDialog.locator("[data-design-theme-value]").first();
   const themeValueVisual =
     (await themeValue.count()) > 0
@@ -1053,6 +1068,12 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   const headingOverlay = homeFrame.locator(
     '[data-design-element-overlay="home-heading"]',
   );
+  const liveLeftField = page.locator('[data-design-style-property="left"]');
+  const liveLeftInput = liveLeftField.locator("input");
+  const leftBeforeCanvasMove = await liveLeftInput.inputValue();
+  await liveLeftField.evaluate((element) => {
+    element.dataset.designLiveIdentity = "heading-left";
+  });
   const headingOverlayBox = await headingOverlay.boundingBox();
   if (!headingOverlayBox) throw new Error("heading overlay has no geometry");
   await page.mouse.move(
@@ -1074,6 +1095,16 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       "design-element-snap-guide",
     ),
   );
+  check(
+    "canvas movement updates only the keyed inspector scalar without remounting it",
+    await waitFor(
+      async () =>
+        (await liveLeftInput.inputValue()) !== leftBeforeCanvasMove &&
+        (await liveLeftField.getAttribute("data-design-live-identity")) ===
+          "heading-left",
+      "design-live-left-scalar",
+    ),
+  );
   await page.evaluate(() => window.dispatchEvent(new Event("blur")));
   await page.mouse.up();
   check(
@@ -1086,6 +1117,10 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       "design-element-snap-cancel",
     ),
   );
+  await propertySearch.fill("transform");
+  await page
+    .getByRole("button", { name: "Edit transform" })
+    .waitFor({ state: "visible" });
   const rotateHandle = homeFrame.getByRole("button", {
     name: "Rotate Make the next move unmistakable.",
   });
@@ -1117,6 +1152,18 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       "design-rotation-preview",
     ),
   );
+  check(
+    "canvas rotation streams the transform value into its inspector control",
+    await waitFor(
+      async () =>
+        (
+          await page
+            .getByRole("button", { name: "Edit transform" })
+            .textContent()
+        )?.includes("rotate(") === true,
+      "design-live-transform-scalar",
+    ),
+  );
   await page.evaluate(() => window.dispatchEvent(new Event("blur")));
   await page.mouse.up();
   check(
@@ -1133,6 +1180,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       "design-rotation-cancel",
     ),
   );
+  await propertySearch.fill("");
 
   const canvasBox = await canvasFocusTarget.boundingBox();
   const frameBox = await homeFrame.boundingBox();
@@ -1341,6 +1389,31 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   const firstDenseLayerId = await denseRows
     .first()
     .getAttribute("data-design-layer-id");
+  const initialDenseRowCount = await denseRows.count();
+  await denseRows.first().focus();
+  await page.keyboard.press("ArrowDown");
+  check(
+    "dense Layers keeps the measured tall window during nearby arrow travel",
+    (await denseRows.count()) >= initialDenseRowCount,
+  );
+  const denseViewport = denseLayersPanel.locator(
+    "[data-radix-scroll-area-viewport]",
+  );
+  await denseViewport.evaluate((element) => {
+    element.scrollTop = element.scrollHeight / 2;
+  });
+  await waitFor(
+    async () =>
+      (await denseRows.first().getAttribute("data-design-layer-id")) !==
+      firstDenseLayerId,
+    "design-dense-layer-scroll-window",
+  );
+  check(
+    "dense Layers keeps one roving tab stop inside the rendered window",
+    (await denseTree
+      .locator('[data-design-layer-id][tabindex="0"]')
+      .count()) === 1,
+  );
   await denseRows.first().focus();
   await page.keyboard.press("End");
   check(
@@ -1357,9 +1430,6 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
           );
         }, firstDenseLayerId),
       "design-dense-layer-end",
-    )) &&
-      (await denseLayersPanel
-        .locator("[data-radix-scroll-area-viewport]")
-        .evaluate((element) => element.scrollTop > 0)),
+    )) && (await denseViewport.evaluate((element) => element.scrollTop > 0)),
   );
 }

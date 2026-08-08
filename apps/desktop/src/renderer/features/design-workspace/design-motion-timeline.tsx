@@ -40,7 +40,9 @@ import {
   designDurationMs,
   designMotionIterationCount,
   designMotionPoints,
+  designMotionPreviewCurrentTime,
   designMotionProperties,
+  designMotionTracksAreValid,
   moveDesignMotionPoint,
   removeDesignMotionPoint,
   setDesignMotionPoint,
@@ -229,6 +231,7 @@ function validMotionDraft(draft: DesignMotionTimelineDraft): boolean {
     /^[A-Za-z_][A-Za-z0-9_-]{0,127}$/.test(draft.name) &&
     draft.keyframes.length >= 2 &&
     draft.keyframes.length <= 32 &&
+    designMotionTracksAreValid(draft.keyframes) &&
     designDurationMs(draft.duration, 0) > 0 &&
     iterations !== null &&
     iterations > 0 &&
@@ -954,7 +957,7 @@ export function DesignMotionTimeline({
       </div>
 
       <div className="border-border1 flex h-10 shrink-0 items-center gap-2 border-t px-3">
-        {selectedPoint && selectedValue !== null ? (
+        {selectedPoint && selectedValue != null ? (
           <>
             <Diamond className="text-highlighted-bright size-3 fill-current" />
             <span className="text-fg3 font-mono text-[10px]">
@@ -986,7 +989,12 @@ export function DesignMotionTimeline({
               variant="ghost"
               size="icon-sm"
               aria-label="Delete selected keyframe"
-              disabled={disabled || points.length <= 2}
+              disabled={
+                disabled ||
+                points.filter(
+                  (point) => point.property === selectedPoint.property,
+                ).length <= 2
+              }
               onClick={() => {
                 mutateDraft((current) => ({
                   ...current,
@@ -1021,21 +1029,20 @@ export function designMotionPreviewInput(
   currentTime: number,
   playing: boolean,
 ) {
+  const duration = designDurationMs(draft.duration);
+  const delay = signedTimeMs(draft.delay);
   return {
     keyframes: draft.keyframes.map((keyframe) => ({
       offset: keyframe.offset,
       styles: { ...keyframe.styles },
     })),
-    duration: designDurationMs(draft.duration),
-    delay: signedTimeMs(draft.delay),
+    duration,
+    delay,
     easing: draft.easing,
     iterations: previewIterations(draft.iterations),
     direction: draft.direction,
     fill: draft.fillMode,
-    currentTime: Math.min(
-      designDurationMs(draft.duration),
-      Math.max(0, currentTime),
-    ),
+    currentTime: designMotionPreviewCurrentTime(currentTime, duration, delay),
     playing,
   } as const;
 }

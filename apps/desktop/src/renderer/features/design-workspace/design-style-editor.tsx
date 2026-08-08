@@ -49,9 +49,17 @@ import {
   readDesignComputedStyle,
   serializeDesignCssDeclarations,
 } from "./design-style-values";
+import { useDesignLivePreviewValue } from "./state/design-live-preview";
+
+interface DesignLivePreviewOwner {
+  workspaceId: string;
+  frame: string;
+  nodeId: string;
+}
 
 interface DesignStyleEditorProps {
   details: DesignRuntimeNodeDetails;
+  livePreviewOwner?: DesignLivePreviewOwner;
   renderField: (
     label: string,
     property: string,
@@ -62,6 +70,38 @@ interface DesignStyleEditorProps {
   onCommitStyles: (styles: Record<string, string | null>) => Promise<void>;
   onOpenMotionTimeline: () => void;
   disabled?: boolean;
+}
+
+function LiveDesignTransformControl({
+  owner,
+  value,
+  disabled,
+  onPreview,
+  onCancelPreview,
+  onCommit,
+}: {
+  owner?: DesignLivePreviewOwner;
+  value: string;
+  disabled: boolean;
+  onPreview: (value: string) => void;
+  onCancelPreview: () => void;
+  onCommit: (value: string) => void;
+}) {
+  const liveValue = useDesignLivePreviewValue(
+    owner?.workspaceId ?? "",
+    owner?.frame ?? "",
+    owner?.nodeId ?? "",
+    "transform",
+  );
+  return (
+    <DesignTransformControl
+      value={owner && liveValue !== undefined ? (liveValue ?? "none") : value}
+      disabled={disabled}
+      onPreview={onPreview}
+      onCancelPreview={onCancelPreview}
+      onCommit={onCommit}
+    />
+  );
 }
 
 function errorMessage(error: unknown): string {
@@ -399,6 +439,7 @@ const STYLE_SEARCH_INDEX = [
 
 export function DesignStyleEditor({
   details,
+  livePreviewOwner,
   renderField,
   onPreviewStyles,
   onCancelStylePreview,
@@ -1006,7 +1047,8 @@ export function DesignStyleEditor({
         filter={normalizedQuery}
         keywords={STYLE_SEARCH_INDEX[5]}
       >
-        <DesignTransformControl
+        <LiveDesignTransformControl
+          owner={livePreviewOwner}
           value={styleValue(details, "transform", "none")}
           disabled={disabled}
           onPreview={(value) => void onPreviewStyles?.({ transform: value })}

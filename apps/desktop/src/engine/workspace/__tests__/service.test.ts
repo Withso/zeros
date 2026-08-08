@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import { runSessionId } from "@zeros/protocol/run-actions";
+import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
 import { WorkspaceService, LOCAL_MAIN_WORKSPACE_ID } from "../service";
 import {
   setStateRootForTesting,
@@ -1589,6 +1590,58 @@ describe("WorkspaceService", () => {
     expect(getDesignSelection(workspace.workspaceId)?.breadcrumb).toEqual(
       deepBreadcrumb.slice(-16),
     );
+
+    const groupSize = DESIGN_SELECTION_NODE_LIMIT;
+    await svc.handle("design.selection.set", {
+      workspaceId: workspace.workspaceId,
+      frame: frame.file,
+      sourceVersion: response.mutation.frame.sourceVersion,
+      selectionVersion: selectedAt * 1_024 + 2,
+      updatedAt: selectedAt + 2,
+      nodeIds: Array.from({ length: groupSize }, () => main!.oid!),
+      breadcrumb: ["main"],
+      rects: Array.from({ length: groupSize }, (_, index) => ({
+        x: index,
+        y: 0,
+        width: 100,
+        height: 100,
+      })),
+      keyComputedStyles: {},
+    });
+    expect(getDesignSelection(workspace.workspaceId)?.nodeIds).toHaveLength(
+      groupSize,
+    );
+    await expect(
+      svc.handle("design.selection.set", {
+        workspaceId: workspace.workspaceId,
+        frame: frame.file,
+        sourceVersion: response.mutation.frame.sourceVersion,
+        selectionVersion: selectedAt * 1_024 + 3,
+        updatedAt: selectedAt + 3,
+        nodeIds: Array.from({ length: groupSize + 1 }, () => main!.oid!),
+        breadcrumb: ["main"],
+        rects: [],
+        keyComputedStyles: {},
+      }),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    await expect(
+      svc.handle("design.selection.set", {
+        workspaceId: workspace.workspaceId,
+        frame: frame.file,
+        sourceVersion: response.mutation.frame.sourceVersion,
+        selectionVersion: selectedAt * 1_024 + 4,
+        updatedAt: selectedAt + 4,
+        nodeIds: [main!.oid!],
+        breadcrumb: ["main"],
+        rects: Array.from({ length: groupSize + 1 }, () => ({
+          x: 0,
+          y: 0,
+          width: 100,
+          height: 100,
+        })),
+        keyComputedStyles: {},
+      }),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
 
     await expect(
       svc.handle("design.runtime.audit", {

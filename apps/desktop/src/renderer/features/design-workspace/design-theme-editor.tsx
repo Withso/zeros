@@ -106,12 +106,14 @@ function ThemeValueField({
   token,
   theme,
   value,
+  inheritedValue,
   disabled,
   onCommit,
 }: {
   token: DesignTokenWire;
   theme: string | null;
   value: string;
+  inheritedValue?: string;
   disabled: boolean;
   onCommit: (value: string) => Promise<void>;
 }) {
@@ -120,7 +122,9 @@ function ThemeValueField({
   const [saving, setSaving] = useState(false);
   const baselineRef = useRef(value);
   const skipCommitRef = useRef(false);
-  const type = inferDesignTokenType(token.name, value, token.syntax);
+  const effectiveValue = draft || inheritedValue || value;
+  const type = inferDesignTokenType(token.name, effectiveValue, token.syntax);
+  const inherited = Boolean(theme && !draft && inheritedValue);
 
   useEffect(() => {
     if (document.activeElement === inputRef.current) return;
@@ -157,7 +161,7 @@ function ThemeValueField({
     <div className="flex min-w-40 items-center gap-2">
       {type === "color" ? (
         <DesignColorPicker
-          value={draft}
+          value={effectiveValue}
           label={`${token.name} ${theme ?? "base"}`}
           disabled={disabled || saving}
           side="right"
@@ -171,10 +175,19 @@ function ThemeValueField({
       <Input
         ref={inputRef}
         data-design-theme-value=""
+        data-design-theme-inherited={inherited ? "true" : undefined}
         value={draft}
+        placeholder={
+          theme && inheritedValue ? `Inherited: ${inheritedValue}` : undefined
+        }
         disabled={disabled || saving}
-        className="zd-design-control-applied h-7 min-w-0 flex-1 font-mono text-xs"
-        aria-label={`${token.name} ${theme ?? "base"} value`}
+        className={cn(
+          "h-7 min-w-0 flex-1 font-mono text-xs",
+          inherited
+            ? "zd-design-control-quiet text-fg3"
+            : "zd-design-control-applied",
+        )}
+        aria-label={`${token.name} ${theme ?? "base"} ${inherited ? "inherited " : ""}value`}
         onFocus={() => {
           skipCommitRef.current = false;
           baselineRef.current = value;
@@ -811,7 +824,10 @@ export function DesignThemeEditor({
                               <ThemeValueField
                                 token={token}
                                 theme={theme}
-                                value={token.themeValues[theme] ?? token.value}
+                                value={token.themeValues[theme] ?? ""}
+                                inheritedValue={
+                                  token.value || token.initialValue
+                                }
                                 disabled={!canEdit}
                                 onCommit={async (value) => {
                                   await updateDesignTokenCached(workspaceId!, {

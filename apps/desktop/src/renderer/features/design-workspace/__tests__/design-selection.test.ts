@@ -206,6 +206,35 @@ describe("design selection workflows", () => {
     );
   });
 
+  it("publishes selections larger than the former sixteen-node engine limit", async () => {
+    const nodeIds = Array.from({ length: 20 }, (_, index) => `layer-${index}`);
+    mocks.designFrameRuntime.mockReturnValue({
+      getNodeDetails: vi.fn(async (nodeId: string) => details(nodeId)),
+      captureScreenshot: vi.fn(async () => {
+        throw new Error("capture unavailable in unit test");
+      }),
+    });
+
+    await expect(
+      selectDesignNodes({
+        workspaceId: "workspace-a",
+        folder: "/design/a",
+        frame: FRAME,
+        nodeIds,
+      }),
+    ).resolves.toHaveLength(20);
+
+    expect(designWorkspaceView("workspace-a").selectedNodeIds).toEqual(nodeIds);
+    expect(mocks.designSetSelection).toHaveBeenCalledWith(
+      "workspace-a",
+      expect.objectContaining({
+        nodeIds,
+        rects: expect.arrayContaining([{ x: 0, y: 0, width: 100, height: 40 }]),
+      }),
+      expect.any(Number),
+    );
+  });
+
   it("collapses an additive selection when its primary layer is clicked", async () => {
     await selectDesignNodes({
       workspaceId: "workspace-a",
@@ -504,6 +533,81 @@ describe("design selection workflows", () => {
         designRuntimeFrameState("workspace-a", "home.html")?.detailsByNode
           .heading?.styles.fontSize,
       ).toBe("40px"),
+    );
+  });
+
+  it("refreshes every selected node when only the runtime revision changes", async () => {
+    const tree = [
+      {
+        oid: "hero",
+        tag: "main",
+        name: "Hero",
+        text: null,
+        visible: true,
+        children: ["heading", "copy"].map((oid) => ({
+          oid,
+          tag: "p",
+          name: oid,
+          text: oid,
+          visible: true,
+          children: [],
+        })),
+      },
+    ];
+    const snapshot = (revision: number) => ({
+      sourceVersion: FRAME.sourceVersion,
+      revision,
+      tree,
+      frame: details("frame"),
+      warnings: [],
+      viewport: {
+        width: FRAME.width,
+        height: FRAME.height,
+        scrollX: 0,
+        scrollY: 0,
+      },
+    });
+    const getNodeDetails = vi.fn(async (nodeId: string) => ({
+      ...details(nodeId),
+      styles: { fontSize: nodeId === "heading" ? "40px" : "24px" },
+    }));
+    mocks.designFrameRuntime.mockReturnValue({
+      getNodeDetails,
+      captureScreenshot: vi.fn(async () => {
+        throw new Error("capture unavailable in unit test");
+      }),
+    });
+
+    reconcileDesignRuntimeSnapshot({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      snapshot: snapshot(1),
+    });
+    await selectDesignNodes({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      nodeIds: ["heading", "copy"],
+      details: [details("heading"), details("copy")],
+    });
+    getNodeDetails.mockClear();
+
+    reconcileDesignRuntimeSnapshot({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      snapshot: snapshot(2),
+    });
+
+    await vi.waitFor(() => expect(getNodeDetails).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() =>
+      expect(
+        designRuntimeFrameState("workspace-a", "home.html")?.detailsByNode,
+      ).toMatchObject({
+        heading: { styles: { fontSize: "40px" } },
+        copy: { styles: { fontSize: "24px" } },
+      }),
     );
   });
 });

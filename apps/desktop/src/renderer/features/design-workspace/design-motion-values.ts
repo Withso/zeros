@@ -52,6 +52,34 @@ export function designMotionProperties(
   ].sort();
 }
 
+/** A draft is committable only when every animated property has enough points
+ * to define an interval. Counting aggregate points lets a one-point track slip
+ * through whenever another property happens to have extra points. */
+export function designMotionTracksAreValid(
+  keyframes: readonly DesignMotionKeyframe[],
+): boolean {
+  const points = designMotionPoints(keyframes);
+  const properties = designMotionProperties(keyframes);
+  return (
+    properties.length > 0 &&
+    properties.every(
+      (property) =>
+        points.filter((point) => point.property === property).length >= 2,
+    )
+  );
+}
+
+/** Convert an effect-local scrub time to Animation.currentTime. */
+export function designMotionPreviewCurrentTime(
+  currentTime: number,
+  duration: number,
+  delay: number,
+): number {
+  const boundedDuration = Math.max(0, duration);
+  const boundedEffectTime = Math.min(boundedDuration, Math.max(0, currentTime));
+  return delay + boundedEffectTime;
+}
+
 export function setDesignMotionPoint(
   keyframes: readonly DesignMotionKeyframe[],
   property: string,

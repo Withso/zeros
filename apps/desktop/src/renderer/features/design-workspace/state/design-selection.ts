@@ -15,6 +15,7 @@ import type {
   DesignRuntimeSnapshot,
   DesignRuntimeTreeNode,
 } from "@zeros/protocol/design-runtime";
+import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
 import type { DesignStyleProvenance } from "@zeros/design-web";
 
 import {
@@ -29,6 +30,10 @@ import {
   designRuntimeFrameState,
   useDesignRuntimeStore,
 } from "./design-runtime-store";
+import {
+  clearDesignLivePreview,
+  publishDesignLivePreviewStyles,
+} from "./design-live-preview";
 import {
   designWorkspaceView,
   useDesignWorkspaceUiStore,
@@ -170,6 +175,7 @@ function persistedKeyStyles(styles: Record<string, string>) {
   const projected: Record<string, string> = {};
   let count = 0;
   for (const property of PERSISTED_KEY_STYLE_PRIORITY) {
+    if (count >= MAX_PERSISTED_KEY_STYLES) break;
     const value = styles[property];
     if (value === undefined) continue;
     projected[property] = value;
@@ -350,6 +356,7 @@ export async function selectDesignNode(input: {
       details,
       frame.sourceVersion,
     );
+  clearDesignLivePreview(workspaceId, frame.file, nodeId);
   await designSetSelection(
     workspaceId,
     elementSelection(frame, details),
@@ -381,8 +388,13 @@ export async function selectDesignNodes(input: {
   nodeIds: readonly string[];
   primaryNodeId?: string;
   details?: readonly DesignRuntimeNodeDetails[];
+  /** Runtime revisions can change computed values without changing source. */
+  forceRuntimeRead?: boolean;
 }): Promise<DesignRuntimeNodeDetails[] | null> {
-  const unique = [...new Set(input.nodeIds.filter(Boolean))].slice(0, 32);
+  const unique = [...new Set(input.nodeIds.filter(Boolean))].slice(
+    0,
+    DESIGN_SELECTION_NODE_LIMIT,
+  );
   const primary =
     (input.primaryNodeId && unique.includes(input.primaryNodeId)
       ? input.primaryNodeId
@@ -411,7 +423,9 @@ export async function selectDesignNodes(input: {
   )?.detailsByNode;
   const resolved = await Promise.all(
     nodeIds.map(async (nodeId) => {
-      const candidate = supplied.get(nodeId) ?? cached?.[nodeId];
+      const candidate =
+        supplied.get(nodeId) ??
+        (!input.forceRuntimeRead ? cached?.[nodeId] : undefined);
       if (candidate?.sourceVersion === input.frame.sourceVersion) {
         return candidate;
       }
@@ -447,6 +461,7 @@ export async function selectDesignNodes(input: {
         candidate,
         input.frame.sourceVersion,
       );
+    clearDesignLivePreview(input.workspaceId, input.frame.file, candidate.oid);
   }
   await designSetSelection(
     input.workspaceId,
@@ -739,6 +754,12 @@ export async function previewDesignNodeStylesTransient(input: {
 }): Promise<DesignRuntimeNodeDetails> {
   const runtime = designFrameRuntime(input.workspaceId, input.frame);
   if (!runtime) throw new Error("The design frame is not ready.");
+  publishDesignLivePreviewStyles(
+    input.workspaceId,
+    input.frame,
+    input.nodeId,
+    input.styles,
+  );
   const details = await runtime.previewStyles(input.nodeId, input.styles);
   if (details.sourceVersion !== input.sourceVersion) {
     throw new Error("The design frame changed before the preview was applied.");
@@ -768,6 +789,7 @@ export async function clearDesignNodeStylePreviewTransient(input: {
   sourceVersion: string;
   nodeId: string;
 }): Promise<DesignRuntimeNodeDetails> {
+  clearDesignLivePreview(input.workspaceId, input.frame, input.nodeId);
   const runtime = designFrameRuntime(input.workspaceId, input.frame);
   if (!runtime) throw new Error("The design frame is not ready.");
   const details = await runtime.clearPreviewStyles(input.nodeId);
@@ -909,6 +931,7 @@ export function reconcileDesignRuntimeSnapshot(input: {
         nodeIds: survivingNodeIds,
         primaryNodeId: nodeId,
         ...(nodeId === snapshot.frame.oid ? { details: [snapshot.frame] } : {}),
+        forceRuntimeRead: previousRuntimeRevision !== snapshot.revision,
       }).catch(() => {
         // Last confirmed exact-key group remains visible during revalidation.
       });

@@ -129,6 +129,8 @@ describe("design style values", () => {
 
   it("resolves field equations against the focused baseline", () => {
     expect(resolveDesignNumericExpression("+10", "24px")).toBe("34px");
+    expect(resolveDesignNumericExpression("-5", "24px")).toBe("-5px");
+    expect(resolveDesignNumericExpression("x-5", "24px")).toBe("19px");
     expect(resolveDesignNumericExpression("*2", "24px")).toBe("48px");
     expect(resolveDesignNumericExpression("(x / 2) + 6", "24px")).toBe("18px");
     expect(resolveDesignNumericExpression("18px", "24px")).toBe("18px");

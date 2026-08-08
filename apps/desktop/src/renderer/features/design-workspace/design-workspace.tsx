@@ -15,6 +15,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { useShallow } from "zustand/react/shallow";
 import "./design-workspace-ui.css";
 import {
   AlertTriangle,
@@ -41,6 +42,7 @@ import type {
   DesignRuntimeNodeDetails,
   DesignRuntimeTreeNode,
 } from "@zeros/protocol/design-runtime";
+import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
 import {
   designParameterDocumentId,
   type DesignComponentDefinition,
@@ -86,7 +88,6 @@ import {
   fetchDesignFoundation,
 } from "./state/design-workspace-cache";
 import {
-  clearDesignNodeStylePreview,
   clearDesignNodeStylePreviewTransient,
   captureDesignRuntimeScreenshot,
   hoverDesignNode,
@@ -95,7 +96,6 @@ import {
   inspectDesignNodeAtLocation,
   inspectDesignNodesInRect,
   inspectDesignNodeStyleProvenance,
-  previewDesignNodeStyles,
   previewDesignNodeMotionTransient,
   previewDesignNodeStylesTransient,
   selectDesignFrame,
@@ -105,6 +105,7 @@ import {
   toggleDesignNodeSelection,
 } from "./state/design-selection";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
+import { useDesignLivePreviewValue } from "./state/design-live-preview";
 import {
   useDesignWorkspaceUiStore,
   useDesignWorkspaceView,
@@ -316,9 +317,6 @@ const EMPTY_NODE_DETAILS: readonly DesignRuntimeNodeDetails[] = Object.freeze(
   [],
 );
 const EMPTY_NODE_IDS: readonly string[] = Object.freeze([]);
-const EMPTY_NODE_DETAILS_BY_ID: Readonly<
-  Record<string, DesignRuntimeNodeDetails>
-> = Object.freeze({});
 
 // --- WORKFLOWS ---
 
@@ -821,21 +819,20 @@ function DesignCanvas({
       ] ?? null
     );
   });
-  const selectedDetailsByNode = useDesignRuntimeStore((state) =>
-    workspaceId && selectedFrame
-      ? (state.byWorkspace[workspaceId]?.frames[selectedFrame.file]
-          ?.detailsByNode ?? EMPTY_NODE_DETAILS_BY_ID)
-      : EMPTY_NODE_DETAILS_BY_ID,
-  );
-  const selectedNodeDetailsList = useMemo(
-    () =>
-      view.selectedNodeIds.length === 0
-        ? EMPTY_NODE_DETAILS
-        : view.selectedNodeIds.flatMap((nodeId) => {
-            const details = selectedDetailsByNode[nodeId];
-            return details ? [details] : [];
-          }),
-    [selectedDetailsByNode, view.selectedNodeIds],
+  const selectedNodeDetailsList = useDesignRuntimeStore(
+    useShallow((state) => {
+      if (!workspaceId || !selectedFrame || view.selectedNodeIds.length === 0) {
+        return EMPTY_NODE_DETAILS;
+      }
+      const detailsByNode =
+        state.byWorkspace[workspaceId]?.frames[selectedFrame.file]
+          ?.detailsByNode;
+      if (!detailsByNode) return EMPTY_NODE_DETAILS;
+      return view.selectedNodeIds.flatMap((nodeId) => {
+        const details = detailsByNode[nodeId];
+        return details ? [details] : [];
+      });
+    }),
   );
   const selectedRuntimeTree = useDesignRuntimeStore((state) => {
     if (!workspaceId || !selectedFrame) return EMPTY_DESIGN_TREE;
@@ -1402,14 +1399,21 @@ function DesignCanvas({
           },
         );
         if (action === "duplicate") {
-          useDesignWorkspaceUiStore
-            .getState()
-            .setSelection(
-              workspaceId,
-              selectedFrame.file,
-              duplicateNodeIds[0]!,
-              duplicateNodeIds,
-            );
+          const currentFrame =
+            result.snapshot?.frames.find(
+              (candidate) => candidate.file === selectedFrame.file,
+            ) ?? selectedFrame;
+          await selectDesignFrame(workspaceId, currentFrame);
+          void selectDesignNodes({
+            workspaceId,
+            folder,
+            frame: currentFrame,
+            nodeIds: duplicateNodeIds,
+            primaryNodeId: duplicateNodeIds[0],
+          }).catch(() => {
+            // The replacement iframe's ready snapshot retries the semantic
+            // selection after it owns the duplicate source generation.
+          });
           toast.success(
             nodeIds.length === 1 ? "Element duplicated" : "Elements duplicated",
           );
@@ -4814,6 +4818,16 @@ function InspectorEditField({
     void Promise.resolve(cancelPreviewRef.current?.()).catch(() => {});
   };
 
+  const finishCommittedPreview = () => {
+    if (previewFrameRef.current !== null) {
+      window.cancelAnimationFrame(previewFrameRef.current);
+      previewFrameRef.current = null;
+    }
+    // Preserve the last exact live scalar until the authoritative source
+    // generation arrives. Clearing here causes a visible value snap-back.
+    previewDirtyRef.current = false;
+  };
+
   const preview = (next: string) => {
     if (!onPreview) return;
     previewDirtyRef.current = true;
@@ -4847,7 +4861,7 @@ function InspectorEditField({
     try {
       await onCommit(resolvedDraft);
       baselineRef.current = resolvedDraft;
-      cancelPreview();
+      finishCommittedPreview();
     } catch (fieldError) {
       setDraft(baseline);
       cancelPreview();
@@ -4970,24 +4984,30 @@ function InspectorEditField({
   );
 }
 
-function InspectorStyleField({
+const InspectorStyleField = React.memo(function InspectorStyleField({
+  workspaceId,
+  frame,
+  nodeId,
   label,
   property,
   value,
   computedValue,
   applied,
-  provenance,
+  hint,
   onInspect,
   onPreviewStyles,
   onCancelPreview,
   onCommitStyles,
 }: {
+  workspaceId: string;
+  frame: string;
+  nodeId: string;
   label: string;
   property: string;
   value: string;
   computedValue: string;
   applied: boolean;
-  provenance: InspectorProvenanceState | null;
+  hint?: string;
   onInspect: (property: string, computedValue: string) => void;
   onPreviewStyles: (
     styles: Record<string, string | null>,
@@ -4995,29 +5015,33 @@ function InspectorStyleField({
   onCancelPreview: () => void | Promise<void>;
   onCommitStyles: (styles: Record<string, string | null>) => Promise<void>;
 }) {
+  const liveValue = useDesignLivePreviewValue(
+    workspaceId,
+    frame,
+    nodeId,
+    property,
+  );
+  const displayedValue = liveValue === undefined ? value : (liveValue ?? "");
   return (
     <InspectorEditField
       label={label}
-      value={value}
+      value={displayedValue}
       placeholder="-"
       styleProperty={property}
       applied={applied}
-      hint={
-        provenance?.property === property
-          ? provenance.loading
-            ? "Resolving…"
-            : provenance.value?.winner
-              ? `${provenance.value.winner.origin} · ${provenance.value.winner.file}`
-              : provenance.value?.origin
-          : undefined
+      hint={hint}
+      onInspect={() =>
+        onInspect(
+          property,
+          typeof liveValue === "string" ? liveValue : computedValue,
+        )
       }
-      onInspect={() => onInspect(property, computedValue)}
       onPreview={(next) => onPreviewStyles({ [property]: next || null })}
       onCancelPreview={onCancelPreview}
       onCommit={(next) => onCommitStyles({ [property]: next || null })}
     />
   );
-}
+});
 
 function DesignInspector({
   workspace,
@@ -5402,7 +5426,7 @@ function DesignInspector({
         ? [
             selectedNodeId,
             ...selectedNodeIds.filter((nodeId) => nodeId !== selectedNodeId),
-          ].slice(0, 32)
+          ].slice(0, DESIGN_SELECTION_NODE_LIMIT)
         : [],
     [selectedNodeId, selectedNodeIds],
   );
@@ -5433,7 +5457,7 @@ function DesignInspector({
         throw new Error("Select one or more design layers first.");
       }
       await Promise.all(
-        styleNodeIds.map((nodeId, index) => {
+        styleNodeIds.map((nodeId) => {
           const input = {
             workspaceId,
             frame: frame.file,
@@ -5441,9 +5465,7 @@ function DesignInspector({
             nodeId,
             styles: stylesForNode(nodeId, styles),
           };
-          return index === 0
-            ? previewDesignNodeStyles({ ...input, folder })
-            : previewDesignNodeStylesTransient(input);
+          return previewDesignNodeStylesTransient(input);
         }),
       );
     },
@@ -5453,16 +5475,14 @@ function DesignInspector({
   const clearSelectedStylePreview = useCallback(async () => {
     if (!workspaceId || !folder || !frame) return;
     await Promise.all(
-      styleNodeIds.map((nodeId, index) => {
+      styleNodeIds.map((nodeId) => {
         const input = {
           workspaceId,
           frame: frame.file,
           sourceVersion: frame.sourceVersion,
           nodeId,
         };
-        return index === 0
-          ? clearDesignNodeStylePreview({ ...input, folder })
-          : clearDesignNodeStylePreviewTransient(input);
+        return clearDesignNodeStylePreviewTransient(input);
       }),
     );
   }, [folder, frame, styleNodeIds, workspaceId]);
@@ -5524,14 +5544,24 @@ function DesignInspector({
     );
     return (
       <InspectorStyleField
-        key={`${styleContext.frame.file}:${styleContext.frame.sourceVersion}:${styleNodeIds.join(":")}:${property}`}
+        key={`${styleContext.workspaceId}:${styleContext.frame.file}:${styleNodeIds.join(":")}:${property}`}
+        workspaceId={styleContext.workspaceId}
+        frame={styleContext.frame.file}
+        nodeId={styleContext.nodeId}
         label={label}
         property={property}
         value={designStyleFieldValue(authoredProperties, property, value)}
         computedValue={value}
         applied={applied}
-        provenance={
-          provenance?.ownerKey === provenanceOwnerKey ? provenance : null
+        hint={
+          provenance?.ownerKey === provenanceOwnerKey &&
+          provenance.property === property
+            ? provenance.loading
+              ? "Resolving…"
+              : provenance.value?.winner
+                ? `${provenance.value.winner.origin} · ${provenance.value.winner.file}`
+                : provenance.value?.origin
+            : undefined
         }
         onInspect={inspectStyle}
         onPreviewStyles={previewSelectedStyles}
@@ -5714,6 +5744,15 @@ function DesignInspector({
                   <DesignStyleEditor
                     key={`${frame!.file}:${styleNodeIds.join(":")}`}
                     details={elementDetails}
+                    livePreviewOwner={
+                      styleContext
+                        ? {
+                            workspaceId: styleContext.workspaceId,
+                            frame: styleContext.frame.file,
+                            nodeId: styleContext.nodeId,
+                          }
+                        : undefined
+                    }
                     renderField={styleField}
                     disabled={foundationAction !== null}
                     onPreviewStyles={previewSelectedStyles}
