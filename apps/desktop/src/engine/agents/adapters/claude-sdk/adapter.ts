@@ -1114,6 +1114,13 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           parent_tool_use_id: null,
         } as SDKUserMessage);
         const { stopReason, usage } = await turn.promise;
+        // Prefer the session's configured model. Claude's perModel list is
+        // sorted priciest-first for the usage popover and can lead with an
+        // expensive subagent/fallback instead of the foreground turn model.
+        const effectiveModel =
+          state.model ||
+          usage?.perModel?.find((entry) => entry.model)?.model ||
+          undefined;
         // (The context-gauge usage refresh fires in runConsumer on every
         // `result` — including turnless runs like compactContext's /compact —
         // so there's nothing to emit here.)
@@ -1126,6 +1133,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           stopReason,
           response: {
             stopReason,
+            ...(effectiveModel ? { effectiveModel } : {}),
             ...(usage ? { usage } : {}),
           } as PromptResponse,
         };

@@ -29,6 +29,7 @@ import type {
   RequestPermissionResponse,
   SessionMode,
   StopReason,
+  TurnUsage,
 } from "../../types";
 import { CursorSdkTranslator } from "./translator";
 import {
@@ -278,7 +279,20 @@ export interface SdkRun {
   // detail must be read from the local store via CursorLocalStore. We keep
   // these optional fields for forward-compat but never rely on them.
   wait(): Promise<
-    | { status?: string; result?: string; errorCode?: string; error?: string }
+    | {
+        status?: string;
+        result?: string;
+        errorCode?: string;
+        error?: string;
+        model?: { id?: string };
+        usage?: {
+          inputTokens?: number;
+          outputTokens?: number;
+          cacheReadTokens?: number;
+          cacheWriteTokens?: number;
+          reasoningTokens?: number;
+        };
+      }
     | undefined
   >;
   cancel(): Promise<void>;
@@ -287,6 +301,27 @@ export interface SdkAgent {
   readonly agentId: string;
   send(message: unknown, options?: unknown): Promise<SdkRun>;
   close?(): void;
+}
+
+function cursorTurnUsage(raw: unknown): TurnUsage | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const usage = raw as Record<string, unknown>;
+  const number = (key: string): number | undefined =>
+    typeof usage[key] === "number" &&
+    Number.isFinite(usage[key]) &&
+    (usage[key] as number) >= 0
+      ? (usage[key] as number)
+      : undefined;
+  const result: TurnUsage = {
+    inputTokens: number("inputTokens"),
+    outputTokens: number("outputTokens"),
+    cacheReadTokens: number("cacheReadTokens"),
+    cacheWriteTokens: number("cacheWriteTokens"),
+    reasoningTokens: number("reasoningTokens"),
+  };
+  return Object.values(result).some((value) => value !== undefined)
+    ? result
+    : undefined;
 }
 
 /** What we hand @cursor/sdk's `mcpServers` — structurally a Cursor
@@ -840,6 +875,7 @@ export class CursorSdkAdapter implements AgentAdapter {
         availableModes: CURSOR_SDK_MODES,
       },
       resumedFresh,
+      ...(resumedFresh ? { replacementSessionId: agent.agentId } : {}),
     } as never;
   }
 
@@ -906,7 +942,10 @@ export class CursorSdkAdapter implements AgentAdapter {
       // session); attempt 2 forces a confirmed-good fallback.
       const modelId =
         attempt === 1
-          ? this.resolveModel(session.modelId)
+          ? this.resolveModel(
+              session.env?.CURSOR_MODEL ?? session.modelId,
+              session.env,
+            )
           : (this.pickRetryModel(session.modelId) ?? session.modelId);
 
       // Fresh translator per attempt so a retried run doesn't inherit the
@@ -989,9 +1028,19 @@ export class CursorSdkAdapter implements AgentAdapter {
       // (→ AGENT_PROMPT_FAILED) rather than returning a clean-looking empty
       // turn (which would also wrongly re-light the green dot via markAuthOk).
       let streamError: unknown = null;
-      let waitResult: { status?: string; result?: string } | undefined;
+      let streamedUsage: TurnUsage | undefined;
+      let waitResult: Awaited<ReturnType<SdkRun["wait"]>>;
       try {
-        for await (const msg of run.stream()) translator.feed(msg);
+        for await (const msg of run.stream()) {
+          const sdkMessage = msg as {
+            type?: string;
+            usage?: unknown;
+          };
+          if (sdkMessage.type === "usage") {
+            streamedUsage = cursorTurnUsage(sdkMessage.usage);
+          }
+          translator.feed(msg);
+        }
         waitResult = await run.wait();
       } catch (err) {
         streamError = err;
@@ -1007,7 +1056,15 @@ export class CursorSdkAdapter implements AgentAdapter {
       // User-requested cancel — benign, end the turn cleanly.
       if (session.cancelRequested) {
         const stopReason = translator.stopReason;
-        return { stopReason, response: { stopReason } as never };
+        const usage = cursorTurnUsage(waitResult?.usage) ?? streamedUsage;
+        return {
+          stopReason,
+          response: {
+            stopReason,
+            effectiveModel: waitResult?.model?.id ?? modelId,
+            ...(usage ? { usage } : {}),
+          } as PromptResponse,
+        };
       }
 
       const runStatus =
@@ -1019,7 +1076,15 @@ export class CursorSdkAdapter implements AgentAdapter {
       // Success.
       if (streamError == null && !runErrored && !translator.sawError) {
         const stopReason = translator.stopReason;
-        return { stopReason, response: { stopReason } as never };
+        const usage = cursorTurnUsage(waitResult?.usage) ?? streamedUsage;
+        return {
+          stopReason,
+          response: {
+            stopReason,
+            effectiveModel: waitResult?.model?.id ?? modelId,
+            ...(usage ? { usage } : {}),
+          } as PromptResponse,
+        };
       }
 
       // Failure — recover the REAL reason. A thrown stream error already
@@ -1123,6 +1188,36 @@ export class CursorSdkAdapter implements AgentAdapter {
     }
   }
 
+  /** Cursor accepts a model on every `agent.send`, so a composer model change
+   * does not require replacing the SDK agent or losing its conversation. */
+  async setModel(opts: { sessionId: string; model: string }): Promise<void> {
+    const session = this.sessions.get(opts.sessionId);
+    const model = opts.model.trim();
+    if (!session || !model) return;
+    session.env = { ...(session.env ?? {}), CURSOR_MODEL: model };
+    session.modelId = this.resolveModel(model, session.env);
+  }
+
+  /** Apply the renderer's complete composer snapshot. Effort and Fast are
+   * represented by concrete Cursor model variants, resolved immediately and
+   * sent on the next run. Keys encoded by omission must be removed first so
+   * toggling Fast off cannot leave a stale variant selected. */
+  async updateConfig(opts: {
+    sessionId: string;
+    env: Record<string, string>;
+  }): Promise<void> {
+    const session = this.sessions.get(opts.sessionId);
+    if (!session) return;
+    const carried = { ...(session.env ?? {}) };
+    delete carried.CURSOR_MODEL;
+    delete carried.ZEROS_THINKING_EFFORT;
+    delete carried.ZEROS_FAST_MODE;
+    delete carried.ZEROS_ADDITIONAL_DIRS;
+    delete carried.ZEROS_PERMISSION_MODE;
+    session.env = { ...carried, ...opts.env };
+    session.modelId = this.resolveModel(session.env.CURSOR_MODEL, session.env);
+  }
+
   /** Rebuild the agent (Agent.resume) when the mode's desired autoReview no
    *  longer matches what's baked into the live agent — the only way to change
    *  the create-time classifier gate for an in-flight chat. Resumes the SAME
@@ -1135,7 +1230,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     try {
       const sdk = await loadSdk();
       const sessionMcp = this.mcpServers(session.mcpServers);
-      session.agent = await sdk.Agent.resume(session.zerosSessionId, {
+      session.agent = await sdk.Agent.resume(session.agent.agentId, {
         apiKey: session.apiKey,
         model: { id: session.modelId },
         cwd: session.cwd,

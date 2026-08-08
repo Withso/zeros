@@ -19,6 +19,7 @@ const rt = vi.hoisted(() => ({
   bootOptions: null as CodexAppServerBootOptions | null,
   notificationHandlers: new Map<string, Set<(params: unknown) => void>>(),
   respondCalls: [] as Array<{ permissionId: string; response: unknown }>,
+  startThreadCalls: [] as Array<Record<string, unknown>>,
   runTurnImpl: null as null | (() => Promise<unknown>),
 }));
 
@@ -35,13 +36,16 @@ vi.mock("../app-server", () => ({
       cliVersion: "0.139.0",
       binarySource: { source: "path", path: "codex" },
       child: { pid: 1234, killed: false },
-      startThread: async () => ({
-        threadId: "thread-1",
-        model: "gpt-5",
-        approvalPolicy: "on-request",
-        sandbox: { type: "workspaceWrite" },
-        raw: {},
-      }),
+      startThread: async (params: Record<string, unknown>) => {
+        rt.startThreadCalls.push(params);
+        return {
+          threadId: "thread-1",
+          model: "gpt-5",
+          approvalPolicy: "on-request",
+          sandbox: { type: "workspaceWrite" },
+          raw: {},
+        };
+      },
       resumeThread: async (p: { threadId: string }) => ({
         threadId: p.threadId,
         model: "gpt-5",
@@ -73,7 +77,7 @@ vi.mock("../app-server", () => ({
   }),
 }));
 
-vi.mock("../../session-paths", () => ({
+vi.mock("../../../session-paths", () => ({
   ensureSessionDir: vi.fn(async () => ({
     root: "/tmp/s",
     env: "/tmp/s/env",
@@ -105,11 +109,18 @@ function makeAdapter() {
   return { adapter: new CodexAppServerAdapter(ctx), emit };
 }
 
-function raiseApproval(permissionId: string): void {
+function raiseApproval(
+  permissionId: string,
+  method: CodexApprovalRequest["method"] = "item/commandExecution/requestApproval",
+  params: Record<string, unknown> = {
+    itemId: `item-${permissionId}`,
+    command: "git status",
+  },
+): void {
   const request: CodexApprovalRequest = {
     permissionId,
-    method: "item/commandExecution/requestApproval",
-    params: { itemId: `item-${permissionId}`, command: "git status" },
+    method,
+    params,
   };
   rt.bootOptions?.onApprovalRequest?.(request);
 }
@@ -124,6 +135,7 @@ describe("codex permission settlement receipts", () => {
     rt.bootOptions = null;
     rt.notificationHandlers.clear();
     rt.respondCalls = [];
+    rt.startThreadCalls = [];
     rt.runTurnImpl = null;
   });
 
@@ -144,6 +156,65 @@ describe("codex permission settlement receipts", () => {
       "permission-stale",
       session.sessionId,
     );
+  });
+
+  it("boots in the permission mode selected before session bind", async () => {
+    const { adapter } = makeAdapter();
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { ZEROS_PERMISSION_MODE: "auto" },
+    });
+
+    expect(session.modes?.currentModeId).toBe("auto-edit");
+    expect(rt.startThreadCalls[0]).toMatchObject({
+      approvalPolicy: "on-request",
+      sandbox: "workspace-write",
+    });
+  });
+
+  it("Approve for me resolves approvals and emits a settled telemetry marker", async () => {
+    const { adapter, emit } = makeAdapter();
+    await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { ZEROS_PERMISSION_MODE: "auto" },
+    });
+
+    raiseApproval("permission-auto");
+
+    expect(emit.onPermissionRequest).toHaveBeenCalledTimes(1);
+    expect(emit.onPermissionRequest.mock.calls[0]?.[2]).toMatchObject({
+      autoResolution: "allow_once",
+    });
+    expect(rt.respondCalls).toEqual([
+      { permissionId: "permission-auto", response: { decision: "accept" } },
+    ]);
+  });
+
+  it("Approve for me still prompts for sandbox-escalation permission profiles", async () => {
+    const { adapter, emit } = makeAdapter();
+    await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { ZEROS_PERMISSION_MODE: "auto" },
+    });
+    const permissions = {
+      network: { enabled: true },
+      fileSystem: { read: ["/tmp/read"], write: ["/tmp/write"] },
+    };
+
+    raiseApproval("permission-profile", "item/permissions/requestApproval", {
+      permissions,
+    });
+
+    // Escalations leave the workspace sandbox — Approve for me must not
+    // silently grant network / arbitrary filesystem paths.
+    expect(rt.respondCalls).toEqual([]);
+    expect(emit.onPermissionRequest).toHaveBeenCalledTimes(1);
+    expect(emit.onPermissionRequest.mock.calls[0]?.[2]).not.toHaveProperty(
+      "autoResolution",
+    );
+    expect(emit.onPermissionRequest.mock.calls[0]?.[2]).toMatchObject({
+      toolCall: expect.objectContaining({ kind: expect.any(String) }),
+    });
   });
 
   it("settles every parked approval when the Codex runtime exits", async () => {
@@ -221,7 +292,10 @@ describe("codex permission settlement receipts", () => {
       return { turnId: "turn-1", status: "completed", raw: {} };
     };
 
-    await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+    const completed = await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT,
+    });
 
     expect(rt.respondCalls).toEqual([
       { permissionId: "permission-stale", response: { decision: "cancel" } },
@@ -231,5 +305,6 @@ describe("codex permission settlement receipts", () => {
       "permission-stale",
       session.sessionId,
     );
+    expect(completed.response.effectiveModel).toBe("gpt-5");
   });
 });

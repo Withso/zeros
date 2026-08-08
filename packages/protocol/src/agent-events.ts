@@ -593,6 +593,10 @@ export interface RequestPermissionRequest {
   sessionId: SessionId;
   toolCall: ToolCall;
   options: PermissionOption[];
+  /** The adapter already resolved this gate without user input. The renderer
+   * records the privacy-safe decision metadata but must not render a card or
+   * send a second response. */
+  autoResolution?: PermissionOptionKind;
   /** Optional provider-authored question copy. This changes only the title of
    * the existing PermissionCard; it never selects a different renderer. */
   title?: string;
@@ -742,6 +746,10 @@ export interface TurnUsage {
 export interface PromptResponse {
   stopReason: StopReason;
   usage?: TurnUsage;
+  /** Model the adapter actually sent/observed for this turn. May differ from
+   * the requested composer model after a provider fallback or variant
+   * resolution. Metadata only; adapters omit it when the protocol is silent. */
+  effectiveModel?: string;
   userMessageId?: string;
 }
 
@@ -770,6 +778,11 @@ export interface LoadSessionResponse {
    *  it must be re-injected on the next prompt). Engine-internal; the renderer
    *  ignores it. */
   resumedFresh?: boolean;
+  /** A degraded resume created a new provider-native session id. The current
+   * engine may continue routing through the requested id as an alias, but the
+   * renderer persists this replacement for the next app restart so it does not
+   * repeatedly attempt the permanently stale id. */
+  replacementSessionId?: SessionId;
 }
 
 export interface ListSessionsResponse {

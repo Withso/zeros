@@ -16,6 +16,7 @@
 
 import { capture, captureException } from "./posthog";
 import type { AgentFailure } from "../../bridge/failure";
+import { logEvent } from "../logging/renderer-log";
 
 // Per-session bookkeeping so agent_session_ended can report duration and
 // turn count without persisting timestamps on the store slot. Keyed by
@@ -32,6 +33,236 @@ const sessionMeta = new Map<
 // streams is overwritten by the next turn's arm or cleared on session end —
 // bounded by the chat-tab cap, so it can't grow unbounded.
 const ttftPending = new Map<string, { agentId: string; startedAt: number }>();
+/** Correlates an approval response with the currently-running prompt without
+ * sending the durable chat/session id to analytics. */
+const activePromptIds = new Map<string, string>();
+/** Prevents double `agent_prompt_finished` when both sendPrompt's finally and a
+ * terminal turn_state push observe the same durable prompt id after reload. */
+const finishedPromptIds = new Map<string, number>();
+const FINISHED_PROMPT_ID_CAP = 200;
+
+/** Catalog-shaped identifiers: model ids, agent ids, mode ids, stop reasons.
+ * Underscores are allowed only for an explicit enum allowlist below — freeform
+ * `alice_private_model` style tokens must not pass through unchanged. */
+const SAFE_METADATA_TOKEN = /^[a-z0-9][a-z0-9.:+-]{0,79}$/i;
+const SAFE_UNDERSCORE_TOKENS = new Set([
+  "allow_once",
+  "allow_always",
+  "allow_always_project",
+  "reject_once",
+  "reject_always",
+  "selected_unknown",
+  "auto_allow_once",
+  "auto_allow_always",
+  "auto_allow_always_project",
+  "auto_reject_once",
+  "auto_reject_always",
+  "policy_allow_once",
+  "policy_allow_always",
+  "policy_allow_always_project",
+  "policy_reject_once",
+  "policy_reject_always",
+  "native_dialog",
+  "end_turn",
+  "max_tokens",
+  "tool_use",
+  "auth_required",
+]);
+
+/** Model ids and native mode ids normally come from a curated catalog, but
+ * adapters can advertise arbitrary strings. Preserve safe identifiers and
+ * coarsen everything else to the literal "custom" — never emit free text and
+ * never emit a deterministic content hash that would fingerprint the value. */
+function safeMetadataToken(
+  value: string | null | undefined,
+): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  if (SAFE_UNDERSCORE_TOKENS.has(trimmed)) return trimmed;
+  if (SAFE_METADATA_TOKEN.test(trimmed)) return trimmed;
+  return "custom";
+}
+
+function safeCount(
+  value: number | undefined,
+  max = Number.MAX_SAFE_INTEGER,
+): number | undefined {
+  if (value == null || !Number.isFinite(value)) return undefined;
+  return Math.min(max, Math.max(0, Math.floor(value)));
+}
+
+export interface AgentPromptStartedArgs {
+  promptId: string;
+  /** Local correlation only; never emitted. */
+  chatId: string;
+  agentId: string;
+  requestedModel?: string | null;
+  effort?: string | null;
+  permissionMode?: string | null;
+  nativeMode?: string | null;
+  fastEnabled: boolean;
+  contentBlockCount: number;
+  imageAttachmentCount: number;
+  textAttachmentCount: number;
+  mentionFileCount: number;
+  mentionFolderCount: number;
+  mentionSelectionCount: number;
+  additionalDirectoryCount: number;
+  isAutoAction: boolean;
+  autoActionKind?: string | null;
+  protocolVersion?: number;
+}
+
+/** Canonical metadata-only prompt envelope. The exact same safe properties go
+ * to app.jsonl and PostHog; prompt text, paths, attachment names, ids, and env
+ * values are deliberately absent. */
+export function trackAgentPromptStarted(args: AgentPromptStartedArgs): void {
+  const promptId = safeMetadataToken(args.promptId) ?? "unknown";
+  activePromptIds.set(args.chatId, promptId);
+  const props = {
+    prompt_id: promptId,
+    agent_id: safeMetadataToken(args.agentId) ?? "unknown",
+    requested_model: safeMetadataToken(args.requestedModel),
+    effort: safeMetadataToken(args.effort),
+    permission_mode: safeMetadataToken(args.permissionMode),
+    native_mode: safeMetadataToken(args.nativeMode),
+    fast_enabled: args.fastEnabled,
+    content_block_count: safeCount(args.contentBlockCount, 10_000),
+    image_attachment_count: safeCount(args.imageAttachmentCount, 10_000),
+    text_attachment_count: safeCount(args.textAttachmentCount, 10_000),
+    mention_file_count: safeCount(args.mentionFileCount, 10_000),
+    mention_folder_count: safeCount(args.mentionFolderCount, 10_000),
+    mention_selection_count: safeCount(args.mentionSelectionCount, 10_000),
+    additional_directory_count: safeCount(
+      args.additionalDirectoryCount,
+      10_000,
+    ),
+    is_auto_action: args.isAutoAction,
+    auto_action_kind: safeMetadataToken(args.autoActionKind),
+    protocol_version: safeCount(args.protocolVersion, 1_000_000),
+  };
+  capture("agent_prompt_started", props);
+  logEvent("agent_prompt_started", props, ["agent", "prompt"]);
+}
+
+/** Re-attach a still-running prompt after renderer reload/adoption. Does not
+ * emit `agent_prompt_started` — that event already fired on the original send. */
+export function adoptAgentPromptCorrelation(args: {
+  chatId: string;
+  promptId: string;
+}): void {
+  const promptId = safeMetadataToken(args.promptId);
+  if (!promptId) return;
+  activePromptIds.set(args.chatId, promptId);
+}
+
+/** Current correlation id for a chat, if any. Used by reload adoption to emit
+ * a terminal finish when the original sendPrompt finally no longer exists. */
+export function peekAgentPromptId(chatId: string): string | undefined {
+  return activePromptIds.get(chatId);
+}
+
+function markPromptFinishedOnce(promptId: string): boolean {
+  if (finishedPromptIds.has(promptId)) return false;
+  finishedPromptIds.set(promptId, Date.now());
+  while (finishedPromptIds.size > FINISHED_PROMPT_ID_CAP) {
+    const oldest = finishedPromptIds.keys().next().value;
+    if (oldest === undefined) break;
+    finishedPromptIds.delete(oldest);
+  }
+  return true;
+}
+
+export function trackAgentPromptFinished(args: {
+  promptId: string;
+  /** Local correlation only; never emitted. */
+  chatId: string;
+  agentId: string;
+  outcome: "completed" | "cancelled" | "failed" | "interrupted";
+  durationMs: number;
+  retryCount: number;
+  stopReason?: string | null;
+  effectiveModel?: string | null;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
+  costUsd?: number;
+  failure?:
+    | (Pick<AgentFailure, "kind" | "stage"> &
+        Partial<Pick<AgentFailure, "message">>)
+    | null;
+}): void {
+  const promptId = safeMetadataToken(args.promptId) ?? "unknown";
+  if (activePromptIds.get(args.chatId) === promptId) {
+    activePromptIds.delete(args.chatId);
+  }
+  if (!markPromptFinishedOnce(promptId)) return;
+  const props = {
+    prompt_id: promptId,
+    agent_id: safeMetadataToken(args.agentId) ?? "unknown",
+    outcome: args.outcome,
+    duration_ms: safeCount(args.durationMs),
+    retry_count: safeCount(args.retryCount, 100),
+    stop_reason: safeMetadataToken(args.stopReason),
+    effective_model: safeMetadataToken(args.effectiveModel),
+    input_tokens: safeCount(args.inputTokens),
+    output_tokens: safeCount(args.outputTokens),
+    cache_read_tokens: safeCount(args.cacheReadTokens),
+    cache_write_tokens: safeCount(args.cacheWriteTokens),
+    reasoning_tokens: safeCount(args.reasoningTokens),
+    cost_usd:
+      args.costUsd != null && Number.isFinite(args.costUsd)
+        ? Math.max(0, args.costUsd)
+        : undefined,
+    failure_kind: safeMetadataToken(args.failure?.kind),
+    failure_stage: safeMetadataToken(args.failure?.stage),
+    failure_message_hash: failureMessageHash(args.failure?.message),
+  };
+  capture("agent_prompt_finished", props);
+  logEvent("agent_prompt_finished", props, ["agent", "prompt"]);
+}
+
+/** User-facing approval telemetry. This records only the decision enum and tool
+ * category; native command/file arguments never leave the renderer. */
+export function trackAgentPermissionDecided(args: {
+  chatId: string;
+  agentId: string;
+  decision: string;
+  toolKind?: string | null;
+}): void {
+  const props = {
+    prompt_id: activePromptIds.get(args.chatId),
+    agent_id: safeMetadataToken(args.agentId) ?? "unknown",
+    decision: safeMetadataToken(args.decision) ?? "unknown",
+    tool_kind: safeMetadataToken(args.toolKind),
+  };
+  capture("agent_permission_decided", props);
+  logEvent("agent_permission_decided", props, ["agent", "permission"]);
+}
+
+/** Blocking user-input telemetry. Answers and question copy are user content
+ * and are never included; only source/outcome/count metadata is retained. */
+export function trackAgentQuestionAnswered(args: {
+  chatId: string;
+  agentId: string;
+  outcome: "answered" | "dismissed";
+  source?: string | null;
+  questionCount: number;
+  blocking: boolean;
+}): void {
+  const props = {
+    prompt_id: activePromptIds.get(args.chatId),
+    agent_id: safeMetadataToken(args.agentId) ?? "unknown",
+    outcome: args.outcome,
+    source: safeMetadataToken(args.source),
+    question_count: safeCount(args.questionCount, 100),
+    blocking: args.blocking,
+  };
+  capture("agent_question_answered", props);
+  logEvent("agent_question_answered", props, ["agent", "question"]);
+}
 
 /** A new agent session was successfully created. */
 export function trackAgentSessionStarted(
@@ -88,10 +319,10 @@ export function trackAgentPromptCompleted(args: {
     if (meta) meta.promptCount += 1;
   }
   capture("agent_prompt_completed", {
-    agent_id: args.agentId,
-    stop_reason: args.stopReason,
+    agent_id: safeMetadataToken(args.agentId) ?? "unknown",
+    stop_reason: safeMetadataToken(args.stopReason),
     duration_ms: args.durationMs,
-    model: args.model ?? undefined,
+    model: safeMetadataToken(args.model),
     input_tokens: args.inputTokens,
     output_tokens: args.outputTokens,
     cost_usd: args.costUsd,
@@ -110,6 +341,9 @@ export function trackAgentSessionEnded(args: {
   const meta = sessionMeta.get(args.chatId);
   sessionMeta.delete(args.chatId);
   ttftPending.delete(args.chatId);
+  const activePromptId = activePromptIds.get(args.chatId);
+  activePromptIds.delete(args.chatId);
+  if (activePromptId) finishedPromptIds.delete(activePromptId);
   capture("agent_session_ended", {
     agent_id: args.agentId,
     outcome: args.outcome,
@@ -326,10 +560,11 @@ export function trackAiGeneration(args: {
     args.outputTokens != null ||
     args.costUsd != null;
   if (!args.model && !hasUsage) return;
+  const model = safeMetadataToken(args.model);
   capture("$ai_generation", {
-    $ai_model: args.model ?? undefined,
-    $ai_provider: args.provider ?? inferProvider(args.model),
-    $ai_trace_id: args.traceId ?? undefined,
+    $ai_model: model,
+    $ai_provider: safeMetadataToken(args.provider) ?? inferProvider(model),
+    $ai_trace_id: safeMetadataToken(args.traceId),
     $ai_latency: args.latencyMs / 1000, // PostHog expects seconds
     $ai_input_tokens: args.inputTokens,
     $ai_output_tokens: args.outputTokens,
@@ -338,6 +573,6 @@ export function trackAiGeneration(args: {
     $ai_reasoning_tokens: args.reasoningTokens,
     // Omitted when undefined → PostHog auto-computes from provider+model+tokens.
     $ai_total_cost_usd: args.costUsd,
-    agent_id: args.agentId,
+    agent_id: safeMetadataToken(args.agentId) ?? "unknown",
   });
 }
