@@ -150,7 +150,7 @@ export interface AgentManifestEntry {
    *  stat() calls behind a process-lifetime memo), so it can run on every
    *  listAgents.
    *
-   *  `override` is the user's persisted Settings → Agent providers → Executable
+   *  `override` is the user's persisted Settings → Agents → Executable
    *  path for this agent (resolved by the gateway from the user settings layer).
    *  It MUST be honoured: the missing-runtime message tells the user to set
    *  exactly that value, so a probe that ignored it left them in a dead end —
@@ -446,7 +446,7 @@ export function toBridgeAgents(
   authenticatedAgentIds?: Set<string>,
   versionInfoByAgentId?: Map<string, AgentVersionInfo>,
   accountByAgentId?: Map<string, AccountDetails>,
-  /** Per-agent persisted Executable-path overrides (Settings → Agent providers),
+  /** Per-agent persisted Executable-path overrides (Settings → Agents),
    *  resolved from the user settings layer by the caller. Fed to each agent's
    *  `runtimeUnavailable` probe so a user-supplied binary clears the
    *  missing-runtime state — see that field's doc for why ignoring it was a

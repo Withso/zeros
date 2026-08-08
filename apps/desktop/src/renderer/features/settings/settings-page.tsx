@@ -26,6 +26,10 @@
 // folded into the Providers panel. Provider auth-method + binary-path
 // overrides live in provider-prefs.ts, consumed at session spawn time.
 //
+// 2026-08-08: nav LABELS only — Preferences → "General", Agent providers →
+// "Agents", Git → "Git & PR". `SectionId`s are untouched, so persisted
+// `settings:active-section` values and deep links keep resolving.
+//
 // Repositories live in their own repository scope rather than a bottom sidebar
 // group; the
 // per-repo detail gained a background-less section nav. Repo settings are
@@ -45,18 +49,18 @@ import { useScrollMemoryRef } from "../../shell/scroll-memory";
 import { useInstantViewSwitch } from "../../shared/ui/use-instant-view-switch";
 import {
   Palette,
-  Settings2,
+  Settings,
   ArrowLeft,
   Building2,
   Check,
   ChevronDown,
-  Plug,
+  Astroid,
   Plus,
   SquareTerminal,
   Blocks,
   KeyRound,
-  Brain,
-  GitBranch,
+  Box,
+  GitPullRequest,
   FlaskConical,
   CircleUser,
   CircleCheck,
@@ -190,14 +194,28 @@ type SectionDef = {
   id: SectionId;
   label: string;
   icon: LucideIcon;
+  /** Optional per-row nav override, appended AFTER `SIDEBAR_ENTRY_CLS` so
+   *  twMerge lets it win (see `INTERNAL_NAV_CLS`). */
+  navClassName?: string;
   Panel: ComponentType<{ surfaceActive?: boolean }>;
 };
+
+// Internal's nav row is the ONE coloured entry in the rail — label AND icon
+// carry `--brown-primary` (the warm accent) in every state, so a staff-only
+// tab reads as staff-only at a glance instead of sitting silently among the
+// fg2 rows. Declared ABOVE `SECTIONS` because the array evaluates at module
+// load and a `const` below would be in its temporal dead zone. Every state
+// SIDEBAR_ENTRY_CLS paints (rest / hover / active / active+hover, row + svg)
+// is restated here so twMerge — which keeps the LAST class per group+modifier
+// — swaps them all; miss one and that state falls back to fg1/fg2.
+const INTERNAL_NAV_CLS =
+  "text-brown-primary hover:text-brown-primary data-[state=active]:text-brown-primary data-[state=active]:hover:text-brown-primary [&>svg]:text-brown-primary data-[state=active]:[&>svg]:text-brown-primary";
 
 const SECTIONS: SectionDef[] = [
   {
     id: "general",
-    label: "Preferences",
-    icon: Settings2,
+    label: "General",
+    icon: Settings,
     Panel: GeneralPanel,
   },
   {
@@ -209,13 +227,13 @@ const SECTIONS: SectionDef[] = [
   {
     id: "models",
     label: "Models",
-    icon: Brain,
+    icon: Box,
     Panel: ModelsPanel,
   },
   {
     id: "providers",
-    label: "Agent providers",
-    icon: Plug,
+    label: "Agents",
+    icon: Astroid,
     Panel: ProvidersPanel,
   },
   // Gated by the `terminalAgents` experimental flag — hidden from the
@@ -235,8 +253,8 @@ const SECTIONS: SectionDef[] = [
   },
   {
     id: "git",
-    label: "Git",
-    icon: GitBranch,
+    label: "Git & PR",
+    icon: GitPullRequest,
     Panel: GitDefaultsPanel,
   },
   // "mcp" left Settings entirely (2026-07-22): MCP servers are managed on the
@@ -288,6 +306,7 @@ const SECTIONS: SectionDef[] = [
     id: "internal",
     label: "Internal",
     icon: Lock,
+    navClassName: INTERNAL_NAV_CLS,
     Panel: InternalPanel,
   },
 ];
@@ -444,8 +463,14 @@ function loadInitialSection(): string {
 // without it the label pops to fg1 on hover. The selected row keeps
 // `fg1` even while hovered via the higher-specificity
 // `data-[state=active]:hover:text-fg1`.
+// ICON SIZE: 14px, set in CSS — NOT via each icon's `size` prop. The Button
+// primitive paints `[&_svg]:size-4` on every button, and a CSS width/height
+// beats the `width`/`height` ATTRIBUTES lucide's `size` prop emits, so
+// `<Icon size={14} />` alone still rendered 16px. `[&_svg]:size-3.5` reuses
+// the primitive's exact selector so twMerge drops the 16px rule outright
+// rather than leaving two rules to fight on source order.
 const SIDEBAR_ENTRY_CLS =
-  "flex h-auto w-full min-w-0 items-center justify-start gap-2.5 rounded-md border-0 bg-transparent px-2.5 py-1.5 text-left text-sm font-normal text-fg2 transition-colors duration-150 ease-out hover:bg-sidebar-bg-hover hover:text-fg2 data-[state=active]:bg-sidebar-bg-hover data-[state=active]:text-fg1 data-[state=active]:hover:text-fg1 [&>svg]:shrink-0 [&>svg]:text-fg2 data-[state=active]:[&>svg]:text-fg1";
+  "flex h-auto w-full min-w-0 items-center justify-start gap-2.5 rounded-md border-0 bg-transparent px-2.5 py-1.5 text-left text-sm font-normal text-fg2 transition-colors duration-150 ease-out hover:bg-sidebar-bg-hover hover:text-fg2 data-[state=active]:bg-sidebar-bg-hover data-[state=active]:text-fg1 data-[state=active]:hover:text-fg1 [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg2 data-[state=active]:[&>svg]:text-fg1";
 
 // Group label in the section list ("Personal" / "Agents" / …) — a quiet,
 // non-interactive divider. `pt-5` opens a clear gap above it (the FIRST
@@ -675,7 +700,7 @@ export function SettingsPage() {
               className={cn(SIDEBAR_ENTRY_CLS, "mb-2")}
               onClick={handleBack}
             >
-              <ArrowLeft size={16} strokeWidth={1.5} />
+              <ArrowLeft size={14} strokeWidth={1.5} />
               <span>Back</span>
             </Button>
           </Tooltip>
@@ -708,6 +733,7 @@ export function SettingsPage() {
                       key={section.id}
                       icon={section.icon}
                       label={section.label}
+                      className={section.navClassName}
                       isActive={
                         selection.scope === "user" &&
                         selection.section === section.id
@@ -824,12 +850,15 @@ function SectionNavButton({
   icon: Icon,
   label,
   isActive,
+  className,
   onClick,
   onIntent,
 }: {
   icon: LucideIcon;
   label: string;
   isActive: boolean;
+  /** Per-row override, merged AFTER the shared entry class so it wins. */
+  className?: string;
   onClick: () => void;
   onIntent?: () => void;
 }) {
@@ -839,7 +868,7 @@ function SectionNavButton({
       role="tab"
       aria-selected={isActive}
       data-state={isActive ? "active" : "inactive"}
-      className={SIDEBAR_ENTRY_CLS}
+      className={cn(SIDEBAR_ENTRY_CLS, className)}
       onClick={onClick}
       // Called, never forwarded bare: React hands a handler the synthetic
       // event, which `prefetchGithubAuthSnapshot` would take as its `fetcher`.
@@ -859,8 +888,9 @@ function SectionNavButton({
 // ── General ─────────────────────────────────────────────
 
 function GeneralPanel() {
-  // Home for general user preferences (the "Preferences" tab; the id
-  // stays `general` for persisted-selection compat). Currently empty —
+  // Home for general user preferences (the "General" tab — labelled
+  // "Preferences" until 2026-08-08; the id has always been `general`, so
+  // persisted selections are unaffected). Currently empty —
   // the old archived-chats toggle that lived here was removed as dead
   // pre-revamp wiring. Kept as the landing section; new general
   // preferences slot in as <SettingsSection>s alongside this empty state.

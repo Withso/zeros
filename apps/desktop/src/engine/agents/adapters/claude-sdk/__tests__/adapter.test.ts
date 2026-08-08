@@ -651,7 +651,7 @@ describe("ClaudeSdkAdapter", () => {
   });
 
   it("honours a cliBinary override as pathToClaudeCodeExecutable", async () => {
-    // The Settings → Agent providers → Executable path knob must still win over
+    // The Settings → Agents → Executable path knob must still win over
     // the staged/bundled runtime. Point it at a real executable (this test file's
     // own interpreter) so the resolver's is-executable check passes on any host.
     const { queryFn, captured } = makeScriptedQuery([
