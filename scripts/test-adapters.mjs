@@ -14,10 +14,9 @@
 //
 // The translators live in TS source; we compile them inline with
 // esbuild so this script doesn't need a separate build step. esbuild
-// is pinned at ^0.21 as a direct devDep in package.json so top-level
-// resolution stays stable for the build scripts that import it —
-// without the pin, hoisting picks arbitrarily between Vite 5.4's
-// 0.21 and Vite 7's 0.27.
+// is kept as a direct devDep in package.json so top-level resolution
+// stays explicit and stable for the build scripts that import it,
+// independent of the transitive copies bundled by Vite and tsup.
 //
 // Usage:
 //   pnpm test:adapters              # run all, fail on mismatch
