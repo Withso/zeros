@@ -4,15 +4,34 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const TOP_BAR = "apps/desktop/src/renderer/shell/top-bar.tsx";
+const RESOURCE_MONITOR = "apps/desktop/src/renderer/shell/resource-monitor.tsx";
+const ELECTRON_MAIN = "apps/desktop/electron/main.ts";
 
 function source(relativePath: string): string {
   return readFileSync(resolve(process.cwd(), relativePath), "utf8");
 }
 
-/** The Tailwind spacing scale is 4px per step, so `gap-2` is 8px and the
- *  half-steps (`gap-1.5`) are 6px. */
-function gapClassToPx(token: string): number {
+/** The Tailwind spacing scale is 4px per step, so `gap-2`/`w-2` are 8px. */
+function spacingClassToPx(token: string): number {
   return Number(token) * 4;
+}
+
+function heightClassToPx(classes: string): number {
+  const height = /(?:^|\s)h-(\d+(?:\.\d+)?)(?:\s|$)/.exec(classes);
+  if (!height) throw new Error(`no h-* on class list: "${classes}"`);
+  return Number(height[1]) * 4;
+}
+
+/** The literal classes on the root header, anchored to its accessible name. */
+function headerClasses(src: string): string {
+  const label = src.indexOf('aria-label="Workspace navigation"');
+  if (label < 0) throw new Error("top-bar accessible label not found");
+  const opener = src.lastIndexOf('className="', label);
+  if (opener < 0) throw new Error("top-bar header className not found");
+  return src.slice(
+    opener + 'className="'.length,
+    src.indexOf('"', opener + 'className="'.length),
+  );
 }
 
 /** The class list on the flex container that lays the workspace tabs out.
@@ -34,7 +53,13 @@ function stripGapPx(src: string): number {
   const classes = stripClasses(src);
   const gap = /(?:^|\s)gap-(\d+(?:\.\d+)?)(?:\s|$)/.exec(classes);
   if (!gap) throw new Error(`no gap-* on the strip container: "${classes}"`);
-  return gapClassToPx(gap[1]);
+  return spacingClassToPx(gap[1]);
+}
+
+function widthClassToPx(classes: string): number {
+  const width = /(?:^|\s)w-(\d+(?:\.\d+)?)(?:\s|$)/.exec(classes);
+  if (!width) throw new Error(`no numeric w-* on class list: "${classes}"`);
+  return spacingClassToPx(width[1]);
 }
 
 /** The literal class string assigned to a top-level `const NAME = "…"`. */
@@ -58,27 +83,33 @@ function numericConstant(src: string, name: string): number {
 // every pin and fade lands off by the difference. Nothing at runtime reads the
 // computed style, so drift here is invisible until the strip visibly misaligns.
 describe("workspace tab strip gap", () => {
-  it("keeps WORKSPACE_TAB_GAP_PX equal to the strip's gap-* class", () => {
+  it("keeps pin math equal to the four-pixel boundary carrier", () => {
     const topBar = source(TOP_BAR);
-
-    expect(numericConstant(topBar, "WORKSPACE_TAB_GAP_PX")).toBe(
-      stripGapPx(topBar),
+    const boundaryWidth = widthClassToPx(
+      classConstant(topBar, "TOP_BAR_BOUNDARY_CLS"),
     );
+
+    // Boundary carriers own the physical gap so their optional hairline does
+    // not add width. Flex gap must remain zero or every boundary doubles it.
+    expect(stripGapPx(topBar)).toBe(0);
+    expect(boundaryWidth).toBe(4);
+    expect(numericConstant(topBar, "WORKSPACE_TAB_GAP_PX")).toBe(boundaryWidth);
   });
 
   it("keeps both edge-inset constants equal to the CSS they describe", () => {
     // Same class of drift as the gap: WORKSPACE_CONTENT_INSET_PX is the first
-    // tab's assumed offset (the lane's own padding) and the scroll-into-view
-    // margin, while WORKSPACE_STICKY_EDGE_INSET_PX is where a pinned tab lands
-    // and where the pinned fades are placed. Nothing reads the computed style,
-    // so a constant that disagrees with the class misplaces the pin silently.
+    // tab's assumed offset (the leading boundary carrier) and the
+    // scroll-into-view margin, while WORKSPACE_STICKY_EDGE_INSET_PX is where a
+    // pinned tab lands and where the pinned fades are placed. Nothing reads the
+    // computed style, so a disagreement silently misplaces the pin.
     const topBar = source(TOP_BAR);
     const lane = stripClasses(topBar);
 
     const lanePadding = /(?:^|\s)px-(\d+)(?:\s|$)/.exec(lane);
     expect(lanePadding).not.toBeNull();
+    expect(Number(lanePadding![1])).toBe(0);
     expect(numericConstant(topBar, "WORKSPACE_CONTENT_INSET_PX")).toBe(
-      Number(lanePadding![1]) * 4,
+      widthClassToPx(classConstant(topBar, "TOP_BAR_BOUNDARY_CLS")),
     );
 
     const tabCls = classConstant(topBar, "WORKSPACE_TAB_CLS");
@@ -94,48 +125,57 @@ describe("workspace tab strip gap", () => {
     );
   });
 
-  it("draws one hairline per edge on a pinned tab", () => {
-    // At its pinned edge the tab is flush against a cell that already draws a
-    // border there, so it must suppress its own on that side and draw the
-    // opposite one. Suppressing the wrong side is the "double border" bug.
+  it("keeps pinned pills borderless and masks both edge gutters", () => {
+    // A selected pill floats four pixels in from either edge. Opaque gutters
+    // preserve that breathing room while tabs scroll underneath it; mutating
+    // inline borders would reintroduce the divided, boxy treatment.
     const topBar = source(TOP_BAR);
-    const start = topBar.indexOf("function applyWorkspacePinBorders");
-    expect(start).toBeGreaterThan(-1);
-    const fn = topBar.slice(
-      start,
-      topBar.indexOf("function setWorkspaceFadeVisible", start),
-    );
-    expect(fn).not.toBe("");
+    const root = topBar.slice(topBar.indexOf("export function TopBar"));
 
-    expect(fn).toContain('const drawLeft = pinSide === "right"');
-    expect(fn).toContain('const drawRight = pinSide === "left"');
-    // Width alone renders nothing on a side whose style is still `none`.
-    expect(fn).toMatch(/borderLeftStyle/);
-    expect(fn).toMatch(/borderRightStyle/);
-    // The carrier must be retired when the pin moves, or the inline borders
-    // strand on a tab that is no longer pinned.
-    expect(topBar).toContain("workspacePinnedTabRef.current = pinnedTab");
-    expect(topBar).toMatch(
-      /workspacePinnedTabRef\.current !== pinnedTab[\s\S]{0,120}?applyWorkspacePinBorders\(\s*workspacePinnedTabRef\.current,\s*null,?\s*\)/,
-    );
+    expect(topBar).not.toContain("applyWorkspacePinBorders");
+    expect(topBar).not.toContain("workspacePinnedTabRef");
+    expect(
+      root.match(/bg-sidebar-bg[^"\n]*\bz-30\b[^"\n]*\bw-1\b/g),
+    ).toHaveLength(2);
   });
 
-  it("draws the divider as a border on the tab, never as an element", () => {
-    // workspaceTabNaturalOffsetLeft walks previousElementSibling for the last
-    // [data-workspace-tab] and adds ONLY the gap constant. A separator element
-    // between tabs would be skipped by that walk and its width never added, so
-    // every tab's reconstructed offset would drift by the separator width — and
-    // it would punch a 1px hole in the strip's hover hit-testing. A border is
-    // inside offsetWidth, so it costs the walk nothing.
+  it("uses centered subtle separators without putting borders on pills", () => {
+    // The active tab should read as one floating selection, while inactive
+    // workspaces get a short hairline in the boundary carrier. The carrier is
+    // already the physical gap, so the line adds no width to pin math.
     const topBar = source(TOP_BAR);
     const tabCls = classConstant(topBar, "WORKSPACE_TAB_CLS");
+    const boundaryCls = classConstant(topBar, "TOP_BAR_BOUNDARY_CLS");
+    const separatorCls = classConstant(topBar, "TOP_BAR_SEPARATOR_CLS");
 
-    expect(tabCls).toMatch(/\bborder-l\b/);
-    expect(tabCls).toMatch(/\bfirst:border-l-0\b/);
-    expect(tabCls).toMatch(/\bborder-border1\b/);
-    // Zero gap is what makes the borders read as one shared divider rather
-    // than two edges with a hole between them.
-    expect(stripGapPx(topBar)).toBe(0);
+    expect(tabCls).toMatch(/\bh-7\b/);
+    expect(tabCls).toMatch(/\brounded-md\b/);
+    expect(tabCls).not.toMatch(/\bborder(?:-[lrtbxy])?(?:\s|$)/);
+    expect(boundaryCls).toMatch(/\bw-1\b/);
+    expect(boundaryCls).toMatch(/\bitems-center\b/);
+    expect(boundaryCls).toMatch(/\bjustify-center\b/);
+    expect(separatorCls).toMatch(/\bbg-border1\b/);
+    expect(separatorCls).toMatch(/(?:^|\s)h-\[14px\](?:\s|$)/);
+    expect(separatorCls).toMatch(/\bw-px\b/);
+  });
+
+  it("keeps conditional boundary utilities token-separated", () => {
+    const topBar = source(TOP_BAR);
+    const boundary = topBar.slice(
+      topBar.indexOf("function TopBarBoundary"),
+      topBar.indexOf("function setWorkspaceFadeVisible"),
+    );
+
+    // Keep conditional fragments in the class combiner. Direct template
+    // concatenation silently produced invalid utilities such as
+    // `w-pxinvisible` and `justify-centerrelative`, and the Tailwind Prettier
+    // plugin normalizes away leading whitespace used as a workaround.
+    expect(boundary).toContain(
+      'cn(TOP_BAR_BOUNDARY_CLS, edge && "relative z-40")',
+    );
+    expect(boundary).toContain(
+      'cn(TOP_BAR_SEPARATOR_CLS, !showSeparator && "invisible")',
+    );
   });
 
   it("sizes tabs by content between a 120px floor and a 180px cap", () => {
@@ -173,5 +213,115 @@ describe("workspace tab strip gap", () => {
       expect(span).toMatch(/\btruncate\b/);
       expect(span).not.toMatch(/\bflex-1\b/);
     }
+  });
+});
+
+describe("top-bar borderless navigation chrome", () => {
+  it("keeps a 40px rail with six pixels around its 28px controls", () => {
+    const topBar = source(TOP_BAR);
+    const railHeight = heightClassToPx(headerClasses(topBar));
+
+    expect(railHeight).toBe(40);
+
+    for (const name of [
+      "ICON_BUTTON_CLS",
+      "MENU_ICON_BUTTON_CLS",
+      "MAIN_TAB_CLS",
+      "PROJECT_TRIGGER_CLS",
+      "WORKSPACE_TAB_CLS",
+    ]) {
+      const controlHeight = heightClassToPx(classConstant(topBar, name));
+      expect(controlHeight).toBe(28);
+      expect((railHeight - controlHeight) / 2).toBe(6);
+    }
+  });
+
+  it("keeps the native traffic lights aligned to the 40px title rail", () => {
+    const electronMain = source(ELECTRON_MAIN);
+
+    // hiddenInset is Electron's compact native macOS treatment. Electron can
+    // position or hide these OS-owned buttons, but exposes no diameter API.
+    expect(electronMain).toContain('titleBarStyle: "hiddenInset"');
+    expect(electronMain).toContain("trafficLightPosition: { x: 19, y: 12 }");
+  });
+
+  it("removes full-height cell borders and uses inset rounded controls", () => {
+    const topBar = source(TOP_BAR);
+    const root = topBar.slice(topBar.indexOf("export function TopBar"));
+    const resourceMonitorSource = source(RESOURCE_MONITOR);
+    const resourceMonitor = resourceMonitorSource.slice(
+      resourceMonitorSource.indexOf("export const ResourceMonitor"),
+    );
+
+    expect(root).not.toMatch(/\bborder-l\b/);
+    expect(root).not.toMatch(/\bborder-r\b/);
+    expect(resourceMonitor).not.toMatch(/\bborder-l\b/);
+    expect(resourceMonitor).not.toMatch(/\bborder-r\b/);
+    // Padding on both adjacent wrappers used to add up to an 8–12px gap.
+    // Four-pixel boundary carriers own navigation gaps; the conditional
+    // Resource/Archive pair uses the equivalent gap-1 so a null ResourceMonitor
+    // cannot leave a phantom carrier behind.
+    expect(root).not.toMatch(/flex h-full shrink-0 items-center px-[12]\b/);
+    expect(resourceMonitor).not.toMatch(/items-center px-2\b/);
+    expect(root).toMatch(
+      /className="flex h-full shrink-0 items-center gap-1">\s*<ResourceMonitor \/>/,
+    );
+    for (const name of [
+      "ICON_BUTTON_CLS",
+      "MENU_ICON_BUTTON_CLS",
+      "MAIN_TAB_CLS",
+      "PROJECT_TRIGGER_CLS",
+    ]) {
+      expect(classConstant(topBar, name)).toMatch(/\brounded-md\b/);
+    }
+  });
+
+  it("gives the selected workspace an opaque inset fill at either sticky edge", () => {
+    const topBar = source(TOP_BAR);
+    const tabCls = classConstant(topBar, "WORKSPACE_TAB_CLS");
+
+    expect(tabCls).toMatch(/data-\[active=true\]:left-1\b/);
+    expect(tabCls).toMatch(/data-\[active=true\]:right-1\b/);
+    expect(tabCls).toMatch(/data-\[active=true\]:bg-sidebar-bg-hover\b/);
+    expect(tabCls).toMatch(/data-\[active=true\]:text-fg1\b/);
+  });
+
+  it("suppresses the carriers on both sides of selected real and pending tabs", () => {
+    const topBar = source(TOP_BAR);
+    const realMap = topBar.slice(
+      topBar.indexOf("{realWorkspaces.map("),
+      topBar.indexOf("{dedupedPendingCreates.map("),
+    );
+    const pendingMap = topBar.slice(
+      topBar.indexOf("{dedupedPendingCreates.map("),
+      topBar.indexOf("{/* The trailing carrier"),
+    );
+
+    for (const map of [realMap, pendingMap]) {
+      expect(map).toContain("const leftActive");
+      expect(map).toMatch(
+        /showSeparator=\{navigationBoundarySeparatorVisible\(\s*leftActive,\s*active,?\s*\)\}/,
+      );
+    }
+  });
+
+  it("registers the selected optimistic workspace with the same pin machinery", () => {
+    // A newly-created workspace is selected before its engine row arrives. It
+    // must remain sticky/revealable during that optimistic interval, not only
+    // after PendingWorkspaceTab is replaced by WorkspaceTab.
+    const topBar = source(TOP_BAR);
+    const pending = topBar.slice(
+      topBar.indexOf("function PendingWorkspaceTab"),
+      topBar.indexOf("interface ProjectPickerProps"),
+    );
+
+    expect(pending).toContain("tabRef");
+    expect(pending).toContain("ref={tabRef}");
+    expect(topBar).toMatch(
+      /const activeWorkspaceTabKey\s*=\s*activeWorkspaceId\s*\?\?\s*activePendingCreate\?\.token\s*\?\?\s*null/,
+    );
+    expect(topBar).toContain('if (activePage !== "workspace") return null;');
+    expect(topBar).toContain("registerWorkspaceTab(pending.token, node)");
+    expect(topBar).toContain("activeWorkspaceTabKey");
   });
 });

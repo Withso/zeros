@@ -579,7 +579,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
     : "Collecting app resource usage";
 
   return (
-    <div className="border-border1 flex h-full shrink-0 items-center border-l px-2">
+    <div className="flex h-full shrink-0 items-center">
       <Popover open={open} onOpenChange={setOpen}>
         <Tooltip label={triggerLabel} side="bottom">
           <PopoverTrigger asChild>

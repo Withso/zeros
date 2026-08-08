@@ -8,6 +8,7 @@ import {
   formatChangeCount,
   horizontalOverflow,
   leftmostLiveWorkspace,
+  navigationBoundarySeparatorVisible,
   orderWorkspaceTabs,
   resolveRepoWorkspaceDestination,
   workspaceFadeVisibility,
@@ -46,6 +47,15 @@ function workspace(id: string, overrides: Partial<Workspace> = {}): Workspace {
     ...overrides,
   };
 }
+
+describe("top-bar boundary separators", () => {
+  it("shows a separator only between two unselected neighbors", () => {
+    expect(navigationBoundarySeparatorVisible(false, false)).toBe(true);
+    expect(navigationBoundarySeparatorVisible(true, false)).toBe(false);
+    expect(navigationBoundarySeparatorVisible(false, true)).toBe(false);
+    expect(navigationBoundarySeparatorVisible(true, true)).toBe(false);
+  });
+});
 
 describe("top-bar horizontal overflow", () => {
   it("shows only the fades backed by hidden content", () => {
