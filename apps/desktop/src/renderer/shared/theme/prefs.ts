@@ -2,17 +2,17 @@
 // Appearance prefs — types + defaults
 // ──────────────────────────────────────────────────────────
 //
-// Current model (2026-07-12):
-//   - mode: "system" | "light" | "dark"
+// Current model (2026-08-08):
+//   - mode: "system" | "light" | "dark" | "orka-black"
 //   - codeTheme: resolved syntax-theme id for the current variant
 //     (stored as per-variant picks — see StoredAppearancePrefs)
 //
 // All neutral / accent tokens are concrete HSL values in
-// `styles/zeros-tokens.css`. `:root` carries the dark default —
-// "Zeros Shade" (muted warm gray, cool blue accent) — and the
-// `[data-theme="light"]` block carries the light overrides
-// (shipped 2026-07-11). `data-theme` on <html> selects between
-// them and drives the `dark:` Tailwind variant.
+// `styles/zeros-tokens.css`. `:root` carries the neutral dark
+// default; `[data-theme-palette="orka-black"]` restores the former
+// warm-gray dark primitives; `[data-theme="light"]` carries the
+// light overrides. `data-theme` stays strictly "dark" | "light"
+// and drives Tailwind plus every polarity-sensitive embedded surface.
 //
 // ─── History ────────────────────────────────────────────────
 // 2026-05-16: hue/intensity/accent sliders and their OKLCH recipe exports were
@@ -41,13 +41,22 @@
 //   each remember their own pick). The old single-slot string —
 //   which the store had frozen to the dark default for everyone —
 //   migrates via migrateLegacyCodeTheme on load.
+// 2026-08-08: Dark became structurally neutral. Most HSL lightness values
+//   stayed fixed; bg1, bg2, and sidebar-bg moved one point up. The former
+//   dark palette was preserved unchanged as the new "orka-black" mode. Both
+//   dark palettes intentionally share the dark code-theme slot and resolved
+//   appearance variant.
 // ──────────────────────────────────────────────────────────
 
-export type ThemeMode = "system" | "light" | "dark";
+export type ThemeMode = "system" | "light" | "dark" | "orka-black";
 
 /** Resolved variant after `system` is decided via prefers-color-scheme.
  *  This is what gets written to the document's data-theme attribute. */
 export type ThemeVariant = "dark" | "light";
+
+/** Concrete visual theme after resolving System. Unlike ThemeVariant, this
+ *  distinguishes the two dark palettes so JS-rendered canvases can repaint. */
+export type ThemeId = ThemeVariant | "orka-black";
 
 export interface AppearancePrefs {
   mode: ThemeMode;
@@ -77,13 +86,27 @@ export const DEFAULT_STORED_PREFS: StoredAppearancePrefs = {
 
 export const STORAGE_KEY = "zeros.appearance.v2";
 
-/** Resolve `mode` to a concrete variant: explicit modes pass through,
- *  "system" follows the macOS prefers-color-scheme signal. */
+/** Resolve `mode` to the concrete visual theme. */
+export function resolveThemeId(
+  mode: ThemeMode,
+  systemPrefersDark: boolean,
+): ThemeId {
+  if (mode === "light") return "light";
+  if (mode === "dark") return "dark";
+  if (mode === "orka-black") return "orka-black";
+  return systemPrefersDark ? "dark" : "light";
+}
+
+/** Collapse a concrete theme to the appearance polarity used by Tailwind,
+ *  native controls, syntax-theme filtering, and `data-theme`. */
+export function themeVariantForId(themeId: ThemeId): ThemeVariant {
+  return themeId === "light" ? "light" : "dark";
+}
+
+/** Resolve `mode` to the dark/light appearance variant. */
 export function resolveVariant(
   mode: ThemeMode,
   systemPrefersDark: boolean,
 ): ThemeVariant {
-  if (mode === "light") return "light";
-  if (mode === "dark") return "dark";
-  return systemPrefersDark ? "dark" : "light";
+  return themeVariantForId(resolveThemeId(mode, systemPrefersDark));
 }

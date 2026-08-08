@@ -201,7 +201,7 @@ const BTN_BASE =
 
 /** Per-variant, tone-aware button chrome. Open-PR secondary buttons use the
  *  filled theme-adaptive action treatment
- *  (white in Shade, mauve in Light — --pr-status-action-*), Merge is the
+ *  (light in dark themes, mauve in Light — --pr-status-action-*), Merge is the
  *  green fill, Continue the violet fill, Archive the white primary. */
 function actionButtonClass(action: PrIslandAction, tone: PrIslandTone): string {
   if (action.variant === "primary") {
