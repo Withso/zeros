@@ -189,7 +189,7 @@ export const windowZoomToggle: CommandHandler = async (_args, event) => {
 // launch creates its window with the right pre-paint color.
 
 const WINDOW_BG_FILE = "window-background.json";
-/** Matches neutral Dark's --bg1 (#141414); used until a renderer
+/** Matches neutral Dark's --bg1 (#121212); used until a renderer
  *  reports a theme, and as the fallback when the persisted file is
  *  missing/corrupt. */
 export const DEFAULT_WINDOW_BACKGROUND = NEUTRAL_DARK_WINDOW_BACKGROUND;

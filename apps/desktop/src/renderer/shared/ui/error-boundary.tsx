@@ -78,7 +78,7 @@ export class ErrorBoundary extends React.Component<Props, State> {
                 maxWidth: 520,
                 fontSize: 12,
                 lineHeight: 1.5,
-                color: "var(--fg3, #8a8a8a)", // check:ui ignore-line (error-boundary fallback)
+                color: "var(--muted-fg, #8a8a8a)", // check:ui ignore-line (error-boundary fallback)
                 fontFamily:
                   "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
                 wordBreak: "break-word",

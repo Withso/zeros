@@ -22,6 +22,38 @@
 // the very moment the user was deciding whether to let the run continue.
 // ──────────────────────────────────────────────────────────
 
+/** Whether the transcript's tail turn is still IN FLIGHT — the single input
+ *  behind both the tail shimmer/timer and the suppression of the turn footer.
+ *  One function because those two must never disagree: a shimmer with no footer
+ *  is the "agent is working" reading, and a footer with no shimmer is the
+ *  settled one. Rendering both from separate expressions is what let a reopened
+ *  chat show the working state and hide its own STOPPED BY USER pill.
+ *
+ *  `pendingLocalTurn` is a real fact — the renderer holds an unsettled prompt
+ *  for THIS turn — and it is what makes the answer survive a reopen. It used to
+ *  be inferred from `session.status === "warming"`, which every chat passes
+ *  through on a tab switch, a workspace switch, and an app reload; combined with
+ *  "no events yet" (indistinguishable from a turn STOPPED before it produced
+ *  any), that inference repainted a finished turn as live, with an elapsed timer
+ *  counting from the original prompt, until the session finished resuming.
+ *
+ *  The empty-turn condition stays: it is what keeps a mid-turn rebuild from
+ *  pulling an already-streamed answer back into the working feed. */
+export function tailTurnInFlight(input: {
+  /** The session has a live turn (streaming, or an adopted engine turn). */
+  sessionStreaming: boolean;
+  /** This exact turn is the one this renderer's in-flight send is running. */
+  pendingLocalTurn: boolean;
+  /** The turn has already rendered at least one agent event. */
+  hasEvents: boolean;
+}): boolean {
+  if (input.sessionStreaming) return true;
+  // A send pending session (re)creation: the prompt is committed to the
+  // transcript but the agent has not started, so the turn is not settled and
+  // must not render a "0s" footer.
+  return input.pendingLocalTurn && !input.hasEvents;
+}
+
 export interface TailIndicatorInput {
   /** This is the active turn AND the session is still streaming. */
   live: boolean;

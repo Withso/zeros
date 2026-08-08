@@ -219,9 +219,18 @@ describe("workspace tab strip gap", () => {
 describe("top-bar borderless navigation chrome", () => {
   it("keeps a 40px rail with six pixels around its 28px controls", () => {
     const topBar = source(TOP_BAR);
-    const railHeight = heightClassToPx(headerClasses(topBar));
+    const header = headerClasses(topBar);
+    const railHeight = heightClassToPx(header);
 
     expect(railHeight).toBe(40);
+
+    // h-10 must be the rail's TOTAL painted height (no `box-content` pushing the
+    // hairline outside the box for a 41px rail), and the 1px border-b must be
+    // balanced by 1px of top padding — otherwise the 28px controls center in the
+    // 39px above the hairline and sit half a pixel above the rail's center line.
+    expect(header).not.toMatch(/\bbox-content\b/);
+    expect(header).toMatch(/\bborder-b\b/);
+    expect(header).toMatch(/\bpt-px\b/);
 
     for (const name of [
       "ICON_BUTTON_CLS",

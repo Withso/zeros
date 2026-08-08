@@ -94,6 +94,9 @@ import { synthesizeReplayPrompt } from "./replay";
 import { activeProviderTurnId } from "./turn-grouping";
 import { ActionsCtx, type SessionsActions } from "./sessions-context";
 import {
+  bumpCancelGeneration,
+  cancelGeneration,
+  cancelledSince,
   loadedSessionStatus,
   markPrebindDirty,
   queueReleaseAction,
@@ -1051,6 +1054,12 @@ export function AgentSessionsProvider({
    *  out from under the user mid-edit. releaseQueue drains if idle+ready. */
   const queueHeldRef = useRef(new Set<string>());
 
+  /** chatId → cancel generation. Bumped by every cancel() and re-read by an
+   *  in-flight sendPrompt after each await, so a Stop is honoured even while the
+   *  send is still parked on a session rebuild / resume and has therefore not
+   *  reached the engine yet. See bumpCancelGeneration. */
+  const cancelGenerationsRef = useRef(new Map<string, number>());
+
   /** Release payloads that are outside the committed deck and no longer owned
    *  by a local operation. The slot itself stays: session routing, active-turn
    *  status, gates, questions, task wake-ups and config updates remain live. */
@@ -1558,6 +1567,39 @@ export function AgentSessionsProvider({
         reasoningTokens?: number;
         costUsd?: number;
       } | null = null;
+      // This send's cancel generation, captured once (see bumpCancelGeneration).
+      // Preparation below can await a session rebuild, a settings-drift respawn,
+      // or a resume-and-retry — all with the chat already showing Stop — so
+      // every one of those awaits re-reads this before letting the prompt out.
+      const sendGeneration = cancelGeneration(
+        cancelGenerationsRef.current,
+        chatId,
+      );
+      const stoppedByUser = () =>
+        cancelledSince(cancelGenerationsRef.current, chatId, sendGeneration);
+      /** Leave the chat exactly as a completed stop leaves it. cancel() already
+       *  published ready + "cancelled", so this only undoes a `streaming` /
+       *  `warming` state a preparation step set AFTER the stop, and releases the
+       *  cancel-suppression flag that no in-flight prompt will now consume. A
+       *  recorded failure is never overwritten — it's the more useful truth. */
+      const settleStoppedSend = () => {
+        const slot = getStore().sessions[chatId];
+        if (
+          slot &&
+          (slot.status === "streaming" || slot.status === "warming")
+        ) {
+          getStore().patchSession(chatId, {
+            status: "ready",
+            error: null,
+            failure: null,
+            lastStopReason: "cancelled",
+            activeTurnStartedAt: null,
+          });
+        }
+        if (getStore().cancellingChats.has(chatId)) {
+          getStore().setCancelling(chatId, false);
+        }
+      };
       try {
         let current = getStore().sessions[chatId];
         if (!current || !current.agentId) return;
@@ -1624,6 +1666,17 @@ export function AgentSessionsProvider({
             current = getStore().sessions[chatId];
             if (!current || !current.sessionId) return;
           }
+        }
+
+        // Point of no return: everything above could await (session rebuild,
+        // drift respawn), and the composer showed Stop the whole time. A Stop in
+        // that window means this prompt must never reach the engine — the bug
+        // was that it did, so the agent started working right after the user
+        // stopped it, and the engine then held a live turn the chat believed was
+        // over (which reappeared as a running shimmer on the next reload).
+        if (stoppedByUser()) {
+          settleStoppedSend();
+          return;
         }
 
         const userMessage: AgentTextMessage = {
@@ -1730,6 +1783,12 @@ export function AgentSessionsProvider({
         // on the first assistant chunk; the recoverable-failure handler below
         // reads it to decide whether a resend would duplicate the turn.
         turnProducedOutputRef.current.set(chatId, false);
+        // Publish WHICH turn this renderer has in flight (cleared in the
+        // finally). The transcript's tail reads it to decide whether the turn is
+        // still running — a question session status cannot answer, because the
+        // `warming` window it used to infer from is also every chat reopen. See
+        // pendingLocalTurns / tailTurnInFlight.
+        getStore().setPendingLocalTurn(chatId, userMessage.id);
 
         // Minted before runPrompt so the AGENT_PROMPT wire payload and local
         // telemetry share one durable correlation id across rebuild/retry.
@@ -1879,6 +1938,11 @@ export function AgentSessionsProvider({
               60_000,
             );
             if (loaded.type !== "AGENT_SESSION_LOADED") return null;
+            // The resume above can take up to a minute with the chat still
+            // showing Stop. Re-check before re-sending: rebuildAndRetry treats
+            // null as "couldn't resume" and its own post-await check turns that
+            // into a clean stop rather than a cold rebuild.
+            if (stoppedByUser()) return null;
             promptRetryCount += 1;
             return await runPrompt(sessionId, prompt);
           } catch {
@@ -1891,6 +1955,13 @@ export function AgentSessionsProvider({
         }): Promise<
           AgentPromptCompleteMessage | AgentPromptFailedMessage | null
         > => {
+          // A recovery is a RE-SEND of the user's prompt. After a Stop there is
+          // nothing to recover: retrying would restart the very turn the user
+          // just ended (the "I stopped it and it kept going" report).
+          if (stoppedByUser()) {
+            settleStoppedSend();
+            return null;
+          }
           // ── True-resume fast path ───────────────────────────────
           // The session is almost always just gone from a restarted engine
           // (a dev HMR respawn on a apps/desktop/src/engine save, or the watchdog) — NOT a
@@ -1905,6 +1976,10 @@ export function AgentSessionsProvider({
               failure: null,
             });
             const resumed = await tryResumeSameSession(current.sessionId);
+            if (stoppedByUser()) {
+              settleStoppedSend();
+              return null;
+            }
             if (resumed) {
               const resumeFailedRecoverably =
                 resumed.type === "AGENT_PROMPT_FAILED" &&
@@ -1952,6 +2027,10 @@ export function AgentSessionsProvider({
             });
           } catch {
             /* surfaces via store below */
+          }
+          if (stoppedByUser()) {
+            settleStoppedSend();
+            return null;
           }
           const rebuilt = getStore().sessions[chatId];
           if (!rebuilt?.sessionId || rebuilt.status !== "ready") return null;
@@ -2068,6 +2147,18 @@ export function AgentSessionsProvider({
           try {
             resp = await runPrompt(current.sessionId, prompt);
           } catch (firstErr) {
+            // A Stop is the most common reason this rejects: killing the
+            // provider tears the stream down, which classifies as the
+            // RECOVERABLE transport-closed — and this path then rebuilt the
+            // session and re-sent the prompt, so the agent went straight back to
+            // work on the turn the user had just stopped. (The
+            // AGENT_PROMPT_FAILED branch below always had this guard; the
+            // rejection path did not.) The expected exit of a cancelled turn is
+            // not a fault: settle quietly, exactly like a clean cancel.
+            if (stoppedByUser() || getStore().cancellingChats.has(chatId)) {
+              settleStoppedSend();
+              return;
+            }
             const failure = classifyRpcError({
               agentId: current.agentId!,
               stage: "prompt",
@@ -2111,9 +2202,12 @@ export function AgentSessionsProvider({
             // If the user just clicked Cancel, this PROMPT_FAILED is the
             // expected exit of the SIGTERM'd subprocess — not a real
             // failure. The cancel handler already optimistically flipped
-            // status to ready; just clear the flag and bail.
-            if (getStore().cancellingChats.has(chatId)) {
-              getStore().setCancelling(chatId, false);
+            // status to ready; just clear the flag and bail. The generation is
+            // the reliable half of the test: cancel() records it before it needs
+            // a live session id, so a stop that arrived while this send was
+            // still being prepared is caught here too.
+            if (stoppedByUser() || getStore().cancellingChats.has(chatId)) {
+              settleStoppedSend();
               return;
             }
             const failure = failureFromAgentError(
@@ -2336,8 +2430,8 @@ export function AgentSessionsProvider({
           // above: the await chain may reject (timeout, transport-closed)
           // because the subprocess died from our SIGTERM, not from a
           // real fault. Don't surface as agent-error.
-          if (getStore().cancellingChats.has(chatId)) {
-            getStore().setCancelling(chatId, false);
+          if (stoppedByUser() || getStore().cancellingChats.has(chatId)) {
+            settleStoppedSend();
             return;
           }
           const failure = classifyRpcError({
@@ -2352,6 +2446,11 @@ export function AgentSessionsProvider({
           });
         }
       } finally {
+        // This turn is no longer in flight, however it ended (sent, aborted by a
+        // stop, bailed before dispatch). Unconditional and first: leaving it set
+        // would strand the tail shimmer on a settled turn — the inverse of the
+        // bug this fact exists to fix.
+        getStore().setPendingLocalTurn(chatId, null);
         if (promptDiagnostics) {
           const terminal = getStore().sessions[chatId];
           const stopReason =
@@ -2452,6 +2551,14 @@ export function AgentSessionsProvider({
 
   const cancel = useCallback<SessionsActions["cancel"]>(
     async (chatId) => {
+      // FIRST, ahead of every early return below — including the bridge guard:
+      // a send whose AGENT_PROMPT hasn't gone out yet (still awaiting a session
+      // rebuild / resume) must abort instead of dispatching after the user
+      // stopped. That send is exactly the case where there is no sessionId — or
+      // even a live bridge — to address a cancel at, so recording the intent
+      // cannot be conditional on having one. It is a local counter bump; no
+      // bridge is needed to make the in-flight send read it.
+      bumpCancelGeneration(cancelGenerationsRef.current, chatId);
       if (!bridge) return;
       // Cancelling the active turn discards any sends queued behind it —
       // the user explicitly stopped, so the follow-ups shouldn't fire. Also
@@ -2486,6 +2593,12 @@ export function AgentSessionsProvider({
         error: null,
         failure: null,
         lastStopReason: "cancelled",
+        // There is no active turn after a stop. The terminal turn_state clears
+        // this too, but not before it arrives (and a wedged adapter may never
+        // send one) — and it is what the tail shimmer anchors its elapsed timer
+        // to, so a stale value is exactly the "timer keeps running after I
+        // stopped" symptom.
+        activeTurnStartedAt: null,
         // Drop any open permission prompt — the engine releases the gate on
         // cancel (adapter.cancel resolves pendingPermissions), so the inline
         // card would otherwise be stranded + clickable against a dead turn.
@@ -3053,6 +3166,7 @@ export function AgentSessionsProvider({
       turnProducedOutputRef.current.delete(chatId);
       announcedDirsRef.current.delete(chatId);
       promptActivityRef.current.delete(chatId);
+      cancelGenerationsRef.current.delete(chatId);
       getStore().removeSession(chatId);
       // Drop on-disk transcript too so a "reset" really starts clean.
       void persistClearChat(chatId).catch((err) => {
@@ -3570,6 +3684,7 @@ export function AgentSessionsProvider({
       turnProducedOutputRef.current.delete(chatId);
       announcedDirsRef.current.delete(chatId);
       promptActivityRef.current.delete(chatId);
+      cancelGenerationsRef.current.delete(chatId);
       const slot = getStore().sessions[chatId];
       // Only sessions the engine actually started have something to tear
       // down. The on-disk transcript is untouched, so reopening the chat

@@ -593,6 +593,13 @@ interface SdkSession {
   /** Set by cancel() so the settled turn maps to `cancelled`, and by
    *  teardown so an in-flight turn ends silently. Reset per turn. */
   cancelRequested: boolean;
+  /** Monotonic count of cancels on this session. prompt() captures it in its
+   *  SYNCHRONOUS prologue and uses it to decide whether the flag above is a
+   *  stale leftover (clear it) or a Stop for the turn it was just handed (keep
+   *  it). The per-turn reset alone couldn't tell those apart, so a Stop landing
+   *  while prompt() waited on the previous turn's teardown seam was erased and
+   *  the new turn streamed to completion. */
+  cancelSeq: number;
   disposed: boolean;
   /** Set by updateConfig when a restart-only knob (CLAUDE_MAX_TURNS / the "max"
    *  effort tier) changes — the live flag-settings layer can't express those,
@@ -919,6 +926,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       questionByToolUse: new Map(),
       abort: new AbortController(),
       cancelRequested: false,
+      cancelSeq: 0,
       disposed: false,
       pendingRestart: false,
       queryAllowsBypass: false,
@@ -1047,6 +1055,11 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         agentId: this.agentId,
       });
     }
+    // Captured before the first await: from here on, a cancel belongs to THIS
+    // turn (the engine has already accepted it), so the stale-flag reset below
+    // must not erase it. See cancelSeq.
+    const entryState = state;
+    const entryCancelSeq = state.cancelSeq;
     let reservedState = state;
     reservedState.pendingPromptCalls += 1;
     this.markSessionBusy(reservedState);
@@ -1096,7 +1109,22 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           });
         }
       }
-      state.cancelRequested = false;
+      // Clear the PREVIOUS turn's flag, but keep a Stop that arrived while this
+      // call was waiting on the teardown seams above — that one is for the turn
+      // about to run, and dropping it made a stopped turn settle as `completed`
+      // (AGENT STOPPED, not STOPPED BY USER). LABEL only: the push into
+      // state.input below is unconditional, so the flag decides how the turn is
+      // reported, never whether it runs. What actually spares the provider the
+      // work is the engine's pre-dispatch short-circuit; this is the backstop
+      // for callers that reach prompt() anyway.
+      //
+      // Comparable only while this is still the same session object. A rebuild
+      // across those seams mints a fresh one, and this deliberately clears
+      // rather than re-reads it: the new object's own cancelSeq is on a
+      // different scale, so a Stop recorded against it after the rebuild is
+      // dropped here too. The engine's turn-scoped intent covers that window.
+      state.cancelRequested =
+        state === entryState && state.cancelSeq !== entryCancelSeq;
       this.ensureQuery(state);
 
       const turn = createDeferred<{
@@ -1643,6 +1671,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     if (!state) return;
     this.markSessionBusy(state);
     state.cancelRequested = true;
+    state.cancelSeq += 1;
     // Release any OPEN permission gate so a turn blocked inside canUseTool
     // unwinds immediately. interrupt() alone does NOT reliably cancel an
     // outstanding can_use_tool control request (the per-tool AbortSignal is
@@ -2623,6 +2652,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   private async teardown(state: SdkSession): Promise<void> {
     state.disposed = true;
     state.cancelRequested = true;
+    // Same reason as cancel(): a prompt() parked on a teardown seam must not
+    // clear a stop that was recorded after it started.
+    state.cancelSeq += 1;
     this.clearIdleTeardown(state);
     state.idleSince = null;
     // Release any open permission gates so canUseTool unwinds.

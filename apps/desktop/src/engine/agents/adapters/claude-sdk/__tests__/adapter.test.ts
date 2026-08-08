@@ -1756,6 +1756,51 @@ describe("ClaudeSdkAdapter", () => {
     await adapter.dispose();
   });
 
+  // prompt() waits on the previous turn's teardown seam before it starts, and
+  // it used to clear cancelRequested unconditionally on the far side of that
+  // wait. A Stop clicked inside the window — the engine had already accepted
+  // this turn, so the stop is for THIS turn — was therefore erased, and the
+  // turn streamed to completion behind a "STOPPED BY USER" pill. The reset is
+  // now generation-aware (cancelSeq): stale flags still clear, this one holds.
+  it("keeps a cancel that lands while prompt() waits on the previous turn", async () => {
+    const { queryFn } = makeScriptedQuery([[initMsg("sdk-1")]]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const state = (
+      adapter as unknown as {
+        sessions: Map<
+          string,
+          {
+            cancelRequested: boolean;
+            turnIdle: { promise: Promise<void> } | null;
+          }
+        >;
+      }
+    ).sessions.get(session.sessionId)!;
+    // A previous turn still unwinding: prompt() parks on this seam.
+    let releasePreviousTurn!: () => void;
+    state.turnIdle = {
+      promise: new Promise<void>((resolve) => {
+        releasePreviousTurn = resolve;
+      }),
+    };
+
+    void adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
+    await tick();
+    await adapter.cancel({ sessionId: session.sessionId });
+    expect(state.cancelRequested).toBe(true);
+
+    releasePreviousTurn();
+    await tick();
+
+    // Survived the per-turn reset, so the turn settles as the user's stop.
+    expect(state.cancelRequested).toBe(true);
+    await adapter.dispose();
+  });
+
   it("publishes only one-shot wakeups from the passive Stop hook", async () => {
     const emitted: SessionNotification[] = [];
     const { queryFn, captured } = makeScriptedQuery([[initMsg("sdk-1")]]);

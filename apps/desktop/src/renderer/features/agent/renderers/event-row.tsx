@@ -76,7 +76,7 @@ const TONE_ICON_COLOR: Record<ReturnType<typeof statusTone>, string> = {
   ok: "text-fg2",
   fail: "text-red-primary/80",
   run: "text-fg1",
-  pending: "text-fg3",
+  pending: "text-muted-fg",
 };
 
 export const EventRow = memo(function EventRow({

@@ -260,7 +260,7 @@ export function TranscriptPreviewShell({
       <div className="border-border2 text-fg2 flex shrink-0 items-center gap-1.5 border-b px-3 py-2 text-xs">
         <AgentIcon agentId={agentId} iconUrl={null} size={13} />
         <span className="text-fg1 font-semibold">{agentName ?? "Agent"}</span>
-        <span className="text-fg3">·</span>
+        <span className="text-muted-fg">·</span>
         {/* "prompts", not "messages". The number counts what the USER sent,
             and the word has to say so — "2 messages" over a chat showing four
             bubbles is the same ambiguity that made the old row-count reading
@@ -275,7 +275,7 @@ export function TranscriptPreviewShell({
             form ("2h ago") to match the app's own vocabulary. */}
         {lastMessageAt > 0 && (
           <>
-            <span className="text-fg3">·</span>
+            <span className="text-muted-fg">·</span>
             <span className="truncate">
               Last active {formatCompactAge(lastMessageAt)} ago
             </span>

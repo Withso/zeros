@@ -56,8 +56,8 @@
 }
 
 /* ZerosSpinner (apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx) — resting-grid fade.
- * The faint --fg3 dots behind the orbit fade one-directionally on a
- * TL→BR diagonal sweep: each rests at --zeros-grid-fade-peak (--fg3 @
+ * The faint --muted-fg dots behind the orbit fade one-directionally on a
+ * TL→BR diagonal sweep: each rests at --zeros-grid-fade-peak (--muted-fg @
  * 40%), fades to --zeros-grid-fade-trough (0) by mid-cycle and HOLDS
  * there, then snaps back only at the loop boundary — it never fades
  * back in mid-loop. Per-dot animation-delays (set inline, ∝ x+y) make
@@ -68,7 +68,7 @@
 }
 
 /* Reduced motion: freeze the fade — the resting dots hold at their
- * static --fg3 @ 40% (inline `opacity` on each dot) and the orbit
+ * static --muted-fg @ 40% (inline `opacity` on each dot) and the orbit
  * rests on the Z tetromino. */
 @media (prefers-reduced-motion: reduce) {
   .zeros-spinner span {

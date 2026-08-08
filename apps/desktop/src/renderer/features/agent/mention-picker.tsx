@@ -111,7 +111,7 @@ export function MentionPicker({
                   </span>
                 )}
               </div>
-              <span className="text-fg3 shrink-0 text-xs">
+              <span className="text-muted-fg shrink-0 text-xs">
                 {KIND_LABEL[item.kind]}
               </span>
             </Button>

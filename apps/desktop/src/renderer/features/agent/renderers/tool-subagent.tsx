@@ -43,7 +43,7 @@ const TONE_ICON_COLOR = {
   ok: "text-fg2",
   fail: "text-red-primary/80",
   run: "text-fg1",
-  pending: "text-fg3",
+  pending: "text-muted-fg",
 } as const;
 
 export const SubagentCard: Renderer<AgentToolMessage> = memo(

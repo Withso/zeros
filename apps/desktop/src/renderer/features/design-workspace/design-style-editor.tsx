@@ -146,16 +146,16 @@ function StyleSection({
             className="hover:bg-bg1-hover flex h-9 w-full items-center gap-2 px-3 text-left"
             aria-label={`${effectiveOpen ? "Collapse" : "Expand"} ${title}`}
           >
-            <span className="text-fg3 [&>svg]:size-3.5">{icon}</span>
+            <span className="text-muted-fg [&>svg]:size-3.5">{icon}</span>
             <span className="text-fg1 text-xs font-medium">{title}</span>
             {summary ? (
-              <span className="text-fg3 ml-auto max-w-32 truncate text-[10px]">
+              <span className="text-muted-fg ml-auto max-w-32 truncate text-[10px]">
                 {summary}
               </span>
             ) : null}
             <ChevronDown
               className={cn(
-                "text-fg3 size-3.5 transition-transform",
+                "text-muted-fg size-3.5 transition-transform",
                 effectiveOpen ? "rotate-0" : "-rotate-90",
               )}
             />
@@ -187,7 +187,7 @@ function PropertySelect({
     : [{ value, label: value }, ...options];
   return (
     <div className="grid min-w-0 grid-cols-[48px_minmax(0,1fr)] items-center gap-2">
-      <span className="text-fg3 truncate text-[10px]" title={label}>
+      <span className="text-muted-fg truncate text-[10px]" title={label}>
         {label}
       </span>
       <Select value={value} disabled={disabled} onValueChange={onChange}>
@@ -257,7 +257,7 @@ function FlexAlignmentControl({
                 <span
                   className={cn(
                     "absolute top-1/2 left-1/2 size-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full",
-                    selected ? "bg-highlighted-bright" : "bg-fg3",
+                    selected ? "bg-highlighted-bright" : "bg-muted-fg",
                   )}
                 />
               </button>
@@ -265,7 +265,7 @@ function FlexAlignmentControl({
           }),
         )}
       </div>
-      <div className="text-fg3 flex flex-col gap-1.5 text-[10px]">
+      <div className="text-muted-fg flex flex-col gap-1.5 text-[10px]">
         <span className="text-fg2">Alignment</span>
         <span className="truncate">X · {selectedX}</span>
         <span className="truncate">Y · {selectedY}</span>
@@ -290,7 +290,7 @@ function ChoiceGroup({
 }) {
   return (
     <div className="grid min-w-0 grid-cols-[48px_minmax(0,1fr)] items-center gap-2">
-      <Label className="text-fg3 truncate text-[10px]" title={label}>
+      <Label className="text-muted-fg truncate text-[10px]" title={label}>
         {label}
       </Label>
       <div className="zd-design-segment-group grid h-7 grid-flow-col rounded-sm">
@@ -503,7 +503,7 @@ export function DesignStyleEditor({
     <div className="flex flex-col">
       <div className="bg-bg1 sticky top-0 z-10 flex h-11 items-center px-3">
         <div className="relative min-w-0 flex-1">
-          <Search className="text-fg3 pointer-events-none absolute top-1/2 left-2 size-3 -translate-y-1/2" />
+          <Search className="text-muted-fg pointer-events-none absolute top-1/2 left-2 size-3 -translate-y-1/2" />
           <Input
             value={propertyQuery}
             className="zd-design-search h-7 pl-7 text-[11px]"
@@ -514,7 +514,7 @@ export function DesignStyleEditor({
         </div>
       </div>
       {!hasSearchMatch ? (
-        <div className="text-fg3 px-3 py-6 text-center text-xs">
+        <div className="text-muted-fg px-3 py-6 text-center text-xs">
           No visual control matches “{propertyQuery}”. Use CSS for any valid
           property.
         </div>
@@ -726,7 +726,7 @@ export function DesignStyleEditor({
             </div>
           </>
         ) : null}
-        <span className="text-fg3 text-[10px] font-medium tracking-wide uppercase">
+        <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
           Padding
         </span>
         <div className="grid grid-cols-2 gap-1.5">
@@ -751,7 +751,7 @@ export function DesignStyleEditor({
             styleValue(details, "padding-left", "0px"),
           )}
         </div>
-        <span className="text-fg3 text-[10px] font-medium tracking-wide uppercase">
+        <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
           Margin
         </span>
         <div className="grid grid-cols-2 gap-1.5">
@@ -776,7 +776,7 @@ export function DesignStyleEditor({
             styleValue(details, "margin-left", "0px"),
           )}
         </div>
-        <span className="text-fg3 text-[10px] font-medium tracking-wide uppercase">
+        <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
           Flex child
         </span>
         <ChoiceGroup
@@ -1117,7 +1117,7 @@ export function DesignStyleEditor({
         filter={normalizedQuery}
         keywords={STYLE_SEARCH_INDEX[7]}
       >
-        <p className="text-fg3 text-[11px] leading-4">
+        <p className="text-muted-fg text-[11px] leading-4">
           Edit property tracks, keyframes, timing, and playback in the canvas
           timeline.
         </p>
@@ -1142,7 +1142,7 @@ export function DesignStyleEditor({
         keywords={STYLE_SEARCH_INDEX[8]}
       >
         <div className="flex items-center justify-between gap-2">
-          <span className="text-fg3 text-xs">
+          <span className="text-muted-fg text-xs">
             Paste a declaration list; selectors and nested rules are rejected.
           </span>
           <Button

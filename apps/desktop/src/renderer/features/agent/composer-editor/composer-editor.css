@@ -27,10 +27,12 @@
   margin: 0;
 }
 
-/* Placeholder (only on the first empty paragraph). `--fg3` (third-tier fg) is
-   already a full hsl() color, so reference it directly — the old
-   `hsl(var(--muted-fg))` double-wrapped (hsl(hsl(...))) to an INVALID color,
-   which silently fell back to the brighter inherited text color. */
+/* Placeholder (only on the first empty paragraph). `--fg3` (the middle
+   foreground tier) matches the shared input primitives' `placeholder:text-fg3`
+   so every placeholder in the app reads at one weight. It is already a full
+   hsl() color, so reference it DIRECTLY — wrapping it as `hsl(var(--fg3))`
+   double-wraps to hsl(hsl(...)), an INVALID color that silently falls back to
+   the brighter inherited text color. */
 .composer-pm p.is-editor-empty:first-child::before {
   content: attr(data-placeholder);
   color: var(--fg3);

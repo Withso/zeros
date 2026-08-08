@@ -224,7 +224,7 @@ function renderDetail(message: AgentMessage): React.ReactNode {
     // returns null for a tool — `expandable` in EventRow then drives
     // the +/- affordance off `detail !== undefined`.
     return (
-      <div className="text-xs italic text-fg3">
+      <div className="text-xs italic text-muted-fg">
         (no captured output)
       </div>
     );

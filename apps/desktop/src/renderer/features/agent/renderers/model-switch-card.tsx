@@ -91,7 +91,7 @@ export const ModelSwitchRecordCard: Renderer<AgentToolMessage> = memo(
             </>
           )}
         </span>
-        <span className="text-fg3 text-[11.5px]">
+        <span className="text-muted-fg text-[11.5px]">
           {info.reason === "refusal" ? (
             <>The session continues on the fallback · no action needed</>
           ) : (

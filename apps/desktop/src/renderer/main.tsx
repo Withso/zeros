@@ -57,7 +57,7 @@ if (window.parent !== window) {
       <div class="text-sm font-medium">
         Zeros can't run inside an embedded browser.
       </div>
-      <div class="max-w-sm text-xs text-fg3">
+      <div class="max-w-sm text-xs text-muted-fg">
         Open Zeros from its Dock icon or main window. Loading the
         dev URL into the workbench browser tab spawns a duplicate
         copy without the native runtime.

@@ -111,7 +111,7 @@ export function SlashCommandPicker({
             }`}
           >
             <span>{t.label}</span>
-            <span className="text-fg3">{counts[t.id]}</span>
+            <span className="text-muted-fg">{counts[t.id]}</span>
           </button>
         );
       })}
@@ -171,7 +171,7 @@ export function SlashCommandPicker({
                   )}
                 </div>
                 {cmd.input && (
-                  <span className="shrink-0 text-xs text-fg3">
+                  <span className="shrink-0 text-xs text-muted-fg">
                     takes input
                   </span>
                 )}

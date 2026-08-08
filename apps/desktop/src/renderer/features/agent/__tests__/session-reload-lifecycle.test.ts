@@ -5,9 +5,13 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
+  bumpCancelGeneration,
+  cancelGeneration,
+  cancelledSince,
   loadedSessionStatus,
   markPrebindDirty,
   queueReleaseAction,
+  sendNeedsSessionRecovery,
   shouldQueuePrompt,
   takePrebindDirty,
 } from "../session-reload-lifecycle";
@@ -266,5 +270,76 @@ describe("session reload lifecycle", () => {
       ["chat-1", "session-1b"],
       ["chat-3", "session-3"],
     ]);
+  });
+});
+
+// A send is not atomic: it can await a session rebuild, a settings-drift
+// respawn, or a resume-and-retry before its AGENT_PROMPT reaches the engine —
+// with the composer showing Stop the whole time. A Stop in that window used to
+// be addressed at a session with no live turn (or no session at all), so the
+// pending prompt went out anyway and the agent started working on the turn the
+// user had just stopped.
+describe("stopping a send that has not gone out yet", () => {
+  it("marks the chat cancelled for a send captured before the stop", () => {
+    const generations = new Map<string, number>();
+    const sendGeneration = cancelGeneration(generations, "chat-1");
+
+    expect(cancelledSince(generations, "chat-1", sendGeneration)).toBe(false);
+    bumpCancelGeneration(generations, "chat-1");
+    expect(cancelledSince(generations, "chat-1", sendGeneration)).toBe(true);
+  });
+
+  it("does not leak a stop across chats or into the next send", () => {
+    const generations = new Map<string, number>();
+    const firstSend = cancelGeneration(generations, "chat-1");
+    bumpCancelGeneration(generations, "chat-1");
+    // The NEXT send captures the post-stop generation, so the same stop must
+    // not abort it too.
+    const secondSend = cancelGeneration(generations, "chat-1");
+
+    expect(cancelledSince(generations, "chat-1", firstSend)).toBe(true);
+    expect(cancelledSince(generations, "chat-1", secondSend)).toBe(false);
+    expect(cancelledSince(generations, "chat-2", 0)).toBe(false);
+  });
+
+  it("counts every stop, so two in a row are still both recorded", () => {
+    const generations = new Map<string, number>();
+    const sendGeneration = cancelGeneration(generations, "chat-1");
+    bumpCancelGeneration(generations, "chat-1");
+    bumpCancelGeneration(generations, "chat-1");
+
+    expect(cancelGeneration(generations, "chat-1")).toBe(2);
+    expect(cancelledSince(generations, "chat-1", sendGeneration)).toBe(true);
+  });
+});
+
+// A send into a chat whose session is still spawning must not block on that
+// spawn: the composer keeps the text with no bubble anywhere, so every further
+// Enter re-enters and enqueues another copy of the same message (reported on
+// Cursor, whose cold host boot is the slowest). shouldQueuePrompt owns that
+// case — the message shows in the queued card at once and dispatches when the
+// session is ready.
+describe("send-time session recovery", () => {
+  it("recovers only from states with nothing in flight", () => {
+    expect(sendNeedsSessionRecovery("failed")).toBe(true);
+    expect(sendNeedsSessionRecovery("auth-required")).toBe(true);
+    expect(sendNeedsSessionRecovery("reconnecting")).toBe(true);
+    expect(sendNeedsSessionRecovery("idle")).toBe(true);
+    expect(sendNeedsSessionRecovery("ready")).toBe(false);
+    expect(sendNeedsSessionRecovery("warming")).toBe(false);
+    expect(sendNeedsSessionRecovery("streaming")).toBe(false);
+  });
+
+  it("hands a warming chat's send to the queue instead", () => {
+    expect(sendNeedsSessionRecovery("warming")).toBe(false);
+    expect(
+      shouldQueuePrompt({
+        status: "warming",
+        hasLocalSend: false,
+        hasQueuedSends: false,
+        queueHeld: false,
+        flushing: false,
+      }),
+    ).toBe(true);
   });
 });

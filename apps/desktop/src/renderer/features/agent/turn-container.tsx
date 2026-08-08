@@ -492,8 +492,9 @@ function ClampedUserPrompt({
           )}
         >
           {/* The bubble changes polarity across themes: bg1-hover clears its
-              light fill, while dark needs bg2-hover after highlighted-bg was
-              lowered to the same lightness as bg1-hover. */}
+              light fill, while the dark palettes need bg2-hover — neutral
+              Dark's highlighted-bg IS bg2, so bg2-hover is exactly the chip
+              fill that surface takes, and Orka's sits a point below it. */}
           <span className="text-fg2 group-hover/more:bg-bg1-hover dark:group-hover/more:bg-bg2-hover group-hover/more:text-fg1 group-focus-visible/more:ring-highlighted-bright inline-flex items-center gap-0.5 rounded-sm px-1.5 py-0.5 text-xs font-medium transition-colors group-focus-visible/more:ring-1">
             More
             <ChevronDown className="size-3.5" strokeWidth={2} />
@@ -578,7 +579,7 @@ function UserMessageActions({
         <Tooltip
           label={createdAt ? new Date(createdAt).toLocaleString() : undefined}
         >
-          <span className="text-fg3 px-1 text-xs tabular-nums select-none">
+          <span className="text-muted-fg px-1 text-xs tabular-nums select-none">
             {age}
           </span>
         </Tooltip>

@@ -700,7 +700,7 @@ export function GitHubSection({
                       <IdentityBadge summary={summary} />
                     </span>
                   ) : (
-                    <span className="text-fg3 mt-0.5 block text-xs">
+                    <span className="text-muted-fg mt-0.5 block text-xs">
                       {!hasConfirmedSnapshot
                         ? githubMethodDescription(method)
                         : method === "gh-cli" && summary.available
@@ -1093,7 +1093,7 @@ export function GitHubSection({
           })}
         </div>
 
-        <p className="text-fg3 m-0 text-xs">
+        <p className="text-muted-fg m-0 text-xs">
           Inactive credentials remain saved. Switching methods never deletes
           another method’s connection.
         </p>

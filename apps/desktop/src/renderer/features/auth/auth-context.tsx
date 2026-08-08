@@ -406,7 +406,7 @@ function AuthConfigErrorScreen() {
       <div className="text-fg1 text-sm font-medium">
         Sign-in isn't available
       </div>
-      <div className="text-fg3 max-w-[380px] text-xs leading-relaxed">
+      <div className="text-muted-fg max-w-[380px] text-xs leading-relaxed">
         Zeros sign-in requires the desktop app.
       </div>
     </div>

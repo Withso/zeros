@@ -5,7 +5,7 @@ export interface LifecycleStatusMeta {
   value: WorkspaceStatus;
   label: string;
   /** Tailwind text-color class — a color-family token (yellow / green /
-   *  violet primary) or neutral --fg3. Colors both the status glyph and label. */
+   *  violet primary) or neutral --muted-fg. Colors both the status glyph and label. */
   colorClass: string;
 }
 
@@ -16,7 +16,7 @@ export interface LifecycleStatusMeta {
  *  Automatic transitions land on in-progress / in-review / done; backlog and
  *  cancelled are reachable only by an explicit manual set. */
 export const LIFECYCLE_STATUSES: readonly LifecycleStatusMeta[] = [
-  { value: "backlog", label: "Backlog", colorClass: "text-fg3" },
+  { value: "backlog", label: "Backlog", colorClass: "text-muted-fg" },
   {
     value: "in-progress",
     label: "In progress",
@@ -31,7 +31,7 @@ export const LIFECYCLE_STATUSES: readonly LifecycleStatusMeta[] = [
   {
     value: "cancelled",
     label: "Cancelled",
-    colorClass: "text-fg3",
+    colorClass: "text-muted-fg",
   },
 ];
 

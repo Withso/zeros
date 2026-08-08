@@ -309,7 +309,7 @@ function TranscriptPill({
         // `size-*` here would be dead markup — the descendant rule outranks it.
         <Check className="text-green-primary" aria-hidden="true" />
       ) : (
-        <span className="text-fg3 text-2xxs tabular-nums">
+        <span className="text-muted-fg text-2xxs tabular-nums">
           {summary.userMessageCount}
         </span>
       )}
@@ -462,7 +462,7 @@ export function TranscriptPickerBody({
                     aria-hidden="true"
                   />
                 ) : (
-                  <span className="text-fg3 text-2xxs shrink-0 tabular-nums">
+                  <span className="text-muted-fg text-2xxs shrink-0 tabular-nums">
                     {s.userMessageCount}
                   </span>
                 )}

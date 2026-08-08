@@ -150,10 +150,12 @@ import {
   agentHasPermissionMenu,
   agentModeForPermission,
   coerceModeIdForModel,
+  envForChat,
   permissionForAgentMode,
   permissionModeShowsFrame,
   staticModesForAgent,
 } from "./model-catalog";
+import { sendNeedsSessionRecovery } from "./session-reload-lifecycle";
 import { requestAiChatTitle } from "./chat-title";
 import {
   newChatBornDefaults,
@@ -186,6 +188,7 @@ import {
   turnKey,
 } from "./turn-container";
 import { TurnEventList } from "./turn-event-list";
+import { tailTurnInFlight } from "./tail-indicators";
 import { pickActiveWorkflow } from "./workflow-activity";
 import { stabilizeTurns } from "./stable-turns";
 import { TurnFooter } from "./turn-footer";
@@ -195,7 +198,11 @@ import {
   sameCheckpoints,
   type Checkpoint,
 } from "./checkpoint-rail";
-import { MAX_MESSAGES_PER_CHAT, useSessionsStore } from "./sessions-store";
+import {
+  MAX_MESSAGES_PER_CHAT,
+  usePendingLocalTurnId,
+  useSessionsStore,
+} from "./sessions-store";
 import { collectPendingQuestionToolCallIds } from "./pending-question-tools";
 import {
   windowOlderMessages as ipcWindowOlderMessages,
@@ -1007,6 +1014,11 @@ export function AgentChat({
       ? (s.sessions[chatId]?.transcriptState ?? "resident") === "resident"
       : true,
   );
+  // Which turn (if any) this renderer has an unsettled prompt for. The tail's
+  // liveness is derived from this rather than from session status, so a chat
+  // being REOPENED — a tab switch, a workspace switch, an app reload, all of
+  // which warm a session — never repaints a finished turn as working.
+  const pendingLocalTurnId = usePendingLocalTurnId(chatId);
   const conversationStarted =
     hasSessionMessages ||
     !transcriptKnown ||
@@ -1529,10 +1541,18 @@ export function AgentChat({
   // Every in-flight attach, so handleSend can wait for the ones the user
   // asked for rather than sending without them. See the top of handleSend.
   const transcriptAttachesRef = useRef<Set<Promise<void>>>(new Set());
-  // True only while a send is parked on those reads — the one stretch of
-  // handleSend that can be re-entered with the composer still full. See the
-  // top of handleSend.
+  // True while a send is being PREPARED — from the first keystroke-triggered
+  // submit until the composer is cleared and the prompt has been handed to the
+  // provider. Every stretch in there can be re-entered with the composer still
+  // full (a cold transcript read, a session rebuild), and each re-entry
+  // snapshots the same composer and sends it again. See handleSend.
   const sendInFlightRef = useRef(false);
+  // The rendered half of the same fact, for the ONE stretch a user can actually
+  // notice: a send parked on a cold transcript read or a session rebuild, which
+  // on a cold provider host takes tens of seconds. The submit button shows the
+  // spinner ("submitted") for it, so a composer that still holds the text reads
+  // as "working on it" instead of an unresponsive button.
+  const [sendPreparing, setSendPreparing] = useState(false);
 
   // "Is this chat attached" is derived from the composer DOCUMENT, never from
   // a second list: that is what makes removing a chip with its × un-add the
@@ -2836,7 +2856,7 @@ export function AgentChat({
       agentId: session.agentId ?? chatThread?.agentId ?? null,
     });
 
-  const handleSend = async (
+  const runSend = async (
     override?: string,
     extras?: {
       /** Inline summary imports from prior chats. Serialized
@@ -2873,29 +2893,19 @@ export function AgentChat({
     // This is not the forbidden "click handler awaits I/O": Send is the
     // commit, and a commit must include what the user staged.
     //
-    // The guard is what makes that await safe to add. Everything that stops
-    // this composer being sent twice — clearComposer, the empty check —
-    // happens AFTER it, so awaiting here opens a window in which a second
-    // Enter re-enters, snapshots the same composer state, and sends it again.
-    // Before this the only awaits ahead of the snapshot resolved in
-    // microtasks, which two keypresses cannot interleave with; a cold
-    // transcript read is real I/O, and a composer sitting visibly untouched
-    // with a spinner on the pill is exactly when someone presses Enter again.
-    //
-    // Scoped INSIDE the `size > 0` check on purpose: the guard then exists
-    // only while this send is genuinely parked on a read, so no other caller
-    // — the EmptyComposer hand-off, the queued-submission flush, "Continue" —
-    // can ever be turned away by it. Same shape as saveQueuedEdit's
-    // queueSaveInFlightRef.
+    // handleSend's single-flight guard is what makes that await safe: everything
+    // that stops this composer being sent twice — clearComposer, the empty check
+    // — happens further down, so awaiting here (or at the session rebuild below)
+    // opens a window in which a second Enter re-enters, snapshots the same
+    // composer state, and sends it again.
     const hydrateNeeded = session.transcriptState !== "resident";
     if (hydrateNeeded || transcriptAttachesRef.current.size > 0) {
-      if (sendInFlightRef.current) return;
-      sendInFlightRef.current = true;
+      setSendPreparing(true);
       try {
         if (hydrateNeeded) await session.hydrateChat();
         await Promise.allSettled([...transcriptAttachesRef.current]);
       } finally {
-        sendInFlightRef.current = false;
+        setSendPreparing(false);
       }
     }
     // A disconnected/failed cold read deliberately leaves the composer intact.
@@ -3021,9 +3031,9 @@ export function AgentChat({
         return;
       }
     }
-    // If the session bounced to warming / reconnecting / failed /
-    // auth-required, kick a fresh ensureSession and wait for it before
-    // sending. Both error states are recoverable BY EXPLICIT SEND:
+    // If the session bounced to reconnecting / failed / auth-required (or never
+    // spawned), kick a fresh ensureSession and wait for it before sending. Both
+    // error states are recoverable BY EXPLICIT SEND:
     // `auth-required` — the user just fixed their key in Settings →
     // Providers and the error copy says "then send again"; the live session
     // cached the REJECTED key at spawn, so a rebuild re-derives env from the
@@ -3032,18 +3042,38 @@ export function AgentChat({
     // which rebuilds (the host respawns half-open after its hold-off).
     // Either way: if the rebuild fails again we land back here — no retry
     // loop, one attempt per explicit user send.
-    if (session.status !== "ready") {
+    //
+    // `warming` is deliberately NOT one of them (see sendNeedsSessionRecovery):
+    // a spawn is already in flight, so awaiting it here only held the composer
+    // hostage — text intact, no bubble, nothing to read as progress — for the
+    // whole spawn. The provider parks the send instead (visible immediately in
+    // the queued card) and dispatches it when the session lands.
+    if (sendNeedsSessionRecovery(session.status)) {
       const targetAgentId = session.agentId ?? chatThread?.agentId;
       if (!targetAgentId) return;
+      setSendPreparing(true);
       try {
         // No `force` needed: ensureSession already counts auth-required as
         // "not healthy" and rebuilds (keeping its concurrent-send de-dup);
         // it only early-returns for healthy ready/streaming sessions. cwd
         // resolution rides ensureSession's resolveSpawnCwd (slot + chat
-        // store fallback), same as the pre-existing warming path.
-        await session.startSession(targetAgentId);
+        // store fallback).
+        //
+        // The chat's composer env MUST ride along. Without it the rebuilt
+        // session is stamped with an empty applied-env key, so sendPrompt's
+        // settings-drift reconcile immediately force-respawns it AGAIN — two
+        // cold spawns for one send (and on Cursor, two host boots) before the
+        // prompt goes anywhere. It also runs the provider's default model for
+        // the window in between, contradicting the pill.
+        await session.startSession(targetAgentId, {
+          env: chatThread
+            ? envForChat(chatThread, session.initialize)
+            : undefined,
+        });
       } catch {
         return;
+      } finally {
+        setSendPreparing(false);
       }
     }
     // Serialize each summary import into a <from_previous_chat>
@@ -3148,6 +3178,32 @@ export function AgentChat({
       .catch(() => {
         /* error surfaces via session.error */
       });
+  };
+
+  /** Single-flight entry point for every send (button, Enter keymap, "Continue",
+   *  the EmptyComposer hand-off, the provisioning auto-send).
+   *
+   *  runSend clears the composer only at its END, and the stretches before that
+   *  can await real I/O: a cold transcript read, and — the one that made this
+   *  visible — a session rebuild, which on a cold provider host runs for tens of
+   *  seconds. A composer sitting visibly untouched is exactly when someone
+   *  presses Enter again, and every re-entry snapshotted the same text and sent
+   *  it again: the reported "nothing happens, so I keep pressing Enter, and then
+   *  the same message shows up several times, all queued".
+   *
+   *  Dropping a re-entry is safe by construction — the composer has not been
+   *  touched, so it is the very message the in-flight call is already sending. */
+  const handleSend = async (
+    override?: string,
+    extras?: Parameters<typeof runSend>[1],
+  ): Promise<void> => {
+    if (sendInFlightRef.current) return;
+    sendInFlightRef.current = true;
+    try {
+      await runSend(override, extras);
+    } finally {
+      sendInFlightRef.current = false;
+    }
   };
   // ── Queued-messages card actions ─────────────────────────
   // (Part of the queued-messages redesign — see QueuedMessagesCard.)
@@ -3418,6 +3474,10 @@ export function AgentChat({
     // ever mounted simultaneously.
     if (activeChatId !== chatId) return;
     if (session.status !== "ready" || session.pendingPermission) return;
+    // A send is already being prepared, so handleSend would drop this one — and
+    // the consume below would still retire it, losing the submission. Wait: this
+    // effect re-runs when `sendPreparing` clears.
+    if (sendInFlightRef.current) return;
     // Thread the EmptyComposer's summary imports + image
     // attachments + bubble metadata through to the first send. Without
     // this, the user's imported context chips were dropped on the way
@@ -3445,6 +3505,9 @@ export function AgentChat({
     chatId,
     activeChatId,
     surfaceActive,
+    // Re-arm once a send that was being prepared has finished, so a submission
+    // that arrived during that window still goes out.
+    sendPreparing,
   ]);
 
   // If a user queues a first turn and then deliberately clears the composer
@@ -3476,6 +3539,9 @@ export function AgentChat({
     if (!chatId || !pendingAutoSend || workspaceProvisioning) return;
     if (session.status !== "ready" || session.pendingPermission) return;
     if (composerEmpty) return;
+    // Don't retire the intent into a send that handleSend would drop because
+    // another one is mid-preparation; this effect re-runs when that clears.
+    if (sendInFlightRef.current) return;
     // Consume first so React Strict effects and unrelated store notifications
     // cannot dispatch the same first turn twice while handleSend is awaiting.
     dispatch({ type: "CONSUME_AUTO_SEND", chatId });
@@ -3488,6 +3554,7 @@ export function AgentChat({
     session.pendingPermission,
     chatId,
     composerEmpty,
+    sendPreparing,
   ]);
 
   // ⌥+click in the browser-tab element picker
@@ -3723,6 +3790,17 @@ export function AgentChat({
                 i,
               );
               const ownsProviderFooter = isProviderTurnTail(turns, i);
+              // One answer for the shimmer AND the footer (see tailTurnInFlight):
+              // they are two halves of the same claim, and computing them apart
+              // is what let a reopened chat show the working shimmer while
+              // hiding this turn's own STOPPED BY USER pill.
+              const turnIsPendingLocal =
+                !!turn.userPrompt && pendingLocalTurnId === turn.userPrompt.id;
+              const turnInFlight = tailTurnInFlight({
+                sessionStreaming: isStreaming,
+                pendingLocalTurn: turnIsPendingLocal,
+                hasEvents: turn.events.length > 0,
+              });
               return (
                 <React.Fragment key={turnKey(turn)}>
                   <TurnContainer turn={turn} isActive={isVisualTail}>
@@ -3814,22 +3892,17 @@ export function AgentChat({
                     turn id) get one — the rare leading "system turn" has nothing
                     to reset to. */}
                     {/* A turn counts as IN FLIGHT while streaming — and also
-                    while the session is "warming" with the turn still empty:
-                    that's a send pending session (re)creation (Cursor's
-                    newSession takes seconds; engine-respawn rebuilds too).
-                    Without the warming clause the just-sent turn flashed as
-                    SETTLED — a "0s ⧉ …" footer, no shimmer — until the first
-                    event arrived. Scoped to empty
-                    turns so REOPENING a chat (also "warming") never repaints
-                    its last completed turn as live. */}
+                    while THIS renderer's own send for it is still pending
+                    session (re)creation (Cursor's newSession takes seconds;
+                    engine-respawn rebuilds too), which would otherwise flash
+                    the just-sent turn as SETTLED ("0s ⧉ …", no shimmer) until
+                    the first event arrived. Keyed on the pending TURN, never on
+                    session status: reopening a chat warms the session too, and
+                    that is how a stopped turn used to come back to life. */}
                     <TurnEventList
                       events={turn.events}
                       isActive={isActiveProviderSegment}
-                      isStreaming={
-                        isStreaming ||
-                        (session.status === "warming" &&
-                          turn.events.length === 0)
-                      }
+                      isStreaming={turnInFlight}
                       showActivity={isVisualTail}
                       activityEvents={turn.providerEvents}
                       activityStartedAt={
@@ -3848,12 +3921,7 @@ export function AgentChat({
                             turnId={turn.recordedTurnId ?? turn.userPrompt.id}
                             events={turn.providerEvents}
                             startedAt={turn.recordedStartedAt}
-                            live={
-                              isVisualTail &&
-                              (isStreaming ||
-                                (session.status === "warming" &&
-                                  turn.events.length === 0))
-                            }
+                            live={isVisualTail && turnInFlight}
                             fallbackStopReason={
                               isVisualTail && session.status !== "streaming"
                                 ? session.lastStopReason
@@ -3864,11 +3932,13 @@ export function AgentChat({
                                 ? footerLabelForFailure(session.failure)
                                 : null
                             }
-                            retrying={
-                              isVisualTail &&
-                              (session.status === "warming" ||
-                                session.status === "reconnecting")
-                            }
+                            // "An auto-rebuild is re-running THIS turn" — which
+                            // only happens while this renderer's own send owns
+                            // it (rebuildAndRetry / the resume-and-retry hop).
+                            // It used to read session status, so merely
+                            // REOPENING a chat suppressed a genuinely failed
+                            // turn's AGENT STOPPED pill until the resume landed.
+                            retrying={isVisualTail && turnIsPendingLocal}
                             isLastTurn={isVisualTail}
                             // One-click resume after a token-cap /
                             // budget stop: functionally the user typing
@@ -4279,26 +4349,39 @@ export function AgentChat({
                         label={
                           composerStreaming
                             ? "Stop agent"
-                            : editingQueuedId
-                              ? "Save message"
-                              : "Send"
+                            : sendPreparing
+                              ? "Starting the agent…"
+                              : editingQueuedId
+                                ? "Save message"
+                                : "Send"
                         }
-                        shortcut={composerStreaming ? undefined : "↵"}
+                        shortcut={
+                          composerStreaming || sendPreparing ? undefined : "↵"
+                        }
                       >
                         <PromptInputSubmit
+                          // `submitted` = this send is parked on a cold
+                          // transcript read or a session (re)build with the
+                          // text still in the composer. Without it the button
+                          // looked idle-but-dead for the whole spawn, which is
+                          // what made people press Enter again and again.
                           status={
                             isErrorState
                               ? "error"
                               : composerStreaming
                                 ? "streaming"
-                                : "ready"
+                                : sendPreparing
+                                  ? "submitted"
+                                  : "ready"
                           }
                           disabled={
                             composerStreaming
                               ? false
-                              : editingQueuedId
-                                ? composerEmpty
-                                : !canSend
+                              : sendPreparing
+                                ? true
+                                : editingQueuedId
+                                  ? composerEmpty
+                                  : !canSend
                           }
                           className="disabled:bg-bg2-hover disabled:text-fg2 size-8 disabled:opacity-100"
                         >

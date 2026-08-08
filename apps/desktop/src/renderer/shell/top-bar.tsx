@@ -1608,10 +1608,25 @@ export function TopBar() {
     realWorkspaces.length > 0 || dedupedPendingCreates.length > 0;
   const hasProjectContext = !!selectedProject || !!pendingOnly;
 
+  // The 40px title rail — h-10 is its TOTAL painted height, hairline included.
+  // `pt-px` is what centers the row: the 1px border-b would otherwise make the
+  // rail 40px of chrome whose 28px controls center in the 39px above the
+  // hairline, so every control sat half a pixel high and the gap under it read
+  // a pixel longer than the gap over it. (It was worse still with the former
+  // `box-content`, which pushed the hairline outside the box for a 41px rail
+  // centered as 40.) One pixel of top padding balances the border, so the
+  // controls land on the rail's own center line with 6px of rail above and 6px
+  // below — and on macOS, where the window-edge stroke covers the rail's FIRST
+  // pixel row (titleBarStyle hiddenInset + rounded corners) exactly as the
+  // hairline covers its LAST, the visible gaps match too.
+  //
+  // The hairline stays a real border rather than an inset shadow so the
+  // workspace strip's opaque z-30 edge gutters (below) cannot paint over it:
+  // they are inset-y-0 inside this content box, which the border sits outside.
   return (
     <header
       ref={topBarRef}
-      className="border-border1 bg-sidebar-bg box-content flex h-10 w-full shrink-0 items-center overflow-hidden border-b"
+      className="border-border1 bg-sidebar-bg flex h-10 w-full shrink-0 items-center overflow-hidden border-b pt-px"
       aria-label="Workspace navigation"
     >
       {/* Native macOS traffic-light reserve. Its empty width provides the

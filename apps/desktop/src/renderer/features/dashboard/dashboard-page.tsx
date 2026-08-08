@@ -434,7 +434,7 @@ function ArchivedColumn({
   return (
     <div className="flex h-full min-h-0 w-72 shrink-0 flex-col px-3">
       <div className="mb-3 flex shrink-0 items-center gap-2">
-        <ArchiveIcon className="text-fg3 size-4" />
+        <ArchiveIcon className="text-muted-fg size-4" />
         <span className="text-fg1 text-sm font-medium">Archived</span>
         <span className="text-fg2 text-xs tabular-nums">{rows.length}</span>
       </div>

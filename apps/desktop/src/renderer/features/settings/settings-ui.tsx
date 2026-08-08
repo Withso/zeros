@@ -292,7 +292,7 @@ export function InheritedRow({
       <div className="flex min-w-0 items-center gap-2">
         <span className="text-fg2 truncate font-mono text-sm">{name}</span>
         {value != null && (
-          <span className="text-fg3 truncate text-xs">{value}</span>
+          <span className="text-muted-fg truncate text-xs">{value}</span>
         )}
       </div>
       {onOverride && (

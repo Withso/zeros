@@ -154,7 +154,7 @@ export function FeedbackDialog({
             </div>
           ) : null}
 
-          <p className="text-xs text-fg3">
+          <p className="text-xs text-muted-fg">
             {includeLogs
               ? "Your message plus the recent app logs shown under View are sent — secrets are scrubbed first."
               : "Only what you write here is sent — never your code, files, or keys."}

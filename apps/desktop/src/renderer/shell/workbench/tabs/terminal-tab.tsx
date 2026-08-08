@@ -922,7 +922,7 @@ function RunActionOverlay({
                     : `Start ${action.name}`}
                 </Button>
               </Tooltip>
-              <div className="text-fg3 max-w-sm truncate font-mono text-xs">
+              <div className="text-muted-fg max-w-sm truncate font-mono text-xs">
                 {outcome ? RUN_LAST_RUN_COPY[outcome] : action.command}
               </div>
             </div>
