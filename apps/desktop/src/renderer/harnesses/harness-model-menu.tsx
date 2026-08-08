@@ -49,9 +49,14 @@ async function main() {
   const React = await import("react");
   const { createRoot } = await import("react-dom/client");
   const { TooltipProvider } = await import("../shared/ui/primitives/tooltip");
-  const { ModelPill, ComposerConcealedContext } = await import(
-    "../features/agent/composer-pills"
-  );
+  const { ModelPill, PermissionToggle, ComposerConcealedContext } =
+    await import("../features/agent/composer-pills");
+  const { ComposerAttachmentMenu } =
+    await import("../features/agent/composer-attachment-menu");
+  const { PromptInputSubmit } =
+    await import("../shared/ui/primitives/elements/prompt-input");
+  const { resolveModelConfiguration } =
+    await import("../features/agent/model-preferences");
   const {
     composerOwnsFocus,
     shouldReclaimComposerFocus,
@@ -60,6 +65,10 @@ async function main() {
 
   function Harness() {
     const [value, setValue] = React.useState<string | null>(null);
+    const [configuration, setConfiguration] = React.useState(() =>
+      resolveModelConfiguration("claude", null, null),
+    );
+    const [permissionMode, setPermissionMode] = React.useState("default");
     const editorRef = React.useRef<HTMLDivElement | null>(null);
 
     // Replicate agent-chat.tsx's "composer always focused" guardian VERBATIM,
@@ -120,23 +129,56 @@ async function main() {
             >
               type here
             </div>
-            <div data-testid="pill-host">
-              <ModelPill
-                agentId="claude"
-                initialize={null}
-                value={value}
-                onChange={(next) => {
-                  setValue(next);
-                  // Load-bearing, NOT debug noise: scripts/ui-smoke-composer.mjs
-                  // reads the page's console and asserts on this exact prefix to
-                  // prove a row click actually reaches onChange. A click that
-                  // merely closed the menu without selecting would otherwise
-                  // pass. Delete this line and `pnpm test:ui-smoke` goes red.
-                  console.log("[harness] onChange", next);
-                }}
-                onSelectAgentModel={() => {}}
-                redirectCrossAgent
-              />
+            <div
+              data-testid="responsive-chat-host"
+              className="[container-type:inline-size] w-[500px] [container-name:agent-chat]"
+            >
+              <div
+                data-testid="pill-host"
+                data-permission-feedback-boundary=""
+                className="flex w-full min-w-0 flex-nowrap items-center gap-1"
+              >
+                <ComposerAttachmentMenu
+                  concealed={false}
+                  onAttachFiles={() => {}}
+                  onAttachTranscript={() => {}}
+                  onLinkWorkspace={() => {}}
+                  onIntent={() => {}}
+                />
+                <ModelPill
+                  agentId="claude"
+                  initialize={null}
+                  value={value}
+                  effort={configuration.effort}
+                  fast={configuration.fast}
+                  onConfigure={setConfiguration}
+                  onChange={(next) => {
+                    setValue(next);
+                    setConfiguration(
+                      resolveModelConfiguration("claude", next, null),
+                    );
+                    // Load-bearing, NOT debug noise: scripts/ui-smoke-composer.mjs
+                    // reads the page's console and asserts on this exact prefix to
+                    // prove a row click actually reaches onChange. A click that
+                    // merely closed the menu without selecting would otherwise
+                    // pass. Delete this line and `pnpm test:ui-smoke` goes red.
+                    console.log("[harness] onChange", next);
+                  }}
+                  onSelectAgentModel={() => {}}
+                  redirectCrossAgent
+                />
+                <PermissionToggle
+                  agentId="claude"
+                  model={value}
+                  currentModeId={permissionMode}
+                  onSelectMode={setPermissionMode}
+                />
+                <PromptInputSubmit
+                  data-testid="composer-send"
+                  data-composer-toolbar-actions=""
+                  className="ml-auto"
+                />
+              </div>
             </div>
           </div>
         </ComposerConcealedContext.Provider>

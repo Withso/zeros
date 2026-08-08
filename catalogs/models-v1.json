@@ -1,7 +1,7 @@
 {
   "$schema": "./models-v1.schema.json",
-  "version": 8,
-  "updatedAt": "2026-07-25",
+  "version": 9,
+  "updatedAt": "2026-08-08",
   "notes": "Curated model-picker source of truth. See catalogs/README.md for capability precedence, compatibility contracts, runtime context handling, verification, and update requirements.",
   "families": {
     "claude": [
@@ -42,25 +42,25 @@
     "codex": [
       {
         "value": "gpt-5.6-sol",
-        "label": "5.6 Sol",
+        "label": "GPT-5.6 Sol",
         "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
         "supportsFast": true
       },
       {
         "value": "gpt-5.6-terra",
-        "label": "5.6 Terra",
+        "label": "GPT-5.6 Terra",
         "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
         "supportsFast": true
       },
       {
         "value": "gpt-5.6-luna",
-        "label": "5.6 Luna",
+        "label": "GPT-5.6 Luna",
         "effortLevels": ["low", "medium", "high", "xhigh"],
         "supportsFast": true
       },
       {
         "value": "gpt-5.5",
-        "label": "5.5",
+        "label": "GPT-5.5",
         "effortLevels": ["low", "medium", "high", "xhigh"],
         "supportsFast": true
       }
@@ -74,7 +74,7 @@
       },
       {
         "value": "grok-4.5",
-        "label": "Grok 4.5",
+        "label": "Cursor Grok 4.5",
         "effortLevels": ["low", "medium", "high"],
         "supportsFast": true
       }
@@ -86,7 +86,7 @@
     "cursor": "CURSOR_MODEL"
   },
   "defaultFavorites": {
-    "claude": "claude-opus-4-8[1m]",
+    "claude": "claude-opus-5[1m]",
     "codex": "gpt-5.6-sol",
     "cursor": "composer-2.5"
   },

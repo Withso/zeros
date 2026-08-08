@@ -34,7 +34,7 @@ boundary.
   at runtime, so a catalog entry and the pinned SDK that supports it must ship
   together.
 
-The current defaults are Claude Opus 4.8, Codex 5.6 Sol, and Cursor Composer
+The current defaults are Claude Opus 5, Codex GPT-5.6 Sol, and Cursor Composer
 2.5. The minimum Claude CLI versions recorded by the catalog are 2.1.170 for
 Fable 5, 2.1.206 for Sonnet 5, and 2.1.219 for Opus 5.
 

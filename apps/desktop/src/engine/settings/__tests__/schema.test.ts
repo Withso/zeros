@@ -130,6 +130,18 @@ describe("sanitizeLayer", () => {
       default: "claude-opus-4-8[1m]",
       default_agent: "claude",
       favorites: { claude: "claude-sonnet-5[1m]" },
+      model_preferences: [
+        {
+          agent: "claude",
+          model: "claude-opus-5[1m]",
+          effort: "max",
+          fast: true,
+        },
+      ],
+      permission_preferences: [
+        { agent: "claude", mode: "auto" },
+        { agent: "codex", mode: "auto-edit" },
+      ],
       chat_title_model: "claude-haiku-4-5",
       claude_code: {
         default_effort_level: "high",
@@ -161,6 +173,119 @@ describe("sanitizeLayer", () => {
     expect(invalid.warnings).toEqual([
       expect.stringContaining("models.claude_code.idle_timeout_minutes"),
     ]);
+  });
+
+  it("sanitizes bounded per-agent permission preferences independently", () => {
+    const result = sanitizeLayer(
+      {
+        models: {
+          permission_preferences: [
+            { agent: "codex", mode: "ask" },
+            { agent: "", mode: "auto" },
+            { agent: "claude", mode: 42 },
+            { agent: "codex", mode: "full-access" },
+          ],
+        },
+      },
+      "user",
+    );
+
+    expect(result.doc).toEqual({
+      models: {
+        permission_preferences: [{ agent: "codex", mode: "full-access" }],
+      },
+    });
+    expect(result.warnings).toHaveLength(2);
+  });
+
+  it("keeps only the newest 32 distinct permission owners", () => {
+    const preferences = Array.from({ length: 35 }, (_, index) => ({
+      agent: `extension-${index}`,
+      mode: `mode-${index}`,
+    }));
+    const result = sanitizeLayer(
+      { models: { permission_preferences: preferences } },
+      "user",
+    );
+
+    expect(result.doc).toEqual({
+      models: { permission_preferences: preferences.slice(3) },
+    });
+    expect(result.warnings).toEqual([
+      expect.stringContaining(
+        "limited to the most recent 32 valid entries — 3 older entries ignored",
+      ),
+    ]);
+  });
+
+  it("drops only malformed per-model preferences and keeps valid siblings", () => {
+    const result = sanitizeLayer(
+      {
+        models: {
+          model_preferences: [
+            { agent: "codex", model: "gpt-5.6-sol", effort: "max", fast: true },
+            { agent: "codex", model: "", effort: "high", fast: false },
+            {
+              agent: "claude",
+              model: "claude-opus-5[1m]",
+              effort: "impossible",
+            },
+            { agent: "cursor", model: "composer-2.5" },
+          ],
+        },
+      },
+      "user",
+    );
+
+    expect(result.doc).toEqual({
+      models: {
+        model_preferences: [
+          { agent: "codex", model: "gpt-5.6-sol", effort: "max", fast: true },
+        ],
+      },
+    });
+    expect(result.warnings).toHaveLength(3);
+  });
+
+  it("keeps the newest 128 valid model preferences and lets the last duplicate win", () => {
+    const result = sanitizeLayer(
+      {
+        models: {
+          model_preferences: [
+            {
+              agent: "codex",
+              model: "gpt-5.6-sol",
+              effort: "low",
+            },
+            ...Array.from({ length: 130 }, () => ({
+              agent: "",
+              model: "corrupt",
+            })),
+            {
+              agent: "codex",
+              model: "gpt-5.6-sol",
+              effort: "max",
+              fast: true,
+            },
+          ],
+        },
+      },
+      "user",
+    );
+
+    expect(result.doc).toEqual({
+      models: {
+        model_preferences: [
+          {
+            agent: "codex",
+            model: "gpt-5.6-sol",
+            effort: "max",
+            fast: true,
+          },
+        ],
+      },
+    });
+    expect(result.warnings.length).toBeGreaterThan(0);
   });
 
   it("drops an invalid GitHub method without dropping its valid siblings", () => {

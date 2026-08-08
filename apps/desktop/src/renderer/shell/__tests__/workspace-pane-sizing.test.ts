@@ -14,11 +14,13 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
+  CONVERSATION_COLUMN_ATTR,
   CONVERSATION_MAX_PX,
   CONVERSATION_MIN_PX,
   CONVERSATION_RATIO_DEFAULT,
   CONVERSATION_RATIO_MAX,
   CONVERSATION_RATIO_VAR,
+  WORKBENCH_COLUMN_ATTR,
   WORKBENCH_MIN_PX,
 } from "../conversation/pane-sizing";
 import {
@@ -63,6 +65,41 @@ describe("conversation/workbench sizing bounds stay in lockstep with CSS", () =>
     expect(conversation).toContain(`min-w-[${CONVERSATION_MIN_PX}px]`);
   });
 
+  it("raises the rendered conversation and split-child floors for the active tree", () => {
+    const paneLayout = read("../conversation/pane-layout.tsx");
+    expect(conversation).toContain("onMinimumSizeChange={setPaneMinimumSize}");
+    expect(paneLayout).toContain("paneTreeMinimumSize(node.first)");
+    expect(paneLayout).toContain("minWidth: isRow ? firstMinimum.width : 0");
+    expect(paneLayout).toContain("minWidth: isRow ? secondMinimum.width : 0");
+  });
+
+  it("caps the tree's floor by the room the row can actually hand over", () => {
+    // The inline floor beats the max-width cap, so an un-capped tree minimum
+    // pushed workbench off the edge as soon as the window shrank below what the
+    // split needs. min() re-resolves against the live row on every resize.
+    expect(conversation).toContain(
+      `min(${"${paneMinimumSize.width}"}px, calc(100% - ${"${WORKBENCH_MIN_PX}"}px))`,
+    );
+    expect(conversation).toContain(
+      `min(${"${paneMinimumSize.width}"}px, 100%)`,
+    );
+  });
+
+  it("gates the first right split on reachable width, through every path", () => {
+    const paneLayout = read("../conversation/pane-layout.tsx");
+    expect(paneLayout).toContain("data-pane-layout-surface");
+    expect(paneLayout).toContain("canSplitPaneTree({");
+    expect(paneLayout).toContain("canSplitAtCurrentSize");
+    expect(paneLayout).toContain("handleSplit(paneId, dropZone)");
+    // The menu gate, the mutation-boundary revalidation, and the drop gate all
+    // spend the same measured budget — surface width plus workbench's slack.
+    expect(paneLayout).toContain("measureSplitCapacity(surface)");
+    expect(paneLayout).toContain(
+      "measureSplitCapacity(paneSurfaceRef.current)",
+    );
+    expect(paneLayout).toContain("growablePaneSurfaceWidth(");
+  });
+
   it("the conversation pane's max-width matches its pixel ceiling and share cap", () => {
     expect(conversation).toContain(
       `max-w-[min(${CONVERSATION_MAX_PX}px,${pct(CONVERSATION_RATIO_MAX)}%)]`,
@@ -89,8 +126,13 @@ describe("conversation/workbench sizing bounds stay in lockstep with CSS", () =>
 
   it("paints live drag grow factors directly instead of invalidating an inherited variable", () => {
     expect(conversation).toMatch(/style\.setProperty\(\s*"flex-grow"/);
-    expect(conversation).toContain("[data-zeros-column-3]");
+    expect(conversation).toContain("[${WORKBENCH_COLUMN_ATTR}]");
+    expect(WORKBENCH_COLUMN_ATTR).toBe("data-zeros-column-3");
     expect(workbench).toContain('data-zeros-column-3=""');
+    // Both columns are addressable by name: the split gate measures workbench's
+    // live width through them to know how far the conversation column can grow.
+    expect(conversation).toContain('data-zeros-column-2=""');
+    expect(CONVERSATION_COLUMN_ATTR).toBe("data-zeros-column-2");
   });
 
   it("pins hidden retained layers and iframes during seam gestures", () => {
@@ -143,8 +185,8 @@ describe("conversation/workbench sizing bounds stay in lockstep with CSS", () =>
 
 // ── The workbench expand jerk, guarded ────────────────────────────────────────
 // Collapsing workbench and expanding it again used to snap conversation pane down to
-// its 320px floor and then ease back out to the saved split (measured:
-// 1600 → 320 → 800px). Two independent mistakes combined to produce it, and
+// its 360px floor and then ease back out to the saved split (measured:
+// 1600 → 360 → 800px). Two independent mistakes combined to produce it, and
 // either one alone would bring it back, so both are asserted here.
 describe("collapsing the workbench cannot move the conversation pane", () => {
   const conversation = code("../conversation/conversation-pane.tsx");

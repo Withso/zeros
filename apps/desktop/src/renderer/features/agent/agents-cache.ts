@@ -59,7 +59,10 @@ function writeSnapshot(next: BridgeRegistryAgent[]): void {
   try {
     localStorage.setItem(
       SNAPSHOT_STORAGE_KEY,
-      JSON.stringify({ agents: next, at: Date.now() } satisfies PersistedSnapshot),
+      JSON.stringify({
+        agents: next,
+        at: Date.now(),
+      } satisfies PersistedSnapshot),
     );
   } catch {
     /* quota / private mode — best-effort, non-fatal */
@@ -75,6 +78,9 @@ function writeSnapshot(next: BridgeRegistryAgent[]): void {
 const persistedAtBoot = readSnapshot();
 let agents: BridgeRegistryAgent[] | null = persistedAtBoot?.agents ?? null;
 let lastLoadedAt = persistedAtBoot?.at ?? 0;
+// Only a load that SUCCEEDED confirms the snapshot — `writeSnapshot` runs on
+// that path alone, so a persisted list is a prior confirmed answer.
+let confirmed = persistedAtBoot !== null;
 let inFlight: Promise<BridgeRegistryAgent[]> | null = null;
 const listeners = new Set<() => void>();
 
@@ -84,6 +90,18 @@ function emit(): void {
 
 export function getAgentsSnapshot(): BridgeRegistryAgent[] | null {
   return agents;
+}
+
+/** Whether the published snapshot is an ANSWER rather than a fallback.
+ *
+ *  `runLoad` publishes `[]` when a load fails with nothing on disk, and that
+ *  array is byte-identical to "the engine really has zero adapters". Anything
+ *  that binds durable identity off the registry — auto-bind, its reconcile pass
+ *  — has to tell those apart, or a startup blip pins a chat to the product
+ *  fallback for good. `invalidateAgentsCache` deliberately leaves this alone:
+ *  forcing the next read to hit the engine does not un-answer the last one. */
+export function hasConfirmedAgents(): boolean {
+  return confirmed;
 }
 
 export function subscribeAgents(fn: () => void): () => void {
@@ -137,9 +155,14 @@ async function runLoad(
   force: boolean,
 ): Promise<BridgeRegistryAgent[]> {
   try {
-    const next = await withTimeout(loadFn(force), LIST_AGENTS_TIMEOUT_MS, "listAgents");
+    const next = await withTimeout(
+      loadFn(force),
+      LIST_AGENTS_TIMEOUT_MS,
+      "listAgents",
+    );
     agents = next;
     lastLoadedAt = Date.now();
+    confirmed = true;
     lastError = null;
     writeSnapshot(next);
     emit();
@@ -211,5 +234,9 @@ export function invalidateAgentsCache(): void {
 
 /** React hook — returns the current snapshot (null until first load). */
 export function useAgentsSnapshot(): BridgeRegistryAgent[] | null {
-  return useSyncExternalStore(subscribeAgents, getAgentsSnapshot, getAgentsSnapshot);
+  return useSyncExternalStore(
+    subscribeAgents,
+    getAgentsSnapshot,
+    getAgentsSnapshot,
+  );
 }

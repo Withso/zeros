@@ -1,0 +1,15 @@
+/* Model-pill disclosure follows the width of the chat pane, not the window.
+   The AgentChat root is the named inline-size container. At the first
+   breakpoint the selected model name yields space while effort/Fast remain;
+   at the 360–399px floor the button becomes the agent mark alone. */
+@container agent-chat (max-width: 449.98px) {
+  [data-model-pill-name] {
+    display: none;
+  }
+}
+
+@container agent-chat (max-width: 399.98px) {
+  [data-model-pill-label] {
+    display: none;
+  }
+}

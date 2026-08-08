@@ -27,7 +27,7 @@
 import type { BridgeRegistryAgent } from "../platform/bridge/messages";
 import type { SessionsCtx } from "../features/agent/sessions-context";
 import { getAgentsSnapshot } from "../features/agent/agents-cache";
-import { pickDefaultAgent } from "../features/settings/default-agent";
+import { pickAgentForNewChat } from "../features/settings/default-agent";
 import { newChatBornDefaults } from "../features/agent/new-chat-defaults";
 import { newChatId } from "./chat-id";
 import type { ChatThread } from "./store";
@@ -53,6 +53,7 @@ export function bornChatThread(
     model: born.model,
     effort: born.effort,
     permissionMode: born.permissionMode,
+    ...(born.lastModeId ? { lastModeId: born.lastModeId } : {}),
     ...(born.fast ? { fast: true } : {}),
     title: "Untitled",
     createdAt: Date.now(),
@@ -61,8 +62,14 @@ export function bornChatThread(
 }
 
 function cachedDefaultAgent(): BridgeRegistryAgent | null {
+  // pickAgentForNewChat relaxes from enabled+runnable down to best-detected,
+  // so a warm snapshot binds the chat synchronously even on a machine where
+  // nothing is signed in yet — the composer's sign-in flow is the recovery
+  // surface. Null only for a cold or empty snapshot; AutoBindAgent then
+  // resolves the binding (including the empty-registry product fallback)
+  // once the live registry answers.
   const cached = getAgentsSnapshot();
-  return cached ? pickDefaultAgent(cached) : null;
+  return cached ? pickAgentForNewChat(cached) : null;
 }
 
 /** Open an additional chat tab in an already-active workspace. Unlike
@@ -155,9 +162,9 @@ export async function spawnDefaultChatForWorkspace(args: {
     // it after the Untitled tab is already visible.
     const agent = cachedDefaultAgent();
     // Born with the user's unified new-chat defaults (Settings → Models):
-    // the family favorite model (null = the agent's own catalog default),
-    // the default reasoning effort clamped to that model's ladder, and the
-    // plan/fast posture. Shared with the "+" → Chat and ⌘T paths so they
+    // the global default model (or this family's product fallback), its exact
+    // remembered effort/Fast pair, and the plan posture. Shared with the
+    // "+" → Chat and ⌘T paths so they
     // can never drift. With no agent resolved, generic defaults apply and
     // AutoBindAgent fills the binding on first render.
     const chat = bornChatThread(agent, folder);

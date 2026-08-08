@@ -13,20 +13,67 @@
 // wrong answer, not a stale pixel.
 // ──────────────────────────────────────────────────────────
 
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 
 import { listChatSummariesForFolder } from "./agent-history-client";
 import { onActiveBridgeConnected } from "../../platform/bridge/active-bridge";
 import { useBridge } from "../../platform/bridge/use-bridge";
 import type { ChatSummaryWire } from "./agent-history-client";
+import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
+import { useCachedRead } from "../../state/use-cached-read";
 
 /** Coalesce re-pulls. The engine already debounces its messages broadcast to
  *  250ms, but a streaming background chat still fires it four times a second
  *  and every one of those would otherwise be a round trip for a row that only
  *  needs its counts to look live. The FIRST pull is never delayed. */
 const REPULL_DEBOUNCE_MS = 400;
+const SUMMARY_MAX_AGE_MS = 30_000;
 
 const EMPTY: readonly ChatSummaryWire[] = [];
+const transcriptSummariesCache = new KeyedAsyncCache<
+  readonly ChatSummaryWire[]
+>(32);
+
+/** JSON keeps folder/id boundaries unambiguous even when a path contains the
+ * separator characters older hand-built keys relied on. */
+export function chatTranscriptSummariesKey(
+  folder: string,
+  excludeChatId: string | null | undefined,
+): string {
+  return JSON.stringify([folder, excludeChatId ?? null]);
+}
+
+function chatTranscriptSummariesRequest(key: string): {
+  folder: string;
+  excludeChatId?: string;
+} {
+  const [folder, excludeChatId] = JSON.parse(key) as [string, string | null];
+  return excludeChatId ? { folder, excludeChatId } : { folder };
+}
+
+function fetchChatTranscriptSummaries(
+  key: string,
+): Promise<readonly ChatSummaryWire[]> {
+  return listChatSummariesForFolder(chatTranscriptSummariesRequest(key));
+}
+
+/** Begin the exact-key read on pointer/focus intent. This mutates only the
+ * shared cache; a closed menu has no subscriber, so warming cannot re-render
+ * AgentChat or delay its urgent click. */
+export function warmChatTranscriptSummaries(
+  folder: string | null | undefined,
+  excludeChatId: string | null | undefined,
+): void {
+  if (!folder) return;
+  const key = chatTranscriptSummariesKey(folder, excludeChatId);
+  void transcriptSummariesCache
+    .load(key, () => fetchChatTranscriptSummaries(key), {
+      maxAgeMs: SUMMARY_MAX_AGE_MS,
+    })
+    .catch(() => {
+      // The mounted picker/row reads the cached error and degrades to empty.
+    });
+}
 
 export interface TranscriptSummaries {
   /** Ordered newest-created first. Empty until the first read lands — the row
@@ -61,57 +108,26 @@ export function useChatTranscriptSummaries(
   excludeChatId: string | null | undefined,
   enabled = true,
 ): TranscriptSummaries {
-  const [snapshot, setSnapshot] = useState<{
-    key: string;
-    value: readonly ChatSummaryWire[];
-  } | null>(null);
-  // The key whose read has FINISHED, success or failure. Separate from
-  // `snapshot` because a failure must not overwrite usable data but must still
-  // end the wait — see `loaded`.
-  const [settledKey, setSettledKey] = useState<string | null>(null);
   const bridge = useBridge();
-  // `\u0000` as the escape, never a literal NUL: one raw NUL byte in the
-  // source makes git classify this file as BINARY, which silently drops it
-  // from every diff, review and content grep in the repo.
-  const key = `${folder ?? ""}\u0000${excludeChatId ?? ""}`;
+  const key = folder ? chatTranscriptSummariesKey(folder, excludeChatId) : null;
+  const read = useCachedRead(
+    transcriptSummariesCache,
+    key,
+    fetchChatTranscriptSummaries,
+    { enabled: enabled && !!folder, maxAgeMs: SUMMARY_MAX_AGE_MS },
+  );
 
   useEffect(() => {
-    if (!enabled || !folder) return;
-    let cancelled = false;
-    // Monotonic pull token. DB_CHANGED fires back-to-back while a background
-    // chat streams and the responses can resolve out of order; only the
-    // LATEST issued pull may commit, or the counts walk backwards.
-    let pullGen = 0;
+    if (!enabled || !key) return;
     let timer: ReturnType<typeof setTimeout> | undefined;
-
-    const pull = async () => {
-      const gen = ++pullGen;
-      try {
-        const next = await listChatSummariesForFolder({
-          folder,
-          excludeChatId: excludeChatId ?? undefined,
-        });
-        if (cancelled || gen !== pullGen) return;
-        setSnapshot({ key, value: next });
-      } catch {
-        // Bridge not ready, or a transient transport failure. Keep the last
-        // confirmed snapshot — never reset usable data because a refresh
-        // started (AGENTS.md).
-      } finally {
-        // Settled either way. A superseded or cancelled pull says nothing:
-        // marking the key done from a stale response would end the wait on
-        // behalf of a read that is still running.
-        if (!cancelled && gen === pullGen) setSettledKey(key);
-      }
-    };
-
-    void pull();
 
     const schedule = () => {
       if (timer !== undefined) return;
       timer = setTimeout(() => {
         timer = undefined;
-        void pull();
+        // Invalidation preserves the last confirmed rows and makes the mounted
+        // useCachedRead issue one generation-guarded replacement request.
+        transcriptSummariesCache.invalidate(key);
       }, REPULL_DEBOUNCE_MS);
     };
 
@@ -143,26 +159,23 @@ export function useChatTranscriptSummaries(
     // respawn, a dropped WORKSPACE_REQUEST — therefore left the row empty
     // until something else wrote to the DB, and an idle empty chat writes
     // nothing. `initial: true` is skipped: that fire is the synchronous
-    // already-connected one at subscribe time, which the `void pull()` above
-    // has just covered.
+    // already-connected one at subscribe time, which useCachedRead's initial
+    // load has just covered.
     const offConnected = onActiveBridgeConnected((_client, { initial }) => {
-      if (!initial) void pull();
+      if (!initial) transcriptSummariesCache.invalidate(key);
     });
 
     return () => {
-      cancelled = true;
       if (timer !== undefined) clearTimeout(timer);
       off?.();
       offConnected();
     };
-  }, [bridge, folder, excludeChatId, key, enabled]);
+  }, [bridge, key, enabled]);
 
-  const fresh = snapshot?.key === key;
   return {
-    summaries: fresh ? snapshot.value : EMPTY,
-    // `fresh ||` is not redundant: a success sets both, but the settled key is
-    // set from a `finally` and the snapshot from the try, so reading only one
-    // of them would make the flag depend on which state React committed first.
-    loaded: fresh || settledKey === key,
+    summaries: read.data ?? EMPTY,
+    // A failed cold read settles loading=false with no data, matching the old
+    // "nothing to offer" degradation instead of stranding the provenance row.
+    loaded: key !== null && !read.loading,
   };
 }

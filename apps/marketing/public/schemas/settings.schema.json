@@ -307,7 +307,7 @@
         },
         "default_agent": {
           "type": "string",
-          "description": "Agent the default model belongs to (claude/codex/cursor). Disambiguates a model id that's shared across agents or whose value embeds another family's name."
+          "description": "Agent the default model belongs to. Disambiguates a model id that's shared across agents or whose value embeds another family's name."
         },
         "review": {
           "type": "string",
@@ -315,7 +315,7 @@
         },
         "default_fast_mode": {
           "type": "boolean",
-          "description": "Start new chats in fast mode."
+          "description": "Legacy global Fast default (migration input for the selected model)."
         },
         "default_plan_mode": {
           "type": "boolean",
@@ -329,7 +329,112 @@
           "additionalProperties": {
             "type": "string"
           },
-          "description": "Favorite model id per agent family."
+          "description": "Legacy favorite model id per agent family (migration input)."
+        },
+        "model_preferences": {
+          "maxItems": 128,
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "agent": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Canonical agent family, or extension agent id, that owns this model."
+                  },
+                  "model": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Exact provider model identifier."
+                  },
+                  "effort": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh",
+                      "max",
+                      "ultracode"
+                    ],
+                    "description": "Last reasoning effort selected for this exact model."
+                  },
+                  "fast": {
+                    "type": "boolean",
+                    "description": "Last Fast-mode selection for this exact model."
+                  }
+                },
+                "required": [
+                  "agent",
+                  "model",
+                  "effort"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "agent": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Canonical agent family, or extension agent id, that owns this model."
+                  },
+                  "model": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Exact provider model identifier."
+                  },
+                  "effort": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh",
+                      "max",
+                      "ultracode"
+                    ],
+                    "description": "Last reasoning effort selected for this exact model."
+                  },
+                  "fast": {
+                    "type": "boolean",
+                    "description": "Last Fast-mode selection for this exact model."
+                  }
+                },
+                "required": [
+                  "agent",
+                  "model",
+                  "fast"
+                ]
+              }
+            ]
+          },
+          "description": "Bounded per-model reasoning and Fast-mode memory. Entries are isolated by agent family and exact model id."
+        },
+        "permission_preferences": {
+          "maxItems": 32,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "agent": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Canonical agent family, or extension agent id, that owns this permission choice."
+              },
+              "mode": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Exact native permission-mode identifier."
+              }
+            },
+            "required": [
+              "agent",
+              "mode"
+            ]
+          },
+          "description": "Bounded per-agent permission-mode memory. Exact native ids preserve modes that share the same coarse posture."
         },
         "chat_title_model": {
           "type": "string",
@@ -348,7 +453,7 @@
                 "max",
                 "ultracode"
               ],
-              "description": "Default reasoning effort for Claude models in new chats."
+              "description": "Legacy Claude-family effort (migration input for the selected model)."
             },
             "fallback_model": {
               "type": "string",
@@ -397,7 +502,7 @@
                 "max",
                 "ultracode"
               ],
-              "description": "Default reasoning effort for Codex (GPT) models in new chats."
+              "description": "Legacy Codex-family effort (migration input for the selected model)."
             }
           },
           "description": "Codex-specific model defaults."

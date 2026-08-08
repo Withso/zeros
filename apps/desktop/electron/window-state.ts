@@ -22,7 +22,7 @@ export const WINDOW_STATE_FILE = "window-state.json";
 /** Must match the BrowserWindow `minWidth`/`minHeight` in main.ts —
  *  a persisted size below the floor (corrupt file, old build) would
  *  otherwise fight the live window's own minimum. */
-export const MAIN_WINDOW_MIN_WIDTH = 800;
+export const MAIN_WINDOW_MIN_WIDTH = 840;
 export const MAIN_WINDOW_MIN_HEIGHT = 700;
 
 /** A restored position must overlap some display's work area by at

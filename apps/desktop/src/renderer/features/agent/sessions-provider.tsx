@@ -975,7 +975,13 @@ export function AgentSessionsProvider({
 
   const listAgents = useCallback<SessionsActions["listAgents"]>(
     async (force = false) => {
-      if (!bridge) return [];
+      // Throw like initAgent rather than resolving [] — a missing bridge is
+      // "engine unreachable", not an authoritative "zero adapters" registry.
+      // A silent [] here used to flow into the agents-cache as a SUCCESSFUL
+      // load: it overwrote the persisted stale-while-revalidate snapshot and
+      // pinned the 30s freshness TTL on a lie, so agent resolution (new-chat
+      // binding, pickers) saw "no agents installed" during a bridge blip.
+      if (!bridge) throw new Error("Engine not connected");
       const resp = await bridge.request<AgentAgentsListMessage>(
         { type: "AGENT_LIST_AGENTS", force },
         30_000,

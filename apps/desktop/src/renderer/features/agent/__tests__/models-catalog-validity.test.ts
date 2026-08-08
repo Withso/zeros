@@ -138,8 +138,8 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
     ]) {
       expect(values).toContain(v);
     }
-    // Order is load-bearing: it drives BOTH the picker's display order and its
-    // ⌘N shortcuts (agent-model-menu renders ⌘{i+1}). Opus 5 sits directly
+    // Order is load-bearing: it drives the picker's display order. Opus 5 sits
+    // directly
     // above the 4.8 it supersedes, so the list stays newest-first per family.
     expect(values).toEqual([
       "claude-fable-5[1m]",

@@ -119,13 +119,14 @@ const PromptInputSubmit = React.forwardRef<
     <Button
       ref={ref}
       type="submit"
+      variant="default"
       size="icon"
       data-slot="prompt-input-submit"
       data-status={status}
       disabled={disabled ?? (isBusy && status === "submitted")}
-      // The send/stop button uses a 4px radius rather than the stock recipe's
-      // rounded-full circle.
-      className={cn("size-7 rounded-sm", className)}
+      // Send/stop is the composer's primary action: a borderless circle in
+      // both themes, matching the desktop control scale at every state.
+      className={cn("size-7 rounded-full border-0", className)}
       aria-label={isBusy ? "Submitting" : "Send message"}
       {...props}
     >

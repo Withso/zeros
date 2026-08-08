@@ -12,6 +12,7 @@
 
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useLayoutEffect,
@@ -32,16 +33,20 @@ import type { InitializeResponse } from "../../platform/bridge/agent-events";
 import {
   agentFamily,
   modelsForAgent as catalogModelsForAgent,
-  displayModelLabel,
+  configuredModelLabelParts,
   effortLabel,
   permissionMenuItems,
+  resolveModelOption,
 } from "./model-catalog";
-import {
-  AgentModelMenu,
-  type AgentModelSelection,
-} from "./agent-model-menu";
+import type { ModelConfiguration } from "./model-preferences";
+import { AgentModelMenu, type AgentModelSelection } from "./agent-model-menu";
 import { AgentIcon } from "./agent-icon";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
+import {
+  resolvePermissionFeedbackPlacement,
+  type PermissionFeedbackPlacement,
+} from "./permission-feedback-placement";
+import "./composer-pills.css";
 
 // Wave 3 close-out (2026-05-16): the in-file useClickAway helper that
 // every pill once shared was deleted. All pills now use shadcn Popover,
@@ -94,8 +99,9 @@ export const ComposerConcealedContext = createContext(false);
 // ── ModelPill ────────────────────────────────────────────
 //
 // The pill opens the UNIFIED agent+model dropdown
-// (AgentModelMenu — ★ favorites + one rail tab per agent, search, 1/2/3 +
-// ⌘1…⌘9 shortcuts). A same-agent pick routes through `onChange` exactly as
+// (AgentModelMenu — focused universal search, one collapsed selected row, and
+// a grouped hover/focus catalog). A
+// same-agent pick routes through `onChange` exactly as
 // before; a pick under a DIFFERENT agent routes through `onSelectAgentModel`
 // so the host can move the chat to that agent (agent-chat opens a tab bound
 // to it — a chat's agentId is set-once by design).
@@ -105,7 +111,10 @@ export function ModelPill({
   iconUrl,
   initialize,
   value,
+  effort,
+  fast,
   onChange,
+  onConfigure,
   onSelectAgentModel,
   redirectCrossAgent,
 }: {
@@ -117,7 +126,10 @@ export function ModelPill({
    *  catalog (initialize._meta.models) over the curated fallback. */
   initialize: InitializeResponse | null;
   value: string | null;
+  effort: ChatEffort;
+  fast: boolean;
   onChange: (next: string | null) => void;
+  onConfigure: (configuration: ModelConfiguration) => void;
   /** A pick under a DIFFERENT agent (the unified dropdown lists them all).
    *  Omitted ⇒ cross-agent rows still render but picking one is a no-op. */
   onSelectAgentModel?: (sel: AgentModelSelection) => void;
@@ -139,12 +151,22 @@ export function ModelPill({
   // `initialize` prop) or the cold-start floor — both reactive to prop changes,
   // so no manual catalog warm/refresh is needed (the remote system is gone).
   const models = catalogModelsForAgent(agentId, initialize);
-  // A null model means "the agent's catalog default" — resolve it the same
-  // way the Effort/Fast capability gates do (models[0]) so the pill, the
-  // menu's ✓, and the toggles always agree.
-  const activeValue = value ?? models[0]?.value ?? null;
-  const current = models.find((m) => m.value === activeValue) ?? null;
-  const displayLabel = displayModelLabel(agentId, current?.label ?? "Model");
+  // A null model means "the agent's global default". resolveModelOption is the
+  // ONE place that chain lives, and the Effort/Fast capability gates plus the
+  // spawn env resolve through it too — so the pill, the menu's ✓, the toggles,
+  // and the model the engine actually runs can never disagree.
+  const current =
+    models.find((m) => m.value === value) ??
+    resolveModelOption(agentId, value ?? null, initialize);
+  const activeValue = current?.value ?? value ?? null;
+  const displayLabel = configuredModelLabelParts(
+    agentId,
+    activeValue,
+    current?.label ?? "Model",
+    effort,
+    fast,
+    initialize,
+  );
 
   // If the agent family has no catalog (unknown wrapper) AND the agent
   // didn't advertise its own models either, hide the pill — a dropdown
@@ -153,10 +175,11 @@ export function ModelPill({
 
   return (
     <AgentModelMenu
-      value={{ agentId, model: activeValue }}
+      value={{ agentId, model: activeValue, effort, fast }}
       open={open && !concealed}
       onOpenChange={setOpen}
       redirectCrossAgent={redirectCrossAgent}
+      onConfigure={onConfigure}
       onSelect={(sel) => {
         if (agentFamily(sel.agentId) === agentFamily(agentId)) {
           onChange(sel.model);
@@ -166,7 +189,7 @@ export function ModelPill({
       }}
     >
       {/* 12px logo and no ChevronDown caret; the pill is just logo + label. */}
-      <button type="button" className={TOOLBAR_PILL}>
+      <button type="button" className={`${TOOLBAR_PILL} min-w-0`}>
         <AgentIcon
           agentId={agentId}
           iconUrl={iconUrl ?? null}
@@ -174,7 +197,21 @@ export function ModelPill({
           monochrome
           className="shrink-0"
         />
-        <span>{displayLabel}</span>
+        <span className="sr-only">
+          Model: {displayLabel.model} {displayLabel.metadata.join(" ")}
+        </span>
+        <span
+          data-model-pill-label
+          aria-hidden="true"
+          className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap"
+        >
+          <span data-model-pill-name>{displayLabel.model} </span>
+          {displayLabel.metadata.length > 0 && (
+            <span data-model-pill-metadata className="text-fg2 opacity-80">
+              {displayLabel.metadata.join(" ")}
+            </span>
+          )}
+        </span>
       </button>
     </AgentModelMenu>
   );
@@ -270,7 +307,7 @@ export function EffortPill({
 // Fast mode — lower-latency inference at higher token cost. Claude maps it to
 // the SDK `fastMode` setting (Opus only); Codex to `service_tier: "fast"`
 // (GPT-5.x). Off = outline bolt only; On = engaged chrome + filled bolt +
-// "Fast" label. The parent only renders this when the model supports it
+// no label. The parent only renders this when the model supports it
 // (agentSupportsFast).
 
 export function FastPill({
@@ -281,9 +318,7 @@ export function FastPill({
   onToggle: () => void;
 }) {
   return (
-    <Tooltip
-      label={active ? "Disable fast mode" : "Enable fast mode"}
-    >
+    <Tooltip label={active ? "Disable fast mode" : "Enable fast mode"}>
       <button
         type="button"
         onClick={onToggle}
@@ -292,7 +327,6 @@ export function FastPill({
         className={active ? TOOLBAR_PILL_ACTIVE : TOOLBAR_PILL}
       >
         <Zap size={16} className={active ? "fill-current" : ""} />
-        {active && <span>Fast</span>}
       </button>
     </Tooltip>
   );
@@ -304,7 +338,8 @@ export function FastPill({
 // the "+" → Permissions submenu. Icon-only at rest: no
 // resting background, icon in --fg2, hover gets the bg-bg3 wash (mirrors the
 // stripped EffortPill). Clicking the ICON cycles the agent's REAL native modes
-// in menu order (wrapping); the picked mode's name flashes to the right for 3s;
+// in menu order (wrapping); the picked mode's name flashes to its right for
+// 3s, moving above only when the toolbar has no room;
 // hover names the current mode (tooltip = just the name, no prefix). Each
 // family's modes get their own icon:
 //
@@ -340,6 +375,10 @@ const PERMISSION_MODE_ICONS: Record<string, Record<string, LucideIcon>> = {
   },
 };
 
+const PERMISSION_FEEDBACK_DURATION_MS = 3000;
+const PERMISSION_FEEDBACK_BOUNDARY = "[data-permission-feedback-boundary]";
+const COMPOSER_TOOLBAR_ACTIONS = "[data-composer-toolbar-actions]";
+
 export function PermissionToggle({
   agentId,
   model,
@@ -364,8 +403,14 @@ export function PermissionToggle({
   // timer on the label.
   const [animKey, setAnimKey] = useState(0);
   const [labelVisible, setLabelVisible] = useState(false);
+  const [tooltipOpen, setTooltipOpen] = useState(false);
+  const [feedbackPlacement, setFeedbackPlacement] =
+    useState<PermissionFeedbackPlacement>("right");
   const userToggledRef = useRef(false);
+  const pointerOverTriggerRef = useRef(false);
   const hideLabelTimerRef = useRef<number | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const feedbackRef = useRef<HTMLSpanElement | null>(null);
   useLayoutEffect(() => {
     if (userToggledRef.current) {
       userToggledRef.current = false;
@@ -376,8 +421,13 @@ export function PermissionToggle({
       }
       hideLabelTimerRef.current = window.setTimeout(() => {
         setLabelVisible(false);
+        // Radix has already consumed the pointer-enter that preceded a click,
+        // so a stationary pointer will not emit another event after the forced
+        // closed period. Re-open explicitly once feedback ends, but only while
+        // the pointer is still genuinely over the permission trigger.
+        if (pointerOverTriggerRef.current) setTooltipOpen(true);
         hideLabelTimerRef.current = null;
-      }, 3000);
+      }, PERMISSION_FEEDBACK_DURATION_MS);
     }
   }, [currentModeId]);
   useEffect(
@@ -389,8 +439,67 @@ export function PermissionToggle({
     [],
   );
 
+  const measureFeedbackPlacement = useCallback(() => {
+    const trigger = triggerRef.current;
+    const feedback = feedbackRef.current;
+    if (!trigger || !feedback) return;
+
+    const triggerRect = trigger.getBoundingClientRect();
+    const boundary = trigger.closest<HTMLElement>(PERMISSION_FEEDBACK_BOUNDARY);
+    const fallbackBoundary = trigger.closest<HTMLElement>("[data-pane-root]");
+    const boundaryRect = (
+      boundary ?? fallbackBoundary
+    )?.getBoundingClientRect();
+    let boundaryRight =
+      boundaryRect?.right ?? document.documentElement.clientWidth;
+    const actions = boundary?.querySelector<HTMLElement>(
+      COMPOSER_TOOLBAR_ACTIONS,
+    );
+    if (actions) {
+      boundaryRight = Math.min(
+        boundaryRight,
+        actions.getBoundingClientRect().left,
+      );
+    }
+
+    const next = resolvePermissionFeedbackPlacement({
+      triggerRight: triggerRect.right,
+      feedbackWidth: feedback.getBoundingClientRect().width,
+      boundaryRight,
+    });
+    setFeedbackPlacement((current) => (current === next ? current : next));
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!labelVisible) return;
+    measureFeedbackPlacement();
+
+    const trigger = triggerRef.current;
+    const feedback = feedbackRef.current;
+    const boundary = trigger?.closest<HTMLElement>(
+      PERMISSION_FEEDBACK_BOUNDARY,
+    );
+    const actions = boundary?.querySelector<HTMLElement>(
+      COMPOSER_TOOLBAR_ACTIONS,
+    );
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(measureFeedbackPlacement);
+    if (trigger) observer?.observe(trigger);
+    if (feedback) observer?.observe(feedback);
+    if (boundary) observer?.observe(boundary);
+    if (actions) observer?.observe(actions);
+    window.addEventListener("resize", measureFeedbackPlacement);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", measureFeedbackPlacement);
+    };
+  }, [labelVisible, measureFeedbackPlacement]);
+
   const items = permissionMenuItems(agentId, model);
-  // No native-mode vocabulary for this agent → no toggle.
+  // No native-mode vocabulary for this agent → no toggle. This check stays
+  // below every hook because a chat can switch between supported agents.
   if (items.length === 0) return null;
 
   let idx = items.findIndex((i) => i.modeId === currentModeId);
@@ -406,11 +515,27 @@ export function PermissionToggle({
     // The transient name label sits OUTSIDE the button (a non-interactive
     // sibling), so only the icon itself is the click target — clicking where
     // the name flashes must NOT cycle the mode.
-    <span className="inline-flex items-center">
-      <Tooltip label={current.label}>
+    <span className="relative inline-flex shrink-0 items-center">
+      <Tooltip
+        label={current.label}
+        delayDuration={0}
+        open={labelVisible ? false : tooltipOpen}
+        onOpenChange={setTooltipOpen}
+      >
         <button
+          ref={triggerRef}
           type="button"
+          onPointerEnter={() => {
+            pointerOverTriggerRef.current = true;
+          }}
+          onPointerLeave={() => {
+            pointerOverTriggerRef.current = false;
+          }}
           onClick={() => {
+            // A tooltip that was already open after a long hover must yield to
+            // the click feedback before the transient label is shown.
+            setTooltipOpen(false);
+            setFeedbackPlacement("right");
             // Arm the animation only for a real cycle (a single-mode list
             // has next === current — clicking changes nothing, so don't animate).
             if (next.modeId !== current.modeId) userToggledRef.current = true;
@@ -421,19 +546,29 @@ export function PermissionToggle({
         >
           {/* Icon — drops in gently from the top, but ONLY on a user toggle
               (keyed remount; key 0 = no animation class, same as EffortPill). */}
-          <span key={animKey} className={animKey > 0 ? `flex ${dropIn}` : "flex"}>
+          <span
+            key={animKey}
+            className={animKey > 0 ? `flex ${dropIn}` : "flex"}
+          >
             <Icon size={16} />
           </span>
         </button>
       </Tooltip>
-      {/* The picked mode's name, flashed to the RIGHT of the icon for 3s after
-          each user toggle. Shares the icon's animKey so both remount + drop in
-          together — the name on a 30ms delay (fill-mode both holds it invisible
-          through the delay) so it trails the icon just slightly.
-          The outer span clips the slide (the animated element can't clip
-          itself), mirroring EffortPill's button-clips-label structure. */}
+      {/* The picked mode's name floats to the RIGHT when it fits, then moves
+          above only when the toolbar boundary/actions leave insufficient room.
+          Absolute positioning is load-bearing: feedback never consumes toolbar
+          width or pushes this single-row composer onto a second line. */}
       {labelVisible && (
-        <span className="text-fg2 inline-flex items-center overflow-hidden py-1 pl-0.5 text-xs font-medium">
+        <span
+          ref={feedbackRef}
+          data-permission-mode-feedback
+          data-placement={feedbackPlacement}
+          className={`text-fg2 pointer-events-none absolute z-[2] inline-flex items-center overflow-hidden py-1 text-xs font-medium whitespace-nowrap ${
+            feedbackPlacement === "right"
+              ? "top-1/2 left-full ml-1 -translate-y-1/2"
+              : "bottom-full left-1/2 mb-1 -translate-x-1/2"
+          }`}
+        >
           <span
             key={animKey}
             className="[animation:zeros-effort-label-in_520ms_cubic-bezier(0.22,1,0.36,1)_30ms_both]"

@@ -21,6 +21,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -687,7 +688,12 @@ export function useComposerEditor(
         onPickSlash,
         onPickPr,
       }),
-      Placeholder.configure({ placeholder }),
+      // The editor is intentionally created once. Resolve the current copy
+      // through optsRef so the same Placeholder plugin can switch from the
+      // new-chat hint to "Send follow up" after the first prompt.
+      Placeholder.configure({
+        placeholder: () => optsRef.current.placeholder,
+      }),
       UndoRedo,
     ],
     // Built once — all dynamic data flows through refs above.
@@ -755,6 +761,19 @@ export function useComposerEditor(
 
   const editorRef = useRef<Editor | null>(null);
   editorRef.current = editor;
+
+  const refreshPlaceholderDecoration = useCallback(() => {
+    const current = editorRef.current;
+    if (!current || current.isDestroyed) return;
+    // Placeholder is a ProseMirror decoration. Reading optsRef makes its text
+    // dynamic, but the view still needs one transaction to recompute the
+    // decoration when only React state changed. An empty transaction preserves
+    // the document, selection, history, and staged attachments.
+    current.view.dispatch(current.state.tr);
+  }, []);
+  useLayoutEffect(() => {
+    refreshPlaceholderDecoration();
+  }, [placeholder, refreshPlaceholderDecoration]);
 
   // While a dispatcher-created worktree is still being provisioned, every
   // graph write is skipped (executeGraphSync — a write into the reserved path
