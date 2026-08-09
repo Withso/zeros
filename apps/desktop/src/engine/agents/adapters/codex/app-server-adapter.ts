@@ -1099,12 +1099,24 @@ export class CodexAppServerAdapter implements AgentAdapter {
     this.drainPendingApprovals(s, s.runtimeAlive);
     s.pendingQuestions.clear();
     this.disposing.add(sessionId);
+    // Drop the session BEFORE the teardown attempt, so a failure reports itself
+    // without pinning an un-retryable state. The runtime memoizes its dispose
+    // promise (a retry would re-await the same hung process-group stop) and the
+    // gateway has already cleared its routing, so keeping the entry would only
+    // leave a forgotten session that a late runtime exit could still drive —
+    // while making the workspace permanently unarchivable for this process.
+    this.sessions.delete(sessionId);
     try {
       let disposeFailed = false;
       let disposeError: unknown;
       try {
-        // Surface process-group teardown failure to the gateway. Ordinary tab
-        // close remains best-effort there; archive/delete uses failClosed.
+        // Codex is the one adapter that owns an explicit process-group stop
+        // (stdio-process stop() SIGTERMs, escalates to SIGKILL, then awaits the
+        // real exit), so a rejection here genuinely means a child may still be
+        // alive in the worktree. Surface it: ordinary tab close stays
+        // best-effort in the gateway, archive/delete passes failClosed and
+        // aborts. A retry then proceeds — the child has already been SIGKILLed
+        // and there is no further escalation available.
         await s.runtime.dispose();
       } catch (err) {
         disposeFailed = true;
@@ -1112,7 +1124,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
       }
       await removeSessionDir(s.zerosSessionId).catch(() => {});
       if (disposeFailed) throw disposeError;
-      if (this.sessions.get(sessionId) === s) this.sessions.delete(sessionId);
     } finally {
       // Keep the suppression alive briefly past dispose() in case the child's
       // exit event lands a tick later, then release the marker.

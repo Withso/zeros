@@ -85,28 +85,19 @@ function send(msg) {
   }
 }
 
-/** SIGKILL every process still descended from the PTY shell. Interactive job
- *  control gives background jobs their OWN process groups, so killing only the
- *  shell's group misses `cmd &`, `nohup`, and `disown`. Walk parent links BEFORE
- *  killing the shell, while those jobs still have an attributable owner.
- *  Best-effort POSIX fallback; Windows retains node-pty's own teardown. */
-function killDescendants(rootPid) {
-  if (
-    process.platform === "win32" ||
-    typeof rootPid !== "number" ||
-    rootPid <= 0
-  ) {
-    return;
-  }
+/** parentPid → child pids, read from one `ps` sweep. `-A -o` is the portable
+ *  spelling: BSD `-ax` and procps disagree, but `-A` means "every process" on
+ *  both macOS and Linux. Returns null when the table can't be read. */
+function readProcessTree() {
   let rows = "";
   try {
-    rows = execFileSync("ps", ["-axo", "pid=,ppid="], {
+    rows = execFileSync("ps", ["-A", "-o", "pid=,ppid="], {
       encoding: "utf8",
       timeout: 1000,
-      maxBuffer: 4 * 1024 * 1024,
+      maxBuffer: 8 * 1024 * 1024,
     });
   } catch {
-    return;
+    return null;
   }
   const children = new Map();
   for (const line of rows.split("\n")) {
@@ -118,6 +109,26 @@ function killDescendants(rootPid) {
     siblings.push(pid);
     children.set(parentPid, siblings);
   }
+  return children;
+}
+
+/** SIGKILL every process still descended from the PTY shell. Interactive job
+ *  control gives background jobs their OWN process groups, so killing only the
+ *  shell's group misses `cmd &`, `nohup`, and `disown`. Walk parent links BEFORE
+ *  killing the shell, while those jobs still have an attributable owner.
+ *  Best-effort POSIX fallback; Windows retains node-pty's own teardown.
+ *  `tree` lets a sweep over many shells (shutdown) share ONE `ps` read instead
+ *  of blocking the host's event loop for up to 1s per session. */
+function killDescendants(rootPid, tree) {
+  if (
+    process.platform === "win32" ||
+    typeof rootPid !== "number" ||
+    rootPid <= 0
+  ) {
+    return;
+  }
+  const children = tree || readProcessTree();
+  if (!children) return;
   const descendants = [];
   const pending = [...(children.get(rootPid) || [])];
   while (pending.length > 0) {
@@ -143,8 +154,8 @@ function killDescendants(rootPid) {
  *  Both are best-effort. Used by BOTH the interactive `kill`
  *  message (the × button) AND shutdown, so a user-closed terminal is torn down
  *  exactly as thoroughly as app-quit — they must never drift apart. */
-function killProc(p) {
-  killDescendants(p.pid);
+function killProc(p, tree) {
+  killDescendants(p.pid, tree);
   try {
     p.kill();
   } catch {
@@ -269,8 +280,11 @@ function shutdown() {
   shuttingDown = true;
   // Same complete teardown as the interactive × (killProc): SIGHUP the shell +
   // SIGKILL its process group, so no shell or backgrounded child lingers when
-  // the engine goes away.
-  for (const p of sessions.values()) killProc(p);
+  // the engine goes away. ONE process-table read is shared across every
+  // session — quit must not serialise N blocking `ps` calls before the first
+  // shell is even signalled.
+  const tree = sessions.size > 0 ? readProcessTree() : null;
+  for (const p of sessions.values()) killProc(p, tree);
   sessions.clear();
   process.exit(0);
 }

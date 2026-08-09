@@ -1470,7 +1470,15 @@ export class WorkspaceService {
     // Use the SAME folder→id mapping the
     // chat redaction uses (under a workspace → its id; an unmanaged folder → an
     // ext:<hash> token or the raw string, both → null).
-    const mapped = this.redactChatFolderForRemote(cwdOrId, listWorkspaces({}));
+    // An unreadable state DB degrades to the containment answer below rather
+    // than throwing — callers here are gates and cleanup paths, and the old
+    // root-first order never surfaced a DB error to them.
+    let mapped: string | null = null;
+    try {
+      mapped = this.redactChatFolderForRemote(cwdOrId, listWorkspaces({}));
+    } catch {
+      mapped = null;
+    }
     if (mapped === LOCAL_MAIN_WORKSPACE_ID) return LOCAL_MAIN_WORKSPACE_ID;
     if (mapped && mapped !== cwdOrId && !mapped.startsWith("ext:"))
       return mapped;

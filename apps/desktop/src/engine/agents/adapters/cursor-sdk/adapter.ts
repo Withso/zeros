@@ -1276,23 +1276,21 @@ export class CursorSdkAdapter implements AgentAdapter {
     // session is superseded mid-turn (one-live-session-per-chat teardown in the
     // engine) — mirrors the claude/codex deliberate-teardown semantics.
     session.cancelRequested = true;
-    let disposeFailed = false;
-    let disposeError: unknown;
+    this.sessions.delete(sessionId);
     try {
       await session.activeRun?.cancel();
-    } catch (err) {
-      disposeFailed = true;
-      disposeError = err;
+    } catch {
+      // Best effort, and deliberately NOT fail-closed for the lifecycle reaper:
+      // cancelling an already-finished run rejects routinely, and the SDK owns
+      // the child either way — so a throw here says nothing about whether a
+      // process survived. See CodexAppServerAdapter.disposeSession for the one
+      // teardown that does observe a real process-group stop.
     }
     try {
       session.agent.close?.();
-    } catch (err) {
-      if (!disposeFailed) disposeError = err;
-      disposeFailed = true;
+    } catch {
+      /* ignore */
     }
-    if (disposeFailed) throw disposeError;
-    if (this.sessions.get(sessionId) === session)
-      this.sessions.delete(sessionId);
   }
 
   async dispose(): Promise<void> {

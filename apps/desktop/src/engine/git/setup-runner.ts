@@ -219,15 +219,35 @@ export class SetupManager {
     }
   }
 
+  /** Cancel a start that has NOT spawned yet, without touching a live PTY.
+   *  Retires the slot so an immediate rerun isn't blocked by a flight that is
+   *  only going to abort; the aborting start's `finally` checks identity, so
+   *  handing the slot over here is safe. Returns true when one was retired.
+   *
+   *  Separate from stop() because the archive/delete reaper must cancel these
+   *  BEFORE it enumerates processes — a pre-spawn flight owns no PTY to
+   *  enumerate, and its login-shell probe would otherwise spend the lifecycle
+   *  drain deadline on a child that must never exist. Killing live PTYs that
+   *  early would be actively wrong: PtyService.kill() drops the session
+   *  synchronously and waitForExit() resolves true for an unknown one, so a
+   *  setup PTY killed before enumeration is invisible to the reaper's exit
+   *  wait and the worktree could be removed while the install still runs. */
+  cancelPendingStart(workspaceId: string): boolean {
+    const flight = this.starting.get(workspaceId);
+    if (!flight) return false;
+    flight.cancelled = true;
+    this.starting.delete(workspaceId);
+    return true;
+  }
+
   /** Stop a live run without treating it as a failure. Flags the entry so the
    *  PTY's kill-exit records "stopped" (not "failed"), flips the state now for
    *  a snappy UI, and kills the PTY. With no live PTY (the run already ended,
    *  or the engine restarted mid-run) it just clears a stale "running" marker. */
   stop(workspaceId: string): void {
-    const flight = this.starting.get(workspaceId);
-    if (flight) {
-      flight.cancelled = true;
-      this.starting.delete(workspaceId);
+    // A pre-spawn flight never published "running" itself, so a user-driven
+    // Stop publishes the stopped state on its behalf.
+    if (this.cancelPendingStart(workspaceId)) {
       this.setState(workspaceId, "stopped");
     }
     const entry = this.entries.get(workspaceId);

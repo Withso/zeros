@@ -698,28 +698,46 @@ export class ZerosEngine {
             (!relative.startsWith("..") && !path.isAbsolute(relative))
           );
         };
-        // Path containment alone is insufficient: a separately registered,
-        // more-specific workspace may live below this folder. Canonical owner
-        // wins; raw containment is only the compatibility fallback for legacy
-        // engine resources that predate workspace binding.
-        const belongsToWorkspace = (candidate: string): boolean => {
+        // Resolving an owner reads the workspace list, and the same folder
+        // backs many PTYs/terminals/chats — memoize per reap so one lifecycle
+        // costs one lookup per DISTINCT path.
+        const ownerCache = new Map<string, string | null>();
+        const ownerOf = (candidate: string): string | null => {
+          const cached = ownerCache.get(candidate);
+          if (cached !== undefined) return cached;
+          let owner: string | null = null;
           try {
-            const owner = this.workspace.workspaceIdForCwd(candidate);
-            return owner ? owner === workspaceId : isUnderRoot(candidate);
+            owner = this.workspace.workspaceIdForCwd(candidate);
           } catch {
-            return isUnderRoot(candidate);
+            owner = null;
           }
+          ownerCache.set(candidate, owner);
+          return owner;
         };
+        // Path containment alone is insufficient: a separately registered,
+        // more-specific workspace may live below this folder. A RESOLVED owner
+        // is authoritative — it must be able to EXCLUDE as well as include —
+        // and raw containment is only the fallback for an unresolvable folder
+        // (a legacy engine resource that predates workspace binding, or a
+        // delete whose row is already gone).
+        const belongsToWorkspace = (candidate: string): boolean => {
+          const owner = ownerOf(candidate);
+          return owner ? owner === workspaceId : isUnderRoot(candidate);
+        };
+        // Cancel manager-owned PRE-SPAWN flights before waiting: setup/run env
+        // resolution can otherwise consume the whole lifecycle timeout even
+        // though no child exists yet. These cancel-only entry points must never
+        // kill a live PTY — kill() drops the session synchronously and
+        // waitForExit() resolves true for an unknown one, so anything killed
+        // before the enumeration below would be invisible to the exit wait and
+        // the worktree could be removed while the process is still exiting.
+        // The live ones are stopped after their exit observers are registered.
+        this.setup.cancelPendingStart(workspaceId);
+        this.runs.cancelPendingStartsForWorkspace(workspaceId);
         // Starts already admitted before this lifecycle acquired its
         // single-flight may still be resolving environment/session state and
         // therefore have no PTY/session to enumerate yet. Wait for them first.
         // Starts arriving after acquisition fail the lifecycle gate.
-        // Cancel manager-owned pre-spawn flights before waiting: setup/run env
-        // resolution can otherwise consume the whole lifecycle timeout even
-        // though no child exists yet. The calls are repeated after enumeration
-        // as an idempotent guard for an already-admitted flight settling here.
-        this.setup.stop(workspaceId);
-        this.runs.stopAllForWorkspace(workspaceId);
         await this.waitForWorkspaceProcessStarts(workspaceId);
 
         // Agent prompts are not necessarily represented by a workspace PTY
@@ -813,13 +831,19 @@ export class ZerosEngine {
           this.terminals.sessionIds().filter((sessionId) => {
             const terminal = this.terminals.get(sessionId);
             if (!terminal) return false;
-            try {
-              const owner = this.workspace.workspaceIdForCwd(terminal.cwd);
-              if (owner) return owner === workspaceId;
-            } catch {
-              /* fall back to the durable registry binding below */
-            }
-            return terminal.workspaceId === workspaceId;
+            // A resolved owner is authoritative both ways, so a row whose
+            // durable binding predates a more-specific nested workspace is
+            // excluded here rather than reaped across that boundary.
+            const owner = ownerOf(terminal.cwd);
+            if (owner) return owner === workspaceId;
+            // Unresolvable owner (a legacy row that carried only a raw cwd, or
+            // a delete whose workspace row is already gone): fall back to the
+            // durable binding, then to raw containment — the same set the PTY
+            // filter admits, so every terminal we kill also gets the
+            // explicit-close marker and the stale-row prune below.
+            return (
+              terminal.workspaceId === workspaceId || isUnderRoot(terminal.cwd)
+            );
           }),
         );
         for (const sessionId of terminalIds) {
