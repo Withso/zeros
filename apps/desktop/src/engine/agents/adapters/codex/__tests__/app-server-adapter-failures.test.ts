@@ -157,8 +157,12 @@ describe("classifyThreadFailure", () => {
       new Error("no rollout found"),
       "loadSession",
     );
-    expect((onPrompt as AgentFailureError).failure.message).toContain("mid-turn");
-    expect((onLoad as AgentFailureError).failure.message).toContain("Start a fresh chat");
+    expect((onPrompt as AgentFailureError).failure.message).toContain(
+      "mid-turn",
+    );
+    expect((onLoad as AgentFailureError).failure.message).toContain(
+      "Start a fresh chat",
+    );
   });
 
   it("returns AgentFailureError(auth-required) on auth-hint errors", () => {
@@ -168,6 +172,22 @@ describe("classifyThreadFailure", () => {
     );
     expect(result).toBeInstanceOf(AgentFailureError);
     expect((result as AgentFailureError).failure.kind).toBe("auth-required");
+  });
+
+  it("returns a terminal rate-limited failure for provider throttling", () => {
+    for (const message of [
+      "HTTP 429: too many requests",
+      "usage limit exceeded",
+      "server overloaded",
+    ]) {
+      const result = classifyThreadFailure(new Error(message), "prompt");
+      expect(result).toBeInstanceOf(AgentFailureError);
+      expect((result as AgentFailureError).failure).toMatchObject({
+        kind: "rate-limited",
+        stage: "prompt",
+        agentId: "codex",
+      });
+    }
   });
 
   it("returns the raw error untouched when no pattern matches", () => {

@@ -26,10 +26,10 @@
 //
 // The wire response is unchanged — every button routes through the same
 // `onRespond` the old surfaces used, so approve/reject semantics (incl.
-// Claude "Deny keeps the turn") are preserved. The PermissionOptionKinds
-// collapse by `kind`, so Claude (allow_once/allow_always/reject_once) and
-// Codex (accept/acceptForSession/decline/cancel) render identically as 3
-// buttons; Codex's extra reject_always ("cancel") is dropped.
+// Claude "Deny keeps the turn") are preserved. Ordinary gates collapse
+// PermissionOptionKinds to the familiar compact rows. Provider-authored gates
+// (`useOptionNames`) preserve every ordered option because Codex can offer
+// multiple distinct exec/network policy amendments with the same broad kind.
 //
 // ONE exception, Claude only: when the always-allow can be persisted to
 // project settings the adapter also sends `allow_always_project`, and we show
@@ -205,15 +205,13 @@ export const PermissionCard = memo(function PermissionCard({
   // project" pair; without it we keep the legacy "don't ask again" wording so
   // Codex/Cursor are unchanged.
   const allowProject = opts.find((o) => o.kind === "allow_always_project");
-  const reject =
-    opts.find((o) => o.kind === "reject_once") ??
-    opts.find((o) => o.kind === "reject_always");
+  const useOptionNames = request.useOptionNames === true;
+  const reject = providerRejectOption(opts, useOptionNames);
   const allowAlwaysLabel = allowProject
     ? "Allow for this chat"
     : command
       ? `Yes, and don't ask again for: ${command}`
       : "Yes, and don't ask again";
-  const useOptionNames = request.useOptionNames === true;
   const contextItems = (request.contextItems ?? []).filter(
     (item) => typeof item === "string" && item.trim().length > 0,
   );
@@ -222,7 +220,12 @@ export const PermissionCard = memo(function PermissionCard({
     if (!opt) return;
     // Sticky "don't ask again": write a chat policy BEFORE responding so the
     // next matching request auto-resolves and never blinks this card.
-    if (onRecordPolicy && chatId && opt.kind === "allow_always") {
+    if (
+      request.allowLocalPolicies !== false &&
+      onRecordPolicy &&
+      chatId &&
+      opt.kind === "allow_always"
+    ) {
       onRecordPolicy({
         id: newPolicyId(),
         chatId,
@@ -323,7 +326,9 @@ export const PermissionCard = memo(function PermissionCard({
             </span>
           ))}
         </div>
-      ) : (label || detail) ? (
+      ) : null}
+
+      {label || detail ? (
         <div className="flex min-w-0 items-center gap-2">
           <Icon className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />
           {label && (
@@ -340,21 +345,30 @@ export const PermissionCard = memo(function PermissionCard({
       ) : null}
 
       <div className="flex flex-col gap-1.5">
-        {allowOnce && (
+        {useOptionNames ? (
+          opts.map((option, index) => (
+            <PermRow
+              key={option.optionId}
+              label={option.name}
+              hint={providerOptionHint(opts, option, index)}
+              onClick={() => respondWith(option)}
+            />
+          ))
+        ) : allowOnce ? (
           <PermRow
-            label={useOptionNames ? allowOnce.name : "Yes"}
+            label="Yes"
             hint="↵"
             onClick={() => respondWith(allowOnce)}
           />
-        )}
-        {allowAlways && (
+        ) : null}
+        {!useOptionNames && allowAlways && (
           <PermRow
-            label={useOptionNames ? allowAlways.name : allowAlwaysLabel}
+            label={allowAlwaysLabel}
             hint="⌘↵"
             onClick={() => respondWith(allowAlways)}
           />
         )}
-        {allowProject && (
+        {!useOptionNames && allowProject && (
           <PermRow
             // Engine-supplied: "Allow for this project" (a scoped rule, e.g. a
             // Bash command) or "Allow all edits in this project" (edit tools).
@@ -363,17 +377,67 @@ export const PermissionCard = memo(function PermissionCard({
             onClick={() => respondWith(allowProject)}
           />
         )}
-        {reject && (
-          <PermRow
-            label={useOptionNames ? reject.name : "No"}
-            hint="⌫"
-            onClick={() => respondWith(reject)}
-          />
+        {!useOptionNames && reject && (
+          <PermRow label="No" hint="⌫" onClick={() => respondWith(reject)} />
         )}
       </div>
     </div>
   );
 });
+
+/** Provider-authored decisions are ordered and may contain both decline and
+ * cancel. The global reject shortcut must select the same first row that owns
+ * its visible hint. Compact legacy cards retain their safer reject-once
+ * preference because reject-always is intentionally collapsed there. */
+export function providerRejectOption(
+  options: PermissionOption[],
+  useOptionNames: boolean,
+): PermissionOption | undefined {
+  if (useOptionNames) {
+    return options.find(
+      (option) =>
+        option.kind === "reject_once" || option.kind === "reject_always",
+    );
+  }
+  return (
+    options.find((option) => option.kind === "reject_once") ??
+    options.find((option) => option.kind === "reject_always")
+  );
+}
+
+/** Give only the first option owned by a global shortcut its hint. Repeated
+ * provider decisions remain mouse/Tab accessible without falsely advertising
+ * one shortcut as selecting several different policy amendments. */
+function providerOptionHint(
+  options: PermissionOption[],
+  option: PermissionOption,
+  index: number,
+): string {
+  const shortcutGroup = (candidate: PermissionOption): string => {
+    switch (candidate.kind) {
+      case "reject_once":
+      case "reject_always":
+        return "reject";
+      default:
+        return candidate.kind;
+    }
+  };
+  const firstForShortcut = options.findIndex(
+    (candidate) => shortcutGroup(candidate) === shortcutGroup(option),
+  );
+  if (firstForShortcut !== index) return "";
+  switch (option.kind) {
+    case "allow_once":
+      return "↵";
+    case "allow_always":
+      return "⌘↵";
+    case "allow_always_project":
+      return "⇧⌘↵";
+    case "reject_once":
+    case "reject_always":
+      return "⌫";
+  }
+}
 
 function PermRow({
   label,
@@ -393,7 +457,9 @@ function PermRow({
       className="border-border3 bg-bg1 hover:border-border4 hover:bg-bg2 flex w-full items-center justify-between gap-3 rounded-md border px-3 py-2 text-left transition-colors duration-150 ease-out"
     >
       <span className="text-fg1 min-w-0 truncate text-sm">{label}</span>
-      <span className="text-fg2 shrink-0 font-mono text-xs">{hint}</span>
+      {hint ? (
+        <span className="text-fg2 shrink-0 font-mono text-xs">{hint}</span>
+      ) : null}
     </button>
   );
 }

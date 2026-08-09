@@ -304,6 +304,9 @@ function questionFallbackPrompt(
   request: import("../../platform/bridge/agent-events").QuestionRequest,
   outcome: import("../../platform/bridge/agent-events").QuestionOutcome,
 ): string {
+  if (outcome.outcome === "declined") {
+    return "I declined your request. Do not proceed with the requested action.";
+  }
   if (outcome.outcome !== "answered") {
     return "I dismissed your question — proceed with your best judgment.";
   }
@@ -543,9 +546,10 @@ export function AgentSessionsProvider({
           // resolved. Never render a card or send a duplicate response.
           continue;
         }
-        const match = chatId
-          ? findMatchingPolicy(policies, tool.kind ?? undefined, tool.title)
-          : null;
+        const match =
+          chatId && p.request.allowLocalPolicies !== false
+            ? findMatchingPolicy(policies, tool.kind ?? undefined, tool.title)
+            : null;
         if (match) {
           // Map decision → wire option. Prefer allow_always /
           // reject_always (sticky on the engine side too); fall back
@@ -2676,7 +2680,8 @@ export function AgentSessionsProvider({
       });
       promptActivityRef.current.get(chatId)?.();
       // Durable record: stamp the resolution onto the transcript tool message
-      // — ANSWERED with per-question answers, or SKIPPED on dismiss — so the
+      // — ANSWERED with per-question answers, DECLINED on an explicit refusal,
+      // or SKIPPED on dismiss — so the
       // read-only card shows the outcome after the composer card is gone
       // (best-effort — no-op if the tool message hasn't landed).
       const toolCallId = head.request.toolCallId;

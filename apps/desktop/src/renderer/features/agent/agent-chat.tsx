@@ -235,6 +235,8 @@ function labelForFailure(
         return "Sign in required";
       case "transport-closed":
         return "Disconnected";
+      case "rate-limited":
+        return "Rate limited";
       case "subprocess-exited":
         return "Agent exited";
       case "protocol-error":
@@ -269,6 +271,8 @@ function footerLabelForFailure(failure: AgentFailure | null): string | null {
       return "AGENT RESPONSE TIMEOUT";
     case "transport-closed":
       return "CONNECTION LOST";
+    case "rate-limited":
+      return "RATE LIMITED";
     case "protocol-error":
       return "AGENT RESPONSE FAILURE";
     default:

@@ -121,12 +121,40 @@ function suppressFocusOnClick(e: ReactMouseEvent) {
 }
 
 function blankState(q: QuestionSpec): QState {
-  return { selected: [], otherActive: q.options.length === 0, freeText: "" };
+  const defaultFreeText = q.defaultFreeText ?? "";
+  return {
+    selected: [...(q.defaultOptionIds ?? [])],
+    otherActive: q.options.length === 0 || q.defaultFreeText !== undefined,
+    freeText: defaultFreeText,
+  };
+}
+
+export function isQuestionFreeTextAnswered(
+  question: QuestionSpec,
+  value: string,
+): boolean {
+  if (question.allowEmptyFreeText === true) return true;
+  return question.preserveFreeText === true
+    ? value.length > 0
+    : value.trim().length > 0;
+}
+
+export function questionFreeTextValue(
+  question: QuestionSpec,
+  active: boolean,
+  value: string,
+): string | undefined {
+  if (!active || !isQuestionFreeTextAnswered(question, value)) {
+    return undefined;
+  }
+  return question.preserveFreeText === true ? value : value.trim();
 }
 
 function isAnswered(q: QuestionSpec, s: QState): boolean {
   if (s.selected.length > 0) return true;
-  if (s.otherActive && s.freeText.trim().length > 0) return true;
+  if (s.otherActive && isQuestionFreeTextAnswered(q, s.freeText)) {
+    return true;
+  }
   return false;
 }
 
@@ -160,30 +188,47 @@ export function QuestionCard({ request, onRespond }: QuestionCardProps) {
   }, []);
 
   const toggleOption = useCallback(
-    (qid: string, optionId: string, isMultiSelect: boolean) => {
+    (question: QuestionSpec, optionId: string, isMultiSelect: boolean) => {
       setAnswers((a) => {
-        const cur = a[qid] ?? {
+        const cur = a[question.id] ?? {
           selected: [],
           otherActive: false,
           freeText: "",
         };
+        const chosen = question.options.find(
+          (option) => option.id === optionId,
+        );
+        const exclusiveIds = new Set(
+          question.options
+            .filter((option) => option.exclusive)
+            .map((option) => option.id),
+        );
         if (isMultiSelect) {
           const has = cur.selected.includes(optionId);
           return {
             ...a,
-            [qid]: {
+            [question.id]: {
               ...cur,
               otherActive: false,
               selected: has
                 ? cur.selected.filter((x) => x !== optionId)
-                : [...cur.selected, optionId],
+                : chosen?.exclusive
+                  ? [optionId]
+                  : [
+                      ...cur.selected.filter((id) => !exclusiveIds.has(id)),
+                      optionId,
+                    ],
             },
           };
         }
         // single-select: replace
         return {
           ...a,
-          [qid]: { ...cur, otherActive: false, selected: [optionId] },
+          [question.id]: {
+            ...cur,
+            otherActive: false,
+            selected: [optionId],
+          },
         };
       });
     },
@@ -213,8 +258,7 @@ export function QuestionCard({ request, onRespond }: QuestionCardProps) {
         outcome: "answered",
         answers: questions.map((qq) => {
           const s = answers[qq.id] ?? blankState(qq);
-          const freeText =
-            s.otherActive && s.freeText.trim() ? s.freeText.trim() : undefined;
+          const freeText = questionFreeTextValue(qq, s.otherActive, s.freeText);
           return { questionId: qq.id, selectedOptionIds: s.selected, freeText };
         }),
       },
@@ -223,6 +267,10 @@ export function QuestionCard({ request, onRespond }: QuestionCardProps) {
 
   const dismiss = useCallback(() => {
     onRespond({ outcome: { outcome: "dismissed" } });
+  }, [onRespond]);
+
+  const decline = useCallback(() => {
+    onRespond({ outcome: { outcome: "declined" } });
   }, [onRespond]);
 
   // "Skips in m:ss" — visible for the last stretch before the engine's
@@ -305,7 +353,7 @@ export function QuestionCard({ request, onRespond }: QuestionCardProps) {
         const opt = cq.options[n - 1];
         if (opt) {
           e.preventDefault();
-          toggleOption(cq.id, opt.id, cmulti);
+          toggleOption(cq, opt.id, cmulti);
         }
       }
     };
@@ -366,7 +414,7 @@ export function QuestionCard({ request, onRespond }: QuestionCardProps) {
                 key={opt.id}
                 type="button"
                 onMouseDown={suppressFocusOnClick}
-                onClick={() => toggleOption(q.id, opt.id, multi)}
+                onClick={() => toggleOption(q, opt.id, multi)}
                 className={cn(
                   "group flex w-full items-start gap-3 rounded-md px-2 py-1.5 text-left transition-colors",
                   selected ? "bg-bg2-hover/70" : "hover:bg-bg1-hover",
@@ -499,22 +547,46 @@ export function QuestionCard({ request, onRespond }: QuestionCardProps) {
           ) : (
             <span />
           )}
-          <Tooltip
-            label={allAnswered ? "Submit" : "Answer all questions"}
-            shortcut={allAnswered ? "↵" : undefined}
-          >
-            <Button
-              type="button"
-              size="icon"
-              variant="default"
-              onMouseDown={suppressFocusOnClick}
-              onClick={submit}
-              disabled={!allAnswered}
-              aria-label="Submit answer"
+          <div className="flex items-center gap-1.5">
+            {request.allowDecline ? (
+              <>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onMouseDown={suppressFocusOnClick}
+                  onClick={dismiss}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onMouseDown={suppressFocusOnClick}
+                  onClick={decline}
+                >
+                  Decline
+                </Button>
+              </>
+            ) : null}
+            <Tooltip
+              label={allAnswered ? "Submit" : "Answer all questions"}
+              shortcut={allAnswered ? "↵" : undefined}
             >
-              <ArrowUp className="size-4" />
-            </Button>
-          </Tooltip>
+              <Button
+                type="button"
+                size="icon"
+                variant="default"
+                onMouseDown={suppressFocusOnClick}
+                onClick={submit}
+                disabled={!allAnswered}
+                aria-label="Submit answer"
+              >
+                <ArrowUp className="size-4" />
+              </Button>
+            </Tooltip>
+          </div>
         </div>
       </div>
     </div>

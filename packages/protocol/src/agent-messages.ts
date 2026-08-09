@@ -317,18 +317,18 @@ export type AgentMessage =
   | AgentErrorNoticeMessage;
 
 // ──────────────────────────────────────────────────────────
-// Question resolution stamps (the ANSWERED / SKIPPED record)
+// Question resolution stamps (the ANSWERED / DECLINED / SKIPPED record)
 // ──────────────────────────────────────────────────────────
 
 /** Durable resolution record stamped onto a question tool message's
  *  rawOutput (key `zerosQuestion`). Drives the transcript card's
- *  ANSWERED / SKIPPED states after the interactive composer card is gone.
+ *  ANSWERED / DECLINED / SKIPPED states after the interactive composer card is gone.
  *  Written by BOTH sides: the renderer stamps optimistically on submit, and
  *  the adapters emit a synthetic tool_call_update carrying it on settle so
  *  the ENGINE-persisted transcript is stamped too (reload / window-reconcile
  *  / cross-device all keep the record). */
 export interface QuestionRecordStamp {
-  outcome: "answered" | "skipped";
+  outcome: "answered" | "declined" | "skipped";
   /** One-line flat summary of the answers (answered only). */
   summary?: string;
   /** Per-question answers so the expanded record can pair each question with
@@ -342,14 +342,20 @@ export function buildQuestionStamp(
   request: import("./agent-events").QuestionRequest,
   outcome: import("./agent-events").QuestionOutcome,
 ): QuestionRecordStamp {
+  if (outcome.outcome === "declined") return { outcome: "declined" };
   if (outcome.outcome !== "answered") return { outcome: "skipped" };
   const byId = new Map(outcome.answers.map((a) => [a.questionId, a]));
   const answers = request.questions.map((q) => {
     const a = byId.get(q.id);
+    if (q.secret && a) {
+      return { prompt: q.prompt, value: "(secret answer hidden)" };
+    }
     const labels = (a?.selectedOptionIds ?? []).map(
       (id) => q.options.find((o) => o.id === id)?.label ?? id,
     );
-    if (a?.freeText) labels.push(a.freeText);
+    if (a?.freeText !== undefined) {
+      labels.push(a.freeText.length > 0 ? a.freeText : "(empty string)");
+    }
     return { prompt: q.prompt, value: labels.join(", ") || "(no answer)" };
   });
   return {
@@ -368,7 +374,13 @@ export function readQuestionStamp(
   const stamp = (rawOutput as Record<string, unknown>).zerosQuestion;
   if (!stamp || typeof stamp !== "object") return null;
   const outcome = (stamp as Record<string, unknown>).outcome;
-  if (outcome !== "answered" && outcome !== "skipped") return null;
+  if (
+    outcome !== "answered" &&
+    outcome !== "declined" &&
+    outcome !== "skipped"
+  ) {
+    return null;
+  }
   return stamp as unknown as QuestionRecordStamp;
 }
 

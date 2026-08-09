@@ -384,6 +384,45 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
     expect(completed.response.effectiveModel).toBe("composer-2.5");
   });
 
+  it("returns the SDK's per-turn token usage from the stream", async () => {
+    sendSpy.mockResolvedValueOnce({
+      id: "run-usage",
+      stream: async function* () {
+        yield {
+          type: "usage",
+          usage: {
+            inputTokens: 120,
+            outputTokens: 30,
+            cacheReadTokens: 80,
+            cacheWriteTokens: 4,
+            totalTokens: 150,
+            reasoningTokens: 7,
+          },
+        };
+      },
+      wait: async () => ({ status: "finished" }),
+      cancel: async () => {},
+    });
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { CURSOR_API_KEY: "key_test" },
+    });
+
+    const completed = await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT,
+    });
+
+    expect(completed.response.usage).toEqual({
+      inputTokens: 120,
+      outputTokens: 30,
+      cacheReadTokens: 80,
+      cacheWriteTokens: 4,
+      reasoningTokens: 7,
+    });
+  });
+
   it("binds model on Agent.resume() so resumed chats don't throw 'explicit model'", async () => {
     const adapter = new CursorSdkAdapter(makeCtx());
     await adapter.loadSession({

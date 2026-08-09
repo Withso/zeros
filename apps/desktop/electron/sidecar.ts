@@ -458,7 +458,10 @@ function resolveCodexCliPaths(): {
       "bin",
       process.platform === "win32" ? "codex.exe" : "codex",
     );
-    if (existsSync(staged)) binary = staged;
+    // The handoff is authoritative even when staging is corrupt. Returning the
+    // expected path makes the engine surface ENOENT instead of silently running
+    // a different global Codex whose protocol may not match this build.
+    binary = staged;
     try {
       const raw = readFileSync(
         path.join(process.resourcesPath, "codex-cli-version.txt"),
@@ -467,6 +470,13 @@ function resolveCodexCliPaths(): {
       if (raw) version = raw;
     } catch {
       /* absent/unreadable — provider diagnostics report no bundled version */
+    }
+    if (!existsSync(staged)) {
+      version = null;
+      console.error(
+        "[Zeros] staged Codex runtime not found under Contents/Resources/" +
+          "codex-runtime — Codex will be unavailable until the app is reinstalled",
+      );
     }
   } else {
     // Source checkouts ONLY, and deliberately not a fallback for a packaged

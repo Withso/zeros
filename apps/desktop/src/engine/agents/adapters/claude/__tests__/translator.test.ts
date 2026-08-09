@@ -78,6 +78,63 @@ describe("ClaudeStreamTranslator onUser", () => {
     expect((upd!.update as { status?: string }).status).toBe("completed");
   });
 
+  it("preserves base64 images returned by tools as renderable content", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_screenshot",
+            name: "mcp__browser__screenshot",
+            input: {},
+          },
+        ],
+      },
+    });
+    t.feed({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_screenshot",
+            content: [
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: "image/png",
+                  data: "UE5H",
+                },
+              },
+              { type: "text", text: "Screenshot captured" },
+            ],
+          },
+        ],
+      },
+    });
+
+    const upd = updates.find(
+      (u) => u.update.sessionUpdate === "tool_call_update",
+    )!.update as {
+      content?: Array<{ content?: Record<string, unknown> }>;
+    };
+    expect(upd.content).toEqual([
+      {
+        type: "content",
+        content: { type: "image", data: "UE5H", mimeType: "image/png" },
+      },
+      {
+        type: "content",
+        content: { type: "text", text: "Screenshot captured" },
+      },
+    ]);
+  });
+
   it("unwraps <tool_use_error> from a failed tool_result's text", () => {
     const { t, updates } = collect();
     t.feed({

@@ -13,6 +13,8 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  autoEditCanAutoApprove,
+  mapApprovalToCanonical,
   mapResponseToCodexDecision,
   defaultMethodResponse,
   type PendingApproval,
@@ -27,8 +29,11 @@ import type { RequestPermissionResponse } from "../../../types";
 const EXEC: CodexApprovalMethod = "item/commandExecution/requestApproval";
 const FILE: CodexApprovalMethod = "item/fileChange/requestApproval";
 const PERMS: CodexApprovalMethod = "item/permissions/requestApproval";
+const LEGACY_EXEC: CodexApprovalMethod = "execCommandApproval";
+const LEGACY_PATCH: CodexApprovalMethod = "applyPatchApproval";
 /** The two methods whose decision is a plain string union. */
 const RUN_METHODS: CodexApprovalMethod[] = [EXEC, FILE];
+const LEGACY_RUN_METHODS: CodexApprovalMethod[] = [LEGACY_EXEC, LEGACY_PATCH];
 
 /** Minimal PendingApproval — the mapper reads only method + params. */
 const pending = (
@@ -78,6 +83,138 @@ describe("mapResponseToCodexDecision — command & file-change (4 options × 2 m
   }
 });
 
+describe("Codex ordered command approval decisions", () => {
+  const execAmendment = {
+    acceptWithExecpolicyAmendment: {
+      execpolicy_amendment: ["git", "status"],
+    },
+  };
+  const networkAmendment = {
+    applyNetworkPolicyAmendment: {
+      network_policy_amendment: { host: "api.example.com", action: "allow" },
+    },
+  };
+  const params = {
+    itemId: "cmd-1",
+    command: "curl https://api.example.com",
+    cwd: "/repo",
+    reason: "Needs the API",
+    networkApprovalContext: { host: "api.example.com", protocol: "https" },
+    additionalPermissions: {
+      network: { enabled: true },
+      fileSystem: { read: ["/repo/input"], write: null },
+    },
+    proposedExecpolicyAmendment: ["git", "status"],
+    proposedNetworkPolicyAmendments: [
+      { host: "api.example.com", action: "allow" },
+    ],
+    availableDecisions: [
+      "accept",
+      execAmendment,
+      networkAmendment,
+      "decline",
+      "cancel",
+    ],
+  };
+
+  it("presents every native decision in provider order and preserves escalation context", () => {
+    const request = mapApprovalToCanonical(
+      {
+        zerosSessionId: "s",
+        fileEditPathsByItemId: new Map(),
+      } as never,
+      { permissionId: "p", method: EXEC, params } as never,
+    );
+
+    expect(request.useOptionNames).toBe(true);
+    expect(
+      request.options.map(({ optionId, name, kind }) => ({
+        optionId,
+        name,
+        kind,
+      })),
+    ).toEqual([
+      { optionId: "accept", name: "Approve once", kind: "allow_once" },
+      {
+        optionId: "acceptWithExecpolicyAmendment:1",
+        name: "Approve and remember command rule",
+        kind: "allow_always",
+      },
+      {
+        optionId: "applyNetworkPolicyAmendment:2",
+        name: "Approve and allow api.example.com",
+        kind: "allow_always",
+      },
+      { optionId: "decline", name: "Decline", kind: "reject_once" },
+      { optionId: "cancel", name: "Cancel", kind: "reject_always" },
+    ]);
+    expect(request.contextItems).toEqual([
+      "Network · https://api.example.com",
+      "Extra network access",
+      "Read · /repo/input",
+    ]);
+    expect(request.toolCall.rawInput).toMatchObject({
+      networkApprovalContext: params.networkApprovalContext,
+      additionalPermissions: params.additionalPermissions,
+      proposedExecpolicyAmendment: params.proposedExecpolicyAmendment,
+      proposedNetworkPolicyAmendments: params.proposedNetworkPolicyAmendments,
+    });
+  });
+
+  it("round-trips only the exact offered amendment object", () => {
+    expect(
+      mapResponseToCodexDecision(
+        pending(EXEC, params),
+        selected("acceptWithExecpolicyAmendment:1"),
+      ),
+    ).toEqual({ decision: execAmendment });
+    expect(
+      mapResponseToCodexDecision(
+        pending(EXEC, params),
+        selected("applyNetworkPolicyAmendment:2"),
+      ),
+    ).toEqual({ decision: networkAmendment });
+  });
+
+  it("rejects forged, stale, or unavailable decision ids", () => {
+    expect(
+      mapResponseToCodexDecision(
+        pending(EXEC, { availableDecisions: ["decline"] }),
+        selected("accept"),
+      ),
+    ).toEqual({ decision: "cancel" });
+    expect(
+      mapResponseToCodexDecision(
+        pending(EXEC, params),
+        selected("acceptWithExecpolicyAmendment:99"),
+      ),
+    ).toEqual({ decision: "cancel" });
+    expect(
+      mapResponseToCodexDecision(
+        pending(EXEC, params),
+        selected("applyNetworkPolicyAmendment:1"),
+      ),
+    ).toEqual({ decision: "cancel" });
+  });
+
+  it("does not silently auto-approve when direct acceptance is not offered", () => {
+    expect(
+      autoEditCanAutoApprove({
+        permissionId: "p",
+        method: EXEC,
+        params: { availableDecisions: [execAmendment, "decline"] },
+      } as never),
+    ).toBe(false);
+    expect(
+      autoEditCanAutoApprove({
+        permissionId: "p",
+        method: EXEC,
+        params: { availableDecisions: ["accept", "decline"] },
+      } as never),
+    ).toBe(true);
+  });
+});
+
 describe("mapResponseToCodexDecision — permissions request (mirror-on-accept)", () => {
   const REQUESTED = {
     network: { enabled: true },
@@ -100,6 +237,29 @@ describe("mapResponseToCodexDecision — permissions request (mirror-on-accept)"
         selected("acceptForSession"),
       ),
     ).toEqual({ permissions: REQUESTED, scope: "session" });
+  });
+
+  it("preserves entry-based filesystem grants and nullable permission fields", () => {
+    const extended = {
+      network: { enabled: null },
+      fileSystem: {
+        read: null,
+        write: ["/repo/output"],
+        globScanMaxDepth: 4,
+        entries: [
+          {
+            path: { type: "glob_pattern", pattern: "/repo/data/**" },
+            access: "read",
+          },
+        ],
+      },
+    };
+    expect(
+      mapResponseToCodexDecision(
+        pending(PERMS, { permissions: extended }),
+        selected("accept"),
+      ),
+    ).toEqual({ permissions: extended, scope: "turn" });
   });
 
   it("accept with NO requested profile grants nothing (safe defaults, no undefined leak)", () => {
@@ -134,6 +294,38 @@ describe("mapResponseToCodexDecision — permissions request (mirror-on-accept)"
       ),
     ).toEqual(EMPTY_GRANT);
   });
+
+  it("an unknown option id grants nothing", () => {
+    expect(
+      mapResponseToCodexDecision(
+        pending(PERMS, { permissions: REQUESTED }),
+        selected("forged-grant"),
+      ),
+    ).toEqual(EMPTY_GRANT);
+  });
+});
+
+describe("mapResponseToCodexDecision — legacy approval compatibility", () => {
+  const optionToDecision: Array<[string, unknown]> = [
+    ["accept", "approved"],
+    ["acceptForSession", "approved_for_session"],
+    ["decline", { denied: { rejection: "User declined this action." } }],
+    ["cancel", "abort"],
+  ];
+  for (const method of LEGACY_RUN_METHODS) {
+    for (const [optionId, decision] of optionToDecision) {
+      it(`${method} · ${optionId} maps to the legacy ReviewDecision`, () => {
+        expect(
+          mapResponseToCodexDecision(pending(method), selected(optionId)),
+        ).toEqual({ decision });
+      });
+    }
+    it(`${method} · an unknown option fails closed to abort`, () => {
+      expect(
+        mapResponseToCodexDecision(pending(method), selected("unknown")),
+      ).toEqual({ decision: "abort" });
+    });
+  }
 });
 
 describe("SAFETY invariant — an unapproved action NEVER becomes a grant", () => {
@@ -151,6 +343,22 @@ describe("SAFETY invariant — an unapproved action NEVER becomes a grant", () =
           decision: string;
         };
         expect(RUNS.has(out.decision)).toBe(false);
+      });
+    }
+  }
+
+  for (const method of LEGACY_RUN_METHODS) {
+    for (const resp of NON_APPROVALS) {
+      const label =
+        resp.outcome.outcome === "cancelled"
+          ? "cancelled"
+          : resp.outcome.optionId;
+      it(`${method} · "${label}" never maps to a legacy approval`, () => {
+        const out = mapResponseToCodexDecision(pending(method), resp) as {
+          decision: unknown;
+        };
+        expect(out.decision).not.toBe("approved");
+        expect(out.decision).not.toBe("approved_for_session");
       });
     }
   }
@@ -197,6 +405,16 @@ describe("defaultMethodResponse", () => {
     expect(defaultMethodResponse(PERMS, "cancel")).toEqual(EMPTY_GRANT);
     expect(defaultMethodResponse(PERMS, "decline")).toEqual(EMPTY_GRANT);
   });
+  for (const method of LEGACY_RUN_METHODS) {
+    it(`${method} · cancel aborts and decline carries an explicit rejection`, () => {
+      expect(defaultMethodResponse(method, "cancel")).toEqual({
+        decision: "abort",
+      });
+      expect(defaultMethodResponse(method, "decline")).toEqual({
+        decision: { denied: { rejection: "User declined this action." } },
+      });
+    });
+  }
 });
 
 describe("app-server fallbacks — no-handler auto-deny & timeout/dispose", () => {
@@ -212,5 +430,16 @@ describe("app-server fallbacks — no-handler auto-deny & timeout/dispose", () =
     expect(defaultCancelResponse(EXEC)).toEqual({ decision: "cancel" });
     expect(defaultCancelResponse(FILE)).toEqual({ decision: "cancel" });
     expect(defaultCancelResponse(PERMS)).toEqual(EMPTY_GRANT);
+  });
+
+  it("answers deprecated approval names with their legacy ReviewDecision shape", () => {
+    for (const method of LEGACY_RUN_METHODS) {
+      expect(defaultDenyResponse(method)).toEqual({
+        decision: {
+          denied: { rejection: "No approval handler is available." },
+        },
+      });
+      expect(defaultCancelResponse(method)).toEqual({ decision: "abort" });
+    }
   });
 });

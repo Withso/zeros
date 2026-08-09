@@ -39,6 +39,8 @@ const TIMEOUT_RX = /\b(?:timeouts?|timed?\s*out)\b/i;
 // instead of surfacing a hard error toast.
 const TRANSPORT_RX =
   /\bconnection\s*(?:closed|reset)|transport\s+closed|broken\s*pipe|engine\s+swapping|request\s+aborted|\breconnecting\b/i;
+const RATE_LIMIT_RX =
+  /\b(?:429|rate[\s_-]*limit(?:ed)?|too many requests|resource exhausted)\b/i;
 /** Mirrors SESSION_EXPIRED_KEYWORDS in
  *  apps/desktop/src/engine/agents/adapters/shared/session-expiry.ts. The engine usually classifies
  *  these on its side, but RPC errors that bubble up to the renderer
@@ -69,7 +71,9 @@ export const SESSION_EXPIRED_RX =
  *  silently broken — String({...}) on the object yielded "[object Object]"
  *  as the user-visible failure message. */
 export function classifyRpcError(
-  arg: unknown | { agentId?: string; stage?: AgentFailure["stage"]; error: unknown },
+  arg:
+    | unknown
+    | { agentId?: string; stage?: AgentFailure["stage"]; error: unknown },
   stageHint?: AgentFailure["stage"],
 ): AgentFailure {
   let err: unknown;
@@ -80,7 +84,11 @@ export function classifyRpcError(
     typeof arg === "object" &&
     "error" in (arg as Record<string, unknown>)
   ) {
-    const o = arg as { agentId?: string; stage?: AgentFailure["stage"]; error: unknown };
+    const o = arg as {
+      agentId?: string;
+      stage?: AgentFailure["stage"];
+      error: unknown;
+    };
     err = o.error;
     agentId = o.agentId;
     if (o.stage) stage = o.stage;
@@ -93,15 +101,24 @@ export function classifyRpcError(
   // depending on the message string surviving any future wording
   // change — the TRANSPORT_RX path below catches it on the fallback.
   const errCode =
-    err instanceof Error
-      ? (err as Error & { code?: string }).code
-      : undefined;
+    err instanceof Error ? (err as Error & { code?: string }).code : undefined;
   const base = { stage, agentId } as Pick<AgentFailure, "stage" | "agentId">;
   if (errCode === "ENGINE_SWAPPING") {
     return { kind: "transport-closed", message, ...base };
   }
   if (SESSION_EXPIRED_RX.test(message)) {
     return { kind: "session-expired", message, ...base };
+  }
+  // A provider throttle can mention a timed-out retry or reset connection.
+  // Keep it terminal before the recoverable timeout/transport fallbacks so the
+  // renderer never amplifies a 429 with an automatic resend.
+  if (RATE_LIMIT_RX.test(message)) {
+    return {
+      kind: "rate-limited",
+      message,
+      advice: "The provider is rate-limiting requests. Try again shortly.",
+      ...base,
+    };
   }
   if (TIMEOUT_RX.test(message)) {
     return { kind: "timeout", message, ...base };

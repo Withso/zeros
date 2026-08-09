@@ -3228,6 +3228,234 @@ describe("ClaudeSdkAdapter AskUserQuestion", () => {
   });
 });
 
+describe("ClaudeSdkAdapter MCP elicitation", () => {
+  it("routes a native SDK form elicitation through the blocking question card", async () => {
+    const emitted: SessionNotification[] = [];
+    const questions: QuestionCapture[] = [];
+    const settles: SettleCapture[] = [];
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-elicitation"), resultOk("sdk-elicitation")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(
+      makeCtx(emitted, [], { questions, settles }),
+      { queryFn },
+    );
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const turn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("use the billing MCP")] as never,
+    });
+    await tick();
+
+    const onElicitation = captured[0]?.onElicitation as
+      | undefined
+      | ((
+          request: Record<string, unknown>,
+          options: { signal: AbortSignal },
+        ) => Promise<Record<string, unknown>>);
+    expect(onElicitation).toBeTypeOf("function");
+    const abort = new AbortController();
+    const result = onElicitation!(
+      {
+        serverName: "billing",
+        mode: "form",
+        message: "Where should the invoice go?",
+        requestedSchema: {
+          type: "object",
+          properties: {
+            email: { type: "string", title: "Email", format: "email" },
+            copies: { type: "integer", title: "Copies", minimum: 1 },
+          },
+          required: ["email", "copies"],
+        },
+      },
+      { signal: abort.signal },
+    );
+    await tick();
+
+    expect(questions).toHaveLength(1);
+    expect(questions[0].request).toMatchObject({
+      source: "native_rpc",
+      blocking: true,
+      toolCallId: expect.stringMatching(/^mcp-elicitation:/),
+      questions: [{ id: "email" }, { id: "copies" }],
+    });
+
+    expect(
+      adapter.respondToQuestion({
+        questionId: questions[0].id,
+        response: {
+          outcome: {
+            outcome: "answered",
+            answers: [
+              {
+                questionId: "email",
+                selectedOptionIds: [],
+                freeText: "person@example.com",
+              },
+              {
+                questionId: "copies",
+                selectedOptionIds: [],
+                freeText: "2",
+              },
+            ],
+          },
+        } as never,
+      }),
+    ).toBe(true);
+    expect(await result).toEqual({
+      action: "accept",
+      content: { email: "person@example.com", copies: 2 },
+    });
+    expect(settles).toMatchObject([
+      {
+        questionId: questions[0].id,
+        sessionId: session.sessionId,
+        outcome: { outcome: "answered" },
+      },
+    ]);
+
+    await turn;
+    await adapter.dispose();
+  });
+
+  it("cancels and evicts an MCP elicitation when the SDK aborts it", async () => {
+    const questions: QuestionCapture[] = [];
+    const settles: SettleCapture[] = [];
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-elicitation-abort"), resultOk("sdk-elicitation-abort")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(
+      makeCtx([], [], { questions, settles }),
+      { queryFn },
+    );
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const turn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("use MCP")] as never,
+    });
+    await tick();
+    const onElicitation = captured[0]?.onElicitation as (
+      request: Record<string, unknown>,
+      options: { signal: AbortSignal },
+    ) => Promise<Record<string, unknown>>;
+    const abort = new AbortController();
+    const result = onElicitation(
+      {
+        serverName: "github",
+        mode: "url",
+        message: "Authorize GitHub",
+        url: "https://github.com/login/oauth/authorize",
+        elicitationId: "oauth-1",
+      },
+      { signal: abort.signal },
+    );
+    await tick();
+    expect(questions).toHaveLength(1);
+
+    abort.abort();
+
+    expect(await result).toEqual({ action: "cancel" });
+    expect(settles[0]?.outcome.outcome).toBe("dismissed");
+    await turn;
+    await adapter.dispose();
+  });
+
+  it("cancels a parked MCP elicitation when Zeros disposes the session", async () => {
+    const questions: QuestionCapture[] = [];
+    const settles: SettleCapture[] = [];
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-elicitation-dispose"), resultOk("sdk-elicitation-dispose")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(
+      makeCtx([], [], { questions, settles }),
+      { queryFn },
+    );
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const turn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("use MCP")] as never,
+    });
+    await tick();
+    const onElicitation = captured[0]?.onElicitation as (
+      request: Record<string, unknown>,
+      options: { signal: AbortSignal },
+    ) => Promise<Record<string, unknown>>;
+    const independentSignal = new AbortController();
+    const result = onElicitation(
+      {
+        serverName: "billing",
+        mode: "form",
+        message: "Confirm billing details",
+        requestedSchema: { type: "object", properties: {} },
+      },
+      { signal: independentSignal.signal },
+    );
+    let resolution: Record<string, unknown> | undefined;
+    void result.then((value) => {
+      resolution = value;
+    });
+    await tick();
+    expect(questions).toHaveLength(1);
+
+    await turn;
+    await adapter.disposeSession(session.sessionId);
+    await tick();
+
+    expect(resolution).toEqual({ action: "cancel" });
+    expect(settles.at(-1)?.outcome.outcome).toBe("dismissed");
+  });
+
+  it("bounds concurrent MCP elicitations and cancels overflow", async () => {
+    const questions: QuestionCapture[] = [];
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-elicitation-bounded"), resultOk("sdk-elicitation-bounded")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(
+      makeCtx([], [], { questions, settles: [] }),
+      { queryFn },
+    );
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const turn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("use MCP")] as never,
+    });
+    await tick();
+    const onElicitation = captured[0]?.onElicitation as (
+      request: Record<string, unknown>,
+      options: { signal: AbortSignal },
+    ) => Promise<Record<string, unknown>>;
+    const abort = new AbortController();
+    const pending = Array.from({ length: 8 }, (_, index) =>
+      onElicitation(
+        {
+          serverName: "untrusted",
+          mode: "form",
+          message: `Question ${index}`,
+          requestedSchema: { type: "object", properties: {} },
+        },
+        { signal: abort.signal },
+      ),
+    );
+    const overflow = onElicitation(
+      {
+        serverName: "untrusted",
+        mode: "form",
+        message: "Overflow",
+        requestedSchema: { type: "object", properties: {} },
+      },
+      { signal: abort.signal },
+    );
+
+    expect(await overflow).toEqual({ action: "cancel" });
+    expect(questions).toHaveLength(8);
+
+    await turn;
+    await adapter.disposeSession(session.sessionId);
+    await Promise.all(pending);
+  });
+});
+
 // ── steer() — mid-turn user-message injection (queued-card "Send now") ──
 
 describe("ClaudeSdkAdapter.steer", () => {
@@ -3389,6 +3617,41 @@ describe("ClaudeSdkAdapter.steer", () => {
     expect(emitted.some((n) => n.update.sessionUpdate === "error_notice")).toBe(
       false,
     );
+    await adapter.dispose();
+  });
+
+  it("classifies provider throttling without immediately replaying the turn", async () => {
+    const { queryFn, inputsSeen } = makeScriptedQuery([
+      [
+        initMsg("sdk-rate"),
+        {
+          type: "result",
+          subtype: "error_during_execution",
+          session_id: "sdk-rate",
+          is_error: true,
+          result: "API Error: 429 rate_limit_error — retry after reset",
+        },
+      ],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+
+    let failure: { kind?: string; advice?: string } | null = null;
+    try {
+      await adapter.prompt({
+        sessionId: session.sessionId,
+        prompt: [textBlock("hi")] as never,
+      });
+    } catch (error) {
+      failure =
+        (error as { failure?: { kind?: string; advice?: string } }).failure ??
+        null;
+    }
+    expect(failure?.kind).toBe("rate-limited");
+    expect(failure?.advice).toMatch(/wait/i);
+    expect(
+      inputsSeen.filter((message) => message.type === "user"),
+    ).toHaveLength(1);
     await adapter.dispose();
   });
 
