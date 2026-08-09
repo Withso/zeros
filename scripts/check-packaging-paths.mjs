@@ -48,6 +48,10 @@ const ENGINE_BINARY = "binaries/zeros-engine-aarch64-apple-darwin";
 // The Claude Code runtime is staged at pack time too (gitignored). Keep in sync
 // with scripts/stage-claude-cli.mjs's STAGED_BINARY / STAGED_VERSION_FILE.
 const CLAUDE_STAGED = ["binaries/claude", "binaries/claude-cli-version.txt"];
+const CODEX_STAGED = [
+  "binaries/codex-runtime",
+  "binaries/codex-cli-version.txt",
+];
 const LEGAL_RESOURCES = [
   "LICENSE",
   "THIRD-PARTY-NOTICES.md",
@@ -159,7 +163,7 @@ for (const from of froms) {
   }
   // Staged at pack time by scripts/stage-claude-cli.mjs (gitignored, like the
   // engine binary) — name-matched against that script's constants below.
-  if (CLAUDE_STAGED.includes(from)) continue;
+  if (CLAUDE_STAGED.includes(from) || CODEX_STAGED.includes(from)) continue;
   if (!existsSync(from))
     errs.push(`extraResources from: "${from}" does not exist`);
 }
@@ -184,6 +188,15 @@ for (const staged of CLAUDE_STAGED) {
     );
   }
 }
+for (const staged of CODEX_STAGED) {
+  if (!froms.includes(staged)) {
+    errs.push(
+      `electron-builder.yml has no extraResources \`from: ${staged}\` — the packaged ` +
+        `engine would fall back to an unpinned Codex from PATH. Keep this in sync ` +
+        `with scripts/stage-codex-cli.mjs.`,
+    );
+  }
+}
 for (const legalResource of LEGAL_RESOURCES) {
   if (!froms.includes(legalResource)) {
     errs.push(
@@ -201,6 +214,12 @@ if (!/stage-claude-cli\.mjs/.test(beforePackSource)) {
       "for a zero-match extraResources entry",
   );
 }
+if (!/stage-codex-cli\.mjs/.test(beforePackSource)) {
+  errs.push(
+    "scripts/electron-before-pack.cjs no longer invokes stage-codex-cli.mjs — " +
+      "the packaged engine would silently fall back to an unpinned Codex on PATH",
+  );
+}
 // The npm copy of the ~250 MiB platform package must stay OUT of the asar: it is
 // exec'd directly (impossible from inside an archive) and would otherwise double
 // the blob's contribution to the download.
@@ -211,6 +230,12 @@ if (
     "electron-builder.yml `files:` must exclude **/node_modules/@anthropic-ai/claude-agent-sdk-*/** — " +
       "otherwise the ~250 MiB Claude Code binary is ALSO packed inside app.asar, where it " +
       "cannot be executed, doubling the app's size for nothing",
+  );
+}
+if (!/!\*\*\/node_modules\/@openai\/codex-\*\/\*\*/.test(yml)) {
+  errs.push(
+    "electron-builder.yml `files:` must exclude **/node_modules/@openai/codex-*/** — " +
+      "the staged native runtime already ships through extraResources",
   );
 }
 
@@ -286,7 +311,7 @@ if (errs.length > 0) {
 }
 console.log(
   `✓ check:packaging-paths — ${froms.length} extraResources + beforePack/afterPack + icon + ` +
-    `${entitlements.length} entitlements resolve; engine binary, Claude runtime staging, and ` +
+    `${entitlements.length} entitlements resolve; engine binary, Claude/Codex runtime staging, and ` +
     `updater assets for stable + ${channelReleaseWorkflows.length} channel workflow(s) ` +
     `(${channelReleaseWorkflows.map((w) => w.label.split(" ")[0]).join(", ")}) are guarded`,
 );

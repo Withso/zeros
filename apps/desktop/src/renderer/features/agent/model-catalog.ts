@@ -46,14 +46,14 @@ export type ModelOption = {
   label: string;
   badge?: string;
   /** Per-model reasoning-effort ladder (ordered low→high). Authoritative for
-   *  the EffortPill. Live discovery overlays this onto the curated entry when a
-   *  match is found; otherwise the curated value stands. */
+   *  the EffortPill. Exact live discovery overrides the bundled fallback when
+   *  present; otherwise the curated value stands. */
   effortLevels?: ChatEffort[];
   /** Whether this model supports Fast mode (drives the FastPill). */
   supportsFast?: boolean;
   /** Minimum agent CLI version this model needs (e.g. Fable 5 → "2.1.170").
-   *  Gated by {@link modelsForAgent} against the agent-advertised
-   *  `_meta.cliVersion` so a model never silently downgrades on an older CLI. */
+   *  Verified at build time by models:verify; runtime availability/capability
+   *  comes from the pinned CLI's live discovery response. */
   minCliVersion?: string;
 };
 
@@ -336,8 +336,8 @@ export function normalizeModelSlug(family: string, id: string): string {
  *  - Claude: the Agent SDK `effort` option (low|medium|high|xhigh|max) +
  *    the `ultracode` setting.
  *  - Codex: reads ZEROS_THINKING_EFFORT → `turn/start.effort`.
- *  Cursor exposes no effort knob, so the effort toggle is hidden for it
- *  rather than writing a value nothing consumes. */
+ *  - Cursor: an advertised effort ladder swaps to a concrete catalog-backed
+ *    reasoning model variant; models without such a ladder hide the toggle. */
 export function agentSupportsEffort(
   agentId: string | null,
   model: string | null = null,
@@ -492,9 +492,9 @@ export function effectiveEffort(
 
 /** Whether the agent+model supports Fast mode (lower-latency inference at
  *  higher token cost). Advertised per-model via the resolved option's
- *  `supportsFast` when present; otherwise the family heuristic: Claude Opus
- *  only, Codex GPT-5.x. When the model is null (agent default) we optimistically
- *  allow it for Claude/Codex — the agent silently no-ops if unsupported. */
+ *  `supportsFast` when present; otherwise the cold-start family heuristic:
+ *  Claude Opus only, Codex GPT-5.x. Null resolves through the same visible
+ *  default model as the composer before this fallback is considered. */
 export function agentSupportsFast(
   agentId: string | null,
   model: string | null,
@@ -945,14 +945,10 @@ export function modelsForAgent(
   if (curated.length === 0) return advertised ?? [];
   if (!advertised) return curated;
 
-  // Overlay live per-model capabilities (effort + fast) onto the curated
-  // entries — but CURATED WINS. Live only FILLS a capability the curated entry
-  // OMITS; it never overrides one the curated entry set explicitly. This is what
-  // makes the effort/fast toggles deterministic: a model the catalog marks with
-  // an empty effort ladder (Haiku) or supportsFast:false (Sonnet 5) can't have a
-  // toggle flip on when late live discovery advertises something different. The
-  // curated catalog is the source of truth for WHICH models show AND (when set)
-  // their capabilities; live discovery is a best-effort fallback for gaps.
+  // The bundled catalog owns WHICH models are displayed. Exact live metadata
+  // owns what this installed runtime/account can actually execute. In
+  // particular, [] and false are meaningful authoritative answers; preserving
+  // a bundled true/full ladder would expose controls that the provider rejects.
   const liveBySlug = new Map<string, ModelOption>();
   for (const m of advertised)
     liveBySlug.set(normalizeModelSlug(family, m.value), m);
@@ -961,10 +957,10 @@ export function modelsForAgent(
     if (!live) return c;
     return {
       ...c,
-      ...(c.effortLevels === undefined && live.effortLevels
+      ...(live.effortLevels !== undefined
         ? { effortLevels: live.effortLevels }
         : {}),
-      ...(c.supportsFast === undefined && typeof live.supportsFast === "boolean"
+      ...(typeof live.supportsFast === "boolean"
         ? { supportsFast: live.supportsFast }
         : {}),
     };
@@ -1010,7 +1006,8 @@ export const EFFORT_ENV_VAR = "ZEROS_THINKING_EFFORT";
 
 /** Env var carrying the composer's Fast-mode toggle ("1" when on). Zeros
  *  convention. Read by the Claude SDK adapter (→ `fastMode` setting) and the
- *  Codex app-server adapter (→ `service_tier: "fast"`). */
+ *  Codex app-server adapter (→ `service_tier: "fast"`), or by Cursor to choose
+ *  a live-catalog fast model variant. */
 export const FAST_MODE_ENV_VAR = "ZEROS_FAST_MODE";
 
 /** Env var carrying the composer's local permission posture
@@ -1133,20 +1130,30 @@ export function envForChatSettings(args: {
   // by a catalog update, hand-edited into settings.toml) can never make the
   // engine run something other than what is on screen. An unknown string is
   // passed through untouched — an extension agent owns its own vocabulary.
-  env[EFFORT_ENV_VAR] = Object.prototype.hasOwnProperty.call(
-    EFFORT_RANK,
-    args.effort,
-  )
-    ? effectiveEffort(
-        args.agentId,
-        model,
-        args.effort as ChatEffort,
-        args.initialize,
-      )
-    : args.effort;
+  const family = agentFamily(args.agentId);
+  const nativeFamily =
+    family === "claude" || family === "codex" || family === "cursor";
+  if (
+    !nativeFamily ||
+    agentSupportsEffort(args.agentId, model, args.initialize)
+  ) {
+    env[EFFORT_ENV_VAR] = Object.prototype.hasOwnProperty.call(
+      EFFORT_RANK,
+      args.effort,
+    )
+      ? effectiveEffort(
+          args.agentId,
+          model,
+          args.effort as ChatEffort,
+          args.initialize,
+        )
+      : args.effort;
+  }
   // Only emit the fast flag when ON, so an off→off toggle never perturbs the
   // env tuple (the respawn key) for agents that don't support it.
-  if (args.fast) env[FAST_MODE_ENV_VAR] = "1";
+  if (args.fast && agentSupportsFast(args.agentId, model, args.initialize)) {
+    env[FAST_MODE_ENV_VAR] = "1";
+  }
   // Same: only carry extra dirs when there's at least one, so the empty case
   // never changes the env tuple. JSON encodes any path safely (spaces/commas).
   const dirs = (args.additionalDirectories ?? []).filter(

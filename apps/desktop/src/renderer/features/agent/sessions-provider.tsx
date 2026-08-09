@@ -2905,7 +2905,7 @@ export function AgentSessionsProvider({
       //
       // Only stamp when the agent ACTUALLY applies config live. The gateway
       // silently no-ops AGENT_UPDATE_CONFIG for adapters without the optional
-      // hook (cursor today), so stamping unconditionally would record a change
+      // hook, so stamping unconditionally would record a change
       // that never landed — sendPrompt would then skip its reconcile and run
       // the turn on the stale model/effort. Leaving the key stale is the
       // correct signal: the reconcile respawns at send time, once, instead of

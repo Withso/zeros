@@ -3224,6 +3224,8 @@ export class ZerosEngine {
       "ZEROS_THINKING_EFFORT",
       "ZEROS_FAST_MODE",
       "ANTHROPIC_MODEL",
+      "OPENAI_MODEL",
+      "CURSOR_MODEL",
     ]);
     const out: Record<string, string> = {};
     for (const [name, value] of Object.entries(env)) {

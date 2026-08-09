@@ -110,22 +110,21 @@ describe("modelsForAgent (curated catalog)", () => {
     expect(values[0]).toBe("claude-fable-5[1m]");
   });
 
-  it("curated list drives DISPLAY; live _meta only OVERLAYS — CURATED CAPABILITIES WIN", () => {
-    // Two guards: (1) advertised models never REPLACE the curated display list;
-    // (2) a curated model that SETS a capability (every entry now sets both
-    // effortLevels + supportsFast) is authoritative — live discovery can only
-    // FILL a field curated omits, never OVERRIDE one it defines. This determinism
-    // is the Haiku flip-flop fix: capabilities can't change as live loads.
+  it("keeps the curated display list while exact live capabilities win", () => {
+    // The curated catalog owns which rows are visible. For an exact live model,
+    // however, the installed provider/runtime is authoritative about the
+    // effort ladder and Fast support available to this account and CLI.
     const initialize = {
       protocolVersion: 1,
       _meta: {
         models: [
           // Slug-matches curated Opus (via [1m] normalization) but advertises a
-          // DIFFERENT, shorter ladder — which must be IGNORED (curated wins).
+          // DIFFERENT, shorter ladder and explicitly no Fast support.
           {
             value: "claude-opus-4-8",
             label: "Opus (live)",
             effortLevels: ["low", "high"],
+            supportsFast: false,
           },
           // …and a model NOT in the curated catalog (must never appear).
           { value: "some-unlisted-model", label: "Unlisted" },
@@ -137,11 +136,14 @@ describe("modelsForAgent (curated catalog)", () => {
     // Display = curated set; the unlisted live model never appears.
     expect(values).toContain("claude-opus-4-8[1m]");
     expect(values).not.toContain("some-unlisted-model");
-    // Curated Opus keeps its full 6-level ladder — the live 2-level ladder can't
-    // override a curated field that's explicitly set.
+    // Exact live capabilities replace the bundled fallback, including an empty
+    // ladder or explicit false (both are meaningful capability answers).
     expect(
       list.find((m) => m.value === "claude-opus-4-8[1m]")?.effortLevels,
-    ).toEqual(["low", "medium", "high", "xhigh", "max", "ultracode"]);
+    ).toEqual(["low", "high"]);
+    expect(
+      list.find((m) => m.value === "claude-opus-4-8[1m]")?.supportsFast,
+    ).toBe(false);
   });
 });
 
@@ -230,8 +232,8 @@ describe("effortLevelsFor (per-model ladder)", () => {
     ]);
   });
   it("Codex 5.6 Sol / Terra expose the full six-tier ladder (…max, ultracode)", () => {
-    // Displayed as Light…Extra High / Max / Ultra; the top two clamp to the
-    // protocol's xhigh at runtime (see mapEffortFromEnv in the codex adapter).
+    // Displayed as Light…Extra High / Max / Ultra; Max stays native `max` and
+    // Ultra maps to native `ultra` in the Codex adapter.
     for (const model of ["gpt-5.6-sol", "gpt-5.6-terra"]) {
       expect(effortLevelsFor("codex", model)).toEqual([
         "low",
@@ -764,6 +766,35 @@ describe("envForChatSettings — permission posture carriage", () => {
       fast: false,
     });
     expect(off[FAST_MODE_ENV_VAR]).toBeUndefined();
+  });
+
+  it("does not send stale Fast mode to a model that cannot run it", () => {
+    const env = envForChatSettings({
+      agentId: "claude",
+      initialize: null,
+      model: "claude-fable-5[1m]",
+      effort: "high",
+      fast: true,
+    });
+    expect(env[FAST_MODE_ENV_VAR]).toBeUndefined();
+  });
+
+  it("does not send stale effort to models without an effort knob", () => {
+    const claude = envForChatSettings({
+      agentId: "claude",
+      initialize: null,
+      model: "claude-haiku-4-5",
+      effort: "high",
+    });
+    expect(claude[EFFORT_ENV_VAR]).toBeUndefined();
+
+    const cursor = envForChatSettings({
+      agentId: "cursor",
+      initialize: null,
+      model: "composer-2.5",
+      effort: "high",
+    });
+    expect(cursor[EFFORT_ENV_VAR]).toBeUndefined();
   });
 
   it("emits ZEROS_ADDITIONAL_DIRS as a JSON array only when non-empty", () => {

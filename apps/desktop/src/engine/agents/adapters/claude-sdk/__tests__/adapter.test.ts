@@ -2284,6 +2284,40 @@ describe("ClaudeSdkAdapter", () => {
     await adapter.dispose();
   });
 
+  it("updateConfig applies the authoritative model snapshot to a live query", async () => {
+    const { queryFn, control } = makeScriptedQuery([[initMsg("sdk-1")]]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({
+      cwd: "/tmp",
+      env: {
+        ANTHROPIC_MODEL: "claude-opus-4-8",
+        ZEROS_THINKING_EFFORT: "high",
+      },
+    });
+    void adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
+    await tick();
+
+    await adapter.updateConfig({
+      sessionId: session.sessionId,
+      env: {
+        ANTHROPIC_MODEL: "claude-haiku-4-5",
+      },
+    });
+
+    expect(control.models.at(-1)).toBe("claude-haiku-4-5");
+    // The SDK shallow-merges flag settings: omission preserves the prior
+    // effort. A model with no effort knob therefore needs an explicit null to
+    // clear the old model's live override.
+    expect(
+      (control.flagSettings.at(-1) as { effortLevel?: string | null })
+        .effortLevel,
+    ).toBeNull();
+    await adapter.dispose();
+  });
+
   it("buildOptions carries additionalDirectories from ZEROS_ADDITIONAL_DIRS into settings.permissions", async () => {
     const { queryFn, captured } = makeScriptedQuery([
       [initMsg("sdk-1"), resultOk("sdk-1")],
@@ -2635,6 +2669,113 @@ describe("ClaudeSdkAdapter", () => {
     // xhigh present → the OUR-tier "ultracode" is appended after it.
     expect(model?.effortLevels).toEqual(["low", "high", "xhigh", "ultracode"]);
     expect(model?.supportsFast).toBe(true);
+    await adapter.dispose();
+  });
+
+  it("discoverModels advertises unsupported Fast explicitly", async () => {
+    const { queryFn } = makeScriptedQuery(
+      [[initMsg("sdk-1"), resultOk("sdk-1")]],
+      {
+        supportedModels: [
+          {
+            value: "claude-haiku-4-5",
+            displayName: "Haiku 4.5",
+            supportsEffort: false,
+            supportedEffortLevels: [],
+            supportsFastMode: false,
+          },
+        ],
+      },
+    );
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
+    await tick();
+    await tick();
+
+    const init = (await adapter.initialize()) as {
+      _meta?: {
+        models?: Array<{ value: string; supportsFast?: boolean }>;
+      };
+    };
+    expect(
+      init._meta?.models?.find((model) => model.value === "claude-haiku-4-5")
+        ?.supportsFast,
+    ).toBe(false);
+    await adapter.dispose();
+  });
+
+  it("discoverModels preserves unknown capability fields as unknown", async () => {
+    const { queryFn } = makeScriptedQuery(
+      [[initMsg("sdk-1"), resultOk("sdk-1")]],
+      {
+        supportedModels: [
+          {
+            value: "claude-opus-4-8",
+            displayName: "Opus 4.8",
+          },
+        ],
+      },
+    );
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
+    await tick();
+    await tick();
+
+    const init = (await adapter.initialize()) as {
+      _meta?: {
+        models?: Array<{
+          value: string;
+          effortLevels?: string[];
+          supportsFast?: boolean;
+        }>;
+      };
+    };
+    const model = init._meta?.models?.find(
+      (entry) => entry.value === "claude-opus-4-8",
+    );
+    expect(model).toBeDefined();
+    expect(model).not.toHaveProperty("effortLevels");
+    expect(model).not.toHaveProperty("supportsFast");
+    await adapter.dispose();
+  });
+
+  it("discoverModels keys alias rows by the SDK's canonical resolved model", async () => {
+    const { queryFn } = makeScriptedQuery(
+      [[initMsg("sdk-1"), resultOk("sdk-1")]],
+      {
+        supportedModels: [
+          {
+            value: "opus",
+            resolvedModel: "claude-opus-5",
+            displayName: "Opus",
+            supportsEffort: true,
+            supportedEffortLevels: ["high", "max"],
+            supportsFastMode: true,
+          },
+        ],
+      },
+    );
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
+    await tick();
+    await tick();
+
+    const init = (await adapter.initialize()) as {
+      _meta?: { models?: Array<{ value: string }> };
+    };
+    expect(init._meta?.models?.[0]?.value).toBe("claude-opus-5");
     await adapter.dispose();
   });
 

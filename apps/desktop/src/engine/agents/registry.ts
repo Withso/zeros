@@ -391,19 +391,9 @@ function readClaudeBundledCliVersion(): string | null {
 function readCodexBundledVersion(): string | null {
   if (cachedCodexVersion !== undefined) return cachedCodexVersion;
   cachedCodexVersion = null;
-  // Same packaged-first ordering as Claude above: require.resolve is dead in the
-  // bun-compiled engine, so the packaged app reports no bundled Codex version and
-  // falls through to the PATH `codex --version` probe — a different number from the
-  // one dev shows.
-  //
-  // NOT YET WIRED — this is a forward-compatible hook, not a live fix. Nothing sets
-  // ZEROS_CODEX_CLI_VERSION today: apps/desktop/electron/sidecar.ts forwards only the Claude pair
-  // (ZEROS_CLAUDE_CLI_PATH / _VERSION), because Codex is a user-installed global by
-  // design (no `bundledRuntime` in its manifest entry, install hint
-  // `npm install -g @openai/codex`, and its platform package isn't even installed in
-  // this repo). Staging a Codex binary the way stage-claude-cli.mjs stages Claude
-  // would make this live; until then packaged Codex behaviour is UNCHANGED and the
-  // PATH fallback below logs loudly that it is not the pinned version.
+  // Packaged-first ordering matches Claude: sidecar.ts reads the version file
+  // written by stage-codex-cli.mjs and passes it through this env var because
+  // require.resolve is unavailable in the Bun-compiled engine.
   const fromEnv = process.env.ZEROS_CODEX_CLI_VERSION?.trim();
   if (fromEnv) {
     cachedCodexVersion = fromEnv;

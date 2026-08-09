@@ -30,8 +30,10 @@ separate legal questions; do not publish a release until the project owner and
 qualified counsel have closed both items.
 
 Platform-specific optional packages use the same vendor terms as their parent
-SDK. The macOS arm64 release currently stages the matching Claude runtime and
-resolves the matching Cursor runtime during packaging.
+SDK. The macOS arm64 release currently stages the matching Claude and Codex
+runtimes and resolves the matching Cursor runtime during packaging. Codex is
+Apache-2.0 and therefore not release-blocking, but it is redistributed and is
+inventoried accordingly.
 
 ## Generated and vendored code
 
@@ -47,6 +49,19 @@ resolves the matching Cursor runtime during packaging.
 
 The upstream generator uses `ts-rs`, which is dual MIT/Apache-2.0. The Codex
 NOTICE also records code derived from Ratatui under MIT.
+
+### Codex native runtime
+
+- **Path:** `Contents/Resources/codex-runtime/` in the packaged macOS app.
+- **Source:** the `@openai/codex-darwin-arm64` platform package, which npm
+  publishes as an alias of `@openai/codex@<version>-darwin-arm64`.
+- **Staging:** `scripts/stage-codex-cli.mjs` copies the whole vendor target
+  (main binary, code-mode host, vendored ripgrep, resources) at `beforePack`;
+  `scripts/check-packaging-paths.mjs` fails the build if that staging or its
+  `extraResources` entries go missing.
+- **License:** Apache-2.0. Because these binaries are redistributed, the
+  generated bundle records the platform package as its own inventory entry and
+  attaches the upstream `LICENSE` and `NOTICE` (Apache-2.0 §4(d)) to it.
 
 ### UI component source
 
