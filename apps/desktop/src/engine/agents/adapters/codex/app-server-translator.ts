@@ -674,16 +674,27 @@ export class CodexAppServerTranslator {
     // terminalInteraction reports what Codex wrote to stdin, not command
     // output. It is a lifecycle beat and must not pollute the visible log.
     if (method === "item/commandExecution/terminalInteraction") return;
-    const chunk =
-      typeof p.delta === "string"
-        ? p.delta
-        : typeof p.output === "string"
-          ? p.output
-          : "";
-    if (!chunk) return;
+    // The two payload shapes are NOT interchangeable, and the field name is
+    // the only thing that distinguishes them. `delta` is an increment and must
+    // be appended; `output` names a whole-log snapshot and must REPLACE, or
+    // each notification re-glues everything already shown ("abc" →
+    // "abcabcdef"). Every method wired above carries `delta` in the pinned
+    // 0.146 schema, so the snapshot arm is a guard against a future/legacy
+    // shape rather than a live path — which is exactly why it must not
+    // silently inherit append semantics.
     const previous = this.emittedToolOutput.get(p.itemId) ?? "";
-    if (previous.length >= MAX_STREAMED_TOOL_OUTPUT_CHARS) return;
-    const text = (previous + chunk).slice(0, MAX_STREAMED_TOOL_OUTPUT_CHARS);
+    let text: string;
+    if (typeof p.delta === "string" && p.delta) {
+      if (previous.length >= MAX_STREAMED_TOOL_OUTPUT_CHARS) return;
+      text = (previous + p.delta).slice(0, MAX_STREAMED_TOOL_OUTPUT_CHARS);
+    } else if (typeof p.output === "string" && p.output) {
+      text = p.output.slice(0, MAX_STREAMED_TOOL_OUTPUT_CHARS);
+      // A capped snapshot repeats its first N chars forever; re-emitting an
+      // identical rawOutput would churn the timeline for no visible change.
+      if (text === previous) return;
+    } else {
+      return;
+    }
     this.emittedToolOutput.set(p.itemId, text);
     this.emit({
       sessionId: this.sessionId,

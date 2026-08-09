@@ -292,6 +292,43 @@ describe("CodexAppServerTranslator", () => {
       expect(updates).toEqual(["first line\n", "first line\nsecond line\n"]);
     });
 
+    it("replaces rather than re-glues an output snapshot", () => {
+      env.t.handle("item/started", {
+        item: { type: "commandExecution", id: "cmd-snap", command: "build" },
+        threadId: "t1",
+        turnId: "u1",
+      });
+      // `output` names the whole log so far, not an increment. Appending it
+      // would render "first\n" then "first\nfirst\nsecond\n".
+      env.t.handle("item/commandExecution/outputDelta", {
+        itemId: "cmd-snap",
+        output: "first\n",
+      });
+      env.t.handle("item/commandExecution/outputDelta", {
+        itemId: "cmd-snap",
+        output: "first\nsecond\n",
+      });
+      // An unchanged snapshot must not churn the timeline.
+      env.t.handle("item/commandExecution/outputDelta", {
+        itemId: "cmd-snap",
+        output: "first\nsecond\n",
+      });
+      // A later true delta resumes appending onto the snapshot.
+      env.t.handle("item/commandExecution/outputDelta", {
+        itemId: "cmd-snap",
+        delta: "third\n",
+      });
+
+      const updates = env.out.emitted
+        .filter((n) => n.update.sessionUpdate === "tool_call_update")
+        .map((n) => (n.update as { rawOutput?: unknown }).rawOutput);
+      expect(updates).toEqual([
+        "first\n",
+        "first\nsecond\n",
+        "first\nsecond\nthird\n",
+      ]);
+    });
+
     it("bounds live output and never echoes terminal stdin into the log", () => {
       env.t.handle("item/started", {
         item: { type: "commandExecution", id: "cmd-bounded", command: "build" },
