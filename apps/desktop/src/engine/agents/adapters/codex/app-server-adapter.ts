@@ -1097,12 +1097,22 @@ export class CodexAppServerAdapter implements AgentAdapter {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     this.drainPendingApprovals(s, s.runtimeAlive);
-    this.sessions.delete(sessionId);
     s.pendingQuestions.clear();
     this.disposing.add(sessionId);
     try {
-      await s.runtime.dispose().catch(() => {});
+      let disposeFailed = false;
+      let disposeError: unknown;
+      try {
+        // Surface process-group teardown failure to the gateway. Ordinary tab
+        // close remains best-effort there; archive/delete uses failClosed.
+        await s.runtime.dispose();
+      } catch (err) {
+        disposeFailed = true;
+        disposeError = err;
+      }
       await removeSessionDir(s.zerosSessionId).catch(() => {});
+      if (disposeFailed) throw disposeError;
+      if (this.sessions.get(sessionId) === s) this.sessions.delete(sessionId);
     } finally {
       // Keep the suppression alive briefly past dispose() in case the child's
       // exit event lands a tick later, then release the marker.

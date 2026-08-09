@@ -13,6 +13,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { describe, it, expect, afterEach } from "vitest";
+import { execFileSync } from "node:child_process";
 import {
   spawnPtyViaHost,
   disposePtyHost,
@@ -109,6 +110,107 @@ describe("pty-host-client — out-of-process node-pty", () => {
     ]);
     expect(result).not.toBeNull();
   });
+
+  it.runIf(process.platform !== "win32")(
+    "reaps a background job when its live terminal is killed",
+    async () => {
+      // The desktop test environment can inherit a packaged host path. This
+      // regression must exercise the source host changed by this checkout.
+      const priorHostScript = process.env.ZEROS_PTY_HOST_SCRIPT;
+      process.env.ZEROS_PTY_HOST_SCRIPT = `${process.cwd()}/apps/desktop/src/engine/pty/pty-host.cjs`;
+      let output = "";
+      let childPid: number | null = null;
+      const handle = spawnPtyViaHost({
+        shell: "/bin/zsh",
+        args: ["-f", "-i"],
+        cwd: process.cwd(),
+        cols: 80,
+        rows: 24,
+        env: process.env as Record<string, string>,
+      });
+      const exit = new Promise<void>((resolve) =>
+        handle.onExit(() => resolve()),
+      );
+      handle.onData((chunk) => {
+        output += chunk;
+        const match = /ZEROS_BG_PID:(\d+)/.exec(output);
+        if (match) childPid = Number(match[1]);
+      });
+      try {
+        const ready = await waitFor(
+          () => output,
+          () => handle.pid > 0,
+          4_000,
+        );
+        expect(ready).toBe(true);
+        handle.write(
+          "setopt monitor; nohup sleep 30 </dev/null >/dev/null 2>&1 & child=$!; disown; echo ZEROS_BG_PID:$child\r",
+        );
+        const childStarted = await waitFor(
+          () => output,
+          () => childPid !== null,
+          4_000,
+        );
+        expect(childStarted).toBe(true);
+        const beforeKill = execFileSync(
+          "ps",
+          ["-o", "pid=,ppid=,pgid=,sess=,command=", "-p", String(childPid)],
+          { encoding: "utf8" },
+        ).trim();
+        handle.kill();
+        await Promise.race([
+          exit,
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error("terminal shell did not exit")),
+              4_000,
+            ),
+          ),
+        ]);
+        expect(childPid).toBeGreaterThan(0);
+        const gone = await waitFor(
+          () => "",
+          () => {
+            try {
+              const state = execFileSync(
+                "ps",
+                ["-o", "stat=", "-p", String(childPid)],
+                { encoding: "utf8" },
+              ).trim();
+              return state.length === 0 || state.startsWith("Z");
+            } catch {
+              return true;
+            }
+          },
+          2_000,
+        );
+        let processRow = "";
+        if (!gone) {
+          try {
+            processRow = execFileSync(
+              "ps",
+              ["-o", "pid=,ppid=,pgid=,sess=,command=", "-p", String(childPid)],
+              { encoding: "utf8" },
+            ).trim();
+          } catch {
+            processRow = "process details unavailable";
+          }
+        }
+        expect(gone, `before=${beforeKill}; after=${processRow}`).toBe(true);
+      } finally {
+        if (priorHostScript === undefined)
+          delete process.env.ZEROS_PTY_HOST_SCRIPT;
+        else process.env.ZEROS_PTY_HOST_SCRIPT = priorHostScript;
+        if (childPid) {
+          try {
+            process.kill(childPid, "SIGKILL");
+          } catch {
+            /* already reaped */
+          }
+        }
+      }
+    },
+  );
 
   it("survives resize and kill without throwing", async () => {
     const { handle, data, exit } = makeHandle();

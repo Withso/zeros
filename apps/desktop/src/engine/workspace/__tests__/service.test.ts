@@ -13,6 +13,8 @@ import {
   getWorkspaceLifecycleStatus,
   listRemoteRestrictedWorkspaceIds,
 } from "../../git";
+import { insertWorkspace } from "../../git/state";
+import type { Workspace } from "../../git/types";
 import { getDesignRuntimeAudit } from "../../design/runtime-audits";
 import {
   getWorkspaceDesignApi,
@@ -960,6 +962,37 @@ describe("WorkspaceService", () => {
     expect(svc.workspaceIdForCwd("/nope/zzz/qqq")).toBeNull();
     expect(svc.workspaceIdForCwd("not-a-real-id")).toBeNull();
     expect(svc.workspaceIdForCwd(undefined)).toBeNull();
+  });
+
+  it("workspaceIdForCwd chooses a more-specific managed owner below the engine root", () => {
+    const nestedPath = path.join(dir, "nested-workspace");
+    fs.mkdirSync(nestedPath, { recursive: true });
+    const now = Date.now();
+    insertWorkspace({
+      id: "ws_nested-owner",
+      repoSlug: "nested",
+      repoRoot: dir,
+      branch: "zeros/nested-owner",
+      baseBranch: "main",
+      path: nestedPath,
+      status: "in-progress",
+      createdAt: now,
+      archivedAt: null,
+      stashRef: null,
+      prNumber: null,
+      prState: null,
+      prUrl: null,
+      agentId: null,
+      lastActiveAt: now,
+      setupState: null,
+    } satisfies Workspace);
+
+    expect(svc.workspaceIdForCwd(path.join(nestedPath, "src"))).toBe(
+      "ws_nested-owner",
+    );
+    expect(svc.workspaceIdForCwd(path.join(dir, "ordinary-subdir"))).toBe(
+      LOCAL_MAIN_WORKSPACE_ID,
+    );
   });
 
   it("reads a file under local-main", async () => {
@@ -2212,7 +2245,7 @@ describe("WorkspaceService", () => {
     for (const entry of created) expect(fs.existsSync(entry.path)).toBe(true);
   });
 
-  it("re-runs the repo setup script in the background after restore (deps recovery)", async () => {
+  it("does not run the repo setup script after restoring a workspace", async () => {
     // createWorkspace needs a base commit; repoSlug is passed explicitly since
     // the test repo has no origin. Configure a setup script via repo settings.
     fs.writeFileSync(path.join(dir, "README.md"), "# x\n");
@@ -2247,8 +2280,8 @@ describe("WorkspaceService", () => {
       repoSlug: "svcrepo",
     });
 
-    // Archive never runs setup; restore does (so gitignored deps like
-    // node_modules — absent from the archive stash — come back, like create).
+    // Neither archive nor restore should run setup. Restoring a workspace must
+    // not execute repository-configured commands implicitly.
     await svc.handle("workspace.archive", {
       workspaceId: created.workspaceId,
       stashUncommitted: true,
@@ -2259,9 +2292,7 @@ describe("WorkspaceService", () => {
       workspaceId: created.workspaceId,
     })) as { restoredAt: number };
     expect(result.restoredAt).toBeGreaterThan(0);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.id).toBe(created.workspaceId);
-    expect(calls[0]!.command).toContain("echo deps");
+    expect(calls).toHaveLength(0);
   });
 
   it("runs setup for the ROWLESS trunk via repoRoot (local:<slug>, no workspace row)", async () => {

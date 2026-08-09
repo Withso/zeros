@@ -1276,17 +1276,23 @@ export class CursorSdkAdapter implements AgentAdapter {
     // session is superseded mid-turn (one-live-session-per-chat teardown in the
     // engine) — mirrors the claude/codex deliberate-teardown semantics.
     session.cancelRequested = true;
-    this.sessions.delete(sessionId);
+    let disposeFailed = false;
+    let disposeError: unknown;
     try {
       await session.activeRun?.cancel();
-    } catch {
-      /* best effort */
+    } catch (err) {
+      disposeFailed = true;
+      disposeError = err;
     }
     try {
       session.agent.close?.();
-    } catch {
-      /* ignore */
+    } catch (err) {
+      if (!disposeFailed) disposeError = err;
+      disposeFailed = true;
     }
+    if (disposeFailed) throw disposeError;
+    if (this.sessions.get(sessionId) === session)
+      this.sessions.delete(sessionId);
   }
 
   async dispose(): Promise<void> {

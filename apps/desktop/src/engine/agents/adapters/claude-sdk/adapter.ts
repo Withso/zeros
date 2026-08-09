@@ -2636,8 +2636,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   async disposeSession(sessionId: string): Promise<void> {
     const state = this.sessions.get(sessionId);
     if (!state) return;
-    this.sessions.delete(sessionId);
     await this.teardown(state);
+    if (this.sessions.get(sessionId) === state) this.sessions.delete(sessionId);
   }
 
   async dispose(): Promise<void> {
@@ -2674,12 +2674,15 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       /* no-op */
     }
     state.input.end();
+    let closeFailed = false;
+    let closeError: unknown;
     try {
       state.query?.close();
-    } catch {
-      /* already closed */
+    } catch (err) {
+      closeFailed = true;
+      closeError = err;
     }
-    state.query = null;
+    if (!closeFailed) state.query = null;
     if (state.consumer) {
       await state.consumer.catch(() => {});
     }
@@ -2688,6 +2691,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         `[agents] claude-sdk session-dir cleanup failed for ${state.zerosSessionId}: ${err instanceof Error ? err.message : String(err)}`,
       );
     });
+    if (closeFailed) throw closeError;
   }
 
   // ── internals ─────────────────────────────────────────

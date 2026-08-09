@@ -940,9 +940,14 @@ export class AgentGateway {
    *  release the session's subprocess / server child / SDK agent +
    *  session dir. Without this, every started session leaked an
    *  on-disk session dir (+ a per-session Codex server child) until app
-   *  quit. Best-effort: a teardown failure is logged, never thrown, so
-   *  closing a tab can't surface an error. */
-  async endSession(agentId: string, sessionId: string): Promise<void> {
+   *  quit. Best-effort by default so closing a tab can't surface an error.
+   *  Lifecycle callers use failClosed: archive/delete must abort when the
+   *  adapter cannot confirm that its session resource was disposed. */
+  async endSession(
+    agentId: string,
+    sessionId: string,
+    opts: { failClosed?: boolean } = {},
+  ): Promise<void> {
     const resolvedAgentId = this.sessionToAgent.get(sessionId) ?? agentId;
     this.sessionToAgent.delete(sessionId);
     this.sessionToWorkspace.delete(sessionId);
@@ -959,6 +964,7 @@ export class AgentGateway {
           `[agents] ${resolvedAgentId} disposeSession(${sessionId}) failed: ` +
             (err instanceof Error ? err.message : String(err)),
         );
+        if (opts.failClosed) throw err;
       }
     }
   }

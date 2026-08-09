@@ -698,10 +698,28 @@ export class ZerosEngine {
             (!relative.startsWith("..") && !path.isAbsolute(relative))
           );
         };
+        // Path containment alone is insufficient: a separately registered,
+        // more-specific workspace may live below this folder. Canonical owner
+        // wins; raw containment is only the compatibility fallback for legacy
+        // engine resources that predate workspace binding.
+        const belongsToWorkspace = (candidate: string): boolean => {
+          try {
+            const owner = this.workspace.workspaceIdForCwd(candidate);
+            return owner ? owner === workspaceId : isUnderRoot(candidate);
+          } catch {
+            return isUnderRoot(candidate);
+          }
+        };
         // Starts already admitted before this lifecycle acquired its
         // single-flight may still be resolving environment/session state and
         // therefore have no PTY/session to enumerate yet. Wait for them first.
         // Starts arriving after acquisition fail the lifecycle gate.
+        // Cancel manager-owned pre-spawn flights before waiting: setup/run env
+        // resolution can otherwise consume the whole lifecycle timeout even
+        // though no child exists yet. The calls are repeated after enumeration
+        // as an idempotent guard for an already-admitted flight settling here.
+        this.setup.stop(workspaceId);
+        this.runs.stopAllForWorkspace(workspaceId);
         await this.waitForWorkspaceProcessStarts(workspaceId);
 
         // Agent prompts are not necessarily represented by a workspace PTY
@@ -711,11 +729,16 @@ export class ZerosEngine {
         // when promptSessions is empty.
         const agentSessionIds = new Set<string>();
         for (const [sessionId, boundWorkspaceId] of this.sessionWorkspace) {
-          if (boundWorkspaceId === workspaceId) agentSessionIds.add(sessionId);
+          if (boundWorkspaceId !== workspaceId) continue;
+          const chatId = this.sessionChat.get(sessionId);
+          const folder = chatId ? getChatLocation(chatId)?.folder : null;
+          if (!folder || belongsToWorkspace(folder)) {
+            agentSessionIds.add(sessionId);
+          }
         }
         for (const [sessionId, chatId] of this.sessionChat) {
           const folder = getChatLocation(chatId)?.folder;
-          if (folder && isUnderRoot(folder)) {
+          if (folder && belongsToWorkspace(folder)) {
             agentSessionIds.add(sessionId);
             // Preserve a lifecycle tombstone after the adapter session is
             // disposed. A late prompt carrying only the old session id must
@@ -743,7 +766,7 @@ export class ZerosEngine {
             try {
               const ended = await Promise.race([
                 this.agents
-                  .endSession(agentId, sessionId)
+                  .endSession(agentId, sessionId, { failClosed: true })
                   .then(() => true)
                   .catch(() => false),
                 new Promise<boolean>((resolve) => {
@@ -776,8 +799,9 @@ export class ZerosEngine {
         }
         const ptyIds = this.pty
           .list()
-          .filter((session) => isUnderRoot(session.cwd))
+          .filter((session) => belongsToWorkspace(session.cwd))
           .map((session) => session.sessionId);
+        const ptyIdSet = new Set(ptyIds);
         // Register exit observers BEFORE the managers call kill(); a fast process
         // can otherwise exit between kill and waiter registration.
         const exitWaits = ptyIds.map((sessionId) =>
@@ -786,11 +810,25 @@ export class ZerosEngine {
         this.setup.stop(workspaceId);
         this.runs.stopAllForWorkspace(workspaceId);
         const terminalIds = new Set(
-          this.terminals.idsUnderFolder(worktreePath),
+          this.terminals.sessionIds().filter((sessionId) => {
+            const terminal = this.terminals.get(sessionId);
+            if (!terminal) return false;
+            try {
+              const owner = this.workspace.workspaceIdForCwd(terminal.cwd);
+              if (owner) return owner === workspaceId;
+            } catch {
+              /* fall back to the durable registry binding below */
+            }
+            return terminal.workspaceId === workspaceId;
+          }),
         );
         for (const sessionId of terminalIds) {
-          this.explicitlyClosing.add(sessionId);
-          this.pty.kill(sessionId);
+          // Exited terminals have only a registry row, no process. Live ones
+          // take the normal explicit-close path and disappear on PTY_EXIT.
+          if (ptyIdSet.has(sessionId)) {
+            this.explicitlyClosing.add(sessionId);
+            this.pty.kill(sessionId);
+          }
         }
         // Cover any engine-owned process cwd'd here that is not represented in
         // setup/run/terminal registries. The operation owns this workspace, so no
@@ -814,6 +852,16 @@ export class ZerosEngine {
             },
           });
         }
+        // Natural-exit tabs have no PTY_EXIT left to retire them. Once every
+        // live process is confirmed gone, prune those stale rows too so restore
+        // cannot surface a restartable terminal from the archived workspace.
+        let terminalsChanged = false;
+        for (const sessionId of terminalIds) {
+          this.explicitlyClosing.delete(sessionId);
+          terminalsChanged =
+            this.terminals.remove(sessionId) || terminalsChanged;
+        }
+        if (terminalsChanged) this.broadcastTerminalsChanged();
       },
     );
     this.workspace.setWorkspaceCheckoutWatchSuspender(
@@ -4510,6 +4558,29 @@ export class ZerosEngine {
       return;
     }
 
+    // Publish the start barrier before any authorization/credential await.
+    // Archive/delete either rejects this start at the lifecycle gate below or
+    // waits for it to become enumerable, then reaps it; there is no gap where a
+    // late PTY can appear after process enumeration.
+    const start = Promise.resolve().then(() =>
+      this.handlePtyCreateForWorkspace(
+        msg,
+        client,
+        ptyExit,
+        reattach,
+        canonicalWsId,
+      ),
+    );
+    return this.trackWorkspaceProcessStart(canonicalWsId, start);
+  }
+
+  private async handlePtyCreateForWorkspace(
+    msg: Extract<EngineMessage, { type: "PTY_CREATE" }>,
+    client: TransportClient,
+    ptyExit: () => void,
+    reattach: boolean,
+    canonicalWsId: string | null,
+  ): Promise<void> {
     let cwdInput = msg.cwd;
     if (client.kind !== "local" && !reattach) {
       // The app-owned authentication cwd is intentionally host-local. Never
@@ -4574,6 +4645,12 @@ export class ZerosEngine {
         baseEnv.PATH ?? "",
       );
       env = credentialEnv ? { ...baseEnv, ...credentialEnv.env } : baseEnv;
+    }
+    // Local credential setup is asynchronous too. Avoid spawning at all when
+    // archive/delete acquired the workspace while it was resolving.
+    if (!this.workspaceAllowsProcessStart(canonicalWsId)) {
+      ptyExit();
+      return;
     }
     const info = this.pty.create({
       sessionId: msg.sessionId,
