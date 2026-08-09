@@ -92,6 +92,7 @@ import { preserveAmbientConfigRoots } from "../shared/config-isolation";
 import {
   answerMcpElicitation,
   buildMcpElicitationQuestion,
+  deliveredQuestionOutcome,
   MAX_PENDING_MCP_ELICITATIONS,
   mcpElicitationAuditInput,
 } from "../shared/mcp-elicitation";
@@ -2667,12 +2668,25 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // Resolve the native SDK callback before best-effort transcript work so a
     // renderer/bridge failure can never strand the MCP tool.
     pending.resolve(sdkResult);
+    // The mapper fails closed: a value that does not satisfy the requested
+    // schema goes out as `cancel`, so the server got nothing. Receipt what was
+    // delivered rather than what the user intended, and say so on the agent log
+    // — the card is already gone by the time the mapping runs.
+    // Only a fail-closed `cancel` is a surprise. Picking a Decline row is an
+    // intentional refusal and reads correctly on its own.
+    const delivered = deliveredQuestionOutcome(outcome, mapped.response);
+    if (delivered !== outcome && mapped.response.action === "cancel") {
+      this.ctx.emit.onAgentStderr(
+        this.agentId,
+        `[zeros] MCP request ${pending.request.nativeRequestId}: the submitted answer does not satisfy the requested schema — the request was cancelled and nothing was sent to the server`,
+      );
+    }
     this.recordQuestionSettlement(
       state,
       questionId,
       pending.request,
       pending.request.toolCallId,
-      outcome,
+      delivered,
     );
   }
 

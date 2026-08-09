@@ -543,11 +543,14 @@ function resolveCodexCliPaths(): {
     }
   }
 
+  // Source checkouts only: the packaged branch always returns the staged path
+  // (and reports its own absence above), so reaching here means the optional
+  // @openai/codex-<platform> package is missing from this dev install.
   if (!binary) {
     console.error(
-      "[Zeros] pinned Codex runtime not found (no staged " +
-        "Contents/Resources/codex-runtime and no platform package) — Codex " +
-        "will fall back to an unpinned `codex` on PATH. Run `pnpm stage:codex-cli`.",
+      "[Zeros] pinned Codex runtime not found (no resolvable " +
+        "@openai/codex platform package) — Codex will fall back to an " +
+        "unpinned `codex` on PATH. Run `pnpm stage:codex-cli`.",
     );
   }
   return { binary, version };

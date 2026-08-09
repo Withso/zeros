@@ -6,7 +6,10 @@ import {
   mapCodexQuestionAnswer,
   mapCodexQuestionToCanonical,
 } from "../app-server-adapter";
-import { mcpElicitationAuditInput } from "../../shared/mcp-elicitation";
+import {
+  deliveredQuestionOutcome,
+  mcpElicitationAuditInput,
+} from "../../shared/mcp-elicitation";
 
 function request(params: Record<string, unknown>): CodexUserInputRequest {
   return {
@@ -469,7 +472,6 @@ describe("Codex MCP elicitation mapping", () => {
       {
         id: "padded",
         defaultFreeText: "  keep me  ",
-        allowEmptyFreeText: true,
         preserveFreeText: true,
       },
       {
@@ -478,6 +480,8 @@ describe("Codex MCP elicitation mapping", () => {
         preserveFreeText: true,
       },
     ]);
+    // Only the field that DECLARED minLength: 0 counts a blank box as filled.
+    expect(canonical.questions[0].allowEmptyFreeText).toBeUndefined();
     expect(
       mapCodexQuestionAnswer(
         native,
@@ -494,6 +498,103 @@ describe("Codex MCP elicitation mapping", () => {
         _meta: null,
       },
     });
+  });
+
+  it("requires real input for text fields the schema never called optional", () => {
+    const native = request({
+      serverName: "support",
+      mode: "form",
+      message: "Open a ticket",
+      requestedSchema: {
+        type: "object",
+        properties: {
+          // No minLength at all — the common case. A blank box is NOT an answer.
+          subject: { type: "string", title: "Subject" },
+          // Declares minLength: 0, but "" can never satisfy the format, so
+          // accepting a blank would only produce a silent cancel on submit.
+          contact: { type: "string", format: "email", minLength: 0 },
+          // Same, via pattern.
+          ticket: { type: "string", pattern: "^T[0-9]{4}$", minLength: 0 },
+        },
+        required: ["subject", "contact", "ticket"],
+      },
+    });
+    const canonical = mapCodexQuestionToCanonical("session-1", native);
+
+    for (const question of canonical.questions) {
+      expect(question.allowOther).toBe(true);
+      expect(question.allowEmptyFreeText).toBeUndefined();
+    }
+  });
+
+  it("renders forms carrying the annotation keys schema generators emit", () => {
+    const native = request({
+      serverName: "notes",
+      mode: "form",
+      message: "Add a note",
+      requestedSchema: {
+        $schema: "http://json-schema.org/draft-07/schema#",
+        type: "object",
+        title: "AddNote",
+        description: "Arguments for add_note",
+        // zod/pydantic emit this on every generated object schema. It cannot
+        // affect the answer — only declared properties are ever sent.
+        additionalProperties: false,
+        properties: { body: { type: "string", title: "Body" } },
+        required: ["body"],
+      },
+    });
+    const canonical = mapCodexQuestionToCanonical("session-1", native);
+
+    expect(canonical.questions.map((question) => question.id)).toEqual(["body"]);
+    expect(
+      mapCodexQuestionAnswer(
+        native,
+        canonical,
+        answered([{ questionId: "body", freeText: "ship it" }]),
+      ),
+    ).toEqual({
+      response: { action: "accept", content: { body: "ship it" }, _meta: null },
+    });
+  });
+
+  it("receipts a fail-closed submit as skipped rather than answered", () => {
+    const submitted = answered([{ questionId: "email", freeText: "nope" }])
+      .outcome;
+
+    // A submit the server never received must not be recorded as an exchange.
+    expect(
+      deliveredQuestionOutcome(submitted, {
+        action: "cancel",
+        content: null,
+        _meta: null,
+      }),
+    ).toEqual({ outcome: "dismissed" });
+    // An explicit refusal keeps its own meaning.
+    expect(
+      deliveredQuestionOutcome(submitted, {
+        action: "decline",
+        content: null,
+        _meta: null,
+      }),
+    ).toEqual({ outcome: "declined" });
+    // A delivered answer is untouched (identity, so the caller can compare).
+    expect(
+      deliveredQuestionOutcome(submitted, {
+        action: "accept",
+        content: {},
+        _meta: null,
+      }),
+    ).toBe(submitted);
+    // A dismissal was already honest.
+    const dismissed = { outcome: "dismissed" } as const;
+    expect(
+      deliveredQuestionOutcome(dismissed, {
+        action: "cancel",
+        content: null,
+        _meta: null,
+      }),
+    ).toBe(dismissed);
   });
 
   it("fails closed for unknown modes and impossible calendar dates", () => {

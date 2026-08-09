@@ -148,6 +148,9 @@ describe("Codex ordered command approval decisions", () => {
       { optionId: "decline", name: "Decline", kind: "reject_once" },
       { optionId: "cancel", name: "Cancel", kind: "reject_always" },
     ]);
+    // Provider-ordered amendments are the reason local policies are off: a
+    // tool-title rule could auto-select the wrong one on a later request.
+    expect(request.allowLocalPolicies).toBe(false);
     expect(request.contextItems).toEqual([
       "Network · https://api.example.com",
       "Extra network access",
@@ -159,6 +162,32 @@ describe("Codex ordered command approval decisions", () => {
       proposedExecpolicyAmendment: params.proposedExecpolicyAmendment,
       proposedNetworkPolicyAmendments: params.proposedNetworkPolicyAmendments,
     });
+  });
+
+  it("leaves saved chat policies working on gates that carry no amendments", () => {
+    const session = {
+      zerosSessionId: "s",
+      fileEditPathsByItemId: new Map(),
+    } as never;
+    // Edit and permission gates have no `availableDecisions`, so the
+    // wrong-amendment risk that disables local policies does not exist there —
+    // rules a user already saved with "don't ask again" must keep resolving.
+    for (const method of [FILE, PERMS, LEGACY_PATCH, LEGACY_EXEC]) {
+      const request = mapApprovalToCanonical(session, {
+        permissionId: "p",
+        method,
+        params: { itemId: "item-1" },
+      } as never);
+      expect(request.useOptionNames).toBeUndefined();
+      expect(request.allowLocalPolicies).toBeUndefined();
+    }
+    // A command gate whose app-server sent no ordered list behaves the same.
+    const untyped = mapApprovalToCanonical(session, {
+      permissionId: "p",
+      method: EXEC,
+      params: { itemId: "cmd-1", command: "ls" },
+    } as never);
+    expect(untyped.allowLocalPolicies).toBeUndefined();
   });
 
   it("round-trips only the exact offered amendment object", () => {

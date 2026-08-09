@@ -78,6 +78,52 @@ describe("ClaudeStreamTranslator onUser", () => {
     expect((upd!.update as { status?: string }).status).toBe("completed");
   });
 
+  it("still renders tool text carried under an unrecognized block type", () => {
+    const { t, updates } = collect();
+    t.feed({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_odd",
+            name: "mcp__legacy__lookup",
+            input: {},
+          },
+        ],
+      },
+    });
+    t.feed({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_odd",
+            // Some MCP servers wrap text, or omit `type` entirely. Dropping
+            // these would blank the tool row instead of showing its output.
+            content: [
+              { type: "output_text", text: "wrapped" },
+              { text: "untyped" },
+            ],
+          },
+        ],
+      },
+    });
+
+    const upd = updates.find(
+      (u) => u.update.sessionUpdate === "tool_call_update",
+    )!.update as {
+      content?: Array<{ content?: Record<string, unknown> }>;
+    };
+    expect(upd.content).toEqual([
+      { type: "content", content: { type: "text", text: "wrapped" } },
+      { type: "content", content: { type: "text", text: "untyped" } },
+    ]);
+  });
+
   it("preserves base64 images returned by tools as renderable content", () => {
     const { t, updates } = collect();
     t.feed({

@@ -62,6 +62,8 @@ import { PERMISSION_RESPONSE_TIMEOUT_MS } from "../shared/constants";
 import {
   answerMcpElicitation,
   buildMcpElicitationQuestion,
+  deliveredQuestionOutcome,
+  isMcpElicitationResponse,
   mcpElicitationAuditInput,
   type McpElicitationAnswer,
   type McpElicitationRequestLike,
@@ -1006,6 +1008,11 @@ export class CodexAppServerAdapter implements AgentAdapter {
   ): boolean {
     const pending = session.pendingQuestions.get(questionId);
     if (!pending || !session.pendingQuestions.delete(questionId)) return false;
+    // The MCP mapper fails closed: a submitted value that does not satisfy the
+    // requested schema is delivered as `cancel`, not as an answer. Receipt what
+    // reached the server, not what the user intended, so the timeline can never
+    // read ANSWERED over a request the server was told to drop.
+    let delivered = outcome;
     try {
       if (response) {
         const mapped = mapCodexQuestionAnswer(
@@ -1016,12 +1023,34 @@ export class CodexAppServerAdapter implements AgentAdapter {
         if ("openUrl" in mapped && mapped.openUrl) {
           openExternalUrl(mapped.openUrl);
         }
+        if (isMcpElicitationResponse(mapped.response)) {
+          delivered = deliveredQuestionOutcome(outcome, mapped.response);
+          // Only a fail-closed `cancel` is a surprise. Picking a Decline row
+          // is an intentional refusal and reads correctly on its own.
+          if (delivered !== outcome && mapped.response.action === "cancel") {
+            this.warnAnswerRejected(pending.request);
+          }
+        }
         pending.runtime.respondToUserInput(questionId, mapped.response);
       }
     } finally {
-      this.settleQuestionRecord(session, questionId, pending.request, outcome);
+      this.settleQuestionRecord(
+        session,
+        questionId,
+        pending.request,
+        delivered,
+      );
     }
     return true;
+  }
+
+  /** A silently converted submit is the one failure the card cannot show on
+   * its own — it is already gone by the time the mapper runs. */
+  private warnAnswerRejected(request: QuestionRequest): void {
+    this.ctx.emit.onAgentStderr(
+      this.agentId,
+      `[zeros] MCP request ${request.nativeRequestId}: the submitted answer does not satisfy the requested schema — the request was cancelled and nothing was sent to the server`,
+    );
   }
 
   // ── account ───────────────────────────────────────────
@@ -2730,12 +2759,17 @@ export function mapApprovalToCanonical(
       rawInput,
     } as never,
     options,
-    ...(nativeChoices !== null ? { useOptionNames: true } : {}),
-    ...(contextItems.length > 0 ? { contextItems } : {}),
     // Codex persists its own session/policy decisions. A Zeros-side policy is
     // broader (tool title/kind matching) and could auto-select the wrong native
-    // amendment on a later request, so keep these gates provider-owned.
-    allowLocalPolicies: false,
+    // amendment on a later request, so provider-ordered gates stay
+    // provider-owned. That reasoning is specific to `availableDecisions`:
+    // plain edit/permission gates carry no amendments, and disabling local
+    // policies for them would quietly stop honoring "don't ask again" rules
+    // users already saved.
+    ...(nativeChoices !== null
+      ? { useOptionNames: true, allowLocalPolicies: false }
+      : {}),
+    ...(contextItems.length > 0 ? { contextItems } : {}),
   } as never;
 }
 

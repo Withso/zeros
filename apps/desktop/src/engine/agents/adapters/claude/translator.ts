@@ -2531,6 +2531,20 @@ function toolResultContent(
         },
       ];
     }
+    // Lenient tail, matching the pre-image behavior: an MCP server that emits
+    // text under a wrapper type (or no type at all) still renders instead of
+    // vanishing from the tool output.
+    if (typeof block.text === "string") {
+      const text = stripToolUseError(block.text);
+      return text
+        ? [
+            {
+              type: "content" as const,
+              content: { type: "text" as const, text },
+            },
+          ]
+        : [];
+    }
     return [];
   });
 }

@@ -289,6 +289,33 @@ export function answerMcpElicitation(
   };
 }
 
+/** Discriminate an MCP wire response from a provider's own answer payload —
+ * only the former carries the fail-closed `cancel` this module can produce. */
+export function isMcpElicitationResponse(
+  value: unknown,
+): value is McpElicitationResponseLike {
+  const action = asRecord(value)?.action;
+  return action === "accept" || action === "decline" || action === "cancel";
+}
+
+/** The outcome that was actually DELIVERED to the MCP server. Every
+ * fail-closed path above (unparseable number, unmet `format`/`pattern`, forged
+ * option id, duplicate/mixed selections) turns a submit into `cancel`, so the
+ * server receives nothing at all. Stamping the transcript from the user's
+ * `answered` intent would record values that were never sent — and read as a
+ * completed exchange — so the durable record follows the wire instead. */
+export function deliveredQuestionOutcome(
+  outcome: QuestionResponse["outcome"],
+  delivered: McpElicitationResponseLike,
+): QuestionResponse["outcome"] {
+  if (outcome.outcome !== "answered" || delivered.action === "accept") {
+    return outcome;
+  }
+  return delivered.action === "decline"
+    ? { outcome: "declined" }
+    : { outcome: "dismissed" };
+}
+
 function buildUrlQuestion(request: McpElicitationRequestLike): QuestionSpec {
   const parsedUrl = safeWebUrlObject(request.url);
   const url = parsedUrl?.toString() ?? null;
@@ -490,15 +517,30 @@ function buildFormQuestions(
       multiSelect: isArray,
       options,
       allowOther: freeText,
-      ...(freeText &&
-      type === "string" &&
-      (numeric(property.minLength) ?? 0) === 0
+      ...(freeText && type === "string" && allowsEmptyString(property)
         ? { allowEmptyFreeText: true }
         : {}),
       ...(freeText && type === "string" ? { preserveFreeText: true } : {}),
       ...defaults,
     };
   });
+}
+
+/** True only when the server EXPLICITLY declared a zero-length string valid
+ * and an empty value would survive `readPropertyAnswer`. Treating the mere
+ * absence of `minLength` as permission would mark every plain required text
+ * box as already answered — Submit lights up before the user types, and a
+ * blank that then fails `format`/`pattern` makes the mapper cancel the whole
+ * request while the transcript still reads as an answer. */
+function allowsEmptyString(property: Record<string, unknown>): boolean {
+  return (
+    numeric(property.minLength) === 0 &&
+    readPropertyAnswer(property, {
+      questionId: "",
+      selectedOptionIds: [],
+      freeText: "",
+    }).ok
+  );
 }
 
 /** Codex 0.146 routes MCP tool approvals through an otherwise ordinary empty
@@ -604,7 +646,22 @@ export function canRenderMcpForm(request: McpElicitationRequestLike): boolean {
   const schema = asRecord(request.requestedSchema);
   if (!schema || schema.type !== "object") return false;
   if (
-    !hasOnlyKeys(schema, ["$schema", "type", "properties", "required"]) ||
+    // `additionalProperties`/`title`/`description` are what zod- and
+    // pydantic-derived schemas routinely emit alongside the MCP subset. None
+    // of them can invalidate what we send: the answer is built only from the
+    // declared `properties`, so no undeclared key is ever produced and the
+    // other two are pure annotations. Rejecting them would degrade a
+    // perfectly renderable form to the "unsupported → cancel" card. Every
+    // key that DOES constrain a value stays unlisted and still fails closed.
+    !hasOnlyKeys(schema, [
+      "$schema",
+      "type",
+      "properties",
+      "required",
+      "additionalProperties",
+      "title",
+      "description",
+    ]) ||
     !jsonSizeWithin(schema, MAX_MCP_SCHEMA_CHARS) ||
     (schema.$schema !== undefined &&
       !boundedString(schema.$schema, MAX_MCP_COPY_CHARS)) ||
