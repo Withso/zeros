@@ -891,7 +891,7 @@ export async function bootCodexAppServerRuntime(
   });
 
   // ── Public handle ─────────────────────────────────────────
-  let disposed = false;
+  let disposePromise: Promise<void> | null = null;
 
   const requestWithRetry = async <T>(
     method: string,
@@ -1105,35 +1105,40 @@ export async function bootCodexAppServerRuntime(
       return requestWithRetry<T>(method, params ?? {}, rpcOpts);
     },
 
-    async dispose() {
-      if (disposed) return;
-      disposed = true;
-      // Settle any in-flight approval requests before the JSON-RPC
-      // client closes so the server doesn't see an abrupt stream
-      // disconnect mid-request (avoids stuck threads server-side).
-      for (const [permissionId, pending] of pendingApprovals) {
-        clearTimeout(pending.timer);
-        pending.resolve(defaultCancelResponse(pending.method));
-        pendingApprovals.delete(permissionId);
-        pendingApprovalByRpcId.delete(pending.rpcRequestId);
-        // Same reason as the timeout path above: this resolver is gone without
-        // a user choice, so the adapter and renderer both need telling. Reached
-        // when the runtime is disposed from underneath a parked approval — a
-        // sidecar teardown or a crash-recovery rebuild, neither of which routes
-        // through disposeSession's own drain.
-        opts.onApprovalSettled?.(permissionId);
-      }
-      for (const [questionId, pending] of pendingUserInputs) {
-        clearTimeout(pending.timer);
-        pending.resolve(pending.cancelResponse);
-        pendingUserInputs.delete(questionId);
-        pendingUserInputByRpcId.delete(pending.rpcRequestId);
-        opts.onUserInputSettled?.(questionId);
-      }
-      for (const w of turnWaiters.values()) w.resolve("cancelled");
-      turnWaiters.clear();
-      client.close("dispose");
-      await proc.stop();
+    dispose() {
+      // A lifecycle timeout does not cancel the underlying disposal promise.
+      // Every retry must await that SAME process-group stop, never observe the
+      // prior attempt and falsely report success while its stop still hangs.
+      if (disposePromise) return disposePromise;
+      disposePromise = (async () => {
+        // Settle any in-flight approval requests before the JSON-RPC
+        // client closes so the server doesn't see an abrupt stream
+        // disconnect mid-request (avoids stuck threads server-side).
+        for (const [permissionId, pending] of pendingApprovals) {
+          clearTimeout(pending.timer);
+          pending.resolve(defaultCancelResponse(pending.method));
+          pendingApprovals.delete(permissionId);
+          pendingApprovalByRpcId.delete(pending.rpcRequestId);
+          // Same reason as the timeout path above: this resolver is gone without
+          // a user choice, so the adapter and renderer both need telling. Reached
+          // when the runtime is disposed from underneath a parked approval — a
+          // sidecar teardown or a crash-recovery rebuild, neither of which routes
+          // through disposeSession's own drain.
+          opts.onApprovalSettled?.(permissionId);
+        }
+        for (const [questionId, pending] of pendingUserInputs) {
+          clearTimeout(pending.timer);
+          pending.resolve(pending.cancelResponse);
+          pendingUserInputs.delete(questionId);
+          pendingUserInputByRpcId.delete(pending.rpcRequestId);
+          opts.onUserInputSettled?.(questionId);
+        }
+        for (const w of turnWaiters.values()) w.resolve("cancelled");
+        turnWaiters.clear();
+        client.close("dispose");
+        await proc.stop();
+      })();
+      return disposePromise;
     },
   };
 }

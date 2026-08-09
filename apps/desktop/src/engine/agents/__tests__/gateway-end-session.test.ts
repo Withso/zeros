@@ -79,4 +79,30 @@ describe("AgentGateway.endSession", () => {
     await expect(gw.endSession("bare", "s3")).resolves.toBeUndefined();
     expect(gw.sessionToAgent.has("s3")).toBe(false);
   });
+
+  it("propagates adapter teardown failure when the caller must fail closed", async () => {
+    const gw = makeGateway() as unknown as {
+      adapters: Map<string, AgentAdapter>;
+      sessionToAgent: Map<string, string>;
+      endSession(
+        agentId: string,
+        sessionId: string,
+        opts: { failClosed: true },
+      ): Promise<void>;
+    };
+    gw.adapters.set("strict", {
+      agentId: "strict",
+      disposeSession: async () => {
+        throw new Error("process group still alive");
+      },
+    } as unknown as AgentAdapter);
+    gw.sessionToAgent.set("s4", "strict");
+
+    await expect(
+      gw.endSession("strict", "s4", { failClosed: true }),
+    ).rejects.toThrow("process group still alive");
+    // Routing still clears even when the resource teardown could not be
+    // confirmed. Archive retains its separate lifecycle tombstone and aborts.
+    expect(gw.sessionToAgent.has("s4")).toBe(false);
+  });
 });

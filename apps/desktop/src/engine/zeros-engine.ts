@@ -698,6 +698,42 @@ export class ZerosEngine {
             (!relative.startsWith("..") && !path.isAbsolute(relative))
           );
         };
+        // Resolving an owner reads the workspace list, and the same folder
+        // backs many PTYs/terminals/chats — memoize per reap so one lifecycle
+        // costs one lookup per DISTINCT path.
+        const ownerCache = new Map<string, string | null>();
+        const ownerOf = (candidate: string): string | null => {
+          const cached = ownerCache.get(candidate);
+          if (cached !== undefined) return cached;
+          let owner: string | null = null;
+          try {
+            owner = this.workspace.workspaceIdForCwd(candidate);
+          } catch {
+            owner = null;
+          }
+          ownerCache.set(candidate, owner);
+          return owner;
+        };
+        // Path containment alone is insufficient: a separately registered,
+        // more-specific workspace may live below this folder. A RESOLVED owner
+        // is authoritative — it must be able to EXCLUDE as well as include —
+        // and raw containment is only the fallback for an unresolvable folder
+        // (a legacy engine resource that predates workspace binding, or a
+        // delete whose row is already gone).
+        const belongsToWorkspace = (candidate: string): boolean => {
+          const owner = ownerOf(candidate);
+          return owner ? owner === workspaceId : isUnderRoot(candidate);
+        };
+        // Cancel manager-owned PRE-SPAWN flights before waiting: setup/run env
+        // resolution can otherwise consume the whole lifecycle timeout even
+        // though no child exists yet. These cancel-only entry points must never
+        // kill a live PTY — kill() drops the session synchronously and
+        // waitForExit() resolves true for an unknown one, so anything killed
+        // before the enumeration below would be invisible to the exit wait and
+        // the worktree could be removed while the process is still exiting.
+        // The live ones are stopped after their exit observers are registered.
+        this.setup.cancelPendingStart(workspaceId);
+        this.runs.cancelPendingStartsForWorkspace(workspaceId);
         // Starts already admitted before this lifecycle acquired its
         // single-flight may still be resolving environment/session state and
         // therefore have no PTY/session to enumerate yet. Wait for them first.
@@ -711,11 +747,16 @@ export class ZerosEngine {
         // when promptSessions is empty.
         const agentSessionIds = new Set<string>();
         for (const [sessionId, boundWorkspaceId] of this.sessionWorkspace) {
-          if (boundWorkspaceId === workspaceId) agentSessionIds.add(sessionId);
+          if (boundWorkspaceId !== workspaceId) continue;
+          const chatId = this.sessionChat.get(sessionId);
+          const folder = chatId ? getChatLocation(chatId)?.folder : null;
+          if (!folder || belongsToWorkspace(folder)) {
+            agentSessionIds.add(sessionId);
+          }
         }
         for (const [sessionId, chatId] of this.sessionChat) {
           const folder = getChatLocation(chatId)?.folder;
-          if (folder && isUnderRoot(folder)) {
+          if (folder && belongsToWorkspace(folder)) {
             agentSessionIds.add(sessionId);
             // Preserve a lifecycle tombstone after the adapter session is
             // disposed. A late prompt carrying only the old session id must
@@ -743,7 +784,7 @@ export class ZerosEngine {
             try {
               const ended = await Promise.race([
                 this.agents
-                  .endSession(agentId, sessionId)
+                  .endSession(agentId, sessionId, { failClosed: true })
                   .then(() => true)
                   .catch(() => false),
                 new Promise<boolean>((resolve) => {
@@ -776,8 +817,9 @@ export class ZerosEngine {
         }
         const ptyIds = this.pty
           .list()
-          .filter((session) => isUnderRoot(session.cwd))
+          .filter((session) => belongsToWorkspace(session.cwd))
           .map((session) => session.sessionId);
+        const ptyIdSet = new Set(ptyIds);
         // Register exit observers BEFORE the managers call kill(); a fast process
         // can otherwise exit between kill and waiter registration.
         const exitWaits = ptyIds.map((sessionId) =>
@@ -786,11 +828,31 @@ export class ZerosEngine {
         this.setup.stop(workspaceId);
         this.runs.stopAllForWorkspace(workspaceId);
         const terminalIds = new Set(
-          this.terminals.idsUnderFolder(worktreePath),
+          this.terminals.sessionIds().filter((sessionId) => {
+            const terminal = this.terminals.get(sessionId);
+            if (!terminal) return false;
+            // A resolved owner is authoritative both ways, so a row whose
+            // durable binding predates a more-specific nested workspace is
+            // excluded here rather than reaped across that boundary.
+            const owner = ownerOf(terminal.cwd);
+            if (owner) return owner === workspaceId;
+            // Unresolvable owner (a legacy row that carried only a raw cwd, or
+            // a delete whose workspace row is already gone): fall back to the
+            // durable binding, then to raw containment — the same set the PTY
+            // filter admits, so every terminal we kill also gets the
+            // explicit-close marker and the stale-row prune below.
+            return (
+              terminal.workspaceId === workspaceId || isUnderRoot(terminal.cwd)
+            );
+          }),
         );
         for (const sessionId of terminalIds) {
-          this.explicitlyClosing.add(sessionId);
-          this.pty.kill(sessionId);
+          // Exited terminals have only a registry row, no process. Live ones
+          // take the normal explicit-close path and disappear on PTY_EXIT.
+          if (ptyIdSet.has(sessionId)) {
+            this.explicitlyClosing.add(sessionId);
+            this.pty.kill(sessionId);
+          }
         }
         // Cover any engine-owned process cwd'd here that is not represented in
         // setup/run/terminal registries. The operation owns this workspace, so no
@@ -814,6 +876,16 @@ export class ZerosEngine {
             },
           });
         }
+        // Natural-exit tabs have no PTY_EXIT left to retire them. Once every
+        // live process is confirmed gone, prune those stale rows too so restore
+        // cannot surface a restartable terminal from the archived workspace.
+        let terminalsChanged = false;
+        for (const sessionId of terminalIds) {
+          this.explicitlyClosing.delete(sessionId);
+          terminalsChanged =
+            this.terminals.remove(sessionId) || terminalsChanged;
+        }
+        if (terminalsChanged) this.broadcastTerminalsChanged();
       },
     );
     this.workspace.setWorkspaceCheckoutWatchSuspender(
@@ -4512,6 +4584,29 @@ export class ZerosEngine {
       return;
     }
 
+    // Publish the start barrier before any authorization/credential await.
+    // Archive/delete either rejects this start at the lifecycle gate below or
+    // waits for it to become enumerable, then reaps it; there is no gap where a
+    // late PTY can appear after process enumeration.
+    const start = Promise.resolve().then(() =>
+      this.handlePtyCreateForWorkspace(
+        msg,
+        client,
+        ptyExit,
+        reattach,
+        canonicalWsId,
+      ),
+    );
+    return this.trackWorkspaceProcessStart(canonicalWsId, start);
+  }
+
+  private async handlePtyCreateForWorkspace(
+    msg: Extract<EngineMessage, { type: "PTY_CREATE" }>,
+    client: TransportClient,
+    ptyExit: () => void,
+    reattach: boolean,
+    canonicalWsId: string | null,
+  ): Promise<void> {
     let cwdInput = msg.cwd;
     if (client.kind !== "local" && !reattach) {
       // The app-owned authentication cwd is intentionally host-local. Never
@@ -4576,6 +4671,12 @@ export class ZerosEngine {
         baseEnv.PATH ?? "",
       );
       env = credentialEnv ? { ...baseEnv, ...credentialEnv.env } : baseEnv;
+    }
+    // Local credential setup is asynchronous too. Avoid spawning at all when
+    // archive/delete acquired the workspace while it was resolving.
+    if (!this.workspaceAllowsProcessStart(canonicalWsId)) {
+      ptyExit();
+      return;
     }
     const info = this.pty.create({
       sessionId: msg.sessionId,
