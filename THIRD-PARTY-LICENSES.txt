@@ -15,9 +15,9 @@ in the desktop application. The independently locked web app currently has
 no production dependencies; generation fails if that changes. Optional
 JavaScript dependencies are included. Host-native optional packages are
 normalized to the macOS arm64
-release contents: the staged Claude runtime, packaged Cursor runtime, and
-packaged ripgrep binary are included; the explicitly excluded Codex platform
-binary is not. Electron's distribution also carries its Chromium notices
+release contents: the staged Claude runtime, the staged Codex runtime, the
+packaged Cursor runtime, and the packaged ripgrep binary are all included.
+Electron's distribution also carries its Chromium notices
 file. See THIRD-PARTY-NOTICES.md for the vendor release requirements.
 
 A package archive that omitted a standalone license file is explicitly
@@ -30,7 +30,7 @@ TERMS-GOVERNED COMPONENTS — RELEASE REVIEW REQUIRED
 - @anthropic-ai/claude-agent-sdk@0.3.221: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 - @cursor/sdk@1.0.26: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 
-PACKAGE INVENTORY (579 resolved package/version records)
+PACKAGE INVENTORY (580 resolved package/version records)
 -----------------
 
 @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.221
@@ -616,6 +616,12 @@ PACKAGE INVENTORY (579 resolved package/version records)
 @openai/codex@0.146.0
   License: Apache-2.0
   Surfaces: root pnpm workspace
+  Source: https://github.com/openai/codex
+  License documents: 9d71575ecfd9, d17f227e4df5
+
+@openai/codex@0.146.0-darwin-arm64
+  License: Apache-2.0
+  Surfaces: desktop packaged runtime (macOS arm64)
   Source: https://github.com/openai/codex
   License documents: 9d71575ecfd9, d17f227e4df5
 
@@ -9322,8 +9328,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT 9d71575ecfd9
 SHA-256: 9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915
-Applies to: @openai/codex@0.146.0
-Source labels: @openai/codex@0.146.0 generated protocol — NOTICE
+Applies to: @openai/codex@0.146.0, @openai/codex@0.146.0-darwin-arm64
+Source labels: @openai/codex@0.146.0 generated protocol — NOTICE; @openai/codex@0.146.0-darwin-arm64 staged native runtime — NOTICE
 ================================================================================
 
 OpenAI Codex
@@ -11753,8 +11759,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT d17f227e4df5
 SHA-256: d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc
-Applies to: @bufbuild/protobuf@1.10.0, @connectrpc/connect-node@1.7.0, @connectrpc/connect-web@1.7.0, @connectrpc/connect@1.7.0, @openai/codex@0.146.0, @pierre/theming@0.0.1, clean-git-ref@2.0.1
-Source labels: @bufbuild/protobuf@1.10.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-node@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-web@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @openai/codex@0.146.0 generated protocol — LICENSE; @pierre/theming@0.0.1 — declared Apache-2.0 terms (archive omitted a standalone file); clean-git-ref@2.0.1 — declared Apache-2.0 terms (archive omitted a standalone file)
+Applies to: @bufbuild/protobuf@1.10.0, @connectrpc/connect-node@1.7.0, @connectrpc/connect-web@1.7.0, @connectrpc/connect@1.7.0, @openai/codex@0.146.0, @openai/codex@0.146.0-darwin-arm64, @pierre/theming@0.0.1, clean-git-ref@2.0.1
+Source labels: @bufbuild/protobuf@1.10.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-node@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-web@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @openai/codex@0.146.0 generated protocol — LICENSE; @openai/codex@0.146.0-darwin-arm64 staged native runtime — LICENSE; @pierre/theming@0.0.1 — declared Apache-2.0 terms (archive omitted a standalone file); clean-git-ref@2.0.1 — declared Apache-2.0 terms (archive omitted a standalone file)
 ================================================================================
 
                                  Apache License

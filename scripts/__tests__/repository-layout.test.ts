@@ -248,6 +248,10 @@ describe("repository layout contracts", () => {
       "@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.221",
       "@cursor/sdk-darwin-arm64@1.0.26",
       "@vscode/ripgrep-darwin-arm64@1.18.0",
+      // The staged Codex runtime is redistributed inside Contents/Resources,
+      // so its platform package must carry terms — not just the JS wrapper.
+      // npm publishes it as an alias, hence the platform-suffixed version.
+      "@openai/codex@0.146.0-darwin-arm64",
       "@tiptap/extension-bubble-menu@3.26.0",
       "@tiptap/extension-floating-menu@3.26.0",
       "@types/trusted-types@2.0.7",
@@ -279,6 +283,22 @@ describe("repository layout contracts", () => {
     expect(sidecar).toContain("ZEROS_CODEX_CLI_VERSION");
     expect(packagingCheck).toContain("binaries/codex-runtime");
     expect(packagingCheck).toContain("binaries/codex-cli-version.txt");
+
+    // A packaged build whose staging went missing must report NO bundled
+    // version. The @openai/codex wrapper's package.json survives inside
+    // app.asar even though its platform package is excluded, so a version
+    // handed over without the binary it describes would have the provider list
+    // advertise the pin while the adapter ran an unpinned `codex` from PATH.
+    expect(sidecar.replace(/\s+/g, "")).toContain(
+      "codexCli.binary&&codexCli.version&&!process.env.ZEROS_CODEX_CLI_VERSION",
+    );
+
+    // Staging the vendor target redistributes the platform package's native
+    // binaries, so the license inventory has to normalize it into the packaged
+    // macOS graph rather than record only the JS wrapper.
+    expect(read("scripts/generate-third-party-licenses.mjs")).toContain(
+      'packageName: "@openai/codex-darwin-arm64"',
+    );
   });
 
   it("does not let an enclosing Zeros parent watchdog kill the engine smoke", () => {

@@ -468,9 +468,15 @@ function resolveCodexCliPaths(): {
     } catch {
       /* absent/unreadable — provider diagnostics report no bundled version */
     }
-  }
-
-  if (!binary || !version) {
+  } else {
+    // Source checkouts ONLY, and deliberately not a fallback for a packaged
+    // build with missing staging. electron-builder excludes the @openai/codex-*
+    // platform packages from app.asar (and nothing can be exec'd from inside an
+    // asar anyway), so this tier can never yield a packaged binary — while the
+    // wrapper's package.json IS still in the asar and would happily yield a
+    // version. Reading it there would make registry.ts report the pinned
+    // version while binary-resolver.ts runs an unpinned `codex` from PATH,
+    // hiding exactly the staging regression this pin exists to prevent.
     try {
       const wrapperPackageJson = require.resolve("@openai/codex/package.json");
       const wrapper = JSON.parse(readFileSync(wrapperPackageJson, "utf8")) as {
@@ -1279,7 +1285,14 @@ async function doSpawnEngine(
   if (codexCli.binary && !process.env.ZEROS_CODEX_CLI_PATH) {
     extraEnv.ZEROS_CODEX_CLI_PATH = codexCli.binary;
   }
-  if (codexCli.version && !process.env.ZEROS_CODEX_CLI_VERSION) {
+  // The version is only claimed alongside the binary it describes. Announcing a
+  // bundled version we are not going to run would make the provider list report
+  // the pin while the adapter executes some other `codex` from PATH.
+  if (
+    codexCli.binary &&
+    codexCli.version &&
+    !process.env.ZEROS_CODEX_CLI_VERSION
+  ) {
     extraEnv.ZEROS_CODEX_CLI_VERSION = codexCli.version;
   }
 
