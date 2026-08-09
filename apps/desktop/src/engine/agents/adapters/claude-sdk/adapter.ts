@@ -43,6 +43,8 @@ import { homedir } from "node:os";
 import {
   query,
   type AccountInfo,
+  type ElicitationRequest,
+  type ElicitationResult,
   type EffortLevel,
   type Options,
   type PermissionMode,
@@ -87,7 +89,15 @@ import {
 import { SESSION_EXPIRED_KEYWORDS } from "../shared/session-expiry";
 import { PERMISSION_RESPONSE_TIMEOUT_MS } from "../shared/constants";
 import { preserveAmbientConfigRoots } from "../shared/config-isolation";
+import {
+  answerMcpElicitation,
+  buildMcpElicitationQuestion,
+  deliveredQuestionOutcome,
+  MAX_PENDING_MCP_ELICITATIONS,
+  mcpElicitationAuditInput,
+} from "../shared/mcp-elicitation";
 import { isDevRuntime } from "../../../runtime";
+import { openExternalUrl } from "../../gateway/open-url";
 import {
   ensureSessionDir,
   removeSessionDir,
@@ -144,6 +154,8 @@ function looksLikeAuthPrompt(text: string): boolean {
 // can't trip it.
 const TRANSIENT_NETWORK_RX =
   /\b(?:ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|EPIPE)\b|fetch\s+failed|socket\s+hang\s?up|getaddrinfo|network\s+(?:error|failure|timeout|unreachable)|connection\s+(?:error|closed|reset|refused|failed|lost)|timed?\s+out|api\s+error[:\s(]*5\d\d\b|overloaded_error|\boverloaded\b/i;
+const RATE_LIMIT_RX =
+  /\b(?:429|rate[\s_-]*limit(?:ed|_error)?|too many requests|resource exhausted|usage limit exceeded)\b/i;
 
 /** Our kebab mode ids → the SDK's PermissionMode tokens. */
 function toSdkPermissionMode(mode: ClaudeMode): PermissionMode {
@@ -290,6 +302,15 @@ interface PendingQuestion {
   dialogResolve?: (r: UserDialogResult) => void;
   timer: ReturnType<typeof setTimeout>;
   detach: Array<() => void>;
+}
+
+interface PendingElicitation {
+  questionId: string;
+  native: ElicitationRequest;
+  request: QuestionRequest;
+  resolve: (result: ElicitationResult) => void;
+  timer: ReturnType<typeof setTimeout>;
+  detach: () => void;
 }
 
 /** AskUserQuestionInput / dialog payload → the canonical QuestionRequest. */
@@ -586,6 +607,8 @@ interface SdkSession {
    *  onUserDialog (A, speculative); both channel-resolvers park here and settle
    *  together. */
   readonly pendingQuestions: Map<string, PendingQuestion>;
+  /** Native MCP elicitation callbacks parked on the same question UI. */
+  readonly pendingElicitations: Map<string, PendingElicitation>;
   /** toolUseID → questionId, so the two channels dedupe onto ONE question. */
   readonly questionByToolUse: Map<string, string>;
   /** Cancels the whole query (dispose / hard abort). */
@@ -934,6 +957,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       providerRunActive: false,
       pendingPermissions: new Map(),
       pendingQuestions: new Map(),
+      pendingElicitations: new Map(),
       questionByToolUse: new Map(),
       abort: new AbortController(),
       cancelRequested: false,
@@ -1523,6 +1547,23 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           if (
             terminalError &&
             !state.cancelRequested &&
+            RATE_LIMIT_RX.test(terminalError)
+          ) {
+            turn.reject(
+              new AgentFailureError({
+                kind: "rate-limited",
+                message: `Claude rate limit: ${terminalError}`,
+                stage: "prompt",
+                agentId: this.agentId,
+                advice:
+                  "Claude is rate-limiting requests. Wait for the provider reset, then try again.",
+              }),
+            );
+            continue;
+          }
+          if (
+            terminalError &&
+            !state.cancelRequested &&
             TRANSIENT_NETWORK_RX.test(terminalError)
           ) {
             // The CLI exhausted its own api_retry attempts on a network /
@@ -1586,16 +1627,27 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           turn.resolve({ stopReason: "cancelled" as StopReason });
         } else {
           const msg = err instanceof Error ? err.message : String(err);
+          const rateLimited = RATE_LIMIT_RX.test(msg);
           turn.reject(
             new AgentFailureError({
-              kind: looksLikeAuthPrompt(msg)
-                ? "auth-required"
-                : "transport-closed",
-              message: looksLikeAuthPrompt(msg)
-                ? "Claude Code is not signed in — open Settings → Providers to sign in via Terminal."
-                : `claude SDK stream ended: ${msg}`,
+              kind: rateLimited
+                ? "rate-limited"
+                : looksLikeAuthPrompt(msg)
+                  ? "auth-required"
+                  : "transport-closed",
+              message: rateLimited
+                ? `Claude rate limit: ${msg}`
+                : looksLikeAuthPrompt(msg)
+                  ? "Claude Code is not signed in — open Settings → Providers to sign in via Terminal."
+                  : `claude SDK stream ended: ${msg}`,
               stage: "prompt",
               agentId: this.agentId,
+              ...(rateLimited
+                ? {
+                    advice:
+                      "Claude is rate-limiting requests. Wait for the provider reset, then try again.",
+                  }
+                : {}),
             }),
           );
         }
@@ -1703,6 +1755,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // Release any parked questions so a blocked turn unwinds.
     for (const questionId of [...state.pendingQuestions.keys()]) {
       this.settleQuestion(state, questionId, { outcome: "dismissed" });
+    }
+    for (const questionId of [...state.pendingElicitations.keys()]) {
+      this.settleElicitation(state, questionId, { outcome: "dismissed" });
     }
     // interrupt() is the SDK's clean per-turn stop (the process stays alive
     // for the next turn). The turn settles `cancelled` via the consumer.
@@ -2311,6 +2366,70 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     };
   }
 
+  /** MCP servers can synchronously ask the SDK host for structured form data
+   * or confirmation before opening an authorization URL. Leaving
+   * Options.onElicitation unset makes the SDK decline every request, which is
+   * indistinguishable from a broken MCP tool in the chat. Park the callback on
+   * the same canonical question card used by AskUserQuestion. */
+  private onElicitation(state: SdkSession) {
+    return (
+      native: ElicitationRequest,
+      options: { signal: AbortSignal },
+    ): Promise<ElicitationResult> => {
+      if (state.pendingElicitations.size >= MAX_PENDING_MCP_ELICITATIONS) {
+        this.ctx.emit.onAgentStderr(
+          this.agentId,
+          `[zeros] refusing concurrent MCP elicitation above ${MAX_PENDING_MCP_ELICITATIONS}; responding cancel`,
+        );
+        return Promise.resolve({ action: "cancel" });
+      }
+      const questionId = randomUUID();
+      const nativeRequestId =
+        native.elicitationId || `${native.serverName || "mcp"}:${questionId}`;
+      const toolCallId = `mcp-elicitation:${nativeRequestId}`;
+      const request = buildMcpElicitationQuestion({
+        sessionId: state.zerosSessionId,
+        questionId,
+        nativeRequestId,
+        toolCallId,
+        request: native,
+        expiresAt: Date.now() + PERMISSION_RESPONSE_TIMEOUT_MS,
+      });
+
+      return new Promise<ElicitationResult>((resolve) => {
+        const timer = setTimeout(() => {
+          this.settleElicitation(state, questionId, {
+            outcome: "dismissed",
+          });
+        }, PERMISSION_RESPONSE_TIMEOUT_MS);
+        timer.unref?.();
+        const onAbort = () => {
+          this.settleElicitation(state, questionId, {
+            outcome: "dismissed",
+          });
+        };
+        options.signal.addEventListener("abort", onAbort, { once: true });
+        const pending: PendingElicitation = {
+          questionId,
+          native,
+          request,
+          resolve,
+          timer,
+          detach: () => options.signal.removeEventListener("abort", onAbort),
+        };
+        state.pendingElicitations.set(questionId, pending);
+        this.questionIndex.set(questionId, state);
+        state.translator.emitBlockingQuestionToolCall(
+          toolCallId,
+          "MCP input requested",
+          mcpElicitationAuditInput(native),
+        );
+        this.ctx.emit.onQuestionRequest(this.agentId, questionId, request);
+        if (options.signal.aborted) onAbort();
+      });
+    };
+  }
+
   /** Claude's native workflow gate is a blocking dialog, but visually it is
    * still the ONE PermissionCard. Only the title, phase pills, and row copy are
    * data-driven; the renderer/card chrome is shared with every other gate. */
@@ -2517,17 +2636,73 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       });
     }
 
-    // Everything below is best-effort AFTER the SDK resolvers — the resolve
-    // above is what un-blocks Claude; a failure here must never strand it.
+    this.recordQuestionSettlement(
+      state,
+      questionId,
+      pq.request,
+      pq.toolUseID,
+      outcome,
+    );
+  }
+
+  private settleElicitation(
+    state: SdkSession,
+    questionId: string,
+    outcome: QuestionResponse["outcome"],
+  ): void {
+    const pending = state.pendingElicitations.get(questionId);
+    if (!pending) return;
+    state.pendingElicitations.delete(questionId);
+    this.questionIndex.delete(questionId);
+    clearTimeout(pending.timer);
+    pending.detach();
+
+    const mapped = answerMcpElicitation(pending.native, { outcome });
+    if (mapped.openUrl) openExternalUrl(mapped.openUrl);
+    const sdkResult: ElicitationResult = {
+      action: mapped.response.action,
+      ...(mapped.response.content
+        ? { content: mapped.response.content as never }
+        : {}),
+    };
+    // Resolve the native SDK callback before best-effort transcript work so a
+    // renderer/bridge failure can never strand the MCP tool.
+    pending.resolve(sdkResult);
+    // The mapper fails closed: a value that does not satisfy the requested
+    // schema goes out as `cancel`, so the server got nothing. Receipt what was
+    // delivered rather than what the user intended, and say so on the agent log
+    // — the card is already gone by the time the mapping runs.
+    // Only a fail-closed `cancel` is a surprise. Picking a Decline row is an
+    // intentional refusal and reads correctly on its own.
+    const delivered = deliveredQuestionOutcome(outcome, mapped.response);
+    if (delivered !== outcome && mapped.response.action === "cancel") {
+      this.ctx.emit.onAgentStderr(
+        this.agentId,
+        `[zeros] MCP request ${pending.request.nativeRequestId}: the submitted answer does not satisfy the requested schema — the request was cancelled and nothing was sent to the server`,
+      );
+    }
+    this.recordQuestionSettlement(
+      state,
+      questionId,
+      pending.request,
+      pending.request.toolCallId,
+      delivered,
+    );
+  }
+
+  /** Durable transcript stamp + renderer delivery receipt shared by native
+   * AskUserQuestion and host-side MCP elicitation. */
+  private recordQuestionSettlement(
+    state: SdkSession,
+    questionId: string,
+    request: QuestionRequest,
+    nativeToolUseId: string | undefined,
+    outcome: QuestionResponse["outcome"],
+  ): void {
+    // Everything here is best-effort AFTER the provider resolver.
     try {
-      // Durable resolution record: stamp the ENGINE-persisted transcript by
-      // emitting a synthetic tool_call_update onto the session stream. The
-      // renderer's own optimistic stamp lives only in memory and is wiped by
-      // the next engine-window reconcile / reload; this update makes the record
-      // authoritative everywhere. Addressed by the translator's MINTED id
-      // (tool_call_update matches on toolCallId, not the vendor id).
-      const mintedId = pq.toolUseID
-        ? state.translator.toolCallIdFor(pq.toolUseID)
+      const mintedId = nativeToolUseId
+        ? state.translator.toolCallIdFor(nativeToolUseId)
         : undefined;
       if (mintedId) {
         this.ctx.emit.onSessionUpdate(this.agentId, {
@@ -2535,17 +2710,13 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           update: {
             sessionUpdate: "tool_call_update",
             toolCallId: mintedId,
+            status: "completed",
             rawOutput: {
-              zerosQuestion: buildQuestionStamp(pq.request, outcome),
+              zerosQuestion: buildQuestionStamp(request, outcome),
             },
           },
         } as never);
       }
-
-      // Tell the renderer the question is settled. Covers the settles the UI
-      // did NOT initiate (response timeout, turn abort, another client); for
-      // a UI-initiated answer it's a harmless echo (that client already
-      // dequeued the card).
       this.ctx.emit.onQuestionSettled?.(
         this.agentId,
         questionId,
@@ -2572,10 +2743,18 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       this.settleQuestion(indexed, opts.questionId, opts.response.outcome);
       return true;
     }
+    if (indexed?.pendingElicitations.has(opts.questionId)) {
+      this.settleElicitation(indexed, opts.questionId, opts.response.outcome);
+      return true;
+    }
     // 2) Live-session scan by questionId.
     for (const state of this.sessions.values()) {
       if (state.pendingQuestions.has(opts.questionId)) {
         this.settleQuestion(state, opts.questionId, opts.response.outcome);
+        return true;
+      }
+      if (state.pendingElicitations.has(opts.questionId)) {
+        this.settleElicitation(state, opts.questionId, opts.response.outcome);
         return true;
       }
     }
@@ -2592,6 +2771,16 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         for (const pq of state.pendingQuestions.values()) {
           if (pq.request.nativeRequestId === opts.nativeRequestId) {
             this.settleQuestion(state, pq.questionId, opts.response.outcome);
+            return true;
+          }
+        }
+        for (const pending of state.pendingElicitations.values()) {
+          if (pending.request.nativeRequestId === opts.nativeRequestId) {
+            this.settleElicitation(
+              state,
+              pending.questionId,
+              opts.response.outcome,
+            );
             return true;
           }
         }
@@ -2704,9 +2893,14 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       } as RequestPermissionResponse);
     }
     state.pendingPermissions.clear();
-    // Release any parked questions so onUserDialog / canUseTool unwind.
+    // Release every parked question so onUserDialog / canUseTool and MCP
+    // onElicitation callbacks unwind even when the SDK gave the callback a
+    // request-local AbortSignal that is independent of this session abort.
     for (const questionId of [...state.pendingQuestions.keys()]) {
       this.settleQuestion(state, questionId, { outcome: "dismissed" });
+    }
+    for (const questionId of [...state.pendingElicitations.keys()]) {
+      this.settleElicitation(state, questionId, { outcome: "dismissed" });
     }
     try {
       state.abort.abort();
@@ -2943,6 +3137,10 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // Deliberately excludes 'refusal_fallback_prompt' so refusal behavior is
       // unchanged.
       onUserDialog: this.onUserDialog(state),
+      // MCP elicitation is a separate SDK callback (it does not flow through
+      // canUseTool/onUserDialog). Without it the SDK declines every form/link
+      // request, so an MCP tool that needs input appears to fail mysteriously.
+      onElicitation: this.onElicitation(state),
       // Passive lifecycle taps. `background_tasks_changed` does not include
       // session-scoped one-shot wakeups; StopHookInput.session_crons is the
       // SDK's authoritative snapshot for those. Recurring crons are filtered

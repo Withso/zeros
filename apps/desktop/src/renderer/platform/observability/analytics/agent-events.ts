@@ -247,7 +247,7 @@ export function trackAgentPermissionDecided(args: {
 export function trackAgentQuestionAnswered(args: {
   chatId: string;
   agentId: string;
-  outcome: "answered" | "dismissed";
+  outcome: "answered" | "declined" | "dismissed";
   source?: string | null;
   questionCount: number;
   blocking: boolean;

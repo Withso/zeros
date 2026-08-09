@@ -795,6 +795,7 @@ export interface BridgeAgentFailure {
     | "subprocess-exited"
     | "protocol-error"
     | "transport-closed"
+    | "rate-limited"
     /** Mirrors AgentFailureKind in apps/desktop/src/engine/agents/types.ts.
      *  The persisted session is gone — most
      *  often Codex "no rollout found", Claude "session not found". */

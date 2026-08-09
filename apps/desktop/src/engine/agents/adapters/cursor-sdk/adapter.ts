@@ -1488,8 +1488,10 @@ export class CursorSdkAdapter implements AgentAdapter {
  *     every worktree / legacy-chat reopen). The shared
  *     SESSION_EXPIRED_KEYWORDS regex (adapters/shared/session-expiry.ts) owns the wording
  *     match and is parity-tested against the renderer-side fallback.
- *  2. Auth errors → `auth-required` so the panel flips to the Sign-in chip.
- *  3. Everything else → `protocol-error`. */
+ *  2. Rate limits → `rate-limited` with retry-later guidance (never an
+ *     immediate auto-replay that would amplify the 429).
+ *  3. Auth errors → `auth-required` so the panel flips to the Sign-in chip.
+ *  4. Everything else → `protocol-error`. */
 export function classifyCursorSdkError(
   err: unknown,
   stage: "newSession" | "loadSession" | "prompt",
@@ -1539,6 +1541,42 @@ export function classifyCursorSdkError(
       agentId: AGENT_ID,
     });
   }
+  // Prefer the SDK's typed throttle signal before message-based network
+  // classification. A RateLimitError can legitimately mention a timed-out
+  // backoff/request; replaying it as a transient disconnect would amplify the
+  // provider's 429. Duck-type because this unstable SDK surface crosses the
+  // Node-host boundary as a reconstructed Error.
+  const e = (err !== null && typeof err === "object" ? err : {}) as {
+    status?: unknown;
+    code?: unknown;
+    name?: unknown;
+    constructor?: { name?: string };
+  };
+  const status = typeof e.status === "number" ? e.status : undefined;
+  const ctorName =
+    (typeof e.name === "string" ? e.name : "") || e.constructor?.name || "";
+  const isRateLimited =
+    status === 429 ||
+    /RateLimitError/i.test(ctorName) ||
+    /\b(?:429|rate[\s_-]*limit(?:ed)?|too many requests|resource exhausted)\b/i.test(
+      message,
+    );
+  if (isRateLimited) {
+    return new AgentFailureError({
+      kind: "rate-limited",
+      message:
+        `cursor-sdk ${stage} was rate-limited by Cursor. The current send ` +
+        `stopped without an automatic replay. (${message})`,
+      stage,
+      agentId: AGENT_ID,
+      advice: "Cursor is rate-limiting requests. Try again shortly.",
+    });
+  }
+  const isAuth =
+    status === 401 ||
+    status === 403 ||
+    /AuthenticationError/i.test(ctorName) ||
+    /auth|unauthor|401|api[\s_-]?key|forbidden|403/i.test(message);
   // TLS / certificate failures connecting to Cursor's HTTP/2 backend. The SDK
   // streams the turn over TLS to api2.cursor.sh, so a cert that doesn't validate
   // ("self-signed certificate", "unable to verify", a real altname mismatch)
@@ -1579,31 +1617,6 @@ export function classifyCursorSdkError(
       agentId: AGENT_ID,
     });
   }
-  // Prefer the SDK's typed error signals over fragile message-regex alone.
-  // @cursor/sdk error classes carry an HTTP `.status` and distinct
-  // constructor names (AuthenticationError 401/403, RateLimitError 429,
-  // ConfigurationError 400/404). A real auth failure whose message doesn't
-  // happen to contain our keywords would otherwise degrade to
-  // protocol-error → a hard "Agent error" toast instead of the Sign-in
-  // chip. We duck-type rather than import the classes so the SDK's
-  // unstable type surface can't break our compile.
-  const e = err as {
-    status?: unknown;
-    code?: unknown;
-    name?: unknown;
-    constructor?: { name?: string };
-  };
-  const status = typeof e.status === "number" ? e.status : undefined;
-  // Prefer `.name` (set on the instance by the SDK's error classes AND on errors
-  // reconstructed across the Node-host boundary, where the minified
-  // constructor.name is meaningless) before falling back to constructor.name.
-  const ctorName =
-    (typeof e.name === "string" ? e.name : "") || e.constructor?.name || "";
-  const isAuth =
-    status === 401 ||
-    status === 403 ||
-    /AuthenticationError/i.test(ctorName) ||
-    /auth|unauthor|401|api[\s_-]?key|forbidden|403/i.test(message);
   // Auth failures get ACTIONABLE copy. Cursor's raw error says "If you are
   // logged in, try logging out and back in" — cursor-agent CLI advice that's
   // meaningless inside Zeros (there is no login; auth is the API key we send).

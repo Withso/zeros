@@ -60,6 +60,25 @@ describe("repository layout contracts", () => {
     expect(preflight).not.toContain("github-section-helpers.test.ts");
   });
 
+  it("keeps the credential-free Codex smoke inside its throwaway state root", () => {
+    const smoke = read("scripts/codex-app-server-smoke.mjs");
+
+    // This command is routinely launched by a coding agent whose sandbox can
+    // write the workspace/tmpdir but not the user's ~/.codex. The smoke claims
+    // to need no credentials, so touching ambient Codex state is both needless
+    // and enough to make the protocol check fail before initialize.
+    expect(smoke).toContain("process.env.CODEX_HOME = codexHome");
+    expect(smoke).toContain("fs.mkdirSync(codexHome, { recursive: true })");
+  });
+
+  it("explains when an agent sandbox blocks the macOS engine smoke listener", () => {
+    const smoke = read("scripts/smoke-engine.mjs");
+
+    expect(smoke).toContain('error.code === "EPERM"');
+    expect(smoke).toMatch(/local TCP listeners?.*sandbox/is);
+    expect(smoke).toMatch(/grant.*network|outside.*sandbox/is);
+  });
+
   it("keeps direct Electron compiler output at the root build boundary", () => {
     const electron = JSON.parse(
       read("apps/desktop/electron/tsconfig.json"),

@@ -28,6 +28,8 @@ const rt = vi.hoisted(() => ({
     | null
     | ((request: {
         questionId: string;
+        rpcRequestId: string;
+        method: "item/tool/requestUserInput" | "mcpServer/elicitation/request";
         params: Record<string, unknown>;
       }) => void),
   runTurnImpl: null as
@@ -415,6 +417,8 @@ describe("codex mid-turn reconnect + per-session crash signalling", () => {
 
     rt.lastOnUserInputRequest?.({
       questionId: "question-1",
+      rpcRequestId: "rpc-question-1",
+      method: "item/tool/requestUserInput",
       params: {
         threadId: "thread-1",
         turnId: "turn-1",

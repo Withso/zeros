@@ -165,6 +165,16 @@ async function loadAppServer() {
 
 const expected = installedCodexVersion();
 const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-codex-smoke-"));
+// This is a protocol/artifact smoke, not a user's configured Codex session.
+// Keep its SQLite state beside the throwaway cwd so the check remains truly
+// credential-free and works when launched by another coding agent whose
+// sandbox can write tmp/workspace paths but intentionally cannot write
+// ~/.codex. buildSpawnEnvWithLoginPath preserves the AMBIENT CODEX_HOME by
+// design, so seed process.env before boot rather than trying to pass a
+// per-child override that the config-root guard would correctly reject.
+const codexHome = path.join(cwd, "codex-home");
+fs.mkdirSync(codexHome, { recursive: true });
+process.env.CODEX_HOME = codexHome;
 
 console.log(`▸ entry:    ${ENTRY}`);
 console.log(`▸ expected: codex ${expected} (installed @openai/codex)`);

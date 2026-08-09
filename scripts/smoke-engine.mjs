@@ -298,7 +298,24 @@ async function smokeWorkspaceLifecycle({ port, token, root }) {
   }
 }
 
-const port = await getFreePort();
+let port;
+try {
+  port = await getFreePort();
+} catch (error) {
+  if (error && typeof error === "object" && error.code === "EPERM") {
+    fail(
+      "the release smoke could not open a local TCP listener because the " +
+        "current execution sandbox blocks network binds. This does not " +
+        "indicate an engine regression: rerun outside the coding-agent " +
+        "sandbox, or grant the agent local-network/listen access.",
+    );
+  }
+  fail(
+    `could not reserve a local engine port: ${
+      error instanceof Error ? error.message : String(error)
+    }`,
+  );
+}
 const sandbox = mkdtempSync(join(tmpdir(), "zeros-engine-smoke-"));
 const root = join(sandbox, "repo");
 const dataDir = join(sandbox, "data");

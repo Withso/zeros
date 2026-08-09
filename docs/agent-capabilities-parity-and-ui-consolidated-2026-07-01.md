@@ -1,6 +1,6 @@
 # Zeros Agents — Open tasks (Claude Code · Codex · Cursor)
 
-**Updated 2026-08-03.** Checked tasks are implemented; unchecked tasks remain open. Each task says what the user gets, in plain language. Re-verified against the repository's pinned agent platforms on 2026-08-03 (Claude Agent SDK 0.3.220 · Codex 0.146.0 · Cursor SDK 1.0.26).
+**Updated 2026-08-09.** Checked tasks are implemented; unchecked tasks remain open. Each task says what the user gets, in plain language. Re-verified against the repository's pinned agent platforms on 2026-08-09 (Claude Agent SDK 0.3.221 · Codex 0.146.0 · Cursor SDK 1.0.26). The latest published releases reviewed were Claude 0.3.226, Codex 0.147.0, and Cursor 1.0.27; the repository pins remain deliberate because these pre-1.0 APIs change their event/types surface and Codex's generated app-server schema is version-coupled to its binary. Upgrade each pin as a separately generated and regression-tested migration.
 
 > **Retention:** This is the actively maintained agent-capability backlog, not a
 > completed historical plan. Keep it until every remaining item is implemented,
@@ -59,13 +59,13 @@ Implementation anchors: shared workflow, effort, permission-copy, and permission
 
 _If the agent saw it, the user should see it — while it happens, not after._
 
-- [ ] **Show images the agent's tools return** — a screenshot from a browser tool renders as a picture; today it's silently dropped. `Claude · P1 · 🎨`
-- [ ] **Long command output grows instead of flickering** — while a Codex command streams, the log appends line by line; today only the latest fragment shows until the end. `Codex · P1 · 🔍`
-- [ ] **Live streaming for Cursor** — one wiring change (the delta channel) unlocks smooth word-by-word text, live shell output, and per-turn token counts for Cursor chats. `Cursor · P1 · 🔍`
-- [ ] **↳ Live shell output for Cursor commands** — see the log while it runs, not on completion. `Cursor · P2 · 🔍`
-- [ ] **↳ Word-by-word text and thinking for Cursor** — replies type out smoothly instead of arriving in blocks. `Cursor · P3 · 🔍`
-- [ ] **↳ Cursor turns report real token usage** — Cursor chats stop being invisible in the cost readout. `Cursor · P2 · ⚙️`
-- [ ] **A stuck Codex error unlocks the chat** — a system error mid-turn should end the turn with a clear "turn failed" instead of leaving the composer locked for up to 10 minutes. `Codex · P2 · 🔍`
+- [x] **Show images the agent's tools return** — Claude base64 image result blocks (including browser/MCP screenshots) now survive translation as canonical image content and render in the existing expandable tool detail. Text siblings remain visible and binary data is never flattened into logs. `Claude · P1 · 🎨`
+- [x] **Long command output grows instead of flickering** — Codex command deltas are accumulated into bounded replacement snapshots, so the existing tool log grows line by line instead of showing only the latest fragment. `Codex · P1 · 🔍`
+- [ ] **Live delta streaming for Cursor** — Zeros already drains `run.stream()` and renders every public SDK message as it arrives. The pinned public SDK exposes whole text/thinking blocks and running/completed tool states, but no text or shell-output delta fields; finer streaming requires an upstream SDK channel, not a hidden Zeros wiring switch. `Cursor · P1 · 🔍`
+- [ ] **↳ Live shell output for Cursor commands** — blocked on the public SDK exposing output deltas; today its `tool_call` message carries running/completed state and the result at completion. `Cursor · P2 · 🔍`
+- [ ] **↳ Word-by-word text and thinking for Cursor** — blocked on the public SDK exposing token/text deltas instead of whole `assistant` / `thinking` message blocks. `Cursor · P3 · 🔍`
+- [x] **↳ Cursor turns report real token usage** — the SDK's terminal `usage` stream message (or `RunResult.usage` fallback) maps into Zeros' per-turn usage fields, including cache and reasoning tokens. `Cursor · P2 · ⚙️`
+- [x] **A stuck Codex error unlocks the chat** — scoped and unscoped terminal app-server errors now fail the active turn immediately, including the race where an error arrives before `turn/start` acknowledges. Retry notifications (`willRetry: true`) remain non-terminal, interrupted turns map to cancelled, and process exit releases every parked approval/question instead of leaving the composer locked. `Codex · P2 · 🔍`
 - [ ] **Codex thoughts stay separate** — three distinct reasoning summaries render as three rows, not one merged blob. `Codex · P2 · 🔍`
 - [ ] **Turn Codex web search on explicitly** — so search is always available, not dependent on CLI defaults. `Codex · P2 · ⚙️`
 - [ ] **Show progress for long MCP tools** — a percentage / "62 of 180" and a slim bar while a long tool runs. `Codex · P2 · 🎨`
@@ -78,14 +78,15 @@ _If the agent saw it, the user should see it — while it happens, not after._
 
 ## 4. Questions, approvals & safety
 
-- [ ] **Render MCP form/link requests instead of failing silently** — when an MCP server needs a form filled or a link opened mid-turn, show it on the question card (masked secrets, explicit continue), and treat a timeout as declined. `Codex · P2 · 🎨`
-- [ ] **Answer unknown dialog requests safely** — Claude can ask the app to show new dialog kinds; anything unrecognized must be answered "cancelled" so the turn never hangs. `Claude · P1 · ⚙️`
+- [x] **Render MCP form/link requests instead of failing silently** — Claude `onElicitation` and Codex `mcpServer/elicitation/request` now share the existing blocking question card. It renders booleans, numbers/integers, enums, multi-select arrays, schema defaults, bounded safe patterns, and email/URI/date/date-time validation; preserves schema-significant whitespace and explicit empty values; and fails closed on malformed or unsupported extended forms. Provider-authored schema size, field count, choice count, copy, URL length, duplicate answers, and parked-request count are bounded so an MCP server cannot flood the renderer or smuggle an unenforced validation keyword through `openai/form`. URL mode shows the full destination and requester before consent, warns on HTTP, userinfo, and Punycode, and opens only HTTP(S) after explicit acceptance. Codex MCP tool approvals also honor advertised one-time/session/always choices through response `_meta`, while decline and cancel remain distinct. Pending requests are cancelled/evicted on exact provider deadline, timeout, abort, provider resolution, stop, turn completion, process exit, or teardown. OAuth query values, form defaults, and answers are redacted from durable/debug records. The MCP standard limits form elicitation to non-sensitive input; secrets remain in the existing Keychain-backed MCP configuration flow rather than being solicited in a form. `Claude+Codex · P2 · 🎨`
+- [x] **Answer unknown dialog requests safely** — Claude dialog kinds outside the supported question/workflow shapes are answered `cancelled`, so a newly introduced provider dialog cannot park the turn forever. `Claude · P1 · ⚙️`
 - [ ] **Approvals leave a record** — after clicking Allow/Block, an "Allowed" / "Blocked" note stays on the row; today the card just vanishes. `All · P2 · 🎨`
 - [ ] **Make "Yes once" and "Don't ask again" look different** — the sticky options should be visually distinct from the one-time Yes. `All · P2 · 🎨`
 - [ ] **Keyboard & focus polish on blocking cards** — permission and question cards get proper focus handling (auto-focus, trap, Enter/Esc) for keyboard users. `All · P2 · 🎨`
-- [ ] **Support Codex's richer approval asks** — network-access requests and "always allow this pattern" amendments arrive with the approval; show what's actually being granted. `Codex · P2 · 🎨`
+- [x] **Support Codex's richer approval asks** — the card preserves the server's exact ordered `availableDecisions`, including session approval, exec-policy amendments, and network-policy amendments, and shows command, cwd, network host/context, and additional filesystem/network permissions. The response returns only the selected provider-owned payload; unknown or forged choice ids fail closed and cannot grant a permission profile. Deprecated `execCommandApproval` and `applyPatchApproval` requests use their version-specific response shapes. `Codex · P2 · 🎨`
+- [ ] **Complete Codex app/plugin installation suggestions** — Codex reuses an empty MCP form for a two-stage browser installation flow, then verifies the installation before accepting. Zeros now recognizes that private envelope and cancels it explicitly instead of falsely reporting a normal form acceptance; a native-equivalent browser/return/verification surface remains to be designed. `Codex · P2 · 🎨`
 - [ ] **Show Codex auto-review verdicts** — when a reviewer subagent approves/denies instead of the user, leave an audit row saying so. `Codex · P2 · 🎨`
-- [ ] **Real per-tool approvals for Cursor via hooks** — Cursor still has no built-in prompt, but Zeros can install its own hook that asks the user before risky tools run; today Cursor tools run with no ask at all. `Cursor · P2 · 🎨`
+- [ ] **Real per-tool approvals for Cursor** — blocked on an upstream host-interactive approval callback for built-in tools. Cursor's public SDK supports custom tools and auto-review, but the pinned and latest reviewed public stream does not let Zeros pause an arbitrary built-in tool before execution; pretending otherwise would show a prompt after the side effect. `Cursor · P2 · 🎨`
 - [ ] **Show the sandbox state** — a small badge when commands run sandboxed, and a clear prompt when the agent asks to reach a new network host. `Claude · P2 · 🎨`
 - [ ] **Show hook activity** — when configured hooks run (start/progress/result, warnings that stop the turn), show quiet rows instead of nothing. `Claude · P3 · 🎨`
 
@@ -94,7 +95,8 @@ _If the agent saw it, the user should see it — while it happens, not after._
 - [ ] **A live cost/token ticker while the turn runs** — watch tokens climb next to the working shimmer; today the bill appears only after the turn ends. `Claude · P2 · 🎨`
 - [ ] **Show plan limits and reset times** — a usage surface (in the context gauge popover) with how much of the 5-hour/weekly limit is used, when it resets, and overage state; warn near the cap. `Claude · P2 · 🎨`
 - [ ] **Surface Codex rate limits** — the data already arrives and is stored; show it (and credits/plan info) instead of dropping it. `Codex · P2 · 🎨`
-- [ ] **Rate-limited Cursor says "try again shortly"** — a 429 becomes a soft retry notice, not a hard "Agent error". `Cursor · P1 · 🔍`
+- [x] **Provider throttles stop cleanly without a retry storm** — Claude terminal/stream throttles, Codex structured `usageLimitExceeded`/`serverOverloaded`/429 failures, and Cursor typed or serialized 429 failures share a distinct rate-limited result with retry-later guidance. None enters the immediate transport replay path. `All · P1 · 🔍`
+- [x] **Rate-limited Cursor says "try again shortly"** — typed SDK `RateLimitError`/429 failures and their serialized Node-host form keep a distinct rate-limited classification and calm retry-later copy. They do not enter the immediate transport replay path, which would amplify the throttle. `Cursor · P1 · 🔍`
 - [ ] **Live thinking-token estimate** — Claude streams how much thinking the model is doing; show it as a small pill. `Claude · P3 · 🎨`
 - [ ] **Show fast-mode cooldown honestly** — when fast mode is on/off/cooling down, the pill reflects it and says why it's unavailable. `Claude · P2 · 🔍`
 
@@ -149,6 +151,8 @@ _If the agent saw it, the user should see it — while it happens, not after._
 
 ## 11. Housekeeping (invisible, keeps the code honest)
 
+- [x] **Ship the pinned Codex runtime in packaged builds** — `beforePack` stages Codex's complete platform vendor tree (CLI, code-mode host, ripgrep, and platform resources), Electron places it outside asar, and the sidecar hands its path/version to the compiled engine. The packaged path is authoritative: an incomplete bundle fails with an actionable error instead of silently running an unpinned global `codex`. The smoke test uses a disposable `CODEX_HOME`, so a locked/corrupt ambient `~/.codex` SQLite database cannot invalidate protocol boot verification. `Codex · P1 · ⚙️`
+- [x] **Complete the pinned Codex server-request lifecycle** — initialization advertises only capabilities Zeros handles, supplies external current time, supports current and deprecated approval names, answers unknown future requests with method-not-found, and consumes `serverRequest/resolved` without a second response. Stop, turn completion, process exit, and disposal deterministically release and receipt all parked approvals/questions. `Codex · P1 · ⚙️`
 - [ ] **Decide the dead Codex subscriptions** — per-turn diff, plan-update, and reasoning-part events are subscribed but dropped; wire them or remove them. `Codex · P2 · ⚙️`
 - [ ] **Delete the dead status-mapper file and stale comments** — `tool-status.ts` has no importers; two comments still reference deleted permission surfaces. `— · P3 · ⚙️`
 - [ ] **Remove or use the dead Codex thread-id getter** — it captures the native id that the resume fix (§8) actually needs. `Codex · P3 · ⚙️`
