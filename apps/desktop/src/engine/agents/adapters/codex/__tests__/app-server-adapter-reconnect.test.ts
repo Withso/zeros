@@ -39,6 +39,10 @@ const rt = vi.hoisted(() => ({
   /** Generic JSON-RPC requests the adapter fires (method, params) — e.g.
    *  compactContext → thread/compact/start. */
   requests: [] as Array<[string, unknown]>,
+  /** `model/list` payload. Overridable so a test can model an app-server that
+   *  omits the capability fields entirely, which must read as "unknown" rather
+   *  than as an authoritative "no effort knob / no Fast". */
+  modelList: null as null | { data?: unknown[] },
   notificationHandlers: new Map<string, (params: unknown) => void>(),
 }));
 
@@ -91,19 +95,21 @@ vi.mock("../app-server", () => ({
         request: vi.fn(async (method: string, params: unknown) => {
           rt.requests.push([method, params]);
           if (method === "model/list") {
-            return {
-              data: [
-                {
-                  id: "gpt-5.6-sol",
-                  displayName: "GPT-5.6 Sol",
-                  supportedReasoningEfforts: [
-                    { reasoningEffort: "xhigh" },
-                    { reasoningEffort: "max" },
-                  ],
-                  serviceTiers: [],
-                },
-              ],
-            };
+            return (
+              rt.modelList ?? {
+                data: [
+                  {
+                    id: "gpt-5.6-sol",
+                    displayName: "GPT-5.6 Sol",
+                    supportedReasoningEfforts: [
+                      { reasoningEffort: "xhigh" },
+                      { reasoningEffort: "max" },
+                    ],
+                    serviceTiers: [],
+                  },
+                ],
+              }
+            );
           }
           return {};
         }),
@@ -157,6 +163,7 @@ describe("codex mid-turn reconnect + per-session crash signalling", () => {
     rt.lastOnUserInputRequest = null;
     rt.runTurnImpl = null;
     rt.requests = [];
+    rt.modelList = null;
     rt.notificationHandlers.clear();
   });
   afterEach(() => {
@@ -177,7 +184,64 @@ describe("codex mid-turn reconnect + per-session crash signalling", () => {
     ).models?.find((entry) => entry.value === "gpt-5.6-sol");
 
     expect(model?.effortLevels).toEqual(["xhigh", "max"]);
+    // serviceTiers: [] is an ANSWER ("this account has no fast tier"), so it
+    // must survive as an explicit false rather than fall back to the heuristic.
     expect(model?.supportsFast).toBe(false);
+  });
+
+  it("leaves omitted capability fields unknown instead of answering none", async () => {
+    // An app-server that never mentions reasoning efforts or service tiers has
+    // told us nothing. Reporting [] / false here would out-rank the bundled
+    // catalog in the renderer's overlay and strip the Effort and Fast pills off
+    // a model that really does support them.
+    rt.modelList = {
+      data: [{ id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol" }],
+    };
+    const { adapter } = makeAdapter();
+    const { initialize } = await adapter.newSession({ cwd: "/tmp/proj" });
+    const model = (
+      initialize._meta as {
+        models?: Array<{ value: string }>;
+      }
+    ).models?.find((entry) => entry.value === "gpt-5.6-sol");
+
+    expect(model).toBeDefined();
+    expect(model).not.toHaveProperty("effortLevels");
+    expect(model).not.toHaveProperty("supportsFast");
+  });
+
+  it("treats a ladder Zeros cannot express as an authoritative empty one", async () => {
+    // Codex advertised only tiers the composer has no token for. There is no
+    // effort the user could pick that this model would accept, so [] is the
+    // honest answer — unlike the omitted-field case above.
+    rt.modelList = {
+      data: [
+        {
+          id: "gpt-5.6-sol",
+          displayName: "GPT-5.6 Sol",
+          supportedReasoningEfforts: [
+            { reasoningEffort: "none" },
+            { reasoningEffort: "minimal" },
+          ],
+          additionalSpeedTiers: ["fast"],
+        },
+      ],
+    };
+    const { adapter } = makeAdapter();
+    const { initialize } = await adapter.newSession({ cwd: "/tmp/proj" });
+    const model = (
+      initialize._meta as {
+        models?: Array<{
+          value: string;
+          effortLevels?: string[];
+          supportsFast?: boolean;
+        }>;
+      }
+    ).models?.find((entry) => entry.value === "gpt-5.6-sol");
+
+    expect(model?.effortLevels).toEqual([]);
+    // additionalSpeedTiers alone answers the Fast question.
+    expect(model?.supportsFast).toBe(true);
   });
 
   it("clears a stale effort when the authoritative config omits it", async () => {

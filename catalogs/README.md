@@ -20,6 +20,11 @@ boundary.
   an exact model match, live `effortLevels` and `supportsFast` values are
   authoritative for what the installed runtime and current account can execute;
   explicit `[]` and `false` must override bundled fallback capabilities.
+- An adapter therefore advertises a capability only when its provider actually
+  answered. Omit the field when the response never addressed it — a missing
+  field is "unknown" and keeps the curated fallback, while `[]`/`false` mean
+  "this runtime says no" and strip the control. Never normalize an absent
+  field into an empty answer.
 - `defaultFavorites` and `aliases` participate in persisted model selection.
   Do not retarget them silently. Add a compatibility migration and regression
   test if an existing selection must resolve differently.

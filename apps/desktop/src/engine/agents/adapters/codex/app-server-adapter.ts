@@ -330,9 +330,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
    *  is account-stable). The Codex ReasoningEffort vocabulary
    *  ladder is normalized into Zeros' existing composer tokens in the
    *  server's intended order (`ultra` → `ultracode`; none/minimal dropped).
-   *  `supportsFast` is always explicit: a missing "fast" service tier is an
-   *  authoritative false for this account/runtime, not permission to fall back
-   *  to a stale bundled heuristic. */
+   *
+   *  Both capabilities follow the AdvertisedModel contract: a field the
+   *  response actually CARRIES is authoritative for this account/runtime even
+   *  when it answers "none" (an empty ladder, no fast tier), while a field the
+   *  response OMITS is left unset so the renderer keeps its bundled fallback.
+   *  Collapsing those two cases would let an older/leaner `model/list` payload
+   *  silently strip the effort and Fast controls off every model. */
   private async discoverModels(session: CodexSession): Promise<void> {
     if (this.modelsDiscovered) return;
     try {
@@ -349,18 +353,34 @@ export class CodexAppServerAdapter implements AgentAdapter {
       const models: AdvertisedModel[] = [];
       for (const m of resp?.data ?? []) {
         if (!m?.id || m.hidden) continue;
-        const effortLevels = (m.supportedReasoningEfforts ?? [])
-          .map((e) => e.reasoningEffort)
-          .map(mapCodexAdvertisedEffort)
-          .filter((e): e is string => typeof e === "string");
-        const hasFast =
-          (m.serviceTiers ?? []).some((t) => t.id === "fast") ||
-          (m.additionalSpeedTiers ?? []).includes("fast");
+        // An advertised ladder that maps to nothing (Codex offered only
+        // none/minimal, which Zeros' composer has no token for) stays an
+        // explicit [] — there is genuinely no effort the user could pick that
+        // this model accepts.
+        const effortLevels = Array.isArray(m.supportedReasoningEfforts)
+          ? m.supportedReasoningEfforts
+              .map((e) => e.reasoningEffort)
+              .map(mapCodexAdvertisedEffort)
+              .filter((e): e is string => typeof e === "string")
+          : undefined;
+        // Either tier field answers the Fast question; only their joint absence
+        // means the response never addressed it.
+        const serviceTiers = Array.isArray(m.serviceTiers)
+          ? m.serviceTiers
+          : undefined;
+        const speedTiers = Array.isArray(m.additionalSpeedTiers)
+          ? m.additionalSpeedTiers
+          : undefined;
+        const supportsFast =
+          serviceTiers || speedTiers
+            ? (serviceTiers ?? []).some((t) => t?.id === "fast") ||
+              (speedTiers ?? []).includes("fast")
+            : undefined;
         models.push({
           value: m.id,
           label: m.displayName || m.id,
-          effortLevels,
-          supportsFast: hasFast,
+          ...(effortLevels !== undefined ? { effortLevels } : {}),
+          ...(supportsFast !== undefined ? { supportsFast } : {}),
         });
       }
       if (models.length > 0) {
