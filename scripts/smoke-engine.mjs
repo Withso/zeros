@@ -346,6 +346,10 @@ const child = spawn(
     stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
+      // A developer may launch this check from inside Zeros itself. Do not
+      // inherit that app instance's watchdog identity into the smoke child:
+      // this script owns the child and intentionally gives it no stdin pipe.
+      ZEROS_PARENT_PID: "",
       ZEROS_DEV: "0",
       ZEROS_RUNTIME_MODE: "packaged",
       ZEROS_DATA_DIR: dataDir,

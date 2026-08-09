@@ -32,6 +32,7 @@
     "watch:engine": "node scripts/codegen-codex.mjs && tsup --watch",
     "build:sidecar": "node scripts/build-sidecar.mjs",
     "stage:claude-cli": "node scripts/stage-claude-cli.mjs",
+    "stage:codex-cli": "node scripts/stage-codex-cli.mjs",
     "smoke:engine": "node scripts/smoke-engine.mjs",
     "smoke:packaged-pty": "node scripts/packaged-pty-smoke.mjs",
     "version:current": "node scripts/compute-version.mjs",

@@ -61,16 +61,10 @@
 // model. `agents:smoke` is where live turns belong.
 //
 // ── WHAT THIS DOES *NOT* PROVE — read before trusting it ──
-// It proves the PIN is good, not that the packaged app uses the pin. Per
-// codex/binary-resolver.ts, the packaged engine is a `bun build --compile`
-// single-file binary with no node_modules on disk, so its `require.resolve`
-// tier cannot fire and it falls through to whatever `codex` is on the user's
-// PATH — a different, unpinned CLI. The tier that would fix that
-// (ZEROS_CODEX_CLI_PATH) exists but is wired to nothing: there is no
-// stage-codex-cli.mjs, and apps/desktop/electron/sidecar.ts forwards only the Claude pair.
-// This gate runs in a source checkout, so it exercises the BUNDLED tier — the
-// one dev uses. Point ZEROS_CODEX_CLI_PATH at a staged binary to check the
-// packaged one (the resolver's comment reserves that tier for exactly this).
+// It proves the installed pin is executable and protocol-compatible. Packaging
+// correctness is separately guarded by stage-codex-cli.mjs,
+// check-packaging-paths.mjs, and the sidecar's ZEROS_CODEX_CLI_PATH handoff.
+// Point ZEROS_CODEX_CLI_PATH at a staged binary to exercise that exact artifact.
 //
 // Resolving via PATH is therefore treated as a FAILURE here, not a pass: in a
 // source checkout it means the @openai/codex platform package did not install,
@@ -92,7 +86,13 @@ const ENTRY = "apps/desktop/src/engine/agents/adapters/codex/app-server.ts";
 
 function die(msg, detail) {
   console.error(`\n✗ FAIL — ${msg}`);
-  if (detail) console.error(String(detail).split("\n").map((l) => `    ${l}`).join("\n"));
+  if (detail)
+    console.error(
+      String(detail)
+        .split("\n")
+        .map((l) => `    ${l}`)
+        .join("\n"),
+    );
   process.exit(1);
 }
 
@@ -126,7 +126,13 @@ for (const signal of ["uncaughtException", "unhandledRejection"]) {
  *  ERR_PACKAGE_PATH_NOT_EXPORTED and this gate would die naming the wrong cause
  *  (the same trap check-runtime-pins.mjs documents). */
 function installedCodexVersion() {
-  const pkg = path.join(ROOT, "node_modules", "@openai", "codex", "package.json");
+  const pkg = path.join(
+    ROOT,
+    "node_modules",
+    "@openai",
+    "codex",
+    "package.json",
+  );
   if (!fs.existsSync(pkg)) {
     die(
       "@openai/codex is not installed — run `pnpm install --frozen-lockfile`.",
@@ -171,7 +177,9 @@ try {
   die("could not compile the codex app-server module", err?.message ?? err);
 }
 if (typeof mod.bootCodexAppServerRuntime !== "function") {
-  die(`${ENTRY} no longer exports bootCodexAppServerRuntime — update this gate.`);
+  die(
+    `${ENTRY} no longer exports bootCodexAppServerRuntime — update this gate.`,
+  );
 }
 
 let handle;
@@ -218,7 +226,9 @@ if (!handle.cliVersion) {
   );
 }
 
-console.log(`▸ resolved: ${handle.binarySource?.path} (${handle.binarySource?.source})`);
+console.log(
+  `▸ resolved: ${handle.binarySource?.path} (${handle.binarySource?.source})`,
+);
 console.log(`▸ reported: codex ${handle.cliVersion ?? "unknown"}`);
 console.log(`▸ userAgent: ${handle.initializeResponse?.userAgent ?? "(none)"}`);
 
@@ -238,14 +248,20 @@ const curatedCodex = (() => {
     );
     return (cat.families?.codex ?? []).map((m) => m.value).filter(Boolean);
   } catch (err) {
-    problems.push(`could not read catalogs/models-v1.json: ${err?.message ?? err}`);
+    problems.push(
+      `could not read catalogs/models-v1.json: ${err?.message ?? err}`,
+    );
     return null;
   }
 })();
 
 let liveIds = null;
 try {
-  const res = await handle.request("model/list", { includeHidden: true }, { timeoutMs: 20_000 });
+  const res = await handle.request(
+    "model/list",
+    { includeHidden: true },
+    { timeoutMs: 20_000 },
+  );
   // An ANSWER we cannot read is drift, not a blip. `model/list` is the binary's
   // authoritative RPC, so a missing `data` array means the response shape moved
   // under us — precisely the protocol regression this gate exists to catch. The
@@ -289,7 +305,9 @@ try {
   // This is the ONLY skip left, and the asymmetry is deliberate: a request that
   // never landed is a blip, while one that ANSWERED is held to its answer (both
   // branches above are hard failures). Do not "even these out".
-  console.log(`▸ models:   model/list unavailable (${String(err?.message ?? err).slice(0, 90)}) — id check SKIPPED`);
+  console.log(
+    `▸ models:   model/list unavailable (${String(err?.message ?? err).slice(0, 90)}) — id check SKIPPED`,
+  );
 }
 
 // UNCONDITIONAL, and deliberately not an `else` arm of the check below: an empty
@@ -298,13 +316,17 @@ try {
 // been skipped — so the normal case (model/list healthy, `families.codex` emptied
 // or its `value` key renamed) printed an id count and exited 0.
 if (curatedCodex?.length === 0) {
-  problems.push("catalogs/models-v1.json lists no codex models — the id check ran against nothing.");
+  problems.push(
+    "catalogs/models-v1.json lists no codex models — the id check ran against nothing.",
+  );
 }
 
 if (liveIds) {
   console.log(
     `▸ models:   ${liveIds.size} offered by the pinned binary, checking ` +
-      (curatedCodex ? `${curatedCodex.length} curated id(s)` : "nothing (catalog unreadable)"),
+      (curatedCodex
+        ? `${curatedCodex.length} curated id(s)`
+        : "nothing (catalog unreadable)"),
   );
   for (const id of curatedCodex ?? []) {
     if (!liveIds.has(id)) {
@@ -336,6 +358,8 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
-console.log(`\n✓ PASS — codex ${handle.cliVersion} booted, completed the app-server`);
+console.log(
+  `\n✓ PASS — codex ${handle.cliVersion} booted, completed the app-server`,
+);
 console.log("  initialize handshake, and matches the installed pin.");
 process.exit(0);

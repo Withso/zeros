@@ -259,11 +259,12 @@ export interface AdvertisedModel {
   value: string;
   label: string;
   badge?: string;
-  /** Ordered reasoning-effort ladder (low→high). Omit when the model has no
-   *  effort knob; the renderer then hides the EffortPill (or, absent any
-   *  advertisement, falls back to its family default). */
+  /** Ordered reasoning-effort ladder (low→high). An explicit empty array means
+   *  the live runtime says this model has no effort knob. Omit only when the
+   *  adapter has no capability answer and the renderer may use its fallback. */
   effortLevels?: string[];
-  /** Whether this model supports Fast mode (drives the FastPill). */
+  /** Whether this model supports Fast mode (drives the FastPill). Explicit
+   *  false is authoritative; omit only when capability is unknown. */
   supportsFast?: boolean;
 }
 

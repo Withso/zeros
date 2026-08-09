@@ -388,7 +388,7 @@ export type PendingChatSubmission = {
  *  The effort ladder Zeros exposes (per the composer effort toggle):
  *    low · medium · high · xhigh · max · ultracode
  *  Not every model supports the whole ladder — see effortLevelsFor() in
- *  model-catalog.ts (Opus = all six; Sonnet/GPT = low…xhigh; Haiku = low…high).
+ *  model-catalog.ts; exact live capabilities override the bundled fallback.
  *  Mapping to the agent: Claude takes `low|medium|high|xhigh|max` as the SDK
  *  `effort` option, and "ultracode" → `xhigh` + the `ultracode` setting
  *  (xhigh effort plus standing multi-agent-workflow permission). Codex maps
@@ -437,21 +437,21 @@ export type ChatThread = {
    *  creation so the header can render without a registry lookup. */
   agentName: string | null;
   /** Model id (agent-specific — e.g. "claude-opus-4-7" for claude).
-   *  null means "use the agent's default". Changing forces session respawn
-   *  because most agents read the model from env at spawn time. */
+   *  null means "use the agent's default". Native adapters apply changes live;
+   *  adapters without that capability pick it up on their next session. */
   model: string | null;
   /** Reasoning effort — mapped to each agent's flag/env at spawn. */
   effort: ChatEffort;
-  /** Fast mode — lower-latency inference at higher token cost. Claude maps
-   *  it to the SDK `fastMode` setting (Opus only); Codex to `service_tier:
-   *  "fast"` (GPT-5.x only). Carried via env (ZEROS_FAST_MODE) and applied on
-   *  the next session (re)spawn, like effort. undefined ≡ off. */
+  /** Fast mode — lower-latency inference at higher token cost. Claude maps it
+   *  to the SDK `fastMode` setting; Codex to `service_tier: "fast"`; Cursor to
+   *  an account-advertised fast model variant. Carried via ZEROS_FAST_MODE and
+   *  applied live by native adapters. undefined ≡ off. */
   fast?: boolean;
   /** Extra working directories Claude can access beyond `folder` (the `/add-dir`
    *  command, SDK `Options.additionalDirectories`). Absolute paths, de-duped.
-   *  Carried via env (ZEROS_ADDITIONAL_DIRS) and applied on the next session
-   *  (re)spawn, like effort/fast (Claude resumes, so context survives). Claude
-   *  only today; undefined/[] ≡ none. */
+   *  Carried via env (ZEROS_ADDITIONAL_DIRS) and applied live by the Claude
+   *  adapter; a later (re)spawn restores the same authoritative selection.
+   *  Claude only today; undefined/[] ≡ none. */
   additionalDirectories?: string[];
   /** Permission gate. Plumbed via agent session/set_mode when the agent
    *  advertises mode support; otherwise stored and applied to new

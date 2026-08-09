@@ -263,6 +263,45 @@ describe("repository layout contracts", () => {
     expect(generator).toContain("apps/web gained production dependencies");
   });
 
+  it("stages the pinned Codex runtime instead of falling back to PATH", () => {
+    const rootPackage = read("package.json");
+    const beforePack = read("scripts/electron-before-pack.cjs");
+    const packaging = read("electron-builder.yml");
+    const sidecar = read("apps/desktop/electron/sidecar.ts");
+    const packagingCheck = read("scripts/check-packaging-paths.mjs");
+
+    expect(existsSync("scripts/stage-codex-cli.mjs")).toBe(true);
+    expect(rootPackage).toContain('"stage:codex-cli"');
+    expect(beforePack).toContain("stage-codex-cli.mjs");
+    expect(packaging).toContain("from: binaries/codex-runtime");
+    expect(packaging).toContain("from: binaries/codex-cli-version.txt");
+    expect(sidecar).toContain("ZEROS_CODEX_CLI_PATH");
+    expect(sidecar).toContain("ZEROS_CODEX_CLI_VERSION");
+    expect(packagingCheck).toContain("binaries/codex-runtime");
+    expect(packagingCheck).toContain("binaries/codex-cli-version.txt");
+  });
+
+  it("does not let an enclosing Zeros parent watchdog kill the engine smoke", () => {
+    const engineSmoke = read("scripts/smoke-engine.mjs");
+
+    expect(engineSmoke).toContain('ZEROS_PARENT_PID: ""');
+  });
+
+  it("threads the active session's live model capabilities into the unified menu", () => {
+    const composerPills = read(
+      "apps/desktop/src/renderer/features/agent/composer-pills.tsx",
+    );
+    const modelMenu = read(
+      "apps/desktop/src/renderer/features/agent/agent-model-menu.tsx",
+    );
+
+    expect(composerPills).toContain("initialize={initialize}");
+    expect(modelMenu).toContain("initialize?: InitializeResponse | null");
+    expect(modelMenu).toContain(
+      "agent.id === value?.agentId ? initialize : null",
+    );
+  });
+
   it("licenses the standalone marketing graph and publishes its notices", () => {
     const licenses = read("THIRD-PARTY-LICENSES.txt");
     const generator = read("scripts/generate-third-party-licenses.mjs");

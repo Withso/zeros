@@ -51,15 +51,9 @@ files:
   # scripts/stage-claude-cli.mjs). Without this negation the app carries the blob
   # twice: ~250 MiB of dead weight in the asar plus the usable copy.
   - "!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**"
-  # EXCLUDE the Codex platform package for the same reason, with one difference:
-  # unlike Claude there is no extraResources entry staging it, so this blob was
-  # never usable at all. @openai/codex-<platform>-<arch> is ~336 MiB (a 285 MiB
-  # `codex` + a 44 MiB codex-code-mode-host + a vendored ripgrep), the auto-walk
-  # pulls it into app.asar, macOS cannot exec it there, and the packaged app
-  # resolves Codex from the user's PATH regardless (see the `fallback` tier in
-  # apps/desktop/src/engine/agents/adapters/codex/binary-resolver.ts). It was pure shipped
-  # weight. Excluding it changes no runtime behaviour — dev is unaffected,
-  # because `files:` only governs packaging.
+  # EXCLUDE Codex's npm platform package from app.asar too. Its complete native
+  # vendor target ships once through the executable extraResources copy below;
+  # an asar copy is both non-executable and hundreds of MiB of duplicate weight.
   - "!**/node_modules/@openai/codex-*/**"
 
 # The bun-compiled engine binary sits outside dist-electron, so bundle
@@ -118,6 +112,14 @@ extraResources:
     to: claude
   - from: binaries/claude-cli-version.txt
     to: claude-cli-version.txt
+  # Pinned Codex native runtime. Preserve the vendor target layout because the
+  # main binary locates its code-mode host, ripgrep, and resources relatively.
+  # stage-codex-cli.mjs creates this at beforePack; sidecar.ts passes the binary
+  # and version to the compiled engine through ZEROS_CODEX_CLI_PATH/_VERSION.
+  - from: binaries/codex-runtime
+    to: codex-runtime
+  - from: binaries/codex-cli-version.txt
+    to: codex-cli-version.txt
   # Repository and third-party terms must travel with every binary release.
   # The generated bundle contains the exact locked production inventory and
   # license/NOTICE texts; `pnpm check:licenses` rejects drift before packaging.

@@ -16,9 +16,10 @@ boundary.
 
 ## Runtime contracts
 
-- Curated `effortLevels` and `supportsFast` values are authoritative. Live
-  discovery may fill a capability only when the curated entry omits it; it must
-  not override an explicit catalog value.
+- The curated catalog is authoritative for which model rows are displayed. For
+  an exact model match, live `effortLevels` and `supportsFast` values are
+  authoritative for what the installed runtime and current account can execute;
+  explicit `[]` and `false` must override bundled fallback capabilities.
 - `defaultFavorites` and `aliases` participate in persisted model selection.
   Do not retarget them silently. Add a compatibility migration and regression
   test if an existing selection must resolve differently.
@@ -27,9 +28,9 @@ boundary.
 - Labels do not claim a context-window size. Runtime-reported context sizes are
   preferred, while shared static fallbacks live in
   `packages/protocol/src/model-context.ts`.
-- Cursor effort and fast modes select concrete model identifiers. Codex's
-  `max` and `ultracode` display tiers map to its highest supported wire effort,
-  `xhigh`.
+- Cursor effort and fast modes select concrete model identifiers. Codex's `max`
+  tier maps to native `max`; the Zeros `ultracode` display tier maps to Codex's
+  native `ultra` effort.
 - `minCliVersion` is a build-time compatibility gate. It does not hide a model
   at runtime, so a catalog entry and the pinned SDK that supports it must ship
   together.
@@ -49,5 +50,6 @@ Fable 5, 2.1.206 for Sonnet 5, and 2.1.219 for Opus 5.
    authentication is available.
 5. Run the adjacent catalog tests before committing.
 
-Live discovery can differ by account and availability, so a successful live
-query supplements—but does not replace—the checked-in compatibility tests.
+Live discovery can differ by account, CLI, and availability. It replaces
+bundled capability fallbacks for exact matches while the checked-in catalog and
+tests continue to own display compatibility and cold-start behavior.

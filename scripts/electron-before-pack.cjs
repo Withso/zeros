@@ -90,4 +90,13 @@ exports.default = async function beforePack(context) {
     [path.join(projectDir, "scripts", "stage-claude-cli.mjs")],
     { cwd: projectDir, env: process.env, stdio: "inherit" },
   );
+
+  // Codex has the same compiled-engine/node_modules boundary. Stage its whole
+  // native vendor target (main binary + code-mode host + ripgrep/resources),
+  // then sidecar.ts supplies the pinned executable and version to the engine.
+  execFileSync(
+    process.execPath,
+    [path.join(projectDir, "scripts", "stage-codex-cli.mjs")],
+    { cwd: projectDir, env: process.env, stdio: "inherit" },
+  );
 };

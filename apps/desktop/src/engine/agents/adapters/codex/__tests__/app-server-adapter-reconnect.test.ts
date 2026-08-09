@@ -90,6 +90,21 @@ vi.mock("../app-server", () => ({
         },
         request: vi.fn(async (method: string, params: unknown) => {
           rt.requests.push([method, params]);
+          if (method === "model/list") {
+            return {
+              data: [
+                {
+                  id: "gpt-5.6-sol",
+                  displayName: "GPT-5.6 Sol",
+                  supportedReasoningEfforts: [
+                    { reasoningEffort: "xhigh" },
+                    { reasoningEffort: "max" },
+                  ],
+                  serviceTiers: [],
+                },
+              ],
+            };
+          }
           return {};
         }),
         dispose: async () => {},
@@ -146,6 +161,51 @@ describe("codex mid-turn reconnect + per-session crash signalling", () => {
   });
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("advertises explicit live max and unsupported Fast capabilities", async () => {
+    const { adapter } = makeAdapter();
+    const { initialize } = await adapter.newSession({ cwd: "/tmp/proj" });
+    const model = (
+      initialize._meta as {
+        models?: Array<{
+          value: string;
+          effortLevels?: string[];
+          supportsFast?: boolean;
+        }>;
+      }
+    ).models?.find((entry) => entry.value === "gpt-5.6-sol");
+
+    expect(model?.effortLevels).toEqual(["xhigh", "max"]);
+    expect(model?.supportsFast).toBe(false);
+  });
+
+  it("clears a stale effort when the authoritative config omits it", async () => {
+    const { adapter } = makeAdapter();
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: {
+        OPENAI_MODEL: "gpt-5.6-sol",
+        ZEROS_THINKING_EFFORT: "max",
+      },
+    });
+    let sent: { effort?: string } | undefined;
+    rt.runTurnImpl = async (params, o) => {
+      sent = params as { effort?: string };
+      o.onTurnStarted?.("turn-1");
+      return { turnId: "turn-1", status: "completed", raw: {} };
+    };
+
+    await adapter.updateConfig({
+      sessionId: session.sessionId,
+      env: { OPENAI_MODEL: "gpt-5.6-sol" },
+    });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT("hi"),
+    });
+
+    expect(sent?.effort).toBeUndefined();
   });
 
   it("throws a recoverable transport-closed when the child dies mid-turn", async () => {

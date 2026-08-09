@@ -724,17 +724,28 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       try {
         const infos = await q.supportedModels();
         const models: AdvertisedModel[] = (infos ?? []).map((mi) => {
-          const base = (mi.supportedEffortLevels ?? []) as string[];
-          const effortLevels = !mi.supportsEffort
-            ? []
-            : base.includes("xhigh")
-              ? [...base, "ultracode"]
-              : base;
+          const base = Array.isArray(mi.supportedEffortLevels)
+            ? (mi.supportedEffortLevels as string[])
+            : undefined;
+          const effortLevels =
+            mi.supportsEffort === false
+              ? []
+              : base
+                ? base.includes("xhigh")
+                  ? [...base, "ultracode"]
+                  : base
+                : undefined;
           return {
-            value: mi.value,
+            // supportedModels may expose a stable selector (`opus`) plus the
+            // exact wire model it currently resolves to. Capability overlays
+            // must key by that canonical id; a local alias table can lag a new
+            // generation and attach Opus 5 capabilities to Opus 4.8.
+            value: mi.resolvedModel?.trim() || mi.value,
             label: mi.displayName || mi.value,
-            effortLevels,
-            ...(mi.supportsFastMode ? { supportsFast: true } : {}),
+            ...(effortLevels !== undefined ? { effortLevels } : {}),
+            ...(typeof mi.supportsFastMode === "boolean"
+              ? { supportsFast: mi.supportsFastMode }
+              : {}),
           };
         });
         if (models.length === 0) {
@@ -1963,6 +1974,12 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     const state = this.sessions.get(opts.sessionId);
     if (!state) return;
     const prevEnv = state.env ?? {};
+    const incomingModel = opts.env.ANTHROPIC_MODEL?.trim() || undefined;
+    const currentModel =
+      state.model ?? prevEnv.ANTHROPIC_MODEL?.trim() ?? undefined;
+    const modelChanged = Boolean(
+      incomingModel && incomingModel !== currentModel,
+    );
     // opts.env is the composer's CURRENT snapshot (from envForChat), which emits
     // the Fast/add-dirs knobs BY OMISSION (absent = off / none). A plain merge
     // can't delete a key, so a stale "on" value would survive a toggle-OFF —
@@ -1973,6 +1990,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // that envForChat does NOT carry.
     const carried = { ...prevEnv };
     delete carried.ZEROS_FAST_MODE;
+    delete carried.ZEROS_THINKING_EFFORT;
     delete carried.ZEROS_ADDITIONAL_DIRS;
     // Same by-omission contract: envForChat emits the fallback /
     // budget knobs only when ON, so a stale value must not survive a toggle-OFF.
@@ -1980,6 +1998,13 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     delete carried.CLAUDE_MAX_BUDGET_USD;
     delete carried[CLAUDE_IDLE_TIMEOUT_ENV_VAR];
     state.env = { ...carried, ...opts.env };
+    // The composer sends a complete native-config snapshot. Keep the live SDK
+    // query and the creation-time state aligned even when this update arrives
+    // without a preceding AGENT_SET_MODEL (relay/recovery paths do exactly
+    // that). setModel also re-arms fallback detection for the new primary.
+    if (modelChanged && incomingModel) {
+      await this.setModel({ sessionId: opts.sessionId, model: incomingModel });
+    }
     // Preserve the original idleSince while re-scheduling: shortening a
     // timeout below time already elapsed releases immediately; lengthening it
     // extends the same idle interval rather than restarting the clock.
@@ -1996,7 +2021,19 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       prevEnv.CLAUDE_MAX_BUDGET_USD !== state.env.CLAUDE_MAX_BUDGET_USD;
     if (!maxTurnsChanged && !maxEffortToggled && !reliabilityChanged) {
       try {
-        await state.query?.applyFlagSettings(this.buildFlagSettings(state));
+        const settings = this.buildFlagSettings(state);
+        await state.query?.applyFlagSettings(
+          state.env.ZEROS_THINKING_EFFORT?.trim()
+            ? settings
+            : {
+                ...settings,
+                // applyFlagSettings shallow-merges and drops `undefined` during
+                // serialization. Explicit null is the SDK's reset operation;
+                // without it, switching to a model with no effort knob leaves
+                // the prior model's live effort override in place.
+                effortLevel: null,
+              },
+        );
       } catch {
         /* older CLI / between turns — staged for next creation */
       }
@@ -2746,9 +2783,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     const allow = parseToolList(env?.CLAUDE_ALLOWED_TOOLS);
     const deny = parseToolList(env?.CLAUDE_DISALLOWED_TOOLS);
     return {
-      // effortLevel is omitted only for the "max"/invalid tier, which never
-      // reaches the live applyFlagSettings path (it forces a restart instead);
-      // for every live tier it's present, so shallow-merge updates it.
+      // effortLevel is omitted for the "max"/invalid/absent tier. updateConfig
+      // turns an absent effort into explicit null before live apply so the SDK
+      // clears, rather than shallow-merges, a previous model's effort.
       ...(effortLevel ? { effortLevel } : {}),
       // fastMode/ultracode are EXPLICIT booleans (never omitted): applyFlagSettings
       // shallow-merges top-level keys, so omitting them when off would leave a

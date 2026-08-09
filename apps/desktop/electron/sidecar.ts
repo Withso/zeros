@@ -439,6 +439,104 @@ function resolveClaudeCliPaths(): {
   return { binary, version };
 }
 
+/** Resolve the complete pinned Codex runtime staged in Resources. Development
+ *  uses the same optional platform package directly; production must never
+ *  depend on a user's PATH because that can select a different CLI/version than
+ *  the app-server protocol bindings and live capability discovery were built
+ *  against. */
+function resolveCodexCliPaths(): {
+  binary: string | null;
+  version: string | null;
+} {
+  let binary: string | null = null;
+  let version: string | null = null;
+
+  if (IS_PACKAGED) {
+    const staged = path.join(
+      process.resourcesPath,
+      "codex-runtime",
+      "bin",
+      process.platform === "win32" ? "codex.exe" : "codex",
+    );
+    if (existsSync(staged)) binary = staged;
+    try {
+      const raw = readFileSync(
+        path.join(process.resourcesPath, "codex-cli-version.txt"),
+        "utf8",
+      ).trim();
+      if (raw) version = raw;
+    } catch {
+      /* absent/unreadable — provider diagnostics report no bundled version */
+    }
+  }
+
+  if (!binary || !version) {
+    try {
+      const wrapperPackageJson = require.resolve("@openai/codex/package.json");
+      const wrapper = JSON.parse(readFileSync(wrapperPackageJson, "utf8")) as {
+        version?: string;
+      };
+      if (!version && typeof wrapper.version === "string") {
+        version = wrapper.version;
+      }
+      if (!binary) {
+        const targets: Record<string, { package: string; triple: string }> = {
+          "darwin-arm64": {
+            package: "@openai/codex-darwin-arm64",
+            triple: "aarch64-apple-darwin",
+          },
+          "darwin-x64": {
+            package: "@openai/codex-darwin-x64",
+            triple: "x86_64-apple-darwin",
+          },
+          "linux-arm64": {
+            package: "@openai/codex-linux-arm64",
+            triple: "aarch64-unknown-linux-musl",
+          },
+          "linux-x64": {
+            package: "@openai/codex-linux-x64",
+            triple: "x86_64-unknown-linux-musl",
+          },
+          "win32-arm64": {
+            package: "@openai/codex-win32-arm64",
+            triple: "aarch64-pc-windows-msvc",
+          },
+          "win32-x64": {
+            package: "@openai/codex-win32-x64",
+            triple: "x86_64-pc-windows-msvc",
+          },
+        };
+        const target = targets[`${process.platform}-${process.arch}`];
+        if (target) {
+          const fromWrapper = createRequire(wrapperPackageJson);
+          const platformPackageJson = fromWrapper.resolve(
+            `${target.package}/package.json`,
+          );
+          const resolved = path.join(
+            path.dirname(platformPackageJson),
+            "vendor",
+            target.triple,
+            "bin",
+            process.platform === "win32" ? "codex.exe" : "codex",
+          );
+          if (existsSync(resolved)) binary = resolved;
+        }
+      }
+    } catch {
+      /* optional package not installed — engine retains its PATH fallback */
+    }
+  }
+
+  if (!binary) {
+    console.error(
+      "[Zeros] pinned Codex runtime not found (no staged " +
+        "Contents/Resources/codex-runtime and no platform package) — Codex " +
+        "will fall back to an unpinned `codex` on PATH. Run `pnpm stage:codex-cli`.",
+    );
+  }
+  return { binary, version };
+}
+
 /** Prove the engine event loop can answer, not merely that its kernel listener
  * still owns the port. A wedged Bun process can keep completing TCP handshakes
  * from the accept backlog for minutes while every HTTP/WS request is frozen;
@@ -1172,6 +1270,17 @@ async function doSpawnEngine(
   }
   if (claudeCli.version && !process.env.ZEROS_CLAUDE_CLI_VERSION) {
     extraEnv.ZEROS_CLAUDE_CLI_VERSION = claudeCli.version;
+  }
+
+  // Codex native runtime. The compiled engine cannot require.resolve the npm
+  // platform package, so hand it the staged executable and exact pinned version.
+  // Explicit environment overrides remain authoritative for diagnostics/tests.
+  const codexCli = resolveCodexCliPaths();
+  if (codexCli.binary && !process.env.ZEROS_CODEX_CLI_PATH) {
+    extraEnv.ZEROS_CODEX_CLI_PATH = codexCli.binary;
+  }
+  if (codexCli.version && !process.env.ZEROS_CODEX_CLI_VERSION) {
+    extraEnv.ZEROS_CODEX_CLI_VERSION = codexCli.version;
   }
 
   // Account-binding config for the engine. The verifier is provider-neutral
