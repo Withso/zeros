@@ -377,6 +377,22 @@ export class RunManager {
     }
   }
 
+  /** Cancel every not-yet-spawned start for a workspace WITHOUT touching a
+   *  live PTY. The archive/delete reaper calls this before it enumerates
+   *  processes: these flights own no PTY to enumerate, and their awaits would
+   *  otherwise spend the lifecycle drain deadline on children that must never
+   *  exist. Killing live PTYs that early would be actively wrong — kill() drops
+   *  the session synchronously and waitForExit() resolves true for an unknown
+   *  one, so a run PTY killed before enumeration is invisible to the reaper's
+   *  exit wait. stopAllForWorkspace still runs afterwards for the live ones. */
+  cancelPendingStartsForWorkspace(workspaceId: string): void {
+    for (const [sessionId, flight] of [...this.starting]) {
+      if (flight.workspaceId !== workspaceId) continue;
+      flight.cancelled = true;
+      this.starting.delete(sessionId);
+    }
+  }
+
   /** Stop every live run belonging to a workspace — the archive/delete
    *  reaper: a run PTY left alive would keep writing into (and can partially
    *  resurrect) the worktree folder the engine is about to remove. */

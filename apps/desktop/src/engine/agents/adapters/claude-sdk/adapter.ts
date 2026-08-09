@@ -2673,6 +2673,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   async disposeSession(sessionId: string): Promise<void> {
     const state = this.sessions.get(sessionId);
     if (!state) return;
+    // Drop the routing entry first: teardown must never leave a half-torn-down
+    // session reachable, and a retry that re-entered it would only repeat the
+    // same failure against the same dead handles.
     this.sessions.delete(sessionId);
     await this.teardown(state);
   }
@@ -2714,7 +2717,14 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     try {
       state.query?.close();
     } catch {
-      /* already closed */
+      // Genuinely benign, and deliberately NOT fail-closed for the lifecycle
+      // reaper: abort() and input.end() above have already unwound the
+      // transport, so a throw here means the query is down — which is the
+      // outcome we wanted. The SDK owns the CLI child, so this call cannot
+      // distinguish "already closed" from "teardown failed"; reporting the
+      // ambiguity as a failure only blocks archive on a session that is gone.
+      // Codex is where a real process-group stop is observable (see
+      // CodexAppServerAdapter.disposeSession).
     }
     state.query = null;
     if (state.consumer) {

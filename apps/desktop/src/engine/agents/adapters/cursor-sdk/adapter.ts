@@ -1280,7 +1280,11 @@ export class CursorSdkAdapter implements AgentAdapter {
     try {
       await session.activeRun?.cancel();
     } catch {
-      /* best effort */
+      // Best effort, and deliberately NOT fail-closed for the lifecycle reaper:
+      // cancelling an already-finished run rejects routinely, and the SDK owns
+      // the child either way — so a throw here says nothing about whether a
+      // process survived. See CodexAppServerAdapter.disposeSession for the one
+      // teardown that does observe a real process-group stop.
     }
     try {
       session.agent.close?.();
