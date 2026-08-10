@@ -1,0 +1,2730 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-zeros-root>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Zeros — Organization hierarchy · Implemented UI catalog</title>
+    <style>
+      /* ============================================================
+         Self-contained implementation catalog.
+         Structure follows styles/Artifacts/template and the Home / Settings
+         IA reference. Primitive values mirror the current Zeros tokens.
+         ============================================================ */
+      :root {
+        color-scheme: dark;
+        --bg0: hsl(0 0% 5%);
+        --bg1: hsl(0 0% 7%);
+        --bg1-hover: hsl(0 0% 12%);
+        --bg1-highlight: hsl(0 0% 9%);
+        --bg2: hsl(0 0% 13%);
+        --bg2-hover: hsl(0 0% 15%);
+        --bg3: hsl(0 0% 9%);
+        --bg3-hover: hsl(0 0% 15%);
+        --sidebar-bg: hsl(0 0% 9%);
+        --sidebar-bg-hover: hsl(0 0% 15%);
+        --fg1: hsl(0 0% 94%);
+        --fg2: hsl(0 0% 72%);
+        --fg3: hsl(0 0% 60%);
+        --muted-fg: hsl(0 0% 44%);
+        --border1: hsl(0 0% 14%);
+        --border2: hsl(0 0% 18%);
+        --border3: hsl(0 0% 24%);
+        --border4: hsl(0 0% 30%);
+        --highlighted-bright: hsl(0 0% 65%);
+        --inverted-bg: hsl(0 0% 92%);
+        --inverted-fg: hsl(0 0% 5%);
+        --primary-button-bg: var(--inverted-bg);
+        --primary-button-hover: hsl(0 0% 83%);
+        --primary-button-fg: var(--inverted-fg);
+        --green-primary: hsl(142 69% 58%);
+        --green-bg: hsl(120 23% 17%);
+        --green-fg: hsl(142 75% 73%);
+        --red-primary: hsl(0 91% 71%);
+        --red-secondary: hsl(7 83% 39%);
+        --red-bg: hsl(13 81% 14%);
+        --red-fg: hsl(20 97% 72%);
+        --yellow-primary: hsl(37 75% 60%);
+        --yellow-bg: hsl(38 68% 17%);
+        --yellow-fg: hsl(44 100% 50%);
+        --blue-primary: hsl(205 80% 73%);
+        --blue-bg: hsl(226 57% 18%);
+        --blue-fg: hsl(211 96% 78%);
+        --violet-primary: hsl(271 80% 73%);
+        --violet-bg: hsl(255 21% 18%);
+        --violet-fg: hsl(265 66% 77%);
+        --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.35);
+        --shadow-deep: 0 24px 64px rgba(0, 0, 0, 0.54);
+        --scrim: hsl(0 0% 0% / 0.8);
+        --radius-sm: 4px;
+        --radius-md: 6px;
+        --radius-lg: 8px;
+        --sans:
+          "Geist Variable", Inter, ui-sans-serif, -apple-system,
+          BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --mono: "Geist Mono Variable", "SFMono-Regular", Consolas, monospace;
+      }
+
+      [data-theme="light"] {
+        color-scheme: light;
+        --bg0: hsl(0 0% 98%);
+        --bg1: hsl(0 0% 100%);
+        --bg1-hover: hsl(0 4% 95%);
+        --bg1-highlight: hsl(0 0% 97%);
+        --bg2: hsl(60 4% 95%);
+        --bg2-hover: hsl(60 4% 91%);
+        --bg3: hsl(0 0% 100%);
+        --bg3-hover: hsl(0 4% 95%);
+        --sidebar-bg: hsl(60 9% 98%);
+        --sidebar-bg-hover: hsl(60 2% 92%);
+        --fg1: hsl(20 7% 16%);
+        --fg2: hsl(20 4% 37%);
+        --fg3: hsl(20 4% 44%);
+        --muted-fg: hsl(20 4% 56%);
+        --border1: hsl(30 9% 91%);
+        --border2: hsl(30 9% 88%);
+        --border3: hsl(60 3% 85%);
+        --border4: hsl(0 1% 83%);
+        --highlighted-bright: hsl(25 5% 45%);
+        --inverted-bg: hsl(20 7% 16%);
+        --inverted-fg: hsl(0 0% 100%);
+        --primary-button-hover: hsl(22 6% 25%);
+        --green-primary: hsl(142 75% 36%);
+        --green-bg: hsl(134 38% 89%);
+        --green-fg: hsl(142 70% 30%);
+        --red-primary: hsl(0 72% 51%);
+        --red-secondary: hsl(0 72% 50%);
+        --red-bg: hsl(18 87% 91%);
+        --red-fg: hsl(18 89% 40%);
+        --yellow-primary: hsl(37 90% 60%);
+        --yellow-bg: hsl(48 97% 89%);
+        --yellow-fg: hsl(37 100% 51%);
+        --blue-primary: hsl(221 83% 53%);
+        --blue-bg: hsl(214 100% 97%);
+        --blue-fg: hsl(224 77% 48%);
+        --violet-primary: hsl(271 80% 51%);
+        --violet-bg: hsl(274 93% 94%);
+        --violet-fg: hsl(263 61% 46%);
+        --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.12);
+        --shadow-deep: 0 24px 64px rgba(0, 0, 0, 0.18);
+        --scrim: hsl(0 0% 0% / 0.4);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        min-width: 320px;
+        min-height: 100vh;
+        margin: 0;
+        background:
+          radial-gradient(
+            circle at 50% -8%,
+            color-mix(in srgb, var(--fg1) 5%, transparent),
+            transparent 32rem
+          ),
+          var(--bg1);
+        color: var(--fg1);
+        font: 13px/1.5 var(--sans);
+        -webkit-font-smoothing: antialiased;
+      }
+
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+
+      button,
+      summary,
+      label[for] {
+        cursor: pointer;
+      }
+
+      button {
+        color: inherit;
+      }
+
+      svg {
+        display: block;
+      }
+
+      code {
+        font-family: var(--mono);
+      }
+
+      :focus-visible {
+        outline: 1px solid var(--highlighted-bright);
+        outline-offset: 2px;
+      }
+
+      .page {
+        width: min(1220px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 48px 0 96px;
+      }
+
+      /* ── Artifact framing ── */
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 28px;
+        align-items: end;
+        padding-bottom: 28px;
+        border-bottom: 1px solid var(--border1);
+      }
+
+      .eyebrow {
+        color: var(--yellow-primary);
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        max-width: 860px;
+        margin: 9px 0 10px;
+        font-size: clamp(27px, 3.4vw, 40px);
+        line-height: 1.05;
+        letter-spacing: -0.035em;
+      }
+
+      .lede {
+        max-width: 820px;
+        margin: 0;
+        color: var(--fg2);
+        font-size: 15px;
+      }
+
+      .hero-aside {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        align-items: flex-end;
+      }
+
+      .summary-chip {
+        width: 274px;
+        padding: 14px 16px;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 90%, transparent);
+      }
+
+      .summary-chip strong,
+      .summary-chip span {
+        display: block;
+      }
+
+      .summary-chip strong {
+        margin-bottom: 3px;
+        font-size: 13px;
+      }
+
+      .summary-chip span {
+        color: var(--fg2);
+        font-size: 12px;
+      }
+
+      .theme-toggle,
+      .artifact-button {
+        display: inline-flex;
+        min-height: 28px;
+        align-items: center;
+        gap: 7px;
+        padding: 0 10px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: var(--bg2);
+        color: var(--fg1);
+        font-size: 12px;
+      }
+
+      .theme-toggle:hover,
+      .artifact-button:hover {
+        background: var(--bg2-hover);
+      }
+
+      .thesis {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        margin: 24px 0 12px;
+      }
+
+      .thesis-card {
+        min-width: 0;
+        padding: 16px 18px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 86%, transparent);
+      }
+
+      .thesis-card.primary {
+        border-color: color-mix(in srgb, var(--green-primary) 26%, var(--border1));
+        background: color-mix(in srgb, var(--green-primary) 5%, var(--sidebar-bg));
+      }
+
+      .thesis-card h3 {
+        margin: 0 0 5px;
+        font-size: 13px;
+      }
+
+      .thesis-card p {
+        margin: 0;
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .toc {
+        position: sticky;
+        top: 0;
+        z-index: 100;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+        margin: 26px -12px 40px;
+        padding: 10px 12px;
+        border-bottom: 1px solid color-mix(in srgb, var(--border1) 80%, transparent);
+        background: color-mix(in srgb, var(--bg1) 84%, transparent);
+        backdrop-filter: blur(14px);
+      }
+
+      .toc a {
+        flex: none;
+        padding: 5px 9px;
+        border-radius: var(--radius-sm);
+        color: var(--fg2);
+        font-size: 12px;
+        text-decoration: none;
+      }
+
+      .toc a:hover {
+        background: var(--bg2);
+        color: var(--fg1);
+      }
+
+      .nav-sep {
+        width: 1px;
+        margin: 3px 4px;
+        background: var(--border2);
+      }
+
+      .band {
+        margin: 0 0 26px;
+        color: var(--fg3);
+        font-size: 12px;
+        font-weight: 650;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .catalog {
+        display: grid;
+        gap: 58px;
+      }
+
+      .catalog + .band {
+        margin-top: 72px;
+      }
+
+      .case {
+        scroll-margin-top: 72px;
+      }
+
+      .case-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 24px;
+        align-items: flex-start;
+        margin-bottom: 16px;
+      }
+
+      .case-title-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        margin-bottom: 6px;
+      }
+
+      .case-number {
+        color: var(--fg3);
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.06em;
+      }
+
+      .tag {
+        display: inline-flex;
+        align-items: center;
+        min-height: 21px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: var(--bg2);
+        color: var(--fg2);
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.025em;
+      }
+
+      .tag.ship {
+        background: color-mix(in srgb, var(--green-primary) 12%, transparent);
+        color: var(--green-primary);
+      }
+
+      .tag.web {
+        background: color-mix(in srgb, var(--blue-primary) 12%, transparent);
+        color: var(--blue-primary);
+      }
+
+      .tag.mac {
+        background: color-mix(in srgb, var(--violet-primary) 12%, transparent);
+        color: var(--violet-primary);
+      }
+
+      .tag.limit {
+        background: color-mix(in srgb, var(--yellow-primary) 12%, transparent);
+        color: var(--yellow-primary);
+      }
+
+      .case h2 {
+        margin: 0;
+        font-size: 19px;
+        line-height: 1.22;
+        letter-spacing: -0.02em;
+      }
+
+      .case-copy {
+        max-width: 790px;
+        margin: 6px 0 0;
+        color: var(--fg2);
+        font-size: 13px;
+      }
+
+      .case-copy b,
+      .frame-note b,
+      .note b,
+      .boundary b {
+        color: var(--fg1);
+      }
+
+      .meta {
+        flex: none;
+        max-width: 300px;
+        padding-top: 2px;
+        color: var(--muted-fg);
+        font: 10.5px/1.5 var(--mono);
+        text-align: right;
+      }
+
+      .frame-wrap {
+        min-width: 0;
+      }
+
+      .frame-label {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin-bottom: 8px;
+        color: var(--fg3);
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+      }
+
+      .frame-label::before {
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+        background: var(--green-primary);
+        content: "";
+      }
+
+      .frame {
+        position: relative;
+        overflow: hidden;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: var(--bg1);
+        box-shadow: var(--shadow-dropdown);
+      }
+
+      .frame-note {
+        margin: 8px 0 0;
+        color: var(--muted-fg);
+        font-size: 11px;
+        line-height: 1.5;
+      }
+
+      .dual {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+      }
+
+      .notes {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 14px;
+      }
+
+      .note {
+        padding: 12px 14px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-md);
+        background: color-mix(in srgb, var(--sidebar-bg) 88%, transparent);
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .note.ship {
+        border-color: color-mix(in srgb, var(--green-primary) 24%, var(--border1));
+        background: color-mix(in srgb, var(--green-primary) 5%, var(--sidebar-bg));
+      }
+
+      /* ── Shared preview controls ── */
+      .button {
+        display: inline-flex;
+        min-height: 30px;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: transparent;
+        padding: 4px 10px;
+        color: var(--fg1);
+        font-size: 11px;
+      }
+
+      .button:hover {
+        border-color: var(--border4);
+        background: var(--bg2-hover);
+      }
+
+      .button.primary {
+        border-color: var(--primary-button-bg);
+        background: var(--primary-button-bg);
+        color: var(--primary-button-fg);
+        font-weight: 600;
+      }
+
+      .button.primary:hover {
+        background: var(--primary-button-hover);
+      }
+
+      .button.danger {
+        border-color: var(--red-secondary);
+        background: var(--red-secondary);
+        color: white;
+      }
+
+      .button:disabled,
+      .is-disabled {
+        cursor: not-allowed;
+        opacity: 0.48;
+      }
+
+      .icon-button {
+        display: inline-grid;
+        width: 28px;
+        height: 28px;
+        place-items: center;
+        border: 0;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--fg2);
+      }
+
+      .icon-button:hover {
+        background: var(--bg2-hover);
+        color: var(--fg1);
+      }
+
+      .icon {
+        width: 14px;
+        height: 14px;
+        flex: none;
+      }
+
+      .avatar {
+        display: inline-grid;
+        width: 28px;
+        height: 28px;
+        flex: none;
+        place-items: center;
+        overflow: hidden;
+        border: 1px solid var(--border2);
+        border-radius: 999px;
+        background: var(--bg2-hover);
+        color: var(--fg1);
+        font-size: 10px;
+        font-weight: 650;
+      }
+
+      .avatar.square {
+        border-radius: var(--radius-md);
+      }
+
+      .avatar.large {
+        width: 42px;
+        height: 42px;
+        font-size: 13px;
+      }
+
+      .avatar.acme {
+        background:
+          linear-gradient(145deg, color-mix(in srgb, var(--blue-primary) 55%, var(--bg2)),
+          color-mix(in srgb, var(--violet-primary) 38%, var(--bg2)));
+        color: var(--fg1);
+      }
+
+      .badge {
+        display: inline-flex;
+        min-height: 20px;
+        align-items: center;
+        padding: 2px 7px;
+        border-radius: var(--radius-sm);
+        background: var(--bg2-hover);
+        color: var(--fg2);
+        font-size: 10px;
+      }
+
+      .badge.success {
+        background: var(--green-bg);
+        color: var(--green-fg);
+      }
+
+      .input,
+      .select {
+        min-width: 0;
+        height: 30px;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: var(--bg1);
+        padding: 0 9px;
+        color: var(--fg1);
+        font-size: 11px;
+      }
+
+      .input::placeholder {
+        color: var(--fg3);
+      }
+
+      /* ============================================================
+         Web dashboard previews
+         ============================================================ */
+      .browser-bar {
+        display: flex;
+        height: 36px;
+        align-items: center;
+        gap: 8px;
+        border-bottom: 1px solid var(--border1);
+        background: var(--sidebar-bg);
+        padding: 0 10px;
+      }
+
+      .traffic-lights {
+        display: flex;
+        gap: 5px;
+      }
+
+      .traffic-lights i {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: var(--border4);
+      }
+
+      .traffic-lights i:first-child {
+        background: hsl(4 86% 64%);
+      }
+
+      .traffic-lights i:nth-child(2) {
+        background: hsl(44 90% 60%);
+      }
+
+      .traffic-lights i:nth-child(3) {
+        background: hsl(132 50% 52%);
+      }
+
+      .address {
+        display: flex;
+        min-width: 0;
+        height: 23px;
+        flex: 1;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-md);
+        background: var(--bg1);
+        color: var(--fg3);
+        font: 10px var(--mono);
+      }
+
+      .web-demo {
+        display: flex;
+        height: 520px;
+        min-height: 0;
+        background: var(--bg1);
+      }
+
+      .web-sidebar {
+        position: relative;
+        z-index: 5;
+        display: flex;
+        width: 222px;
+        flex: none;
+        flex-direction: column;
+        border-right: 1px solid var(--border1);
+        background: var(--sidebar-bg);
+        padding: 13px 10px 10px;
+      }
+
+      .web-brand {
+        display: flex;
+        height: 28px;
+        align-items: center;
+        gap: 8px;
+        padding: 0 7px;
+        color: var(--fg1);
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      .brand-mark {
+        display: inline-grid;
+        width: 20px;
+        height: 20px;
+        place-items: center;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-md);
+        background: var(--bg2);
+        font-size: 10px;
+      }
+
+      .web-org-switcher {
+        position: relative;
+        margin-top: 14px;
+      }
+
+      .web-org-switcher summary {
+        display: flex;
+        min-height: 40px;
+        list-style: none;
+        align-items: center;
+        gap: 8px;
+        border-radius: var(--radius-md);
+        padding: 5px 7px;
+        color: var(--fg1);
+      }
+
+      .web-org-switcher summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .web-org-switcher summary:hover,
+      .web-org-switcher[open] summary {
+        background: var(--sidebar-bg-hover);
+      }
+
+      .summary-copy,
+      .org-option-copy,
+      .member-copy {
+        display: flex;
+        min-width: 0;
+        flex: 1;
+        flex-direction: column;
+      }
+
+      .summary-copy strong,
+      .org-option-copy strong,
+      .member-copy strong {
+        overflow: hidden;
+        color: var(--fg1);
+        font-size: 11px;
+        font-weight: 550;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .summary-copy small,
+      .org-option-copy small,
+      .member-copy small {
+        overflow: hidden;
+        color: var(--muted-fg);
+        font-size: 9.5px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .org-popover {
+        position: absolute;
+        top: calc(100% + 5px);
+        left: 0;
+        z-index: 30;
+        width: 258px;
+        overflow: hidden;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: var(--bg3);
+        padding: 5px;
+        box-shadow: var(--shadow-dropdown);
+      }
+
+      .popover-label {
+        padding: 5px 8px;
+        color: var(--muted-fg);
+        font-size: 9.5px;
+      }
+
+      .org-option,
+      .menu-action {
+        display: flex;
+        width: 100%;
+        min-height: 37px;
+        align-items: center;
+        gap: 8px;
+        border: 0;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        padding: 5px 7px;
+        color: var(--fg2);
+        text-align: left;
+      }
+
+      .org-option:hover,
+      .menu-action:hover {
+        background: var(--bg3-hover);
+        color: var(--fg1);
+      }
+
+      .menu-separator {
+        height: 1px;
+        margin: 4px 3px;
+        background: var(--border2);
+      }
+
+      .web-nav {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        margin-top: 13px;
+      }
+
+      .web-nav-label {
+        padding: 11px 8px 3px;
+        color: var(--muted-fg);
+        font-size: 9.5px;
+      }
+
+      .web-nav button {
+        display: flex;
+        width: 100%;
+        height: 28px;
+        align-items: center;
+        gap: 8px;
+        border: 0;
+        border-radius: var(--radius-md);
+        background: transparent;
+        padding: 0 8px;
+        color: var(--fg2);
+        font-size: 11px;
+        text-align: left;
+      }
+
+      .web-nav button:hover,
+      .web-nav button.is-active {
+        background: var(--sidebar-bg-hover);
+        color: var(--fg1);
+      }
+
+      .web-nav button:disabled {
+        cursor: not-allowed;
+        color: var(--muted-fg);
+        opacity: 0.6;
+      }
+
+      .web-account {
+        display: grid;
+        grid-template-columns: 26px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 7px;
+        margin-top: auto;
+        border-top: 1px solid var(--border1);
+        padding: 10px 4px 0;
+      }
+
+      .web-account .who {
+        min-width: 0;
+      }
+
+      .web-account .who strong,
+      .web-account .who small {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .web-account .who strong {
+        font-size: 10px;
+        font-weight: 550;
+      }
+
+      .web-account .who small,
+      .web-account a {
+        color: var(--muted-fg);
+        font-size: 8.5px;
+      }
+
+      .web-main {
+        min-width: 0;
+        flex: 1;
+        overflow: auto;
+        background: var(--bg1);
+      }
+
+      .web-content {
+        width: min(100%, 770px);
+        margin: 0 auto;
+        padding: 46px clamp(24px, 5vw, 62px) 60px;
+      }
+
+      .web-panel[hidden] {
+        display: none;
+      }
+
+      .web-heading {
+        display: flex;
+        min-height: 46px;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 18px;
+        margin-bottom: 14px;
+      }
+
+      .web-heading h3 {
+        margin: 0;
+        font-size: 17px;
+        font-weight: 550;
+        letter-spacing: -0.015em;
+      }
+
+      .web-heading p,
+      .web-card p {
+        margin: 3px 0 0;
+        color: var(--muted-fg);
+        font-size: 10.5px;
+      }
+
+      .web-stack {
+        display: flex;
+        flex-direction: column;
+        gap: 13px;
+      }
+
+      .web-card {
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: var(--bg2);
+        padding: 14px;
+      }
+
+      .identity-row,
+      .card-title,
+      .row-actions {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .card-title {
+        align-items: flex-start;
+        justify-content: space-between;
+      }
+
+      .card-title strong,
+      .identity-row strong {
+        color: var(--fg1);
+        font-size: 11px;
+        font-weight: 550;
+      }
+
+      .settings-card {
+        overflow: hidden;
+        padding: 0;
+      }
+
+      .settings-row {
+        display: grid;
+        min-height: 58px;
+        grid-template-columns: minmax(150px, 1fr) minmax(0, auto);
+        align-items: center;
+        gap: 16px;
+        border-top: 1px solid var(--border1);
+        padding: 11px 14px;
+      }
+
+      .settings-row:first-child {
+        border-top: 0;
+      }
+
+      .settings-copy strong {
+        display: block;
+        color: var(--fg1);
+        font-size: 10.5px;
+        font-weight: 550;
+      }
+
+      .settings-copy small {
+        color: var(--muted-fg);
+        font-size: 9.5px;
+      }
+
+      .settings-value {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 6px;
+      }
+
+      .id-code {
+        max-width: 180px;
+        overflow: hidden;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-sm);
+        background: var(--bg1);
+        padding: 4px 7px;
+        color: var(--fg2);
+        font: 9.5px var(--mono);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .capability-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      .capability {
+        display: flex;
+        min-height: 52px;
+        align-items: center;
+        gap: 9px;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-md);
+        background: var(--bg1-highlight);
+        padding: 9px;
+      }
+
+      .capability .dot {
+        width: 7px;
+        height: 7px;
+        flex: none;
+        border-radius: 999px;
+        background: var(--green-primary);
+      }
+
+      .capability strong,
+      .capability small {
+        display: block;
+      }
+
+      .capability strong {
+        color: var(--fg1);
+        font-size: 10px;
+      }
+
+      .capability small {
+        color: var(--muted-fg);
+        font-size: 9px;
+      }
+
+      .notice {
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: var(--bg2);
+        padding: 14px;
+        color: var(--fg2);
+        font-size: 10.5px;
+      }
+
+      .notice strong {
+        display: block;
+        margin-bottom: 3px;
+        color: var(--fg1);
+      }
+
+      .danger-card {
+        border-color: color-mix(in srgb, var(--red-primary) 48%, var(--border2));
+      }
+
+      .inline-form {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 104px auto;
+        align-items: end;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      .field {
+        display: flex;
+        min-width: 0;
+        flex-direction: column;
+        gap: 4px;
+        color: var(--fg1);
+        font-size: 9.5px;
+      }
+
+      .member-list,
+      .team-list {
+        margin-top: 10px;
+      }
+
+      .member-row,
+      .team-row {
+        display: grid;
+        min-height: 46px;
+        grid-template-columns: 28px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 8px;
+        border-top: 1px solid var(--border1);
+      }
+
+      .member-row:first-child,
+      .team-row:first-child {
+        border-top: 0;
+      }
+
+      .route-map {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 8px;
+        margin-top: 14px;
+      }
+
+      .route-state {
+        min-width: 0;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-md);
+        background: var(--bg1-highlight);
+        padding: 10px;
+      }
+
+      .route-state code {
+        display: block;
+        overflow: hidden;
+        margin-bottom: 5px;
+        color: var(--blue-primary);
+        font-size: 9.5px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .route-state strong {
+        display: block;
+        font-size: 10.5px;
+      }
+
+      .route-state span {
+        color: var(--muted-fg);
+        font-size: 9.5px;
+      }
+
+      .demo-dialog {
+        width: min(400px, calc(100% - 32px));
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: var(--bg1);
+        padding: 0;
+        color: var(--fg2);
+        box-shadow: var(--shadow-deep);
+      }
+
+      .demo-dialog::backdrop {
+        background: var(--scrim);
+      }
+
+      .dialog-inner {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding: 18px;
+      }
+
+      .dialog-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+      }
+
+      .dialog-head h3 {
+        margin: 0;
+        color: var(--fg1);
+        font-size: 14px;
+      }
+
+      .dialog-head p {
+        margin: 3px 0 0;
+        color: var(--muted-fg);
+        font-size: 10.5px;
+      }
+
+      .dialog-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 7px;
+      }
+
+      /* Web static snapshot grid */
+      .snapshot-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .snapshot {
+        min-width: 0;
+        min-height: 260px;
+        background: var(--bg1);
+        padding: 20px;
+      }
+
+      .snapshot .web-content {
+        width: auto;
+        padding: 0;
+      }
+
+      /* Mobile web preview */
+      .mobile-stage {
+        display: grid;
+        min-height: 470px;
+        place-items: center;
+        padding: 22px;
+        background:
+          radial-gradient(circle at 50% 10%, color-mix(in srgb, var(--blue-primary) 8%, transparent), transparent 38%),
+          var(--bg1-highlight);
+      }
+
+      .phone {
+        position: relative;
+        width: 294px;
+        height: 428px;
+        overflow: hidden;
+        border: 1px solid var(--border3);
+        border-radius: 22px;
+        background: var(--bg1);
+        box-shadow: var(--shadow-deep);
+      }
+
+      .phone-header {
+        display: flex;
+        height: 48px;
+        align-items: center;
+        gap: 8px;
+        border-bottom: 1px solid var(--border1);
+        padding: 0 13px;
+      }
+
+      .phone-content {
+        padding: 22px 15px;
+      }
+
+      .phone-scrim {
+        position: absolute;
+        inset: 0;
+        z-index: 3;
+        background: var(--scrim);
+      }
+
+      .phone-drawer {
+        position: absolute;
+        inset: 0 auto 0 0;
+        z-index: 4;
+        width: 236px;
+        border-right: 1px solid var(--border2);
+        background: var(--sidebar-bg);
+        padding: 14px 10px;
+      }
+
+      /* ============================================================
+         Mac app previews
+         ============================================================ */
+      .mac-window {
+        display: flex;
+        min-height: 390px;
+        flex-direction: column;
+        background: var(--bg1);
+      }
+
+      .mac-titlebar {
+        display: flex;
+        height: 34px;
+        align-items: center;
+        gap: 8px;
+        border-bottom: 1px solid var(--border1);
+        background: var(--sidebar-bg);
+        padding: 0 10px;
+      }
+
+      .project-pill,
+      .workspace-pill {
+        display: inline-flex;
+        height: 22px;
+        align-items: center;
+        gap: 6px;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-sm);
+        padding: 0 7px;
+        color: var(--fg2);
+        font-size: 10px;
+      }
+
+      .mac-body {
+        display: flex;
+        min-height: 0;
+        flex: 1;
+      }
+
+      .mac-sidebar {
+        position: relative;
+        display: flex;
+        width: 196px;
+        flex: none;
+        flex-direction: column;
+        border-right: 1px solid var(--border1);
+        background: var(--sidebar-bg);
+        padding: 10px;
+      }
+
+      .mac-org-switcher {
+        position: relative;
+      }
+
+      .mac-org-switcher summary {
+        display: flex;
+        height: 30px;
+        list-style: none;
+        align-items: center;
+        gap: 7px;
+        border-radius: var(--radius-md);
+        padding: 0 8px;
+        color: var(--fg1);
+        font-size: 11px;
+        font-weight: 550;
+      }
+
+      .mac-org-switcher summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .mac-org-switcher summary:hover,
+      .mac-org-switcher[open] summary {
+        background: var(--sidebar-bg-hover);
+      }
+
+      .mac-org-icon {
+        display: inline-grid;
+        width: 19px;
+        height: 19px;
+        place-items: center;
+        border-radius: var(--radius-sm);
+        background: var(--bg2-hover);
+      }
+
+      .mac-menu {
+        position: absolute;
+        top: 34px;
+        left: 0;
+        z-index: 40;
+        width: 250px;
+        overflow: hidden;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: var(--bg3);
+        padding: 5px;
+        box-shadow: var(--shadow-dropdown);
+      }
+
+      .mac-menu-label {
+        overflow: hidden;
+        padding: 5px 8px;
+        color: var(--muted-fg);
+        font-size: 9.5px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .mac-menu-item {
+        display: flex;
+        width: 100%;
+        min-height: 28px;
+        align-items: center;
+        gap: 7px;
+        border: 0;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        padding: 0 8px;
+        color: var(--fg2);
+        font-size: 10.5px;
+        text-align: left;
+      }
+
+      .mac-menu-item:hover {
+        background: var(--bg3-hover);
+        color: var(--fg1);
+      }
+
+      .mac-menu-item .end {
+        margin-left: auto;
+        color: var(--muted-fg);
+      }
+
+      .mac-divider {
+        height: 1px;
+        margin: 7px -1px;
+        background: var(--border1);
+      }
+
+      .mac-nav-label {
+        margin: 12px 8px 3px;
+        color: var(--muted-fg);
+        font-size: 9.5px;
+      }
+
+      .mac-nav-item {
+        display: flex;
+        height: 27px;
+        align-items: center;
+        gap: 8px;
+        border-radius: var(--radius-md);
+        padding: 0 8px;
+        color: var(--fg2);
+        font-size: 10.5px;
+      }
+
+      .mac-nav-item.active {
+        background: var(--sidebar-bg-hover);
+        color: var(--fg1);
+      }
+
+      .mac-nav-item .count {
+        margin-left: auto;
+        color: var(--muted-fg);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .repo-chip {
+        display: inline-grid;
+        width: 14px;
+        height: 14px;
+        place-items: center;
+        border-radius: var(--radius-sm);
+        background: var(--bg2-hover);
+        color: var(--fg2);
+        font-size: 8px;
+        font-weight: 650;
+      }
+
+      .mac-profile {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin-top: auto;
+        border-top: 1px solid var(--border1);
+        padding: 10px 4px 0;
+      }
+
+      .mac-profile .who {
+        display: flex;
+        min-width: 0;
+        flex: 1;
+        flex-direction: column;
+      }
+
+      .mac-profile .who strong,
+      .mac-profile .who small {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .mac-profile .who strong {
+        font-size: 10px;
+        font-weight: 500;
+      }
+
+      .mac-profile .who small {
+        color: var(--muted-fg);
+        font-size: 8.5px;
+      }
+
+      .mac-main {
+        min-width: 0;
+        flex: 1;
+        padding: 17px;
+      }
+
+      .mac-main h3 {
+        margin: 0 0 10px;
+        font-size: 14px;
+      }
+
+      .filter-chips {
+        display: flex;
+        gap: 5px;
+        margin-bottom: 13px;
+      }
+
+      .filter-chip {
+        border: 1px solid var(--border2);
+        border-radius: 999px;
+        padding: 2px 8px;
+        color: var(--fg2);
+        font-size: 9.5px;
+      }
+
+      .filter-chip.active {
+        border-color: var(--border3);
+        background: var(--bg2);
+        color: var(--fg1);
+      }
+
+      .board {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .board-column {
+        min-width: 0;
+      }
+
+      .board-heading {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        margin-bottom: 7px;
+        color: var(--fg1);
+        font-size: 9.5px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+
+      .board-heading .status-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+      }
+
+      .board-heading .n {
+        color: var(--muted-fg);
+        font-weight: 500;
+      }
+
+      .workspace-card {
+        min-width: 0;
+        margin-bottom: 7px;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-md);
+        background: var(--bg1-highlight);
+        padding: 7px 8px;
+      }
+
+      .workspace-card strong {
+        display: block;
+        overflow: hidden;
+        margin-bottom: 2px;
+        font-size: 10px;
+        font-weight: 550;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .workspace-card small {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        color: var(--muted-fg);
+        font-size: 8.5px;
+      }
+
+      .scope-demo-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+
+      .segmented {
+        display: inline-flex;
+        overflow: hidden;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-md);
+      }
+
+      .segmented button {
+        min-height: 27px;
+        border: 0;
+        border-left: 1px solid var(--border3);
+        background: transparent;
+        padding: 0 10px;
+        color: var(--fg2);
+        font-size: 10px;
+      }
+
+      .segmented button:first-child {
+        border-left: 0;
+      }
+
+      .segmented button.active {
+        background: var(--bg2-hover);
+        color: var(--fg1);
+      }
+
+      .scope-explainer {
+        color: var(--muted-fg);
+        font-size: 10px;
+      }
+
+      /* Settings preview */
+      .settings-shell {
+        display: flex;
+        min-height: 390px;
+      }
+
+      .settings-sidebar {
+        width: 220px;
+        flex: none;
+        border-right: 1px solid var(--border1);
+        background: var(--sidebar-bg);
+        padding: 12px 10px;
+      }
+
+      .settings-back {
+        display: flex;
+        height: 28px;
+        align-items: center;
+        gap: 7px;
+        margin-bottom: 5px;
+        border-radius: var(--radius-md);
+        padding: 0 8px;
+        color: var(--fg2);
+        font-size: 10.5px;
+      }
+
+      .settings-group {
+        margin: 13px 8px 3px;
+        color: var(--muted-fg);
+        font-size: 9.5px;
+      }
+
+      .settings-nav-item {
+        display: flex;
+        height: 27px;
+        align-items: center;
+        gap: 7px;
+        border-radius: var(--radius-md);
+        padding: 0 8px;
+        color: var(--fg2);
+        font-size: 10.5px;
+      }
+
+      .settings-nav-item.active {
+        background: var(--sidebar-bg-hover);
+        color: var(--fg1);
+      }
+
+      .settings-main {
+        min-width: 0;
+        flex: 1;
+        background: var(--bg1);
+        padding: 32px clamp(22px, 6vw, 70px);
+      }
+
+      .settings-main h3 {
+        margin: 0 0 18px;
+        font-size: 15px;
+        font-weight: 550;
+      }
+
+      .settings-ui-row {
+        display: flex;
+        min-height: 54px;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        border-bottom: 1px solid var(--border1);
+      }
+
+      .settings-ui-row strong,
+      .settings-ui-row small {
+        display: block;
+      }
+
+      .settings-ui-row strong {
+        font-size: 10.5px;
+      }
+
+      .settings-ui-row small {
+        color: var(--muted-fg);
+        font-size: 9.5px;
+      }
+
+      /* Feedback preview */
+      .feedback-stage {
+        display: grid;
+        min-height: 420px;
+        place-items: center;
+        padding: 26px;
+        background:
+          linear-gradient(var(--scrim), var(--scrim)),
+          radial-gradient(circle at 30% 20%, var(--bg2-hover), transparent 44%),
+          var(--bg1);
+      }
+
+      .feedback-dialog {
+        width: min(430px, 100%);
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: var(--bg1);
+        padding: 18px;
+        box-shadow: var(--shadow-deep);
+      }
+
+      .feedback-dialog h3 {
+        margin: 0;
+        font-size: 14px;
+      }
+
+      .feedback-dialog > p {
+        margin: 3px 0 14px;
+        color: var(--muted-fg);
+        font-size: 10.5px;
+      }
+
+      .feedback-field {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        margin-top: 11px;
+        color: var(--fg1);
+        font-size: 10px;
+      }
+
+      .fake-select {
+        position: relative;
+        display: flex;
+        height: 32px;
+        align-items: center;
+        justify-content: space-between;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        padding: 0 9px;
+        color: var(--fg1);
+      }
+
+      .fake-select-menu {
+        position: absolute;
+        top: 35px;
+        right: 0;
+        left: 0;
+        z-index: 3;
+        overflow: hidden;
+        border: 1px solid var(--border2);
+        border-radius: var(--radius-lg);
+        background: var(--bg3);
+        padding: 4px;
+        box-shadow: var(--shadow-dropdown);
+      }
+
+      .fake-select-option {
+        display: flex;
+        min-height: 28px;
+        align-items: center;
+        justify-content: space-between;
+        border-radius: var(--radius-sm);
+        padding: 0 8px;
+        color: var(--fg2);
+      }
+
+      .fake-select-option.selected,
+      .fake-select-option:hover {
+        background: var(--bg3-hover);
+        color: var(--fg1);
+      }
+
+      .textarea {
+        min-height: 82px;
+        resize: none;
+        border: 1px solid var(--border3);
+        border-radius: var(--radius-sm);
+        background: var(--bg1);
+        padding: 8px 9px;
+        color: var(--fg3);
+        font-size: 10.5px;
+      }
+
+      .feedback-check {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin-top: 66px;
+        color: var(--fg2);
+        font-size: 9.5px;
+      }
+
+      .feedback-check input {
+        width: 13px;
+        height: 13px;
+        margin: 0;
+        accent-color: var(--fg1);
+      }
+
+      .feedback-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 7px;
+        margin-top: 15px;
+      }
+
+      /* Boundaries + source map */
+      .boundaries {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .boundary {
+        min-width: 0;
+        border: 1px solid var(--border1);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--sidebar-bg) 88%, transparent);
+        padding: 14px;
+      }
+
+      .boundary .status {
+        display: inline-flex;
+        margin-bottom: 8px;
+        border-radius: 999px;
+        background: var(--yellow-bg);
+        padding: 2px 7px;
+        color: var(--yellow-fg);
+        font-size: 9.5px;
+        font-weight: 600;
+      }
+
+      .boundary h3 {
+        margin: 0 0 4px;
+        font-size: 12px;
+      }
+
+      .boundary p {
+        margin: 0;
+        color: var(--fg2);
+        font-size: 11px;
+      }
+
+      .source-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 11px;
+      }
+
+      .source-table th,
+      .source-table td {
+        border: 1px solid var(--border1);
+        padding: 8px 10px;
+        text-align: left;
+        vertical-align: top;
+      }
+
+      .source-table th {
+        background: color-mix(in srgb, var(--sidebar-bg) 90%, transparent);
+        color: var(--fg2);
+        font-size: 10px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .source-table td {
+        color: var(--fg2);
+      }
+
+      .source-table td:first-child {
+        width: 190px;
+        color: var(--fg1);
+        font-weight: 550;
+      }
+
+      .source-table code {
+        color: var(--fg3);
+        font-size: 9.5px;
+      }
+
+      .footer-note {
+        margin-top: 64px;
+        border-top: 1px solid var(--border1);
+        padding-top: 20px;
+        color: var(--muted-fg);
+        font-size: 11px;
+        line-height: 1.65;
+      }
+
+      .footer-note b {
+        color: var(--fg2);
+      }
+
+      @media (max-width: 980px) {
+        .hero,
+        .dual,
+        .snapshot-grid,
+        .thesis,
+        .boundaries {
+          grid-template-columns: 1fr;
+        }
+
+        .hero-aside {
+          align-items: flex-start;
+        }
+
+        .meta {
+          display: none;
+        }
+
+        .route-map,
+        .board {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+
+      @media (max-width: 720px) {
+        .page {
+          width: min(100% - 24px, 1220px);
+          padding-top: 28px;
+        }
+
+        .toc {
+          margin-bottom: 30px;
+        }
+
+        .web-sidebar,
+        .mac-sidebar,
+        .settings-sidebar {
+          width: 168px;
+        }
+
+        .web-demo {
+          height: 480px;
+        }
+
+        .web-content {
+          padding: 28px 16px 44px;
+        }
+
+        .settings-row,
+        .inline-form,
+        .capability-grid,
+        .route-map,
+        .board {
+          grid-template-columns: 1fr;
+        }
+
+        .settings-value {
+          justify-content: flex-start;
+        }
+
+        .notes {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          transition-duration: 0.01ms !important;
+          animation-duration: 0.01ms !important;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <svg width="0" height="0" aria-hidden="true" style="position: absolute">
+      <symbol id="i-user" viewBox="0 0 24 24">
+        <circle cx="12" cy="8" r="4" fill="none" stroke="currentColor" stroke-width="1.8" />
+        <path d="M4.5 21a7.5 7.5 0 0 1 15 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+      </symbol>
+      <symbol id="i-building" viewBox="0 0 24 24">
+        <path d="M4 21V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v17M16 8h3a1 1 0 0 1 1 1v12M8 7h4M8 11h4M8 15h4M3 21h18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+      </symbol>
+      <symbol id="i-grid" viewBox="0 0 24 24">
+        <rect x="3" y="3" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="1.8" />
+        <rect x="14" y="3" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="1.8" />
+        <rect x="3" y="14" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="1.8" />
+        <rect x="14" y="14" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="1.8" />
+      </symbol>
+      <symbol id="i-blocks" viewBox="0 0 24 24">
+        <rect x="3" y="3" width="8" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="1.8" />
+        <rect x="13" y="13" width="8" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="1.8" />
+        <path d="M15 3h4a2 2 0 0 1 2 2v4M9 21H5a2 2 0 0 1-2-2v-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+      </symbol>
+      <symbol id="i-settings" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.7" />
+        <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.2a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 4.8 15a1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.3a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3 1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8 1.7 1.7 0 0 0 1.5 1h.3a2 2 0 1 1 0 4h-.3a1.7 1.7 0 0 0-1.5 1Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+      </symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24">
+        <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+      </symbol>
+      <symbol id="i-check" viewBox="0 0 24 24">
+        <path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" />
+      </symbol>
+      <symbol id="i-external" viewBox="0 0 24 24">
+        <path d="M14 4h6v6M20 4l-9 9M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+      </symbol>
+      <symbol id="i-log-out" viewBox="0 0 24 24">
+        <path d="M10 17l5-5-5-5M15 12H3M15 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+      </symbol>
+      <symbol id="i-arrow-left" viewBox="0 0 24 24">
+        <path d="m15 18-6-6 6-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+      </symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24">
+        <path d="M3 7h6l2 2h10v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" />
+      </symbol>
+      <symbol id="i-message" viewBox="0 0 24 24">
+        <path d="M21 15a4 4 0 0 1-4 4H8l-5 3v-7a4 4 0 0 1-1-2.6V7a4 4 0 0 1 4-4h11a4 4 0 0 1 4 4Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+      </symbol>
+    </svg>
+
+    <main class="page">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">UI implementation catalog · Current PR · 2026-08-10</div>
+          <h1>Organization management moves to the web; the Mac scopes local work to the selected owner.</h1>
+          <p class="lede">
+            This catalog shows only UI and user-visible behavior implemented on the current branch compared with
+            <code>origin/main</code>. It separates functional management surfaces from intentionally disabled future controls,
+            and keeps the signed-in web dashboard distinct from the desktop handoff flow.
+          </p>
+        </div>
+        <div class="hero-aside">
+          <button class="theme-toggle" id="themeToggle" type="button" aria-pressed="false">
+            ◐ <span id="themeLabel">Light preview</span>
+          </button>
+          <div class="summary-chip">
+            <strong>Implementation, not proposal</strong>
+            <span>Web: organization administration.</span>
+            <span>Mac: organization selection + workspace scope.</span>
+          </div>
+        </div>
+      </header>
+
+      <div class="thesis">
+        <article class="thesis-card primary">
+          <h3>The browser owns administration</h3>
+          <p>Create, identity, members, invitations, roles, teams, billing status, and deletion now live at <code>app.zeros.build</code>.</p>
+        </article>
+        <article class="thesis-card">
+          <h3>The Mac owns working context</h3>
+          <p>The Home rail selects Personal or an organization; workspace cards, tabs, pending rows, archives, and counts follow that owner.</p>
+        </article>
+        <article class="thesis-card">
+          <h3>Capability is not provisioning</h3>
+          <p>Cloud eligibility is visible, but cloud workspace creation, extra teams, and billing management remain intentionally unavailable.</p>
+        </article>
+      </div>
+
+      <nav class="toc" aria-label="Artifact sections">
+        <a href="#web-dashboard">Web dashboard</a>
+        <a href="#web-admin">Members · Teams · Billing</a>
+        <a href="#web-mobile">Mobile web</a>
+        <span class="nav-sep"></span>
+        <a href="#mac-switcher">Mac switcher</a>
+        <a href="#mac-scope">Workspace scope</a>
+        <a href="#mac-settings">Settings</a>
+        <a href="#feedback">Feedback</a>
+        <span class="nav-sep"></span>
+        <a href="#boundaries">Not shipped</a>
+        <a href="#sources">Source map</a>
+      </nav>
+
+      <p class="band">Part A — app.zeros.build · implemented signed-in management</p>
+      <div class="catalog">
+        <section class="case" id="web-dashboard">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">W1</span>
+                <span class="tag ship">Implemented</span>
+                <span class="tag web">Interactive web preview</span>
+              </div>
+              <h2>The signed-in root is now an organization dashboard</h2>
+              <p class="case-copy">
+                A verified session without desktop handoff context now renders the dashboard instead of the old “open the desktop app” card.
+                Use the organization switcher and section buttons below. Personal disables collaborative sections; Acme enables them.
+                The “Create organization” action opens the implemented name-only dialog.
+              </p>
+            </div>
+            <div class="meta">apps/web/lib/dashboard.mjs<br />apps/web/public/dashboard.js<br />apps/web/public/dashboard.css</div>
+          </div>
+
+          <div class="frame-wrap">
+            <div class="frame-label">Current signed-in browser surface — controls in this preview change documented states</div>
+            <div class="frame">
+              <div class="browser-bar">
+                <div class="traffic-lights"><i></i><i></i><i></i></div>
+                <div class="address">app.zeros.build/?organization=&amp;section=</div>
+              </div>
+              <div class="web-demo" id="webDemo" data-org="personal">
+                <aside class="web-sidebar">
+                  <div class="web-brand"><span class="brand-mark">Z</span>Zeros</div>
+                  <details class="web-org-switcher" id="webOrgSwitcher">
+                    <summary>
+                      <span class="avatar square" id="webOrgAvatar">AR</span>
+                      <span class="summary-copy"><strong id="webOrgName">Arun</strong><small id="webOrgKind">Personal</small></span>
+                      <span aria-hidden="true">⌄</span>
+                    </summary>
+                    <div class="org-popover" role="listbox" aria-label="Organizations">
+                      <div class="popover-label">Organizations</div>
+                      <button class="org-option" type="button" data-web-org="personal">
+                        <span class="avatar square">AR</span>
+                        <span class="org-option-copy"><strong>Arun</strong><small>Local workspaces only</small></span>
+                        <svg class="icon web-org-check" data-org-check="personal"><use href="#i-check" /></svg>
+                      </button>
+                      <button class="org-option" type="button" data-web-org="acme">
+                        <span class="avatar square acme">A</span>
+                        <span class="org-option-copy"><strong>Acme</strong><small>Local + cloud workspaces</small></span>
+                        <svg class="icon web-org-check" data-org-check="acme" hidden><use href="#i-check" /></svg>
+                      </button>
+                      <div class="menu-separator"></div>
+                      <button class="menu-action" type="button" id="openCreateOrganization">
+                        <svg class="icon"><use href="#i-plus" /></svg>Create organization
+                      </button>
+                    </div>
+                  </details>
+
+                  <nav class="web-nav" aria-label="Dashboard sections">
+                    <div class="web-nav-label">Account</div>
+                    <button class="is-active" type="button" data-web-section="profile"><span aria-hidden="true">○</span>Profile</button>
+                    <div class="web-nav-label">Organization</div>
+                    <button type="button" data-web-section="general"><span aria-hidden="true">◇</span>General</button>
+                    <button type="button" data-web-section="members" data-collaborative disabled><span aria-hidden="true">♙</span>Members</button>
+                    <button type="button" data-web-section="teams" data-collaborative disabled><span aria-hidden="true">▦</span>Teams</button>
+                    <button type="button" data-web-section="billing" data-collaborative disabled><span aria-hidden="true">▭</span>Billing</button>
+                  </nav>
+
+                  <div class="web-account">
+                    <span class="avatar">AR</span>
+                    <span class="who"><strong>Arun</strong><small>arun@example.com</small></span>
+                    <a href="#web-dashboard">Sign out</a>
+                  </div>
+                </aside>
+
+                <div class="web-main">
+                  <div class="web-content">
+                    <section class="web-panel web-stack" data-web-panel="profile">
+                      <div class="web-heading"><div><h3>Profile</h3><p>Your browser account and sign-in identity.</p></div></div>
+                      <div class="web-card identity-row">
+                        <span class="avatar large">AR</span>
+                        <div><strong>Arun</strong><p>arun@example.com</p></div>
+                      </div>
+                      <div class="web-card card-title">
+                        <div><strong>Account identity</strong><p>Name and avatar are currently provided by Google or GitHub.</p></div>
+                        <span class="badge">Provider-managed</span>
+                      </div>
+                    </section>
+
+                    <section class="web-panel web-stack" data-web-panel="general" hidden>
+                      <div class="web-heading"><div><h3>General</h3><p id="generalDescription">Your permanent, device-local account space.</p></div></div>
+                      <div class="web-card settings-card">
+                        <div class="settings-row">
+                          <span class="settings-copy"><strong>Logo</strong><small>Shown for this organization across Zeros.</small></span>
+                          <span class="settings-value"><span class="avatar square large" id="generalAvatar">AR</span><button class="button org-edit-control" type="button" hidden>Change</button></span>
+                        </div>
+                        <div class="settings-row">
+                          <span class="settings-copy"><strong id="nameLabel">Personal name</strong><small id="nameHint">Provided by your sign-in identity.</small></span>
+                          <span class="settings-value" id="nameValue"><strong>Arun</strong></span>
+                        </div>
+                        <div class="settings-row">
+                          <span class="settings-copy"><strong>Organization ID</strong><small>Your stable tenant identifier.</small></span>
+                          <span class="settings-value"><code class="id-code" id="organizationId">8b72d312-personal</code><button class="icon-button" type="button" aria-label="Copy organization ID">▣</button></span>
+                        </div>
+                        <div class="settings-row">
+                          <span class="settings-copy"><strong>Your role</strong><small>What you can do in this organization.</small></span>
+                          <span class="settings-value"><span class="badge" id="organizationRole">owner</span></span>
+                        </div>
+                      </div>
+                      <div class="web-card">
+                        <div class="card-title"><div><strong>Workspace access</strong><p>Capability metadata; provisioning still enforces plan and quota.</p></div></div>
+                        <div class="capability-grid">
+                          <div class="capability"><span class="dot"></span><div><strong>Local workspaces</strong><small>Available on your Mac</small></div></div>
+                          <div class="capability" id="cloudCapability"><span class="dot" id="cloudDot" style="background: var(--muted-fg)"></span><div><strong>Cloud workspaces</strong><small id="cloudCopy">Not available in Personal</small></div></div>
+                        </div>
+                      </div>
+                      <div class="notice" id="personalNotice"><strong>Personal is permanent</strong>Personal cannot be removed. It cannot invite members and stores workspace configuration locally.</div>
+                      <div class="web-card danger-card" id="dangerZone" hidden>
+                        <div class="card-title"><div><strong>Delete organization</strong><p>Revokes pending invitations and removes the organization from Zeros.</p></div><button class="button danger" type="button">Delete organization</button></div>
+                      </div>
+                    </section>
+
+                    <section class="web-panel web-stack" data-web-panel="members" hidden>
+                      <div class="web-heading"><div><h3>Members</h3><p>Organization members are automatically included in the default team.</p></div></div>
+                      <div class="web-card">
+                        <div class="card-title"><div><strong>Invite member</strong><p>The recipient must sign in with this exact email address.</p></div></div>
+                        <div class="inline-form">
+                          <label class="field">Email address<input class="input" placeholder="teammate@example.com" /></label>
+                          <label class="field">Role<select class="select"><option>Member</option><option>Admin</option></select></label>
+                          <button class="button primary" type="button">Send invite</button>
+                        </div>
+                      </div>
+                      <div class="web-card">
+                        <div class="card-title"><div><strong>Members</strong><p>3 members</p></div></div>
+                        <div class="member-list">
+                          <div class="member-row"><span class="avatar">AR</span><span class="member-copy"><strong>Arun (you)</strong><small>arun@example.com</small></span><span class="row-actions"><select class="select"><option>Owner</option><option>Admin</option><option>Member</option></select></span></div>
+                          <div class="member-row"><span class="avatar">SN</span><span class="member-copy"><strong>Sarah Ng</strong><small>sarah@acme.dev</small></span><span class="row-actions"><select class="select"><option>Admin</option><option>Member</option></select><button class="icon-button" type="button" aria-label="Remove Sarah">×</button></span></div>
+                          <div class="member-row"><span class="avatar">DM</span><span class="member-copy"><strong>Devon Miles</strong><small>devon@acme.dev</small></span><span class="row-actions"><span class="badge">member</span><button class="icon-button" type="button" aria-label="Remove Devon">×</button></span></div>
+                        </div>
+                      </div>
+                      <div class="web-card">
+                        <div class="card-title"><div><strong>Pending invitations</strong><p>Unused invitations expire automatically.</p></div></div>
+                        <div class="member-list">
+                          <div class="member-row"><span class="avatar">✉</span><span class="member-copy"><strong>mina@acme.dev</strong><small>Pending · expires Aug 17</small></span><span class="row-actions"><span class="badge">member</span><button class="icon-button" type="button" aria-label="Revoke invitation">×</button></span></div>
+                        </div>
+                      </div>
+                    </section>
+
+                    <section class="web-panel web-stack" data-web-panel="teams" hidden>
+                      <div class="web-heading"><div><h3>Teams</h3><p>Teams group organization members and workspace access.</p></div><button class="button" type="button" disabled>New team · Coming later</button></div>
+                      <div class="notice"><strong>One default team for now</strong>The hierarchy and membership metadata are ready. Creating additional teams will be enabled in a future release.</div>
+                      <div class="web-card">
+                        <div class="card-title"><div><strong>Organization teams</strong><p>Every organization member belongs to the default team.</p></div></div>
+                        <div class="team-list"><div class="team-row"><span class="avatar square">D</span><span class="member-copy"><strong>Default</strong><small>default · Default team</small></span><span class="badge success">Default</span></div></div>
+                      </div>
+                    </section>
+
+                    <section class="web-panel web-stack" data-web-panel="billing" hidden>
+                      <div class="web-heading"><div><h3>Billing</h3><p>Plan, seats, and payment management for this organization.</p></div></div>
+                      <div class="web-card card-title"><div><strong>Free</strong><p>3 organization members</p></div><span class="badge">No subscription</span></div>
+                      <div class="notice"><strong>Billing management is coming soon</strong>Checkout, invoices, and payment methods will be connected here in a later release.<br /><br /><button class="button" type="button" disabled>Manage billing</button></div>
+                    </section>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <p class="frame-note">Try: open the organization menu → select <b>Acme</b> → Members / Teams / Billing. The preview mirrors Personal-first defaults and role-gated organization controls.</p>
+          </div>
+
+          <div class="route-map" aria-label="Web route outcomes">
+            <div class="route-state"><code>GET / · signed out</code><strong>Sign in to Zeros</strong><span>Google and GitHub provider buttons.</span></div>
+            <div class="route-state"><code>GET / · signed in</code><strong>Organization dashboard</strong><span>The new default shown above.</span></div>
+            <div class="route-state"><code>GET / · valid handoff</code><strong>Launch Zeros</strong><span>Mints the desktop handoff ticket.</span></div>
+            <div class="route-state"><code>GET /launch · no handoff</code><strong>Desktop guidance</strong><span>Does not silently become Dashboard.</span></div>
+          </div>
+
+          <dialog class="demo-dialog" id="createOrganizationDialog">
+            <form method="dialog" class="dialog-inner">
+              <div class="dialog-head"><div><h3>Create organization</h3><p>Organizations can own local and cloud workspaces.</p></div><button class="icon-button" value="cancel" aria-label="Close">×</button></div>
+              <label class="field">Organization name<input class="input" required maxlength="80" placeholder="Acme" /></label>
+              <div class="dialog-actions"><button class="button" value="cancel">Cancel</button><button class="button primary" value="default">Create organization</button></div>
+            </form>
+          </dialog>
+        </section>
+
+        <section class="case" id="web-admin">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">W2</span>
+                <span class="tag ship">Implemented</span>
+                <span class="tag web">Administration states</span>
+              </div>
+              <h2>Members are functional; Teams and Billing expose their current boundaries</h2>
+              <p class="case-copy">
+                Owners and admins can invite, revoke, change permitted roles, remove members, or leave. The default team is visible,
+                but adding teams is disabled. Billing renders the current plan/member state, while management remains disabled.
+              </p>
+            </div>
+            <div class="meta">apps/web/public/dashboard.js<br />memberPermissions · membersHtml<br />teamsHtml · billingHtml</div>
+          </div>
+
+          <div class="snapshot-grid">
+            <div class="frame-wrap">
+              <div class="frame-label">Members — invite, roles, remove, revoke</div>
+              <div class="frame snapshot">
+                <div class="web-content">
+                  <div class="web-heading"><div><h3>Members</h3><p>Organization members are automatically included in the default team.</p></div></div>
+                  <div class="web-card">
+                    <div class="card-title"><div><strong>Invite member</strong><p>Invitation links copy to the clipboard when available.</p></div></div>
+                    <div class="inline-form"><input class="input" placeholder="teammate@example.com" /><select class="select"><option>Member</option><option>Admin</option></select><button class="button primary">Send invite</button></div>
+                  </div>
+                  <div class="web-card" style="margin-top: 10px">
+                    <div class="member-row"><span class="avatar">SN</span><span class="member-copy"><strong>Sarah Ng</strong><small>sarah@acme.dev</small></span><span class="row-actions"><select class="select"><option>Admin</option><option>Member</option></select><button class="icon-button">×</button></span></div>
+                    <div class="member-row"><span class="avatar">✉</span><span class="member-copy"><strong>mina@acme.dev</strong><small>Pending · expires Aug 17</small></span><span class="row-actions"><span class="badge">member</span><button class="icon-button">×</button></span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="frame-wrap">
+              <div class="frame-label">Teams + Billing — visible, deliberately constrained</div>
+              <div class="frame snapshot">
+                <div class="web-content">
+                  <div class="web-heading"><div><h3>Teams</h3><p>One live default team for now.</p></div><button class="button" disabled>New team · Coming later</button></div>
+                  <div class="web-card team-row"><span class="avatar square">D</span><span class="member-copy"><strong>Default</strong><small>Every organization member</small></span><span class="badge success">Default</span></div>
+                  <div class="web-heading" style="margin-top: 18px"><div><h3>Billing</h3><p>Plan, seats, and payment management.</p></div></div>
+                  <div class="web-card card-title"><div><strong>Free</strong><p>3 organization members</p></div><span class="badge">No subscription</span></div>
+                  <div style="margin-top: 10px"><button class="button" disabled>Manage billing</button></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="case" id="web-mobile">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">W3</span>
+                <span class="tag ship">Implemented</span>
+                <span class="tag web">Responsive ≤ 760px</span>
+              </div>
+              <h2>The same dashboard collapses into a mobile drawer</h2>
+              <p class="case-copy">
+                At narrow widths the fixed sidebar becomes an off-canvas drawer, a sticky header appears, and cards, settings rows,
+                capability tiles, and the member invite form collapse to one column. Escape closes the drawer and restores focus.
+              </p>
+            </div>
+            <div class="meta">apps/web/public/dashboard.css<br />@media (max-width: 760px)<br />setMobileNavigationOpen()</div>
+          </div>
+          <div class="frame">
+            <div class="mobile-stage">
+              <div class="phone">
+                <div class="phone-header"><span class="brand-mark">Z</span><strong style="font-size: 11px">Acme</strong><span style="margin-left: auto; color: var(--fg2)">☰</span></div>
+                <div class="phone-content">
+                  <div class="web-heading"><div><h3>General</h3><p>Organization identity and workspace capabilities.</p></div></div>
+                  <div class="web-card"><strong style="font-size: 11px">Workspace access</strong><div class="capability-grid"><div class="capability"><span class="dot"></span><div><strong>Local workspaces</strong><small>Available on your Mac</small></div></div><div class="capability"><span class="dot"></span><div><strong>Cloud workspaces</strong><small>Organization eligible</small></div></div></div></div>
+                </div>
+                <div class="phone-scrim"></div>
+                <aside class="phone-drawer">
+                  <div class="web-brand"><span class="brand-mark">Z</span>Zeros</div>
+                  <div class="web-org-switcher" style="margin-top: 14px"><summary style="background: var(--sidebar-bg-hover)"><span class="avatar square acme">A</span><span class="summary-copy"><strong>Acme</strong><small>Organization</small></span><span>⌄</span></summary></div>
+                  <nav class="web-nav"><div class="web-nav-label">Account</div><button><span>○</span>Profile</button><div class="web-nav-label">Organization</div><button class="is-active"><span>◇</span>General</button><button><span>♙</span>Members</button><button><span>▦</span>Teams</button><button><span>▭</span>Billing</button></nav>
+                </aside>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <p class="band">Part B — Zeros Mac app · implemented owner-aware workspace UI</p>
+      <div class="catalog">
+        <section class="case" id="mac-switcher">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">M1</span>
+                <span class="tag ship">Implemented</span>
+                <span class="tag mac">Interactive Mac preview</span>
+              </div>
+              <h2>The active organization now sits above Dashboard in the Home rail</h2>
+              <p class="case-copy">
+                The new switcher uses a Personal or building icon, lists every organization, and provides Create / Manage links that
+                open the browser dashboard. Settings and session actions also live in the menu. Selecting an owner returns the app to Dashboard.
+              </p>
+            </div>
+            <div class="meta">organization-switcher.tsx<br />home-sidebar.tsx<br />organization-links.ts</div>
+          </div>
+
+          <div class="frame-wrap">
+            <div class="frame-label">Current Home sidebar — open the organization menu and switch owners</div>
+            <div class="frame">
+              <div class="mac-window" id="macDemo" data-org="acme">
+                <div class="mac-titlebar">
+                  <div class="traffic-lights"><i></i><i></i><i></i></div>
+                  <span class="project-pill"><span class="repo-chip">Z</span> Zeros</span>
+                  <span class="workspace-pill">organization-hierarchy</span>
+                  <span style="margin-left: auto; color: var(--muted-fg); font-size: 10px">⌘ K</span>
+                </div>
+                <div class="mac-body">
+                  <aside class="mac-sidebar">
+                    <details class="mac-org-switcher" open>
+                      <summary><span class="mac-org-icon"><svg class="icon mac-active-icon"><use href="#i-building" /></svg></span><span id="macOrgLabel">Acme</span><span style="margin-left: auto; color: var(--muted-fg)">⌃⌄</span></summary>
+                      <div class="mac-menu">
+                        <div class="mac-menu-label">arun@example.com</div>
+                        <button class="mac-menu-item" data-mac-org="personal"><svg class="icon"><use href="#i-user" /></svg>Personal<svg class="icon end mac-org-check" data-mac-check="personal" hidden><use href="#i-check" /></svg></button>
+                        <button class="mac-menu-item" data-mac-org="acme"><svg class="icon"><use href="#i-building" /></svg>Acme<svg class="icon end mac-org-check" data-mac-check="acme"><use href="#i-check" /></svg></button>
+                        <div class="menu-separator"></div>
+                        <button class="mac-menu-item"><svg class="icon"><use href="#i-plus" /></svg>Create organization<svg class="icon end"><use href="#i-external" /></svg></button>
+                        <button class="mac-menu-item"><svg class="icon"><use href="#i-building" /></svg><span id="macManageLabel">Manage organization</span><svg class="icon end"><use href="#i-external" /></svg></button>
+                        <div class="menu-separator"></div>
+                        <button class="mac-menu-item"><svg class="icon"><use href="#i-settings" /></svg>Settings</button>
+                        <button class="mac-menu-item"><svg class="icon"><use href="#i-log-out" /></svg>Log out</button>
+                      </div>
+                    </details>
+                    <div class="mac-divider"></div>
+                    <div class="mac-nav-item active"><svg class="icon"><use href="#i-grid" /></svg>Dashboard</div>
+                    <div class="mac-nav-item"><svg class="icon"><use href="#i-blocks" /></svg>Customize</div>
+                    <div class="mac-nav-label">Repos</div>
+                    <div class="mac-nav-item"><span class="repo-chip">Z</span>Zeros<span class="count" data-mac-repo-count>3</span></div>
+                    <div class="mac-nav-item"><span class="repo-chip">W</span>website<span class="count" data-mac-repo-count-secondary>1</span></div>
+                    <div class="mac-nav-item"><svg class="icon"><use href="#i-plus" /></svg>Add repo</div>
+                    <div class="mac-profile"><span class="avatar">AR</span><span class="who"><strong>Arun</strong><small>arun@example.com</small></span><svg class="icon" style="color: var(--fg2)"><use href="#i-settings" /></svg></div>
+                  </aside>
+                  <div class="mac-main">
+                    <h3>Dashboard</h3>
+                    <div class="filter-chips"><span class="filter-chip active">All projects</span><span class="filter-chip">Zeros</span><span class="filter-chip">website</span></div>
+                    <div class="board" id="macBoard"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <p class="frame-note"><b>Current visual detail:</b> the Mac switcher uses generic Personal / building icons. Organization logos uploaded on web are not rendered in this switcher.</p>
+          </div>
+        </section>
+
+        <section class="case" id="mac-scope">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">M2</span>
+                <span class="tag ship">Implemented behavior</span>
+                <span class="tag mac">Same surfaces, filtered rows</span>
+              </div>
+              <h2>Switching owner changes workspace content—not the repository list or board layout</h2>
+              <p class="case-copy">
+                Dashboard cards, repo workspace lists, top-bar tabs, archived rows, pending creates, and repo counts all use the active owner.
+                Personal includes legacy unowned rows; an organization includes exact-ID rows only. New and adopted local workspaces snapshot
+                the selected owner when the action begins.
+              </p>
+            </div>
+            <div class="meta">organization-capabilities.ts<br />dashboard-page.tsx · repo-page.tsx<br />top-bar.tsx · pending-workspaces.ts</div>
+          </div>
+
+          <div class="frame">
+            <div class="snapshot" id="scopeDemo" style="min-height: 340px">
+              <div class="scope-demo-toolbar">
+                <div><strong style="font-size: 12px">Workspace visibility</strong><div class="scope-explainer" id="scopeExplainer">Acme-owned rows only · exact organization ID</div></div>
+                <div class="segmented" aria-label="Organization preview"><button type="button" data-scope-org="personal">Personal</button><button class="active" type="button" data-scope-org="acme">Acme</button></div>
+              </div>
+              <div class="board" id="scopeBoard"></div>
+              <div class="notes">
+                <div class="note"><b>Repos stay visible.</b> The Home rail still lists local repositories. Their counts and workspace contents follow the active owner.</div>
+                <div class="note ship"><b>Intent is stable.</b> Changing the switcher while create/adopt work is in flight cannot retarget that workspace.</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="case" id="mac-settings">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">M3</span>
+                <span class="tag ship">Implemented removal</span>
+                <span class="tag mac">Administration moved to web</span>
+              </div>
+              <h2>Desktop Settings no longer contains Team, Members, or Create Team</h2>
+              <p class="case-copy">
+                Settings returns to device configuration only: Personal, Agents, and Workspace groups. Existing persisted selections for
+                Organization / Team / Members resolve to General. Invite deep links remain compatible and still open the Join Team dialog.
+              </p>
+            </div>
+            <div class="meta">settings-page.tsx<br />SECTIONS · SECTION_GROUPS<br />InviteDeepLinkHandler</div>
+          </div>
+
+          <div class="frame">
+            <div class="settings-shell">
+              <aside class="settings-sidebar">
+                <div class="settings-back"><svg class="icon"><use href="#i-arrow-left" /></svg>Back</div>
+                <div class="settings-group">Personal</div>
+                <div class="settings-nav-item active"><svg class="icon"><use href="#i-settings" /></svg>General</div>
+                <div class="settings-nav-item">◐ Appearance</div>
+                <div class="settings-nav-item">⚗ Experimental</div>
+                <div class="settings-nav-item"><svg class="icon"><use href="#i-user" /></svg>Profile</div>
+                <div class="settings-nav-item"><svg class="icon"><use href="#i-blocks" /></svg>Integrations</div>
+                <div class="settings-group">Agents</div>
+                <div class="settings-nav-item">□ Models</div>
+                <div class="settings-nav-item">✦ Agents</div>
+                <div class="settings-group">Workspace</div>
+                <div class="settings-nav-item">⌁ Environment</div>
+                <div class="settings-nav-item">⑂ Git &amp; PR</div>
+              </aside>
+              <div class="settings-main">
+                <div style="display: flex; justify-content: flex-end"><button class="button">Open settings.toml</button></div>
+                <h3>General</h3>
+                <div class="settings-ui-row"><span><strong>Default repository location</strong><small>Where Zeros looks when opening a local project.</small></span><span class="id-code">~/Documents</span></div>
+                <div class="settings-ui-row"><span><strong>Analytics</strong><small>Share anonymous product usage.</small></span><span class="badge success">On</span></div>
+                <div class="notice" style="margin-top: 18px"><strong>Organization administration is browser-owned</strong>Create, manage members, and billing are reached from the Home organization menu and open at app.zeros.build.</div>
+              </div>
+            </div>
+          </div>
+          <p class="frame-note">The explanatory notice above is an artifact annotation; the shipped Settings page simply omits the Administration group.</p>
+        </section>
+
+        <section class="case" id="feedback">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">M4</span>
+                <span class="tag ship">Implemented</span>
+                <span class="tag mac">Small visible taxonomy change</span>
+              </div>
+              <h2>Feedback now has three product-approved types</h2>
+              <p class="case-copy">
+                “Bug” and “Issue” are combined into <b>Bug or Issue</b>; the remaining choices are Feedback and Feature Request.
+                The message, optional scrubbed logs, privacy copy, and send flow remain in the same dialog.
+              </p>
+            </div>
+            <div class="meta">feedback-types.ts<br />feedback-dialog.tsx<br />submit-feedback.ts</div>
+          </div>
+
+          <div class="frame">
+            <div class="feedback-stage">
+              <div class="feedback-dialog">
+                <h3>Send feedback</h3>
+                <p>Report a bug, request a feature, or tell us how it’s going.</p>
+                <label class="feedback-field">Type
+                  <span class="fake-select">Bug or Issue <span>⌃</span>
+                    <span class="fake-select-menu">
+                      <span class="fake-select-option selected">Bug or Issue <svg class="icon"><use href="#i-check" /></svg></span>
+                      <span class="fake-select-option">Feedback</span>
+                      <span class="fake-select-option">Feature Request</span>
+                    </span>
+                  </span>
+                </label>
+                <label class="feedback-field">Message<textarea class="textarea" readonly>Tell us about the bug you found, an idea, or how it’s going…</textarea></label>
+                <label class="feedback-check"><input type="checkbox" />Include recent app logs (may include personal data)<span style="margin-left: auto">View</span></label>
+                <p style="margin: 8px 0 0; color: var(--muted-fg); font-size: 9.5px">Only what you write here is sent — never your code, files, or keys.</p>
+                <div class="feedback-actions"><button class="button">Cancel</button><button class="button primary" disabled>Send feedback</button></div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <p class="band">Part C — explicit boundaries in the implemented UI</p>
+      <div class="catalog">
+        <section class="case" id="boundaries">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row">
+                <span class="case-number">B</span>
+                <span class="tag limit">Not shipped in this PR</span>
+              </div>
+              <h2>Visible capability scaffolding does not imply the feature is available</h2>
+              <p class="case-copy">These are the important limits to preserve when reviewing or presenting the PR.</p>
+            </div>
+          </div>
+
+          <div class="boundaries">
+            <article class="boundary"><span class="status">Eligibility only</span><h3>Cloud workspaces</h3><p>Organizations can display “Organization eligible,” but there is no cloud create, provision, join, or history UI.</p></article>
+            <article class="boundary"><span class="status">Disabled</span><h3>Additional teams</h3><p>The default child team is visible. <b>New team · Coming later</b> is intentionally disabled.</p></article>
+            <article class="boundary"><span class="status">Disabled</span><h3>Billing management</h3><p>Plan and member/seat status render. Checkout, invoices, payment methods, and Manage billing do not.</p></article>
+            <article class="boundary"><span class="status">Browser-owned</span><h3>Desktop administration</h3><p>The Mac does not duplicate create, rename, member, team, billing, or delete controls; it opens the web dashboard.</p></article>
+            <article class="boundary"><span class="status">Context, not badges</span><h3>Workspace ownership</h3><p>Cards and tabs do not gain organization badges. The active switcher context determines which rows exist.</p></article>
+            <article class="boundary"><span class="status">Repositories remain local</span><h3>Repo list</h3><p>Repository names stay visible in the rail. Workspace counts and rows—not repositories themselves—are owner-filtered.</p></article>
+          </div>
+        </section>
+
+        <section class="case" id="sources">
+          <div class="case-head">
+            <div>
+              <div class="case-title-row"><span class="case-number">S</span><span class="tag">Implementation source map</span></div>
+              <h2>Where each visible surface is implemented</h2>
+            </div>
+          </div>
+          <table class="source-table">
+            <thead><tr><th>Surface</th><th>Primary implementation</th><th>User-visible result</th></tr></thead>
+            <tbody>
+              <tr><td>Signed-in browser root</td><td><code>apps/web/lib/hub.ts</code><br /><code>apps/web/lib/dashboard.mjs</code></td><td>Dashboard replaces the contextless signed-in launch card at <code>/</code>.</td></tr>
+              <tr><td>Dashboard behavior</td><td><code>apps/web/public/dashboard.js</code><br /><code>apps/web/public/dashboard.css</code></td><td>Organization switching, section navigation, management actions, responsive drawer, loading/error retention.</td></tr>
+              <tr><td>Mac organization menu</td><td><code>apps/desktop/src/renderer/features/team/organization-switcher.tsx</code></td><td>Personal / organization selection plus web management links and session actions.</td></tr>
+              <tr><td>Home rail placement</td><td><code>apps/desktop/src/renderer/shell/home-sidebar.tsx</code></td><td>Switcher above Dashboard; selected owner changes visible workspace counts.</td></tr>
+              <tr><td>Workspace filtering</td><td><code>organization-capabilities.ts</code><br /><code>dashboard-page.tsx</code><br /><code>repo-page.tsx</code><br /><code>top-bar.tsx</code></td><td>Live, pending, archived, Dashboard, repo, and top-bar rows use the same semantic owner.</td></tr>
+              <tr><td>Desktop Settings</td><td><code>apps/desktop/src/renderer/features/settings/settings-page.tsx</code></td><td>Administration group removed; old stored destinations resolve safely to General.</td></tr>
+              <tr><td>Feedback types</td><td><code>feedback-types.ts</code><br /><code>feedback-dialog.tsx</code></td><td>Three choices, defaulting to Bug or Issue.</td></tr>
+            </tbody>
+          </table>
+        </section>
+      </div>
+
+      <p class="footer-note">
+        <b>Reference basis:</b> this file follows <code>styles/Artifacts/template/ui-design-template.html</code> and the frame language in
+        <code>styles/Artifacts/Designs/design-home-settings-ia-2026-07-15.html</code>. Content was traced from the current branch against
+        <code>origin/main</code>; future concepts from earlier proposal artifacts were deliberately excluded. Preview controls are local-only
+        documentation interactions and do not make network, authentication, filesystem, billing, or workspace calls.
+      </p>
+    </main>
+
+    <script>
+      (function () {
+        "use strict";
+
+        var root = document.documentElement;
+        var themeToggle = document.getElementById("themeToggle");
+        var themeLabel = document.getElementById("themeLabel");
+        themeToggle.addEventListener("click", function () {
+          var toLight = root.getAttribute("data-theme") !== "light";
+          root.setAttribute("data-theme", toLight ? "light" : "dark");
+          themeToggle.setAttribute("aria-pressed", String(toLight));
+          themeLabel.textContent = toLight ? "Dark preview" : "Light preview";
+        });
+
+        var webDemo = document.getElementById("webDemo");
+        var webOrgSwitcher = document.getElementById("webOrgSwitcher");
+        var webSectionButtons = Array.from(document.querySelectorAll("[data-web-section]"));
+        var webPanels = Array.from(document.querySelectorAll("[data-web-panel]"));
+
+        function showWebSection(section) {
+          webSectionButtons.forEach(function (button) {
+            button.classList.toggle("is-active", button.dataset.webSection === section);
+          });
+          webPanels.forEach(function (panel) {
+            panel.hidden = panel.dataset.webPanel !== section;
+          });
+        }
+
+        function setWebOrganization(organization) {
+          var personal = organization === "personal";
+          webDemo.dataset.org = organization;
+          document.getElementById("webOrgName").textContent = personal ? "Arun" : "Acme";
+          document.getElementById("webOrgKind").textContent = personal ? "Personal" : "Organization";
+          document.getElementById("webOrgAvatar").textContent = personal ? "AR" : "A";
+          document.getElementById("webOrgAvatar").classList.toggle("acme", !personal);
+          document.getElementById("generalAvatar").textContent = personal ? "AR" : "A";
+          document.getElementById("generalAvatar").classList.toggle("acme", !personal);
+          document.getElementById("generalDescription").textContent = personal
+            ? "Your permanent, device-local account space."
+            : "Organization identity and workspace capabilities.";
+          document.getElementById("nameLabel").textContent = personal ? "Personal name" : "Organization name";
+          document.getElementById("nameHint").textContent = personal
+            ? "Provided by your sign-in identity."
+            : "Shown across Zeros and in invitations.";
+          document.getElementById("nameValue").innerHTML = personal
+            ? "<strong>Arun</strong>"
+            : '<input class="input" aria-label="Organization name" value="Acme" /><button class="button" type="button">Save</button>';
+          document.getElementById("organizationId").textContent = personal ? "8b72d312-personal" : "4f28c715-acme-org";
+          document.getElementById("organizationRole").textContent = "owner";
+          document.getElementById("cloudDot").style.background = personal ? "var(--muted-fg)" : "var(--green-primary)";
+          document.getElementById("cloudCopy").textContent = personal ? "Not available in Personal" : "Organization eligible";
+          document.getElementById("personalNotice").hidden = !personal;
+          document.getElementById("dangerZone").hidden = personal;
+          document.querySelectorAll(".org-edit-control").forEach(function (control) { control.hidden = personal; });
+          document.querySelectorAll("[data-collaborative]").forEach(function (button) { button.disabled = personal; });
+          document.querySelectorAll("[data-org-check]").forEach(function (check) { check.hidden = check.dataset.orgCheck !== organization; });
+          if (personal && ["members", "teams", "billing"].includes(webSectionButtons.find(function (button) { return button.classList.contains("is-active"); })?.dataset.webSection)) {
+            showWebSection("profile");
+          } else if (!personal && webSectionButtons.find(function (button) { return button.classList.contains("is-active"); })?.dataset.webSection === "profile") {
+            showWebSection("general");
+          }
+          webOrgSwitcher.open = false;
+        }
+
+        webSectionButtons.forEach(function (button) {
+          button.addEventListener("click", function () {
+            if (!button.disabled) showWebSection(button.dataset.webSection);
+          });
+        });
+        document.querySelectorAll("[data-web-org]").forEach(function (button) {
+          button.addEventListener("click", function () { setWebOrganization(button.dataset.webOrg); });
+        });
+        document.getElementById("openCreateOrganization").addEventListener("click", function () {
+          webOrgSwitcher.open = false;
+          document.getElementById("createOrganizationDialog").showModal();
+        });
+        document.querySelectorAll('#createOrganizationDialog [value="cancel"]').forEach(function (button) {
+          button.addEventListener("click", function (event) {
+            event.preventDefault();
+            document.getElementById("createOrganizationDialog").close();
+          });
+        });
+
+        var workspaceData = {
+          personal: [
+            { status: "backlog", title: "quick-start", repo: "Zeros" },
+            { status: "progress", title: "local-history", repo: "Zeros" },
+            { status: "review", title: "landing-copy", repo: "website" },
+            { status: "done", title: "legacy-worktree", repo: "Zeros" }
+          ],
+          acme: [
+            { status: "backlog", title: "member-invites", repo: "Zeros" },
+            { status: "progress", title: "organization-hierarchy", repo: "Zeros" },
+            { status: "progress", title: "release-alpha", repo: "Zeros" },
+            { status: "review", title: "dashboard-proxy", repo: "website" }
+          ]
+        };
+
+        var statusMeta = {
+          backlog: { label: "Backlog", color: "var(--fg3)" },
+          progress: { label: "In progress", color: "var(--yellow-primary)" },
+          review: { label: "In review", color: "var(--green-primary)" },
+          done: { label: "Done", color: "var(--violet-primary)" }
+        };
+
+        function boardMarkup(organization) {
+          return Object.keys(statusMeta).map(function (status) {
+            var rows = workspaceData[organization].filter(function (row) { return row.status === status; });
+            var cards = rows.map(function (row) {
+              return '<div class="workspace-card"><strong>' + row.title + '</strong><small><span class="repo-chip">' + row.repo.charAt(0) + '</span>' + row.repo + '</small></div>';
+            }).join("");
+            return '<div class="board-column"><div class="board-heading"><span class="status-dot" style="background:' + statusMeta[status].color + '"></span>' + statusMeta[status].label + '<span class="n">' + rows.length + '</span></div>' + cards + '</div>';
+          }).join("");
+        }
+
+        var macDemo = document.getElementById("macDemo");
+        function setMacOrganization(organization) {
+          var personal = organization === "personal";
+          macDemo.dataset.org = organization;
+          document.getElementById("macOrgLabel").textContent = personal ? "Personal" : "Acme";
+          document.getElementById("macManageLabel").textContent = personal ? "Manage account" : "Manage organization";
+          document.querySelector(".mac-active-icon use").setAttribute("href", personal ? "#i-user" : "#i-building");
+          document.querySelectorAll("[data-mac-check]").forEach(function (check) { check.hidden = check.dataset.macCheck !== organization; });
+          document.querySelector("[data-mac-repo-count]").textContent = personal ? "3" : "3";
+          document.querySelector("[data-mac-repo-count-secondary]").textContent = personal ? "1" : "1";
+          document.getElementById("macBoard").innerHTML = boardMarkup(organization);
+        }
+        document.querySelectorAll("[data-mac-org]").forEach(function (button) {
+          button.addEventListener("click", function () {
+            setMacOrganization(button.dataset.macOrg);
+            button.closest("details").open = false;
+          });
+        });
+
+        function setScopeOrganization(organization) {
+          document.querySelectorAll("[data-scope-org]").forEach(function (button) {
+            button.classList.toggle("active", button.dataset.scopeOrg === organization);
+          });
+          document.getElementById("scopeExplainer").textContent = organization === "personal"
+            ? "Legacy unowned rows + exact Personal rows"
+            : "Acme-owned rows only · exact organization ID";
+          document.getElementById("scopeBoard").innerHTML = boardMarkup(organization);
+        }
+        document.querySelectorAll("[data-scope-org]").forEach(function (button) {
+          button.addEventListener("click", function () { setScopeOrganization(button.dataset.scopeOrg); });
+        });
+
+        setWebOrganization("personal");
+        showWebSection("profile");
+        setMacOrganization("acme");
+        setScopeOrganization("acme");
+      })();
+    </script>
+  </body>
+</html>
