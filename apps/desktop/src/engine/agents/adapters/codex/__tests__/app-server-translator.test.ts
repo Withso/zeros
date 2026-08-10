@@ -307,6 +307,72 @@ describe("CodexAppServerTranslator", () => {
       });
     });
 
+    it("keeps an explicit transcript note for unrenderable dynamic-tool media", () => {
+      env.t.handle("item/started", {
+        item: {
+          type: "dynamicToolCall",
+          id: "dynamic-unrenderable",
+          namespace: "workspace",
+          tool: "inspect",
+          arguments: {},
+          status: "inProgress",
+          contentItems: null,
+          success: null,
+        },
+        threadId: "t1",
+        turnId: "u1",
+      });
+      env.t.handle("item/completed", {
+        item: {
+          type: "dynamicToolCall",
+          id: "dynamic-unrenderable",
+          namespace: "workspace",
+          tool: "inspect",
+          arguments: {},
+          status: "completed",
+          success: true,
+          contentItems: [
+            {
+              type: "inputImage",
+              imageUrl: "data:image/svg+xml,%3Csvg%3E%3C/svg%3E",
+            },
+            {
+              type: "inputAudio",
+              audioUrl: "data:image/png;base64,aGVsbG8=",
+            },
+          ],
+        },
+        threadId: "t1",
+        turnId: "u1",
+      });
+
+      const update = env.out.emitted.find(
+        (notification) =>
+          notification.update.sessionUpdate === "tool_call_update",
+      );
+      expect(update?.update).toMatchObject({
+        status: "completed",
+        content: [
+          {
+            type: "content",
+            content: {
+              type: "text",
+              text: "Dynamic tool image output could not be rendered.",
+            },
+          },
+          {
+            type: "content",
+            content: {
+              type: "text",
+              text: "Dynamic tool audio output could not be rendered.",
+            },
+          },
+        ],
+      });
+      const renderedContent = (update?.update as { content?: unknown }).content;
+      expect(JSON.stringify(renderedContent)).not.toContain("%3Csvg%3E");
+    });
+
     it("commandExecution: started → tool_call(execute, in_progress), completed exit 0 → completed", () => {
       env.t.handle("item/started", {
         item: {

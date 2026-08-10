@@ -36,6 +36,9 @@ disappear without review.
 `ServerRequest`, and `ServerNotificationEnvelope`. The manifest describes the
 harness boundary, not UI completeness:
 
+This is a structural classification and protocol-drift check, not proof that
+every classified method has a behavioral implementation or test.
+
 - Client `handled`: the harness has an explicit lifecycle wrapper.
 - Client `generated-only`: generated method/params are available to typed,
   Codex-only engine integrations, but the harness makes no product-support

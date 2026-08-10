@@ -187,16 +187,26 @@ export function resolveCodexRuntimeSource({
   };
 }
 
-function stageFile(source, destination, executable) {
+export function stageFile(source, destination, executable) {
   mkdirSync(dirname(destination), { recursive: true });
-  let method = "hardlink";
-  try {
-    linkSync(source, destination);
-  } catch {
+  const sourceMode = statSync(source).mode & 0o777;
+  let method;
+  // chmod on a hardlink also mutates the source inode in node_modules. Keep
+  // the fast path only when the source already has the packaged mode we need;
+  // otherwise make an independent copy before normalizing it.
+  if (executable && sourceMode !== 0o755) {
     copyFileSync(source, destination);
     method = "copy";
+  } else {
+    method = "hardlink";
+    try {
+      linkSync(source, destination);
+    } catch {
+      copyFileSync(source, destination);
+      method = "copy";
+    }
   }
-  if (executable) chmodSync(destination, 0o755);
+  if (executable && method === "copy") chmodSync(destination, 0o755);
   return method;
 }
 

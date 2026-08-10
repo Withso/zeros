@@ -1206,17 +1206,36 @@ function dynamicToolContent(
       });
       continue;
     }
-    if (value.type === "inputImage" && typeof value.imageUrl === "string") {
-      const block = dynamicMediaContent(value.imageUrl, "image");
-      if (block) content.push({ type: "content", content: block });
+    if (value.type === "inputImage") {
+      const block =
+        typeof value.imageUrl === "string"
+          ? dynamicMediaContent(value.imageUrl, "image")
+          : null;
+      content.push({
+        type: "content",
+        content: block ?? unrenderableDynamicMedia("image"),
+      });
       continue;
     }
-    if (value.type === "inputAudio" && typeof value.audioUrl === "string") {
-      const block = dynamicMediaContent(value.audioUrl, "audio");
-      if (block) content.push({ type: "content", content: block });
+    if (value.type === "inputAudio") {
+      const block =
+        typeof value.audioUrl === "string"
+          ? dynamicMediaContent(value.audioUrl, "audio")
+          : null;
+      content.push({
+        type: "content",
+        content: block ?? unrenderableDynamicMedia("audio"),
+      });
     }
   }
   return content.length > 0 ? content : null;
+}
+
+function unrenderableDynamicMedia(kind: "image" | "audio"): ContentBlock {
+  return {
+    type: "text",
+    text: `Dynamic tool ${kind} output could not be rendered.`,
+  };
 }
 
 function dynamicMediaContent(

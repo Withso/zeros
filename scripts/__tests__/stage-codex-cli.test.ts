@@ -1,4 +1,14 @@
-import { existsSync, readFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -9,6 +19,7 @@ import {
   STAGED_VERSION_FILE,
   codexTargetFor,
   resolveCodexRuntimeSource,
+  stageFile,
 } from "../stage-codex-cli.mjs";
 
 describe("stage Codex CLI", () => {
@@ -74,4 +85,25 @@ describe("stage Codex CLI", () => {
     expect(STAGED_RUNTIME_DIR).toBe("binaries/codex-runtime");
     expect(STAGED_VERSION_FILE).toBe("binaries/codex-cli-version.txt");
   });
+
+  it.skipIf(process.platform === "win32")(
+    "does not mutate source permissions while normalizing a staged executable",
+    () => {
+      const fixture = mkdtempSync(path.join(tmpdir(), "zeros-codex-stage-"));
+      try {
+        const source = path.join(fixture, "source", "codex");
+        const destination = path.join(fixture, "staged", "codex");
+        mkdirSync(path.dirname(source), { recursive: true });
+        writeFileSync(source, "fixture", { mode: 0o700, flag: "wx" });
+        chmodSync(source, 0o700);
+
+        stageFile(source, destination, true);
+
+        expect(statSync(source).mode & 0o777).toBe(0o700);
+        expect(statSync(destination).mode & 0o777).toBe(0o755);
+      } finally {
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    },
+  );
 });
