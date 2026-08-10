@@ -98,7 +98,10 @@ import {
   dbDeleteChat,
   type ChatRowWire,
 } from "./features/agent/agent-history-client";
-import { providerIdentityClearForTransition } from "./features/agent/chat-provider-identity-persistence";
+import {
+  persistChatRowsWithBestEffortIdentityClears,
+  providerIdentityClearForTransition,
+} from "./features/agent/chat-provider-identity-persistence";
 import {
   loadScrollPositions,
   pruneScrollPositions,
@@ -466,10 +469,19 @@ function ChatsPersistence() {
       // renderer transition from a known binding to none therefore needs an
       // explicit compare-and-clear first. The resume-id guard makes a delayed
       // reset harmless if the engine has already learned a newer binding.
-      await Promise.all(
-        identityClears.map((input) => dbClearChatProviderIdentity(input)),
+      const failedIdentityClears =
+        await persistChatRowsWithBestEffortIdentityClears(
+          rows.map(threadToRow),
+          identityClears,
+          dbClearChatProviderIdentity,
+          dbReplaceAllChats,
+        );
+      if (failedIdentityClears.length === 0) return;
+      console.warn(
+        `[Zeros] ${failedIdentityClears.length} provider identity clear${
+          failedIdentityClears.length === 1 ? "" : "s"
+        } could not be confirmed; chat metadata was still saved.`,
       );
-      await dbReplaceAllChats(rows.map(threadToRow));
     })().catch((err) => {
       // Roll back only entries that still point at this failed batch. A newer
       // user edit or live snapshot must never be overwritten by the rollback.

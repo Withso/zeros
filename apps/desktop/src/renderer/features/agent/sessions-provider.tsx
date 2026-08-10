@@ -95,6 +95,7 @@ import { synthesizeReplayPrompt } from "./replay";
 import { activeProviderTurnId } from "./turn-grouping";
 import { ActionsCtx, type SessionsActions } from "./sessions-context";
 import {
+  bindFailureWasSuperseded,
   bindStillOwnsSessionSlot,
   bumpCancelGeneration,
   cancelGeneration,
@@ -1306,6 +1307,7 @@ export function AgentSessionsProvider({
       const bindCancelled = () =>
         cancelledSince(cancelGenerationsRef.current, chatId, bindGeneration);
 
+      let bindWasSuperseded = false;
       const work = (async () => {
         getStore().setSession(chatId, {
           ...BLANK,
@@ -1419,6 +1421,10 @@ export function AgentSessionsProvider({
               console.warn(
                 `[Zeros ensureSession] attempt ${attempt}/${ENSURE_SESSION_ATTEMPTS} for ${agentId}: AGENT_ERROR kind=${lastFailure.kind} message=${lastFailure.message}`,
               );
+              if (bindFailureWasSuperseded(lastFailure)) {
+                bindWasSuperseded = true;
+                return;
+              }
               if (!failureIsRecoverable(lastFailure)) break;
               continue;
             }
@@ -1491,6 +1497,10 @@ export function AgentSessionsProvider({
             console.warn(
               `[Zeros ensureSession] attempt ${attempt}/${ENSURE_SESSION_ATTEMPTS} for ${agentId} threw: kind=${lastFailure.kind} msg=${lastFailure.message}`,
             );
+            if (bindFailureWasSuperseded(lastFailure)) {
+              bindWasSuperseded = true;
+              return;
+            }
             if (!failureIsRecoverable(lastFailure)) break;
           }
         }
@@ -1520,6 +1530,20 @@ export function AgentSessionsProvider({
       ensureInFlightRef.current.set(chatId, work);
       try {
         await work;
+        // A newer exact-chat bind owns the result. Do not publish an error or
+        // retry against it. When the superseding work belongs to another
+        // client (there is no replacement local flight), leave this slot in a
+        // calm recoverable state so the next send can re-adopt the winner.
+        if (
+          bindWasSuperseded &&
+          ensureInFlightRef.current.get(chatId) === work
+        ) {
+          getStore().patchSession(chatId, {
+            status: "reconnecting",
+            error: null,
+            failure: null,
+          });
+        }
       } finally {
         // Identity-checked, like loadIntoChat's: a loadSession that installed
         // its own deferred here while this ensure was running owns the entry
@@ -1985,7 +2009,10 @@ export function AgentSessionsProvider({
         // id is never a resume locator. Returns the prompt result, or null if
         // loadSession didn't re-establish (caller then cold-rebuilds).
         const tryResumeSameSession = async (): Promise<
-          AgentPromptCompleteMessage | AgentPromptFailedMessage | null
+          | AgentPromptCompleteMessage
+          | AgentPromptFailedMessage
+          | "superseded"
+          | null
         > => {
           try {
             // Prefer the newest exact-chat slot: providers can publish a
@@ -2046,7 +2073,10 @@ export function AgentSessionsProvider({
               },
               60_000,
             );
-            if (loaded.type !== "AGENT_SESSION_LOADED") return null;
+            if (loaded.type !== "AGENT_SESSION_LOADED") {
+              const failure = failureFromAgentError(loaded, "loadSession");
+              return bindFailureWasSuperseded(failure) ? "superseded" : null;
+            }
             const recovered = recoveredSessionIdentity(loaded, {
               providerBinding: recoveryProviderBinding,
               providerMetadata: recoveryProviderMetadata,
@@ -2063,8 +2093,13 @@ export function AgentSessionsProvider({
             if (stoppedByUser()) return null;
             promptRetryCount += 1;
             return await runPrompt(recovered.executionId, prompt);
-          } catch {
-            return null;
+          } catch (err) {
+            const failure = classifyRpcError({
+              agentId: current.agentId!,
+              stage: "loadSession",
+              error: err,
+            });
+            return bindFailureWasSuperseded(failure) ? "superseded" : null;
           }
         };
 
@@ -2096,6 +2131,32 @@ export function AgentSessionsProvider({
             const resumed = await tryResumeSameSession();
             if (stoppedByUser()) {
               settleStoppedSend();
+              return null;
+            }
+            if (resumed === "superseded") {
+              // A newer local adoption may already be in flight. Wait for it
+              // and route the retry through the execution it publishes; never
+              // turn this ownership race into a cold provider conversation.
+              const replacementFlight = ensureInFlightRef.current.get(chatId);
+              if (replacementFlight) {
+                await replacementFlight.catch(() => {});
+              }
+              if (stoppedByUser()) {
+                settleStoppedSend();
+                return null;
+              }
+              const replacement = getStore().sessions[chatId];
+              if (replacement?.sessionId && replacement.status === "ready") {
+                promptRetryCount += 1;
+                return runPrompt(replacement.sessionId, prompt);
+              }
+              if (replacement && replacement.status !== "streaming") {
+                getStore().patchSession(chatId, {
+                  status: "reconnecting",
+                  error: null,
+                  failure: null,
+                });
+              }
               return null;
             }
             if (resumed) {
@@ -3603,6 +3664,7 @@ export function AgentSessionsProvider({
       );
       const bindCancelled = () =>
         cancelledSince(cancelGenerationsRef.current, chatId, bindGeneration);
+      let bindWasSuperseded = false;
       // Preserve any messages already in the slot (typically just put
       // there by hydrateChat) — wiping them here is what produced the
       // "chat empty on reopen" bug for agents whose loadSession doesn't
@@ -3704,6 +3766,10 @@ export function AgentSessionsProvider({
           // even though every other code path correctly maps that to
           // transport-closed. Same shape as sendPrompt's catch.
           const failure = failureFromAgentError(resp, "loadSession");
+          if (bindFailureWasSuperseded(failure)) {
+            bindWasSuperseded = true;
+            return true;
+          }
           // No durable binding is an intentional probe for an engine-owned
           // execution that survived a renderer reload. A miss means the caller
           // should create a new execution; it is not a user-visible failure.
@@ -3827,6 +3893,10 @@ export function AgentSessionsProvider({
           stage: "loadSession",
           error: err,
         });
+        if (bindFailureWasSuperseded(failure)) {
+          bindWasSuperseded = true;
+          return true;
+        }
         // Most engine failures arrive as AGENT_ERROR responses above, but a
         // bridge implementation may reject its RPC with the same structured
         // session-expired failure. Keep both transport shapes on the identical
@@ -3850,6 +3920,16 @@ export function AgentSessionsProvider({
         return true;
       } finally {
         resolveLoadFlight();
+        if (
+          bindWasSuperseded &&
+          ensureInFlightRef.current.get(chatId) === loadFlight
+        ) {
+          getStore().patchSession(chatId, {
+            status: "reconnecting",
+            error: null,
+            failure: null,
+          });
+        }
         if (ensureInFlightRef.current.get(chatId) === loadFlight) {
           ensureInFlightRef.current.delete(chatId);
         }

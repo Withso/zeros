@@ -5,6 +5,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
+  bindFailureWasSuperseded,
   bindStillOwnsSessionSlot,
   bumpCancelGeneration,
   cancelGeneration,
@@ -482,6 +483,26 @@ describe("send-time session recovery", () => {
         stage: "loadSession",
       }),
     ).toBe(false);
+  });
+
+  it("treats a superseded bind as a harmless lifecycle race", () => {
+    const failure = {
+      kind: "lifecycle-superseded" as const,
+      message: "A newer bind owns this conversation.",
+      stage: "loadSession" as const,
+    };
+
+    expect(bindFailureWasSuperseded(failure)).toBe(true);
+    expect(resumeFailureInvalidatesBinding(failure)).toBe(false);
+
+    const legacyEngineFailure = {
+      kind: "session-expired" as const,
+      message:
+        "The conversation was closed or superseded while its agent session was starting.",
+      stage: "loadSession" as const,
+    };
+    expect(bindFailureWasSuperseded(legacyEngineFailure)).toBe(true);
+    expect(resumeFailureInvalidatesBinding(legacyEngineFailure)).toBe(false);
   });
 
   it("hands a warming chat's send to the queue instead", () => {

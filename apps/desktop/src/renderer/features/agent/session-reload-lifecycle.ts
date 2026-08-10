@@ -81,13 +81,30 @@ export function statusForFailure(failure: AgentFailure): SessionStatus {
   return "failed";
 }
 
+/** A create/load that lost the engine's exact-conversation ownership race is
+ * already replaced by newer lifecycle work. Match the legacy message too so a
+ * current renderer paired with an older protocol-v8 engine does not mistake
+ * its old `session-expired` classification for provider-thread deletion. */
+export function bindFailureWasSuperseded(
+  failure: AgentFailure | null | undefined,
+): boolean {
+  return (
+    failure?.kind === "lifecycle-superseded" ||
+    /\bconversation was closed or superseded while its agent session was starting\b/i.test(
+      failure?.message ?? "",
+    )
+  );
+}
+
 /** A durable binding is discarded only when the provider says that exact
  * conversation no longer exists. Auth, transport, and timeout failures must
  * retain it so a temporary outage never destroys resumable context. */
 export function resumeFailureInvalidatesBinding(
   failure: AgentFailure | null | undefined,
 ): boolean {
-  return failure?.kind === "session-expired";
+  return (
+    failure?.kind === "session-expired" && !bindFailureWasSuperseded(failure)
+  );
 }
 
 /** How a terminal engine `turn_state` settles the slot.

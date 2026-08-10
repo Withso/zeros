@@ -836,6 +836,9 @@ export interface BridgeAgentFailure {
     | "subprocess-exited"
     | "protocol-error"
     | "transport-closed"
+    /** A newer local lifecycle operation owns this conversation bind. This is
+     *  not evidence that the provider-side conversation expired. */
+    | "lifecycle-superseded"
     | "rate-limited"
     /** Mirrors AgentFailureKind in apps/desktop/src/engine/agents/types.ts.
      *  The persisted session is gone — most

@@ -46,6 +46,10 @@ export type AgentFailureKind =
   | "subprocess-exited"
   | "protocol-error"
   | "transport-closed"
+  /** The caller lost a local conversation-bind race to a newer create/load or
+   *  to an explicit close. The provider conversation is still valid; callers
+   *  must not discard its durable binding or cold-start a replacement. */
+  | "lifecycle-superseded"
   /** Provider/account throttling. Terminal for this send (we do not amplify
    *  a 429 with an immediate automatic replay), but the composer stays usable
    *  and the UI presents calm retry-later copy. */

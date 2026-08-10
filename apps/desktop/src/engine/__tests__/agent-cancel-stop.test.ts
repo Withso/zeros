@@ -769,6 +769,19 @@ describe("tab close while a provider session is still binding", () => {
 
     expect(endSession).toHaveBeenCalledWith("codex", "superseded-execution");
     expect(state.conversationExecution.get("chat-1")).toBe("current-execution");
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "AGENT_ERROR",
+          requestId: "new-session-1",
+          code: "AGENT_LIFECYCLE_SUPERSEDED",
+          failure: expect.objectContaining({
+            kind: "lifecycle-superseded",
+            stage: "newSession",
+          }),
+        }),
+      ]),
+    );
     expect(
       messages.filter((message) => message.type === "AGENT_SESSION_CREATED"),
     ).toEqual([
@@ -778,6 +791,90 @@ describe("tab close while a provider session is still binding", () => {
         }),
       }),
     ]);
+  });
+
+  it("does not report a superseded resume as provider-session expiry", async () => {
+    const { state } = testEngine(30_024);
+    const { client, messages } = testClient();
+    state.router.register(client);
+    vi.spyOn(state, "agentSpawnOpts").mockResolvedValue({});
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    vi.spyOn(state.agents, "loadSession")
+      .mockImplementationOnce(async () => {
+        await firstGate;
+        return { executionId: "superseded-resume" };
+      })
+      .mockImplementationOnce(async () => {
+        await secondGate;
+        return { executionId: "current-resume" };
+      });
+    const endSession = vi
+      .spyOn(state.agents, "endSession")
+      .mockResolvedValue(undefined);
+    const loadMessage = (id: string) =>
+      ({
+        type: "AGENT_LOAD_SESSION",
+        id,
+        source: "browser",
+        timestamp: 1,
+        agentId: "codex",
+        chatId: "chat-1",
+        providerBinding: {
+          version: 1,
+          providerId: "codex",
+          kind: "native",
+          resumeId: "provider-thread-1",
+        },
+      }) as EngineMessage;
+
+    const first = state.handleMessage(loadMessage("load-session-1"), client);
+    await vi.waitFor(() =>
+      expect(state.agents.loadSession).toHaveBeenCalledTimes(1),
+    );
+    const second = state.handleMessage(loadMessage("load-session-2"), client);
+    await vi.waitFor(() =>
+      expect(state.agents.loadSession).toHaveBeenCalledTimes(2),
+    );
+
+    releaseFirst();
+    await first;
+    releaseSecond();
+    await second;
+
+    expect(endSession).toHaveBeenCalledWith("codex", "superseded-resume");
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "AGENT_ERROR",
+          requestId: "load-session-1",
+          code: "AGENT_LIFECYCLE_SUPERSEDED",
+          failure: expect.objectContaining({
+            kind: "lifecycle-superseded",
+            stage: "loadSession",
+          }),
+        }),
+        expect.objectContaining({
+          type: "AGENT_SESSION_LOADED",
+          requestId: "load-session-2",
+          executionId: "current-resume",
+        }),
+      ]),
+    );
+    expect(messages).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          requestId: "load-session-1",
+          failure: expect.objectContaining({ kind: "session-expired" }),
+        }),
+      ]),
+    );
   });
 
   it("does not erase a replacement route opened while the old close settles", async () => {

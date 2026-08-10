@@ -2161,7 +2161,10 @@ export class ZerosEngine {
     stage: "newSession" | "loadSession",
   ): AgentFailureError {
     return new AgentFailureError({
-      kind: "session-expired",
+      // Losing this engine-local ownership race says nothing about the
+      // provider's durable thread. In particular, it must never trigger the
+      // renderer's provider-binding invalidation path.
+      kind: "lifecycle-superseded",
       stage,
       message:
         "The conversation was closed or superseded while its agent session was starting.",

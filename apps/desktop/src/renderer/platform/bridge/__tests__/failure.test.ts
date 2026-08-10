@@ -29,4 +29,20 @@ describe("agent failure classification", () => {
     expect(failure.kind).toBe("rate-limited");
     expect(isRecoverable(failure)).toBe(false);
   });
+
+  it("classifies a deduplicated bind request as superseded, not expired", () => {
+    const failure = classifyRpcError({
+      agentId: "codex",
+      stage: "loadSession",
+      error: new Error(
+        "AGENT_LOAD_SESSION superseded by newer queued copy",
+      ),
+    });
+
+    expect(failure).toMatchObject({
+      kind: "lifecycle-superseded",
+      stage: "loadSession",
+    });
+    expect(isRecoverable(failure)).toBe(false);
+  });
 });
