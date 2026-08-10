@@ -67,24 +67,29 @@ beforeEach(() => {
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      const parsedUrl = new URL(url);
       calls.push({ url, init: init ?? {}, body: parseBody(init) });
 
-      if (url.includes("api.intercom.io")) {
+      if (
+        parsedUrl.origin === "https://api.intercom.io" ||
+        parsedUrl.origin === "https://api.eu.intercom.io" ||
+        parsedUrl.origin === "https://api.au.intercom.io"
+      ) {
         if (intercomFails) {
           return new Response('{"error":"private-upstream-detail"}', {
             status: 500,
           });
         }
-        if (url.includes("/contacts/find_by_external_id/")) {
+        if (parsedUrl.pathname.startsWith("/contacts/find_by_external_id/")) {
           return contactExists
             ? Response.json({ id: "contact-1" })
             : Response.json({ error: "not found" }, { status: 404 });
         }
-        if (url.endsWith("/contacts")) {
+        if (parsedUrl.pathname === "/contacts") {
           contactExists = true;
           return Response.json({ id: "contact-1" });
         }
-        if (url.endsWith("/conversations")) {
+        if (parsedUrl.pathname === "/conversations") {
           return Response.json({ id: "convo-9" });
         }
         return Response.json({ ok: true });
@@ -178,6 +183,13 @@ async function post(
 }
 
 describe("feedback route", () => {
+  it.each([
+    "https://api.intercom.io.attacker.example/contacts",
+    "https://attacker.example/api.intercom.io/contacts",
+  ])("does not classify a lookalike host as Intercom: %s", async (url) => {
+    await expect(fetch(url)).rejects.toThrow(`unmocked fetch: ${url}`);
+  });
+
   it("returns a clear 503 when no destination is configured", async () => {
     const response = await post({ message: "hello" }, null);
     expect(response.status).toBe(503);
