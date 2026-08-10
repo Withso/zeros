@@ -336,6 +336,8 @@ export interface CreateWorkspaceFromBranchOptions {
   /** The project registry's stable slug. Required by local-only repositories
    * that have no remote URL from which one can be derived. */
   repoSlug?: string;
+  /** Tenant root captured by the renderer when the open-branch intent starts. */
+  organizationId?: string | null;
   branchName: string;
   /** Optional hint about which tool created the branch — used by the
    *  renderer for analytics / UI labels. Doesn't affect behavior. */
@@ -622,6 +624,8 @@ async function createWorkspaceFromBranchInner(
   const now = Date.now();
   const ws: Workspace = {
     id: workspaceId,
+    organizationId: opts.organizationId?.trim() || null,
+    placement: "local",
     repoSlug,
     repoRoot: opts.repoRoot,
     branch: opts.branchName,
@@ -775,6 +779,8 @@ export interface AdoptExistingWorktreeOptions {
    *  no-origin repos, where the slug is derived from the path, not the remote.
    *  Falls back to deriving from origin when omitted. */
   repoSlug?: string;
+  /** Tenant root captured by the renderer when the adoption intent starts. */
+  organizationId?: string | null;
   sourceTool?: DetectedTool;
 }
 
@@ -938,6 +944,8 @@ async function adoptExistingWorktreeInner(
   const now = Date.now();
   const ws: Workspace = {
     id: workspaceId,
+    organizationId: opts.organizationId?.trim() || null,
+    placement: "local",
     repoSlug,
     repoRoot: opts.repoRoot,
     branch: opts.branchName,

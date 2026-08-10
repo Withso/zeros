@@ -1258,25 +1258,30 @@ export function AppShellBody() {
  *  harmless while signed out, and the post-sign-in mount lands there. */
 function InviteDeepLinkHandler() {
   const dispatch = useWorkspaceDispatch();
-  const { status } = useAuth();
+  const { status, userId } = useAuth();
   const openTeamForInvite = React.useCallback(() => {
     setSetting("settings:active-section", "user:team");
     dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
   }, [dispatch]);
   useInviteDeepLink(openTeamForInvite);
   const prevStatus = React.useRef(status);
+  const prevUserId = React.useRef(userId);
   React.useEffect(() => {
-    if (
-      prevStatus.current === "authenticated" &&
-      status === "unauthenticated"
-    ) {
+    const signedOut =
+      prevStatus.current === "authenticated" && status === "unauthenticated";
+    const accountChanged =
+      prevUserId.current !== null &&
+      userId !== null &&
+      prevUserId.current !== userId;
+    if (signedOut || accountChanged) {
       clearPendingInviteToken();
       // Account A's team list must not render for account B (or flash the
       // Administration tabs for a zero-team next account).
-      clearTeamStore();
+      clearTeamStore({ resetSelection: true });
     }
     prevStatus.current = status;
-  }, [status]);
+    prevUserId.current = userId;
+  }, [status, userId]);
   return null;
 }
 

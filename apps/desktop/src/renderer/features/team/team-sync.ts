@@ -30,6 +30,7 @@ import { CONTROL_PLANE_URL, controlPlane } from "./control-plane";
 import { getActiveTeamId, subscribeActiveTeam } from "./active-team";
 import {
   organizationContextNeedsClear,
+  organizationContextShouldRefreshOnFocus,
   organizationContextStillSelected,
 } from "./organization-context-isolation";
 import { reconcileOrganizationWorkspaceOwnership } from "./organization-membership-history";
@@ -52,7 +53,7 @@ export function requestTeamResync(): void {
 export function useTeamEngineSync(): void {
   const bridge = useBridge();
   const bridgeStatus = useBridgeStatus();
-  const { status: authStatus } = useAuth();
+  const { status: authStatus, userId } = useAuth();
 
   useEffect(() => {
     // LOCAL bridge only: the engine op is local-only.
@@ -62,9 +63,8 @@ export function useTeamEngineSync(): void {
     let disposed = false;
     let running = false; // exactly one sync in flight at a time
     let pending = false; // a request arrived while one was running → run once more
-    // Bumped synchronously by clearTeamStore on sign-out. An Account A fetch
-    // that settles in the cleanup gap must not republish A for Account B.
-    const storeGeneration = getOrganizationStoreGeneration();
+    let publishingOrganizationSnapshot = false;
+    let lastSyncStartedAt = 0;
     // `undefined` is deliberate: a renderer reload can reconnect to an engine
     // that still holds another account/organization's in-memory settings.
     let appliedOrganizationId: string | null | undefined;
@@ -87,6 +87,7 @@ export function useTeamEngineSync(): void {
         return;
       }
       running = true;
+      lastSyncStartedAt = Date.now();
       try {
         // Signed out → clear the engine's team context (don't leave a prior
         // account's organization settings resident).
@@ -106,10 +107,30 @@ export function useTeamEngineSync(): void {
         ) {
           await clearEngine(selectedBeforeFetch);
         }
+        // Capture per request, not per effect. A same-status account switch can
+        // clear the store without waiting for this hook's cleanup/remount.
+        const storeGeneration = getOrganizationStoreGeneration();
         const me = await controlPlane.me();
         if (disposed) return;
-        if (!acceptOrganizationSnapshot(me, storeGeneration)) return;
-        await reconcileOrganizationWorkspaceOwnership(me);
+        let accepted = false;
+        publishingOrganizationSnapshot = true;
+        try {
+          accepted = acceptOrganizationSnapshot(me, storeGeneration);
+        } finally {
+          publishingOrganizationSnapshot = false;
+        }
+        if (!accepted) return;
+        // Local ownership repair is independent from the settings courier. A
+        // bridge restart should defer that idempotent repair, not prevent this
+        // pass from refreshing the active organization's engine context.
+        try {
+          await reconcileOrganizationWorkspaceOwnership(me);
+        } catch (error) {
+          console.warn(
+            "[organization] local workspace ownership repair deferred:",
+            error instanceof Error ? error.message : error,
+          );
+        }
         // Honor the Home switcher's selection; fall back to Personal/first.
         const wantId = getActiveTeamId();
         const organizations = me.organizations ?? me.teams;
@@ -163,6 +184,10 @@ export function useTeamEngineSync(): void {
     };
 
     const kick = () => {
+      // Publishing the fetched snapshot can synchronously update the semantic
+      // hint. This pass already continues with that exact snapshot, so its own
+      // listener notification must not enqueue a duplicate network round trip.
+      if (publishingOrganizationSnapshot) return;
       // A switch while a settings fetch is running must clear immediately;
       // `sync` then coalesces a trailing exact-owner refresh.
       const selected = getActiveTeamId();
@@ -180,13 +205,21 @@ export function useTeamEngineSync(): void {
     const unsubTeam = subscribeActiveTeam(kick);
     // Organization changes made in app.zeros.build become visible as soon as
     // the user returns from the browser, rather than after the 15-minute poll.
-    window.addEventListener("focus", kick);
+    const onFocus = () => {
+      if (
+        !organizationContextShouldRefreshOnFocus(lastSyncStartedAt, Date.now())
+      ) {
+        return;
+      }
+      kick();
+    };
+    window.addEventListener("focus", onFocus);
     return () => {
       disposed = true;
       clearInterval(timer);
       resyncListeners.delete(kick);
       unsubTeam();
-      window.removeEventListener("focus", kick);
+      window.removeEventListener("focus", onFocus);
     };
-  }, [bridge, bridgeStatus, authStatus]);
+  }, [bridge, bridgeStatus, authStatus, userId]);
 }

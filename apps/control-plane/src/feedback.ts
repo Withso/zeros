@@ -22,6 +22,7 @@ import {
 const INTERCOM_VERSION = "2.14";
 const LINEAR_GQL = "https://api.linear.app/graphql";
 const REQUEST_TIMEOUT_MS = 15_000;
+const DELIVERY_TIMEOUT_MS = 40_000;
 const MAX_INTERCOM_LOGS = 6_000;
 const MAX_LINEAR_INLINE_LOGS = 20_000;
 
@@ -98,10 +99,15 @@ function intercomApiBase(region: IntercomConfig["region"]): string {
   return "https://api.intercom.io";
 }
 
+function upstreamSignal(deadline: AbortSignal): AbortSignal {
+  return AbortSignal.any([deadline, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]);
+}
+
 async function intercomRequest(
   config: IntercomConfig,
   method: "GET" | "POST",
   path: string,
+  deadline: AbortSignal,
   body?: JsonRecord,
 ): Promise<JsonRecord> {
   const init: RequestInit = {
@@ -112,7 +118,7 @@ async function intercomRequest(
       "intercom-version": INTERCOM_VERSION,
       ...(body ? { "content-type": "application/json" } : {}),
     },
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: upstreamSignal(deadline),
   };
   if (body) init.body = JSON.stringify(body);
 
@@ -127,12 +133,14 @@ async function intercomRequest(
 async function findIntercomContact(
   config: IntercomConfig,
   externalId: string,
+  deadline: AbortSignal,
 ): Promise<JsonRecord | null> {
   try {
     return await intercomRequest(
       config,
       "GET",
       `/contacts/find_by_external_id/${encodeURIComponent(externalId)}`,
+      deadline,
     );
   } catch (error) {
     if (error instanceof UpstreamError && error.status === 404) return null;
@@ -143,24 +151,39 @@ async function findIntercomContact(
 async function getOrCreateIntercomContact(
   config: IntercomConfig,
   sender: { providerSub: string; email: string; displayName: string | null },
+  deadline: AbortSignal,
 ): Promise<string> {
-  const existing = await findIntercomContact(config, sender.providerSub);
+  const existing = await findIntercomContact(
+    config,
+    sender.providerSub,
+    deadline,
+  );
   if (typeof existing?.id === "string" && existing.id) return existing.id;
 
   try {
-    const created = await intercomRequest(config, "POST", "/contacts", {
-      role: "user",
-      external_id: sender.providerSub,
-      email: sender.email,
-      ...(sender.displayName ? { name: sender.displayName } : {}),
-    });
+    const created = await intercomRequest(
+      config,
+      "POST",
+      "/contacts",
+      deadline,
+      {
+        role: "user",
+        external_id: sender.providerSub,
+        email: sender.email,
+        ...(sender.displayName ? { name: sender.displayName } : {}),
+      },
+    );
     if (typeof created.id === "string" && created.id) return created.id;
     throw new Error("Intercom contact creation returned no id");
   } catch (error) {
     // Two first submissions can race. Intercom correctly rejects the second
     // create with 409; resolve the contact that the winning request created.
     if (error instanceof UpstreamError && error.status === 409) {
-      const raced = await findIntercomContact(config, sender.providerSub);
+      const raced = await findIntercomContact(
+        config,
+        sender.providerSub,
+        deadline,
+      );
       if (typeof raced?.id === "string" && raced.id) return raced.id;
     }
     throw error;
@@ -184,8 +207,9 @@ async function deliverToIntercom(
   sender: { providerSub: string; email: string; displayName: string | null },
   payload: FeedbackPayload,
   link: string,
+  deadline: AbortSignal,
 ): Promise<string> {
-  const contactId = await getOrCreateIntercomContact(config, sender);
+  const contactId = await getOrCreateIntercomContact(config, sender, deadline);
   const label = FEEDBACK_TYPE_LABELS[payload.type];
   const metadata = [
     payload.app_version ? `App ${escapeHtml(payload.app_version)}` : "",
@@ -204,10 +228,16 @@ async function deliverToIntercom(
         )}</pre>`
       : "");
 
-  const conversation = await intercomRequest(config, "POST", "/conversations", {
-    from: { type: "user", id: contactId },
-    body: html,
-  });
+  const conversation = await intercomRequest(
+    config,
+    "POST",
+    "/conversations",
+    deadline,
+    {
+      from: { type: "user", id: contactId },
+      body: html,
+    },
+  );
   const conversationId =
     typeof conversation.id === "string"
       ? conversation.id
@@ -225,6 +255,7 @@ async function deliverToIntercom(
         config,
         "POST",
         `/conversations/${encodeURIComponent(conversationId)}/tags`,
+        deadline,
         { id: tagId, admin_id: config.adminId },
       );
     } catch (error) {
@@ -241,6 +272,7 @@ async function linearGql(
   config: LinearConfig,
   query: string,
   variables: JsonRecord,
+  deadline: AbortSignal,
 ): Promise<JsonRecord> {
   const response = await fetch(LINEAR_GQL, {
     method: "POST",
@@ -249,7 +281,7 @@ async function linearGql(
       "content-type": "application/json",
     },
     body: JSON.stringify({ query, variables }),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: upstreamSignal(deadline),
   });
   const text = await response.text();
   const parsed = responseJson(text) as {
@@ -283,6 +315,7 @@ function validLinearUploadUrl(raw: string): URL | null {
 async function uploadLogsToLinear(
   config: LinearConfig,
   logs: string,
+  deadline: AbortSignal,
 ): Promise<string | null> {
   try {
     const bytes = new TextEncoder().encode(logs);
@@ -299,6 +332,7 @@ async function uploadLogsToLinear(
         filename: `zeros-feedback-logs-${Date.now()}.jsonl`,
         size: bytes.length,
       },
+      deadline,
     );
     const upload = (
       data.fileUpload as {
@@ -330,7 +364,7 @@ async function uploadLogsToLinear(
       method: "PUT",
       headers,
       body: bytes,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: upstreamSignal(deadline),
     });
     if (!response.ok) {
       throw new UpstreamError("Linear", response.status, "log upload failed");
@@ -354,6 +388,7 @@ async function deliverToLinear(
   payload: FeedbackPayload,
   link: string,
   intercomConversationId: string | null,
+  deadline: AbortSignal,
 ): Promise<LinearIssueRef> {
   const label = FEEDBACK_TYPE_LABELS[payload.type];
   const titleMessage = payload.message.replace(/\s+/g, " ").slice(0, 80);
@@ -378,7 +413,7 @@ async function deliverToLinear(
 
   let logsSection = "";
   if (payload.logs) {
-    const assetUrl = await uploadLogsToLinear(config, payload.logs);
+    const assetUrl = await uploadLogsToLinear(config, payload.logs, deadline);
     logsSection = assetUrl
       ? `\n\n### Recent app logs (scrubbed)\n[zeros-feedback-logs.jsonl](${assetUrl})`
       : `\n\n### Recent app logs (scrubbed, tail)\n\`\`\`\n${payload.logs.slice(
@@ -400,6 +435,7 @@ async function deliverToLinear(
         ...(labelId ? { labelIds: [labelId] } : {}),
       },
     },
+    deadline,
   );
   const issue = (data.issueCreate as { issue?: LinearIssueRef })?.issue;
   if (!issue?.identifier || !issue.url) {
@@ -435,6 +471,9 @@ export function createFeedbackRoutes(
     const payload = parsed.data;
     const sender = c.get("user");
     const link = posthogLink(payload, config.posthogProjectUrl);
+    // Individual calls remain bounded at 15s, while this shared signal caps
+    // the sequential Intercom → Linear dependency chain as one HTTP request.
+    const deadline = AbortSignal.timeout(DELIVERY_TIMEOUT_MS);
 
     let conversationId: string | null = null;
     if (config.intercom) {
@@ -444,6 +483,7 @@ export function createFeedbackRoutes(
           sender,
           payload,
           link,
+          deadline,
         );
       } catch (error) {
         console.error("[feedback] Intercom delivery failed:", error);
@@ -460,6 +500,7 @@ export function createFeedbackRoutes(
           payload,
           link,
           conversationId,
+          deadline,
         );
       } catch (error) {
         console.error("[feedback] Linear delivery failed:", error);

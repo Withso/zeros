@@ -44,6 +44,13 @@ test("dashboard intent survives sign-in without carrying unrelated query state",
     ),
     "https://app.zeros.build/",
   );
+  assert.equal(
+    dashboardReturnUrl(
+      "https://app.zeros.build",
+      "https://app.zeros.build/launch",
+    ),
+    "https://app.zeros.build/launch",
+  );
 });
 
 test("dashboard renders Personal first-class, organization sections, and no bearer tokens", () => {

@@ -32,6 +32,11 @@ export function validMutationOrigin(request) {
   );
 }
 
+/** Release a response body that will not be returned or consumed. */
+export async function cancelUnusedResponseBody(response) {
+  await response.body?.cancel().catch(() => undefined);
+}
+
 /** Consume a fetch body incrementally and stop reading as soon as it crosses
  * the proxy ceiling. This keeps a chunked request from allocating up to the
  * platform-wide request limit before the dashboard's much smaller bound runs. */

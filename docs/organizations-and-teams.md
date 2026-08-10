@@ -82,12 +82,17 @@ Desktop workspace rows carry two additive fields:
 
 The SQLite constraint rejects a cloud placement without an organization ID.
 Existing rows migrate as `organization_id = NULL, placement = 'local'`; a null
-owner is the compatibility representation of legacy Personal data. New local
-creates snapshot the selected organization at intent time and persist its ID.
-Changing the switcher while an asynchronous create is preparing cannot retarget
-that operation. Home, Dashboard, repository, tab, pending-create, and archive
-collections are filtered by the selected owner. Legacy null-owned rows appear
-only in Personal; organization-owned rows match their exact organization ID.
+owner is the compatibility representation of legacy Personal data. On an
+account's first hierarchy-aware organization snapshot, the desktop normalizes a
+persisted promoted-Team selection to Personal so those legacy rows remain
+visible. After hierarchy ownership has been confirmed, the selected owner may
+be restored from account history during a cold refresh. Every local creation
+path, including adopted worktrees and branch/PR workspaces, snapshots that
+owner at intent time and persists its ID. Changing the switcher while an
+asynchronous create is preparing cannot retarget that operation. Home,
+Dashboard, repository, tab, pending-create, and archive collections are
+filtered by the selected owner. Legacy null-owned rows appear only in Personal;
+organization-owned rows match their exact organization ID.
 After a confirmed leave or deletion, local rows from the retired organization
 are reassigned to that account's Personal tenant. Bounded per-account
 membership tombstones make the repair idempotent and catch a workspace create

@@ -4362,6 +4362,7 @@ export class WorkspaceService {
         const result = await createWorkspaceFromBranch({
           repoRoot: reqStr(params, "repoRoot"),
           repoSlug: optStr(params, "repoSlug"),
+          organizationId: optStr(params, "organizationId"),
           branchName: reqStr(params, "branchName"),
           sourceTool: optStr(params, "sourceTool") as DetectedTool | undefined,
           prNumber: optNum(params, "prNumber"),
@@ -4401,6 +4402,7 @@ export class WorkspaceService {
           worktreePath: reqStr(params, "worktreePath"),
           branchName: reqStr(params, "branchName"),
           repoSlug: optStr(params, "repoSlug"),
+          organizationId: optStr(params, "organizationId"),
           sourceTool: optStr(params, "sourceTool") as DetectedTool | undefined,
         });
       case "workspace.proposeBranchName":

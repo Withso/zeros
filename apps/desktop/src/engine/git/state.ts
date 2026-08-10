@@ -975,6 +975,22 @@ export function removeWorktreeSeed(worktreePath: string): void {
   }
 }
 
+function recoveredWorkspaceOwnership(seed: Partial<Workspace>): {
+  organizationId: string | null;
+  placement: "local" | "cloud";
+} {
+  const organizationId =
+    typeof seed.organizationId === "string" && seed.organizationId.trim()
+      ? seed.organizationId.trim()
+      : null;
+  return {
+    organizationId,
+    // Recovery is best-effort. A cloud marker without an owner cannot satisfy
+    // the durable placement invariant, so retain the checkout as local.
+    placement: seed.placement === "cloud" && organizationId ? "cloud" : "local",
+  };
+}
+
 /** Scan the app-data seed dir for `workspace.json` seeds and re-insert any
  *  missing workspace whose worktree still exists. The current home for seeds
  *  (the in-worktree `.zeros/workspace.json` was retired). Uses each seed's own
@@ -1015,8 +1031,7 @@ function seedFromAppData(): { inserted: number; skipped: number } {
     insertWorkspace({
       id: seed.id,
       kind: seed.kind === "design" ? "design" : "code",
-      organizationId: seed.organizationId ?? null,
-      placement: seed.placement === "cloud" ? "cloud" : "local",
+      ...recoveredWorkspaceOwnership(seed),
       repoSlug: seed.repoSlug ?? path.basename(path.dirname(seed.path)),
       repoRoot: seed.repoRoot,
       branch: seed.branch,
@@ -1087,8 +1102,7 @@ function seedFromRoot(root: string): { inserted: number; skipped: number } {
       const ws: Workspace = {
         id: seed.id,
         kind: seed.kind === "design" ? "design" : "code",
-        organizationId: seed.organizationId ?? null,
-        placement: seed.placement === "cloud" ? "cloud" : "local",
+        ...recoveredWorkspaceOwnership(seed),
         repoSlug: seed.repoSlug ?? repoSlug,
         repoRoot: seed.repoRoot,
         branch: seed.branch,

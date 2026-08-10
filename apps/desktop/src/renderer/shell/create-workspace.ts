@@ -53,7 +53,10 @@ import {
 import { toast } from "../shared/ui/primitives/elements";
 import { isInternalFeatureActive } from "../features/settings/internal-features";
 import { isExpectedElectron, isNativeRuntime } from "../platform/runtime";
-import { getActiveOrganizationSnapshot } from "../features/team/team-store";
+import {
+  getActiveOrganizationIdSnapshot,
+  getActiveOrganizationSnapshot,
+} from "../features/team/team-store";
 import { localWorkspaceOwner } from "../features/team/organization-capabilities";
 
 type Dispatch = ReturnType<typeof useWorkspaceDispatch>;
@@ -68,7 +71,10 @@ export async function createWorkspaceForProject(args: {
   // Capture semantic ownership at intent time. The user can switch
   // organizations while prepare crosses the bridge; that must not silently
   // move the already-requested workspace to the newly selected owner.
-  const owner = localWorkspaceOwner(getActiveOrganizationSnapshot());
+  const owner = localWorkspaceOwner(
+    getActiveOrganizationSnapshot(),
+    getActiveOrganizationIdSnapshot(),
+  );
   const designCreationAllowed = () =>
     isInternalFeatureActive("designWorkspaces") &&
     (isNativeRuntime() || isExpectedElectron());

@@ -337,7 +337,7 @@ export async function ensureUser(
  * every authenticated request repairs an interrupted/manual import and updates
  * the fallback "Personal" label if an identity provider later supplies a name.
  */
-async function ensurePersonalOrganization(
+export async function ensurePersonalOrganization(
   tx: Tx,
   user: {
     id: string;
@@ -346,33 +346,83 @@ async function ensurePersonalOrganization(
 ): Promise<void> {
   const displayName = user.display_name?.trim() || "Personal";
   const preferredSlug = `personal-${user.id.replaceAll("-", "")}`;
-  const created = await tx.query<{ id: string }>(
-    `INSERT INTO organizations (
-       slug, name, created_by, is_personal, cloud_workspaces_allowed
-     )
-     VALUES (
-       CASE WHEN EXISTS (SELECT 1 FROM organizations WHERE slug = $1)
-            THEN $1 || '-' || $4 ELSE $1 END,
-       $2, $3, true, false
-     )
-     ON CONFLICT (created_by) WHERE is_personal AND deleted_at IS NULL
-     DO NOTHING
-     RETURNING id`,
-    [
-      preferredSlug,
-      displayName,
-      user.id,
-      randomBytes(16).toString("hex"),
-    ],
+  const existing = await tx.query<{
+    id: string;
+    name: string;
+    has_organization_membership: boolean;
+    default_team_id: string | null;
+    has_team_membership: boolean;
+  }>(
+    `SELECT o.id, o.name,
+            EXISTS (
+              SELECT 1 FROM organization_members om
+              WHERE om.org_id = o.id AND om.user_id = $1 AND om.role = 'owner'
+            ) AS has_organization_membership,
+            dt.id AS default_team_id,
+            EXISTS (
+              SELECT 1 FROM team_members tm
+              WHERE tm.team_id = dt.id AND tm.user_id = $1
+                AND tm.role = 'maintainer'
+            ) AS has_team_membership
+     FROM organizations o
+     LEFT JOIN LATERAL (
+       SELECT t.id FROM teams t
+       WHERE t.org_id = o.id AND t.is_default AND t.deleted_at IS NULL
+       ORDER BY t.id LIMIT 1
+     ) dt ON true
+     WHERE o.created_by = $1 AND o.is_personal AND o.deleted_at IS NULL`,
+    [user.id],
   );
-  const selected = created.rows[0]
-    ? created
-    : await tx.query<{ id: string }>(
+  const current = existing.rows[0];
+  const invariantComplete = Boolean(
+    current?.has_organization_membership &&
+    current.default_team_id &&
+    current.has_team_membership,
+  );
+  if (current && invariantComplete) {
+    // A provider name may arrive after the first token. Promote only the
+    // literal fallback so a future user-editable name is never overwritten.
+    if (displayName !== "Personal" && current.name === "Personal") {
+      await tx.query(
+        `UPDATE organizations SET name = $2
+         WHERE id = $1 AND is_personal AND name = 'Personal'`,
+        [current.id, displayName],
+      );
+    }
+    return;
+  }
+
+  let orgId = current?.id ?? null;
+  let createdPersonal = false;
+  if (!orgId) {
+    let slug = preferredSlug;
+    for (let attempt = 0; attempt < 5 && !orgId; attempt++) {
+      // Targetless DO NOTHING covers both the per-owner invariant and a slug
+      // squatter that commits between attempts. The follow-up owner read
+      // distinguishes a concurrent same-user winner from a slug collision.
+      const created = await tx.query<{ id: string }>(
+        `INSERT INTO organizations (
+           slug, name, created_by, is_personal, cloud_workspaces_allowed
+         )
+         VALUES ($1, $2, $3, true, false)
+         ON CONFLICT DO NOTHING
+         RETURNING id`,
+        [slug, displayName, user.id],
+      );
+      if (created.rows[0]) {
+        orgId = created.rows[0].id;
+        createdPersonal = true;
+        break;
+      }
+      const selected = await tx.query<{ id: string }>(
         `SELECT id FROM organizations
          WHERE created_by = $1 AND is_personal AND deleted_at IS NULL`,
         [user.id],
       );
-  const orgId = selected.rows[0]?.id;
+      orgId = selected.rows[0]?.id ?? null;
+      slug = `${preferredSlug}-${randomBytes(16).toString("hex")}`;
+    }
+  }
   if (!orgId) throw new Error("Couldn't provision Personal organization");
 
   // A provider name may arrive after the first token. Promote only the literal
@@ -409,7 +459,7 @@ async function ensurePersonalOrganization(
      ON CONFLICT (team_id, user_id) DO NOTHING`,
     [orgId, user.id],
   );
-  if (created.rows[0]) {
+  if (createdPersonal) {
     await tx.query(
       `INSERT INTO audit_log (org_id, actor_id, action, subject)
        VALUES ($1, $2, 'organization.personal_created', '{}'::jsonb)`,

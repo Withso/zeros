@@ -10,13 +10,18 @@ const ORGANIZATION_ID_RE =
  * trip. Desktop handoff credentials and arbitrary query parameters must not be
  * copied into the post-login return URL. */
 export function dashboardReturnUrl(appBase, requestUrl) {
-  const destination = new URL("/", appBase);
   let source;
   try {
     source = new URL(requestUrl);
   } catch {
-    return destination.toString();
+    return new URL("/", appBase).toString();
   }
+  // `/launch` remains desktop guidance when it has no handoff credentials;
+  // do not turn an OAuth round trip from that explicit entry into Dashboard.
+  const destination = new URL(
+    source.pathname === "/launch" ? "/launch" : "/",
+    appBase,
+  );
   const organization = source.searchParams.get("organization");
   if (organization && ORGANIZATION_ID_RE.test(organization)) {
     destination.searchParams.set("organization", organization);

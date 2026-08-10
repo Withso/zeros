@@ -3,6 +3,9 @@ export declare function allowedControlPlaneRoute(
   pathname: string,
 ): boolean;
 export declare function validMutationOrigin(request: Request): boolean;
+export declare function cancelUnusedResponseBody(
+  response: Response,
+): Promise<void>;
 export declare function readBoundedBody(
   request: Request,
   maxBytes: number,

@@ -1,8 +1,8 @@
 // app.zeros.build/launch?scheme=&nonce=&challenge=
 //
-// Kept as an entry alias (the desktop may open /launch); it renders the same
-// session-aware hub as `/`. The hub canonicalizes the post-sign-in return to the
-// root `/`, so this is just an initial entry point. See lib/hub.ts.
+// Kept as the desktop entry (the app opens /launch). With valid handoff context
+// it launches the app; without context it remains desktop guidance rather than
+// silently becoming the organization dashboard. See lib/hub.ts.
 
 import { renderHub } from "../lib/hub";
 import type { Env } from "../lib/session";

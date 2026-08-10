@@ -19,3 +19,15 @@ export function organizationContextStillSelected(
 ): boolean {
   return requestedOrganizationId === selectedOrganizationId;
 }
+
+export const ORGANIZATION_FOCUS_RESYNC_MIN_INTERVAL_MS = 30_000;
+
+/** Window activation is a freshness hint, not an instruction to issue one
+ * request per alt-tab. Explicit mutations and selection changes bypass this
+ * guard; focus only refreshes once the last real sync start is old enough. */
+export function organizationContextShouldRefreshOnFocus(
+  lastSyncStartedAt: number,
+  now: number,
+): boolean {
+  return now - lastSyncStartedAt >= ORGANIZATION_FOCUS_RESYNC_MIN_INTERVAL_MS;
+}

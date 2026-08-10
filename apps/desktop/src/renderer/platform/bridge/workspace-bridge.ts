@@ -1847,6 +1847,7 @@ export async function bridgeWorkspaceCreateFromBranch(
   args: {
     repoRoot: string;
     repoSlug?: string;
+    organizationId: string | null;
     branchName: string;
     sourceTool?: DetectedTool;
     /** Attach an existing PR (opening a PR by its head branch). */
@@ -1873,6 +1874,7 @@ export async function bridgeWorkspaceAdoptExisting(
     worktreePath: string;
     branchName: string;
     repoSlug?: string;
+    organizationId: string | null;
     sourceTool?: DetectedTool;
   },
 ): Promise<CreatedWorkspace> {

@@ -219,6 +219,7 @@ describe("cross-tool interop", () => {
       const result = await createWorkspaceFromBranch({
         repoRoot,
         branchName: "cursor/adopt-me",
+        organizationId: "org_active",
       });
       expect(result.workspaceId).toMatch(/^ws_[0-9a-f]{6}-/);
       expect(result.branch).toBe("cursor/adopt-me");
@@ -229,6 +230,18 @@ describe("cross-tool interop", () => {
         await readFile(worktreeSeedPath(result.path), "utf8"),
       );
       expect(seed.branch).toBe("cursor/adopt-me");
+      expect(seed).toMatchObject({
+        organizationId: "org_active",
+        placement: "local",
+      });
+      expect(
+        listWorkspaces().find(
+          (workspace) => workspace.id === result.workspaceId,
+        ),
+      ).toMatchObject({
+        organizationId: "org_active",
+        placement: "local",
+      });
       // Listed via the cross-tool listing it should now appear as zeros.
       const branches = await listAllBranches({
         repoSlug: "acme-example",
@@ -547,6 +560,7 @@ describe("cross-tool interop", () => {
         worktreePath: wt,
         branchName: "feature/ext",
         repoSlug: "acme-example",
+        organizationId: "org_active",
       });
       expect(res.workspaceId).toMatch(/^ws_[0-9a-f]{6}-/);
       expect(res.branch).toBe("feature/ext");
@@ -555,9 +569,19 @@ describe("cross-tool interop", () => {
       const row = listWorkspaces({}).find((w) => w.path === wt);
       expect(row).toBeDefined();
       expect(row?.status).toBe("in-progress");
+      expect(row).toMatchObject({
+        organizationId: "org_active",
+        placement: "local",
+      });
       // Crash-recovery seed is written to app-data, NOT a .zeros/ in the worktree.
       expect(existsSync(path.join(wt, ".zeros"))).toBe(false);
       expect(existsSync(worktreeSeedPath(wt))).toBe(true);
+      expect(
+        JSON.parse(await readFile(worktreeSeedPath(wt), "utf8")),
+      ).toMatchObject({
+        organizationId: "org_active",
+        placement: "local",
+      });
     });
 
     it("is idempotent and single-flighted on the worktree path", async () => {

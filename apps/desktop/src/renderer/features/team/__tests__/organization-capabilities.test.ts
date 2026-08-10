@@ -71,6 +71,10 @@ describe("organization workspace capabilities", () => {
       organizationId: null,
       placement: "local",
     });
+    expect(localWorkspaceOwner(null, "org_confirmed")).toEqual({
+      organizationId: "org_confirmed",
+      placement: "local",
+    });
   });
 
   it("treats legacy unowned rows as Personal and accepts explicit Personal ownership", () => {

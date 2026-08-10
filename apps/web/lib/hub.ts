@@ -7,7 +7,8 @@
 // explicitly, so there is no provider-level "Site URL" fallback to rescue
 // anymore) — otherwise the user lands on a context-less page after sign-in
 // instead of seeing "Launch Zeros". After sign-in everyone returns to the
-// canonical hub (root `/`), which then reads the context from the URL or cookie.
+// canonical hub (root `/`) when context exists; an explicit context-less
+// `/launch` entry remains on `/launch` and shows desktop guidance.
 //
 // Three outcomes:
 //   • signed out                  → "Continue with Google / GitHub" right here
@@ -143,6 +144,12 @@ async function dashboard(
   });
 }
 
+function signedInNoHandoff(env: Env): string {
+  return `<div class="title">You're signed in</div>
+          <div class="sub">Open the Zeros desktop app and choose “Sign in” to connect this account.</div>
+          ${signOutLink(env)}`;
+}
+
 function launchInner(env: Env, h: Handoff): string {
   // h is validated; JSON.stringify into the script is safe.
   const script = `
@@ -215,6 +222,9 @@ export async function renderHub(request: Request, env: Env): Promise<Response> {
     return finish(shell("Sign in to Zeros", signedOut(self)));
   }
   if (!hasHandoff) {
+    if (url.pathname === "/launch") {
+      return finish(shell("Signed in", signedInNoHandoff(env)));
+    }
     return finish(await dashboard(request, env, verified!));
   }
   return finish(shell("Launch Zeros", launchInner(env, ctx)));

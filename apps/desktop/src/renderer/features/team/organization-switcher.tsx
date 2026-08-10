@@ -3,6 +3,7 @@ import {
   Check,
   ChevronsUpDown,
   ExternalLink,
+  LogIn,
   LogOut,
   Plus,
   Settings,
@@ -18,7 +19,7 @@ import {
   DropdownMenuTrigger,
 } from "../../shared/ui/primitives/dropdown-menu";
 import { shellOpenUrl } from "../../platform/app";
-import { useAuth } from "../auth";
+import { useAuth, type AuthStatus } from "../auth";
 import { setActiveOrganizationSelection } from "./active-team";
 import { organizationDashboardUrl } from "./organization-links";
 import { useActiveOrganization, useOrganizations } from "./team-store";
@@ -33,6 +34,20 @@ function openDashboard(
   void shellOpenUrl(organizationDashboardUrl(APP_BASE_URL, options));
 }
 
+export function organizationSwitcherSessionActions(
+  authStatus: AuthStatus,
+): {
+  showManagement: boolean;
+  sessionAction: "sign-in" | "log-out" | null;
+} {
+  return authStatus === "authenticated"
+    ? { showManagement: true, sessionAction: "log-out" }
+    : {
+        showManagement: false,
+        sessionAction: authStatus === "unauthenticated" ? "sign-in" : null,
+      };
+}
+
 export function OrganizationSwitcher({
   onOpenSettings,
   onOrganizationChanged,
@@ -40,11 +55,16 @@ export function OrganizationSwitcher({
   onOpenSettings?: () => void;
   onOrganizationChanged?: () => void;
 }) {
-  const { me, status } = useOrganizations();
+  const { me, status: organizationStatus } = useOrganizations();
   const active = useActiveOrganization();
-  const { email, signOut } = useAuth();
-  const organizations = me?.organizations ?? me?.teams ?? [];
-  const label = active?.name?.trim() || "Personal";
+  const { email, status: authStatus, startBrowserSignIn, signOut } = useAuth();
+  const sessionActions = organizationSwitcherSessionActions(authStatus);
+  const organizations = sessionActions.showManagement
+    ? (me?.organizations ?? me?.teams ?? [])
+    : [];
+  const label =
+    active?.name?.trim() ||
+    (organizationStatus === "loading" ? "Loading…" : "Personal");
 
   return (
     <DropdownMenu>
@@ -62,9 +82,7 @@ export function OrganizationSwitcher({
               <Building2 strokeWidth={1.5} />
             )}
           </span>
-          <span className="min-w-0 flex-1 truncate text-left">
-            {label ?? (status === "loading" ? "Loading…" : "Personal")}
-          </span>
+          <span className="min-w-0 flex-1 truncate text-left">{label}</span>
           <ChevronsUpDown
             className="text-muted-fg shrink-0"
             strokeWidth={1.5}
@@ -94,28 +112,32 @@ export function OrganizationSwitcher({
             {organization.id === active?.id && <Check aria-hidden="true" />}
           </DropdownMenuItem>
         ))}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem
-          onSelect={() => openDashboard({ action: "create-organization" })}
-        >
-          <Plus />
-          <span>Create organization</span>
-          <ExternalLink className="text-muted-fg ml-auto" />
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          onSelect={() =>
-            openDashboard({
-              ...(active ? { organizationId: active.id } : {}),
-              section: active?.isPersonal ? "profile" : "general",
-            })
-          }
-        >
-          <Building2 />
-          <span>
-            {active?.isPersonal ? "Manage account" : "Manage organization"}
-          </span>
-          <ExternalLink className="text-muted-fg ml-auto" />
-        </DropdownMenuItem>
+        {sessionActions.showManagement && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onSelect={() => openDashboard({ action: "create-organization" })}
+            >
+              <Plus />
+              <span>Create organization</span>
+              <ExternalLink className="text-muted-fg ml-auto" />
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() =>
+                openDashboard({
+                  ...(active ? { organizationId: active.id } : {}),
+                  section: active?.isPersonal ? "profile" : "general",
+                })
+              }
+            >
+              <Building2 />
+              <span>
+                {active?.isPersonal ? "Manage account" : "Manage organization"}
+              </span>
+              <ExternalLink className="text-muted-fg ml-auto" />
+            </DropdownMenuItem>
+          </>
+        )}
         <DropdownMenuSeparator />
         {onOpenSettings && (
           <DropdownMenuItem onSelect={onOpenSettings}>
@@ -123,10 +145,17 @@ export function OrganizationSwitcher({
             <span>Settings</span>
           </DropdownMenuItem>
         )}
-        <DropdownMenuItem onSelect={() => void signOut()}>
-          <LogOut />
-          <span>Log out</span>
-        </DropdownMenuItem>
+        {sessionActions.sessionAction === "log-out" ? (
+          <DropdownMenuItem onSelect={() => void signOut()}>
+            <LogOut />
+            <span>Log out</span>
+          </DropdownMenuItem>
+        ) : sessionActions.sessionAction === "sign-in" ? (
+          <DropdownMenuItem onSelect={() => void startBrowserSignIn()}>
+            <LogIn />
+            <span>Sign in</span>
+          </DropdownMenuItem>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );

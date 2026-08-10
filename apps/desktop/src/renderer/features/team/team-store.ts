@@ -25,11 +25,17 @@ import {
 } from "./control-plane";
 import {
   clearActiveOrganizationSelectionHint,
+  getActiveOrganizationIsPersonalHint,
   getActiveTeamId,
   setActiveOrganizationSelection,
   subscribeActiveTeam,
 } from "./active-team";
-import { reconcileOrganizationWorkspaceOwnership } from "./organization-membership-history";
+import { requestTeamResync } from "./team-sync";
+import {
+  hasOrganizationOwnershipHistory,
+  hasRecordedOrganizationOwnership,
+  reconcileOrganizationWorkspaceOwnership,
+} from "./organization-membership-history";
 
 export type TeamStoreStatus = "idle" | "loading" | "ready" | "error";
 
@@ -88,6 +94,16 @@ export function getActiveOrganizationSnapshot(): TeamSummary | null {
   );
 }
 
+/** Exact owner for a local create intent. A confirmed membership-history
+ * entry keeps cold-start/outage creates under the durable selection; an
+ * unproven flat-Team-era id deliberately falls back to legacy Personal. */
+export function getActiveOrganizationIdSnapshot(): string | null {
+  const active = getActiveOrganizationSnapshot();
+  if (active) return active.id;
+  const persisted = getActiveTeamId();
+  return hasRecordedOrganizationOwnership(persisted) ? persisted : null;
+}
+
 /** Commit an exact `/v1/me` snapshot from either the visible store refresh or
  * the bridge-aware background sync. Sharing this publication prevents the
  * switcher from retaining a deleted/left organization for 15 minutes while
@@ -99,7 +115,16 @@ export function acceptOrganizationSnapshot(
   if (expectedGeneration !== generation) return false;
   const current = getActiveTeamId();
   const organizations = me.organizations ?? me.teams;
+  const personal = organizations.find(
+    (organization) => organization.isPersonal,
+  );
+  // One-time flat-Team → hierarchy normalization. Legacy SQLite rows are
+  // intentionally Personal/null-owned, so retaining a promoted collaborative
+  // selection would make the entire existing workspace collection disappear.
+  const firstHierarchySnapshot =
+    personal != null && !hasOrganizationOwnershipHistory(me.user.id);
   const selected =
+    (firstHierarchySnapshot ? personal : undefined) ??
     organizations.find((organization) => organization.id === current) ??
     organizations[0] ??
     null;
@@ -129,7 +154,17 @@ export function refreshTeams(): Promise<Me | null> {
       // Keep the persisted selection valid: a deleted/left organization falls
       // back to Personal/first. A mixed-version empty list clears the engine
       // layer via the active-team subscribe → team-sync chain.
+      const organizations = me.organizations ?? me.teams;
+      const selectionWasAlreadyEmpty =
+        getActiveTeamId() === null &&
+        getActiveOrganizationIsPersonalHint() === null;
       acceptOrganizationSnapshot(me);
+      // An empty snapshot reconciled against an already-empty selection emits
+      // no active-selection event. Explicitly clear any settings document the
+      // engine may still hold from a previous/mixed-version snapshot.
+      if (selectionWasAlreadyEmpty && organizations.length === 0) {
+        requestTeamResync();
+      }
       void reconcileOrganizationWorkspaceOwnership(me).catch((error) => {
         console.warn(
           "[organization] local workspace ownership repair deferred:",
@@ -156,13 +191,28 @@ export function refreshTeams(): Promise<Me | null> {
   return run;
 }
 
-/** Sign-out: drop the cache (and orphan any in-flight fetch) so the next
- *  account starts clean. */
-export function clearTeamStore(): void {
+/** Drop the cache (and orphan any in-flight fetch) so the next account starts
+ * clean. A renderer cold reload keeps the durable selection; a real account
+ * boundary opts into clearing it so another account cannot inherit its owner. */
+export function clearTeamStore(
+  options: { resetSelection?: boolean } = {},
+): void {
   generation += 1;
   inflight = null;
-  clearActiveOrganizationSelectionHint();
+  const previousId = getActiveTeamId();
+  const previousHint = getActiveOrganizationIsPersonalHint();
+  if (options.resetSelection) {
+    setActiveOrganizationSelection(null, null);
+  } else {
+    clearActiveOrganizationSelectionHint();
+  }
   emit({ me: null, status: "idle", error: null });
+  // Clearing can be a no-op for the active-selection publisher. Re-kick the
+  // courier explicitly so it captures this generation and clears/refetches.
+  const selectionPublished =
+    previousId !== getActiveTeamId() ||
+    previousHint !== getActiveOrganizationIsPersonalHint();
+  if (!selectionPublished) requestTeamResync();
 }
 
 function subscribe(listener: () => void): () => void {

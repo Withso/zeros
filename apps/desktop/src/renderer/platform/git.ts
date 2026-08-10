@@ -897,6 +897,7 @@ export async function workspaceContinueOnNewBranch(args: {
 export async function workspaceCreateFromBranch(args: {
   repoRoot: string;
   repoSlug?: string;
+  organizationId: string | null;
   branchName: string;
   sourceTool?: DetectedTool;
   /** Attach an existing PR when opening it by its head branch (so the Review
@@ -920,6 +921,7 @@ export async function workspaceAdoptExisting(args: {
   worktreePath: string;
   branchName: string;
   repoSlug?: string;
+  organizationId: string | null;
   sourceTool?: DetectedTool;
 }): Promise<CreatedWorkspace> {
   const created = await bridgeWorkspaceAdoptExisting(

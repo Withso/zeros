@@ -47,7 +47,7 @@ GET  /THIRD-PARTY-LICENSES.txt → generated exact-version license bundle
 GET  /robots.txt               → Allow: /  (middleware; not the app Disallow)
 ```
 
-App-only paths hit on a marketing host (`/auth/*`, `/handoff/*`, `/github/connected`, `/launch`, `/invite`) **302 → `app.zeros.build`**.
+App-only paths hit on a marketing host (`/auth/*`, `/handoff/*`, `/api/*`, `/github/connected`, `/launch`, `/invite`) **302 → `app.zeros.build`**.
 
 ## Local development
 

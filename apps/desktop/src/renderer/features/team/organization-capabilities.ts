@@ -20,9 +20,23 @@ export function canCreateWorkspaceIn(
 export function localWorkspaceOwner(organization: OrganizationSummary | null): {
   organizationId: string | null;
   placement: "local";
+};
+export function localWorkspaceOwner(
+  organization: OrganizationSummary | null,
+  confirmedOrganizationId: string | null,
+): {
+  organizationId: string | null;
+  placement: "local";
+};
+export function localWorkspaceOwner(
+  organization: OrganizationSummary | null,
+  confirmedOrganizationId: string | null = null,
+): {
+  organizationId: string | null;
+  placement: "local";
 } {
   return {
-    organizationId: organization?.id ?? null,
+    organizationId: organization?.id ?? confirmedOrganizationId,
     placement: "local",
   };
 }

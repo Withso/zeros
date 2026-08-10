@@ -68,6 +68,30 @@ function readHistory(): OrganizationMembershipHistory {
   };
 }
 
+/** Whether this account has already observed a hierarchy-aware ownership
+ * snapshot. Absence is the one-time upgrade signal: the durable active id may
+ * still be a promoted flat-Team selection while all existing rows are legacy
+ * Personal data. */
+export function hasOrganizationOwnershipHistory(userId: string): boolean {
+  return readHistory().accounts.some(
+    (account) => account.userId === userId && account.personalId !== null,
+  );
+}
+
+/** Recover the last confirmed owner while `/v1/me` is cold or unavailable.
+ * This never trusts the active-id key by itself: the first hierarchy upgrade
+ * has no history yet, so a legacy Team selection cannot claim new rows. */
+export function hasRecordedOrganizationOwnership(
+  organizationId: string | null,
+): organizationId is string {
+  return Boolean(
+    organizationId &&
+    readHistory().accounts.some((account) =>
+      account.organizationIds.includes(organizationId),
+    ),
+  );
+}
+
 function currentSnapshot(me: Me): OrganizationMembershipSnapshot | null {
   const organizations = me.organizations ?? me.teams ?? [];
   const personal = organizations.find(

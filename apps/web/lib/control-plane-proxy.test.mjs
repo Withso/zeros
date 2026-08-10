@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   allowedControlPlaneRoute,
+  cancelUnusedResponseBody,
   readBoundedBody,
   validMutationOrigin,
 } from "./control-plane-policy.mjs";
@@ -92,4 +93,23 @@ test("bounded request bodies are replayable exact bytes", async () => {
   const result = await readBoundedBody(request, 8);
   assert.equal(result.ok, true);
   assert.equal(new TextDecoder().decode(result.body), "{}");
+});
+
+test("a superseded upstream response releases its unread body", async () => {
+  let cancelled = false;
+  const response = new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"error":"expired"}'));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    }),
+    { status: 401 },
+  );
+
+  await cancelUnusedResponseBody(response);
+
+  assert.equal(cancelled, true);
 });

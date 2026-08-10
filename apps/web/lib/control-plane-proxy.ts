@@ -8,6 +8,7 @@ import {
 } from "./session";
 import {
   allowedControlPlaneRoute,
+  cancelUnusedResponseBody,
   readBoundedBody,
   validMutationOrigin,
 } from "./control-plane-policy.mjs";
@@ -86,6 +87,10 @@ export async function proxyControlPlane(
   if (upstream.status === 401 && session.refreshToken) {
     const granted = await refreshGrant(env, session.refreshToken);
     if (granted.ok) {
+      // The first response will never be returned after a successful refresh.
+      // Release its stream before replaying so Workers does not retain an
+      // unread 401 body for the rest of the request.
+      await cancelUnusedResponseBody(upstream);
       session = {
         ...session,
         accessToken: granted.data.access_token,

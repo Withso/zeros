@@ -276,6 +276,29 @@ describe("feedback route", () => {
     );
   });
 
+  it("composes every upstream call with one total delivery deadline", async () => {
+    const delivery = new AbortController();
+    const timeout = vi
+      .spyOn(AbortSignal, "timeout")
+      .mockImplementation((milliseconds) =>
+        milliseconds === 40_000
+          ? delivery.signal
+          : new AbortController().signal,
+      );
+
+    const response = await post({ message: "keep the request bounded" });
+
+    expect(response.status).toBe(200);
+    expect(timeout).toHaveBeenCalledWith(40_000);
+    const signals = calls
+      .map((call) => call.init.signal)
+      .filter((signal): signal is AbortSignal => signal instanceof AbortSignal);
+    expect(signals.length).toBeGreaterThan(1);
+    expect(signals.every((signal) => !signal.aborted)).toBe(true);
+    delivery.abort();
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+  });
+
   it("still succeeds through Linear when Intercom is down", async () => {
     intercomFails = true;
     const response = await post({ message: "help", logs: "line" });
