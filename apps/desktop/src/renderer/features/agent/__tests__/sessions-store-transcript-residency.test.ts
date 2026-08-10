@@ -76,7 +76,7 @@ describe("sessions-store transcript residency", () => {
     });
     expect(slot.pendingQuestions).toHaveLength(1);
     expect(slot.backgroundTasks).toHaveLength(1);
-    expect(state.sessionToChatId["session-a"]).toBe("chat-a");
+    expect(state.executionToChatId["session-a"]).toBe("chat-a");
   });
 
   it("does not fold live chunks into a cold transcript and marks it for exact rehydration", () => {

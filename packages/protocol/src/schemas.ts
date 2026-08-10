@@ -53,6 +53,7 @@ export const KNOWN_MESSAGE_TYPES = [
   "AGENT_KEY_VALIDATED",
   "AGENT_TITLE_GENERATED",
   "AGENT_SESSION_CREATED",
+  "AGENT_SESSION_CLOSED",
   "AGENT_AGENT_INITIALIZED",
   "AGENT_AUTH_COMPLETED",
   "AGENT_SESSION_UPDATE",
@@ -131,6 +132,8 @@ const isNonEmptyStr = (v: unknown): v is string =>
   typeof v === "string" && v.length > 0;
 const isUint = (v: unknown): boolean =>
   typeof v === "number" && Number.isInteger(v) && v >= 0;
+const executionRoute = (env: Record<string, unknown>): unknown =>
+  env.executionId ?? env.sessionId;
 
 /** Per-type field validation for the relay-REACHABLE WRITE paths. The envelope
  *  check only guarantees id/source/timestamp/type; the engine's dispatcher then
@@ -144,35 +147,61 @@ function assertInboundPayload(env: Record<string, unknown>): void {
   const bad = (field: string): never => {
     throw new Error(`Invalid ${String(env.type)} payload: ${field}`);
   };
+  // During the identity-model compatibility window clients send both names. They are two
+  // spellings of one Zeros-owned route, never independent identities.
+  if (
+    String(env.type).startsWith("AGENT_") &&
+    env.executionId !== undefined &&
+    env.sessionId !== undefined &&
+    env.executionId !== env.sessionId
+  ) {
+    bad("executionId/sessionId mismatch");
+  }
   switch (env.type) {
     case "AGENT_PROMPT":
     case "AGENT_STEER":
-      if (!isNonEmptyStr(env.sessionId)) bad("sessionId");
+      if (!isNonEmptyStr(executionRoute(env))) bad("executionId");
       if (!Array.isArray(env.prompt)) bad("prompt");
       // Optional correlation id — metadata only. Reject non-strings so a remote
       // client cannot smuggle structured payload into the active-turn record.
       if (env.promptId !== undefined && !isStr(env.promptId)) bad("promptId");
       break;
     case "AGENT_CANCEL":
-    case "AGENT_CLOSE_SESSION":
-    case "AGENT_LOAD_SESSION":
     case "AGENT_COMPACT":
-      if (!isNonEmptyStr(env.sessionId)) bad("sessionId");
+      if (!isNonEmptyStr(executionRoute(env))) bad("executionId");
+      break;
+    case "AGENT_CLOSE_SESSION":
+      if (!isNonEmptyStr(executionRoute(env)) && !isNonEmptyStr(env.chatId))
+        bad("executionId/chatId");
+      if (env.chatId !== undefined && !isNonEmptyStr(env.chatId)) bad("chatId");
+      break;
+    case "AGENT_LOAD_SESSION":
+      if (
+        !isNonEmptyStr(executionRoute(env)) &&
+        !isNonEmptyStr(env.chatId) &&
+        (typeof env.providerBinding !== "object" ||
+          env.providerBinding === null)
+      )
+        bad("executionId/chatId/providerBinding");
       break;
     case "AGENT_STOP_BACKGROUND_TASK":
-      if (!isNonEmptyStr(env.sessionId)) bad("sessionId");
+      if (!isNonEmptyStr(executionRoute(env))) bad("executionId");
       if (!isNonEmptyStr(env.taskId)) bad("taskId");
       break;
     case "AGENT_SET_MODE":
-      if (!isNonEmptyStr(env.sessionId)) bad("sessionId");
+      if (!isNonEmptyStr(executionRoute(env))) bad("executionId");
       if (!isStr(env.modeId)) bad("modeId");
+      break;
+    case "AGENT_SET_MODEL":
+      if (!isNonEmptyStr(executionRoute(env))) bad("executionId");
+      if (!isNonEmptyStr(env.model)) bad("model");
       break;
     case "AGENT_UPDATE_CONFIG":
       // Relay-reachable, and `env` flows into the agent subprocess environment,
       // so validate its SHAPE here (the engine handler additionally scrubs
       // hazardous names + clamps dirs for remote clients). It must be a plain
       // string→string object — reject arrays / nested objects / non-string vals.
-      if (!isNonEmptyStr(env.sessionId)) bad("sessionId");
+      if (!isNonEmptyStr(executionRoute(env))) bad("executionId");
       if (
         typeof env.env !== "object" ||
         env.env === null ||

@@ -17,7 +17,7 @@
 // What lives here:
 //   - `sessions`: the chatId-keyed slot map (the one truth)
 //   - `warmAgentIds`: set of agent ids the engine confirmed alive
-//   - `sessionToChatId`: O(1) reverse index for bridge dispatch
+//   - `executionToChatId`: O(1) reverse index for bridge dispatch
 //     (kept in the store so it stays consistent with `sessions`
 //     instead of as a separate React ref that can drift)
 //   - Pure mutators + bridge-notification reducers
@@ -233,8 +233,10 @@ function hasDurableMessages(messages: AgentMessage[]): boolean {
 export const BLANK: AgentSessionState = {
   agentId: null,
   agentName: null,
-  durableSessionId: null,
+  executionId: null,
   sessionId: null,
+  providerBinding: null,
+  providerMetadata: null,
   cwd: null,
   initialize: null,
   session: null,
@@ -265,9 +267,9 @@ export const BLANK: AgentSessionState = {
 export interface SessionsStoreState {
   sessions: Record<string, AgentSessionState>;
   warmAgentIds: Set<string>;
-  /** sessionId → chatId reverse index. Updated atomically with `sessions`
+  /** executionId → chatId reverse index. Updated atomically with `sessions`
    *  so bridge dispatch stays O(1) and never reads a half-applied state. */
-  sessionToChatId: Record<string, string>;
+  executionToChatId: Record<string, string>;
   // NOTE (2026-06-08): the `loadInProgress` content-suppression was removed.
   // It existed solely to drop the OLD Claude `history.ts` JSONL transcript
   // replay (`claude -p --resume`) so it wouldn't duplicate the disk hydrate.
@@ -449,7 +451,7 @@ export interface SessionsStoreState {
 export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
   sessions: {},
   warmAgentIds: new Set(),
-  sessionToChatId: {},
+  executionToChatId: {},
   scrollPositions: {},
   cancellingChats: new Set(),
   pendingLocalTurns: {},
@@ -541,14 +543,21 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
   },
   setSession: (chatId, slot) => {
     set((state) => {
-      const normalized =
+      let normalized =
         !slot.hasTranscript && hasDurableMessages(slot.messages)
           ? { ...slot, hasTranscript: true }
           : slot;
+      const executionId = normalized.executionId ?? normalized.sessionId;
+      if (
+        normalized.executionId !== executionId ||
+        normalized.sessionId !== executionId
+      ) {
+        normalized = { ...normalized, executionId, sessionId: executionId };
+      }
       const next = { ...state.sessions, [chatId]: normalized };
       return {
         sessions: next,
-        sessionToChatId: rebuildIndex(next),
+        executionToChatId: rebuildIndex(next),
       };
     });
   },
@@ -570,16 +579,28 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           transcriptDirty: patch.transcriptDirty ?? false,
         };
       }
-      const updated = { ...existing, ...normalizedPatch };
+      let updated = { ...existing, ...normalizedPatch };
+      const executionId =
+        patch.executionId !== undefined
+          ? patch.executionId
+          : patch.sessionId !== undefined
+            ? patch.sessionId
+            : (existing.executionId ?? existing.sessionId);
+      if (
+        updated.executionId !== executionId ||
+        updated.sessionId !== executionId
+      ) {
+        updated = { ...updated, executionId, sessionId: executionId };
+      }
       const next = { ...state.sessions, [chatId]: updated };
-      // Only rebuild the reverse index if sessionId changed — saves work
-      // on the common path (token chunks don't touch sessionId).
-      const indexNeedsUpdate = existing.sessionId !== updated.sessionId;
+      // Only rebuild the reverse index if executionId changed — saves work
+      // on the common path (token chunks don't touch routing identity).
+      const indexNeedsUpdate = existing.executionId !== updated.executionId;
       return {
         sessions: next,
-        sessionToChatId: indexNeedsUpdate
+        executionToChatId: indexNeedsUpdate
           ? rebuildIndex(next)
-          : state.sessionToChatId,
+          : state.executionToChatId,
       };
     });
   },
@@ -654,7 +675,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         : state.cancellingChats;
       return {
         sessions,
-        sessionToChatId: rebuildIndex(sessions),
+        executionToChatId: rebuildIndex(sessions),
         cancellingChats,
         pendingLocalTurns: withoutPendingLocalTurn(
           state.pendingLocalTurns,
@@ -686,7 +707,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         : state.cancellingChats;
       return {
         sessions: next,
-        sessionToChatId: rebuildIndex(next),
+        executionToChatId: rebuildIndex(next),
         scrollPositions: nextScroll,
         cancellingChats: nextCancelling,
         pendingLocalTurns: withoutPendingLocalTurn(
@@ -712,7 +733,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
     set({
       sessions: {},
       warmAgentIds: new Set(),
-      sessionToChatId: {},
+      executionToChatId: {},
       scrollPositions: {},
       cancellingChats: new Set(),
       pendingLocalTurns: {},
@@ -721,16 +742,18 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
 
   applyBridgeUpdate: (notification) => {
     // Engine-authoritative chatId (stamped on the notification by the bridge
-    // listener) wins over the local sessionId→chatId index, which can be
-    // momentarily stale (mid force-respawn the old sessionId is de-indexed
-    // before the new one binds; an agent may emit before its sessionId is
+    // listener) wins over the local executionId→chatId index, which can be
+    // momentarily stale (mid force-respawn the old execution is de-indexed
+    // before the new one binds; an agent may emit before its executionId is
     // stored). This is the keystone fix for "messages/tool calls vanish, only
     // mode-switch banners survive": banners are synthesized locally with the
     // live sessionId so they always routed, while agent content arrived on a
     // sessionId the index didn't (yet) know and was silently dropped here.
     const chatId =
       (notification as { chatId?: string }).chatId ??
-      get().sessionToChatId[notification.sessionId];
+      get().executionToChatId[
+        notification.executionId ?? notification.sessionId
+      ];
     if (!chatId) return;
 
     const upd = notification.update as {
@@ -749,14 +772,45 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       stopReason?: AgentSessionState["lastStopReason"];
       startedAt?: number;
       effort?: string;
+      providerBinding?: import("@zeros/protocol/identities").ProviderBinding;
+      providerMetadata?: import("@zeros/protocol/identities").ProviderMetadata;
     };
+
+    if (
+      upd.sessionUpdate === "provider_binding_update" &&
+      upd.providerBinding
+    ) {
+      const slot = get().sessions[chatId];
+      const currentExecution = slot?.executionId ?? slot?.sessionId;
+      const sourceExecution =
+        notification.executionId ?? notification.sessionId;
+      if (
+        !slot ||
+        currentExecution !== sourceExecution ||
+        upd.providerBinding.providerId !== slot.agentId
+      ) {
+        return;
+      }
+      get().patchSession(chatId, {
+        providerBinding: upd.providerBinding,
+        ...(upd.providerMetadata
+          ? { providerMetadata: upd.providerMetadata }
+          : {}),
+      });
+      return;
+    }
 
     // Lifecycle is exact-session state. Content may legitimately arrive with
     // an engine-stamped chatId during a bind race, but a terminal event from a
     // superseded session must never settle the replacement session.
     if (upd.sessionUpdate === "turn_state" && upd.state) {
       const slot = get().sessions[chatId];
-      if (!slot || slot.sessionId !== notification.sessionId) return;
+      if (
+        !slot ||
+        (slot.executionId ?? slot.sessionId) !==
+          (notification.executionId ?? notification.sessionId)
+      )
+        return;
       if (upd.state === "running") {
         get().patchSession(chatId, {
           status: "streaming",
@@ -988,7 +1042,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
 
   applyBridgePermissionRequest: (agentId, permissionId, request) => {
     const sid = (request as { sessionId?: string }).sessionId;
-    const chatId = sid ? get().sessionToChatId[sid] : undefined;
+    const chatId = sid ? get().executionToChatId[sid] : undefined;
     if (!chatId) return;
     const slot = get().sessions[chatId];
     if (!slot) return;
@@ -1080,7 +1134,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
 
   applyBridgeQuestionRequest: (agentId, questionId, request) => {
     const sid = (request as { sessionId?: string }).sessionId;
-    const chatId = sid ? get().sessionToChatId[sid] : undefined;
+    const chatId = sid ? get().executionToChatId[sid] : undefined;
     if (!chatId) return;
     const slot = get().sessions[chatId];
     if (!slot) return;
@@ -1295,6 +1349,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           status: "reconnecting" as SessionStatus,
           error: null,
           failure: null,
+          executionId: null,
           sessionId: null,
           session: null,
         };
@@ -1302,7 +1357,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       if (!changed) return state;
       return {
         sessions: next,
-        sessionToChatId: rebuildIndex(next),
+        executionToChatId: rebuildIndex(next),
       };
     });
   },
@@ -1313,7 +1368,8 @@ function rebuildIndex(
 ): Record<string, string> {
   const map: Record<string, string> = {};
   for (const [chatId, slot] of Object.entries(sessions)) {
-    if (slot.sessionId) map[slot.sessionId] = chatId;
+    const executionId = slot.executionId ?? slot.sessionId;
+    if (executionId) map[executionId] = chatId;
   }
   return map;
 }

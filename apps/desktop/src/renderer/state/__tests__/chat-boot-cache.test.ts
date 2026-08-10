@@ -77,6 +77,35 @@ describe("synchronous chat boot cache", () => {
     ).toMatchObject({ agentId: null, model: null });
   });
 
+  it("drops a provider binding that does not belong to the cached agent", () => {
+    expect(
+      sanitizeCachedChat({
+        id: "cross-provider",
+        agentId: "claude",
+        providerBinding: {
+          version: 1,
+          providerId: "codex",
+          kind: "native",
+          resumeId: "thread-1",
+        },
+        providerMetadata: { version: 1 },
+      }),
+    ).toMatchObject({ agentId: "claude" });
+    const chat = sanitizeCachedChat({
+      id: "cross-provider",
+      agentId: "claude",
+      providerBinding: {
+        version: 1,
+        providerId: "codex",
+        kind: "native",
+        resumeId: "thread-1",
+      },
+      providerMetadata: { version: 1 },
+    });
+    expect(chat?.providerBinding).toBeUndefined();
+    expect(chat?.providerMetadata).toBeUndefined();
+  });
+
   it("restores a valid backup only when no intentional-empty tombstone exists", () => {
     const backup = [{ id: "backup", title: "Recovered" }];
     setSetting(CHATS_STORAGE_KEY, []);

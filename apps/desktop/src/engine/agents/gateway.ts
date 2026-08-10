@@ -27,6 +27,7 @@
 
 import * as fsp from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 
 // Resolve workspaceId → cwd before spawning.
 // We import directly from the workspace state module (not the git
@@ -75,6 +76,11 @@ import type {
 import type { AccountDetails, EnrichedRegistryAgent } from "../types";
 import { AgentFailureError } from "./types";
 import { dedupeMcpServers, resolveMcpServersForRepo } from "./mcp-registry";
+import {
+  coerceProviderBinding,
+  legacyProviderBinding,
+  type ProviderBinding,
+} from "@zeros/protocol/identities";
 
 /** Every agent spawn must carry an
  *  explicit, non-empty cwd. The earlier silent fallback to engine
@@ -255,16 +261,16 @@ export class AgentGateway {
    *  already built with. */
   private readonly mcpServersView: McpServerRegistration[] = [];
   private readonly adapters = new Map<string, AgentAdapter>();
-  private readonly sessionToAgent = new Map<string, string>();
+  private readonly executionToAgent = new Map<string, string>();
   /** Track which workspace each session belongs
    *  to so adapter callbacks can look it up (e.g. for the background-
    *  rename hook in follow-up C). Sessions without a workspaceId
    *  (chats spawned from a plain folder) simply have no entry here. */
-  private readonly sessionToWorkspace = new Map<string, string>();
+  private readonly executionToWorkspace = new Map<string, string>();
   /** Resolved cwd (worktree path) per session — so `prompt()` can tell an
    *  agent that doesn't self-report its cwd where it is. Set at
    *  newSession/loadSession, cleared on endSession/dispose. */
-  private readonly sessionToCwd = new Map<string, string>();
+  private readonly executionToCwd = new Map<string, string>();
   /** Sessions already given the one-shot cwd hint (see CWD_SELF_AWARE_AGENTS).
    *  First prompt per session only — the agent's server keeps it in history. */
   private readonly sessionsCwdHinted = new Set<string>();
@@ -275,7 +281,7 @@ export class AgentGateway {
   // session (loadSession) is pre-marked instructed so the block — already in the
   // resumed transcript — isn't sent twice. See system-instructions/ for the text.
   private readonly sessionsInstructed = new Set<string>();
-  private readonly sessionToInstructionCtx = new Map<
+  private readonly executionToInstructionCtx = new Map<
     string,
     {
       additionalDirectories: string[];
@@ -773,6 +779,8 @@ export class AgentGateway {
        *  Advanced. Threaded down to the adapter so the per-turn spawn
        *  uses this in place of the registry's `cliBinary`. */
       cliBinary?: string;
+      /** Publish the engine-owned route before adapter.newSession can emit. */
+      onExecutionCreated?: (executionId: string) => void;
     } = {},
   ): Promise<NewSessionResponse> {
     const adapter = await this.adapterFor(agentId);
@@ -826,45 +834,95 @@ export class AgentGateway {
       cwd,
       instructionCtx,
     );
-    const { session } = await adapter.newSession({
-      cwd,
-      env: spawn.env,
-      cliBinary: spawn.cliBinary,
-      mcpServers: await this.resolveSessionMcp(agentId, cwd, mainRepoRoot),
-      ...(systemInstruction ? { systemInstruction } : {}),
-    });
+    const executionId = randomUUID();
+    const mcpServers = await this.resolveSessionMcp(agentId, cwd, mainRepoRoot);
+    opts.onExecutionCreated?.(executionId);
+    let session: NewSessionResponse;
+    try {
+      ({ session } = await adapter.newSession({
+        executionId,
+        cwd,
+        env: spawn.env,
+        cliBinary: spawn.cliBinary,
+        mcpServers,
+        ...(systemInstruction ? { systemInstruction } : {}),
+      }));
+    } catch (err) {
+      await this.disposeRejectedExecutions(adapter, [executionId]);
+      throw err;
+    }
+    if (
+      session.executionId !== executionId ||
+      session.sessionId !== executionId
+    ) {
+      await this.disposeRejectedExecutions(adapter, [executionId]);
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        stage: "newSession",
+        message: `Agent ${agentId} replaced the Zeros execution identity during startup.`,
+      });
+    }
+    if (
+      session.providerBinding &&
+      session.providerBinding.providerId !== agentId
+    ) {
+      await this.disposeRejectedExecutions(adapter, [executionId]);
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        stage: "newSession",
+        message: `Agent ${agentId} returned another provider's binding.`,
+      });
+    }
     console.log(
-      `[agents] ${agentId} newSession: sessionId=${session.sessionId} cwd=${cwd}` +
+      `[agents] ${agentId} newSession: executionId=${session.executionId} cwd=${cwd}` +
         (opts.workspaceId ? ` workspaceId=${opts.workspaceId}` : "") +
         (systemInstruction ? " sysInstr=native" : ""),
     );
-    this.sessionToAgent.set(session.sessionId, agentId);
-    this.sessionToCwd.set(session.sessionId, cwd);
-    this.sessionToInstructionCtx.set(session.sessionId, instructionCtx);
+    this.executionToAgent.set(session.executionId, agentId);
+    this.executionToCwd.set(session.executionId, cwd);
+    this.executionToInstructionCtx.set(session.executionId, instructionCtx);
     if (systemInstruction) {
       // Delivered natively at thread creation — the first prompt must NOT
       // also prepend the in-band block.
-      this.sessionsInstructed.add(session.sessionId);
+      this.sessionsInstructed.add(session.executionId);
     }
     // Otherwise: NEW session → left un-instructed so the first prompt injects
     // the preamble.
     if (opts.workspaceId) {
-      this.sessionToWorkspace.set(session.sessionId, opts.workspaceId);
+      this.executionToWorkspace.set(session.executionId, opts.workspaceId);
     }
     return session;
   }
 
   async loadSession(
     agentId: string,
-    sessionId: string,
+    bindingOrLegacyId: ProviderBinding | string,
     opts: {
       cwd?: string;
       env?: Record<string, string>;
       workspaceId?: string;
       cliBinary?: string;
+      /** Publish the engine-owned route before adapter.loadSession can emit
+       * updates. The caller must remove provisional routing if load rejects. */
+      onExecutionCreated?: (executionId: string) => void;
     } = {},
   ): Promise<LoadSessionResponse> {
+    const providerBinding =
+      typeof bindingOrLegacyId === "string"
+        ? legacyProviderBinding(agentId, bindingOrLegacyId)
+        : coerceProviderBinding(bindingOrLegacyId);
+    if (!providerBinding || providerBinding.providerId !== agentId) {
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        stage: "loadSession",
+        message:
+          "The persisted provider binding does not belong to this agent.",
+      });
+    }
+    // Validate ownership before constructing an adapter or touching provider
+    // credentials/storage. A foreign binding must fail at the Zeros boundary.
     const adapter = await this.adapterFor(agentId);
+    const executionId = randomUUID();
     const cwd = resolveAgentCwd(opts.cwd, "loadSession", opts.workspaceId);
     // Apply the same settings-env overlay + user-provider fallback as newSession,
     // so a resumed session gets the repo `env` table, `env_files`,
@@ -890,30 +948,63 @@ export class AgentGateway {
       cwd,
       instructionCtx,
     );
-    const response = await adapter.loadSession({
-      sessionId,
-      cwd,
-      env: spawn.env,
-      cliBinary: spawn.cliBinary,
-      mcpServers: await this.resolveSessionMcp(agentId, cwd, mainRepoRoot),
-      ...(systemInstruction ? { systemInstruction } : {}),
-    });
+    const mcpServers = await this.resolveSessionMcp(agentId, cwd, mainRepoRoot);
+    opts.onExecutionCreated?.(executionId);
+    let response: LoadSessionResponse;
+    try {
+      response = await adapter.loadSession({
+        executionId,
+        providerBinding,
+        // Compatibility for adapters/tests that have not yet adopted bindings.
+        sessionId: providerBinding.legacySessionId ?? providerBinding.resumeId,
+        cwd,
+        env: spawn.env,
+        cliBinary: spawn.cliBinary,
+        mcpServers,
+        ...(systemInstruction ? { systemInstruction } : {}),
+      });
+    } catch (err) {
+      // Adapters may allocate a subprocess/session directory before discovering
+      // that the provider locator is invalid. A rejected load must not strand
+      // that provisional execution after its engine route is torn down.
+      await this.disposeRejectedExecutions(adapter, [executionId]);
+      throw err;
+    }
+    if (response.executionId && response.executionId !== executionId) {
+      await this.disposeRejectedExecutions(adapter, [executionId]);
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        stage: "loadSession",
+        message: `Agent ${agentId} replaced the Zeros execution identity during resume.`,
+      });
+    }
+    if (
+      response.providerBinding &&
+      response.providerBinding.providerId !== agentId
+    ) {
+      await this.disposeRejectedExecutions(adapter, [executionId]);
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        stage: "loadSession",
+        message: `Agent ${agentId} returned another provider's binding.`,
+      });
+    }
     console.log(
-      `[agents] ${agentId} loadSession: sessionId=${sessionId} cwd=${cwd}` +
+      `[agents] ${agentId} loadSession: executionId=${executionId} cwd=${cwd}` +
         (opts.workspaceId ? ` workspaceId=${opts.workspaceId}` : "") +
         (systemInstruction ? " sysInstr=native" : ""),
     );
-    this.sessionToAgent.set(sessionId, agentId);
-    this.sessionToCwd.set(sessionId, cwd);
-    this.sessionToInstructionCtx.set(sessionId, instructionCtx);
+    this.executionToAgent.set(executionId, agentId);
+    this.executionToCwd.set(executionId, cwd);
+    this.executionToInstructionCtx.set(executionId, instructionCtx);
     if (systemInstruction) {
       // NATIVE channel: the adapter attached the orientation on thread/resume
       // — and its degraded resume-→-fresh-thread fallback attaches it on the
       // fresh thread/start too — so BOTH resume shapes are covered. Never
       // re-inject in-band. (The cwd hint re-arm below still applies on a
       // fresh thread for non-self-aware agents.)
-      this.sessionsInstructed.add(sessionId);
-      if (response.resumedFresh) this.sessionsCwdHinted.delete(sessionId);
+      this.sessionsInstructed.add(executionId);
+      if (response.resumedFresh) this.sessionsCwdHinted.delete(executionId);
     } else if (response.resumedFresh) {
       // DEGRADED RESUME → the adapter couldn't resume and started a FRESH
       // thread/agent (Codex stale rollout, Cursor "agent not found", Claude
@@ -921,18 +1012,22 @@ export class AgentGateway {
       // preamble would be lost forever; re-arm the one-shot (delete, don't
       // add) so the next prompt() re-injects the workspace orientation + cwd
       // hint.
-      this.sessionsInstructed.delete(sessionId);
-      this.sessionsCwdHinted.delete(sessionId);
+      this.sessionsInstructed.delete(executionId);
+      this.sessionsCwdHinted.delete(executionId);
     } else {
       // TRUE RESUME → the first-turn <system_instruction> already rides in
       // the resumed transcript; pre-mark instructed so prompt() never
       // re-sends it.
-      this.sessionsInstructed.add(sessionId);
+      this.sessionsInstructed.add(executionId);
     }
     if (opts.workspaceId) {
-      this.sessionToWorkspace.set(sessionId, opts.workspaceId);
+      this.executionToWorkspace.set(executionId, opts.workspaceId);
     }
-    return response;
+    return {
+      ...response,
+      executionId,
+      providerBinding: response.providerBinding ?? providerBinding,
+    };
   }
 
   /** Tear down a single session's resources when its chat tab is closed.
@@ -943,18 +1038,38 @@ export class AgentGateway {
    *  quit. Best-effort by default so closing a tab can't surface an error.
    *  Lifecycle callers use failClosed: archive/delete must abort when the
    *  adapter cannot confirm that its session resource was disposed. */
+  private async disposeRejectedExecutions(
+    adapter: AgentAdapter,
+    executionIds: Array<string | undefined>,
+  ): Promise<void> {
+    if (!adapter.disposeSession) return;
+    for (const executionId of new Set(
+      executionIds.filter(Boolean) as string[],
+    )) {
+      try {
+        await adapter.disposeSession(executionId);
+      } catch (err) {
+        console.warn(
+          `[agents] ${adapter.agentId} failed to dispose rejected execution ` +
+            `${executionId}: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }
+  }
+
   async endSession(
     agentId: string,
     sessionId: string,
     opts: { failClosed?: boolean } = {},
   ): Promise<void> {
-    const resolvedAgentId = this.sessionToAgent.get(sessionId) ?? agentId;
-    this.sessionToAgent.delete(sessionId);
-    this.sessionToWorkspace.delete(sessionId);
-    this.sessionToCwd.delete(sessionId);
+    const resolvedAgentId = this.executionToAgent.get(sessionId) ?? agentId;
+    this.executionToAgent.delete(sessionId);
+    this.executionToWorkspace.delete(sessionId);
+    this.executionToCwd.delete(sessionId);
     this.sessionsCwdHinted.delete(sessionId);
     this.sessionsInstructed.delete(sessionId);
-    this.sessionToInstructionCtx.delete(sessionId);
+    this.executionToInstructionCtx.delete(sessionId);
     const adapter = this.adapters.get(resolvedAgentId);
     if (adapter?.disposeSession) {
       try {
@@ -992,7 +1107,7 @@ export class AgentGateway {
   ): ContentBlock[] {
     if (CWD_SELF_AWARE_AGENTS.has(resolvedAgentId)) return prompt;
     if (this.sessionsCwdHinted.has(sessionId)) return prompt;
-    const cwd = this.sessionToCwd.get(sessionId);
+    const cwd = this.executionToCwd.get(sessionId);
     if (!cwd) return prompt;
     this.sessionsCwdHinted.add(sessionId);
     const hint: ContentBlock = {
@@ -1012,7 +1127,7 @@ export class AgentGateway {
    *  /add-dir, a JSON array). ZEROS_TARGET_BRANCH / ZEROS_PROMPTS_GENERAL are
    *  optional — once the Actions settings UI + spawn-env feed them they flow
    *  through here automatically; until then the preamble + /add-dir awareness
-   *  still ship. Callers stash the result in sessionToInstructionCtx. */
+   *  still ship. Callers stash the result in executionToInstructionCtx. */
   private parseInstructionCtx(env: Record<string, string> | undefined): {
     additionalDirectories: string[];
     targetBranch?: string;
@@ -1073,9 +1188,9 @@ export class AgentGateway {
   ): ContentBlock[] {
     if (this.sessionsInstructed.has(sessionId)) return prompt;
     this.sessionsInstructed.add(sessionId);
-    const cwd = this.sessionToCwd.get(sessionId);
+    const cwd = this.executionToCwd.get(sessionId);
     if (!cwd) return prompt;
-    const ctx = this.sessionToInstructionCtx.get(sessionId);
+    const ctx = this.executionToInstructionCtx.get(sessionId);
     const block = buildFirstTurnSystemInstruction({
       workspaceDir: cwd,
       targetBranch: ctx?.targetBranch ?? null,
@@ -1278,10 +1393,12 @@ export class AgentGateway {
     );
     await Promise.all(disposals);
     this.adapters.clear();
-    this.sessionToAgent.clear();
-    this.sessionToWorkspace.clear();
-    this.sessionToCwd.clear();
+    this.executionToAgent.clear();
+    this.executionToWorkspace.clear();
+    this.executionToCwd.clear();
+    this.executionToInstructionCtx.clear();
     this.sessionsCwdHinted.clear();
+    this.sessionsInstructed.clear();
     this.agentInitializes.clear();
     this.cachedAgents = null;
     this.cachedAgentsAt = null;
@@ -1328,7 +1445,7 @@ export class AgentGateway {
    *  pre-session window before the map has an entry. Mirrors endSession so
    *  prompt/cancel/setMode and teardown all resolve a session identically. */
   private adapterForSession(sessionId: string, agentId?: string): AgentAdapter {
-    const resolvedId = this.sessionToAgent.get(sessionId) ?? agentId;
+    const resolvedId = this.executionToAgent.get(sessionId) ?? agentId;
     if (!resolvedId) {
       // No route AND no caller agentId — the renderer is holding a
       // sessionId we have no record of (almost always: the engine
@@ -1350,7 +1467,7 @@ export class AgentGateway {
       console.warn(
         `[agents] adapterForSession miss: agentId=${resolvedId} sessionId=${sessionId} ` +
           `live=[${Array.from(this.adapters.keys()).join(",")}] ` +
-          `routes=${this.sessionToAgent.size}`,
+          `routes=${this.executionToAgent.size}`,
       );
       // The adapter map is ONLY cleared by gateway.dispose() — i.e. the
       // engine process restarted (HMR respawn / watchdog / crash) and the

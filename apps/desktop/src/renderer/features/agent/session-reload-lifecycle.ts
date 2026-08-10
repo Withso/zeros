@@ -1,5 +1,67 @@
 import type { SessionStatus } from "./use-agent-session";
-import { isRecoverable, type AgentFailure } from "../../platform/bridge/failure";
+import {
+  isRecoverable,
+  type AgentFailure,
+} from "../../platform/bridge/failure";
+import type {
+  ProviderBinding,
+  ProviderMetadata,
+} from "@zeros/protocol/identities";
+
+/** Durable locator fields for a load-session recovery request.
+ *
+ * A failed execution id is intentionally not accepted here: after an engine
+ * restart it is neither a live route nor a provider resume handle. The
+ * compatibility sessionId, when present, is derived only from the durable
+ * provider binding so a protocol-v8 engine can still resume it. With no
+ * binding, chatId on the surrounding request performs a conversation-only
+ * probe for an execution that survived a renderer reload. */
+export function recoveryLoadLocator(
+  providerBinding: ProviderBinding | null | undefined,
+): { providerBinding?: ProviderBinding; sessionId?: string } {
+  if (!providerBinding) return {};
+  return {
+    providerBinding,
+    sessionId: providerBinding.legacySessionId ?? providerBinding.resumeId,
+  };
+}
+
+/** Identity patch and prompt route produced by a successful recovery load.
+ * The engine may mint a replacement execution even though the durable provider
+ * conversation stays the same, so all subsequent routing must use the load
+ * response rather than the dead execution captured before recovery. */
+export function recoveredSessionIdentity(
+  loaded: {
+    executionId?: string | null;
+    sessionId?: string | null;
+    response?: {
+      providerBinding?: ProviderBinding;
+      providerMetadata?: ProviderMetadata;
+    };
+  },
+  previous: {
+    providerBinding?: ProviderBinding | null;
+    providerMetadata?: ProviderMetadata | null;
+  },
+): {
+  executionId: string;
+  sessionId: string;
+  providerBinding: ProviderBinding | null;
+  providerMetadata: ProviderMetadata | null;
+} | null {
+  const executionId = loaded.executionId ?? loaded.sessionId;
+  if (!executionId) return null;
+  const providerBinding =
+    loaded.response?.providerBinding ?? previous.providerBinding ?? null;
+  return {
+    executionId,
+    sessionId: executionId,
+    providerBinding,
+    providerMetadata: providerBinding
+      ? (loaded.response?.providerMetadata ?? previous.providerMetadata ?? null)
+      : null,
+  };
+}
 
 /** The engine survives a local renderer reload. Its prompt activity is the
  * authoritative lifecycle signal; a successfully loaded active session must
@@ -17,6 +79,32 @@ export function statusForFailure(failure: AgentFailure): SessionStatus {
   if (failure.kind === "auth-required") return "auth-required";
   if (isRecoverable(failure)) return "reconnecting";
   return "failed";
+}
+
+/** A create/load that lost the engine's exact-conversation ownership race is
+ * already replaced by newer lifecycle work. Match the legacy message too so a
+ * current renderer paired with an older protocol-v8 engine does not mistake
+ * its old `session-expired` classification for provider-thread deletion. */
+export function bindFailureWasSuperseded(
+  failure: AgentFailure | null | undefined,
+): boolean {
+  return (
+    failure?.kind === "lifecycle-superseded" ||
+    /\bconversation was closed or superseded while its agent session was starting\b/i.test(
+      failure?.message ?? "",
+    )
+  );
+}
+
+/** A durable binding is discarded only when the provider says that exact
+ * conversation no longer exists. Auth, transport, and timeout failures must
+ * retain it so a temporary outage never destroys resumable context. */
+export function resumeFailureInvalidatesBinding(
+  failure: AgentFailure | null | undefined,
+): boolean {
+  return (
+    failure?.kind === "session-expired" && !bindFailureWasSuperseded(failure)
+  );
 }
 
 /** How a terminal engine `turn_state` settles the slot.
@@ -59,6 +147,21 @@ export function shouldQueuePrompt(input: {
     input.status === "streaming" ||
     input.status === "warming"
   );
+}
+
+/** Route an explicit "Send now" for a queued row from authoritative session
+ * lifecycle, not from the renderer-local prompt promise. A reloaded renderer
+ * has no local send lock for the engine turn it adopted, but status remains
+ * `streaming`; that row must steer into the live turn. Conversely, a local
+ * prompt still preparing can momentarily own the lock before status becomes
+ * streaming, so it must keep the row parked instead of steering into nothing. */
+export function queuedSendNowAction(input: {
+  status: SessionStatus;
+  hasLocalSend: boolean;
+}): "steer" | "flush" | "wait" {
+  if (input.status === "streaming") return "steer";
+  if (input.hasLocalSend || input.status === "warming") return "wait";
+  return "flush";
 }
 
 /** Whether an explicit send must rebuild the chat's session BEFORE the message
@@ -134,6 +237,22 @@ export function cancelledSince(
   generation: number,
 ): boolean {
   return cancelGeneration(generations, chatId) !== generation;
+}
+
+/** A bind-time async continuation may update renderer state only while it
+ * still owns both the chat lifecycle generation and the exact execution slot.
+ * Tab close removes the slot; a fast History restore can replace it. Either
+ * transition makes permission/config callbacks from the old bind stale. */
+export function bindStillOwnsSessionSlot(input: {
+  cancelled: boolean;
+  expectedExecutionId: string;
+  slotExecutionId?: string | null;
+  slotSessionId?: string | null;
+}): boolean {
+  if (input.cancelled) return false;
+  return (
+    (input.slotExecutionId ?? input.slotSessionId) === input.expectedExecutionId
+  );
 }
 
 /** Remember that live pushes for an exact session arrived before its renderer

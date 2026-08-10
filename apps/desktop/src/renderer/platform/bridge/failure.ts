@@ -41,6 +41,10 @@ const TRANSPORT_RX =
   /\bconnection\s*(?:closed|reset)|transport\s+closed|broken\s*pipe|engine\s+swapping|request\s+aborted|\breconnecting\b/i;
 const RATE_LIMIT_RX =
   /\b(?:429|rate[\s_-]*limit(?:ed)?|too many requests|resource exhausted)\b/i;
+// ws-client rejects an older queued create/load when a newer exact-chat copy
+// replaces it. That is a local ownership race, not a dead provider thread.
+const LIFECYCLE_SUPERSEDED_RX =
+  /\b(?:superseded by newer queued copy|conversation was closed or superseded while its agent session was starting)\b/i;
 /** Mirrors SESSION_EXPIRED_KEYWORDS in
  *  apps/desktop/src/engine/agents/adapters/shared/session-expiry.ts. The engine usually classifies
  *  these on its side, but RPC errors that bubble up to the renderer
@@ -105,6 +109,9 @@ export function classifyRpcError(
   const base = { stage, agentId } as Pick<AgentFailure, "stage" | "agentId">;
   if (errCode === "ENGINE_SWAPPING") {
     return { kind: "transport-closed", message, ...base };
+  }
+  if (LIFECYCLE_SUPERSEDED_RX.test(message)) {
+    return { kind: "lifecycle-superseded", message, ...base };
   }
   if (SESSION_EXPIRED_RX.test(message)) {
     return { kind: "session-expired", message, ...base };

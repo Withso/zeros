@@ -90,6 +90,8 @@ import type { SandboxPolicy as GenSandboxPolicy } from "./generated/v2/SandboxPo
 import type { AskForApproval as GenAskForApproval } from "./generated/v2/AskForApproval";
 import type { UserInput as GenUserInput } from "./generated/v2/UserInput";
 import type { ThreadStartParams as GenThreadStartParams } from "./generated/v2/ThreadStartParams";
+import type { ThreadStartResponse as GenThreadStartResponse } from "./generated/v2/ThreadStartResponse";
+import type { ThreadResumeResponse as GenThreadResumeResponse } from "./generated/v2/ThreadResumeResponse";
 import type { TurnStartParams as GenTurnStartParams } from "./generated/v2/TurnStartParams";
 import type { AttestationGenerateResponse as GenAttestationGenerateResponse } from "./generated/v2/AttestationGenerateResponse";
 import type { ChatgptAuthTokensRefreshParams as GenChatgptAuthTokensRefreshParams } from "./generated/v2/ChatgptAuthTokensRefreshParams";
@@ -395,6 +397,12 @@ export interface CodexAppServerHandle {
    *  the initial state. */
   startThread(params: CodexThreadStartParams): Promise<{
     threadId: string;
+    providerSessionId: string;
+    gitInfo?: {
+      sha: string | null;
+      branch: string | null;
+      originUrl: string | null;
+    } | null;
     model: string;
     approvalPolicy: CodexApprovalPolicy;
     sandbox: CodexSandboxPolicy;
@@ -408,6 +416,12 @@ export interface CodexAppServerHandle {
     params: { threadId: string } & Partial<CodexThreadStartParams>,
   ): Promise<{
     threadId: string;
+    providerSessionId: string;
+    gitInfo?: {
+      sha: string | null;
+      branch: string | null;
+      originUrl: string | null;
+    } | null;
     model?: string;
     raw: unknown;
   }>;
@@ -1096,18 +1110,14 @@ export async function bootCodexAppServerRuntime(
     child: proc.child,
 
     async startThread(params) {
-      const result = await requestWithRetry<{
-        thread: { id: string };
-        model: string;
-        approvalPolicy: CodexApprovalPolicy;
-        // ThreadStartResponse.sandbox is the legacy SandboxPolicy object
-        // (matches codex-rs/app-server-protocol/v2/thread.rs) even though
-        // the *request* takes a SandboxMode string. We only read the
-        // shape here for diagnostics — passing it through unchanged.
-        sandbox: CodexSandboxPolicy;
-      }>("thread/start", params);
+      const result = await requestWithRetry<GenThreadStartResponse>(
+        "thread/start",
+        params,
+      );
       return {
         threadId: result.thread.id,
+        providerSessionId: result.thread.sessionId,
+        gitInfo: result.thread.gitInfo ?? null,
         model: result.model,
         approvalPolicy: result.approvalPolicy,
         sandbox: result.sandbox,
@@ -1116,12 +1126,14 @@ export async function bootCodexAppServerRuntime(
     },
 
     async resumeThread(params) {
-      const result = await requestWithRetry<{
-        thread: { id: string };
-        model?: string;
-      }>("thread/resume", params);
+      const result = await requestWithRetry<GenThreadResumeResponse>(
+        "thread/resume",
+        params,
+      );
       return {
         threadId: result.thread.id,
+        providerSessionId: result.thread.sessionId,
+        gitInfo: result.thread.gitInfo ?? null,
         ...(typeof result.model === "string" ? { model: result.model } : {}),
         raw: result,
       };

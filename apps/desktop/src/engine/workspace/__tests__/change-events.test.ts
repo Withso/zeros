@@ -7,12 +7,14 @@ import {
 } from "../change-events";
 
 describe("dbChangedKinds", () => {
-  it.each(["chats.upsert", "chats.delete", "chats.bulkUpsert"])(
-    "classifies %s as chat server state",
-    (op) => {
-      expect(dbChangedKinds(op)).toEqual(["chats"]);
-    },
-  );
+  it.each([
+    "chats.upsert",
+    "chats.delete",
+    "chats.bulkUpsert",
+    "chats.clearProviderIdentity",
+  ])("classifies %s as chat server state", (op) => {
+    expect(dbChangedKinds(op)).toEqual(["chats"]);
+  });
 
   it.each([
     "project.upsert",

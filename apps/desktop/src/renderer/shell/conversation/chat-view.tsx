@@ -64,6 +64,11 @@ import {
   takeProvisionalBinding,
   type PriorChatIdentity,
 } from "./auto-bind-chat";
+import {
+  legacyProviderBinding,
+  sameProviderBinding,
+  sameProviderMetadata,
+} from "@zeros/protocol/identities";
 
 export function ChatView({
   chatId,
@@ -178,6 +183,8 @@ function priorIdentityOf(chat: ChatThread): PriorChatIdentity {
   return {
     agentName: chat.agentName,
     sessionId: chat.sessionId,
+    providerBinding: chat.providerBinding,
+    providerMetadata: chat.providerMetadata,
     model: chat.model,
     effort: chat.effort,
     fast: chat.fast,
@@ -258,7 +265,7 @@ function useProvisionalBindingReconcile(chat: ChatThread | null): void {
   const bridgeStatus = useBridgeStatus();
   const chatId = chat?.kind === "chat" ? chat.id : null;
   const boundAgentId = chat?.agentId ?? null;
-  const hasSession = Boolean(chat?.sessionId);
+  const hasSession = Boolean(chat?.providerBinding ?? chat?.sessionId);
 
   // The cache's only routine loader lives in AgentChat, which never mounts
   // while a chat is agentless. On a cold cache (fresh install, new dev data
@@ -342,10 +349,13 @@ function ChatBody({
   // retained transcript is parked. A session created just before a workspace
   // switch must still be linked to its chat even if the chat is never revealed
   // again before application shutdown.
-  const liveSessionId = useSessionsStore((state) => {
+  const liveProviderBinding = useSessionsStore((state) => {
     const slot = state.sessions[chatId];
-    return slot?.durableSessionId ?? slot?.sessionId ?? null;
+    return slot?.providerBinding ?? null;
   });
+  const liveProviderMetadata = useSessionsStore(
+    (state) => state.sessions[chatId]?.providerMetadata ?? null,
+  );
   const chat = useChatById(chatId);
 
   // Serialize the env tuple so the effect only fires on a real
@@ -359,10 +369,9 @@ function ChatBody({
 
   // Initial spawn (idempotent). ensureSession short-circuits if the
   // same (chatId, agentId) pair is already ready. When the chat has a
-  // persisted sessionId (either seeded by "Resume recent thread" or
-  // carried over from a previous app run), we load that session from
-  // disk instead of creating a new one — provider state is a hot
-  // cache, the agent CLI's on-disk transcript is the source of truth.
+  // persisted provider binding (either seeded by "Resume recent thread" or
+  // carried over from a previous app run), we ask the provider to resume it
+  // instead of creating a new one.
   const sessions = useAgentSessions();
   // Optimistic create: render the provisional composer immediately, but do not
   // spawn into the announced path until the exact create lifecycle publishes.
@@ -407,34 +416,60 @@ function ChatBody({
       }
 
       const env = chat ? envForChat(chat, session.initialize) : undefined;
-      const persistedSessionId = chat?.sessionId;
+      const persistedProviderBinding =
+        (chat?.providerBinding?.providerId === agentId
+          ? chat.providerBinding
+          : undefined) ??
+        (chat?.sessionId
+          ? legacyProviderBinding(agentId, chat.sessionId)
+          : undefined);
       // Pass cwd verbatim so the gateway can surface
       // "no project folder bound" as an explicit error instead of silently
       // falling back to engine projectRoot.
-      if (persistedSessionId) {
-        // Tell the engine the prior session id so future prompts resume the
-        // agent's server-side context. On AGENT_ERROR the provider lands in
-        // "failed" — clear sessionId so the next Retry falls into ensureSession
-        // with a fresh id.
+      if (persistedProviderBinding) {
+        // Tell the engine the provider's durable binding; the engine either
+        // re-adopts this conversation's live execution or mints a fresh one.
         void sessions
-          .loadIntoChat(chatId, agentId, persistedSessionId, {
+          .loadIntoChat(chatId, agentId, persistedProviderBinding, {
             agentName,
             cwd,
             env,
           })
-          .then(() => {
-            if (cancelled) return;
-            const after = sessions.getSession(chatId);
-            if (after?.status === "failed") {
-              dispatch({
-                type: "UPDATE_CHAT_SETTINGS",
-                id: chatId,
-                updates: { sessionId: undefined },
-              });
-            }
+          .then((adopted) => {
+            if (cancelled || adopted) return;
+            // A definitive provider "not found" is the only load failure that
+            // invalidates durable identity. Clear all compatibility mirrors
+            // before creating the replacement so the broken handle cannot be
+            // reintroduced by persistence or the next mount.
+            dispatch({
+              type: "UPDATE_CHAT_SETTINGS",
+              id: chatId,
+              updates: {
+                providerBinding: undefined,
+                providerMetadata: undefined,
+                sessionId: undefined,
+              },
+            });
+            void session.ensureSession(agentId, { agentName, cwd, env });
           });
       } else {
-        void session.ensureSession(agentId, { agentName, cwd, env });
+        const hasPriorContext =
+          existing?.hasTranscript === true ||
+          (existing?.messages.length ?? 0) > 0;
+        if (!hasPriorContext) {
+          void session.ensureSession(agentId, { agentName, cwd, env });
+        } else {
+          // Probe by Zeros conversation id first. A renderer reload can lose
+          // its volatile execution route before a newly-learned provider
+          // binding was persisted; the engine can still reattach it. Only a
+          // confirmed miss creates a new execution.
+          void sessions
+            .loadIntoChat(chatId, agentId, null, { agentName, cwd, env })
+            .then((adopted) => {
+              if (cancelled || adopted) return;
+              void session.ensureSession(agentId, { agentName, cwd, env });
+            });
+        }
       }
       envKeyRef.current = envKey;
     })();
@@ -454,21 +489,33 @@ function ChatBody({
     workspaceProvisioning,
   ]);
 
-  // Persist the session id back onto the chat metadata whenever the
-  // provider reports a new one (after newSession, loadSession, or a
-  // forced model-swap respawn). This is what makes the disk link
-  // survive app restarts and future workspace swaps.
+  // Persist only the provider binding. The Zeros execution id stays in the
+  // live session store and is intentionally absent from durable chat state.
   useEffect(() => {
     if (!chat) return;
-    const sid = liveSessionId;
-    if (sid && sid !== chat.sessionId) {
+    const binding = liveProviderBinding;
+    const providerMetadataChanged =
+      liveProviderMetadata !== null &&
+      !sameProviderMetadata(liveProviderMetadata, chat.providerMetadata);
+    if (
+      binding &&
+      (!sameProviderBinding(binding, chat.providerBinding) ||
+        providerMetadataChanged)
+    ) {
       dispatch({
         type: "UPDATE_CHAT_SETTINGS",
         id: chatId,
-        updates: { sessionId: sid },
+        updates: {
+          providerBinding: binding,
+          ...(liveProviderMetadata
+            ? { providerMetadata: liveProviderMetadata }
+            : {}),
+          // Downgrade mirror only. Current code never reads it as a route.
+          sessionId: binding.legacySessionId ?? binding.resumeId,
+        },
       });
     }
-  }, [chatId, liveSessionId, chat, dispatch]);
+  }, [chatId, liveProviderBinding, liveProviderMetadata, chat, dispatch]);
 
   // Respawn when the user changes model/effort — but ONLY for an agent that
   // cannot absorb the change live (see agent/live-config-support.ts).
@@ -484,9 +531,9 @@ function ChatBody({
   // so Claude minted a fresh claudeSessionId (no `--resume`) and Codex a fresh
   // thread, while the renderer kept the transcript on screen — a
   // mid-conversation model change silently gave the agent amnesia and
-  // overwrote the resumable chat.sessionId on the way out. And on a chat with
-  // nothing sent yet the warming→ready flip makes the empty-state line blink
-  // out and back on every pill click.
+  // overwrote the resumable provider binding on the way out. And on a chat
+  // with nothing sent yet the warming→ready flip makes the empty-state line
+  // blink out and back on every pill click.
   //
   // For the agents that DO need it, the rebuild still runs here. For everyone
   // else the safety net is sendPrompt's settings-drift reconcile
@@ -534,9 +581,15 @@ function ChatBody({
     if (session.status !== "failed" && session.status !== "reconnecting")
       return;
     const env = envForChat(chat, session.initialize);
-    const persistedSessionId = chat.sessionId;
-    if (persistedSessionId) {
-      void sessions.loadIntoChat(chatId, agentId, persistedSessionId, {
+    const persistedProviderBinding =
+      (chat.providerBinding?.providerId === agentId
+        ? chat.providerBinding
+        : undefined) ??
+      (chat.sessionId
+        ? legacyProviderBinding(agentId, chat.sessionId)
+        : undefined);
+    if (persistedProviderBinding) {
+      void sessions.loadIntoChat(chatId, agentId, persistedProviderBinding, {
         agentName,
         // Pass cwd verbatim so the
         // gateway can surface "no project folder bound" as an explicit
@@ -546,15 +599,12 @@ function ChatBody({
         env,
       });
     } else {
-      void session.ensureSession(agentId, {
-        agentName,
-        // Pass cwd verbatim so the
-        // gateway can surface "no project folder bound" as an explicit
-        // error instead of silently falling back to engine projectRoot.
-        // The prior `cwd || undefined` collapse hid the bug.
-        cwd,
-        env,
-      });
+      void sessions
+        .loadIntoChat(chatId, agentId, null, { agentName, cwd, env })
+        .then((adopted) => {
+          if (adopted) return;
+          void session.ensureSession(agentId, { agentName, cwd, env });
+        });
     }
     // We deliberately exclude `session` from deps — its identity
     // changes on every state update and would re-fire this loop.

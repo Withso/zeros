@@ -13,6 +13,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { randomUUID } from "node:crypto";
+import { providerBindingForResume } from "@zeros/protocol/identities";
 
 import { AgentFailureError } from "../../types";
 import { SESSION_EXPIRED_KEYWORDS } from "../shared/session-expiry";
@@ -449,7 +450,8 @@ async function loadSdk(): Promise<CursorSdkModule> {
 }
 
 interface Session {
-  zerosSessionId: string; // == SDK agentId
+  /** Zeros-owned live execution route; deliberately not the SDK agent id. */
+  zerosSessionId: string;
   cwd: string;
   apiKey: string;
   modelId: string;
@@ -696,6 +698,7 @@ export class CursorSdkAdapter implements AgentAdapter {
   }
 
   async newSession(opts: {
+    executionId?: string;
     cwd: string;
     env?: Record<string, string>;
     cliBinary?: string;
@@ -735,8 +738,9 @@ export class CursorSdkAdapter implements AgentAdapter {
       throw this.classify(err, "newSession");
     }
 
+    const executionId = opts.executionId ?? randomUUID();
     const session: Session = {
-      zerosSessionId: agent.agentId,
+      zerosSessionId: executionId,
       cwd: opts.cwd,
       apiKey,
       modelId,
@@ -748,11 +752,13 @@ export class CursorSdkAdapter implements AgentAdapter {
       mcpServers: opts.mcpServers,
       appliedAutoReview: autoReviewFor(CURSOR_DEFAULT_MODE),
     };
-    this.sessions.set(agent.agentId, session);
+    this.sessions.set(executionId, session);
 
     return {
       session: {
-        sessionId: agent.agentId,
+        executionId,
+        sessionId: executionId,
+        providerBinding: providerBindingForResume("cursor", agent.agentId),
         modes: {
           currentModeId: CURSOR_DEFAULT_MODE,
           availableModes: CURSOR_SDK_MODES,
@@ -763,13 +769,24 @@ export class CursorSdkAdapter implements AgentAdapter {
   }
 
   async loadSession(opts: {
-    sessionId: string;
+    executionId?: string;
+    providerBinding?: import("@zeros/protocol/identities").ProviderBinding;
+    sessionId?: string;
     cwd: string;
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
   }): Promise<LoadSessionResponse> {
     const apiKey = this.resolveApiKey(opts.env);
+    const executionId = opts.executionId ?? opts.sessionId ?? randomUUID();
+    const providerResumeId = opts.providerBinding?.resumeId ?? opts.sessionId;
+    if (!providerResumeId) {
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        stage: "loadSession",
+        message: "Cursor resume requires a provider agent binding.",
+      });
+    }
     // Discover the account's catalog (cached, once per process) so the model
     // is validated BEFORE create/resume — otherwise a stale id (e.g. the old
     // `composer-2-fast` default, or a persisted pick) throws "Cannot use this
@@ -790,7 +807,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     // prior transcript carrying it).
     let resumedFresh = false;
     try {
-      agent = await sdk.Agent.resume(opts.sessionId, {
+      agent = await sdk.Agent.resume(providerResumeId, {
         apiKey,
         // Bind the resolved model on resume too. `Agent.resume` reconstructs
         // the agent from Cursor's local SQLite store, which may hold NO
@@ -832,7 +849,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       if (failure.failure.kind !== "session-expired") throw failure;
       this.ctx.emit.onAgentStderr(
         AGENT_ID,
-        `[cursor-sdk] resume of ${opts.sessionId} failed (${
+        `[cursor-sdk] resume of ${providerResumeId} failed (${
           err instanceof Error ? err.message : String(err)
         }); starting a fresh agent in ${opts.cwd}.`,
       );
@@ -856,8 +873,8 @@ export class CursorSdkAdapter implements AgentAdapter {
         throw this.classify(createErr, "loadSession");
       }
     }
-    this.sessions.set(opts.sessionId, {
-      zerosSessionId: opts.sessionId,
+    this.sessions.set(executionId, {
+      zerosSessionId: executionId,
       cwd: opts.cwd,
       apiKey,
       modelId,
@@ -870,6 +887,8 @@ export class CursorSdkAdapter implements AgentAdapter {
       appliedAutoReview: autoReviewFor(CURSOR_DEFAULT_MODE),
     });
     return {
+      executionId,
+      providerBinding: providerBindingForResume("cursor", agent.agentId),
       modes: {
         currentModeId: CURSOR_DEFAULT_MODE,
         availableModes: CURSOR_SDK_MODES,
@@ -890,6 +909,10 @@ export class CursorSdkAdapter implements AgentAdapter {
       const sessions = items
         .map((it) => ({
           sessionId: String(it.agentId ?? it.id ?? ""),
+          providerBinding: providerBindingForResume(
+            "cursor",
+            String(it.agentId ?? it.id ?? ""),
+          ),
           cwd: typeof it.cwd === "string" ? it.cwd : (opts.cwd ?? ""),
           title: typeof it.name === "string" ? it.name : undefined,
           updatedAt:
@@ -898,7 +921,7 @@ export class CursorSdkAdapter implements AgentAdapter {
               : undefined,
         }))
         .filter((s) => s.sessionId);
-      return { sessions } as never;
+      return { sessions };
     } catch {
       return { sessions: [] } as never;
     }

@@ -72,6 +72,36 @@ describe("chat snapshot reconciliation", () => {
     expect(result.rowsToPush).toEqual([]);
   });
 
+  it("treats provider bindings and metadata as authoritative persisted fields", () => {
+    const local = {
+      ...chat("a", 2),
+      providerBinding: {
+        version: 1 as const,
+        providerId: "codex",
+        kind: "native" as const,
+        resumeId: "thread-old",
+      },
+    };
+    const remote = {
+      ...chat("a", 2),
+      providerBinding: {
+        version: 1 as const,
+        providerId: "codex",
+        kind: "native" as const,
+        resumeId: "thread-new",
+      },
+      providerMetadata: {
+        version: 1 as const,
+        git: { sha: "abc", branch: "main", originUrl: null },
+      },
+    };
+
+    const result = reconcileChatSnapshot([local], [remote], []);
+
+    expect(result.chats).toEqual([remote]);
+    expect(result.rowsToPush).toEqual([]);
+  });
+
   it("drops tombstoned cache rows but favors a recreated live row", () => {
     const recreated = chat("live", 5);
     const result = reconcileChatSnapshot(

@@ -10,7 +10,8 @@ This integration is intentionally split into two layers:
 - The Codex harness owns process startup, JSON-RPC, initialization, generated
   method/parameter types, Codex host requests, thread/turn transport, and
   translation into Zeros' canonical agent events.
-- Zeros owns live session identity, durable chat identity, persistence,
+- Zeros owns live execution identity, durable conversation identity,
+  [provider-binding persistence](agent-identity-model.md),
   lifecycle projection, browser/tool implementations, skills, plugins, apps,
   MCP configuration, approval UI, and every renderer-facing capability.
 
@@ -117,10 +118,11 @@ must not be claimed from macOS or Linux CI.
 
 ## Explicit non-goals
 
-This harness change does not add or change:
+The Codex harness itself does not define or own:
 
-- Zeros chat/session identifiers, Codex native thread persistence, database
-  migrations, fork/archive/rename/pin synchronization, or lifecycle projection;
+- Zeros conversation/execution identifiers, provider-binding persistence,
+  database migrations, fork/archive/rename/pin synchronization, or lifecycle
+  projection;
 - renderer capability RPC, Codex settings panels, marketplace/plugin/app UI,
   or SDK jobs;
 - browser automation, browser leases, native views, CDP, or MCP browser

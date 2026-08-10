@@ -31,6 +31,10 @@ import type {
   WorkflowProgress,
 } from "../../platform/bridge/agent-events";
 import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
+import type {
+  ProviderBinding,
+  ProviderMetadata,
+} from "@zeros/protocol/identities";
 
 // The agent message model + the pure SessionNotification→message folder moved to
 // @zeros/protocol so the engine can run the same coalescer it does. Re-
@@ -101,12 +105,14 @@ export interface AgentUsage {
 export interface AgentSessionState {
   agentId: string | null;
   agentName: string | null;
-  /** Provider-native id persisted onto the ChatThread for the next app launch.
-   * Usually identical to `sessionId`; differs temporarily when a degraded
-   * resume keeps the requested id as this engine's live routing alias but the
-   * adapter created a replacement provider session. */
-  durableSessionId: string | null;
+  /** Canonical Zeros-owned ephemeral route. */
+  executionId: string | null;
+  /** @deprecated Compatibility alias for executionId. */
   sessionId: string | null;
+  /** Durable provider resume identity; persisted on ChatThread, never used as
+   * the live routing/cache key. */
+  providerBinding: ProviderBinding | null;
+  providerMetadata: ProviderMetadata | null;
   /** The chat's folder, captured
    *  on first ensureSession + restored on rebuilds. Without this, the
    *  silent-retry path called ensureSession({ force:true })

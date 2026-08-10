@@ -537,7 +537,9 @@ describe("Cursor modes — Ask / Auto / Full access + autoReview rebuild", () =>
     await adapter.setMode({ sessionId: id, modeId: "agent" });
     await adapter.prompt({ sessionId: id, prompt: TEXT });
     expect(resumeSpy).toHaveBeenCalledTimes(1);
-    expect(resumeSpy.mock.calls[0][0]).toBe(id); // same session id — history preserved
+    // Rebuild resumes Cursor's provider-owned agent id, never the distinct
+    // Zeros execution route used by prompt/cancel/cache dispatch.
+    expect(resumeSpy.mock.calls[0][0]).toBe("agent-xyz");
     expect(resumeSpy.mock.calls[0][1].local).not.toHaveProperty("autoReview");
 
     // Prompt again, same mode → no further rebuild.
@@ -598,6 +600,34 @@ describe("Cursor modes — Ask / Auto / Full access + autoReview rebuild", () =>
     });
     await adapter.prompt({ sessionId: "prior-agent-id", prompt: TEXT });
     expect(resumeSpy.mock.calls[0][0]).toBe("agent-xyz");
+  });
+
+  it("routes a resumed Cursor agent through a distinct Zeros execution id", async () => {
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const loaded = await adapter.loadSession({
+      executionId: "zeros-execution-1",
+      providerBinding: {
+        version: 1,
+        providerId: "cursor",
+        kind: "native",
+        resumeId: "cursor-agent-previous",
+      },
+      cwd: "/tmp/proj",
+      env: { CURSOR_API_KEY: "key_test" },
+    });
+
+    expect(resumeSpy).toHaveBeenCalledWith(
+      "cursor-agent-previous",
+      expect.any(Object),
+    );
+    expect(loaded.providerBinding).toEqual({
+      version: 1,
+      providerId: "cursor",
+      kind: "native",
+      resumeId: "agent-xyz",
+    });
+    await adapter.prompt({ sessionId: "zeros-execution-1", prompt: TEXT });
+    expect(sendSpy).toHaveBeenCalled();
   });
 });
 

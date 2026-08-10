@@ -92,6 +92,7 @@ import {
 import { resolveRepoScript, resolveRunActions } from "../settings/repo-scripts";
 import { isRunSessionId, runActionOneShot } from "@zeros/protocol/run-actions";
 import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
+import { sameProviderBinding } from "@zeros/protocol/identities";
 import type { DesignOperation } from "@zeros/design-core";
 import type {
   RunActionStatus,
@@ -221,6 +222,7 @@ import {
   upsertChat,
   deleteChat,
   bulkUpsertChats,
+  clearChatProviderIdentity,
   coerceChatRow,
   setChatWorkspaceResolver,
   type ChatRow,
@@ -662,7 +664,9 @@ const REMOTE_READABLE = new Set<string>([
  *  They ARE part of the remote allowlist (deny-by-default), so an unknown
  *  mutation op is still refused. Enumerated 1:1 from the non-read helpers in
  *  apps/desktop/src/renderer/platform/bridge/workspace-bridge.ts (chats.* upserts/deletes + messages.*
- *  import/clear/truncate). Local desktop clients bypass the gate entirely. */
+ *  import/clear/truncate), except chats.clearProviderIdentity: that removes a
+ *  host-learned provider capability and is deliberately local-only. Local
+ *  desktop clients bypass the gate entirely. */
 const REMOTE_METADATA_OPS = new Set<string>([
   "chats.upsert",
   "chats.delete",
@@ -696,21 +700,58 @@ const REMOTE_WRITE_DENYLIST = [
 ] as const;
 
 /** A remote client may freely edit its OWN chat metadata (title, pin, model,
- *  effort…), but two fields are host-local capabilities it must not set from an
- *  untrusted wire object:
+ *  effort…), but some fields are host-local capabilities or identity learned
+ *  by the host and must survive an incomplete untrusted wire object:
  *    • `additionalDirectories` widens the host Claude agent's sanctioned
  *      filesystem scope (→ ZEROS_ADDITIONAL_DIRS → SDK `Options.additionalDirectories`
  *      on the next respawn). Letting a paired-but-untrusted device upsert arbitrary
  *      absolute paths would expand local file access with no host prompt — the same
  *      class of leak the `RESOLVE_AGENT_BINARY` handler refuses for remote clients.
  *    • `fast` flips run mode (cost/behavior) and has no remote picker.
+ *    • `providerBinding` / `providerMetadata` attach the chat to the provider's
+ *      durable conversation. Protocol-v8 peers predating these fields omit them;
+ *      their routine sync must not detach every host conversation.
  *  On a remote upsert we keep whatever the host already persisted (or the safe
- *  default for a brand-new chat), never the value off the wire. Local desktop
- *  writes bypass this entirely. See the remote-client trust boundary. */
+ *  default for a brand-new chat) for capabilities. Provider identity is
+ *  slightly different: the engine can learn it from a stream immediately
+ *  before the local renderer archives/unmounts, so an incomplete SAME-agent
+ *  write from either client must preserve the newer DB value. Changing agent
+ *  is still the explicit clear boundary. See the remote-client trust boundary. */
+function preserveProviderIdentity(
+  c: ChatRow,
+  existing: ChatRow | null = getChat(c.id),
+): ChatRow {
+  const incomingProviderBinding =
+    c.providerBinding?.providerId === c.agentId ? c.providerBinding : null;
+  const existingProviderBinding =
+    existing?.providerBinding?.providerId === c.agentId
+      ? existing.providerBinding
+      : null;
+  // Once SQLite has a same-agent binding it is the host-authoritative value:
+  // the engine writes provider refinements there before notifying renderers,
+  // so either a missing OR a different incoming value may be a stale surface
+  // racing that notification. Replacing it requires the explicit guarded
+  // clear operation (or an agent switch), after which a new binding can attach.
+  const providerBinding =
+    existingProviderBinding ?? incomingProviderBinding ?? null;
+  const providerMetadata = existingProviderBinding
+    ? sameProviderBinding(existingProviderBinding, incomingProviderBinding)
+      ? (c.providerMetadata ?? existing?.providerMetadata ?? null)
+      : (existing?.providerMetadata ?? null)
+    : incomingProviderBinding
+      ? (c.providerMetadata ?? null)
+      : null;
+  return {
+    ...c,
+    providerBinding,
+    providerMetadata: providerBinding ? providerMetadata : null,
+  };
+}
+
 function preserveHostOnlyFields(c: ChatRow): ChatRow {
   const existing = getChat(c.id);
   return {
-    ...c,
+    ...preserveProviderIdentity(c, existing),
     additionalDirectories: existing?.additionalDirectories ?? [],
     fast: existing?.fast ?? false,
   };
@@ -3439,7 +3480,11 @@ export class WorkspaceService {
       }
       case "chats.upsert": {
         const c = coerceChatRow(params.chat);
-        if (c) upsertChat(remote ? preserveHostOnlyFields(c) : c);
+        if (c) {
+          upsertChat(
+            remote ? preserveHostOnlyFields(c) : preserveProviderIdentity(c),
+          );
+        }
         return { ok: true };
       }
       case "chats.delete": {
@@ -3453,12 +3498,22 @@ export class WorkspaceService {
         deleteChat(id);
         return { ok: true };
       }
+      case "chats.clearProviderIdentity": {
+        const chatId = reqStr(params, "chatId");
+        const agentId = reqStr(params, "agentId");
+        const resumeId = reqStr(params, "resumeId");
+        return {
+          ok: clearChatProviderIdentity(chatId, agentId, resumeId),
+        };
+      }
       case "chats.bulkUpsert": {
         const raw = Array.isArray(params.chats) ? params.chats : [];
         const rows = raw
           .map(coerceChatRow)
           .filter((c): c is ChatRow => c !== null)
-          .map((c) => (remote ? preserveHostOnlyFields(c) : c));
+          .map((c) =>
+            remote ? preserveHostOnlyFields(c) : preserveProviderIdentity(c),
+          );
         bulkUpsertChats(rows);
         return { ok: true };
       }

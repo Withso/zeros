@@ -16,6 +16,10 @@
 import { nativeInvoke } from "../../platform/runtime";
 import { notifyContextGraphChanged } from "../../platform/context-graph";
 import type { AgentMessage } from "./use-agent-session";
+import type {
+  ProviderBinding,
+  ProviderMetadata,
+} from "@zeros/protocol/identities";
 import {
   isAgentAttachmentDiskPath,
   readAgentAttachmentFile,
@@ -27,6 +31,7 @@ import {
   bridgeChatList,
   bridgeChatSnapshot,
   bridgeChatDelete,
+  bridgeChatClearProviderIdentity,
   bridgeChatBulkUpsert,
   bridgeMessageWindow,
   bridgeMessageWindowOlder,
@@ -446,7 +451,11 @@ export interface ChatRowWire {
   title: string;
   createdAt: number;
   updatedAt: number;
+  /** Read/downgrade compatibility only. Live routing uses executionId and
+   * durable resume uses providerBinding. */
   sessionId: string | null;
+  providerBinding?: ProviderBinding | null;
+  providerMetadata?: ProviderMetadata | null;
   pinned: boolean;
   archived: boolean;
   sourceChatId: string | null;
@@ -466,6 +475,17 @@ export async function dbChatSnapshot(): Promise<ChatSnapshotWire> {
 
 export async function dbDeleteChat(id: string): Promise<void> {
   await bridgeChatDelete(requireBridge("delete the chat"), id);
+}
+
+export async function dbClearChatProviderIdentity(input: {
+  chatId: string;
+  agentId: string;
+  resumeId: string;
+}): Promise<boolean> {
+  return bridgeChatClearProviderIdentity(
+    requireBridge("clear a stale chat provider binding"),
+    input,
+  );
 }
 
 export async function dbReplaceAllChats(chats: ChatRowWire[]): Promise<void> {

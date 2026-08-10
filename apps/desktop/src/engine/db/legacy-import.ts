@@ -24,6 +24,7 @@ import { openSqlite } from "./sqlite";
 import { openZerosDb } from "./index";
 import { upsertChat, type ChatRow } from "./chats";
 import { upsertChatMessagesBulk, type PersistedMessage } from "./messages";
+import { legacyProviderBinding } from "@zeros/protocol/identities";
 
 const FLAG_KEY = "legacy-agent-history-migrated";
 
@@ -95,6 +96,9 @@ function toChatRow(r: LegacyChatRow): ChatRow {
     createdAt: r.created_at ?? 0,
     updatedAt: r.updated_at ?? 0,
     sessionId: r.session_id,
+    ...(r.agent_id && r.session_id
+      ? { providerBinding: legacyProviderBinding(r.agent_id, r.session_id) }
+      : {}),
     pinned: r.pinned === 1,
     archived: r.archived === 1,
     sourceChatId: r.source_chat_id,

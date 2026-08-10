@@ -23,7 +23,14 @@
 
 // ── Identifiers ─────────────────────────────────────────────
 
-export type SessionId = string;
+import type {
+  ExecutionId,
+  ProviderBinding,
+  ProviderMetadata,
+} from "./identities";
+
+/** @deprecated Agent "session" on the Zeros wire is an execution route. */
+export type SessionId = ExecutionId;
 export type ToolCallId = string;
 export type SessionModeId = string;
 export type SessionModelId = string;
@@ -393,19 +400,15 @@ export type SessionUpdate =
   | ErrorNoticeUpdate
   | UsageUpdateNotification
   | SessionInfoUpdateNotification
+  | ProviderBindingUpdateNotification
   | TurnStateUpdateNotification;
 
 /** Engine-authored lifecycle notification for a provider turn. Unlike the
  * AGENT_PROMPT RPC response, this survives renderer reload/re-adoption because
  * it is routed as a session-scoped push to the current client.
  *
- * Purely additive and wire-compatible in both directions, so it deliberately
- * does NOT bump PROTOCOL_VERSION (same reasoning as PTY_LIST_RESULT's
- * `processPids`): applyUpdate ignores an unrecognised `sessionUpdate`, so an old
- * client simply keeps its RPC-response-only behaviour, and a new client against
- * an older engine sees no `promptActive` on AGENT_SESSION_LOADED and resolves to
- * `ready` exactly as it does today. Bumping would strand a remote peer
- * against a desktop engine that has not shipped yet. */
+ * The update remains additive for older clients; the identity model also
+ * standardizes the enclosing execution route without a protocol bump. */
 export interface TurnStateUpdateNotification {
   sessionUpdate: "turn_state";
   /** Opening user-message id; identical to the durable turn-row key. */
@@ -565,9 +568,22 @@ export interface SessionInfoUpdateNotification {
   updatedAt?: string;
 }
 
+/** The adapter learned or replaced its durable native resume identity. This is
+ * conversation metadata, not an execution-route change. Claude emits it after
+ * the SDK's init frame reveals session_id; degraded resumes may emit a native
+ * replacement too. */
+export interface ProviderBindingUpdateNotification {
+  sessionUpdate: "provider_binding_update";
+  providerBinding: ProviderBinding;
+  providerMetadata?: ProviderMetadata;
+}
+
 /** Top-level notification carried by AGENT_SESSION_UPDATE bridge
  *  messages. Maps `sessionId` to the session state it mutates. */
 export interface SessionNotification {
+  /** Canonical Zeros-owned live route. */
+  executionId?: ExecutionId;
+  /** @deprecated Compatibility alias for executionId. */
   sessionId: SessionId;
   update: SessionUpdate;
 }
@@ -780,6 +796,7 @@ export interface PromptResponse {
 
 export interface SessionInfo {
   sessionId: SessionId;
+  providerBinding?: ProviderBinding;
   cwd: string;
   title?: string;
   updatedAt?: string;
@@ -787,12 +804,20 @@ export interface SessionInfo {
 }
 
 export interface NewSessionResponse {
+  /** Canonical Zeros-owned live route, never persisted as provider identity. */
+  executionId: ExecutionId;
+  /** @deprecated Compatibility alias for executionId. */
   sessionId: SessionId;
+  providerBinding?: ProviderBinding;
+  providerMetadata?: ProviderMetadata;
   modes?: SessionModeState;
   models?: SessionModelState;
 }
 
 export interface LoadSessionResponse {
+  executionId?: ExecutionId;
+  providerBinding?: ProviderBinding;
+  providerMetadata?: ProviderMetadata;
   modes?: SessionModeState;
   models?: SessionModelState;
   /** The adapter could NOT resume a prior transcript and started a FRESH
@@ -803,10 +828,9 @@ export interface LoadSessionResponse {
    *  it must be re-injected on the next prompt). Engine-internal; the renderer
    *  ignores it. */
   resumedFresh?: boolean;
-  /** A degraded resume created a new provider-native session id. The current
-   * engine may continue routing through the requested id as an alias, but the
-   * renderer persists this replacement for the next app restart so it does not
-   * repeatedly attempt the permanently stale id. */
+  /** Protocol-v8 downgrade compatibility: a degraded resume created a new
+   * provider-native locator. Identity-aware renderers persist providerBinding;
+   * older clients still read this field to avoid retrying the stale locator. */
   replacementSessionId?: SessionId;
 }
 

@@ -32,7 +32,17 @@ function applyUpTo(db: Database.Database, maxVersion: number): void {
     "INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
   );
   for (const m of MIGRATIONS.filter((m) => m.version <= maxVersion)) {
-    db.exec(m.up);
+    // v22 is a conditional repair: the final v21 already has payload_json,
+    // while the draft v21 does not. Mirror runMigrations so this helper can
+    // safely construct any later released schema.
+    const hasPayload =
+      m.version === 22 &&
+      (
+        db.prepare("PRAGMA table_info(workspace_lifecycle_journal)").all() as {
+          name: string;
+        }[]
+      ).some((column) => column.name === "payload_json");
+    if (!hasPayload) db.exec(m.up);
     mark.run(m.version, m.name);
   }
 }
@@ -101,6 +111,12 @@ describe("Zeros DB — migration ladder data safety (forward-only)", () => {
         notnull: 1,
         dflt_value: "'code'",
       });
+      expect(
+        chatColumns.some((column) => column.name === "provider_binding"),
+      ).toBe(true);
+      expect(
+        chatColumns.some((column) => column.name === "provider_metadata"),
+      ).toBe(true);
 
       // Idempotent: a second run on the same DB applies nothing and never throws
       // (re-applying a migration's CREATE/ALTER would throw — proves the
@@ -287,6 +303,147 @@ describe("Zeros DB — migration ladder data safety (forward-only)", () => {
         ).n,
       ).toBe(1);
       expect(tables.has("workspaces")).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("migration 30 repairs draft v28/v29 native columns and preserves their Codex identity", () => {
+    const db = new Database(":memory:");
+    try {
+      applyUpTo(db, 27);
+      db.exec(`
+        ALTER TABLE chats ADD COLUMN native_session_id TEXT;
+        ALTER TABLE chats ADD COLUMN native_git_info TEXT;
+        INSERT INTO schema_migrations (version, name)
+          VALUES (28, 'chats.native_session_id');
+        INSERT INTO schema_migrations (version, name)
+          VALUES (29, 'chats.native_git_info');
+        INSERT INTO chats (
+          id, agent_id, session_id, native_session_id, native_git_info, title
+        ) VALUES (
+          'chat-codex', 'codex', 'old-live-execution', 'codex-thread-1',
+          '{"sha":"abc","branch":"main","originUrl":"https://example.test/repo"}',
+          'Keep me'
+        );
+      `);
+
+      expect(() => runMigrations(db)).not.toThrow();
+
+      const row = db
+        .prepare(
+          `SELECT provider_binding, provider_metadata, title
+             FROM chats WHERE id = 'chat-codex'`,
+        )
+        .get() as {
+        provider_binding: string;
+        provider_metadata: string;
+        title: string;
+      };
+      expect(JSON.parse(row.provider_binding)).toEqual({
+        version: 1,
+        providerId: "codex",
+        kind: "native",
+        resumeId: "codex-thread-1",
+        legacySessionId: "old-live-execution",
+      });
+      expect(JSON.parse(row.provider_metadata)).toEqual({
+        version: 1,
+        git: {
+          sha: "abc",
+          branch: "main",
+          originUrl: "https://example.test/repo",
+        },
+      });
+      expect(row.title).toBe("Keep me");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("repairs a database that stopped after only draft v28 before final v29 runs", () => {
+    const db = new Database(":memory:");
+    try {
+      applyUpTo(db, 27);
+      db.exec(`
+        ALTER TABLE chats ADD COLUMN native_session_id TEXT;
+        INSERT INTO schema_migrations (version, name)
+          VALUES (28, 'chats.native_session_id');
+        INSERT INTO chats (
+          id, agent_id, session_id, native_session_id, title
+        ) VALUES (
+          'chat-codex', 'codex', 'old-execution', 'codex-thread-partial',
+          'Partial draft'
+        );
+      `);
+
+      expect(() => runMigrations(db)).not.toThrow();
+      const row = db
+        .prepare(
+          `SELECT provider_binding, provider_metadata
+             FROM chats WHERE id = 'chat-codex'`,
+        )
+        .get() as {
+        provider_binding: string;
+        provider_metadata: string | null;
+      };
+      expect(JSON.parse(row.provider_binding)).toEqual({
+        version: 1,
+        providerId: "codex",
+        kind: "native",
+        resumeId: "codex-thread-partial",
+        legacySessionId: "old-execution",
+      });
+      expect(row.provider_metadata).toBeNull();
+      expect(appliedVersions(db).at(-1)).toBe(latestSchemaVersion());
+    } finally {
+      db.close();
+    }
+  });
+
+  it("migration 29 backfills legacy mainline chat locators without treating Claude executions as native ids", () => {
+    const db = new Database(":memory:");
+    try {
+      applyUpTo(db, 27);
+      db.exec(`
+        INSERT INTO chats (id, agent_id, session_id, title) VALUES
+          ('chat-cursor', 'cursor', 'cursor-agent-1', 'Cursor'),
+          ('chat-claude', 'claude', 'old-claude-execution', 'Claude'),
+          ('chat-unbound', NULL, 'ambiguous-locator', 'Unbound');
+      `);
+
+      runMigrations(db);
+      const rows = db
+        .prepare(
+          `SELECT id, provider_binding FROM chats
+            WHERE id IN ('chat-cursor', 'chat-claude') ORDER BY id`,
+        )
+        .all() as Array<{ id: string; provider_binding: string }>;
+      const bindings = new Map(
+        rows.map((row) => [row.id, JSON.parse(row.provider_binding)]),
+      );
+      expect(bindings.get("chat-cursor")).toEqual({
+        version: 1,
+        providerId: "cursor",
+        kind: "native",
+        resumeId: "cursor-agent-1",
+      });
+      expect(bindings.get("chat-claude")).toEqual({
+        version: 1,
+        providerId: "claude",
+        kind: "legacy",
+        resumeId: "old-claude-execution",
+        legacySessionId: "old-claude-execution",
+      });
+      expect(
+        (
+          db
+            .prepare(
+              "SELECT provider_binding FROM chats WHERE id = 'chat-unbound'",
+            )
+            .get() as { provider_binding: string | null }
+        ).provider_binding,
+      ).toBeNull();
     } finally {
       db.close();
     }

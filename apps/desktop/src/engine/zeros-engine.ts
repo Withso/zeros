@@ -126,6 +126,7 @@ import type {
   QuestionRequest,
   ContentBlock,
   LoadSessionResponse,
+  NewSessionResponse,
   PromptResponse,
   StopReason,
   TurnUsage,
@@ -139,6 +140,13 @@ import {
   PTY_AGENT_AUTH_CWD,
   type AgentPromptBubble,
 } from "@zeros/protocol/messages";
+import {
+  coerceProviderBinding,
+  legacyProviderBinding,
+  sameProviderBinding,
+  type ProviderBinding,
+  type ProviderMetadata,
+} from "@zeros/protocol/identities";
 import { upsertChatMessagesBulk } from "./db/messages";
 import {
   startTurn as startTurnRow,
@@ -147,7 +155,12 @@ import {
   clearTurnSnapshots,
   type TurnFile,
 } from "./db/turns";
-import { getChatLocation } from "./db/chats";
+import {
+  clearChatProviderIdentity,
+  getChat,
+  getChatLocation,
+  updateChatProviderIdentity,
+} from "./db/chats";
 import {
   authoredPathsFromMessages,
   deleteSnapshotRefs,
@@ -249,6 +262,21 @@ function durablePromptId(raw: unknown, fallback: string): string {
 }
 
 const VERSION = "0.0.5";
+
+/** Once an execution exists, its engine-owned route selects the adapter. The
+ * wire's agentId remains for v8 compatibility and diagnostics, but a stale
+ * renderer label must not rebind an execution to another provider. */
+const EXECUTION_ROUTED_AGENT_MESSAGES = new Set([
+  "AGENT_PROMPT",
+  "AGENT_CANCEL",
+  "AGENT_STOP_BACKGROUND_TASK",
+  "AGENT_STEER",
+  "AGENT_CLOSE_SESSION",
+  "AGENT_SET_MODE",
+  "AGENT_SET_MODEL",
+  "AGENT_COMPACT",
+  "AGENT_UPDATE_CONFIG",
+]);
 
 /** Master switch for the Zeros design surface (CSS selector index, design MCP,
  *  canvas element-picker, apply-change). Currently OFF — the surface is being
@@ -431,6 +459,23 @@ export class ZerosEngine {
    *  LIVES (survives a client reload so persistence continues); cleared on
    *  explicit AGENT_CLOSE_SESSION. */
   private readonly sessionChat = new Map<string, string>();
+  /** Durable Zeros conversation → current live execution. Renderer reloads
+   * re-adopt through this map without persisting an ephemeral execution id. */
+  private readonly conversationExecution = new Map<string, string>();
+  /** Session-scoped provider exits that arrived while a prompt was still
+   * settling. Keep their owner/chat/workspace tags until the terminal event is
+   * routed and persisted, but never expose them as live executions. */
+  private readonly exitedAgentExecutions = new Set<string>();
+  /** Latest provider-bind intent per Zeros conversation. A tab close removes
+   * the token, and a newer create/load replaces it, so an older adapter result
+   * can be disposed instead of publishing an orphan execution after the user's
+   * lifecycle intent has already changed. Tokens are process-monotonic. */
+  private conversationBindSerial = 0;
+  private readonly conversationBindTokens = new Map<string, number>();
+  /** Conversation closes are cancellation+dispose transactions. A rapid
+   * History restore waits for the exact close already in progress before it
+   * asks any provider to resume the durable binding. */
+  private readonly conversationCloseFlights = new Map<string, Promise<void>>();
   /** Agent sessionId → its workspaceId. Lets the engine withhold a session in a
    *  remote-restricted workspace from relay devices: its stream +
    *  permission prompts go to LOCAL clients only, and a relay client may not act
@@ -799,12 +844,20 @@ export class ZerosEngine {
         );
         for (const { sessionId, ended } of endedAgents) {
           if (!ended) continue;
+          const conversationId = this.sessionChat.get(sessionId);
           this.router.clearOwner(sessionId);
           this.sessionAgent.delete(sessionId);
           this.sessionMessages.delete(sessionId);
           this.sessionLoadResponses.delete(sessionId);
+          this.exitedAgentExecutions.delete(sessionId);
           this.activePromptContexts.delete(sessionId);
           this.clearPendingAgentInteractions(sessionId);
+          if (
+            conversationId &&
+            this.conversationExecution.get(conversationId) === sessionId
+          ) {
+            this.conversationExecution.delete(conversationId);
+          }
         }
         if (endedAgents.some(({ ended }) => !ended)) {
           throw new GitError({
@@ -1028,14 +1081,45 @@ export class ZerosEngine {
           agentId: string,
           notification: SessionNotification,
         ) => {
+          if (
+            notification.executionId &&
+            notification.executionId !== notification.sessionId
+          ) {
+            console.warn(
+              `[agents] ${agentId} emitted mismatched execution routes; update dropped`,
+            );
+            return;
+          }
+          if (
+            notification.update.sessionUpdate === "provider_binding_update" &&
+            notification.update.providerBinding.providerId !== agentId
+          ) {
+            console.warn(
+              `[agents] ${agentId} emitted another provider's binding; update dropped`,
+            );
+            return;
+          }
           // Route the stream to the client that owns this session — not every
           // device. (Falls back to broadcast for an unowned session.)
-          const sessionId = notification.sessionId;
-          this.touchActivePrompt(sessionId);
+          const executionId =
+            notification.executionId ?? notification.sessionId;
+          const executionAgentId = this.sessionAgent.get(executionId);
+          if (executionAgentId && executionAgentId !== agentId) {
+            console.warn(
+              `[agents] ${agentId} emitted an update for ${executionAgentId}'s execution; update dropped`,
+            );
+            return;
+          }
+          const normalizedNotification = {
+            ...notification,
+            executionId,
+            sessionId: executionId,
+          };
+          this.touchActivePrompt(executionId);
           if (notification.update.sessionUpdate === "current_mode_update") {
-            const cached = this.sessionLoadResponses.get(sessionId);
+            const cached = this.sessionLoadResponses.get(executionId);
             if (cached?.modes) {
-              this.sessionLoadResponses.set(sessionId, {
+              this.sessionLoadResponses.set(executionId, {
                 ...cached,
                 modes: {
                   ...cached.modes,
@@ -1044,25 +1128,42 @@ export class ZerosEngine {
               });
             }
           }
+          if (notification.update.sessionUpdate === "provider_binding_update") {
+            const cached = this.sessionLoadResponses.get(executionId) ?? {};
+            this.sessionLoadResponses.set(executionId, {
+              ...cached,
+              providerBinding: notification.update.providerBinding,
+              ...(notification.update.providerMetadata
+                ? { providerMetadata: notification.update.providerMetadata }
+                : {}),
+            });
+            this.persistProviderIdentityForChat(
+              this.sessionChat.get(executionId),
+              agentId,
+              notification.update.providerBinding,
+              notification.update.providerMetadata,
+            );
+          }
           this.routeSessionScoped(
-            sessionId,
+            executionId,
             createMessage({
               type: "AGENT_SESSION_UPDATE",
               source: "engine",
               agentId,
-              notification: notification as never,
+              executionId,
+              notification: normalizedNotification as never,
               // Engine-authoritative routing: stamp the chat this session is
               // bound to so the renderer never drops an update on a stale
               // sessionId index (force-respawn / create-load / an adapter that
               // emits before the renderer has stored the sessionId). Same map
               // persistSessionUpdate uses below.
-              ...(this.sessionChat.get(sessionId)
-                ? { chatId: this.sessionChat.get(sessionId) }
+              ...(this.sessionChat.get(executionId)
+                ? { chatId: this.sessionChat.get(executionId) }
                 : {}),
             }),
           );
           // Persist the transcript as it streams; the engine is the source.
-          this.persistSessionUpdate(sessionId, notification);
+          this.persistSessionUpdate(executionId, normalizedNotification);
         },
         onPermissionRequest: (
           agentId: string,
@@ -1110,6 +1211,7 @@ export class ZerosEngine {
               source: "engine",
               agentId,
               permissionId,
+              executionId: sessionId,
               sessionId,
             }),
           );
@@ -1174,16 +1276,41 @@ export class ZerosEngine {
           signal: string | null,
           sessionId?: string | null,
         ) => {
-          this.broadcast(
-            createMessage({
-              type: "AGENT_AGENT_EXITED",
-              source: "engine",
-              agentId,
-              sessionId: sessionId ?? null,
-              code,
-              signal: signal ? String(signal) : null,
-            }),
-          );
+          const exited = createMessage({
+            type: "AGENT_AGENT_EXITED",
+            source: "engine",
+            agentId,
+            ...(sessionId ? { executionId: sessionId } : {}),
+            sessionId: sessionId ?? null,
+            code,
+            signal: signal ? String(signal) : null,
+          });
+          if (!sessionId) {
+            this.broadcast(exited);
+            return;
+          }
+          // Route while ownership/workspace tags still exist, then retire the
+          // dead execution. Keeping an idle provider exit in these maps makes a
+          // later chat reopen "re-adopt" a route the gateway can no longer run.
+          this.routeSessionScoped(sessionId, exited);
+          const promptStillSettling = this.activePromptContexts.has(sessionId);
+          if (promptStillSettling) {
+            this.exitedAgentExecutions.add(sessionId);
+            this.sessionAgent.delete(sessionId);
+            const conversationId = this.sessionChat.get(sessionId);
+            if (
+              conversationId &&
+              this.conversationExecution.get(conversationId) === sessionId
+            ) {
+              this.conversationExecution.delete(conversationId);
+            }
+            void this.agents.endSession(agentId, sessionId).catch(() => {});
+            return;
+          }
+          this.clearAgentExecutionRoute(sessionId, {
+            preservePrompt: false,
+          });
+          void this.agents.endSession(agentId, sessionId).catch(() => {});
         },
       },
     };
@@ -1903,6 +2030,147 @@ export class ZerosEngine {
     return tracked;
   }
 
+  private beginConversationBind(
+    conversationId: string | undefined,
+  ): number | null {
+    if (!conversationId) return null;
+    const token = ++this.conversationBindSerial;
+    this.conversationBindTokens.set(conversationId, token);
+    return token;
+  }
+
+  /** Release a completed/failed bind token without deleting a newer bind or a
+   * close invalidation that superseded it while the adapter was awaiting. */
+  private finishConversationBind(
+    conversationId: string | undefined,
+    token: number | null,
+  ): void {
+    if (
+      conversationId &&
+      token !== null &&
+      this.conversationBindTokens.get(conversationId) === token
+    ) {
+      this.conversationBindTokens.delete(conversationId);
+    }
+  }
+
+  /** Register the route fields needed by stream routing and persistence. For a
+   * resume this runs before adapter.loadSession, closing the window where an
+   * adapter update had no owner/chat/workspace and therefore broadcast. */
+  private registerAgentExecutionRoute(input: {
+    executionId: string;
+    agentId: string;
+    ownerId: string;
+    chatId?: string;
+    workspaceId?: string | null;
+  }): void {
+    this.router.setOwner(input.executionId, input.ownerId);
+    this.sessionAgent.set(input.executionId, input.agentId);
+    if (input.chatId) {
+      this.sessionChat.set(input.executionId, input.chatId);
+      this.conversationExecution.set(input.chatId, input.executionId);
+    }
+    if (input.workspaceId) {
+      this.sessionWorkspace.set(input.executionId, input.workspaceId);
+    }
+  }
+
+  /** Remove all engine-owned routing for an execution. A provider process exit
+   * can race the prompt promise's own finalizer, so that path may preserve the
+   * turn record until its existing settle logic completes. */
+  private clearAgentExecutionRoute(
+    executionId: string,
+    opts: { preservePrompt?: boolean } = {},
+  ): void {
+    const conversationId = this.sessionChat.get(executionId);
+    this.router.clearOwner(executionId);
+    this.sessionAgent.delete(executionId);
+    this.sessionChat.delete(executionId);
+    this.sessionWorkspace.delete(executionId);
+    this.sessionMessages.delete(executionId);
+    this.sessionLoadResponses.delete(executionId);
+    this.exitedAgentExecutions.delete(executionId);
+    this.clearPendingAgentInteractions(executionId);
+    if (!opts.preservePrompt) {
+      this.activePromptContexts.delete(executionId);
+      this.promptSessions.delete(executionId);
+    }
+    if (
+      conversationId &&
+      this.conversationExecution.get(conversationId) === executionId
+    ) {
+      this.conversationExecution.delete(conversationId);
+    }
+  }
+
+  /** The engine learns provider identity at creation/resume and sometimes
+   * later from the stream (Claude init). Persist at every authoritative point
+   * so renderer unmount can never be the durability boundary. */
+  private persistProviderIdentityForChat(
+    chatId: string | undefined,
+    agentId: string,
+    providerBinding: ProviderBinding | null | undefined,
+    providerMetadata?: ProviderMetadata | null,
+  ): void {
+    if (!chatId || !providerBinding) return;
+    try {
+      updateChatProviderIdentity(
+        chatId,
+        agentId,
+        providerBinding,
+        providerMetadata,
+      );
+    } catch (err) {
+      // Identity durability is best-effort at the engine boundary; never break
+      // provider startup/streaming. The renderer's chat-state mirror remains a
+      // second write path whenever its surface stays mounted.
+      console.warn(
+        `[agents] failed to persist provider binding for chat ${chatId}: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    }
+  }
+
+  private conversationBindIsCurrent(
+    conversationId: string | undefined,
+    token: number | null,
+  ): boolean {
+    return (
+      !conversationId ||
+      token === null ||
+      this.conversationBindTokens.get(conversationId) === token
+    );
+  }
+
+  private invalidateConversationBind(conversationId: string | undefined): void {
+    if (conversationId) this.conversationBindTokens.delete(conversationId);
+  }
+
+  private async waitForConversationClose(
+    conversationId: string | undefined,
+  ): Promise<void> {
+    if (!conversationId) return;
+    for (;;) {
+      const flight = this.conversationCloseFlights.get(conversationId);
+      if (!flight) return;
+      await flight.catch(() => {});
+    }
+  }
+
+  private staleConversationBindFailure(
+    stage: "newSession" | "loadSession",
+  ): AgentFailureError {
+    return new AgentFailureError({
+      // Losing this engine-local ownership race says nothing about the
+      // provider's durable thread. In particular, it must never trigger the
+      // renderer's provider-binding invalidation path.
+      kind: "lifecycle-superseded",
+      stage,
+      message:
+        "The conversation was closed or superseded while its agent session was starting.",
+    });
+  }
+
   /** Drain work admitted before archive/delete acquired its lifecycle flight.
    *  Looping covers a start that registered just before acquisition while an
    *  earlier one was already being awaited. Fail closed after a bounded wait:
@@ -2222,6 +2490,32 @@ export class ZerosEngine {
     msg: EngineMessage,
     client: TransportClient,
   ): Promise<void> {
+    // Normalize the canonical route name once at the dispatch edge. Handlers and
+    // adapters still accept `sessionId` during the compatibility window, but
+    // whenever a canonical executionId is present it is the route they see.
+    if (
+      msg.type !== "AGENT_LOAD_SESSION" &&
+      "executionId" in msg &&
+      typeof msg.executionId === "string"
+    ) {
+      msg = { ...msg, sessionId: msg.executionId } as EngineMessage;
+    }
+    const routedExecutionId = (msg as { sessionId?: unknown }).sessionId;
+    const suppliedAgentId = (msg as { agentId?: unknown }).agentId;
+    if (
+      EXECUTION_ROUTED_AGENT_MESSAGES.has(msg.type) &&
+      typeof routedExecutionId === "string" &&
+      typeof suppliedAgentId === "string"
+    ) {
+      const executionAgentId = this.sessionAgent.get(routedExecutionId);
+      if (executionAgentId && executionAgentId !== suppliedAgentId) {
+        console.warn(
+          `[agents] normalized stale agent label ${suppliedAgentId} → ${executionAgentId} ` +
+            `for execution ${routedExecutionId.slice(0, 8)}…`,
+        );
+        msg = { ...msg, agentId: executionAgentId } as EngineMessage;
+      }
+    }
     // Diagnostic: log every AGENT_* message at the dispatch boundary so
     // we can tell from main.log whether prompts are even reaching the
     // engine. Used to triage "user sent codex prompt, no response" —
@@ -2230,14 +2524,20 @@ export class ZerosEngine {
     {
       const requestId = (msg as { id?: string }).id;
       const agentId = (msg as { agentId?: string }).agentId;
-      const sessionId = (msg as { sessionId?: string }).sessionId;
+      const executionId =
+        (msg as { executionId?: string; sessionId?: string }).executionId ??
+        (msg as { sessionId?: string }).sessionId;
       console.log(
         `[agents] dispatch ${msg.type}` +
           (agentId ? ` agent=${agentId}` : "") +
-          (sessionId ? ` session=${sessionId.slice(0, 8)}…` : "") +
+          (executionId ? ` execution=${executionId.slice(0, 8)}…` : "") +
           (requestId ? ` reqId=${requestId.slice(0, 8)}…` : ""),
       );
     }
+    let bindToFinish: {
+      conversationId: string | undefined;
+      token: number | null;
+    } | null = null;
     try {
       switch (msg.type) {
         case "AGENT_LIST_AGENTS": {
@@ -2295,11 +2595,20 @@ export class ZerosEngine {
           return;
         }
         case "AGENT_NEW_SESSION": {
+          const bindToken = this.beginConversationBind(msg.chatId);
+          bindToFinish = { conversationId: msg.chatId, token: bindToken };
+          await this.waitForConversationClose(msg.chatId);
+          if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
+            throw this.staleConversationBindFailure("newSession");
+          }
           const spawnOpts = await this.agentSpawnOpts(
             msg,
             client,
             "newSession",
           );
+          if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
+            throw this.staleConversationBindFailure("newSession");
+          }
           const lifecycleWorkspaceId = this.workspaceIdForProcess(
             spawnOpts.workspaceId,
             spawnOpts.cwd,
@@ -2309,6 +2618,7 @@ export class ZerosEngine {
             spawnOpts.workspaceId,
             spawnOpts.cwd,
           );
+          let provisionalExecutionId: string | undefined;
           const { initialize, session } = await this.trackWorkspaceProcessStart(
             lifecycleWorkspaceId,
             (async () => {
@@ -2320,26 +2630,91 @@ export class ZerosEngine {
               this.assertAgentWorkspaceProcessStartAllowed(
                 lifecycleWorkspaceId,
               );
-              const session = await this.agents.newSession(msg.agentId, {
-                cwd: spawnOpts.cwd,
-                env: spawnOpts.env,
-                workspaceId: spawnOpts.workspaceId,
-                cliBinary: spawnOpts.cliBinary,
-              });
+              if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
+                throw this.staleConversationBindFailure("newSession");
+              }
+              let session: NewSessionResponse;
+              try {
+                session = await this.agents.newSession(msg.agentId, {
+                  cwd: spawnOpts.cwd,
+                  env: spawnOpts.env,
+                  workspaceId: spawnOpts.workspaceId,
+                  cliBinary: spawnOpts.cliBinary,
+                  onExecutionCreated: (executionId) => {
+                    if (
+                      !this.conversationBindIsCurrent(msg.chatId, bindToken)
+                    ) {
+                      throw this.staleConversationBindFailure("newSession");
+                    }
+                    this.assertAgentWorkspaceProcessStartAllowed(
+                      lifecycleWorkspaceId,
+                    );
+                    provisionalExecutionId = executionId;
+                    this.registerAgentExecutionRoute({
+                      executionId,
+                      agentId: msg.agentId,
+                      ownerId: client.id,
+                      chatId: msg.chatId,
+                      workspaceId: lifecycleWorkspaceId,
+                    });
+                  },
+                });
+              } catch (err) {
+                if (provisionalExecutionId) {
+                  this.clearAgentExecutionRoute(provisionalExecutionId);
+                }
+                throw err;
+              }
+              const executionId = session.executionId;
+              if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
+                this.clearAgentExecutionRoute(executionId);
+                await this.agents
+                  .endSession(msg.agentId, executionId)
+                  .catch(() => {});
+                throw this.staleConversationBindFailure("newSession");
+              }
+              if (
+                provisionalExecutionId &&
+                this.sessionAgent.get(executionId) !== msg.agentId
+              ) {
+                await this.agents
+                  .endSession(msg.agentId, executionId)
+                  .catch(() => {});
+                throw new AgentFailureError({
+                  kind: "session-expired",
+                  stage: "newSession",
+                  message: "The agent execution exited while it was starting.",
+                });
+              }
               // Publish ownership before the tracked promise resolves so a
               // concurrently-starting reaper can discover and dispose it.
-              this.router.setOwner(session.sessionId, client.id);
-              this.sessionAgent.set(session.sessionId, msg.agentId);
-              this.sessionLoadResponses.set(session.sessionId, {
+              if (!provisionalExecutionId) {
+                provisionalExecutionId = executionId;
+                this.registerAgentExecutionRoute({
+                  executionId,
+                  agentId: msg.agentId,
+                  ownerId: client.id,
+                  chatId: msg.chatId,
+                  workspaceId: lifecycleWorkspaceId,
+                });
+              }
+              this.sessionLoadResponses.set(executionId, {
+                ...(this.sessionLoadResponses.get(executionId) ?? {}),
                 ...(session.modes ? { modes: session.modes } : {}),
                 ...(session.models ? { models: session.models } : {}),
+                ...(session.providerBinding
+                  ? { providerBinding: session.providerBinding }
+                  : {}),
+                ...(session.providerMetadata
+                  ? { providerMetadata: session.providerMetadata }
+                  : {}),
               });
-              if (msg.chatId)
-                this.sessionChat.set(session.sessionId, msg.chatId);
-              if (lifecycleWorkspaceId) {
-                this.sessionWorkspace.set(
-                  session.sessionId,
-                  lifecycleWorkspaceId,
+              if (msg.chatId) {
+                this.persistProviderIdentityForChat(
+                  msg.chatId,
+                  msg.agentId,
+                  session.providerBinding,
+                  session.providerMetadata,
                 );
               }
               try {
@@ -2351,21 +2726,42 @@ export class ZerosEngine {
                 // awaiting the adapter. Dispose before releasing the start
                 // barrier so cleanup never misses this late session.
                 await this.agents
-                  .endSession(msg.agentId, session.sessionId)
+                  .endSession(msg.agentId, executionId)
                   .catch(() => {});
-                this.router.clearOwner(session.sessionId);
-                this.sessionAgent.delete(session.sessionId);
-                this.sessionChat.delete(session.sessionId);
-                this.sessionWorkspace.delete(session.sessionId);
-                this.sessionMessages.delete(session.sessionId);
-                this.sessionLoadResponses.delete(session.sessionId);
-                this.clearPendingAgentInteractions(session.sessionId);
+                this.clearAgentExecutionRoute(executionId);
                 throw err;
               }
               return { initialize, session };
             })(),
           );
           this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+          if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
+            const executionId = session.executionId;
+            const stillRegistered =
+              this.sessionAgent.get(executionId) === msg.agentId;
+            this.router.clearOwner(executionId);
+            this.sessionAgent.delete(executionId);
+            this.sessionChat.delete(executionId);
+            this.sessionWorkspace.delete(executionId);
+            this.sessionMessages.delete(executionId);
+            this.sessionLoadResponses.delete(executionId);
+            this.exitedAgentExecutions.delete(executionId);
+            this.activePromptContexts.delete(executionId);
+            this.promptSessions.delete(executionId);
+            this.clearPendingAgentInteractions(executionId);
+            if (
+              msg.chatId &&
+              this.conversationExecution.get(msg.chatId) === executionId
+            ) {
+              this.conversationExecution.delete(msg.chatId);
+            }
+            if (stillRegistered) {
+              await this.agents
+                .endSession(msg.agentId, executionId)
+                .catch(() => {});
+            }
+            throw this.staleConversationBindFailure("newSession");
+          }
           if (msg.chatId) {
             // One live agent session per chat. This fresh session supersedes
             // any prior session still bound to the same chat — a model/effort
@@ -2382,7 +2778,7 @@ export class ZerosEngine {
             for (const [priorSessionId, boundChatId] of this.sessionChat) {
               if (
                 boundChatId === msg.chatId &&
-                priorSessionId !== session.sessionId
+                priorSessionId !== session.executionId
               )
                 superseded.push(priorSessionId);
             }
@@ -2392,9 +2788,15 @@ export class ZerosEngine {
               this.router.clearOwner(priorSessionId);
               this.sessionAgent.delete(priorSessionId);
               this.sessionChat.delete(priorSessionId);
+              if (
+                this.conversationExecution.get(msg.chatId) === priorSessionId
+              ) {
+                this.conversationExecution.delete(msg.chatId);
+              }
               this.sessionWorkspace.delete(priorSessionId);
               this.sessionMessages.delete(priorSessionId);
               this.sessionLoadResponses.delete(priorSessionId);
+              this.exitedAgentExecutions.delete(priorSessionId);
               // The predecessor's turn is abandoned by definition here, and its
               // prompt promise may never settle after endSession — so its own
               // finally may never run. Retire the record with the rest of the
@@ -2473,6 +2875,7 @@ export class ZerosEngine {
                   source: "engine",
                   requestId: msg.id,
                   agentId: msg.agentId,
+                  executionId: msg.sessionId,
                   sessionId: msg.sessionId,
                   error: "The agent is already responding to this chat.",
                 }),
@@ -2622,6 +3025,7 @@ export class ZerosEngine {
                 source: "engine",
                 requestId: msg.id,
                 agentId: msg.agentId,
+                executionId: msg.sessionId,
                 sessionId: msg.sessionId,
                 stopReason: response.stopReason,
                 response,
@@ -2667,6 +3071,7 @@ export class ZerosEngine {
                 source: "engine",
                 requestId: msg.id,
                 agentId: msg.agentId,
+                executionId: msg.sessionId,
                 sessionId: msg.sessionId,
                 error: err instanceof Error ? err.message : String(err),
                 failure,
@@ -2691,6 +3096,9 @@ export class ZerosEngine {
               this.promptSessions.delete(msg.sessionId);
               this.cancelRequested.delete(msg.sessionId);
               this.clearPendingAgentInteractions(msg.sessionId);
+            }
+            if (this.exitedAgentExecutions.has(msg.sessionId)) {
+              this.clearAgentExecutionRoute(msg.sessionId);
             }
             this.exitPrompt();
           }
@@ -2753,6 +3161,7 @@ export class ZerosEngine {
               source: "engine",
               requestId: msg.id,
               agentId: msg.agentId,
+              executionId: msg.sessionId,
               sessionId: msg.sessionId,
               ...(steeredTurnId ? { turnId: steeredTurnId } : {}),
             }),
@@ -2760,20 +3169,166 @@ export class ZerosEngine {
           return;
         }
         case "AGENT_CLOSE_SESSION": {
-          if (this.remoteMayNotActOnSession(msg.sessionId, client, false)) {
+          const requestedExecutionId = msg.executionId ?? msg.sessionId;
+          // A conversation-only close can arrive while create/load is still
+          // awaiting the provider, before sessionWorkspace has an execution
+          // key to authorize. Fall back to the durable chat owner so a paired
+          // device cannot invalidate a bind hidden by the desktop owner's
+          // remote-workspace restriction.
+          if (
+            msg.chatId &&
+            client.kind !== "local" &&
+            this.conversationRestrictedFromRemote(msg.chatId)
+          ) {
             this.refuseSessionAccess(msg.id, msg.agentId, client);
             return;
           }
-          // Fire-and-forget teardown of a closed chat's engine resources.
-          this.router.clearOwner(msg.sessionId);
-          this.sessionAgent.delete(msg.sessionId);
-          this.sessionChat.delete(msg.sessionId);
-          this.sessionWorkspace.delete(msg.sessionId);
-          this.sessionMessages.delete(msg.sessionId);
-          this.sessionLoadResponses.delete(msg.sessionId);
-          this.activePromptContexts.delete(msg.sessionId);
-          this.clearPendingAgentInteractions(msg.sessionId);
-          await this.agents.endSession(msg.agentId, msg.sessionId);
+          const candidateExecutionIds = new Set<string>();
+          if (requestedExecutionId) {
+            candidateExecutionIds.add(requestedExecutionId);
+          }
+          if (msg.chatId) {
+            const mappedExecution = this.conversationExecution.get(msg.chatId);
+            if (mappedExecution) candidateExecutionIds.add(mappedExecution);
+            // A timed-out/retried bind can briefly leave more than one route
+            // attached to a conversation. Closing the tab owns all of them.
+            for (const [executionId, conversationId] of this.sessionChat) {
+              if (conversationId === msg.chatId) {
+                candidateExecutionIds.add(executionId);
+              }
+            }
+          }
+          for (const executionId of candidateExecutionIds) {
+            if (this.remoteMayNotActOnSession(executionId, client, false)) {
+              this.refuseSessionAccess(msg.id, msg.agentId, client);
+              return;
+            }
+          }
+          // Invalidate even when no execution exists yet. A create/resume that
+          // was already awaiting provider startup will dispose its late result;
+          // a later reopen receives a new token and may bind normally.
+          this.invalidateConversationBind(msg.chatId);
+
+          const previousClose = msg.chatId
+            ? this.conversationCloseFlights.get(msg.chatId)
+            : undefined;
+          let releaseClose: (() => void) | undefined;
+          const closeFlight = msg.chatId
+            ? new Promise<void>((resolve) => {
+                releaseClose = resolve;
+              })
+            : null;
+          if (msg.chatId && closeFlight) {
+            // Publish the barrier before the first await. A History restore in
+            // the next task may bind immediately, but it must not hand a
+            // provider its durable resume id while this execution is still
+            // cancelling/disposing that same provider conversation.
+            this.conversationCloseFlights.set(msg.chatId, closeFlight);
+          }
+
+          try {
+            // Do not `await undefined`: even that yields one microtask, which
+            // lets a prompt in its pre-dispatch window reach the adapter before
+            // this first close records cancellation. Only serialized follow-up
+            // closes have an earlier transaction to await.
+            if (previousClose) await previousClose.catch(() => {});
+            const candidateIsKnown = (executionId: string) =>
+              this.sessionAgent.has(executionId) ||
+              this.sessionChat.has(executionId) ||
+              this.activePromptContexts.has(executionId) ||
+              this.promptSessions.has(executionId);
+            const hasKnownCandidate = [...candidateExecutionIds].some(
+              candidateIsKnown,
+            );
+            const executions = [...candidateExecutionIds]
+              .filter(
+                (executionId) =>
+                  candidateIsKnown(executionId) ||
+                  // A trusted local close may be the final cleanup attempt
+                  // after engine routing maps were partially lost. The gateway
+                  // still knows how to dispose its exact explicit route. A
+                  // remote client never gets this unknown-route capability.
+                  (client.kind === "local" &&
+                    !hasKnownCandidate &&
+                    executionId === requestedExecutionId),
+              )
+              .map((executionId) => ({
+                executionId,
+                agentId: this.sessionAgent.get(executionId) ?? msg.agentId,
+                conversationId: this.sessionChat.get(executionId),
+              }));
+
+            const settlements = await Promise.all(
+              executions.map(({ executionId }) =>
+                this.cancelLiveAgentSessions([executionId]),
+              ),
+            );
+            for (const [index, execution] of executions.entries()) {
+              const { executionId, conversationId } = execution;
+              this.router.clearOwner(executionId);
+              this.sessionAgent.delete(executionId);
+              this.sessionChat.delete(executionId);
+              this.sessionWorkspace.delete(executionId);
+              this.sessionMessages.delete(executionId);
+              this.sessionLoadResponses.delete(executionId);
+              this.exitedAgentExecutions.delete(executionId);
+              // A wedged adapter is still owned by the cancel-settle watchdog.
+              // Do not erase its record/timer; it will publish + persist
+              // cancellation even if disposeSession never makes the prompt
+              // promise return.
+              if (settlements[index]) {
+                this.activePromptContexts.delete(executionId);
+                this.promptSessions.delete(executionId);
+              }
+              this.clearPendingAgentInteractions(executionId);
+              if (
+                conversationId &&
+                this.conversationExecution.get(conversationId) === executionId
+              ) {
+                this.conversationExecution.delete(conversationId);
+              }
+            }
+            if (msg.chatId) {
+              const currentExecution = this.conversationExecution.get(
+                msg.chatId,
+              );
+              if (
+                currentExecution &&
+                candidateExecutionIds.has(currentExecution)
+              ) {
+                this.conversationExecution.delete(msg.chatId);
+              }
+            }
+            await Promise.all(
+              executions.map(({ agentId, executionId }) =>
+                this.agents.endSession(agentId, executionId),
+              ),
+            );
+          } finally {
+            releaseClose?.();
+            if (
+              msg.chatId &&
+              closeFlight &&
+              this.conversationCloseFlights.get(msg.chatId) === closeFlight
+            ) {
+              this.conversationCloseFlights.delete(msg.chatId);
+            }
+          }
+          client.send(
+            createMessage({
+              type: "AGENT_SESSION_CLOSED",
+              source: "engine",
+              requestId: msg.id,
+              agentId: msg.agentId,
+              ...(requestedExecutionId
+                ? {
+                    executionId: requestedExecutionId,
+                    sessionId: requestedExecutionId,
+                  }
+                : {}),
+              ...(msg.chatId ? { chatId: msg.chatId } : {}),
+            }),
+          );
           return;
         }
         case "AGENT_PERMISSION_RESPONSE": {
@@ -2823,6 +3378,7 @@ export class ZerosEngine {
               source: "engine",
               requestId: msg.id,
               agentId: msg.agentId,
+              executionId: msg.sessionId,
               sessionId: msg.sessionId,
               modeId: msg.modeId,
             }),
@@ -2912,7 +3468,50 @@ export class ZerosEngine {
           return;
         }
         case "AGENT_LOAD_SESSION": {
-          if (this.remoteMayNotActOnSession(msg.sessionId, client, true)) {
+          const bindToken = this.beginConversationBind(msg.chatId);
+          bindToFinish = { conversationId: msg.chatId, token: bindToken };
+          await this.waitForConversationClose(msg.chatId);
+          if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
+            throw this.staleConversationBindFailure("loadSession");
+          }
+          // A renderer persists only the provider binding. On reload it
+          // re-adopts the engine's current execution by Zeros conversation id;
+          // after an engine restart there is no live route, so the gateway
+          // mints a fresh execution for the same durable binding.
+          let mappedConversationExecution = msg.chatId
+            ? this.conversationExecution.get(msg.chatId)
+            : undefined;
+          // Repair an older/partial map state before spawning. `sessionChat`
+          // remains authoritative evidence that this conversation already has
+          // a live engine execution; missing only the reverse index must not
+          // create a second provider process for the same chat.
+          if (!mappedConversationExecution && msg.chatId) {
+            for (const [executionId, conversationId] of this.sessionChat) {
+              if (
+                conversationId === msg.chatId &&
+                this.sessionAgent.get(executionId) === msg.agentId
+              ) {
+                mappedConversationExecution = executionId;
+                this.conversationExecution.set(msg.chatId, executionId);
+                break;
+              }
+            }
+          }
+          const requestedExecutionId =
+            // The chat's engine-owned route is newer evidence than a renderer
+            // execution captured before a reload/restart. Letting an explicit
+            // stale id win here would miss the live route and mint a duplicate
+            // adapter process for the same conversation.
+            mappedConversationExecution ??
+            msg.executionId ??
+            // A lone v8 load sessionId may still be a durable provider
+            // locator. When an explicit binding accompanies it, never try the
+            // compatibility locator as a live route.
+            (msg.providerBinding ? undefined : msg.sessionId);
+          if (
+            requestedExecutionId &&
+            this.remoteMayNotActOnSession(requestedExecutionId, client, true)
+          ) {
             this.refuseSessionAccess(msg.id, msg.agentId, client);
             return;
           }
@@ -2921,26 +3520,40 @@ export class ZerosEngine {
           // adapters implement load as replacement/disposal, which would kill
           // the exact turn we are trying to recover.
           //
-          // Only for a turn that is actually still LIVE. This used to re-adopt
-          // on the mere existence of the record, so a stopped-but-unsettled or
-          // stale turn answered promptActive:true with its original startedAt —
-          // the reloaded (or tab-switched) chat showed the running shimmer with
-          // a timer counting the whole time since the prompt, for a turn that
-          // was over. A dead record is released here exactly as AGENT_PROMPT
-          // releases it, and this load proceeds as an ordinary resume.
-          const existingPrompt = this.activePromptContexts.get(msg.sessionId);
+          // A live execution can be re-adopted whether its provider is busy or
+          // idle. Prompt state is stricter: a stopped/stale record must be
+          // released before the cached execution is returned, or a renderer
+          // reload would resurrect the running shimmer and its old timer.
+          const existingPrompt = requestedExecutionId
+            ? this.activePromptContexts.get(requestedExecutionId)
+            : undefined;
           if (existingPrompt && !this.activePromptIsLive(existingPrompt)) {
             console.warn(
-              `[agents] releasing a dead in-flight prompt for session ` +
-                `${msg.sessionId.slice(0, 8)}… on load: ` +
+              `[agents] releasing a dead in-flight prompt for execution ` +
+                `${requestedExecutionId!.slice(0, 8)}… on load: ` +
                 `${existingPrompt.terminalPublished ? "already settled" : "no activity"}`,
             );
             this.disarmCancelSettleDeadline(existingPrompt);
-            this.activePromptContexts.delete(msg.sessionId);
-            this.promptSessions.delete(msg.sessionId);
+            this.activePromptContexts.delete(requestedExecutionId!);
+            this.promptSessions.delete(requestedExecutionId!);
           }
-          const activePrompt = this.activePromptContexts.get(msg.sessionId);
-          if (activePrompt) {
+          const activePrompt = requestedExecutionId
+            ? this.activePromptContexts.get(requestedExecutionId)
+            : undefined;
+          const liveExecution =
+            requestedExecutionId && this.sessionAgent.has(requestedExecutionId)
+              ? requestedExecutionId
+              : null;
+          if (liveExecution) {
+            const liveAgentId = this.sessionAgent.get(liveExecution);
+            if (liveAgentId !== msg.agentId) {
+              throw new AgentFailureError({
+                kind: "protocol-error",
+                stage: "loadSession",
+                message:
+                  "This conversation's live execution belongs to a different agent.",
+              });
+            }
             // Nothing is spawned here, so cwd/env/cliBinary are moot — but
             // agentSpawnOpts is ALSO the choke point that refuses a remote
             // (untrusted) client naming no resolvable managed workspace, and
@@ -2960,9 +3573,8 @@ export class ZerosEngine {
               // …and it must be THIS session's workspace. Satisfying the clamp
               // with any workspace the caller can reach would otherwise let it
               // adopt a live turn belonging to a different one.
-              const sessionWorkspaceId = this.sessionWorkspace.get(
-                msg.sessionId,
-              );
+              const sessionWorkspaceId =
+                this.sessionWorkspace.get(liveExecution);
               if (
                 sessionWorkspaceId &&
                 sessionWorkspaceId !== msg.workspaceId
@@ -2980,7 +3592,7 @@ export class ZerosEngine {
               // owns after a reload; an untrusted client may only CONFIRM the
               // existing one (or establish one where none exists) — never move
               // a live turn onto a chat of its choosing.
-              const boundChatId = this.sessionChat.get(msg.sessionId);
+              const boundChatId = this.sessionChat.get(liveExecution);
               if (msg.chatId && boundChatId && boundChatId !== msg.chatId) {
                 throw new AgentFailureError({
                   kind: "protocol-error",
@@ -2990,11 +3602,12 @@ export class ZerosEngine {
                 });
               }
             }
-            this.router.setOwner(msg.sessionId, client.id);
-            this.sessionAgent.set(msg.sessionId, msg.agentId);
+            this.router.setOwner(liveExecution, client.id);
+            this.sessionAgent.set(liveExecution, msg.agentId);
             if (msg.chatId) {
-              this.sessionChat.set(msg.sessionId, msg.chatId);
-              activePrompt.chatId = msg.chatId;
+              this.sessionChat.set(liveExecution, msg.chatId);
+              this.conversationExecution.set(msg.chatId, liveExecution);
+              if (activePrompt) activePrompt.chatId = msg.chatId;
             }
             client.send(
               createMessage({
@@ -3002,22 +3615,43 @@ export class ZerosEngine {
                 source: "engine",
                 requestId: msg.id,
                 agentId: msg.agentId,
-                sessionId: msg.sessionId,
-                response: this.sessionLoadResponses.get(msg.sessionId) ?? {},
-                promptActive: true,
-                activeTurnStartedAt: activePrompt.startedAt,
-                promptId: activePrompt.promptId,
+                executionId: liveExecution,
+                sessionId: liveExecution,
+                response: this.sessionLoadResponses.get(liveExecution) ?? {},
+                promptActive: !!activePrompt,
+                ...(activePrompt
+                  ? {
+                      activeTurnStartedAt: activePrompt.startedAt,
+                      promptId: activePrompt.promptId,
+                    }
+                  : {}),
               }),
             );
-            this.emitTurnState(activePrompt, "running");
-            this.replayPendingAgentInteractions(msg.sessionId, client);
+            if (activePrompt) this.emitTurnState(activePrompt, "running");
+            this.replayPendingAgentInteractions(liveExecution, client);
             return;
+          }
+          // A reverse mapping without an owning agent route is not adoptable.
+          // Dispose the gateway's possible leftover before minting a replacement
+          // so partial bookkeeping loss cannot leak a duplicate provider child.
+          if (
+            requestedExecutionId &&
+            (this.sessionChat.has(requestedExecutionId) ||
+              mappedConversationExecution === requestedExecutionId)
+          ) {
+            this.clearAgentExecutionRoute(requestedExecutionId);
+            await this.agents
+              .endSession(msg.agentId, requestedExecutionId)
+              .catch(() => {});
           }
           const loadOpts = await this.agentSpawnOpts(
             msg,
             client,
             "loadSession",
           );
+          if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
+            throw this.staleConversationBindFailure("loadSession");
+          }
           const lifecycleWorkspaceId = this.workspaceIdForProcess(
             loadOpts.workspaceId,
             loadOpts.cwd,
@@ -3027,45 +3661,250 @@ export class ZerosEngine {
             loadOpts.workspaceId,
             loadOpts.cwd,
           );
-          this.router.setOwner(msg.sessionId, client.id);
-          this.sessionAgent.set(msg.sessionId, msg.agentId);
-          if (msg.chatId) this.sessionChat.set(msg.sessionId, msg.chatId);
-          if (lifecycleWorkspaceId) {
-            this.sessionWorkspace.set(msg.sessionId, lifecycleWorkspaceId);
+          // The renderer may have unmounted between an engine-authoritative
+          // provider_binding_update and its React chat-row mirror. A
+          // conversation-only probe therefore falls back to the durable engine
+          // row before degrading a compatibility sessionId into a legacy
+          // binding. This is also the crash-safe path for a close/reopen in
+          // that narrow window.
+          const persistedChat = msg.chatId ? getChat(msg.chatId) : null;
+          const persistedProviderBinding = persistedChat?.providerBinding;
+          const persistedLegacyBinding =
+            persistedChat?.agentId === msg.agentId && persistedChat.sessionId
+              ? legacyProviderBinding(msg.agentId, persistedChat.sessionId)
+              : null;
+          if (client.kind !== "local") {
+            const suppliedBinding = coerceProviderBinding(msg.providerBinding);
+            const trustedBinding =
+              persistedProviderBinding?.providerId === msg.agentId
+                ? persistedProviderBinding
+                : persistedLegacyBinding;
+            const location = msg.chatId ? getChatLocation(msg.chatId) : null;
+            const persistedWorkspaceId = this.workspaceIdForProcess(
+              location?.workspaceId,
+              location?.folder,
+            );
+            if (
+              !msg.chatId ||
+              !persistedChat ||
+              persistedChat.agentId !== msg.agentId ||
+              !trustedBinding ||
+              (msg.providerBinding &&
+                (!suppliedBinding ||
+                  !sameProviderBinding(suppliedBinding, trustedBinding))) ||
+              (msg.sessionId &&
+                msg.sessionId !==
+                  (trustedBinding.legacySessionId ??
+                    trustedBinding.resumeId)) ||
+              !msg.workspaceId ||
+              persistedWorkspaceId !== lifecycleWorkspaceId ||
+              persistedWorkspaceId !== msg.workspaceId
+            ) {
+              throw new AgentFailureError({
+                kind: "protocol-error",
+                stage: "loadSession",
+                message:
+                  "A remote resume must match the provider identity and workspace persisted for this chat.",
+              });
+            }
           }
+          const providerBinding =
+            coerceProviderBinding(msg.providerBinding) ??
+            (persistedProviderBinding?.providerId === msg.agentId
+              ? persistedProviderBinding
+              : null) ??
+            persistedLegacyBinding ??
+            (msg.sessionId
+              ? legacyProviderBinding(msg.agentId, msg.sessionId)
+              : null);
+          if (!providerBinding || providerBinding.providerId !== msg.agentId) {
+            throw new AgentFailureError({
+              kind:
+                !msg.providerBinding && !msg.sessionId
+                  ? "session-expired"
+                  : "protocol-error",
+              stage: "loadSession",
+              message:
+                !msg.providerBinding && !msg.sessionId
+                  ? "This conversation has no live execution or durable provider binding."
+                  : "This conversation has no valid provider binding for the selected agent.",
+            });
+          }
+          let provisionalExecutionId: string | undefined;
           const response = await this.trackWorkspaceProcessStart(
             lifecycleWorkspaceId,
             (async () => {
-              const response = await this.agents.loadSession(
-                msg.agentId,
-                msg.sessionId,
-                {
-                  cwd: loadOpts.cwd,
-                  env: loadOpts.env,
-                  workspaceId: loadOpts.workspaceId,
-                  cliBinary: loadOpts.cliBinary,
-                },
-              );
-              this.assertAgentWorkspaceProcessStartAllowed(
-                lifecycleWorkspaceId,
-              );
-              return response;
+              let adapterLoadCompleted = false;
+              try {
+                const loaded = await this.agents.loadSession(
+                  msg.agentId,
+                  providerBinding,
+                  {
+                    cwd: loadOpts.cwd,
+                    env: loadOpts.env,
+                    workspaceId: loadOpts.workspaceId,
+                    cliBinary: loadOpts.cliBinary,
+                    onExecutionCreated: (executionId) => {
+                      if (
+                        !this.conversationBindIsCurrent(msg.chatId, bindToken)
+                      ) {
+                        throw this.staleConversationBindFailure("loadSession");
+                      }
+                      this.assertAgentWorkspaceProcessStartAllowed(
+                        lifecycleWorkspaceId,
+                      );
+                      provisionalExecutionId = executionId;
+                      this.registerAgentExecutionRoute({
+                        executionId,
+                        agentId: msg.agentId,
+                        ownerId: client.id,
+                        chatId: msg.chatId,
+                        workspaceId: lifecycleWorkspaceId,
+                      });
+                    },
+                  },
+                );
+                adapterLoadCompleted = true;
+                // Defensive compatibility for a mocked/older gateway that did
+                // not invoke the early callback. Keep registration inside the
+                // tracked start so a concurrent workspace reaper still sees it.
+                if (!provisionalExecutionId && loaded.executionId) {
+                  provisionalExecutionId = loaded.executionId;
+                  this.registerAgentExecutionRoute({
+                    executionId: loaded.executionId,
+                    agentId: msg.agentId,
+                    ownerId: client.id,
+                    chatId: msg.chatId,
+                    workspaceId: lifecycleWorkspaceId,
+                  });
+                }
+                this.assertAgentWorkspaceProcessStartAllowed(
+                  lifecycleWorkspaceId,
+                );
+                return loaded;
+              } catch (err) {
+                if (provisionalExecutionId) {
+                  this.clearAgentExecutionRoute(provisionalExecutionId);
+                }
+                if (adapterLoadCompleted && provisionalExecutionId) {
+                  await this.agents
+                    .endSession(msg.agentId, provisionalExecutionId)
+                    .catch(() => {});
+                }
+                if (
+                  err instanceof AgentFailureError &&
+                  err.failure.kind === "session-expired" &&
+                  this.conversationBindIsCurrent(msg.chatId, bindToken) &&
+                  msg.chatId
+                ) {
+                  const cleared = clearChatProviderIdentity(
+                    msg.chatId,
+                    msg.agentId,
+                    providerBinding.resumeId,
+                  );
+                  if (cleared) {
+                    // This mutation bypasses WorkspaceService, so publish the
+                    // same keyed invalidation its write path would. Every open
+                    // renderer must forget the dead durable handle, not only
+                    // the surface whose load received AGENT_ERROR.
+                    this.broadcast(
+                      createMessage({
+                        type: "DB_CHANGED",
+                        source: "engine",
+                        kinds: ["chats"],
+                      }),
+                    );
+                  }
+                }
+                throw err;
+              }
             })(),
           );
-          this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
-          this.sessionLoadResponses.set(msg.sessionId, response);
+          const executionId = response.executionId;
+          if (!executionId) {
+            if (provisionalExecutionId) {
+              this.clearAgentExecutionRoute(provisionalExecutionId);
+              await this.agents
+                .endSession(msg.agentId, provisionalExecutionId)
+                .catch(() => {});
+            }
+            throw new AgentFailureError({
+              kind: "protocol-error",
+              stage: "loadSession",
+              message: "The agent adapter did not return a Zeros execution id.",
+            });
+          }
+          if (
+            provisionalExecutionId &&
+            provisionalExecutionId !== executionId
+          ) {
+            this.clearAgentExecutionRoute(provisionalExecutionId);
+            await Promise.all([
+              this.agents
+                .endSession(msg.agentId, provisionalExecutionId)
+                .catch(() => {}),
+              this.agents.endSession(msg.agentId, executionId).catch(() => {}),
+            ]);
+            throw new AgentFailureError({
+              kind: "protocol-error",
+              stage: "loadSession",
+              message:
+                "The agent gateway returned a different execution than it published.",
+            });
+          }
+          if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
+            this.clearAgentExecutionRoute(executionId);
+            await this.agents
+              .endSession(msg.agentId, executionId)
+              .catch(() => {});
+            throw this.staleConversationBindFailure("loadSession");
+          }
+          try {
+            this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+          } catch (err) {
+            this.clearAgentExecutionRoute(executionId);
+            await this.agents
+              .endSession(msg.agentId, executionId)
+              .catch(() => {});
+            throw err;
+          }
+          // A provider exit emitted during load has already retired this route;
+          // never resurrect a dead execution merely because load then resolved.
+          if (this.sessionAgent.get(executionId) !== msg.agentId) {
+            await this.agents
+              .endSession(msg.agentId, executionId)
+              .catch(() => {});
+            throw new AgentFailureError({
+              kind: "session-expired",
+              stage: "loadSession",
+              message: "The agent execution exited while it was resuming.",
+            });
+          }
+          if (msg.chatId) {
+            this.persistProviderIdentityForChat(
+              msg.chatId,
+              msg.agentId,
+              response.providerBinding,
+              response.providerMetadata,
+            );
+          }
+          this.sessionLoadResponses.set(executionId, {
+            ...(this.sessionLoadResponses.get(executionId) ?? {}),
+            ...response,
+          });
           client.send(
             createMessage({
               type: "AGENT_SESSION_LOADED",
               source: "engine",
               requestId: msg.id,
               agentId: msg.agentId,
-              sessionId: msg.sessionId,
+              executionId,
+              sessionId: executionId,
               response,
               promptActive: false,
             }),
           );
-          this.replayPendingAgentInteractions(msg.sessionId, client);
+          this.replayPendingAgentInteractions(executionId, client);
           return;
         }
         default:
@@ -3101,6 +3940,13 @@ export class ZerosEngine {
           failure,
         }),
       );
+    } finally {
+      if (bindToFinish) {
+        this.finishConversationBind(
+          bindToFinish.conversationId,
+          bindToFinish.token,
+        );
+      }
     }
   }
 
@@ -3545,8 +4391,14 @@ export class ZerosEngine {
   private async cancelLiveAgentSessions(
     sessionIds: Iterable<string>,
   ): Promise<boolean> {
-    const live = [...new Set(sessionIds)].filter((sessionId) =>
-      this.promptSessions.has(sessionId),
+    // activePromptContexts is installed before the pre-snapshot awaits and
+    // promptSessions only after preparation. Looking at promptSessions alone
+    // leaves a close/archive race where an accepted prompt is invisible and
+    // gets dispatched after its session has already been disposed.
+    const live = [...new Set(sessionIds)].filter(
+      (sessionId) =>
+        this.promptSessions.has(sessionId) ||
+        this.activePromptContexts.has(sessionId),
     );
     if (live.length === 0) return true;
     await Promise.all(
@@ -3568,12 +4420,38 @@ export class ZerosEngine {
     );
     const deadline = Date.now() + 3000;
     while (
-      live.some((sessionId) => this.promptSessions.has(sessionId)) &&
+      live.some(
+        (sessionId) =>
+          this.promptSessions.has(sessionId) ||
+          this.activePromptContexts.has(sessionId),
+      ) &&
       Date.now() < deadline
     ) {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    return live.every((sessionId) => !this.promptSessions.has(sessionId));
+    // A lifecycle (tab close, reset, workspace disposal) cannot leave the
+    // durable turn looking live until the general 15-second Stop watchdog.
+    // The adapter has already had its bounded cancel window; publish and await
+    // the bookkeeping half now, before the caller disposes the execution or
+    // lets this conversation resume through a replacement route. Keep the
+    // active record itself until the adapter promise settles, so its eventual
+    // catch/finally remains correctly attributed and cannot take over a newer
+    // execution.
+    await Promise.all(
+      live.map(async (sessionId) => {
+        const prompt = this.activePromptContexts.get(sessionId);
+        if (prompt?.cancelledByUser) {
+          await this.settleCancelledPrompt(prompt, 3_000, {
+            warnIfUnacknowledged: false,
+          });
+        }
+      }),
+    );
+    return live.every(
+      (sessionId) =>
+        !this.promptSessions.has(sessionId) &&
+        !this.activePromptContexts.has(sessionId),
+    );
   }
 
   // ── Turn recording (v13: footer / per-turn changes / reset) ──────────
@@ -4068,6 +4946,24 @@ export class ZerosEngine {
     return !!(wsId && listRemoteRestrictedWorkspaceIds().has(wsId));
   }
 
+  /** Authorize a route-less conversation lifecycle request. The cached
+   * workspace id is normally present; deriving from the folder covers a row
+   * written just before the cache backfill. A live mapping remains a second
+   * source for legacy rows with no durable workspace cache. */
+  private conversationRestrictedFromRemote(chatId: string): boolean {
+    const liveExecutionId = this.conversationExecution.get(chatId);
+    if (liveExecutionId && this.sessionRestrictedFromRemote(liveExecutionId)) {
+      return true;
+    }
+    const location = getChatLocation(chatId);
+    const workspaceId =
+      location?.workspaceId ??
+      this.workspace.workspaceIdForCwd(location?.folder ?? undefined);
+    return !!(
+      workspaceId && listRemoteRestrictedWorkspaceIds().has(workspaceId)
+    );
+  }
+
   /** Publish prompt lifecycle independently of the request/response socket.
    * The current owner may be a renderer that adopted the session after the
    * prompt began, which is precisely why the original RPC response is not
@@ -4083,8 +4979,10 @@ export class ZerosEngine {
         type: "AGENT_SESSION_UPDATE",
         source: "engine",
         agentId: prompt.agentId,
+        executionId: prompt.sessionId,
         ...(prompt.chatId ? { chatId: prompt.chatId } : {}),
         notification: {
+          executionId: prompt.sessionId,
           sessionId: prompt.sessionId,
           update: {
             sessionUpdate: "turn_state",
@@ -4176,37 +5074,50 @@ export class ZerosEngine {
     if (prompt.cancelSettleTimer || prompt.adapterSettled) return;
     const timer = setTimeout(() => {
       prompt.cancelSettleTimer = undefined;
-      if (prompt.adapterSettled || prompt.terminalPublished) return;
-      // A later prompt already owns this session (only reachable after a stale
-      // release), so this record no longer speaks for it.
-      if (this.activePromptContexts.get(prompt.sessionId) !== prompt) return;
-      prompt.terminalPublished = true;
-      console.warn(
-        `[agents] cancel not acknowledged within ` +
-          `${Math.round(CANCEL_SETTLE_DEADLINE_MS / 1000)}s for session ` +
-          `${prompt.sessionId.slice(0, 8)}…: settling the turn as cancelled`,
-      );
-      // finishTurn is self-contained (it never throws) and owns the durable
-      // half: the row this chat's footer reads as STOPPED BY USER after a
-      // reload. Matched by REFERENCE, not by turn id — the record's id and
-      // beginTurn's are derived separately and disagree whenever the client
-      // omitted userMessageId, so an id comparison here skipped the write for
-      // exactly the turns it was meant to close.
-      const turnCtx = this.activeTurnSnapshots.get(prompt.sessionId);
-      if (turnCtx && turnCtx === prompt.turnSnapshot) {
-        this.activeTurnSnapshots.delete(prompt.sessionId);
-        // Claim the durable half only now that we are performing it. A turn
-        // still being PREPARED has no row here yet (a pre-snapshot can outrun
-        // this deadline on a large repo); leaving this false is what lets the
-        // prompt handler finalize that row instead of skipping it forever.
-        prompt.turnRowSettled = true;
-        void this.finishTurn(turnCtx, "cancelled", "cancelled");
-      }
-      this.emitTurnState(prompt, "cancelled", "cancelled");
+      void this.settleCancelledPrompt(prompt, CANCEL_SETTLE_DEADLINE_MS);
     }, CANCEL_SETTLE_DEADLINE_MS);
     // Never hold the engine's event loop open for a stop deadline.
     timer.unref?.();
     prompt.cancelSettleTimer = timer;
+  }
+
+  /** Make the stopped outcome authoritative while retaining ownership of a
+   * wedged adapter promise. Used by both the general Stop watchdog and the
+   * shorter explicit-lifecycle boundary. */
+  private async settleCancelledPrompt(
+    prompt: ActivePromptContext,
+    acknowledgementWindowMs: number,
+    opts: { warnIfUnacknowledged?: boolean } = {},
+  ): Promise<void> {
+    if (prompt.adapterSettled || prompt.terminalPublished) return;
+    // A later prompt already owns this session (only reachable after a stale
+    // release), so this record no longer speaks for it.
+    if (this.activePromptContexts.get(prompt.sessionId) !== prompt) return;
+    this.disarmCancelSettleDeadline(prompt);
+    prompt.terminalPublished = true;
+    if (opts.warnIfUnacknowledged !== false) {
+      console.warn(
+        `[agents] cancel not acknowledged within ` +
+          `${Math.round(acknowledgementWindowMs / 1000)}s for session ` +
+          `${prompt.sessionId.slice(0, 8)}…: settling the turn as cancelled`,
+      );
+    }
+    // finishTurn is self-contained (it never throws) and owns the durable
+    // half: the row this chat's footer reads as STOPPED BY USER after a reload.
+    // Matched by REFERENCE, not by turn id — the record's id and beginTurn's are
+    // derived separately and disagree whenever the client omitted
+    // userMessageId, so an id comparison here skipped the write for exactly the
+    // turns it was meant to close.
+    const turnCtx = this.activeTurnSnapshots.get(prompt.sessionId);
+    if (turnCtx && turnCtx === prompt.turnSnapshot) {
+      this.activeTurnSnapshots.delete(prompt.sessionId);
+      // Claim the durable half only now that we are performing it. A turn still
+      // being PREPARED has no row here yet; leaving this false is what lets the
+      // prompt handler finalize that row instead of skipping it forever.
+      prompt.turnRowSettled = true;
+      await this.finishTurn(turnCtx, "cancelled", "cancelled");
+    }
+    this.emitTurnState(prompt, "cancelled", "cancelled");
   }
 
   private disarmCancelSettleDeadline(prompt: ActivePromptContext): void {

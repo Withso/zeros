@@ -94,3 +94,59 @@ export function isChatDiscardableOnClose(inputs: ChatCloseInputs): boolean {
   if (draftHasContent(inputs.storedDraft)) return false;
   return true;
 }
+
+export type TabCloseResourceAction = "close-session" | "kill-terminal";
+
+/** Resource lifecycle paired with the tab's archive/discard decision.
+ *
+ * Every chat close is an explicit stop boundary: the visible tab leaves, its
+ * active execution is cancelled, and queued follow-ups are discarded. Durable
+ * transcript/provider identity remain available when an archived chat is
+ * restored. Terminals remain explicit PTY resources and are killed on close. */
+export function tabCloseResourceAction(input: {
+  kind: ChatThread["kind"];
+  discard: boolean;
+}): TabCloseResourceAction {
+  if (input.kind === "terminal") return "kill-terminal";
+  return "close-session";
+}
+
+export interface ChatCloseConfirmationInput {
+  agentName: string;
+  running: boolean;
+  queuedCount: number;
+}
+
+export interface ChatCloseConfirmationCopy {
+  title: string;
+  description: string;
+}
+
+/** Confirmation copy for the only close cases that destroy work the user has
+ * not yet seen settle. An idle chat closes immediately; a running turn or
+ * unsent queue requires an explicit destructive confirmation. */
+export function chatCloseConfirmation(
+  input: ChatCloseConfirmationInput,
+): ChatCloseConfirmationCopy | null {
+  const queuedCount = Math.max(0, Math.floor(input.queuedCount));
+  if (!input.running && queuedCount === 0) return null;
+  if (input.running) {
+    const queuedSuffix =
+      queuedCount > 0
+        ? ` and discard ${queuedCount} queued ${queuedCount === 1 ? "message" : "messages"}`
+        : "";
+    return {
+      title: "Close running chat?",
+      description:
+        `This chat is currently running. Closing it will stop ` +
+        `${input.agentName}${queuedSuffix}.`,
+    };
+  }
+  return {
+    title: `Close chat with queued ${queuedCount === 1 ? "message" : "messages"}?`,
+    description:
+      queuedCount === 1
+        ? "Closing this chat will discard its queued message before it is sent."
+        : `Closing this chat will discard ${queuedCount} queued messages before they are sent.`,
+  };
+}

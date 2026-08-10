@@ -28,7 +28,7 @@ describe("sessions-store archive detach", () => {
 
     const detached = useSessionsStore.getState();
     expect(detached.sessions["chat-a"]).toBeUndefined();
-    expect(detached.sessionToChatId["session-a"]).toBeUndefined();
+    expect(detached.executionToChatId["session-a"]).toBeUndefined();
     expect(detached.scrollPositions["chat-a"]).toEqual({
       top: 420,
       anchorId: "turn-7",

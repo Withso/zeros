@@ -22,6 +22,7 @@ import type {
   RequestPermissionResponse,
 } from "../../platform/bridge/agent-events";
 import type { ListSessionsResponse } from "../../platform/bridge/agent-events";
+import type { ProviderBinding } from "@zeros/protocol/identities";
 import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
 import type {
   AgentSessionState,
@@ -61,6 +62,12 @@ export interface QueuedEditPayload {
  *  using `useContext(ActionsCtx)` don't re-render on every token. */
 export interface SessionsActions {
   getSession(chatId: string): AgentSessionState | undefined;
+  /** Fresh close-boundary work snapshot. Includes local sends still awaiting a
+   * route, adopted provider turns, active background work, and queued prompts. */
+  getCloseActivity(chatId: string): {
+    running: boolean;
+    queuedCount: number;
+  };
   listAgents(force?: boolean): Promise<BridgeRegistryAgent[]>;
   initAgent(agentId: string): Promise<InitializeResponse>;
   ensureSession(
@@ -145,9 +152,9 @@ export interface SessionsActions {
   loadIntoChat(
     chatId: string,
     agentId: string,
-    sessionId: string,
+    providerBinding: ProviderBinding | null,
     options?: StartForChatOptions,
-  ): Promise<void>;
+  ): Promise<boolean>;
   /** Load an explicitly cold transcript from disk. Idempotent and shared per
    *  exact chat; resident slots only receive a background reconcile, while a
    *  retained cold slot publishes `loading` until its authoritative window is
@@ -157,11 +164,11 @@ export interface SessionsActions {
    *  outside this set may release only their heavyweight transcript payload;
    *  live session routing and control state remain resident. */
   setRetainedChatIds(chatIds: readonly string[]): void;
-  /** Tell the engine to tear down this chat's session (subprocess /
-   *  server child / hook token / session dir) because its tab is being
-   *  closed/archived. Fire-and-forget; the on-disk transcript is kept, so
-   *  reopening the chat re-resumes via loadSession. Safe to call for a
-   *  chat with no live session (no-op). */
+  /** Stop this chat's current work, discard queued follow-ups, and tear down
+   * its execution (subprocess / server child / hook token / session dir).
+   * Conversation history and the provider binding remain durable, so restoring
+   * an archived chat can resume into a fresh execution. Safe before a route has
+   * been published: the conversation id invalidates an in-flight bind. */
   closeSession(chatId: string): void;
   disposeAll(): void;
 }

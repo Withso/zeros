@@ -310,6 +310,94 @@ const streamText = (t: string): Msg => ({
 });
 
 describe("ClaudeSdkAdapter", () => {
+  it("publishes Claude's native binding without replacing the Zeros execution route", async () => {
+    const emitted: SessionNotification[] = [];
+    const { queryFn } = makeScriptedQuery([
+      [initMsg("claude-native-1"), resultOk("claude-native-1")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
+    const { session } = await adapter.newSession({
+      executionId: "zeros-execution-1",
+      cwd: "/tmp",
+    });
+
+    expect(session.executionId).toBe("zeros-execution-1");
+    await adapter.prompt({
+      sessionId: session.executionId,
+      prompt: [textBlock("hello")] as never,
+    });
+
+    expect(
+      emitted.find(
+        (notification) =>
+          notification.update.sessionUpdate === "provider_binding_update",
+      ),
+    ).toMatchObject({
+      executionId: "zeros-execution-1",
+      sessionId: "zeros-execution-1",
+      update: {
+        providerBinding: {
+          version: 1,
+          providerId: "claude",
+          kind: "native",
+          resumeId: "claude-native-1",
+          legacySessionId: "zeros-execution-1",
+        },
+      },
+    });
+    await adapter.dispose();
+  });
+
+  it("resumes a native Claude binding into a different Zeros execution", async () => {
+    const { queryFn, captured } = makeScriptedQuery([
+      [assistantText("continued"), resultOk("claude-native-2")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const loaded = await adapter.loadSession({
+      executionId: "zeros-execution-2",
+      providerBinding: {
+        version: 1,
+        providerId: "claude",
+        kind: "native",
+        resumeId: "claude-native-2",
+      },
+      cwd: "/tmp",
+    });
+    expect(loaded.executionId).toBe("zeros-execution-2");
+    expect(loaded.providerBinding?.resumeId).toBe("claude-native-2");
+
+    await adapter.prompt({
+      sessionId: "zeros-execution-2",
+      prompt: [textBlock("continue")] as never,
+    });
+    expect(captured[0]?.resume).toBe("claude-native-2");
+    await adapter.dispose();
+  });
+
+  it("preserves an old Claude locator without replacing it with the new execution", async () => {
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
+      queryFn: makeScriptedQuery([]).queryFn,
+    });
+    const loaded = await adapter.loadSession({
+      executionId: "new-execution",
+      providerBinding: {
+        version: 1,
+        providerId: "claude",
+        kind: "native",
+        resumeId: "claude-native",
+        legacySessionId: "old-directory-locator",
+      },
+      cwd: "/tmp",
+    });
+
+    expect(loaded.providerBinding).toMatchObject({
+      resumeId: "claude-native",
+      legacySessionId: "old-directory-locator",
+    });
+    expect(loaded.providerBinding?.legacySessionId).not.toBe("new-execution");
+    await adapter.dispose();
+  });
+
   it("closes an idle Claude query at the configured deadline and lazily resumes the next turn", async () => {
     vi.useFakeTimers();
     try {

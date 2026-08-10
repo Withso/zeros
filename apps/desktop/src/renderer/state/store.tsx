@@ -1,6 +1,10 @@
 import type { ComposerAttachment } from "../features/agent/composer-attachments";
 import type { AgentTextMessageAttachment } from "../features/agent/use-agent-session";
 import type { WorkbenchScopeMap } from "../shell/workbench/tab-model";
+import type {
+  ProviderBinding,
+  ProviderMetadata,
+} from "@zeros/protocol/identities";
 
 export { normalizeChatPermissionMode } from "./chat-permission";
 
@@ -476,18 +480,14 @@ export type ChatThread = {
   title: string;
   createdAt: number;
   updatedAt: number;
-  /** Persistent agent sessionId. Source-of-truth link from a chat
-   *  in our sidebar to the on-disk transcript the agent CLI writes
-   *  (Claude: ~/.claude/projects/<hash>/<sessionId>.jsonl, Codex:
-   *  ~/.codex/sessions/...). Set in three ways:
-   *    - "Resume from recent thread" UI seeds it on chat creation.
-   *    - First successful new-session creation writes it back.
-   *    - It updates whenever the active agent forks / starts a new
-   *      session under the same chat (model swap with force=true).
-   *  Provider state is a hot cache; this field survives app restarts
-   *  and is what lets us replay history on next mount. Cleared if a
-   *  loadIntoChat fails so retry can fall through to a fresh session. */
+  /** Deprecated pre-v28 provider/session locator. Retained for boot-cache and
+   * downgrade compatibility only; never use it to route a live execution. */
   sessionId?: string;
+  /** Provider-owned durable resume identity. Zeros conversation identity stays
+   * `id`; a live runtime is separately keyed by executionId. */
+  providerBinding?: ProviderBinding;
+  /** Provider-authored descriptive state. Never drives routing or checkout. */
+  providerMetadata?: ProviderMetadata;
   /** Pinned to the top of the sidebar, independent of project grouping.
    *  Defaults to false / undefined for old records. */
   pinned?: boolean;

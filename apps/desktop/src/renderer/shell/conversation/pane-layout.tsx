@@ -86,9 +86,12 @@ import {
 } from "../../state/chat-panes-store";
 import { ChatTabs } from "./chat-tabs";
 import {
+  chatCloseConfirmation,
   isChatDiscardableOnClose,
   messageCountForChatClose,
+  tabCloseResourceAction,
 } from "./chat-close";
+import { ChatCloseDialog } from "./chat-close-dialog";
 import {
   captureScrollWithin,
   preserveScrollGeometryWithin,
@@ -228,6 +231,11 @@ export function ConversationPaneLayout({
   const dispatch = useWorkspaceDispatch();
   const sessions = useAgentSessions();
   const { closeSession } = sessions;
+  const [pendingChatClose, setPendingChatClose] = useState<{
+    paneId: string;
+    chat: ChatThread;
+    copy: NonNullable<ReturnType<typeof chatCloseConfirmation>>;
+  } | null>(null);
 
   const activeFolder = useWorkspaceStore(selectActiveFolder);
   const pendingWorkspaceValidationFolder = useWorkspaceStore(
@@ -409,9 +417,8 @@ export function ConversationPaneLayout({
     [sessions],
   );
 
-  const handleCloseTab = useCallback(
-    (paneId: string, chat: ChatThread, e?: React.MouseEvent) => {
-      e?.stopPropagation();
+  const closeTabNow = useCallback(
+    (paneId: string, chat: ChatThread) => {
       const closedFolder = chat.folder;
       // Fresh read — the pane-focus pointerdown that preceded this click
       // may have re-pointed the global selection this same tick.
@@ -435,15 +442,6 @@ export function ConversationPaneLayout({
       const sessionSlot = useSessionsStore.getState().sessions[chat.id];
       const messageCount = messageCountForChatClose(sessionSlot);
 
-      // Reap the backing resource (see conversation/chat-tabs history: a
-      // terminal tab's PTY must be EXPLICITLY killed; a chat tab reaps
-      // its engine session, transcript kept on disk).
-      if (chat.kind === "terminal") {
-        void ptyKill({ sessionId: chat.id });
-      } else {
-        closeSession(chat.id);
-      }
-
       // A never-used "Untitled" tab (no message, no rename/title, no typed
       // draft) is DISCARDED so it never clutters the History menu; every
       // other close ARCHIVES (soft-delete, restorable from History). See
@@ -457,6 +455,19 @@ export function ConversationPaneLayout({
         liveDraft: getLiveChatDraft(chat.id),
         storedDraft: useWorkspaceStore.getState().chatComposerDrafts[chat.id],
       });
+
+      // Closing a chat is an explicit stop boundary for every agent. The
+      // conversation/provider binding remain durable when archived, but the
+      // current execution and every queued follow-up are cancelled now.
+      // Terminals remain explicit process resources and are killed on close.
+      switch (tabCloseResourceAction({ kind: chat.kind, discard })) {
+        case "kill-terminal":
+          void ptyKill({ sessionId: chat.id });
+          break;
+        case "close-session":
+          closeSession(chat.id);
+          break;
+      }
       dispatch({ type: discard ? "DELETE_CHAT" : "ARCHIVE_CHAT", id: chat.id });
 
       if (wasActive) {
@@ -504,6 +515,40 @@ export function ConversationPaneLayout({
       layout,
     ],
   );
+
+  const handleCloseTab = useCallback(
+    (paneId: string, chat: ChatThread, e?: React.MouseEvent) => {
+      e?.stopPropagation();
+      if (chat.kind !== "terminal") {
+        const activity = sessions.getCloseActivity(chat.id);
+        const agentName =
+          chat.agentName?.trim() || chat.agentId?.trim() || "the agent";
+        const copy = chatCloseConfirmation({ agentName, ...activity });
+        if (copy) {
+          setPendingChatClose({ paneId, chat, copy });
+          return;
+        }
+      }
+      closeTabNow(paneId, chat);
+    },
+    [closeTabNow, sessions],
+  );
+
+  const cancelPendingChatClose = useCallback(() => {
+    setPendingChatClose(null);
+  }, []);
+
+  const confirmPendingChatClose = useCallback(() => {
+    const pending = pendingChatClose;
+    if (!pending) return;
+    setPendingChatClose(null);
+    // The chat can disappear through remote sync while the modal is open.
+    // Revalidate before mutating so Confirm on a stale dialog is inert.
+    const live = useWorkspaceStore
+      .getState()
+      .chats.find((chat) => chat.id === pending.chat.id && !chat.archived);
+    if (live) closeTabNow(pending.paneId, live);
+  }, [closeTabNow, pendingChatClose]);
 
   /** Restore a chat from History into the pane whose menu was used. */
   const handleRestoreChat = useCallback(
@@ -682,21 +727,39 @@ export function ConversationPaneLayout({
   // paint, and an actually empty destination needs no misleading error state.
   if (!activeWorkspacePath) {
     return (
-      <div ref={paneSurfaceRef} className="flex min-h-0 flex-1 flex-col">
-        <div className={STRIP_SHELL_CLS} data-tauri-drag-region />
-        <div className="min-h-0 flex-1" />
-      </div>
+      <>
+        <div ref={paneSurfaceRef} className="flex min-h-0 flex-1 flex-col">
+          <div className={STRIP_SHELL_CLS} data-tauri-drag-region />
+          <div className="min-h-0 flex-1" />
+        </div>
+        {pendingChatClose && (
+          <ChatCloseDialog
+            copy={pendingChatClose.copy}
+            onCancel={cancelPendingChatClose}
+            onConfirm={confirmPendingChatClose}
+          />
+        )}
+      </>
     );
   }
 
   return (
-    <div
-      ref={paneSurfaceRef}
-      data-pane-layout-surface=""
-      className="flex min-h-0 min-w-0 flex-1"
-    >
-      <PaneNodeView node={layout.root} ctx={ctx} />
-    </div>
+    <>
+      <div
+        ref={paneSurfaceRef}
+        data-pane-layout-surface=""
+        className="flex min-h-0 min-w-0 flex-1"
+      >
+        <PaneNodeView node={layout.root} ctx={ctx} />
+      </div>
+      {pendingChatClose && (
+        <ChatCloseDialog
+          copy={pendingChatClose.copy}
+          onCancel={cancelPendingChatClose}
+          onConfirm={confirmPendingChatClose}
+        />
+      )}
+    </>
   );
 }
 

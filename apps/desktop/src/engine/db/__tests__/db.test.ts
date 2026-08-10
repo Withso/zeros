@@ -27,6 +27,7 @@ import {
   coerceChatRow,
   setChatWorkspaceResolver,
   backfillChatWorkspaceIds,
+  updateChatProviderIdentity,
   type ChatRow,
 } from "../chats";
 import { headRev, tombstonesSince } from "../sync";
@@ -134,9 +135,9 @@ describe("Zeros DB (unified engine store)", () => {
       .all() as { version: number }[];
     expect(applied.map((r) => r.version)).toEqual([
       1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-      22, 23, 24, 25, 26, 27,
+      22, 23, 24, 25, 26, 27, 28, 29, 30,
     ]);
-    expect(latestSchemaVersion()).toBe(27);
+    expect(latestSchemaVersion()).toBe(30);
   });
 
   it("stamps + backfills chats.workspace_id from folder via the resolver (v11)", () => {
@@ -188,7 +189,7 @@ describe("Zeros DB (unified engine store)", () => {
     const count = db
       .prepare("SELECT COUNT(*) AS n FROM schema_migrations")
       .get() as { n: number };
-    expect(count.n).toBe(27);
+    expect(count.n).toBe(30);
   });
 
   it("preserves created_at on upsert (immutable after first insert)", () => {
@@ -411,6 +412,110 @@ describe("Zeros DB (unified engine store)", () => {
 
     deleteChat("c2");
     expect(listChats().some((c) => c.id === "c2")).toBe(false);
+  });
+
+  it("chats: persists provider identity without persisting a live execution", () => {
+    setZerosDbPathForTesting(tmpDbFile());
+    const db = openZerosDb();
+    upsertChat(
+      makeChat("identity", {
+        agentId: "codex",
+        sessionId: "must-not-win",
+        providerBinding: {
+          version: 1,
+          providerId: "codex",
+          kind: "native",
+          resumeId: "thread-1",
+          scopeId: "root-thread-1",
+          legacySessionId: "old-locator",
+        },
+        providerMetadata: {
+          version: 1,
+          git: { sha: "abc", branch: "main", originUrl: null },
+        },
+      }),
+    );
+
+    expect(listChats().find((chat) => chat.id === "identity")).toMatchObject({
+      sessionId: "old-locator",
+      providerBinding: {
+        providerId: "codex",
+        resumeId: "thread-1",
+        scopeId: "root-thread-1",
+      },
+      providerMetadata: {
+        git: { sha: "abc", branch: "main", originUrl: null },
+      },
+    });
+    const raw = db
+      .prepare("SELECT session_id FROM chats WHERE id = 'identity'")
+      .get() as { session_id: string };
+    expect(raw.session_id).toBe("old-locator");
+    expect(raw.session_id).not.toBe("must-not-win");
+  });
+
+  it("chats: atomically records a provider binding learned mid-stream", () => {
+    setZerosDbPathForTesting(tmpDbFile());
+    upsertChat(
+      makeChat("late-binding", {
+        agentId: "claude",
+        providerBinding: {
+          version: 1,
+          providerId: "claude",
+          kind: "legacy",
+          resumeId: "legacy-session",
+        },
+        providerMetadata: {
+          version: 1,
+          git: { sha: "abc", branch: "main", originUrl: null },
+        },
+      }),
+    );
+    const beforeBindingRev = headRev();
+
+    expect(
+      updateChatProviderIdentity("late-binding", "claude", {
+        version: 1,
+        providerId: "claude",
+        kind: "native",
+        resumeId: "claude-native-session",
+      }),
+    ).toBe(true);
+    expect(
+      listChats().find((chat) => chat.id === "late-binding"),
+    ).toMatchObject({
+      sessionId: "claude-native-session",
+      providerBinding: {
+        providerId: "claude",
+        kind: "native",
+        resumeId: "claude-native-session",
+      },
+      // A binding-only refinement must not erase descriptive metadata.
+      providerMetadata: {
+        git: { sha: "abc", branch: "main", originUrl: null },
+      },
+    });
+    expect(listChatsSince(beforeBindingRev)).toEqual([
+      expect.objectContaining({
+        id: "late-binding",
+        providerBinding: expect.objectContaining({
+          resumeId: "claude-native-session",
+        }),
+      }),
+    ]);
+
+    expect(
+      updateChatProviderIdentity("late-binding", "codex", {
+        version: 1,
+        providerId: "codex",
+        kind: "native",
+        resumeId: "wrong-provider-thread",
+      }),
+    ).toBe(false);
+    expect(
+      listChats().find((chat) => chat.id === "late-binding")?.providerBinding
+        ?.resumeId,
+    ).toBe("claude-native-session");
   });
 
   it("summariesForFolder: first user message per chat; includes archived; excludes self / no-user / other folders", () => {
@@ -636,6 +741,31 @@ describe("Zeros DB (unified engine store)", () => {
       coerceChatRow({ id: "z", additionalDirectories: "nope" })!
         .additionalDirectories,
     ).toEqual([]);
+    expect(
+      coerceChatRow({
+        id: "cross-provider",
+        agentId: "claude",
+        providerBinding: {
+          version: 1,
+          providerId: "codex",
+          kind: "native",
+          resumeId: "thread-1",
+        },
+        providerMetadata: { version: 1 },
+      }),
+    ).toMatchObject({ providerBinding: null, providerMetadata: null });
+    expect(
+      coerceChatRow({
+        id: "unbound-provider",
+        agentId: null,
+        providerBinding: {
+          version: 1,
+          providerId: "codex",
+          kind: "native",
+          resumeId: "thread-1",
+        },
+      }),
+    ).toMatchObject({ providerBinding: null, providerMetadata: null });
   });
 
   it("chats: additionalDirectories round-trips through the JSON-array column", () => {

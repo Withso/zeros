@@ -131,6 +131,7 @@ vi.mock("../../session-paths", () => ({
     log: "/tmp/s/log",
     telemetry: "/tmp/s/tel",
   })),
+  writeSessionMeta: vi.fn(async () => {}),
   removeSessionDir: vi.fn(async () => {}),
 }));
 

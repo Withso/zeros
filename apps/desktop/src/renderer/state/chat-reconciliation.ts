@@ -1,3 +1,8 @@
+import {
+  sameProviderBinding,
+  sameProviderMetadata,
+} from "@zeros/protocol/identities";
+
 import type { ChatThread } from "./store";
 
 function sameDirectories(left: string[], right: string[]): boolean {
@@ -29,6 +34,8 @@ export function samePersistedChat(
     left.createdAt === right.createdAt &&
     left.updatedAt === right.updatedAt &&
     left.sessionId === right.sessionId &&
+    sameProviderBinding(left.providerBinding, right.providerBinding) &&
+    sameProviderMetadata(left.providerMetadata, right.providerMetadata) &&
     left.pinned === right.pinned &&
     left.archived === right.archived &&
     left.sourceChatId === right.sourceChatId &&

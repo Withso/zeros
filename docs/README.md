@@ -7,6 +7,8 @@ contributors after the change that introduced them has shipped.
   renderer's loading, caching, navigation, and retained-surface invariants.
 - [Navigation state persistence](navigation-state-persistence.md) documents
   owner-keyed selection and cleanup behavior.
+- [Agent identity model](agent-identity-model.md) defines Zeros workspace,
+  conversation, execution, and provider-binding ownership and lifecycle.
 - [Design Foundation 1.0](design-foundation-1.0.md) defines the canonical
   source, identity, transaction, renderer, headless, agent, and performance
   contracts beneath the Design workspace.
