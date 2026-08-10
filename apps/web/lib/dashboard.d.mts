@@ -6,7 +6,7 @@ export interface DashboardOrganization {
   logo: string | null;
   role: "owner" | "admin" | "member";
   isPersonal: boolean;
-  defaultTeamId: string;
+  defaultTeamId: string | null;
   workspaceCapabilities: { local: true; cloud: boolean };
   teamCapabilities: { multiple: false; canCreate: false };
 }

@@ -134,6 +134,31 @@ describe("app assembly — request body limits", () => {
     expect(response.status).toBe(401);
   });
 
+  it("authenticates before granting feedback's larger transport ceiling", async () => {
+    const response = await app.request("/v1/feedback", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ logs: "x".repeat(2 * 1024 * 1024) }),
+    });
+
+    // An unauthenticated request is rejected before the feedback-only body
+    // middleware is allowed to inspect or buffer its multi-megabyte payload.
+    expect(response.status).toBe(401);
+  });
+
+  it("throttles repeated feedback attempts by client IP before auth", async () => {
+    const statuses: number[] = [];
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const response = await app.request("/v1/feedback", {
+        method: "POST",
+        headers: { "x-real-ip": "192.0.2.10" },
+      });
+      statuses.push(response.status);
+    }
+
+    expect(statuses).toEqual([401, 401, 401, 401, 401, 429]);
+  });
+
   it("keeps the 256 KiB ceiling on ordinary API routes", async () => {
     const response = await app.request("/v1/teams", {
       method: "POST",

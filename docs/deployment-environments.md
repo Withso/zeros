@@ -216,10 +216,11 @@ Configure at least one destination in each shipped Railway environment:
 - Linear: `LINEAR_API_KEY`, `LINEAR_TEAM_ID`, optional label map
 - optional: `POSTHOG_PROJECT_URL`
 
-The endpoint uses the already verified Auth0 user identity, applies a tighter
-per-user rate limit, sends independently to Intercom and Linear, and returns
-success if either destination accepts the report. Intercom and Linear secrets
-never enter Cloudflare Pages or a desktop build.
+The endpoint applies a Railway `X-Real-IP` limit before authentication, then
+uses the verified Auth0 user identity and a tighter per-user limit. It sends
+independently to Intercom and Linear and returns success if either destination
+accepts the report. Intercom and Linear secrets never enter Cloudflare Pages or
+a desktop build.
 
 After the new Production endpoint has received a real test report, remove the
 old Worker deployment and its rate-limiter binding from the Cloudflare

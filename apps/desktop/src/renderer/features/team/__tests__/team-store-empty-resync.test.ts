@@ -27,8 +27,10 @@ const storage = new Map<string, string>();
   },
 };
 
-const { clearTeamStore, refreshTeams } = await import("../team-store");
-const { getActiveTeamId } = await import("../active-team");
+const { acceptOrganizationSnapshot, clearTeamStore, refreshTeams } =
+  await import("../team-store");
+const { getActiveTeamId, setActiveOrganizationSelection } =
+  await import("../active-team");
 
 describe("empty organization refresh", () => {
   beforeEach(() => {
@@ -67,5 +69,22 @@ describe("empty organization refresh", () => {
     await refreshTeams();
 
     expect(mocks.requestTeamResync).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains the durable owner through a mixed-version empty snapshot", () => {
+    setActiveOrganizationSelection("org_1", false);
+
+    acceptOrganizationSnapshot({
+      user: {
+        id: "user_1",
+        email: "user@example.test",
+        displayName: "User",
+        staffRole: null,
+      },
+      organizations: [],
+      teams: [],
+    });
+
+    expect(getActiveTeamId()).toBe("org_1");
   });
 });

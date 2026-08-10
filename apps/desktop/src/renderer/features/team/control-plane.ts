@@ -97,6 +97,20 @@ export class ControlPlaneError extends Error {
   }
 }
 
+export async function withLegacyOrganizationSettingsFallback<T>(
+  organizationRequest: () => Promise<T>,
+  legacyTeamRequest: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await organizationRequest();
+  } catch (error) {
+    if (!(error instanceof ControlPlaneError) || error.status !== 404) {
+      throw error;
+    }
+    return legacyTeamRequest();
+  }
+}
+
 async function request<T>(
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   path: string,
@@ -153,14 +167,27 @@ export const controlPlane = {
     ),
 
   getOrganizationSettings: (organizationId: string, scope = "*") =>
-    request<{
-      scope: string;
-      doc: Record<string, unknown>;
-      updated_at: string | null;
-      localOnly?: boolean;
-    }>(
-      "GET",
-      `/v1/organizations/${organizationId}/settings?scope=${encodeURIComponent(scope)}`,
+    withLegacyOrganizationSettingsFallback(
+      () =>
+        request<{
+          scope: string;
+          doc: Record<string, unknown>;
+          updated_at: string | null;
+          localOnly?: boolean;
+        }>(
+          "GET",
+          `/v1/organizations/${organizationId}/settings?scope=${encodeURIComponent(scope)}`,
+        ),
+      () =>
+        request<{
+          scope: string;
+          doc: Record<string, unknown>;
+          updated_at: string | null;
+          localOnly?: boolean;
+        }>(
+          "GET",
+          `/v1/teams/${organizationId}/settings?scope=${encodeURIComponent(scope)}`,
+        ),
     ),
 
   /** Compatibility operation: the flat-Team route now creates an organization

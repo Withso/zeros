@@ -9,6 +9,7 @@ import {
 import {
   allowedControlPlaneRoute,
   cancelUnusedResponseBody,
+  jsonContentTypeOrCancel,
   readBoundedBody,
   validMutationOrigin,
 } from "./control-plane-policy.mjs";
@@ -108,8 +109,8 @@ export async function proxyControlPlane(
     }
   }
 
-  const contentType = upstream.headers.get("Content-Type") ?? "";
-  if (!contentType.toLowerCase().includes("application/json")) {
+  const contentType = await jsonContentTypeOrCancel(upstream);
+  if (!contentType) {
     return jsonError(502, "bad_gateway", "Organization service returned an invalid response");
   }
   return new Response(upstream.body, {

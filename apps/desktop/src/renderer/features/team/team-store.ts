@@ -34,6 +34,7 @@ import { requestTeamResync } from "./team-sync";
 import {
   hasOrganizationOwnershipHistory,
   hasRecordedOrganizationOwnership,
+  recordOrganizationHierarchySeen,
   reconcileOrganizationWorkspaceOwnership,
 } from "./organization-membership-history";
 
@@ -128,10 +129,15 @@ export function acceptOrganizationSnapshot(
     organizations.find((organization) => organization.id === current) ??
     organizations[0] ??
     null;
-  setActiveOrganizationSelection(
-    selected?.id ?? null,
-    selected?.isPersonal ?? null,
-  );
+  // An authoritative empty response is a tolerated mixed-version/provisioning
+  // state, not evidence that the durable owner was deleted. Keep the selection
+  // so later creates and a recovered snapshot retain their semantic owner.
+  if (selected) {
+    setActiveOrganizationSelection(selected.id, selected.isPersonal);
+  }
+  if (firstHierarchySnapshot && personal && getActiveTeamId() === personal.id) {
+    recordOrganizationHierarchySeen(me.user.id);
+  }
   setSetting(HAS_TEAMS_KEY, organizations.length > 0);
   emit({ me, status: "ready", error: null });
   return true;
@@ -152,17 +158,13 @@ export function refreshTeams(): Promise<Me | null> {
       // write.
       if (gen !== generation) return null;
       // Keep the persisted selection valid: a deleted/left organization falls
-      // back to Personal/first. A mixed-version empty list clears the engine
-      // layer via the active-team subscribe → team-sync chain.
+      // back to Personal/first. A mixed-version empty list retains that durable
+      // selection but explicitly clears the engine layer below.
       const organizations = me.organizations ?? me.teams;
-      const selectionWasAlreadyEmpty =
-        getActiveTeamId() === null &&
-        getActiveOrganizationIsPersonalHint() === null;
       acceptOrganizationSnapshot(me);
-      // An empty snapshot reconciled against an already-empty selection emits
-      // no active-selection event. Explicitly clear any settings document the
-      // engine may still hold from a previous/mixed-version snapshot.
-      if (selectionWasAlreadyEmpty && organizations.length === 0) {
+      // Empty snapshots deliberately do not publish a selection change. Re-kick
+      // the courier so any previously applied remote settings are still cleared.
+      if (organizations.length === 0) {
         requestTeamResync();
       }
       void reconcileOrganizationWorkspaceOwnership(me).catch((error) => {

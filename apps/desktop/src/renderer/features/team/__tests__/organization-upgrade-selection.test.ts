@@ -74,6 +74,30 @@ describe("first hierarchy-aware organization snapshot", () => {
     ).toHaveLength(1);
   });
 
+  it("does not repeat the one-time normalization before ownership repair can run", () => {
+    const personal = organization("personal_1", true);
+    const collaborative = organization("legacy_team_1", false);
+    const me: Me = {
+      user: {
+        id: "user_1",
+        email: "user@example.test",
+        displayName: "User",
+        staffRole: null,
+      },
+      organizations: [personal, collaborative],
+      teams: [personal, collaborative],
+    };
+    setSetting("team:active-id", collaborative.id);
+
+    acceptOrganizationSnapshot(me);
+    expect(getActiveTeamId()).toBe(personal.id);
+
+    setSetting("team:active-id", collaborative.id);
+    acceptOrganizationSnapshot(me);
+
+    expect(getActiveTeamId()).toBe(collaborative.id);
+  });
+
   it("retains a confirmed owner for creates during a later cold refresh", async () => {
     const personal = organization("personal_1", true);
     const collaborative = organization("org_1", false);
@@ -90,6 +114,29 @@ describe("first hierarchy-aware organization snapshot", () => {
     await reconcileOrganizationWorkspaceOwnership(me);
     setSetting("team:active-id", collaborative.id);
     clearTeamStore();
+
+    expect(getActiveOrganizationIdSnapshot()).toBe(collaborative.id);
+  });
+
+  it("does not replace confirmed ownership history with an empty rollout snapshot", async () => {
+    const personal = organization("personal_1", true);
+    const collaborative = organization("org_1", false);
+    const me: Me = {
+      user: {
+        id: "user_1",
+        email: "user@example.test",
+        displayName: "User",
+        staffRole: null,
+      },
+      organizations: [personal, collaborative],
+      teams: [personal, collaborative],
+    };
+    await reconcileOrganizationWorkspaceOwnership(me);
+    setSetting("team:active-id", collaborative.id);
+
+    const empty: Me = { ...me, organizations: [], teams: [] };
+    acceptOrganizationSnapshot(empty);
+    await reconcileOrganizationWorkspaceOwnership(empty);
 
     expect(getActiveOrganizationIdSnapshot()).toBe(collaborative.id);
   });

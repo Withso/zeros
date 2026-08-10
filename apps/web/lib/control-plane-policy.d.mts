@@ -6,6 +6,9 @@ export declare function validMutationOrigin(request: Request): boolean;
 export declare function cancelUnusedResponseBody(
   response: Response,
 ): Promise<void>;
+export declare function jsonContentTypeOrCancel(
+  response: Response,
+): Promise<string | null>;
 export declare function readBoundedBody(
   request: Request,
   maxBytes: number,

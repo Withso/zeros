@@ -10,7 +10,7 @@
 // shared store if the service ever runs multi-instance.
 // ──────────────────────────────────────────────────────────
 
-import type { MiddlewareHandler } from "hono";
+import type { Context, MiddlewareHandler } from "hono";
 import { HttpError } from "./authz.js";
 
 type Bucket = { count: number; resetAt: number };
@@ -23,17 +23,20 @@ function sweep(now: number): void {
   for (const [k, b] of windows) if (b.resetAt <= now) windows.delete(k);
 }
 
-/** Fixed-window limiter middleware. `key` names the bucket; the acting
- *  user id (from the verified JWT) scopes it. Throws 429 on exceed. */
+/** Fixed-window limiter middleware. `bucket` names the operation; callers may
+ * provide a pre-auth identity such as a trusted edge client IP. Otherwise the
+ * verified acting user id scopes it. Throws 429 on exceed. */
 export function rateLimit(
   bucket: string,
   limit: number,
   windowMs: number,
+  keyFor?: (context: Context) => string,
 ): MiddlewareHandler {
   return async (c, next) => {
     const now = Date.now();
     const user = c.get("user");
-    const key = `${bucket}:${user?.id ?? "anon"}`;
+    const identity = keyFor?.(c) || user?.id || "anon";
+    const key = `${bucket}:${identity}`;
     const existing = windows.get(key);
     if (!existing || existing.resetAt <= now) {
       sweep(now);

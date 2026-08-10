@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   allowedControlPlaneRoute,
   cancelUnusedResponseBody,
+  jsonContentTypeOrCancel,
   readBoundedBody,
   validMutationOrigin,
 } from "./control-plane-policy.mjs";
@@ -111,5 +112,23 @@ test("a superseded upstream response releases its unread body", async () => {
 
   await cancelUnusedResponseBody(response);
 
+  assert.equal(cancelled, true);
+});
+
+test("a non-JSON upstream response is released before proxy rejection", async () => {
+  let cancelled = false;
+  const response = new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("<h1>Bad gateway</h1>"));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    }),
+    { headers: { "content-type": "text/html" } },
+  );
+
+  assert.equal(await jsonContentTypeOrCancel(response), null);
   assert.equal(cancelled, true);
 });

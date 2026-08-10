@@ -37,6 +37,17 @@ export async function cancelUnusedResponseBody(response) {
   await response.body?.cancel().catch(() => undefined);
 }
 
+/** Return a JSON response's content type. Invalid upstream formats are never
+ * forwarded, so release their body before the caller synthesizes a 502. */
+export async function jsonContentTypeOrCancel(response) {
+  const contentType = response.headers.get("Content-Type") ?? "";
+  if (contentType.toLowerCase().includes("application/json")) {
+    return contentType;
+  }
+  await cancelUnusedResponseBody(response);
+  return null;
+}
+
 /** Consume a fetch body incrementally and stop reading as soon as it crosses
  * the proxy ceiling. This keeps a chunked request from allocating up to the
  * platform-wide request limit before the dashboard's much smaller bound runs. */

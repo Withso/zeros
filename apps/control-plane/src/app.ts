@@ -14,6 +14,7 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { cors } from "hono/cors";
 import { bodyLimit } from "hono/body-limit";
+import { isIP } from "node:net";
 import type pg from "pg";
 
 import type { Config } from "./config.js";
@@ -92,16 +93,25 @@ export function createApp(
     app.route("/", createGithubUnconfiguredRoutes());
   }
 
-  // Cap request bodies BEFORE handlers buffer + JSON-parse them. Feedback has
-  // a deliberate 500k-character, secret-scrubbed log attachment, so it gets a
-  // separate 2 MiB transport ceiling (enough for worst-case UTF-8 + JSON).
-  // Every other route keeps the much smaller 256 KiB abuse boundary.
+  // Railway's edge supplies X-Real-IP for the original client. Mirror the
+  // retired feedback Worker's pre-auth abuse boundary so anonymous callers
+  // cannot fan out body buffering or JWT/JWKS work. Invalid/missing values
+  // share one bounded fallback bucket instead of creating attacker-chosen keys.
+  const feedbackPreAuthLimit = rateLimit("feedback-preauth", 5, 60_000, (c) => {
+    const clientIp = c.req.header("X-Real-IP")?.trim() ?? "";
+    return isIP(clientIp) ? clientIp : "unknown";
+  });
+  app.use("/v1/feedback", (c, next) =>
+    c.req.method === "POST" ? feedbackPreAuthLimit(c, next) : next(),
+  );
+
+  // Cap ordinary request bodies BEFORE auth or handlers can inspect them.
+  // Feedback's larger ceiling is installed only after authentication below:
+  // an anonymous caller must not make the service buffer a multi-MiB body.
   const defaultBodyLimit = bodyLimit({ maxSize: 256 * 1024 });
   const feedbackBodyLimit = bodyLimit({ maxSize: 2 * 1024 * 1024 });
   app.use("/v1/*", (c, next) =>
-    c.req.path === "/v1/feedback"
-      ? feedbackBodyLimit(c, next)
-      : defaultBodyLimit(c, next),
+    c.req.path === "/v1/feedback" ? next() : defaultBodyLimit(c, next),
   );
 
   // Everything under /v1 requires a verified Auth0-issued JWT.
@@ -118,6 +128,11 @@ export function createApp(
   // body, so keep a much tighter per-user ceiling in addition to the blanket
   // rate limit. Authentication has already populated the user key.
   app.use("/v1/feedback", rateLimit("feedback", 5, 60_000));
+
+  // Only an authenticated, rate-limited sender may attach the deliberate
+  // 500k-character, secret-scrubbed log tail. Two MiB covers worst-case UTF-8
+  // plus JSON framing without granting that buffer to anonymous traffic.
+  app.use("/v1/feedback", feedbackBodyLimit);
 
   app.route("/", createFeedbackRoutes(config.feedback));
   app.route("/", createRoutes(pool, emailConfig));

@@ -4,6 +4,7 @@ import { getSetting, setSetting } from "../../platform/settings";
 import type { Me } from "./control-plane";
 
 const HISTORY_KEY = "organization:membership-history-v1";
+const HIERARCHY_SEEN_KEY = "organization:hierarchy-seen-v1";
 const MAX_ACCOUNTS = 8;
 const MAX_ORGANIZATIONS = 200;
 
@@ -68,14 +69,39 @@ function readHistory(): OrganizationMembershipHistory {
   };
 }
 
+function readHierarchySeenUserIds(): string[] {
+  const raw = getSetting<unknown>(HIERARCHY_SEEN_KEY, null);
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+  const userIds = (raw as { userIds?: unknown }).userIds;
+  return Array.isArray(userIds)
+    ? userIds.filter(validId).slice(0, MAX_ACCOUNTS)
+    : [];
+}
+
 /** Whether this account has already observed a hierarchy-aware ownership
  * snapshot. Absence is the one-time upgrade signal: the durable active id may
  * still be a promoted flat-Team selection while all existing rows are legacy
  * Personal data. */
 export function hasOrganizationOwnershipHistory(userId: string): boolean {
-  return readHistory().accounts.some(
-    (account) => account.userId === userId && account.personalId !== null,
+  return (
+    readHierarchySeenUserIds().includes(userId) ||
+    readHistory().accounts.some(
+      (account) => account.userId === userId && account.personalId !== null,
+    )
   );
+}
+
+/** Record the one-time hierarchy normalization independently from engine
+ * ownership repair. A missing preload bridge may defer the latter indefinitely,
+ * but must not keep snapping the user's active selection back to Personal. */
+export function recordOrganizationHierarchySeen(userId: string): void {
+  if (!validId(userId)) return;
+  const current = readHierarchySeenUserIds();
+  if (current.includes(userId)) return;
+  setSetting(HIERARCHY_SEEN_KEY, {
+    version: 1,
+    userIds: [userId, ...current].slice(0, MAX_ACCOUNTS),
+  });
 }
 
 /** Recover the last confirmed owner while `/v1/me` is cold or unavailable.
@@ -94,6 +120,10 @@ export function hasRecordedOrganizationOwnership(
 
 function currentSnapshot(me: Me): OrganizationMembershipSnapshot | null {
   const organizations = me.organizations ?? me.teams ?? [];
+  // Every hierarchy-aware account has Personal. An empty response is therefore
+  // a rollout/provisioning gap, not an authoritative membership deletion; keep
+  // the last confirmed ownership snapshot until a non-empty response arrives.
+  if (organizations.length === 0) return null;
   const personal = organizations.find(
     (organization) => organization.isPersonal,
   );

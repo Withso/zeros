@@ -191,10 +191,12 @@ accepts `issue` from released desktop builds and normalizes it to `bug` before
 selecting either provider ID.
 
 Identity always comes from the verified Auth0 user, never the JSON body. The
-body is strict, messages and scrubbed logs are bounded, and the route has a
-five-per-minute per-user limit. Intercom and Linear delivery are independent;
-the request succeeds when either accepts it. Full scrubbed logs go to a private
-Linear upload while Intercom receives only a readable tail.
+body is strict, messages and scrubbed logs are bounded, and the route has both
+a pre-auth five-per-minute Railway client-IP limit and a five-per-minute
+per-user limit. Its larger body allowance applies only after both authentication
+and those limits. Intercom and Linear delivery are independent; the request
+succeeds when either accepts it. Full scrubbed logs go to a private Linear
+upload while Intercom receives only a readable tail.
 
 ## Security model
 

@@ -221,6 +221,61 @@ d("organization routes", () => {
     actor = owner;
   });
 
+  it("keeps a damaged organization visible when its default team is missing", async () => {
+    const created = await request("/v1/organizations", {
+      method: "POST",
+      body: { name: "Needs Repair" },
+    });
+    const organization = (await created.json()) as {
+      organization: { id: string };
+    };
+    const orgId = organization.organization.id;
+    const invite = await request(`/v1/organizations/${orgId}/invitations`, {
+      method: "POST",
+      body: { email: member.email, role: "member" },
+    });
+    const invitation = (await invite.json()) as {
+      invitation: { token: string };
+    };
+    await pool.query(`DELETE FROM teams WHERE org_id = $1`, [orgId]);
+
+    const me = (await (await request("/v1/me")).json()) as {
+      organizations: Array<{ id: string; defaultTeamId: string | null }>;
+    };
+    expect(me.organizations).toContainEqual(
+      expect.objectContaining({ id: orgId, defaultTeamId: null }),
+    );
+
+    const detail = await request(`/v1/organizations/${orgId}`);
+    expect(detail.status).toBe(200);
+    await expect(detail.json()).resolves.toMatchObject({
+      organization: { id: orgId, defaultTeamId: null },
+    });
+
+    const updated = await request(`/v1/organizations/${orgId}`, {
+      method: "PATCH",
+      body: { name: "Still Visible" },
+    });
+    expect(updated.status).toBe(200);
+    await expect(updated.json()).resolves.toMatchObject({
+      organization: { id: orgId, name: "Still Visible", defaultTeamId: null },
+    });
+
+    actor = member;
+    try {
+      const accepted = await request("/v1/invitations/accept", {
+        method: "POST",
+        body: { token: invitation.invitation.token },
+      });
+      expect(accepted.status).toBe(200);
+      await expect(accepted.json()).resolves.toMatchObject({
+        organization: { id: orgId, defaultTeamId: null },
+      });
+    } finally {
+      actor = owner;
+    }
+  });
+
   it("keeps /v1/teams as an organization-id compatibility alias", async () => {
     const me = (await (await request("/v1/me")).json()) as {
       organizations: Array<{ id: string; isPersonal: boolean }>;

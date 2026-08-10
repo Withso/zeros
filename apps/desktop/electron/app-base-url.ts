@@ -6,12 +6,12 @@ declare const __ZEROS_APP_BASE_URL_BAKED__: string | undefined;
 
 const PRODUCTION_APP_ORIGIN = "https://app.zeros.build";
 
-function normalizedAppOrigin(raw: string): string {
+function normalizedAppOrigin(raw: string): string | null {
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
-    throw new Error("Invalid Zeros web app URL");
+    return null;
   }
   const loopbackHttp =
     url.protocol === "http:" &&
@@ -26,17 +26,22 @@ function normalizedAppOrigin(raw: string): string {
     url.hash ||
     url.pathname !== "/"
   ) {
-    throw new Error(
-      "Zeros web app URL must be a credential-free HTTPS origin (or loopback HTTP)",
-    );
+    return null;
   }
   return url.origin;
 }
 
 /** Exported seam for exact precedence/validation tests. */
 export function resolveAppBaseUrl(candidates: readonly string[]): string {
-  const selected = candidates.find((candidate) => candidate.trim())?.trim();
-  return normalizedAppOrigin(selected || PRODUCTION_APP_ORIGIN);
+  for (const candidate of candidates) {
+    const raw = candidate.trim();
+    if (!raw) continue;
+    const origin = normalizedAppOrigin(raw);
+    if (origin) return origin;
+  }
+  const production = normalizedAppOrigin(PRODUCTION_APP_ORIGIN);
+  if (!production) throw new Error("Invalid production Zeros web app URL");
+  return production;
 }
 
 export function appBaseUrl(): string {

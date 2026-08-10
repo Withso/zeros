@@ -80,7 +80,7 @@ type OrganizationRow = {
   role: OrganizationRole;
   is_personal: boolean;
   cloud_workspaces_allowed: boolean;
-  default_team_id: string;
+  default_team_id: string | null;
 };
 
 export type OrganizationSummary = {
@@ -90,7 +90,7 @@ export type OrganizationSummary = {
   logo: string | null;
   role: OrganizationRole;
   isPersonal: boolean;
-  defaultTeamId: string;
+  defaultTeamId: string | null;
   workspaceCapabilities: { local: true; cloud: boolean };
   teamCapabilities: { multiple: false; canCreate: false };
 };
@@ -112,13 +112,25 @@ function organizationSummary(row: OrganizationRow): OrganizationSummary {
   };
 }
 
+function requiredOrganizationSummary(
+  row: OrganizationRow | undefined,
+): OrganizationSummary {
+  if (!row) {
+    throw new HttpError(404, "not_found", "Organization not found");
+  }
+  return organizationSummary(row);
+}
+
 const ORGANIZATION_SUMMARY_SQL = `
   SELECT o.id, o.slug, o.name, o.logo, om.role, o.is_personal,
          o.cloud_workspaces_allowed, dt.id AS default_team_id
   FROM organizations o
   JOIN organization_members om ON om.org_id = o.id
-  JOIN teams dt
-    ON dt.org_id = o.id AND dt.is_default AND dt.deleted_at IS NULL`;
+  LEFT JOIN LATERAL (
+    SELECT t.id FROM teams t
+    WHERE t.org_id = o.id AND t.is_default AND t.deleted_at IS NULL
+    ORDER BY t.id LIMIT 1
+  ) dt ON true`;
 
 export function createRoutes(pool: pg.Pool, email?: EmailConfig): Hono {
   const app = new Hono();
@@ -235,7 +247,7 @@ export function createRoutes(pool: pg.Pool, email?: EmailConfig): Hono {
          WHERE o.id = $1 AND om.user_id = $2`,
         [invitation.org_id, user.id],
       );
-      return organizationSummary(result.rows[0]!);
+      return requiredOrganizationSummary(result.rows[0]);
     });
     return c.json({ organization: joined, team: joined });
   });
@@ -324,7 +336,7 @@ function createOrganizationRouter(
          WHERE o.id = $1 AND om.user_id = $2 AND o.deleted_at IS NULL`,
         [orgId, user.id],
       );
-      return organizationSummary(result.rows[0]!);
+      return requiredOrganizationSummary(result.rows[0]);
     });
     return legacy
       ? c.json({ team: organization })
@@ -372,7 +384,7 @@ function createOrganizationRouter(
          WHERE o.id = $1 AND om.user_id = $2`,
         [orgId, user.id],
       );
-      return organizationSummary(result.rows[0]!);
+      return requiredOrganizationSummary(result.rows[0]);
     });
     return legacy
       ? c.json({ team: organization })

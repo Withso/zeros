@@ -391,14 +391,14 @@ d("schema + signup transaction", () => {
     // Mirror the delete handler's owner-departure logic in two parallel txns.
     const leave = (leaver: string) =>
       withSystemTx(pool, async (tx) => {
+        await tx.query(`SELECT 1 FROM organizations WHERE id = $1 FOR UPDATE`, [
+          orgId,
+        ]);
         await tx.query(
           `SELECT role FROM organization_members
            WHERE org_id = $1 AND user_id = $2 FOR UPDATE`,
           [orgId, leaver],
         );
-        await tx.query(`SELECT 1 FROM organizations WHERE id = $1 FOR UPDATE`, [
-          orgId,
-        ]);
         const { rows } = await tx.query<{ n: string }>(
           `SELECT count(*) AS n FROM organization_members
            WHERE org_id = $1 AND role = 'owner'`,
