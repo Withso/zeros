@@ -22,6 +22,7 @@ import type {
   RequestPermissionResponse,
 } from "../../platform/bridge/agent-events";
 import type { ListSessionsResponse } from "../../platform/bridge/agent-events";
+import type { ProviderBinding } from "@zeros/protocol/identities";
 import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
 import type {
   AgentSessionState,
@@ -145,9 +146,9 @@ export interface SessionsActions {
   loadIntoChat(
     chatId: string,
     agentId: string,
-    sessionId: string,
+    providerBinding: ProviderBinding | null,
     options?: StartForChatOptions,
-  ): Promise<void>;
+  ): Promise<boolean>;
   /** Load an explicitly cold transcript from disk. Idempotent and shared per
    *  exact chat; resident slots only receive a background reconcile, while a
    *  retained cold slot publishes `loading` until its authoritative window is

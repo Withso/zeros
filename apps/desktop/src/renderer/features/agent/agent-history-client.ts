@@ -16,6 +16,10 @@
 import { nativeInvoke } from "../../platform/runtime";
 import { notifyContextGraphChanged } from "../../platform/context-graph";
 import type { AgentMessage } from "./use-agent-session";
+import type {
+  ProviderBinding,
+  ProviderMetadata,
+} from "@zeros/protocol/identities";
 import {
   isAgentAttachmentDiskPath,
   readAgentAttachmentFile,
@@ -446,7 +450,11 @@ export interface ChatRowWire {
   title: string;
   createdAt: number;
   updatedAt: number;
+  /** Read/downgrade compatibility only. Live routing uses executionId and
+   * durable resume uses providerBinding. */
   sessionId: string | null;
+  providerBinding?: ProviderBinding | null;
+  providerMetadata?: ProviderMetadata | null;
   pinned: boolean;
   archived: boolean;
   sourceChatId: string | null;

@@ -19,6 +19,12 @@
 
 import { openZerosDb } from "./index";
 import { nextRev, recordTombstone, clearTombstone } from "./sync";
+import {
+  coerceProviderBinding,
+  coerceProviderMetadata,
+  type ProviderBinding,
+  type ProviderMetadata,
+} from "@zeros/protocol/identities";
 
 // ── workspace_id stamping (v11) ────────────────────────────
 //
@@ -75,7 +81,13 @@ export interface ChatRow {
   title: string;
   createdAt: number;
   updatedAt: number;
+  /** Deprecated compatibility locator for builds before the identity model.
+   * Never use this as a live execution route. */
   sessionId: string | null;
+  /** Optional on the wire for protocol-v8/legacy renderer compatibility. */
+  providerBinding?: ProviderBinding | null;
+  /** Optional on the wire for protocol-v8/legacy renderer compatibility. */
+  providerMetadata?: ProviderMetadata | null;
   pinned: boolean;
   archived: boolean;
   sourceChatId: string | null;
@@ -98,6 +110,8 @@ interface ChatDbRow {
   created_at: number | null;
   updated_at: number | null;
   session_id: string | null;
+  provider_binding: string | null;
+  provider_metadata: string | null;
   pinned: number;
   archived: number;
   source_chat_id: string | null;
@@ -126,7 +140,22 @@ function parseDirs(raw: string | null | undefined): string[] {
   }
 }
 
+function safeJson(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
 function toChatRow(r: ChatDbRow): ChatRow {
+  const parsedBinding = coerceProviderBinding(
+    r.provider_binding ? safeJson(r.provider_binding) : null,
+  );
+  const providerBinding =
+    parsedBinding && parsedBinding.providerId === r.agent_id
+      ? parsedBinding
+      : null;
   return {
     id: r.id,
     folder: r.folder ?? "",
@@ -143,6 +172,10 @@ function toChatRow(r: ChatDbRow): ChatRow {
     createdAt: r.created_at ?? 0,
     updatedAt: r.updated_at ?? 0,
     sessionId: r.session_id,
+    providerBinding,
+    providerMetadata: providerBinding
+      ? coerceProviderMetadata(r.provider_metadata)
+      : null,
     pinned: r.pinned === 1,
     archived: r.archived === 1,
     sourceChatId: r.source_chat_id,
@@ -151,6 +184,20 @@ function toChatRow(r: ChatDbRow): ChatRow {
 }
 
 function toDbParams(c: ChatRow): Record<string, string | number | null> {
+  const parsedBinding = coerceProviderBinding(c.providerBinding);
+  const providerBinding =
+    parsedBinding && parsedBinding.providerId === c.agentId
+      ? parsedBinding
+      : null;
+  const providerMetadata = providerBinding
+    ? coerceProviderMetadata(c.providerMetadata)
+    : null;
+  // Keep the old column as a downgrade locator, never as the canonical route.
+  // Migrated Claude rows retain their old directory locator; new native
+  // bindings mirror the provider resume id and never a current execution id.
+  const compatibilitySessionId = providerBinding
+    ? (providerBinding.legacySessionId ?? providerBinding.resumeId)
+    : (c.sessionId ?? null);
   return {
     id: c.id,
     folder: c.folder ?? "",
@@ -168,7 +215,11 @@ function toDbParams(c: ChatRow): Record<string, string | number | null> {
     title: c.title ?? "",
     created_at: typeof c.createdAt === "number" ? c.createdAt : 0,
     updated_at: typeof c.updatedAt === "number" ? c.updatedAt : 0,
-    session_id: c.sessionId ?? null,
+    session_id: compatibilitySessionId,
+    provider_binding: providerBinding ? JSON.stringify(providerBinding) : null,
+    provider_metadata: providerMetadata
+      ? JSON.stringify(providerMetadata)
+      : null,
     pinned: c.pinned ? 1 : 0,
     archived: c.archived ? 1 : 0,
     source_chat_id: c.sourceChatId ?? null,
@@ -184,12 +235,14 @@ const UPSERT_SQL = `
 INSERT INTO chats (id, folder, agent_id, agent_name, model, effort, permission_mode,
                    last_mode_id, pre_plan_mode_id, fast,
                    additional_directories, title,
-                   created_at, updated_at, session_id, pinned, archived, source_chat_id, kind,
+                   created_at, updated_at, session_id, provider_binding, provider_metadata,
+                   pinned, archived, source_chat_id, kind,
                    workspace_id, rev)
 VALUES (@id, @folder, @agent_id, @agent_name, @model, @effort, @permission_mode,
         @last_mode_id, @pre_plan_mode_id, @fast,
         @additional_directories, @title,
-        @created_at, @updated_at, @session_id, @pinned, @archived, @source_chat_id, @kind,
+        @created_at, @updated_at, @session_id, @provider_binding, @provider_metadata,
+        @pinned, @archived, @source_chat_id, @kind,
         @workspace_id, @rev)
 ON CONFLICT(id) DO UPDATE SET
   folder=excluded.folder, agent_id=excluded.agent_id, agent_name=excluded.agent_name,
@@ -197,7 +250,9 @@ ON CONFLICT(id) DO UPDATE SET
   last_mode_id=excluded.last_mode_id, pre_plan_mode_id=excluded.pre_plan_mode_id,
   fast=excluded.fast, additional_directories=excluded.additional_directories,
   title=excluded.title, updated_at=excluded.updated_at,
-  session_id=excluded.session_id, pinned=excluded.pinned, archived=excluded.archived,
+  session_id=excluded.session_id, provider_binding=excluded.provider_binding,
+  provider_metadata=excluded.provider_metadata,
+  pinned=excluded.pinned, archived=excluded.archived,
   source_chat_id=excluded.source_chat_id, kind=excluded.kind,
   workspace_id=excluded.workspace_id, rev=excluded.rev`;
 // NOTE: created_at is intentionally NOT in the UPDATE set. It is immutable after
@@ -217,10 +272,12 @@ export function coerceChatRow(o: unknown): ChatRow | null {
     typeof v === "string" ? v : null;
   const num = (v: unknown): number =>
     typeof v === "number" && Number.isFinite(v) ? v : 0;
+  const agentId = strOrNull(r.agentId);
+  const providerBinding = coerceProviderBinding(r.providerBinding);
   return {
     id: r.id,
     folder: str(r.folder),
-    agentId: strOrNull(r.agentId),
+    agentId,
     agentName: strOrNull(r.agentName),
     model: strOrNull(r.model),
     effort: str(r.effort),
@@ -239,6 +296,17 @@ export function coerceChatRow(o: unknown): ChatRow | null {
     createdAt: num(r.createdAt),
     updatedAt: num(r.updatedAt),
     sessionId: strOrNull(r.sessionId),
+    // A binding is owned by the selected provider. Refuse a cross-provider
+    // binding at the untrusted relay boundary instead of handing it to an
+    // adapter with different credentials/storage semantics.
+    providerBinding:
+      providerBinding && providerBinding.providerId === agentId
+        ? providerBinding
+        : null,
+    providerMetadata:
+      providerBinding && providerBinding.providerId === agentId
+        ? coerceProviderMetadata(r.providerMetadata)
+        : null,
     pinned: r.pinned === true,
     archived: r.archived === true,
     sourceChatId: strOrNull(r.sourceChatId),
@@ -253,7 +321,8 @@ export function listChats(): ChatRow[] {
       `SELECT id, folder, agent_id, agent_name, model, effort, permission_mode,
               last_mode_id, pre_plan_mode_id, fast,
               additional_directories, title,
-              created_at, updated_at, session_id, pinned, archived, source_chat_id, kind
+              created_at, updated_at, session_id, provider_binding, provider_metadata,
+              pinned, archived, source_chat_id, kind
        FROM chats ORDER BY updated_at DESC`,
     )
     .all() as ChatDbRow[];
@@ -271,7 +340,8 @@ export function getChat(id: string): ChatRow | null {
       `SELECT id, folder, agent_id, agent_name, model, effort, permission_mode,
               last_mode_id, pre_plan_mode_id, fast,
               additional_directories, title,
-              created_at, updated_at, session_id, pinned, archived, source_chat_id, kind
+              created_at, updated_at, session_id, provider_binding, provider_metadata,
+              pinned, archived, source_chat_id, kind
        FROM chats WHERE id = ?`,
     )
     .get(id) as ChatDbRow | undefined;
@@ -555,7 +625,8 @@ export function listChatsSince(since: number): ChatRow[] {
       `SELECT id, folder, agent_id, agent_name, model, effort, permission_mode,
               last_mode_id, pre_plan_mode_id, fast,
               additional_directories, title,
-              created_at, updated_at, session_id, pinned, archived, source_chat_id, kind
+              created_at, updated_at, session_id, provider_binding, provider_metadata,
+              pinned, archived, source_chat_id, kind
        FROM chats WHERE rev > ? ORDER BY rev`,
     )
     .all(since) as ChatDbRow[];

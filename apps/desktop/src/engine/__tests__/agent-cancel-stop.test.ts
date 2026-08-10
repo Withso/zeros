@@ -381,8 +381,10 @@ describe("session load after a stop", () => {
       client,
     );
 
-    // An ordinary resume — no phantom live turn, no ticking timer.
-    expect(loadSession).toHaveBeenCalled();
+    // The execution remains reusable, but the settled prompt itself is gone:
+    // renderer reload must not replace the idle provider session or resurrect
+    // a phantom live turn/ticking timer.
+    expect(loadSession).not.toHaveBeenCalled();
     expect(messages).toEqual(
       expect.arrayContaining([
         expect.objectContaining({

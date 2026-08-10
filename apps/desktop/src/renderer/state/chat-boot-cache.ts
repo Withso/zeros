@@ -16,6 +16,10 @@ import {
   CHATS_STORAGE_KEY,
   CHATS_TOMBSTONE_KEY,
 } from "./chats-local-cache";
+import {
+  coerceProviderBinding,
+  coerceProviderMetadata,
+} from "@zeros/protocol/identities";
 
 const VALID_EFFORTS = new Set<ChatEffort>([
   "low",
@@ -60,15 +64,22 @@ export function sanitizeCachedChat(value: unknown): ChatThread | null {
     : "high";
   const legacyResume =
     typeof raw.resumeSessionId === "string" ? raw.resumeSessionId : undefined;
+  const agentId =
+    typeof raw.agentId === "string" && raw.agentId.trim().length > 0
+      ? raw.agentId
+      : null;
+  const parsedBinding = coerceProviderBinding(raw.providerBinding);
+  const providerBinding =
+    parsedBinding?.providerId === agentId ? parsedBinding : null;
+  const providerMetadata = providerBinding
+    ? coerceProviderMetadata(raw.providerMetadata)
+    : null;
 
   return {
     id: raw.id,
     folder: typeof raw.folder === "string" ? raw.folder : "",
     kind,
-    agentId:
-      typeof raw.agentId === "string" && raw.agentId.trim().length > 0
-        ? raw.agentId
-        : null,
+    agentId,
     agentName: typeof raw.agentName === "string" ? raw.agentName : null,
     model:
       typeof raw.model === "string" && raw.model.trim().length > 0
@@ -92,6 +103,8 @@ export function sanitizeCachedChat(value: unknown): ChatThread | null {
       : legacyResume
         ? { sessionId: legacyResume }
         : {}),
+    ...(providerBinding ? { providerBinding } : {}),
+    ...(providerMetadata ? { providerMetadata } : {}),
     pinned: raw.pinned === true,
     archived: raw.archived === true,
     ...(typeof raw.sourceChatId === "string"

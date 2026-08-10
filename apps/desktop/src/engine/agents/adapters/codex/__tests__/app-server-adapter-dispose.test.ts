@@ -27,6 +27,8 @@ vi.mock("../app-server", () => ({
     child: { pid: 4321, killed: false },
     startThread: async () => ({
       threadId: "thread-1",
+      providerSessionId: "codex-root-session-1",
+      gitInfo: { sha: "abc", branch: "main", originUrl: null },
       model: "gpt-5",
       approvalPolicy: "on-request",
       sandbox: { type: "workspaceWrite" },
@@ -83,6 +85,31 @@ describe("CodexAppServerAdapter.disposeSession", () => {
   beforeEach(() => {
     rt.disposeCalls = 0;
     rt.disposeImpl = null;
+  });
+
+  it("returns Codex thread identity separately from the Zeros execution", async () => {
+    const adapter = makeAdapter();
+    const { session } = await adapter.newSession({
+      executionId: "zeros-execution-1",
+      cwd: "/tmp/proj",
+    });
+
+    expect(session).toMatchObject({
+      executionId: "zeros-execution-1",
+      sessionId: "zeros-execution-1",
+      providerBinding: {
+        version: 1,
+        providerId: "codex",
+        kind: "native",
+        resumeId: "thread-1",
+        scopeId: "codex-root-session-1",
+      },
+      providerMetadata: {
+        version: 1,
+        git: { sha: "abc", branch: "main", originUrl: null },
+      },
+    });
+    await adapter.disposeSession(session.executionId);
   });
 
   it("reports a process-group teardown failure to the caller", async () => {

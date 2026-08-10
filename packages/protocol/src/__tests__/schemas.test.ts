@@ -130,6 +130,88 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
     ).toBe("AGENT_STOP_BACKGROUND_TASK");
   });
 
+  it("accepts the canonical execution route and rejects split aliases", () => {
+    const b = { ...base, source: "browser" as const };
+    expect(
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_PROMPT",
+        agentId: "codex",
+        executionId: "execution-1",
+        prompt: [],
+      }).type,
+    ).toBe("AGENT_PROMPT");
+    expect(() =>
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_PROMPT",
+        agentId: "codex",
+        executionId: "execution-1",
+        sessionId: "provider-thread-1",
+        prompt: [],
+      }),
+    ).toThrow(/mismatch/);
+  });
+
+  it("accepts provider-only durable resume requests", () => {
+    const b = { ...base, source: "browser" as const };
+    expect(
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_LOAD_SESSION",
+        agentId: "codex",
+        chatId: "conversation-1",
+        providerBinding: {
+          version: 1,
+          providerId: "codex",
+          kind: "native",
+          resumeId: "thread-1",
+        },
+      }).type,
+    ).toBe("AGENT_LOAD_SESSION");
+  });
+
+  it("accepts a conversation-only live execution probe", () => {
+    const b = { ...base, source: "browser" as const };
+    expect(
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_LOAD_SESSION",
+        agentId: "codex",
+        chatId: "conversation-1",
+      }).type,
+    ).toBe("AGENT_LOAD_SESSION");
+    expect(() =>
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_LOAD_SESSION",
+        agentId: "codex",
+      }),
+    ).toThrow(/executionId\/chatId\/providerBinding/);
+  });
+
+  it("validates live model changes against the execution route", () => {
+    const b = { ...base, source: "browser" as const };
+    expect(
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_SET_MODEL",
+        agentId: "claude",
+        executionId: "execution-1",
+        model: "claude-sonnet",
+      }).type,
+    ).toBe("AGENT_SET_MODEL");
+    expect(() =>
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_SET_MODEL",
+        agentId: "claude",
+        executionId: "execution-1",
+        model: "",
+      }),
+    ).toThrow(/model/);
+  });
+
   it("rejects an invalid background-task stop target", () => {
     const b = { ...base, source: "browser" as const };
     expect(() =>

@@ -35,6 +35,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { randomUUID } from "node:crypto";
+import { providerBindingForResume } from "@zeros/protocol/identities";
 import * as fsp from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
@@ -547,7 +548,7 @@ function readAgentCountFromDetail(detail: string | null): number | null {
 }
 
 interface SdkSession {
-  /** Zeros-side routing id (returned to the renderer; keys persistence). */
+  /** Zeros-side ephemeral routing id (returned to the renderer; never durable). */
   readonly zerosSessionId: string;
   cwd: string;
   env?: Record<string, string>;
@@ -567,6 +568,9 @@ interface SdkSession {
    *  `resume`; null until the first turn has started. Persisted to the
    *  session dir so a reopen / engine-restart can resume the real id. */
   claudeSessionId: string | null;
+  /** Pre-identity-model session-directory locator, retained only when loading
+   * an existing legacy binding. Never set to a newly-minted execution id. */
+  legacySessionId: string | null;
   /** The live persistent query (null until the first prompt, or after an idle
    *  release / dispose / fatal error — recreated lazily with `resume`). */
   query: Query | null;
@@ -846,13 +850,14 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   // ── newSession / loadSession ──────────────────────────
 
   async newSession(opts: {
+    executionId?: string;
     cwd: string;
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
   }): Promise<{ session: NewSessionResponse; initialize: InitializeResponse }> {
     const initialize = await this.initialize();
-    const zerosSessionId = randomUUID();
+    const zerosSessionId = opts.executionId ?? randomUUID();
     await ensureSessionDir(zerosSessionId);
     await writeSessionMeta(zerosSessionId, {
       agentId: this.agentId,
@@ -863,6 +868,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     const state = this.makeState(zerosSessionId, opts);
     this.sessions.set(zerosSessionId, state);
     const session: NewSessionResponse = {
+      executionId: zerosSessionId,
       sessionId: zerosSessionId,
       modes: {
         // Report the resolved default (from settings.json) so the permission
@@ -876,13 +882,16 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   }
 
   async loadSession(opts: {
-    sessionId: string;
+    executionId?: string;
+    providerBinding?: import("@zeros/protocol/identities").ProviderBinding;
+    sessionId?: string;
     cwd: string;
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
   }): Promise<LoadSessionResponse> {
-    const existing = this.sessions.get(opts.sessionId);
+    const executionId = opts.executionId ?? opts.sessionId ?? randomUUID();
+    const existing = this.sessions.get(executionId);
     if (existing) {
       existing.cwd = opts.cwd;
       existing.env = opts.env;
@@ -891,23 +900,52 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       this.refreshIdleTeardown(existing);
       return loadResponseWithModes(existing.permissionMode);
     }
-    await ensureSessionDir(opts.sessionId);
-    const state = this.makeState(opts.sessionId, opts);
+    await ensureSessionDir(executionId);
+    const state = this.makeState(executionId, opts);
     // Re-attach the SDK session id so the next prompt resumes the real
     // conversation (the renderer hydrates the transcript from its own
     // SQLite — we never re-replay Claude's JSONL). Survives engine restart.
-    state.claudeSessionId = await this.readClaudeSessionId(opts.sessionId);
-    this.sessions.set(opts.sessionId, state);
+    if (opts.providerBinding?.kind === "native") {
+      state.claudeSessionId = opts.providerBinding.resumeId;
+      state.legacySessionId = opts.providerBinding.legacySessionId ?? null;
+    } else {
+      const legacyLocator =
+        opts.providerBinding?.legacySessionId ??
+        opts.providerBinding?.resumeId ??
+        opts.sessionId;
+      state.legacySessionId = legacyLocator ?? null;
+      state.claudeSessionId = legacyLocator
+        ? await this.readClaudeSessionId(legacyLocator)
+        : null;
+    }
+    if (state.claudeSessionId) {
+      await this.persistClaudeSessionId(executionId, state.claudeSessionId);
+    }
+    this.sessions.set(executionId, state);
     // Re-advertise modes on resume. Without this the renderer's permission
     // pill falls back to its generic local ids (full/auto-edit/ask/plan-only)
     // for a resumed chat, and "Full Access" wouldn't route to bypass.
     // No persisted Claude session id → the next prompt starts a FRESH
     // conversation (nothing to `--resume`), so the first-turn preamble isn't in
     // any history; tell the gateway to re-inject it (resumedFresh).
-    return loadResponseWithModes(
-      state.permissionMode,
-      state.claudeSessionId == null,
-    );
+    return {
+      ...loadResponseWithModes(
+        state.permissionMode,
+        state.claudeSessionId == null,
+      ),
+      executionId,
+      ...(state.claudeSessionId
+        ? {
+            providerBinding: providerBindingForResume(
+              "claude",
+              state.claudeSessionId,
+              state.legacySessionId
+                ? { legacySessionId: state.legacySessionId }
+                : {},
+            ),
+          }
+        : {}),
+    };
   }
 
   async listSessions(): Promise<ListSessionsResponse> {
@@ -933,6 +971,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // hierarchy); a persisted per-chat mode overrides via reconcile.
       permissionMode: resolveDefaultPermissionMode(opts.cwd),
       claudeSessionId: null,
+      legacySessionId: null,
       query: null,
       input: new InputQueue<SDKUserMessage>(),
       consumer: null,
@@ -1430,6 +1469,20 @@ export class ClaudeSdkAdapter implements AgentAdapter {
               state.zerosSessionId,
               m.session_id,
             );
+            this.ctx.emit.onSessionUpdate(this.agentId, {
+              executionId: state.zerosSessionId,
+              sessionId: state.zerosSessionId,
+              update: {
+                sessionUpdate: "provider_binding_update",
+                providerBinding: providerBindingForResume(
+                  "claude",
+                  m.session_id,
+                  state.legacySessionId
+                    ? { legacySessionId: state.legacySessionId }
+                    : {},
+                ),
+              },
+            });
           }
           // The init message carries the skill-NAME subset separately from the
           // merged command list (`init.skills: string[]`). Capture it so the

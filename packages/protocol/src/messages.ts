@@ -28,6 +28,12 @@ import type {
   AgentTextMessageAttachment,
   MessageContentSegment,
 } from "./agent-messages";
+import type {
+  ConversationId,
+  ExecutionId,
+  ProviderBinding,
+  WorkspaceId,
+} from "./identities";
 
 export type MessageSource = "browser" | "engine";
 
@@ -356,13 +362,13 @@ export interface AgentNewSessionMessage extends BaseMessage {
   /** The renderer chat this session belongs to. Lets the engine persist the
    *  transcript by chatId as it streams, so
    *  forks of the same chat aggregate under one transcript. */
-  chatId?: string;
+  chatId?: ConversationId;
   cwd?: string;
   /** Engine workspace id when the chat lives in a Zeros-managed worktree.
    *  Lets the gateway map session → workspace (background branch-rename
    *  hook, lastActiveAt). Omitted for primary-checkout / foreign-worktree
    *  chats — the engine keys off `cwd` alone there. */
-  workspaceId?: string;
+  workspaceId?: WorkspaceId;
   /** Env passed to the agent subprocess at spawn time. */
   env?: Record<string, string>;
   /** Optional CLI binary path override (Settings → Providers → Advanced).
@@ -464,6 +470,7 @@ export interface AgentPromptMessage extends BaseMessage {
   type: "AGENT_PROMPT";
   agentId: string;
   sessionId: string;
+  executionId?: ExecutionId;
   prompt: ContentBlock[];
   /** Optional faithful-bubble payload (segments/attachments/displayText).
    *  Older clients omit it; the engine then persists the plain wire text. */
@@ -486,6 +493,7 @@ export interface AgentCancelMessage extends BaseMessage {
   type: "AGENT_CANCEL";
   agentId: string;
   sessionId: string;
+  executionId?: ExecutionId;
 }
 
 /** Stop one active background task without cancelling the parent turn or any
@@ -494,6 +502,7 @@ export interface AgentStopBackgroundTaskMessage extends BaseMessage {
   type: "AGENT_STOP_BACKGROUND_TASK";
   agentId: string;
   sessionId: string;
+  executionId?: ExecutionId;
   taskId: string;
 }
 
@@ -508,6 +517,7 @@ export interface AgentSteerMessage extends BaseMessage {
   type: "AGENT_STEER";
   agentId: string;
   sessionId: string;
+  executionId?: ExecutionId;
   prompt: ContentBlock[];
   /** Faithful-bubble payload — same contract as AGENT_PROMPT.bubble. */
   bubble?: AgentPromptBubble;
@@ -522,6 +532,7 @@ export interface AgentSteeredMessage extends BaseMessage {
   requestId: string;
   agentId: string;
   sessionId: string;
+  executionId?: ExecutionId;
   /** Opening user-message id for the provider turn that accepted this steer.
    *  Lets the renderer keep a separate steer bubble without inventing a
    *  second persisted turn/footer. Absent for mixed-version engines. */
@@ -534,6 +545,7 @@ export interface AgentCloseSessionMessage extends BaseMessage {
   type: "AGENT_CLOSE_SESSION";
   agentId: string;
   sessionId: string;
+  executionId?: ExecutionId;
 }
 
 export interface AgentPermissionResponseMessage extends BaseMessage {
@@ -562,6 +574,7 @@ export interface AgentSetModeMessage extends BaseMessage {
   type: "AGENT_SET_MODE";
   agentId: string;
   sessionId: string;
+  executionId?: ExecutionId;
   modeId: string;
 }
 
@@ -570,6 +583,7 @@ export interface AgentModeChangedMessage extends BaseMessage {
   requestId: string;
   agentId: string;
   sessionId: string;
+  executionId?: ExecutionId;
   modeId: string;
 }
 
@@ -584,6 +598,7 @@ export interface AgentCompactMessage extends BaseMessage {
   type: "AGENT_COMPACT";
   agentId: string;
   sessionId: string;
+  executionId?: ExecutionId;
 }
 
 /** Change the model of a LIVE session without rebuilding it. Used by the
@@ -594,6 +609,7 @@ export interface AgentSetModelMessage extends BaseMessage {
   type: "AGENT_SET_MODEL";
   agentId: string;
   sessionId: string;
+  executionId?: ExecutionId;
   model: string;
 }
 
@@ -608,6 +624,7 @@ export interface AgentUpdateConfigMessage extends BaseMessage {
   type: "AGENT_UPDATE_CONFIG";
   agentId: string;
   sessionId: string;
+  executionId?: ExecutionId;
   env: Record<string, string>;
 }
 
@@ -621,13 +638,17 @@ export interface AgentListSessionsMessage extends BaseMessage {
 export interface AgentLoadSessionMessage extends BaseMessage {
   type: "AGENT_LOAD_SESSION";
   agentId: string;
-  sessionId: string;
+  /** Deprecated legacy locator/live route. New clients send providerBinding
+   * and let the engine re-adopt by conversation or mint an execution. */
+  sessionId?: string;
+  executionId?: ExecutionId;
+  providerBinding?: ProviderBinding;
   /** See AgentNewSessionMessage.chatId — the engine persists this resumed
    *  session's transcript under the chat. */
-  chatId?: string;
+  chatId?: ConversationId;
   cwd?: string;
   /** Engine workspace id — see AgentNewSessionMessage.workspaceId. */
-  workspaceId?: string;
+  workspaceId?: WorkspaceId;
   env?: Record<string, string>;
   /** Optional CLI binary path override (Settings → Providers →
    *  Advanced). Mirrors AgentNewSessionMessage.cliBinary. */
@@ -647,6 +668,7 @@ export interface AgentSessionLoadedMessage extends BaseMessage {
   requestId: string;
   agentId: string;
   sessionId: string;
+  executionId: ExecutionId;
   response: LoadSessionResponse;
   /** Engine-owned prompt state at the exact moment this session was adopted.
    * Optional for compatibility with older engines. */
@@ -690,12 +712,13 @@ export interface AgentSessionUpdateMessage extends BaseMessage {
   type: "AGENT_SESSION_UPDATE";
   agentId: string;
   notification: SessionNotification;
+  executionId?: ExecutionId;
   /** Engine-authoritative chat binding for this update (the engine's own
-   *  sessionId→chatId map). The renderer routes by THIS when present, falling
-   *  back to its sessionToChatId index only when absent — so an update can
+   *  executionId→conversationId map). The renderer routes by THIS when present,
+   *  falling back to its executionToChatId index only when absent — so an update can
    *  never be dropped because the renderer's index is momentarily stale (mid
-   *  force-respawn, during session create/load, or for an adapter that
-   *  emits before the renderer has stored the sessionId). Optional so older
+   *  force-respawn, during execution create/load, or for an adapter that
+   *  emits before the renderer has stored the executionId). Optional so older
    *  engines / clients still interoperate. */
   chatId?: string;
 }
@@ -715,6 +738,7 @@ export interface AgentPermissionSettledMessage extends BaseMessage {
   agentId: string;
   permissionId: string;
   sessionId: string;
+  executionId?: ExecutionId;
 }
 
 /** A blocking user-input question from the agent (twin of
@@ -748,6 +772,7 @@ export interface AgentPromptCompleteMessage extends BaseMessage {
   requestId: string;
   agentId: string;
   sessionId: string;
+  executionId?: ExecutionId;
   stopReason: StopReason;
   response: PromptResponse;
 }
@@ -757,6 +782,7 @@ export interface AgentPromptFailedMessage extends BaseMessage {
   requestId: string;
   agentId: string;
   sessionId: string;
+  executionId?: ExecutionId;
   error: string;
   /** Mirror of the engine-side AgentPromptFailedMessage.failure.
    *  Populated when the adapter threw AgentFailureError so the
@@ -780,6 +806,7 @@ export interface AgentAgentExitedMessage extends BaseMessage {
    *  THAT chat to reconnecting, not every open chat on the agent. Absent
    *  (undefined/null) means an agent-wide exit (a shared subprocess). */
   sessionId?: string | null;
+  executionId?: ExecutionId | null;
   code: number | null;
   signal: string | null;
 }

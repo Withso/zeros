@@ -32,6 +32,7 @@ import type {
   StopReason,
   TurnUsage,
 } from "@zeros/protocol/agent-events";
+import type { ExecutionId, ProviderBinding } from "@zeros/protocol/identities";
 import type { AccountDetails } from "@zeros/protocol/messages";
 
 // ── Failure taxonomy ─────────────────────────────────────
@@ -209,6 +210,9 @@ export interface AgentAdapter {
    *  `systemInstruction` is the assembled first-turn instruction body — passed
    *  ONLY to adapters declaring `nativeSystemInstruction` (see above). */
   newSession(opts: {
+    /** Zeros-owned ephemeral route. Gateway always supplies this; optional only
+     * for direct adapter test/back-compat callers. */
+    executionId?: ExecutionId;
     cwd: string;
     env?: Record<string, string>;
     cliBinary?: string;
@@ -216,12 +220,16 @@ export interface AgentAdapter {
     systemInstruction?: string;
   }): Promise<{ session: NewSessionResponse; initialize: InitializeResponse }>;
 
-  /** Resume a prior session by id. `systemInstruction` as in newSession —
+  /** Resume a prior provider binding into a fresh Zeros execution.
+   * `systemInstruction` as in newSession —
    *  native-channel adapters attach it on resume too (refreshes the thread's
    *  instructions, and covers the degraded resume-→-fresh-thread fallback,
    *  whose new thread would otherwise have no orientation at all). */
   loadSession(opts: {
-    sessionId: string;
+    executionId?: ExecutionId;
+    providerBinding?: ProviderBinding;
+    /** @deprecated Pre-identity-model locator accepted during migration. */
+    sessionId?: string;
     cwd: string;
     env?: Record<string, string>;
     cliBinary?: string;

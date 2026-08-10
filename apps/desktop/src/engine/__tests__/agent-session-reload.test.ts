@@ -27,6 +27,7 @@ interface TestEngineInternals {
   };
   sessionAgent: Map<string, string>;
   sessionChat: Map<string, string>;
+  conversationExecution: Map<string, string>;
   sessionWorkspace: Map<string, string>;
   promptSessions: Set<string>;
   activePromptContexts: Map<string, ActivePromptRecord>;
@@ -78,6 +79,7 @@ describe("agent session continuity across a local renderer reload", () => {
     const state = internals(engine);
     const { client, messages } = testClient();
     state.router.register(client);
+    state.sessionAgent.set("session-1", "codex");
     state.activePromptContexts.set("session-1", activePrompt());
     state.sessionLoadResponses.set("session-1", {
       modes: { availableModes: [], currentModeId: "auto" },
@@ -138,6 +140,7 @@ describe("agent session continuity across a local renderer reload", () => {
     const { client: reloaded, messages } = testClient("reloaded");
     state.router.register(owner);
     state.router.register(reloaded);
+    state.sessionAgent.set("session-1", "codex");
     state.activePromptContexts.set(
       "session-1",
       activePrompt({ promptId: "prompt-durable-42" }),
@@ -168,6 +171,120 @@ describe("agent session continuity across a local renderer reload", () => {
     );
   });
 
+  it("re-adopts by Zeros conversation id without persisting the execution", async () => {
+    const engine = new ZerosEngine({ root: process.cwd(), port: 29_897 });
+    const state = internals(engine);
+    const { client, messages } = testClient();
+    state.router.register(client);
+    state.sessionAgent.set("execution-1", "codex");
+    state.sessionChat.set("execution-1", "conversation-1");
+    state.conversationExecution.set("conversation-1", "execution-1");
+    state.sessionLoadResponses.set("execution-1", {
+      providerBinding: {
+        version: 1,
+        providerId: "codex",
+        kind: "native",
+        resumeId: "thread-1",
+      },
+    });
+    const loadSession = vi.spyOn(state.agents, "loadSession");
+
+    await state.handleMessage(
+      {
+        type: "AGENT_LOAD_SESSION",
+        id: "load-by-conversation",
+        source: "browser",
+        timestamp: 1,
+        agentId: "codex",
+        chatId: "conversation-1",
+        providerBinding: {
+          version: 1,
+          providerId: "codex",
+          kind: "native",
+          resumeId: "thread-1",
+        },
+      },
+      client,
+    );
+
+    expect(loadSession).not.toHaveBeenCalled();
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "AGENT_SESSION_LOADED",
+          executionId: "execution-1",
+          sessionId: "execution-1",
+          promptActive: false,
+        }),
+      ]),
+    );
+  });
+
+  it("refuses to re-adopt another agent's live execution", async () => {
+    const engine = new ZerosEngine({ root: process.cwd(), port: 29_899 });
+    const state = internals(engine);
+    const { client, messages } = testClient();
+    state.router.register(client);
+    state.sessionAgent.set("execution-1", "codex");
+    state.sessionChat.set("execution-1", "conversation-1");
+    state.conversationExecution.set("conversation-1", "execution-1");
+    const loadSession = vi.spyOn(state.agents, "loadSession");
+
+    await state.handleMessage(
+      {
+        type: "AGENT_LOAD_SESSION",
+        id: "load-with-wrong-agent",
+        source: "browser",
+        timestamp: 1,
+        agentId: "claude",
+        chatId: "conversation-1",
+      },
+      client,
+    );
+
+    expect(loadSession).not.toHaveBeenCalled();
+    expect(messages).toEqual([
+      expect.objectContaining({
+        type: "AGENT_ERROR",
+        failure: expect.objectContaining({ kind: "protocol-error" }),
+        message: expect.stringContaining("different agent"),
+      }),
+    ]);
+    expect(state.sessionAgent.get("execution-1")).toBe("codex");
+    expect(state.conversationExecution.get("conversation-1")).toBe(
+      "execution-1",
+    );
+  });
+
+  it("classifies a conversation with no live execution or binding as an expected miss", async () => {
+    const engine = new ZerosEngine({ root: process.cwd(), port: 29_898 });
+    const state = internals(engine);
+    const { client, messages } = testClient();
+    state.router.register(client);
+    const loadSession = vi.spyOn(state.agents, "loadSession");
+
+    await state.handleMessage(
+      {
+        type: "AGENT_LOAD_SESSION",
+        id: "load-missing-conversation",
+        source: "browser",
+        timestamp: 1,
+        agentId: "codex",
+        chatId: "conversation-missing",
+        cwd: process.cwd(),
+      },
+      client,
+    );
+
+    expect(loadSession).not.toHaveBeenCalled();
+    expect(messages).toEqual([
+      expect.objectContaining({
+        type: "AGENT_ERROR",
+        failure: expect.objectContaining({ kind: "session-expired" }),
+      }),
+    ]);
+  });
+
   it("keeps session-to-agent identity when only the local renderer disconnects", () => {
     const engine = new ZerosEngine({ root: process.cwd(), port: 29_881 });
     const state = internals(engine);
@@ -195,6 +312,7 @@ describe("re-adoption keeps the remote trust boundary", () => {
     state.router.register(owner);
     state.router.register(relay);
     state.router.setOwner("session-1", owner.id);
+    state.sessionAgent.set("session-1", "codex");
     state.sessionChat.set("session-1", "chat-1");
     state.activePromptContexts.set("session-1", activePrompt());
 
@@ -229,6 +347,7 @@ describe("re-adoption keeps the remote trust boundary", () => {
     state.router.register(owner);
     state.router.register(relay);
     state.router.setOwner("session-1", owner.id);
+    state.sessionAgent.set("session-1", "codex");
     state.sessionWorkspace.set("session-1", "workspace-1");
     // Reachable workspace, wrong one: satisfying the clamp with any workspace
     // the caller can name must not let it adopt another workspace's live turn.
@@ -267,6 +386,7 @@ describe("re-adoption keeps the remote trust boundary", () => {
     state.router.register(owner);
     state.router.register(relay);
     state.router.setOwner("session-1", owner.id);
+    state.sessionAgent.set("session-1", "codex");
     state.sessionChat.set("session-1", "chat-1");
     // Get PAST the workspace clamp — same managed workspace, resolvable, inside
     // the allowlist — so this pins the chat guard specifically.
@@ -308,6 +428,7 @@ describe("re-adoption keeps the remote trust boundary", () => {
     const state = internals(engine);
     const { client, messages } = testClient("renderer-2");
     state.router.register(client);
+    state.sessionAgent.set("session-1", "codex");
     state.sessionChat.set("session-1", "chat-1");
     state.sessionWorkspace.set("session-1", "workspace-1");
     state.activePromptContexts.set("session-1", activePrompt());
@@ -391,7 +512,7 @@ describe("in-flight prompt staleness", () => {
         source: "browser",
         timestamp: 1,
         agentId: "codex",
-        sessionId: "session-1",
+        executionId: "session-1",
         prompt: [{ type: "text", text: "again" }],
       } as EngineMessage,
       client,
@@ -404,6 +525,36 @@ describe("in-flight prompt staleness", () => {
       }),
     ]);
     expect(state.activePromptContexts.has("session-1")).toBe(true);
+  });
+
+  it("keeps the execution's provider authoritative over a stale client label", async () => {
+    const engine = new ZerosEngine({ root: process.cwd(), port: 29_900 });
+    const state = internals(engine);
+    const { client, messages } = testClient();
+    state.router.register(client);
+    state.sessionAgent.set("session-1", "codex");
+    state.activePromptContexts.set("session-1", activePrompt());
+
+    await state.handleMessage(
+      {
+        type: "AGENT_PROMPT",
+        id: "prompt-with-stale-agent",
+        source: "browser",
+        timestamp: 1,
+        agentId: "claude",
+        executionId: "session-1",
+        prompt: [{ type: "text", text: "again" }],
+      } as EngineMessage,
+      client,
+    );
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        type: "AGENT_PROMPT_FAILED",
+        agentId: "codex",
+      }),
+    ]);
+    expect(state.sessionAgent.get("session-1")).toBe("codex");
   });
 
   it("releases a ghost record instead of refusing the chat forever", async () => {

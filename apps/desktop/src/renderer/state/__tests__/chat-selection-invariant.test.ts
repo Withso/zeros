@@ -154,6 +154,102 @@ describe("UPDATE_CHAT_SETTINGS preserves pane focus", () => {
       state().chats.find((item) => item.id === "background")?.agentId,
     ).toBe("codex");
   });
+
+  it("keeps conversation identity but clears another provider's binding", () => {
+    dispatch()({
+      type: "HYDRATE_CHATS",
+      chats: [
+        {
+          ...chat("bound", A, 100),
+          agentId: "codex",
+          sessionId: "thread-1",
+          providerBinding: {
+            version: 1,
+            providerId: "codex",
+            kind: "native",
+            resumeId: "thread-1",
+          },
+          providerMetadata: {
+            version: 1,
+            git: { sha: "abc", branch: "main", originUrl: null },
+          },
+        },
+      ],
+      activeChatId: "bound",
+    });
+
+    dispatch()({
+      type: "UPDATE_CHAT_SETTINGS",
+      id: "bound",
+      updates: { agentId: "claude", agentName: "Claude" },
+    });
+
+    const updated = state().chats.find((item) => item.id === "bound");
+    expect(updated?.id).toBe("bound");
+    expect(updated?.providerBinding).toBeUndefined();
+    expect(updated?.providerMetadata).toBeUndefined();
+    expect(updated?.sessionId).toBeUndefined();
+  });
+
+  it("clears provider identity when the selected agent is explicitly removed", () => {
+    dispatch()({
+      type: "HYDRATE_CHATS",
+      chats: [
+        {
+          ...chat("bound", A, 100),
+          agentId: "codex",
+          sessionId: "thread-1",
+          providerBinding: {
+            version: 1,
+            providerId: "codex",
+            kind: "native",
+            resumeId: "thread-1",
+          },
+          providerMetadata: { version: 1 },
+        },
+      ],
+      activeChatId: "bound",
+    });
+
+    dispatch()({
+      type: "UPDATE_CHAT_SETTINGS",
+      id: "bound",
+      updates: { agentId: null, agentName: null, sessionId: undefined },
+    });
+
+    expect(state().chats.find((item) => item.id === "bound")).toMatchObject({
+      agentId: null,
+      providerBinding: undefined,
+      providerMetadata: undefined,
+      sessionId: undefined,
+    });
+  });
+
+  it("derives the downgrade locator when a provider binding is reconciled", () => {
+    dispatch()({
+      type: "HYDRATE_CHATS",
+      chats: [{ ...chat("binding", A, 100), agentId: "claude" }],
+      activeChatId: "binding",
+    });
+
+    dispatch()({
+      type: "UPDATE_CHAT_SETTINGS",
+      id: "binding",
+      updates: {
+        providerBinding: {
+          version: 1,
+          providerId: "claude",
+          kind: "native",
+          resumeId: "claude-native",
+          legacySessionId: "legacy-directory",
+        },
+      },
+    });
+
+    expect(state().chats.find((item) => item.id === "binding")?.sessionId).toBe(
+      "legacy-directory",
+    );
+  });
 });
 
 describe("DELETE_CHAT stays in the same workspace", () => {

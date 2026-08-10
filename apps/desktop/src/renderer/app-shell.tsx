@@ -350,6 +350,8 @@ function threadToRow(c: ChatThread): ChatRowWire {
     createdAt: c.createdAt,
     updatedAt: c.updatedAt,
     sessionId: c.sessionId ?? null,
+    providerBinding: c.providerBinding ?? null,
+    providerMetadata: c.providerMetadata ?? null,
     pinned: !!c.pinned,
     archived: !!c.archived,
     sourceChatId: c.sourceChatId ?? null,
@@ -379,6 +381,8 @@ function rowToThread(r: ChatRowWire): ChatThread {
   // (== "chat" by store convention).
   const resolvedKind: "chat" | "terminal" | undefined =
     r.kind === "terminal" || r.kind === "chat" ? r.kind : undefined;
+  const providerBinding =
+    r.providerBinding?.providerId === r.agentId ? r.providerBinding : undefined;
   return {
     id: r.id,
     folder: r.folder,
@@ -397,6 +401,10 @@ function rowToThread(r: ChatRowWire): ChatThread {
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
     sessionId: r.sessionId ?? undefined,
+    providerBinding,
+    providerMetadata: providerBinding
+      ? (r.providerMetadata ?? undefined)
+      : undefined,
     pinned: r.pinned,
     archived: r.archived,
     sourceChatId: r.sourceChatId ?? undefined,
@@ -664,8 +672,8 @@ function ChatsPersistence() {
  *
  * In-place swap (no webview reload):
  *   1. Drop every in-memory session — they reference the dead engine's
- *      sessionIds. The persistent chat.sessionId on disk lets us
- *      replay history on the user's next chat-open.
+ *      executionIds. The persistent provider binding on the chat lets us
+ *      resume provider state on the user's next chat-open.
  *   2. Force the bridge client to re-resolve the engine port and open a
  *      fresh socket. Pending RPCs reject with a soft-fail — upstream
  *      retry loops handle it.
@@ -675,7 +683,7 @@ function ChatsPersistence() {
  *
  * Generation guard: any late callback from the old engine is dropped
  * because (a) the websocket is closed, so events stop arriving, and
- * (b) the in-memory sessionId → chatId map was wiped by disposeAll().
+ * (b) the in-memory executionId → conversationId map was wiped by disposeAll().
  */
 function ReloadOnProjectChange() {
   const sessions = useAgentSessions();

@@ -205,6 +205,8 @@ export type Action =
           | "agentId"
           | "agentName"
           | "sessionId"
+          | "providerBinding"
+          | "providerMetadata"
           | "sourceChatId"
           | "folder"
         >
@@ -1199,11 +1201,53 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
     case "UPDATE_CHAT_SETTINGS":
       return {
         ...state,
-        chats: state.chats.map((c) =>
-          c.id === action.id
-            ? { ...c, ...action.updates, updatedAt: Date.now() }
-            : c,
-        ),
+        chats: state.chats.map((c) => {
+          if (c.id !== action.id) return c;
+          const agentWasUpdated = Object.prototype.hasOwnProperty.call(
+            action.updates,
+            "agentId",
+          );
+          const nextAgentId = agentWasUpdated
+            ? action.updates.agentId
+            : c.agentId;
+          const agentChanged = nextAgentId !== c.agentId;
+          const requestedBinding = Object.prototype.hasOwnProperty.call(
+            action.updates,
+            "providerBinding",
+          )
+            ? action.updates.providerBinding
+            : c.providerBinding;
+          const bindingWasUpdated = Object.prototype.hasOwnProperty.call(
+            action.updates,
+            "providerBinding",
+          );
+          const providerBinding =
+            requestedBinding?.providerId === nextAgentId
+              ? requestedBinding
+              : undefined;
+          const providerMetadata = providerBinding
+            ? agentChanged
+              ? action.updates.providerMetadata
+              : (action.updates.providerMetadata ?? c.providerMetadata)
+            : undefined;
+          return {
+            ...c,
+            ...action.updates,
+            // A durable provider binding belongs to exactly one provider. An
+            // agent switch keeps the Zeros conversation but must never carry
+            // the old provider's resume handle into the new adapter.
+            providerBinding,
+            ...(agentChanged || bindingWasUpdated
+              ? {
+                  sessionId:
+                    providerBinding?.legacySessionId ??
+                    providerBinding?.resumeId,
+                  providerMetadata,
+                }
+              : {}),
+            updatedAt: Date.now(),
+          };
+        }),
       };
     case "TOUCH_CHAT":
       return {

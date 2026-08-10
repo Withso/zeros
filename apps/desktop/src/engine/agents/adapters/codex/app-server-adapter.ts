@@ -36,6 +36,7 @@
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
+import { providerBindingForResume } from "@zeros/protocol/identities";
 
 import type {
   AgentAdapter,
@@ -224,6 +225,17 @@ interface CodexSession {
   translator: CodexAppServerTranslator;
   /** Codex threadId — captured from thread/start (new) or thread/resume (load). */
   threadId: string;
+  /** Codex session-tree identity. Forked threads retain this root id; it is
+   * descriptive provider scope and never a Zeros execution route. */
+  providerSessionId: string;
+  providerMetadata?: {
+    version: 1;
+    git?: {
+      sha: string | null;
+      branch: string | null;
+      originUrl: string | null;
+    };
+  };
   /** The thread's resolved model (thread/start `model`; best-effort on
    *  resume). Fallback for turn/start's collaborationMode.settings.model when
    *  the composer supplies no per-turn model — Settings.model is REQUIRED and
@@ -424,6 +436,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 
   async newSession(opts: {
+    executionId?: string;
     cwd: string;
     env?: Record<string, string>;
     cliBinary?: string;
@@ -437,6 +450,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       mcpServers: opts.mcpServers,
       systemInstruction: opts.systemInstruction,
       kind: "new",
+      zerosSessionId: opts.executionId,
     });
     // Surface Codex's real model catalog (+ effort ladder) onto the cached
     // initialize BEFORE returning, so the session's picker reflects the live
@@ -449,7 +463,14 @@ export class CodexAppServerAdapter implements AgentAdapter {
       // field (+ `as never` casts that hid the mismatch from tsc) left the
       // codex mode pill empty on every new session.
       session: {
+        executionId: session.zerosSessionId,
         sessionId: session.zerosSessionId,
+        providerBinding: providerBindingForResume("codex", session.threadId, {
+          scopeId: session.providerSessionId,
+        }),
+        ...(session.providerMetadata
+          ? { providerMetadata: session.providerMetadata }
+          : {}),
         modes: {
           currentModeId: session.modeId,
           availableModes: CODEX_MODES,
@@ -460,23 +481,28 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 
   async loadSession(opts: {
-    sessionId: string;
+    executionId?: string;
+    providerBinding?: import("@zeros/protocol/identities").ProviderBinding;
+    sessionId?: string;
     cwd: string;
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
     systemInstruction?: string;
   }): Promise<LoadSessionResponse> {
-    // Resume against codex's stored thread. The sessionId we get IS the codex
-    // thread id (set by listSessions, persisted by the UI), and we key the live
-    // runtime + session dir on it. If the SAME thread is already open in another
-    // live chat, a second boot would overwrite the map entry (leaking the first
-    // runtime) and share the session dir (disposing one rm's it out from under
-    // the other, including in-flight prompt image attachments). Tear down the
-    // prior live session first so the newest open wins cleanly instead of
-    // corrupting both.
-    if (this.sessions.has(opts.sessionId)) {
-      await this.disposeSession(opts.sessionId);
+    // Resume the provider thread into a separately-minted Zeros execution. The
+    // native thread id never keys the live runtime or its attachment directory.
+    const executionId = opts.executionId ?? opts.sessionId ?? randomUUID();
+    const resumeThreadId = opts.providerBinding?.resumeId ?? opts.sessionId;
+    if (!resumeThreadId) {
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        stage: "loadSession",
+        message: "Codex resume requires a provider thread binding.",
+      });
+    }
+    if (this.sessions.has(executionId)) {
+      await this.disposeSession(executionId);
     }
     const { session, resumedFresh } = await this.bootSession({
       cwd: opts.cwd,
@@ -485,8 +511,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
       mcpServers: opts.mcpServers,
       systemInstruction: opts.systemInstruction,
       kind: "resume",
-      resumeThreadId: opts.sessionId,
-      zerosSessionId: opts.sessionId, // key live runtime + dir on the codex thread id
+      resumeThreadId,
+      zerosSessionId: executionId,
     });
     // Populate the live model catalog for resumed chats too. Fire-and-forget:
     // loadSession returns no initialize, so the gateway re-poll (modelsDynamic)
@@ -498,6 +524,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // response/session wrapper + `available` field left the mode pill empty on
     // every resumed codex chat.
     return {
+      executionId,
+      providerBinding: providerBindingForResume("codex", session.threadId, {
+        scopeId: session.providerSessionId,
+      }),
+      ...(session.providerMetadata
+        ? { providerMetadata: session.providerMetadata }
+        : {}),
       modes: {
         currentModeId: session.modeId,
         availableModes: CODEX_MODES,
@@ -1340,6 +1373,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     }
 
     let threadId: string;
+    let providerSessionId: string;
+    let providerMetadata: CodexSession["providerMetadata"];
     let threadModel: string | null = null;
     // True when a `kind:"resume"` could not load the rollout and fell through to
     // a fresh thread below — the gateway re-injects the first-turn
@@ -1364,6 +1399,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
               : {}),
           });
           threadId = result.threadId;
+          providerSessionId = result.providerSessionId ?? result.threadId;
+          providerMetadata = result.gitInfo
+            ? { version: 1, git: result.gitInfo }
+            : undefined;
           threadModel = result.model ?? null;
         } catch (resumeErr) {
           // 2026-05-28: when codex says "no rollout for this thread"
@@ -1392,6 +1431,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
             ),
           );
           threadId = fresh.threadId;
+          providerSessionId = fresh.providerSessionId ?? fresh.threadId;
+          providerMetadata = fresh.gitInfo
+            ? { version: 1, git: fresh.gitInfo }
+            : undefined;
           threadModel = fresh.model ?? null;
           resumedFresh = true;
         }
@@ -1405,6 +1448,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
           ),
         );
         threadId = result.threadId;
+        providerSessionId = result.providerSessionId ?? result.threadId;
+        providerMetadata = result.gitInfo
+          ? { version: 1, git: result.gitInfo }
+          : undefined;
         threadModel = result.model ?? null;
       }
     } catch (err) {
@@ -1442,6 +1489,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
       runtime,
       translator,
       threadId,
+      providerSessionId,
+      providerMetadata,
       threadModel,
       modeId: initialMode,
       activeTurnId: null,

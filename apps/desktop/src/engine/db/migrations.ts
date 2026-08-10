@@ -796,6 +796,53 @@ ALTER TABLE workspaces ADD COLUMN kind TEXT NOT NULL DEFAULT 'code'
 CREATE INDEX idx_workspaces_kind ON workspaces(kind, archived_at);
 `;
 
+/** v28 — provider-neutral durable binding. This replaces the draft Codex-only
+ * `native_session_id`: the JSON value is a versioned ProviderBinding and is
+ * equally usable by Codex, Claude, Cursor, and future adapters. The existing
+ * `session_id` column remains as a read/downgrade compatibility locator; it is
+ * no longer the canonical live execution identity. */
+const MIGRATION_28_CHAT_PROVIDER_BINDING = `
+ALTER TABLE chats ADD COLUMN provider_binding TEXT;
+`;
+
+/** v29 — descriptive provider metadata, separate from identity. This
+ * generalizes the draft `native_git_info` column and backfills pre-model chat
+ * locators. Cursor historically persisted its native SDK agent id; other
+ * adapters persisted a Zeros runtime/session-directory locator and therefore
+ * remain explicitly legacy until the adapter resolves the native handle. */
+const MIGRATION_29_CHAT_PROVIDER_METADATA = `
+ALTER TABLE chats ADD COLUMN provider_metadata TEXT;
+
+UPDATE chats
+   SET provider_binding = CASE
+     WHEN agent_id = 'cursor' THEN json_object(
+       'version', 1,
+       'providerId', agent_id,
+       'kind', 'native',
+       'resumeId', session_id
+     )
+     ELSE json_object(
+       'version', 1,
+       'providerId', agent_id,
+       'kind', 'legacy',
+       'resumeId', session_id,
+       'legacySessionId', session_id
+     )
+   END
+ WHERE provider_binding IS NULL
+   AND agent_id IS NOT NULL
+   AND session_id IS NOT NULL
+   AND length(trim(session_id)) > 0;
+`;
+
+/** v30 — compatibility marker for dev databases that already applied the old
+ * draft v28/v29 under their original Codex-only column names. The actual repair
+ * is conditional JavaScript in repairDraftChatIdentityColumns because SQLite
+ * has no portable ADD COLUMN IF NOT EXISTS. */
+const MIGRATION_30_CHAT_IDENTITY_COMPATIBILITY = `
+SELECT 1;
+`;
+
 /** The ordered migration list. Append only — NEVER edit or reorder a shipped
  *  entry; add a new one. */
 export const MIGRATIONS: Migration[] = [
@@ -930,6 +977,21 @@ export const MIGRATIONS: Migration[] = [
     name: "workspaces.kind (code or design workspace)",
     up: MIGRATION_27_WORKSPACE_KIND,
   },
+  {
+    version: 28,
+    name: "chats.provider_binding (provider-neutral durable resume identity)",
+    up: MIGRATION_28_CHAT_PROVIDER_BINDING,
+  },
+  {
+    version: 29,
+    name: "chats.provider_metadata (provider-neutral descriptive metadata)",
+    up: MIGRATION_29_CHAT_PROVIDER_METADATA,
+  },
+  {
+    version: 30,
+    name: "chat identity compatibility repair for draft v28/v29",
+    up: MIGRATION_30_CHAT_IDENTITY_COMPATIBILITY,
+  },
 ];
 
 /** Run all pending migrations in order, each in its own transaction. Idempotent
@@ -969,6 +1031,146 @@ function hasWorkspaceLifecyclePayloadColumn(db: Database.Database): boolean {
   return columns.some((column) => column.name === "payload_json");
 }
 
+function tableColumns(db: Database.Database, table: string): Set<string> {
+  return new Set(
+    (
+      db.prepare(`PRAGMA table_info("${table}")`).all() as Array<{
+        name: string;
+      }>
+    ).map((column) => column.name),
+  );
+}
+
+/** Repair databases that saw the feature-branch draft v28/v29. Those versions
+ * are already recorded, so the final v28/v29 cannot replay. Preserve the old
+ * native values, add the generalized columns, then fill any remaining mainline
+ * `session_id` locators. Runs inside v30's transaction and is idempotent. */
+function repairDraftChatIdentityColumns(db: Database.Database): void {
+  let columns = tableColumns(db, "chats");
+  if (!columns.has("provider_binding")) {
+    db.exec("ALTER TABLE chats ADD COLUMN provider_binding TEXT");
+  }
+  if (!columns.has("provider_metadata")) {
+    db.exec("ALTER TABLE chats ADD COLUMN provider_metadata TEXT");
+  }
+  columns = tableColumns(db, "chats");
+
+  if (columns.has("native_session_id")) {
+    const rows = db
+      .prepare(
+        `SELECT id, agent_id, session_id, native_session_id
+          FROM chats
+          WHERE provider_binding IS NULL
+            AND agent_id IS NOT NULL
+            AND native_session_id IS NOT NULL
+            AND length(trim(native_session_id)) > 0`,
+      )
+      .all() as Array<{
+      id: string;
+      agent_id: string | null;
+      session_id: string | null;
+      native_session_id: string;
+    }>;
+    const update = db.prepare(
+      "UPDATE chats SET provider_binding = ? WHERE id = ?",
+    );
+    for (const row of rows) {
+      if (!row.agent_id) continue;
+      update.run(
+        JSON.stringify({
+          version: 1,
+          providerId: row.agent_id,
+          kind: "native",
+          resumeId: row.native_session_id,
+          ...(row.session_id ? { legacySessionId: row.session_id } : {}),
+        }),
+        row.id,
+      );
+    }
+  }
+
+  if (columns.has("native_git_info")) {
+    const rows = db
+      .prepare(
+        `SELECT id, native_git_info
+           FROM chats
+          WHERE provider_metadata IS NULL
+            AND native_git_info IS NOT NULL`,
+      )
+      .all() as Array<{ id: string; native_git_info: string }>;
+    const update = db.prepare(
+      "UPDATE chats SET provider_metadata = ? WHERE id = ?",
+    );
+    for (const row of rows) {
+      try {
+        const git = JSON.parse(row.native_git_info) as unknown;
+        if (!git || typeof git !== "object" || Array.isArray(git)) continue;
+        update.run(JSON.stringify({ version: 1, git }), row.id);
+      } catch {
+        // Corrupt draft metadata is descriptive only. Leave it null rather
+        // than blocking the user's database from opening.
+      }
+    }
+  }
+
+  const legacyRows = db
+    .prepare(
+      `SELECT id, agent_id, session_id
+         FROM chats
+        WHERE provider_binding IS NULL
+          AND agent_id IS NOT NULL
+          AND session_id IS NOT NULL
+          AND length(trim(session_id)) > 0`,
+    )
+    .all() as Array<{
+    id: string;
+    agent_id: string | null;
+    session_id: string;
+  }>;
+  const updateLegacy = db.prepare(
+    "UPDATE chats SET provider_binding = ? WHERE id = ?",
+  );
+  for (const row of legacyRows) {
+    if (!row.agent_id) continue;
+    const providerId = row.agent_id;
+    updateLegacy.run(
+      JSON.stringify(
+        providerId === "cursor"
+          ? {
+              version: 1,
+              providerId,
+              kind: "native",
+              resumeId: row.session_id,
+            }
+          : {
+              version: 1,
+              providerId,
+              kind: "legacy",
+              resumeId: row.session_id,
+              legacySessionId: row.session_id,
+            },
+      ),
+      row.id,
+    );
+  }
+}
+
+/** A few internal builds could stop after only one draft identity migration.
+ * Detect those schemas before replaying the final v28/v29 SQL: otherwise final
+ * v29 would reference provider_binding before v30 had a chance to repair it. */
+function shouldRepairDraftChatIdentity(
+  db: Database.Database,
+  version: 28 | 29,
+): boolean {
+  const columns = tableColumns(db, "chats");
+  if (columns.has("native_session_id") || columns.has("native_git_info")) {
+    return true;
+  }
+  return version === 28
+    ? columns.has("provider_binding")
+    : !columns.has("provider_binding") || columns.has("provider_metadata");
+}
+
 export function runMigrations(db: Database.Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1000,11 +1202,23 @@ export function runMigrations(db: Database.Database): void {
   for (const m of pending) {
     const tx = db.transaction(() => {
       if (m.version === 7) backupNonEmptyV1Tables(db); // Preserve non-empty v1 tables.
+      let skipSql = false;
+      if (
+        (m.version === 28 || m.version === 29) &&
+        shouldRepairDraftChatIdentity(db, m.version)
+      ) {
+        repairDraftChatIdentityColumns(db);
+        skipSql = true;
+      }
+      if (m.version === 30) repairDraftChatIdentityColumns(db);
       // Early dev builds applied a draft v21 before payload_json existed.
       // SQLite has no portable ADD COLUMN IF NOT EXISTS, so v22 is an ordinary
       // tracked ALTER for those databases and a recorded no-op for fresh/final
       // v21 databases that already have the exact column.
-      if (m.version !== 22 || !hasWorkspaceLifecyclePayloadColumn(db)) {
+      if (
+        !skipSql &&
+        (m.version !== 22 || !hasWorkspaceLifecyclePayloadColumn(db))
+      ) {
         db.exec(m.up);
       }
       insert.run(m.version, m.name);

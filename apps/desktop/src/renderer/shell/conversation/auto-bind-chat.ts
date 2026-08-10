@@ -17,7 +17,14 @@ export type AutoBindChatSettings = Pick<
   ChatThread,
   "agentId" | "agentName" | "model" | "effort" | "fast" | "permissionMode"
 > &
-  Pick<ChatThread, "sessionId" | "lastModeId" | "prePlanModeId">;
+  Pick<
+    ChatThread,
+    | "sessionId"
+    | "providerBinding"
+    | "providerMetadata"
+    | "lastModeId"
+    | "prePlanModeId"
+  >;
 
 /** What an unbound chat still remembers about the agent it used to run. A
  *  persisted row that lost its `agentId` (a pre-binding record, a corrupted
@@ -29,6 +36,8 @@ export type AutoBindChatSettings = Pick<
 export interface PriorChatIdentity {
   agentName?: string | null;
   sessionId?: string | null;
+  providerBinding?: ChatThread["providerBinding"];
+  providerMetadata?: ChatThread["providerMetadata"];
   model?: string | null;
   effort?: ChatThread["effort"];
   fast?: boolean;
@@ -85,6 +94,7 @@ export function resolveAutoBindChatSettings(
   // not a match.
   const sameFamily = priorFamily !== "" && priorFamily === agentFamily(agentId);
   const keepsSession = Boolean(prior.sessionId) && sameFamily;
+  const keepsBinding = Boolean(prior.providerBinding) && sameFamily;
   const born = newChatBornDefaults(agentId);
   return {
     agentId,
@@ -92,6 +102,8 @@ export function resolveAutoBindChatSettings(
     ...born,
     ...priorConfiguration(agentId, sameFamily ? prior : {}),
     sessionId: keepsSession ? (prior.sessionId ?? undefined) : undefined,
+    providerBinding: keepsBinding ? prior.providerBinding : undefined,
+    providerMetadata: keepsBinding ? prior.providerMetadata : undefined,
     prePlanModeId: undefined,
   };
 }

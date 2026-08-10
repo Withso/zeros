@@ -89,6 +89,7 @@ import {
   buildAdditionalDirsSystemInstruction,
   prependSystemInstruction,
 } from "@zeros/protocol/system-instructions";
+import { legacyProviderBinding } from "@zeros/protocol/identities";
 import { resolveBridgeWorkspaceIdForCwd } from "../../platform/bridge/workspace-id-resolver";
 import { synthesizeReplayPrompt } from "./replay";
 import { activeProviderTurnId } from "./turn-grouping";
@@ -239,7 +240,13 @@ async function reconcilePermissionModeAtBind(
     const resp = await bridge.request<
       AgentModeChangedMessage | AgentErrorMessage
     >(
-      { type: "AGENT_SET_MODE", agentId, sessionId, modeId: desired.id },
+      {
+        type: "AGENT_SET_MODE",
+        agentId,
+        executionId: sessionId,
+        sessionId,
+        modeId: desired.id,
+      },
       10_000,
     );
     if (resp.type === "AGENT_ERROR") {
@@ -532,7 +539,7 @@ export function AgentSessionsProvider({
         // which the store derives from request.sessionId. Mirror that
         // lookup here so we can intercept before the prompt UI lands.
         const sid = (p.request as { sessionId?: string }).sessionId;
-        const chatId = sid ? store.sessionToChatId[sid] : undefined;
+        const chatId = sid ? store.executionToChatId[sid] : undefined;
         const policies = chatId ? (store.chatPolicies[chatId] ?? []) : [];
         const tool = p.request.toolCall;
         if (p.request.autoResolution) {
@@ -597,7 +604,7 @@ export function AgentSessionsProvider({
         );
       }
       for (const settled of permissionSettles) {
-        const chatId = store.sessionToChatId[settled.sessionId];
+        const chatId = store.executionToChatId[settled.sessionId];
         if (chatId) {
           store.settlePendingPermission(chatId, settled.permissionId);
         }
@@ -627,7 +634,7 @@ export function AgentSessionsProvider({
         if (u?.sessionUpdate !== "current_effort_update") continue;
         const cid =
           (n as { chatId?: string }).chatId ??
-          store.sessionToChatId[n.sessionId];
+          store.executionToChatId[n.sessionId];
         if (!cid || effortBefore.has(cid)) continue;
         const chat = useWorkspaceStore
           .getState()
@@ -643,7 +650,8 @@ export function AgentSessionsProvider({
               ? n.update.state !== "running"
               : false;
           const chatId =
-            (n as { chatId?: string }).chatId ?? s.sessionToChatId[n.sessionId];
+            (n as { chatId?: string }).chatId ??
+            s.executionToChatId[n.sessionId];
           const exactSession =
             !!chatId && s.sessions[chatId]?.sessionId === n.sessionId;
           s.applyBridgeUpdate(n);
@@ -785,7 +793,10 @@ export function AgentSessionsProvider({
       // 2026-06-08 — no current adapter replays on resume, so it only ever
       // swallowed live turns. See the note in sessions-store.ts.)
       const chatId =
-        msg.chatId ?? state.sessionToChatId[msg.notification.sessionId];
+        msg.chatId ??
+        state.executionToChatId[
+          msg.notification.executionId ?? msg.notification.sessionId
+        ];
       // Only a genuinely unbound/cold slot needs a later disk reconcile. A
       // different non-null session id is an intentionally superseded owner;
       // remembering its late pushes would retain a stale dirty key forever.
@@ -846,7 +857,7 @@ export function AgentSessionsProvider({
       };
       const sid = (msg.request as { sessionId?: string }).sessionId;
       const chatId = sid
-        ? useSessionsStore.getState().sessionToChatId[sid]
+        ? useSessionsStore.getState().executionToChatId[sid]
         : undefined;
       if (chatId) promptActivityRef.current.get(chatId)?.();
       permBuffer.push({
@@ -862,7 +873,7 @@ export function AgentSessionsProvider({
       (raw) => {
         const msg = raw as { permissionId: string; sessionId: string };
         const chatId =
-          useSessionsStore.getState().sessionToChatId[msg.sessionId];
+          useSessionsStore.getState().executionToChatId[msg.sessionId];
         if (chatId) promptActivityRef.current.get(chatId)?.();
         permissionSettledBuffer.push({
           permissionId: msg.permissionId,
@@ -879,7 +890,7 @@ export function AgentSessionsProvider({
         request: import("../../platform/bridge/agent-events").QuestionRequest;
       };
       const chatId =
-        useSessionsStore.getState().sessionToChatId[msg.request.sessionId];
+        useSessionsStore.getState().executionToChatId[msg.request.sessionId];
       if (chatId) {
         questionChatRef.current.set(msg.questionId, chatId);
         promptActivityRef.current.get(chatId)?.();
@@ -1348,14 +1359,23 @@ export function AgentSessionsProvider({
               if (!failureIsRecoverable(lastFailure)) break;
               continue;
             }
+            const executionId =
+              resp.session.executionId ?? resp.session.sessionId;
+            const providerBinding =
+              resp.session.providerBinding ??
+              (resp.session.executionId
+                ? null
+                : legacyProviderBinding(agentId, resp.session.sessionId));
             getStore().patchSession(chatId, {
               // Keep the session non-sendable until its persisted permission
               // mode has been applied. Publishing ready first allowed an
               // immediate Enter/auto-send to race AGENT_SET_MODE and run with
               // the adapter default instead of the user's selection.
               status: "warming",
-              durableSessionId: resp.session.sessionId,
-              sessionId: resp.session.sessionId,
+              executionId,
+              sessionId: executionId,
+              providerBinding,
+              providerMetadata: resp.session.providerMetadata ?? null,
               session: resp.session,
               initialize: resp.initialize,
               availableModes: resp.session.modes?.availableModes ?? [],
@@ -1378,7 +1398,7 @@ export function AgentSessionsProvider({
               await reconcilePermissionModeAtBind(bridge, getStore, {
                 chatId,
                 agentId,
-                sessionId: resp.session.sessionId,
+                sessionId: executionId,
                 availableModes: resp.session.modes?.availableModes ?? [],
                 currentModeId: resp.session.modes?.currentModeId ?? null,
               });
@@ -1866,6 +1886,7 @@ export function AgentSessionsProvider({
                 {
                   type: "AGENT_PROMPT",
                   agentId: current.agentId!,
+                  executionId: sessionId,
                   sessionId,
                   prompt: promptToSend,
                   // Persist the user msg under the renderer's id so turn ids align
@@ -2616,6 +2637,7 @@ export function AgentSessionsProvider({
       bridge.send({
         type: "AGENT_CANCEL",
         agentId: current.agentId,
+        executionId: current.executionId ?? current.sessionId,
         sessionId: current.sessionId,
       });
     },
@@ -2796,6 +2818,7 @@ export function AgentSessionsProvider({
           {
             type: "AGENT_SET_MODE",
             agentId: current.agentId,
+            executionId: current.executionId ?? current.sessionId,
             sessionId: current.sessionId,
             modeId,
           },
@@ -2831,6 +2854,7 @@ export function AgentSessionsProvider({
       bridge.send({
         type: "AGENT_SET_MODEL",
         agentId: current.agentId,
+        executionId: current.executionId ?? current.sessionId,
         sessionId: current.sessionId,
         model,
       });
@@ -2851,6 +2875,7 @@ export function AgentSessionsProvider({
       bridge.send({
         type: "AGENT_COMPACT",
         agentId: current.agentId,
+        executionId: current.executionId ?? current.sessionId,
         sessionId: current.sessionId,
       });
     },
@@ -2865,6 +2890,7 @@ export function AgentSessionsProvider({
       bridge.send({
         type: "AGENT_STOP_BACKGROUND_TASK",
         agentId: current.agentId,
+        executionId: current.executionId ?? current.sessionId,
         sessionId: current.sessionId,
         taskId,
       });
@@ -2902,6 +2928,7 @@ export function AgentSessionsProvider({
       bridge.send({
         type: "AGENT_UPDATE_CONFIG",
         agentId: current.agentId,
+        executionId: current.executionId ?? current.sessionId,
         sessionId: current.sessionId,
         env,
       });
@@ -3109,6 +3136,7 @@ export function AgentSessionsProvider({
           {
             type: "AGENT_STEER",
             agentId: slot.agentId,
+            executionId: slot.executionId ?? slot.sessionId,
             sessionId: slot.sessionId,
             prompt,
             userMessageId: messageId,
@@ -3459,8 +3487,8 @@ export function AgentSessionsProvider({
   );
 
   const loadIntoChat = useCallback<SessionsActions["loadIntoChat"]>(
-    async (chatId, agentId, sessionId, options) => {
-      if (!bridge) return;
+    async (chatId, agentId, providerBinding, options) => {
+      if (!bridge) return true;
       // Preserve any messages already in the slot (typically just put
       // there by hydrateChat) — wiping them here is what produced the
       // "chat empty on reopen" bug for agents whose loadSession doesn't
@@ -3478,8 +3506,9 @@ export function AgentSessionsProvider({
         ...BLANK,
         agentId,
         agentName: options?.agentName ?? agentId,
-        durableSessionId: sessionId,
-        sessionId,
+        executionId: null,
+        sessionId: null,
+        providerBinding: providerBinding ?? null,
         cwd: resolvedCwd,
         status: "warming",
         transcriptState: existing?.transcriptState ?? BLANK.transcriptState,
@@ -3528,7 +3557,16 @@ export function AgentSessionsProvider({
             type: "AGENT_LOAD_SESSION",
             agentId,
             chatId, // Bind the resumed session to its chat for persistence.
-            sessionId,
+            ...(providerBinding
+              ? {
+                  providerBinding,
+                  // Protocol-v8 engines accept only this overloaded locator.
+                  // The current engine ignores it as a route when a binding
+                  // is present and never persists it as an execution.
+                  sessionId:
+                    providerBinding.legacySessionId ?? providerBinding.resumeId,
+                }
+              : {}),
             cwd: resolvedCwd ?? undefined,
             workspaceId: resumeWorkspaceId ?? undefined,
             env: mergedEnv,
@@ -3545,6 +3583,17 @@ export function AgentSessionsProvider({
           // even though every other code path correctly maps that to
           // transport-closed. Same shape as sendPrompt's catch.
           const failure = failureFromAgentError(resp, "loadSession");
+          // No durable binding is an intentional probe for an engine-owned
+          // execution that survived a renderer reload. A miss means the caller
+          // should create a new execution; it is not a user-visible failure.
+          if (!providerBinding && failure.kind === "session-expired") {
+            getStore().patchSession(chatId, {
+              status: "warming",
+              error: null,
+              failure: null,
+            });
+            return false;
+          }
           getStore().patchSession(chatId, {
             status: statusForFailure(failure),
             error: failure.message,
@@ -3553,21 +3602,22 @@ export function AgentSessionsProvider({
           // Same reasoning as ensureSession's failure tail: a send parked during
           // this adoption has no other path back to the user.
           drainOrDropQueue(chatId);
-          return;
+          return true;
         }
-        // Cursor can recover a missing SDK transcript by creating a fresh
-        // provider agent while the current engine keeps routing through the
-        // requested id as an alias. Keep the live alias in `sessionId`, but
-        // expose the real replacement separately for ChatBody's persistence
-        // effect; otherwise that effect immediately overwrites the replacement
-        // with the alias and every reopen retries the permanently stale id.
-        const replacementSessionId = resp.response.replacementSessionId;
+        const executionId = resp.executionId ?? resp.sessionId;
+        const resolvedProviderBinding =
+          resp.response.providerBinding ?? providerBinding;
         getStore().patchSession(chatId, {
           // As on new-session bind, do not expose a sendable state until the
           // user's persisted native permission mode has reached the adapter.
           status: "warming",
-          durableSessionId: replacementSessionId ?? resp.sessionId,
-          sessionId: resp.sessionId,
+          executionId,
+          sessionId: executionId,
+          providerBinding: resolvedProviderBinding,
+          providerMetadata:
+            resp.response.providerMetadata ??
+            existing?.providerMetadata ??
+            null,
           availableModes: resp.response.modes?.availableModes ?? [],
           currentModeId: resp.response.modes?.currentModeId ?? null,
           error: null,
@@ -3589,7 +3639,7 @@ export function AgentSessionsProvider({
           });
         }
         const prebindDirtySession = prebindDirtySessionsRef.current.get(chatId);
-        if (prebindDirtySession && prebindDirtySession !== resp.sessionId) {
+        if (prebindDirtySession && prebindDirtySession !== executionId) {
           prebindDirtySessionsRef.current.delete(chatId);
         }
         // Re-apply the chat's persisted permission posture on resume too. The
@@ -3601,7 +3651,7 @@ export function AgentSessionsProvider({
           await reconcilePermissionModeAtBind(bridge, getStore, {
             chatId,
             agentId,
-            sessionId: resp.sessionId,
+            sessionId: executionId,
             availableModes: resp.response.modes?.availableModes ?? [],
             currentModeId: resp.response.modes?.currentModeId ?? null,
           });
@@ -3618,12 +3668,13 @@ export function AgentSessionsProvider({
             takePrebindDirty(
               prebindDirtySessionsRef.current,
               chatId,
-              resp.sessionId,
+              executionId,
             )
           ) {
             void reconcileChatMessages(chatId);
           }
         }
+        return true;
       } catch (err) {
         // Classify the raw rejection (engine-swap rejections carry
         // code:"ENGINE_SWAPPING"; WS-disconnect timeouts match
@@ -3640,6 +3691,7 @@ export function AgentSessionsProvider({
           failure,
         });
         drainOrDropQueue(chatId);
+        return true;
       } finally {
         resolveLoadFlight();
         if (ensureInFlightRef.current.get(chatId) === loadFlight) {
@@ -3698,6 +3750,7 @@ export function AgentSessionsProvider({
         bridge.send({
           type: "AGENT_CLOSE_SESSION",
           agentId: slot.agentId,
+          executionId: slot.executionId ?? slot.sessionId,
           sessionId: slot.sessionId,
         });
       }

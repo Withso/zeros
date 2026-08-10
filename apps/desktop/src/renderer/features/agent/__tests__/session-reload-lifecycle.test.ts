@@ -250,6 +250,41 @@ describe("session reload lifecycle", () => {
     );
   });
 
+  it("rejects a stale provider binding from a superseded execution", () => {
+    const store = useSessionsStore.getState();
+    store.setSession("chat-1", {
+      ...BLANK,
+      agentId: "claude",
+      executionId: "new-execution",
+      sessionId: "new-execution",
+      providerBinding: {
+        version: 1,
+        providerId: "claude",
+        kind: "native",
+        resumeId: "new-provider-session",
+      },
+    });
+
+    store.applyBridgeUpdate({
+      executionId: "old-execution",
+      sessionId: "old-execution",
+      chatId: "chat-1",
+      update: {
+        sessionUpdate: "provider_binding_update",
+        providerBinding: {
+          version: 1,
+          providerId: "claude",
+          kind: "native",
+          resumeId: "old-provider-session",
+        },
+      },
+    } as SessionNotification);
+
+    expect(
+      useSessionsStore.getState().sessions["chat-1"]?.providerBinding?.resumeId,
+    ).toBe("new-provider-session");
+  });
+
   it("reconciles missed pre-bind output only for the exact adopted session", () => {
     const dirty = new Map<string, string>();
     markPrebindDirty(dirty, "chat-1", "old-session");
