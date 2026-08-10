@@ -110,17 +110,23 @@ d("migration ladder", () => {
     expect(ran).toEqual([LADDER[LADDER.length - 1]]);
   });
 
-  it("replays from every intermediate revision", async () => {
-    // A deployment can be at ANY prior revision (a long-lived staging box, a
-    // restored backup, a rollback). Every suffix of the ladder must apply to
-    // the state its prefix leaves.
-    for (let k = 0; k < LADDER.length; k++) {
-      await reset();
-      await applyThrough(k);
-      const ran = await runMigrations(pool);
-      expect(ran, `applying from revision ${k}`).toEqual(LADDER.slice(k));
-    }
-  });
+  it(
+    "replays from every intermediate revision",
+    async () => {
+      // A deployment can be at ANY prior revision (a long-lived staging box, a
+      // restored backup, a rollback). Every suffix of the ladder must apply to
+      // the state its prefix leaves.
+      for (let k = 0; k < LADDER.length; k++) {
+        await reset();
+        await applyThrough(k);
+        const ran = await runMigrations(pool);
+        expect(ran, `applying from revision ${k}`).toEqual(LADDER.slice(k));
+      }
+    },
+    // This matrix executes O(n²) real DDL as the ladder grows. Keep a scoped
+    // ceiling for a genuine hang while allowing for shared-runner I/O variance.
+    30_000,
+  );
 });
 
 // ── Per-migration data-preservation ──────────────────────
