@@ -161,6 +161,57 @@ describe("startGitWatcher", () => {
     await waitFor(() => changes > 0);
   });
 
+  it("stops observing a nested agent worktree when its .git marker appears late", async () => {
+    const root = await mkdtemp(join(tmpdir(), "zeros-late-tool-watch-"));
+    roots.push(root);
+    await mkdir(join(root, ".git", "logs"), { recursive: true });
+    await writeFile(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
+    await writeFile(join(root, ".git", "index"), "index");
+    await writeFile(join(root, ".git", "logs", "HEAD"), "");
+
+    let changes = 0;
+    const watcher = startGitWatcher(
+      () => [{ root, workspaceId: "workspace-late-marker" }],
+      () => {
+        changes += 1;
+      },
+      {
+        // Exercise the native event path: this test covers the short window in
+        // which git has created the worktree directory but not its marker yet.
+        usePolling: false,
+        pollIntervalMs: 60_000,
+        worktreeDebounceMs: 10,
+        awaitWriteFinishMs: 20,
+      },
+    );
+    watchers.push(watcher);
+    await watcher.ready;
+
+    const nested = join(root, ".claude", "worktrees", "nested");
+    await mkdir(nested, { recursive: true });
+    await waitFor(() => changes > 0);
+
+    // Prove Chokidar subscribed before the marker landed. The ignore callback
+    // must be re-evaluated dynamically rather than caching that first decision.
+    const earlyFile = join(nested, "early.txt");
+    let before = changes;
+    await writeFile(earlyFile, "before\n");
+    await waitFor(() => changes > before);
+
+    await writeFile(join(nested, ".git"), "gitdir: /outside/common.git\n");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    before = changes;
+
+    await writeFile(earlyFile, "after\n");
+    await mkdir(join(nested, "generated"), { recursive: true });
+    await writeFile(join(nested, "generated", "late.txt"), "late\n");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(changes).toBe(before);
+
+    await writeFile(join(root, "visible-after-marker.txt"), "hello\n");
+    await waitFor(() => changes > before);
+  });
+
   it("invalidates when terminal git changes the index without a source event", async () => {
     const root = await mkdtemp(join(tmpdir(), "zeros-git-state-watch-"));
     roots.push(root);

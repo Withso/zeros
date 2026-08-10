@@ -652,14 +652,16 @@ async function enumerateMatches(
             ),
           );
     if (listed.opaqueDirectories.length > 0) {
+      const count = listed.opaqueDirectories.length;
       const examples = listed.opaqueDirectories
         .slice(0, 3)
         .map((p) => `"${p}"`)
         .join(", ");
       warnings.push(
-        `files-to-copy: skipped ${listed.opaqueDirectories.length} opaque nested Git ` +
-          `worktree/repository director${listed.opaqueDirectories.length === 1 ? "y" : "ies"}` +
-          (examples ? ` reported while matching files (${examples})` : ""),
+        `files-to-copy: found ${count} separate Git ` +
+          `checkout${count === 1 ? "" : "s"} while scanning` +
+          (examples ? ` (${examples})` : "") +
+          "; separate checkouts are not copied",
       );
     }
     return { paths: listed.paths, complete: true, warnings, prune };

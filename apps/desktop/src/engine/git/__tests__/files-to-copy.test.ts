@@ -153,7 +153,7 @@ describe("resolveFilesToCopy", () => {
     expect(r.paths).toEqual([]);
     expect(r.warnings).toEqual([
       expect.stringContaining(
-        "skipped 1 opaque nested Git worktree/repository",
+        "found 1 separate Git checkout while scanning",
       ),
     ]);
   });
