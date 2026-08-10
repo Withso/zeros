@@ -221,6 +221,92 @@ describe("CodexAppServerTranslator", () => {
   });
 
   describe("tool-call lifecycle", () => {
+    it("preserves dynamic-tool output as canonical Zeros content", () => {
+      env.t.handle("item/started", {
+        item: {
+          type: "dynamicToolCall",
+          id: "dynamic-1",
+          namespace: "workspace",
+          tool: "inspect",
+          arguments: { path: "README.md" },
+          status: "inProgress",
+          contentItems: null,
+          success: null,
+        },
+        threadId: "t1",
+        turnId: "u1",
+      });
+      env.t.handle("item/completed", {
+        item: {
+          type: "dynamicToolCall",
+          id: "dynamic-1",
+          namespace: "workspace",
+          tool: "inspect",
+          arguments: { path: "README.md" },
+          status: "completed",
+          success: true,
+          contentItems: [
+            { type: "inputText", text: "inspection complete" },
+            {
+              type: "inputImage",
+              imageUrl: "data:image/png;base64,aGVsbG8=",
+            },
+            {
+              type: "inputAudio",
+              audioUrl: "data:audio/wav;base64,d2F2",
+            },
+            {
+              type: "inputImage",
+              imageUrl: "https://example.com/result.png",
+            },
+          ],
+        },
+        threadId: "t1",
+        turnId: "u1",
+      });
+
+      const call = env.out.emitted.find(
+        (notification) => notification.update.sessionUpdate === "tool_call",
+      );
+      expect(call?.update).toMatchObject({
+        title: "workspace/inspect",
+        rawInput: {
+          namespace: "workspace",
+          tool: "inspect",
+          arguments: { path: "README.md" },
+        },
+      });
+      const update = env.out.emitted.find(
+        (notification) =>
+          notification.update.sessionUpdate === "tool_call_update",
+      );
+      expect(update?.update).toMatchObject({
+        status: "completed",
+        content: [
+          {
+            type: "content",
+            content: { type: "text", text: "inspection complete" },
+          },
+          {
+            type: "content",
+            content: { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+          },
+          {
+            type: "content",
+            content: { type: "audio", mimeType: "audio/wav", data: "d2F2" },
+          },
+          {
+            type: "content",
+            content: {
+              type: "resource_link",
+              uri: "https://example.com/result.png",
+              name: "Dynamic tool image",
+            },
+          },
+        ],
+      });
+    });
+
     it("commandExecution: started → tool_call(execute, in_progress), completed exit 0 → completed", () => {
       env.t.handle("item/started", {
         item: {

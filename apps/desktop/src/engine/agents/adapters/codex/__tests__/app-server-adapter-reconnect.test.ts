@@ -56,6 +56,27 @@ vi.mock("../app-server", () => ({
     }) => {
       rt.lastOnExit = opts.onExit ?? null;
       rt.lastOnUserInputRequest = opts.onUserInputRequest ?? null;
+      const request = vi.fn(async (method: string, params: unknown) => {
+        rt.requests.push([method, params]);
+        if (method === "model/list") {
+          return (
+            rt.modelList ?? {
+              data: [
+                {
+                  id: "gpt-5.6-sol",
+                  displayName: "GPT-5.6 Sol",
+                  supportedReasoningEfforts: [
+                    { reasoningEffort: "xhigh" },
+                    { reasoningEffort: "max" },
+                  ],
+                  serviceTiers: [],
+                },
+              ],
+            }
+          );
+        }
+        return {};
+      });
       return {
         initializeResponse: {
           userAgent: "codex_cli 0.139.0",
@@ -94,27 +115,8 @@ vi.mock("../app-server", () => ({
           rt.notificationHandlers.set(method, handler);
           return () => rt.notificationHandlers.delete(method);
         },
-        request: vi.fn(async (method: string, params: unknown) => {
-          rt.requests.push([method, params]);
-          if (method === "model/list") {
-            return (
-              rt.modelList ?? {
-                data: [
-                  {
-                    id: "gpt-5.6-sol",
-                    displayName: "GPT-5.6 Sol",
-                    supportedReasoningEfforts: [
-                      { reasoningEffort: "xhigh" },
-                      { reasoningEffort: "max" },
-                    ],
-                    serviceTiers: [],
-                  },
-                ],
-              }
-            );
-          }
-          return {};
-        }),
+        request,
+        requestTyped: request,
         dispose: async () => {},
       };
     },

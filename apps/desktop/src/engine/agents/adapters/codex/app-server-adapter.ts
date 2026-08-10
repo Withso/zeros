@@ -366,16 +366,19 @@ export class CodexAppServerAdapter implements AgentAdapter {
   private async discoverModels(session: CodexSession): Promise<void> {
     if (this.modelsDiscovered) return;
     try {
-      const resp = await session.runtime.request<{
-        data?: Array<{
-          id?: string;
-          displayName?: string;
-          hidden?: boolean;
-          supportedReasoningEfforts?: Array<{ reasoningEffort?: string }>;
-          serviceTiers?: Array<{ id?: string }>;
-          additionalSpeedTiers?: string[];
-        }>;
-      }>("model/list", { includeHidden: false }, { timeoutMs: 5_000 });
+      const resp = await session.runtime.requestTyped<
+        "model/list",
+        {
+          data?: Array<{
+            id?: string;
+            displayName?: string;
+            hidden?: boolean;
+            supportedReasoningEfforts?: Array<{ reasoningEffort?: string }>;
+            serviceTiers?: Array<{ id?: string }>;
+            additionalSpeedTiers?: string[];
+          }>;
+        }
+      >("model/list", { includeHidden: false }, { timeoutMs: 5_000 });
       const models: AdvertisedModel[] = [];
       for (const m of resp?.data ?? []) {
         if (!m?.id || m.hidden) continue;
@@ -773,7 +776,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       });
     }
     const input = await this.buildUserInput(session, opts.prompt);
-    await session.runtime.request("turn/steer", {
+    await session.runtime.requestTyped("turn/steer", {
       threadId: session.threadId,
       input,
       expectedTurnId: turnId,
@@ -797,7 +800,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // the previous turn's working group.
     session.translator.expectManualCompaction();
     try {
-      await session.runtime.request("thread/compact/start", {
+      await session.runtime.requestTyped("thread/compact/start", {
         threadId: session.threadId,
       });
     } catch (err) {
@@ -1183,7 +1186,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
   private async readAccount(
     runtime: CodexAppServerHandle,
   ): Promise<AccountDetails | null> {
-    const resp = await runtime.request<GetAccountResponse>(
+    const resp = await runtime.requestTyped<"account/read", GetAccountResponse>(
       "account/read",
       { refreshToken: false } satisfies GetAccountParams,
       { timeoutMs: 5_000 },
@@ -1577,16 +1580,19 @@ export class CodexAppServerAdapter implements AgentAdapter {
     session: CodexSession,
   ): Promise<AvailableCommand[]> {
     try {
-      const resp = await session.runtime.request<{
-        data?: Array<{
-          skills?: Array<{
-            name?: string;
-            description?: string;
-            shortDescription?: string;
-            enabled?: boolean;
+      const resp = await session.runtime.requestTyped<
+        "skills/list",
+        {
+          data?: Array<{
+            skills?: Array<{
+              name?: string;
+              description?: string;
+              shortDescription?: string;
+              enabled?: boolean;
+            }>;
           }>;
-        }>;
-      }>(
+        }
+      >(
         "skills/list",
         // forceReload bypasses a stale boot-time cache so a re-poll picks up the
         // bundled skills the moment the app-server has registered them.
