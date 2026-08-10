@@ -18,6 +18,41 @@ const MIGRATIONS_DIR = path.join(
   "migrations",
 );
 
+const CONTROLLED_DOWNTIME_MARKER =
+  "-- zeros:requires-controlled-downtime";
+
+/**
+ * A marked migration is incompatible with the currently running server schema.
+ * In a production-mode container it must be named explicitly before the runner
+ * can execute it. This is a backstop against a Git push turning an ordinary
+ * Railway rolling deployment into an unplanned production migration.
+ */
+export function assertMigrationApproved(
+  file: string,
+  sql: string,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (
+    env.NODE_ENV !== "production" ||
+    !sql.split("\n").slice(0, 12).includes(CONTROLLED_DOWNTIME_MARKER)
+  ) {
+    return;
+  }
+  const approvals = new Set(
+    (env.CONTROL_PLANE_MIGRATION_APPROVALS ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
+  if (!approvals.has(file)) {
+    throw new Error(
+      `Migration ${file} requires controlled downtime and is not approved. ` +
+        `Stop the old deployment, take a database backup, then set ` +
+        `CONTROL_PLANE_MIGRATION_APPROVALS=${file} for the one-time rollout.`,
+    );
+  }
+}
+
 export async function runMigrations(pool: pg.Pool): Promise<string[]> {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -39,6 +74,7 @@ export async function runMigrations(pool: pg.Pool): Promise<string[]> {
   for (const file of files) {
     if (applied.has(file)) continue;
     const sql = await readFile(path.join(MIGRATIONS_DIR, file), "utf8");
+    assertMigrationApproved(file, sql);
     const client = await pool.connect();
     try {
       await client.query("BEGIN");

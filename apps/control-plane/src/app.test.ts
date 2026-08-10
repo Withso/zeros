@@ -46,6 +46,7 @@ function config(github: GithubBackendConfig | null): Config {
     port: 8080,
     isProduction: true,
     github,
+    feedback: null,
   };
 }
 
@@ -116,5 +117,29 @@ describe("app assembly — healthz", () => {
     const response = await healthy.request("/healthz");
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ ok: true });
+  });
+});
+
+describe("app assembly — request body limits", () => {
+  const app = createApp(config(null), pool, emailConfig as never);
+  const body = JSON.stringify({ logs: "x".repeat(300 * 1024) });
+
+  it("allows feedback's scrubbed-log payload past the default route ceiling", async () => {
+    const response = await app.request("/v1/feedback", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+    // It reached authentication; the default 256 KiB limiter did not reject it.
+    expect(response.status).toBe(401);
+  });
+
+  it("keeps the 256 KiB ceiling on ordinary API routes", async () => {
+    const response = await app.request("/v1/teams", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+    expect(response.status).toBe(413);
   });
 });

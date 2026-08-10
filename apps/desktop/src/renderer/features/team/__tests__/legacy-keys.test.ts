@@ -182,4 +182,27 @@ describe("the Team readers adopt their pre-rename keys", () => {
     const { lastKnownHasTeams } = await import("../team-store");
     expect(lastKnownHasTeams()).toBe(false);
   });
+
+  it("tracks confirmed Personal selection in memory for an offline engine clear", async () => {
+    const active = await import("../active-team");
+    active.clearActiveOrganizationSelectionHint();
+    let changes = 0;
+    const unsubscribe = active.subscribeActiveTeam(() => {
+      changes += 1;
+    });
+    try {
+      active.setActiveOrganizationSelection("personal-id", true);
+      expect(active.getActiveTeamId()).toBe("personal-id");
+      expect(active.getActiveOrganizationIsPersonalHint()).toBe(true);
+
+      // Compatibility callers do not know the semantic kind. Clear the hint
+      // instead of carrying Personal across to a different organization id.
+      active.setActiveTeamId("organization-id");
+      expect(active.getActiveOrganizationIsPersonalHint()).toBeNull();
+      expect(changes).toBe(2);
+    } finally {
+      unsubscribe();
+      active.clearActiveOrganizationSelectionHint();
+    }
+  });
 });

@@ -11,6 +11,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
 import { cors } from "hono/cors";
 import { bodyLimit } from "hono/body-limit";
 import type pg from "pg";
@@ -26,6 +27,7 @@ import {
   createGithubRoutes,
   createGithubUnconfiguredRoutes,
 } from "./github.js";
+import { createFeedbackRoutes } from "./feedback.js";
 
 export function createApp(
   config: Config,
@@ -90,11 +92,17 @@ export function createApp(
     app.route("/", createGithubUnconfiguredRoutes());
   }
 
-  // Cap request bodies BEFORE the handlers buffer + JSON-parse them —
-  // otherwise a giant payload is fully in memory before Zod's per-field
-  // limits can help. 256 KB comfortably covers a settings doc + a 200 KB
-  // team-logo data URL; anything larger is abuse.
-  app.use("/v1/*", bodyLimit({ maxSize: 256 * 1024 }));
+  // Cap request bodies BEFORE handlers buffer + JSON-parse them. Feedback has
+  // a deliberate 500k-character, secret-scrubbed log attachment, so it gets a
+  // separate 2 MiB transport ceiling (enough for worst-case UTF-8 + JSON).
+  // Every other route keeps the much smaller 256 KiB abuse boundary.
+  const defaultBodyLimit = bodyLimit({ maxSize: 256 * 1024 });
+  const feedbackBodyLimit = bodyLimit({ maxSize: 2 * 1024 * 1024 });
+  app.use("/v1/*", (c, next) =>
+    c.req.path === "/v1/feedback"
+      ? feedbackBodyLimit(c, next)
+      : defaultBodyLimit(c, next),
+  );
 
   // Everything under /v1 requires a verified Auth0-issued JWT.
   app.use("/v1/*", createAuthMiddleware(config, pool));
@@ -106,10 +114,20 @@ export function createApp(
   // verified user id, not the IP.
   app.use("/v1/*", rateLimit("global", 240, 60_000));
 
+  // Feedback can fan out to two paid third-party APIs and accept a larger
+  // body, so keep a much tighter per-user ceiling in addition to the blanket
+  // rate limit. Authentication has already populated the user key.
+  app.use("/v1/feedback", rateLimit("feedback", 5, 60_000));
+
+  app.route("/", createFeedbackRoutes(config.feedback));
   app.route("/", createRoutes(pool, emailConfig));
   if (config.github) app.route("/", createGithubRoutes(pool, config.github));
 
   app.onError((err, c) => {
+    // Preserve deliberate framework responses such as bodyLimit's 413. Turning
+    // them into a generic 500 both hides the real client error and defeats the
+    // middleware contract.
+    if (err instanceof HTTPException) return err.getResponse();
     if (err instanceof HttpError) {
       return c.json(
         { error: { code: err.code, message: err.message } },

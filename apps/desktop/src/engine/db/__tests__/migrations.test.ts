@@ -101,12 +101,62 @@ describe("Zeros DB — migration ladder data safety (forward-only)", () => {
         notnull: 1,
         dflt_value: "'code'",
       });
+      expect(
+        workspaceColumns.find((column) => column.name === "placement"),
+      ).toMatchObject({
+        name: "placement",
+        notnull: 1,
+        dflt_value: "'local'",
+      });
+      expect(
+        workspaceColumns.find((column) => column.name === "organization_id"),
+      ).toMatchObject({ name: "organization_id", notnull: 0 });
 
       // Idempotent: a second run on the same DB applies nothing and never throws
       // (re-applying a migration's CREATE/ALTER would throw — proves the
       // schema_migrations guard holds).
       expect(() => runMigrations(db)).not.toThrow();
       expect(appliedVersions(db)).toHaveLength(latest);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("migration 28 backfills legacy workspaces as local and reserves cloud for an organization owner", () => {
+    const db = new Database(":memory:");
+    try {
+      // Stop before the conditional v22 repair; runMigrations owns that path.
+      // The row still crosses every workspace migration, including v28.
+      applyUpTo(db, 21);
+      db.prepare(
+        `INSERT INTO workspaces
+           (id, repo_slug, repo_root, branch, base_branch, path,
+            status, created_at)
+         VALUES ('ws_legacy', 'repo', '/repo', 'zeros/Cream',
+                 'main', '/workspaces/Cream', 'in-progress', 1)`,
+      ).run();
+
+      runMigrations(db);
+
+      expect(
+        db
+          .prepare(
+            `SELECT organization_id, placement FROM workspaces
+             WHERE id = 'ws_legacy'`,
+          )
+          .get(),
+      ).toEqual({ organization_id: null, placement: "local" });
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO workspaces
+               (id, kind, repo_slug, repo_root, branch, base_branch, path,
+                status, created_at, placement)
+             VALUES ('ws_bad', 'code', 'repo', '/repo', 'zeros/Blue',
+                     'main', '/workspaces/Blue', 'in-progress', 2, 'cloud')`,
+          )
+          .run(),
+      ).toThrow(/CHECK/i);
     } finally {
       db.close();
     }

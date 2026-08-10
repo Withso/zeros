@@ -1,6 +1,6 @@
-// app.zeros.build/  — the session-aware hub (canonical landing after sign-in).
-// Replaces the old static "open the desktop app" page so a signed-in user (and a
-// post-OAuth Site-URL fallback) lands on "Launch Zeros". See lib/hub.ts.
+// app.zeros.build/ — signed-out auth hub and signed-in organization dashboard.
+// Desktop handoffs still use the same renderer when their validated launch
+// context is present. See lib/hub.ts.
 
 import { renderHub } from "../lib/hub";
 import type { Env } from "../lib/session";

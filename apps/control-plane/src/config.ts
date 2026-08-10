@@ -7,6 +7,8 @@
 
 import { z } from "zod";
 
+import { FEEDBACK_TYPES, type FeedbackType } from "./feedback-types.js";
+
 const EnvSchema = z.object({
   /** Postgres connection string (Railway: the service's DATABASE_URL). */
   DATABASE_URL: z.string().min(1),
@@ -98,6 +100,22 @@ export type GithubBackendConfig = {
   desktopSchemes: readonly ["zeros", "zeros-alpha", "zeros-beta", "zeros-dev"];
 };
 
+export type FeedbackBackendConfig = {
+  intercom: {
+    token: string;
+    region: "us" | "eu" | "au";
+    adminId: string | null;
+    tagIds: Readonly<Partial<Record<FeedbackType, string>>>;
+    appId: string | null;
+  } | null;
+  linear: {
+    apiKey: string;
+    teamId: string;
+    labelIds: Readonly<Partial<Record<FeedbackType, string>>>;
+  } | null;
+  posthogProjectUrl: string | null;
+};
+
 export type Config = {
   databaseUrl: string;
   authIssuers: string[];
@@ -107,6 +125,8 @@ export type Config = {
   isProduction: boolean;
   /** Null when no GitHub App is registered for this environment. */
   github: GithubBackendConfig | null;
+  /** Null when neither feedback destination is configured. */
+  feedback: FeedbackBackendConfig | null;
 };
 
 function validatedServiceUrl(
@@ -202,6 +222,183 @@ function parseGithubConfig(env: NodeJS.ProcessEnv): GithubBackendConfig {
   };
 }
 
+function parseFeedbackMap(
+  raw: string | undefined,
+  name: string,
+): Readonly<Partial<Record<FeedbackType, string>>> {
+  if (!raw?.trim()) return {};
+  try {
+    const parsed = z.record(z.string().trim().min(1)).parse(JSON.parse(raw));
+    const unknown = Object.keys(parsed).filter(
+      (key) =>
+        key !== "issue" &&
+        !FEEDBACK_TYPES.includes(key as (typeof FEEDBACK_TYPES)[number]),
+    );
+    if (unknown.length > 0) {
+      console.error(
+        `[config] ${name} ignores unknown feedback types: ${unknown.join(", ")}`,
+      );
+    }
+    const normalized: Partial<Record<FeedbackType, string>> = {};
+    for (const type of FEEDBACK_TYPES) {
+      const value = parsed[type];
+      if (value) normalized[type] = value;
+    }
+    if (parsed.issue) {
+      console.warn(
+        `[config] ${name} maps legacy "issue" to "bug"; update the variable to use "bug".`,
+      );
+      normalized.bug ??= parsed.issue;
+    }
+    return normalized;
+  } catch (error) {
+    console.error(
+      `[config] ${name} is invalid and feedback tagging is DISABLED: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return {};
+  }
+}
+
+function loadFeedbackConfig(
+  env: NodeJS.ProcessEnv,
+): FeedbackBackendConfig | null {
+  const intercomKeys = [
+    "INTERCOM_TOKEN",
+    "INTERCOM_REGION",
+    "INTERCOM_ADMIN_ID",
+    "INTERCOM_TAG_IDS",
+    "INTERCOM_APP_ID",
+  ] as const;
+  const intercomSupplied = intercomKeys.filter(
+    (key) => (env[key] ?? "").trim().length > 0,
+  );
+  const intercomToken = env.INTERCOM_TOKEN?.trim();
+  let intercom: FeedbackBackendConfig["intercom"] = null;
+  if (intercomToken) {
+    const region = (env.INTERCOM_REGION?.trim().toLowerCase() ||
+      "us") as string;
+    if (region === "us" || region === "eu" || region === "au") {
+      const adminId = env.INTERCOM_ADMIN_ID?.trim() || null;
+      const tagIds = parseFeedbackMap(env.INTERCOM_TAG_IDS, "INTERCOM_TAG_IDS");
+      if (
+        (adminId && Object.keys(tagIds).length === 0) ||
+        (!adminId && Object.keys(tagIds).length > 0)
+      ) {
+        console.error(
+          "[config] Intercom feedback tags require BOTH INTERCOM_ADMIN_ID and INTERCOM_TAG_IDS; conversations remain enabled without tags.",
+        );
+      }
+      intercom = {
+        token: intercomToken,
+        region,
+        adminId,
+        tagIds,
+        appId: env.INTERCOM_APP_ID?.trim() || null,
+      };
+    } else {
+      console.error(
+        `[config] Intercom feedback is DISABLED — INTERCOM_REGION must be us, eu, or au (received ${JSON.stringify(region)}).`,
+      );
+    }
+  } else if (intercomSupplied.length > 0) {
+    console.error(
+      "[config] Intercom feedback is DISABLED — INTERCOM_TOKEN is missing.",
+    );
+  }
+
+  const linearKey = env.LINEAR_API_KEY?.trim();
+  const linearTeam = env.LINEAR_TEAM_ID?.trim();
+  const linearSupplied = [
+    "LINEAR_API_KEY",
+    "LINEAR_TEAM_ID",
+    "LINEAR_LABEL_IDS",
+  ].filter((key) => (env[key] ?? "").trim().length > 0);
+  let linear: FeedbackBackendConfig["linear"] = null;
+  if (linearKey && linearTeam) {
+    linear = {
+      apiKey: linearKey,
+      teamId: linearTeam,
+      labelIds: parseFeedbackMap(env.LINEAR_LABEL_IDS, "LINEAR_LABEL_IDS"),
+    };
+  } else if (linearSupplied.length > 0) {
+    console.error(
+      "[config] Linear feedback is DISABLED — LINEAR_API_KEY and LINEAR_TEAM_ID must both be set.",
+    );
+  }
+
+  let posthogProjectUrl: string | null = null;
+  if (env.POSTHOG_PROJECT_URL?.trim()) {
+    try {
+      posthogProjectUrl = validatedServiceUrl(
+        env.POSTHOG_PROJECT_URL.trim(),
+        "POSTHOG_PROJECT_URL",
+        { allowPath: true },
+      );
+    } catch (error) {
+      console.error(
+        `[config] POSTHOG_PROJECT_URL is ignored: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  return intercom || linear ? { intercom, linear, posthogProjectUrl } : null;
+}
+
+const HOSTED_ENVIRONMENTS = {
+  alpha: {
+    audience: "https://api-alpha.zeros.build",
+    branch: "main",
+  },
+  beta: {
+    audience: "https://api-beta.zeros.build",
+    branch: "release/",
+  },
+  production: {
+    audience: "https://api.zeros.build",
+    branch: "release/",
+  },
+} as const;
+
+function validateRailwayEnvironment(
+  env: NodeJS.ProcessEnv,
+  audience: string,
+): void {
+  // Railway injects these values. Local processes and non-Railway hosts have no
+  // project id and intentionally skip this deployment-topology assertion.
+  if (!env.RAILWAY_PROJECT_ID) return;
+  const name = (env.RAILWAY_ENVIRONMENT_NAME ?? "").trim().toLowerCase();
+  const expected =
+    HOSTED_ENVIRONMENTS[name as keyof typeof HOSTED_ENVIRONMENTS];
+  if (!expected) {
+    throw new Error(
+      "Invalid environment: Railway environment must be named alpha, beta, or production",
+    );
+  }
+  if (audience !== expected.audience) {
+    throw new Error(
+      `Invalid environment: AUTH_AUDIENCE must be ${expected.audience} in Railway ${name}`,
+    );
+  }
+  const branch = (env.RAILWAY_GIT_BRANCH ?? "").trim();
+  if (!branch) {
+    throw new Error(
+      `Invalid environment: Railway ${name} requires a Git-connected deployment with RAILWAY_GIT_BRANCH metadata`,
+    );
+  }
+  const validReleaseBranch = /^release\/\d+\.\d+\.\d+$/.test(branch);
+  if (name === "alpha" ? branch !== expected.branch : !validReleaseBranch) {
+    throw new Error(
+      `Invalid environment: Railway ${name} cannot deploy Git branch ${JSON.stringify(
+        branch,
+      )}; expected ${name === "alpha" ? "main" : "release/X.Y.Z"}`,
+    );
+  }
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = EnvSchema.safeParse(env);
   if (!parsed.success) {
@@ -211,6 +408,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error(`Invalid environment: ${missing}`);
   }
   const e = parsed.data;
+  validateRailwayEnvironment(env, e.AUTH_AUDIENCE);
   const base = `https://${e.AUTH0_DOMAIN.replace(/\/+$/, "")}`;
   const issuers = (e.AUTH_ISSUER ?? `${base}/`)
     .split(",")
@@ -247,5 +445,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     port: e.PORT,
     isProduction: e.NODE_ENV === "production",
     github,
+    feedback: loadFeedbackConfig(env),
   };
 }

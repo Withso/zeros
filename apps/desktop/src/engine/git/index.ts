@@ -62,6 +62,7 @@ export {
   setWorkspaceRemoteRestricted,
   listRemoteRestrictedWorkspaceIds,
   getWorkspaceById,
+  reassignLocalWorkspaceOrganization,
   updateWorkspace,
 } from "./state";
 

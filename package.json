@@ -87,7 +87,7 @@
     "typecheck": "pnpm typecheck:app && pnpm typecheck:electron && pnpm typecheck:packages",
     "typecheck:app": "tsc --noEmit -p tsconfig.typecheck.json",
     "typecheck:electron": "tsc --noEmit -p apps/desktop/electron/tsconfig.typecheck.json",
-    "typecheck:packages": "pnpm --filter @zeros/design-core run typecheck && pnpm --filter @zeros/design-web run typecheck && pnpm --filter @zeros/protocol run typecheck && pnpm --filter @zeros/feedback-worker run typecheck && pnpm --filter @zeros/marketing run typecheck",
+    "typecheck:packages": "pnpm --filter @zeros/design-core run typecheck && pnpm --filter @zeros/design-web run typecheck && pnpm --filter @zeros/protocol run typecheck && pnpm --filter @zeros/marketing run typecheck",
     "schemas:build": "tsx scripts/build-settings-schemas.ts",
     "test:ui-smoke": "node scripts/ui-smoke-composer.mjs",
     "test:control-plane": "pnpm --dir apps/control-plane test"

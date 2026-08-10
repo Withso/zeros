@@ -230,7 +230,7 @@ jobs:
 
       - name: Prod VITE_* env-set is wired into release.yml
         # A VITE_ var the app uses but release.yml doesn't inject ships a DMG
-        # without it (analytics/feedback go dark). Names only, never values.
+        # without it (analytics/environment routing goes dark). Names only.
         run: pnpm check:vite-env
 
       - name: Electron security posture intact

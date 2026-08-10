@@ -53,6 +53,8 @@ import {
 import { toast } from "../shared/ui/primitives/elements";
 import { isInternalFeatureActive } from "../features/settings/internal-features";
 import { isExpectedElectron, isNativeRuntime } from "../platform/runtime";
+import { getActiveOrganizationSnapshot } from "../features/team/team-store";
+import { localWorkspaceOwner } from "../features/team/organization-capabilities";
 
 type Dispatch = ReturnType<typeof useWorkspaceDispatch>;
 
@@ -63,6 +65,10 @@ export async function createWorkspaceForProject(args: {
 }): Promise<boolean> {
   const { project, dispatch } = args;
   const kind = args.kind === "design" ? "design" : "code";
+  // Capture semantic ownership at intent time. The user can switch
+  // organizations while prepare crosses the bridge; that must not silently
+  // move the already-requested workspace to the newly selected owner.
+  const owner = localWorkspaceOwner(getActiveOrganizationSnapshot());
   const designCreationAllowed = () =>
     isInternalFeatureActive("designWorkspaces") &&
     (isNativeRuntime() || isExpectedElectron());
@@ -99,6 +105,7 @@ export async function createWorkspaceForProject(args: {
   const pendingToken = beginPendingCreate({
     repoRoot: project.repoRoot,
     repoSlug: project.repoSlug,
+    ...owner,
     kind,
     path: prepared.path,
     branch: prepared.branch,
@@ -148,6 +155,7 @@ export async function createWorkspaceForProject(args: {
     const created = await workspaceCreate({
       repoRoot: project.repoRoot,
       repoSlug: project.repoSlug,
+      ...owner,
       ...(kind === "design" ? { kind } : {}),
       ...(chat?.agentId ? { agentId: chat.agentId } : {}),
       preparedId: prepared.workspaceId,

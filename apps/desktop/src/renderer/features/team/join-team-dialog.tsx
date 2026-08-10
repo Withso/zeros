@@ -24,7 +24,7 @@ import {
 } from "../../shared/ui/primitives/dialog";
 import { controlPlane } from "./control-plane";
 import { parseInviteToken } from "./invite-link";
-import { setActiveTeamId } from "./active-team";
+import { setActiveOrganizationSelection } from "./active-team";
 import { requestTeamResync } from "./team-sync";
 import { refreshTeams } from "./team-store";
 import { errorMessage } from "./team-panel";
@@ -64,7 +64,7 @@ export function JoinTeamDialog({
     try {
       const { team } = await controlPlane.acceptInvitation(token);
       await refreshTeams();
-      setActiveTeamId(team.id);
+      setActiveOrganizationSelection(team.id, false);
       requestTeamResync();
       onOpenChange(false);
       toast.success(`Welcome to ${team.name}`);

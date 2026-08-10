@@ -33,7 +33,7 @@ describe("slugify", () => {
     expect(slugify("Ünïcode Náme")).toBe("unicode-name");
   });
   it("never returns an empty slug", () => {
-    expect(slugify("!!!")).toBe("team");
+    expect(slugify("!!!")).toBe("organization");
   });
 });
 

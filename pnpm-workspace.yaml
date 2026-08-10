@@ -1,5 +1,4 @@
 packages:
-  - "apps/feedback-worker"
   - "apps/marketing"
   - "packages/*"
 

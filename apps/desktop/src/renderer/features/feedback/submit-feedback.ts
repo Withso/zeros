@@ -1,10 +1,9 @@
 // ──────────────────────────────────────────────────────────
-// Feedback submission → the Intercom bridge Worker
+// Feedback submission → the authenticated control plane
 // ──────────────────────────────────────────────────────────
 //
-// The Help → Feedback modal calls submitFeedback(); the Worker
-// (apps/feedback-worker) turns it into an Intercom conversation
-// in the maintainers' support inbox.
+// The Help → Feedback modal calls submitFeedback(); the Railway control plane
+// turns it into an Intercom conversation and/or Linear issue.
 //
 // What we send is intentional — the user's own words to our support — plus a
 // little safe metadata (type, app version). With the user's explicit opt-in
@@ -12,18 +11,23 @@
 // along too (viewable beforehand via the dialog's View button). NEVER keys
 // or unscrubbed credentials.
 //
-// We do NOT send an address. The Worker takes the sender's identity from the
-// Auth0 access token this request carries, so the address Intercom shows is
-// one Auth0 verified. The modal used to have an "Email (optional)" field and
-// the Worker trusted it, which meant anyone holding the (bundled, therefore
-// public) shared secret could file feedback as any address.
+// We do NOT send an address. The control plane takes the sender's identity from
+// its verified Auth0 session, so the address Intercom shows is one Auth0
+// verified. The modal used to have an "Email (optional)" field and trusted it,
+// which meant anyone holding the old bundled shared secret could impersonate
+// an address.
 // ──────────────────────────────────────────────────────────
 
 import { isElectron, nativeInvoke } from "@/renderer/platform/runtime";
-import { analyticsDistinctId, capture } from "@/renderer/platform/observability/analytics/posthog";
+import {
+  analyticsDistinctId,
+  capture,
+} from "@/renderer/platform/observability/analytics/posthog";
 import { getSession } from "@/renderer/features/auth/auth-store";
+import { CONTROL_PLANE_URL } from "@/renderer/features/team/control-plane";
+import type { FeedbackType } from "./feedback-types";
 
-export type FeedbackType = "issue" | "bug" | "feature" | "feedback";
+export type { FeedbackType } from "./feedback-types";
 
 export interface FeedbackInput {
   type: FeedbackType;
@@ -36,8 +40,8 @@ export interface FeedbackInput {
   logs?: string;
 }
 
-/** Client-side ceiling on the log payload — matches the Worker's MAX_LOGS so
- *  the request body stays comfortably under Worker/Intercom limits. The main
+/** Client-side ceiling on the log payload — matches the backend's MAX_LOGS so
+ *  the request body stays comfortably under control-plane/Intercom limits. The main
  *  process already applies this same cap to logs_recent AND the "View" export
  *  (apps/desktop/electron/ipc/commands/logs.ts MAX_EXPORT_CHARS), so View is byte-identical
  *  to what we submit; this slice is a defensive backstop only. */
@@ -58,14 +62,16 @@ export async function recentLogsForFeedback(): Promise<string | undefined> {
   }
 }
 
-const FEEDBACK_URL = (import.meta.env.VITE_FEEDBACK_URL || "").trim();
+const FEEDBACK_URL = CONTROL_PLANE_URL
+  ? `${CONTROL_PLANE_URL}/v1/feedback`
+  : null;
 
 /** Whether feedback submission is wired in this build. The Help menu hides
  *  "Send feedback" when this is false.
  *
- *  Only the URL now — the companion VITE_FEEDBACK_TOKEN is gone. Auth rides on
- *  the user's own session instead, so there is no build-time credential left
- *  to forget, and no secret baked into the bundle. */
+ *  Feedback now follows the same environment-specific control-plane URL as
+ *  organizations. Auth rides on the user's own session, so there is no second
+ *  endpoint or build-time credential to drift across Alpha/Beta/Production. */
 export function isFeedbackConfigured(): boolean {
   return !!FEEDBACK_URL;
 }
@@ -80,10 +86,10 @@ async function appVersion(): Promise<string | undefined> {
   }
 }
 
-/** Submit feedback to the Worker. Resolves on success; throws a user-facing
+/** Submit feedback to the control plane. Resolves on success; throws a user-facing
  *  Error on failure (the caller toasts it). */
 export async function submitFeedback(input: FeedbackInput): Promise<void> {
-  if (!isFeedbackConfigured()) {
+  if (!FEEDBACK_URL) {
     throw new Error("Feedback isn't set up in this build yet.");
   }
   const message = input.message.trim();
@@ -118,7 +124,9 @@ export async function submitFeedback(input: FeedbackInput): Promise<void> {
     throw new Error("Your session expired. Sign in again to send feedback.");
   }
   if (!res.ok) {
-    throw new Error(`Couldn't send feedback (${res.status}). Please try again.`);
+    throw new Error(
+      `Couldn't send feedback (${res.status}). Please try again.`,
+    );
   }
   // Product signal only — type + whether logs rode along. NEVER the message
   // or the logs themselves (PostHog is metadata-only by contract).

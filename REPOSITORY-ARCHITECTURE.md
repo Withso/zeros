@@ -16,8 +16,7 @@ zeros/
 │   ├── desktop/          # Electron main/preload, local engine, React renderer
 │   ├── control-plane/    # Railway API and Postgres migrations
 │   ├── web/              # Cloudflare Pages hub and edge functions
-│   ├── marketing/        # Public website source
-│   └── feedback-worker/  # Cloudflare Worker
+│   └── marketing/        # Public website source
 ├── packages/
 │   └── protocol/         # Shared transport contracts and redaction
 ├── catalogs/             # Versioned provider/model data and schemas
@@ -68,7 +67,6 @@ Railway and Cloudflare configuration belongs beside the application it deploys:
 
 - `apps/control-plane/railway.json` and `Dockerfile`
 - `apps/web/functions/` and Cloudflare Pages build scripts
-- `apps/feedback-worker/wrangler.jsonc`
 - `electron-builder.yml` and `build/` for desktop releases
 
 A top-level `deploy/` directory would add indirection without shared
@@ -98,10 +96,9 @@ scratch comparisons were intentionally not retained in the public source tree.
 | Directory              | Owns                                                                 | Build/deployment boundary                                             |
 | ---------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------- |
 | `apps/desktop`         | Native shell, local engine, renderer, desktop assets                 | Root pnpm lock, Vite, tsup, Electron Builder, macOS release workflows |
-| `apps/control-plane`   | Hosted API, auth/authz, teams, invites, audit, rate limits, Postgres | Independent pnpm lock, Docker/Railway                                 |
+| `apps/control-plane`   | Hosted API, auth/authz, organizations, feedback, audit, rate limits, Postgres | Independent pnpm lock, Docker/Railway                           |
 | `apps/web`             | Browser auth handoff, launch hub, Cloudflare edge functions          | Independent npm lock, Cloudflare Pages                                |
 | `apps/marketing`       | Public site, changelog, legal pages, download surface                | Root workspace for development; standalone lock for Pages             |
-| `apps/feedback-worker` | Authenticated feedback forwarding                                    | pnpm workspace, Cloudflare Worker                                     |
 
 Each app has a README describing its local boundary. A new app should be added
 only when it can be built, tested, deployed, and owned independently.
@@ -261,7 +258,7 @@ When GitLab, Bitbucket, Linear, Slack, or another integration is implemented:
 | `backend/`                                  | `apps/control-plane/`                                              | Precise deployable ownership                         |
 | `website/web-app/`                          | `apps/web/`                                                        | Cloudflare Pages application boundary                |
 | `website/marketing/`                        | `apps/marketing/`                                                  | Independent public-site source                       |
-| `packages/feedback-intercom-webhook/`       | `apps/feedback-worker/`                                            | Deployable Worker, not a shared library              |
+| `packages/feedback-intercom-webhook/`       | `apps/control-plane/src/feedback.ts`                               | Feedback now shares authenticated backend ownership  |
 | `packages/core/`                            | `packages/protocol/`                                               | Describes the actual stable shared contract          |
 | `electron/`                                 | `apps/desktop/electron/`                                           | Native code belongs to the desktop app               |
 | `src/engine/`                               | `apps/desktop/src/engine/`                                         | Local sidecar belongs to the desktop app             |
@@ -547,9 +544,9 @@ Create environments named exactly `alpha`, `beta`, and `production`:
 - Delete the public `cursor/setup-dev-environment` branch if it is obsolete.
   Cursor is a real integration, but an abandoned automation branch adds noise;
   confirm that no active deployment or PR consumes it first.
-- Confirm the unified Cloudflare Pages project root is `apps/web`, the feedback
-  Worker is deployed from `apps/feedback-worker`, and the Railway service root
-  is `apps/control-plane` before the first deployment from this tree. The Pages
+- Confirm the Cloudflare Pages project root is `apps/web` and the Railway
+  service root is `apps/control-plane` before the first deployment from this
+  tree. Feedback is a control-plane route, not a separate Worker. The Pages
   build installs `apps/marketing` as an input; it is not a second Pages root.
 - Authenticate the GitHub CLI and provide `CLOUDFLARE_ACCOUNT_ID` plus a valid
   `CLOUDFLARE_API_TOKEN`, then run `pnpm check:web-deploy` until both the build
@@ -604,7 +601,7 @@ The final Linux verification pass produced the following results:
 | Marketing route tests                                                                                                                                                             | Passed: 9 tests; also included in the root suite                                                                                                  |
 | Marketing typecheck and production build                                                                                                                                          | Passed                                                                                                                                            |
 | Web hub tests, typecheck, and assembled production build                                                                                                                          | Passed: 23 tests across 9 suites; all three legal files matched the repository sources byte-for-byte                                              |
-| Feedback Worker typecheck                                                                                                                                                         | Passed                                                                                                                                            |
+| Authenticated feedback route tests and control-plane typecheck                                                                                                                    | Passed                                                                                                                                            |
 | Preload, Cursor ASAR, desktop migrations, control-plane migrations, protocol, Vite env, Electron hardening, runtime pin, packaging, deep-link, workflow, and model-catalog guards | Passed; runtime pin check emitted one documented Claude wrapper/CLI freshness warning                                                             |
 | Third-party license determinism                                                                                                                                                   | Passed: 580 package/version records across root, control-plane, standalone marketing, and target-native graphs; 259 unique documents              |
 | Repository-specific secret scan                                                                                                                                                   | Passed: all 2,617 intended tracked files                                                                                                          |

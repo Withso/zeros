@@ -9,7 +9,8 @@ boundaries.
 
 1. The client authenticates to the control plane.
 2. Every workspace API authorizes the actor against the workspace's current
-   owner/team membership and role.
+   organization, organization membership and role, and any narrower child-team
+   grant. Personal must fail closed for cloud placement.
 3. Provisioning credentials remain server-side and are never returned to a
    renderer or placed in a sandbox.
 4. A remote engine connection uses a short-lived grant bound to account,

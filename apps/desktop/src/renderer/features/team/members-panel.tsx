@@ -45,7 +45,7 @@ import {
 } from "./control-plane";
 import { parseInviteToken } from "./invite-link";
 import { requestTeamResync } from "./team-sync";
-import { setActiveTeamId } from "./active-team";
+import { setActiveOrganizationSelection } from "./active-team";
 import { refreshTeams, useActiveTeam, useTeams } from "./team-store";
 import { MAX_INVITES_PER_BATCH, parseInviteEmails } from "./invite-emails";
 import { ROLE_LABELS, errorMessage } from "./team-panel";
@@ -494,7 +494,7 @@ function JoinTeamSection() {
       setDraft("");
       toast.success(`Welcome to ${team.name}`);
       await refreshTeams();
-      setActiveTeamId(team.id);
+      setActiveOrganizationSelection(team.id, false);
       requestTeamResync();
     } catch (err) {
       // wrong_account / invalid_invite come back with exact, safe copy

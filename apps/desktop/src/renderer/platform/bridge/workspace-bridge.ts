@@ -1766,6 +1766,17 @@ export async function bridgeWorkspaceSetStatus(
   await workspaceOp(bridge, "workspace.setStatus", { ...args });
 }
 
+export async function bridgeWorkspaceReassignLocalOrganization(
+  bridge: RuntimeClient,
+  args: { fromOrganizationId: string; toOrganizationId: string },
+): Promise<{ changes: number; repoSlugs: string[] }> {
+  return (await workspaceOp(
+    bridge,
+    "workspace.reassignLocalOrganization",
+    args,
+  )) as { changes: number; repoSlugs: string[] };
+}
+
 export async function bridgeWorkspaceArchive(
   bridge: RuntimeClient,
   args: { workspaceId: string; stashUncommitted?: boolean },

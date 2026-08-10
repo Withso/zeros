@@ -6,18 +6,15 @@ import react from "@vitejs/plugin-react";
 // Strict CSP for the PACKAGED Electron renderer (loaded from file://). Injected
 // ONLY by `vite build` — dev (serve) needs HMR's ws+eval. connect-src enumerates
 // every origin the renderer actually talks to (engine WS, control plane, PostHog,
-// feedback worker, BYO-key AI providers, model catalog); frame-src
+// BYO-key AI providers, model catalog); frame-src
 // stays open for the embedded browser tab; script-src is locked to 'self'
 // (+ wasm-unsafe-eval for shiki) to neutralise injected/remote scripts so an
 // XSS can't exfiltrate the in-memory session token.
 //
-// The feedback-worker origin is NOT hardcoded: it's derived from
-// VITE_FEEDBACK_URL — the same env var the renderer actually posts feedback to
-// (apps/desktop/src/renderer/features/feedback/submit-feedback.ts) — so this allowlist always tracks
-// wherever feedback goes. Unset → feedback is disabled and no origin is added.
-// (A hardcoded, account-specific worker subdomain here used to silently
-// CSP-block any build that pointed VITE_FEEDBACK_URL elsewhere.)
-function buildElectronRendererCsp(feedbackOrigin: string): string {
+// The control-plane origin is derived from VITE_CONTROL_PLANE_URL so local and
+// Railway-provided domains work as well as the custom *.zeros.build domains.
+// Organizations and feedback now share this one authenticated backend.
+function buildElectronRendererCsp(controlPlaneOrigin: string): string {
   const connectSrc = [
     "'self'",
     "ws://localhost:*",
@@ -35,7 +32,7 @@ function buildElectronRendererCsp(feedbackOrigin: string): string {
     // the door open for a hot catalog refresh without a re-release; it is
     // NOT a tracking or telemetry endpoint.
     "https://withso.github.io",
-    feedbackOrigin, // from VITE_FEEDBACK_URL; "" (dropped below) when unset
+    controlPlaneOrigin,
   ]
     .filter(Boolean)
     .join(" ");
@@ -57,12 +54,20 @@ function buildElectronRendererCsp(feedbackOrigin: string): string {
   ].join("; ");
 }
 
-// Origin (scheme+host) of the feedback worker, parsed from VITE_FEEDBACK_URL.
+// Origin (scheme+host) parsed from the environment-specific control-plane URL.
 // Returns "" when the env is unset or unparseable.
-function feedbackOriginFromEnv(url: string | undefined): string {
+function controlPlaneOriginFromEnv(url: string | undefined): string {
   if (!url) return "";
   try {
-    return new URL(url).origin;
+    const parsed = new URL(url);
+    if (
+      (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
+      parsed.username ||
+      parsed.password
+    ) {
+      return "";
+    }
+    return parsed.origin;
   } catch {
     return "";
   }
@@ -71,10 +76,10 @@ function feedbackOriginFromEnv(url: string | undefined): string {
 function electronRendererCsp(command: string, mode: string) {
   // Resolve the CSP once at config-eval time (loadEnv reads .env* + matching
   // process.env). Only injected on `vite build`; dev serve returns html as-is.
-  const feedbackOrigin = feedbackOriginFromEnv(
-    loadEnv(mode, process.cwd(), "VITE_").VITE_FEEDBACK_URL,
+  const controlPlaneOrigin = controlPlaneOriginFromEnv(
+    loadEnv(mode, process.cwd(), "VITE_").VITE_CONTROL_PLANE_URL,
   );
-  const csp = buildElectronRendererCsp(feedbackOrigin);
+  const csp = buildElectronRendererCsp(controlPlaneOrigin);
   return {
     name: "zeros-electron-renderer-csp",
     transformIndexHtml(html: string): string {
@@ -215,7 +220,6 @@ export default defineConfig(({ command, mode }) => ({
         "**/apps/control-plane/**",
         "**/apps/web/**",
         "**/apps/marketing/**",
-        "**/apps/feedback-worker/**",
         "**/docs/**",
         // pnpm/npm lockfile churn: spurious mtime touches happen
         // when pnpm normalises ordering with no semantic change.

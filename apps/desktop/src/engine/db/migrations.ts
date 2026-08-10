@@ -796,6 +796,20 @@ ALTER TABLE workspaces ADD COLUMN kind TEXT NOT NULL DEFAULT 'code'
 CREATE INDEX idx_workspaces_kind ON workspaces(kind, archived_at);
 `;
 
+/** v28 — semantic owner and execution placement. Existing rows predate
+ * organization selection and are therefore interpreted as Personal; NULL is
+ * retained as that compatibility marker. All existing worktrees are local.
+ * A cloud row must name an organization, while Personal's local-only rule is
+ * enforced by the control-plane capability and desktop create gate. */
+const MIGRATION_28_WORKSPACE_OWNER = `
+ALTER TABLE workspaces ADD COLUMN organization_id TEXT;
+ALTER TABLE workspaces ADD COLUMN placement TEXT NOT NULL DEFAULT 'local'
+  CHECK (placement IN ('local', 'cloud'))
+  CHECK (placement = 'local' OR organization_id IS NOT NULL);
+CREATE INDEX idx_workspaces_organization
+  ON workspaces(organization_id, placement, archived_at);
+`;
+
 /** The ordered migration list. Append only — NEVER edit or reorder a shipped
  *  entry; add a new one. */
 export const MIGRATIONS: Migration[] = [
@@ -929,6 +943,11 @@ export const MIGRATIONS: Migration[] = [
     version: 27,
     name: "workspaces.kind (code or design workspace)",
     up: MIGRATION_27_WORKSPACE_KIND,
+  },
+  {
+    version: 28,
+    name: "workspaces: organization owner + local/cloud placement",
+    up: MIGRATION_28_WORKSPACE_OWNER,
   },
 ];
 

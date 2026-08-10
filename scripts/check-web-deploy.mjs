@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ──────────────────────────────────────────────────────────
-// check-web-deploy — did the tip of origin/main actually reach zeros.build?
+// check-web-deploy — did the selected commit reach the selected Pages project?
 // ──────────────────────────────────────────────────────────
 //
 // The obvious canary (diff the /assets/index-<hash>.js on zeros.build) is WRONG
@@ -11,16 +11,18 @@
 //
 // So ask the deploy system instead of the artifact. Two independent signals:
 //
-//   1. GitHub check run "Cloudflare Pages: zeros-web" on the origin/main tip.
+//   1. GitHub check run "Cloudflare Pages: <project>" on the selected ref.
 //      Needs only `gh` (already authenticated) — NO Cloudflare secret.
 //   2. The Cloudflare canonical_deployment — the deployment actually serving
 //      zeros.build / www.zeros.build / app.zeros.build. Authoritative, but needs
 //      CLOUDFLARE_API_TOKEN. Skipped with a note when the token is absent.
 //
 // Signal 1 alone answers "did it build?". Signal 2 answers "is it live?".
-// Exit 1 only when a signal positively contradicts origin/main.
+// Exit 1 only when a signal positively contradicts the selected ref.
 //
 //   pnpm check:web-deploy
+//   CF_PAGES_PROJECT=zeros-web-alpha WEB_DEPLOY_REF=origin/main pnpm check:web-deploy
+//   CF_PAGES_PROJECT=zeros-web-beta WEB_DEPLOY_REF=origin/release/1.2.3 pnpm check:web-deploy
 //   CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… pnpm check:web-deploy
 //                                                     # adds the live check
 // ──────────────────────────────────────────────────────────
@@ -28,6 +30,7 @@
 import { execFileSync } from "node:child_process";
 
 const PROJECT = process.env.CF_PAGES_PROJECT || "zeros-web";
+const TARGET_REF = process.env.WEB_DEPLOY_REF || "origin/main";
 const ACCOUNT = (process.env.CLOUDFLARE_ACCOUNT_ID || "").trim();
 const CHECK_NAME = `Cloudflare Pages: ${PROJECT}`;
 
@@ -35,18 +38,21 @@ function git(...args) {
   return execFileSync("git", args, { encoding: "utf8" }).trim();
 }
 
-/** origin/main tip, refreshed when the network allows (a stale ref lies). */
+/** Selected tip, refreshed when it names an origin branch and network allows. */
 function targetSha() {
+  const remoteBranch = /^origin\/(.+)$/.exec(TARGET_REF)?.[1];
   try {
-    execFileSync("git", ["fetch", "origin", "main", "--quiet"], {
-      stdio: "ignore",
-    });
+    if (remoteBranch) {
+      execFileSync("git", ["fetch", "origin", remoteBranch, "--quiet"], {
+        stdio: "ignore",
+      });
+    }
   } catch {
     console.log(
-      "ℹ  offline or fetch blocked — comparing against the local origin/main ref.",
+      `ℹ  offline or fetch blocked — comparing against local ${TARGET_REF}.`,
     );
   }
-  return git("rev-parse", "origin/main");
+  return git("rev-parse", TARGET_REF);
 }
 
 function repoSlug() {
@@ -178,7 +184,7 @@ async function cloudflareLive(sha) {
 // ── Report ────────────────────────────────────────────────
 const sha = targetSha();
 const slug = repoSlug();
-console.log(`  ${slug}  origin/main @ ${sha.slice(0, 8)}\n`);
+console.log(`  ${slug}  ${TARGET_REF} @ ${sha.slice(0, 8)}\n`);
 
 const build = githubCheck(slug, sha);
 const live = await cloudflareLive(sha);
@@ -204,7 +210,7 @@ if (live.state === "ok" && live.aliases?.length)
 const bad = ["stale", "failed", "missing"];
 if (bad.includes(build.state) || bad.includes(live.state)) {
   console.error(
-    `\n✗ check:web-deploy — origin/main is NOT fully deployed. ` +
+    `\n✗ check:web-deploy — ${TARGET_REF} is NOT fully deployed. ` +
       `Open the project at dash.cloudflare.com → Workers & Pages → ${PROJECT}.`,
   );
   process.exit(1);
@@ -220,16 +226,16 @@ if (build.state === "building") {
 // custom domains — overstating that is the exact mistake this script exists to stop.
 if (live.state === "ok") {
   console.log(
-    `\n✓ check:web-deploy — ${PROJECT} is serving origin/main (${sha.slice(0, 8)}).`,
+    `\n✓ check:web-deploy — ${PROJECT} is serving ${TARGET_REF} (${sha.slice(0, 8)}).`,
   );
 } else if (build.state === "ok") {
   console.log(
-    `\n✓ check:web-deploy — ${PROJECT} built origin/main (${sha.slice(0, 8)}) successfully.\n` +
+    `\n✓ check:web-deploy — ${PROJECT} built ${TARGET_REF} (${sha.slice(0, 8)}) successfully.\n` +
       `   Live status unverified (${live.note}) — set CLOUDFLARE_API_TOKEN to confirm what zeros.build is actually serving.`,
   );
 } else {
   console.log(
-    `\nℹ check:web-deploy — deployment status is unverified for origin/main (${sha.slice(0, 8)}).\n` +
+    `\nℹ check:web-deploy — deployment status is unverified for ${TARGET_REF} (${sha.slice(0, 8)}).\n` +
       `   Build signal: ${build.note}\n` +
       `   Live signal: ${live.note}`,
   );

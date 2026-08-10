@@ -1,21 +1,20 @@
 // ──────────────────────────────────────────────────────────
-// Team → engine sync (O4c). The renderer owns the control-plane session,
-// so IT fetches the active team's settings doc and couriers it into the
-// engine's in-memory slot (team.setContext). (The shared-secrets vault
+// Organization → engine settings sync. The renderer owns the control-plane
+// session, so it fetches the active organization's settings doc and couriers
+// it into the compatibility in-memory slot (`team.setContext`). (The shared-secrets vault
 // was removed 2026-07-22 — the courier now carries the settings doc
 // only, no decrypted values.)
 //
-// Sync triggers: bridge (re)connect, sign-in/out, active-team change, a
-// 15-minute refresh, and an explicit requestTeamResync() after settings
-// mutations or team membership changes.
+// Sync triggers: bridge (re)connect, sign-in/out, active-team change, window
+// focus, a 15-minute refresh, and an explicit requestTeamResync() after
+// settings mutations or organization membership changes.
 //
 // Correctness properties (audit 2026-07-04):
 //   • Local bridge only — the engine operation rejects remote callers.
-//   • Signed out → courier an EMPTY context so a prior account's team
+//   • Signed out → courier an EMPTY context so a prior account's organization
 //     settings do not linger in engine memory across accounts.
-//   • The ACTIVE team (active-team.ts), not teams[0], drives what's synced,
-//     so the panel's switcher and the engine agree. Zero teams is a
-//     supported state → the context clears.
+//   • The active organization, not organizations[0], drives what's synced.
+//     Personal and a mixed-version empty list both clear the remote context.
 //   • Monotonic sequencing — a slow fetch can't overwrite a newer one
 //     by serializing syncs and couriering only the latest result.
 //   • On-demand resyncs while disconnected set a pending flag drained on
@@ -29,6 +28,15 @@ import { useBridge, useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { bridgeTeamSetContext } from "../../platform/bridge/workspace-bridge";
 import { CONTROL_PLANE_URL, controlPlane } from "./control-plane";
 import { getActiveTeamId, subscribeActiveTeam } from "./active-team";
+import {
+  organizationContextNeedsClear,
+  organizationContextStillSelected,
+} from "./organization-context-isolation";
+import { reconcileOrganizationWorkspaceOwnership } from "./organization-membership-history";
+import {
+  acceptOrganizationSnapshot,
+  getOrganizationStoreGeneration,
+} from "./team-store";
 
 const RESYNC_INTERVAL_MS = 15 * 60_000;
 
@@ -54,10 +62,17 @@ export function useTeamEngineSync(): void {
     let disposed = false;
     let running = false; // exactly one sync in flight at a time
     let pending = false; // a request arrived while one was running → run once more
+    // Bumped synchronously by clearTeamStore on sign-out. An Account A fetch
+    // that settles in the cleanup gap must not republish A for Account B.
+    const storeGeneration = getOrganizationStoreGeneration();
+    // `undefined` is deliberate: a renderer reload can reconnect to an engine
+    // that still holds another account/organization's in-memory settings.
+    let appliedOrganizationId: string | null | undefined;
 
-    const clearEngine = async () => {
+    const clearEngine = async (semanticOrganizationId: string | null) => {
       try {
         await bridgeTeamSetContext(bridge, { teamId: null, doc: null });
+        appliedOrganizationId = semanticOrganizationId;
       } catch {
         /* engine gone / blip — next connect re-syncs */
       }
@@ -74,31 +89,62 @@ export function useTeamEngineSync(): void {
       running = true;
       try {
         // Signed out → clear the engine's team context (don't leave a prior
-        // account's team settings resident).
+        // account's organization settings resident).
         if (authStatus !== "authenticated") {
-          await clearEngine();
+          await clearEngine(null);
           return;
+        }
+        // Clear before the network read whenever the semantic owner changed.
+        // This protects Organization B as well as Personal from inheriting
+        // Organization A's environment/settings during an outage.
+        const selectedBeforeFetch = getActiveTeamId();
+        if (
+          organizationContextNeedsClear(
+            appliedOrganizationId,
+            selectedBeforeFetch,
+          )
+        ) {
+          await clearEngine(selectedBeforeFetch);
         }
         const me = await controlPlane.me();
-        // Honor the panel's selection; fall back to the first team. A user
-        // with NO teams is a normal state now — the context clears.
+        if (disposed) return;
+        if (!acceptOrganizationSnapshot(me, storeGeneration)) return;
+        await reconcileOrganizationWorkspaceOwnership(me);
+        // Honor the Home switcher's selection; fall back to Personal/first.
         const wantId = getActiveTeamId();
-        const team = me.teams.find((t) => t.id === wantId) ?? me.teams[0];
+        const organizations = me.organizations ?? me.teams;
+        const team =
+          organizations.find((organization) => organization.id === wantId) ??
+          organizations[0];
         if (disposed) return;
         if (!team) {
-          await clearEngine();
+          await clearEngine(null);
           return;
         }
-        const settings = await controlPlane.getTeamSettings(team.id);
-        if (disposed) return;
+        if (organizationContextNeedsClear(appliedOrganizationId, team.id)) {
+          await clearEngine(team.id);
+        }
+        // Personal is deliberately device-local. Clear the compatibility
+        // engine team slot rather than fetching/persisting a cloud document.
+        if (team.isPersonal) {
+          return;
+        }
+        const settings = await controlPlane.getOrganizationSettings(team.id);
+        if (
+          disposed ||
+          !organizationContextStillSelected(team.id, getActiveTeamId())
+        ) {
+          return;
+        }
         await bridgeTeamSetContext(bridge, {
           teamId: team.id,
           doc: settings.doc ?? null,
         });
+        appliedOrganizationId = team.id;
       } catch (err) {
-        // Signed out mid-flight / control plane unreachable — leave the
-        // last-couriered context in place rather than blanking it on a
-        // transient error. Sign-out clears explicitly.
+        // A same-owner transient failure retains the last context. Owner
+        // changes and sign-out clear before the request, so stale settings can
+        // never leak across organizations or accounts.
         // But never swallow SILENTLY: a permanent rejection (e.g. every call
         // 401ing after the Auth0 migration, 2026-07-07) hid for days because
         // this catch was empty. The Team panel shows its own error UI
@@ -116,17 +162,31 @@ export function useTeamEngineSync(): void {
       }
     };
 
-    const kick = () => void sync();
+    const kick = () => {
+      // A switch while a settings fetch is running must clear immediately;
+      // `sync` then coalesces a trailing exact-owner refresh.
+      const selected = getActiveTeamId();
+      void (async () => {
+        if (organizationContextNeedsClear(appliedOrganizationId, selected)) {
+          await clearEngine(selected);
+        }
+        await sync();
+      })();
+    };
 
     void sync();
     const timer = setInterval(() => void sync(), RESYNC_INTERVAL_MS);
     resyncListeners.add(kick);
     const unsubTeam = subscribeActiveTeam(kick);
+    // Organization changes made in app.zeros.build become visible as soon as
+    // the user returns from the browser, rather than after the 15-minute poll.
+    window.addEventListener("focus", kick);
     return () => {
       disposed = true;
       clearInterval(timer);
       resyncListeners.delete(kick);
       unsubTeam();
+      window.removeEventListener("focus", kick);
     };
   }, [bridge, bridgeStatus, authStatus]);
 }

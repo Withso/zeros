@@ -75,16 +75,16 @@ export async function sendEmail(
 /** The invitation email. Plain, robust HTML (no images, no CSS frameworks —
  *  invite mail must survive every client). */
 export function inviteEmailHtml(opts: {
-  teamName: string;
+  organizationName: string;
   inviterName: string;
   acceptUrl: string;
   expiresDays: number;
 }): { subject: string; html: string } {
-  const subject = `${opts.inviterName} invited you to ${opts.teamName} on Zeros`;
+  const subject = `${opts.inviterName} invited you to ${opts.organizationName} on Zeros`;
   const html = `<!doctype html>
 <html><body style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1b1b22;line-height:1.6;max-width:520px;margin:0 auto;padding:32px 20px">
-  <h2 style="margin:0 0 16px;font-size:20px">Join ${escapeHtml(opts.teamName)} on Zeros</h2>
-  <p style="margin:0 0 20px">${escapeHtml(opts.inviterName)} invited you to collaborate in <b>${escapeHtml(opts.teamName)}</b>.</p>
+  <h2 style="margin:0 0 16px;font-size:20px">Join ${escapeHtml(opts.organizationName)} on Zeros</h2>
+  <p style="margin:0 0 20px">${escapeHtml(opts.inviterName)} invited you to collaborate in <b>${escapeHtml(opts.organizationName)}</b>.</p>
   <p style="margin:0 0 28px">
     <a href="${escapeAttr(opts.acceptUrl)}"
        style="background:#1b1b22;color:#ffffff;text-decoration:none;padding:10px 18px;border-radius:8px;display:inline-block">

@@ -21,7 +21,7 @@ Durable record and configured Git remote
 The design separates four concerns:
 
 1. **Client plane:** desktop first, then web and mobile control surfaces.
-2. **Control plane:** identity, team authorization, workspace registry,
+2. **Control plane:** identity, organization and child-team authorization, workspace registry,
    lifecycle intents, idempotency, audit, quotas, and provider orchestration.
 3. **Execution plane:** one isolated environment containing the repository,
    engine, agent processes, and terminals.

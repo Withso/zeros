@@ -95,6 +95,7 @@ beforeAll(async () => {
     authAudience: AUDIENCE,
     port: 0,
     isProduction: false,
+    feedback: null,
     github: {
       appId: 123,
       clientId: "Iv1.test",

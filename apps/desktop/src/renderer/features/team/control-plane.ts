@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────────────────
-// Control-plane client — the desktop app's door to teams, membership, and
+// Control-plane client — the desktop app's door to organizations, membership, and
 // invitations in apps/control-plane/.
 //
 // Auth: every call carries the CURRENT Auth0 access token from the app's
@@ -7,11 +7,15 @@
 // never manage). The backend verifies it against the JWKS and decides
 // authorization in Postgres; the client sends identity, nothing more.
 //
-// Config: VITE_CONTROL_PLANE_URL (unset → the Team settings area shows a
-// not-configured empty state; nothing else breaks).
+// Config: VITE_CONTROL_PLANE_URL (unset → organization context is unavailable;
+// local-only legacy behavior remains usable).
 // ──────────────────────────────────────────────────────────
 
 import { getSession } from "../auth/auth-store";
+import {
+  normalizeOrganizationSummary,
+  type OrganizationSummaryWire,
+} from "./organization-summary";
 
 export const CONTROL_PLANE_URL: string | null =
   (import.meta.env.VITE_CONTROL_PLANE_URL as string | undefined)?.replace(
@@ -19,19 +23,27 @@ export const CONTROL_PLANE_URL: string | null =
     "",
   ) || null;
 
-export type TeamRole = "owner" | "admin" | "member";
+export type OrganizationRole = "owner" | "admin" | "member";
+/** Compatibility name used by the pre-hierarchy Administration components. */
+export type TeamRole = OrganizationRole;
 
-export type TeamSummary = {
+export type OrganizationSummary = {
   id: string;
   slug: string;
   name: string;
   /** Small raster logo as a data: URL (png/jpeg/webp), or null. */
   logo: string | null;
-  role: TeamRole;
+  role: OrganizationRole;
+  isPersonal: boolean;
+  defaultTeamId: string | null;
+  workspaceCapabilities: { local: true; cloud: boolean };
+  teamCapabilities: { multiple: false; canCreate: false };
 };
+export type TeamSummary = OrganizationSummary;
 
-/** Product-wide staff role. NOT a TeamRole and never comparable to one — it
- *  says "works on Zeros", not "may do X in this team". null ⇒ ordinary user.
+/** Product-wide staff role. NOT an OrganizationRole and never comparable to
+ *  one — it says "works on Zeros", not "may do X in this organization".
+ *  null ⇒ ordinary user.
  *  Backed by `users.staff_role` and re-read from Postgres on every request;
  *  see apps/control-plane/migrations/0007_staff_role.sql. */
 export type StaffRole = "developer";
@@ -41,8 +53,11 @@ export type Me = {
     id: string;
     email: string;
     displayName: string | null;
+    avatarUrl?: string | null;
     staffRole: StaffRole | null;
   };
+  organizations?: OrganizationSummary[];
+  /** Compatibility mirror returned by the control plane. */
   teams: TeamSummary[];
 };
 
@@ -117,10 +132,39 @@ async function request<T>(
 }
 
 export const controlPlane = {
-  me: () => request<Me>("GET", "/v1/me"),
+  me: async (): Promise<Me> => {
+    const raw = await request<
+      Omit<Me, "organizations" | "teams"> & {
+        organizations?: OrganizationSummaryWire[];
+        teams?: OrganizationSummaryWire[];
+      }
+    >("GET", "/v1/me");
+    const organizations = (raw.organizations ?? raw.teams ?? []).map(
+      normalizeOrganizationSummary,
+    );
+    return { ...raw, organizations, teams: organizations };
+  },
 
-  /** Explicit team creation — the ONLY way a team comes to exist (nothing is
-   *  auto-created at sign-in; teams are optional). Creator becomes owner. */
+  createOrganization: (name: string, logo?: string | null) =>
+    request<{ organization: OrganizationSummary }>(
+      "POST",
+      "/v1/organizations",
+      { name, ...(logo ? { logo } : {}) },
+    ),
+
+  getOrganizationSettings: (organizationId: string, scope = "*") =>
+    request<{
+      scope: string;
+      doc: Record<string, unknown>;
+      updated_at: string | null;
+      localOnly?: boolean;
+    }>(
+      "GET",
+      `/v1/organizations/${organizationId}/settings?scope=${encodeURIComponent(scope)}`,
+    ),
+
+  /** Compatibility operation: the flat-Team route now creates an organization
+   *  and its default child team. New UI creates organizations in the web app. */
   createTeam: (name: string, logo?: string | null) =>
     request<{ team: { id: string; slug: string; name: string; logo: string | null } }>(
       "POST",

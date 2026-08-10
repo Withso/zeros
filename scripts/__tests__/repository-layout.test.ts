@@ -166,14 +166,11 @@ describe("repository layout contracts", () => {
     const vite = read("vite.config.ts");
     expect(vite).not.toContain('"**/apps/**"');
     expect(vite).not.toContain('"**/website/**"');
-    for (const app of [
-      "control-plane",
-      "web",
-      "marketing",
-      "feedback-worker",
-    ]) {
+    for (const app of ["control-plane", "web", "marketing"]) {
       expect(vite).toContain(`"**/apps/${app}/**"`);
     }
+    expect(existsSync("apps/feedback-worker/package.json")).toBe(false);
+    expect(existsSync("apps/control-plane/src/feedback.ts")).toBe(true);
   });
 
   it("keeps localhost discovery aligned with current development apps", () => {
@@ -404,5 +401,10 @@ describe("repository layout contracts", () => {
     expect(alpha).not.toContain("workflow_dispatch:");
     expect(beta).not.toContain("workflow_dispatch:");
     expect(stable.match(/environment: production/g)).toHaveLength(2);
+    expect(stable).toContain("Require a Beta-validated release branch");
+    expect(stable).toContain(
+      "Production must be dispatched from 'release/X.Y.Z' after Beta validation",
+    );
+    expect(stable).not.toContain("refs/heads/main|refs/heads/release/*");
   });
 });

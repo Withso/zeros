@@ -60,7 +60,7 @@ import {
   type TeamRole,
   type TeamSummary,
 } from "./control-plane";
-import { setActiveTeamId } from "./active-team";
+import { setActiveOrganizationSelection } from "./active-team";
 import { requestTeamResync } from "./team-sync";
 import {
   refreshTeams,
@@ -223,7 +223,7 @@ function TeamSwitcher({
           <DropdownMenuItem
             key={o.id}
             data-selected={o.id === active.id || undefined}
-            onSelect={() => setActiveTeamId(o.id)}
+            onSelect={() => setActiveOrganizationSelection(o.id, o.isPersonal)}
           >
             <TeamLogo team={o} size={20} />
             <span className="flex-1 truncate">{o.name}</span>

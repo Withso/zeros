@@ -80,8 +80,6 @@ export default defineConfig({
       "apps/desktop/src/renderer/features/team/__tests__/**/*.test.ts",
       // Structured logging: renderer console-arg serialization (pure).
       "apps/desktop/src/renderer/platform/observability/logging/__tests__/**/*.test.ts",
-      // Feedback → Intercom/Linear bridge Worker (fetch handler, mocked APIs).
-      "apps/feedback-worker/src/__tests__/**/*.test.ts",
       // Marketing deep-link routing without a server/router runtime.
       "apps/marketing/src/**/__tests__/**/*.test.ts",
     ],

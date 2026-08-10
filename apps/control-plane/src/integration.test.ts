@@ -37,17 +37,15 @@ d("schema + signup transaction", () => {
     });
   };
 
-  /** Mirror POST /v1/teams' bootstrap (team + owner membership).
-   *  System context like the route itself: user-context RLS can't insert a
-   *  brand-new team because ON CONFLICT/RETURNING apply USING to the new row. */
-  const createTeam = async (
+  /** Mirror POST /v1/organizations' atomic bootstrap. */
+  const createOrganization = async (
     ownerId: string,
     name: string,
     logo: string | null = null,
   ) =>
     withSystemTx(pool, async (tx) => {
-      const team = await tx.query<{ id: string }>(
-        `INSERT INTO teams (slug, name, logo, created_by)
+      const organization = await tx.query<{ id: string }>(
+        `INSERT INTO organizations (slug, name, logo, created_by)
          VALUES ($1, $2, $3, $4) RETURNING id`,
         [
           `${name.toLowerCase()}-${randomUUID().slice(0, 8)}`,
@@ -56,29 +54,52 @@ d("schema + signup transaction", () => {
           ownerId,
         ],
       );
-      const teamId = team.rows[0]!.id;
+      const orgId = organization.rows[0]!.id;
       await tx.query(
-        `INSERT INTO team_members (team_id, user_id, role) VALUES ($1, $2, 'owner')`,
-        [teamId, ownerId],
+        `INSERT INTO organization_members (org_id, user_id, role)
+         VALUES ($1, $2, 'owner')`,
+        [orgId, ownerId],
       );
-      return teamId;
+      const team = await tx.query<{ id: string }>(
+        `INSERT INTO teams (org_id, slug, name, is_default, created_by)
+         VALUES ($1, 'default', 'Default', true, $2) RETURNING id`,
+        [orgId, ownerId],
+      );
+      await tx.query(
+        `INSERT INTO team_members (team_id, org_id, user_id, role)
+         VALUES ($1, $2, $3, 'maintainer')`,
+        [team.rows[0]!.id, orgId, ownerId],
+      );
+      return orgId;
     });
 
-  it("signup provisions the user + identity only — NO team is auto-created", async () => {
+  it("signup provisions exactly one permanent Personal organization and default team", async () => {
     const { id } = await signup("Test User");
     const again = await signup(); // a different identity → a different user
     expect(again.id).not.toBe(id);
 
-    const teams = await pool.query(
-      `SELECT 1 FROM teams WHERE created_by = $1`,
+    const organizations = await pool.query(
+      `SELECT id, name, is_personal, cloud_workspaces_allowed
+       FROM organizations WHERE created_by = $1`,
       [id],
     );
-    expect(teams.rowCount).toBe(0);
+    expect(organizations.rows).toHaveLength(1);
+    expect(organizations.rows[0]).toMatchObject({
+      name: "Test User",
+      is_personal: true,
+      cloud_workspaces_allowed: false,
+    });
     const memberships = await pool.query(
-      `SELECT 1 FROM team_members WHERE user_id = $1`,
+      `SELECT om.role AS organization_role, tm.role AS team_role
+       FROM organization_members om
+       JOIN teams t ON t.org_id = om.org_id AND t.is_default
+       JOIN team_members tm ON tm.team_id = t.id AND tm.user_id = om.user_id
+       WHERE om.user_id = $1`,
       [id],
     );
-    expect(memberships.rowCount).toBe(0);
+    expect(memberships.rows).toEqual([
+      { organization_role: "owner", team_role: "maintainer" },
+    ]);
   });
 
   describe("staff_role (0007)", () => {
@@ -193,37 +214,103 @@ d("schema + signup transaction", () => {
     expect(users.rowCount).toBe(1);
   });
 
-  it("stores and returns the team logo data URL", async () => {
+  it("repairs an imported account when a legacy organization owns its preferred Personal slug", async () => {
+    const { id: legacyOwner } = await signup();
+    const userId = randomUUID();
+    const sub = randomUUID();
+    const email = `imported-${sub}@example.com`;
+    const preferredSlug = `personal-${userId.replaceAll("-", "")}`;
+    await pool.query(
+      `INSERT INTO users (id, email, display_name) VALUES ($1, $2, 'Imported')`,
+      [userId, email],
+    );
+    await pool.query(
+      `INSERT INTO user_identities (user_id, provider, provider_sub)
+       VALUES ($1, 'auth0', $2)`,
+      [userId, sub],
+    );
+    await pool.query(
+      `INSERT INTO organizations (slug, name, created_by)
+       VALUES ($1, 'Legacy slug squatter', $2)`,
+      [preferredSlug, legacyOwner],
+    );
+
+    await expect(
+      ensureUser(pool, {
+        provider: "auth0",
+        providerSub: sub,
+        email,
+        displayName: "Imported",
+      }),
+    ).resolves.toMatchObject({ id: userId });
+    const personal = await pool.query<{ slug: string }>(
+      `SELECT slug FROM organizations
+       WHERE created_by = $1 AND is_personal AND deleted_at IS NULL`,
+      [userId],
+    );
+    expect(personal.rows).toHaveLength(1);
+    expect(personal.rows[0]!.slug).toMatch(
+      new RegExp(`^${preferredSlug}-[0-9a-f]{32}$`),
+    );
+  });
+
+  it("serializes concurrent first requests for the same identity", async () => {
+    const sub = randomUUID();
+    const input = {
+      provider: "auth0",
+      providerSub: sub,
+      email: `parallel-${sub}@example.com`,
+      displayName: "Parallel",
+    };
+    const [first, second] = await Promise.all([
+      ensureUser(pool, input),
+      ensureUser(pool, input),
+    ]);
+    expect(second.id).toBe(first.id);
+    const result = await pool.query<{ users: number; personal: number }>(
+      `SELECT
+         count(DISTINCT u.id)::int AS users,
+         count(DISTINCT o.id)::int AS personal
+       FROM users u
+       LEFT JOIN organizations o
+         ON o.created_by = u.id AND o.is_personal AND o.deleted_at IS NULL
+       WHERE u.email = $1`,
+      [input.email],
+    );
+    expect(result.rows[0]).toEqual({ users: 1, personal: 1 });
+  });
+
+  it("stores and returns the organization logo data URL", async () => {
     const { id } = await signup();
     const logo = "data:image/png;base64,iVBORw0KGgo=";
-    const teamId = await createTeam(id, "Logoful", logo);
+    const orgId = await createOrganization(id, "Logoful", logo);
     const back = await pool.query<{ logo: string | null }>(
-      `SELECT logo FROM teams WHERE id = $1`,
-      [teamId],
+      `SELECT logo FROM organizations WHERE id = $1`,
+      [orgId],
     );
     expect(back.rows[0]!.logo).toBe(logo);
   });
 
-  it("an owner can soft-delete any team, and its invites stop resolving", async () => {
+  it("a deleted organization's invites stop resolving", async () => {
     const { id } = await signup();
-    const teamId = await createTeam(id, "Doomed");
+    const orgId = await createOrganization(id, "Doomed");
     const tokenHash = Buffer.from(randomUUID().replaceAll("-", ""), "hex");
     await withSystemTx(pool, (tx) =>
       tx.query(
-        `INSERT INTO invitations (team_id, email, token_hash, invited_by)
+        `INSERT INTO invitations (org_id, email, token_hash, invited_by)
          VALUES ($1, 'x@example.com', $2, $3)`,
-        [teamId, tokenHash, id],
+        [orgId, tokenHash, id],
       ),
     );
 
-    await pool.query(`UPDATE teams SET deleted_at = now() WHERE id = $1`, [
-      teamId,
+    await pool.query(`UPDATE organizations SET deleted_at = now() WHERE id = $1`, [
+      orgId,
     ]);
 
     // The accept path's join must refuse invites into a deleted team.
     const inv = await pool.query(
       `SELECT i.id FROM invitations i
-       JOIN teams t ON t.id = i.team_id AND t.deleted_at IS NULL
+       JOIN organizations o ON o.id = i.org_id AND o.deleted_at IS NULL
        WHERE i.token_hash = $1
          AND i.accepted_at IS NULL AND i.revoked_at IS NULL AND i.expires_at > now()`,
       [tokenHash],
@@ -231,77 +318,96 @@ d("schema + signup transaction", () => {
     expect(inv.rowCount).toBe(0);
   });
 
+  it("removes a soft-deleted organization from former members' RLS scope", async () => {
+    const { id } = await signup();
+    const orgId = await createOrganization(id, "Invisible");
+    await pool.query(`UPDATE organizations SET deleted_at = now() WHERE id = $1`, [
+      orgId,
+    ]);
+
+    const visible = await withUserTx(pool, id, (tx) =>
+      tx.query(`SELECT id FROM organizations WHERE id = $1`, [orgId]),
+    );
+    expect(visible.rowCount).toBe(0);
+  });
+
   it("self-leave succeeds under USER-context RLS (audit before the membership delete)", async () => {
     // Replays the DELETE /members/:user handler's exact statement ORDER in
     // the member's own RLS context. The order is load-bearing: once the
-    // actor's membership row is gone, app_user_team_ids() drops the team, so
+    // actor's membership row is gone, app_user_org_ids() drops the org, so
     // an audit INSERT after the delete violates its WITH CHECK.
     const { id: owner } = await signup();
     const { id: member } = await signup();
-    const teamId = await createTeam(owner, "LeaveCo");
+    const orgId = await createOrganization(owner, "LeaveCo");
     await withSystemTx(pool, (tx) =>
       tx.query(
-        `INSERT INTO team_members (team_id, user_id, role) VALUES ($1, $2, 'member')`,
-        [teamId, member],
+        `INSERT INTO organization_members (org_id, user_id, role)
+         VALUES ($1, $2, 'member')`,
+        [orgId, member],
       ),
     );
 
     await withUserTx(pool, member, async (tx) => {
       await tx.query(
-        `SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2 FOR UPDATE`,
-        [teamId, member],
+        `SELECT role FROM organization_members
+         WHERE org_id = $1 AND user_id = $2 FOR UPDATE`,
+        [orgId, member],
       );
       await tx.query(
-        `INSERT INTO audit_log (team_id, actor_id, action, subject) VALUES ($1, $2, 'member.left', '{}')`,
-        [teamId, member],
+        `INSERT INTO audit_log (org_id, actor_id, action, subject)
+         VALUES ($1, $2, 'member.left', '{}')`,
+        [orgId, member],
       );
       await tx.query(
-        `DELETE FROM team_members WHERE team_id = $1 AND user_id = $2`,
-        [teamId, member],
+        `DELETE FROM organization_members WHERE org_id = $1 AND user_id = $2`,
+        [orgId, member],
       );
     });
 
     const membership = await pool.query(
-      `SELECT 1 FROM team_members WHERE team_id = $1 AND user_id = $2`,
-      [teamId, member],
+      `SELECT 1 FROM organization_members WHERE org_id = $1 AND user_id = $2`,
+      [orgId, member],
     );
     expect(membership.rowCount).toBe(0);
     const auditRows = await pool.query(
-      `SELECT 1 FROM audit_log WHERE team_id = $1 AND actor_id = $2 AND action = 'member.left'`,
-      [teamId, member],
+      `SELECT 1 FROM audit_log WHERE org_id = $1 AND actor_id = $2 AND action = 'member.left'`,
+      [orgId, member],
     );
     expect(auditRows.rowCount).toBe(1);
   });
 
-  it("serializes concurrent owner departures so a team can never reach zero owners", async () => {
-    // Two owners, both leave at once. The team-row lock in assertNotLastOwner
+  it("serializes concurrent owner departures so an organization can never reach zero owners", async () => {
+    // Two owners, both leave at once. The organization-row lock
     // must serialize them: exactly one succeeds, the other hits last_owner.
     const { id: o1 } = await signup();
     const { id: o2 } = await signup();
-    const teamId = await createTeam(o1, "Shared");
+    const orgId = await createOrganization(o1, "Shared");
     await pool.query(
-      `INSERT INTO team_members (team_id, user_id, role) VALUES ($1, $2, 'owner')`,
-      [teamId, o2],
+      `INSERT INTO organization_members (org_id, user_id, role)
+       VALUES ($1, $2, 'owner')`,
+      [orgId, o2],
     );
 
     // Mirror the delete handler's owner-departure logic in two parallel txns.
     const leave = (leaver: string) =>
       withSystemTx(pool, async (tx) => {
         await tx.query(
-          `SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2 FOR UPDATE`,
-          [teamId, leaver],
+          `SELECT role FROM organization_members
+           WHERE org_id = $1 AND user_id = $2 FOR UPDATE`,
+          [orgId, leaver],
         );
-        await tx.query(`SELECT 1 FROM teams WHERE id = $1 FOR UPDATE`, [
-          teamId,
+        await tx.query(`SELECT 1 FROM organizations WHERE id = $1 FOR UPDATE`, [
+          orgId,
         ]);
         const { rows } = await tx.query<{ n: string }>(
-          `SELECT count(*) AS n FROM team_members WHERE team_id = $1 AND role = 'owner'`,
-          [teamId],
+          `SELECT count(*) AS n FROM organization_members
+           WHERE org_id = $1 AND role = 'owner'`,
+          [orgId],
         );
         if (Number(rows[0]!.n) <= 1) throw new Error("last_owner");
         await tx.query(
-          `DELETE FROM team_members WHERE team_id = $1 AND user_id = $2`,
-          [teamId, leaver],
+          `DELETE FROM organization_members WHERE org_id = $1 AND user_id = $2`,
+          [orgId, leaver],
         );
       });
 
@@ -309,60 +415,50 @@ d("schema + signup transaction", () => {
     const fulfilled = results.filter((r) => r.status === "fulfilled").length;
     expect(fulfilled).toBe(1); // exactly one left; the other was blocked
     const owners = await pool.query(
-      `SELECT count(*)::int AS n FROM team_members WHERE team_id = $1 AND role = 'owner'`,
-      [teamId],
+      `SELECT count(*)::int AS n FROM organization_members
+       WHERE org_id = $1 AND role = 'owner'`,
+      [orgId],
     );
     expect(owners.rows[0].n).toBe(1); // never zero
   });
 
   it("keeps one pending invite per email", async () => {
     const { id } = await signup();
-    const teamId = await createTeam(id, "Invariants");
+    const orgId = await createOrganization(id, "Invariants");
 
     await withSystemTx(pool, (tx) =>
       tx.query(
-        `INSERT INTO invitations (team_id, email, token_hash, invited_by)
+        `INSERT INTO invitations (org_id, email, token_hash, invited_by)
          VALUES ($1, 'x@example.com', $2, $3)`,
-        [teamId, Buffer.from(randomUUID().replaceAll("-", ""), "hex"), id],
+        [orgId, Buffer.from(randomUUID().replaceAll("-", ""), "hex"), id],
       ),
     );
     await expect(
       withSystemTx(pool, (tx) =>
         tx.query(
-          `INSERT INTO invitations (team_id, email, token_hash, invited_by)
+          `INSERT INTO invitations (org_id, email, token_hash, invited_by)
            VALUES ($1, 'x@example.com', $2, $3)`,
-          [teamId, Buffer.from(randomUUID().replaceAll("-", ""), "hex"), id],
+          [orgId, Buffer.from(randomUUID().replaceAll("-", ""), "hex"), id],
         ),
       ),
     ).rejects.toThrow(/one_pending_invite|duplicate key/);
   });
 
-  it("leaves ONE flat Team level after 0006 — no org_* names, no sub-teams", async () => {
-    // The old two-level model is gone. Three things must all hold, and the
-    // third is the one a partial rename would break: `invitations.team_id`
-    // has to point at the TENANT ROOT now, not at a surviving sub-team.
-    const orgish = await pool.query(
-      `SELECT 1 FROM information_schema.tables
-       WHERE table_schema = 'public'
-         AND table_name IN ('organizations', 'organization_members', 'org_settings', 'org_secrets')`,
+  it("keeps the Organization → default Team hierarchy explicit", async () => {
+    const { id } = await signup();
+    const orgId = await createOrganization(id, "Hierarchy");
+    const result = await pool.query(
+      `SELECT o.id AS organization_id, t.id AS team_id, t.is_default
+       FROM organizations o JOIN teams t ON t.org_id = o.id
+       WHERE o.id = $1`,
+      [orgId],
     );
-    expect(orgish.rowCount).toBe(0);
-
-    const orgCols = await pool.query(
-      `SELECT 1 FROM information_schema.columns
-       WHERE table_schema = 'public' AND column_name = 'org_id'`,
-    );
-    expect(orgCols.rowCount).toBe(0);
-
-    const fk = await pool.query<{ referenced: string }>(
-      `SELECT confrelid::regclass::text AS referenced
-       FROM pg_constraint
-       WHERE conrelid = 'invitations'::regclass AND contype = 'f'
-         AND conkey = ARRAY[(SELECT attnum FROM pg_attribute
-                             WHERE attrelid = 'invitations'::regclass
-                               AND attname = 'team_id')]`,
-    );
-    expect(fk.rows[0]?.referenced).toBe("teams");
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0]).toMatchObject({
+      organization_id: orgId,
+      is_default: true,
+    });
+    expect(result.rows[0].team_id).not.toBe(orgId);
   });
 
   it("isolates personal GitHub installations while allowing one GitHub installation to be authorized by several users", async () => {

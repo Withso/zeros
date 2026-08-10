@@ -3,7 +3,8 @@
 // ──────────────────────────────────────────────────────────
 //
 // Sidebar + detail pane: ONE sidebar with grouped
-// sections (Personal / Agents / Workspace / Administration). This page
+// sections (Personal / Agents / Workspace). Organization administration is
+// browser-owned at app.zeros.build; this page remains device configuration.
 // owns the USER scope only; repository settings live on each repository page
 // (Home rail → repository → Settings tab).
 // Settings is its own page: this section nav is the MAIN sidebar (the
@@ -51,9 +52,7 @@ import {
   Palette,
   Settings,
   ArrowLeft,
-  Building2,
   Astroid,
-  Plus,
   SquareTerminal,
   Blocks,
   KeyRound,
@@ -64,7 +63,6 @@ import {
   CircleCheck,
   LogOut,
   Lock,
-  UsersRound,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -104,20 +102,11 @@ import { repoPageViewForSection } from "../repositories/repo-page";
 import { OpenSettingsFileButton } from "../../shared/ui/open-settings-file-button";
 import { GitHubSection } from "./github-section";
 import { prefetchGithubAuthSnapshot } from "./github-auth-prefetch";
-import { TeamPanel } from "../team/team-panel";
-import { MembersPanel } from "../team/members-panel";
-import { CreateTeamDialog } from "../team/create-team-dialog";
 import { JoinTeamDialog } from "../team/join-team-dialog";
 import {
   consumePendingInviteToken,
   subscribePendingInvite,
 } from "../team/invite-link";
-import { CONTROL_PLANE_URL } from "../team/control-plane";
-import {
-  lastKnownHasTeams,
-  subscribeCreateTeamDialog,
-  useTeams,
-} from "../team/team-store";
 import { isAnalyticsOptedOut } from "../../platform/observability/analytics/consent";
 import { setAnalyticsEnabled } from "../../platform/observability/analytics/posthog";
 import { useAuth } from "../auth";
@@ -170,8 +159,6 @@ type SectionId =
   | "environment"
   | "git"
   | "repos"
-  | "team"
-  | "members"
   | "integrations"
   | "account"
   | "experimental"
@@ -251,22 +238,6 @@ const SECTIONS: SectionDef[] = [
   // repository's page. The id
   // stays in SectionId only so legacy `repo:<id>:<section>` selections keep
   // parsing — the redirect effect below sends them to the repo page.
-  // Administration pair — gated in `availableSections`: hidden entirely
-  // while the signed-in user has ZERO teams (teams are optional since
-  // 2026-07-22; nothing is auto-created at sign-in). The sidebar shows a
-  // "+ Create team" entry in their place — see the nav.
-  {
-    id: "team",
-    label: "Team",
-    icon: Building2,
-    Panel: TeamPanel,
-  },
-  {
-    id: "members",
-    label: "Members",
-    icon: UsersRound,
-    Panel: MembersPanel,
-  },
   {
     id: "integrations",
     label: "Integrations",
@@ -317,7 +288,6 @@ const SECTION_GROUPS: Array<{ label: string; ids: SectionId[] }> = [
   },
   { label: "Agents", ids: ["models", "providers", "terminal-agents"] },
   { label: "Workspace", ids: ["environment", "git"] },
-  { label: "Administration", ids: ["team", "members"] },
 ];
 
 // ── Active-selection encoding ───────────────────────────
@@ -389,9 +359,12 @@ function parseSelection(active: string): Selection {
   const rawBare = active.startsWith("user:")
     ? active.slice("user:".length)
     : active;
-  // "Organization" became "Team" (2026-07-25) — carry a persisted selection
-  // forward instead of silently dumping the user on General.
-  const bare = rawBare === "organization" ? "team" : rawBare;
+  // Organization/Team administration moved to app.zeros.build. Old persisted
+  // selections resolve to General instead of exposing a retired desktop panel.
+  const bare =
+    rawBare === "organization" || rawBare === "team" || rawBare === "members"
+      ? "general"
+      : rawBare;
   return { scope: "user", section: isStaticSection(bare) ? bare : "general" };
 }
 
@@ -496,11 +469,8 @@ export function SettingsPage() {
     [],
   );
 
-  // Administration dialogs — Create team (sidebar entry at zero teams,
-  // team-switcher "New team") and Join team (invite deep links). Both
-  // render HERE, not in a panel: a zero-team user has NO Administration
-  // tabs, so the panels can't host them.
-  const [createTeamOpen, setCreateTeamOpen] = useState(false);
+  // Invite handoff remains desktop-readable for existing email links; all
+  // member management and organization creation live in the web dashboard.
   const [joinTeamOpen, setJoinTeamOpen] = useState(false);
   const [joinToken, setJoinToken] = useState("");
 
@@ -516,12 +486,6 @@ export function SettingsPage() {
     };
     takePending();
     return subscribePendingInvite(takePending);
-  }, []);
-
-  // Panels ask for the create dialog via the team-store bus (the team
-  // switcher's "New team" item lives in a different tree).
-  useEffect(() => {
-    return subscribeCreateTeamDialog(() => setCreateTeamOpen(true));
   }, []);
 
   // One-time import of the legacy localStorage
@@ -583,35 +547,22 @@ export function SettingsPage() {
   // non-internal account) can never leave the panel reachable.
   const [terminalAgentsEnabled] = useExperimentalFeature("terminalAgents");
   const internalUser = useIsInternalUser();
-  // Administration gating: teams are OPTIONAL — with the control plane
-  // configured and the team list empty, the Team/Members tabs drop out and
-  // the sidebar offers "+ Create team" instead. While the first fetch is
-  // still in flight, the persisted last-known answer stands in so a
-  // zero-team user doesn't watch the tabs flash in and vanish on every
-  // launch; the live store wins once "ready".
-  const { me: teamsMe, status: teamsStatus } = useTeams();
-  const zeroTeams =
-    !!CONTROL_PLANE_URL &&
-    (teamsStatus === "ready"
-      ? (teamsMe?.teams.length ?? 0) === 0
-      : lastKnownHasTeams() === false);
   const availableSections = useMemo(
     () =>
       SECTIONS.filter(
         (s) =>
           (s.id !== "terminal-agents" || terminalAgentsEnabled) &&
-          (s.id !== "internal" || internalUser) &&
-          ((s.id !== "team" && s.id !== "members") || !zeroTeams),
+          (s.id !== "internal" || internalUser),
       ),
-    [terminalAgentsEnabled, internalUser, zeroTeams],
+    [terminalAgentsEnabled, internalUser],
   );
   const activeSection: SectionDef | null =
     selection.scope === "user"
       ? (availableSections.find((s) => s.id === selection.section) ??
         availableSections[0])
       : null;
-  // Normalize a selection whose section a gate just dropped (zero teams
-  // hiding team/members, an experimental/internal flag flipping
+  // Normalize a selection whose section a gate just dropped (an
+  // experimental/internal flag flipping
   // off): the fallback panel above already renders, but without this
   // rewrite the sidebar shows NO active row and — worse — the retired
   // selection lies in wait, spontaneously reactivating if its gate ever
@@ -696,14 +647,7 @@ export function SettingsPage() {
               const section = availableSections.find((s) => s.id === id);
               return section ? [section] : [];
             });
-            // Zero teams empties the Administration group (its tabs are
-            // gated off) — it renders a "+ Create team" entry instead of
-            // vanishing, keeping team creation reachable as the
-            // LAST item of the sidebar. Other empty groups still hide.
-            const isAdministration = group.label === "Administration";
-            if (sections.length === 0 && !(isAdministration && zeroTeams)) {
-              return null;
-            }
+            if (sections.length === 0) return null;
             return (
               <React.Fragment key={group.label}>
                 <div
@@ -733,16 +677,6 @@ export function SettingsPage() {
                       }
                     />
                   ))}
-                  {isAdministration && zeroTeams && (
-                    <Button
-                      variant="ghost"
-                      className={SIDEBAR_ENTRY_CLS}
-                      onClick={() => setCreateTeamOpen(true)}
-                    >
-                      <Plus size={14} />
-                      <span className="truncate">Create team</span>
-                    </Button>
-                  )}
                 </div>
               </React.Fragment>
             );
@@ -804,25 +738,12 @@ export function SettingsPage() {
         </div>
       </div>
 
-      {/* Administration dialogs — page-level so they exist in EVERY team
-          state (a zero-team user has no Administration panels to host
-          them). Success navigates to the Team tab, which exists again by
-          then (both dialogs refresh the team store first). */}
-      <CreateTeamDialog
-        open={createTeamOpen}
-        onOpenChange={setCreateTeamOpen}
-        onCreated={() => setActive(userSelection("team"))}
-        onSwitchToJoin={() => {
-          setCreateTeamOpen(false);
-          setJoinToken("");
-          setJoinTeamOpen(true);
-        }}
-      />
+      {/* Compatibility invite handoff. New invitations are managed on web. */}
       <JoinTeamDialog
         open={joinTeamOpen}
         initialToken={joinToken}
         onOpenChange={setJoinTeamOpen}
-        onJoined={() => setActive(userSelection("team"))}
+        onJoined={() => setActive(userSelection("general"))}
       />
     </div>
   );

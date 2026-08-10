@@ -1,7 +1,7 @@
 // Help → Feedback modal (also ⌥⌘F). Collects a typed message and posts it to
-// the Intercom bridge Worker via submitFeedback(). There is deliberately no
-// address field: the Worker reads the sender from the Auth0 access token the
-// request carries, so the address support replies to is one Auth0 verified
+// the Railway control plane via submitFeedback(). There is deliberately no
+// address field: the backend reads the sender from the verified Auth0 session,
+// so the address support replies to is one Auth0 verified
 // rather than whatever was typed here. With
 // the "Include recent app logs" checkbox ticked, the secret-scrubbed recent
 // log tail (app.jsonl — main + engine + renderer, see apps/desktop/electron/log-store.ts)
@@ -32,17 +32,14 @@ import { Label } from "@/renderer/shared/ui/primitives/label";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { isElectron, nativeInvoke } from "@/renderer/platform/runtime";
 import {
+  DEFAULT_FEEDBACK_TYPE,
+  FEEDBACK_TYPE_OPTIONS,
+  type FeedbackType,
+} from "@/renderer/features/feedback/feedback-types";
+import {
   recentLogsForFeedback,
   submitFeedback,
-  type FeedbackType,
 } from "@/renderer/features/feedback/submit-feedback";
-
-const TYPE_OPTIONS: { value: FeedbackType; label: string }[] = [
-  { value: "bug", label: "Bug" },
-  { value: "feature", label: "Feature request" },
-  { value: "issue", label: "Issue" },
-  { value: "feedback", label: "Feedback" },
-];
 
 export function FeedbackDialog({
   open,
@@ -51,13 +48,13 @@ export function FeedbackDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const [type, setType] = useState<FeedbackType>("bug");
+  const [type, setType] = useState<FeedbackType>(DEFAULT_FEEDBACK_TYPE);
   const [message, setMessage] = useState("");
   const [includeLogs, setIncludeLogs] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   const reset = () => {
-    setType("bug");
+    setType(DEFAULT_FEEDBACK_TYPE);
     setMessage("");
     setIncludeLogs(false);
   };
@@ -101,12 +98,15 @@ export function FeedbackDialog({
         <div className="grid gap-3">
           <div className="grid gap-1.5">
             <Label htmlFor="feedback-type">Type</Label>
-            <Select value={type} onValueChange={(v) => setType(v as FeedbackType)}>
+            <Select
+              value={type}
+              onValueChange={(v) => setType(v as FeedbackType)}
+            >
               <SelectTrigger id="feedback-type" className="w-full">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {TYPE_OPTIONS.map((o) => (
+                {FEEDBACK_TYPE_OPTIONS.map((o) => (
                   <SelectItem key={o.value} value={o.value}>
                     {o.label}
                   </SelectItem>
@@ -134,7 +134,7 @@ export function FeedbackDialog({
                 type="checkbox"
                 checked={includeLogs}
                 onChange={(e) => setIncludeLogs(e.target.checked)}
-                className="size-3.5 shrink-0 accent-fg1"
+                className="accent-fg1 size-3.5 shrink-0"
               />
               <Label
                 htmlFor="feedback-include-logs"
@@ -154,7 +154,7 @@ export function FeedbackDialog({
             </div>
           ) : null}
 
-          <p className="text-xs text-muted-fg">
+          <p className="text-muted-fg text-xs">
             {includeLogs
               ? "Your message plus the recent app logs shown under View are sent — secrets are scrubbed first."
               : "Only what you write here is sent — never your code, files, or keys."}
