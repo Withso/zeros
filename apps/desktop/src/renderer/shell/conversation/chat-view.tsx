@@ -429,11 +429,29 @@ function ChatBody({
       if (persistedProviderBinding) {
         // Tell the engine the provider's durable binding; the engine either
         // re-adopts this conversation's live execution or mints a fresh one.
-        void sessions.loadIntoChat(chatId, agentId, persistedProviderBinding, {
-          agentName,
-          cwd,
-          env,
-        });
+        void sessions
+          .loadIntoChat(chatId, agentId, persistedProviderBinding, {
+            agentName,
+            cwd,
+            env,
+          })
+          .then((adopted) => {
+            if (cancelled || adopted) return;
+            // A definitive provider "not found" is the only load failure that
+            // invalidates durable identity. Clear all compatibility mirrors
+            // before creating the replacement so the broken handle cannot be
+            // reintroduced by persistence or the next mount.
+            dispatch({
+              type: "UPDATE_CHAT_SETTINGS",
+              id: chatId,
+              updates: {
+                providerBinding: undefined,
+                providerMetadata: undefined,
+                sessionId: undefined,
+              },
+            });
+            void session.ensureSession(agentId, { agentName, cwd, env });
+          });
       } else {
         const hasPriorContext =
           existing?.hasTranscript === true ||

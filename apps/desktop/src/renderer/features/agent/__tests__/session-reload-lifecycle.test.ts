@@ -15,6 +15,7 @@ import {
   queueReleaseAction,
   recoveredSessionIdentity,
   recoveryLoadLocator,
+  resumeFailureInvalidatesBinding,
   sendNeedsSessionRecovery,
   shouldQueuePrompt,
   takePrebindDirty,
@@ -457,6 +458,30 @@ describe("send-time session recovery", () => {
     expect(sendNeedsSessionRecovery("ready")).toBe(false);
     expect(sendNeedsSessionRecovery("warming")).toBe(false);
     expect(sendNeedsSessionRecovery("streaming")).toBe(false);
+  });
+
+  it("forgets a binding only when the provider confirms it expired", () => {
+    expect(
+      resumeFailureInvalidatesBinding({
+        kind: "session-expired",
+        message: "thread not found",
+        stage: "loadSession",
+      }),
+    ).toBe(true);
+    expect(
+      resumeFailureInvalidatesBinding({
+        kind: "auth-required",
+        message: "sign in",
+        stage: "loadSession",
+      }),
+    ).toBe(false);
+    expect(
+      resumeFailureInvalidatesBinding({
+        kind: "transport-closed",
+        message: "engine restarted",
+        stage: "loadSession",
+      }),
+    ).toBe(false);
   });
 
   it("hands a warming chat's send to the queue instead", () => {

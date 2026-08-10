@@ -92,6 +92,7 @@ import {
 import { resolveRepoScript, resolveRunActions } from "../settings/repo-scripts";
 import { isRunSessionId, runActionOneShot } from "@zeros/protocol/run-actions";
 import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
+import { sameProviderBinding } from "@zeros/protocol/identities";
 import type { DesignOperation } from "@zeros/design-core";
 import type {
   RunActionStatus,
@@ -221,6 +222,7 @@ import {
   upsertChat,
   deleteChat,
   bulkUpsertChats,
+  clearChatProviderIdentity,
   coerceChatRow,
   setChatWorkspaceResolver,
   type ChatRow,
@@ -662,7 +664,9 @@ const REMOTE_READABLE = new Set<string>([
  *  They ARE part of the remote allowlist (deny-by-default), so an unknown
  *  mutation op is still refused. Enumerated 1:1 from the non-read helpers in
  *  apps/desktop/src/renderer/platform/bridge/workspace-bridge.ts (chats.* upserts/deletes + messages.*
- *  import/clear/truncate). Local desktop clients bypass the gate entirely. */
+ *  import/clear/truncate), except chats.clearProviderIdentity: that removes a
+ *  host-learned provider capability and is deliberately local-only. Local
+ *  desktop clients bypass the gate entirely. */
 const REMOTE_METADATA_OPS = new Set<string>([
   "chats.upsert",
   "chats.delete",
@@ -723,15 +727,20 @@ function preserveProviderIdentity(
     existing?.providerBinding?.providerId === c.agentId
       ? existing.providerBinding
       : null;
+  // Once SQLite has a same-agent binding it is the host-authoritative value:
+  // the engine writes provider refinements there before notifying renderers,
+  // so either a missing OR a different incoming value may be a stale surface
+  // racing that notification. Replacing it requires the explicit guarded
+  // clear operation (or an agent switch), after which a new binding can attach.
   const providerBinding =
-    incomingProviderBinding ?? existingProviderBinding ?? null;
-  const providerMetadata = incomingProviderBinding
-    ? (c.providerMetadata ??
-      (existingProviderBinding?.resumeId === incomingProviderBinding.resumeId
-        ? existing?.providerMetadata
-        : null) ??
-      null)
-    : (existing?.providerMetadata ?? null);
+    existingProviderBinding ?? incomingProviderBinding ?? null;
+  const providerMetadata = existingProviderBinding
+    ? sameProviderBinding(existingProviderBinding, incomingProviderBinding)
+      ? (c.providerMetadata ?? existing?.providerMetadata ?? null)
+      : (existing?.providerMetadata ?? null)
+    : incomingProviderBinding
+      ? (c.providerMetadata ?? null)
+      : null;
   return {
     ...c,
     providerBinding,
@@ -3488,6 +3497,14 @@ export class WorkspaceService {
         deleteTurnsForChat(id);
         deleteChat(id);
         return { ok: true };
+      }
+      case "chats.clearProviderIdentity": {
+        const chatId = reqStr(params, "chatId");
+        const agentId = reqStr(params, "agentId");
+        const resumeId = reqStr(params, "resumeId");
+        return {
+          ok: clearChatProviderIdentity(chatId, agentId, resumeId),
+        };
       }
       case "chats.bulkUpsert": {
         const raw = Array.isArray(params.chats) ? params.chats : [];

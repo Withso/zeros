@@ -828,10 +828,9 @@ export interface LoadSessionResponse {
    *  it must be re-injected on the next prompt). Engine-internal; the renderer
    *  ignores it. */
   resumedFresh?: boolean;
-  /** A degraded resume created a new provider-native session id. The current
-   * engine may continue routing through the requested id as an alias, but the
-   * renderer persists this replacement for the next app restart so it does not
-   * repeatedly attempt the permanently stale id. */
+  /** Protocol-v8 downgrade compatibility: a degraded resume created a new
+   * provider-native locator. Identity-aware renderers persist providerBinding;
+   * older clients still read this field to avoid retrying the stale locator. */
   replacementSessionId?: SessionId;
 }
 

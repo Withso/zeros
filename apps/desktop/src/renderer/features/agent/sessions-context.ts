@@ -62,6 +62,12 @@ export interface QueuedEditPayload {
  *  using `useContext(ActionsCtx)` don't re-render on every token. */
 export interface SessionsActions {
   getSession(chatId: string): AgentSessionState | undefined;
+  /** Fresh close-boundary work snapshot. Includes local sends still awaiting a
+   * route, adopted provider turns, active background work, and queued prompts. */
+  getCloseActivity(chatId: string): {
+    running: boolean;
+    queuedCount: number;
+  };
   listAgents(force?: boolean): Promise<BridgeRegistryAgent[]>;
   initAgent(agentId: string): Promise<InitializeResponse>;
   ensureSession(

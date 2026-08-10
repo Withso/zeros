@@ -81,6 +81,15 @@ export function statusForFailure(failure: AgentFailure): SessionStatus {
   return "failed";
 }
 
+/** A durable binding is discarded only when the provider says that exact
+ * conversation no longer exists. Auth, transport, and timeout failures must
+ * retain it so a temporary outage never destroys resumable context. */
+export function resumeFailureInvalidatesBinding(
+  failure: AgentFailure | null | undefined,
+): boolean {
+  return failure?.kind === "session-expired";
+}
+
 /** How a terminal engine `turn_state` settles the slot.
  *
  * The engine emits terminal turn_state for EVERY turn, not just re-adopted

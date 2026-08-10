@@ -94,9 +94,11 @@ import { rememberProject } from "./platform/recent-projects";
 import {
   dbChatSnapshot,
   dbReplaceAllChats,
+  dbClearChatProviderIdentity,
   dbDeleteChat,
   type ChatRowWire,
 } from "./features/agent/agent-history-client";
+import { providerIdentityClearForTransition } from "./features/agent/chat-provider-identity-persistence";
 import {
   loadScrollPositions,
   pruneScrollPositions,
@@ -451,7 +453,24 @@ function ChatsPersistence() {
       engineRows.set(row.id, row);
       engineDeletedIdsRef.current.delete(row.id);
     }
-    void dbReplaceAllChats(rows.map(threadToRow)).catch((err) => {
+    const identityClears = rows.flatMap((row) => {
+      const clear = providerIdentityClearForTransition(
+        previous.get(row.id),
+        row,
+      );
+      return clear ? [clear] : [];
+    });
+    void (async () => {
+      // Same-agent NULL upserts ordinarily preserve an engine-learned binding,
+      // which protects against stale renderer/remote snapshots. An intentional
+      // renderer transition from a known binding to none therefore needs an
+      // explicit compare-and-clear first. The resume-id guard makes a delayed
+      // reset harmless if the engine has already learned a newer binding.
+      await Promise.all(
+        identityClears.map((input) => dbClearChatProviderIdentity(input)),
+      );
+      await dbReplaceAllChats(rows.map(threadToRow));
+    })().catch((err) => {
       // Roll back only entries that still point at this failed batch. A newer
       // user edit or live snapshot must never be overwritten by the rollback.
       for (const row of rows) {

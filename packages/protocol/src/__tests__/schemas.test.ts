@@ -23,6 +23,20 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
     }
   });
 
+  it("accepts the correlated agent-close acknowledgement", () => {
+    expect(KNOWN_MESSAGE_TYPES).toContain("AGENT_SESSION_CLOSED");
+    expect(
+      parseBridgeMessage({
+        ...base,
+        source: "engine",
+        type: "AGENT_SESSION_CLOSED",
+        requestId: "close-1",
+        agentId: "codex",
+        chatId: "chat-1",
+      }).type,
+    ).toBe("AGENT_SESSION_CLOSED");
+  });
+
   it("rejects an unknown message type", () => {
     expect(() =>
       parseBridgeMessage({ ...base, source: "browser", type: "NOPE" }),

@@ -425,6 +425,49 @@ export function updateChatProviderIdentity(
   return result.changes > 0;
 }
 
+/** Explicitly detach a provider conversation after that provider confirmed it
+ * no longer exists (or the user reset a pristine same-agent chat). The
+ * compare-and-clear guard prevents a delayed renderer write from erasing a
+ * newer binding learned by the engine after the reset was requested. */
+export function clearChatProviderIdentity(
+  chatId: string,
+  agentId: string,
+  expectedResumeId: string,
+): boolean {
+  if (!chatId || !agentId || !expectedResumeId) return false;
+  const db = openZerosDb();
+  const tx = db.transaction(() => {
+    const row = db
+      .prepare(
+        "SELECT session_id, provider_binding FROM chats WHERE id = ? AND agent_id = ?",
+      )
+      .get(chatId, agentId) as
+      | { session_id: string | null; provider_binding: string | null }
+      | undefined;
+    const binding = coerceProviderBinding(
+      row?.provider_binding ? safeJson(row.provider_binding) : null,
+    );
+    const providerMatches =
+      binding?.providerId === agentId && binding.resumeId === expectedResumeId;
+    const legacyMatches = !binding && row?.session_id === expectedResumeId;
+    if (!providerMatches && !legacyMatches) {
+      return false;
+    }
+    const result = db
+      .prepare(
+        `UPDATE chats
+            SET session_id = NULL,
+                provider_binding = NULL,
+                provider_metadata = NULL,
+                rev = @rev
+          WHERE id = @id AND agent_id = @agent_id`,
+      )
+      .run({ id: chatId, agent_id: agentId, rev: nextRev() });
+    return result.changes > 0;
+  });
+  return tx();
+}
+
 export function deleteChat(id: string): void {
   if (!id) return;
   const db = openZerosDb();

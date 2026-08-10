@@ -31,6 +31,7 @@ import {
   bridgeChatList,
   bridgeChatSnapshot,
   bridgeChatDelete,
+  bridgeChatClearProviderIdentity,
   bridgeChatBulkUpsert,
   bridgeMessageWindow,
   bridgeMessageWindowOlder,
@@ -474,6 +475,17 @@ export async function dbChatSnapshot(): Promise<ChatSnapshotWire> {
 
 export async function dbDeleteChat(id: string): Promise<void> {
   await bridgeChatDelete(requireBridge("delete the chat"), id);
+}
+
+export async function dbClearChatProviderIdentity(input: {
+  chatId: string;
+  agentId: string;
+  resumeId: string;
+}): Promise<boolean> {
+  return bridgeChatClearProviderIdentity(
+    requireBridge("clear a stale chat provider binding"),
+    input,
+  );
 }
 
 export async function dbReplaceAllChats(chats: ChatRowWire[]): Promise<void> {

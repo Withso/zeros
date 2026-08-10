@@ -1047,6 +1047,11 @@ function tableColumns(db: Database.Database, table: string): Set<string> {
  * `session_id` locators. Runs inside v30's transaction and is idempotent. */
 function repairDraftChatIdentityColumns(db: Database.Database): void {
   let columns = tableColumns(db, "chats");
+  const needsCompatibilityRepair =
+    columns.has("native_session_id") ||
+    columns.has("native_git_info") ||
+    !columns.has("provider_binding") ||
+    !columns.has("provider_metadata");
   if (!columns.has("provider_binding")) {
     db.exec("ALTER TABLE chats ADD COLUMN provider_binding TEXT");
   }
@@ -1112,6 +1117,11 @@ function repairDraftChatIdentityColumns(db: Database.Database): void {
       }
     }
   }
+
+  // A mainline/fresh database already ran v29's set-based legacy backfill.
+  // Avoid scanning every chat again when v30 is only recording its compatibility
+  // marker; only draft/incomplete schemas need the JavaScript repair below.
+  if (!needsCompatibilityRepair) return;
 
   const legacyRows = db
     .prepare(

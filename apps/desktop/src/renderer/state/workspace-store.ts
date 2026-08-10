@@ -1221,8 +1221,15 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
             action.updates,
             "providerBinding",
           );
-          const providerBinding =
-            requestedBinding?.providerId === nextAgentId
+          const sessionWasUpdated = Object.prototype.hasOwnProperty.call(
+            action.updates,
+            "sessionId",
+          );
+          const explicitSessionReset =
+            sessionWasUpdated && !action.updates.sessionId;
+          const providerBinding = explicitSessionReset
+            ? undefined
+            : requestedBinding?.providerId === nextAgentId
               ? requestedBinding
               : undefined;
           const providerMetadata = providerBinding
@@ -1237,11 +1244,16 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
             // agent switch keeps the Zeros conversation but must never carry
             // the old provider's resume handle into the new adapter.
             providerBinding,
-            ...(agentChanged || bindingWasUpdated
+            ...(agentChanged || bindingWasUpdated || sessionWasUpdated
               ? {
                   sessionId:
                     providerBinding?.legacySessionId ??
-                    providerBinding?.resumeId,
+                    providerBinding?.resumeId ??
+                    (sessionWasUpdated
+                      ? action.updates.sessionId
+                      : agentChanged
+                        ? undefined
+                        : c.sessionId),
                   providerMetadata,
                 }
               : {}),

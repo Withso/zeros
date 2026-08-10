@@ -86,7 +86,11 @@ import {
 } from "./app-server";
 import { CodexAppServerTranslator } from "./app-server-translator";
 import { listCodexSessions } from "./history";
-import { ensureSessionDir, removeSessionDir } from "../../session-paths";
+import {
+  ensureSessionDir,
+  removeSessionDir,
+  writeSessionMeta,
+} from "../../session-paths";
 import { mergeCommands } from "@zeros/protocol/builtin-commands";
 import { buildQuestionStamp } from "@zeros/protocol/agent-messages";
 import type {
@@ -1322,7 +1326,18 @@ export class CodexAppServerAdapter implements AgentAdapter {
     zerosSessionId?: string;
   }): Promise<{ session: CodexSession; resumedFresh: boolean }> {
     const zerosSessionId = opts.zerosSessionId ?? randomUUID();
-    await ensureSessionDir(zerosSessionId);
+    try {
+      await ensureSessionDir(zerosSessionId);
+      await writeSessionMeta(zerosSessionId, {
+        agentId: this.agentId,
+        cwd: opts.cwd,
+        pid: process.pid,
+        createdAt: Date.now(),
+      });
+    } catch (err) {
+      await removeSessionDir(zerosSessionId).catch(() => {});
+      throw err;
+    }
 
     // Seed thread/start from the same persisted posture the renderer will
     // reconcile over AGENT_SET_MODE. This makes the first turn truthful even
@@ -1362,6 +1377,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         onExit: (code, signal) => this.handleRuntimeExit(session, code, signal),
       });
     } catch (err) {
+      await removeSessionDir(zerosSessionId).catch(() => {});
       // Initialize-time failures with auth-flavoured messages should
       // surface as the canonical auth-required AgentFailure so the
       // gateway flips the green dot + the UI shows the "sign in"
@@ -1455,7 +1471,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
         threadModel = result.model ?? null;
       }
     } catch (err) {
-      await runtime.dispose();
+      await runtime.dispose().catch(() => {});
+      await removeSessionDir(zerosSessionId).catch(() => {});
       // thread/resume against a rollout codex has cleaned up surfaces
       // as a "no rollout found"-shaped error. Classify so the UI's
       // session-expired pill renders instead of a generic alert. The
@@ -1552,8 +1569,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
    *      flips to reconnecting (one child per session; the old agent-wide
    *      signal flipped every open Codex chat). The next send revives it.
    *
-   *  Either way the session stays in the map (so a late respondToPermission
-   *  no-ops rather than hard-errors); chat-tab close / dispose evicts it. */
+   *  Mid-turn state stays until prompt recovery settles it. For an idle exit,
+   *  the engine's session-scoped exit handler retires the route and calls the
+   *  gateway disposal path, which evicts this dead adapter state before the
+   *  next send resumes the durable thread into a fresh execution. */
   private handleRuntimeExit(
     session: CodexSession | undefined,
     code: number | null,

@@ -590,6 +590,18 @@ export async function bridgeChatDelete(
   await workspaceOp(bridge, "chats.delete", { id });
 }
 
+export async function bridgeChatClearProviderIdentity(
+  bridge: RuntimeClient,
+  input: { chatId: string; agentId: string; resumeId: string },
+): Promise<boolean> {
+  const result = (await workspaceOp(
+    bridge,
+    "chats.clearProviderIdentity",
+    input,
+  )) as { ok?: boolean } | undefined;
+  return result?.ok === true;
+}
+
 export async function bridgeChatBulkUpsert(
   bridge: RuntimeClient,
   chats: ChatRowWire[],

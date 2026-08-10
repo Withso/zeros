@@ -539,11 +539,23 @@ export interface AgentSteeredMessage extends BaseMessage {
   turnId?: string;
 }
 
-/** Fire-and-forget: stop a conversation's current work and tear down its
- * engine-side execution resources. `chatId` is sufficient while creation or
- * resume is still in flight and no execution route has been published yet. */
+/** Stop a conversation's current work and tear down its engine-side execution
+ * resources. The engine replies with AGENT_SESSION_CLOSED after disposal;
+ * `chatId` is sufficient while creation/resume is still in flight and no
+ * execution route has been published yet. */
 export interface AgentCloseSessionMessage extends BaseMessage {
   type: "AGENT_CLOSE_SESSION";
+  agentId: string;
+  sessionId?: string;
+  executionId?: ExecutionId;
+  chatId?: ConversationId;
+}
+
+/** Correlated acknowledgement emitted only after cancellation and adapter
+ * disposal have completed for every execution attached to the conversation. */
+export interface AgentSessionClosedMessage extends BaseMessage {
+  type: "AGENT_SESSION_CLOSED";
+  requestId: string;
   agentId: string;
   sessionId?: string;
   executionId?: ExecutionId;
@@ -1082,6 +1094,7 @@ export type BridgeMessage =
   | AgentKeyValidatedMessage
   | AgentTitleGeneratedMessage
   | AgentSessionCreatedMessage
+  | AgentSessionClosedMessage
   | AgentAgentInitializedMessage
   | AgentAuthCompletedMessage
   | AgentSessionUpdateMessage

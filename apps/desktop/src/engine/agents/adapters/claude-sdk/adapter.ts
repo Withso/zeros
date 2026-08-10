@@ -971,7 +971,11 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // hierarchy); a persisted per-chat mode overrides via reconcile.
       permissionMode: resolveDefaultPermissionMode(opts.cwd),
       claudeSessionId: null,
-      legacySessionId: null,
+      // Protocol-v8 builds persisted chats.session_id and can only reopen a
+      // Claude session directory by this Zeros locator. Keep it as the
+      // downgrade mirror while the durable binding itself uses Claude's native
+      // session id once the init event arrives.
+      legacySessionId: zerosSessionId,
       query: null,
       input: new InputQueue<SDKUserMessage>(),
       consumer: null,

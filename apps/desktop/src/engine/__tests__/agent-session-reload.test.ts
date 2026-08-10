@@ -12,8 +12,9 @@ import type { EngineMessage } from "../types";
 import { ZerosEngine } from "../index";
 import { MessageRouter } from "../transport/router";
 import type { TransportClient } from "../transport/types";
-import { closeZerosDb, setZerosDbPathForTesting } from "../db";
-import { upsertChat } from "../db/chats";
+import { closeZerosDb, openZerosDb, setZerosDbPathForTesting } from "../db";
+import { getChat, upsertChat } from "../db/chats";
+import { AgentFailureError } from "../agents/types";
 
 interface ActivePromptRecord {
   sessionId: string;
@@ -28,12 +29,23 @@ interface ActivePromptRecord {
 interface TestEngineInternals {
   router: MessageRouter;
   agents: {
+    events: {
+      onSessionUpdate: (agentId: string, notification: unknown) => void;
+      onAgentExit: (
+        agentId: string,
+        code: number | null,
+        signal: string | null,
+        sessionId?: string | null,
+      ) => void;
+    };
     loadSession: (...args: unknown[]) => Promise<unknown>;
     prompt: (...args: unknown[]) => Promise<unknown>;
+    endSession: (...args: unknown[]) => Promise<unknown>;
   };
   sessionAgent: Map<string, string>;
   sessionChat: Map<string, string>;
   conversationExecution: Map<string, string>;
+  conversationBindTokens: Map<string, number>;
   sessionWorkspace: Map<string, string>;
   promptSessions: Set<string>;
   activePromptContexts: Map<string, ActivePromptRecord>;
@@ -136,6 +148,43 @@ describe("agent session continuity across a local renderer reload", () => {
           permissionId: "permission-1",
         }),
       ]),
+    );
+    expect(state.conversationBindTokens.has("chat-1")).toBe(false);
+  });
+
+  it("prefers the chat's live execution over a stale explicit reload route", async () => {
+    const engine = new ZerosEngine({ root: process.cwd(), port: 29_887 });
+    const state = internals(engine);
+    const { client, messages } = testClient();
+    state.router.register(client);
+    state.sessionAgent.set("execution-live", "codex");
+    state.sessionChat.set("execution-live", "chat-live");
+    state.conversationExecution.set("chat-live", "execution-live");
+    state.sessionLoadResponses.set("execution-live", {});
+    const loadSession = vi.spyOn(state.agents, "loadSession");
+
+    await state.handleMessage(
+      {
+        type: "AGENT_LOAD_SESSION",
+        id: "load-stale-explicit",
+        source: "browser",
+        timestamp: 1,
+        agentId: "codex",
+        chatId: "chat-live",
+        executionId: "execution-dead",
+      },
+      client,
+    );
+
+    expect(loadSession).not.toHaveBeenCalled();
+    expect(messages).toEqual([
+      expect.objectContaining({
+        type: "AGENT_SESSION_LOADED",
+        executionId: "execution-live",
+      }),
+    ]);
+    expect(state.conversationExecution.get("chat-live")).toBe(
+      "execution-live",
     );
   });
 
@@ -291,6 +340,149 @@ describe("agent session continuity across a local renderer reload", () => {
     ]);
   });
 
+  it("never degrades a dead executionId into a provider resume locator", async () => {
+    const engine = new ZerosEngine({ root: process.cwd(), port: 29_895 });
+    const state = internals(engine);
+    const { client, messages } = testClient();
+    state.router.register(client);
+    const loadSession = vi.spyOn(state.agents, "loadSession");
+
+    await state.handleMessage(
+      {
+        type: "AGENT_LOAD_SESSION",
+        id: "load-dead-execution",
+        source: "browser",
+        timestamp: 1,
+        agentId: "codex",
+        executionId: "dead-zeros-route",
+        cwd: process.cwd(),
+      },
+      client,
+    );
+
+    expect(loadSession).not.toHaveBeenCalled();
+    expect(messages).toEqual([
+      expect.objectContaining({
+        type: "AGENT_ERROR",
+        failure: expect.objectContaining({ kind: "session-expired" }),
+      }),
+    ]);
+  });
+
+  it("registers owner, chat, agent, and workspace before adapter resume emits", async () => {
+    const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-early-route-"));
+    setZerosDbPathForTesting(path.join(dbDir, "zeros.db"));
+    try {
+      const engine = new ZerosEngine({ root: process.cwd(), port: 29_894 });
+      const state = internals(engine);
+      const { client: owner, messages: ownerMessages } = testClient("owner");
+      const { client: observer, messages: observerMessages } = testClient(
+        "observer",
+        "cloud",
+      );
+      state.router.register(owner);
+      state.router.register(observer);
+
+      let finishLoad!: (response: LoadSessionResponse) => void;
+      const loadResult = new Promise<LoadSessionResponse>((resolve) => {
+        finishLoad = resolve;
+      });
+      vi.spyOn(state.agents, "loadSession").mockImplementation(
+        async (...args: unknown[]) => {
+          const opts = args[2] as {
+            onExecutionCreated?: (executionId: string) => void;
+          };
+          expect(opts.onExecutionCreated).toBeTypeOf("function");
+          opts.onExecutionCreated?.("execution-during-load");
+          return loadResult;
+        },
+      );
+
+      const pending = state.handleMessage(
+        {
+          type: "AGENT_LOAD_SESSION",
+          id: "load-with-early-route",
+          source: "browser",
+          timestamp: 1,
+          agentId: "codex",
+          chatId: "chat-during-load",
+          providerBinding: {
+            version: 1,
+            providerId: "codex",
+            kind: "native",
+            resumeId: "thread-during-load",
+          },
+          cwd: process.cwd(),
+        },
+        owner,
+      );
+
+      await vi.waitFor(() => {
+        expect(state.sessionAgent.get("execution-during-load")).toBe("codex");
+      });
+      expect(state.router.ownerOf("execution-during-load")).toBe(owner.id);
+      expect(state.sessionChat.get("execution-during-load")).toBe(
+        "chat-during-load",
+      );
+      expect(state.conversationExecution.get("chat-during-load")).toBe(
+        "execution-during-load",
+      );
+      expect(state.sessionWorkspace.has("execution-during-load")).toBe(true);
+      const workspaceId = state.sessionWorkspace.get("execution-during-load")!;
+      openZerosDb()
+        .prepare(
+          "INSERT INTO remote_restricted_workspaces (workspace_id) VALUES (?)",
+        )
+        .run(workspaceId);
+
+      state.agents.events.onSessionUpdate("codex", {
+        executionId: "execution-during-load",
+        sessionId: "execution-during-load",
+        update: {
+          sessionUpdate: "current_mode_update",
+          currentModeId: "auto",
+        },
+      });
+      expect(ownerMessages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: "AGENT_SESSION_UPDATE" }),
+        ]),
+      );
+      expect(observerMessages).toEqual([]);
+
+      finishLoad({ executionId: "execution-during-load" });
+      await pending;
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+      fs.rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
+  it("removes a dead idle execution before a later conversation probe", async () => {
+    const engine = new ZerosEngine({ root: process.cwd(), port: 29_893 });
+    const state = internals(engine);
+    const { client } = testClient();
+    state.router.register(client);
+    state.router.setOwner("dead-execution", client.id);
+    state.sessionAgent.set("dead-execution", "codex");
+    state.sessionChat.set("dead-execution", "chat-dead");
+    state.conversationExecution.set("chat-dead", "dead-execution");
+    const endSession = vi
+      .spyOn(state.agents, "endSession")
+      .mockResolvedValue(undefined);
+
+    state.agents.events.onAgentExit("codex", 1, null, "dead-execution");
+
+    expect(state.router.ownerOf("dead-execution")).toBeUndefined();
+    expect(state.sessionAgent.has("dead-execution")).toBe(false);
+    expect(state.sessionChat.has("dead-execution")).toBe(false);
+    expect(state.conversationExecution.has("chat-dead")).toBe(false);
+    await vi.waitFor(() => {
+      expect(endSession).toHaveBeenCalledWith("codex", "dead-execution");
+    });
+  });
+
   it("resumes from the chat row when the renderer missed a late provider binding", async () => {
     const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-bind-reload-"));
     setZerosDbPathForTesting(path.join(dbDir, "zeros.db"));
@@ -370,6 +562,89 @@ describe("agent session continuity across a local renderer reload", () => {
     }
   });
 
+  it("publishes a chat invalidation when a definitive resume miss clears its binding", async () => {
+    const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-expired-bind-"));
+    setZerosDbPathForTesting(path.join(dbDir, "zeros.db"));
+    const providerBinding = {
+      version: 1 as const,
+      providerId: "codex",
+      kind: "native" as const,
+      resumeId: "expired-thread",
+    };
+    try {
+      upsertChat({
+        id: "expired-conversation",
+        folder: process.cwd(),
+        agentId: "codex",
+        agentName: "Codex",
+        model: null,
+        effort: "high",
+        permissionMode: "auto",
+        lastModeId: null,
+        prePlanModeId: null,
+        fast: false,
+        additionalDirectories: [],
+        title: "Expired conversation",
+        createdAt: 1,
+        updatedAt: 1,
+        sessionId: providerBinding.resumeId,
+        providerBinding,
+        providerMetadata: null,
+        pinned: false,
+        archived: true,
+        sourceChatId: null,
+        kind: "chat",
+      });
+      const engine = new ZerosEngine({ root: process.cwd(), port: 29_897 });
+      const state = internals(engine);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      vi.spyOn(state.agents, "loadSession").mockRejectedValue(
+        new AgentFailureError({
+          kind: "session-expired",
+          stage: "loadSession",
+          message: "Provider thread no longer exists",
+        }),
+      );
+
+      await state.handleMessage(
+        {
+          type: "AGENT_LOAD_SESSION",
+          id: "load-expired-binding",
+          source: "browser",
+          timestamp: 1,
+          agentId: "codex",
+          chatId: "expired-conversation",
+          providerBinding,
+          cwd: process.cwd(),
+        },
+        client,
+      );
+
+      expect(getChat("expired-conversation")).toMatchObject({
+        sessionId: null,
+        providerBinding: null,
+        providerMetadata: null,
+      });
+      expect(messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "DB_CHANGED",
+            kinds: ["chats"],
+          }),
+          expect.objectContaining({
+            type: "AGENT_ERROR",
+            failure: expect.objectContaining({ kind: "session-expired" }),
+          }),
+        ]),
+      );
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+      fs.rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps session-to-agent identity when only the local renderer disconnects", () => {
     const engine = new ZerosEngine({ root: process.cwd(), port: 29_881 });
     const state = internals(engine);
@@ -389,6 +664,44 @@ describe("agent session continuity across a local renderer reload", () => {
 // spawned here, but ownership of a LIVE turn — its stream, its replayed
 // permission cards, and the chat its transcript is written to — still moves.
 describe("re-adoption keeps the remote trust boundary", () => {
+  it("refuses a raw provider binding that is not attached to an accessible chat", async () => {
+    const engine = new ZerosEngine({ root: process.cwd(), port: 29_888 });
+    const state = internals(engine);
+    const { client: relay, messages } = testClient("relay-1", "cloud");
+    state.router.register(relay);
+    vi.spyOn(state.workspace, "resolveCwd").mockReturnValue(process.cwd());
+    vi.spyOn(state.pty, "isWithinAllowed").mockReturnValue(true);
+    const loadSession = vi
+      .spyOn(state.agents, "loadSession")
+      .mockResolvedValue({ executionId: "should-not-load" });
+
+    await state.handleMessage(
+      {
+        type: "AGENT_LOAD_SESSION",
+        id: "raw-remote-binding",
+        source: "browser",
+        timestamp: 1,
+        agentId: "codex",
+        workspaceId: "workspace-1",
+        providerBinding: {
+          version: 1,
+          providerId: "codex",
+          kind: "native",
+          resumeId: "thread-from-another-workspace",
+        },
+      },
+      relay,
+    );
+
+    expect(loadSession).not.toHaveBeenCalled();
+    expect(messages).toEqual([
+      expect.objectContaining({
+        type: "AGENT_ERROR",
+        code: "AGENT_PROTOCOL_ERROR",
+      }),
+    ]);
+  });
+
   it("refuses a remote client that names no managed workspace", async () => {
     const engine = new ZerosEngine({ root: process.cwd(), port: 29_882 });
     const state = internals(engine);

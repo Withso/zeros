@@ -341,6 +341,7 @@ describe("ClaudeSdkAdapter", () => {
           providerId: "claude",
           kind: "native",
           resumeId: "claude-native-1",
+          legacySessionId: "zeros-execution-1",
         },
       },
     });

@@ -59,10 +59,12 @@ vi.mock("../../../session-paths", () => ({
     log: "/tmp/s/log",
     telemetry: "/tmp/s/tel",
   })),
+  writeSessionMeta: vi.fn(async () => {}),
   removeSessionDir: vi.fn(async () => {}),
 }));
 
 import { CodexAppServerAdapter } from "../app-server-adapter";
+import { writeSessionMeta } from "../../../session-paths";
 
 function makeAdapter() {
   const ctx = {
@@ -109,6 +111,14 @@ describe("CodexAppServerAdapter.disposeSession", () => {
         git: { sha: "abc", branch: "main", originUrl: null },
       },
     });
+    expect(writeSessionMeta).toHaveBeenCalledWith(
+      "zeros-execution-1",
+      expect.objectContaining({
+        agentId: "codex",
+        cwd: "/tmp/proj",
+        pid: process.pid,
+      }),
+    );
     await adapter.disposeSession(session.executionId);
   });
 

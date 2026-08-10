@@ -250,6 +250,75 @@ describe("UPDATE_CHAT_SETTINGS preserves pane focus", () => {
       "legacy-directory",
     );
   });
+
+  it("preserves a same-family legacy locator while repairing a missing agent id", () => {
+    dispatch()({
+      type: "HYDRATE_CHATS",
+      chats: [
+        {
+          ...chat("legacy-auto-bind", A, 100),
+          agentId: null,
+          agentName: "Codex",
+          sessionId: "legacy-thread-1",
+        },
+      ],
+      activeChatId: "legacy-auto-bind",
+    });
+
+    dispatch()({
+      type: "UPDATE_CHAT_SETTINGS",
+      id: "legacy-auto-bind",
+      updates: {
+        agentId: "codex",
+        agentName: "Codex",
+        sessionId: "legacy-thread-1",
+        providerBinding: undefined,
+        providerMetadata: undefined,
+      },
+    });
+
+    expect(
+      state().chats.find((item) => item.id === "legacy-auto-bind"),
+    ).toMatchObject({
+      agentId: "codex",
+      sessionId: "legacy-thread-1",
+    });
+  });
+
+  it("treats an explicit session reset as a provider identity reset", () => {
+    dispatch()({
+      type: "HYDRATE_CHATS",
+      chats: [
+        {
+          ...chat("same-agent-reset", A, 100),
+          agentId: "codex",
+          sessionId: "thread-1",
+          providerBinding: {
+            version: 1,
+            providerId: "codex",
+            kind: "native",
+            resumeId: "thread-1",
+          },
+          providerMetadata: { version: 1 },
+        },
+      ],
+      activeChatId: "same-agent-reset",
+    });
+
+    dispatch()({
+      type: "UPDATE_CHAT_SETTINGS",
+      id: "same-agent-reset",
+      updates: { model: "gpt-5", sessionId: undefined },
+    });
+
+    expect(
+      state().chats.find((item) => item.id === "same-agent-reset"),
+    ).toMatchObject({
+      providerBinding: undefined,
+      providerMetadata: undefined,
+      sessionId: undefined,
+    });
+  });
 });
 
 describe("DELETE_CHAT stays in the same workspace", () => {

@@ -427,6 +427,15 @@ describe("explicit session close during a live turn", () => {
         state: "cancelled",
         stopReason: "cancelled",
       });
+      expect(messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "AGENT_SESSION_CLOSED",
+            requestId: "close-req-1",
+            chatId: "chat-1",
+          }),
+        ]),
+      );
     },
   );
 
@@ -527,6 +536,27 @@ describe("explicit session close during a live turn", () => {
       true,
     );
     expect(endSession).toHaveBeenCalledWith("claude", "session-1");
+  });
+
+  it("retries disposal for an explicit local route after routing maps were lost", async () => {
+    const { state } = testEngine(29_938);
+    const { client, messages } = testClient();
+    state.router.register(client);
+    const endSession = vi
+      .spyOn(state.agents, "endSession")
+      .mockResolvedValue(undefined);
+
+    await state.handleMessage(closeMessage("codex"), client);
+
+    expect(endSession).toHaveBeenCalledWith("codex", "session-1");
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "AGENT_SESSION_CLOSED",
+          requestId: "close-req-1",
+        }),
+      ]),
+    );
   });
 });
 

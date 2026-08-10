@@ -779,6 +779,8 @@ export class AgentGateway {
        *  Advanced. Threaded down to the adapter so the per-turn spawn
        *  uses this in place of the registry's `cliBinary`. */
       cliBinary?: string;
+      /** Publish the engine-owned route before adapter.newSession can emit. */
+      onExecutionCreated?: (executionId: string) => void;
     } = {},
   ): Promise<NewSessionResponse> {
     const adapter = await this.adapterFor(agentId);
@@ -833,14 +835,22 @@ export class AgentGateway {
       instructionCtx,
     );
     const executionId = randomUUID();
-    const { session } = await adapter.newSession({
-      executionId,
-      cwd,
-      env: spawn.env,
-      cliBinary: spawn.cliBinary,
-      mcpServers: await this.resolveSessionMcp(agentId, cwd, mainRepoRoot),
-      ...(systemInstruction ? { systemInstruction } : {}),
-    });
+    const mcpServers = await this.resolveSessionMcp(agentId, cwd, mainRepoRoot);
+    opts.onExecutionCreated?.(executionId);
+    let session: NewSessionResponse;
+    try {
+      ({ session } = await adapter.newSession({
+        executionId,
+        cwd,
+        env: spawn.env,
+        cliBinary: spawn.cliBinary,
+        mcpServers,
+        ...(systemInstruction ? { systemInstruction } : {}),
+      }));
+    } catch (err) {
+      await this.disposeRejectedExecutions(adapter, [executionId]);
+      throw err;
+    }
     if (
       session.executionId !== executionId ||
       session.sessionId !== executionId
@@ -892,6 +902,9 @@ export class AgentGateway {
       env?: Record<string, string>;
       workspaceId?: string;
       cliBinary?: string;
+      /** Publish the engine-owned route before adapter.loadSession can emit
+       * updates. The caller must remove provisional routing if load rejects. */
+      onExecutionCreated?: (executionId: string) => void;
     } = {},
   ): Promise<LoadSessionResponse> {
     const providerBinding =
@@ -935,17 +948,28 @@ export class AgentGateway {
       cwd,
       instructionCtx,
     );
-    const response = await adapter.loadSession({
-      executionId,
-      providerBinding,
-      // Compatibility for adapters/tests that have not yet adopted bindings.
-      sessionId: providerBinding.legacySessionId ?? providerBinding.resumeId,
-      cwd,
-      env: spawn.env,
-      cliBinary: spawn.cliBinary,
-      mcpServers: await this.resolveSessionMcp(agentId, cwd, mainRepoRoot),
-      ...(systemInstruction ? { systemInstruction } : {}),
-    });
+    const mcpServers = await this.resolveSessionMcp(agentId, cwd, mainRepoRoot);
+    opts.onExecutionCreated?.(executionId);
+    let response: LoadSessionResponse;
+    try {
+      response = await adapter.loadSession({
+        executionId,
+        providerBinding,
+        // Compatibility for adapters/tests that have not yet adopted bindings.
+        sessionId: providerBinding.legacySessionId ?? providerBinding.resumeId,
+        cwd,
+        env: spawn.env,
+        cliBinary: spawn.cliBinary,
+        mcpServers,
+        ...(systemInstruction ? { systemInstruction } : {}),
+      });
+    } catch (err) {
+      // Adapters may allocate a subprocess/session directory before discovering
+      // that the provider locator is invalid. A rejected load must not strand
+      // that provisional execution after its engine route is torn down.
+      await this.disposeRejectedExecutions(adapter, [executionId]);
+      throw err;
+    }
     if (response.executionId && response.executionId !== executionId) {
       await this.disposeRejectedExecutions(adapter, [executionId]);
       throw new AgentFailureError({

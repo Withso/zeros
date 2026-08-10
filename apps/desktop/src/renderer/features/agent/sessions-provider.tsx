@@ -105,6 +105,7 @@ import {
   queueReleaseAction,
   recoveredSessionIdentity,
   recoveryLoadLocator,
+  resumeFailureInvalidatesBinding,
   shouldQueuePrompt,
   statusForFailure,
   takePrebindDirty,
@@ -135,6 +136,10 @@ import {
   releaseTranscriptRequest,
   shouldEvictTranscriptPayload,
 } from "./transcript-retention";
+import {
+  closeActivityForSession,
+  closeRouteForSession,
+} from "./session-close-lifecycle";
 
 // 2026-06-09: reconcile now runs on EVERY bind (new session, respawn, resume).
 // It used to run at most once per chat to avoid clobbering a mode the user
@@ -3710,6 +3715,21 @@ export function AgentSessionsProvider({
             });
             return false;
           }
+          // The provider confirmed this exact durable conversation no longer
+          // exists. Let ChatView atomically forget the binding and create a
+          // fresh execution now; retaining it would repeat the same failed
+          // resume on every reopen. Temporary/auth failures deliberately keep
+          // the binding and continue through the ordinary failure UI.
+          if (providerBinding && resumeFailureInvalidatesBinding(failure)) {
+            getStore().patchSession(chatId, {
+              status: "warming",
+              providerBinding: null,
+              providerMetadata: null,
+              error: null,
+              failure: null,
+            });
+            return false;
+          }
           getStore().patchSession(chatId, {
             status: statusForFailure(failure),
             error: failure.message,
@@ -3807,6 +3827,20 @@ export function AgentSessionsProvider({
           stage: "loadSession",
           error: err,
         });
+        // Most engine failures arrive as AGENT_ERROR responses above, but a
+        // bridge implementation may reject its RPC with the same structured
+        // session-expired failure. Keep both transport shapes on the identical
+        // self-heal path so a dead provider locator cannot wedge every reopen.
+        if (providerBinding && resumeFailureInvalidatesBinding(failure)) {
+          getStore().patchSession(chatId, {
+            status: "warming",
+            providerBinding: null,
+            providerMetadata: null,
+            error: null,
+            failure: null,
+          });
+          return false;
+        }
         getStore().patchSession(chatId, {
           status: statusForFailure(failure),
           error: failure.message,
@@ -3835,6 +3869,15 @@ export function AgentSessionsProvider({
 
   const getSession = useCallback<SessionsActions["getSession"]>(
     (chatId) => getStore().sessions[chatId],
+    [getStore],
+  );
+
+  const getCloseActivity = useCallback<SessionsActions["getCloseActivity"]>(
+    (chatId) =>
+      closeActivityForSession(getStore().sessions[chatId], {
+        localSendInFlight: sendingChatsRef.current.has(chatId),
+        queuedCount: sendQueueRef.current.get(chatId)?.length ?? 0,
+      }),
     [getStore],
   );
 
@@ -3880,24 +3923,18 @@ export function AgentSessionsProvider({
         useWorkspaceStore.getState().chats.find((chat) => chat.id === chatId)
           ?.agentId;
       if (bridge && agentId) {
-        // request() deliberately makes this fire-and-forget frame use the
-        // bridge's bounded reconnect queue. AGENT_CLOSE_SESSION has no reply,
-        // so the short timeout is swallowed after delivery; a transient socket
-        // gap must not turn tab close into "keep working invisibly".
+        // request() gives the lifecycle transaction a correlated acknowledgement
+        // while still using the bridge's bounded reconnect queue. A transient
+        // socket gap must not turn tab close into "keep working invisibly".
         void bridge
           .request(
             {
               type: "AGENT_CLOSE_SESSION",
               agentId,
               chatId,
-              ...(slot.sessionId
-                ? {
-                    executionId: slot.executionId ?? slot.sessionId,
-                    sessionId: slot.sessionId,
-                  }
-                : {}),
+              ...closeRouteForSession(slot),
             },
-            { timeoutMs: 1_000 },
+            { timeoutMs: 15_000 },
           )
           .catch(() => {});
       }
@@ -3916,6 +3953,7 @@ export function AgentSessionsProvider({
   const actions = useMemo<SessionsActions>(
     () => ({
       getSession,
+      getCloseActivity,
       listAgents,
       initAgent,
       ensureSession,
@@ -3943,6 +3981,7 @@ export function AgentSessionsProvider({
     }),
     [
       getSession,
+      getCloseActivity,
       listAgents,
       initAgent,
       ensureSession,

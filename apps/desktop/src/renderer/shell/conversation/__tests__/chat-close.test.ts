@@ -5,6 +5,7 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  chatCloseConfirmation,
   draftHasContent,
   isChatDiscardableOnClose,
   messageCountForChatClose,
@@ -152,5 +153,58 @@ describe("tabCloseResourceAction", () => {
     expect(tabCloseResourceAction({ kind: "terminal", discard: false })).toBe(
       "kill-terminal",
     );
+  });
+});
+
+describe("chatCloseConfirmation", () => {
+  it("asks before stopping a running turn for every provider", () => {
+    for (const agentName of ["Claude", "Codex", "Cursor"]) {
+      expect(
+        chatCloseConfirmation({
+          agentName,
+          running: true,
+          queuedCount: 0,
+        }),
+      ).toEqual({
+        title: "Close running chat?",
+        description: `This chat is currently running. Closing it will stop ${agentName}.`,
+      });
+    }
+  });
+
+  it("warns that queued prompts will be discarded", () => {
+    expect(
+      chatCloseConfirmation({
+        agentName: "Claude",
+        running: true,
+        queuedCount: 2,
+      }),
+    ).toEqual({
+      title: "Close running chat?",
+      description:
+        "This chat is currently running. Closing it will stop Claude and discard 2 queued messages.",
+    });
+
+    expect(
+      chatCloseConfirmation({
+        agentName: "Codex",
+        running: false,
+        queuedCount: 1,
+      }),
+    ).toEqual({
+      title: "Close chat with queued message?",
+      description:
+        "Closing this chat will discard its queued message before it is sent.",
+    });
+  });
+
+  it("does not interrupt an ordinary idle close", () => {
+    expect(
+      chatCloseConfirmation({
+        agentName: "Cursor",
+        running: false,
+        queuedCount: 0,
+      }),
+    ).toBeNull();
   });
 });
