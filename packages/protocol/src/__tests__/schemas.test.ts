@@ -190,6 +190,25 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
     ).toThrow(/executionId\/chatId\/providerBinding/);
   });
 
+  it("accepts a conversation-only close while its execution is still binding", () => {
+    const b = { ...base, source: "browser" as const };
+    expect(
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_CLOSE_SESSION",
+        agentId: "claude",
+        chatId: "conversation-1",
+      }).type,
+    ).toBe("AGENT_CLOSE_SESSION");
+    expect(() =>
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_CLOSE_SESSION",
+        agentId: "claude",
+      }),
+    ).toThrow(/executionId\/chatId/);
+  });
+
   it("validates live model changes against the execution route", () => {
     const b = { ...base, source: "browser" as const };
     expect(

@@ -66,8 +66,9 @@ another product identity or route namespace.
    native handle is known.
 4. The engine routes all live events by `executionId` and binds that execution
    to the conversation in memory.
-5. The renderer persists only the provider binding and metadata. It never
-   writes the execution ID to the chat row.
+5. The engine persists only the provider binding and metadata; the renderer
+   mirrors those durable fields into its chat state. Neither writes the
+   execution ID to the chat row.
 
 ### Renderer reload or tab remount
 
@@ -87,9 +88,12 @@ identity remain unchanged.
 
 A provider may reveal or replace its native handle after startup. The adapter
 emits `provider_binding_update` on the current execution. The engine caches and
-forwards it; the renderer applies it only when the event belongs to the chat's
-exact current execution, then persists the binding. The update never rekeys the
-live route or changes the conversation.
+forwards it and atomically writes it to the chat row; the renderer applies it
+only when the event belongs to the chat's exact current execution and mirrors
+the binding into its local chat state. The engine write matters for Claude,
+whose native resume id arrives in the first streamed init event: an immediate
+tab close cannot unmount React before the durable handle reaches SQLite. The
+update never rekeys the live route or changes the conversation.
 
 ### Agent switch
 
@@ -101,19 +105,19 @@ dispatcher.
 
 ### Tab close, execution close, archive, and delete
 
-Closing a used chat tab is navigation, not cancellation. The conversation is
-archived out of the visible strip, while an active turn, queued sends,
-permission/question gate, background task, or foreground workflow keeps its
-execution alive. When that work becomes idle, the renderer explicitly closes
-the execution and removes both directions of the in-memory
-conversation/execution mapping. Reopening from History before then cancels the
-deferred close and reuses the exact live route.
+Closing any chat tab is an explicit stop boundary. The renderer discards queued
+follow-ups and invalidates create/resume work even when no execution route has
+been published yet. The engine cancels and settles every accepted turn for the
+conversation before disposing its Claude, Codex, or Cursor execution and
+removing both directions of the in-memory conversation/execution mapping.
 
-A pristine discarded tab can close immediately. Explicit reset/delete and
-workspace lifecycle operations cancel and settle an accepted turn before they
-dispose its execution. In every case, durable chat state and the provider
-binding remain available according to the conversation's archive/delete
-policy; provider thread APIs never own that product lifecycle.
+Tab close does not delete provider history. A used conversation is archived out
+of the visible strip with its transcript and durable provider binding intact.
+Restoring it from History and sending again creates a fresh `executionId` and
+resumes the same provider conversation. Create/load for that conversation waits
+for any active close transaction to finish, so provider resume never overlaps
+cancel/dispose of the old execution. A pristine unused tab may still be
+discarded, while provider thread APIs never own archive/delete policy.
 
 ## Wire compatibility
 

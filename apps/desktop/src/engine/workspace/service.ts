@@ -708,12 +708,15 @@ const REMOTE_WRITE_DENYLIST = [
  *      durable conversation. Protocol-v8 peers predating these fields omit them;
  *      their routine sync must not detach every host conversation.
  *  On a remote upsert we keep whatever the host already persisted (or the safe
- *  default for a brand-new chat) for capabilities. A valid provider binding can
- *  advance through sync, but an absent/cross-provider binding preserves the
- *  host copy and its matching metadata. Local desktop writes bypass this
- *  entirely. See the remote-client trust boundary. */
-function preserveHostOnlyFields(c: ChatRow): ChatRow {
-  const existing = getChat(c.id);
+ *  default for a brand-new chat) for capabilities. Provider identity is
+ *  slightly different: the engine can learn it from a stream immediately
+ *  before the local renderer archives/unmounts, so an incomplete SAME-agent
+ *  write from either client must preserve the newer DB value. Changing agent
+ *  is still the explicit clear boundary. See the remote-client trust boundary. */
+function preserveProviderIdentity(
+  c: ChatRow,
+  existing: ChatRow | null = getChat(c.id),
+): ChatRow {
   const incomingProviderBinding =
     c.providerBinding?.providerId === c.agentId ? c.providerBinding : null;
   const existingProviderBinding =
@@ -731,10 +734,17 @@ function preserveHostOnlyFields(c: ChatRow): ChatRow {
     : (existing?.providerMetadata ?? null);
   return {
     ...c,
-    additionalDirectories: existing?.additionalDirectories ?? [],
-    fast: existing?.fast ?? false,
     providerBinding,
     providerMetadata: providerBinding ? providerMetadata : null,
+  };
+}
+
+function preserveHostOnlyFields(c: ChatRow): ChatRow {
+  const existing = getChat(c.id);
+  return {
+    ...preserveProviderIdentity(c, existing),
+    additionalDirectories: existing?.additionalDirectories ?? [],
+    fast: existing?.fast ?? false,
   };
 }
 
@@ -3461,7 +3471,11 @@ export class WorkspaceService {
       }
       case "chats.upsert": {
         const c = coerceChatRow(params.chat);
-        if (c) upsertChat(remote ? preserveHostOnlyFields(c) : c);
+        if (c) {
+          upsertChat(
+            remote ? preserveHostOnlyFields(c) : preserveProviderIdentity(c),
+          );
+        }
         return { ok: true };
       }
       case "chats.delete": {
@@ -3480,7 +3494,9 @@ export class WorkspaceService {
         const rows = raw
           .map(coerceChatRow)
           .filter((c): c is ChatRow => c !== null)
-          .map((c) => (remote ? preserveHostOnlyFields(c) : c));
+          .map((c) =>
+            remote ? preserveHostOnlyFields(c) : preserveProviderIdentity(c),
+          );
         bulkUpsertChats(rows);
         return { ok: true };
       }

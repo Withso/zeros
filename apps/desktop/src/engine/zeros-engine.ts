@@ -142,6 +142,8 @@ import {
 import {
   coerceProviderBinding,
   legacyProviderBinding,
+  type ProviderBinding,
+  type ProviderMetadata,
 } from "@zeros/protocol/identities";
 import { upsertChatMessagesBulk } from "./db/messages";
 import {
@@ -151,7 +153,11 @@ import {
   clearTurnSnapshots,
   type TurnFile,
 } from "./db/turns";
-import { getChatLocation } from "./db/chats";
+import {
+  getChat,
+  getChatLocation,
+  updateChatProviderIdentity,
+} from "./db/chats";
 import {
   authoredPathsFromMessages,
   deleteSnapshotRefs,
@@ -453,6 +459,16 @@ export class ZerosEngine {
   /** Durable Zeros conversation → current live execution. Renderer reloads
    * re-adopt through this map without persisting an ephemeral execution id. */
   private readonly conversationExecution = new Map<string, string>();
+  /** Latest provider-bind intent per Zeros conversation. A tab close removes
+   * the token, and a newer create/load replaces it, so an older adapter result
+   * can be disposed instead of publishing an orphan execution after the user's
+   * lifecycle intent has already changed. Tokens are process-monotonic. */
+  private conversationBindSerial = 0;
+  private readonly conversationBindTokens = new Map<string, number>();
+  /** Conversation closes are cancellation+dispose transactions. A rapid
+   * History restore waits for the exact close already in progress before it
+   * asks any provider to resume the durable binding. */
+  private readonly conversationCloseFlights = new Map<string, Promise<void>>();
   /** Agent sessionId → its workspaceId. Lets the engine withhold a session in a
    *  remote-restricted workspace from relay devices: its stream +
    *  permission prompts go to LOCAL clients only, and a relay client may not act
@@ -1113,6 +1129,12 @@ export class ZerosEngine {
                 ? { providerMetadata: notification.update.providerMetadata }
                 : {}),
             });
+            this.persistProviderIdentityForChat(
+              this.sessionChat.get(executionId),
+              agentId,
+              notification.update.providerBinding,
+              notification.update.providerMetadata,
+            );
           }
           this.routeSessionScoped(
             executionId,
@@ -1976,6 +1998,80 @@ export class ZerosEngine {
     return tracked;
   }
 
+  private beginConversationBind(
+    conversationId: string | undefined,
+  ): number | null {
+    if (!conversationId) return null;
+    const token = ++this.conversationBindSerial;
+    this.conversationBindTokens.set(conversationId, token);
+    return token;
+  }
+
+  /** The engine learns provider identity at creation/resume and sometimes
+   * later from the stream (Claude init). Persist at every authoritative point
+   * so renderer unmount can never be the durability boundary. */
+  private persistProviderIdentityForChat(
+    chatId: string | undefined,
+    agentId: string,
+    providerBinding: ProviderBinding | null | undefined,
+    providerMetadata?: ProviderMetadata | null,
+  ): void {
+    if (!chatId || !providerBinding) return;
+    try {
+      updateChatProviderIdentity(
+        chatId,
+        agentId,
+        providerBinding,
+        providerMetadata,
+      );
+    } catch (err) {
+      // Identity durability is best-effort at the engine boundary; never break
+      // provider startup/streaming. The renderer's chat-state mirror remains a
+      // second write path whenever its surface stays mounted.
+      console.warn(
+        `[agents] failed to persist provider binding for chat ${chatId}: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    }
+  }
+
+  private conversationBindIsCurrent(
+    conversationId: string | undefined,
+    token: number | null,
+  ): boolean {
+    return (
+      !conversationId ||
+      token === null ||
+      this.conversationBindTokens.get(conversationId) === token
+    );
+  }
+
+  private invalidateConversationBind(conversationId: string | undefined): void {
+    if (conversationId) this.conversationBindTokens.delete(conversationId);
+  }
+
+  private async waitForConversationClose(
+    conversationId: string | undefined,
+  ): Promise<void> {
+    if (!conversationId) return;
+    for (;;) {
+      const flight = this.conversationCloseFlights.get(conversationId);
+      if (!flight) return;
+      await flight.catch(() => {});
+    }
+  }
+
+  private staleConversationBindFailure(
+    stage: "newSession" | "loadSession",
+  ): AgentFailureError {
+    return new AgentFailureError({
+      kind: "session-expired",
+      stage,
+      message:
+        "The conversation was closed or superseded while its agent session was starting.",
+    });
+  }
+
   /** Drain work admitted before archive/delete acquired its lifecycle flight.
    *  Looping covers a start that registered just before acquisition while an
    *  earlier one was already being awaited. Fail closed after a bounded wait:
@@ -2392,11 +2488,19 @@ export class ZerosEngine {
           return;
         }
         case "AGENT_NEW_SESSION": {
+          const bindToken = this.beginConversationBind(msg.chatId);
+          await this.waitForConversationClose(msg.chatId);
+          if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
+            throw this.staleConversationBindFailure("newSession");
+          }
           const spawnOpts = await this.agentSpawnOpts(
             msg,
             client,
             "newSession",
           );
+          if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
+            throw this.staleConversationBindFailure("newSession");
+          }
           const lifecycleWorkspaceId = this.workspaceIdForProcess(
             spawnOpts.workspaceId,
             spawnOpts.cwd,
@@ -2417,6 +2521,9 @@ export class ZerosEngine {
               this.assertAgentWorkspaceProcessStartAllowed(
                 lifecycleWorkspaceId,
               );
+              if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
+                throw this.staleConversationBindFailure("newSession");
+              }
               const session = await this.agents.newSession(msg.agentId, {
                 cwd: spawnOpts.cwd,
                 env: spawnOpts.env,
@@ -2424,6 +2531,12 @@ export class ZerosEngine {
                 cliBinary: spawnOpts.cliBinary,
               });
               const executionId = session.executionId;
+              if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
+                await this.agents
+                  .endSession(msg.agentId, executionId)
+                  .catch(() => {});
+                throw this.staleConversationBindFailure("newSession");
+              }
               // Publish ownership before the tracked promise resolves so a
               // concurrently-starting reaper can discover and dispose it.
               this.router.setOwner(executionId, client.id);
@@ -2441,6 +2554,12 @@ export class ZerosEngine {
               if (msg.chatId) {
                 this.sessionChat.set(executionId, msg.chatId);
                 this.conversationExecution.set(msg.chatId, executionId);
+                this.persistProviderIdentityForChat(
+                  msg.chatId,
+                  msg.agentId,
+                  session.providerBinding,
+                  session.providerMetadata,
+                );
               }
               if (lifecycleWorkspaceId) {
                 this.sessionWorkspace.set(executionId, lifecycleWorkspaceId);
@@ -2475,6 +2594,32 @@ export class ZerosEngine {
             })(),
           );
           this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+          if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
+            const executionId = session.executionId;
+            const stillRegistered =
+              this.sessionAgent.get(executionId) === msg.agentId;
+            this.router.clearOwner(executionId);
+            this.sessionAgent.delete(executionId);
+            this.sessionChat.delete(executionId);
+            this.sessionWorkspace.delete(executionId);
+            this.sessionMessages.delete(executionId);
+            this.sessionLoadResponses.delete(executionId);
+            this.activePromptContexts.delete(executionId);
+            this.promptSessions.delete(executionId);
+            this.clearPendingAgentInteractions(executionId);
+            if (
+              msg.chatId &&
+              this.conversationExecution.get(msg.chatId) === executionId
+            ) {
+              this.conversationExecution.delete(msg.chatId);
+            }
+            if (stillRegistered) {
+              await this.agents
+                .endSession(msg.agentId, executionId)
+                .catch(() => {});
+            }
+            throw this.staleConversationBindFailure("newSession");
+          }
           if (msg.chatId) {
             // One live agent session per chat. This fresh session supersedes
             // any prior session still bound to the same chat — a model/effort
@@ -2878,40 +3023,138 @@ export class ZerosEngine {
           return;
         }
         case "AGENT_CLOSE_SESSION": {
-          if (this.remoteMayNotActOnSession(msg.sessionId, client, false)) {
+          const requestedExecutionId = msg.executionId ?? msg.sessionId;
+          // A conversation-only close can arrive while create/load is still
+          // awaiting the provider, before sessionWorkspace has an execution
+          // key to authorize. Fall back to the durable chat owner so a paired
+          // device cannot invalidate a bind hidden by the desktop owner's
+          // remote-workspace restriction.
+          if (
+            msg.chatId &&
+            client.kind !== "local" &&
+            this.conversationRestrictedFromRemote(msg.chatId)
+          ) {
             this.refuseSessionAccess(msg.id, msg.agentId, client);
             return;
           }
-          // An explicit close/discard is cancellation, but it still has to
-          // settle the accepted turn BEFORE routing and adapter state vanish.
-          // The old order deleted activePromptContexts first and disposed the
-          // Claude query underneath its prompt promise; when that promise did
-          // not return, the durable turn row remained `running` forever.
-          const promptSettled = await this.cancelLiveAgentSessions([
-            msg.sessionId,
-          ]);
-          const conversationId = this.sessionChat.get(msg.sessionId);
-          this.router.clearOwner(msg.sessionId);
-          this.sessionAgent.delete(msg.sessionId);
-          this.sessionChat.delete(msg.sessionId);
-          this.sessionWorkspace.delete(msg.sessionId);
-          this.sessionMessages.delete(msg.sessionId);
-          this.sessionLoadResponses.delete(msg.sessionId);
-          // A wedged adapter is still owned by the cancel-settle watchdog. Do
-          // not erase its record/timer; it will publish + persist cancellation
-          // even if disposeSession never makes the prompt promise return.
-          if (promptSettled) {
-            this.activePromptContexts.delete(msg.sessionId);
-            this.promptSessions.delete(msg.sessionId);
+          const candidateExecutionIds = new Set<string>();
+          if (requestedExecutionId) {
+            candidateExecutionIds.add(requestedExecutionId);
           }
-          this.clearPendingAgentInteractions(msg.sessionId);
-          if (
-            conversationId &&
-            this.conversationExecution.get(conversationId) === msg.sessionId
-          ) {
-            this.conversationExecution.delete(conversationId);
+          if (msg.chatId) {
+            const mappedExecution = this.conversationExecution.get(msg.chatId);
+            if (mappedExecution) candidateExecutionIds.add(mappedExecution);
+            // A timed-out/retried bind can briefly leave more than one route
+            // attached to a conversation. Closing the tab owns all of them.
+            for (const [executionId, conversationId] of this.sessionChat) {
+              if (conversationId === msg.chatId) {
+                candidateExecutionIds.add(executionId);
+              }
+            }
           }
-          await this.agents.endSession(msg.agentId, msg.sessionId);
+          for (const executionId of candidateExecutionIds) {
+            if (this.remoteMayNotActOnSession(executionId, client, false)) {
+              this.refuseSessionAccess(msg.id, msg.agentId, client);
+              return;
+            }
+          }
+          // Invalidate even when no execution exists yet. A create/resume that
+          // was already awaiting provider startup will dispose its late result;
+          // a later reopen receives a new token and may bind normally.
+          this.invalidateConversationBind(msg.chatId);
+
+          const previousClose = msg.chatId
+            ? this.conversationCloseFlights.get(msg.chatId)
+            : undefined;
+          let releaseClose: (() => void) | undefined;
+          const closeFlight = msg.chatId
+            ? new Promise<void>((resolve) => {
+                releaseClose = resolve;
+              })
+            : null;
+          if (msg.chatId && closeFlight) {
+            // Publish the barrier before the first await. A History restore in
+            // the next task may bind immediately, but it must not hand a
+            // provider its durable resume id while this execution is still
+            // cancelling/disposing that same provider conversation.
+            this.conversationCloseFlights.set(msg.chatId, closeFlight);
+          }
+
+          try {
+            // Do not `await undefined`: even that yields one microtask, which
+            // lets a prompt in its pre-dispatch window reach the adapter before
+            // this first close records cancellation. Only serialized follow-up
+            // closes have an earlier transaction to await.
+            if (previousClose) await previousClose.catch(() => {});
+            const executions = [...candidateExecutionIds]
+              .filter(
+                (executionId) =>
+                  this.sessionAgent.has(executionId) ||
+                  this.sessionChat.has(executionId) ||
+                  this.activePromptContexts.has(executionId) ||
+                  this.promptSessions.has(executionId),
+              )
+              .map((executionId) => ({
+                executionId,
+                agentId: this.sessionAgent.get(executionId) ?? msg.agentId,
+                conversationId: this.sessionChat.get(executionId),
+              }));
+
+            const settlements = await Promise.all(
+              executions.map(({ executionId }) =>
+                this.cancelLiveAgentSessions([executionId]),
+              ),
+            );
+            for (const [index, execution] of executions.entries()) {
+              const { executionId, conversationId } = execution;
+              this.router.clearOwner(executionId);
+              this.sessionAgent.delete(executionId);
+              this.sessionChat.delete(executionId);
+              this.sessionWorkspace.delete(executionId);
+              this.sessionMessages.delete(executionId);
+              this.sessionLoadResponses.delete(executionId);
+              // A wedged adapter is still owned by the cancel-settle watchdog.
+              // Do not erase its record/timer; it will publish + persist
+              // cancellation even if disposeSession never makes the prompt
+              // promise return.
+              if (settlements[index]) {
+                this.activePromptContexts.delete(executionId);
+                this.promptSessions.delete(executionId);
+              }
+              this.clearPendingAgentInteractions(executionId);
+              if (
+                conversationId &&
+                this.conversationExecution.get(conversationId) === executionId
+              ) {
+                this.conversationExecution.delete(conversationId);
+              }
+            }
+            if (msg.chatId) {
+              const currentExecution = this.conversationExecution.get(
+                msg.chatId,
+              );
+              if (
+                currentExecution &&
+                candidateExecutionIds.has(currentExecution)
+              ) {
+                this.conversationExecution.delete(msg.chatId);
+              }
+            }
+            await Promise.all(
+              executions.map(({ agentId, executionId }) =>
+                this.agents.endSession(agentId, executionId),
+              ),
+            );
+          } finally {
+            releaseClose?.();
+            if (
+              msg.chatId &&
+              closeFlight &&
+              this.conversationCloseFlights.get(msg.chatId) === closeFlight
+            ) {
+              this.conversationCloseFlights.delete(msg.chatId);
+            }
+          }
           return;
         }
         case "AGENT_PERMISSION_RESPONSE": {
@@ -3051,6 +3294,11 @@ export class ZerosEngine {
           return;
         }
         case "AGENT_LOAD_SESSION": {
+          const bindToken = this.beginConversationBind(msg.chatId);
+          await this.waitForConversationClose(msg.chatId);
+          if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
+            throw this.staleConversationBindFailure("loadSession");
+          }
           // A renderer persists only the provider binding. On reload it
           // re-adopts the engine's current execution by Zeros conversation id;
           // after an engine restart there is no live route, so the gateway
@@ -3192,6 +3440,9 @@ export class ZerosEngine {
             client,
             "loadSession",
           );
+          if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
+            throw this.staleConversationBindFailure("loadSession");
+          }
           const lifecycleWorkspaceId = this.workspaceIdForProcess(
             loadOpts.workspaceId,
             loadOpts.cwd,
@@ -3201,8 +3452,20 @@ export class ZerosEngine {
             loadOpts.workspaceId,
             loadOpts.cwd,
           );
+          // The renderer may have unmounted between an engine-authoritative
+          // provider_binding_update and its React chat-row mirror. A
+          // conversation-only probe therefore falls back to the durable engine
+          // row before degrading a compatibility sessionId into a legacy
+          // binding. This is also the crash-safe path for a close/reopen in
+          // that narrow window.
+          const persistedProviderBinding = msg.chatId
+            ? getChat(msg.chatId)?.providerBinding
+            : null;
           const providerBinding =
             coerceProviderBinding(msg.providerBinding) ??
+            (persistedProviderBinding?.providerId === msg.agentId
+              ? persistedProviderBinding
+              : null) ??
             (msg.sessionId
               ? legacyProviderBinding(msg.agentId, msg.sessionId)
               : null);
@@ -3255,6 +3518,12 @@ export class ZerosEngine {
               message: "The agent adapter did not return a Zeros execution id.",
             });
           }
+          if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
+            await this.agents
+              .endSession(msg.agentId, executionId)
+              .catch(() => {});
+            throw this.staleConversationBindFailure("loadSession");
+          }
           try {
             this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
           } catch (err) {
@@ -3268,6 +3537,12 @@ export class ZerosEngine {
           if (msg.chatId) {
             this.sessionChat.set(executionId, msg.chatId);
             this.conversationExecution.set(msg.chatId, executionId);
+            this.persistProviderIdentityForChat(
+              msg.chatId,
+              msg.agentId,
+              response.providerBinding,
+              response.providerMetadata,
+            );
           }
           if (lifecycleWorkspaceId) {
             this.sessionWorkspace.set(executionId, lifecycleWorkspaceId);
@@ -3803,6 +4078,22 @@ export class ZerosEngine {
     ) {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
+    // A lifecycle (tab close, reset, workspace disposal) cannot leave the
+    // durable turn looking live until the general 15-second Stop watchdog.
+    // The adapter has already had its bounded cancel window; publish and await
+    // the bookkeeping half now, before the caller disposes the execution or
+    // lets this conversation resume through a replacement route. Keep the
+    // active record itself until the adapter promise settles, so its eventual
+    // catch/finally remains correctly attributed and cannot take over a newer
+    // execution.
+    await Promise.all(
+      live.map(async (sessionId) => {
+        const prompt = this.activePromptContexts.get(sessionId);
+        if (prompt?.cancelledByUser) {
+          await this.settleCancelledPrompt(prompt, 3_000);
+        }
+      }),
+    );
     return live.every(
       (sessionId) =>
         !this.promptSessions.has(sessionId) &&
@@ -4302,6 +4593,27 @@ export class ZerosEngine {
     return !!(wsId && listRemoteRestrictedWorkspaceIds().has(wsId));
   }
 
+  /** Authorize a route-less conversation lifecycle request. The cached
+   * workspace id is normally present; deriving from the folder covers a row
+   * written just before the cache backfill. A live mapping remains a second
+   * source for legacy rows with no durable workspace cache. */
+  private conversationRestrictedFromRemote(chatId: string): boolean {
+    const liveExecutionId = this.conversationExecution.get(chatId);
+    if (
+      liveExecutionId &&
+      this.sessionRestrictedFromRemote(liveExecutionId)
+    ) {
+      return true;
+    }
+    const location = getChatLocation(chatId);
+    const workspaceId =
+      location?.workspaceId ??
+      this.workspace.workspaceIdForCwd(location?.folder ?? undefined);
+    return !!(
+      workspaceId && listRemoteRestrictedWorkspaceIds().has(workspaceId)
+    );
+  }
+
   /** Publish prompt lifecycle independently of the request/response socket.
    * The current owner may be a renderer that adopted the session after the
    * prompt began, which is precisely why the original RPC response is not
@@ -4412,37 +4724,47 @@ export class ZerosEngine {
     if (prompt.cancelSettleTimer || prompt.adapterSettled) return;
     const timer = setTimeout(() => {
       prompt.cancelSettleTimer = undefined;
-      if (prompt.adapterSettled || prompt.terminalPublished) return;
-      // A later prompt already owns this session (only reachable after a stale
-      // release), so this record no longer speaks for it.
-      if (this.activePromptContexts.get(prompt.sessionId) !== prompt) return;
-      prompt.terminalPublished = true;
-      console.warn(
-        `[agents] cancel not acknowledged within ` +
-          `${Math.round(CANCEL_SETTLE_DEADLINE_MS / 1000)}s for session ` +
-          `${prompt.sessionId.slice(0, 8)}…: settling the turn as cancelled`,
-      );
-      // finishTurn is self-contained (it never throws) and owns the durable
-      // half: the row this chat's footer reads as STOPPED BY USER after a
-      // reload. Matched by REFERENCE, not by turn id — the record's id and
-      // beginTurn's are derived separately and disagree whenever the client
-      // omitted userMessageId, so an id comparison here skipped the write for
-      // exactly the turns it was meant to close.
-      const turnCtx = this.activeTurnSnapshots.get(prompt.sessionId);
-      if (turnCtx && turnCtx === prompt.turnSnapshot) {
-        this.activeTurnSnapshots.delete(prompt.sessionId);
-        // Claim the durable half only now that we are performing it. A turn
-        // still being PREPARED has no row here yet (a pre-snapshot can outrun
-        // this deadline on a large repo); leaving this false is what lets the
-        // prompt handler finalize that row instead of skipping it forever.
-        prompt.turnRowSettled = true;
-        void this.finishTurn(turnCtx, "cancelled", "cancelled");
-      }
-      this.emitTurnState(prompt, "cancelled", "cancelled");
+      void this.settleCancelledPrompt(prompt, CANCEL_SETTLE_DEADLINE_MS);
     }, CANCEL_SETTLE_DEADLINE_MS);
     // Never hold the engine's event loop open for a stop deadline.
     timer.unref?.();
     prompt.cancelSettleTimer = timer;
+  }
+
+  /** Make the stopped outcome authoritative while retaining ownership of a
+   * wedged adapter promise. Used by both the general Stop watchdog and the
+   * shorter explicit-lifecycle boundary. */
+  private async settleCancelledPrompt(
+    prompt: ActivePromptContext,
+    acknowledgementWindowMs: number,
+  ): Promise<void> {
+    if (prompt.adapterSettled || prompt.terminalPublished) return;
+    // A later prompt already owns this session (only reachable after a stale
+    // release), so this record no longer speaks for it.
+    if (this.activePromptContexts.get(prompt.sessionId) !== prompt) return;
+    this.disarmCancelSettleDeadline(prompt);
+    prompt.terminalPublished = true;
+    console.warn(
+      `[agents] cancel not acknowledged within ` +
+        `${Math.round(acknowledgementWindowMs / 1000)}s for session ` +
+        `${prompt.sessionId.slice(0, 8)}…: settling the turn as cancelled`,
+    );
+    // finishTurn is self-contained (it never throws) and owns the durable
+    // half: the row this chat's footer reads as STOPPED BY USER after a reload.
+    // Matched by REFERENCE, not by turn id — the record's id and beginTurn's are
+    // derived separately and disagree whenever the client omitted
+    // userMessageId, so an id comparison here skipped the write for exactly the
+    // turns it was meant to close.
+    const turnCtx = this.activeTurnSnapshots.get(prompt.sessionId);
+    if (turnCtx && turnCtx === prompt.turnSnapshot) {
+      this.activeTurnSnapshots.delete(prompt.sessionId);
+      // Claim the durable half only now that we are performing it. A turn still
+      // being PREPARED has no row here yet; leaving this false is what lets the
+      // prompt handler finalize that row instead of skipping it forever.
+      prompt.turnRowSettled = true;
+      await this.finishTurn(turnCtx, "cancelled", "cancelled");
+    }
+    this.emitTurnState(prompt, "cancelled", "cancelled");
   }
 
   private disarmCancelSettleDeadline(prompt: ActivePromptContext): void {

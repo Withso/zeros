@@ -28,6 +28,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LoadSessionResponse } from "@zeros/protocol/agent-events";
 import type { EngineMessage } from "../types";
 import { ZerosEngine } from "../index";
+import {
+  closeZerosDb,
+  openZerosDb,
+  setZerosDbPathForTesting,
+} from "../db";
 import { MessageRouter } from "../transport/router";
 import type { TransportClient } from "../transport/types";
 
@@ -55,6 +60,8 @@ interface TurnSnapshotRecord {
 interface TestEngineInternals {
   router: MessageRouter;
   agents: {
+    ensureAgent: (...args: unknown[]) => Promise<unknown>;
+    newSession: (...args: unknown[]) => Promise<unknown>;
     prompt: (...args: unknown[]) => Promise<unknown>;
     cancel: (...args: unknown[]) => Promise<void>;
     endSession: (...args: unknown[]) => Promise<void>;
@@ -62,6 +69,8 @@ interface TestEngineInternals {
   };
   sessionAgent: Map<string, string>;
   sessionChat: Map<string, string>;
+  conversationExecution: Map<string, string>;
+  conversationBindTokens: Map<string, number>;
   promptSessions: Set<string>;
   activePromptContexts: Map<string, ActivePromptRecord>;
   activeTurnSnapshots: Map<string, TurnSnapshotRecord>;
@@ -73,6 +82,7 @@ interface TestEngineInternals {
     stopReason: string | null,
   ): Promise<void>;
   activePromptIsLive(prompt: ActivePromptRecord): boolean;
+  cancelLiveAgentSessions(sessionIds: Iterable<string>): Promise<boolean>;
   handleMessage(message: EngineMessage, client: TransportClient): Promise<void>;
 }
 
@@ -125,15 +135,39 @@ function cancelMessage(): EngineMessage {
   } as EngineMessage;
 }
 
-function closeMessage(): EngineMessage {
+function closeMessage(agentId = "claude"): EngineMessage {
   return {
     type: "AGENT_CLOSE_SESSION",
     id: "close-req-1",
     source: "browser",
     timestamp: 3,
-    agentId: "claude",
+    agentId,
     executionId: "session-1",
     sessionId: "session-1",
+    chatId: "chat-1",
+  } as EngineMessage;
+}
+
+function closeConversationMessage(agentId: string): EngineMessage {
+  return {
+    type: "AGENT_CLOSE_SESSION",
+    id: "close-conversation-1",
+    source: "browser",
+    timestamp: 3,
+    agentId,
+    chatId: "chat-1",
+  } as EngineMessage;
+}
+
+function newSessionMessage(agentId: string): EngineMessage {
+  return {
+    type: "AGENT_NEW_SESSION",
+    id: "new-session-1",
+    source: "browser",
+    timestamp: 1,
+    agentId,
+    chatId: "chat-1",
+    cwd: process.cwd(),
   } as EngineMessage;
 }
 
@@ -360,86 +394,481 @@ describe("an adapter that never acknowledges the cancel", () => {
 });
 
 describe("explicit session close during a live turn", () => {
-  it("cancels a prompt accepted in the pre-dispatch window", async () => {
-    const { state } = testEngine(29_898);
+  it.each(["claude", "codex", "cursor"])(
+    "cancels a %s prompt accepted in the pre-dispatch window",
+    async (agentId) => {
+      const port =
+        29_898 + (["claude", "codex", "cursor"].indexOf(agentId) + 1) * 10;
+      const { state } = testEngine(port);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      state.sessionAgent.set("session-1", agentId);
+      state.sessionChat.set("session-1", "chat-1");
+      const prompt = vi.spyOn(state.agents, "prompt");
+      const cancel = vi
+        .spyOn(state.agents, "cancel")
+        .mockResolvedValue(undefined);
+      const endSession = vi
+        .spyOn(state.agents, "endSession")
+        .mockResolvedValue(undefined);
+
+      const promptFlight = state.handleMessage(
+        promptMessage({ agentId }),
+        client,
+      );
+      expect(state.activePromptContexts.has("session-1")).toBe(true);
+      const closeFlight = state.handleMessage(closeMessage(agentId), client);
+      await Promise.all([promptFlight, closeFlight]);
+
+      expect(prompt).not.toHaveBeenCalled();
+      expect(cancel).toHaveBeenCalledWith(agentId, "session-1");
+      expect(endSession).toHaveBeenCalledWith(agentId, "session-1");
+      expect(turnStates(messages)).toContainEqual({
+        state: "cancelled",
+        stopReason: "cancelled",
+      });
+    },
+  );
+
+  it.each(["claude", "codex", "cursor"])(
+    "cancels and settles a %s turn before disposing its execution",
+    async (agentId) => {
+      const port =
+        29_899 + (["claude", "codex", "cursor"].indexOf(agentId) + 1) * 10;
+      const { state } = testEngine(port);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      state.sessionAgent.set("session-1", agentId);
+      state.sessionChat.set("session-1", "chat-1");
+
+      let releasePrompt!: () => void;
+      const promptGate = new Promise<void>((resolve) => {
+        releasePrompt = resolve;
+      });
+      const prompt = vi
+        .spyOn(state.agents, "prompt")
+        .mockImplementation(async () => {
+          await promptGate;
+          return { stopReason: "cancelled" };
+        });
+      const cancel = vi
+        .spyOn(state.agents, "cancel")
+        .mockResolvedValue(undefined);
+      const endSession = vi
+        .spyOn(state.agents, "endSession")
+        .mockResolvedValue(undefined);
+
+      const promptFlight = state.handleMessage(
+        promptMessage({ agentId }),
+        client,
+      );
+      await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
+      const closeFlight = state.handleMessage(closeMessage(agentId), client);
+
+      try {
+        await vi.waitFor(() => expect(cancel).toHaveBeenCalledTimes(1));
+      } finally {
+        releasePrompt();
+        await Promise.all([promptFlight, closeFlight]);
+      }
+
+      expect(cancel).toHaveBeenCalledWith(agentId, "session-1");
+      expect(endSession).toHaveBeenCalledWith(agentId, "session-1");
+      expect(cancel.mock.invocationCallOrder[0]).toBeLessThan(
+        endSession.mock.invocationCallOrder[0],
+      );
+      expect(turnStates(messages)).toContainEqual({
+        state: "cancelled",
+        stopReason: "cancelled",
+      });
+      expect(state.activePromptContexts.has("session-1")).toBe(false);
+      expect(state.promptSessions.has("session-1")).toBe(false);
+    },
+  );
+
+  it("publishes a durable stop before disposing an unresponsive execution", async () => {
+    vi.useFakeTimers();
+    const { state } = testEngine(29_939);
     const { client, messages } = testClient();
     state.router.register(client);
     state.sessionAgent.set("session-1", "claude");
     state.sessionChat.set("session-1", "chat-1");
-    const prompt = vi.spyOn(state.agents, "prompt");
-    const cancel = vi
-      .spyOn(state.agents, "cancel")
-      .mockResolvedValue(undefined);
+    state.conversationExecution.set("chat-1", "session-1");
+    state.promptSessions.add("session-1");
+    state.activePromptContexts.set("session-1", {
+      sessionId: "session-1",
+      agentId: "claude",
+      chatId: "chat-1",
+      turnId: "user-1",
+      promptId: "prompt-1",
+      startedAt: Date.now(),
+      lastActivityAt: Date.now(),
+    });
+    vi.spyOn(state.agents, "cancel").mockResolvedValue(undefined);
     const endSession = vi
       .spyOn(state.agents, "endSession")
       .mockResolvedValue(undefined);
 
-    const promptFlight = state.handleMessage(
-      promptMessage({ agentId: "claude" }),
-      client,
+    const closeFlight = state.handleMessage(closeMessage("claude"), client);
+    await vi.waitFor(() =>
+      expect(state.agents.cancel).toHaveBeenCalledTimes(1),
     );
-    expect(state.activePromptContexts.has("session-1")).toBe(true);
-    const closeFlight = state.handleMessage(closeMessage(), client);
-    await Promise.all([promptFlight, closeFlight]);
+    // The adapter never removes its active-prompt record. The lifecycle's
+    // bounded settle window must still make the stopped outcome authoritative
+    // before provider disposal and before a restored chat is allowed to bind.
+    await vi.advanceTimersByTimeAsync(3_100);
+    await closeFlight;
 
-    expect(prompt).not.toHaveBeenCalled();
-    expect(cancel).toHaveBeenCalledWith("claude", "session-1");
-    expect(endSession).toHaveBeenCalledWith("claude", "session-1");
     expect(turnStates(messages)).toContainEqual({
       state: "cancelled",
       stopReason: "cancelled",
     });
+    expect(state.activePromptContexts.get("session-1")?.terminalPublished).toBe(
+      true,
+    );
+    expect(endSession).toHaveBeenCalledWith("claude", "session-1");
+  });
+});
+
+describe("tab close while a provider session is still binding", () => {
+  it("refuses a conversation-only close from a remote-restricted workspace", async () => {
+    const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-close-auth-"));
+    setZerosDbPathForTesting(path.join(dbDir, "zeros.db"));
+    try {
+      const db = openZerosDb();
+      db.prepare(
+        `INSERT INTO chats (id, folder, agent_id, title, workspace_id)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run("chat-1", process.cwd(), "claude", "Private chat", "private-ws");
+      db.prepare(
+        `INSERT INTO remote_restricted_workspaces (workspace_id) VALUES (?)`,
+      ).run("private-ws");
+
+      const { state } = testEngine(30_023);
+      const { client, messages } = testClient("relay-1", "cloud");
+      state.router.register(client);
+      // This models create/load awaiting the provider: there is a conversation
+      // bind token, but no execution route for the ordinary session guard yet.
+      state.conversationBindTokens.set("chat-1", 41);
+
+      await state.handleMessage(closeConversationMessage("claude"), client);
+
+      expect(messages).toEqual([
+        expect.objectContaining({
+          type: "AGENT_ERROR",
+          code: "SESSION_RESTRICTED",
+        }),
+      ]);
+      expect(state.conversationBindTokens.get("chat-1")).toBe(41);
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+      fs.rmSync(dbDir, { recursive: true, force: true });
+    }
   });
 
-  it("cancels and settles the turn before disposing its execution", async () => {
-    const { state } = testEngine(29_899);
+  it.each(["claude", "codex", "cursor"])(
+    "disposes a late %s execution instead of publishing an orphan route",
+    async (agentId) => {
+      const port =
+        29_940 + (["claude", "codex", "cursor"].indexOf(agentId) + 1) * 10;
+      const { state } = testEngine(port);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      vi.spyOn(state, "agentSpawnOpts").mockResolvedValue({});
+      vi.spyOn(state.agents, "ensureAgent").mockResolvedValue({});
+      let releaseSession!: () => void;
+      const sessionGate = new Promise<void>((resolve) => {
+        releaseSession = resolve;
+      });
+      const newSession = vi
+        .spyOn(state.agents, "newSession")
+        .mockImplementation(async () => {
+          await sessionGate;
+          return {
+            executionId: "late-execution-1",
+            sessionId: "late-execution-1",
+            providerBinding: {
+              version: 1,
+              providerId: agentId,
+              kind: "native",
+              resumeId: `${agentId}-provider-session-1`,
+            },
+          };
+        });
+      const endSession = vi
+        .spyOn(state.agents, "endSession")
+        .mockResolvedValue(undefined);
+
+      const startFlight = state.handleMessage(
+        newSessionMessage(agentId),
+        client,
+      );
+      await vi.waitFor(() => expect(newSession).toHaveBeenCalledTimes(1));
+
+      await state.handleMessage(closeConversationMessage(agentId), client);
+      releaseSession();
+      await startFlight;
+
+      expect(endSession).toHaveBeenCalledWith(agentId, "late-execution-1");
+      expect(state.sessionAgent.has("late-execution-1")).toBe(false);
+      expect(state.sessionChat.has("late-execution-1")).toBe(false);
+      expect(state.conversationExecution.has("chat-1")).toBe(false);
+      expect(messages).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: "AGENT_SESSION_CREATED" }),
+        ]),
+      );
+    },
+  );
+
+  it.each(["claude", "codex", "cursor"])(
+    "disposes a late %s resume instead of repopulating a closed chat",
+    async (agentId) => {
+      const port =
+        29_980 + (["claude", "codex", "cursor"].indexOf(agentId) + 1) * 10;
+      const { state } = testEngine(port);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      vi.spyOn(state, "agentSpawnOpts").mockResolvedValue({});
+      let releaseLoad!: () => void;
+      const loadGate = new Promise<void>((resolve) => {
+        releaseLoad = resolve;
+      });
+      const loadSession = vi
+        .spyOn(state.agents, "loadSession")
+        .mockImplementation(async () => {
+          await loadGate;
+          return {
+            executionId: "late-resume-1",
+            providerBinding: {
+              version: 1,
+              providerId: agentId,
+              kind: "native",
+              resumeId: `${agentId}-provider-session-1`,
+            },
+          };
+        });
+      const endSession = vi
+        .spyOn(state.agents, "endSession")
+        .mockResolvedValue(undefined);
+
+      const loadFlight = state.handleMessage(
+        {
+          type: "AGENT_LOAD_SESSION",
+          id: "load-late-1",
+          source: "browser",
+          timestamp: 1,
+          agentId,
+          chatId: "chat-1",
+          providerBinding: {
+            version: 1,
+            providerId: agentId,
+            kind: "native",
+            resumeId: `${agentId}-provider-session-1`,
+          },
+        } as EngineMessage,
+        client,
+      );
+      await vi.waitFor(() => expect(loadSession).toHaveBeenCalledTimes(1));
+
+      await state.handleMessage(closeConversationMessage(agentId), client);
+      releaseLoad();
+      await loadFlight;
+
+      expect(endSession).toHaveBeenCalledWith(agentId, "late-resume-1");
+      expect(state.sessionAgent.has("late-resume-1")).toBe(false);
+      expect(state.conversationExecution.has("chat-1")).toBe(false);
+      expect(messages).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: "AGENT_SESSION_LOADED" }),
+        ]),
+      );
+    },
+  );
+
+  it("lets only the newest create attempt publish for a conversation", async () => {
+    const { state } = testEngine(30_020);
     const { client, messages } = testClient();
     state.router.register(client);
-    state.sessionAgent.set("session-1", "claude");
-    state.sessionChat.set("session-1", "chat-1");
-
-    let releasePrompt!: () => void;
-    const promptGate = new Promise<void>((resolve) => {
-      releasePrompt = resolve;
+    vi.spyOn(state, "agentSpawnOpts").mockResolvedValue({});
+    vi.spyOn(state.agents, "ensureAgent").mockResolvedValue({});
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
     });
-    const prompt = vi
-      .spyOn(state.agents, "prompt")
-      .mockImplementation(async () => {
-        await promptGate;
-        return { stopReason: "cancelled" };
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const newSession = vi
+      .spyOn(state.agents, "newSession")
+      .mockImplementationOnce(async () => {
+        await firstGate;
+        return {
+          executionId: "superseded-execution",
+          sessionId: "superseded-execution",
+        };
+      })
+      .mockImplementationOnce(async () => {
+        await secondGate;
+        return {
+          executionId: "current-execution",
+          sessionId: "current-execution",
+        };
       });
-    const cancel = vi
-      .spyOn(state.agents, "cancel")
-      .mockResolvedValue(undefined);
     const endSession = vi
       .spyOn(state.agents, "endSession")
       .mockResolvedValue(undefined);
 
-    const promptFlight = state.handleMessage(
-      promptMessage({ agentId: "claude" }),
+    const first = state.handleMessage(newSessionMessage("codex"), client);
+    await vi.waitFor(() => expect(newSession).toHaveBeenCalledTimes(1));
+    const second = state.handleMessage(
+      {
+        ...newSessionMessage("codex"),
+        id: "new-session-2",
+      } as EngineMessage,
       client,
     );
-    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
-    const closeFlight = state.handleMessage(closeMessage(), client);
+    await vi.waitFor(() => expect(newSession).toHaveBeenCalledTimes(2));
 
-    try {
-      await vi.waitFor(() => expect(cancel).toHaveBeenCalledTimes(1));
-    } finally {
-      releasePrompt();
-      await Promise.all([promptFlight, closeFlight]);
-    }
+    releaseFirst();
+    await first;
+    releaseSecond();
+    await second;
 
-    expect(cancel).toHaveBeenCalledWith("claude", "session-1");
-    expect(endSession).toHaveBeenCalledWith("claude", "session-1");
-    expect(cancel.mock.invocationCallOrder[0]).toBeLessThan(
-      endSession.mock.invocationCallOrder[0],
-    );
-    expect(turnStates(messages)).toContainEqual({
-      state: "cancelled",
-      stopReason: "cancelled",
+    expect(endSession).toHaveBeenCalledWith("codex", "superseded-execution");
+    expect(state.conversationExecution.get("chat-1")).toBe("current-execution");
+    expect(
+      messages.filter((message) => message.type === "AGENT_SESSION_CREATED"),
+    ).toEqual([
+      expect.objectContaining({
+        session: expect.objectContaining({
+          executionId: "current-execution",
+        }),
+      }),
+    ]);
+  });
+
+  it("does not erase a replacement route opened while the old close settles", async () => {
+    const { state } = testEngine(30_021);
+    const { client } = testClient();
+    state.router.register(client);
+    state.sessionAgent.set("old-execution", "claude");
+    state.sessionChat.set("old-execution", "chat-1");
+    state.conversationExecution.set("chat-1", "old-execution");
+    let releaseClose!: () => void;
+    const closeGate = new Promise<void>((resolve) => {
+      releaseClose = resolve;
     });
-    expect(state.activePromptContexts.has("session-1")).toBe(false);
-    expect(state.promptSessions.has("session-1")).toBe(false);
+    const cancelLive = vi
+      .spyOn(state, "cancelLiveAgentSessions")
+      .mockImplementation(async () => {
+        await closeGate;
+        return true;
+      });
+    vi.spyOn(state.agents, "endSession").mockResolvedValue(undefined);
+
+    const closeFlight = state.handleMessage(closeMessage("claude"), client);
+    await vi.waitFor(() => expect(cancelLive).toHaveBeenCalledTimes(1));
+
+    // History was restored while cancellation of the old provider turn was
+    // settling. The replacement is a different execution for the same durable
+    // conversation and must survive the old close handler's cleanup tail.
+    state.sessionAgent.set("new-execution", "claude");
+    state.sessionChat.set("new-execution", "chat-1");
+    state.conversationExecution.set("chat-1", "new-execution");
+    releaseClose();
+    await closeFlight;
+
+    expect(state.conversationExecution.get("chat-1")).toBe("new-execution");
+    expect(state.sessionAgent.get("new-execution")).toBe("claude");
+    expect(state.sessionChat.get("new-execution")).toBe("chat-1");
+  });
+
+  it("waits for close disposal before resuming the durable provider session", async () => {
+    const { state } = testEngine(30_022);
+    const { client, messages } = testClient();
+    state.router.register(client);
+    state.sessionAgent.set("old-execution", "codex");
+    state.sessionChat.set("old-execution", "chat-1");
+    state.conversationExecution.set("chat-1", "old-execution");
+    vi.spyOn(state, "agentSpawnOpts").mockResolvedValue({});
+
+    let releaseClose!: () => void;
+    const closeGate = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    const cancelLive = vi
+      .spyOn(state, "cancelLiveAgentSessions")
+      .mockImplementation(async () => {
+        await closeGate;
+        return true;
+      });
+    vi.spyOn(state.agents, "endSession").mockResolvedValue(undefined);
+    const loadSession = vi
+      .spyOn(state.agents, "loadSession")
+      .mockResolvedValue({
+        executionId: "resumed-execution",
+        providerBinding: {
+          version: 1,
+          providerId: "codex",
+          kind: "native",
+          resumeId: "codex-provider-session-1",
+        },
+      });
+
+    const closeFlight = state.handleMessage(
+      {
+        ...closeMessage("codex"),
+        executionId: "old-execution",
+        sessionId: "old-execution",
+      } as EngineMessage,
+      client,
+    );
+    await vi.waitFor(() => expect(cancelLive).toHaveBeenCalledTimes(1));
+
+    const loadFlight = state.handleMessage(
+      {
+        type: "AGENT_LOAD_SESSION",
+        id: "load-after-close-1",
+        source: "browser",
+        timestamp: 4,
+        agentId: "codex",
+        chatId: "chat-1",
+        providerBinding: {
+          version: 1,
+          providerId: "codex",
+          kind: "native",
+          resumeId: "codex-provider-session-1",
+        },
+      } as EngineMessage,
+      client,
+    );
+
+    // Reopening from History is allowed immediately, but provider resume must
+    // not overlap cancel/dispose for the old execution of the same chat.
+    await Promise.resolve();
+    expect(loadSession).not.toHaveBeenCalled();
+    expect(messages).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "AGENT_SESSION_LOADED" }),
+      ]),
+    );
+
+    releaseClose();
+    await Promise.all([closeFlight, loadFlight]);
+
+    expect(loadSession).toHaveBeenCalledTimes(1);
+    expect(state.conversationExecution.get("chat-1")).toBe("resumed-execution");
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "AGENT_SESSION_LOADED",
+          executionId: "resumed-execution",
+        }),
+      ]),
+    );
   });
 });
 

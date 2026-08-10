@@ -95,17 +95,16 @@ import { synthesizeReplayPrompt } from "./replay";
 import { activeProviderTurnId } from "./turn-grouping";
 import { ActionsCtx, type SessionsActions } from "./sessions-context";
 import {
+  bindStillOwnsSessionSlot,
   bumpCancelGeneration,
   cancelGeneration,
   cancelledSince,
-  deferredArchiveCloseAction,
   loadedSessionStatus,
   markPrebindDirty,
   queuedSendNowAction,
   queueReleaseAction,
   recoveredSessionIdentity,
   recoveryLoadLocator,
-  sessionNeedsBackgroundRetention,
   shouldQueuePrompt,
   statusForFailure,
   takePrebindDirty,
@@ -218,9 +217,26 @@ async function reconcilePermissionModeAtBind(
     sessionId: string;
     availableModes: SessionMode[];
     currentModeId: string | null;
+    bindCancelled?: () => boolean;
   },
 ): Promise<void> {
-  const { chatId, agentId, sessionId, availableModes, currentModeId } = args;
+  const {
+    chatId,
+    agentId,
+    sessionId,
+    availableModes,
+    currentModeId,
+    bindCancelled,
+  } = args;
+  const bindStillOwnsSlot = (): boolean => {
+    const slot = getStore().sessions[chatId];
+    return bindStillOwnsSessionSlot({
+      cancelled: bindCancelled?.() ?? false,
+      expectedExecutionId: sessionId,
+      slotExecutionId: slot?.executionId,
+      slotSessionId: slot?.sessionId,
+    });
+  };
   if (availableModes.length === 0) return;
   // Chat threads (which carry permissionMode) live in the workspace store,
   // not the sessions store that `getStore` snapshots.
@@ -240,6 +256,7 @@ async function reconcilePermissionModeAtBind(
   // own default), or already in the desired mode → nothing to do. The
   // `=== currentModeId` short-circuit keeps the common idempotent re-bind a no-op.
   if (!desired || desired.id === currentModeId) return;
+  if (!bindStillOwnsSlot()) return;
   getStore().patchSession(chatId, { currentModeId: desired.id });
   try {
     const resp = await bridge.request<
@@ -254,11 +271,13 @@ async function reconcilePermissionModeAtBind(
       },
       10_000,
     );
-    if (resp.type === "AGENT_ERROR") {
+    if (resp.type === "AGENT_ERROR" && bindStillOwnsSlot()) {
       getStore().patchSession(chatId, { currentModeId });
     }
   } catch {
-    getStore().patchSession(chatId, { currentModeId });
+    if (bindStillOwnsSlot()) {
+      getStore().patchSession(chatId, { currentModeId });
+    }
   }
 }
 
@@ -379,11 +398,6 @@ export function AgentSessionsProvider({
   // loaded. The local send promise/finally does not exist in that case, so the
   // bridge listener reaches the normal queue release through this late-bound ref.
   const releaseQueueRef = useRef<(chatId: string) => void>(() => {});
-  /** Used-chat tab closes are soft: the execution and its renderer FIFO remain
-   * live until every foreground/background operation settles. */
-  const deferredArchiveCloseRef = useRef(new Set<string>());
-  /** Late-bound because transcript eviction is declared before closeSession. */
-  const closeSessionNowRef = useRef<(chatId: string) => void>(() => {});
   const reconcileChatMessagesRef = useRef<(chatId: string) => Promise<void>>(
     async () => {},
   );
@@ -1079,61 +1093,27 @@ export function AgentSessionsProvider({
    *  out from under the user mid-edit. releaseQueue drains if idle+ready. */
   const queueHeldRef = useRef(new Set<string>());
 
-  const sessionHasPendingBackgroundWork = useCallback(
-    (chatId: string): boolean => {
-      const slot = getStore().sessions[chatId];
-      if (!slot) return false;
-      const queued = (sendQueueRef.current.get(chatId)?.length ?? 0) > 0;
-      return sessionNeedsBackgroundRetention({
-        status: slot.status,
-        hasLocalSend: sendingChatsRef.current.has(chatId),
-        hasQueuedSends: queued,
-        queueHeld: queueHeldRef.current.has(chatId) && queued,
-        ensuring: ensureInFlightRef.current.has(chatId),
-        pendingInteraction:
-          slot.pendingPermission != null ||
-          (slot.pendingQuestions?.length ?? 0) > 0,
-        hasBackgroundTasks:
-          slot.backgroundTasks.length > 0 || slot.waitingForBackgroundTasks,
-        hasForegroundWorkflows: slot.workflows.some(
-          (workflow) =>
-            workflow.status === "running" || workflow.status === "paused",
-        ),
-      });
-    },
-    [getStore],
-  );
-
-  /** Reap one archived session only after its last turn, FIFO send, gate, task,
-   * or bind has settled. A History reopen cancels the deferred reaper. */
-  const finishDeferredArchiveClose = useCallback(
-    (chatId: string): boolean => {
-      const chat = useWorkspaceStore
-        .getState()
-        .chats.find((candidate) => candidate.id === chatId);
-      const action = deferredArchiveCloseAction({
-        requested: deferredArchiveCloseRef.current.has(chatId),
-        // A deleted chat is no longer visible either and should be reaped.
-        archived: chat?.archived ?? true,
-        hasPendingWork: sessionHasPendingBackgroundWork(chatId),
-      });
-      if (action === "cancel") {
-        deferredArchiveCloseRef.current.delete(chatId);
-      } else if (action === "close") {
-        deferredArchiveCloseRef.current.delete(chatId);
-        closeSessionNowRef.current(chatId);
-        return true;
-      }
-      return false;
-    },
-    [sessionHasPendingBackgroundWork],
-  );
-
   /** chatId → cancel generation. Bumped by every cancel() and re-read by an
    *  in-flight sendPrompt after each await, so a Stop is honoured even while the
    *  send is still parked on a session rebuild / resume and has therefore not
    *  reached the engine yet. See bumpCancelGeneration. */
   const cancelGenerationsRef = useRef(new Map<string, number>());
+
+  /** Dispose only the exact route returned by a create/load that completed
+   * after its renderer operation was cancelled. Deliberately omit chatId: a
+   * fast History reopen may already own a newer route for the conversation,
+   * and stale cleanup must never invalidate that replacement. */
+  const closeLateExecution = useCallback(
+    (agentId: string, executionId: string): void => {
+      bridge?.send({
+        type: "AGENT_CLOSE_SESSION",
+        agentId,
+        executionId,
+        sessionId: executionId,
+      });
+    },
+    [bridge],
+  );
 
   /** Release payloads that are outside the committed deck and no longer owned
    *  by a local operation. The slot itself stays: session routing, active-turn
@@ -1148,18 +1128,12 @@ export function AgentSessionsProvider({
     );
     for (const [chatId, slot] of Object.entries(store.sessions)) {
       if (!openChatIds.has(chatId)) {
-        if (deferredArchiveCloseRef.current.has(chatId)) {
-          if (finishDeferredArchiveClose(chatId)) continue;
-          // Keep the lightweight routing shell while background work is live.
-          // The normal gate below may still evict the heavyweight transcript.
-        } else {
-          pendingHydratesRef.current.delete(chatId);
-          invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
-          invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
-          persistedMessageRefsRef.current.delete(chatId);
-          store.detachSession(chatId);
-          continue;
-        }
+        pendingHydratesRef.current.delete(chatId);
+        invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
+        invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
+        persistedMessageRefsRef.current.delete(chatId);
+        store.detachSession(chatId);
+        continue;
       }
       const queued = (sendQueueRef.current.get(chatId)?.length ?? 0) > 0;
       if (
@@ -1193,7 +1167,7 @@ export function AgentSessionsProvider({
       }
       store.evictTranscript(chatId);
     }
-  }, [finishDeferredArchiveClose, getStore]);
+  }, [getStore]);
 
   const setRetainedChatIds = useCallback<SessionsActions["setRetainedChatIds"]>(
     (chatIds) => {
@@ -1204,11 +1178,6 @@ export function AgentSessionsProvider({
         [...next].every((chatId) => previous.has(chatId))
       ) {
         return;
-      }
-      // This set is published only by the committed bounded chat deck, so it
-      // is an authoritative reopen rather than speculative hover intent.
-      for (const chatId of next) {
-        deferredArchiveCloseRef.current.delete(chatId);
       }
       retainedChatIdsRef.current = next;
       evictUnretainedTranscripts();
@@ -1325,6 +1294,12 @@ export function AgentSessionsProvider({
       // OWN folder / active scope from the store, so a spawn from ANY
       // recovery path lands in the right folder instead of throwing.
       const resolvedCwd = resolveSpawnCwd(chatId, options?.cwd, existing?.cwd);
+      const bindGeneration = cancelGeneration(
+        cancelGenerationsRef.current,
+        chatId,
+      );
+      const bindCancelled = () =>
+        cancelledSince(cancelGenerationsRef.current, chatId, bindGeneration);
 
       const work = (async () => {
         getStore().setSession(chatId, {
@@ -1352,7 +1327,7 @@ export function AgentSessionsProvider({
         // we pass down — the race makes it absolute.
         let lastFailure: AgentFailure | null = null;
         const attemptOnce = async (): Promise<
-          AgentSessionCreatedMessage | AgentErrorMessage
+          AgentSessionCreatedMessage | AgentErrorMessage | null
         > => {
           const timer = new Promise<never>((_, reject) => {
             window.setTimeout(
@@ -1395,6 +1370,7 @@ export function AgentSessionsProvider({
             bridge,
             resolvedCwd,
           );
+          if (bindCancelled()) return null;
 
           const request = bridge.request<
             AgentSessionCreatedMessage | AgentErrorMessage
@@ -1420,8 +1396,19 @@ export function AgentSessionsProvider({
           if (backoff > 0) {
             await new Promise((r) => setTimeout(r, backoff));
           }
+          if (bindCancelled()) return;
           try {
             const resp = await attemptOnce();
+            if (!resp) return;
+            if (bindCancelled()) {
+              if (resp.type === "AGENT_SESSION_CREATED") {
+                closeLateExecution(
+                  agentId,
+                  resp.session.executionId ?? resp.session.sessionId,
+                );
+              }
+              return;
+            }
             if (resp.type === "AGENT_ERROR") {
               lastFailure = failureFromAgentError(resp, "newSession");
               console.warn(
@@ -1472,7 +1459,12 @@ export function AgentSessionsProvider({
                 sessionId: executionId,
                 availableModes: resp.session.modes?.availableModes ?? [],
                 currentModeId: resp.session.modes?.currentModeId ?? null,
+                bindCancelled,
               });
+            }
+            if (bindCancelled()) {
+              closeLateExecution(agentId, executionId);
+              return;
             }
             getStore().patchSession(chatId, { status: "ready" });
             trackAgentSessionStarted(agentId, chatId);
@@ -1485,6 +1477,7 @@ export function AgentSessionsProvider({
             drainNextQueued(chatId);
             return;
           } catch (err) {
+            if (bindCancelled()) return;
             lastFailure = classifyRpcError({
               agentId,
               stage: "newSession",
@@ -1538,6 +1531,7 @@ export function AgentSessionsProvider({
       getStore,
       drainNextQueued,
       drainOrDropQueue,
+      closeLateExecution,
       evictUnretainedTranscripts,
     ],
   );
@@ -2565,6 +2559,7 @@ export function AgentSessionsProvider({
           });
         }
       } finally {
+        const lifecycleCancelled = stoppedByUser();
         // This turn is no longer in flight, however it ended (sent, aborted by a
         // stop, bailed before dispatch). Unconditional and first: leaving it set
         // would strand the tail shimmer on a settled turn — the inverse of the
@@ -2654,7 +2649,15 @@ export function AgentSessionsProvider({
         // When the turn didn't recover, STOP draining: drop the pending
         // queue and remove its greyed placeholders (mirrors cancel()) so the
         // user resends deliberately once the chat is healthy again.
-        drainOrDropQueue(chatId);
+        if (lifecycleCancelled) {
+          // closeSession/cancel already discarded everything queued before the
+          // stop. Anything present now was typed after a restore/new send and
+          // belongs to the next generation: release it only if ready, never
+          // classify/drop it using this old turn's terminal state.
+          drainNextQueued(chatId);
+        } else {
+          drainOrDropQueue(chatId);
+        }
         evictUnretainedTranscripts();
       }
     },
@@ -3288,7 +3291,6 @@ export function AgentSessionsProvider({
 
   const reset = useCallback<SessionsActions["reset"]>(
     (chatId) => {
-      deferredArchiveCloseRef.current.delete(chatId);
       prebindDirtySessionsRef.current.delete(chatId);
       pendingHydratesRef.current.delete(chatId);
       invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
@@ -3590,6 +3592,12 @@ export function AgentSessionsProvider({
   const loadIntoChat = useCallback<SessionsActions["loadIntoChat"]>(
     async (chatId, agentId, providerBinding, options) => {
       if (!bridge) return true;
+      const bindGeneration = cancelGeneration(
+        cancelGenerationsRef.current,
+        chatId,
+      );
+      const bindCancelled = () =>
+        cancelledSince(cancelGenerationsRef.current, chatId, bindGeneration);
       // Preserve any messages already in the slot (typically just put
       // there by hydrateChat) — wiping them here is what produced the
       // "chat empty on reopen" bug for agents whose loadSession doesn't
@@ -3650,6 +3658,7 @@ export function AgentSessionsProvider({
           bridge,
           resolvedCwd,
         );
+        if (bindCancelled()) return true;
 
         const resp = await bridge.request<
           AgentSessionLoadedMessage | AgentErrorMessage
@@ -3675,6 +3684,12 @@ export function AgentSessionsProvider({
           },
           5 * 60_000,
         );
+        if (bindCancelled()) {
+          if (resp.type === "AGENT_SESSION_LOADED") {
+            closeLateExecution(agentId, resp.executionId ?? resp.sessionId);
+          }
+          return true;
+        }
         if (resp.type === "AGENT_ERROR") {
           // Classify so transport-closed / session-expired / timeout
           // route to status="reconnecting" (silent self-heal) rather
@@ -3755,7 +3770,12 @@ export function AgentSessionsProvider({
             sessionId: executionId,
             availableModes: resp.response.modes?.availableModes ?? [],
             currentModeId: resp.response.modes?.currentModeId ?? null,
+            bindCancelled,
           });
+        }
+        if (bindCancelled()) {
+          closeLateExecution(agentId, executionId);
+          return true;
         }
         getStore().patchSession(chatId, {
           status: loadedSessionStatus(resp.promptActive === true),
@@ -3777,6 +3797,7 @@ export function AgentSessionsProvider({
         }
         return true;
       } catch (err) {
+        if (bindCancelled()) return true;
         // Classify the raw rejection (engine-swap rejections carry
         // code:"ENGINE_SWAPPING"; WS-disconnect timeouts match
         // TIMEOUT_RX) so the renderer's reconnect chip surfaces for
@@ -3806,6 +3827,7 @@ export function AgentSessionsProvider({
       getStore,
       drainNextQueued,
       drainOrDropQueue,
+      closeLateExecution,
       reconcileChatMessages,
       evictUnretainedTranscripts,
     ],
@@ -3817,7 +3839,6 @@ export function AgentSessionsProvider({
   );
 
   const disposeAll = useCallback<SessionsActions["disposeAll"]>(() => {
-    deferredArchiveCloseRef.current.clear();
     getStore().clearAll();
     prebindDirtySessionsRef.current.clear();
     pendingHydratesRef.current.clear();
@@ -3832,30 +3853,53 @@ export function AgentSessionsProvider({
 
   const closeSession = useCallback<SessionsActions["closeSession"]>(
     (chatId) => {
-      deferredArchiveCloseRef.current.delete(chatId);
+      // Closing a tab has the same cancellation boundary as Stop. Record it
+      // before any bridge/route guard so a prompt still awaiting create/load
+      // cannot dispatch after the tab has disappeared.
+      bumpCancelGeneration(cancelGenerationsRef.current, chatId);
+      const slot = getStore().sessions[chatId];
       prebindDirtySessionsRef.current.delete(chatId);
       pendingHydratesRef.current.delete(chatId);
       invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
       invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
       persistedMessageRefsRef.current.delete(chatId);
+      // Release the dedupe owner immediately. Its promise still settles behind
+      // identity checks, while a fast History reopen may start a fresh bind.
+      ensureInFlightRef.current.delete(chatId);
       sendQueueRef.current.delete(chatId);
       queueHeldRef.current.delete(chatId);
       flushBubbleRef.current.delete(chatId);
       turnProducedOutputRef.current.delete(chatId);
       announcedDirsRef.current.delete(chatId);
       promptActivityRef.current.delete(chatId);
-      cancelGenerationsRef.current.delete(chatId);
-      const slot = getStore().sessions[chatId];
-      // Only sessions the engine actually started have something to tear
-      // down. The on-disk transcript is untouched, so reopening the chat
-      // re-resumes via loadSession.
-      if (bridge && slot?.agentId && slot.sessionId) {
-        bridge.send({
-          type: "AGENT_CLOSE_SESSION",
-          agentId: slot.agentId,
-          executionId: slot.executionId ?? slot.sessionId,
-          sessionId: slot.sessionId,
-        });
+      // A conversation-only close invalidates a provider create/load that is
+      // still awaiting its execution id. When a route already exists the
+      // engine also cancels and settles that exact active turn before dispose.
+      const agentId =
+        slot?.agentId ??
+        useWorkspaceStore.getState().chats.find((chat) => chat.id === chatId)
+          ?.agentId;
+      if (bridge && agentId) {
+        // request() deliberately makes this fire-and-forget frame use the
+        // bridge's bounded reconnect queue. AGENT_CLOSE_SESSION has no reply,
+        // so the short timeout is swallowed after delivery; a transient socket
+        // gap must not turn tab close into "keep working invisibly".
+        void bridge
+          .request(
+            {
+              type: "AGENT_CLOSE_SESSION",
+              agentId,
+              chatId,
+              ...(slot.sessionId
+                ? {
+                    executionId: slot.executionId ?? slot.sessionId,
+                    sessionId: slot.sessionId,
+                  }
+                : {}),
+            },
+            { timeoutMs: 1_000 },
+          )
+          .catch(() => {});
       }
       // Always detach locally — including while the bridge is disconnected or
       // before a session id exists. Otherwise explicitly closed/discarded cold
@@ -3864,22 +3908,6 @@ export function AgentSessionsProvider({
       getStore().detachSession(chatId);
     },
     [bridge, getStore],
-  );
-  closeSessionNowRef.current = closeSession;
-
-  const archiveSession = useCallback<SessionsActions["archiveSession"]>(
-    (chatId) => {
-      if (!getStore().sessions[chatId]) return;
-      if (!sessionHasPendingBackgroundWork(chatId)) {
-        closeSession(chatId);
-        return;
-      }
-      // Do not clear the FIFO, detach the slot, or send AGENT_CLOSE_SESSION.
-      // The tab's ARCHIVE_CHAT dispatch follows synchronously; completion and
-      // task updates later release this exact id once it is truly idle.
-      deferredArchiveCloseRef.current.add(chatId);
-    },
-    [closeSession, getStore, sessionHasPendingBackgroundWork],
   );
 
   // The actions object is stable across renders. No `sessions` field —
@@ -3910,7 +3938,6 @@ export function AgentSessionsProvider({
       loadIntoChat,
       hydrateChat,
       setRetainedChatIds,
-      archiveSession,
       closeSession,
       disposeAll,
     }),
@@ -3938,28 +3965,10 @@ export function AgentSessionsProvider({
       loadIntoChat,
       hydrateChat,
       setRetainedChatIds,
-      archiveSession,
       closeSession,
       disposeAll,
     ],
   );
-
-  // A deferred tab close can become idle through an engine-owned turn settle,
-  // a permission/question resolution, or a background-task snapshot — none of
-  // those necessarily has a local sendPrompt finally. Observe only changed
-  // exact slots and let the shared pending-work predicate decide when to reap.
-  useEffect(() => {
-    let previous = useSessionsStore.getState().sessions;
-    return useSessionsStore.subscribe((state) => {
-      if (state.sessions === previous) return;
-      const before = previous;
-      previous = state.sessions;
-      for (const chatId of [...deferredArchiveCloseRef.current]) {
-        if (state.sessions[chatId] === before[chatId]) continue;
-        finishDeferredArchiveClose(chatId);
-      }
-    });
-  }, [finishDeferredArchiveClose]);
 
   // ── Persistence subscription ────────────────────────────
   //

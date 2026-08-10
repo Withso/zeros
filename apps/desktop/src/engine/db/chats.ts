@@ -376,6 +376,55 @@ export function upsertChat(c: ChatRow): void {
   tx();
 }
 
+/** Persist a provider resume handle learned after session creation (Claude
+ * publishes its native id from the first streamed init event). This narrow
+ * engine-owned update avoids round-tripping the whole chat row through the
+ * renderer, which can unmount on tab close before its effect runs.
+ *
+ * The selected agent remains authoritative and every identity column changes
+ * in one SQL statement. Omitted metadata means "not refined by this event",
+ * not "erase the last confirmed snapshot". */
+export function updateChatProviderIdentity(
+  chatId: string,
+  agentId: string,
+  binding: ProviderBinding,
+  metadata?: ProviderMetadata | null,
+): boolean {
+  if (!chatId || !agentId) return false;
+  const providerBinding = coerceProviderBinding(binding);
+  if (!providerBinding || providerBinding.providerId !== agentId) return false;
+  const hasMetadata = metadata !== undefined;
+  const providerMetadata = hasMetadata
+    ? coerceProviderMetadata(metadata)
+    : null;
+  const compatibilitySessionId =
+    providerBinding.legacySessionId ?? providerBinding.resumeId;
+  const result = openZerosDb()
+    .prepare(
+      `UPDATE chats
+       SET session_id = @session_id,
+           provider_binding = @provider_binding,
+           provider_metadata = CASE
+             WHEN @has_metadata = 1 THEN @provider_metadata
+             ELSE provider_metadata
+           END,
+           rev = @rev
+       WHERE id = @id AND agent_id = @agent_id`,
+    )
+    .run({
+      id: chatId,
+      agent_id: agentId,
+      session_id: compatibilitySessionId,
+      provider_binding: JSON.stringify(providerBinding),
+      provider_metadata: providerMetadata
+        ? JSON.stringify(providerMetadata)
+        : null,
+      has_metadata: hasMetadata ? 1 : 0,
+      rev: nextRev(),
+    });
+  return result.changes > 0;
+}
+
 export function deleteChat(id: string): void {
   if (!id) return;
   const db = openZerosDb();

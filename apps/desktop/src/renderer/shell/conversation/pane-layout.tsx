@@ -228,7 +228,7 @@ export function ConversationPaneLayout({
   const newAgentFolder = useNewAgentFolder();
   const dispatch = useWorkspaceDispatch();
   const sessions = useAgentSessions();
-  const { archiveSession, closeSession } = sessions;
+  const { closeSession } = sessions;
 
   const activeFolder = useWorkspaceStore(selectActiveFolder);
   const pendingWorkspaceValidationFolder = useWorkspaceStore(
@@ -450,9 +450,9 @@ export function ConversationPaneLayout({
         storedDraft: useWorkspaceStore.getState().chatComposerDrafts[chat.id],
       });
 
-      // Closing a USED chat is navigation, not Stop. Let its active turn and
-      // FIFO finish in the background; archiveSession reaps the execution once
-      // it is genuinely idle. Only a pristine discarded chat tears down now.
+      // Closing a chat is an explicit stop boundary for every agent. The
+      // conversation/provider binding remain durable when archived, but the
+      // current execution and every queued follow-up are cancelled now.
       // Terminals remain explicit process resources and are killed on close.
       switch (tabCloseResourceAction({ kind: chat.kind, discard })) {
         case "kill-terminal":
@@ -460,9 +460,6 @@ export function ConversationPaneLayout({
           break;
         case "close-session":
           closeSession(chat.id);
-          break;
-        case "archive-session":
-          archiveSession(chat.id);
           break;
       }
       dispatch({ type: discard ? "DELETE_CHAT" : "ARCHIVE_CHAT", id: chat.id });
@@ -504,7 +501,6 @@ export function ConversationPaneLayout({
     [
       chatsByPane,
       visibleChats,
-      archiveSession,
       closeSession,
       dispatch,
       sessions,

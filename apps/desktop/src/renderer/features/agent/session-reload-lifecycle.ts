@@ -138,48 +138,6 @@ export function queuedSendNowAction(input: {
   return "flush";
 }
 
-/** Whether closing the visual tab must retain its runtime shell until work
- * settles. Closing a tab is navigation, so any fact capable of producing more
- * transcript, a queued send, or an interaction keeps the execution alive in
- * the background. Reconnecting alone is not work: with no local operation or
- * queue behind it, an archived dead route can be released immediately. */
-export function sessionNeedsBackgroundRetention(input: {
-  status: SessionStatus;
-  hasLocalSend: boolean;
-  hasQueuedSends: boolean;
-  queueHeld: boolean;
-  ensuring: boolean;
-  pendingInteraction: boolean;
-  hasBackgroundTasks: boolean;
-  hasForegroundWorkflows: boolean;
-}): boolean {
-  return (
-    input.status === "streaming" ||
-    input.status === "warming" ||
-    input.hasLocalSend ||
-    input.hasQueuedSends ||
-    input.queueHeld ||
-    input.ensuring ||
-    input.pendingInteraction ||
-    input.hasBackgroundTasks ||
-    input.hasForegroundWorkflows
-  );
-}
-
-/** Resolve the deferred reaper from durable tab visibility plus the latest
- * exact-session work snapshot. Kept pure so the two important races stay
- * explicit: a History reopen cancels the reaper, while an archived chat is
- * closed only after its final operation settles. */
-export function deferredArchiveCloseAction(input: {
-  requested: boolean;
-  archived: boolean;
-  hasPendingWork: boolean;
-}): "none" | "cancel" | "wait" | "close" {
-  if (!input.requested) return "none";
-  if (!input.archived) return "cancel";
-  return input.hasPendingWork ? "wait" : "close";
-}
-
 /** Whether an explicit send must rebuild the chat's session BEFORE the message
  * can go anywhere — the composer's retry affordance for a chat sitting in
  * `failed` / `auth-required` / `reconnecting` (or one that never spawned).
@@ -253,6 +211,22 @@ export function cancelledSince(
   generation: number,
 ): boolean {
   return cancelGeneration(generations, chatId) !== generation;
+}
+
+/** A bind-time async continuation may update renderer state only while it
+ * still owns both the chat lifecycle generation and the exact execution slot.
+ * Tab close removes the slot; a fast History restore can replace it. Either
+ * transition makes permission/config callbacks from the old bind stale. */
+export function bindStillOwnsSessionSlot(input: {
+  cancelled: boolean;
+  expectedExecutionId: string;
+  slotExecutionId?: string | null;
+  slotSessionId?: string | null;
+}): boolean {
+  if (input.cancelled) return false;
+  return (
+    (input.slotExecutionId ?? input.slotSessionId) === input.expectedExecutionId
+  );
 }
 
 /** Remember that live pushes for an exact session arrived before its renderer

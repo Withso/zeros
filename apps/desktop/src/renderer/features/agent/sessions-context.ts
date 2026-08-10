@@ -158,14 +158,11 @@ export interface SessionsActions {
    *  outside this set may release only their heavyweight transcript payload;
    *  live session routing and control state remain resident. */
   setRetainedChatIds(chatIds: readonly string[]): void;
-  /** Remove a used chat from the visible strip without cancelling work. Its
-   * live turn, queued sends, interactions, and background tasks finish offscreen;
-   * the provider tears down the execution once it becomes idle. */
-  archiveSession(chatId: string): void;
-  /** Tell the engine to tear down this chat's session (subprocess /
-   *  server child / hook token / session dir) immediately. Used for explicit
-   *  discard/reset-style lifecycles, not for archiving a used tab. The on-disk
-   *  transcript is kept. Safe for a chat with no live session (no-op). */
+  /** Stop this chat's current work, discard queued follow-ups, and tear down
+   * its execution (subprocess / server child / hook token / session dir).
+   * Conversation history and the provider binding remain durable, so restoring
+   * an archived chat can resume into a fresh execution. Safe before a route has
+   * been published: the conversation id invalidates an in-flight bind. */
   closeSession(chatId: string): void;
   disposeAll(): void;
 }

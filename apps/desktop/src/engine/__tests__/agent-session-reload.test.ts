@@ -1,3 +1,7 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import type {
@@ -8,6 +12,8 @@ import type { EngineMessage } from "../types";
 import { ZerosEngine } from "../index";
 import { MessageRouter } from "../transport/router";
 import type { TransportClient } from "../transport/types";
+import { closeZerosDb, setZerosDbPathForTesting } from "../db";
+import { upsertChat } from "../db/chats";
 
 interface ActivePromptRecord {
   sessionId: string;
@@ -283,6 +289,85 @@ describe("agent session continuity across a local renderer reload", () => {
         failure: expect.objectContaining({ kind: "session-expired" }),
       }),
     ]);
+  });
+
+  it("resumes from the chat row when the renderer missed a late provider binding", async () => {
+    const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-bind-reload-"));
+    setZerosDbPathForTesting(path.join(dbDir, "zeros.db"));
+    const providerBinding = {
+      version: 1 as const,
+      providerId: "codex",
+      kind: "native" as const,
+      resumeId: "thread-learned-by-engine",
+    };
+    try {
+      upsertChat({
+        id: "db-conversation",
+        folder: process.cwd(),
+        agentId: "codex",
+        agentName: "Codex",
+        model: null,
+        effort: "high",
+        permissionMode: "auto",
+        lastModeId: null,
+        prePlanModeId: null,
+        fast: false,
+        additionalDirectories: [],
+        title: "Persisted conversation",
+        createdAt: 1,
+        updatedAt: 1,
+        sessionId: providerBinding.resumeId,
+        providerBinding,
+        providerMetadata: null,
+        pinned: false,
+        archived: true,
+        sourceChatId: null,
+        kind: "chat",
+      });
+      const engine = new ZerosEngine({ root: process.cwd(), port: 29_896 });
+      const state = internals(engine);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      const loadSession = vi
+        .spyOn(state.agents, "loadSession")
+        .mockResolvedValue({
+          executionId: "execution-resumed-from-db",
+          providerBinding,
+        });
+
+      // This is the renderer's conversation-only probe: its React chat row
+      // missed the final provider update during unmount, while SQLite has it.
+      await state.handleMessage(
+        {
+          type: "AGENT_LOAD_SESSION",
+          id: "load-binding-from-db",
+          source: "browser",
+          timestamp: 1,
+          agentId: "codex",
+          chatId: "db-conversation",
+          cwd: process.cwd(),
+        },
+        client,
+      );
+
+      expect(loadSession).toHaveBeenCalledWith(
+        "codex",
+        providerBinding,
+        expect.objectContaining({ cwd: process.cwd() }),
+      );
+      expect(messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "AGENT_SESSION_LOADED",
+            executionId: "execution-resumed-from-db",
+          }),
+        ]),
+      );
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+      fs.rmSync(dbDir, { recursive: true, force: true });
+    }
   });
 
   it("keeps session-to-agent identity when only the local renderer disconnects", () => {

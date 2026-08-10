@@ -539,13 +539,15 @@ export interface AgentSteeredMessage extends BaseMessage {
   turnId?: string;
 }
 
-/** Fire-and-forget: tear down a session's engine-side resources when its
- *  chat tab is closed/archived/deleted. No response is sent. */
+/** Fire-and-forget: stop a conversation's current work and tear down its
+ * engine-side execution resources. `chatId` is sufficient while creation or
+ * resume is still in flight and no execution route has been published yet. */
 export interface AgentCloseSessionMessage extends BaseMessage {
   type: "AGENT_CLOSE_SESSION";
   agentId: string;
-  sessionId: string;
+  sessionId?: string;
   executionId?: ExecutionId;
+  chatId?: ConversationId;
 }
 
 export interface AgentPermissionResponseMessage extends BaseMessage {

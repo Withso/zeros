@@ -27,6 +27,7 @@ import {
   coerceChatRow,
   setChatWorkspaceResolver,
   backfillChatWorkspaceIds,
+  updateChatProviderIdentity,
   type ChatRow,
 } from "../chats";
 import { headRev, tombstonesSince } from "../sync";
@@ -451,6 +452,70 @@ describe("Zeros DB (unified engine store)", () => {
       .get() as { session_id: string };
     expect(raw.session_id).toBe("old-locator");
     expect(raw.session_id).not.toBe("must-not-win");
+  });
+
+  it("chats: atomically records a provider binding learned mid-stream", () => {
+    setZerosDbPathForTesting(tmpDbFile());
+    upsertChat(
+      makeChat("late-binding", {
+        agentId: "claude",
+        providerBinding: {
+          version: 1,
+          providerId: "claude",
+          kind: "legacy",
+          resumeId: "legacy-session",
+        },
+        providerMetadata: {
+          version: 1,
+          git: { sha: "abc", branch: "main", originUrl: null },
+        },
+      }),
+    );
+    const beforeBindingRev = headRev();
+
+    expect(
+      updateChatProviderIdentity("late-binding", "claude", {
+        version: 1,
+        providerId: "claude",
+        kind: "native",
+        resumeId: "claude-native-session",
+      }),
+    ).toBe(true);
+    expect(
+      listChats().find((chat) => chat.id === "late-binding"),
+    ).toMatchObject({
+      sessionId: "claude-native-session",
+      providerBinding: {
+        providerId: "claude",
+        kind: "native",
+        resumeId: "claude-native-session",
+      },
+      // A binding-only refinement must not erase descriptive metadata.
+      providerMetadata: {
+        git: { sha: "abc", branch: "main", originUrl: null },
+      },
+    });
+    expect(listChatsSince(beforeBindingRev)).toEqual([
+      expect.objectContaining({
+        id: "late-binding",
+        providerBinding: expect.objectContaining({
+          resumeId: "claude-native-session",
+        }),
+      }),
+    ]);
+
+    expect(
+      updateChatProviderIdentity("late-binding", "codex", {
+        version: 1,
+        providerId: "codex",
+        kind: "native",
+        resumeId: "wrong-provider-thread",
+      }),
+    ).toBe(false);
+    expect(
+      listChats().find((chat) => chat.id === "late-binding")?.providerBinding
+        ?.resumeId,
+    ).toBe("claude-native-session");
   });
 
   it("summariesForFolder: first user message per chat; includes archived; excludes self / no-user / other folders", () => {

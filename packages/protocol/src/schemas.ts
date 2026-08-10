@@ -166,9 +166,13 @@ function assertInboundPayload(env: Record<string, unknown>): void {
       if (env.promptId !== undefined && !isStr(env.promptId)) bad("promptId");
       break;
     case "AGENT_CANCEL":
-    case "AGENT_CLOSE_SESSION":
     case "AGENT_COMPACT":
       if (!isNonEmptyStr(executionRoute(env))) bad("executionId");
+      break;
+    case "AGENT_CLOSE_SESSION":
+      if (!isNonEmptyStr(executionRoute(env)) && !isNonEmptyStr(env.chatId))
+        bad("executionId/chatId");
+      if (env.chatId !== undefined && !isNonEmptyStr(env.chatId)) bad("chatId");
       break;
     case "AGENT_LOAD_SESSION":
       if (

@@ -139,16 +139,16 @@ describe("messageCountForChatClose", () => {
 });
 
 describe("tabCloseResourceAction", () => {
-  it("lets a used chat finish in the background instead of closing its execution", () => {
+  it("stops every chat execution when its tab closes", () => {
     expect(tabCloseResourceAction({ kind: "chat", discard: false })).toBe(
-      "archive-session",
+      "close-session",
     );
-  });
-
-  it("still tears down a discarded pristine chat and kills a terminal", () => {
     expect(tabCloseResourceAction({ kind: "chat", discard: true })).toBe(
       "close-session",
     );
+  });
+
+  it("still kills a terminal process when its tab closes", () => {
     expect(tabCloseResourceAction({ kind: "terminal", discard: false })).toBe(
       "kill-terminal",
     );

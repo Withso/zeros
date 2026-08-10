@@ -1317,11 +1317,10 @@ export function AgentChat({
           return true;
         case "clear": {
           // Close THIS chat and open a fresh one bound to the same
-          // agent/model/workspace, then navigate to it. Unlike dismissing a
-          // used tab (which lets live work finish offscreen), /clear is an
-          // explicit context reset, so closeSession reaps the old execution.
-          // Its transcript stays on disk and ARCHIVE_CHAT only removes it from
-          // the open strip — it remains reopenable from History.
+          // agent/model/workspace, then navigate to it. As with tab close,
+          // closeSession stops and reaps the old execution. Its transcript stays
+          // on disk and ARCHIVE_CHAT only removes it from the open strip — it
+          // remains reopenable from History.
           // (chatThread is non-null per the guard above, so
           // chatId is set; this check just narrows the optional prop for TS.)
           if (!chatId) return false;

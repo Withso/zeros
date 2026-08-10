@@ -946,7 +946,7 @@ describe("WorkspaceService", () => {
     }
   });
 
-  it("preserves a host provider binding when a remote bulk upsert omits it", async () => {
+  it("preserves a host provider binding when a stale chat upsert omits it", async () => {
     const { setZerosDbPathForTesting, closeZerosDb } = await import("../../db");
     setZerosDbPathForTesting(path.join(dir, "zeros-provider-binding.db"));
     try {
@@ -994,6 +994,7 @@ describe("WorkspaceService", () => {
         chats: Array<{
           id: string;
           title: string;
+          archived: boolean;
           sessionId: string | null;
           providerBinding?: {
             providerId: string;
@@ -1018,6 +1019,54 @@ describe("WorkspaceService", () => {
         providerMetadata: {
           git: { sha: "abc123", branch: "main" },
         },
+      });
+
+      // The desktop's archive write can race a provider_binding_update learned
+      // directly by the engine. It is trusted, but its pre-event ChatThread is
+      // still stale; same-agent omission must preserve the newer DB identity.
+      await svc.handle("chats.bulkUpsert", {
+        chats: [
+          {
+            id: "provider-owned",
+            folder: dir,
+            agentId: "codex",
+            title: "Archived locally",
+            archived: true,
+            providerBinding: null,
+            providerMetadata: null,
+          },
+        ],
+      });
+      const afterLocal = (await svc.handle("chats.list")) as typeof result;
+      expect(
+        afterLocal.chats.find((chat) => chat.id === "provider-owned"),
+      ).toMatchObject({
+        title: "Archived locally",
+        archived: true,
+        sessionId: "codex-thread-1",
+        providerBinding: {
+          providerId: "codex",
+          resumeId: "codex-thread-1",
+        },
+      });
+
+      // Changing provider is the explicit clear boundary; a Codex binding must
+      // never leak into Claude merely because the incoming row omitted one.
+      await svc.handle("chats.upsert", {
+        chat: {
+          id: "provider-owned",
+          folder: dir,
+          agentId: "claude",
+          title: "Switched provider",
+        },
+      });
+      const switched = (await svc.handle("chats.list")) as typeof result;
+      expect(
+        switched.chats.find((chat) => chat.id === "provider-owned"),
+      ).toMatchObject({
+        title: "Switched provider",
+        providerBinding: null,
+        providerMetadata: null,
       });
     } finally {
       closeZerosDb();
