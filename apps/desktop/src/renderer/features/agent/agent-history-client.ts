@@ -447,6 +447,12 @@ export interface ChatRowWire {
   createdAt: number;
   updatedAt: number;
   sessionId: string | null;
+  nativeSessionId: string | null;
+  nativeGitInfo?: {
+    sha: string | null;
+    branch: string | null;
+    originUrl: string | null;
+  } | null;
   pinned: boolean;
   archived: boolean;
   sourceChatId: string | null;

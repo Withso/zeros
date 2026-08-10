@@ -11,7 +11,7 @@
 //                 → runtime.runTurn (with per-turn mode overrides).
 //   cancel      → runtime.interruptTurn for EVERY live turn (parent +
 //                 collab subagent threads; turn/interrupt is per-thread).
-//   setMode     → stash composite mode; applied on next turn (no respawn).
+//   setMode     → update thread settings live + every later turn (no respawn).
 //   respond     → map Zeros RequestPermissionResponse → method-specific
 //                 codex approval response → runtime.respondToPermission.
 //   dispose     → drain pending approvals (cancel), kill runtimes,
@@ -40,11 +40,13 @@ import { randomUUID } from "node:crypto";
 import type {
   AgentAdapter,
   AgentAdapterContext,
+  CodexCapabilityCall,
   ContentBlock,
   InitializeResponse,
   ListSessionsResponse,
   LoadSessionResponse,
   McpServerRegistration,
+  NativeThreadAction,
   NewSessionResponse,
   PromptResponse,
   QuestionAnswer,
@@ -66,7 +68,9 @@ import {
   type CodexApprovalMethod,
   type CodexApprovalPolicy,
   type CodexApprovalRequest,
+  type CodexApprovalsReviewer,
   type CodexAppServerHandle,
+  type CodexMcpElicitationRequest,
   type CodexSandboxMode,
   type CodexSandboxPolicy,
   type CodexThreadStartParams,
@@ -81,10 +85,21 @@ import { buildQuestionStamp } from "@zeros/protocol/agent-messages";
 import type {
   AdvertisedModel,
   AvailableCommand,
+  NativeThreadGoal,
 } from "@zeros/protocol/agent-events";
 import type { AccountDetails } from "@zeros/protocol/messages";
 import type { GetAccountResponse } from "./generated/v2/GetAccountResponse";
 import type { GetAccountParams } from "./generated/v2/GetAccountParams";
+import type { McpServerElicitationRequestResponse } from "./generated/v2/McpServerElicitationRequestResponse";
+import type { JsonValue } from "./generated/serde_json/JsonValue";
+import {
+  browserDynamicTools,
+  browserMcpServerRegistration,
+  createBrowserDynamicToolHandler,
+  mergeBrowserAutomationEnv,
+  registerCodexBrowserUseSession,
+} from "./browser-automation-client";
+import { invokeCodexCapability } from "./codex-capability-dispatch";
 
 const AGENT_ID = "codex";
 const CLIENT_INFO = { name: "Zeros", version: "0.0.5", title: "Zeros Mac App" };
@@ -117,8 +132,8 @@ const CODEX_MODES: SessionMode[] = [
   },
   {
     id: "auto-edit",
-    name: "Auto-Edit",
-    description: "Auto-approve workspace edits; ask for risky ops.",
+    name: "Approve for Me",
+    description: "Route sandbox-boundary approvals through Codex Auto-review.",
   },
   {
     id: "full-access",
@@ -193,10 +208,7 @@ interface CodexSession {
   pendingApprovals: Map<string, PendingApproval>;
   /** questionId → pending blocking-question state (runtime + the request we
    *  built, for answer reshaping + dismiss). Twin of pendingApprovals. */
-  pendingQuestions: Map<
-    string,
-    { runtime: CodexAppServerHandle; request: QuestionRequest }
-  >;
+  pendingQuestions: Map<string, PendingCodexQuestion>;
   /** itemId → the file paths of a fileChange item, captured as items stream.
    *  A fileChange APPROVAL request carries only the itemId (its params have
    *  no changes[]), so to show WHICH / HOW MANY files a patch touches we
@@ -214,6 +226,18 @@ interface CodexSession {
    *  per-session value rather than a global because thread/turn-level
    *  policies can lift session-scoped overrides off the latest snapshot. */
   latestRateLimits: unknown | null;
+  /** Latest startup/auth lifecycle for MCP servers attached to this loaded
+   * thread. The list RPC intentionally reports catalog/auth data only; merge
+   * these notifications into settings reads so failures and reauth prompts are
+   * not lost between the notification and the next renderer refresh. */
+  mcpStartupStatus: Map<
+    string,
+    {
+      status: string;
+      error: string | null;
+      failureReason: string | null;
+    }
+  >;
   /** True between `prompt()` start and settle. Lets the runtime-exit
    *  handler tell a mid-turn crash (owned by the in-flight prompt()'s
    *  recoverable retry) from an idle crash (broadcast so the chat shows
@@ -230,6 +254,19 @@ interface CodexSession {
    *  the generic protocol-error that stranded the user before. */
   childExitedMidTurn: boolean;
 }
+
+type PendingCodexQuestion =
+  | {
+      kind: "user-input";
+      runtime: CodexAppServerHandle;
+      request: QuestionRequest;
+    }
+  | {
+      kind: "mcp-elicitation";
+      runtime: CodexAppServerHandle;
+      request: QuestionRequest;
+      params: CodexMcpElicitationRequest["params"];
+    };
 
 export class CodexAppServerAdapter implements AgentAdapter {
   readonly agentId = AGENT_ID;
@@ -353,6 +390,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       // codex mode pill empty on every new session.
       session: {
         sessionId: session.zerosSessionId,
+        nativeSessionId: session.threadId,
         modes: {
           currentModeId: session.modeId,
           availableModes: CODEX_MODES,
@@ -364,32 +402,31 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
   async loadSession(opts: {
     sessionId: string;
+    nativeSessionId?: string;
     cwd: string;
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
     systemInstruction?: string;
   }): Promise<LoadSessionResponse> {
-    // Resume against codex's stored thread. The sessionId we get IS the codex
-    // thread id (set by listSessions, persisted by the UI), and we key the live
-    // runtime + session dir on it. If the SAME thread is already open in another
-    // live chat, a second boot would overwrite the map entry (leaking the first
-    // runtime) and share the session dir (disposing one rm's it out from under
-    // the other, including in-flight prompt image attachments). Tear down the
-    // prior live session first so the newest open wins cleanly instead of
-    // corrupting both.
+    // Resume against Codex's stored native thread, while keeping the Zeros
+    // session id as the live runtime/browser-task identity. Older persisted
+    // chats used the same id for both, hence the fallback below. If the same
+    // Zeros runtime id is already open in another live chat, a second boot
+    // would overwrite the map entry (leaking the first runtime) and share its
+    // session directory. Tear down the prior live session first.
     if (this.sessions.has(opts.sessionId)) {
       await this.disposeSession(opts.sessionId);
     }
-    const { session, resumedFresh } = await this.bootSession({
+    const { session, resumedFresh, nativeThreadMetadata } = await this.bootSession({
       cwd: opts.cwd,
       env: opts.env,
       cliBinary: opts.cliBinary,
       mcpServers: opts.mcpServers,
       systemInstruction: opts.systemInstruction,
       kind: "resume",
-      resumeThreadId: opts.sessionId,
-      zerosSessionId: opts.sessionId, // key live runtime + dir on the codex thread id
+      resumeThreadId: opts.nativeSessionId ?? opts.sessionId,
+      zerosSessionId: opts.sessionId,
     });
     // Populate the live model catalog for resumed chats too. Fire-and-forget:
     // loadSession returns no initialize, so the gateway re-poll (modelsDynamic)
@@ -401,11 +438,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // response/session wrapper + `available` field left the mode pill empty on
     // every resumed codex chat.
     return {
+      nativeSessionId: session.threadId,
       modes: {
         currentModeId: session.modeId,
         availableModes: CODEX_MODES,
       },
       resumedFresh,
+      ...(nativeThreadMetadata ? { nativeThreadMetadata } : {}),
     };
   }
 
@@ -414,6 +453,68 @@ export class CodexAppServerAdapter implements AgentAdapter {
     cursor?: string | null;
   }): Promise<ListSessionsResponse> {
     return listCodexSessions({ cwd: opts.cwd });
+  }
+
+  async updateNativeThread(opts: NativeThreadAction): Promise<void> {
+    const live = this.sessions.get(opts.sessionId);
+    if (live) {
+      if (live.threadId !== opts.nativeThreadId) {
+        throw new Error("native Codex thread does not match the live session");
+      }
+      await applyNativeThreadAction(live.runtime, opts);
+      return;
+    }
+
+    // Archived/inactive chats frequently have no interactive child. Use a
+    // short-lived app-server connection so lifecycle actions remain fully
+    // native instead of becoming Zeros-only metadata.
+    const runtime = await bootCodexAppServerRuntime({
+      cwd: opts.cwd,
+      env: opts.env,
+      cliBinary: opts.cliBinary,
+      clientInfo: CLIENT_INFO,
+      mcpServers: [],
+      logTag: `codex-lifecycle:${opts.nativeThreadId.slice(0, 8)}`,
+      onStderr: (line) => this.ctx.emit.onAgentStderr(this.agentId, line),
+    });
+    try {
+      await applyNativeThreadAction(runtime, opts);
+    } finally {
+      await runtime.dispose();
+    }
+  }
+
+  async callCodexCapability(opts: CodexCapabilityCall): Promise<unknown> {
+    const live = opts.sessionId ? this.sessions.get(opts.sessionId) : null;
+    if (live?.runtimeAlive) {
+      const result = await invokeCodexCapability(
+        live.runtime,
+        opts.operation,
+        opts.params,
+      );
+      return opts.operation === "mcp.status.list"
+        ? mergeMcpStartupStatus(result, live.mcpStartupStatus)
+        : result;
+    }
+
+    const runtime = await bootCodexAppServerRuntime({
+      cwd: opts.cwd,
+      env: opts.env,
+      cliBinary: opts.cliBinary,
+      clientInfo: CLIENT_INFO,
+      mcpServers: [],
+      logTag: `codex-capability:${opts.operation}`,
+      onStderr: (line) => this.ctx.emit.onAgentStderr(this.agentId, line),
+    });
+    try {
+      return await invokeCodexCapability(
+        runtime,
+        opts.operation,
+        opts.params,
+      );
+    } finally {
+      await runtime.dispose();
+    }
   }
 
   async prompt(opts: {
@@ -446,7 +547,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
     session.postCancelInterruptUntil = 0;
 
     const input = await this.buildUserInput(session, opts.prompt);
-    const { approvalPolicy, sandboxPolicy } = modePolicyFor(session.modeId);
+    const { approvalPolicy, approvalsReviewer, sandboxPolicy } = modePolicyFor(
+      session.modeId,
+    );
 
     // 2026-05-28: per-turn model + reasoning effort. The composer's
     // ModelPill / EffortPill write to chat.model / chat.effort which
@@ -494,6 +597,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
           threadId: session.threadId,
           input,
           approvalPolicy,
+          approvalsReviewer,
           sandboxPolicy,
           ...(model ? { model } : {}),
           ...(effort ? { effort } : {}),
@@ -638,6 +742,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       // resolvers. Fail closed and receipt every straggler before a later turn
       // can enqueue behind a dead renderer card.
       this.drainPendingApprovals(session, session.runtimeAlive);
+      this.drainPendingQuestions(session, session.runtimeAlive);
     }
   }
 
@@ -751,6 +856,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // Release approval RPCs as part of Stop itself. Interrupting the turn does
     // not guarantee the app-server will settle every server→client request.
     this.drainPendingApprovals(session, session.runtimeAlive);
+    this.drainPendingQuestions(session, session.runtimeAlive);
     // Sweep EVERY live turn, not just the parent's. turn/interrupt is
     // per-(thread, turn), and collab subagent threads keep running —
     // streaming tool calls into the timeline — if only the parent turn
@@ -818,6 +924,34 @@ export class CodexAppServerAdapter implements AgentAdapter {
           currentModeId: opts.modeId,
         } as never,
       });
+
+      // Keep the app-server thread's native settings aligned immediately.
+      // prompt() also carries this snapshot on every turn, which closes the
+      // UI's fire-and-forget select → send race. The thread update matters
+      // while an existing session is already alive: in particular, changing
+      // to "Approve for me" must swap human approval routing for Codex's
+      // risk-based Auto-review without rebuilding the session.
+      const { approvalPolicy, approvalsReviewer, sandboxPolicy } =
+        modePolicyFor(opts.modeId);
+      try {
+        await session.runtime.request(
+          "thread/settings/update",
+          {
+            threadId: session.threadId,
+            approvalPolicy,
+            approvalsReviewer,
+            sandboxPolicy,
+          },
+          { timeoutMs: 5_000 },
+        );
+      } catch (err) {
+        // Per-turn overrides remain authoritative even if an older or
+        // restarting app-server cannot accept the sticky thread update.
+        this.ctx.emit.onAgentStderr(
+          this.agentId,
+          `[codex] live permission-mode update failed; the next turn will still use ${opts.modeId}: ${String(err)}`,
+        );
+      }
     }
   }
 
@@ -850,17 +984,11 @@ export class CodexAppServerAdapter implements AgentAdapter {
     for (const session of this.sessions.values()) {
       const pending = session.pendingQuestions.get(opts.questionId);
       if (!pending) continue;
-      session.pendingQuestions.delete(opts.questionId);
-      const codexResponse = mapQuestionAnswerToCodex(
-        pending.request,
-        opts.response,
-      );
-      pending.runtime.respondToUserInput(opts.questionId, codexResponse);
-      this.settleQuestionRecord(
+      this.answerPendingQuestion(
         session,
         opts.questionId,
-        pending.request,
-        opts.response.outcome,
+        pending,
+        opts.response,
       );
       return true;
     }
@@ -871,18 +999,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         for (const [qid, pending] of session.pendingQuestions) {
           if (pending.request.nativeRequestId !== opts.nativeRequestId)
             continue;
-          session.pendingQuestions.delete(qid);
-          const codexResponse = mapQuestionAnswerToCodex(
-            pending.request,
-            opts.response,
-          );
-          pending.runtime.respondToUserInput(qid, codexResponse);
-          this.settleQuestionRecord(
-            session,
-            qid,
-            pending.request,
-            opts.response.outcome,
-          );
+          this.answerPendingQuestion(session, qid, pending, opts.response);
           return true;
         }
       }
@@ -1047,8 +1164,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     this.drainPendingApprovals(s, s.runtimeAlive);
+    this.drainPendingQuestions(s, s.runtimeAlive);
     this.sessions.delete(sessionId);
-    s.pendingQuestions.clear();
     this.disposing.add(sessionId);
     try {
       await s.runtime.dispose().catch(() => {});
@@ -1072,7 +1189,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         // also auto-cancels its in-flight approval promises, so this
         // is belt-and-braces — but it keeps the adapter map clean.
         this.drainPendingApprovals(s, s.runtimeAlive);
-        s.pendingQuestions.clear();
+        this.drainPendingQuestions(s, s.runtimeAlive);
         await s.runtime.dispose();
         // Best-effort session dir removal.
         await removeSessionDir(s.zerosSessionId).catch(() => {});
@@ -1102,11 +1219,15 @@ export class CodexAppServerAdapter implements AgentAdapter {
     kind: "new" | "resume";
     /** Required when kind === "resume". */
     resumeThreadId?: string;
-    /** When kind === "resume", caller may want the Zeros sessionId to
-     *  match the codex thread id (so the UI's persistent key resolves
-     *  through listSessions). For kind === "new", a fresh UUID. */
+    /** Stable Zeros runtime/browser-task identity. For a new session this is a
+     * fresh UUID; resume keeps the previously persisted Zeros id while
+     * `resumeThreadId` independently addresses the provider transcript. */
     zerosSessionId?: string;
-  }): Promise<{ session: CodexSession; resumedFresh: boolean }> {
+  }): Promise<{
+    session: CodexSession;
+    resumedFresh: boolean;
+    nativeThreadMetadata: LoadSessionResponse["nativeThreadMetadata"] | null;
+  }> {
     const zerosSessionId = opts.zerosSessionId ?? randomUUID();
     await ensureSessionDir(zerosSessionId);
 
@@ -1122,13 +1243,28 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // eslint-disable-next-line prefer-const -- assigned after runtime boot; closures above capture the live ref.
     let session!: CodexSession;
     let runtime: CodexAppServerHandle;
+    const browserEnv = mergeBrowserAutomationEnv(opts.env);
+    const browserTaskBinding = { taskId: zerosSessionId };
     try {
+      const configuredMcpServers = opts.mcpServers ?? this.ctx.mcpServers;
+      const browserMcp = browserMcpServerRegistration(
+        browserEnv,
+        browserTaskBinding,
+      );
+      const mcpServers = browserMcp
+        ? [
+            browserMcp,
+            ...configuredMcpServers.filter(
+              (server) => server.name !== browserMcp.name,
+            ),
+          ]
+        : configuredMcpServers;
       runtime = await bootCodexAppServerRuntime({
         cwd: opts.cwd,
         env: opts.env,
         cliBinary: opts.cliBinary,
         clientInfo: CLIENT_INFO,
-        mcpServers: opts.mcpServers ?? this.ctx.mcpServers,
+        mcpServers,
         logTag: `codex-app-server:${zerosSessionId.slice(0, 8)}`,
         onApprovalRequest: (request) =>
           this.handleApprovalRequest(session, request),
@@ -1138,6 +1274,14 @@ export class CodexAppServerAdapter implements AgentAdapter {
           this.handleUserInputRequest(session, request),
         onUserInputSettled: (questionId) =>
           this.handleUserInputSettled(session, questionId),
+        onMcpElicitationRequest: (request) =>
+          this.handleMcpElicitationRequest(session, request),
+        onMcpElicitationSettled: (questionId) =>
+          this.handleUserInputSettled(session, questionId),
+        onDynamicToolCall: createBrowserDynamicToolHandler(
+          browserEnv,
+          browserTaskBinding,
+        ),
         onStderr: (line) => {
           this.ctx.emit.onAgentStderr(this.agentId, line);
         },
@@ -1160,6 +1304,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
     let threadId: string;
     let threadModel: string | null = null;
+    let nativeThreadMetadata: LoadSessionResponse["nativeThreadMetadata"] | null = null;
     // True when a `kind:"resume"` could not load the rollout and fell through to
     // a fresh thread below — the gateway re-injects the first-turn
     // <system_instruction> in that case (the fresh thread has no history).
@@ -1184,6 +1329,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
           });
           threadId = result.threadId;
           threadModel = result.model ?? null;
+          nativeThreadMetadata = readNativeThreadMetadata(result.raw);
         } catch (resumeErr) {
           // 2026-05-28: when codex says "no rollout for this thread"
           // (typically because the previous turn/start failed and no
@@ -1239,6 +1385,17 @@ export class CodexAppServerAdapter implements AgentAdapter {
       );
     }
 
+    const browserUseRegistered = await registerCodexBrowserUseSession(
+      browserEnv,
+      browserTaskBinding,
+      threadId,
+    );
+    if (!browserUseRegistered && browserDynamicTools(browserEnv)) {
+      console.warn(
+        `[codex-app-server] Browser Use native binding failed for ${zerosSessionId.slice(0, 8)}`,
+      );
+    }
+
     const translator = new CodexAppServerTranslator({
       sessionId: zerosSessionId,
       emit: (notification: SessionNotification) =>
@@ -1274,6 +1431,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       authMode: null,
       planType: null,
       latestRateLimits: null,
+      mcpStartupStatus: new Map(),
       turnActive: false,
       runtimeAlive: true,
       childExitedMidTurn: false,
@@ -1283,6 +1441,20 @@ export class CodexAppServerAdapter implements AgentAdapter {
     this.wireTurnTracking(session, runtime);
     this.wireFileChangeCapture(session, runtime);
     this.wireAccountListeners(session, runtime);
+    this.wireMcpListeners(session, runtime);
+    // Resume/open must hydrate the provider-owned goal even if no change
+    // notification fires during this app-server connection.
+    const goalRequest = runtime.getThreadGoal?.({ threadId });
+    if (goalRequest) void goalRequest
+      .then((response) => {
+        const goal = canonicalNativeGoal(response.goal);
+        if (!goal || !session.runtimeAlive) return;
+        this.ctx.emit.onSessionUpdate(this.agentId, {
+          sessionId: zerosSessionId,
+          update: { sessionUpdate: "native_goal_update", goal },
+        });
+      })
+      .catch(() => {});
     // Slash-command discovery. Codex is a bespoke (non-stream-json)
     // adapter, so it doesn't inherit the shared first-prompt discovery
     // hook. We pull from two sources and merge them:
@@ -1306,7 +1478,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       void this.refreshCommands(session);
     });
 
-    return { session, resumedFresh };
+    return { session, resumedFresh, nativeThreadMetadata };
   }
 
   /** The `codex app-server` child for a session exited. Three cases:
@@ -1342,7 +1514,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // The runtime is already dead, so only drop local resolver handles and
     // emit their receipts; there is no JSON-RPC peer left to answer.
     this.drainPendingApprovals(session, false);
-    session.pendingQuestions.clear();
+    this.drainPendingQuestions(session, false);
     session.fileEditPathsByItemId.clear();
 
     // Case 2 — mid-turn crash. The in-flight prompt() recovers.
@@ -1483,6 +1655,50 @@ export class CodexAppServerAdapter implements AgentAdapter {
         this.agentId,
         `[codex-app-server:${session.zerosSessionId.slice(0, 8)}] account.login.completed`,
       );
+    });
+  }
+
+  private wireMcpListeners(
+    session: CodexSession,
+    runtime: CodexAppServerHandle,
+  ): void {
+    runtime.onNotification("mcpServer/startupStatus/updated", (params) => {
+      const p = (params ?? {}) as {
+        threadId?: unknown;
+        name?: unknown;
+        status?: unknown;
+        error?: unknown;
+        failureReason?: unknown;
+      };
+      if (
+        typeof p.name !== "string" ||
+        typeof p.status !== "string" ||
+        (p.threadId !== null && p.threadId !== undefined && p.threadId !== session.threadId)
+      ) return;
+      session.mcpStartupStatus.set(p.name, {
+        status: p.status,
+        error: typeof p.error === "string" ? p.error : null,
+        failureReason:
+          typeof p.failureReason === "string" ? p.failureReason : null,
+      });
+    });
+
+    runtime.onNotification("mcpServer/oauthLogin/completed", (params) => {
+      const p = (params ?? {}) as {
+        threadId?: unknown;
+        name?: unknown;
+        success?: unknown;
+        error?: unknown;
+      };
+      if (
+        typeof p.name !== "string" ||
+        (p.threadId !== null && p.threadId !== undefined && p.threadId !== session.threadId)
+      ) return;
+      session.mcpStartupStatus.set(p.name, {
+        status: p.success === true ? "ready" : "failed",
+        error: typeof p.error === "string" ? p.error : null,
+        failureReason: p.success === true ? null : "reauthenticationRequired",
+      });
     });
   }
 
@@ -1660,12 +1876,39 @@ export class CodexAppServerAdapter implements AgentAdapter {
     const canonical = mapUserInputToQuestion(
       session.zerosSessionId,
       request.questionId,
+      request.requestId,
       request.params,
     );
     session.translator.emitUserInputToolCall(request.params);
     session.pendingQuestions.set(request.questionId, {
+      kind: "user-input",
       runtime: session.runtime,
       request: canonical,
+    });
+    this.ctx.emit.onQuestionRequest(
+      this.agentId,
+      request.questionId,
+      canonical,
+    );
+  }
+
+  /** Project a standard MCP form or URL flow through the canonical blocking
+   * question card, while retaining the native schema for typed response
+   * reconstruction. The runtime never forwards the unadvertised openai/form
+   * variant here. */
+  private handleMcpElicitationRequest(
+    session: CodexSession,
+    request: CodexMcpElicitationRequest,
+  ): void {
+    const canonical = mapMcpElicitationToQuestion(
+      session.zerosSessionId,
+      request,
+    );
+    session.pendingQuestions.set(request.questionId, {
+      kind: "mcp-elicitation",
+      runtime: session.runtime,
+      request: canonical,
+      params: request.params,
     });
     this.ctx.emit.onQuestionRequest(
       this.agentId,
@@ -1686,6 +1929,68 @@ export class CodexAppServerAdapter implements AgentAdapter {
     this.settleQuestionRecord(session, questionId, pending.request, {
       outcome: "dismissed",
     });
+  }
+
+  private answerPendingQuestion(
+    session: CodexSession,
+    questionId: string,
+    pending: PendingCodexQuestion,
+    response: QuestionResponse,
+  ): void {
+    if (!session.pendingQuestions.delete(questionId)) return;
+    let outcome = response.outcome;
+    if (pending.kind === "user-input") {
+      pending.runtime.respondToUserInput(
+        questionId,
+        mapQuestionAnswerToCodex(pending.request, response),
+      );
+    } else {
+      try {
+        pending.runtime.respondToMcpElicitation(
+          questionId,
+          mapQuestionAnswerToMcpElicitation(pending.params, response),
+        );
+      } catch (err) {
+        // A malformed numeric/form value must never become an invalid JSON
+        // payload (NaN serializes as null). Cancel safely and make the mismatch
+        // visible in the agent log; the settlement receipt stamps SKIPPED.
+        pending.runtime.respondToMcpElicitation(questionId, {
+          action: "cancel",
+          content: null,
+          _meta: null,
+        });
+        outcome = { outcome: "dismissed" };
+        this.ctx.emit.onAgentStderr(
+          this.agentId,
+          `[zeros] MCP elicitation answer rejected locally: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    this.settleQuestionRecord(session, questionId, pending.request, outcome);
+  }
+
+  private drainPendingQuestions(
+    session: CodexSession,
+    resolveRuntime: boolean,
+  ): void {
+    for (const [questionId, pending] of [...session.pendingQuestions]) {
+      try {
+        if (resolveRuntime) {
+          this.answerPendingQuestion(session, questionId, pending, {
+            outcome: { outcome: "dismissed" },
+          });
+        } else if (session.pendingQuestions.delete(questionId)) {
+          this.settleQuestionRecord(session, questionId, pending.request, {
+            outcome: "dismissed",
+          });
+        }
+      } catch (err) {
+        this.ctx.emit.onAgentStderr(
+          this.agentId,
+          `[zeros] question drain failed for ${questionId}: ${String(err)}`,
+        );
+      }
+    }
   }
 
   /** Post-settle bookkeeping shared by every settle path (answer, vendor-id
@@ -1771,6 +2076,34 @@ export class CodexAppServerAdapter implements AgentAdapter {
       "item/commandExecution/terminalInteraction",
       "item/fileChange/outputDelta",
       "item/fileChange/patchUpdated",
+      "item/mcpToolCall/progress",
+      "hook/started",
+      "hook/completed",
+      "model/rerouted",
+      "item/autoApprovalReview/started",
+      "item/autoApprovalReview/completed",
+      "thread/environment/connected",
+      "thread/environment/disconnected",
+      "model/safetyBuffering/updated",
+      "model/verification",
+      "thread/compacted",
+      "turn/moderationMetadata",
+      "externalAgentConfig/import/progress",
+      "externalAgentConfig/import/completed",
+      "mcpServer/oauthLogin/completed",
+      "mcpServer/startupStatus/updated",
+      "remoteControl/status/changed",
+      "app/list/updated",
+      "thread/realtime/started",
+      "thread/realtime/itemAdded",
+      "thread/realtime/transcript/delta",
+      "thread/realtime/transcript/done",
+      "thread/realtime/outputAudio/delta",
+      "thread/realtime/sdp",
+      "thread/realtime/error",
+      "thread/realtime/closed",
+      "windowsSandbox/setupCompleted",
+      "windows/worldWritableWarning",
       "process/outputDelta",
       "command/exec/outputDelta",
       "error",
@@ -1785,6 +2118,62 @@ export class CodexAppServerAdapter implements AgentAdapter {
     for (const m of methods) {
       runtime.onNotification(m, (params) => translator.handle(m, params));
     }
+    const emitLifecycle = (
+      event: "archived" | "unarchived" | "deleted" | "closed",
+      params: unknown,
+    ): void => {
+      const nativeThreadId = (params as { threadId?: unknown })?.threadId;
+      // A Codex runtime can also report collaboration child threads. They do
+      // not own the Zeros chat row, so only the parent thread may mutate it.
+      if (nativeThreadId !== owner.threadId) return;
+      this.ctx.emit.onNativeThreadEvent?.(this.agentId, {
+        sessionId: owner.zerosSessionId,
+        nativeThreadId,
+        event,
+      });
+    };
+    runtime.onNotification("thread/archived", (params) =>
+      emitLifecycle("archived", params),
+    );
+    runtime.onNotification("thread/unarchived", (params) =>
+      emitLifecycle("unarchived", params),
+    );
+    runtime.onNotification("thread/deleted", (params) =>
+      emitLifecycle("deleted", params),
+    );
+    runtime.onNotification("thread/closed", (params) =>
+      emitLifecycle("closed", params),
+    );
+    runtime.onNotification("thread/name/updated", (params) => {
+      const p = params as { threadId?: unknown; threadName?: unknown };
+      if (p.threadId !== owner.threadId || typeof p.threadName !== "string") {
+        return;
+      }
+      this.ctx.emit.onNativeThreadEvent?.(this.agentId, {
+        sessionId: owner.zerosSessionId,
+        nativeThreadId: owner.threadId,
+        event: "name-updated",
+        name: p.threadName,
+      });
+    });
+    runtime.onNotification("thread/goal/updated", (params) => {
+      const p = params as { threadId?: unknown; goal?: unknown };
+      if (p.threadId !== owner.threadId) return;
+      const goal = canonicalNativeGoal(p.goal);
+      if (!goal) return;
+      this.ctx.emit.onSessionUpdate(this.agentId, {
+        sessionId: owner.zerosSessionId,
+        update: { sessionUpdate: "native_goal_update", goal },
+      });
+    });
+    runtime.onNotification("thread/goal/cleared", (params) => {
+      const p = params as { threadId?: unknown };
+      if (p.threadId !== owner.threadId) return;
+      this.ctx.emit.onSessionUpdate(this.agentId, {
+        sessionId: owner.zerosSessionId,
+        update: { sessionUpdate: "native_goal_update", goal: null },
+      });
+    });
     // Codex may autonomously raise the thread to native `ultra`. Keep the ONE
     // existing composer effort picker truthful by persisting that provider
     // state into the exact parent chat. Child/collaboration thread settings
@@ -1877,6 +2266,119 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
 // ── Helpers ──────────────────────────────────────────────────
 
+function readNativeThreadMetadata(
+  result: unknown,
+): LoadSessionResponse["nativeThreadMetadata"] | null {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return null;
+  const thread = (result as { thread?: unknown }).thread;
+  if (!thread || typeof thread !== "object" || Array.isArray(thread)) return null;
+  const value = thread as Record<string, unknown>;
+  if (typeof value.isPinned !== "boolean") return null;
+  const rawGitInfo = value.gitInfo;
+  const gitInfo =
+    rawGitInfo && typeof rawGitInfo === "object" && !Array.isArray(rawGitInfo)
+      ? (rawGitInfo as Record<string, unknown>)
+      : null;
+  const nullableString = (input: unknown): string | null =>
+    typeof input === "string" ? input : null;
+  return {
+    name: nullableString(value.name),
+    isPinned: value.isPinned,
+    gitInfo: gitInfo
+      ? {
+          sha: nullableString(gitInfo.sha),
+          branch: nullableString(gitInfo.branch),
+          originUrl: nullableString(gitInfo.originUrl),
+        }
+      : null,
+  };
+}
+
+function mergeMcpStartupStatus(
+  result: unknown,
+  statuses: ReadonlyMap<
+    string,
+    { status: string; error: string | null; failureReason: string | null }
+  >,
+): unknown {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return result;
+  const root = result as Record<string, unknown>;
+  if (!Array.isArray(root.data)) return result;
+  let changed = false;
+  const data = root.data.map((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+    const row = raw as Record<string, unknown>;
+    const startup = typeof row.name === "string" ? statuses.get(row.name) : undefined;
+    if (!startup) return raw;
+    changed = true;
+    return { ...row, ...startup };
+  });
+  return changed ? { ...root, data } : result;
+}
+
+async function applyNativeThreadAction(
+  runtime: CodexAppServerHandle,
+  opts: NativeThreadAction,
+): Promise<void> {
+  const threadId = opts.nativeThreadId;
+  switch (opts.action) {
+    case "archive":
+      await runtime.archiveThread({ threadId });
+      return;
+    case "unarchive":
+      await runtime.unarchiveThread({ threadId });
+      return;
+    case "delete":
+      await runtime.deleteThread({ threadId });
+      return;
+    case "rename": {
+      const name = opts.name?.trim();
+      if (!name) throw new Error("native Codex thread name cannot be empty");
+      await runtime.setThreadName({ threadId, name });
+      return;
+    }
+    case "pin":
+      await runtime.updateThreadMetadata({ threadId, isPinned: true });
+      return;
+    case "unpin":
+      await runtime.updateThreadMetadata({ threadId, isPinned: false });
+      return;
+  }
+}
+
+function canonicalNativeGoal(value: unknown): NativeThreadGoal | null {
+  const goal = value as Record<string, unknown> | null;
+  const statuses = new Set<NativeThreadGoal["status"]>([
+    "active",
+    "paused",
+    "blocked",
+    "usageLimited",
+    "budgetLimited",
+    "complete",
+  ]);
+  if (
+    !goal ||
+    typeof goal.objective !== "string" ||
+    !statuses.has(goal.status as NativeThreadGoal["status"])
+  ) {
+    return null;
+  }
+  const number = (input: unknown): number =>
+    typeof input === "number" && Number.isFinite(input) ? input : 0;
+  return {
+    objective: goal.objective,
+    status: goal.status as NativeThreadGoal["status"],
+    tokenBudget:
+      typeof goal.tokenBudget === "number" && Number.isFinite(goal.tokenBudget)
+        ? goal.tokenBudget
+        : null,
+    tokensUsed: number(goal.tokensUsed),
+    timeUsedSeconds: number(goal.timeUsedSeconds),
+    createdAt: number(goal.createdAt),
+    updatedAt: number(goal.updatedAt),
+  };
+}
+
 function buildInitializeResponse(): InitializeResponse {
   return {
     protocolVersion: 1 as never,
@@ -1919,18 +2421,24 @@ export function buildThreadStartParams(
   systemInstruction?: string,
 ): CodexThreadStartParams {
   const model = env?.OPENAI_MODEL;
-  const { approvalPolicy, sandboxMode } = modePolicyFor(modeId);
+  const { approvalPolicy, approvalsReviewer, sandboxMode } =
+    modePolicyFor(modeId);
+  const dynamicTools = browserDynamicTools(mergeBrowserAutomationEnv(env));
   return {
     cwd,
     ...(model ? { model } : {}),
     ...(systemInstruction ? { developerInstructions: systemInstruction } : {}),
     approvalPolicy,
+    approvalsReviewer,
     sandbox: sandboxMode,
+    ...(dynamicTools ? { dynamicTools } : {}),
   };
 }
 
 export interface CodexModePolicy {
   approvalPolicy: CodexApprovalPolicy;
+  /** Native app-server reviewer for requests surfaced by approvalPolicy. */
+  approvalsReviewer: CodexApprovalsReviewer;
   /** Simple kebab-case mode string for `thread/start.sandbox`. The Rust
    *  `SandboxMode` enum is externally-tagged with no payload — must
    *  serialize as a plain string, never a tagged object. */
@@ -1969,6 +2477,7 @@ export function modePolicyFor(modeId: CodexModeId): CodexModePolicy {
         // asked when the MODEL chose to escalate, which made ask and
         // auto-edit behave identically.
         approvalPolicy: "untrusted",
+        approvalsReviewer: "user",
         sandboxMode: "workspace-write",
         sandboxPolicy: {
           type: "workspaceWrite",
@@ -1980,11 +2489,11 @@ export function modePolicyFor(modeId: CodexModeId): CodexModePolicy {
       };
     case "auto-edit":
       return {
-        // codex deprecated "on-failure" (warning in every turn, 2026-07-04);
-        // "on-request" is the replacement it names for interactive runs and
-        // matches the codex CLI's own "Auto" preset (workspace-write +
-        // on-request): sandboxed work runs freely, escalations ask.
+        // "Approve for me" is Codex Auto-review: retain the interactive
+        // on-request boundary, but route eligible escalations to Codex's
+        // risk-based reviewer agent instead of stopping for the user.
         approvalPolicy: "on-request",
+        approvalsReviewer: "auto_review",
         sandboxMode: "workspace-write",
         sandboxPolicy: {
           type: "workspaceWrite",
@@ -1997,12 +2506,14 @@ export function modePolicyFor(modeId: CodexModeId): CodexModePolicy {
     case "full-access":
       return {
         approvalPolicy: "never",
+        approvalsReviewer: "user",
         sandboxMode: "danger-full-access",
         sandboxPolicy: { type: "dangerFullAccess" },
       };
     case "read-only":
       return {
         approvalPolicy: "on-request",
+        approvalsReviewer: "user",
         sandboxMode: "read-only",
         sandboxPolicy: { type: "readOnly", networkAccess: false },
       };
@@ -2134,6 +2645,7 @@ function mimeToExt(mime: string | undefined): string {
 function mapUserInputToQuestion(
   sessionId: string,
   questionId: string,
+  requestId: string | number,
   params: Record<string, unknown>,
 ): QuestionRequest {
   const rawQuestions = Array.isArray(params?.questions)
@@ -2170,7 +2682,11 @@ function mapUserInputToQuestion(
   return {
     sessionId: sessionId as never,
     questionId,
-    nativeRequestId: itemId ?? questionId,
+    // itemId is stable across a reconnect/replay and therefore remains the
+    // best renderer dedupe key. Fall back to the real JSON-RPC request id when
+    // this ask has no associated item.
+    nativeRequestId:
+      itemId ?? codexNativeRequestId("user-input", params.threadId, requestId),
     toolCallId: itemId,
     source: "native_rpc",
     blocking: true,
@@ -2205,6 +2721,347 @@ function mapQuestionAnswerToCodex(
     answers[q.id] = { answers: vals };
   }
   return { answers };
+}
+
+// ── MCP elicitation params ↔ canonical questions ───────────
+
+const MCP_CONFIRM_QUESTION_ID = "__mcp_action__";
+
+function mcpSkipOptionId(property: string): string {
+  return `__zeros_mcp_omit__:${property}`;
+}
+
+function codexNativeRequestId(
+  kind: string,
+  threadId: unknown,
+  requestId: string | number,
+): string {
+  const thread = typeof threadId === "string" ? threadId : "unknown-thread";
+  return `${kind}:${thread}:${typeof requestId}:${String(requestId)}`;
+}
+
+/** Standard MCP form and URL elicitations → the existing blocking question
+ * surface. OpenAI extended forms are intentionally not advertised and are
+ * cancelled inside the runtime before reaching this mapper. */
+export function mapMcpElicitationToQuestion(
+  sessionId: string,
+  request: CodexMcpElicitationRequest,
+): QuestionRequest {
+  const { params } = request;
+  const nativeRequestId = codexNativeRequestId(
+    "mcp-elicitation",
+    params.threadId,
+    request.requestId,
+  );
+  const expiresAt = Date.now() + PERMISSION_RESPONSE_TIMEOUT_MS;
+
+  if (params.mode === "url") {
+    const safeUrl = safeHttpUrl(params.url);
+    const options = safeUrl
+      ? [
+          {
+            id: "accept",
+            label: "Continue",
+            description: "I completed the browser flow",
+            preview: safeUrl,
+          },
+          {
+            id: "decline",
+            label: "Decline",
+            description: "Do not authorize this MCP server",
+          },
+        ]
+      : [
+          {
+            id: "decline",
+            label: "Decline",
+            description: "The server supplied an unsupported URL",
+          },
+        ];
+    return {
+      sessionId: sessionId as never,
+      questionId: request.questionId,
+      nativeRequestId,
+      source: "native_rpc",
+      blocking: true,
+      expiresAt,
+      questions: [
+        {
+          id: MCP_CONFIRM_QUESTION_ID,
+          header: `MCP · ${params.serverName}`,
+          prompt: params.message,
+          multiSelect: false,
+          options,
+          allowOther: false,
+        },
+      ],
+    };
+  }
+
+  if (params.mode !== "form") {
+    throw new Error("unsupported MCP elicitation form mode");
+  }
+
+  const required = new Set(params.requestedSchema.required ?? []);
+  const properties = Object.entries(params.requestedSchema.properties).filter(
+    (entry): entry is [string, NonNullable<(typeof entry)[1]>] =>
+      entry[1] !== undefined,
+  );
+  const questions: QuestionSpec[] = properties.map(
+    ([property, schema], index) => {
+      const options = mcpSchemaOptions(schema);
+      const optional = !required.has(property);
+      if (optional) {
+        options.push({
+          id: mcpSkipOptionId(property),
+          label: "Skip",
+          description: "Leave this optional field unset",
+        });
+      }
+      const title = schema.title?.trim() || property;
+      const fieldPrompt = schema.description?.trim() || title;
+      const constraints = mcpConstraintHint(schema);
+      return {
+        id: property,
+        header: `MCP · ${params.serverName}`,
+        prompt: `${index === 0 ? `${params.message} — ` : ""}${fieldPrompt}${constraints}`,
+        multiSelect: schema.type === "array",
+        options,
+        allowOther:
+          schema.type === "string" ||
+          schema.type === "number" ||
+          schema.type === "integer"
+            ? !mcpSchemaHasEnum(schema)
+            : false,
+      };
+    },
+  );
+
+  // An empty object schema is a confirmation-only elicitation.
+  if (questions.length === 0) {
+    questions.push({
+      id: MCP_CONFIRM_QUESTION_ID,
+      header: `MCP · ${params.serverName}`,
+      prompt: params.message,
+      multiSelect: false,
+      options: [
+        { id: "accept", label: "Continue" },
+        { id: "decline", label: "Decline" },
+      ],
+      allowOther: false,
+    });
+  }
+
+  return {
+    sessionId: sessionId as never,
+    questionId: request.questionId,
+    nativeRequestId,
+    source: "native_rpc",
+    blocking: true,
+    expiresAt,
+    questions,
+  };
+}
+
+export function mapQuestionAnswerToMcpElicitation(
+  params: CodexMcpElicitationRequest["params"],
+  response: QuestionResponse,
+): McpServerElicitationRequestResponse {
+  if (response.outcome.outcome === "dismissed") {
+    return { action: "cancel", content: null, _meta: null };
+  }
+
+  const answers = new Map(
+    response.outcome.answers.map((answer) => [answer.questionId, answer]),
+  );
+  if (params.mode === "url") {
+    const action = answers
+      .get(MCP_CONFIRM_QUESTION_ID)
+      ?.selectedOptionIds.at(0);
+    return {
+      action:
+        action === "accept"
+          ? "accept"
+          : action === "decline"
+            ? "decline"
+            : "cancel",
+      content: null,
+      _meta: null,
+    };
+  }
+
+  if (params.mode !== "form") {
+    return { action: "cancel", content: null, _meta: null };
+  }
+
+  const properties = Object.entries(params.requestedSchema.properties).filter(
+    (entry): entry is [string, NonNullable<(typeof entry)[1]>] =>
+      entry[1] !== undefined,
+  );
+  if (properties.length === 0) {
+    const action = answers
+      .get(MCP_CONFIRM_QUESTION_ID)
+      ?.selectedOptionIds.at(0);
+    return {
+      action: action === "accept" ? "accept" : "decline",
+      content: action === "accept" ? {} : null,
+      _meta: null,
+    };
+  }
+
+  const required = new Set(params.requestedSchema.required ?? []);
+  const content: Record<string, JsonValue> = {};
+  for (const [property, schema] of properties) {
+    const answer = answers.get(property);
+    const selected = (answer?.selectedOptionIds ?? []).filter(
+      (value) => value !== mcpSkipOptionId(property),
+    );
+    const omitted =
+      !answer?.freeText?.trim() &&
+      selected.length === 0 &&
+      answer?.selectedOptionIds.includes(mcpSkipOptionId(property));
+    if (omitted && !required.has(property)) continue;
+
+    const value = mcpAnswerValue(schema, selected, answer?.freeText);
+    if (value === undefined) {
+      if (required.has(property)) {
+        throw new Error(`required field ${property} has no valid value`);
+      }
+      continue;
+    }
+    content[property] = value;
+  }
+
+  return { action: "accept", content, _meta: null };
+}
+
+function mcpSchemaOptions(
+  schema: Record<string, unknown>,
+): QuestionSpec["options"] {
+  if (schema.type === "boolean") {
+    return [
+      { id: "true", label: "Yes" },
+      { id: "false", label: "No" },
+    ];
+  }
+  if (Array.isArray(schema.oneOf)) {
+    return schema.oneOf.flatMap((option) => {
+      if (!isRecord(option) || typeof option.const !== "string") return [];
+      return [
+        {
+          id: option.const,
+          label: typeof option.title === "string" ? option.title : option.const,
+        },
+      ];
+    });
+  }
+  if (Array.isArray(schema.enum)) {
+    const names = Array.isArray(schema.enumNames) ? schema.enumNames : [];
+    return schema.enum.flatMap((value, index) =>
+      typeof value === "string"
+        ? [
+            {
+              id: value,
+              label: typeof names[index] === "string" ? names[index] : value,
+            },
+          ]
+        : [],
+    );
+  }
+  const items = isRecord(schema.items) ? schema.items : null;
+  if (items && Array.isArray(items.anyOf)) {
+    return items.anyOf.flatMap((option) => {
+      if (!isRecord(option) || typeof option.const !== "string") return [];
+      return [
+        {
+          id: option.const,
+          label: typeof option.title === "string" ? option.title : option.const,
+        },
+      ];
+    });
+  }
+  if (items && Array.isArray(items.enum)) {
+    return items.enum.flatMap((value) =>
+      typeof value === "string" ? [{ id: value, label: value }] : [],
+    );
+  }
+  return [];
+}
+
+function mcpSchemaHasEnum(schema: Record<string, unknown>): boolean {
+  return (
+    Array.isArray(schema.oneOf) ||
+    Array.isArray(schema.enum) ||
+    (isRecord(schema.items) &&
+      (Array.isArray(schema.items.anyOf) || Array.isArray(schema.items.enum)))
+  );
+}
+
+function mcpConstraintHint(schema: Record<string, unknown>): string {
+  const hints: string[] = [];
+  if (schema.type === "number") hints.push("number");
+  if (schema.type === "integer") hints.push("whole number");
+  if (typeof schema.minimum === "number") hints.push(`min ${schema.minimum}`);
+  if (typeof schema.maximum === "number") hints.push(`max ${schema.maximum}`);
+  if (typeof schema.minLength === "number") {
+    hints.push(`min ${schema.minLength} characters`);
+  }
+  if (typeof schema.maxLength === "number") {
+    hints.push(`max ${schema.maxLength} characters`);
+  }
+  return hints.length > 0 ? ` (${hints.join(", ")})` : "";
+}
+
+function mcpAnswerValue(
+  schema: Record<string, unknown>,
+  selected: string[],
+  freeText: string | undefined,
+): JsonValue | undefined {
+  const text = freeText?.trim();
+  if (schema.type === "array") return selected;
+  if (schema.type === "boolean") {
+    if (selected[0] === "true") return true;
+    if (selected[0] === "false") return false;
+    return undefined;
+  }
+  const raw = text || selected[0];
+  if (!raw) return undefined;
+  if (schema.type === "number" || schema.type === "integer") {
+    const value = Number(raw);
+    if (!Number.isFinite(value)) throw new Error(`${raw} is not a number`);
+    if (schema.type === "integer" && !Number.isInteger(value)) {
+      throw new Error(`${raw} is not a whole number`);
+    }
+    if (typeof schema.minimum === "number" && value < schema.minimum) {
+      throw new Error(`${value} is below minimum ${schema.minimum}`);
+    }
+    if (typeof schema.maximum === "number" && value > schema.maximum) {
+      throw new Error(`${value} is above maximum ${schema.maximum}`);
+    }
+    return value;
+  }
+  if (typeof schema.minLength === "number" && raw.length < schema.minLength) {
+    throw new Error(`${schema.title ?? "value"} is too short`);
+  }
+  if (typeof schema.maxLength === "number" && raw.length > schema.maxLength) {
+    throw new Error(`${schema.title ?? "value"} is too long`);
+  }
+  return raw;
+}
+
+function safeHttpUrl(value: string): string | undefined {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" || parsed.protocol === "http:"
+      ? parsed.href
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 // ── Approval params → canonical RequestPermissionRequest ─────

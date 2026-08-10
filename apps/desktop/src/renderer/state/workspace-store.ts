@@ -205,6 +205,8 @@ export type Action =
           | "agentId"
           | "agentName"
           | "sessionId"
+          | "nativeSessionId"
+          | "nativeGitInfo"
           | "sourceChatId"
           | "folder"
         >

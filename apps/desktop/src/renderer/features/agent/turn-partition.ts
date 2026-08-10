@@ -99,6 +99,15 @@ function isSettledBackgroundTask(e: AgentMessage): boolean {
   );
 }
 
+/** Adapter notices can land after the provider's final answer while the
+ * session is settling (for example MCP shutdown/cancellation notices). They
+ * remain inspectable working records, but must be transparent while locating
+ * the answer suffix. Otherwise a restored transcript whose last persisted row
+ * is a notice folds the actual answer into the collapsed working stripe. */
+function isLateWorkingNotice(e: AgentMessage): boolean {
+  return e.kind === "error_notice";
+}
+
 /** Trailing-run membership: the concluding answer text, plus any manual
  *  compaction row (which typically lands AFTER the answer — the user
  *  compacted an idle chat — and must stay visible, not fold into the
@@ -122,7 +131,8 @@ export function partitionTurn(
   // by membership instead of slicing at one cut.
   const finalOutputIndexes = new Set<number>();
   for (let i = events.length - 1; i >= 0; i--) {
-    if (isSettledBackgroundTask(events[i])) continue;
+    if (isSettledBackgroundTask(events[i]) || isLateWorkingNotice(events[i]))
+      continue;
     if (isFinalOutputEvent(events[i])) {
       finalOutputIndexes.add(i);
     } else {

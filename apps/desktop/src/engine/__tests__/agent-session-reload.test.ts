@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type {
   LoadSessionResponse,
@@ -8,6 +11,8 @@ import type { EngineMessage } from "../types";
 import { ZerosEngine } from "../index";
 import { MessageRouter } from "../transport/router";
 import type { TransportClient } from "../transport/types";
+import { closeZerosDb, setZerosDbPathForTesting } from "../db";
+import { upsertChat } from "../db/chats";
 
 interface ActivePromptRecord {
   sessionId: string;
@@ -147,6 +152,17 @@ describe("agent session continuity across a local renderer reload", () => {
 // spawned here, but ownership of a LIVE turn — its stream, its replayed
 // permission cards, and the chat its transcript is written to — still moves.
 describe("re-adoption keeps the remote trust boundary", () => {
+  beforeEach(() => {
+    setZerosDbPathForTesting(
+      join(mkdtempSync(join(tmpdir(), "zeros-session-reload-")), "zeros.db"),
+    );
+  });
+
+  afterEach(() => {
+    closeZerosDb();
+    setZerosDbPathForTesting(null);
+  });
+
   it("refuses a remote client that names no managed workspace", async () => {
     const engine = new ZerosEngine({ root: process.cwd(), port: 29_882 });
     const state = internals(engine);
@@ -294,6 +310,63 @@ describe("re-adoption keeps the remote trust boundary", () => {
       ]),
     );
     expect(state.router.ownerOf("session-1")).toBe(client.id);
+  });
+
+  it("refuses a cold remote resume whose native thread is not bound to its chat", async () => {
+    upsertChat({
+      id: "chat-1",
+      folder: process.cwd(),
+      agentId: "codex",
+      agentName: "Codex",
+      model: null,
+      effort: "",
+      permissionMode: "default",
+      lastModeId: null,
+      prePlanModeId: null,
+      fast: false,
+      additionalDirectories: [],
+      title: "Bound Codex chat",
+      createdAt: 1,
+      updatedAt: 1,
+      sessionId: "zeros-session-1",
+      nativeSessionId: "codex-thread-owned",
+      pinned: false,
+      archived: false,
+      sourceChatId: null,
+      kind: "chat",
+    });
+
+    const engine = new ZerosEngine({ root: process.cwd(), port: 29_891 });
+    const state = internals(engine);
+    const { client: relay, messages } = testClient("relay-1", "cloud");
+    state.router.register(relay);
+    vi.spyOn(state.workspace, "resolveCwd").mockReturnValue(process.cwd());
+    vi.spyOn(state.pty, "isWithinAllowed").mockReturnValue(true);
+    const loadSession = vi.spyOn(state.agents, "loadSession");
+
+    await state.handleMessage(
+      {
+        type: "AGENT_LOAD_SESSION",
+        id: "load-native-mismatch",
+        source: "browser",
+        timestamp: 1,
+        agentId: "codex",
+        sessionId: "zeros-session-1",
+        nativeSessionId: "codex-thread-attacker",
+        workspaceId: "workspace-1",
+        chatId: "chat-1",
+      },
+      relay,
+    );
+
+    expect(loadSession).not.toHaveBeenCalled();
+    expect(messages).toEqual([
+      expect.objectContaining({
+        type: "AGENT_ERROR",
+        code: "AGENT_PROTOCOL_ERROR",
+        message: expect.stringContaining("native Codex thread"),
+      }),
+    ]);
   });
 });
 

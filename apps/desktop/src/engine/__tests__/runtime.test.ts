@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   isDevRuntime,
+  shouldUsePollingFileWatchers,
   engineBasePort,
   channel,
   isChannel,
@@ -19,6 +20,7 @@ const KEYS = [
   "ZEROS_DEV",
   "ZEROS_RUNTIME_MODE",
   "ZEROS_ENGINE_BASE_PORT",
+  "ZEROS_ENGINE_COMPILED",
   "ZEROS_CHANNEL",
 ] as const;
 const saved: Record<string, string | undefined> = {};
@@ -54,6 +56,20 @@ describe("engine runtime mode + port range", () => {
     process.env.ZEROS_RUNTIME_MODE = "dev";
     expect(isDevRuntime()).toBe(true);
     expect(engineBasePort()).toBe(ENGINE_BASE_PORT_DEV);
+  });
+
+  it("keeps polling enabled for a compiled dev-channel engine", () => {
+    process.env.ZEROS_DEV = "1";
+    process.env.ZEROS_ENGINE_COMPILED = "1";
+
+    expect(isDevRuntime()).toBe(true);
+    expect(shouldUsePollingFileWatchers()).toBe(true);
+  });
+
+  it("uses native file events only for a source dev engine", () => {
+    process.env.ZEROS_DEV = "1";
+
+    expect(shouldUsePollingFileWatchers()).toBe(false);
   });
 
   it("ZEROS_CHANNEL=beta → Beta's own base port 24203", () => {

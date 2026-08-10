@@ -5,6 +5,7 @@ import {
   isLoopbackUrl,
   looksLikeBrowserUrl,
   normalizeBrowserUrl,
+  resolveBrowserAddressInput,
 } from "../localhost-url";
 
 describe("normalizeBrowserUrl", () => {
@@ -63,6 +64,29 @@ describe("looksLikeBrowserUrl", () => {
   it("keeps plain words and file-like searches out of direct URL results", () => {
     for (const value of ["browser", "App.tsx", "src/app", "component snap"])
       expect(looksLikeBrowserUrl(value)).toBe(false);
+  });
+});
+
+describe("resolveBrowserAddressInput", () => {
+  it("keeps URL-like input as direct navigation", () => {
+    expect(resolveBrowserAddressInput("example.com/docs")).toBe(
+      "https://example.com/docs",
+    );
+    expect(resolveBrowserAddressInput("localhost:3000/settings")).toBe(
+      "http://localhost:3000/settings",
+    );
+  });
+
+  it("turns ordinary text into a Google search", () => {
+    expect(resolveBrowserAddressInput("codex browser permissions")).toBe(
+      "https://www.google.com/search?q=codex+browser+permissions",
+    );
+  });
+
+  it("rejects empty and explicit non-web schemes", () => {
+    expect(resolveBrowserAddressInput("   ")).toBeNull();
+    expect(resolveBrowserAddressInput("javascript:alert(1)")).toBeNull();
+    expect(resolveBrowserAddressInput("file:///etc/passwd")).toBeNull();
   });
 });
 

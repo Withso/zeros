@@ -24,6 +24,31 @@ export function isDevRuntime(): boolean {
   return process.env.ZEROS_DEV === "1" || process.env.ZEROS_RUNTIME_MODE === "dev";
 }
 
+/** True when the engine is executing from a Bun single-file binary rather than
+ *  directly from TypeScript source. This is deliberately independent of the
+ *  release channel: a locally installed `Zeros Dev.app` is both dev-channel
+ *  (isolated data, ports, and feature flags) and compiled. Conflating those two
+ *  facts enabled native macOS FSEvents in the compiled binary, where Chokidar
+ *  can deadlock Bun's event loop after the HTTP socket binds.
+ *
+ *  Electron's sidecar owns the executable choice and therefore supplies the
+ *  authoritative flag. `ZEROS_RUNTIME_MODE=packaged` remains supported for the
+ *  standalone packaged-engine smoke test and other direct binary launches. */
+export function isCompiledEngineRuntime(): boolean {
+  if (typeof process === "undefined" || !process.env) return false;
+  return (
+    process.env.ZEROS_ENGINE_COMPILED === "1" ||
+    process.env.ZEROS_RUNTIME_MODE === "packaged"
+  );
+}
+
+/** File-watcher backend policy. Preserve polling for non-dev/headless runs and
+ *  require it for every compiled engine, including the dev release channel.
+ *  Native file events are reserved for the uncompiled source-development path. */
+export function shouldUsePollingFileWatchers(): boolean {
+  return isCompiledEngineRuntime() || !isDevRuntime();
+}
+
 // Loopback base ports for the engine's HTTP + WebSocket bridge. Every release
 // channel owns a DISJOINT footprint so Stable, Beta, and a `pnpm electron:dev`
 // engine can run AT THE SAME TIME without competing for ports or cross-killing

@@ -138,6 +138,18 @@ const commandTable: Record<string, CommandHandler> = {
   "iframe:clear-cookies": notImpl("iframe:clear-cookies", 0),
   "iframe-picker:capture-region": notImpl("iframe-picker:capture-region", 0),
   "browser:reinject-picker": notImpl("browser:reinject-picker", 0),
+  browser_session_attach: notImpl("browser_session_attach", 0),
+  browser_session_detach: notImpl("browser_session_detach", 0),
+  browser_session_control: notImpl("browser_session_control", 0),
+  browser_confirmation_respond: notImpl("browser_confirmation_respond", 0),
+  browser_session_policy_update: notImpl("browser_session_policy_update", 0),
+  browser_developer_cdp_set: notImpl("browser_developer_cdp_set", 0),
+  browser_provider_set: notImpl("browser_provider_set", 0),
+  browser_provider_probe: notImpl("browser_provider_probe", 0),
+  browser_computer_use_request: notImpl("browser_computer_use_request", 0),
+  browser_cloud_token_set: notImpl("browser_cloud_token_set", 0),
+  browser_cloud_token_has: notImpl("browser_cloud_token_has", 0),
+  browser_cloud_token_delete: notImpl("browser_cloud_token_delete", 0),
 
   // ── Workspace lifecycle ──────────────────────────────────
   // (lifecycle list/create/archive/etc. moved to the engine bridge; only the

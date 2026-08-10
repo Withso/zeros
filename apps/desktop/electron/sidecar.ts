@@ -47,7 +47,7 @@ import {
 import { secretsFilePath, getSecret, setSecret } from "./secret-store";
 import { githubCredentialStore } from "./github-auth-runtime";
 import { getSessionUserForMain } from "./ipc/commands/auth-session";
-import { githubCredentialForEngine } from "./github-engine-credential";
+import { githubCredentialForEngineLazyOwner } from "./github-engine-credential";
 import {
   MCP_VAULT_ACCOUNT,
   parseVaultBlob,
@@ -140,7 +140,11 @@ function archTriple(): string {
  *
  *    Falls back to the pre-built bun binary at
  *    binaries/zeros-engine-<triple> if bun isn't on PATH. */
-function resolveEngineSpawn(): { cmd: string; args: string[] } {
+function resolveEngineSpawn(): {
+  cmd: string;
+  args: string[];
+  compiled: boolean;
+} {
   const triple = archTriple();
 
   if (IS_PACKAGED) {
@@ -149,7 +153,7 @@ function resolveEngineSpawn(): { cmd: string; args: string[] } {
       path.join(process.resourcesPath, `zeros-engine-${triple}`),
     ];
     for (const p of candidates) {
-      if (existsSync(p)) return { cmd: p, args: [] };
+      if (existsSync(p)) return { cmd: p, args: [], compiled: true };
     }
     throw new Error(
       `engine binary not found. Tried:\n${candidates
@@ -166,14 +170,14 @@ function resolveEngineSpawn(): { cmd: string; args: string[] } {
     // Look for bun on PATH. `which` is synchronous here but cheap —
     // only runs once per spawnEngine call.
     const bunPath = resolveBunPath();
-    if (bunPath) return { cmd: bunPath, args: [cliSrc] };
+    if (bunPath) return { cmd: bunPath, args: [cliSrc], compiled: false };
   }
 
   // Fallback: pre-compiled bun binary (dev without bun on PATH, or
   // `pnpm build:sidecar` was run and the binary is fresher).
   const devBin = path.join(repoRoot, "binaries", `zeros-engine-${triple}`);
   if (existsSync(devBin)) {
-    return { cmd: devBin, args: [] };
+    return { cmd: devBin, args: [], compiled: true };
   }
   throw new Error(
     `engine not found in dev mode. Install bun (https://bun.sh) or run \`pnpm build:sidecar\`.`,
@@ -437,6 +441,74 @@ function resolveClaudeCliPaths(): {
     );
   }
   return { binary, version };
+}
+
+function codexTargetTriple(
+  platform = process.platform,
+  arch = process.arch,
+): string | null {
+  const triples: Record<string, string> = {
+    "darwin:x64": "x86_64-apple-darwin",
+    "darwin:arm64": "aarch64-apple-darwin",
+    "linux:x64": "x86_64-unknown-linux-musl",
+    "linux:arm64": "aarch64-unknown-linux-musl",
+    "win32:x64": "x86_64-pc-windows-msvc",
+    "win32:arm64": "aarch64-pc-windows-msvc",
+  };
+  return triples[`${platform}:${arch}`] ?? null;
+}
+
+/** Resolve the pinned Codex runtime staged by stage-codex-cli.mjs.
+ *
+ * Unlike the source checkout, the bun-compiled packaged engine has no
+ * node_modules from which binary-resolver.ts can resolve @openai/codex. The
+ * staged tree preserves vendor/<triple> so the native executable can also find
+ * codex-code-mode-host and ripgrep. A missing staged runtime remains a loud,
+ * Codex-local failure instead of preventing the whole engine from starting. */
+function resolveCodexCliPaths(): {
+  binary: string | null;
+  version: string | null;
+  managedPackageRoot: string | null;
+} {
+  if (!IS_PACKAGED) {
+    return { binary: null, version: null, managedPackageRoot: null };
+  }
+
+  const triple = codexTargetTriple();
+  const managedPackageRoot = path.join(
+    process.resourcesPath,
+    "codex-runtime",
+  );
+  const binary = triple
+    ? path.join(
+        managedPackageRoot,
+        "vendor",
+        triple,
+        "bin",
+        process.platform === "win32" ? "codex.exe" : "codex",
+      )
+    : null;
+  let version: string | null = null;
+  try {
+    const raw = readFileSync(
+      path.join(process.resourcesPath, "codex-cli-version.txt"),
+      "utf8",
+    ).trim();
+    if (raw) version = raw;
+  } catch {
+    /* absent/unreadable — registry reports no bundled version */
+  }
+
+  if (!binary || !existsSync(binary)) {
+    console.error(
+      `[Zeros] Pinned Codex CLI not found below ${managedPackageRoot} ` +
+        `(target ${triple ?? `${process.platform}-${process.arch}`}) — Codex will ` +
+        "fall back to an explicit override or global `codex`. Repackage after " +
+        "running `pnpm stage:codex-cli`.",
+    );
+    return { binary: null, version: null, managedPackageRoot: null };
+  }
+  return { binary, version, managedPackageRoot };
 }
 
 /** Prove the engine event loop can answer, not merely that its kernel listener
@@ -1066,7 +1138,7 @@ async function doSpawnEngine(
   );
   await killCurrentChild();
 
-  const { cmd, args: engineArgs } = resolveEngineSpawn();
+  const { cmd, args: engineArgs, compiled } = resolveEngineSpawn();
   // The engine writes its bootstrap manifest (port + /ws token) here — in the
   // app-data dir keyed by repo, NOT into <projectRoot>/.zeros anymore. We read
   // the port back from it below. Delete a stale one first so a slow boot can't
@@ -1118,6 +1190,12 @@ async function doSpawnEngine(
   }
 
   const extraEnv: Record<string, string> = {};
+  // Execution mode is independent of release channel. A packaged Zeros Dev
+  // build still runs the Bun-compiled binary and must not enable the native
+  // FSEvents path that is safe only under `bun apps/.../cli.ts`. The engine
+  // consumes this before arming its Git watcher; always overwrite any inherited
+  // value because this process is the authority that selected the executable.
+  extraEnv.ZEROS_ENGINE_COMPILED = compiled ? "1" : "0";
   if (secretsFile) extraEnv.ZEROS_SECRETS_FILE = secretsFile;
   if (legacyAgentDb) extraEnv.ZEROS_LEGACY_AGENT_DB = legacyAgentDb;
 
@@ -1172,6 +1250,24 @@ async function doSpawnEngine(
   }
   if (claudeCli.version && !process.env.ZEROS_CLAUDE_CLI_VERSION) {
     extraEnv.ZEROS_CLAUDE_CLI_VERSION = claudeCli.version;
+  }
+
+  // Pinned Codex CLI. Only packaged builds need this handoff: development can
+  // resolve @openai/codex normally, while the bun-compiled engine cannot. Keep
+  // all three values together so an explicit user override never inherits the
+  // staged runtime's version or managed-package root by accident.
+  const codexCli = resolveCodexCliPaths();
+  if (codexCli.binary && !process.env.ZEROS_CODEX_CLI_PATH) {
+    extraEnv.ZEROS_CODEX_CLI_PATH = codexCli.binary;
+    if (codexCli.version && !process.env.ZEROS_CODEX_CLI_VERSION) {
+      extraEnv.ZEROS_CODEX_CLI_VERSION = codexCli.version;
+    }
+    if (
+      codexCli.managedPackageRoot &&
+      !process.env.CODEX_MANAGED_PACKAGE_ROOT
+    ) {
+      extraEnv.CODEX_MANAGED_PACKAGE_ROOT = codexCli.managedPackageRoot;
+    }
   }
 
   // Account-binding config for the engine. The verifier is provider-neutral
@@ -1547,9 +1643,9 @@ export async function pushGithubCredentialToEngine(): Promise<void> {
   } catch {
     credential = null;
   }
-  const engineCredential = githubCredentialForEngine(
+  const engineCredential = githubCredentialForEngineLazyOwner(
     credential,
-    getSessionUserForMain()?.sub ?? null,
+    () => getSessionUserForMain()?.sub ?? null,
   );
   try {
     child.stdin.write(

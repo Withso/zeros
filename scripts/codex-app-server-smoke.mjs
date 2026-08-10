@@ -61,16 +61,14 @@
 // model. `agents:smoke` is where live turns belong.
 //
 // ── WHAT THIS DOES *NOT* PROVE — read before trusting it ──
-// It proves the PIN is good, not that the packaged app uses the pin. Per
-// codex/binary-resolver.ts, the packaged engine is a `bun build --compile`
-// single-file binary with no node_modules on disk, so its `require.resolve`
-// tier cannot fire and it falls through to whatever `codex` is on the user's
-// PATH — a different, unpinned CLI. The tier that would fix that
-// (ZEROS_CODEX_CLI_PATH) exists but is wired to nothing: there is no
-// stage-codex-cli.mjs, and apps/desktop/electron/sidecar.ts forwards only the Claude pair.
-// This gate runs in a source checkout, so it exercises the BUNDLED tier — the
-// one dev uses. Point ZEROS_CODEX_CLI_PATH at a staged binary to check the
-// packaged one (the resolver's comment reserves that tier for exactly this).
+// It proves the binary selected for this invocation is good; it is not by
+// itself a signed-app or installer smoke test. Source checkouts exercise the
+// BUNDLED tier. Packaging stages the complete pinned runtime under
+// Resources/codex-runtime and sidecar.ts forwards ZEROS_CODEX_CLI_PATH plus
+// CODEX_MANAGED_PACKAGE_ROOT to the engine. Point those variables at the staged
+// runtime to exercise exactly the same override tier before building an app.
+// A release still needs check:packaging-paths and a launched packaged-app smoke
+// to prove Electron copied and can execute those resources after signing.
 //
 // Resolving via PATH is therefore treated as a FAILURE here, not a pass: in a
 // source checkout it means the @openai/codex platform package did not install,

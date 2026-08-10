@@ -51,15 +51,10 @@ files:
   # scripts/stage-claude-cli.mjs). Without this negation the app carries the blob
   # twice: ~250 MiB of dead weight in the asar plus the usable copy.
   - "!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**"
-  # EXCLUDE the Codex platform package for the same reason, with one difference:
-  # unlike Claude there is no extraResources entry staging it, so this blob was
-  # never usable at all. @openai/codex-<platform>-<arch> is ~336 MiB (a 285 MiB
-  # `codex` + a 44 MiB codex-code-mode-host + a vendored ripgrep), the auto-walk
-  # pulls it into app.asar, macOS cannot exec it there, and the packaged app
-  # resolves Codex from the user's PATH regardless (see the `fallback` tier in
-  # apps/desktop/src/engine/agents/adapters/codex/binary-resolver.ts). It was pure shipped
-  # weight. Excluding it changes no runtime behaviour — dev is unaffected,
-  # because `files:` only governs packaging.
+  # EXCLUDE the Codex platform package from app.asar. Its native runtime ships
+  # exactly once through the staged `codex-runtime` extraResource below, where
+  # the bun-compiled engine can execute it and retain the vendor-relative
+  # codex-code-mode-host + ripgrep paths.
   - "!**/node_modules/@openai/codex-*/**"
 
 # The bun-compiled engine binary sits outside dist-electron, so bundle
@@ -118,6 +113,17 @@ extraResources:
     to: claude
   - from: binaries/claude-cli-version.txt
     to: claude-cli-version.txt
+  # The pinned Codex CLI runtime. scripts/stage-codex-cli.mjs preserves the
+  # platform package's vendor/<triple> layout because Codex resolves its code
+  # mode host and ripgrep relative to that managed package root. Electron main
+  # passes the executable and version to the engine through ZEROS_CODEX_CLI_PATH
+  # / ZEROS_CODEX_CLI_VERSION, so packaged chat never drifts to a global CLI.
+  - from: binaries/codex-runtime
+    to: codex-runtime
+    filter:
+      - "**/*"
+  - from: binaries/codex-cli-version.txt
+    to: codex-cli-version.txt
   # Repository and third-party terms must travel with every binary release.
   # The generated bundle contains the exact locked production inventory and
   # license/NOTICE texts; `pnpm check:licenses` rejects drift before packaging.
@@ -187,6 +193,8 @@ mac:
   # block into Info.plist so macOS LaunchServices routes zeros://
   # URLs to our .app.
   extendInfo:
+    NSMicrophoneUsageDescription: >-
+      Zeros uses the microphone only when you start Codex realtime voice in a task.
     CFBundleURLTypes:
       - CFBundleURLName: Zeros
         CFBundleURLSchemes:

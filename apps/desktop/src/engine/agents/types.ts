@@ -32,7 +32,10 @@ import type {
   StopReason,
   TurnUsage,
 } from "@zeros/protocol/agent-events";
-import type { AccountDetails } from "@zeros/protocol/messages";
+import type {
+  AccountDetails,
+  CodexCapabilityOperation,
+} from "@zeros/protocol/messages";
 
 // ── Failure taxonomy ─────────────────────────────────────
 //
@@ -94,8 +97,46 @@ export class AgentFailureError extends Error {
 // Every adapter emits into this channel. The gateway translates to
 // AGENT_* wire messages and broadcasts over the WebSocket.
 
+export interface NativeThreadEvent {
+  sessionId: string;
+  nativeThreadId: string;
+  event:
+    | "archived"
+    | "unarchived"
+    | "deleted"
+    | "closed"
+    | "name-updated";
+  name?: string;
+}
+
+export interface NativeThreadAction {
+  sessionId: string;
+  nativeThreadId: string;
+  cwd: string;
+  action: "archive" | "unarchive" | "delete" | "rename" | "pin" | "unpin";
+  name?: string;
+  env?: Record<string, string>;
+  cliBinary?: string;
+}
+
+export interface CodexCapabilityCall {
+  operation: CodexCapabilityOperation;
+  cwd: string;
+  sessionId?: string;
+  params?: unknown;
+  env?: Record<string, string>;
+  cliBinary?: string;
+}
+
 export interface AgentGatewayEvents {
   onSessionUpdate: (agentId: string, notification: SessionNotification) => void;
+  /** Provider-owned thread metadata/lifecycle changed outside the Zeros chat
+   * reducer (for example in another Codex client). Optional because providers
+   * without a native thread store never emit it. */
+  onNativeThreadEvent?: (
+    agentId: string,
+    event: NativeThreadEvent,
+  ) => void;
   onPermissionRequest: (
     agentId: string,
     permissionId: string,
@@ -156,6 +197,8 @@ export type McpServerRegistration =
       transport: "http";
       url: string;
       headers?: Record<string, string>;
+      /** Name of an environment variable containing the HTTP bearer token. */
+      bearerTokenEnvVar?: string;
     };
 
 // ── Gateway construction shape (drop-in with AgentSessionManager) ──
@@ -218,12 +261,20 @@ export interface AgentAdapter {
    *  whose new thread would otherwise have no orientation at all). */
   loadSession(opts: {
     sessionId: string;
+    nativeSessionId?: string;
     cwd: string;
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
     systemInstruction?: string;
   }): Promise<LoadSessionResponse>;
+
+  /** Mutate a provider-owned durable thread, including when its interactive
+   * runtime is not currently loaded. */
+  updateNativeThread?(opts: NativeThreadAction): Promise<void>;
+
+  /** Invoke one reviewed Codex app-server capability operation. */
+  callCodexCapability?(opts: CodexCapabilityCall): Promise<unknown>;
 
   /** List resumable sessions the CLI knows about. */
   listSessions(opts: {

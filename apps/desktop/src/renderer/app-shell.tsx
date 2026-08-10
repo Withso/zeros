@@ -49,10 +49,12 @@ import { useAgentSessions } from "./features/agent/sessions-hooks";
 import { UpdateNotifications } from "./features/update/update-notifications";
 import { useCopyLogsHotkey } from "./shell/use-copy-logs-hotkey";
 import { useNewTabHotkeys } from "./shell/use-new-chat-hotkey";
+import { useOpenBrowserHotkey } from "./shell/use-open-browser-hotkey";
 import { useShortcutsHotkey } from "./shell/use-shortcuts-hotkey";
 import { ShortcutsPalette } from "./shell/shortcuts-palette";
 import { FeedbackDialog } from "./shell/dialogs/feedback-dialog";
 import { onFeedbackDialogRequest } from "./shell/feedback-controller";
+import { onWorkbenchVisibleRequest } from "./shell/workbench-visibility-controller";
 import { isFeedbackConfigured } from "./features/feedback/submit-feedback";
 import { ModelsSettingsSync } from "./features/agent/models-settings-sync";
 import { TopBar } from "./shell/top-bar";
@@ -115,6 +117,10 @@ import {
   useInternalUserResolutionSettled,
 } from "./features/settings/internal-features";
 import { shouldLeaveBlockedDesignWorkspace } from "./shell/design-workspace-access";
+import { BrowserSessionController } from "./features/browser/browser-session-controller";
+import { BrowserConfirmationController } from "./features/browser/browser-confirmation-controller";
+import { BrowserDeveloperCdpController } from "./features/browser/browser-developer-cdp-controller";
+import { BrowserProviderController } from "./features/browser/browser-provider-controller";
 
 // Chat localStorage cache keys live in a shared module so the repo-removal
 // path (which bulk-deletes a repo's chats) reconciles the exact same keys this
@@ -342,6 +348,8 @@ function threadToRow(c: ChatThread): ChatRowWire {
     createdAt: c.createdAt,
     updatedAt: c.updatedAt,
     sessionId: c.sessionId ?? null,
+    nativeSessionId: c.nativeSessionId ?? null,
+    nativeGitInfo: c.nativeGitInfo ?? null,
     pinned: !!c.pinned,
     archived: !!c.archived,
     sourceChatId: c.sourceChatId ?? null,
@@ -389,6 +397,8 @@ function rowToThread(r: ChatRowWire): ChatThread {
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
     sessionId: r.sessionId ?? undefined,
+    nativeSessionId: r.nativeSessionId ?? undefined,
+    nativeGitInfo: r.nativeGitInfo ?? undefined,
     pinned: r.pinned,
     archived: r.archived,
     sourceChatId: r.sourceChatId ?? undefined,
@@ -760,6 +770,17 @@ function ShellRouter() {
       return next;
     });
   }, []);
+  React.useEffect(
+    () =>
+      onWorkbenchVisibleRequest(() => {
+        setWorkbenchCollapsed((prev) => {
+          if (!prev) return prev;
+          setSetting(WORKBENCH_COLLAPSED_KEY, false);
+          return false;
+        });
+      }),
+    [],
+  );
 
   // ⌥⌘B anywhere toggles Workbench. Skipped inside editable surfaces so
   // we don't steal from native text-input bindings (if any use ⌥⌘B).
@@ -918,6 +939,11 @@ function MainShellBody({
     designWorkspacesActive && designWorkspaceRequested;
   const designWorkspaceBlocked =
     designWorkspaceRequested && !designWorkspacesActive;
+  useOpenBrowserHotkey(
+    activePage === "workspace" &&
+      Boolean(activeWorkspaceFolder) &&
+      !designWorkspaceRequested,
+  );
   const shellSurfaceRef = useRef<HTMLDivElement | null>(null);
   useInstantViewSwitch(
     `${activePage}:${activeWorkspace?.id ?? activeRepoId ?? activeProject?.id ?? "none"}`,
@@ -1228,6 +1254,10 @@ export function AppShellBody() {
           <ReloadOnProjectChange />
           <ChatsPersistence />
           <ModelsSettingsSync />
+          <BrowserSessionController />
+          <BrowserConfirmationController />
+          <BrowserDeveloperCdpController />
+          <BrowserProviderController />
           <ShellRouter />
         </AgentSessionsProvider>
       </BridgeProvider>

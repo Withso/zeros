@@ -41,6 +41,7 @@ import {
   useChatSession,
 } from "../../features/agent/sessions-hooks";
 import { useSessionsStore } from "../../features/agent/sessions-store";
+import { sessionIdentityUpdate } from "./session-identity";
 import { useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { AgentChat } from "../../features/agent/agent-chat";
 import { envForChat } from "../../features/agent/model-catalog";
@@ -232,6 +233,9 @@ function ChatBody({
   const liveSessionId = useSessionsStore(
     (state) => state.sessions[chatId]?.sessionId ?? null,
   );
+  const liveNativeSessionId = useSessionsStore(
+    (state) => state.sessions[chatId]?.nativeSessionId ?? null,
+  );
   const chat = useChatById(chatId);
 
   // Serialize the env tuple so the effect only fires on a real
@@ -307,6 +311,7 @@ function ChatBody({
             agentName,
             cwd,
             env,
+            nativeSessionId: chat?.nativeSessionId,
           })
           .then(() => {
             if (cancelled) return;
@@ -315,7 +320,10 @@ function ChatBody({
               dispatch({
                 type: "UPDATE_CHAT_SETTINGS",
                 id: chatId,
-                updates: { sessionId: undefined },
+                updates: {
+                  sessionId: undefined,
+                  nativeSessionId: undefined,
+                },
               });
             }
           });
@@ -346,15 +354,19 @@ function ChatBody({
   // survive app restarts and future workspace swaps.
   useEffect(() => {
     if (!chat) return;
-    const sid = liveSessionId;
-    if (sid && sid !== chat.sessionId) {
+    const updates = sessionIdentityUpdate(
+      chat,
+      liveSessionId,
+      liveNativeSessionId,
+    );
+    if (updates) {
       dispatch({
         type: "UPDATE_CHAT_SETTINGS",
         id: chatId,
-        updates: { sessionId: sid },
+        updates,
       });
     }
-  }, [chatId, liveSessionId, chat, dispatch]);
+  }, [chatId, liveSessionId, liveNativeSessionId, chat, dispatch]);
 
   // Respawn when the user changes model/effort — but ONLY for an agent that
   // cannot absorb the change live (cursor today; see
@@ -431,6 +443,7 @@ function ChatBody({
         // The prior `cwd || undefined` collapse hid the bug.
         cwd,
         env,
+        nativeSessionId: chat.nativeSessionId,
       });
     } else {
       void session.ensureSession(agentId, {

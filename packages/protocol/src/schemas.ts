@@ -14,6 +14,7 @@
 
 import { z } from "zod";
 import type { BridgeMessage } from "./messages";
+import { CODEX_CAPABILITY_OPERATIONS } from "./messages";
 
 /** Every known wire `type` discriminator. Keep in sync with the
  *  BridgeMessage union (the union is the source of truth; this list
@@ -83,6 +84,14 @@ export const KNOWN_MESSAGE_TYPES = [
   "PTY_TERMINALS_CHANGED",
   "RESOLVE_AGENT_BINARY",
   "AGENT_BINARY_RESOLVED",
+  "CODEX_JOB_START",
+  "CODEX_JOB_GET",
+  "CODEX_JOB_LIST",
+  "CODEX_JOB_CANCEL",
+  "CODEX_JOB_SNAPSHOT",
+  "CODEX_JOBS_LIST",
+  "CODEX_CAPABILITY_REQUEST",
+  "CODEX_CAPABILITY_RESPONSE",
 ] as const;
 
 const knownTypes = new Set<string>(KNOWN_MESSAGE_TYPES);
@@ -131,6 +140,19 @@ const isNonEmptyStr = (v: unknown): v is string =>
   typeof v === "string" && v.length > 0;
 const isUint = (v: unknown): boolean =>
   typeof v === "number" && Number.isInteger(v) && v >= 0;
+const isBoundedStr = (v: unknown, max: number): v is string =>
+  isNonEmptyStr(v) && v.length <= max;
+
+function isBoundedJsonObject(value: unknown, maxChars: number): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  try {
+    return JSON.stringify(value).length <= maxChars;
+  } catch {
+    return false;
+  }
+}
 
 /** Per-type field validation for the relay-REACHABLE WRITE paths. The envelope
  *  check only guarantees id/source/timestamp/type; the engine's dispatcher then
@@ -152,9 +174,16 @@ function assertInboundPayload(env: Record<string, unknown>): void {
       break;
     case "AGENT_CANCEL":
     case "AGENT_CLOSE_SESSION":
-    case "AGENT_LOAD_SESSION":
     case "AGENT_COMPACT":
       if (!isNonEmptyStr(env.sessionId)) bad("sessionId");
+      break;
+    case "AGENT_LOAD_SESSION":
+      if (!isNonEmptyStr(env.sessionId)) bad("sessionId");
+      if (
+        env.nativeSessionId !== undefined &&
+        !isBoundedStr(env.nativeSessionId, 200)
+      )
+        bad("nativeSessionId");
       break;
     case "AGENT_STOP_BACKGROUND_TASK":
       if (!isNonEmptyStr(env.sessionId)) bad("sessionId");
@@ -218,6 +247,62 @@ function assertInboundPayload(env: Record<string, unknown>): void {
       break;
     case "RESOLVE_AGENT_BINARY":
       if (!isNonEmptyStr(env.agentId)) bad("agentId");
+      break;
+    case "CODEX_JOB_START":
+      if (!isBoundedStr(env.cwd, 4096)) bad("cwd");
+      if (!isBoundedStr(env.prompt, 100_000)) bad("prompt");
+      if (env.model !== undefined && !isBoundedStr(env.model, 200))
+        bad("model");
+      if (
+        env.reasoningEffort !== undefined &&
+        !["minimal", "low", "medium", "high", "xhigh"].includes(
+          String(env.reasoningEffort),
+        )
+      )
+        bad("reasoningEffort");
+      if (
+        env.sandboxMode !== undefined &&
+        !["read-only", "workspace-write"].includes(String(env.sandboxMode))
+      )
+        bad("sandboxMode");
+      if (
+        env.networkAccessEnabled !== undefined &&
+        typeof env.networkAccessEnabled !== "boolean"
+      )
+        bad("networkAccessEnabled");
+      if (
+        env.timeoutMs !== undefined &&
+        (!Number.isSafeInteger(env.timeoutMs) ||
+          Number(env.timeoutMs) < 1_000 ||
+          Number(env.timeoutMs) > 30 * 60_000)
+      )
+        bad("timeoutMs");
+      if (
+        env.outputSchema !== undefined &&
+        !isBoundedJsonObject(env.outputSchema, 128_000)
+      )
+        bad("outputSchema");
+      break;
+    case "CODEX_JOB_GET":
+    case "CODEX_JOB_CANCEL":
+      if (!isBoundedStr(env.jobId, 200)) bad("jobId");
+      break;
+    case "CODEX_JOB_LIST":
+      break;
+    case "CODEX_CAPABILITY_REQUEST":
+      if (!CODEX_CAPABILITY_OPERATIONS.includes(env.operation as never))
+        bad("operation");
+      if (!isBoundedStr(env.cwd, 4096)) bad("cwd");
+      if (env.sessionId !== undefined && !isBoundedStr(env.sessionId, 200))
+        bad("sessionId");
+      if (env.params !== undefined) {
+        try {
+          const encoded = JSON.stringify(env.params);
+          if (encoded === undefined || encoded.length > 256_000) bad("params");
+        } catch {
+          bad("params");
+        }
+      }
       break;
     case "AGENT_VALIDATE_KEY":
       if (!isNonEmptyStr(env.agentId)) bad("agentId");

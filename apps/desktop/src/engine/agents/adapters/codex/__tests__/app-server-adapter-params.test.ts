@@ -59,19 +59,28 @@ describe("modePolicyFor", () => {
     expect(ask).toHaveProperty("excludeSlashTmp");
 
     expect(modePolicyFor("read-only").sandboxPolicy.type).toBe("readOnly");
-    expect(modePolicyFor("full-access").sandboxPolicy.type).toBe("dangerFullAccess");
+    expect(modePolicyFor("full-access").sandboxPolicy.type).toBe(
+      "dangerFullAccess",
+    );
   });
 
   it("maps approval policies distinctly per mode and never uses deprecated on-failure", () => {
     // codex deprecated "on-failure" (per-turn warning); "untrusted" is the
-    // real ask-before-everything policy, "on-request" the codex-CLI Auto
-    // preset. ask and auto-edit must NOT collapse into the same policy.
+    // real ask-before-everything policy. Approve for me stays interactive so
+    // Codex can route boundary requests through its Auto-review agent.
     expect(modePolicyFor("ask").approvalPolicy).toBe("untrusted");
     expect(modePolicyFor("auto-edit").approvalPolicy).toBe("on-request");
     expect(modePolicyFor("full-access").approvalPolicy).toBe("never");
     for (const mode of MODES) {
       expect(modePolicyFor(mode).approvalPolicy).not.toBe("on-failure");
     }
+  });
+
+  it("routes only Approve for me through Codex native Auto-review", () => {
+    expect(modePolicyFor("auto-edit").approvalsReviewer).toBe("auto_review");
+    expect(modePolicyFor("ask").approvalsReviewer).toBe("user");
+    expect(modePolicyFor("read-only").approvalsReviewer).toBe("user");
+    expect(modePolicyFor("full-access").approvalsReviewer).toBe("user");
   });
 });
 
@@ -87,8 +96,19 @@ describe("buildThreadStartParams", () => {
     }
   });
 
+  it("carries the native reviewer on thread/start", () => {
+    expect(
+      buildThreadStartParams("/tmp", undefined, "auto-edit").approvalsReviewer,
+    ).toBe("auto_review");
+    expect(
+      buildThreadStartParams("/tmp", undefined, "ask").approvalsReviewer,
+    ).toBe("user");
+  });
+
   it("includes model only when OPENAI_MODEL env is set", () => {
-    expect(buildThreadStartParams("/tmp", undefined, "ask").model).toBeUndefined();
+    expect(
+      buildThreadStartParams("/tmp", undefined, "ask").model,
+    ).toBeUndefined();
     expect(buildThreadStartParams("/tmp", {}, "ask").model).toBeUndefined();
     expect(
       buildThreadStartParams("/tmp", { OPENAI_MODEL: "gpt-5" }, "ask").model,
@@ -113,9 +133,88 @@ describe("buildThreadStartParams", () => {
     expect(buildThreadStartParams("/tmp", undefined, "ask")).not.toHaveProperty(
       "developerInstructions",
     );
-    expect(buildThreadStartParams("/tmp", undefined, "ask", "")).not.toHaveProperty(
-      "developerInstructions",
+    expect(
+      buildThreadStartParams("/tmp", undefined, "ask", ""),
+    ).not.toHaveProperty("developerInstructions");
+  });
+
+  it("advertises the isolated browser namespace when the host bridge is available", () => {
+    const params = buildThreadStartParams(
+      "/tmp",
+      {
+        ZEROS_BROWSER_AUTOMATION_URL: "http://127.0.0.1:43123",
+        ZEROS_BROWSER_AUTOMATION_TOKEN: "test-token",
+      },
+      "ask",
     );
+
+    expect(params.dynamicTools).toEqual([
+      expect.objectContaining({
+        type: "namespace",
+        name: "zeros_browser",
+        tools: expect.arrayContaining([
+          expect.objectContaining({ type: "function", name: "open" }),
+          expect.objectContaining({ type: "function", name: "snapshot" }),
+          expect.objectContaining({ type: "function", name: "click" }),
+          expect.objectContaining({ type: "function", name: "type" }),
+          expect.objectContaining({ type: "function", name: "upload" }),
+          expect.objectContaining({ type: "function", name: "screenshot" }),
+        ]),
+      }),
+    ]);
+  });
+
+  it("keeps the host browser available when the session supplies model overrides", () => {
+    const previousUrl = process.env.ZEROS_BROWSER_AUTOMATION_URL;
+    const previousToken = process.env.ZEROS_BROWSER_AUTOMATION_TOKEN;
+    process.env.ZEROS_BROWSER_AUTOMATION_URL = "http://127.0.0.1:43123";
+    process.env.ZEROS_BROWSER_AUTOMATION_TOKEN = "host-token";
+
+    try {
+      const params = buildThreadStartParams(
+        "/tmp",
+        { OPENAI_MODEL: "gpt-5.6-sol" },
+        "ask",
+      );
+
+      expect(params.dynamicTools).toEqual([
+        expect.objectContaining({
+          type: "namespace",
+          name: "zeros_browser",
+        }),
+      ]);
+    } finally {
+      if (previousUrl === undefined) {
+        delete process.env.ZEROS_BROWSER_AUTOMATION_URL;
+      } else {
+        process.env.ZEROS_BROWSER_AUTOMATION_URL = previousUrl;
+      }
+      if (previousToken === undefined) {
+        delete process.env.ZEROS_BROWSER_AUTOMATION_TOKEN;
+      } else {
+        process.env.ZEROS_BROWSER_AUTOMATION_TOKEN = previousToken;
+      }
+    }
+  });
+
+  it("does not advertise browser tools without a complete loopback bridge", () => {
+    expect(
+      buildThreadStartParams(
+        "/tmp",
+        { ZEROS_BROWSER_AUTOMATION_TOKEN: "token-only" },
+        "ask",
+      ).dynamicTools,
+    ).toBeUndefined();
+    expect(
+      buildThreadStartParams(
+        "/tmp",
+        {
+          ZEROS_BROWSER_AUTOMATION_URL: "https://example.com",
+          ZEROS_BROWSER_AUTOMATION_TOKEN: "test-token",
+        },
+        "ask",
+      ).dynamicTools,
+    ).toBeUndefined();
   });
 });
 

@@ -405,8 +405,9 @@ export type ChatEffort =
 /** Permission posture for a chat — the user-facing "Permissions" choice, mapped
  *  per agent to a concrete native mode (see agentModeForPermission):
  *    plan          → Claude "plan" / Codex "read-only" — design, no execution
- *    auto          → Claude "auto" (classifier) / Codex "auto-edit" (on-failure +
- *                    sandbox) — the SAFE default every new chat is born with
+ *    auto          → Claude "auto" (classifier) / Codex "auto-edit"
+ *                    (on-request + Auto-review + sandbox) — the SAFE default
+ *                    every new chat is born with
  *    tool-approval → Claude "default" / Codex "ask" — prompt before tools run
  *    danger        → Claude "bypass" / Codex "full-access" — no checks at all */
 export type ChatPermissionMode = "plan" | "auto" | "tool-approval" | "danger";
@@ -476,10 +477,10 @@ export type ChatThread = {
   title: string;
   createdAt: number;
   updatedAt: number;
-  /** Persistent agent sessionId. Source-of-truth link from a chat
-   *  in our sidebar to the on-disk transcript the agent CLI writes
-   *  (Claude: ~/.claude/projects/<hash>/<sessionId>.jsonl, Codex:
-   *  ~/.codex/sessions/...). Set in three ways:
+  /** Persistent Zeros sessionId. For providers whose runtime identity is also
+   *  their transcript identity (including Claude), this is the on-disk resume
+   *  key. Codex keeps its distinct app-server thread id in nativeSessionId.
+   *  Set in three ways:
    *    - "Resume from recent thread" UI seeds it on chat creation.
    *    - First successful new-session creation writes it back.
    *    - It updates whenever the active agent forks / starts a new
@@ -488,6 +489,17 @@ export type ChatThread = {
    *  and is what lets us replay history on next mount. Cleared if a
    *  loadIntoChat fails so retry can fall through to a fresh session. */
   sessionId?: string;
+  /** Provider-owned durable resume handle when it differs from the live Zeros
+   * session id. Codex stores its native app-server thread id here. */
+  nativeSessionId?: string;
+  /** Git metadata recorded by the provider for its durable thread. This is
+   * distinct from the currently selected workspace branch and must not drive
+   * a checkout or rebase. */
+  nativeGitInfo?: {
+    sha: string | null;
+    branch: string | null;
+    originUrl: string | null;
+  };
   /** Pinned to the top of the sidebar, independent of project grouping.
    *  Defaults to false / undefined for old records. */
   pinned?: boolean;

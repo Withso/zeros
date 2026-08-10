@@ -96,10 +96,19 @@ const args = [
 ];
 
 console.log(`[electron-builder-run] channel=${channel}`);
+const builderEnv = { ...process.env, ZEROS_CHANNEL: channel };
+// A credentialless local build is finalized by electron-after-pack.cjs with a
+// complete deep ad-hoc signature. Do not let electron-builder auto-discover an
+// unrelated Apple Development certificate afterwards and overwrite that known
+// good signature. Protected release builds provide CSC_LINK and retain normal
+// Developer ID discovery/signing.
+if (!process.env.CSC_LINK) {
+  builderEnv.CSC_IDENTITY_AUTO_DISCOVERY = "false";
+}
 const res = spawnSync("pnpm", args, {
   stdio: "inherit",
   // Re-export the resolved channel so the bake (electron:compile, if a caller
   // chains it) and any nested tooling see the same value.
-  env: { ...process.env, ZEROS_CHANNEL: channel },
+  env: builderEnv,
 });
 process.exit(res.status ?? 1);

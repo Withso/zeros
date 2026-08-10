@@ -11,8 +11,8 @@
 //     initiated approval requests, structured account + rate-limit
 //     events) instead of stderr-scraping a one-shot subprocess.
 //   - one long-lived child per session — no per-turn cold-start tax.
-//   - per-turn approvalPolicy + sandboxPolicy overrides without
-//     respawning the process.
+//   - live approvalPolicy + approvalsReviewer + sandboxPolicy overrides
+//     without respawning the process.
 //   - typed image attachments via `localImage` parts.
 //   - MCP injection via `-c mcp_servers.<name>.…` at spawn — no
 //     mutation of the user's global `~/.codex/config.toml`.

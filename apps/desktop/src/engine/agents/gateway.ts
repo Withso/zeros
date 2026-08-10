@@ -62,11 +62,13 @@ import type {
   AgentAdapterContext,
   AgentGatewayEvents,
   AgentGatewayOptions,
+  CodexCapabilityCall,
   ContentBlock,
   InitializeResponse,
   ListSessionsResponse,
   LoadSessionResponse,
   McpServerRegistration,
+  NativeThreadAction,
   NewSessionResponse,
   PromptResponse,
   QuestionResponse,
@@ -862,6 +864,7 @@ export class AgentGateway {
       env?: Record<string, string>;
       workspaceId?: string;
       cliBinary?: string;
+      nativeSessionId?: string;
     } = {},
   ): Promise<LoadSessionResponse> {
     const adapter = await this.adapterFor(agentId);
@@ -892,6 +895,9 @@ export class AgentGateway {
     );
     const response = await adapter.loadSession({
       sessionId,
+      ...(opts.nativeSessionId
+        ? { nativeSessionId: opts.nativeSessionId }
+        : {}),
       cwd,
       env: spawn.env,
       cliBinary: spawn.cliBinary,
@@ -933,6 +939,34 @@ export class AgentGateway {
       this.sessionToWorkspace.set(sessionId, opts.workspaceId);
     }
     return response;
+  }
+
+  async updateNativeThread(
+    agentId: string,
+    action: NativeThreadAction,
+  ): Promise<void> {
+    const adapter = await this.adapterFor(agentId);
+    if (!adapter.updateNativeThread) return;
+    await adapter.updateNativeThread(action);
+  }
+
+  async callCodexCapability(call: CodexCapabilityCall): Promise<unknown> {
+    const adapter = await this.adapterFor("codex");
+    if (!adapter.callCodexCapability) {
+      throw new Error("The installed Codex runtime has no capability bridge.");
+    }
+    const merged = withWorktreeEnv(
+      mergeSpawnEnv(call.cwd, undefined),
+      call.cwd,
+    );
+    const spawn = applyUserProviderConfig(call.cwd, "codex", {
+      env: merged,
+    });
+    return adapter.callCodexCapability({
+      ...call,
+      env: spawn.env,
+      cliBinary: spawn.cliBinary,
+    });
   }
 
   /** Tear down a single session's resources when its chat tab is closed.

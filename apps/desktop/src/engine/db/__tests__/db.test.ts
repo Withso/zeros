@@ -63,6 +63,8 @@ function makeChat(id: string, over: Partial<ChatRow> = {}): ChatRow {
     createdAt: 1,
     updatedAt: 1,
     sessionId: null,
+    nativeSessionId: null,
+    nativeGitInfo: null,
     pinned: false,
     archived: false,
     sourceChatId: null,
@@ -134,9 +136,55 @@ describe("Zeros DB (unified engine store)", () => {
       .all() as { version: number }[];
     expect(applied.map((r) => r.version)).toEqual([
       1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-      22, 23, 24, 25, 26, 27,
+      22, 23, 24, 25, 26, 27, 28, 29,
     ]);
-    expect(latestSchemaVersion()).toBe(27);
+    expect(latestSchemaVersion()).toBe(29);
+    expect(
+      (
+        db.prepare("PRAGMA table_info(chats)").all() as { name: string }[]
+      ).some((column) => column.name === "native_session_id"),
+    ).toBe(true);
+    expect(
+      (
+        db.prepare("PRAGMA table_info(chats)").all() as { name: string }[]
+      ).some((column) => column.name === "native_git_info"),
+    ).toBe(true);
+  });
+
+  it("round-trips the provider-native session identity separately", () => {
+    setZerosDbPathForTesting(tmpDbFile());
+    upsertChat(
+      makeChat("codex-chat", {
+        agentId: "codex",
+        sessionId: "zeros-runtime-1",
+        nativeSessionId: "codex-thread-1",
+      }),
+    );
+
+    expect(listChats()[0]).toMatchObject({
+      sessionId: "zeros-runtime-1",
+      nativeSessionId: "codex-thread-1",
+    });
+  });
+
+  it("round-trips provider-native Git metadata without flattening nullable fields", () => {
+    setZerosDbPathForTesting(tmpDbFile());
+    upsertChat(
+      makeChat("codex-git", {
+        agentId: "codex",
+        nativeGitInfo: {
+          sha: "abc123",
+          branch: "santhosh",
+          originUrl: null,
+        },
+      }),
+    );
+
+    expect(listChats()[0]?.nativeGitInfo).toEqual({
+      sha: "abc123",
+      branch: "santhosh",
+      originUrl: null,
+    });
   });
 
   it("stamps + backfills chats.workspace_id from folder via the resolver (v11)", () => {
@@ -188,7 +236,7 @@ describe("Zeros DB (unified engine store)", () => {
     const count = db
       .prepare("SELECT COUNT(*) AS n FROM schema_migrations")
       .get() as { n: number };
-    expect(count.n).toBe(27);
+    expect(count.n).toBe(29);
   });
 
   it("preserves created_at on upsert (immutable after first insert)", () => {

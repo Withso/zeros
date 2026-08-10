@@ -18,6 +18,7 @@ import React, {
   useState,
 } from "react";
 import { useOpenChatFileInWorkbench } from "@/renderer/shell/workbench/use-open-file";
+import { useOpenBrowserInWorkbench } from "@/renderer/shell/workbench/use-open-browser";
 import { chatFileOpenCwd } from "@/renderer/shell/workbench/direct-file-open";
 import {
   materializeScrollGeometryWithin,
@@ -46,6 +47,7 @@ import {
   type ChatThread,
 } from "../../state/store";
 import { newChatId } from "../../state/chat-id";
+import { callCodexCapability } from "./codex-capabilities-client";
 import { expandMentionsInText } from "./mentions";
 import {
   useComposerEditor,
@@ -56,6 +58,7 @@ import {
   type ComposerSegment,
 } from "./composer-editor";
 import { QueuedMessagesCard } from "./queued-messages-card";
+import { RealtimeVoiceControl } from "./realtime-voice-control";
 import {
   BackgroundTasksCard,
   BackgroundTasksWaitingLine,
@@ -144,6 +147,7 @@ import {
   ComposerConcealedContext,
 } from "./composer-pills";
 import { ContextGauge } from "./context-gauge";
+import { NativeGoalPill } from "./native-goal-pill";
 import { ChatProvenance } from "./chat-provenance";
 import {
   ChatTranscriptPills,
@@ -674,6 +678,18 @@ export function AgentChat({
     (url: string) => openPrUrlRef.current(url),
     [],
   );
+  // Ordinary web links and Codex MCP verification URLs share the active
+  // workspace's retained Browser surface. A stable through-ref keeps the entire
+  // historical transcript from re-rendering when the workbench tab list moves.
+  const openBrowser = useOpenBrowserInWorkbench();
+  const openBrowserRef = useRef(openBrowser);
+  useEffect(() => {
+    openBrowserRef.current = openBrowser;
+  }, [openBrowser]);
+  const openBrowserUrlThroughRef = useCallback(
+    (url: string) => openBrowserRef.current({ url }),
+    [],
+  );
   // toolCallIds of queued blocking questions — the transcript question card
   // renders AWAITING RESPONSE (non-expandable) for these, and the tail
   // shimmer/timer hide while the agent is parked on the user.
@@ -683,6 +699,32 @@ export function AgentChat({
       session.messages,
     );
   }, [session.pendingQuestions, session.messages]);
+  const approveGuardianDeniedAction = useCallback(
+    async (event: unknown) => {
+      const payload =
+        event && typeof event === "object" && !Array.isArray(event)
+          ? (event as Record<string, unknown>)
+          : null;
+      const nativeThreadId = chatThread?.nativeSessionId;
+      if (
+        chatThread?.agentId !== "codex" ||
+        !chatThread.sessionId ||
+        !nativeThreadId ||
+        payload?.threadId !== nativeThreadId
+      ) {
+        throw new Error(
+          "This Guardian decision does not belong to the active Codex task.",
+        );
+      }
+      await callCodexCapability({
+        operation: "thread.guardianDeniedAction.approve",
+        cwd: chatThread.folder,
+        sessionId: chatThread.sessionId,
+        params: { threadId: nativeThreadId, event },
+      });
+    },
+    [chatThread],
+  );
   const messageCtx: RendererContext = useMemo(
     () => ({
       isStreaming,
@@ -703,6 +745,8 @@ export function AgentChat({
       attachmentImagesActive: surfaceActive,
       openFile: openFileThroughRef,
       openPrUrl: openPrUrlThroughRef,
+      openBrowserUrl: openBrowserUrlThroughRef,
+      approveGuardianDeniedAction,
     }),
     [
       isStreaming,
@@ -724,6 +768,8 @@ export function AgentChat({
       surfaceActive,
       openFileThroughRef,
       openPrUrlThroughRef,
+      openBrowserUrlThroughRef,
+      approveGuardianDeniedAction,
     ],
   );
   // Scroll + active-prompt elements tracked via state so the
@@ -4098,6 +4144,11 @@ export function AgentChat({
               </span>
             </div>
           )}
+          {chatThread?.agentId === "codex" &&
+          chatThread.sessionId &&
+          chatThread.nativeSessionId ? (
+            <RealtimeVoiceControl chat={chatThread} active={surfaceActive} />
+          ) : null}
           {/* Queued messages (2026-07-06 redesign): sends typed mid-turn dock
             here as a card tucked under the NEXT composer-slot surface (the composer, or the permission/question card that replaces it) — NOT greyed
             transcript bubbles. Rows offer Edit (loads into the composer
@@ -4142,6 +4193,7 @@ export function AgentChat({
               key={pendingQuestion.questionId}
               request={pendingQuestion.request}
               onRespond={(response) => session.respondToQuestion(response)}
+              onOpenExternalUrl={openBrowserUrlThroughRef}
             />
           )}
           {/* Plan review (Claude's ExitPlanMode): a standalone card above the
@@ -4379,6 +4431,7 @@ export function AgentChat({
                       ALWAYS present: empty ring + "Send a message to see
                       context usage." before the first turn, disabled ring +
                       honest note for Cursor (no usage in its SDK). */}
+                      <NativeGoalPill goal={session.nativeGoal} />
                       <ContextGauge
                         usage={session.usage}
                         unavailableReason={contextUnavailableReason}

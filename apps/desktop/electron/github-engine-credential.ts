@@ -31,3 +31,21 @@ export function githubCredentialForEngine(
     ...(credential.variantKey ? { variantKey: credential.variantKey } : {}),
   };
 }
+
+/** Project a selected credential without touching the signed-in session unless
+ * a GitHub App credential actually needs its owner binding checked. Keychain
+ * reads on macOS are synchronous and may display an ACL prompt after a local
+ * app reinstall, so eagerly resolving the owner can stall Electron main even
+ * when the selected credential is null, PAT, or gh-cli. */
+export function githubCredentialForEngineLazyOwner(
+  credential: GithubCredential | null,
+  getCurrentOwnerSub: () => string | null,
+  nowMs = Date.now(),
+): GithubCredential | null {
+  if (!credential || credential.method !== "github-app") return credential;
+  return githubCredentialForEngine(
+    credential,
+    getCurrentOwnerSub(),
+    nowMs,
+  );
+}

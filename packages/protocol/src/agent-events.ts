@@ -390,9 +390,34 @@ export type SessionUpdate =
   | CurrentEffortUpdate
   | ModeSwitchUpdate
   | ErrorNoticeUpdate
+  | RealtimeStatusUpdate
+  | RealtimeAudioUpdate
   | UsageUpdateNotification
+  | NativeGoalUpdateNotification
   | SessionInfoUpdateNotification
   | TurnStateUpdateNotification;
+
+/** Ephemeral Codex realtime lifecycle. These updates are routed live but
+ * applyUpdate deliberately ignores them, so microphone/audio state never
+ * becomes durable transcript content. */
+export interface RealtimeStatusUpdate {
+  sessionUpdate: "realtime_status";
+  threadId: string;
+  status: "active" | "closed" | "error";
+  realtimeSessionId?: string;
+  message?: string;
+}
+
+/** Ephemeral PCM16 little-endian audio emitted by Codex realtime. */
+export interface RealtimeAudioUpdate {
+  sessionUpdate: "realtime_audio";
+  threadId: string;
+  data: string;
+  sampleRate: number;
+  numChannels: number;
+  samplesPerChannel?: number | null;
+  itemId?: string | null;
+}
 
 /** Engine-authored lifecycle notification for a provider turn. Unlike the
  * AGENT_PROMPT RPC response, this survives renderer reload/re-adoption because
@@ -556,6 +581,28 @@ export interface UsageUpdateNotification {
    *  whose protocol has no breakdown (Codex) omit it and the popover
    *  shows Used/Free only. Ordered as received; tokens are absolute. */
   categories?: Array<{ name: string; tokens: number }>;
+}
+
+export interface NativeThreadGoal {
+  objective: string;
+  status:
+    | "active"
+    | "paused"
+    | "blocked"
+    | "usageLimited"
+    | "budgetLimited"
+    | "complete";
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Provider-native long-running goal state (Codex thread goals today). */
+export interface NativeGoalUpdateNotification {
+  sessionUpdate: "native_goal_update";
+  goal: NativeThreadGoal | null;
 }
 
 export interface SessionInfoUpdateNotification {
@@ -755,13 +802,31 @@ export interface SessionInfo {
 
 export interface NewSessionResponse {
   sessionId: SessionId;
+  /** Provider-owned durable resume handle when it differs from the live Zeros
+   * session id. Codex uses its native app-server thread id here. */
+  nativeSessionId?: SessionId;
   modes?: SessionModeState;
   models?: SessionModelState;
 }
 
 export interface LoadSessionResponse {
+  /** Authoritative provider-native resume handle after load. It can change
+   * when a stale native thread degrades to a fresh thread. */
+  nativeSessionId?: SessionId;
   modes?: SessionModeState;
   models?: SessionModelState;
+  /** Provider-owned durable metadata returned by a native resume/read. The
+   * engine can reconcile the matching local chat without guessing from a
+   * transcript preview or restarting the native thread. */
+  nativeThreadMetadata?: {
+    name: string | null;
+    isPinned: boolean;
+    gitInfo: {
+      sha: string | null;
+      branch: string | null;
+      originUrl: string | null;
+    } | null;
+  };
   /** The adapter could NOT resume a prior transcript and started a FRESH
    *  thread/agent instead (Codex stale rollout → `startThread`; Cursor "agent
    *  not found" → `Agent.create`; Claude with no persisted session id). The

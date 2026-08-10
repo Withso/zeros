@@ -1,0 +1,942 @@
+{
+  "schemaVersion": 1,
+  "codexProtocolVersion": "0.146.0",
+  "clientRequests": {
+    "initialize": {
+      "state": "supported",
+      "owner": "Codex app-server client"
+    },
+    "thread/start": {
+      "state": "supported",
+      "owner": "native thread lifecycle bridge"
+    },
+    "thread/resume": {
+      "state": "supported",
+      "owner": "native thread lifecycle bridge"
+    },
+    "thread/fork": {
+      "state": "supported",
+      "owner": "atomic native thread fork workflow"
+    },
+    "thread/archive": {
+      "state": "supported",
+      "owner": "native thread lifecycle bridge"
+    },
+    "thread/delete": {
+      "state": "supported",
+      "owner": "native thread lifecycle bridge"
+    },
+    "thread/unsubscribe": {
+      "state": "not-applicable",
+      "owner": "Zeros session lifecycle",
+      "reason": "Zeros owns one app-server runtime per active chat and closes that runtime when the chat releases it, so a second thread subscription lifecycle would create conflicting ownership."
+    },
+    "thread/increment_elicitation": {
+      "state": "not-applicable",
+      "owner": "blocking interaction bridge",
+      "reason": "This is an upstream client-internal elicitation reference counter; Zeros tracks each blocking request by native request id and must not mutate Codex client accounting."
+    },
+    "thread/decrement_elicitation": {
+      "state": "not-applicable",
+      "owner": "blocking interaction bridge",
+      "reason": "This is an upstream client-internal elicitation reference counter; Zeros settles each blocking request by native request id and must not mutate Codex client accounting."
+    },
+    "thread/name/set": {
+      "state": "supported",
+      "owner": "native thread lifecycle bridge"
+    },
+    "thread/goal/set": {
+      "state": "supported",
+      "owner": "native task goal settings"
+    },
+    "thread/goal/get": {
+      "state": "supported",
+      "owner": "native task goal settings"
+    },
+    "thread/goal/clear": {
+      "state": "supported",
+      "owner": "native task goal settings"
+    },
+    "thread/metadata/update": {
+      "state": "supported",
+      "owner": "native thread metadata persistence"
+    },
+    "thread/settings/update": {
+      "state": "supported",
+      "owner": "native thread lifecycle bridge"
+    },
+    "thread/memoryMode/set": {
+      "state": "supported",
+      "owner": "memory settings bridge"
+    },
+    "memory/reset": {
+      "state": "supported",
+      "owner": "confirmed memory reset workflow"
+    },
+    "thread/unarchive": {
+      "state": "supported",
+      "owner": "native thread lifecycle bridge"
+    },
+    "thread/compact/start": {
+      "state": "supported",
+      "owner": "native thread lifecycle bridge"
+    },
+    "thread/shellCommand": {
+      "state": "not-applicable",
+      "owner": "Zeros terminal bridge",
+      "reason": "Zeros has an authoritative workspace-scoped PTY with resize, stdin, lifecycle, persistence, and approval handling; exposing Codex shellCommand would duplicate terminal ownership."
+    },
+    "thread/approveGuardianDeniedAction": {
+      "state": "supported",
+      "owner": "guardian approval retry workflow"
+    },
+    "thread/backgroundTerminals/clean": {
+      "state": "supported",
+      "owner": "native background terminal settings"
+    },
+    "thread/backgroundTerminals/list": {
+      "state": "supported",
+      "owner": "native thread lifecycle bridge"
+    },
+    "thread/backgroundTerminals/terminate": {
+      "state": "supported",
+      "owner": "native thread lifecycle bridge"
+    },
+    "thread/rollback": {
+      "state": "not-applicable",
+      "owner": "Zeros turn reset workflow",
+      "reason": "The deprecated RPC removes stored turns but does not revert file changes; Zeros does not expose it as rollback and keeps its file-aware turn reset workflow authoritative."
+    },
+    "thread/list": {
+      "state": "supported",
+      "owner": "native thread lifecycle bridge"
+    },
+    "thread/search": {
+      "state": "supported",
+      "owner": "native thread lifecycle bridge"
+    },
+    "thread/searchOccurrences": {
+      "state": "supported",
+      "owner": "bounded native history occurrence search"
+    },
+    "thread/loaded/list": {
+      "state": "supported",
+      "owner": "bounded loaded-thread discovery surface"
+    },
+    "thread/read": {
+      "state": "supported",
+      "owner": "native history inspection and resume metadata bridge"
+    },
+    "thread/turns/list": {
+      "state": "supported",
+      "owner": "bounded cursor-paginated native history inspection"
+    },
+    "thread/items/list": {
+      "state": "supported",
+      "owner": "bounded cursor-paginated native history inspection"
+    },
+    "thread/inject_items": {
+      "state": "not-applicable",
+      "owner": "native transcript integrity boundary",
+      "reason": "This private history-mutation RPC bypasses normal turn attribution and is not exposed by Zeros; imported history uses the explicit external-agent import workflow instead."
+    },
+    "skills/list": {
+      "state": "supported",
+      "owner": "skill discovery bridge"
+    },
+    "skills/extraRoots/set": {
+      "state": "partial",
+      "owner": "skill discovery bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "hooks/list": {
+      "state": "partial",
+      "owner": "hook workflow bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "marketplace/add": {
+      "state": "supported",
+      "owner": "Codex marketplace settings"
+    },
+    "marketplace/remove": {
+      "state": "supported",
+      "owner": "confirmed Codex marketplace removal workflow"
+    },
+    "marketplace/upgrade": {
+      "state": "supported",
+      "owner": "Codex marketplace settings"
+    },
+    "plugin/list": {
+      "state": "supported",
+      "owner": "typed Codex plugin discovery settings"
+    },
+    "plugin/installed": {
+      "state": "partial",
+      "owner": "Codex plugin bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "plugin/read": {
+      "state": "partial",
+      "owner": "Codex plugin bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "plugin/skill/read": {
+      "state": "partial",
+      "owner": "Codex plugin bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "plugin/share/save": {
+      "state": "partial",
+      "owner": "Codex plugin bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "plugin/share/updateTargets": {
+      "state": "partial",
+      "owner": "Codex plugin bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "plugin/share/list": {
+      "state": "partial",
+      "owner": "Codex plugin bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "plugin/share/checkout": {
+      "state": "partial",
+      "owner": "Codex plugin bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "plugin/share/delete": {
+      "state": "partial",
+      "owner": "Codex plugin bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "app/read": {
+      "state": "partial",
+      "owner": "Codex apps bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "app/list": {
+      "state": "supported",
+      "owner": "typed Codex apps discovery settings"
+    },
+    "app/installed": {
+      "state": "partial",
+      "owner": "Codex apps bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "fs/readFile": {
+      "state": "not-applicable",
+      "owner": "Zeros keyed filesystem bridge",
+      "reason": "Zeros already owns workspace-bounded keyed file reads and keeps exact-key snapshots during revalidation; a second renderer-facing filesystem authority is intentionally excluded."
+    },
+    "fs/writeFile": {
+      "state": "not-applicable",
+      "owner": "Zeros keyed filesystem bridge",
+      "reason": "Zeros owns workspace-bounded writes, approvals, and file-change attribution; a parallel app-server write surface would bypass those invariants."
+    },
+    "fs/createDirectory": {
+      "state": "not-applicable",
+      "owner": "Zeros keyed filesystem bridge",
+      "reason": "Directory creation remains within the workspace-bounded Zeros filesystem and command workflows to preserve one approval and invalidation authority."
+    },
+    "fs/getMetadata": {
+      "state": "not-applicable",
+      "owner": "Zeros keyed filesystem bridge",
+      "reason": "Zeros already provides keyed workspace metadata reads and retains exact-key state; duplicating the read path would create incoherent caches."
+    },
+    "fs/readDirectory": {
+      "state": "not-applicable",
+      "owner": "Zeros keyed filesystem bridge",
+      "reason": "Workspace directory enumeration is already a keyed Zeros server-state surface and is not duplicated through app-server."
+    },
+    "fs/remove": {
+      "state": "not-applicable",
+      "owner": "Zeros keyed filesystem bridge",
+      "reason": "Destructive file removal must remain in the Zeros workspace and approval boundary; the generic app-server filesystem RPC is not exposed."
+    },
+    "fs/copy": {
+      "state": "not-applicable",
+      "owner": "Zeros keyed filesystem bridge",
+      "reason": "File copies remain in the Zeros workspace and approval boundary so destination invalidation and authored-file attribution stay coherent."
+    },
+    "fs/watch": {
+      "state": "not-applicable",
+      "owner": "Zeros keyed filesystem bridge",
+      "reason": "Zeros already owns bounded workspace watchers and keyed cache invalidation; a second watch registry would leak ownership across chats."
+    },
+    "fs/unwatch": {
+      "state": "not-applicable",
+      "owner": "Zeros keyed filesystem bridge",
+      "reason": "Watch cleanup is paired with the authoritative Zeros watcher registry; app-server watch handles are never created by the product."
+    },
+    "skills/config/write": {
+      "state": "partial",
+      "owner": "skill discovery bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "plugin/install": {
+      "state": "supported",
+      "owner": "Codex plugin install workflow"
+    },
+    "plugin/uninstall": {
+      "state": "supported",
+      "owner": "Codex plugin uninstall workflow"
+    },
+    "turn/start": {
+      "state": "supported",
+      "owner": "turn lifecycle bridge"
+    },
+    "turn/steer": {
+      "state": "supported",
+      "owner": "turn lifecycle bridge"
+    },
+    "turn/interrupt": {
+      "state": "supported",
+      "owner": "turn lifecycle bridge"
+    },
+    "thread/realtime/start": {
+      "state": "supported",
+      "owner": "realtime voice control"
+    },
+    "thread/realtime/appendAudio": {
+      "state": "supported",
+      "owner": "bounded realtime microphone bridge"
+    },
+    "thread/realtime/appendText": {
+      "state": "supported",
+      "owner": "realtime voice control"
+    },
+    "thread/realtime/appendSpeech": {
+      "state": "supported",
+      "owner": "realtime voice control"
+    },
+    "thread/realtime/stop": {
+      "state": "supported",
+      "owner": "realtime voice lifecycle"
+    },
+    "thread/realtime/listVoices": {
+      "state": "supported",
+      "owner": "realtime voice selection"
+    },
+    "review/start": {
+      "state": "supported",
+      "owner": "review workflow bridge"
+    },
+    "model/list": {
+      "state": "supported",
+      "owner": "model catalog bridge"
+    },
+    "modelProvider/capabilities/read": {
+      "state": "partial",
+      "owner": "model catalog bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "experimentalFeature/list": {
+      "state": "partial",
+      "owner": "capability settings bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "permissionProfile/list": {
+      "state": "partial",
+      "owner": "capability settings bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "experimentalFeature/enablement/set": {
+      "state": "partial",
+      "owner": "capability settings bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "remoteControl/enable": {
+      "state": "supported",
+      "owner": "remote control settings toggle"
+    },
+    "remoteControl/disable": {
+      "state": "supported",
+      "owner": "remote control settings toggle"
+    },
+    "remoteControl/status/read": {
+      "state": "supported",
+      "owner": "typed remote control status settings"
+    },
+    "remoteControl/client/list": {
+      "state": "supported",
+      "owner": "bounded remote client inspector"
+    },
+    "remoteControl/client/revoke": {
+      "state": "supported",
+      "owner": "confirmed remote client revocation"
+    },
+    "collaborationMode/list": {
+      "state": "partial",
+      "owner": "collaboration mode bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "mock/experimentalMethod": {
+      "state": "not-applicable",
+      "owner": "legacy or test protocol boundary",
+      "reason": "This protocol-only test method is never advertised by the production Zeros client."
+    },
+    "environment/add": {
+      "state": "partial",
+      "owner": "environment bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "environment/info": {
+      "state": "partial",
+      "owner": "environment bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "environment/status": {
+      "state": "partial",
+      "owner": "environment bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "mcpServer/oauth/login": {
+      "state": "supported",
+      "owner": "MCP Browser sign-in workflow"
+    },
+    "config/mcpServer/reload": {
+      "state": "supported",
+      "owner": "MCP settings reload workflow"
+    },
+    "mcpServerStatus/list": {
+      "state": "supported",
+      "owner": "MCP status and reauthentication settings"
+    },
+    "mcpServer/resource/read": {
+      "state": "supported",
+      "owner": "bounded MCP resource inspector"
+    },
+    "mcpServer/tool/call": {
+      "state": "supported",
+      "owner": "confirmed MCP tool inspector"
+    },
+    "windowsSandbox/setupStart": {
+      "state": "partial",
+      "owner": "Windows sandbox bridge",
+      "reason": "Setup is typed, local-only, allowlisted, dispatch-tested, and its completion event is translated; runtime validation requires a Windows host."
+    },
+    "windowsSandbox/readiness": {
+      "state": "partial",
+      "owner": "Windows sandbox bridge",
+      "reason": "Readiness is typed, local-only, allowlisted, and dispatch-tested; runtime validation requires a Windows host."
+    },
+    "account/login/start": {
+      "state": "supported",
+      "owner": "native Codex Browser sign-in workflow"
+    },
+    "account/login/cancel": {
+      "state": "supported",
+      "owner": "cancellable in-app browser sign-in workflow"
+    },
+    "account/logout": {
+      "state": "supported",
+      "owner": "confirmed native Codex sign-out workflow"
+    },
+    "account/rateLimits/read": {
+      "state": "supported",
+      "owner": "account allowance settings"
+    },
+    "account/rateLimitResetCredit/consume": {
+      "state": "supported",
+      "owner": "confirmed idempotent allowance reset workflow"
+    },
+    "account/usage/read": {
+      "state": "supported",
+      "owner": "account token activity settings"
+    },
+    "account/workspaceMessages/read": {
+      "state": "supported",
+      "owner": "account workspace message settings"
+    },
+    "account/sendAddCreditsNudgeEmail": {
+      "state": "supported",
+      "owner": "confirmed workspace owner notification workflow"
+    },
+    "feedback/upload": {
+      "state": "not-applicable",
+      "owner": "Zeros feedback workflow",
+      "reason": "Zeros uses its own user-visible, scrubbed feedback path; silently forwarding product diagnostics to the Codex backend would violate that consent boundary."
+    },
+    "command/exec": {
+      "state": "not-applicable",
+      "owner": "Zeros terminal bridge",
+      "reason": "Zeros owns the workspace PTY, approvals, process identity, persistence, and renderer lifecycle; app-server command execution is intentionally not a second terminal authority."
+    },
+    "command/exec/write": {
+      "state": "not-applicable",
+      "owner": "Zeros terminal bridge",
+      "reason": "Input is routed through the authoritative Zeros PTY by process identity; no app-server command handle is created by the product."
+    },
+    "command/exec/terminate": {
+      "state": "not-applicable",
+      "owner": "Zeros terminal bridge",
+      "reason": "Termination is routed through the authoritative Zeros PTY by process identity; no app-server command handle is created by the product."
+    },
+    "command/exec/resize": {
+      "state": "not-applicable",
+      "owner": "Zeros terminal bridge",
+      "reason": "Terminal geometry is owned by the active Zeros PTY surface; no app-server command handle is created by the product."
+    },
+    "process/spawn": {
+      "state": "not-applicable",
+      "owner": "Zeros process bridge",
+      "reason": "Zeros owns process spawning through its workspace-scoped engine and approval pipeline; duplicating it through app-server would bypass process attribution."
+    },
+    "process/writeStdin": {
+      "state": "not-applicable",
+      "owner": "Zeros process bridge",
+      "reason": "Process input is routed through the authoritative Zeros process registry; app-server process handles are not product-owned."
+    },
+    "process/kill": {
+      "state": "not-applicable",
+      "owner": "Zeros process bridge",
+      "reason": "Process termination is routed through the authoritative Zeros process registry; app-server process handles are not product-owned."
+    },
+    "process/resizePty": {
+      "state": "not-applicable",
+      "owner": "Zeros process bridge",
+      "reason": "PTY resize is tied to the authoritative Zeros terminal surface; app-server process handles are not product-owned."
+    },
+    "config/read": {
+      "state": "partial",
+      "owner": "configuration bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "externalAgentConfig/detect": {
+      "state": "partial",
+      "owner": "configuration bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "externalAgentConfig/import": {
+      "state": "partial",
+      "owner": "configuration bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "externalAgentConfig/import/recordHistory": {
+      "state": "partial",
+      "owner": "configuration bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "externalAgentConfig/import/readHistories": {
+      "state": "partial",
+      "owner": "configuration bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "config/value/write": {
+      "state": "partial",
+      "owner": "configuration bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "config/batchWrite": {
+      "state": "partial",
+      "owner": "configuration bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "configRequirements/read": {
+      "state": "partial",
+      "owner": "configuration bridge",
+      "reason": "The generated method is callable through the authenticated runtime escape hatch, but Zeros has no complete typed product surface and end-to-end behavior test for it yet."
+    },
+    "account/read": {
+      "state": "supported",
+      "owner": "account bridge"
+    },
+    "getConversationSummary": {
+      "state": "not-applicable",
+      "owner": "legacy or test protocol boundary",
+      "reason": "Zeros uses the v2 thread, history, Git, and file-search surfaces rather than this legacy compatibility endpoint."
+    },
+    "gitDiffToRemote": {
+      "state": "not-applicable",
+      "owner": "legacy or test protocol boundary",
+      "reason": "Zeros uses the v2 thread, history, Git, and file-search surfaces rather than this legacy compatibility endpoint."
+    },
+    "getAuthStatus": {
+      "state": "not-applicable",
+      "owner": "legacy or test protocol boundary",
+      "reason": "Zeros uses the v2 thread, history, Git, and file-search surfaces rather than this legacy compatibility endpoint."
+    },
+    "fuzzyFileSearch": {
+      "state": "not-applicable",
+      "owner": "legacy or test protocol boundary",
+      "reason": "Zeros uses the v2 thread, history, Git, and file-search surfaces rather than this legacy compatibility endpoint."
+    },
+    "fuzzyFileSearch/sessionStart": {
+      "state": "not-applicable",
+      "owner": "legacy or test protocol boundary",
+      "reason": "Zeros uses the v2 thread, history, Git, and file-search surfaces rather than this legacy compatibility endpoint."
+    },
+    "fuzzyFileSearch/sessionUpdate": {
+      "state": "not-applicable",
+      "owner": "legacy or test protocol boundary",
+      "reason": "Zeros uses the v2 thread, history, Git, and file-search surfaces rather than this legacy compatibility endpoint."
+    },
+    "fuzzyFileSearch/sessionStop": {
+      "state": "not-applicable",
+      "owner": "legacy or test protocol boundary",
+      "reason": "Zeros uses the v2 thread, history, Git, and file-search surfaces rather than this legacy compatibility endpoint."
+    }
+  },
+  "serverRequests": {
+    "item/commandExecution/requestApproval": {
+      "state": "supported",
+      "owner": "app-server approval bridge"
+    },
+    "item/fileChange/requestApproval": {
+      "state": "supported",
+      "owner": "app-server approval bridge"
+    },
+    "item/tool/requestUserInput": {
+      "state": "supported",
+      "owner": "app-server question bridge"
+    },
+    "mcpServer/elicitation/request": {
+      "state": "supported",
+      "owner": "MCP interaction bridge"
+    },
+    "item/permissions/requestApproval": {
+      "state": "supported",
+      "owner": "app-server approval bridge"
+    },
+    "item/tool/call": {
+      "state": "supported",
+      "owner": "dynamic tool bridge and isolated browser host"
+    },
+    "account/chatgptAuthTokens/refresh": {
+      "state": "partial",
+      "owner": "authentication bridge",
+      "reason": "Zeros currently delegates Codex authentication to the CLI and has no host token refresh provider."
+    },
+    "attestation/generate": {
+      "state": "partial",
+      "owner": "desktop host bridge",
+      "reason": "The client does not advertise requestAttestation until a platform attestation provider exists."
+    },
+    "currentTime/read": {
+      "state": "supported",
+      "owner": "desktop host bridge"
+    },
+    "applyPatchApproval": {
+      "state": "not-applicable",
+      "owner": "legacy protocol bridge",
+      "reason": "Zeros starts v2 threads and handles item/fileChange/requestApproval; this generated legacy approval is rejected safely when not registered."
+    },
+    "execCommandApproval": {
+      "state": "not-applicable",
+      "owner": "legacy protocol bridge",
+      "reason": "Zeros starts v2 threads and handles item/commandExecution/requestApproval; this generated legacy approval is rejected safely when not registered."
+    }
+  },
+  "serverNotifications": {
+    "error": {
+      "state": "supported",
+      "owner": "runtime lifecycle and translator"
+    },
+    "thread/started": {
+      "state": "supported",
+      "owner": "translator"
+    },
+    "thread/status/changed": {
+      "state": "partial",
+      "owner": "translator",
+      "reason": "The notification is consumed as a deliberate no-op; collaboration item events currently provide the visible workflow state."
+    },
+    "thread/archived": {
+      "state": "supported",
+      "owner": "native thread lifecycle bridge"
+    },
+    "thread/deleted": {
+      "state": "supported",
+      "owner": "native thread lifecycle bridge"
+    },
+    "thread/unarchived": {
+      "state": "supported",
+      "owner": "native thread lifecycle bridge"
+    },
+    "thread/closed": {
+      "state": "supported",
+      "owner": "native thread lifecycle bridge"
+    },
+    "skills/changed": {
+      "state": "supported",
+      "owner": "skill discovery bridge"
+    },
+    "thread/name/updated": {
+      "state": "supported",
+      "owner": "native thread lifecycle bridge"
+    },
+    "thread/goal/updated": {
+      "state": "supported",
+      "owner": "native goal session state"
+    },
+    "thread/goal/cleared": {
+      "state": "supported",
+      "owner": "native goal session state"
+    },
+    "thread/environment/connected": {
+      "state": "supported",
+      "owner": "environment bridge"
+    },
+    "thread/environment/disconnected": {
+      "state": "supported",
+      "owner": "environment bridge"
+    },
+    "thread/settings/updated": {
+      "state": "partial",
+      "owner": "composer settings bridge",
+      "reason": "Zeros currently synchronizes native effort changes but not every thread setting."
+    },
+    "thread/tokenUsage/updated": {
+      "state": "supported",
+      "owner": "translator"
+    },
+    "turn/started": {
+      "state": "supported",
+      "owner": "turn lifecycle bridge"
+    },
+    "hook/started": {
+      "state": "supported",
+      "owner": "hook workflow bridge"
+    },
+    "turn/completed": {
+      "state": "supported",
+      "owner": "runtime lifecycle and translator"
+    },
+    "hook/completed": {
+      "state": "supported",
+      "owner": "hook workflow bridge"
+    },
+    "turn/diff/updated": {
+      "state": "partial",
+      "owner": "translator",
+      "reason": "The aggregate is consumed as a no-op because file-change items drive the current diff UI; exact aggregate preservation is still pending."
+    },
+    "turn/plan/updated": {
+      "state": "supported",
+      "owner": "durable plan timeline bridge"
+    },
+    "item/started": {
+      "state": "supported",
+      "owner": "translator and turn tracker"
+    },
+    "item/autoApprovalReview/started": {
+      "state": "supported",
+      "owner": "approval workflow bridge"
+    },
+    "item/autoApprovalReview/completed": {
+      "state": "supported",
+      "owner": "approval workflow bridge"
+    },
+    "item/completed": {
+      "state": "supported",
+      "owner": "translator and file-change capture"
+    },
+    "rawResponseItem/completed": {
+      "state": "not-applicable",
+      "owner": "canonical transcript boundary",
+      "reason": "Zeros persists canonical typed items and deliberately excludes raw provider response bodies that can duplicate content or expose opaque provider data."
+    },
+    "rawResponse/completed": {
+      "state": "not-applicable",
+      "owner": "canonical transcript boundary",
+      "reason": "Zeros persists canonical typed turn events and deliberately excludes complete raw provider responses that can duplicate content or expose opaque provider data."
+    },
+    "item/agentMessage/delta": {
+      "state": "supported",
+      "owner": "translator"
+    },
+    "item/plan/delta": {
+      "state": "partial",
+      "owner": "translator",
+      "reason": "The adapter subscribes to the delta but the translator does not project a plan surface yet."
+    },
+    "command/exec/outputDelta": {
+      "state": "supported",
+      "owner": "translator"
+    },
+    "process/outputDelta": {
+      "state": "supported",
+      "owner": "translator"
+    },
+    "process/exited": {
+      "state": "not-applicable",
+      "owner": "Zeros process bridge",
+      "reason": "Zeros does not create standalone app-server process handles; the authoritative Zeros process registry emits its own exit lifecycle."
+    },
+    "item/commandExecution/outputDelta": {
+      "state": "supported",
+      "owner": "translator"
+    },
+    "item/commandExecution/terminalInteraction": {
+      "state": "supported",
+      "owner": "translator"
+    },
+    "item/fileChange/outputDelta": {
+      "state": "supported",
+      "owner": "translator"
+    },
+    "item/fileChange/patchUpdated": {
+      "state": "supported",
+      "owner": "translator"
+    },
+    "serverRequest/resolved": {
+      "state": "supported",
+      "owner": "blocking interaction bridge"
+    },
+    "item/mcpToolCall/progress": {
+      "state": "supported",
+      "owner": "MCP tool timeline bridge"
+    },
+    "mcpServer/oauthLogin/completed": {
+      "state": "supported",
+      "owner": "MCP live authentication status cache"
+    },
+    "mcpServer/startupStatus/updated": {
+      "state": "supported",
+      "owner": "MCP live startup and reauthentication status cache"
+    },
+    "account/updated": {
+      "state": "partial",
+      "owner": "account bridge",
+      "reason": "Authentication and plan fields are captured, but only diagnostics and later probes expose changes to the UI."
+    },
+    "account/rateLimits/updated": {
+      "state": "supported",
+      "owner": "account allowance state and settings surface"
+    },
+    "app/list/updated": {
+      "state": "partial",
+      "owner": "Codex apps bridge",
+      "reason": "Installed app changes are not synchronized into the Zeros capability picker yet."
+    },
+    "remoteControl/status/changed": {
+      "state": "partial",
+      "owner": "remote control bridge",
+      "reason": "Remote-control status is platform-conditional and has no Zeros surface yet."
+    },
+    "externalAgentConfig/import/progress": {
+      "state": "supported",
+      "owner": "configuration import bridge"
+    },
+    "externalAgentConfig/import/completed": {
+      "state": "supported",
+      "owner": "configuration import bridge"
+    },
+    "fs/changed": {
+      "state": "not-applicable",
+      "owner": "Zeros keyed filesystem bridge",
+      "reason": "Zeros does not create app-server filesystem watches; its authoritative bounded watcher invalidates exact-key filesystem state directly."
+    },
+    "item/reasoning/summaryTextDelta": {
+      "state": "supported",
+      "owner": "translator"
+    },
+    "item/reasoning/summaryPartAdded": {
+      "state": "partial",
+      "owner": "translator",
+      "reason": "Part boundaries are subscribed but not preserved in the canonical reasoning stream."
+    },
+    "item/reasoning/textDelta": {
+      "state": "supported",
+      "owner": "translator"
+    },
+    "thread/compacted": {
+      "state": "not-applicable",
+      "owner": "context lifecycle bridge",
+      "reason": "This notification is deprecated upstream; Zeros renders the authoritative contextCompaction item lifecycle instead."
+    },
+    "model/rerouted": {
+      "state": "supported",
+      "owner": "model state bridge"
+    },
+    "model/verification": {
+      "state": "supported",
+      "owner": "model state bridge"
+    },
+    "turn/moderationMetadata": {
+      "state": "not-applicable",
+      "owner": "turn policy bridge",
+      "reason": "Provider-internal moderation metadata is consumed without exposing opaque policy data as transcript content."
+    },
+    "model/safetyBuffering/updated": {
+      "state": "supported",
+      "owner": "model state bridge"
+    },
+    "warning": {
+      "state": "supported",
+      "owner": "translator"
+    },
+    "guardianWarning": {
+      "state": "supported",
+      "owner": "translator"
+    },
+    "deprecationNotice": {
+      "state": "supported",
+      "owner": "translator"
+    },
+    "configWarning": {
+      "state": "supported",
+      "owner": "translator"
+    },
+    "fuzzyFileSearch/sessionUpdated": {
+      "state": "not-applicable",
+      "owner": "Zeros file search",
+      "reason": "The composer uses the authoritative Zeros workspace file search and never starts Codex fuzzy-search sessions, so no parallel result stream exists."
+    },
+    "fuzzyFileSearch/sessionCompleted": {
+      "state": "not-applicable",
+      "owner": "Zeros file search",
+      "reason": "The composer uses the authoritative Zeros workspace file search and never starts Codex fuzzy-search sessions, so no parallel completion stream exists."
+    },
+    "thread/realtime/started": {
+      "state": "supported",
+      "owner": "realtime microphone and lifecycle controller"
+    },
+    "thread/realtime/itemAdded": {
+      "state": "partial",
+      "owner": "realtime conversation bridge",
+      "reason": "Opaque backend items are consumed without persistence to protect transcript integrity; a dedicated volatile realtime consumer remains pending."
+    },
+    "thread/realtime/transcript/delta": {
+      "state": "supported",
+      "owner": "realtime conversation bridge"
+    },
+    "thread/realtime/transcript/done": {
+      "state": "supported",
+      "owner": "realtime conversation bridge"
+    },
+    "thread/realtime/outputAudio/delta": {
+      "state": "supported",
+      "owner": "volatile bounded realtime audio playback"
+    },
+    "thread/realtime/sdp": {
+      "state": "partial",
+      "owner": "realtime conversation bridge",
+      "reason": "SDP is subscribed and deliberately excluded from durable history; WebRTC transport ownership remains pending in the desktop realtime controller."
+    },
+    "thread/realtime/error": {
+      "state": "supported",
+      "owner": "realtime conversation bridge"
+    },
+    "thread/realtime/closed": {
+      "state": "supported",
+      "owner": "realtime conversation bridge"
+    },
+    "windows/worldWritableWarning": {
+      "state": "partial",
+      "owner": "Windows host bridge",
+      "reason": "The warning is translated into a recoverable Zeros notice; runtime verification requires a Windows host."
+    },
+    "windowsSandbox/setupCompleted": {
+      "state": "partial",
+      "owner": "Windows host bridge",
+      "reason": "The setup result is translated into a correlated workflow row; runtime verification requires a Windows host."
+    },
+    "account/login/completed": {
+      "state": "partial",
+      "owner": "account bridge",
+      "reason": "The completion is logged and triggers later probes, but no typed renderer event is emitted yet."
+    }
+  }
+}

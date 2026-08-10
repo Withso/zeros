@@ -90,4 +90,13 @@ exports.default = async function beforePack(context) {
     [path.join(projectDir, "scripts", "stage-claude-cli.mjs")],
     { cwd: projectDir, env: process.env, stdio: "inherit" },
   );
+
+  // Stage the complete pinned Codex vendor tree. The packaged engine cannot
+  // require.resolve @openai/codex from its bun single-file image, and falling
+  // back to a user's global CLI violates the generated app-server protocol pin.
+  execFileSync(
+    process.execPath,
+    [path.join(projectDir, "scripts", "stage-codex-cli.mjs")],
+    { cwd: projectDir, env: process.env, stdio: "inherit" },
+  );
 };

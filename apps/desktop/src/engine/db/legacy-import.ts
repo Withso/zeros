@@ -95,6 +95,7 @@ function toChatRow(r: LegacyChatRow): ChatRow {
     createdAt: r.created_at ?? 0,
     updatedAt: r.updated_at ?? 0,
     sessionId: r.session_id,
+    nativeSessionId: null,
     pinned: r.pinned === 1,
     archived: r.archived === 1,
     sourceChatId: r.source_chat_id,

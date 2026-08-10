@@ -24,7 +24,7 @@
 //   native :hover.
 
 import React from "react";
-import { X } from "lucide-react";
+import { MousePointer2, X } from "lucide-react";
 import { Tooltip } from "../../shared/ui/primitives";
 import { FileTypeIcon } from "../../features/agent/composer-editor/file-type-icon";
 import { useWorkspaceDispatch } from "../../state/store";
@@ -48,6 +48,7 @@ import {
 import { useWorkspaceChangeCount } from "./tabs/changes-tab";
 import { useGitRefreshKey } from "../use-git-refresh-key";
 import { WorkbenchNewTabMenu } from "./new-tab-menu";
+import { useBrowserSessionAgentPresence } from "../../features/browser/browser-session-activity-store";
 
 interface WorkbenchTabStripProps {
   /** The persisted workbench home + open-File tab list — see Workbench. */
@@ -173,12 +174,17 @@ function TabPill({
   // A File tab wears its file's own colored type glyph (same sprite as the tree
   // and the viewer breadcrumb); everything else keeps its type's lucide glyph.
   const iconPath = workbenchTabIconPath(tab);
+  const browserPresence = useBrowserSessionAgentPresence(tab.browserSessionId);
+  const agentActive = tab.type === "browser" && browserPresence.active;
   return (
     <div
       ref={registerRef}
       role="tab"
       aria-selected={active}
-      aria-label={tab.title}
+      aria-label={
+        agentActive ? `${tab.title} — Agent controlling browser` : tab.title
+      }
+      data-agent-active={agentActive || undefined}
       tabIndex={0}
       onClick={onActivate}
       onKeyDown={(e) => {
@@ -204,7 +210,12 @@ function TabPill({
           : WORKBENCH_TAB_PILL_INACTIVE_CLS,
       ].join(" ")}
     >
-      {iconPath ? (
+      {agentActive ? (
+        <span className="relative size-3.5 shrink-0" aria-hidden="true">
+          <MousePointer2 className="text-blue-primary size-3.5" />
+          <span className="bg-blue-primary absolute -top-0.5 -right-0.5 size-1.5 rounded-full motion-safe:animate-pulse" />
+        </span>
+      ) : iconPath ? (
         // size 14 === the size-3.5 the lucide glyphs use, so swapping the glyph
         // never shifts the pill's label.
         <FileTypeIcon name={iconPath} size={14} className="shrink-0" />

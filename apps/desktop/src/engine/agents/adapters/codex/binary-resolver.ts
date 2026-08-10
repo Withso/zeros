@@ -68,20 +68,18 @@ export async function resolveCodexBinary(opts: {
     );
   }
 
-  // 2. Bundled wrapper handed over by Electron main. This is the tier that WOULD
-  //    fix the packaged path: the require.resolve below CANNOT work there, because
+  // 2. Bundled native runtime handed over by Electron main. This fixes the
+  //    packaged path: the require.resolve below CANNOT work there, because
   //    the packaged engine is a `bun build --compile` single-file binary with no
   //    node_modules on disk, so packaged builds fall through to step 4 and run
   //    whatever `codex` is on the user's PATH — a DIFFERENT, unpinned CLI from the
   //    one dev runs. (Same root cause as the Claude "Native CLI binary not found"
   //    failure; see claude-sdk/binary-resolver.ts for the full write-up.)
   //
-  //    NOT YET WIRED: nothing sets ZEROS_CODEX_CLI_PATH today — apps/desktop/electron/sidecar.ts
-  //    forwards only the Claude pair, and there is no Codex staging step. Codex is a
-  //    user-installed global by design (no `bundledRuntime` in its manifest entry).
-  //    The tier exists so a future stage-codex-cli.mjs is a one-line wire-up, and so
-  //    a smoke harness can point at a real binary. Until then step 4's warning is
-  //    the honest signal that the CLI is unpinned.
+  //    scripts/stage-codex-cli.mjs preserves the platform vendor layout under
+  //    Contents/Resources/codex-runtime, and sidecar.ts passes the executable
+  //    here through ZEROS_CODEX_CLI_PATH. A smoke harness can use the same env
+  //    contract against the staged artifact.
   const fromEnv = process.env.ZEROS_CODEX_CLI_PATH?.trim();
   if (fromEnv) {
     if (await pathExists(fromEnv)) {

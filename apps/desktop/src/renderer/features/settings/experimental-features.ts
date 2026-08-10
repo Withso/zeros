@@ -20,7 +20,10 @@
 import { useCallback, useSyncExternalStore } from "react";
 
 /** The set of experimental feature flags. */
-export type ExperimentalFeature = "terminalAgents" | "workInLocalMain";
+export type ExperimentalFeature =
+  | "terminalAgents"
+  | "workInLocalMain"
+  | "developerBrowserCdp";
 
 const STORAGE_KEY = "zeros.experimentalFeatures";
 

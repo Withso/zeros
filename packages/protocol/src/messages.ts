@@ -617,6 +617,9 @@ export interface AgentLoadSessionMessage extends BaseMessage {
   type: "AGENT_LOAD_SESSION";
   agentId: string;
   sessionId: string;
+  /** Provider-native durable resume handle. Falls back to sessionId for older
+   * clients and providers whose live and native identities are identical. */
+  nativeSessionId?: string;
   /** See AgentNewSessionMessage.chatId — the engine persists this resumed
    *  session's transcript under the chat. */
   chatId?: string;
@@ -1006,6 +1009,186 @@ export interface AgentBinaryResolvedMessage extends BaseMessage {
   resolvedVia: "override" | "well-known" | "path" | "fallback";
 }
 
+// ── Codex SDK headless jobs ─────────────────────────────
+
+export interface CodexJobStartMessage extends BaseMessage {
+  type: "CODEX_JOB_START";
+  cwd: string;
+  prompt: string;
+  model?: string;
+  reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
+  sandboxMode?: "read-only" | "workspace-write";
+  networkAccessEnabled?: boolean;
+  outputSchema?: unknown;
+  timeoutMs?: number;
+}
+
+export interface CodexJobGetMessage extends BaseMessage {
+  type: "CODEX_JOB_GET";
+  jobId: string;
+}
+
+export interface CodexJobListMessage extends BaseMessage {
+  type: "CODEX_JOB_LIST";
+}
+
+export interface CodexJobCancelMessage extends BaseMessage {
+  type: "CODEX_JOB_CANCEL";
+  jobId: string;
+}
+
+export interface CodexJobWire {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  createdAt: number;
+  startedAt?: number;
+  completedAt?: number;
+  threadId?: string;
+  result?: {
+    finalResponse: string;
+    items: unknown[];
+    usage: unknown | null;
+  };
+  error?: string;
+}
+
+export interface CodexJobSnapshotMessage extends BaseMessage {
+  type: "CODEX_JOB_SNAPSHOT";
+  requestId: string;
+  job: CodexJobWire | null;
+  error?: {
+    code: "LOCAL_ONLY" | "UNAVAILABLE" | "INVALID_REQUEST";
+    message: string;
+  };
+}
+
+export interface CodexJobsListMessage extends BaseMessage {
+  type: "CODEX_JOBS_LIST";
+  requestId: string;
+  jobs: CodexJobWire[];
+  error?: {
+    code: "LOCAL_ONLY" | "UNAVAILABLE";
+    message: string;
+  };
+}
+
+// ── Codex app-server capability surface ─────────────────
+
+export const CODEX_CAPABILITY_OPERATIONS = [
+  "thread.fork",
+  "thread.goal.set",
+  "thread.goal.get",
+  "thread.goal.clear",
+  "thread.list",
+  "thread.read",
+  "thread.turns.list",
+  "thread.items.list",
+  "thread.search",
+  "thread.searchOccurrences",
+  "thread.loaded.list",
+  "thread.backgroundTerminals.list",
+  "thread.backgroundTerminals.clean",
+  "thread.backgroundTerminals.terminate",
+  "thread.metadata.update",
+  "thread.memoryMode.set",
+  "thread.guardianDeniedAction.approve",
+  "memory.reset",
+  "thread.realtime.start",
+  "thread.realtime.appendAudio",
+  "thread.realtime.appendText",
+  "thread.realtime.appendSpeech",
+  "thread.realtime.stop",
+  "thread.realtime.voices.list",
+  "skills.list",
+  "skills.extraRoots.set",
+  "skills.config.write",
+  "hooks.list",
+  "mcp.oauth.login",
+  "mcp.reload",
+  "mcp.status.list",
+  "mcp.resource.read",
+  "mcp.tool.call",
+  "apps.list",
+  "apps.read",
+  "apps.installed",
+  "plugins.list",
+  "plugins.installed",
+  "plugins.read",
+  "plugins.skill.read",
+  "plugins.install",
+  "plugins.uninstall",
+  "marketplaces.add",
+  "marketplaces.remove",
+  "marketplaces.upgrade",
+  "pluginShares.save",
+  "pluginShares.updateTargets",
+  "pluginShares.list",
+  "pluginShares.checkout",
+  "pluginShares.delete",
+  "account.read",
+  "account.rateLimits.read",
+  "account.usage.read",
+  "account.workspaceMessages.read",
+  "account.login.start",
+  "account.login.cancel",
+  "account.logout",
+  "account.rateLimitResetCredit.consume",
+  "account.sendAddCreditsNudgeEmail",
+  "config.read",
+  "config.value.write",
+  "config.batch.write",
+  "config.requirements.read",
+  "externalAgentConfig.detect",
+  "externalAgentConfig.import",
+  "externalAgentConfig.history.record",
+  "externalAgentConfig.histories.read",
+  "review.start",
+  "environment.add",
+  "environment.info",
+  "environment.status",
+  "remoteControl.enable",
+  "remoteControl.disable",
+  "remoteControl.status.read",
+  "remoteControl.clients.list",
+  "remoteControl.clients.revoke",
+  "models.list",
+  "models.providerCapabilities.read",
+  "experimental.list",
+  "experimental.set",
+  "permissionProfiles.list",
+  "collaborationModes.list",
+  "windowsSandbox.setup.start",
+  "windowsSandbox.readiness",
+] as const;
+
+export type CodexCapabilityOperation =
+  (typeof CODEX_CAPABILITY_OPERATIONS)[number];
+
+export interface CodexCapabilityRequestMessage extends BaseMessage {
+  type: "CODEX_CAPABILITY_REQUEST";
+  operation: CodexCapabilityOperation;
+  /** Host cwd used when a short-lived app-server runtime is required. */
+  cwd: string;
+  /** Prefer an already-open interactive runtime when available. */
+  sessionId?: string;
+  params?: unknown;
+}
+
+export interface CodexCapabilityResponseMessage extends BaseMessage {
+  type: "CODEX_CAPABILITY_RESPONSE";
+  requestId: string;
+  operation: CodexCapabilityOperation;
+  result?: unknown;
+  error?: {
+    code:
+      | "LOCAL_ONLY"
+      | "UNAVAILABLE"
+      | "INVALID_REQUEST"
+      | "UNSUPPORTED";
+    message: string;
+  };
+}
+
 // ── Union ────────────────────────────────────────────────
 
 export type BridgeMessage =
@@ -1077,7 +1260,17 @@ export type BridgeMessage =
   | PtyTerminalsChangedMessage
   // Agent binary resolution
   | ResolveAgentBinaryMessage
-  | AgentBinaryResolvedMessage;
+  | AgentBinaryResolvedMessage
+  // Codex SDK headless jobs (trusted local desktop only)
+  | CodexJobStartMessage
+  | CodexJobGetMessage
+  | CodexJobListMessage
+  | CodexJobCancelMessage
+  | CodexJobSnapshotMessage
+  | CodexJobsListMessage
+  // Codex app-server product capabilities (trusted local desktop only)
+  | CodexCapabilityRequestMessage
+  | CodexCapabilityResponseMessage;
 
 // ── Helpers ──────────────────────────────────────────────
 

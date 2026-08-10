@@ -36,9 +36,12 @@
 // ──────────────────────────────────────────────────────────
 
 import { randomUUID } from "node:crypto";
+import { basename, isAbsolute } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { isDevRuntime } from "../../../runtime";
 import type { ContentBlock, SessionNotification, TurnUsage } from "../../types";
+import type { ToolCallContent } from "@zeros/protocol/agent-events";
 
 type Emit = (notification: SessionNotification) => void;
 type ToolKind =
@@ -245,11 +248,12 @@ export class CodexAppServerTranslator {
         // story, so there is nothing to render here.
         break;
       case "turn/diff/updated":
-      case "turn/plan/updated":
         // Known aggregate snapshots. FileChange item events already drive the
-        // edit timeline + authored-file attribution, and Zeros deliberately
-        // has no plan card. Re-emitting either would duplicate UI; treating
-        // them as unknown only creates high-volume diagnostic noise.
+        // edit timeline + authored-file attribution. Re-emitting the diff
+        // would duplicate UI; treating it as unknown creates diagnostic noise.
+        break;
+      case "turn/plan/updated":
+        this.onTurnPlanUpdated(params);
         break;
       case "item/started":
         this.onItemStarted(params);
@@ -273,6 +277,90 @@ export class CodexAppServerTranslator {
         break;
       case "item/fileChange/patchUpdated":
         this.onFilePatchUpdated(params);
+        break;
+      case "item/mcpToolCall/progress":
+        this.onMcpToolCallProgress(params);
+        break;
+      case "hook/started":
+        this.onHookLifecycle(params, false);
+        break;
+      case "hook/completed":
+        this.onHookLifecycle(params, true);
+        break;
+      case "model/rerouted":
+        this.onModelRerouted(params);
+        break;
+      case "item/autoApprovalReview/started":
+        this.onAutoApprovalReview(params, false);
+        break;
+      case "item/autoApprovalReview/completed":
+        this.onAutoApprovalReview(params, true);
+        break;
+      case "thread/environment/connected":
+        this.onEnvironmentConnection(params, true);
+        break;
+      case "thread/environment/disconnected":
+        this.onEnvironmentConnection(params, false);
+        break;
+      case "model/safetyBuffering/updated":
+        this.onSafetyBuffering(params);
+        break;
+      case "model/verification":
+        this.onModelVerification(params);
+        break;
+      case "externalAgentConfig/import/progress":
+        this.onExternalConfigImport(params, false);
+        break;
+      case "externalAgentConfig/import/completed":
+        this.onExternalConfigImport(params, true);
+        break;
+      case "mcpServer/oauthLogin/completed":
+        this.onMcpOauthCompleted(params);
+        break;
+      case "mcpServer/startupStatus/updated":
+        this.onMcpStartupStatus(params);
+        break;
+      case "remoteControl/status/changed":
+        this.onRemoteControlStatus(params);
+        break;
+      case "app/list/updated":
+        this.onSimpleNotice("codex_apps_updated", "Available Codex apps changed.");
+        break;
+      case "thread/realtime/started":
+        this.onRealtimeStarted(params);
+        break;
+      case "thread/realtime/transcript/delta":
+        this.onRealtimeTranscriptDelta(params);
+        break;
+      case "thread/realtime/transcript/done":
+        this.onRealtimeTranscriptDone(params);
+        break;
+      case "thread/realtime/error":
+        this.onRealtimeError(params);
+        break;
+      case "thread/realtime/closed":
+        this.onRealtimeClosed(params);
+        break;
+      case "thread/realtime/outputAudio/delta":
+        this.onRealtimeAudioDelta(params);
+        break;
+      case "thread/realtime/itemAdded":
+      case "thread/realtime/sdp":
+        // Transport-level payloads are consumed by the realtime client. They
+        // are deliberately not persisted into the transcript: SDP is a
+        // session secret and raw backend items can contain large opaque data.
+        break;
+      case "windowsSandbox/setupCompleted":
+        this.onWindowsSandboxSetupCompleted(params);
+        break;
+      case "windows/worldWritableWarning":
+        this.onWindowsWorldWritableWarning(params);
+        break;
+      case "thread/compacted":
+      case "turn/moderationMetadata":
+        // ContextCompactedNotification is deprecated in favor of the
+        // contextCompaction item already rendered above. Moderation metadata
+        // is provider-internal and must not be exposed as chat prose.
         break;
       case "error":
         this.onError(params);
@@ -401,6 +489,47 @@ export class CodexAppServerTranslator {
         size: typeof size === "number" ? size : 0,
         used: typeof used === "number" ? used : 0,
       },
+    });
+  }
+
+  private onTurnPlanUpdated(params: unknown): void {
+    const p = params as {
+      turnId?: string;
+      explanation?: string | null;
+      plan?: Array<{ step?: string; status?: string }>;
+    };
+    if (typeof p.turnId !== "string" || !Array.isArray(p.plan)) return;
+    const steps = p.plan.filter(
+      (step): step is { step: string; status?: string } =>
+        typeof step?.step === "string" && step.step.trim().length > 0,
+    );
+    if (steps.length === 0) return;
+    const completed = steps.filter(
+      (step) => step.status === "completed",
+    ).length;
+    const settled = completed === steps.length;
+    const markdown = [
+      ...(typeof p.explanation === "string" && p.explanation.trim()
+        ? [p.explanation.trim(), ""]
+        : []),
+      ...steps.map(
+        (step) =>
+          `- [${step.status === "completed" ? "x" : " "}] ${step.step.trim()}`,
+      ),
+    ].join("\n");
+    const toolCallId = this.ensureToolCallId(`plan:${p.turnId}`);
+    this.emitToolCallUpsert(toolCallId, {
+      nativeToolCallId: `plan:${p.turnId}`,
+      title: `Plan · ${completed}/${steps.length} complete`,
+      kind: "other",
+      status: settled ? "completed" : "in_progress",
+      rawInput: { explanation: p.explanation ?? null, plan: steps },
+      content: [
+        {
+          type: "content",
+          content: { type: "text", text: markdown } as ContentBlock,
+        },
+      ],
     });
   }
 
@@ -555,6 +684,8 @@ export class CodexAppServerTranslator {
             : typeof output === "string"
               ? output
               : "";
+        const dynamicContent =
+          item.type === "dynamicToolCall" ? dynamicToolContent(item) : null;
         this.emit({
           sessionId: this.sessionId,
           update: {
@@ -562,8 +693,9 @@ export class CodexAppServerTranslator {
             toolCallId,
             status,
             rawOutput: output,
-            content:
-              contentText.length > 0
+            content: dynamicContent
+              ? dynamicContent
+              : contentText.length > 0
                 ? [
                     {
                       type: "content",
@@ -664,6 +796,22 @@ export class CodexAppServerTranslator {
     });
   }
 
+  private onMcpToolCallProgress(params: unknown): void {
+    const p = params as { itemId?: string; message?: string };
+    if (typeof p.itemId !== "string" || typeof p.message !== "string") return;
+    const toolCallId = this.toolCallIds.get(p.itemId);
+    if (!toolCallId) return;
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId,
+        status: "in_progress",
+        rawOutput: { progress: p.message },
+      },
+    });
+  }
+
   private onError(params: unknown): void {
     const p = params as {
       error?: { codexErrorInfo?: unknown; message?: string };
@@ -733,6 +881,420 @@ export class CodexAppServerTranslator {
         message: `${tag}: ${text}`,
       } as never,
     });
+  }
+
+  private onHookLifecycle(params: unknown, completed: boolean): void {
+    const p = params as {
+      run?: { id?: unknown; eventName?: unknown; status?: unknown; statusMessage?: unknown };
+    };
+    if (typeof p?.run?.id !== "string") return;
+    const toolCallId = this.ensureToolCallId(`hook:${p.run.id}`);
+    const eventName =
+      typeof p.run.eventName === "string" ? p.run.eventName : "workflow";
+    const failed = p.run.status === "failed" || p.run.status === "blocked";
+    this.emitToolCallUpsert(toolCallId, {
+      title: `Hook · ${eventName}`,
+      kind: "other",
+      status: completed ? (failed ? "failed" : "completed") : "in_progress",
+      rawInput: { eventName, hookId: p.run.id },
+      ...(completed
+        ? {
+            rawOutput: {
+              status: p.run.status,
+              ...(typeof p.run.statusMessage === "string"
+                ? { message: p.run.statusMessage }
+                : {}),
+            },
+          }
+        : {}),
+    });
+  }
+
+  private onModelRerouted(params: unknown): void {
+    const p = params as {
+      fromModel?: unknown;
+      toModel?: unknown;
+      reason?: unknown;
+    };
+    if (typeof p.toModel !== "string") return;
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: `model-switch-${randomUUID()}`,
+        title: "Model switched",
+        kind: "model_switch",
+        status: "completed",
+        rawInput: {
+          ...(typeof p.fromModel === "string" ? { fromModel: p.fromModel } : {}),
+          toModel: p.toModel,
+          ...(typeof p.reason === "string" ? { reason: p.reason } : {}),
+        },
+      },
+    });
+  }
+
+  private onAutoApprovalReview(params: unknown, completed: boolean): void {
+    const p = params as {
+      reviewId?: unknown;
+      targetItemId?: unknown;
+      action?: unknown;
+      review?: unknown;
+      decisionSource?: unknown;
+    };
+    if (typeof p.reviewId !== "string") return;
+    const toolCallId = this.ensureToolCallId(`auto-review:${p.reviewId}`);
+    this.emitToolCallUpsert(toolCallId, {
+      title: "Approval review",
+      kind: "other",
+      status: completed ? "completed" : "in_progress",
+      rawInput: {
+        reviewId: p.reviewId,
+        ...(typeof p.targetItemId === "string" ? { targetItemId: p.targetItemId } : {}),
+        action: p.action,
+      },
+      ...(completed
+        ? {
+            rawOutput: {
+              review: p.review,
+              decisionSource: p.decisionSource,
+              // The explicit retry RPC requires the serialized guardian event.
+              // Preserve the complete generated notification payload instead
+              // of attempting to reconstruct an unstable protocol shape in UI.
+              event: params,
+            },
+          }
+        : {}),
+    });
+  }
+
+  private onEnvironmentConnection(params: unknown, connected: boolean): void {
+    const environmentId = (params as { environmentId?: unknown })?.environmentId;
+    if (typeof environmentId !== "string") return;
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "error_notice",
+        noticeId: `${this.turnPrefix}-environment-${this.noticeSeq++}`,
+        severity: "warning",
+        recoverable: true,
+        code: connected ? "environment_connected" : "environment_disconnected",
+        message: connected
+          ? `Codex environment ${environmentId} connected.`
+          : `Codex environment ${environmentId} disconnected.`,
+      },
+    });
+  }
+
+  private onSafetyBuffering(params: unknown): void {
+    const p = params as {
+      model?: unknown;
+      showBufferingUi?: unknown;
+      reasons?: unknown;
+    };
+    if (p.showBufferingUi !== true) return;
+    const reasons = Array.isArray(p.reasons)
+      ? p.reasons.filter((reason): reason is string => typeof reason === "string")
+      : [];
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "error_notice",
+        noticeId: `${this.turnPrefix}-safety-buffer-${this.noticeSeq++}`,
+        severity: "warning",
+        recoverable: true,
+        code: "model_safety_buffering",
+        message: `Codex is verifying this response${typeof p.model === "string" ? ` with ${p.model}` : ""}${reasons.length ? `: ${reasons.join(", ")}` : "."}`,
+      },
+    });
+  }
+
+  private onModelVerification(params: unknown): void {
+    const verifications = (params as { verifications?: unknown })?.verifications;
+    if (!Array.isArray(verifications) || verifications.length === 0) return;
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: `model-verification-${randomUUID()}`,
+        title: "Model verification",
+        kind: "other",
+        status: "completed",
+        rawOutput: { verifications },
+      },
+    });
+  }
+
+  private onExternalConfigImport(params: unknown, completed: boolean): void {
+    const p = params as { importId?: unknown; itemTypeResults?: unknown };
+    if (typeof p.importId !== "string") return;
+    const toolCallId = this.ensureToolCallId(`external-import:${p.importId}`);
+    this.emitToolCallUpsert(toolCallId, {
+      title: "Import agent configuration",
+      kind: "other",
+      status: completed ? "completed" : "in_progress",
+      rawInput: { importId: p.importId },
+      ...(completed ? { rawOutput: { itemTypeResults: p.itemTypeResults } } : {}),
+    });
+  }
+
+  private onMcpOauthCompleted(params: unknown): void {
+    const p = params as { name?: unknown; success?: unknown; error?: unknown };
+    if (typeof p.name !== "string") return;
+    const success = p.success === true;
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "error_notice",
+        noticeId: `${this.turnPrefix}-mcp-oauth-${this.noticeSeq++}`,
+        severity: success ? "warning" : "error",
+        recoverable: success,
+        code: "mcp_oauth_complete",
+        message: success
+          ? `${p.name} MCP sign-in completed.`
+          : `${p.name} MCP sign-in failed${typeof p.error === "string" ? `: ${p.error}` : "."}`,
+      },
+    });
+  }
+
+  private onMcpStartupStatus(params: unknown): void {
+    const p = params as { name?: unknown; status?: unknown; error?: unknown };
+    if (typeof p.name !== "string" || typeof p.status !== "string") return;
+    if (p.status === "ready" || p.status === "starting") return;
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "error_notice",
+        noticeId: `${this.turnPrefix}-mcp-status-${this.noticeSeq++}`,
+        severity: "warning",
+        recoverable: true,
+        code: "mcp_startup_status",
+        message: `${p.name} MCP is ${p.status}${typeof p.error === "string" ? `: ${p.error}` : "."}`,
+      },
+    });
+  }
+
+  private onRemoteControlStatus(params: unknown): void {
+    const p = params as { status?: unknown; serverName?: unknown };
+    if (typeof p.status !== "string") return;
+    this.onSimpleNotice(
+      "remote_control_status",
+      `Codex remote control ${p.status}${typeof p.serverName === "string" ? ` on ${p.serverName}` : ""}.`,
+    );
+  }
+
+  private onSimpleNotice(code: string, message: string): void {
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "error_notice",
+        noticeId: `${this.turnPrefix}-${code}-${this.noticeSeq++}`,
+        severity: "warning",
+        recoverable: true,
+        code,
+        message,
+      },
+    });
+  }
+
+  private realtimeToolCallId(threadId: string): string {
+    return this.ensureToolCallId(`realtime:${threadId}`);
+  }
+
+  private onRealtimeStarted(params: unknown): void {
+    const p = params as {
+      threadId?: unknown;
+      realtimeSessionId?: unknown;
+      version?: unknown;
+    };
+    if (typeof p.threadId !== "string") return;
+    this.emitToolCallUpsert(this.realtimeToolCallId(p.threadId), {
+      title: "Realtime conversation",
+      kind: "other",
+      status: "in_progress",
+      rawInput: {
+        ...(typeof p.realtimeSessionId === "string"
+          ? { realtimeSessionId: p.realtimeSessionId }
+          : {}),
+        version: p.version,
+      },
+    });
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "realtime_status",
+        threadId: p.threadId,
+        status: "active",
+        ...(typeof p.realtimeSessionId === "string"
+          ? { realtimeSessionId: p.realtimeSessionId }
+          : {}),
+      },
+    });
+  }
+
+  private onRealtimeTranscriptDelta(params: unknown): void {
+    const p = params as { threadId?: unknown; role?: unknown; delta?: unknown };
+    if (
+      typeof p.threadId !== "string" ||
+      typeof p.role !== "string" ||
+      typeof p.delta !== "string" ||
+      p.delta.length === 0
+    ) {
+      return;
+    }
+    const messageId = `${this.turnPrefix}-realtime-${p.threadId}-${p.role}`;
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate:
+          p.role === "user" ? "user_message_chunk" : "agent_message_chunk",
+        content: { type: "text", text: p.delta } as ContentBlock,
+        messageId,
+      },
+    });
+  }
+
+  private onRealtimeTranscriptDone(params: unknown): void {
+    const p = params as { threadId?: unknown; role?: unknown; text?: unknown };
+    if (typeof p.threadId !== "string" || typeof p.text !== "string") return;
+    this.emitToolCallUpsert(this.realtimeToolCallId(p.threadId), {
+      status: "in_progress",
+      rawOutput: { role: p.role, transcript: p.text },
+    });
+  }
+
+  private onRealtimeAudioDelta(params: unknown): void {
+    const p = params as {
+      threadId?: unknown;
+      audio?: {
+        data?: unknown;
+        sampleRate?: unknown;
+        numChannels?: unknown;
+        samplesPerChannel?: unknown;
+        itemId?: unknown;
+      };
+    };
+    if (typeof p.threadId !== "string") return;
+    if (
+      typeof p.audio?.data === "string" &&
+      p.audio.data.length <= 2_000_000 &&
+      typeof p.audio.sampleRate === "number" &&
+      typeof p.audio.numChannels === "number"
+    ) {
+      this.emit({
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "realtime_audio",
+          threadId: p.threadId,
+          data: p.audio.data,
+          sampleRate: p.audio.sampleRate,
+          numChannels: p.audio.numChannels,
+          samplesPerChannel:
+            typeof p.audio.samplesPerChannel === "number"
+              ? p.audio.samplesPerChannel
+              : null,
+          itemId:
+            typeof p.audio.itemId === "string" ? p.audio.itemId : null,
+        },
+      });
+    }
+    // Do not copy/persist the base64 audio data into durable chat history.
+    // The live realtime consumer receives it directly from app-server; the
+    // transcript records only non-sensitive stream metadata.
+    this.emitToolCallUpsert(this.realtimeToolCallId(p.threadId), {
+      status: "in_progress",
+      rawOutput: {
+        audio: {
+          sampleRate: p.audio?.sampleRate,
+          numChannels: p.audio?.numChannels,
+          samplesPerChannel: p.audio?.samplesPerChannel,
+        },
+      },
+    });
+  }
+
+  private onRealtimeError(params: unknown): void {
+    const p = params as { threadId?: unknown; message?: unknown };
+    if (typeof p.threadId !== "string") return;
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "realtime_status",
+        threadId: p.threadId,
+        status: "error",
+        message:
+          typeof p.message === "string"
+            ? p.message
+            : "Realtime conversation failed.",
+      },
+    });
+    this.emitToolCallUpsert(this.realtimeToolCallId(p.threadId), {
+      title: "Realtime conversation",
+      kind: "other",
+      status: "failed",
+      rawOutput: {
+        error:
+          typeof p.message === "string"
+            ? p.message
+            : "Realtime conversation failed.",
+      },
+    });
+  }
+
+  private onRealtimeClosed(params: unknown): void {
+    const p = params as { threadId?: unknown; reason?: unknown };
+    if (typeof p.threadId !== "string") return;
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "realtime_status",
+        threadId: p.threadId,
+        status: "closed",
+        ...(typeof p.reason === "string" ? { message: p.reason } : {}),
+      },
+    });
+    this.emitToolCallUpsert(this.realtimeToolCallId(p.threadId), {
+      status: "completed",
+      rawOutput: {
+        ...(typeof p.reason === "string" ? { reason: p.reason } : {}),
+      },
+    });
+  }
+
+  private onWindowsSandboxSetupCompleted(params: unknown): void {
+    const p = params as { mode?: unknown; success?: unknown; error?: unknown };
+    this.emitToolCallUpsert(
+      this.ensureToolCallId(`windows-sandbox:${String(p.mode ?? "default")}`),
+      {
+        title: "Windows sandbox setup",
+        kind: "other",
+        status: p.success === true ? "completed" : "failed",
+        rawInput: { mode: p.mode },
+        rawOutput: {
+          success: p.success === true,
+          ...(typeof p.error === "string" ? { error: p.error } : {}),
+        },
+      },
+    );
+  }
+
+  private onWindowsWorldWritableWarning(params: unknown): void {
+    const p = params as {
+      samplePaths?: unknown;
+      extraCount?: unknown;
+      failedScan?: unknown;
+    };
+    const paths = Array.isArray(p.samplePaths)
+      ? p.samplePaths.filter((path): path is string => typeof path === "string")
+      : [];
+    const extraCount = typeof p.extraCount === "number" ? p.extraCount : 0;
+    const detail = paths.length > 0 ? ` ${paths.join(", ")}` : "";
+    this.onSimpleNotice(
+      "windows_world_writable",
+      p.failedScan === true
+        ? "Windows sandbox could not finish scanning writable paths."
+        : `Windows sandbox found broadly writable paths.${detail}${extraCount > 0 ? ` and ${extraCount} more` : ""}`,
+    );
   }
 
   // ── Helpers ─────────────────────────────────────────────
@@ -843,6 +1405,7 @@ type ThreadItemUnion =
   | {
       type: "dynamicToolCall";
       id: string;
+      namespace?: string | null;
       tool: string;
       arguments?: unknown;
       contentItems?: unknown;
@@ -1114,6 +1677,119 @@ function toolOutput(item: ThreadItemUnion): unknown {
     return item.result;
   }
   return null;
+}
+
+/** Convert Responses-compatible dynamic-tool output into the canonical chat
+ * content blocks that the renderer and transcript database already preserve.
+ * Browser screenshots therefore survive reloads and render inline instead of
+ * being buried as a base64 string inside raw JSON. */
+function dynamicToolContent(
+  item: Extract<ThreadItemUnion, { type: "dynamicToolCall" }>,
+): ToolCallContent[] | null {
+  if (!Array.isArray(item.contentItems)) return null;
+  const content: ToolCallContent[] = [];
+  for (const candidate of item.contentItems) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const value = candidate as Record<string, unknown>;
+    if (value.type === "inputText" && typeof value.text === "string") {
+      content.push({
+        type: "content",
+        content: { type: "text", text: value.text },
+      });
+      if (item.namespace === "zeros_browser" || item.tool === "screenshot") {
+        for (const artifact of browserArtifactsFromText(value.text)) {
+          content.push({ type: "content", content: artifact });
+        }
+      }
+      continue;
+    }
+    if (value.type !== "inputImage" || typeof value.imageUrl !== "string") {
+      continue;
+    }
+    const match = /^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=]+)$/i.exec(
+      value.imageUrl,
+    );
+    if (!match) continue;
+    content.push({
+      type: "content",
+      content: { type: "image", mimeType: match[1]!, data: match[2]! },
+    });
+  }
+  // Put the durable file link after the inline preview regardless of the tool
+  // response's metadata-before-image ordering.
+  content.sort((left, right) => contentOrder(left) - contentOrder(right));
+  return content.length > 0 ? content : null;
+}
+
+function browserArtifactsFromText(text: string): ContentBlock[] {
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    const content: ContentBlock[] = [];
+    const artifact = parsed.artifact as Record<string, unknown> | undefined;
+    if (
+      artifact?.kind === "browser-screenshot" &&
+      typeof artifact.path === "string" &&
+      isAbsolute(artifact.path) &&
+      artifact.mimeType === "image/jpeg"
+    ) {
+      content.push({
+        type: "resource_link",
+        uri: pathToFileURL(artifact.path).href,
+        name: basename(artifact.path),
+        mimeType: "image/jpeg",
+        ...(typeof artifact.size === "number" ? { size: artifact.size } : {}),
+        title: "Browser screenshot evidence",
+      });
+    } else if (
+      artifact?.kind === "browser-trace" &&
+      typeof artifact.path === "string" &&
+      isAbsolute(artifact.path) &&
+      artifact.mimeType === "application/json"
+    ) {
+      content.push({
+        type: "resource_link",
+        uri: pathToFileURL(artifact.path).href,
+        name: basename(artifact.path),
+        mimeType: "application/json",
+        ...(typeof artifact.size === "number" ? { size: artifact.size } : {}),
+        title: "Browser trace evidence",
+      });
+    }
+    if (Array.isArray(parsed.downloads)) {
+      for (const candidate of parsed.downloads.slice(-40)) {
+        if (!candidate || typeof candidate !== "object") continue;
+        const download = candidate as Record<string, unknown>;
+        if (
+          download.kind !== "browser-download" ||
+          typeof download.path !== "string" ||
+          !isAbsolute(download.path)
+        ) {
+          continue;
+        }
+        content.push({
+          type: "resource_link",
+          uri: pathToFileURL(download.path).href,
+          name: basename(download.path),
+          ...(typeof download.mimeType === "string"
+            ? { mimeType: download.mimeType.slice(0, 200) }
+            : {}),
+          ...(typeof download.size === "number" ? { size: download.size } : {}),
+          title: "Browser download evidence",
+        });
+      }
+    }
+    return content;
+  } catch {
+    return [];
+  }
+}
+
+function contentOrder(block: ToolCallContent): number {
+  if (block.type !== "content") return 3;
+  if (block.content.type === "text") return 0;
+  if (block.content.type === "image") return 1;
+  if (block.content.type === "resource_link") return 2;
+  return 3;
 }
 
 function truncate(s: string, n: number): string {
