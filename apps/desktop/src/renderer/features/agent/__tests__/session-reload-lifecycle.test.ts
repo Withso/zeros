@@ -337,6 +337,59 @@ describe("session reload lifecycle", () => {
     ).toBe("new-provider-session");
   });
 
+  it("detaches only the exact current provider binding", () => {
+    const store = useSessionsStore.getState();
+    const currentBinding = {
+      version: 1 as const,
+      providerId: "codex",
+      kind: "native" as const,
+      resumeId: "thread-current",
+      scopeId: "session-tree",
+    };
+    store.setSession("chat-1", {
+      ...BLANK,
+      agentId: "codex",
+      executionId: "execution-current",
+      sessionId: "execution-current",
+      providerBinding: currentBinding,
+      providerMetadata: {
+        version: 1,
+        git: { sha: "legacy", branch: "legacy", originUrl: null },
+      },
+    });
+
+    store.applyBridgeUpdate({
+      executionId: "execution-current",
+      sessionId: "execution-current",
+      chatId: "chat-1",
+      update: {
+        sessionUpdate: "provider_binding_detached",
+        providerBinding: { ...currentBinding, resumeId: "thread-stale" },
+        reason: "provider_deleted",
+      },
+    } as SessionNotification);
+    expect(
+      useSessionsStore.getState().sessions["chat-1"]?.providerBinding,
+    ).toEqual(currentBinding);
+
+    store.applyBridgeUpdate({
+      executionId: "execution-current",
+      sessionId: "execution-current",
+      chatId: "chat-1",
+      update: {
+        sessionUpdate: "provider_binding_detached",
+        providerBinding: currentBinding,
+        reason: "provider_deleted",
+      },
+    } as SessionNotification);
+    expect(
+      useSessionsStore.getState().sessions["chat-1"]?.providerBinding,
+    ).toBeNull();
+    expect(
+      useSessionsStore.getState().sessions["chat-1"]?.providerMetadata,
+    ).toBeNull();
+  });
+
   it("reconciles missed pre-bind output only for the exact adopted session", () => {
     const dirty = new Map<string, string>();
     markPrebindDirty(dirty, "chat-1", "old-session");

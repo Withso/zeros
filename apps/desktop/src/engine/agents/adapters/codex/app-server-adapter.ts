@@ -36,7 +36,11 @@
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
-import { providerBindingForResume } from "@zeros/protocol/identities";
+import {
+  coerceProviderBinding,
+  providerBindingForResume,
+  type ProviderBinding,
+} from "@zeros/protocol/identities";
 
 import type {
   AgentAdapter,
@@ -101,6 +105,8 @@ import type {
 import type { AccountDetails } from "@zeros/protocol/messages";
 import type { GetAccountResponse } from "./generated/v2/GetAccountResponse";
 import type { GetAccountParams } from "./generated/v2/GetAccountParams";
+import type { ThreadDeletedNotification } from "./generated/v2/ThreadDeletedNotification";
+import type { ThreadForkResponse } from "./generated/v2/ThreadForkResponse";
 
 const AGENT_ID = "codex";
 const CLIENT_INFO = { name: "Zeros", version: "0.0.5", title: "Zeros Mac App" };
@@ -232,14 +238,6 @@ interface CodexSession {
   /** Codex session-tree identity. Forked threads retain this root id; it is
    * descriptive provider scope and never a Zeros execution route. */
   providerSessionId: string;
-  providerMetadata?: {
-    version: 1;
-    git?: {
-      sha: string | null;
-      branch: string | null;
-      originUrl: string | null;
-    };
-  };
   /** The thread's resolved model (thread/start `model`; best-effort on
    *  resume). Fallback for turn/start's collaborationMode.settings.model when
    *  the composer supplies no per-turn model — Settings.model is REQUIRED and
@@ -472,9 +470,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
         providerBinding: providerBindingForResume("codex", session.threadId, {
           scopeId: session.providerSessionId,
         }),
-        ...(session.providerMetadata
-          ? { providerMetadata: session.providerMetadata }
-          : {}),
         modes: {
           currentModeId: session.modeId,
           availableModes: CODEX_MODES,
@@ -532,15 +527,112 @@ export class CodexAppServerAdapter implements AgentAdapter {
       providerBinding: providerBindingForResume("codex", session.threadId, {
         scopeId: session.providerSessionId,
       }),
-      ...(session.providerMetadata
-        ? { providerMetadata: session.providerMetadata }
-        : {}),
       modes: {
         currentModeId: session.modeId,
         availableModes: CODEX_MODES,
       },
       resumedFresh,
     };
+  }
+
+  /** Fork a Codex thread into another opaque provider binding. Zeros creates
+   * and owns the destination conversation separately; this method neither
+   * creates a Zeros execution nor projects Codex title/pin/archive/git state.
+   * A live source runtime is reused when available, otherwise a bounded
+   * short-lived app-server performs the single typed RPC. */
+  async forkProviderBinding(opts: {
+    providerBinding: ProviderBinding;
+    cwd: string;
+    env?: Record<string, string>;
+    cliBinary?: string;
+    mcpServers?: McpServerRegistration[];
+    systemInstruction?: string;
+  }): Promise<{ providerBinding: ProviderBinding }> {
+    const source = coerceProviderBinding(opts.providerBinding);
+    if (!source || source.providerId !== AGENT_ID || source.kind !== "native") {
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        stage: "forkSession",
+        agentId: AGENT_ID,
+        message: "Codex fork requires a native Codex thread binding.",
+      });
+    }
+
+    const liveSource = Array.from(this.sessions.values()).find(
+      (candidate) =>
+        candidate.runtimeAlive && candidate.threadId === source.resumeId,
+    );
+    let runtime = liveSource?.runtime;
+    let ownsRuntime = false;
+    if (!runtime) {
+      try {
+        runtime = await bootCodexAppServerRuntime({
+          cwd: opts.cwd,
+          env: opts.env,
+          cliBinary: opts.cliBinary,
+          clientInfo: CLIENT_INFO,
+          mcpServers: opts.mcpServers ?? this.ctx.mcpServers,
+          logTag: `codex-app-server:fork:${source.resumeId.slice(0, 8)}`,
+          onStderr: (line) => this.ctx.emit.onAgentStderr(this.agentId, line),
+        });
+        ownsRuntime = true;
+      } catch (err) {
+        throw classifyBootFailure(err, "forkSession");
+      }
+    }
+
+    try {
+      const response = await runtime.requestTyped<
+        "thread/fork",
+        ThreadForkResponse
+      >("thread/fork", {
+        threadId: source.resumeId,
+        cwd: opts.cwd,
+        ...(opts.systemInstruction
+          ? { developerInstructions: opts.systemInstruction }
+          : {}),
+        ephemeral: false,
+        // Zeros needs only the new opaque reference. Do not transfer a large
+        // turn payload or let a copied goal start hidden provider work before
+        // the destination conversation is opened through the common resume.
+        excludeTurns: true,
+        deferGoalContinuation: true,
+      });
+      const thread = response?.thread;
+      if (
+        !thread?.id ||
+        !thread.sessionId ||
+        thread.id === source.resumeId ||
+        thread.forkedFromId !== source.resumeId ||
+        thread.ephemeral
+      ) {
+        throw new AgentFailureError({
+          kind: "protocol-error",
+          stage: "forkSession",
+          agentId: AGENT_ID,
+          message: "Codex returned an invalid durable thread fork.",
+        });
+      }
+      return {
+        providerBinding: providerBindingForResume(AGENT_ID, thread.id, {
+          // Read the provider scope from the response; fork lineage is not
+          // inferred from the source binding.
+          scopeId: thread.sessionId,
+        }),
+      };
+    } catch (err) {
+      throw classifyThreadFailure(err, "forkSession");
+    } finally {
+      if (ownsRuntime) {
+        await runtime.dispose().catch((err) => {
+          console.warn(
+            `[codex-app-server] failed to dispose short-lived fork runtime: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        });
+      }
+    }
   }
 
   async listSessions(opts: {
@@ -1390,7 +1482,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
     let threadId: string;
     let providerSessionId: string;
-    let providerMetadata: CodexSession["providerMetadata"];
     let threadModel: string | null = null;
     // True when a `kind:"resume"` could not load the rollout and fell through to
     // a fresh thread below — the gateway re-injects the first-turn
@@ -1416,9 +1507,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
           });
           threadId = result.threadId;
           providerSessionId = result.providerSessionId ?? result.threadId;
-          providerMetadata = result.gitInfo
-            ? { version: 1, git: result.gitInfo }
-            : undefined;
           threadModel = result.model ?? null;
         } catch (resumeErr) {
           // 2026-05-28: when codex says "no rollout for this thread"
@@ -1448,9 +1536,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
           );
           threadId = fresh.threadId;
           providerSessionId = fresh.providerSessionId ?? fresh.threadId;
-          providerMetadata = fresh.gitInfo
-            ? { version: 1, git: fresh.gitInfo }
-            : undefined;
           threadModel = fresh.model ?? null;
           resumedFresh = true;
         }
@@ -1465,9 +1550,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
         );
         threadId = result.threadId;
         providerSessionId = result.providerSessionId ?? result.threadId;
-        providerMetadata = result.gitInfo
-          ? { version: 1, git: result.gitInfo }
-          : undefined;
         threadModel = result.model ?? null;
       }
     } catch (err) {
@@ -1507,7 +1589,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
       translator,
       threadId,
       providerSessionId,
-      providerMetadata,
       threadModel,
       modeId: initialMode,
       activeTurnId: null,
@@ -1526,6 +1607,35 @@ export class CodexAppServerAdapter implements AgentAdapter {
       childExitedMidTurn: false,
     };
     this.sessions.set(zerosSessionId, session);
+
+    // Provider deletion owns only the opaque provider reference. Codex
+    // archive, unarchive, close, name, and pin state are intentionally not
+    // subscribed: Zeros remains authoritative for conversation lifecycle and
+    // product metadata.
+    const onThreadDeleted = (deleted: ThreadDeletedNotification) => {
+      if (deleted.threadId !== session.threadId) return;
+      this.ctx.emit.onSessionUpdate(this.agentId, {
+        sessionId: session.zerosSessionId,
+        update: {
+          sessionUpdate: "provider_binding_detached",
+          providerBinding: providerBindingForResume(
+            AGENT_ID,
+            session.threadId,
+            { scopeId: session.providerSessionId },
+          ),
+          reason: "provider_deleted",
+        },
+      });
+    };
+    if (typeof runtime.onNotificationTyped === "function") {
+      runtime.onNotificationTyped("thread/deleted", onThreadDeleted);
+    } else {
+      // Compatibility for old embedded/test handles; shipping app-server
+      // runtimes always expose the generated typed subscription.
+      runtime.onNotification("thread/deleted", (raw) =>
+        onThreadDeleted(raw as ThreadDeletedNotification),
+      );
+    }
 
     this.wireTurnTracking(session, runtime);
     this.wireFileChangeCapture(session, runtime);
@@ -3048,7 +3158,7 @@ const RATE_LIMIT_RX =
 
 function codexRateLimitFailure(
   message: string,
-  stage: "newSession" | "loadSession" | "prompt",
+  stage: "newSession" | "loadSession" | "forkSession" | "prompt",
 ): AgentFailureError {
   return new AgentFailureError({
     kind: "rate-limited",
@@ -3099,7 +3209,7 @@ export function codexDisconnectedFailure(): AgentFailureError {
 
 function classifyBootFailure(
   err: unknown,
-  stage: "newSession" | "loadSession",
+  stage: "newSession" | "loadSession" | "forkSession",
 ): Error {
   const message = err instanceof Error ? err.message : String(err);
   if (RATE_LIMIT_RX.test(message)) {
@@ -3135,7 +3245,7 @@ function classifyBootFailure(
 // Exported for unit testing — see __tests__/app-server-adapter-failures.test.ts.
 export function classifyThreadFailure(
   err: unknown,
-  stage: "newSession" | "loadSession" | "prompt",
+  stage: "newSession" | "loadSession" | "forkSession" | "prompt",
 ): Error {
   const message = err instanceof Error ? err.message : String(err);
   if (RATE_LIMIT_RX.test(message)) {

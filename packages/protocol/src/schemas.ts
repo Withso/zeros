@@ -47,6 +47,7 @@ export const KNOWN_MESSAGE_TYPES = [
   "AGENT_UPDATE_CONFIG",
   "AGENT_LIST_SESSIONS",
   "AGENT_LOAD_SESSION",
+  "AGENT_FORK_CONVERSATION",
   "AGENT_VALIDATE_KEY",
   "AGENT_GENERATE_TITLE",
   "AGENT_AGENTS_LIST",
@@ -64,6 +65,7 @@ export const KNOWN_MESSAGE_TYPES = [
   "AGENT_MODE_CHANGED",
   "AGENT_SESSIONS_LIST",
   "AGENT_SESSION_LOADED",
+  "AGENT_CONVERSATION_FORKED",
   "AGENT_PROMPT_COMPLETE",
   "AGENT_PROMPT_FAILED",
   "AGENT_AGENT_STDERR",
@@ -183,6 +185,37 @@ function assertInboundPayload(env: Record<string, unknown>): void {
           env.providerBinding === null)
       )
         bad("executionId/chatId/providerBinding");
+      break;
+    case "AGENT_FORK_CONVERSATION":
+      if (!isNonEmptyStr(env.agentId)) bad("agentId");
+      if (!isNonEmptyStr(env.sourceChatId)) bad("sourceChatId");
+      if (
+        !isNonEmptyStr(env.destinationChatId) ||
+        env.destinationChatId === env.sourceChatId
+      )
+        bad("destinationChatId");
+      if (env.workspaceId !== undefined && !isNonEmptyStr(env.workspaceId))
+        bad("workspaceId");
+      if (
+        env.providerBinding !== undefined ||
+        env.sessionId !== undefined ||
+        env.executionId !== undefined ||
+        env.lastTurnId !== undefined ||
+        env.cwd !== undefined
+      )
+        bad("providerBinding/sessionId/executionId/lastTurnId/cwd");
+      if (env.cliBinary !== undefined && !isNonEmptyStr(env.cliBinary))
+        bad("cliBinary");
+      if (
+        env.env !== undefined &&
+        (typeof env.env !== "object" ||
+          env.env === null ||
+          Array.isArray(env.env) ||
+          !Object.values(env.env as Record<string, unknown>).every(
+            (v) => typeof v === "string",
+          ))
+      )
+        bad("env");
       break;
     case "AGENT_STOP_BACKGROUND_TASK":
       if (!isNonEmptyStr(executionRoute(env))) bad("executionId");

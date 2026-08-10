@@ -156,6 +156,7 @@ import {
   type TurnFile,
 } from "./db/turns";
 import {
+  attachChatProviderIdentityIfUnbound,
   clearChatProviderIdentity,
   getChat,
   getChatLocation,
@@ -472,6 +473,10 @@ export class ZerosEngine {
    * lifecycle intent has already changed. Tokens are process-monotonic. */
   private conversationBindSerial = 0;
   private readonly conversationBindTokens = new Map<string, number>();
+  /** Source conversations currently being snapshotted by a native provider
+   * fork. Prompt dispatch checks this synchronously so a new turn cannot race
+   * a "latest completed state" fork after its initial idle check. */
+  private readonly conversationForkSources = new Set<string>();
   /** Conversation closes are cancellation+dispose transactions. A rapid
    * History restore waits for the exact close already in progress before it
    * asks any provider to resume the durable binding. */
@@ -498,6 +503,13 @@ export class ZerosEngine {
   private readonly sessionLoadResponses = new Map<
     string,
     LoadSessionResponse
+  >();
+  /** Exact provider bindings deleted while an adapter create/resume is still
+   * resolving. The late response must not resurrect a handle that an earlier
+   * provider_binding_detached event already compare-and-cleared. */
+  private readonly detachedProviderBindings = new Map<
+    string,
+    ProviderBinding
   >();
   /** Agent sessionId → the authoritative provider turn currently recording.
    *  A mid-turn steer uses this owner instead of opening a second turn row. */
@@ -849,6 +861,7 @@ export class ZerosEngine {
           this.sessionAgent.delete(sessionId);
           this.sessionMessages.delete(sessionId);
           this.sessionLoadResponses.delete(sessionId);
+          this.detachedProviderBindings.delete(sessionId);
           this.exitedAgentExecutions.delete(sessionId);
           this.activePromptContexts.delete(sessionId);
           this.clearPendingAgentInteractions(sessionId);
@@ -1091,7 +1104,9 @@ export class ZerosEngine {
             return;
           }
           if (
-            notification.update.sessionUpdate === "provider_binding_update" &&
+            (notification.update.sessionUpdate === "provider_binding_update" ||
+              notification.update.sessionUpdate ===
+                "provider_binding_detached") &&
             notification.update.providerBinding.providerId !== agentId
           ) {
             console.warn(
@@ -1115,7 +1130,6 @@ export class ZerosEngine {
             executionId,
             sessionId: executionId,
           };
-          this.touchActivePrompt(executionId);
           if (notification.update.sessionUpdate === "current_mode_update") {
             const cached = this.sessionLoadResponses.get(executionId);
             if (cached?.modes) {
@@ -1129,6 +1143,23 @@ export class ZerosEngine {
             }
           }
           if (notification.update.sessionUpdate === "provider_binding_update") {
+            const detachedBinding =
+              this.detachedProviderBindings.get(executionId);
+            if (
+              detachedBinding &&
+              sameProviderBinding(
+                detachedBinding,
+                notification.update.providerBinding,
+              )
+            ) {
+              console.warn(
+                `[agents] ${agentId} emitted a binding update for an already-deleted provider reference; update dropped`,
+              );
+              return;
+            }
+            if (detachedBinding) {
+              this.detachedProviderBindings.delete(executionId);
+            }
             const cached = this.sessionLoadResponses.get(executionId) ?? {};
             this.sessionLoadResponses.set(executionId, {
               ...cached,
@@ -1144,6 +1175,66 @@ export class ZerosEngine {
               notification.update.providerMetadata,
             );
           }
+          if (
+            notification.update.sessionUpdate === "provider_binding_detached"
+          ) {
+            const detachedBinding = notification.update.providerBinding;
+            const cached = this.sessionLoadResponses.get(executionId);
+            if (
+              cached?.providerBinding &&
+              !sameProviderBinding(cached.providerBinding, detachedBinding)
+            ) {
+              console.warn(
+                `[agents] ${agentId} emitted a stale binding detachment; update dropped`,
+              );
+              return;
+            }
+            const chatId = this.sessionChat.get(executionId);
+            const persistedBinding = chatId
+              ? coerceProviderBinding(getChat(chatId)?.providerBinding)
+              : null;
+            if (
+              persistedBinding &&
+              !sameProviderBinding(persistedBinding, detachedBinding)
+            ) {
+              console.warn(
+                `[agents] ${agentId} emitted a detachment older than the persisted binding; update dropped`,
+              );
+              return;
+            }
+            this.detachedProviderBindings.set(executionId, detachedBinding);
+            if (cached) {
+              const next = { ...cached };
+              delete next.providerBinding;
+              delete next.providerMetadata;
+              this.sessionLoadResponses.set(executionId, next);
+            }
+            let cleared = false;
+            if (chatId) {
+              try {
+                cleared = clearChatProviderIdentity(
+                  chatId,
+                  agentId,
+                  detachedBinding,
+                );
+              } catch (err) {
+                console.warn(
+                  `[agents] failed to detach provider binding for chat ${chatId}: ` +
+                    (err instanceof Error ? err.message : String(err)),
+                );
+              }
+            }
+            if (cleared) {
+              this.broadcast(
+                createMessage({
+                  type: "DB_CHANGED",
+                  source: "engine",
+                  kinds: ["chats"],
+                }),
+              );
+            }
+          }
+          this.touchActivePrompt(executionId);
           this.routeSessionScoped(
             executionId,
             createMessage({
@@ -2089,6 +2180,7 @@ export class ZerosEngine {
     this.sessionWorkspace.delete(executionId);
     this.sessionMessages.delete(executionId);
     this.sessionLoadResponses.delete(executionId);
+    this.detachedProviderBindings.delete(executionId);
     this.exitedAgentExecutions.delete(executionId);
     this.clearPendingAgentInteractions(executionId);
     if (!opts.preservePrompt) {
@@ -2131,6 +2223,28 @@ export class ZerosEngine {
     }
   }
 
+  /** Prevent an adapter response that resolves after provider deletion from
+   * resurrecting the deleted durable handle in caches, SQLite, or the
+   * renderer. A genuinely different replacement binding supersedes the marker
+   * and is allowed through. */
+  private withoutDetachedProviderIdentity<
+    T extends {
+      providerBinding?: ProviderBinding;
+      providerMetadata?: ProviderMetadata;
+    },
+  >(executionId: string, value: T): T {
+    const detached = this.detachedProviderBindings.get(executionId);
+    if (!detached || !value.providerBinding) return value;
+    if (!sameProviderBinding(detached, value.providerBinding)) {
+      this.detachedProviderBindings.delete(executionId);
+      return value;
+    }
+    const next = { ...value };
+    delete next.providerBinding;
+    delete next.providerMetadata;
+    return next;
+  }
+
   private conversationBindIsCurrent(
     conversationId: string | undefined,
     token: number | null,
@@ -2158,7 +2272,7 @@ export class ZerosEngine {
   }
 
   private staleConversationBindFailure(
-    stage: "newSession" | "loadSession",
+    stage: "newSession" | "loadSession" | "forkSession",
   ): AgentFailureError {
     return new AgentFailureError({
       // Losing this engine-local ownership race says nothing about the
@@ -2167,7 +2281,7 @@ export class ZerosEngine {
       kind: "lifecycle-superseded",
       stage,
       message:
-        "The conversation was closed or superseded while its agent session was starting.",
+        "The conversation was closed or superseded while its provider operation was in progress.",
     });
   }
 
@@ -2538,6 +2652,7 @@ export class ZerosEngine {
       conversationId: string | undefined;
       token: number | null;
     } | null = null;
+    let forkSourceToFinish: string | null = null;
     try {
       switch (msg.type) {
         case "AGENT_LIST_AGENTS": {
@@ -2698,6 +2813,10 @@ export class ZerosEngine {
                   workspaceId: lifecycleWorkspaceId,
                 });
               }
+              session = this.withoutDetachedProviderIdentity(
+                executionId,
+                session,
+              );
               this.sessionLoadResponses.set(executionId, {
                 ...(this.sessionLoadResponses.get(executionId) ?? {}),
                 ...(session.modes ? { modes: session.modes } : {}),
@@ -2745,6 +2864,7 @@ export class ZerosEngine {
             this.sessionWorkspace.delete(executionId);
             this.sessionMessages.delete(executionId);
             this.sessionLoadResponses.delete(executionId);
+            this.detachedProviderBindings.delete(executionId);
             this.exitedAgentExecutions.delete(executionId);
             this.activePromptContexts.delete(executionId);
             this.promptSessions.delete(executionId);
@@ -2796,6 +2916,7 @@ export class ZerosEngine {
               this.sessionWorkspace.delete(priorSessionId);
               this.sessionMessages.delete(priorSessionId);
               this.sessionLoadResponses.delete(priorSessionId);
+              this.detachedProviderBindings.delete(priorSessionId);
               this.exitedAgentExecutions.delete(priorSessionId);
               // The predecessor's turn is abandoned by definition here, and its
               // prompt promise may never settle after endSession — so its own
@@ -2860,6 +2981,22 @@ export class ZerosEngine {
         case "AGENT_PROMPT": {
           if (this.remoteMayNotActOnSession(msg.sessionId, client, true)) {
             this.refuseSessionAccess(msg.id, msg.agentId, client);
+            return;
+          }
+          const promptChatId = this.sessionChat.get(msg.sessionId);
+          if (promptChatId && this.conversationForkSources.has(promptChatId)) {
+            client.send(
+              createMessage({
+                type: "AGENT_PROMPT_FAILED",
+                source: "engine",
+                requestId: msg.id,
+                agentId: msg.agentId,
+                executionId: msg.sessionId,
+                sessionId: msg.sessionId,
+                error:
+                  "Wait for this conversation's provider fork to finish before sending.",
+              }),
+            );
             return;
           }
           // Renderer-local send locks disappear on reload. Keep the hard
@@ -3271,6 +3408,7 @@ export class ZerosEngine {
               this.sessionWorkspace.delete(executionId);
               this.sessionMessages.delete(executionId);
               this.sessionLoadResponses.delete(executionId);
+              this.detachedProviderBindings.delete(executionId);
               this.exitedAgentExecutions.delete(executionId);
               // A wedged adapter is still owned by the cancel-settle watchdog.
               // Do not erase its record/timer; it will publish + persist
@@ -3467,6 +3605,208 @@ export class ZerosEngine {
           );
           return;
         }
+        case "AGENT_FORK_CONVERSATION": {
+          const bindToken = this.beginConversationBind(msg.destinationChatId);
+          bindToFinish = {
+            conversationId: msg.destinationChatId,
+            token: bindToken,
+          };
+          await Promise.all([
+            this.waitForConversationClose(msg.sourceChatId),
+            this.waitForConversationClose(msg.destinationChatId),
+          ]);
+          if (
+            !this.conversationBindIsCurrent(msg.destinationChatId, bindToken)
+          ) {
+            throw this.staleConversationBindFailure("forkSession");
+          }
+
+          const sourceChat = getChat(msg.sourceChatId);
+          const destinationChat = getChat(msg.destinationChatId);
+          const sourceBinding = coerceProviderBinding(
+            sourceChat?.providerBinding,
+          );
+          if (
+            !sourceChat ||
+            !destinationChat ||
+            msg.sourceChatId === msg.destinationChatId
+          ) {
+            throw new AgentFailureError({
+              kind: "protocol-error",
+              stage: "forkSession",
+              message:
+                "A provider fork requires distinct persisted source and destination conversations.",
+            });
+          }
+          if (
+            sourceChat.agentId !== msg.agentId ||
+            destinationChat.agentId !== msg.agentId ||
+            sourceBinding?.providerId !== msg.agentId ||
+            sourceBinding.kind !== "native"
+          ) {
+            throw new AgentFailureError({
+              kind: "protocol-error",
+              stage: "forkSession",
+              message:
+                "The source and destination must belong to the selected agent and the source must have a native provider binding.",
+            });
+          }
+          if (
+            destinationChat.sourceChatId !== sourceChat.id ||
+            destinationChat.providerBinding ||
+            destinationChat.sessionId
+          ) {
+            throw new AgentFailureError({
+              kind: "protocol-error",
+              stage: "forkSession",
+              message:
+                "The destination must be an unbound Zeros fork of the source conversation.",
+            });
+          }
+          if (
+            !sourceChat.folder ||
+            !destinationChat.folder ||
+            path.resolve(sourceChat.folder) !==
+              path.resolve(destinationChat.folder)
+          ) {
+            throw new AgentFailureError({
+              kind: "protocol-error",
+              stage: "forkSession",
+              message:
+                "Conversation fork must stay inside the source Zeros workspace.",
+            });
+          }
+
+          const sourceLocation = getChatLocation(sourceChat.id);
+          const destinationLocation = getChatLocation(destinationChat.id);
+          const sourceWorkspaceId = this.workspaceIdForProcess(
+            sourceLocation?.workspaceId,
+            sourceChat.folder,
+          );
+          const destinationWorkspaceId = this.workspaceIdForProcess(
+            destinationLocation?.workspaceId,
+            destinationChat.folder,
+          );
+          if (
+            sourceWorkspaceId !== destinationWorkspaceId ||
+            (client.kind !== "local" && !msg.workspaceId) ||
+            (msg.workspaceId !== undefined &&
+              msg.workspaceId !== destinationWorkspaceId)
+          ) {
+            throw new AgentFailureError({
+              kind: "protocol-error",
+              stage: "forkSession",
+              message:
+                "The fork request does not match the conversations' persisted Zeros workspace.",
+            });
+          }
+          if (
+            this.conversationExecution.has(destinationChat.id) ||
+            Array.from(this.sessionChat.values()).includes(destinationChat.id)
+          ) {
+            throw new AgentFailureError({
+              kind: "protocol-error",
+              stage: "forkSession",
+              message:
+                "The destination conversation already has a live execution.",
+            });
+          }
+          if (this.conversationForkSources.has(sourceChat.id)) {
+            throw new AgentFailureError({
+              kind: "lifecycle-superseded",
+              stage: "forkSession",
+              message:
+                "Another provider fork is already reading this source conversation.",
+            });
+          }
+          this.conversationForkSources.add(sourceChat.id);
+          forkSourceToFinish = sourceChat.id;
+          const sourceHasActiveWork = Array.from(
+            this.sessionChat.entries(),
+          ).some(
+            ([executionId, conversationId]) =>
+              conversationId === sourceChat.id &&
+              this.activePromptContexts.has(executionId),
+          );
+          if (sourceHasActiveWork) {
+            throw new AgentFailureError({
+              kind: "protocol-error",
+              stage: "forkSession",
+              message:
+                "Wait for the source conversation's active turn to finish before forking it.",
+            });
+          }
+
+          const forkSpawnOpts = await this.agentSpawnOpts(
+            {
+              cwd: destinationChat.folder,
+              env: msg.env,
+              workspaceId: destinationWorkspaceId ?? undefined,
+              cliBinary: msg.cliBinary,
+            },
+            client,
+            "forkSession",
+          );
+          this.assertAgentWorkspaceProcessStartAllowed(
+            destinationWorkspaceId,
+            forkSpawnOpts.workspaceId,
+            forkSpawnOpts.cwd,
+          );
+          const providerBinding = await this.trackWorkspaceProcessStart(
+            destinationWorkspaceId,
+            this.agents.forkProviderBinding(msg.agentId, sourceBinding, {
+              cwd: forkSpawnOpts.cwd,
+              env: forkSpawnOpts.env,
+              workspaceId: forkSpawnOpts.workspaceId,
+              cliBinary: forkSpawnOpts.cliBinary,
+            }),
+          );
+          if (
+            !this.conversationBindIsCurrent(msg.destinationChatId, bindToken)
+          ) {
+            throw this.staleConversationBindFailure("forkSession");
+          }
+          this.assertAgentWorkspaceProcessStartAllowed(destinationWorkspaceId);
+          const attached = attachChatProviderIdentityIfUnbound(
+            destinationChat.id,
+            msg.agentId,
+            sourceChat.id,
+            sourceChat.folder,
+            destinationChat.folder,
+            sourceBinding,
+            providerBinding,
+          );
+          if (!attached) {
+            // Do not compensate by deleting the provider thread: native delete
+            // can cascade through descendants. The newer Zeros mutation wins;
+            // an unattached provider fork is safer than destructive rollback.
+            throw new AgentFailureError({
+              kind: "lifecycle-superseded",
+              stage: "forkSession",
+              message:
+                "The destination conversation changed before its provider binding could be attached.",
+            });
+          }
+          this.broadcast(
+            createMessage({
+              type: "DB_CHANGED",
+              source: "engine",
+              kinds: ["chats"],
+            }),
+          );
+          client.send(
+            createMessage({
+              type: "AGENT_CONVERSATION_FORKED",
+              source: "engine",
+              requestId: msg.id,
+              agentId: msg.agentId,
+              sourceChatId: sourceChat.id,
+              destinationChatId: destinationChat.id,
+              providerBinding,
+            }),
+          );
+          return;
+        }
         case "AGENT_LOAD_SESSION": {
           const bindToken = this.beginConversationBind(msg.chatId);
           bindToFinish = { conversationId: msg.chatId, token: bindToken };
@@ -3644,12 +3984,66 @@ export class ZerosEngine {
               .endSession(msg.agentId, requestedExecutionId)
               .catch(() => {});
           }
+          // A persisted Zeros conversation is authoritative for cold resume.
+          // The renderer still couriers binding/cwd fields for older engines
+          // and rowless compatibility, but a stale local mirror must never
+          // roll SQLite back to an older provider thread or workspace.
+          const persistedChat = msg.chatId ? getChat(msg.chatId) : null;
+          if (persistedChat && persistedChat.agentId !== msg.agentId) {
+            throw new AgentFailureError({
+              kind: "protocol-error",
+              stage: "loadSession",
+              message:
+                "The persisted conversation belongs to a different agent.",
+            });
+          }
+          const persistedProviderBinding = persistedChat?.providerBinding;
+          const persistedLegacyBinding =
+            persistedChat?.agentId === msg.agentId && persistedChat.sessionId
+              ? legacyProviderBinding(msg.agentId, persistedChat.sessionId)
+              : null;
+          const persistedLocation = msg.chatId
+            ? getChatLocation(msg.chatId)
+            : null;
+          const persistedWorkspaceId = this.workspaceIdForProcess(
+            persistedLocation?.workspaceId,
+            persistedLocation?.folder,
+          );
           const loadOpts = await this.agentSpawnOpts(
-            msg,
+            client.kind === "local" && persistedChat
+              ? {
+                  ...msg,
+                  cwd: persistedChat.folder,
+                  workspaceId: persistedWorkspaceId ?? undefined,
+                }
+              : msg,
             client,
             "loadSession",
           );
           if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
+            throw this.staleConversationBindFailure("loadSession");
+          }
+          const currentPersistedChat = msg.chatId ? getChat(msg.chatId) : null;
+          const currentPersistedLocation = msg.chatId
+            ? getChatLocation(msg.chatId)
+            : null;
+          const currentPersistedWorkspaceId = this.workspaceIdForProcess(
+            currentPersistedLocation?.workspaceId,
+            currentPersistedLocation?.folder,
+          );
+          if (
+            Boolean(currentPersistedChat) !== Boolean(persistedChat) ||
+            (persistedChat &&
+              currentPersistedChat &&
+              (currentPersistedChat.agentId !== persistedChat.agentId ||
+                currentPersistedChat.folder !== persistedChat.folder ||
+                currentPersistedChat.sessionId !== persistedChat.sessionId ||
+                !sameProviderBinding(
+                  currentPersistedChat.providerBinding,
+                  persistedChat.providerBinding,
+                ) ||
+                currentPersistedWorkspaceId !== persistedWorkspaceId))
+          ) {
             throw this.staleConversationBindFailure("loadSession");
           }
           const lifecycleWorkspaceId = this.workspaceIdForProcess(
@@ -3667,23 +4061,12 @@ export class ZerosEngine {
           // row before degrading a compatibility sessionId into a legacy
           // binding. This is also the crash-safe path for a close/reopen in
           // that narrow window.
-          const persistedChat = msg.chatId ? getChat(msg.chatId) : null;
-          const persistedProviderBinding = persistedChat?.providerBinding;
-          const persistedLegacyBinding =
-            persistedChat?.agentId === msg.agentId && persistedChat.sessionId
-              ? legacyProviderBinding(msg.agentId, persistedChat.sessionId)
-              : null;
           if (client.kind !== "local") {
             const suppliedBinding = coerceProviderBinding(msg.providerBinding);
             const trustedBinding =
               persistedProviderBinding?.providerId === msg.agentId
                 ? persistedProviderBinding
                 : persistedLegacyBinding;
-            const location = msg.chatId ? getChatLocation(msg.chatId) : null;
-            const persistedWorkspaceId = this.workspaceIdForProcess(
-              location?.workspaceId,
-              location?.folder,
-            );
             if (
               !msg.chatId ||
               !persistedChat ||
@@ -3708,30 +4091,36 @@ export class ZerosEngine {
               });
             }
           }
-          const providerBinding =
-            coerceProviderBinding(msg.providerBinding) ??
-            (persistedProviderBinding?.providerId === msg.agentId
+          const persistedBinding =
+            persistedProviderBinding?.providerId === msg.agentId
               ? persistedProviderBinding
-              : null) ??
-            persistedLegacyBinding ??
-            (msg.sessionId
-              ? legacyProviderBinding(msg.agentId, msg.sessionId)
-              : null);
+              : persistedLegacyBinding;
+          const providerBinding = persistedChat
+            ? persistedBinding
+            : (coerceProviderBinding(msg.providerBinding) ??
+              (msg.sessionId
+                ? legacyProviderBinding(msg.agentId, msg.sessionId)
+                : null));
           if (!providerBinding || providerBinding.providerId !== msg.agentId) {
+            const persistedBindingMissing = Boolean(
+              msg.chatId && persistedChat?.agentId === msg.agentId,
+            );
             throw new AgentFailureError({
               kind:
-                !msg.providerBinding && !msg.sessionId
+                persistedBindingMissing ||
+                (!msg.providerBinding && !msg.sessionId)
                   ? "session-expired"
                   : "protocol-error",
               stage: "loadSession",
               message:
-                !msg.providerBinding && !msg.sessionId
+                persistedBindingMissing ||
+                (!msg.providerBinding && !msg.sessionId)
                   ? "This conversation has no live execution or durable provider binding."
                   : "This conversation has no valid provider binding for the selected agent.",
             });
           }
           let provisionalExecutionId: string | undefined;
-          const response = await this.trackWorkspaceProcessStart(
+          let response = await this.trackWorkspaceProcessStart(
             lifecycleWorkspaceId,
             (async () => {
               let adapterLoadCompleted = false;
@@ -3880,6 +4269,10 @@ export class ZerosEngine {
               message: "The agent execution exited while it was resuming.",
             });
           }
+          response = this.withoutDetachedProviderIdentity(
+            executionId,
+            response,
+          );
           if (msg.chatId) {
             this.persistProviderIdentityForChat(
               msg.chatId,
@@ -3947,6 +4340,9 @@ export class ZerosEngine {
           bindToFinish.token,
         );
       }
+      if (forkSourceToFinish) {
+        this.conversationForkSources.delete(forkSourceToFinish);
+      }
     }
   }
 
@@ -3973,7 +4369,7 @@ export class ZerosEngine {
       cliBinary?: string;
     },
     client: TransportClient,
-    stage: "newSession" | "loadSession",
+    stage: "newSession" | "loadSession" | "forkSession",
   ): Promise<{
     cwd?: string;
     env?: Record<string, string>;
@@ -4017,7 +4413,7 @@ export class ZerosEngine {
    *  allowlisted managed workspace. */
   private assertRemoteWorkspaceOperable(
     workspaceId: string | undefined,
-    stage: "newSession" | "loadSession",
+    stage: "newSession" | "loadSession" | "forkSession",
   ): string {
     // Remote (untrusted): never trust a client-supplied cwd / env / cliBinary.
     if (!workspaceId) {

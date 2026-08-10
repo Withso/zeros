@@ -27,6 +27,8 @@ import {
   coerceChatRow,
   setChatWorkspaceResolver,
   backfillChatWorkspaceIds,
+  attachChatProviderIdentityIfUnbound,
+  clearChatProviderIdentity,
   updateChatProviderIdentity,
   type ChatRow,
 } from "../chats";
@@ -516,6 +518,159 @@ describe("Zeros DB (unified engine store)", () => {
       listChats().find((chat) => chat.id === "late-binding")?.providerBinding
         ?.resumeId,
     ).toBe("claude-native-session");
+  });
+
+  it("chats: attaches a fork binding only to its unbound Zeros destination", () => {
+    setZerosDbPathForTesting(tmpDbFile());
+    const sourceBinding = {
+      version: 1 as const,
+      providerId: "codex",
+      kind: "native" as const,
+      resumeId: "thread-source",
+      scopeId: "session-tree",
+    };
+    upsertChat(
+      makeChat("source", {
+        agentId: "codex",
+        providerBinding: sourceBinding,
+        sessionId: sourceBinding.resumeId,
+      }),
+    );
+    upsertChat(
+      makeChat("destination", {
+        agentId: "codex",
+        title: "Zeros fork title",
+        pinned: true,
+        archived: true,
+        sourceChatId: "source",
+      }),
+    );
+    const forkBinding = {
+      ...sourceBinding,
+      resumeId: "thread-fork",
+    };
+
+    expect(
+      attachChatProviderIdentityIfUnbound(
+        "destination",
+        "codex",
+        "source",
+        "/p",
+        "/p",
+        sourceBinding,
+        sourceBinding,
+      ),
+    ).toBe(false);
+    expect(
+      attachChatProviderIdentityIfUnbound(
+        "destination",
+        "codex",
+        "source",
+        "/p",
+        "/p",
+        sourceBinding,
+        forkBinding,
+      ),
+    ).toBe(true);
+    expect(listChats().find((chat) => chat.id === "destination")).toMatchObject(
+      {
+        title: "Zeros fork title",
+        pinned: true,
+        archived: true,
+        sourceChatId: "source",
+        sessionId: "thread-fork",
+        providerBinding: forkBinding,
+        providerMetadata: null,
+      },
+    );
+
+    expect(
+      attachChatProviderIdentityIfUnbound(
+        "destination",
+        "codex",
+        "source",
+        "/p",
+        "/p",
+        sourceBinding,
+        { ...forkBinding, resumeId: "must-not-replace" },
+      ),
+    ).toBe(false);
+    expect(
+      attachChatProviderIdentityIfUnbound(
+        "source",
+        "codex",
+        "wrong-parent",
+        "/p",
+        "/p",
+        sourceBinding,
+        { ...forkBinding, resumeId: "must-not-attach" },
+      ),
+    ).toBe(false);
+    expect(
+      listChats().find((chat) => chat.id === "destination")?.providerBinding
+        ?.resumeId,
+    ).toBe("thread-fork");
+
+    upsertChat(
+      makeChat("stale-destination", {
+        agentId: "codex",
+        sourceChatId: "source",
+      }),
+    );
+    expect(
+      updateChatProviderIdentity(
+        "source",
+        "codex",
+        { ...sourceBinding, resumeId: "thread-source-replacement" },
+        null,
+      ),
+    ).toBe(true);
+    expect(
+      attachChatProviderIdentityIfUnbound(
+        "stale-destination",
+        "codex",
+        "source",
+        "/p",
+        "/p",
+        sourceBinding,
+        { ...forkBinding, resumeId: "must-not-attach-from-stale-source" },
+      ),
+    ).toBe(false);
+  });
+
+  it("chats: detaches a native provider reference by exact binding", () => {
+    setZerosDbPathForTesting(tmpDbFile());
+    const binding = {
+      version: 1 as const,
+      providerId: "codex",
+      kind: "native" as const,
+      resumeId: "thread-shared-id",
+      scopeId: "current-provider-scope",
+    };
+    upsertChat(
+      makeChat("exact-detach", {
+        agentId: "codex",
+        providerBinding: binding,
+        sessionId: binding.resumeId,
+      }),
+    );
+
+    expect(
+      clearChatProviderIdentity("exact-detach", "codex", {
+        ...binding,
+        scopeId: "stale-provider-scope",
+      }),
+    ).toBe(false);
+    expect(
+      listChats().find((chat) => chat.id === "exact-detach")?.providerBinding,
+    ).toEqual(binding);
+
+    expect(clearChatProviderIdentity("exact-detach", "codex", binding)).toBe(
+      true,
+    );
+    expect(
+      listChats().find((chat) => chat.id === "exact-detach")?.providerBinding,
+    ).toBeNull();
   });
 
   it("summariesForFolder: first user message per chat; includes archived; excludes self / no-user / other folders", () => {

@@ -185,6 +185,44 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
     ).toBe("AGENT_LOAD_SESSION");
   });
 
+  it("accepts only product-owned conversation ids for provider forks", () => {
+    const b = { ...base, source: "browser" as const };
+    expect(KNOWN_MESSAGE_TYPES).toContain("AGENT_FORK_CONVERSATION");
+    expect(
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_FORK_CONVERSATION",
+        agentId: "codex",
+        sourceChatId: "conversation-source",
+        destinationChatId: "conversation-fork",
+      }).type,
+    ).toBe("AGENT_FORK_CONVERSATION");
+    expect(() =>
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_FORK_CONVERSATION",
+        agentId: "codex",
+        sourceChatId: "same-conversation",
+        destinationChatId: "same-conversation",
+      }),
+    ).toThrow(/destinationChatId/);
+    expect(() =>
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_FORK_CONVERSATION",
+        agentId: "codex",
+        sourceChatId: "conversation-source",
+        destinationChatId: "conversation-fork",
+        providerBinding: {
+          version: 1,
+          providerId: "codex",
+          kind: "native",
+          resumeId: "raw-provider-thread",
+        },
+      }),
+    ).toThrow(/providerBinding/);
+  });
+
   it("accepts a conversation-only live execution probe", () => {
     const b = { ...base, source: "browser" as const };
     expect(

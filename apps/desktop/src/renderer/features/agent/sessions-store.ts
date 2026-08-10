@@ -61,6 +61,7 @@ import { loadPolicies, savePolicies, type PolicyRule } from "./policies";
 import { effortAdoptedEnvKey } from "./model-catalog";
 import { useWorkspaceStore } from "../../state/workspace-store";
 import type { ChatEffort } from "../../state/store";
+import { sameProviderBinding } from "@zeros/protocol/identities";
 
 const MAX_STDERR_LINES = 200;
 const MAX_BACKGROUND_TASKS_PER_CHAT = 100;
@@ -796,6 +797,29 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         ...(upd.providerMetadata
           ? { providerMetadata: upd.providerMetadata }
           : {}),
+      });
+      return;
+    }
+
+    if (
+      upd.sessionUpdate === "provider_binding_detached" &&
+      upd.providerBinding
+    ) {
+      const slot = get().sessions[chatId];
+      const currentExecution = slot?.executionId ?? slot?.sessionId;
+      const sourceExecution =
+        notification.executionId ?? notification.sessionId;
+      if (
+        !slot ||
+        currentExecution !== sourceExecution ||
+        upd.providerBinding.providerId !== slot.agentId ||
+        !sameProviderBinding(slot.providerBinding, upd.providerBinding)
+      ) {
+        return;
+      }
+      get().patchSession(chatId, {
+        providerBinding: null,
+        providerMetadata: null,
       });
       return;
     }

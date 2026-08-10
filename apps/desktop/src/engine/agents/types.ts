@@ -67,6 +67,7 @@ export type AgentFailureStage =
   | "initialize"
   | "newSession"
   | "loadSession"
+  | "forkSession"
   | "prompt"
   | "cancel"
   | "stopBackgroundTask"
@@ -240,6 +241,19 @@ export interface AgentAdapter {
     mcpServers?: McpServerRegistration[];
     systemInstruction?: string;
   }): Promise<LoadSessionResponse>;
+
+  /** Fork one durable provider conversation reference. This operation creates
+   * no Zeros execution and owns no product chat lifecycle; the engine attaches
+   * the returned opaque binding to a destination conversation it created
+   * separately. Optional because not every provider exposes native fork. */
+  forkProviderBinding?(opts: {
+    providerBinding: ProviderBinding;
+    cwd: string;
+    env?: Record<string, string>;
+    cliBinary?: string;
+    mcpServers?: McpServerRegistration[];
+    systemInstruction?: string;
+  }): Promise<{ providerBinding: ProviderBinding }>;
 
   /** List resumable sessions the CLI knows about. */
   listSessions(opts: {

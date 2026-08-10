@@ -106,11 +106,8 @@ describe("CodexAppServerAdapter.disposeSession", () => {
         resumeId: "thread-1",
         scopeId: "codex-root-session-1",
       },
-      providerMetadata: {
-        version: 1,
-        git: { sha: "abc", branch: "main", originUrl: null },
-      },
     });
+    expect(session).not.toHaveProperty("providerMetadata");
     expect(writeSessionMeta).toHaveBeenCalledWith(
       "zeros-execution-1",
       expect.objectContaining({

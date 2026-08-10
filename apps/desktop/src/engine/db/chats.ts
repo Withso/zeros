@@ -22,6 +22,7 @@ import { nextRev, recordTombstone, clearTombstone } from "./sync";
 import {
   coerceProviderBinding,
   coerceProviderMetadata,
+  sameProviderBinding,
   type ProviderBinding,
   type ProviderMetadata,
 } from "@zeros/protocol/identities";
@@ -425,6 +426,98 @@ export function updateChatProviderIdentity(
   return result.changes > 0;
 }
 
+/** Attach the provider result of a fork to an already-created Zeros
+ * conversation. The destination's Zeros identity and lifecycle metadata exist
+ * first; this compare-and-set only fills its previously-empty opaque provider
+ * reference. The transaction also verifies the source still has the exact
+ * folder and binding that was forked, so a concurrent source rebind cannot
+ * attach an obsolete provider child. */
+export function attachChatProviderIdentityIfUnbound(
+  chatId: string,
+  agentId: string,
+  expectedSourceChatId: string,
+  expectedSourceFolder: string,
+  expectedDestinationFolder: string,
+  expectedSourceBinding: ProviderBinding,
+  binding: ProviderBinding,
+): boolean {
+  if (
+    !chatId ||
+    !agentId ||
+    !expectedSourceChatId ||
+    !expectedSourceFolder ||
+    !expectedDestinationFolder
+  )
+    return false;
+  const providerBinding = coerceProviderBinding(binding);
+  const sourceBinding = coerceProviderBinding(expectedSourceBinding);
+  if (
+    !providerBinding ||
+    !sourceBinding ||
+    providerBinding.kind !== "native" ||
+    sourceBinding.kind !== "native" ||
+    providerBinding.providerId !== agentId ||
+    sourceBinding.providerId !== agentId ||
+    sameProviderBinding(providerBinding, sourceBinding)
+  ) {
+    return false;
+  }
+  const compatibilitySessionId =
+    providerBinding.legacySessionId ?? providerBinding.resumeId;
+  const db = openZerosDb();
+  const tx = db.transaction(() => {
+    const source = db
+      .prepare(
+        `SELECT agent_id, folder, provider_binding
+           FROM chats
+          WHERE id = ?
+          LIMIT 1`,
+      )
+      .get(expectedSourceChatId) as
+      | {
+          agent_id: string | null;
+          folder: string | null;
+          provider_binding: string | null;
+        }
+      | undefined;
+    const persistedSourceBinding = coerceProviderBinding(
+      source?.provider_binding ? safeJson(source.provider_binding) : null,
+    );
+    if (
+      source?.agent_id !== agentId ||
+      source.folder !== expectedSourceFolder ||
+      !sameProviderBinding(persistedSourceBinding, sourceBinding)
+    ) {
+      return false;
+    }
+    const result = db
+      .prepare(
+        `UPDATE chats
+          SET session_id = @session_id,
+              provider_binding = @provider_binding,
+              provider_metadata = NULL,
+              rev = @rev
+        WHERE id = @id
+          AND agent_id = @agent_id
+          AND source_chat_id = @source_chat_id
+          AND folder = @folder
+          AND session_id IS NULL
+          AND provider_binding IS NULL`,
+      )
+      .run({
+        id: chatId,
+        agent_id: agentId,
+        source_chat_id: expectedSourceChatId,
+        folder: expectedDestinationFolder,
+        session_id: compatibilitySessionId,
+        provider_binding: JSON.stringify(providerBinding),
+        rev: nextRev(),
+      });
+    return result.changes > 0;
+  });
+  return tx();
+}
+
 /** Explicitly detach a provider conversation after that provider confirmed it
  * no longer exists (or the user reset a pristine same-agent chat). The
  * compare-and-clear guard prevents a delayed renderer write from erasing a
@@ -432,8 +525,11 @@ export function updateChatProviderIdentity(
 export function clearChatProviderIdentity(
   chatId: string,
   agentId: string,
-  expectedResumeId: string,
+  expected: string | ProviderBinding,
 ): boolean {
+  const expectedBinding = coerceProviderBinding(expected);
+  const expectedResumeId =
+    typeof expected === "string" ? expected : expectedBinding?.resumeId;
   if (!chatId || !agentId || !expectedResumeId) return false;
   const db = openZerosDb();
   const tx = db.transaction(() => {
@@ -447,9 +543,12 @@ export function clearChatProviderIdentity(
     const binding = coerceProviderBinding(
       row?.provider_binding ? safeJson(row.provider_binding) : null,
     );
-    const providerMatches =
-      binding?.providerId === agentId && binding.resumeId === expectedResumeId;
-    const legacyMatches = !binding && row?.session_id === expectedResumeId;
+    const providerMatches = expectedBinding
+      ? sameProviderBinding(binding, expectedBinding)
+      : binding?.providerId === agentId &&
+        binding.resumeId === expectedResumeId;
+    const legacyMatches =
+      !expectedBinding && !binding && row?.session_id === expectedResumeId;
     if (!providerMatches && !legacyMatches) {
       return false;
     }

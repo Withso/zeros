@@ -669,6 +669,37 @@ export interface AgentLoadSessionMessage extends BaseMessage {
   cliBinary?: string;
 }
 
+/** Fork a durable provider conversation into a Zeros-owned destination
+ * conversation. The caller creates/persists the destination chat first; the
+ * engine reads the source binding from its own chat row and attaches the
+ * provider's returned opaque binding to the destination. Provider thread ids
+ * are intentionally not accepted as request input. */
+export interface AgentForkConversationMessage extends BaseMessage {
+  type: "AGENT_FORK_CONVERSATION";
+  agentId: string;
+  sourceChatId: ConversationId;
+  destinationChatId: ConversationId;
+  /** Engine workspace id for the destination conversation. Remote clients must
+   * supply it; the engine still verifies it against the persisted chat. */
+  workspaceId?: WorkspaceId;
+  /** Spawn configuration couriers. The engine discards these for untrusted
+   * remote clients and always resolves cwd from the destination chat. */
+  env?: Record<string, string>;
+  cliBinary?: string;
+}
+
+/** The provider fork has been attached to the already-existing Zeros
+ * destination conversation. No execution is created by this command; ordinary
+ * AGENT_LOAD_SESSION resumes the returned binding when the destination opens. */
+export interface AgentConversationForkedMessage extends BaseMessage {
+  type: "AGENT_CONVERSATION_FORKED";
+  requestId: string;
+  agentId: string;
+  sourceChatId: ConversationId;
+  destinationChatId: ConversationId;
+  providerBinding: ProviderBinding;
+}
+
 export interface AgentSessionsListMessage extends BaseMessage {
   type: "AGENT_SESSIONS_LIST";
   requestId: string;
@@ -849,6 +880,7 @@ export interface BridgeAgentFailure {
     | "initialize"
     | "newSession"
     | "loadSession"
+    | "forkSession"
     | "prompt"
     | "cancel"
     | "stopBackgroundTask"
@@ -1090,6 +1122,7 @@ export type BridgeMessage =
   | AgentUpdateConfigMessage
   | AgentListSessionsMessage
   | AgentLoadSessionMessage
+  | AgentForkConversationMessage
   | AgentValidateKeyMessage
   | AgentGenerateTitleMessage
   // Agent (engine → browser)
@@ -1109,6 +1142,7 @@ export type BridgeMessage =
   | AgentSteeredMessage
   | AgentSessionsListMessage
   | AgentSessionLoadedMessage
+  | AgentConversationForkedMessage
   | AgentPromptCompleteMessage
   | AgentPromptFailedMessage
   | AgentAgentStderrMessage

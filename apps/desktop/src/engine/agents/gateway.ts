@@ -117,7 +117,7 @@ function resolveExistingWorkspacePath(workspaceId: string): string | null {
 
 export function resolveAgentCwd(
   cwd: string | undefined,
-  stage: "newSession" | "loadSession",
+  stage: "newSession" | "loadSession" | "forkSession",
   workspaceId?: string,
 ): string {
   // Prefer explicit cwd when supplied — the renderer knows where the
@@ -1028,6 +1028,81 @@ export class AgentGateway {
       executionId,
       providerBinding: response.providerBinding ?? providerBinding,
     };
+  }
+
+  /** Ask an adapter to fork an opaque durable provider reference. Zeros owns
+   * the source/destination conversations and persistence around this call; the
+   * gateway only applies the ordinary spawn/config boundary and validates that
+   * the adapter returned a distinct native binding for the selected provider. */
+  async forkProviderBinding(
+    agentId: string,
+    binding: ProviderBinding,
+    opts: {
+      cwd?: string;
+      env?: Record<string, string>;
+      workspaceId?: string;
+      cliBinary?: string;
+    },
+  ): Promise<ProviderBinding> {
+    const providerBinding = coerceProviderBinding(binding);
+    if (!providerBinding || providerBinding.providerId !== agentId) {
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        stage: "forkSession",
+        message: "The source provider binding does not belong to this agent.",
+      });
+    }
+    const adapter = await this.adapterFor(agentId);
+    if (!adapter.forkProviderBinding) {
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        stage: "forkSession",
+        message: `Agent ${agentId} does not support native conversation fork.`,
+      });
+    }
+    const cwd = resolveAgentCwd(opts.cwd, "forkSession", opts.workspaceId);
+    const mainRepoRoot = opts.workspaceId
+      ? getWorkspaceById(opts.workspaceId)?.repoRoot
+      : undefined;
+    const merged = await withTargetBranchEnv(
+      withWorktreeEnv(mergeSpawnEnv(cwd, opts.env, mainRepoRoot), cwd),
+      opts.workspaceId,
+    );
+    const spawn = applyUserProviderConfig(
+      cwd,
+      agentId,
+      { env: merged, cliBinary: opts.cliBinary },
+      mainRepoRoot,
+    );
+    const instructionCtx = this.parseInstructionCtx(spawn.env);
+    const systemInstruction = this.nativeInstructionFor(
+      adapter,
+      cwd,
+      instructionCtx,
+    );
+    const mcpServers = await this.resolveSessionMcp(agentId, cwd, mainRepoRoot);
+    const result = await adapter.forkProviderBinding({
+      providerBinding,
+      cwd,
+      env: spawn.env,
+      cliBinary: spawn.cliBinary,
+      mcpServers,
+      ...(systemInstruction ? { systemInstruction } : {}),
+    });
+    const forkedBinding = coerceProviderBinding(result.providerBinding);
+    if (
+      !forkedBinding ||
+      forkedBinding.kind !== "native" ||
+      forkedBinding.providerId !== agentId ||
+      forkedBinding.resumeId === providerBinding.resumeId
+    ) {
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        stage: "forkSession",
+        message: `Agent ${agentId} returned an invalid provider fork binding.`,
+      });
+    }
+    return forkedBinding;
   }
 
   /** Tear down a single session's resources when its chat tab is closed.
