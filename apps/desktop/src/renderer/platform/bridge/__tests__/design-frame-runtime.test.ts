@@ -17,10 +17,13 @@ const capabilities = {
   methods: [
     "getSnapshot",
     "getElementAtLoc",
+    "getElementsInRect",
     "getNodeDetails",
     "getMatchedStyles",
     "setNodeVisibility",
+    "setTheme",
     "previewStyles",
+    "previewMotion",
     "clearPreviewStyles",
     "captureScreenshot",
   ] as const,
@@ -122,11 +125,28 @@ describe("design frame runtime client", () => {
     expect(source.postMessage).toHaveBeenCalledTimes(1);
     await expect(pending).resolves.toMatchObject({ revision: 2 });
 
+    const theme = connection.setTheme("dark");
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
+    const themeRequest = requests[1] as { requestId: string };
+    expect(themeRequest).toMatchObject({
+      method: "setTheme",
+      args: { theme: "dark" },
+    });
+    framePort.postMessage({
+      protocol: DESIGN_RUNTIME_PROTOCOL,
+      version: DESIGN_RUNTIME_VERSION,
+      type: "response",
+      requestId: themeRequest.requestId,
+      ok: true,
+      result: snapshot(2),
+    });
+    await expect(theme).resolves.toMatchObject({ revision: 2 });
+
     const preview = connection.previewStyles("frame", {
       "background-color": "var(--bg1)",
     });
-    await vi.waitFor(() => expect(requests).toHaveLength(2));
-    const previewRequest = requests[1] as {
+    await vi.waitFor(() => expect(requests).toHaveLength(3));
+    const previewRequest = requests[2] as {
       requestId: string;
       method: string;
       args: Record<string, unknown>;
@@ -147,6 +167,41 @@ describe("design frame runtime client", () => {
       result: snapshot(2).frame,
     });
     await expect(preview).resolves.toMatchObject({ oid: "frame" });
+
+    const motion = connection.previewMotion("frame", {
+      keyframes: [
+        { offset: 0, styles: { opacity: "0" } },
+        { offset: 100, styles: { opacity: "1" } },
+      ],
+      duration: 300,
+      delay: 0,
+      easing: "ease-out",
+      iterations: 1,
+      direction: "normal",
+      fill: "both",
+      currentTime: 150,
+      playing: false,
+    });
+    await vi.waitFor(() => expect(requests).toHaveLength(4));
+    const motionRequest = requests[3] as { requestId: string };
+    expect(motionRequest).toMatchObject({
+      method: "previewMotion",
+      args: {
+        nodeId: "frame",
+        duration: 300,
+        currentTime: 150,
+        playing: false,
+      },
+    });
+    framePort.postMessage({
+      protocol: DESIGN_RUNTIME_PROTOCOL,
+      version: DESIGN_RUNTIME_VERSION,
+      type: "response",
+      requestId: motionRequest.requestId,
+      ok: true,
+      result: snapshot(2).frame,
+    });
+    await expect(motion).resolves.toMatchObject({ oid: "frame" });
 
     framePort.postMessage({
       protocol: DESIGN_RUNTIME_PROTOCOL,

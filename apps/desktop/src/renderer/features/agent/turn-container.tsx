@@ -492,8 +492,9 @@ function ClampedUserPrompt({
           )}
         >
           {/* The bubble changes polarity across themes: bg1-hover clears its
-              light fill, while dark needs bg2-hover after highlighted-bg was
-              lowered to the same lightness as bg1-hover. */}
+              light fill, while the dark palettes need bg2-hover — neutral
+              Dark's highlighted-bg IS bg2, so bg2-hover is exactly the chip
+              fill that surface takes, and Orka's sits a point below it. */}
           <span className="text-fg2 group-hover/more:bg-bg1-hover dark:group-hover/more:bg-bg2-hover group-hover/more:text-fg1 group-focus-visible/more:ring-highlighted-bright inline-flex items-center gap-0.5 rounded-sm px-1.5 py-0.5 text-xs font-medium transition-colors group-focus-visible/more:ring-1">
             More
             <ChevronDown className="size-3.5" strokeWidth={2} />
@@ -578,7 +579,7 @@ function UserMessageActions({
         <Tooltip
           label={createdAt ? new Date(createdAt).toLocaleString() : undefined}
         >
-          <span className="text-fg3 px-1 text-xs tabular-nums select-none">
+          <span className="text-muted-fg px-1 text-xs tabular-nums select-none">
             {age}
           </span>
         </Tooltip>
@@ -796,10 +797,13 @@ function TurnPromptEditor({
                 attachment pills (originals reconstructed in place + any new
                 ones). Enter submits, Esc cancels (via the editor keymap). */}
             {editorContent}
-            <PromptInputToolbar className="min-w-0 gap-1.5 pt-1 pr-0 pb-1 pl-0">
+            <PromptInputToolbar
+              data-permission-feedback-boundary=""
+              className="min-w-0 flex-nowrap gap-1.5 pt-1 pr-0 pb-1 pl-0"
+            >
               {/* gap-0.5: exactly 2px between the + and the pill block, matching
                   the main composer. */}
-              <PromptInputTools className="gap-0.5">
+              <PromptInputTools className="min-w-0 flex-nowrap gap-0.5">
                 <Tooltip label="Attach file">
                   <Button
                     variant="ghost"
@@ -827,6 +831,7 @@ function TurnPromptEditor({
               </PromptInputTools>
               <Tooltip label="Resend" shortcut="↵">
                 <PromptInputSubmit
+                  data-composer-toolbar-actions=""
                   disabled={sendDisabled}
                   aria-label="Resend edited prompt"
                   className="disabled:bg-bg2-hover disabled:text-fg2 size-8 disabled:opacity-100"

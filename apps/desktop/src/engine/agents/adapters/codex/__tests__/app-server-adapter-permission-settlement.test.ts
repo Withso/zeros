@@ -13,6 +13,7 @@ import type {
 import type {
   CodexApprovalRequest,
   CodexAppServerBootOptions,
+  CodexUserInputRequest,
 } from "../app-server";
 
 const rt = vi.hoisted(() => ({
@@ -21,6 +22,8 @@ const rt = vi.hoisted(() => ({
   respondCalls: [] as Array<{ permissionId: string; response: unknown }>,
   requestCalls: [] as Array<{ method: string; params: unknown }>,
   runTurnCalls: [] as unknown[],
+  userInputCalls: [] as Array<{ questionId: string; response: unknown }>,
+  startThreadCalls: [] as Array<Record<string, unknown>>,
   runTurnImpl: null as null | (() => Promise<unknown>),
 }));
 
@@ -37,13 +40,16 @@ vi.mock("../app-server", () => ({
       cliVersion: "0.139.0",
       binarySource: { source: "path", path: "codex" },
       child: { pid: 1234, killed: false },
-      startThread: async () => ({
-        threadId: "thread-1",
-        model: "gpt-5",
-        approvalPolicy: "on-request",
-        sandbox: { type: "workspaceWrite" },
-        raw: {},
-      }),
+      startThread: async (params: Record<string, unknown>) => {
+        rt.startThreadCalls.push(params);
+        return {
+          threadId: "thread-1",
+          model: "gpt-5",
+          approvalPolicy: "on-request",
+          sandbox: { type: "workspaceWrite" },
+          raw: {},
+        };
+      },
       resumeThread: async (p: { threadId: string }) => ({
         threadId: p.threadId,
         model: "gpt-5",
@@ -60,7 +66,9 @@ vi.mock("../app-server", () => ({
       respondToPermission: (permissionId: string, response: unknown) => {
         rt.respondCalls.push({ permissionId, response });
       },
-      respondToUserInput: () => {},
+      respondToUserInput: (questionId: string, response: unknown) => {
+        rt.userInputCalls.push({ questionId, response });
+      },
       onNotification: (method: string, handler: (params: unknown) => void) => {
         let handlers = rt.notificationHandlers.get(method);
         if (!handlers) {
@@ -99,6 +107,7 @@ function makeAdapter() {
     onPermissionRequest: vi.fn(),
     onPermissionSettled: vi.fn(),
     onQuestionRequest: vi.fn(),
+    onQuestionSettled: vi.fn(),
     onAgentStderr: vi.fn(),
     onAgentExit: vi.fn(),
   };
@@ -111,14 +120,41 @@ function makeAdapter() {
   return { adapter: new CodexAppServerAdapter(ctx), emit };
 }
 
-function raiseApproval(permissionId: string): void {
+function raiseApproval(
+  permissionId: string,
+  method: CodexApprovalRequest["method"] = "item/commandExecution/requestApproval",
+  params: Record<string, unknown> = {
+    itemId: `item-${permissionId}`,
+    command: "git status",
+  },
+): void {
   const request: CodexApprovalRequest = {
     permissionId,
     requestId: `native-${permissionId}`,
-    method: "item/commandExecution/requestApproval",
-    params: { itemId: `item-${permissionId}`, command: "git status" },
+    method,
+    params,
   };
   rt.bootOptions?.onApprovalRequest?.(request);
+}
+
+function raiseQuestion(questionId: string): void {
+  const request: CodexUserInputRequest = {
+    questionId,
+    rpcRequestId: `rpc-${questionId}`,
+    method: "item/tool/requestUserInput",
+    expiresAt: Date.now() + 30_000,
+    params: {
+      itemId: `item-${questionId}`,
+      questions: [
+        {
+          id: "choice",
+          question: "Pick one",
+          options: [{ label: "A", description: "Option A" }],
+        },
+      ],
+    },
+  };
+  rt.bootOptions?.onUserInputRequest?.(request);
 }
 
 function cancelled(): RequestPermissionResponse {
@@ -133,6 +169,8 @@ describe("codex permission settlement receipts", () => {
     rt.respondCalls = [];
     rt.requestCalls = [];
     rt.runTurnCalls = [];
+    rt.userInputCalls = [];
+    rt.startThreadCalls = [];
     rt.runTurnImpl = null;
   });
 
@@ -153,6 +191,65 @@ describe("codex permission settlement receipts", () => {
       "permission-stale",
       session.sessionId,
     );
+  });
+
+  it("boots in the permission mode selected before session bind", async () => {
+    const { adapter } = makeAdapter();
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { ZEROS_PERMISSION_MODE: "auto" },
+    });
+
+    expect(session.modes?.currentModeId).toBe("auto-edit");
+    expect(rt.startThreadCalls[0]).toMatchObject({
+      approvalPolicy: "on-request",
+      sandbox: "workspace-write",
+    });
+  });
+
+  it("Approve for me resolves approvals and emits a settled telemetry marker", async () => {
+    const { adapter, emit } = makeAdapter();
+    await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { ZEROS_PERMISSION_MODE: "auto" },
+    });
+
+    raiseApproval("permission-auto");
+
+    expect(emit.onPermissionRequest).toHaveBeenCalledTimes(1);
+    expect(emit.onPermissionRequest.mock.calls[0]?.[2]).toMatchObject({
+      autoResolution: "allow_once",
+    });
+    expect(rt.respondCalls).toEqual([
+      { permissionId: "permission-auto", response: { decision: "accept" } },
+    ]);
+  });
+
+  it("Approve for me still prompts for sandbox-escalation permission profiles", async () => {
+    const { adapter, emit } = makeAdapter();
+    await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { ZEROS_PERMISSION_MODE: "auto" },
+    });
+    const permissions = {
+      network: { enabled: true },
+      fileSystem: { read: ["/tmp/read"], write: ["/tmp/write"] },
+    };
+
+    raiseApproval("permission-profile", "item/permissions/requestApproval", {
+      permissions,
+    });
+
+    // Escalations leave the workspace sandbox — Approve for me must not
+    // silently grant network / arbitrary filesystem paths.
+    expect(rt.respondCalls).toEqual([]);
+    expect(emit.onPermissionRequest).toHaveBeenCalledTimes(1);
+    expect(emit.onPermissionRequest.mock.calls[0]?.[2]).not.toHaveProperty(
+      "autoResolution",
+    );
+    expect(emit.onPermissionRequest.mock.calls[0]?.[2]).toMatchObject({
+      toolCall: expect.objectContaining({ kind: expect.any(String) }),
+    });
   });
 
   it("settles every parked approval when the Codex runtime exits", async () => {
@@ -187,6 +284,27 @@ describe("codex permission settlement receipts", () => {
     ]);
   });
 
+  it("cancels and receipts parked questions before session disposal", async () => {
+    const { adapter, emit } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    raiseQuestion("question-dispose");
+
+    await adapter.disposeSession(session.sessionId);
+
+    expect(rt.userInputCalls).toEqual([
+      {
+        questionId: "question-dispose",
+        response: { answers: { choice: { answers: [] } } },
+      },
+    ]);
+    expect(emit.onQuestionSettled).toHaveBeenCalledWith(
+      "codex",
+      "question-dispose",
+      session.sessionId,
+      { outcome: "dismissed" },
+    );
+  });
+
   it("cancels and receipts parked approvals when the user stops the turn", async () => {
     const { adapter, emit } = makeAdapter();
     const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
@@ -201,6 +319,27 @@ describe("codex permission settlement receipts", () => {
       "codex",
       "permission-1",
       session.sessionId,
+    );
+  });
+
+  it("cancels and receipts parked questions when the user stops the turn", async () => {
+    const { adapter, emit } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    raiseQuestion("question-stop");
+
+    await adapter.cancel({ sessionId: session.sessionId });
+
+    expect(rt.userInputCalls).toEqual([
+      {
+        questionId: "question-stop",
+        response: { answers: { choice: { answers: [] } } },
+      },
+    ]);
+    expect(emit.onQuestionSettled).toHaveBeenCalledWith(
+      "codex",
+      "question-stop",
+      session.sessionId,
+      { outcome: "dismissed" },
     );
   });
 
@@ -230,7 +369,10 @@ describe("codex permission settlement receipts", () => {
       return { turnId: "turn-1", status: "completed", raw: {} };
     };
 
-    await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+    const completed = await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT,
+    });
 
     expect(rt.respondCalls).toEqual([
       { permissionId: "permission-stale", response: { decision: "cancel" } },
@@ -239,6 +381,31 @@ describe("codex permission settlement receipts", () => {
       "codex",
       "permission-stale",
       session.sessionId,
+    );
+    expect(completed.response.effectiveModel).toBe("gpt-5");
+  });
+
+  it("drops any parked question abandoned at turn completion", async () => {
+    const { adapter, emit } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    rt.runTurnImpl = async () => {
+      raiseQuestion("question-stale");
+      return { turnId: "turn-1", status: "completed", raw: {} };
+    };
+
+    await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+
+    expect(rt.userInputCalls).toEqual([
+      {
+        questionId: "question-stale",
+        response: { answers: { choice: { answers: [] } } },
+      },
+    ]);
+    expect(emit.onQuestionSettled).toHaveBeenCalledWith(
+      "codex",
+      "question-stale",
+      session.sessionId,
+      { outcome: "dismissed" },
     );
   });
 

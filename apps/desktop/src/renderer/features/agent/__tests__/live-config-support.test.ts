@@ -20,17 +20,15 @@ describe("agentAppliesConfigLive", () => {
     expect(agentAppliesConfigLive("claude")).toBe(true);
     // codex app-server: turn/start re-reads session.env every turn.
     expect(agentAppliesConfigLive("codex")).toBe(true);
-  });
-
-  it("is false for cursor — model is baked into Agent.create", () => {
-    expect(agentAppliesConfigLive("cursor")).toBe(false);
+    // cursor-sdk: every send carries an explicit, freshly-resolved model id.
+    expect(agentAppliesConfigLive("cursor")).toBe(true);
   });
 
   it("resolves wrapper/vendor agent id variants through agentFamily", () => {
     expect(agentAppliesConfigLive("claude-code")).toBe(true);
     expect(agentAppliesConfigLive("@anthropic-ai/claude-code")).toBe(true);
     expect(agentAppliesConfigLive("openai-codex")).toBe(true);
-    expect(agentAppliesConfigLive("cursor-agent")).toBe(false);
+    expect(agentAppliesConfigLive("cursor-agent")).toBe(true);
   });
 
   it("is false for an unknown or missing agent — respawn is the safe default", () => {

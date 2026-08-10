@@ -13,6 +13,9 @@
 // ──────────────────────────────────────────────────────────
 
 import { describe, it, expect, afterEach } from "vitest";
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   spawnPtyViaHost,
   disposePtyHost,
@@ -25,6 +28,46 @@ const SHELL =
   process.env.SHELL && process.env.SHELL.length > 0
     ? process.env.SHELL
     : "/bin/sh";
+
+/** The host script THIS checkout owns. Resolved from the module URL, not
+ *  process.cwd() — vitest's cwd is the repo root today, but the descendant-reap
+ *  test below must exercise the source host either way (a desktop test env can
+ *  otherwise inherit a packaged ZEROS_PTY_HOST_SCRIPT). */
+const SOURCE_HOST_SCRIPT = fileURLToPath(
+  new URL("../pty-host.cjs", import.meta.url),
+);
+
+/** An interactive shell with job control AND `disown`. Rules out /bin/sh
+ *  (dash on Linux has neither), so the reap test skips rather than fails on a
+ *  runner that ships neither zsh nor bash. `-f`/`--norc` keep user rc files out
+ *  of the spawned shell. `prelude` covers the one difference that bites here:
+ *  interactive bash has history expansion on, so `$!` dies with "event not
+ *  found" instead of yielding the background job's pid. It has to be its OWN
+ *  line — expansion is applied when the line is READ, so `set +H` sharing a
+ *  line with `$!` is already too late. */
+const JOB_CONTROL_SHELL = [
+  { shell: "/bin/zsh", args: ["-f", "-i"], prelude: "" },
+  {
+    shell: "/bin/bash",
+    args: ["--norc", "--noprofile", "-i"],
+    prelude: "set +H",
+  },
+].find((candidate) => existsSync(candidate.shell));
+
+/** Diagnostics only — never let the failure message itself fail the test on a
+ *  runner whose `ps` rejects one of these format specifiers. */
+function describeProcess(pid: number | null): string {
+  if (!pid) return "no pid";
+  try {
+    return execFileSync(
+      "ps",
+      ["-o", "pid=,ppid=,pgid=,stat=,command=", "-p", String(pid)],
+      { encoding: "utf8" },
+    ).trim();
+  } catch {
+    return "process details unavailable";
+  }
+}
 
 function makeHandle(): {
   handle: PtyHandle;
@@ -109,6 +152,103 @@ describe("pty-host-client — out-of-process node-pty", () => {
     ]);
     expect(result).not.toBeNull();
   });
+
+  it.runIf(process.platform !== "win32" && JOB_CONTROL_SHELL !== undefined)(
+    "reaps a background job when its live terminal is killed",
+    async () => {
+      // The desktop test environment can inherit a packaged host path. This
+      // regression must exercise the source host changed by this checkout.
+      const priorHostScript = process.env.ZEROS_PTY_HOST_SCRIPT;
+      process.env.ZEROS_PTY_HOST_SCRIPT = SOURCE_HOST_SCRIPT;
+      let output = "";
+      let childPid: number | null = null;
+      const handle = spawnPtyViaHost({
+        shell: JOB_CONTROL_SHELL!.shell,
+        args: JOB_CONTROL_SHELL!.args,
+        cwd: process.cwd(),
+        cols: 80,
+        rows: 24,
+        env: process.env as Record<string, string>,
+      });
+      const exit = new Promise<void>((resolve) =>
+        handle.onExit(() => resolve()),
+      );
+      handle.onData((chunk) => {
+        output += chunk;
+        const match = /ZEROS_BG_PID:(\d+)/.exec(output);
+        if (match) childPid = Number(match[1]);
+      });
+      try {
+        const ready = await waitFor(
+          () => output,
+          () => handle.pid > 0,
+          4_000,
+        );
+        expect(ready).toBe(true);
+        if (JOB_CONTROL_SHELL!.prelude) {
+          handle.write(`${JOB_CONTROL_SHELL!.prelude}\r`);
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+        // `set -m` is the portable spelling of zsh's `setopt monitor`: job
+        // control puts the background job in its OWN process group, which is
+        // exactly what a process-group-only kill misses. nohup + disown then
+        // strip the last two ties to the shell.
+        handle.write(
+          "set -m; nohup sleep 30 </dev/null >/dev/null 2>&1 & child=$!; disown; echo ZEROS_BG_PID:$child\r",
+        );
+        const childStarted = await waitFor(
+          () => output,
+          () => childPid !== null,
+          4_000,
+        );
+        expect(childStarted).toBe(true);
+        const beforeKill = describeProcess(childPid);
+        handle.kill();
+        await Promise.race([
+          exit,
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error("terminal shell did not exit")),
+              4_000,
+            ),
+          ),
+        ]);
+        expect(childPid).toBeGreaterThan(0);
+        const gone = await waitFor(
+          () => "",
+          () => {
+            try {
+              const state = execFileSync(
+                "ps",
+                ["-o", "stat=", "-p", String(childPid)],
+                { encoding: "utf8" },
+              ).trim();
+              return state.length === 0 || state.startsWith("Z");
+            } catch {
+              return true;
+            }
+          },
+          2_000,
+        );
+        const processRow = gone ? "" : describeProcess(childPid);
+        expect(
+          gone,
+          `shell=${JOB_CONTROL_SHELL!.shell}; before=${beforeKill}; after=${processRow}`,
+        ).toBe(true);
+      } finally {
+        if (priorHostScript === undefined)
+          delete process.env.ZEROS_PTY_HOST_SCRIPT;
+        else process.env.ZEROS_PTY_HOST_SCRIPT = priorHostScript;
+        if (childPid) {
+          try {
+            process.kill(childPid, "SIGKILL");
+          } catch {
+            /* already reaped */
+          }
+        }
+      }
+    },
+  );
 
   it("survives resize and kill without throwing", async () => {
     const { handle, data, exit } = makeHandle();

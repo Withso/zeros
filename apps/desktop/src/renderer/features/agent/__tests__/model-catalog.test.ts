@@ -12,18 +12,22 @@ import {
   modelEnvVarForAgent,
   agentSupportsEffort,
   agentSupportsFast,
+  defaultEffortForLevels,
+  effectiveEffort,
   effortLevelsFor,
   effortLabel,
   displayModelLabel,
+  configuredModelLabel,
+  configuredModelLabelParts,
   agentModeForPermission,
   permissionForAgentMode,
   nativeModeIdForPosture,
   permissionMenuItems,
   agentHasPermissionMenu,
   coerceModeIdForModel,
-  nearestEffort,
   staticModesForAgent,
   envForChatSettings,
+  resolveModelOption,
   EFFORT_ENV_VAR,
   FAST_MODE_ENV_VAR,
   PERMISSION_MODE_ENV_VAR,
@@ -106,22 +110,21 @@ describe("modelsForAgent (curated catalog)", () => {
     expect(values[0]).toBe("claude-fable-5[1m]");
   });
 
-  it("curated list drives DISPLAY; live _meta only OVERLAYS — CURATED CAPABILITIES WIN", () => {
-    // Two guards: (1) advertised models never REPLACE the curated display list;
-    // (2) a curated model that SETS a capability (every entry now sets both
-    // effortLevels + supportsFast) is authoritative — live discovery can only
-    // FILL a field curated omits, never OVERRIDE one it defines. This determinism
-    // is the Haiku flip-flop fix: capabilities can't change as live loads.
+  it("keeps the curated display list while exact live capabilities win", () => {
+    // The curated catalog owns which rows are visible. For an exact live model,
+    // however, the installed provider/runtime is authoritative about the
+    // effort ladder and Fast support available to this account and CLI.
     const initialize = {
       protocolVersion: 1,
       _meta: {
         models: [
           // Slug-matches curated Opus (via [1m] normalization) but advertises a
-          // DIFFERENT, shorter ladder — which must be IGNORED (curated wins).
+          // DIFFERENT, shorter ladder and explicitly no Fast support.
           {
             value: "claude-opus-4-8",
             label: "Opus (live)",
             effortLevels: ["low", "high"],
+            supportsFast: false,
           },
           // …and a model NOT in the curated catalog (must never appear).
           { value: "some-unlisted-model", label: "Unlisted" },
@@ -133,11 +136,14 @@ describe("modelsForAgent (curated catalog)", () => {
     // Display = curated set; the unlisted live model never appears.
     expect(values).toContain("claude-opus-4-8[1m]");
     expect(values).not.toContain("some-unlisted-model");
-    // Curated Opus keeps its full 6-level ladder — the live 2-level ladder can't
-    // override a curated field that's explicitly set.
+    // Exact live capabilities replace the bundled fallback, including an empty
+    // ladder or explicit false (both are meaningful capability answers).
     expect(
       list.find((m) => m.value === "claude-opus-4-8[1m]")?.effortLevels,
-    ).toEqual(["low", "medium", "high", "xhigh", "max", "ultracode"]);
+    ).toEqual(["low", "high"]);
+    expect(
+      list.find((m) => m.value === "claude-opus-4-8[1m]")?.supportsFast,
+    ).toBe(false);
   });
 });
 
@@ -226,8 +232,8 @@ describe("effortLevelsFor (per-model ladder)", () => {
     ]);
   });
   it("Codex 5.6 Sol / Terra expose the full six-tier ladder (…max, ultracode)", () => {
-    // Displayed as Light…Extra High / Max / Ultra; the top two clamp to the
-    // protocol's xhigh at runtime (see mapEffortFromEnv in the codex adapter).
+    // Displayed as Light…Extra High / Max / Ultra; Max stays native `max` and
+    // Ultra maps to native `ultra` in the Codex adapter.
     for (const model of ["gpt-5.6-sol", "gpt-5.6-terra"]) {
       expect(effortLevelsFor("codex", model)).toEqual([
         "low",
@@ -273,6 +279,118 @@ describe("displayModelLabel (picker label cleanup)", () => {
   });
 });
 
+describe("configuredModelLabel (single composer model pill)", () => {
+  it("exposes model and secondary configuration as separate render parts", () => {
+    expect(
+      configuredModelLabelParts(
+        "codex",
+        "gpt-5.6-sol",
+        "GPT-5.6 Sol",
+        "high",
+        true,
+      ),
+    ).toEqual({ model: "GPT-5.6 Sol", metadata: ["High", "Fast"] });
+  });
+
+  it("appends supported effort and enabled Fast in reading order", () => {
+    expect(
+      configuredModelLabel("codex", "gpt-5.6-sol", "GPT-5.6 Sol", "high", true),
+    ).toBe("GPT-5.6 Sol High Fast");
+    expect(
+      configuredModelLabel(
+        "claude",
+        "claude-opus-5[1m]",
+        "Claude Opus 5",
+        "max",
+        false,
+      ),
+    ).toBe("Opus 5 Max");
+  });
+
+  it("omits stale settings that the exact model cannot run", () => {
+    expect(
+      configuredModelLabel(
+        "claude",
+        "claude-fable-5[1m]",
+        "Claude Fable 5",
+        "high",
+        true,
+      ),
+    ).toBe("Fable 5 High");
+    expect(
+      configuredModelLabel(
+        "cursor",
+        "composer-2.5",
+        "Composer 2.5",
+        "high",
+        true,
+      ),
+    ).toBe("Composer 2.5 Fast");
+  });
+
+  // The label used to render ChatThread.effort verbatim while the popover it
+  // opens clamped the same value, so a tier the ladder had dropped read
+  // "Ultracode" on the pill and "High" in the editor.
+  it("names the tier the model can actually run, not a retired one", () => {
+    expect(
+      configuredModelLabel(
+        "codex",
+        "gpt-5.6-luna",
+        "GPT-5.6 Luna",
+        "ultracode",
+        false,
+      ),
+    ).toBe("GPT-5.6 Luna High");
+    expect(
+      configuredModelLabel(
+        "cursor",
+        "grok-4.5",
+        "Cursor Grok 4.5",
+        "max",
+        false,
+      ),
+    ).toBe("Cursor Grok 4.5 High");
+  });
+});
+
+describe("effectiveEffort (the one stale-tier clamp)", () => {
+  it("keeps a tier the ladder advertises", () => {
+    expect(effectiveEffort("codex", "gpt-5.6-sol", "ultracode")).toBe(
+      "ultracode",
+    );
+    expect(effectiveEffort("claude", "claude-opus-5[1m]", "max")).toBe("max");
+  });
+
+  it("falls back to the ladder's own default when the tier is gone", () => {
+    expect(effectiveEffort("codex", "gpt-5.6-luna", "ultracode")).toBe("high");
+    expect(effectiveEffort("codex", "gpt-5.5", "max")).toBe("high");
+    expect(effectiveEffort("cursor", "grok-4.5", "xhigh")).toBe("high");
+  });
+
+  it("leaves a knob-less model's inert value alone", () => {
+    // Haiku advertises an empty ladder: there is no tier to clamp toward, and
+    // ChatThread still carries a value for a stable serialized shape.
+    expect(effectiveEffort("claude", "claude-haiku-4-5", "max")).toBe("max");
+  });
+
+  it("agrees with the remembered-value default for every catalog ladder", () => {
+    // Both sides must resolve "no usable stored tier" identically — the label
+    // clamp and new-chat memory share defaultEffortForLevels for that reason.
+    for (const [agentId, model] of [
+      ["claude", "claude-opus-5[1m]"],
+      ["codex", "gpt-5.6-luna"],
+      ["cursor", "grok-4.5"],
+    ] as const) {
+      const levels = effortLevelsFor(agentId, model, null);
+      expect(effectiveEffort(agentId, model, "ultracode")).toBe(
+        levels.includes("ultracode")
+          ? "ultracode"
+          : defaultEffortForLevels(levels),
+      );
+    }
+  });
+});
+
 describe("agentSupportsFast (Fast-mode capability gate)", () => {
   it("Claude: Opus 4.8 supports fast; Fable 5 / Sonnet 5 / Haiku do not", () => {
     expect(agentSupportsFast("claude", "claude-opus-4-8[1m]")).toBe(true);
@@ -284,17 +402,20 @@ describe("agentSupportsFast (Fast-mode capability gate)", () => {
     expect(agentSupportsFast("codex", "gpt-5.5")).toBe(true);
     expect(agentSupportsFast("codex", "gpt-5.4")).toBe(true);
   });
-  it("null model resolves to the agent's catalog DEFAULT (models[0]) — matching what ModelPill shows", () => {
-    // A null model = "the agent default" = the model the pill displays as active
-    // (models[0]). The gate must read THAT model's real capability, not an
-    // optimistic family guess, so the Fast toggle matches the pill:
+  it("null model resolves to the agent's GLOBAL default — matching what ModelPill shows", () => {
+    // A null model = "the agent default" = the model the pill displays as
+    // active (the star, falling back to the catalog default). The gate must
+    // read THAT model's real capability, not an optimistic family guess and
+    // not the catalog list head, so the Fast toggle matches the pill:
     //   • Cursor default = Composer 2.5 (fast) → SHOWS (the reported bug: it was
     //     hidden because the old null path fell to the cursor heuristic → false).
     expect(agentSupportsFast("cursor", null)).toBe(true);
     //   • Codex default = 5.6 Sol (fast) → shows.
     expect(agentSupportsFast("codex", null)).toBe(true);
-    //   • Claude default = Fable 5 (NO fast, per spec) → hidden, matching its pill.
-    expect(agentSupportsFast("claude", null)).toBe(false);
+    //   • Claude default = the starred Opus 5 (fast) → shows. The list HEAD is
+    //     Fable 5 (no fast); reading the head here is what hid the toggle on a
+    //     chat whose pill said Opus 5.
+    expect(agentSupportsFast("claude", null)).toBe(true);
   });
   it("other families never support fast", () => {
     for (const id of ["cursor", null]) {
@@ -647,6 +768,35 @@ describe("envForChatSettings — permission posture carriage", () => {
     expect(off[FAST_MODE_ENV_VAR]).toBeUndefined();
   });
 
+  it("does not send stale Fast mode to a model that cannot run it", () => {
+    const env = envForChatSettings({
+      agentId: "claude",
+      initialize: null,
+      model: "claude-fable-5[1m]",
+      effort: "high",
+      fast: true,
+    });
+    expect(env[FAST_MODE_ENV_VAR]).toBeUndefined();
+  });
+
+  it("does not send stale effort to models without an effort knob", () => {
+    const claude = envForChatSettings({
+      agentId: "claude",
+      initialize: null,
+      model: "claude-haiku-4-5",
+      effort: "high",
+    });
+    expect(claude[EFFORT_ENV_VAR]).toBeUndefined();
+
+    const cursor = envForChatSettings({
+      agentId: "cursor",
+      initialize: null,
+      model: "composer-2.5",
+      effort: "high",
+    });
+    expect(cursor[EFFORT_ENV_VAR]).toBeUndefined();
+  });
+
   it("emits ZEROS_ADDITIONAL_DIRS as a JSON array only when non-empty", () => {
     const withDirs = envForChatSettings({
       agentId: "claude",
@@ -677,32 +827,6 @@ describe("envForChatSettings — permission posture carriage", () => {
   });
 });
 
-describe("nearestEffort (carry-over when switching/redirecting models)", () => {
-  const GROK = ["low", "medium", "high"] as const;
-  const CODEX_55 = ["low", "medium", "high", "xhigh"] as const;
-
-  it("keeps the exact level when the target ladder offers it", () => {
-    expect(nearestEffort([...CODEX_55], "high")).toBe("high");
-    expect(nearestEffort([...GROK], "low")).toBe("low");
-  });
-
-  it("slides DOWN to the highest level below the carried one", () => {
-    // The spec's example: max on Grok 4.5 (low/medium/high) → high.
-    expect(nearestEffort([...GROK], "max")).toBe("high");
-    // Sol@max → 5.5 (low…xhigh) lands on xhigh, not a hardcoded high.
-    expect(nearestEffort([...CODEX_55], "max")).toBe("xhigh");
-    expect(nearestEffort([...CODEX_55], "ultracode")).toBe("xhigh");
-  });
-
-  it("falls to the ladder floor when carrying below everything offered", () => {
-    expect(nearestEffort(["high", "max"], "low")).toBe("high");
-  });
-
-  it("returns null for an empty ladder (no effort knob to carry to)", () => {
-    expect(nearestEffort([], "high")).toBeNull();
-  });
-});
-
 describe("envForChatSettings — model carriage (2026-07-13 default-model fix)", () => {
   it("an explicit model rides the family env var verbatim", () => {
     const env = envForChatSettings({
@@ -714,17 +838,22 @@ describe("envForChatSettings — model carriage (2026-07-13 default-model fix)",
     expect(env.ANTHROPIC_MODEL).toBe("claude-haiku-4-5");
   });
 
-  it("a NULL model resolves to the catalog default the ModelPill displays (never omitted)", () => {
+  it("a NULL model resolves to the global default the ModelPill displays (never omitted)", () => {
     // Omitting the var let the agent CLI fall back to its OWN configured
     // default, which could silently differ from what the pill shows — the
     // "pill says one model, turn ran another" bug.
+    //
+    // The resolved value is the STARRED model (catalog fallback when unset),
+    // not the catalog list head. Those differ for Claude — head is Fable 5,
+    // star is Opus 5 — and sending the head while the pill rendered the star
+    // is that same bug wearing a different hat.
     const claude = envForChatSettings({
       agentId: "claude",
       initialize: null,
       model: null,
       effort: "high",
     });
-    expect(claude.ANTHROPIC_MODEL).toBe("claude-fable-5[1m]");
+    expect(claude.ANTHROPIC_MODEL).toBe("claude-opus-5[1m]");
 
     const codex = envForChatSettings({
       agentId: "codex",
@@ -751,5 +880,85 @@ describe("envForChatSettings — model carriage (2026-07-13 default-model fix)",
       effort: "high",
     });
     expect(Object.keys(env).some((k) => /MODEL/i.test(k))).toBe(false);
+  });
+});
+
+describe("a null ChatThread.model means ONE model everywhere", () => {
+  // The label, the capability gates, and the spawn env each used to answer
+  // "which model is this null?" on their own. For Claude the answers differed:
+  // the pill showed the starred Opus 5 (Fast-capable) while the gates and the
+  // env resolved the list head Fable 5 (not Fast-capable). The chat then ran
+  // Fable under an "Opus 5" label, and toggling the Fast switch the menu
+  // offered sent a flag the running model does not support.
+  const MODEL_ENV_VAR: Record<string, string> = {
+    claude: "ANTHROPIC_MODEL",
+    codex: "OPENAI_MODEL",
+    cursor: "CURSOR_MODEL",
+  };
+
+  for (const agentId of ["claude", "codex", "cursor"]) {
+    it(`${agentId}: label, Fast gate, and spawn env all agree`, () => {
+      const resolved = resolveModelOption(agentId, null, null);
+      expect(resolved).not.toBeNull();
+
+      // The engine runs exactly the model the pill names.
+      const env = envForChatSettings({
+        agentId,
+        initialize: null,
+        model: null,
+        effort: "high",
+      });
+      expect(env[MODEL_ENV_VAR[agentId]]).toBe(resolved?.value);
+
+      // And the Fast gate answers for that same model, so the menu can never
+      // offer a toggle the running model does not support.
+      expect(agentSupportsFast(agentId, null, null)).toBe(
+        agentSupportsFast(agentId, resolved?.value ?? null, null),
+      );
+      expect(effortLevelsFor(agentId, null, null)).toEqual(
+        effortLevelsFor(agentId, resolved?.value ?? null, null),
+      );
+    });
+  }
+
+  it("resolves to the starred model, not the catalog list head", () => {
+    // Claude is the family where the two differ, which is what made the
+    // divergence observable at all.
+    expect(modelsForAgent("claude", null)[0]?.value).toBe("claude-fable-5[1m]");
+    expect(resolveModelOption("claude", null, null)?.value).toBe(
+      "claude-opus-5[1m]",
+    );
+    // Fast capability follows the starred model, not the head.
+    expect(agentSupportsFast("claude", null, null)).toBe(true);
+  });
+
+  it("sends the same clamped effort the pill names", () => {
+    // Luna's ladder has no `ultracode`. The label clamps it, so the env must
+    // too — otherwise the fix moves the disagreement instead of removing it.
+    const env = envForChatSettings({
+      agentId: "codex",
+      initialize: null,
+      model: "gpt-5.6-luna",
+      effort: "ultracode",
+    });
+    expect(env[EFFORT_ENV_VAR]).toBe("high");
+    expect(
+      configuredModelLabelParts(
+        "codex",
+        "gpt-5.6-luna",
+        "GPT-5.6 Luna",
+        "ultracode",
+        false,
+      ).metadata,
+    ).toEqual([effortLabel("codex", "high")]);
+    // An extension agent's own vocabulary is passed through untouched.
+    expect(
+      envForChatSettings({
+        agentId: "mystery-agent",
+        initialize: null,
+        model: null,
+        effort: "turbo",
+      })[EFFORT_ENV_VAR],
+    ).toBe("turbo");
   });
 });

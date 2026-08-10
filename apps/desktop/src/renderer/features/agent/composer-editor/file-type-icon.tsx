@@ -80,7 +80,7 @@ const ICON_PALETTE: Record<string, string> = {
 // `[data-icon-token='…'] { color: var(--trees-file-icon-color-…) }` rules
 // (which in turn point at the --trees-icon-* colors above). Tokens the tree
 // leaves unstyled (e.g. "font") fall through to the tree's muted foreground —
-// our --fg3, exactly what TREE_THEME_VARS feeds --trees-fg-muted.
+// our --muted-fg, exactly what TREE_THEME_VARS feeds --trees-fg-muted.
 const TOKEN_PALETTE: Record<string, string> = {
   astro: "purple",
   babel: "yellow",
@@ -137,7 +137,7 @@ const TOKEN_PALETTE: Record<string, string> = {
 /** The color the Files tab paints this token with (see the tables above). */
 function tokenColor(token: string): string {
   const palette = TOKEN_PALETTE[token];
-  return palette ? ICON_PALETTE[palette] : "var(--fg3)";
+  return palette ? ICON_PALETTE[palette] : "var(--muted-fg)";
 }
 
 export interface FileTypeIconProps {

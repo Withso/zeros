@@ -61,7 +61,15 @@ import type {
 } from "../../types";
 import { AgentFailureError } from "../../types";
 import { PERMISSION_RESPONSE_TIMEOUT_MS } from "../shared/constants";
+import {
+  answerMcpElicitation,
+  buildMcpElicitationQuestion,
+  type McpElicitationAnswer,
+  mcpElicitationAuditInput,
+  type McpElicitationRequestLike,
+} from "../shared/mcp-elicitation";
 import { isDevRuntime } from "../../../runtime";
+import { openExternalUrl } from "../../gateway/open-url";
 
 import {
   bootCodexAppServerRuntime,
@@ -86,6 +94,7 @@ import type {
   AdvertisedModel,
   AvailableCommand,
   NativeThreadGoal,
+  PermissionOption,
 } from "@zeros/protocol/agent-events";
 import type { AccountDetails } from "@zeros/protocol/messages";
 import type { GetAccountResponse } from "./generated/v2/GetAccountResponse";
@@ -124,6 +133,37 @@ const CANCELLED_PERMISSION_RESPONSE = {
   outcome: { outcome: "cancelled" },
 } as RequestPermissionResponse;
 
+/** The explicit grant used by Codex's "Approve for me" mode. The adapter
+ * resolves native approval RPCs itself in that mode, so the renderer never
+ * shows a card whose only intended action is approval. */
+const AUTO_APPROVE_PERMISSION_RESPONSE = {
+  outcome: { outcome: "selected", optionId: "accept" },
+} as RequestPermissionResponse;
+
+/** Methods safe to settle without a user card in `auto-edit`. Sandbox
+ * escalations (`item/permissions/requestApproval` — network / arbitrary
+ * filesystem paths) stay on the normal renderer gate so Approve for me keeps
+ * the workspace sandbox. */
+const AUTO_EDIT_AUTO_APPROVE_METHODS = new Set<CodexApprovalMethod>([
+  "item/commandExecution/requestApproval",
+  "item/fileChange/requestApproval",
+  "execCommandApproval",
+  "applyPatchApproval",
+]);
+
+export function autoEditCanAutoApprove(
+  request: Pick<CodexApprovalRequest, "method" | "params">,
+): boolean {
+  if (!AUTO_EDIT_AUTO_APPROVE_METHODS.has(request.method)) return false;
+  if (request.method !== "item/commandExecution/requestApproval") return true;
+  const available = request.params.availableDecisions;
+  // Newer app-server builds can constrain a command gate to policy-amendment
+  // decisions. Auto-edit means "approve this operation", not "silently write
+  // a persistent policy". If the server supplied an explicit list, auto-settle
+  // only when the plain one-shot accept is actually offered.
+  return !Array.isArray(available) || available.includes("accept");
+}
+
 const CODEX_MODES: SessionMode[] = [
   {
     id: "ask",
@@ -148,6 +188,33 @@ const CODEX_MODES: SessionMode[] = [
 ] as never;
 
 export type CodexModeId = "ask" | "auto-edit" | "full-access" | "read-only";
+
+/** Resolve the renderer's persisted permission posture (plus legacy/native
+ * spellings) before thread/start. AGENT_SET_MODE remains the live update path,
+ * but seeding from env closes the create/resume window in which the first turn
+ * previously ran in `ask` regardless of what the user selected. Unknown values
+ * fail safe to Ask First. */
+export function codexModeFromEnv(
+  env: Record<string, string> | undefined,
+): CodexModeId {
+  switch (env?.ZEROS_PERMISSION_MODE?.trim().toLowerCase()) {
+    case "plan":
+    case "plan-only":
+    case "read-only":
+      return "read-only";
+    case "auto":
+    case "auto-edit":
+      return "auto-edit";
+    case "danger":
+    case "full":
+    case "full-access":
+      return "full-access";
+    case "tool-approval":
+    case "ask":
+    default:
+      return "ask";
+  }
+}
 
 /** Per-pending-approval state. Keyed by Zeros permissionId so
  *  respondToPermission can route the user's decision back to the
@@ -260,6 +327,7 @@ type PendingCodexQuestion =
       kind: "user-input";
       runtime: CodexAppServerHandle;
       request: QuestionRequest;
+      native: CodexUserInputRequest;
     }
   | {
       kind: "mcp-elicitation";
@@ -319,9 +387,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
    *  is account-stable). The Codex ReasoningEffort vocabulary
    *  ladder is normalized into Zeros' existing composer tokens in the
    *  server's intended order (`ultra` → `ultracode`; none/minimal dropped).
-   *  `supportsFast` is set only when a "fast" service
-   *  tier is advertised — otherwise left unset so the renderer's gpt-5*
-   *  heuristic stands (never a regression). */
+   *
+   *  Both capabilities follow the AdvertisedModel contract: a field the
+   *  response actually CARRIES is authoritative for this account/runtime even
+   *  when it answers "none" (an empty ladder, no fast tier), while a field the
+   *  response OMITS is left unset so the renderer keeps its bundled fallback.
+   *  Collapsing those two cases would let an older/leaner `model/list` payload
+   *  silently strip the effort and Fast controls off every model. */
   private async discoverModels(session: CodexSession): Promise<void> {
     if (this.modelsDiscovered) return;
     try {
@@ -338,18 +410,34 @@ export class CodexAppServerAdapter implements AgentAdapter {
       const models: AdvertisedModel[] = [];
       for (const m of resp?.data ?? []) {
         if (!m?.id || m.hidden) continue;
-        const effortLevels = (m.supportedReasoningEfforts ?? [])
-          .map((e) => e.reasoningEffort)
-          .map(mapCodexAdvertisedEffort)
-          .filter((e): e is string => typeof e === "string");
-        const hasFast =
-          (m.serviceTiers ?? []).some((t) => t.id === "fast") ||
-          (m.additionalSpeedTiers ?? []).includes("fast");
+        // An advertised ladder that maps to nothing (Codex offered only
+        // none/minimal, which Zeros' composer has no token for) stays an
+        // explicit [] — there is genuinely no effort the user could pick that
+        // this model accepts.
+        const effortLevels = Array.isArray(m.supportedReasoningEfforts)
+          ? m.supportedReasoningEfforts
+              .map((e) => e.reasoningEffort)
+              .map(mapCodexAdvertisedEffort)
+              .filter((e): e is string => typeof e === "string")
+          : undefined;
+        // Either tier field answers the Fast question; only their joint absence
+        // means the response never addressed it.
+        const serviceTiers = Array.isArray(m.serviceTiers)
+          ? m.serviceTiers
+          : undefined;
+        const speedTiers = Array.isArray(m.additionalSpeedTiers)
+          ? m.additionalSpeedTiers
+          : undefined;
+        const supportsFast =
+          serviceTiers || speedTiers
+            ? (serviceTiers ?? []).some((t) => t?.id === "fast") ||
+              (speedTiers ?? []).includes("fast")
+            : undefined;
         models.push({
           value: m.id,
           label: m.displayName || m.id,
-          effortLevels,
-          ...(hasFast ? { supportsFast: true } : {}),
+          ...(effortLevels !== undefined ? { effortLevels } : {}),
+          ...(supportsFast !== undefined ? { supportsFast } : {}),
         });
       }
       if (models.length > 0) {
@@ -653,6 +741,17 @@ export class CodexAppServerAdapter implements AgentAdapter {
       // chat bubble while the green dot stayed green. Promote it to a real
       // auth-required failure here so the gateway's runtime auth
       // invalidation flips the dot.
+      const rateLimit = session.translator.rateLimitFailure;
+      if (rateLimit) {
+        throw new AgentFailureError({
+          kind: "rate-limited",
+          message: `Codex: ${rateLimit}.`,
+          stage: "prompt",
+          agentId: AGENT_ID,
+          advice:
+            "Codex is rate-limiting requests. Wait for the provider reset, then try again.",
+        });
+      }
       const authQuota = session.translator.authQuotaFailure;
       if (authQuota) {
         throw new AgentFailureError({
@@ -703,6 +802,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       const stopReason = session.cancelRequested
         ? "cancelled"
         : mapStopReason(result.status, session.translator.stopReason);
+      const effectiveModel = model ?? session.threadModel ?? undefined;
       // stopReason rides INSIDE the response too: the gateway returns only
       // the inner response (it discards the outer field), so omitting it here
       // left the engine persisting a NULL stop reason for every Codex turn —
@@ -711,6 +811,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         stopReason,
         response: {
           stopReason,
+          ...(effectiveModel ? { effectiveModel } : {}),
           ...(turnUsage ? { usage: turnUsage } : {}),
         } as PromptResponse,
       };
@@ -739,8 +840,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
       session.turnActive = false;
       session.cancelRequested = false;
       // A completed/failed turn cannot still service one of its approval
-      // resolvers. Fail closed and receipt every straggler before a later turn
-      // can enqueue behind a dead renderer card.
+      // or question resolvers. Fail closed and receipt every straggler before
+      // a later turn can enqueue behind a dead renderer card.
       this.drainPendingApprovals(session, session.runtimeAlive);
       this.drainPendingQuestions(session, session.runtimeAlive);
     }
@@ -904,6 +1005,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     if (!session) return;
     const carried = { ...(session.env ?? {}) };
     delete carried.ZEROS_FAST_MODE;
+    delete carried.ZEROS_THINKING_EFFORT;
     delete carried.ZEROS_ADDITIONAL_DIRS;
     session.env = { ...carried, ...opts.env };
   }
@@ -997,8 +1099,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
     if (opts.nativeRequestId) {
       for (const session of this.sessions.values()) {
         for (const [qid, pending] of session.pendingQuestions) {
-          if (pending.request.nativeRequestId !== opts.nativeRequestId)
+          if (pending.request.nativeRequestId !== opts.nativeRequestId) {
             continue;
+          }
           this.answerPendingQuestion(session, qid, pending, opts.response);
           return true;
         }
@@ -1011,6 +1114,18 @@ export class CodexAppServerAdapter implements AgentAdapter {
       `[zeros] respondToQuestion: no pending question ${opts.questionId} (native ${opts.nativeRequestId ?? "-"}) — answer dropped (already settled or session rebuilt)`,
     );
     return false;
+  }
+
+  /** Receipt a question whose native resolver was already retired. */
+  private settlePendingQuestion(
+    session: CodexSession,
+    questionId: string,
+    outcome: QuestionResponse["outcome"],
+  ): boolean {
+    const pending = session.pendingQuestions.get(questionId);
+    if (!pending || !session.pendingQuestions.delete(questionId)) return false;
+    this.settleQuestionRecord(session, questionId, pending.request, outcome);
+    return true;
   }
 
   // ── account ───────────────────────────────────────────
@@ -1165,11 +1280,32 @@ export class CodexAppServerAdapter implements AgentAdapter {
     if (!s) return;
     this.drainPendingApprovals(s, s.runtimeAlive);
     this.drainPendingQuestions(s, s.runtimeAlive);
-    this.sessions.delete(sessionId);
     this.disposing.add(sessionId);
+    // Drop the session BEFORE the teardown attempt, so a failure reports itself
+    // without pinning an un-retryable state. The runtime memoizes its dispose
+    // promise (a retry would re-await the same hung process-group stop) and the
+    // gateway has already cleared its routing, so keeping the entry would only
+    // leave a forgotten session that a late runtime exit could still drive —
+    // while making the workspace permanently unarchivable for this process.
+    this.sessions.delete(sessionId);
     try {
-      await s.runtime.dispose().catch(() => {});
+      let disposeFailed = false;
+      let disposeError: unknown;
+      try {
+        // Codex is the one adapter that owns an explicit process-group stop
+        // (stdio-process stop() SIGTERMs, escalates to SIGKILL, then awaits the
+        // real exit), so a rejection here genuinely means a child may still be
+        // alive in the worktree. Surface it: ordinary tab close stays
+        // best-effort in the gateway, archive/delete passes failClosed and
+        // aborts. A retry then proceeds — the child has already been SIGKILLed
+        // and there is no further escalation available.
+        await s.runtime.dispose();
+      } catch (err) {
+        disposeFailed = true;
+        disposeError = err;
+      }
       await removeSessionDir(s.zerosSessionId).catch(() => {});
+      if (disposeFailed) throw disposeError;
     } finally {
       // Keep the suppression alive briefly past dispose() in case the child's
       // exit event lands a tick later, then release the marker.
@@ -1231,10 +1367,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
     const zerosSessionId = opts.zerosSessionId ?? randomUUID();
     await ensureSessionDir(zerosSessionId);
 
-    // Always boot in "ask". The UI's mode pill is the canonical setter;
-    // env-driven overrides would race the pill's persisted value, so
-    // they're rejected.
-    const initialMode: CodexModeId = "ask";
+    // Seed thread/start from the same persisted posture the renderer will
+    // reconcile over AGENT_SET_MODE. This makes the first turn truthful even
+    // when it is dispatched immediately after session creation.
+    const initialMode = codexModeFromEnv(opts.env);
 
     // Boot the runtime first; we pass an onApprovalRequest closure that
     // will mutate `session.pendingApprovals` once the session object
@@ -1781,6 +1917,60 @@ export class CodexAppServerAdapter implements AgentAdapter {
     session: CodexSession,
     request: CodexApprovalRequest,
   ): void {
+    // Approve for me auto-settles in-sandbox tool gates only. Permission-profile
+    // escalations (network / out-of-workspace paths) still require a user card.
+    if (session.modeId === "auto-edit" && autoEditCanAutoApprove(request)) {
+      let approved = false;
+      try {
+        const response = mapResponseToCodexDecision(
+          {
+            runtime: session.runtime,
+            method: request.method,
+            params: request.params,
+          },
+          AUTO_APPROVE_PERMISSION_RESPONSE,
+        );
+        session.runtime.respondToPermission(request.permissionId, response);
+        approved = true;
+      } catch {
+        // Fall through to the normal renderer gate if the native response
+        // shape changes. A failed auto-approval must never silently run or
+        // strand the turn.
+        this.ctx.emit.onAgentStderr(
+          this.agentId,
+          "[zeros] Codex auto-approval failed; requesting user approval",
+        );
+      }
+      if (approved) {
+        // Forward a metadata-only settled gate so the renderer can correlate
+        // the auto decision with the active prompt in logs/PostHog. The marker
+        // makes this observational: it never renders a card or responds twice.
+        try {
+          this.ctx.emit.onPermissionRequest(
+            this.agentId,
+            request.permissionId,
+            {
+              ...mapApprovalToCanonical(session, request),
+              autoResolution: "allow_once",
+            },
+          );
+          this.ctx.emit.onPermissionSettled?.(
+            this.agentId,
+            request.permissionId,
+            session.zerosSessionId,
+          );
+        } catch {
+          this.ctx.emit.onAgentStderr(
+            this.agentId,
+            "[zeros] Codex auto-approval telemetry emit failed",
+          );
+        }
+        console.info(
+          `[codex] auto-approved ${request.method} in mode=auto-edit`,
+        );
+        return;
+      }
+    }
     session.pendingApprovals.set(request.permissionId, {
       runtime: session.runtime,
       method: request.method,
@@ -1873,17 +2063,24 @@ export class CodexAppServerAdapter implements AgentAdapter {
     session: CodexSession,
     request: CodexUserInputRequest,
   ): void {
-    const canonical = mapUserInputToQuestion(
+    const canonical = mapCodexQuestionToCanonical(
       session.zerosSessionId,
-      request.questionId,
-      request.requestId,
-      request.params,
+      request,
     );
-    session.translator.emitUserInputToolCall(request.params);
+    if (request.method === "item/tool/requestUserInput") {
+      session.translator.emitUserInputToolCall(request.params);
+    } else {
+      session.translator.emitBlockingQuestionToolCall(
+        canonical.toolCallId,
+        "MCP input requested",
+        mcpElicitationAuditInput(request.params as McpElicitationRequestLike),
+      );
+    }
     session.pendingQuestions.set(request.questionId, {
       kind: "user-input",
       runtime: session.runtime,
       request: canonical,
+      native: request,
     });
     this.ctx.emit.onQuestionRequest(
       this.agentId,
@@ -1924,11 +2121,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     session: CodexSession,
     questionId: string,
   ): void {
-    const pending = session?.pendingQuestions?.get(questionId);
-    if (!pending || !session.pendingQuestions.delete(questionId)) return;
-    this.settleQuestionRecord(session, questionId, pending.request, {
-      outcome: "dismissed",
-    });
+    this.settlePendingQuestion(session, questionId, { outcome: "dismissed" });
   }
 
   private answerPendingQuestion(
@@ -1940,10 +2133,15 @@ export class CodexAppServerAdapter implements AgentAdapter {
     if (!session.pendingQuestions.delete(questionId)) return;
     let outcome = response.outcome;
     if (pending.kind === "user-input") {
-      pending.runtime.respondToUserInput(
-        questionId,
-        mapQuestionAnswerToCodex(pending.request, response),
+      const mapped = mapCodexQuestionAnswer(
+        pending.native,
+        pending.request,
+        response,
       );
+      if ("openUrl" in mapped && mapped.openUrl) {
+        openExternalUrl(mapped.openUrl);
+      }
+      pending.runtime.respondToUserInput(questionId, mapped.response);
     } else {
       try {
         pending.runtime.respondToMcpElicitation(
@@ -2530,16 +2728,22 @@ export function modePolicyFor(modeId: CodexModeId): CodexModePolicy {
  *  variant`, i.e. every send fails. So each Zeros tier must map onto a token
  *  Codex really has:
  *    • `ultra`  — the native proactive multi-agent tier (`ultracode` → this).
- *    • `max`    — Claude-only, NOT a Codex variant, so it clamps DOWN to
- *                 `xhigh` (Codex's highest ordinary reasoning tier). It is
- *                 normally unreachable (CODEX_LADDER excludes it), but a
- *                 persisted/settings-derived effort can still carry it, and a
- *                 graceful downgrade beats a hard turn failure.
+ *    • `max`    — native on current Codex models (including GPT-5.6), and must
+ *                 remain distinct from `xhigh` so a provider settings echo
+ *                 cannot rewrite the user's Max selection as Extra High.
  *  Unknown / empty values stay unset so Codex picks its own default
  *  (typically "medium"). */
 export function mapCodexEffortFromEnv(
   value: string | undefined,
-): "minimal" | "low" | "medium" | "high" | "xhigh" | "ultra" | undefined {
+):
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max"
+  | "ultra"
+  | undefined {
   switch (value?.trim().toLowerCase()) {
     case "minimal":
       return "minimal";
@@ -2552,7 +2756,7 @@ export function mapCodexEffortFromEnv(
     case "xhigh":
       return "xhigh";
     case "max":
-      return "xhigh";
+      return "max";
     case "ultracode":
     case "ultra":
       return "ultra";
@@ -2561,12 +2765,7 @@ export function mapCodexEffortFromEnv(
   }
 }
 
-/** Codex protocol token → the already-shipping composer effort vocabulary.
- *
- *  Deliberately asymmetric with {@link mapCodexEffortFromEnv}: this direction
- *  reads what the SERVER claims to support, so an unexpected `max` is honoured
- *  (shown as Max) rather than dropped — the outbound clamp then keeps the turn
- *  itself on a token today's app-server accepts. */
+/** Codex protocol token → the already-shipping composer effort vocabulary. */
 export function mapCodexAdvertisedEffort(
   value: string | undefined,
 ): string | undefined {
@@ -2634,7 +2833,37 @@ function mimeToExt(mime: string | undefined): string {
   }
 }
 
-// ── requestUserInput params → canonical QuestionRequest ─────
+// ── blocking server questions → canonical QuestionRequest ──
+
+/** Route Codex-native questions and MCP elicitation through the same canonical
+ * card while retaining their distinct response schemas. */
+export function mapCodexQuestionToCanonical(
+  sessionId: string,
+  request: CodexUserInputRequest,
+): QuestionRequest {
+  if (request.method === "mcpServer/elicitation/request") {
+    const params = request.params as McpElicitationRequestLike;
+    const nativeRequestId =
+      (typeof params.elicitationId === "string" && params.elicitationId) ||
+      request.rpcRequestId;
+    return buildMcpElicitationQuestion({
+      sessionId,
+      questionId: request.questionId,
+      nativeRequestId,
+      toolCallId: `mcp-elicitation:${nativeRequestId}`,
+      request: params,
+      expiresAt:
+        request.expiresAt ?? Date.now() + PERMISSION_RESPONSE_TIMEOUT_MS,
+    });
+  }
+  return mapUserInputToQuestion(
+    sessionId,
+    request.questionId,
+    request.rpcRequestId,
+    request.params,
+    request.expiresAt,
+  );
+}
 
 /** Convert a Codex ToolRequestUserInputParams into the canonical QuestionRequest.
  *  Codex specifics: option `id` == `label` (the answer is a label array, so the
@@ -2645,8 +2874,9 @@ function mimeToExt(mime: string | undefined): string {
 function mapUserInputToQuestion(
   sessionId: string,
   questionId: string,
-  requestId: string | number,
+  rpcRequestId: string,
   params: Record<string, unknown>,
+  expiresAt?: number,
 ): QuestionRequest {
   const rawQuestions = Array.isArray(params?.questions)
     ? (params.questions as Array<Record<string, unknown>>)
@@ -2682,18 +2912,13 @@ function mapUserInputToQuestion(
   return {
     sessionId: sessionId as never,
     questionId,
-    // itemId is stable across a reconnect/replay and therefore remains the
-    // best renderer dedupe key. Fall back to the real JSON-RPC request id when
-    // this ask has no associated item.
-    nativeRequestId:
-      itemId ?? codexNativeRequestId("user-input", params.threadId, requestId),
+    nativeRequestId: itemId ?? rpcRequestId,
     toolCallId: itemId,
     source: "native_rpc",
     blocking: true,
-    // app-server.ts armed its auto-skip timer (APPROVAL_TIMEOUT_MS = the same
-    // shared constant) synchronously before forwarding this request, so
-    // "now + timeout" matches the empty-answer settle within milliseconds.
-    expiresAt: Date.now() + PERMISSION_RESPONSE_TIMEOUT_MS,
+    // app-server.ts owns the resolver timer and forwards its exact deadline.
+    // The fallback covers synthetic/older test requests only.
+    expiresAt: expiresAt ?? Date.now() + PERMISSION_RESPONSE_TIMEOUT_MS,
     questions,
   };
 }
@@ -2701,14 +2926,14 @@ function mapUserInputToQuestion(
 /** Canonical QuestionResponse → Codex ToolRequestUserInputResponse
  *  ({ answers: { [questionId]: { answers: string[] } } }). Since option id ==
  *  label, selectedOptionIds ARE the labels; free-text is appended last. On
- *  dismiss we send empty arrays for every question id because Codex has no
- *  cancel variant. */
-function mapQuestionAnswerToCodex(
+ *  dismiss/decline we send empty arrays for every question id because Codex
+ *  has no cancel variant. (Only MCP cards expose decline as a distinct action.) */
+function mapNativeQuestionAnswerToCodex(
   request: QuestionRequest,
   response: QuestionResponse,
 ): { answers: Record<string, { answers: string[] }> } {
   const answers: Record<string, { answers: string[] }> = {};
-  if (response.outcome.outcome === "dismissed") {
+  if (response.outcome.outcome !== "answered") {
     for (const q of request.questions) answers[q.id] = { answers: [] };
     return { answers };
   }
@@ -2867,8 +3092,13 @@ export function mapQuestionAnswerToMcpElicitation(
   params: CodexMcpElicitationRequest["params"],
   response: QuestionResponse,
 ): McpServerElicitationRequestResponse {
-  if (response.outcome.outcome === "dismissed") {
-    return { action: "cancel", content: null, _meta: null };
+  if (response.outcome.outcome !== "answered") {
+    return {
+      action:
+        response.outcome.outcome === "declined" ? "decline" : "cancel",
+      content: null,
+      _meta: null,
+    };
   }
 
   const answers = new Map(
@@ -3064,20 +3294,167 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/** Canonical response mapped through the upstream MCP compatibility layer. */
+export function mapCodexQuestionAnswer(
+  native: CodexUserInputRequest,
+  request: QuestionRequest,
+  response: QuestionResponse,
+):
+  | McpElicitationAnswer
+  | { response: ReturnType<typeof mapNativeQuestionAnswerToCodex> } {
+  if (native.method === "mcpServer/elicitation/request") {
+    return answerMcpElicitation(
+      native.params as McpElicitationRequestLike,
+      response,
+    );
+  }
+  return { response: mapNativeQuestionAnswerToCodex(request, response) };
+}
+
 // ── Approval params → canonical RequestPermissionRequest ─────
 
+interface NativeCommandChoice {
+  option: PermissionOption;
+  decision: unknown;
+}
+
+const BASE_COMMAND_DECISIONS = {
+  accept: { name: "Approve once", kind: "allow_once" },
+  acceptForSession: {
+    name: "Approve for session",
+    kind: "allow_always",
+  },
+  decline: { name: "Decline", kind: "reject_once" },
+  cancel: { name: "Cancel", kind: "reject_always" },
+} as const;
+
+/** Convert one app-server `availableDecisions` entry into a stable renderer
+ * choice. Object decisions are referenced by their position rather than
+ * serialized into the option id; the response mapper indexes back into the
+ * adapter-owned params, so renderer input can never manufacture a policy. */
+function nativeCommandChoice(
+  decision: unknown,
+  index: number,
+): NativeCommandChoice | null {
+  if (typeof decision === "string" && decision in BASE_COMMAND_DECISIONS) {
+    const spec =
+      BASE_COMMAND_DECISIONS[decision as keyof typeof BASE_COMMAND_DECISIONS];
+    return {
+      option: { optionId: decision, name: spec.name, kind: spec.kind },
+      decision,
+    };
+  }
+
+  const record = asRecord(decision);
+  const exec = asRecord(record?.acceptWithExecpolicyAmendment);
+  const execPolicy = exec?.execpolicy_amendment;
+  if (
+    Array.isArray(execPolicy) &&
+    execPolicy.length > 0 &&
+    execPolicy.every((part) => typeof part === "string")
+  ) {
+    return {
+      option: {
+        optionId: `acceptWithExecpolicyAmendment:${index}`,
+        name: "Approve and remember command rule",
+        kind: "allow_always",
+      },
+      decision,
+    };
+  }
+
+  const network = asRecord(record?.applyNetworkPolicyAmendment);
+  const amendment = asRecord(network?.network_policy_amendment);
+  const host = stringField(amendment ?? {}, "host")?.trim();
+  const action = amendment?.action;
+  if (host && (action === "allow" || action === "deny")) {
+    return {
+      option: {
+        optionId: `applyNetworkPolicyAmendment:${index}`,
+        name:
+          action === "allow"
+            ? `Approve and allow ${host}`
+            : `Deny and block ${host}`,
+        kind: action === "allow" ? "allow_always" : "reject_always",
+      },
+      decision,
+    };
+  }
+  return null;
+}
+
+function nativeCommandChoices(
+  params: Record<string, unknown>,
+): NativeCommandChoice[] | null {
+  const available = params.availableDecisions;
+  if (!Array.isArray(available)) return null;
+  const choices: NativeCommandChoice[] = [];
+  const seenIds = new Set<string>();
+  for (let index = 0; index < available.length; index += 1) {
+    const choice = nativeCommandChoice(available[index], index);
+    if (!choice || seenIds.has(choice.option.optionId)) continue;
+    seenIds.add(choice.option.optionId);
+    choices.push(choice);
+  }
+  return choices;
+}
+
+function commandApprovalContext(params: Record<string, unknown>): string[] {
+  const items: string[] = [];
+  const networkContext = asRecord(params.networkApprovalContext);
+  const host = stringField(networkContext ?? {}, "host")?.trim();
+  const protocol = stringField(networkContext ?? {}, "protocol")?.trim();
+  if (host) {
+    items.push(`Network · ${protocol ? `${protocol}://` : ""}${host}`);
+  }
+
+  const additional = asRecord(params.additionalPermissions);
+  const network = asRecord(additional?.network);
+  if (network?.enabled === true) items.push("Extra network access");
+  const fileSystem = asRecord(additional?.fileSystem);
+  for (const [label, value] of [
+    ["Read", fileSystem?.read],
+    ["Write", fileSystem?.write],
+  ] as const) {
+    if (!Array.isArray(value)) continue;
+    for (const pathValue of value) {
+      if (typeof pathValue === "string" && pathValue.trim()) {
+        items.push(`${label} · ${pathValue}`);
+      }
+    }
+  }
+  if (Array.isArray(fileSystem?.entries)) {
+    for (const entryValue of fileSystem.entries) {
+      const entry = asRecord(entryValue);
+      const access = stringField(entry ?? {}, "access");
+      const pathSpec = asRecord(entry?.path);
+      const pathValue =
+        stringField(pathSpec ?? {}, "path") ??
+        stringField(pathSpec ?? {}, "pattern") ??
+        stringField(pathSpec ?? {}, "value");
+      if (access && pathValue) items.push(`${access} · ${pathValue}`);
+    }
+  }
+  // The full, unabridged request remains in rawInput. Keep the prominent pill
+  // row bounded when a sandbox asks for a large path set.
+  return items.slice(0, 6);
+}
+
 /** Convert a codex approval request into the canonical Zeros shape the
- *  gateway broadcasts to the renderer. The option set is identical
- *  across methods (we always offer the same 4 choices); the renderer
- *  decides how to render them. */
+ *  gateway broadcasts to the renderer. Command approvals honor the exact
+ *  ordered `availableDecisions` list when app-server supplies one, including
+ *  exec-policy and network-policy amendment objects. */
 export function mapApprovalToCanonical(
   session: CodexSession,
   request: CodexApprovalRequest,
 ): RequestPermissionRequest {
   const params = request.params;
-  const itemId = stringField(params, "itemId") ?? randomUUID();
+  const itemId =
+    stringField(params, "itemId") ??
+    stringField(params, "callId") ??
+    randomUUID();
   const reason = stringField(params, "reason");
-  const command = stringField(params, "command");
+  const command = commandField(params, "command");
   const cwd = stringField(params, "cwd");
 
   let title: string;
@@ -3085,15 +3462,37 @@ export function mapApprovalToCanonical(
   let rawInput: unknown;
   switch (request.method) {
     case "item/commandExecution/requestApproval":
+    case "execCommandApproval":
       title = command ? `Run: ${truncate(command, 60)}` : "Run shell command";
       kind = "execute";
-      rawInput = { command, cwd, reason };
+      rawInput = {
+        command,
+        cwd,
+        reason,
+        networkApprovalContext: params.networkApprovalContext,
+        additionalPermissions: params.additionalPermissions,
+        proposedExecpolicyAmendment: params.proposedExecpolicyAmendment,
+        proposedNetworkPolicyAmendments: params.proposedNetworkPolicyAmendments,
+        availableDecisions: params.availableDecisions,
+      };
       break;
     case "item/fileChange/requestApproval": {
       // Correlate back to the streamed item to surface the file list — the
       // approval params themselves have no changes[]. One patch may touch
       // several files; the card shows a count for >1, the single path for 1.
       const filePaths = session.fileEditPathsByItemId.get(itemId) ?? [];
+      title = "Apply file changes";
+      kind = "edit";
+      rawInput = {
+        reason,
+        grantRoot: stringField(params, "grantRoot"),
+        ...(filePaths.length > 0 ? { filePaths } : {}),
+      };
+      break;
+    }
+    case "applyPatchApproval": {
+      const fileChanges = asRecord(params.fileChanges);
+      const filePaths = fileChanges ? Object.keys(fileChanges) : [];
       title = "Apply file changes";
       kind = "edit";
       rawInput = {
@@ -3110,6 +3509,36 @@ export function mapApprovalToCanonical(
       break;
   }
 
+  const nativeChoices =
+    request.method === "item/commandExecution/requestApproval"
+      ? nativeCommandChoices(params)
+      : null;
+  const options =
+    nativeChoices === null
+      ? [
+          { optionId: "accept", name: "Approve", kind: "allow_once" },
+          {
+            optionId: "acceptForSession",
+            name: "Approve for session",
+            kind: "allow_always",
+          },
+          { optionId: "decline", name: "Decline", kind: "reject_once" },
+          { optionId: "cancel", name: "Cancel", kind: "reject_always" },
+        ]
+      : nativeChoices.length > 0
+        ? nativeChoices.map((choice) => choice.option)
+        : [
+            {
+              optionId: "cancel",
+              name: "Cancel unsupported approval",
+              kind: "reject_always",
+            },
+          ];
+  const contextItems =
+    request.method === "item/commandExecution/requestApproval"
+      ? commandApprovalContext(params)
+      : [];
+
   return {
     sessionId: session.zerosSessionId as never,
     toolCall: {
@@ -3119,16 +3548,18 @@ export function mapApprovalToCanonical(
       status: "pending" as never,
       rawInput,
     } as never,
-    options: [
-      { optionId: "accept", name: "Approve", kind: "allow_once" },
-      {
-        optionId: "acceptForSession",
-        name: "Approve for session",
-        kind: "allow_always",
-      },
-      { optionId: "decline", name: "Decline", kind: "reject_once" },
-      { optionId: "cancel", name: "Cancel", kind: "reject_always" },
-    ] as never,
+    options,
+    // Codex persists its own session/policy decisions. A Zeros-side policy is
+    // broader (tool title/kind matching) and could auto-select the wrong native
+    // amendment on a later request, so provider-ordered gates stay
+    // provider-owned. That reasoning is specific to `availableDecisions`:
+    // plain edit/permission gates carry no amendments, and disabling local
+    // policies for them would quietly stop honoring "don't ask again" rules
+    // users already saved.
+    ...(nativeChoices !== null
+      ? { useOptionNames: true, allowLocalPolicies: false }
+      : {}),
+    ...(contextItems.length > 0 ? { contextItems } : {}),
   } as never;
 }
 
@@ -3149,7 +3580,26 @@ export function mapResponseToCodexDecision(
   // outcome.outcome === "selected"
   const optionId = (outcome as { optionId: string }).optionId;
   switch (method) {
-    case "item/commandExecution/requestApproval":
+    case "item/commandExecution/requestApproval": {
+      const choices = nativeCommandChoices(params);
+      if (choices !== null) {
+        const selected = choices.find(
+          (choice) => choice.option.optionId === optionId,
+        );
+        return { decision: selected?.decision ?? "cancel" };
+      }
+      switch (optionId) {
+        case "accept":
+          return { decision: "accept" };
+        case "acceptForSession":
+          return { decision: "acceptForSession" };
+        case "decline":
+          return { decision: "decline" };
+        case "cancel":
+        default:
+          return { decision: "cancel" };
+      }
+    }
     case "item/fileChange/requestApproval": {
       // Map optionId → CommandExecutionApprovalDecision /
       // FileChangeApprovalDecision string union. Both share the same
@@ -3179,25 +3629,49 @@ export function mapResponseToCodexDecision(
       // A future granular picker would replace this mirror with a
       // custom grant payload riding on the wire (the RequestPermissionResponse
       // shape doesn't currently carry grant fields).
-      if (optionId === "decline" || optionId === "cancel") {
+      if (optionId !== "accept" && optionId !== "acceptForSession") {
         return defaultMethodResponse(method, "decline");
       }
-      const requested = params.permissions as
-        | {
-            network?: { enabled?: boolean };
-            fileSystem?: { read?: string[]; write?: string[] };
-          }
-        | undefined;
+      const requested = asRecord(params.permissions);
+      const requestedNetwork = asRecord(requested?.network);
+      const requestedFileSystem = asRecord(requested?.fileSystem);
       return {
         permissions: {
-          network: { enabled: requested?.network?.enabled ?? false },
-          fileSystem: {
-            read: requested?.fileSystem?.read ?? [],
-            write: requested?.fileSystem?.write ?? [],
-          },
+          // Mirror the complete provider-authored profile, including the
+          // entry-based filesystem vocabulary added alongside legacy
+          // read/write arrays. The renderer never supplies these fields, so it
+          // cannot widen the request. Missing/malformed branches grant nothing.
+          network: requestedNetwork
+            ? { ...requestedNetwork }
+            : { enabled: false },
+          fileSystem: requestedFileSystem
+            ? { ...requestedFileSystem }
+            : { read: [], write: [] },
         },
         scope: optionId === "acceptForSession" ? "session" : "turn",
       };
+    }
+    case "execCommandApproval":
+    case "applyPatchApproval": {
+      let decision: unknown;
+      switch (optionId) {
+        case "accept":
+          decision = "approved";
+          break;
+        case "acceptForSession":
+          decision = "approved_for_session";
+          break;
+        case "decline":
+          decision = {
+            denied: { rejection: "User declined this action." },
+          };
+          break;
+        case "cancel":
+        default:
+          decision = "abort";
+          break;
+      }
+      return { decision };
     }
   }
 }
@@ -3218,6 +3692,15 @@ export function defaultMethodResponse(
         },
         scope: "turn",
       };
+    case "execCommandApproval":
+    case "applyPatchApproval":
+      return decision === "cancel"
+        ? { decision: "abort" }
+        : {
+            decision: {
+              denied: { rejection: "User declined this action." },
+            },
+          };
   }
 }
 
@@ -3227,6 +3710,24 @@ function stringField(
 ): string | undefined {
   const v = params[key];
   return typeof v === "string" ? v : undefined;
+}
+
+function commandField(
+  params: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const value = params[key];
+  if (typeof value === "string") return value;
+  if (Array.isArray(value) && value.every((part) => typeof part === "string")) {
+    return value.join(" ");
+  }
+  return undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 /** Pull the non-empty file paths off a streamed fileChange item's changes[]
@@ -3258,6 +3759,22 @@ function truncate(s: string, n: number): string {
 
 const AUTH_HINT_RX =
   /\b(not\s+(?:logged|signed)\s*in|please\s+run\s*\/?login|sign[- ]in\s+required|api\s*key\s+(?:not|required|invalid)|refresh\s+token\s+(?:was\s+)?(?:already\s+used|expired|invalid)|access\s+token\s+(?:could\s+not\s+be\s+refreshed|expired|invalid)|log\s+out\s+and\s+sign\s+in|token[_\s-]invalidated|unauthori[sz]ed|401)\b/i;
+const RATE_LIMIT_RX =
+  /\b(?:429|rate[\s_-]*limit(?:ed|_error)?|too many requests|resource exhausted|usage limit exceeded|server overloaded)\b/i;
+
+function codexRateLimitFailure(
+  message: string,
+  stage: "newSession" | "loadSession" | "prompt",
+): AgentFailureError {
+  return new AgentFailureError({
+    kind: "rate-limited",
+    message: `Codex rate limit: ${message}`,
+    stage,
+    agentId: AGENT_ID,
+    advice:
+      "Codex is rate-limiting requests. Wait for the provider reset, then try again.",
+  });
+}
 
 // Patterns that indicate codex no longer has the rollout/thread we're
 // trying to talk to. Broadened from the original "no rollout found"
@@ -3301,6 +3818,9 @@ function classifyBootFailure(
   stage: "newSession" | "loadSession",
 ): Error {
   const message = err instanceof Error ? err.message : String(err);
+  if (RATE_LIMIT_RX.test(message)) {
+    return codexRateLimitFailure(message, stage);
+  }
   if (AUTH_HINT_RX.test(message)) {
     return new AgentFailureError({
       kind: "auth-required",
@@ -3334,6 +3854,9 @@ export function classifyThreadFailure(
   stage: "newSession" | "loadSession" | "prompt",
 ): Error {
   const message = err instanceof Error ? err.message : String(err);
+  if (RATE_LIMIT_RX.test(message)) {
+    return codexRateLimitFailure(message, stage);
+  }
   if (STALE_THREAD_RX.test(message)) {
     // Wording differs by stage so the renderer's chip / inline note
     // makes sense: load-time means the chat is being reopened cold;

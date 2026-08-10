@@ -10,10 +10,12 @@ describe("Codex app-server host requests", () => {
   it("advertises attestation only when a real host provider exists", () => {
     expect(buildInitializeCapabilities({ requestAttestation: false })).toEqual({
       experimentalApi: true,
+      mcpServerOpenaiFormElicitation: true,
       requestAttestation: false,
     });
     expect(buildInitializeCapabilities({ requestAttestation: true })).toEqual({
       experimentalApi: true,
+      mcpServerOpenaiFormElicitation: true,
       requestAttestation: true,
     });
   });

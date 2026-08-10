@@ -250,13 +250,12 @@ describe("Codex Ultra effort synchronization", () => {
     expect(mapCodexEffortFromEnv("ultracode")).toBe("ultra");
   });
 
-  it("clamps the Claude-only max tier down instead of failing the turn", () => {
-    // ReasoningEffort is an open `string` in the generated protocol, so an
-    // unknown variant is not a compile error — it is a hard `turn/start:
-    // Invalid request` on every send. "max" is Claude-only, so it must land on
-    // Codex's highest ordinary tier.
-    expect(mapCodexEffortFromEnv("max")).toBe("xhigh");
-    expect(mapCodexEffortFromEnv("MAX ")).toBe("xhigh");
+  it("preserves Codex's native max tier exactly", () => {
+    // GPT-5.6 advertises and accepts `max`. Downgrading it to `xhigh` makes the
+    // provider's thread/settings update overwrite the user's Max selection in
+    // the composer with Extra High after the first send.
+    expect(mapCodexEffortFromEnv("max")).toBe("max");
+    expect(mapCodexEffortFromEnv("MAX ")).toBe("max");
   });
 
   it("passes the tiers Codex really has through verbatim", () => {

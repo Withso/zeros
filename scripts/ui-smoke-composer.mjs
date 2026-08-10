@@ -126,7 +126,7 @@ try {
   page.on("pageerror", (err) => pageErrors.push(err.message));
 
   await page.goto(pageUrl, { waitUntil: "networkidle" });
-  const pill = page.locator('[data-testid="pill-host"] button').first();
+  const pill = page.getByRole("button", { name: /^Model:/ });
   await pill.waitFor({ state: "visible", timeout: 10_000 });
 
   const menuOpen = () =>
@@ -143,6 +143,254 @@ try {
     }
     return false;
   };
+  const closeModelMenuWithEscape = async (label) => {
+    // A collapsed selected row can reopen its hover catalog underneath the
+    // stationary pointer. Escape intentionally closes that nested layer first,
+    // so allow one more press before declaring the outer menu stuck.
+    for (let attempt = 0; attempt < 3 && (await menuOpen()); attempt += 1) {
+      await page.keyboard.press("Escape");
+      if (
+        await waitFor(
+          async () => !(await menuOpen()),
+          `${label}-${attempt}`,
+          500,
+        )
+      ) {
+        return true;
+      }
+    }
+    return !(await menuOpen());
+  };
+
+  // Composer controls are container-responsive: split-pane width, not browser
+  // viewport width, decides how much of the model summary remains. Exercise
+  // both strict boundaries (450/400 stay in the wider state; 449/399 collapse).
+  const responsiveHost = page.getByTestId("responsive-chat-host");
+  const responsiveModelState = async (width) => {
+    await responsiveHost.evaluate((host, nextWidth) => {
+      host.style.width = `${nextWidth}px`;
+    }, width);
+    return pill.evaluate((button) => {
+      const name = button.querySelector("[data-model-pill-name]");
+      const metadata = button.querySelector("[data-model-pill-metadata]");
+      const label = button.querySelector("[data-model-pill-label]");
+      const visible = (element) =>
+        !!element && getComputedStyle(element).display !== "none";
+      return {
+        name: visible(name),
+        metadata: visible(metadata),
+        label: visible(label),
+        icon: !!button.querySelector("svg"),
+      };
+    });
+  };
+  const at450 = await responsiveModelState(450);
+  const below450 = await responsiveModelState(449);
+  const at400 = await responsiveModelState(400);
+  const below400 = await responsiveModelState(399);
+  check(
+    "450px keeps logo, model, and effort metadata",
+    at450.icon && at450.name && at450.metadata && at450.label,
+    JSON.stringify(at450),
+  );
+  check(
+    "below 450px keeps logo plus effort metadata without model name",
+    below450.icon && !below450.name && below450.metadata && below450.label,
+    JSON.stringify(below450),
+  );
+  check(
+    "400px still keeps effort metadata",
+    at400.icon && !at400.name && at400.metadata && at400.label,
+    JSON.stringify(at400),
+  );
+  check(
+    "below 400px shows only the agent logo",
+    below400.icon &&
+      !below400.label &&
+      (await page.getByRole("button", { name: /^Model:/ }).count()) === 1,
+    JSON.stringify(below400),
+  );
+  await responsiveModelState(360);
+  const compactRowOverflow = await page
+    .getByTestId("pill-host")
+    .evaluate((row) => ({
+      clientWidth: row.clientWidth,
+      scrollWidth: row.scrollWidth,
+    }));
+  check(
+    "360px chat floor keeps the composer controls on one row without overflow",
+    compactRowOverflow.scrollWidth <= compactRowOverflow.clientWidth,
+    `${compactRowOverflow.scrollWidth}/${compactRowOverflow.clientWidth}`,
+  );
+  await responsiveModelState(500);
+
+  const sendButtonShape = await page
+    .getByTestId("composer-send")
+    .evaluate((button) => {
+      const style = getComputedStyle(button);
+      const rect = button.getBoundingClientRect();
+      return {
+        width: rect.width,
+        height: rect.height,
+        radius: Number.parseFloat(style.borderTopLeftRadius),
+        border: style.borderTopWidth,
+      };
+    });
+  check(
+    "composer send is a borderless circle",
+    Math.abs(sendButtonShape.width - sendButtonShape.height) <= 0.5 &&
+      sendButtonShape.radius >= sendButtonShape.width / 2 &&
+      sendButtonShape.border === "0px",
+    JSON.stringify(sendButtonShape),
+  );
+
+  // Permission tooltip is immediate during an ordinary hover. A click gives
+  // the transient feedback exclusive use of that surface: right-first when it
+  // fits, then top when a live resize removes the space beside the icon.
+  const pillHost = page.getByTestId("pill-host");
+  const permissionButton = pillHost.locator(
+    'button[aria-label^="Permission mode:"]',
+  );
+  const visibleTooltipCount = () =>
+    page
+      .locator(
+        "[data-radix-popper-content-wrapper] > [data-side][data-state]:visible",
+      )
+      .count();
+  await permissionButton.hover();
+  check(
+    "permission tooltip opens immediately outside a click-feedback cycle",
+    await waitFor(
+      async () => (await visibleTooltipCount()) === 1,
+      "permission-tooltip-immediate",
+      1_000,
+    ),
+  );
+  await page.getByTestId("fake-editor").hover();
+  // Radix creates a trigger→content grace polygon on pointerleave. Playwright's
+  // hover is a single coordinate jump, so deliver the follow-up movement a
+  // real travelling pointer would naturally produce to leave that polygon.
+  await page.mouse.move(800, 100, { steps: 2 });
+  check(
+    "permission tooltip closes when ordinary hover ends",
+    await waitFor(
+      async () => (await visibleTooltipCount()) === 0,
+      "permission-tooltip-close",
+      1_000,
+    ),
+  );
+  const rowHeightBeforePermission = await pillHost.evaluate(
+    (row) => row.getBoundingClientRect().height,
+  );
+  await permissionButton.click();
+  const permissionFeedback = page.locator("[data-permission-mode-feedback]");
+  check(
+    "permission toggle shows transient mode feedback",
+    await waitFor(
+      () => permissionFeedback.isVisible().catch(() => false),
+      "permission-feedback",
+    ),
+  );
+  const permissionGeometry = await Promise.all([
+    permissionButton.boundingBox(),
+    permissionFeedback.boundingBox(),
+    pillHost.evaluate((row) => row.getBoundingClientRect().height),
+    permissionFeedback.getAttribute("data-placement"),
+  ]);
+  check(
+    "permission feedback prefers the icon's right without changing row height",
+    !!permissionGeometry[0] &&
+      !!permissionGeometry[1] &&
+      permissionGeometry[1].x >=
+        permissionGeometry[0].x + permissionGeometry[0].width &&
+      Math.abs(permissionGeometry[2] - rowHeightBeforePermission) <= 0.5 &&
+      permissionGeometry[3] === "right",
+    JSON.stringify(permissionGeometry),
+  );
+  check(
+    "permission tooltip yields while click feedback is visible",
+    await waitFor(
+      async () => (await visibleTooltipCount()) === 0,
+      "permission-tooltip-click-suppression",
+      1_000,
+    ),
+  );
+  await responsiveModelState(160);
+  check(
+    "permission feedback moves above only when right-side room disappears",
+    await waitFor(
+      async () =>
+        (await permissionFeedback.getAttribute("data-placement")) === "top",
+      "permission-feedback-top-fallback",
+      1_000,
+    ),
+  );
+  const compactPermissionGeometry = await Promise.all([
+    permissionButton.boundingBox(),
+    permissionFeedback.boundingBox(),
+    pillHost.evaluate((row) => row.getBoundingClientRect().height),
+  ]);
+  check(
+    "top fallback remains outside the one-line composer row",
+    !!compactPermissionGeometry[0] &&
+      !!compactPermissionGeometry[1] &&
+      compactPermissionGeometry[1].y + compactPermissionGeometry[1].height <=
+        compactPermissionGeometry[0].y &&
+      Math.abs(compactPermissionGeometry[2] - rowHeightBeforePermission) <= 0.5,
+    JSON.stringify(compactPermissionGeometry),
+  );
+  await responsiveModelState(500);
+  check(
+    "permission feedback returns right when resize restores room",
+    await waitFor(
+      async () =>
+        (await permissionFeedback.getAttribute("data-placement")) === "right",
+      "permission-feedback-right-restore",
+      1_000,
+    ),
+  );
+  await permissionButton.hover();
+  check(
+    "permission tooltip appears after the click-feedback delay",
+    await waitFor(
+      async () =>
+        (await permissionFeedback.count()) === 0 &&
+        (await visibleTooltipCount()) === 1,
+      "permission-tooltip-after-click-delay",
+      3_500,
+    ),
+  );
+  await page.mouse.move(800, 100, { steps: 2 });
+  await waitFor(
+    async () => (await visibleTooltipCount()) === 0,
+    "permission-tooltip-post-delay-close",
+    1_000,
+  );
+
+  // The "+" overlay owns its open update in a tiny memoized subtree. There is
+  // no loading wait or parent-state turn: the menu is visible as soon as the
+  // real pointer click finishes.
+  const attachmentTrigger = page.getByRole("button", {
+    name: "Add attachment or link a workspace",
+  });
+  const attachmentMenu = page.locator("[data-composer-attachment-menu]");
+  await attachmentTrigger.click();
+  check(
+    "composer attachment menu opens on the click turn",
+    await attachmentMenu.isVisible().catch(() => false),
+  );
+  check(
+    "composer attachment menu exposes all three actions",
+    (await attachmentMenu.getByRole("menuitem").count()) === 3,
+  );
+  await page.keyboard.press("Escape");
+  check(
+    "composer attachment menu closes with Escape",
+    await waitFor(
+      async () => !(await attachmentMenu.isVisible().catch(() => false)),
+      "attachment-menu-close",
+    ),
+  );
 
   // 1. Open — and survive the guardian (the 2026-07-24 regression closed it
   //    within one macrotask of opening).
@@ -152,14 +400,1147 @@ try {
   // dismiss path ample room to fire before asserting stability.
   await page.waitForTimeout(600);
   check("menu stays open (no guardian dismiss)", await menuOpen());
-  const rowCount = await page.locator("[cmdk-item]").count();
-  check("menu lists models", rowCount > 0, `${rowCount} rows`);
+  const searchInput = page.getByPlaceholder("Search models…");
+  check(
+    "model search receives open-time focus",
+    await waitFor(
+      () => searchInput.evaluate((input) => input === document.activeElement),
+      "search-open-focus",
+    ),
+  );
+  const modelRow = (label) =>
+    page.locator("[cmdk-item]").filter({ hasText: label }).first();
+  const rowText = async (label) => (await modelRow(label).textContent()) ?? "";
+  const modelMenu = () => page.locator("[cmdk-root]").locator("xpath=..");
+  const selectedModel = () => page.getByTestId("selected-model-browser");
+  const catalog = () => page.getByTestId("model-catalog-sidecar");
+  const catalogRow = (label) =>
+    catalog()
+      .locator("[data-model-catalog-item]")
+      .filter({ hasText: label })
+      .first();
+  const catalogEditButton = (label) =>
+    catalogRow(label).getByRole("button", {
+      name: `Edit settings for ${label}`,
+    });
+  const catalogFavoriteButton = (label) =>
+    catalogRow(label).locator("[data-model-favorite-action]");
+  const defaultIndicators = () =>
+    page.locator("[data-default-model-indicator]");
+  const modelEditor = () => page.getByTestId("model-configuration-popover");
 
-  // 2. Selecting a row fires onChange and closes the menu. Row 0 is the
-  //    current model (harness default), so pick the second row for a real
-  //    change; the harness logs "[harness] onChange <value>".
-  const targetRow = page.locator("[cmdk-item]").nth(Math.min(1, rowCount - 1));
-  await targetRow.click();
+  const initialPillText = (
+    (await pill.locator("[data-model-pill-label]").textContent()) ?? ""
+  )
+    .replace(/\s+/g, " ")
+    .trim();
+  check(
+    "composer combines model and effort in one pill",
+    initialPillText === "Opus 5 High",
+    initialPillText,
+  );
+  const pillMetadataPresentation = await pill
+    .locator("[data-model-pill-metadata]")
+    .evaluate((metadata) => {
+      const fg2Probe = document.createElement("span");
+      fg2Probe.style.color = "var(--fg2)";
+      document.body.append(fg2Probe);
+      const presentation = {
+        text: metadata.textContent?.trim() ?? "",
+        color: getComputedStyle(metadata).color,
+        fg2: getComputedStyle(fg2Probe).color,
+        opacity: getComputedStyle(metadata).opacity,
+      };
+      fg2Probe.remove();
+      return presentation;
+    })
+    .catch(() => null);
+  check(
+    "composer renders effort/Fast as 80%-opacity fg2 metadata",
+    pillMetadataPresentation?.text === "High" &&
+      pillMetadataPresentation.color === pillMetadataPresentation.fg2 &&
+      pillMetadataPresentation.opacity === "0.8",
+    JSON.stringify(pillMetadataPresentation),
+  );
+  check(
+    "composer has no standalone Fast or effort controls",
+    (await page.getByRole("button", { name: /fast mode/i }).count()) === 0 &&
+      (await page
+        .getByRole("button", { name: /reasoning effort:/i })
+        .count()) === 0,
+  );
+
+  const modelMenuWidth = await modelMenu().evaluate((element) =>
+    element instanceof HTMLElement ? element.offsetWidth : 0,
+  );
+  check(
+    "model popup is at most 230px wide",
+    modelMenuWidth > 0 && modelMenuWidth <= 230,
+    `${modelMenuWidth}px`,
+  );
+  const modelMenuOverflow = await modelMenu().evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }));
+  check(
+    "narrow model popup has no horizontal overflow",
+    modelMenuOverflow.scrollWidth <= modelMenuOverflow.clientWidth,
+    `${modelMenuOverflow.scrollWidth}/${modelMenuOverflow.clientWidth}`,
+  );
+
+  // 2. The default surface is deliberately collapsed: no provider-logo rail
+  //    and no full catalog in the main popup. Only the selected model sits
+  //    below the focused search; hovering it opens a grouped sidecar without
+  //    stealing focus from search.
+  check(
+    "model popup has no provider-logo rail",
+    (await page.getByRole("tablist", { name: "Agents" }).count()) === 0,
+  );
+  check(
+    "default model section renders no expanded command rows",
+    (await page.locator("[cmdk-item]").count()) === 0,
+  );
+  check(
+    "default model section shows only the selected model",
+    (await selectedModel().count()) === 1 &&
+      ((await selectedModel().textContent()) ?? "").includes("Opus 5") &&
+      ((await selectedModel().textContent()) ?? "").includes("High"),
+  );
+  await selectedModel().hover();
+  check(
+    "hovering the selected model opens the catalog sidecar",
+    await waitFor(() => catalog().isVisible(), "model-catalog-hover"),
+  );
+  const catalogWidth = await catalog().evaluate((element) =>
+    element instanceof HTMLElement ? element.offsetWidth : 0,
+  );
+  check(
+    "model catalog popup is at most 230px wide",
+    catalogWidth > 0 && catalogWidth <= 230,
+    `${catalogWidth}px`,
+  );
+  const catalogOverflow = await catalog().evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }));
+  check(
+    "narrow model catalog has no horizontal overflow",
+    catalogOverflow.scrollWidth <= catalogOverflow.clientWidth,
+    `${catalogOverflow.scrollWidth}/${catalogOverflow.clientWidth}`,
+  );
+  await selectedModel().click();
+  check(
+    "clicking the hovered selected model keeps its catalog open",
+    await catalog().isVisible(),
+  );
+  check(
+    "clicking the selected model preserves search focus",
+    await searchInput.evaluate((input) => input === document.activeElement),
+  );
+  check(
+    "catalog sidecar groups rows under agent titles",
+    (await catalog().getByRole("group", { name: "Claude Code" }).count()) ===
+      1 &&
+      (await catalog().getByRole("group", { name: "Codex" }).count()) === 1 &&
+      (await catalog().getByRole("group", { name: "Cursor" }).count()) === 1,
+  );
+  check(
+    "every catalog agent heading leads with one brand mark",
+    (await catalog()
+      .locator('[data-model-section-heading="agent"] > span:first-child svg')
+      .count()) === (await catalog().locator('section[role="group"]').count()),
+  );
+  await catalogRow("GPT-5.6 Sol").hover();
+  check(
+    "catalog stays open across trigger-to-sidecar travel",
+    await catalog().isVisible(),
+  );
+  check(
+    "hover catalog preserves search focus",
+    await searchInput.evaluate((input) => input === document.activeElement),
+  );
+  await page.keyboard.press("Escape");
+  check(
+    "Escape closes only the nested catalog first",
+    (await menuOpen()) &&
+      (await waitFor(
+        async () => !(await catalog().isVisible()),
+        "catalog-esc",
+      )),
+  );
+  await selectedModel().hover();
+  check(
+    "catalog can reopen after nested Escape",
+    await waitFor(() => catalog().isVisible(), "catalog-reopen"),
+  );
+
+  // An empty query renders NO cmdk rows on purpose — the collapsed selected
+  // model is the only default row. That makes the catalog the sole browse
+  // surface, so it has to be reachable without a pointer: Tab moves from the
+  // always-focused search to the selected-model button (whose focus opens the
+  // sidecar) and then into the grouped rows themselves. Typing remains the
+  // primary path (arrows + Enter over universal results).
+  await searchInput.press("Tab");
+  const browserFocused = await selectedModel().evaluate(
+    (element) => element === document.activeElement,
+  );
+  await page.keyboard.press("Tab");
+  const rowFocus = await page.evaluate(() => {
+    const sidecar = document.querySelector(
+      '[data-testid="model-catalog-sidecar"]',
+    );
+    const active = document.activeElement;
+    return {
+      inside: !!sidecar && !!active && sidecar.contains(active),
+      label: active?.getAttribute("aria-label") ?? "",
+    };
+  });
+  check(
+    "Tab walks from search into the catalog's model rows",
+    browserFocused && rowFocus.inside && /^Select /.test(rowFocus.label),
+    `${browserFocused}/${rowFocus.inside}/${rowFocus.label}`,
+  );
+  // Return to the pointer-driven state the geometry checks below measure: focus
+  // inside the sidecar keeps a row's hover-only actions revealed, and handing
+  // the caret straight back mid-flight makes Radix re-mount the layer under
+  // them. Tear the catalog down and reopen it the same way the checks above do.
+  await page.keyboard.press("Escape");
+  await waitFor(async () => !(await catalog().isVisible()), "catalog-esc-tab");
+  // The pointer never left the selected row during the keyboard probe, so it
+  // has to move away before hovering it can emit pointerenter again.
+  await searchInput.hover();
+  await searchInput.focus();
+  await selectedModel().hover();
+  await waitFor(() => catalog().isVisible(), "catalog-reopen-after-tab");
+
+  // Rows are one left-aligned phrase: model, effort, Fast, default star. The
+  // right edge is reserved for the active tick or a non-active model's editor.
+  // An agent heading leads with its brand mark on the model names' left edge,
+  // and its title follows that mark.
+  check(
+    "model rows have no command-number badges",
+    (await page.locator("kbd").count()) === 0,
+  );
+  check(
+    "active model row shows default High effort",
+    ((await catalogRow("Opus 5").textContent()) ?? "").includes("High"),
+  );
+  const claudeGroup = catalog().getByRole("group", { name: "Claude Code" });
+  const claudeMarkBox = await claudeGroup
+    .locator('[data-model-section-heading="agent"] > span:first-child')
+    .boundingBox();
+  const claudeHeadingBox = await claudeGroup
+    .locator("[data-model-section-title]")
+    .boundingBox();
+  const opusNameBox = await catalogRow("Opus 5")
+    .getByText("Opus 5", { exact: true })
+    .boundingBox();
+  check(
+    "agent brand marks and model names share the same left edge",
+    !!claudeMarkBox &&
+      !!opusNameBox &&
+      Math.abs(claudeMarkBox.x - opusNameBox.x) <= 1,
+  );
+  check(
+    "agent titles sit directly after their brand mark",
+    !!claudeMarkBox &&
+      !!claudeHeadingBox &&
+      claudeHeadingBox.x - (claudeMarkBox.x + claudeMarkBox.width) <= 8,
+  );
+  const modelNameFontWeight = await catalogRow("Opus 5")
+    .locator("[data-model-name]")
+    .evaluate((name) => getComputedStyle(name).fontWeight);
+  // "Reasoning", "Options", "Model", and every agent title are one label tier:
+  // model-name weight, 12px, on the 28px heading rhythm.
+  const sectionTitles = [
+    page.getByText("Reasoning", { exact: true }),
+    page.getByText("Options", { exact: true }),
+    modelMenu().getByText("Model", { exact: true }),
+    catalog().locator("[data-model-section-title]").first(),
+  ];
+  const titleFontWeights = await Promise.all(
+    sectionTitles.map((title) =>
+      title.evaluate((node) => getComputedStyle(node).fontWeight),
+    ),
+  );
+  check(
+    "configuration, Model, and agent titles match model-name weight",
+    titleFontWeights.every((weight) => weight === modelNameFontWeight),
+    `${modelNameFontWeight}/${titleFontWeights.join(",")}`,
+  );
+  const titleFontSizes = await Promise.all(
+    sectionTitles.map((title) =>
+      title.evaluate((node) => getComputedStyle(node).fontSize),
+    ),
+  );
+  check(
+    "every model-menu section title is 12px",
+    titleFontSizes.every((size) => size === "12px"),
+    titleFontSizes.join(","),
+  );
+  const titleHeights = await Promise.all([
+    ...sectionTitles
+      .slice(0, 3)
+      .map((title) => title.evaluate((node) => node.offsetHeight)),
+    catalog()
+      .locator("[data-model-section-title]")
+      .first()
+      .locator("xpath=..")
+      .evaluate((title) => title.offsetHeight),
+  ]);
+  check(
+    "all model-menu titles use the compact 28px rhythm",
+    titleHeights.every((height) => height <= 28),
+    titleHeights.join(","),
+  );
+  const catalogRowHeights = await catalog()
+    .locator("[data-model-catalog-item]")
+    .evaluateAll((items) => items.map((item) => item.offsetHeight));
+  check(
+    "all catalog models use one compact 26px row height",
+    catalogRowHeights.length > 0 &&
+      catalogRowHeights.every((height) => Math.abs(height - 26) <= 0.5),
+    catalogRowHeights.join(","),
+  );
+  const effortRowHeights = await page
+    .getByRole("radiogroup", { name: "Reasoning effort" })
+    .getByRole("radio")
+    .evaluateAll((items) => items.map((item) => item.offsetHeight));
+  const fastOptionRowHeight = await page
+    .getByRole("switch", { name: /Fast mode for/ })
+    .locator("xpath=..")
+    .evaluate((row) => row.offsetHeight);
+  check(
+    "configuration choices share the same 26px dropdown row height",
+    effortRowHeights.length > 0 &&
+      effortRowHeights.every((height) => Math.abs(height - 26) <= 0.5) &&
+      Math.abs(fastOptionRowHeight - 26) <= 0.5,
+    `${effortRowHeights.join(",")}/${fastOptionRowHeight}`,
+  );
+  const compactRowPadding = await Promise.all([
+    catalogRow("GPT-5.6 Sol").evaluate((row) => ({
+      top: getComputedStyle(row).paddingTop,
+      bottom: getComputedStyle(row).paddingBottom,
+    })),
+    page
+      .getByRole("radiogroup", { name: "Reasoning effort" })
+      .getByRole("radio")
+      .first()
+      .evaluate((row) => ({
+        top: getComputedStyle(row).paddingTop,
+        bottom: getComputedStyle(row).paddingBottom,
+      })),
+    page
+      .getByRole("switch", { name: /Fast mode for/ })
+      .locator("xpath=..")
+      .evaluate((row) => ({
+        top: getComputedStyle(row).paddingTop,
+        bottom: getComputedStyle(row).paddingBottom,
+      })),
+    selectedModel().evaluate((row) => ({
+      top: getComputedStyle(row).paddingTop,
+      bottom: getComputedStyle(row).paddingBottom,
+    })),
+  ]);
+  check(
+    "model-menu items use 4px top and bottom padding",
+    compactRowPadding.every(
+      ({ top, bottom }) => top === "4px" && bottom === "4px",
+    ),
+    JSON.stringify(compactRowPadding),
+  );
+  const catalogItemGaps = await catalog()
+    .getByRole("group")
+    .evaluateAll((groups) =>
+      groups.flatMap((group) => {
+        const items = Array.from(
+          group.querySelectorAll("[data-model-catalog-item]"),
+        );
+        return items.slice(1).map((item, index) => {
+          const previous = items[index].getBoundingClientRect();
+          const current = item.getBoundingClientRect();
+          return current.top - previous.bottom;
+        });
+      }),
+    );
+  const reasoningItemGaps = await page
+    .getByRole("radiogroup", { name: "Reasoning effort" })
+    .getByRole("radio")
+    .evaluateAll((items) =>
+      items.slice(1).map((item, index) => {
+        const previous = items[index].getBoundingClientRect();
+        const current = item.getBoundingClientRect();
+        return current.top - previous.bottom;
+      }),
+    );
+  check(
+    "catalog and reasoning items have an exact 1px inter-item gap",
+    catalogItemGaps.length > 0 &&
+      reasoningItemGaps.length > 0 &&
+      [...catalogItemGaps, ...reasoningItemGaps].every(
+        (gap) => Math.abs(gap - 1) <= 0.5,
+      ),
+    `${catalogItemGaps.join(",")}/${reasoningItemGaps.join(",")}`,
+  );
+  // A group's separator is the NEXT group's border-top, so its section box top
+  // is the rule itself: the previous group's 2px tail keeps a hovered last row
+  // from painting flush against it.
+  const haikuRowBox = await catalogRow("Haiku 4.5").boundingBox();
+  const codexGroupBox = await catalog()
+    .getByRole("group", { name: "Codex" })
+    .boundingBox();
+  check(
+    "agent group separators clear the last row by 2px",
+    !!haikuRowBox &&
+      !!codexGroupBox &&
+      Math.abs(codexGroupBox.y - (haikuRowBox.y + haikuRowBox.height) - 2) <= 1,
+    codexGroupBox && haikuRowBox
+      ? `${codexGroupBox.y - haikuRowBox.y - haikuRowBox.height}`
+      : "no box",
+  );
+  const solNameBox = await catalogRow("GPT-5.6 Sol")
+    .getByText("GPT-5.6 Sol", { exact: true })
+    .boundingBox();
+  const solEffortBox = await catalogRow("GPT-5.6 Sol")
+    .getByText("High", { exact: true })
+    .boundingBox();
+  check(
+    "effort sits directly beside the model name",
+    !!solNameBox &&
+      !!solEffortBox &&
+      solEffortBox.x - (solNameBox.x + solNameBox.width) <= 12,
+  );
+  const solMetadataPresentation = await catalogRow("GPT-5.6 Sol")
+    .locator("[data-model-metadata]")
+    .evaluate((metadata) => {
+      const fg2Probe = document.createElement("span");
+      fg2Probe.style.color = "var(--fg2)";
+      document.body.append(fg2Probe);
+      const presentation = {
+        color: getComputedStyle(metadata).color,
+        fg2: getComputedStyle(fg2Probe).color,
+        opacity: getComputedStyle(metadata).opacity,
+      };
+      fg2Probe.remove();
+      return presentation;
+    });
+  check(
+    "row effort/Fast metadata uses fg2 at 80% opacity",
+    solMetadataPresentation.color === solMetadataPresentation.fg2 &&
+      solMetadataPresentation.opacity === "0.8",
+    JSON.stringify(solMetadataPresentation),
+  );
+  check(
+    "Codex fallback is the single connected-provider default",
+    (await defaultIndicators().count()) === 1 &&
+      (await defaultIndicators()
+        .first()
+        .evaluate((indicator) =>
+          indicator
+            .closest("[data-model-catalog-item]")
+            ?.textContent?.includes("GPT-5.6 Sol"),
+        )),
+  );
+  const solStarBox = await catalogRow("GPT-5.6 Sol")
+    .locator("[data-default-model-indicator]")
+    .boundingBox();
+  check(
+    "default star sits directly after effort metadata",
+    !!solEffortBox &&
+      !!solStarBox &&
+      solStarBox.x - (solEffortBox.x + solEffortBox.width) <= 12,
+  );
+  check(
+    "selected non-default model shows no star",
+    (await catalogRow("Opus 5")
+      .locator("[data-default-model-indicator]")
+      .count()) === 0 &&
+      (await selectedModel()
+        .locator("[data-default-model-indicator]")
+        .count()) === 0,
+  );
+  const activeRowBox = await catalogRow("Opus 5").boundingBox();
+  const selectedTickBox = await catalogRow("Opus 5")
+    .getByLabel("Selected model")
+    .boundingBox();
+  check(
+    "selected tick occupies the row's right edge",
+    !!activeRowBox &&
+      !!selectedTickBox &&
+      activeRowBox.x +
+        activeRowBox.width -
+        (selectedTickBox.x + selectedTickBox.width) <=
+        12,
+  );
+  check(
+    "selected row has no edit action",
+    (await catalogEditButton("Opus 5").count()) === 0,
+  );
+  check(
+    "non-selected configurable rows expose a right-edge edit action",
+    (await catalogEditButton("GPT-5.6 Terra").count()) === 1,
+  );
+  const terraEditAtRest = await catalogEditButton("GPT-5.6 Terra").evaluate(
+    (button) => ({
+      opacity: getComputedStyle(button).opacity,
+      pointerEvents: getComputedStyle(button).pointerEvents,
+    }),
+  );
+  check(
+    "Edit is visually and pointer-inert until its model row is hovered",
+    terraEditAtRest.opacity === "0" && terraEditAtRest.pointerEvents === "none",
+    JSON.stringify(terraEditAtRest),
+  );
+  await catalogRow("GPT-5.6 Terra").hover();
+  check(
+    "Edit appears when its model row is hovered",
+    await waitFor(
+      () =>
+        catalogEditButton("GPT-5.6 Terra").evaluate(
+          (button) =>
+            getComputedStyle(button).opacity === "1" &&
+            getComputedStyle(button).pointerEvents !== "none",
+        ),
+      "catalog-edit-hover",
+    ),
+  );
+  const terraEditPresentation = await catalogEditButton("GPT-5.6 Terra")
+    .evaluate((button) => {
+      const fg2Probe = document.createElement("span");
+      fg2Probe.style.color = "var(--fg2)";
+      document.body.append(fg2Probe);
+      const presentation = {
+        text: button.textContent?.trim() ?? "",
+        fontSize: getComputedStyle(button).fontSize,
+        color: getComputedStyle(button).color,
+        fg2: getComputedStyle(fg2Probe).color,
+        iconCount: button.querySelectorAll("svg").length,
+      };
+      fg2Probe.remove();
+      return presentation;
+    })
+    .catch(() => null);
+  check(
+    "model editor action is 12px fg2 Edit text without an icon",
+    terraEditPresentation?.text === "Edit" &&
+      terraEditPresentation.fontSize === "12px" &&
+      terraEditPresentation.color === terraEditPresentation.fg2 &&
+      terraEditPresentation.iconCount === 0,
+    JSON.stringify(terraEditPresentation),
+  );
+  const terraRowBox = await catalogRow("GPT-5.6 Terra").boundingBox();
+  const terraEditBox = await catalogEditButton("GPT-5.6 Terra").boundingBox();
+  check(
+    "non-selected edit occupies the row's right edge",
+    !!terraRowBox &&
+      !!terraEditBox &&
+      terraRowBox.x +
+        terraRowBox.width -
+        (terraEditBox.x + terraEditBox.width) <=
+        8,
+  );
+  const terraFavorite = catalogFavoriteButton("GPT-5.6 Terra");
+  const terraMetadataBox = await catalogRow("GPT-5.6 Terra")
+    .locator("[data-model-metadata]")
+    .boundingBox();
+  const terraFavoriteBox = await terraFavorite.boundingBox();
+  check(
+    "favorite stays directly beside a model phrase when the row has room",
+    (await catalogRow("GPT-5.6 Terra").getAttribute(
+      "data-favorite-placement",
+    )) === "inline" &&
+      !!terraMetadataBox &&
+      !!terraFavoriteBox &&
+      terraFavoriteBox.x - (terraMetadataBox.x + terraMetadataBox.width) <= 8,
+  );
+  const hoverActionTransitions = await catalogRow("GPT-5.6 Terra").evaluate(
+    (row) => {
+      const actions = row.querySelector("[data-model-row-actions]");
+      const favorite = row.querySelector("[data-model-favorite-action]");
+      const edit = row.querySelector('[aria-label^="Edit settings for"]');
+      const read = (element) => {
+        if (!(element instanceof HTMLElement)) return null;
+        const style = getComputedStyle(element);
+        return {
+          background: style.backgroundColor,
+          transitionDuration: style.transitionDuration,
+        };
+      };
+      return {
+        actions: read(actions),
+        favorite: read(favorite),
+        edit: read(edit),
+      };
+    },
+  );
+  check(
+    "favorite/Edit reveal has no delayed opacity or background transition",
+    Object.values(hoverActionTransitions).every(
+      (style) =>
+        style !== null &&
+        style.transitionDuration
+          .split(",")
+          .every((duration) => Number.parseFloat(duration) === 0),
+    ) && hoverActionTransitions.edit?.background === "rgba(0, 0, 0, 0)",
+    JSON.stringify(hoverActionTransitions),
+  );
+  await catalogRow("GPT-5.6 Luna").hover();
+  const departedTerraActions = await catalogRow("GPT-5.6 Terra").evaluate(
+    (row) => ({
+      favoriteOpacity: getComputedStyle(
+        row.querySelector("[data-model-favorite-action]"),
+      ).opacity,
+      editOpacity: getComputedStyle(
+        row.querySelector('[aria-label^="Edit settings for"]'),
+      ).opacity,
+      overlayBackground: getComputedStyle(
+        row.querySelector("[data-model-row-actions]"),
+      ).backgroundColor,
+    }),
+  );
+  check(
+    "moving between rows clears the departed action background immediately",
+    departedTerraActions.favoriteOpacity === "0" &&
+      departedTerraActions.editOpacity === "0" &&
+      departedTerraActions.overlayBackground === "rgba(0, 0, 0, 0)",
+    JSON.stringify(departedTerraActions),
+  );
+  await catalog().evaluate((element) => {
+    element.style.width = "140px";
+  });
+  check(
+    "favorite overlays a long model phrase only when available width runs out",
+    await waitFor(
+      async () =>
+        (await catalogRow("GPT-5.6 Terra").getAttribute(
+          "data-favorite-placement",
+        )) === "overlay",
+      "favorite-overlay-on-narrow-row",
+    ),
+  );
+  const narrowTerraName = await catalogRow("GPT-5.6 Terra")
+    .locator("[data-model-name]")
+    .evaluate((name) => ({
+      clientWidth: name.clientWidth,
+      scrollWidth: name.scrollWidth,
+    }));
+  check(
+    "overlay placement keeps the full model name ahead of optional metadata",
+    narrowTerraName.clientWidth >= narrowTerraName.scrollWidth,
+    JSON.stringify(narrowTerraName),
+  );
+  await catalog().evaluate((element) => {
+    element.style.width = "";
+  });
+  check(
+    "favorite returns beside the phrase when width becomes available",
+    await waitFor(
+      async () =>
+        (await catalogRow("GPT-5.6 Terra").getAttribute(
+          "data-favorite-placement",
+        )) === "inline",
+      "favorite-inline-after-resize",
+    ),
+  );
+  await catalog()
+    .getByRole("group", { name: "Cursor" })
+    .locator("[data-model-section-title]")
+    .hover();
+  const cursorName = catalogRow("Cursor Grok 4.5").locator("[data-model-name]");
+  const cursorNameAtRest = await cursorName.evaluate((name) => ({
+    clientWidth: name.clientWidth,
+    scrollWidth: name.scrollWidth,
+  }));
+  check(
+    "model name gets width priority over metadata and hidden actions",
+    cursorNameAtRest.clientWidth >= cursorNameAtRest.scrollWidth,
+    JSON.stringify(cursorNameAtRest),
+  );
+  const cursorRowHeightBeforeHover = await catalogRow(
+    "Cursor Grok 4.5",
+  ).evaluate((row) => row.getBoundingClientRect().height);
+  const cursorActionOverlay = catalogRow("Cursor Grok 4.5").locator(
+    "[data-model-row-actions]",
+  );
+  const cursorActionLayout = await cursorActionOverlay
+    .evaluate((overlay) => ({
+      position: getComputedStyle(overlay).position,
+      right: getComputedStyle(overlay).right,
+    }))
+    .catch(() => null);
+  await catalogRow("Cursor Grok 4.5").hover();
+  const cursorRowHeightAfterHover = await catalogRow(
+    "Cursor Grok 4.5",
+  ).evaluate((row) => row.getBoundingClientRect().height);
+  check(
+    "hover actions overlay long labels without reflowing the row",
+    cursorActionLayout?.position === "absolute" &&
+      cursorActionLayout.right !== "auto" &&
+      Math.abs(cursorRowHeightAfterHover - cursorRowHeightBeforeHover) <= 0.5,
+    JSON.stringify({
+      cursorActionLayout,
+      cursorRowHeightBeforeHover,
+      cursorRowHeightAfterHover,
+    }),
+  );
+
+  // Editing a non-selected row changes only that exact model's durable memory:
+  // it must not select the row, close the catalog, or reconfigure active Opus.
+  const selectionsBeforeEdit = consoleLines.filter((line) =>
+    line.includes("[harness] onChange"),
+  ).length;
+  await catalogRow("GPT-5.6 Terra").hover();
+  await catalogEditButton("GPT-5.6 Terra").click();
+  check(
+    "non-selected model editor opens beside its row",
+    await waitFor(() => modelEditor().isVisible(), "model-editor-open"),
+  );
+  const modelEditorWidth = await modelEditor().evaluate((element) =>
+    element instanceof HTMLElement ? element.offsetWidth : 0,
+  );
+  check(
+    "model editor popup is at most 230px wide",
+    modelEditorWidth > 0 && modelEditorWidth <= 230,
+    `${modelEditorWidth}px`,
+  );
+  const modelEditorOverflow = await modelEditor().evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }));
+  check(
+    "narrow model editor has no horizontal overflow",
+    modelEditorOverflow.scrollWidth <= modelEditorOverflow.clientWidth,
+    `${modelEditorOverflow.scrollWidth}/${modelEditorOverflow.clientWidth}`,
+  );
+  await modelEditor()
+    .getByRole("radio", { name: "Medium", exact: true })
+    .click();
+  const terraFastSwitch = modelEditor().getByRole("switch", {
+    name: "Fast mode for gpt-5.6-terra",
+  });
+  await terraFastSwitch.click();
+  check(
+    "editing a non-selected model keeps the catalog and editor open",
+    (await catalog().isVisible()) && (await modelEditor().isVisible()),
+  );
+  check(
+    "editing a non-selected model does not select it",
+    consoleLines.filter((line) => line.includes("[harness] onChange"))
+      .length === selectionsBeforeEdit &&
+      (await catalogRow("Opus 5").getByLabel("Selected model").count()) === 1 &&
+      ((await selectedModel().textContent()) ?? "").includes("High") &&
+      !((await selectedModel().textContent()) ?? "").includes("Medium") &&
+      !((await selectedModel().textContent()) ?? "").includes("Fast"),
+  );
+  check(
+    "edited model row immediately shows remembered Medium Fast",
+    ((await catalogRow("GPT-5.6 Terra").textContent()) ?? "").includes(
+      "Medium",
+    ) &&
+      ((await catalogRow("GPT-5.6 Terra").textContent()) ?? "").includes(
+        "Fast",
+      ),
+  );
+  await page.keyboard.press("Escape");
+  check(
+    "Escape closes only the model editor before the catalog",
+    (await catalog().isVisible()) &&
+      (await waitFor(
+        async () => !(await modelEditor().isVisible()),
+        "model-editor-esc",
+      )),
+  );
+
+  // Every catalog row owns a favorite control beside its model metadata. The
+  // global default is filled at rest; all others reveal an outline star on
+  // row hover/focus. Favoriting is configuration-only: it must not select a
+  // row, close either popover, or steal the search caret.
+  const catalogItemsCount = await catalog()
+    .locator("[data-model-catalog-item]")
+    .count();
+  const catalogFavoriteCount = await catalog()
+    .locator("[data-model-favorite-action]")
+    .count();
+  check(
+    "every catalog model has a favorite action",
+    catalogItemsCount > 0 && catalogFavoriteCount === catalogItemsCount,
+    `${catalogFavoriteCount}/${catalogItemsCount}`,
+  );
+  const opusFavorite = catalogFavoriteButton("Opus 5");
+  if ((await opusFavorite.count()) === 1) {
+    const hiddenOpacity = await opusFavorite.evaluate(
+      (button) => getComputedStyle(button).opacity,
+    );
+    await catalogRow("Opus 5").hover();
+    const favoriteRevealed = await waitFor(
+      () =>
+        opusFavorite.evaluate(
+          (button) => getComputedStyle(button).opacity === "1",
+        ),
+      "catalog-favorite-hover",
+    );
+    check(
+      "non-default favorite star reveals on row hover",
+      hiddenOpacity === "0" && favoriteRevealed,
+      `${hiddenOpacity} -> ${favoriteRevealed ? "1" : "not 1"}`,
+    );
+    const selectionsBeforeFavorite = consoleLines.filter((line) =>
+      line.includes("[harness] onChange"),
+    ).length;
+    await opusFavorite.click();
+    check(
+      "favorite click moves the one global default without selecting",
+      (await waitFor(
+        async () =>
+          (await catalogRow("Opus 5")
+            .locator("[data-default-model-indicator]")
+            .count()) === 1,
+        "favorite-model",
+      )) &&
+        (await catalog().locator("[data-default-model-indicator]").count()) ===
+          1 &&
+        (await catalogRow("GPT-5.6 Sol")
+          .locator("[data-default-model-indicator]")
+          .count()) === 0 &&
+        consoleLines.filter((line) => line.includes("[harness] onChange"))
+          .length === selectionsBeforeFavorite,
+    );
+    const activeDefaultMetadataBox = await catalogRow("Opus 5")
+      .locator("[data-model-metadata]")
+      .boundingBox();
+    const activeDefaultStarBox = await catalogRow("Opus 5")
+      .locator("[data-default-model-indicator]")
+      .boundingBox();
+    check(
+      "an active default keeps its star directly beside its configuration",
+      !!activeDefaultMetadataBox &&
+        !!activeDefaultStarBox &&
+        activeDefaultStarBox.x -
+          (activeDefaultMetadataBox.x + activeDefaultMetadataBox.width) <=
+          8,
+    );
+    check(
+      "favorite click keeps catalog open and search focused",
+      (await catalog().isVisible()) &&
+        (await searchInput.evaluate(
+          (input) => input === document.activeElement,
+        )),
+    );
+    check(
+      "collapsed selected model reflects the new default star",
+      (await selectedModel()
+        .locator("[data-default-model-indicator]")
+        .count()) === 1,
+    );
+  } else {
+    check("non-default favorite star reveals on row hover", false);
+    check(
+      "favorite click moves the one global default without selecting",
+      false,
+    );
+    check(
+      "an active default keeps its star directly beside its configuration",
+      false,
+    );
+    check("favorite click keeps catalog open and search focused", false);
+    check("collapsed selected model reflects the new default star", false);
+  }
+
+  // 3. Active-model settings and the searchable model list share one popover.
+  //    There is no top-level Edit detour. A non-empty query closes the hover
+  //    catalog and puts matching results directly below the same search input.
+  check(
+    "model search has no top-level Edit action",
+    (await modelMenu().getByText("Edit", { exact: true }).count()) === 0,
+  );
+  check(
+    "popover shows the Reasoning section",
+    await page.getByText("Reasoning", { exact: true }).isVisible(),
+  );
+  check(
+    "popover shows the Options section",
+    await page.getByText("Options", { exact: true }).isVisible(),
+  );
+  const optionsBox = await page
+    .getByText("Options", { exact: true })
+    .boundingBox();
+  const searchBox = await searchInput.boundingBox();
+  check(
+    "model search sits below configuration",
+    !!optionsBox &&
+      !!searchBox &&
+      searchBox.y > optionsBox.y + optionsBox.height,
+  );
+  const modelHeadingBox = await modelMenu()
+    .getByText("Model", { exact: true })
+    .boundingBox();
+  const searchRowBox = await modelMenu()
+    .locator('[data-slot="command-input-wrapper"]')
+    .boundingBox();
+  check(
+    "Model title precedes the always-focused search field",
+    !!modelHeadingBox &&
+      !!searchRowBox &&
+      modelHeadingBox.y + modelHeadingBox.height <= searchRowBox.y,
+  );
+  const modelSectionSeparators = await modelMenu().evaluate((menu) => {
+    const command = menu.querySelector("[cmdk-root]");
+    const inputWrapper = menu.querySelector(
+      '[data-slot="command-input-wrapper"]',
+    );
+    return {
+      beforeTitle: command ? getComputedStyle(command).borderTopWidth : "0px",
+      afterSearch: inputWrapper
+        ? getComputedStyle(inputWrapper).borderBottomWidth
+        : "0px",
+    };
+  });
+  check(
+    "Model title/search block has separators before the title and after search",
+    modelSectionSeparators.beforeTitle === "1px" &&
+      modelSectionSeparators.afterSearch === "1px",
+    JSON.stringify(modelSectionSeparators),
+  );
+  await searchInput.fill("GPT-5.6");
+  check(
+    "search query closes the unfiltered catalog sidecar",
+    await waitFor(async () => !(await catalog().isVisible()), "catalog-close"),
+  );
+  const searchItemGaps = await page
+    .locator("[cmdk-item]")
+    .evaluateAll((items) =>
+      items.slice(1).map((item, index) => {
+        const previous = items[index].getBoundingClientRect();
+        const current = item.getBoundingClientRect();
+        return current.top - previous.bottom;
+      }),
+    );
+  check(
+    "search-result items have the same exact 1px gap",
+    searchItemGaps.length > 0 &&
+      searchItemGaps.every((gap) => Math.abs(gap - 1) <= 0.5),
+    searchItemGaps.join(","),
+  );
+  await searchInput.fill("Fable");
+  check(
+    "search filters to matching model results",
+    (await page.locator("[cmdk-item]").count()) === 1 &&
+      (await rowText("Fable 5")).includes("Fable 5"),
+  );
+  const searchRowHeight = await modelRow("Fable 5").evaluate(
+    (row) => row.getBoundingClientRect().height,
+  );
+  check(
+    "search results use the same compact 26px model-row height",
+    Math.abs(searchRowHeight - 26) <= 0.5,
+    `${searchRowHeight}px`,
+  );
+  const searchRowPadding = await modelRow("Fable 5").evaluate((row) => ({
+    top: getComputedStyle(row).paddingTop,
+    bottom: getComputedStyle(row).paddingBottom,
+  }));
+  check(
+    "search-result rows use 4px top and bottom padding",
+    searchRowPadding.top === "4px" && searchRowPadding.bottom === "4px",
+    JSON.stringify(searchRowPadding),
+  );
+  const resultBox = await modelRow("Fable 5").boundingBox();
+  const filteredSearchBox = await searchInput.boundingBox();
+  check(
+    "search results render below the search field",
+    !!resultBox &&
+      !!filteredSearchBox &&
+      resultBox.y >= filteredSearchBox.y + filteredSearchBox.height,
+  );
+  const fableFavorite = modelRow("Fable 5").locator(
+    "[data-model-favorite-action]",
+  );
+  const fableEdit = modelRow("Fable 5").getByRole("button", {
+    name: "Edit settings for Fable 5",
+  });
+  await searchInput.hover();
+  const fableEditAtRest = await fableEdit.evaluate((button) => ({
+    opacity: getComputedStyle(button).opacity,
+    pointerEvents: getComputedStyle(button).pointerEvents,
+  }));
+  check(
+    "search-result Edit stays hidden until row hover",
+    fableEditAtRest.opacity === "0" && fableEditAtRest.pointerEvents === "none",
+    JSON.stringify(fableEditAtRest),
+  );
+  check(
+    "search result exposes its favorite action",
+    (await fableFavorite.count()) === 1,
+  );
+  check(
+    "search-result favorite stays inline when the model phrase fits",
+    (await modelRow("Fable 5").getAttribute("data-favorite-placement")) ===
+      "inline",
+  );
+  if ((await fableFavorite.count()) === 1) {
+    await modelRow("Fable 5").hover();
+    check(
+      "search-result favorite star reveals on hover",
+      await waitFor(
+        () =>
+          fableFavorite.evaluate(
+            (button) => getComputedStyle(button).opacity === "1",
+          ),
+        "search-favorite-hover",
+      ),
+    );
+    check(
+      "search-result Edit reveals with the favorite action",
+      await waitFor(
+        () =>
+          fableEdit.evaluate(
+            (button) =>
+              getComputedStyle(button).opacity === "1" &&
+              getComputedStyle(button).pointerEvents !== "none",
+          ),
+        "search-edit-hover",
+      ),
+    );
+    const searchSelectionsBeforeFavorite = consoleLines.filter((line) =>
+      line.includes("[harness] onChange"),
+    ).length;
+    await fableFavorite.click();
+    check(
+      "search-result favorite changes only the default and preserves search",
+      (await waitFor(
+        async () =>
+          (await modelRow("Fable 5")
+            .locator("[data-default-model-indicator]")
+            .count()) === 1,
+        "search-favorite-model",
+      )) &&
+        (await menuOpen()) &&
+        (await searchInput.inputValue()) === "Fable" &&
+        (await searchInput.evaluate(
+          (input) => input === document.activeElement,
+        )) &&
+        consoleLines.filter((line) => line.includes("[harness] onChange"))
+          .length === searchSelectionsBeforeFavorite,
+    );
+    // The harness's null model deliberately follows Claude's default, so the
+    // new Fable default also becomes its pending active model. Round-trip the
+    // default to Opus before the later Opus-only Fast assertions, while proving
+    // the same search-row favorite path remains selection-free in reverse.
+    await searchInput.fill("Opus 5");
+    const opusSearchFavorite = modelRow("Opus 5").locator(
+      "[data-model-favorite-action]",
+    );
+    await modelRow("Opus 5").hover();
+    await opusSearchFavorite.click();
+    check(
+      "search favorite round-trip restores a default-bound pending model",
+      (await waitFor(
+        async () =>
+          (await modelRow("Opus 5")
+            .locator("[data-default-model-indicator]")
+            .count()) === 1,
+        "search-favorite-restore",
+      )) &&
+        consoleLines.filter((line) => line.includes("[harness] onChange"))
+          .length === searchSelectionsBeforeFavorite,
+    );
+    await searchInput.fill("Fable");
+    await modelRow("Fable 5").hover();
+  } else {
+    check("search-result favorite star reveals on hover", false);
+    check("search-result Edit reveals with the favorite action", false);
+    check(
+      "search-result favorite changes only the default and preserves search",
+      false,
+    );
+    check(
+      "search favorite round-trip restores a default-bound pending model",
+      false,
+    );
+  }
+  check(
+    "search-result editor uses Edit text",
+    (
+      (await modelRow("Fable 5")
+        .getByRole("button", { name: "Edit settings for Fable 5" })
+        .textContent()) ?? ""
+    ).trim() === "Edit",
+  );
+  const searchSelectionsBeforeEdit = consoleLines.filter((line) =>
+    line.includes("[harness] onChange"),
+  ).length;
+  await modelRow("Fable 5")
+    .getByRole("button", { name: "Edit settings for Fable 5" })
+    .click();
+  check(
+    "filtered result editor opens without selecting its command row",
+    (await waitFor(() => modelEditor().isVisible(), "search-editor-open")) &&
+      (await menuOpen()) &&
+      consoleLines.filter((line) => line.includes("[harness] onChange"))
+        .length === searchSelectionsBeforeEdit,
+  );
+  await page.keyboard.press("Escape");
+  check(
+    "closing a filtered result editor preserves its query and result",
+    (await menuOpen()) &&
+      (await searchInput.inputValue()) === "Fable" &&
+      (await page.locator("[cmdk-item]").count()) === 1,
+  );
+  await searchInput.fill("");
+  check(
+    "clearing search collapses back to selected-only",
+    (await page.locator("[cmdk-item]").count()) === 0 &&
+      (await selectedModel().count()) === 1,
+  );
+  await page.getByRole("radio", { name: "Max", exact: true }).click();
+  const fastSwitch = page.getByRole("switch", {
+    name: "Fast mode for claude-opus-5[1m]",
+  });
+  await fastSwitch.click();
+  check(
+    "popover enables Fast",
+    (await fastSwitch.getAttribute("aria-checked")) === "true",
+  );
+  check(
+    "selected model shows its remembered Max Fast state",
+    await waitFor(async () => {
+      const text = (await selectedModel().textContent()) ?? "";
+      return text.includes("Max") && text.includes("Fast");
+    }, "row-config"),
+  );
+  check(
+    "Escape closes the configured model menu after nested layers",
+    await closeModelMenuWithEscape("close-after-configure"),
+  );
+  const configuredPillText = (
+    (await pill.locator("[data-model-pill-label]").textContent()) ?? ""
+  )
+    .replace(/\s+/g, " ")
+    .trim();
+  check(
+    "composer model pill reflects effort and Fast configuration",
+    configuredPillText === "Opus 5 Max Fast",
+    configuredPillText,
+  );
+  check(
+    "configured composer still has no standalone Fast or effort controls",
+    (await page.getByRole("button", { name: /fast mode/i }).count()) === 0 &&
+      (await page
+        .getByRole("button", { name: /reasoning effort:/i })
+        .count()) === 0,
+  );
+
+  // 4. A→B→A restores each model's own memory. Selecting rows still reaches
+  //    onChange and closes, and the controlled popover can reopen.
+  await pill.click();
+  check(
+    "menu re-opens after configuration",
+    await waitFor(menuOpen, "reopen-after-configure"),
+  );
+  await page.waitForTimeout(600);
+  check("re-opened menu stays open", await menuOpen());
+  await searchInput.fill("Fable");
+  await modelRow("Fable 5").click({ position: { x: 8, y: 8 } });
   check(
     "selecting a row closes the menu",
     await waitFor(async () => !(await menuOpen()), "close-on-select"),
@@ -169,21 +1550,30 @@ try {
     consoleLines.some((l) => l.includes("[harness] onChange")),
   );
 
-  // 3. Re-open after close — catches open-state desync between the pill's
-  //    controlled state and Radix's internal toggle. Wait for focus to land
-  //    in the search input (Radix's focus scope settles async) before
-  //    sending Escape, mirroring what a real user's key press would meet.
   await pill.click();
   check("menu re-opens after a selection", await waitFor(menuOpen, "reopen"));
+  check(
+    "second model keeps its own High/non-Fast defaults",
+    ((await selectedModel().textContent()) ?? "").includes("High") &&
+      !((await selectedModel().textContent()) ?? "").includes("Fast"),
+  );
+  await searchInput.fill("Opus 5");
+  await modelRow("Opus 5").click({ position: { x: 8, y: 8 } });
+  await waitFor(async () => !(await menuOpen()), "close-second-selection");
+  await pill.click();
+  await waitFor(menuOpen, "reopen-restored-model");
+  check(
+    "returning to the first model restores Max Fast",
+    ((await selectedModel().textContent()) ?? "").includes("Max") &&
+      ((await selectedModel().textContent()) ?? "").includes("Fast"),
+  );
+  // Wait for Radix's focus scope before Escape, mirroring a user key press.
   await waitFor(
     () => page.evaluate(() => document.activeElement?.tagName === "INPUT"),
     "search-focus",
   );
-  await page.keyboard.press("Escape");
-  check(
-    "Escape closes the menu",
-    await waitFor(async () => !(await menuOpen()), "esc-close"),
-  );
+  const finalMenuClosed = await closeModelMenuWithEscape("final-escape");
+  check("Escape closes the menu", finalMenuClosed);
 
   // The design surface owns a separate harness contract and deliberately has
   // no coding-agent chat mounted.
@@ -826,21 +2216,18 @@ try {
   );
   check(
     "Header-driven tree search keeps matches and filters unrelated rows",
-    await waitFor(
-      async () => {
-        const match = page.locator(
-          '[data-testid="files-tree-panel"] [data-item-path="lib/readme.md"]',
-        );
-        const unrelated = page.locator(
-          '[data-testid="files-tree-panel"] [data-item-path="package.json"]',
-        );
-        return (
-          (await match.isVisible().catch(() => false)) &&
-          !(await unrelated.isVisible().catch(() => true))
-        );
-      },
-      "tree-panel-search-filter",
-    ),
+    await waitFor(async () => {
+      const match = page.locator(
+        '[data-testid="files-tree-panel"] [data-item-path="lib/readme.md"]',
+      );
+      const unrelated = page.locator(
+        '[data-testid="files-tree-panel"] [data-item-path="package.json"]',
+      );
+      return (
+        (await match.isVisible().catch(() => false)) &&
+        !(await unrelated.isVisible().catch(() => true))
+      );
+    }, "tree-panel-search-filter"),
   );
   await page.keyboard.press("Escape");
   check(

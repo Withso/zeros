@@ -54,8 +54,11 @@
     }
   ],
   "vulnerabilityAlerts": {
-    "description": "Security fixes bypass the opt-in allowlist above. `enabled: true` here overrides the `matchPackageNames: [*] / enabled: false` rule for advisory-driven updates only, so a vulnerable transitive dependency still gets a PR even though routine version bumps for that package are muted. This is the capability that made Dependabot worth keeping before it was removed; unscheduled on purpose, because an advisory should not wait for Monday.",
+    "description": "Security fixes bypass the opt-in allowlist above. `enabled: true` here overrides the `matchPackageNames: [*] / enabled: false` rule for advisory-driven updates only, so a vulnerable transitive dependency still gets a PR even though routine version bumps for that package are muted. Advisory fixes are grouped into one maintainer-reviewed PR, and `rangeStrategy: bump` raises vulnerable manifest floors instead of relying on a safe lockfile resolution alone. Unscheduled on purpose, because an advisory should not wait for Monday; never automerged because security rollups require human review.",
     "enabled": true,
-    "labels": ["dependencies", "automated", "security"]
+    "labels": ["dependencies", "automated", "security"],
+    "groupName": "security updates",
+    "rangeStrategy": "bump",
+    "automerge": false
   }
 }

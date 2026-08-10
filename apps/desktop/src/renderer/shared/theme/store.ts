@@ -31,9 +31,12 @@ import { applyTheme } from "./derive";
 import {
   DEFAULT_STORED_PREFS,
   STORAGE_KEY,
+  resolveThemeId,
   resolveVariant,
+  themeVariantForId,
   type AppearancePrefs,
   type StoredAppearancePrefs,
+  type ThemeId,
   type ThemeVariant,
 } from "./prefs";
 import {
@@ -66,12 +69,17 @@ function normalizeStored(parsed: unknown): StoredAppearancePrefs {
   // that mode migrates to "system" silently. The retired variant
   // modes (orka-night / neutral / zeros-blue / zeros-shade, removed
   // 2026-07-07 when Zeros Shade became the single :root theme) fall
-  // through to the default ("dark") the same way.
+  // through to the default ("dark") the same way. `orka-black` is a NEW
+  // id for the palette preserved in 2026-08; do not repurpose the retired
+  // `orka-night` id because it represented a different historical palette.
   const rawMode = raw.mode as string | undefined;
   const mode: StoredAppearancePrefs["mode"] =
     rawMode === "high-contrast"
       ? "system"
-      : rawMode === "system" || rawMode === "light" || rawMode === "dark"
+      : rawMode === "system" ||
+          rawMode === "light" ||
+          rawMode === "dark" ||
+          rawMode === "orka-black"
         ? rawMode
         : DEFAULT_STORED_PREFS.mode;
   // Per-variant picks. Slot values are validated lazily by
@@ -104,7 +112,9 @@ function durableModeFallback(): StoredAppearancePrefs["mode"] | null {
   if (typeof window === "undefined") return null;
   const m = (window as { __ZEROS_APPEARANCE_MODE__?: unknown })
     .__ZEROS_APPEARANCE_MODE__;
-  return m === "system" || m === "light" || m === "dark" ? m : null;
+  return m === "system" || m === "light" || m === "dark" || m === "orka-black"
+    ? m
+    : null;
 }
 
 function readStoredPrefs(): StoredAppearancePrefs {
@@ -129,7 +139,9 @@ function systemPrefersDark(): boolean {
  *  always the concrete registry id whose appearance matches `variant`; both
  *  are recomputed together by refresh() so snapshots stay consistent. */
 let stored: StoredAppearancePrefs = readStoredPrefs();
-let variant: ThemeVariant = resolveVariant(stored.mode, systemPrefersDark());
+let prefersDark = systemPrefersDark();
+let themeId: ThemeId = resolveThemeId(stored.mode, prefersDark);
+let variant: ThemeVariant = themeVariantForId(themeId);
 let prefs: AppearancePrefs = derivePrefs(stored, variant);
 const subscribers = new Set<() => void>();
 
@@ -161,9 +173,11 @@ function emit(): void {
  *  (e.g. an OS appearance flip in "system" mode — mode string identical, but
  *  variant and therefore codeTheme differ). */
 function refresh(): void {
-  variant = resolveVariant(stored.mode, systemPrefersDark());
+  prefersDark = systemPrefersDark();
+  themeId = resolveThemeId(stored.mode, prefersDark);
+  variant = themeVariantForId(themeId);
   prefs = derivePrefs(stored, variant);
-  applyTheme(prefs, { systemPrefersDark: systemPrefersDark() });
+  applyTheme(prefs, { systemPrefersDark: prefersDark });
   emit();
 }
 
@@ -175,6 +189,12 @@ export function getPrefs(): AppearancePrefs {
  *  Cached alongside prefs so it's a stable useSyncExternalStore snapshot. */
 export function getVariant(): ThemeVariant {
   return variant;
+}
+
+/** The concrete visual theme. Unlike getVariant(), this changes on a
+ *  neutral-Dark ↔ Orka-black switch so canvas renderers can re-read tokens. */
+export function getThemeId(): ThemeId {
+  return themeId;
 }
 
 export function setPrefs(patch: Partial<AppearancePrefs>): void {
@@ -205,7 +225,7 @@ export function subscribe(listener: () => void): () => void {
 // Apply on module load — runs before React mounts so first paint has
 // the user's last-saved prefs (no flash of default theme).
 if (typeof document !== "undefined") {
-  applyTheme(prefs, { systemPrefersDark: systemPrefersDark() });
+  applyTheme(prefs, { systemPrefersDark: prefersDark });
 }
 
 // Console-accessible API for ad-hoc theme testing without shipping a

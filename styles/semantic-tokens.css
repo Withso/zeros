@@ -11,8 +11,11 @@
         theme. Answers "what should THIS feature use, per theme?".
 
    A semantic token exists so a component can flip its treatment
-   between Shade (dark) and Light with NO per-theme conditional in the
-   component — the token carries the theme logic.
+   between dark and Light with NO per-theme conditional in the
+   component — the token carries the theme logic. Neutral Dark and
+   Orka black deliberately share these aliases: their structural
+   difference lives entirely in primitive values, while semantic status
+   remains meaning-bearing in both palettes.
 
    Load order (apps/desktop/src/renderer/main.tsx): zeros-tokens.css → semantic-tokens.css →
    globals.css. Semantics are plain CSS var definitions on :root /
@@ -25,11 +28,11 @@
    here.
    ============================================================ */
 
-/* ── Shade (default dark theme) ── */
+/* ── Dark themes (neutral Dark + Orka black) ── */
 :root {
   /* PR status island — open-PR (brown) states.
      Action button flips polarity per theme so its icon never vanishes:
-     the white primary button in Shade, a solid --brown-fg in Light. */
+     the light primary button in either dark palette, a solid --brown-fg in Light. */
   --pr-status-surface: var(
     --brown-bg
   ); /* brown container surface (the raw --brown-bg, per design) */
@@ -50,13 +53,13 @@
   --pr-status-chip-border-merged: var(--violet-750); /* merged (violet) */
   --pr-status-chip-border-closed: var(
     --red-750
-  ); /* closed (red) — muted brick outline in Shade */
+  ); /* closed (red) — muted brick outline in dark themes */
 
   /* Merged-row "Continue" button — filled violet, label flips per theme. */
   --pr-status-continue-bg: var(--violet-fg);
   --pr-status-continue-fg: var(
     --inverted-fg
-  ); /* dark label on the light-violet button in Shade */
+  ); /* dark label on the light-violet button in dark themes */
 
   /* Loader (ZerosSpinner — the Orbit/Agent shimmer, apps/desktop/src/renderer/shared/ui/loading/
      zeros-spinner.tsx). The app's DEFAULT loader colors: the lit piece
@@ -69,7 +72,7 @@
                                           the piece must paint in the
                                           on-inverted foreground or it
                                           vanishes against the near-white
-                                          (Shade) / near-black (Light) fill.
+                                          (dark themes) / near-black (Light) fill.
                                           Rest shares the same color — the
                                           spinner's own 70%/40% opacity
                                           split keeps the two layers
@@ -79,7 +82,7 @@
      (currentColor) instead — the button's own text color already carries
      the per-theme logic. */
   --loader-active: var(--fg2);
-  --loader-rest: var(--fg3);
+  --loader-rest: var(--muted-fg);
   --loader-active-inverted: var(--primary-button-fg);
   --loader-rest-inverted: var(--primary-button-fg);
 
@@ -87,7 +90,7 @@
      the shortcuts palette's tabs + category/Kbd chips). A translucent wash
      that reads as "selected" without going opaque on a blurred panel; reuse
      it for any glass-morphism selected/raised state. Consume via
-     `bg-[var(--selected-glass)]`. Per-theme mix: a light-gray lift in Shade,
+     `bg-[var(--selected-glass)]`. Per-theme mix: a light-gray lift in Dark,
      a white lift in Light. */
   --selected-glass: color-mix(in oklab, var(--bg5) 25%, transparent);
 }

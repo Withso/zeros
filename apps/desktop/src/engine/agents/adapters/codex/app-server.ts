@@ -53,6 +53,7 @@ import {
 } from "../shared/stdio-process";
 import type { McpServerRegistration } from "../../types";
 import {
+  JSON_RPC_NO_RESPONSE,
   JsonRpcRequestError,
   JsonRpcResponseSuppressedError,
   JsonRpcStdioClient,
@@ -61,6 +62,7 @@ import {
 import { buildSpawnEnvWithLoginPath } from "../shared/login-shell-path";
 import { resolveCodexBinary, type CodexBinarySource } from "./binary-resolver";
 import { PERMISSION_RESPONSE_TIMEOUT_MS } from "../shared/constants";
+import { MAX_PENDING_MCP_ELICITATIONS } from "../shared/mcp-elicitation";
 
 // ── Type re-exports (subset of generated bindings) ─────────
 
@@ -145,6 +147,7 @@ export function buildInitializeCapabilities(options: {
   return {
     experimentalApi: true,
     requestAttestation: options.requestAttestation,
+    mcpServerOpenaiFormElicitation: true,
   };
 }
 
@@ -271,17 +274,29 @@ export interface CodexApprovalRequest {
 export type CodexApprovalMethod =
   | "item/commandExecution/requestApproval"
   | "item/fileChange/requestApproval"
-  | "item/permissions/requestApproval";
+  | "item/permissions/requestApproval"
+  /** Deprecated v1 request names remain in the pinned generated schema and
+   * can still surface from migrated sessions / compatibility feature flags. */
+  | "execCommandApproval"
+  | "applyPatchApproval";
 
-/** A server-initiated blocking user-input question (item/tool/requestUserInput).
- *  Twin of CodexApprovalRequest — the answer is deferred until
+export type CodexUserInputMethod =
+  | "item/tool/requestUserInput"
+  | "mcpServer/elicitation/request";
+
+/** A server-initiated blocking question. This covers Codex's own
+ *  item/tool/requestUserInput and MCP form/URL elicitation. Twin of
+ *  CodexApprovalRequest — the answer is deferred until
  *  respondToUserInput(questionId, response). */
 export interface CodexUserInputRequest {
   /** Stable id Zeros mints; the lookup key for respondToUserInput. */
   questionId: string;
-  /** Native JSON-RPC request id echoed by `serverRequest/resolved`. */
-  requestId: GenRequestId;
-  /** Raw ToolRequestUserInputParams. */
+  /** Peer-authored JSON-RPC id, retained for replay/cancellation correlation. */
+  rpcRequestId: string;
+  method: CodexUserInputMethod;
+  /** Exact engine-side deadline for the parked JSON-RPC resolver. */
+  expiresAt?: number;
+  /** Raw method-specific params. */
   params: Record<string, unknown>;
 }
 
@@ -319,14 +334,14 @@ export interface CodexAppServerBootOptions {
    *  engine's re-adoption replay set from re-presenting a gate nothing can
    *  answer. */
   onApprovalSettled?: (permissionId: string) => void;
-  /** Server-initiated blocking user-input question received (item/tool/
-   *  requestUserInput). Fired synchronously; the response is deferred until
-   *  `respondToUserInput(questionId, response)`. If unset, answers empty. */
+  /** Server-initiated blocking user-input question received (Codex native
+   *  question or MCP elicitation). Fired synchronously; the response is
+   *  deferred until `respondToUserInput(questionId, response)`. If unset, the
+   *  request is answered with its safe empty/cancel response. */
   onUserInputRequest?: (request: CodexUserInputRequest) => void;
   /** A pending user-input question settled WITHOUT a respondToUserInput
-   *  call — its response timeout fired and the codex side was answered
-   *  empty. Lets the adapter evict its own pending entry and tell the
-   *  renderer to drop the parked card. */
+   *  call — timeout, server-side resolution, or dispose. Lets the adapter
+   *  evict its own pending entry and tell the renderer to drop the card. */
   onUserInputSettled?: (questionId: string) => void;
   /** MCP `elicitation/create` request received from a configured server. */
   onMcpElicitationRequest?: (request: CodexMcpElicitationRequest) => void;
@@ -441,8 +456,9 @@ export interface CodexAppServerHandle
   respondToPermission(permissionId: string, response: unknown): void;
 
   /** Resolve a pending user-input question the adapter received via
-   *  `onUserInputRequest`. `response` MUST be a ToolRequestUserInputResponse
-   *  ({ answers: { [questionId]: { answers: string[] } } }). No-op if unknown. */
+   *  `onUserInputRequest`. The response must match the originating method
+   *  (ToolRequestUserInputResponse or McpServerElicitationRequestResponse).
+   *  No-op if unknown. */
   respondToUserInput(questionId: string, response: unknown): void;
 
   /** Resolve a pending MCP elicitation with
@@ -597,14 +613,16 @@ export async function bootCodexAppServerRuntime(
       ? (line) => {
           if (line.length < 2_000)
             console.log(
-              `[${logTag}] OUT ${truncate(redactRpcLine(line), 400)}`,
+              `[${logTag}] OUT ${truncate(redactCodexRpcLine(line), 400)}`,
             );
         }
       : undefined,
     onInbound: (line) => {
       touchActiveTurnActivity();
       if (rpcTraceEnabled && line.length < 2_000) {
-        console.log(`[${logTag}] IN  ${truncate(redactRpcLine(line), 400)}`);
+        console.log(
+          `[${logTag}] IN  ${truncate(redactCodexRpcLine(line), 400)}`,
+        );
       }
     },
   });
@@ -684,17 +702,18 @@ export async function bootCodexAppServerRuntime(
   // respondToPermission to merely tolerate.
   interface PendingApprovalEntry {
     resolve: (response: unknown) => void;
-    reject: (error: Error) => void;
-    requestId: GenRequestId;
     method: CodexApprovalMethod;
+    rpcRequestId: string;
     /** setTimeout handle so respondToPermission can clear it. */
     timer: NodeJS.Timeout;
   }
   const pendingApprovals = new Map<string, PendingApprovalEntry>();
+  const pendingApprovalByRpcId = new Map<string, string>();
   const wireApproval = (method: CodexApprovalMethod) => {
-    client.onRequest(method, (params, inbound) => {
-      return new Promise<unknown>((resolve, reject) => {
+    client.onRequest(method, (params, context) => {
+      return new Promise<unknown>((resolve) => {
         const permissionId = randomUUID();
+        const rpcRequestId = String(context.id);
         if (!opts.onApprovalRequest) {
           // No adapter handler — auto-deny with the method-appropriate shape.
           console.warn(
@@ -706,6 +725,7 @@ export async function bootCodexAppServerRuntime(
         const timer = setTimeout(() => {
           if (!pendingApprovals.has(permissionId)) return;
           pendingApprovals.delete(permissionId);
+          pendingApprovalByRpcId.delete(rpcRequestId);
           console.warn(
             `[${logTag}] approval ${permissionId} (${method}) timed out after ${APPROVAL_TIMEOUT_MS}ms — auto-cancelling`,
           );
@@ -723,18 +743,18 @@ export async function bootCodexAppServerRuntime(
         timer.unref?.();
         pendingApprovals.set(permissionId, {
           resolve,
-          reject,
-          requestId: inbound.id,
           method,
+          rpcRequestId,
           timer,
         });
+        pendingApprovalByRpcId.set(rpcRequestId, permissionId);
         // A blocking approval is healthy activity, but it can legitimately
         // wait for the full approval timeout. Reset after arming that timer
         // so the inactivity watchdog cannot beat the auto-cancel timer.
         touchActiveTurnActivity();
         opts.onApprovalRequest({
           permissionId,
-          requestId: inbound.id,
+          requestId: context.id,
           method,
           params: (params ?? {}) as Record<string, unknown>,
         });
@@ -744,54 +764,107 @@ export async function bootCodexAppServerRuntime(
   wireApproval("item/commandExecution/requestApproval");
   wireApproval("item/fileChange/requestApproval");
   wireApproval("item/permissions/requestApproval");
+  wireApproval("execCommandApproval");
+  wireApproval("applyPatchApproval");
 
-  // ── User-input round-trip (item/tool/requestUserInput) ──
-  // Twin of the approval flow: a blocking question whose answer is deferred
-  // until respondToUserInput. No cancel variant exists in the response schema,
-  // so timeout / dispose / no-handler all answer `{ answers: {} }` (empty).
+  // Codex asks the host for wall-clock time instead of trusting the model's
+  // training cutoff. It is a server→client request in the generated protocol,
+  // not a notification; leaving it unregistered returns -32601 and needlessly
+  // deprives otherwise healthy turns of an exact timestamp.
+  client.onRequest("currentTime/read", () => ({
+    currentTimeAt: Math.floor(Date.now() / 1000),
+  }));
+
+  // ── Blocking question round-trips ──────────────────────
+  // Twin of the approval flow. Codex's own requestUserInput has no cancel
+  // variant and receives an empty answer on abandonment. MCP elicitation does
+  // have explicit decline/cancel actions, so timeout/dispose use cancel and a
+  // missing host handler declines immediately. Keeping those shapes separate
+  // is required: app-server validates the method-specific response schema.
   interface PendingUserInputEntry {
     resolve: (response: unknown) => void;
-    reject: (error: Error) => void;
-    requestId: GenRequestId;
     timer: NodeJS.Timeout;
+    method: CodexUserInputMethod;
+    rpcRequestId: string;
+    cancelResponse: unknown;
   }
   const pendingUserInputs = new Map<string, PendingUserInputEntry>();
-  client.onRequest("item/tool/requestUserInput", (params, inbound) => {
-    return new Promise<unknown>((resolve, reject) => {
-      const questionId = randomUUID();
-      if (!opts.onUserInputRequest) {
-        resolve({ answers: {} });
-        return;
-      }
-      const timer = setTimeout(() => {
-        if (!pendingUserInputs.has(questionId)) return;
-        pendingUserInputs.delete(questionId);
-        console.warn(
-          `[${logTag}] user-input ${questionId} timed out after ${APPROVAL_TIMEOUT_MS}ms — answering empty`,
-        );
-        resolve({ answers: {} });
-        // The renderer's card is still parked on this id — tell the adapter
-        // so it evicts the pending entry and the UI drops the card.
-        opts.onUserInputSettled?.(questionId);
-      }, APPROVAL_TIMEOUT_MS);
-      timer.unref?.();
-      pendingUserInputs.set(questionId, {
-        resolve,
-        reject,
-        requestId: inbound.id,
-        timer,
-      });
-      // Same ordering as approvals: the question may sit open for the whole
-      // timeout, so reset the inactivity watchdog after the auto-empty timer
-      // is armed.
-      touchActiveTurnActivity();
-      opts.onUserInputRequest({
-        questionId,
-        requestId: inbound.id,
-        params: (params ?? {}) as Record<string, unknown>,
+  const pendingUserInputByRpcId = new Map<string, string>();
+  const safeMcpResponse = (action: "decline" | "cancel") => ({
+    action,
+    content: null,
+    _meta: null,
+  });
+  const wireUserInput = (
+    method: CodexUserInputMethod,
+    noHandlerResponse: unknown,
+    cancelResponse: unknown,
+  ): void => {
+    client.onRequest(method, (params, context) => {
+      return new Promise<unknown>((resolve) => {
+        if (
+          method === "mcpServer/elicitation/request" &&
+          [...pendingUserInputs.values()].filter(
+            (pending) => pending.method === method,
+          ).length >= MAX_PENDING_MCP_ELICITATIONS
+        ) {
+          console.warn(
+            `[${logTag}] refusing concurrent MCP elicitation above ` +
+              `${MAX_PENDING_MCP_ELICITATIONS}; responding cancel`,
+          );
+          resolve(cancelResponse);
+          return;
+        }
+        const questionId = randomUUID();
+        const rpcRequestId = String(context.id);
+        if (!opts.onUserInputRequest) {
+          resolve(noHandlerResponse);
+          return;
+        }
+        const requestParams = (params ?? {}) as Record<string, unknown>;
+        const timeoutMs = userInputTimeoutMs(method, requestParams);
+        const expiresAt = Date.now() + timeoutMs;
+        const timer = setTimeout(() => {
+          if (!pendingUserInputs.has(questionId)) return;
+          pendingUserInputs.delete(questionId);
+          pendingUserInputByRpcId.delete(rpcRequestId);
+          console.warn(
+            `[${logTag}] user-input ${questionId} (${method}) timed out after ${timeoutMs}ms — auto-cancelling`,
+          );
+          resolve(cancelResponse);
+          // The renderer's card is still parked on this id — tell the adapter
+          // so it evicts the pending entry and the UI drops the card.
+          opts.onUserInputSettled?.(questionId);
+        }, timeoutMs);
+        timer.unref?.();
+        pendingUserInputs.set(questionId, {
+          resolve,
+          timer,
+          method,
+          rpcRequestId,
+          cancelResponse,
+        });
+        pendingUserInputByRpcId.set(rpcRequestId, questionId);
+        // Same ordering as approvals: the question may sit open for the whole
+        // timeout, so reset the inactivity watchdog after the auto-cancel
+        // timer is armed.
+        touchActiveTurnActivity();
+        opts.onUserInputRequest({
+          questionId,
+          rpcRequestId,
+          method,
+          expiresAt,
+          params: requestParams,
+        });
       });
     });
-  });
+  };
+  wireUserInput("item/tool/requestUserInput", { answers: {} }, { answers: {} });
+  wireUserInput(
+    "mcpServer/elicitation/request",
+    safeMcpResponse("decline"),
+    safeMcpResponse("cancel"),
+  );
 
   // ── MCP elicitation round-trip ───────────────────────────
   interface PendingMcpElicitationEntry {
@@ -801,7 +874,7 @@ export async function bootCodexAppServerRuntime(
     timer: NodeJS.Timeout;
   }
   const pendingMcpElicitations = new Map<string, PendingMcpElicitationEntry>();
-  client.onRequest("mcpServer/elicitation/request", (params, inbound) => {
+  if (!opts.onUserInputRequest) client.onRequest("mcpServer/elicitation/request", (params, inbound) => {
     return new Promise<GenMcpServerElicitationRequestResponse>(
       (resolve, reject) => {
         const questionId = randomUUID();
@@ -878,32 +951,46 @@ export async function bootCodexAppServerRuntime(
     };
   };
 
-  // Codex emits this after a local response and when it clears a request
-  // itself (turn completion/interruption or another client). The local-response
-  // path already removed its entry. A remaining entry is therefore externally
-  // resolved: reject its deferred handler with the JSON-RPC suppression marker
-  // so no late response is written, then evict the renderer card.
+  // The server can resolve/cancel a parked request independently (for example
+  // when its owning turn is interrupted). Correlate the peer's original RPC id
+  // back to our UI id and release both sides; otherwise the renderer keeps a
+  // dead question until the full 30-minute timeout.
   subscribe("serverRequest/resolved", (params) => {
-    const resolved = params as GenServerRequestResolvedNotification;
-    const requestKey = codexRequestKey(resolved?.requestId);
-    if (!requestKey) return;
+    const requestId = (params as { requestId?: string | number } | null)
+      ?.requestId;
+    if (requestId == null) return;
+    const rpcRequestId = String(requestId);
+    const permissionId = pendingApprovalByRpcId.get(rpcRequestId);
+    if (permissionId) {
+      const pending = pendingApprovals.get(permissionId);
+      if (pending) {
+        pendingApprovals.delete(permissionId);
+        pendingApprovalByRpcId.delete(rpcRequestId);
+        clearTimeout(pending.timer);
+        // The server has already retired this JSON-RPC request. Settle our
+        // handler closure without sending a second, late response.
+        pending.resolve(JSON_RPC_NO_RESPONSE);
+        opts.onApprovalSettled?.(permissionId);
+      }
+      return;
+    }
+    const questionId = pendingUserInputByRpcId.get(rpcRequestId);
+    if (!questionId) return;
+    const pending = pendingUserInputs.get(questionId);
+    if (!pending) return;
+    pendingUserInputs.delete(questionId);
+    pendingUserInputByRpcId.delete(rpcRequestId);
+    clearTimeout(pending.timer);
+    pending.resolve(JSON_RPC_NO_RESPONSE);
+    opts.onUserInputSettled?.(questionId);
+    return;
+  });
 
-    for (const [permissionId, pending] of pendingApprovals) {
-      if (codexRequestKey(pending.requestId) !== requestKey) continue;
-      pendingApprovals.delete(permissionId);
-      clearTimeout(pending.timer);
-      pending.reject(new JsonRpcResponseSuppressedError());
-      opts.onApprovalSettled?.(permissionId);
-      return;
-    }
-    for (const [questionId, pending] of pendingUserInputs) {
-      if (codexRequestKey(pending.requestId) !== requestKey) continue;
-      pendingUserInputs.delete(questionId);
-      clearTimeout(pending.timer);
-      pending.reject(new JsonRpcResponseSuppressedError());
-      opts.onUserInputSettled?.(questionId);
-      return;
-    }
+  subscribe("serverRequest/resolved", (params) => {
+    const requestKey = codexRequestKey(
+      (params as GenServerRequestResolvedNotification | null)?.requestId,
+    );
+    if (!requestKey) return;
     for (const [questionId, pending] of pendingMcpElicitations) {
       if (codexRequestKey(pending.requestId) !== requestKey) continue;
       pendingMcpElicitations.delete(questionId);
@@ -914,10 +1001,7 @@ export async function bootCodexAppServerRuntime(
     }
   });
 
-  // ── Handshake: initialized notification ──────────────────
-  // Register every blocking request and internal settlement handler before
-  // acknowledging initialization. App-server may begin sending requests as
-  // soon as it observes this notification.
+  // Register all blocking handlers before acknowledging initialization.
   client.notify("initialized", {});
 
   // ── Track turn lifecycle for runTurn correlation ─────────
@@ -949,6 +1033,10 @@ export async function bootCodexAppServerRuntime(
     string,
     "completed" | "failed" | "cancelled"
   >();
+  /** Monotonic marker closes the small window where a server-level terminal
+   * error arrives after turn/start was sent but before its ACK gives us the
+   * turn id needed to install a waiter. */
+  let unscopedTerminalErrorEpoch = 0;
 
   const recordCompletion = (
     turnId: string,
@@ -1005,20 +1093,42 @@ export async function bootCodexAppServerRuntime(
     console.warn(
       `[codex-app-server] error without turnId — failing all pending turns: ${JSON.stringify(p)}`,
     );
+    unscopedTerminalErrorEpoch += 1;
     for (const w of turnWaiters.values()) w.resolve("failed");
     turnWaiters.clear();
   });
 
+  /** Release server-initiated request closures after an unexpected process
+   * exit. There is no peer left to answer, so suppress wire responses while
+   * still evicting adapter/renderer cards immediately. */
+  const abandonPendingServerRequests = (): void => {
+    for (const [permissionId, pending] of pendingApprovals) {
+      clearTimeout(pending.timer);
+      pendingApprovals.delete(permissionId);
+      pendingApprovalByRpcId.delete(pending.rpcRequestId);
+      pending.resolve(JSON_RPC_NO_RESPONSE);
+      opts.onApprovalSettled?.(permissionId);
+    }
+    for (const [questionId, pending] of pendingUserInputs) {
+      clearTimeout(pending.timer);
+      pendingUserInputs.delete(questionId);
+      pendingUserInputByRpcId.delete(pending.rpcRequestId);
+      pending.resolve(JSON_RPC_NO_RESPONSE);
+      opts.onUserInputSettled?.(questionId);
+    }
+  };
+
   // ── Exit cleanup ──────────────────────────────────────────
   void proc.exited.then(({ code, signal }) => {
     client.close(`codex exited code=${code} signal=${signal ?? ""}`);
+    abandonPendingServerRequests();
     for (const w of turnWaiters.values()) w.resolve("failed");
     turnWaiters.clear();
     opts.onExit?.(code, signal);
   });
 
   // ── Public handle ─────────────────────────────────────────
-  let disposed = false;
+  let disposePromise: Promise<void> | null = null;
 
   const requestWithRetry = async <T>(
     method: string,
@@ -1101,6 +1211,7 @@ export async function bootCodexAppServerRuntime(
     },
 
     async runTurn(params, runOpts) {
+      const startingErrorEpoch = unscopedTerminalErrorEpoch;
       // Step 1 — send `turn/start` and await its ACKNOWLEDGMENT.
       //
       // Per the codex app-server contract, this response carries the
@@ -1124,13 +1235,18 @@ export async function bootCodexAppServerRuntime(
       if (
         ackStatus === "completed" ||
         ackStatus === "failed" ||
-        ackStatus === "cancelled"
+        ackStatus === "cancelled" ||
+        ackStatus === "interrupted"
       ) {
         return {
           turnId,
-          status: ackStatus as "completed" | "failed" | "cancelled",
+          status: ackStatus === "interrupted" ? "cancelled" : ackStatus,
           raw: ack,
         };
+      }
+
+      if (unscopedTerminalErrorEpoch !== startingErrorEpoch) {
+        return { turnId, status: "failed", raw: ack };
       }
 
       // Step 2 — await `turn/completed` (or `error`) for this turnId.
@@ -1205,6 +1321,7 @@ export async function bootCodexAppServerRuntime(
         return;
       }
       pendingApprovals.delete(permissionId);
+      pendingApprovalByRpcId.delete(pending.rpcRequestId);
       clearTimeout(pending.timer);
       pending.resolve(response);
     },
@@ -1216,6 +1333,7 @@ export async function bootCodexAppServerRuntime(
         return;
       }
       pendingUserInputs.delete(questionId);
+      pendingUserInputByRpcId.delete(pending.rpcRequestId);
       clearTimeout(pending.timer);
       pending.resolve(response);
     },
@@ -1245,41 +1363,66 @@ export async function bootCodexAppServerRuntime(
       return requestWithRetry<T>(method, params ?? {}, rpcOpts);
     },
 
-    async dispose() {
-      if (disposed) return;
-      disposed = true;
-      // Settle any in-flight approval requests before the JSON-RPC
-      // client closes so the server doesn't see an abrupt stream
-      // disconnect mid-request (avoids stuck threads server-side).
-      for (const [permissionId, pending] of pendingApprovals) {
-        clearTimeout(pending.timer);
-        pending.resolve(defaultCancelResponse(pending.method));
-        pendingApprovals.delete(permissionId);
-        // Same reason as the timeout path above: this resolver is gone without
-        // a user choice, so the adapter and renderer both need telling. Reached
-        // when the runtime is disposed from underneath a parked approval — a
-        // sidecar teardown or a crash-recovery rebuild, neither of which routes
-        // through disposeSession's own drain.
-        opts.onApprovalSettled?.(permissionId);
-      }
-      for (const [questionId, pending] of pendingUserInputs) {
-        clearTimeout(pending.timer);
-        pending.resolve({ answers: {} });
-        pendingUserInputs.delete(questionId);
-        opts.onUserInputSettled?.(questionId);
-      }
-      for (const [questionId, pending] of pendingMcpElicitations) {
-        clearTimeout(pending.timer);
-        pending.resolve(cancelledMcpElicitationResponse());
-        pendingMcpElicitations.delete(questionId);
-        opts.onMcpElicitationSettled?.(questionId);
-      }
-      for (const w of turnWaiters.values()) w.resolve("cancelled");
-      turnWaiters.clear();
-      client.close("dispose");
-      await proc.stop();
+    dispose() {
+      // A lifecycle timeout does not cancel the underlying disposal promise.
+      // Every retry must await that SAME process-group stop, never observe the
+      // prior attempt and falsely report success while its stop still hangs.
+      if (disposePromise) return disposePromise;
+      disposePromise = (async () => {
+        // Settle any in-flight approval requests before the JSON-RPC
+        // client closes so the server doesn't see an abrupt stream
+        // disconnect mid-request (avoids stuck threads server-side).
+        for (const [permissionId, pending] of pendingApprovals) {
+          clearTimeout(pending.timer);
+          pending.resolve(defaultCancelResponse(pending.method));
+          pendingApprovals.delete(permissionId);
+          pendingApprovalByRpcId.delete(pending.rpcRequestId);
+          // Same reason as the timeout path above: this resolver is gone without
+          // a user choice, so the adapter and renderer both need telling. Reached
+          // when the runtime is disposed from underneath a parked approval — a
+          // sidecar teardown or a crash-recovery rebuild, neither of which routes
+          // through disposeSession's own drain.
+          opts.onApprovalSettled?.(permissionId);
+        }
+        for (const [questionId, pending] of pendingUserInputs) {
+          clearTimeout(pending.timer);
+          pending.resolve(pending.cancelResponse);
+          pendingUserInputs.delete(questionId);
+          pendingUserInputByRpcId.delete(pending.rpcRequestId);
+          opts.onUserInputSettled?.(questionId);
+        }
+        for (const [questionId, pending] of pendingMcpElicitations) {
+          clearTimeout(pending.timer);
+          pending.resolve(cancelledMcpElicitationResponse());
+          pendingMcpElicitations.delete(questionId);
+          opts.onMcpElicitationSettled?.(questionId);
+        }
+        for (const w of turnWaiters.values()) w.resolve("cancelled");
+        turnWaiters.clear();
+        client.close("dispose");
+        await proc.stop();
+      })();
+      return disposePromise;
     },
   };
+}
+
+function userInputTimeoutMs(
+  method: CodexUserInputMethod,
+  params: Record<string, unknown>,
+): number {
+  if (method !== "item/tool/requestUserInput") {
+    return APPROVAL_TIMEOUT_MS;
+  }
+  const requested = params.autoResolutionMs;
+  if (
+    typeof requested !== "number" ||
+    !Number.isSafeInteger(requested) ||
+    requested < 1_000
+  ) {
+    return APPROVAL_TIMEOUT_MS;
+  }
+  return Math.min(requested, APPROVAL_TIMEOUT_MS);
 }
 
 // ── Internal helpers ─────────────────────────────────────────
@@ -1306,23 +1449,57 @@ function truncate(s: string, n: number): string {
   return s.length <= n ? s : `${s.slice(0, n)}…(${s.length - n} more)`;
 }
 
-/** Redact prompt-bearing fields from a JSON-RPC line before logging.
- *  Currently scrubs `params.input` (turn/start) — the only field that
- *  carries user text. If the line is not valid JSON or has no input,
- *  the original line is returned unchanged. */
-function redactRpcLine(line: string): string {
+/** Redact prompt- and answer-bearing fields from a JSON-RPC line before
+ * logging. Server-request responses do not carry a method name, so their
+ * `result.answers` / `result.content` fields need explicit treatment too.
+ * If the line is not valid JSON or has no sensitive payload, return it as-is. */
+export function redactCodexRpcLine(line: string): string {
   try {
     const obj = JSON.parse(line) as {
-      params?: { input?: unknown };
+      params?: {
+        input?: unknown;
+        url?: unknown;
+        requestedSchema?: unknown;
+      };
+      result?: { answers?: unknown; content?: unknown };
       method?: string;
     };
+    let changed = false;
     if (obj.params && Array.isArray(obj.params.input)) {
       obj.params.input = `[redacted ${obj.params.input.length} input parts]`;
-      return JSON.stringify(obj);
+      changed = true;
     }
-    return line;
+    if (obj.result && "answers" in obj.result) {
+      obj.result.answers = "[redacted answers]";
+      changed = true;
+    }
+    if (obj.result && "content" in obj.result) {
+      obj.result.content = "[redacted content]";
+      changed = true;
+    }
+    if (obj.method === "mcpServer/elicitation/request" && obj.params) {
+      if ("url" in obj.params) {
+        obj.params.url = redactMcpTraceUrl(obj.params.url);
+        changed = true;
+      }
+      if ("requestedSchema" in obj.params) {
+        obj.params.requestedSchema = "[redacted MCP schema]";
+        changed = true;
+      }
+    }
+    return changed ? JSON.stringify(obj) : line;
   } catch {
     return line;
+  }
+}
+
+function redactMcpTraceUrl(value: unknown): string {
+  if (typeof value !== "string") return "[redacted MCP URL]";
+  try {
+    const url = new URL(value);
+    return `${url.origin}${url.pathname ? "/…" : ""} [redacted MCP URL]`;
+  } catch {
+    return "[redacted MCP URL]";
   }
 }
 
@@ -1466,6 +1643,13 @@ export function defaultDenyResponse(method: CodexApprovalMethod): unknown {
         },
         scope: "turn",
       };
+    case "execCommandApproval":
+    case "applyPatchApproval":
+      return {
+        decision: {
+          denied: { rejection: "No approval handler is available." },
+        },
+      };
   }
 }
 
@@ -1479,5 +1663,8 @@ export function defaultCancelResponse(method: CodexApprovalMethod): unknown {
       return { decision: "cancel" };
     case "item/permissions/requestApproval":
       return defaultDenyResponse(method);
+    case "execCommandApproval":
+    case "applyPatchApproval":
+      return { decision: "abort" };
   }
 }

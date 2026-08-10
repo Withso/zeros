@@ -208,7 +208,13 @@ function serializeSettings(
       const patched = tomlPatch(existingText, ordered);
       // toml-patch can return syntactically invalid TOML WITHOUT throwing; round-
       // trip it so a bad patch falls through to the full rewrite, never to disk.
-      parseToml(patched);
+      // It can also return VALID but semantically incomplete TOML (notably when
+      // replacing an array-of-tables with `[]`), so syntax alone is insufficient:
+      // require the parsed result to equal the document we asked it to write.
+      const parsed = parseToml(patched);
+      if (!settingsValuesEqual(parsed, ordered)) {
+        throw new Error("TOML patch did not preserve the requested document");
+      }
       return patched;
     } catch {
       /* exotic existing formatting / CST edge — fall back to a full rewrite
@@ -216,6 +222,59 @@ function serializeSettings(
     }
   }
   return stringifyToml(ordered);
+}
+
+/** Structural equality for parsed TOML values. Ignore object prototypes and
+ * key order; TOML settings contain only scalar, array, and table values.
+ *
+ * This compares a PARSED document against the plain JS one we asked toml-patch
+ * to write, so it must tolerate the representation changes a faithful round trip
+ * introduces — otherwise a CORRECT patch is discarded and that one write loses
+ * the file's comments (never its data: the fallback is a full rewrite). The two
+ * that occur: smol-toml returns datetimes as a `Date` subclass (`TomlDate`), and
+ * `-0` re-parses as `0` after being written `-0.0`, so numbers compare with `===`
+ * rather than `Object.is`. Integers beyond `Number.MAX_SAFE_INTEGER` never reach
+ * here — toml-patch itself refuses to serialize them and we take the rewrite. */
+function settingsValuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (typeof left === "number" && typeof right === "number") {
+    return left === right;
+  }
+  if (left instanceof Date || right instanceof Date) {
+    return (
+      left instanceof Date &&
+      right instanceof Date &&
+      left.toISOString() === right.toISOString()
+    );
+  }
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => settingsValuesEqual(value, right[index]))
+    );
+  }
+  if (
+    typeof left !== "object" ||
+    left === null ||
+    typeof right !== "object" ||
+    right === null
+  ) {
+    return false;
+  }
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord);
+  const rightKeys = Object.keys(rightRecord);
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key) =>
+        Object.prototype.hasOwnProperty.call(rightRecord, key) &&
+        settingsValuesEqual(leftRecord[key], rightRecord[key]),
+    )
+  );
 }
 
 /** Strip `undefined` values (smol-toml rejects them) without touching others. */

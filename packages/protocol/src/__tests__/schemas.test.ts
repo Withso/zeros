@@ -98,8 +98,19 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
         agentId: "a",
         sessionId: "s",
         prompt: [],
+        promptId: "prompt-abc",
       }).type,
     ).toBe("AGENT_PROMPT");
+    expect(() =>
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_PROMPT",
+        agentId: "a",
+        sessionId: "s",
+        prompt: [],
+        promptId: 12,
+      }),
+    ).toThrow(/promptId/);
     expect(
       parseBridgeMessage({
         ...b,

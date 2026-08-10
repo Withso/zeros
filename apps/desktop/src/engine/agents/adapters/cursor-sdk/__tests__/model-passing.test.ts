@@ -370,13 +370,56 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
       cwd: "/tmp/proj",
       env: { CURSOR_API_KEY: "key_test" },
     });
-    await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+    const completed = await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT,
+    });
 
     expect(sendSpy).toHaveBeenCalledTimes(1);
     const [, opts] = sendSpy.mock.calls[0];
     expect(opts).toMatchObject({
       mode: "agent",
       model: { id: "composer-2.5" },
+    });
+    expect(completed.response.effectiveModel).toBe("composer-2.5");
+  });
+
+  it("returns the SDK's per-turn token usage from the stream", async () => {
+    sendSpy.mockResolvedValueOnce({
+      id: "run-usage",
+      stream: async function* () {
+        yield {
+          type: "usage",
+          usage: {
+            inputTokens: 120,
+            outputTokens: 30,
+            cacheReadTokens: 80,
+            cacheWriteTokens: 4,
+            totalTokens: 150,
+            reasoningTokens: 7,
+          },
+        };
+      },
+      wait: async () => ({ status: "finished" }),
+      cancel: async () => {},
+    });
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { CURSOR_API_KEY: "key_test" },
+    });
+
+    const completed = await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT,
+    });
+
+    expect(completed.response.usage).toEqual({
+      inputTokens: 120,
+      outputTokens: 30,
+      cacheReadTokens: 80,
+      cacheWriteTokens: 4,
+      reasoningTokens: 7,
     });
   });
 
@@ -413,6 +456,39 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
     expect(createOpts).toMatchObject({ model: { id: "composer-2.5" } });
     const [, sendOpts] = sendSpy.mock.calls[0];
     expect(sendOpts.model).toEqual({ id: "composer-2.5" });
+  });
+
+  it("applies live model, effort, and fast changes to the next send", async () => {
+    modelsListSpy.mockResolvedValue([
+      { id: "grok-4.5", displayName: "Grok 4.5" },
+      {
+        id: "grok-4.5-thinking-high-fast",
+        displayName: "Grok 4.5 High Fast",
+      },
+    ]);
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: {
+        CURSOR_API_KEY: "key_test",
+        CURSOR_MODEL: "grok-4.5",
+        ZEROS_THINKING_EFFORT: "low",
+      },
+    });
+
+    await adapter.updateConfig({
+      sessionId: session.sessionId,
+      env: {
+        CURSOR_MODEL: "grok-4.5",
+        ZEROS_THINKING_EFFORT: "high",
+        ZEROS_FAST_MODE: "1",
+      },
+    });
+    await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+
+    expect(sendSpy.mock.calls[0][1].model).toEqual({
+      id: "grok-4.5-thinking-high-fast",
+    });
   });
 });
 
@@ -497,6 +573,31 @@ describe("Cursor modes — Ask / Auto / Full access + autoReview rebuild", () =>
     resumeSpy.mockResolvedValue(fakeAgent);
     await adapter.prompt({ sessionId: id, prompt: TEXT });
     expect(resumeSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("reports and uses the replacement SDK id after a stale resume falls back fresh", async () => {
+    resumeSpy.mockRejectedValueOnce(
+      new Error("Agent prior-agent-id not found"),
+    );
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const loaded = await adapter.loadSession({
+      sessionId: "prior-agent-id",
+      cwd: "/tmp/proj",
+      env: { CURSOR_API_KEY: "key_test" },
+    });
+
+    expect(loaded).toMatchObject({
+      resumedFresh: true,
+      replacementSessionId: "agent-xyz",
+    });
+
+    resumeSpy.mockClear().mockResolvedValue(fakeAgent);
+    await adapter.setMode({
+      sessionId: "prior-agent-id",
+      modeId: "agent",
+    });
+    await adapter.prompt({ sessionId: "prior-agent-id", prompt: TEXT });
+    expect(resumeSpy.mock.calls[0][0]).toBe("agent-xyz");
   });
 });
 

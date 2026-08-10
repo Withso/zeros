@@ -43,7 +43,9 @@ When the Electron app starts, the CSS arrives in this order:
    ├── @import "@fontsource-variable/geist-mono"
    ├── @custom-variant dark (...)
    ├── @theme inline { ... }   ← wires primitives → utility classes
-   ├── :root { ... }            ← primitive token values (dark)
+   ├── :root { ... }            ← primitive token values (neutral dark)
+   ├── [data-theme-palette="orka-black"] ← preserved warm dark overrides
+   ├── [data-theme="light"]     ← light overrides
    └── @layer base { ... }      ← border-color + outline-color defaults
 2. styles/semantic-tokens.css    ← semantic/component aliases
 3. styles/globals.css            ← ordered imports from styles/global/
@@ -55,13 +57,29 @@ Then on the JS side, the appearance store runs:
 ```
 apps/desktop/src/renderer/shared/theme/store.ts (module load)
   ↓ readStoredPrefs() — read localStorage (key: zeros.appearance.v2)
-  ↓ applyTheme(prefs, { systemPrefersDark }) — write data-theme on <html>
+  ↓ applyTheme(prefs, { systemPrefersDark })
+      ├── write data-theme="dark|light" on <html>
+      └── set/remove data-theme-palette="orka-black"
 React mounts
 ```
 
-`data-theme` on `<html>` selects the theme: `:root` carries the dark default (Zeros Shade) and the `[data-theme="light"]` block (added 2026-07-11) overrides every primitive with the light values. `applyTheme` also reports the resolved `--bg1` to the Electron main process (`window_set_background`) so the native window's pre-paint background tracks the theme across launches.
+`data-theme` is deliberately only the resolved appearance (`dark` or `light`):
+Tailwind's `dark:` variant, `color-scheme`, syntax-theme filtering, and embedded
+surfaces all depend on that binary polarity. `:root` carries neutral Dark;
+`data-theme-palette="orka-black"` restores the former warm-gray dark structural
+tokens; and `[data-theme="light"]` overrides the full palette. System resolves to
+neutral Dark or Light with macOS—Orka black is an explicit selection.
 
-This is why **theme changes are instant** — there's no React state, no virtual DOM, no per-component re-render. The CSS variables propagate via the cascade, and modern browsers handle it under 16 ms.
+`applyTheme` also reports the resolved `--bg1` to Electron
+(`window_set_background`) so the native window's pre-paint background tracks the
+theme across launches. JS-painted surfaces subscribe to the concrete theme id,
+not only dark/light, so xterm and canvas colors repaint during a Dark ↔ Orka
+black switch.
+
+This is why **theme changes are instant**: CSS-painted surfaces update through the
+cascade without per-component theme props. The few JavaScript-painted surfaces
+(terminals and canvas loaders) subscribe to the concrete theme identity so they
+repaint when Dark and Orka black switch without changing dark/light polarity.
 
 ---
 
@@ -69,18 +87,25 @@ This is why **theme changes are instant** — there's no React state, no virtual
 
 **One layer of primitives** plus a small set of **component aliases**. Full reference in `styles/zeros-foundation.md` §2.
 
-| Family                    | Tokens                                                                                      | Tailwind prefix                                        |
-| ------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| Backgrounds               | `--bg1` … `--bg5` + `--bg{1,2,3}-hover` + `--bg1-highlight`                                 | `bg-bg1`, `bg-bg2-hover`, etc.                         |
-| Foregrounds               | `--fg1`, `--fg2`, `--muted-fg`                                                              | `text-fg1`, `text-fg2`, `text-muted-fg`                |
-| Repository navigation     | `--sidebar-bg`, `--sidebar-bg-hover`                                                        | `bg-sidebar-bg`, `bg-sidebar-bg-hover`                 |
-| Borders                   | `--border1` … `--border4`                                                                   | `border-border1`, etc.                                 |
-| Highlighted (brand)       | `--highlighted-bg`, `--highlighted-bright`                                                  | `bg-highlighted-bright`, etc.                          |
-| Inverted (polarity pair)  | `--inverted-bg`, `--inverted-fg`                                                            | `bg-inverted-bg`, `text-inverted-fg`                   |
-| Component aliases         | `--primary-button-bg/-hover/-fg`                                                            | `bg-primary-button-bg`, etc.                           |
-| Color palettes (semantic) | `--{red,green,yellow,blue,violet}-{primary,bg,fg}` + `--red-secondary`/`--red-secondary-fg` | `text-red-primary`, `bg-red-bg`, `text-green-fg`, etc. |
+| Family                    | Tokens                                                                        | Tailwind prefix                                        |
+| ------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------ |
+| Backgrounds               | `--bg0` … `--bg5` + `--pane-bg`, `--bg{1,2,3}-hover`, `--bg1-highlight`       | `bg-bg1`, `bg-bg2-hover`, etc.                         |
+| Foregrounds               | `--fg1`, `--fg2`, `--fg3`, `--muted-fg`                                       | `text-fg1`, `text-fg2`, `text-fg3`, `text-muted-fg`    |
+| Repository navigation     | `--sidebar-bg`, `--sidebar-bg-hover`                                          | `bg-sidebar-bg`, `bg-sidebar-bg-hover`                 |
+| Borders                   | `--border1` … `--border4`                                                     | `border-border1`, etc.                                 |
+| Highlighted (interaction) | `--highlighted-bg`, `--highlighted-bright`                                    | `bg-highlighted-bright`, etc.                          |
+| Inverted (polarity pair)  | `--inverted-bg`, `--inverted-fg`                                              | `bg-inverted-bg`, `text-inverted-fg`                   |
+| Component aliases         | `--primary-button-bg/-hover/-fg`                                              | `bg-primary-button-bg`, etc.                           |
+| Color palettes (semantic) | `--{red,green,yellow,blue,violet,brown}-{primary,bg,fg}` + red secondary pair | `text-red-primary`, `bg-red-bg`, `text-green-fg`, etc. |
 
 **Tailwind utility naming is verbatim**: `--color-bg1` → class `bg-bg1`. The `bg-bg1` repeat reads slightly odd but it's unambiguous and matches the token name exactly. No shadcn aliases, no canonical depth tokens, no `--tint` family.
+
+“Neutral Dark” applies to structural primitives: backgrounds, foregrounds,
+borders, interaction highlights, and the inverted pair. The six semantic color
+families remain chromatic in both dark palettes because they identify errors,
+success, warnings, information, merged/done state, file paths, and diff state.
+Syntax themes, agent brand marks, and file-type icons are also independent
+meaning-bearing or user-selected color systems and are not desaturated.
 
 ---
 
@@ -97,7 +122,7 @@ The internal flow:
 3. **Find the existing surface.** Claude reads `apps/desktop/src/renderer/shell/conversation/conversation-header.tsx` to see how the project breadcrumb is styled — `text-fg2` idle, `hover:bg-bg1-hover hover:text-fg1`.
 4. **Compose the new component.** Picks tokens:
    - Trigger button: `text-fg2 hover:bg-bg1-hover hover:text-fg1` (matches breadcrumb)
-   - Popover panel: `bg-bg3 border border-border1 rounded-lg`
+   - Popover panel: `bg-bg3 border border-border2 rounded-lg`
    - Search input: existing `<Input>` primitive (`bg-bg3` since it's inside a popover; if you want it on the trigger side, `bg-bg1`)
    - Item rows: `text-fg1` idle, `hover:bg-bg3-hover hover:text-fg1`, `data-[active=true]:bg-bg3-hover`
    - Selected indicator: `Check` icon at `size-3.5`, `text-fg2`
@@ -145,14 +170,14 @@ The hover rule (foundation §5 #4) is surface-scoped. Phrasing in terms of surfa
 
 The foundation doc has a recipe for nearly every chrome surface. Naming the recipe puts Claude on the right path.
 
-### 6.4 If you mean spotlight, say "highlighted"; if you mean focal CTA, say "primary"
+### 6.4 If you mean interaction emphasis, say "highlighted"; if you mean focal CTA, say "primary"
 
 Two tokens for "this thing pops" — not interchangeable:
 
-| Phrase                       | Token                                                                                 | What it does                                    |
-| ---------------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| "Use the primary button"     | `bg-primary-button-bg text-primary-button-fg`                                         | Filled focal CTA, ONE per screen                |
-| "Use the highlighted accent" | `bg-highlighted-bg` (text on it: `text-fg1`/`text-fg2`) / `border-highlighted-bright` | Brand anchor moments (user bubble), input focus |
+| Phrase                          | Token                                                                                 | What it does                        |
+| ------------------------------- | ------------------------------------------------------------------------------------- | ----------------------------------- |
+| "Use the primary button"        | `bg-primary-button-bg text-primary-button-fg`                                         | Filled focal CTA, ONE per screen    |
+| "Use the highlighted treatment" | `bg-highlighted-bg` (text on it: `text-fg1`/`text-fg2`) / `border-highlighted-bright` | User bubble, selection, input focus |
 
 ### 6.5 Lock the typography scale upfront
 
@@ -187,14 +212,14 @@ When the design direction shifts, here's where each kind of change lands:
 ## §8 — TL;DR
 
 - **Tokens live in `styles/zeros-tokens.css`.** Primitive HSL values; edit the token, not the component.
-- **Only knob: theme mode** (system / light / dark). Dark is Zeros Shade in `:root`; light is the `[data-theme="light"]` override block; System follows macOS.
-- **Backgrounds**: `bg-bg1` (canvas) → `bg-bg2` (composer) → `bg-bg3` (popover/dropdown/dialog). Hovers are surface-scoped (`bg-bg1-hover`, `bg-bg2-hover`, `bg-bg3-hover`).
-- **Foregrounds**: `text-fg1` (highlighted), `text-fg2` (default), `text-muted-fg` (placeholders).
+- **Only knob: theme mode** (System / Light / Dark / Orka black). Dark is neutral in `:root`; Orka black restores the previous warm-gray dark primitives; Light is the `[data-theme="light"]` override; System follows macOS and uses neutral Dark when macOS is dark.
+- **Backgrounds**: `bg-bg0` (inactive pane), `bg-bg1` (canvas), `bg-bg2` (composer), and `bg-bg3` (floating popover/dropdown/menu only). Hovers are surface-scoped (`bg-bg1-hover`, `bg-bg2-hover`, `bg-bg3-hover`).
+- **Foregrounds**: `text-fg1` (highlighted), `text-fg2` (default), then pick the quieter tier by REFERENCE POINT — `text-fg3` when stepping down from the `fg2` text beside it (placeholders, ignored file-tree rows), `text-muted-fg` when the content is incidental to the surface (metadata, disabled, empty states). See foundation §9.1.1.
 - **Borders**: `border-border1` (default) → `border-border3` (component) → `border-border4` (highlighted).
 - **Two "stand-out" tokens**:
   - `bg-primary-button-bg text-primary-button-fg` — inverted focal CTA button. One per screen.
-  - `bg-highlighted-bg` / `border-highlighted-bright` — brand anchor moments, input focus, code-link highlights.
+  - `bg-highlighted-bg` / `border-highlighted-bright` — interaction emphasis, input focus, code-link highlights.
 - **Repository sidebar only** = `bg-sidebar-bg` / `bg-sidebar-bg-hover`. The settings sidebar uses the default tokens.
 - **Semantic status = the color families** — error→red, success→green, warning→yellow, info→blue, done→violet. Use `text-<family>-primary`, or `bg-<family>-bg`+`text-<family>-fg` for callouts.
-- **Diff renderer** = the Zeros palette via `diff-theme.ts` — warm surface (`--sidebar-bg` in the workbench, `--bg1` in EditCards) + green/red/neutral `--diffs-*-color-override` bases; @pierre derives the rest, syntax from Shiki.
-- **Claude follows the Zeros Foundation skill on every UI task.** To steer it, reference recipes from `zeros-foundation.md` §4 and anti-patterns from §5. Say "primary button" for inverted CTA, "highlighted" for brand accent.
+- **Diff renderer** = the Zeros palette via `diff-theme.ts` — theme-adaptive structural surface (`--sidebar-bg` in the workbench, `--bg1` in EditCards) + green/red/neutral `--diffs-*-color-override` bases; @pierre derives the rest, syntax from Shiki.
+- **Claude follows the Zeros Foundation skill on every UI task.** To steer it, reference recipes from `zeros-foundation.md` §4 and anti-patterns from §5. Say "primary button" for inverted CTA, "highlighted" for interaction emphasis.

@@ -26,6 +26,10 @@ import {
 const BOUNDS = { x: 40, y: 60, width: 1600, height: 1000 };
 
 describe("sanitizeWindowState", () => {
+  it("reserves the 360px conversation floor in the live window minimum", () => {
+    expect(MAIN_WINDOW_MIN_WIDTH).toBe(840);
+  });
+
   it("passes through a valid state", () => {
     expect(
       sanitizeWindowState({ bounds: BOUNDS, maximized: true, fullScreen: false }),

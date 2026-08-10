@@ -20,6 +20,7 @@ import { FilePen, FileText, Terminal, Wrench } from "lucide-react";
 import {
   describePermission,
   PermissionCard,
+  providerRejectOption,
   relativizePath,
 } from "../permission-card";
 import type { RequestPermissionRequest } from "../../../platform/bridge/agent-events";
@@ -223,5 +224,87 @@ describe("canonical permission-card variants", () => {
     expect(html).not.toMatch(
       /blocking request|estimated tokens|large workflow/i,
     );
+  });
+
+  it("renders every ordered provider choice even when kinds repeat", () => {
+    const request: RequestPermissionRequest = {
+      sessionId: "s" as never,
+      title: "Command approval",
+      useOptionNames: true,
+      toolCall: {
+        toolCallId: "command-1",
+        title: "Run command",
+        kind: "execute",
+        status: "pending",
+        rawInput: { command: "curl https://api.example.com" },
+      },
+      options: [
+        { optionId: "once", name: "Approve once", kind: "allow_once" },
+        {
+          optionId: "command-rule",
+          name: "Approve and remember command rule",
+          kind: "allow_always",
+        },
+        {
+          optionId: "network-rule",
+          name: "Approve and allow api.example.com",
+          kind: "allow_always",
+        },
+        { optionId: "decline", name: "Decline", kind: "reject_once" },
+        { optionId: "cancel", name: "Cancel", kind: "reject_always" },
+      ],
+    };
+
+    const html = renderToStaticMarkup(
+      createElement(PermissionCard, { request, onRespond: () => {} }),
+    );
+    for (const label of request.options.map((option) => option.name)) {
+      expect(html).toContain(label);
+    }
+    // Decline and Cancel are distinct rows but share one global rejection
+    // shortcut. Only the row that Backspace/Delete actually selects may claim
+    // the hint.
+    expect(html.match(/⌫/g)).toHaveLength(1);
+  });
+
+  it("shows the command as well as provider-authored permission context", () => {
+    const request: RequestPermissionRequest = {
+      sessionId: "s" as never,
+      title: "Command approval",
+      contextItems: ["Network · https://api.example.com", "Extra network access"],
+      useOptionNames: true,
+      allowLocalPolicies: false,
+      toolCall: {
+        toolCallId: "command-with-network-1",
+        title: "Run: curl https://api.example.com",
+        kind: "execute",
+        status: "pending",
+        rawInput: {
+          command: "curl https://api.example.com/v1/data",
+          cwd: "/repo",
+        },
+      },
+      options: [
+        { optionId: "accept", name: "Approve once", kind: "allow_once" },
+        { optionId: "decline", name: "Decline", kind: "reject_once" },
+      ],
+    };
+
+    const html = renderToStaticMarkup(
+      createElement(PermissionCard, { request, onRespond: () => {} }),
+    );
+    expect(html).toContain("Network · https://api.example.com");
+    expect(html).toContain("Extra network access");
+    expect(html).toContain("curl https://api.example.com/v1/data");
+  });
+
+  it("maps the rejection shortcut to the first ordered provider rejection", () => {
+    const options: RequestPermissionRequest["options"] = [
+      { optionId: "cancel", name: "Cancel", kind: "reject_always" },
+      { optionId: "decline", name: "Decline", kind: "reject_once" },
+    ];
+    expect(providerRejectOption(options, true)?.optionId).toBe("cancel");
+    // Compact legacy cards still prefer the non-terminal rejection.
+    expect(providerRejectOption(options, false)?.optionId).toBe("decline");
   });
 });

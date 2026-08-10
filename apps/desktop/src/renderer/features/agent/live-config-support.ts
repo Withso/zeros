@@ -32,11 +32,10 @@ import { agentFamily } from "./model-catalog";
  *             (adapters/claude-sdk/adapter.ts setModel/updateConfig).
  *    codex  — turn/start re-reads `session.env` every turn, so rewriting the
  *             env IS the apply (adapters/codex/app-server-adapter.ts).
- *
- *  cursor is absent on purpose: the model is baked into `Agent.create` and the
- *  effort/Fast tier is encoded into the model id variant, so there is nothing
- *  to mutate on a live agent — it genuinely needs a new session. */
-const LIVE_CONFIG_FAMILIES = new Set(["claude", "codex"]);
+ *    cursor — every SDK send accepts an explicit model id; updateConfig
+ *             re-resolves effort/Fast to a catalog-backed variant without
+ *             replacing the agent (adapters/cursor-sdk/adapter.ts). */
+const LIVE_CONFIG_FAMILIES = new Set(["claude", "codex", "cursor"]);
 
 /** True when a model/effort/Fast/add-dir change can be pushed into the RUNNING
  *  session (AGENT_SET_MODEL / AGENT_UPDATE_CONFIG) instead of respawning it.

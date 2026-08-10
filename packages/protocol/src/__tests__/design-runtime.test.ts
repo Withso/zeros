@@ -16,6 +16,7 @@ describe("design runtime protocol", () => {
     expect(DESIGN_RUNTIME_SOURCE).toContain("elementsFromPoint");
     expect(DESIGN_RUNTIME_SOURCE).toContain("captureScreenshot");
     expect(DESIGN_RUNTIME_SOURCE).toContain("previewStyles");
+    expect(DESIGN_RUNTIME_SOURCE).toContain("setTheme");
     expect(DESIGN_RUNTIME_SOURCE).toContain("clearPreviewStyles");
     expect(DESIGN_RUNTIME_SOURCE).toContain("getMatchedStyles");
     expect(DESIGN_RUNTIME_SOURCE).toContain('message.type === "teardown"');
@@ -24,11 +25,13 @@ describe("design runtime protocol", () => {
     expect(DESIGN_RUNTIME_SOURCE).toContain("auditWarnings");
     expect(DESIGN_RUNTIME_SOURCE).toContain("contrastRatio");
     expect(DESIGN_RUNTIME_SOURCE).toContain("spacing-scale");
+    expect(DESIGN_RUNTIME_SOURCE).toContain("MAX_TREE_NODES = 20000");
+    expect(DESIGN_RUNTIME_SOURCE).toContain("MAX_TREE_DEPTH = 32");
     expect(DESIGN_RUNTIME_SOURCE).toContain("__zerosDesignSourceVersion");
     expect(DESIGN_RUNTIME_SOURCE).toContain(
       "sourceVersion: SOURCE_VERSION,\n      oid: oid",
     );
-    expect(DESIGN_RUNTIME_SOURCE).toContain("roots.push(treeNode(body))");
+    expect(DESIGN_RUNTIME_SOURCE).toContain("treeNode(body, 0, treeBudget)");
     expect(DESIGN_RUNTIME_SOURCE).toContain(
       "frame: frameDetailsOf(frameElement())",
     );
@@ -106,6 +109,13 @@ describe("design runtime protocol", () => {
           }>((resolve, reject) => {
             document.body.innerHTML =
               '<section data-oid="hero"><h1 data-oid="heading">Hello</h1></section>';
+            let nested = document.querySelector('[data-oid="hero"]')!;
+            for (let index = 0; index < 33; index += 1) {
+              const child = document.createElement("div");
+              child.dataset.oid = `nested-${index}`;
+              nested.append(child);
+              nested = child;
+            }
             (
               window as Window & {
                 __zerosDesignSourceVersion?: string;
@@ -201,6 +211,17 @@ describe("design runtime protocol", () => {
           frame: { oid: "", tag: "body", selector: "body" },
         },
       });
+      expect(
+        (
+          result.payload.snapshot as {
+            warnings: Array<{ ruleId: string }>;
+          }
+        ).warnings,
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ ruleId: "layer-tree-limit" }),
+        ]),
+      );
     } finally {
       await browser.close();
     }
@@ -318,6 +339,445 @@ describe("design runtime protocol", () => {
         previewWidth: "37px",
         restoredWidth: "",
       });
+    } finally {
+      await browser.close();
+    }
+  }, 20_000);
+
+  it("scrubs and clears a multi-keyframe motion preview", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      const result = await page.evaluate(
+        ({ source }) =>
+          new Promise<{ previewOpacity: number; restoredOpacity: number }>(
+            (resolve, reject) => {
+              document.body.innerHTML =
+                '<main data-oid="target" style="opacity: .2"></main>';
+              (
+                window as Window & { __zerosDesignSourceVersion?: string }
+              ).__zerosDesignSourceVersion = "f".repeat(24);
+              const element = document.querySelector(
+                '[data-oid="target"]',
+              ) as HTMLElement;
+              const channel = new MessageChannel();
+              let previewOpacity = 0;
+              const timeout = window.setTimeout(
+                () => reject(new Error("motion preview timed out")),
+                3_000,
+              );
+              channel.port1.onmessage = (event) => {
+                const message = event.data as {
+                  type?: string;
+                  event?: string;
+                  requestId?: string;
+                  ok?: boolean;
+                  error?: { message?: string };
+                };
+                if (message.type === "event" && message.event === "ready") {
+                  channel.port1.postMessage({
+                    protocol: "zeros-design-runtime",
+                    version: 2,
+                    type: "request",
+                    sourceVersion: "f".repeat(24),
+                    requestId: "motion",
+                    method: "previewMotion",
+                    args: {
+                      nodeId: "target",
+                      keyframes: [
+                        { offset: 0, styles: { opacity: "0" } },
+                        { offset: 50, styles: { opacity: ".4" } },
+                        { offset: 100, styles: { opacity: "1" } },
+                      ],
+                      duration: 1_000,
+                      delay: 200,
+                      easing: "linear",
+                      iterations: 1,
+                      direction: "normal",
+                      fill: "both",
+                      currentTime: 1_200,
+                      playing: false,
+                    },
+                  });
+                  return;
+                }
+                if (
+                  message.type === "response" &&
+                  message.requestId === "motion"
+                ) {
+                  if (!message.ok) {
+                    reject(
+                      new Error(message.error?.message ?? "motion failed"),
+                    );
+                    return;
+                  }
+                  previewOpacity = Number(getComputedStyle(element).opacity);
+                  channel.port1.postMessage({
+                    protocol: "zeros-design-runtime",
+                    version: 2,
+                    type: "request",
+                    sourceVersion: "f".repeat(24),
+                    requestId: "clear",
+                    method: "clearPreviewStyles",
+                    args: { nodeId: "target" },
+                  });
+                  return;
+                }
+                if (
+                  message.type === "response" &&
+                  message.requestId === "clear"
+                ) {
+                  window.clearTimeout(timeout);
+                  resolve({
+                    previewOpacity,
+                    restoredOpacity: Number(getComputedStyle(element).opacity),
+                  });
+                }
+              };
+              channel.port1.start();
+              new Function(source)();
+              window.postMessage(
+                {
+                  protocol: "zeros-design-runtime",
+                  version: 2,
+                  type: "handshake",
+                  sourceVersion: "f".repeat(24),
+                },
+                "*",
+                [channel.port2],
+              );
+            },
+          ),
+        { source: DESIGN_RUNTIME_SOURCE },
+      );
+      expect(result.previewOpacity).toBeCloseTo(1, 2);
+      expect(result.restoredOpacity).toBeCloseTo(0.2, 2);
+    } finally {
+      await browser.close();
+    }
+  }, 20_000);
+
+  it("applies token themes and resolves nested canvas hit modes", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      const result = await page.evaluate(
+        ({ source }) =>
+          new Promise<{
+            topLevel: string;
+            descended: string;
+            deepestDescend: string;
+            nestedPeer: string;
+            authoredStyleProperties: string[];
+            peerAuthoredStyleProperties: string[];
+            repeatedAuthoredScanStable: boolean;
+            parentTextEditable: boolean;
+            childTextEditable: boolean;
+            marquee: string[];
+            theme: string | null;
+            background: string;
+            repeatedThemeRevisionStable: boolean;
+          }>((resolve, reject) => {
+            document.head.innerHTML = `<style>
+              :root { --accent: rgb(255, 0, 0); }
+              [data-zd-theme="dark"] { --accent: rgb(0, 0, 255); }
+              body { margin: 0; }
+              [data-oid="parent"] { position: absolute; inset: 0; width: 200px; height: 100px; }
+              [data-oid="child"], [data-oid="peer"] { position: absolute; top: 0; display: block; width: 100px; height: 100px; }
+              [data-oid="child"] { left: 0; background: var(--accent); }
+              [data-oid="peer"] { left: 100px; background-color: red; }
+            </style>`;
+            document.body.dataset.oid = "frame-body";
+            document.body.innerHTML =
+              '<main data-oid="parent"><button data-oid="child" style="margin-right: 50px; padding: 10px 32px 32px; inset-inline-start: 4px">Child</button><button data-oid="peer">Peer</button></main>';
+            (
+              window as Window & { __zerosDesignSourceVersion?: string }
+            ).__zerosDesignSourceVersion = "f".repeat(24);
+            const channel = new MessageChannel();
+            const values = {
+              topLevel: "",
+              descended: "",
+              deepestDescend: "",
+              nestedPeer: "",
+              authoredStyleProperties: [] as string[],
+              peerAuthoredStyleProperties: [] as string[],
+              repeatedAuthoredScanStable: false,
+              parentTextEditable: false,
+              childTextEditable: false,
+              marquee: [] as string[],
+            };
+            let firstThemeRevision: number | undefined;
+            let authoredMatchesBeforeRepeat = 0;
+            let authoredMatchCalls = 0;
+            const originalMatches = Element.prototype.matches;
+            Element.prototype.matches = function (selector: string) {
+              authoredMatchCalls += 1;
+              return originalMatches.call(this, selector);
+            };
+            const timeout = window.setTimeout(
+              () => reject(new Error("theme and hit-mode requests timed out")),
+              3_000,
+            );
+            const request = (
+              requestId: string,
+              method: string,
+              args: Record<string, unknown>,
+            ) =>
+              channel.port1.postMessage({
+                protocol: "zeros-design-runtime",
+                version: 2,
+                type: "request",
+                sourceVersion: "f".repeat(24),
+                requestId,
+                method,
+                args,
+              });
+            channel.port1.onmessage = (event) => {
+              const message = event.data as {
+                type?: string;
+                event?: string;
+                requestId?: string;
+                ok?: boolean;
+                result?:
+                  | {
+                      oid?: string;
+                      revision?: number;
+                      textEditable?: boolean;
+                      authoredStyleProperties?: string[];
+                    }
+                  | Array<{ oid?: string }>;
+                error?: { message?: string };
+              };
+              if (message.type === "event" && message.event === "ready") {
+                request("top", "getElementAtLoc", {
+                  x: 50,
+                  y: 50,
+                  mode: "top-level",
+                });
+                return;
+              }
+              if (message.type !== "response") return;
+              if (!message.ok) {
+                window.clearTimeout(timeout);
+                reject(new Error(message.error?.message ?? "runtime failed"));
+                return;
+              }
+              const objectResult = Array.isArray(message.result)
+                ? undefined
+                : message.result;
+              if (message.requestId === "top") {
+                values.topLevel = objectResult?.oid ?? "";
+                values.parentTextEditable = objectResult?.textEditable === true;
+                request("descend", "getElementAtLoc", {
+                  x: 50,
+                  y: 50,
+                  mode: "descend",
+                  selectedNodeId: "parent",
+                });
+              } else if (message.requestId === "descend") {
+                values.descended = objectResult?.oid ?? "";
+                values.childTextEditable = objectResult?.textEditable === true;
+                request("deepest-descend", "getElementAtLoc", {
+                  x: 50,
+                  y: 50,
+                  mode: "descend",
+                  selectedNodeId: "child",
+                });
+              } else if (message.requestId === "deepest-descend") {
+                values.deepestDescend = objectResult?.oid ?? "";
+                request("peer-preserve", "getElementAtLoc", {
+                  x: 150,
+                  y: 50,
+                  mode: "preserve",
+                  selectedNodeId: "child",
+                });
+              } else if (message.requestId === "peer-preserve") {
+                values.nestedPeer = objectResult?.oid ?? "";
+                values.peerAuthoredStyleProperties =
+                  objectResult?.authoredStyleProperties ?? [];
+                request("child-details", "getNodeDetails", {
+                  nodeId: "child",
+                });
+              } else if (message.requestId === "child-details") {
+                values.authoredStyleProperties =
+                  objectResult?.authoredStyleProperties ?? [];
+                request("marquee", "getElementsInRect", {
+                  x: 0,
+                  y: 0,
+                  width: 60,
+                  height: 60,
+                  scopeNodeId: "parent",
+                });
+              } else if (message.requestId === "marquee") {
+                values.marquee = Array.isArray(message.result)
+                  ? message.result.flatMap((item) =>
+                      item.oid ? [item.oid] : [],
+                    )
+                  : [];
+                authoredMatchesBeforeRepeat = authoredMatchCalls;
+                request("peer-details-again", "getNodeDetails", {
+                  nodeId: "peer",
+                });
+              } else if (message.requestId === "peer-details-again") {
+                values.repeatedAuthoredScanStable =
+                  authoredMatchesBeforeRepeat === authoredMatchCalls;
+                request("theme", "setTheme", { theme: "dark" });
+              } else if (message.requestId === "theme") {
+                firstThemeRevision = objectResult?.revision;
+                request("theme-again", "setTheme", { theme: "dark" });
+              } else if (message.requestId === "theme-again") {
+                window.clearTimeout(timeout);
+                const child = document.querySelector(
+                  '[data-oid="child"]',
+                ) as HTMLElement;
+                resolve({
+                  ...values,
+                  theme: document.documentElement.getAttribute("data-zd-theme"),
+                  background: getComputedStyle(child).backgroundColor,
+                  repeatedThemeRevisionStable:
+                    firstThemeRevision === objectResult?.revision,
+                });
+              }
+            };
+            channel.port1.start();
+            new Function(source)();
+            window.postMessage(
+              {
+                protocol: "zeros-design-runtime",
+                version: 2,
+                type: "handshake",
+                sourceVersion: "f".repeat(24),
+              },
+              "*",
+              [channel.port2],
+            );
+          }),
+        { source: DESIGN_RUNTIME_SOURCE },
+      );
+
+      expect(result).toEqual({
+        topLevel: "parent",
+        descended: "child",
+        deepestDescend: "child",
+        nestedPeer: "peer",
+        authoredStyleProperties: expect.arrayContaining([
+          "background",
+          "inset-inline-start",
+          "margin-right",
+          "padding",
+        ]),
+        peerAuthoredStyleProperties: expect.arrayContaining([
+          "background-color",
+        ]),
+        repeatedAuthoredScanStable: true,
+        parentTextEditable: false,
+        childTextEditable: true,
+        marquee: ["child"],
+        theme: "dark",
+        background: "rgb(0, 0, 255)",
+        repeatedThemeRevisionStable: true,
+      });
+      expect(result.peerAuthoredStyleProperties).not.toContain("background");
+      expect(result.peerAuthoredStyleProperties).not.toContain(
+        "background-image",
+      );
+    } finally {
+      await browser.close();
+    }
+  }, 20_000);
+
+  it("keeps preserve and descend depth aligned below an oid-bearing body", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      const result = await page.evaluate(
+        ({ source }) =>
+          new Promise<{ preserve: string; descend: string }>(
+            (resolve, reject) => {
+              document.head.innerHTML = `<style>
+                body { margin: 0; }
+                [data-oid="left-1"], [data-oid="right-1"] {
+                  position: absolute; top: 0; width: 100px; height: 100px;
+                }
+                [data-oid="left-1"] { left: 0; }
+                [data-oid="right-1"] { left: 120px; }
+                [data-oid$="-2"], [data-oid$="-3"], [data-oid$="-4"] {
+                  position: absolute; inset: 0;
+                }
+              </style>`;
+              document.body.dataset.oid = "frame-body";
+              document.body.innerHTML =
+                '<section data-oid="left-1"><div data-oid="left-2"><div data-oid="left-3"></div></div></section>' +
+                '<section data-oid="right-1"><div data-oid="right-2"><div data-oid="right-3"><div data-oid="right-4"></div></div></div></section>';
+              (
+                window as Window & { __zerosDesignSourceVersion?: string }
+              ).__zerosDesignSourceVersion = "d".repeat(24);
+              const channel = new MessageChannel();
+              const values = { preserve: "", descend: "" };
+              const timeout = window.setTimeout(
+                () => reject(new Error("nested hit requests timed out")),
+                3_000,
+              );
+              const request = (
+                requestId: string,
+                mode: "preserve" | "descend",
+                selectedNodeId: string,
+              ) =>
+                channel.port1.postMessage({
+                  protocol: "zeros-design-runtime",
+                  version: 2,
+                  type: "request",
+                  sourceVersion: "d".repeat(24),
+                  requestId,
+                  method: "getElementAtLoc",
+                  args: { x: 150, y: 50, mode, selectedNodeId },
+                });
+              channel.port1.onmessage = (event) => {
+                const message = event.data as {
+                  type?: string;
+                  event?: string;
+                  requestId?: string;
+                  ok?: boolean;
+                  result?: { oid?: string };
+                  error?: { message?: string };
+                };
+                if (message.type === "event" && message.event === "ready") {
+                  request("preserve", "preserve", "left-3");
+                  return;
+                }
+                if (message.type !== "response") return;
+                if (!message.ok) {
+                  window.clearTimeout(timeout);
+                  reject(new Error(message.error?.message ?? "runtime failed"));
+                  return;
+                }
+                if (message.requestId === "preserve") {
+                  values.preserve = message.result?.oid ?? "";
+                  request("descend", "descend", "left-2");
+                } else if (message.requestId === "descend") {
+                  window.clearTimeout(timeout);
+                  values.descend = message.result?.oid ?? "";
+                  resolve(values);
+                }
+              };
+              channel.port1.start();
+              new Function(source)();
+              window.postMessage(
+                {
+                  protocol: "zeros-design-runtime",
+                  version: 2,
+                  type: "handshake",
+                  sourceVersion: "d".repeat(24),
+                },
+                "*",
+                [channel.port2],
+              );
+            },
+          ),
+        { source: DESIGN_RUNTIME_SOURCE },
+      );
+
+      expect(result).toEqual({ preserve: "right-3", descend: "right-3" });
     } finally {
       await browser.close();
     }

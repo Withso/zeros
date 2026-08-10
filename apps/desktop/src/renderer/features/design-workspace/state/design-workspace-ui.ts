@@ -6,6 +6,7 @@
 // workspace. They survive A → B → A and reload without leaking one design's
 // state into another. The persisted map is validated, bounded, and LRU-pruned.
 
+import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
 import { create } from "zustand";
 
 const STORAGE_KEY = "zeros:design-workspace-ui-v1";
@@ -17,8 +18,11 @@ export type DesignBottomPanel = "layers" | "assets";
 export interface DesignWorkspaceViewState {
   selectedFrame: string | null;
   selectedNodeId: string | null;
+  /** Primary-first stable identities for additive canvas/layer selection. */
+  selectedNodeIds: string[];
   panel: DesignBottomPanel;
   codeView: boolean;
+  activeTheme: string | null;
   zoom: number;
   panX: number;
   panY: number;
@@ -29,8 +33,10 @@ export const DEFAULT_DESIGN_WORKSPACE_VIEW: Readonly<DesignWorkspaceViewState> =
   Object.freeze({
     selectedFrame: null,
     selectedNodeId: null,
+    selectedNodeIds: [],
     panel: "layers",
     codeView: false,
+    activeTheme: null,
     zoom: 0.25,
     panX: 64,
     panY: 64,
@@ -42,7 +48,7 @@ export function clampDesignZoom(value: number): number {
   return Math.min(2, Math.max(0.05, value));
 }
 
-function validDesignNodeId(value: unknown): value is string {
+export function isValidDesignNodeId(value: unknown): value is string {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
@@ -70,14 +76,31 @@ export function normalizeDesignWorkspaceView(
     /^[A-Za-z0-9][A-Za-z0-9._-]*\.html$/i.test(record.selectedFrame)
       ? record.selectedFrame
       : null;
+  const selectedNodeId =
+    selectedFrame && isValidDesignNodeId(record.selectedNodeId)
+      ? record.selectedNodeId
+      : null;
+  const selectedNodeIds = selectedNodeId
+    ? [
+        ...new Set([
+          selectedNodeId,
+          ...(Array.isArray(record.selectedNodeIds)
+            ? record.selectedNodeIds.filter(isValidDesignNodeId)
+            : []),
+        ]),
+      ].slice(0, DESIGN_SELECTION_NODE_LIMIT)
+    : [];
   return {
     selectedFrame,
-    selectedNodeId:
-      selectedFrame && validDesignNodeId(record.selectedNodeId)
-        ? record.selectedNodeId
-        : null,
+    selectedNodeId,
+    selectedNodeIds,
     panel: record.panel === "assets" ? "assets" : "layers",
     codeView: record.codeView === true,
+    activeTheme:
+      typeof record.activeTheme === "string" &&
+      /^[a-z][a-z0-9_-]{0,63}$/.test(record.activeTheme)
+        ? record.activeTheme
+        : null,
     zoom: clampDesignZoom(
       typeof record.zoom === "number"
         ? record.zoom
@@ -179,9 +202,15 @@ if (typeof window !== "undefined") {
 interface DesignWorkspaceUiStore {
   byWorkspace: Record<string, DesignWorkspaceViewState>;
   setSelectedFrame(workspaceId: string, frame: string | null): void;
-  setSelection(workspaceId: string, frame: string, nodeId: string | null): void;
+  setSelection(
+    workspaceId: string,
+    frame: string,
+    nodeId: string | null,
+    nodeIds?: readonly string[],
+  ): void;
   setPanel(workspaceId: string, panel: DesignBottomPanel): void;
   setCodeView(workspaceId: string, codeView: boolean): void;
+  setActiveTheme(workspaceId: string, activeTheme: string | null): void;
   setViewport(
     workspaceId: string,
     viewport: Pick<DesignWorkspaceViewState, "zoom" | "panX" | "panY">,
@@ -219,6 +248,10 @@ export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
             state.byWorkspace[workspaceId]?.selectedFrame === selectedFrame
               ? state.byWorkspace[workspaceId]?.selectedNodeId
               : null,
+          selectedNodeIds:
+            state.byWorkspace[workspaceId]?.selectedFrame === selectedFrame
+              ? state.byWorkspace[workspaceId]?.selectedNodeIds
+              : [],
           // Source belongs to the selected frame. Closing it when selection is
           // cleared prevents a blank code surface from becoming durable.
           ...(selectedFrame ? {} : { codeView: false }),
@@ -226,11 +259,14 @@ export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
       }));
     },
 
-    setSelection(workspaceId, selectedFrame, selectedNodeId) {
+    setSelection(workspaceId, selectedFrame, selectedNodeId, selectedNodeIds) {
       set((state) => ({
         byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
           selectedFrame,
           selectedNodeId,
+          selectedNodeIds: selectedNodeId
+            ? [selectedNodeId, ...(selectedNodeIds ?? [])]
+            : [],
         }),
       }));
     },
@@ -247,6 +283,14 @@ export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
       set((state) => ({
         byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
           codeView,
+        }),
+      }));
+    },
+
+    setActiveTheme(workspaceId, activeTheme) {
+      set((state) => ({
+        byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
+          activeTheme,
         }),
       }));
     },

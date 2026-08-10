@@ -238,6 +238,7 @@ function hasDurableMessages(messages: AgentMessage[]): boolean {
 export const BLANK: AgentSessionState = {
   agentId: null,
   agentName: null,
+  durableSessionId: null,
   sessionId: null,
   nativeSessionId: null,
   cwd: null,
@@ -309,6 +310,22 @@ export interface SessionsStoreState {
    *  inside the prompt-failure handler when the expected exit arrives. */
   cancellingChats: Set<string>;
 
+  /** chatId → the user-message id of the turn THIS renderer currently has in
+   *  flight (its optimistic bubble is in the transcript and its prompt has not
+   *  settled). Empty for every chat after a reload.
+   *
+   *  Top-level, not a slot field, deliberately: a mid-send session rebuild
+   *  re-seeds the slot from BLANK, which is exactly when the fact matters.
+   *
+   *  It exists because "is this turn in flight?" was being inferred from
+   *  `status === "warming" && no events yet` — and reopening a chat (a tab
+   *  switch, a workspace switch, an app reload) goes through the same warming
+   *  window, so a turn STOPPED before it produced any output — no events, ever —
+   *  was repainted as live: agent shimmer plus an elapsed timer counting from
+   *  the original prompt, with its footer suppressed, until the session settled.
+   *  A turn id cannot be confused that way. */
+  pendingLocalTurns: Record<string, string>;
+
   /** Per-chat permission policies ("Always allow Bash",
    *  etc.). Loaded from localStorage at boot; kept in memory and
    *  persisted on every mutation. Keys are chat ids; values are
@@ -342,6 +359,10 @@ export interface SessionsStoreState {
    *  populated. */
   seedScrollPositions: (positions: Record<string, ChatScrollPosition>) => void;
   setCancelling: (chatId: string, value: boolean) => void;
+  /** Publish (or clear, with null) the turn this renderer has in flight for a
+   *  chat. Called by sendPrompt as it commits the optimistic bubble and again
+   *  from its finally, so it is never left set for a settled turn. */
+  setPendingLocalTurn: (chatId: string, turnId: string | null) => void;
   clearAll: () => void;
 
   // Policy mutators.
@@ -438,6 +459,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
   sessionToChatId: {},
   scrollPositions: {},
   cancellingChats: new Set(),
+  pendingLocalTurns: {},
   // Load existing policies eagerly so the first permission
   // request after boot can already auto-respond. The doc is small
   // (a few rules per chat) so eager load has no measurable cost.
@@ -476,6 +498,17 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       if (value) next.add(chatId);
       else next.delete(chatId);
       return { cancellingChats: next };
+    });
+  },
+
+  setPendingLocalTurn: (chatId, turnId) => {
+    set((state) => {
+      const current = state.pendingLocalTurns[chatId];
+      if ((turnId ?? undefined) === current) return state;
+      const next = { ...state.pendingLocalTurns };
+      if (turnId) next[chatId] = turnId;
+      else delete next[chatId];
+      return { pendingLocalTurns: next };
     });
   },
 
@@ -630,6 +663,10 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         sessions,
         sessionToChatId: rebuildIndex(sessions),
         cancellingChats,
+        pendingLocalTurns: withoutPendingLocalTurn(
+          state.pendingLocalTurns,
+          chatId,
+        ),
       };
     });
   },
@@ -660,6 +697,10 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         sessionToChatId: rebuildIndex(next),
         scrollPositions: nextScroll,
         cancellingChats: nextCancelling,
+        pendingLocalTurns: withoutPendingLocalTurn(
+          state.pendingLocalTurns,
+          chatId,
+        ),
       };
     });
   },
@@ -683,6 +724,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       sessionToChatId: {},
       scrollPositions: {},
       cancellingChats: new Set(),
+      pendingLocalTurns: {},
     });
   },
 
@@ -818,6 +860,13 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       const workspace = useWorkspaceStore.getState();
       const chat = workspace.chats.find((candidate) => candidate.id === chatId);
       if (chat && chat.effort !== effort) {
+        // ONLY the chat snapshot moves. This notification is not a user choice:
+        // Codex raises its own thread to native `ultra` mid-turn (see the
+        // app-server adapter's thread/settings/updated hook), so writing the
+        // exact model's durable memory here would let the model's own behavior
+        // reopen every FUTURE chat at the tier it escalated to — and mirror
+        // that into the user's settings.toml. The composer still follows the
+        // running session, which is what this update is for.
         workspace.dispatch({
           type: "UPDATE_CHAT_SETTINGS",
           id: chatId,
@@ -1301,6 +1350,18 @@ function rebuildIndex(
   return map;
 }
 
+/** Identity-stable removal: a chat with no pending local turn returns the same
+ *  map, so dropping an unrelated slot never re-renders every transcript. */
+function withoutPendingLocalTurn(
+  pending: Record<string, string>,
+  chatId: string,
+): Record<string, string> {
+  if (!(chatId in pending)) return pending;
+  const next = { ...pending };
+  delete next[chatId];
+  return next;
+}
+
 // ──────────────────────────────────────────────────────────
 // Selector hooks — preferred over reading the whole store
 // ──────────────────────────────────────────────────────────
@@ -1316,6 +1377,23 @@ function rebuildIndex(
  *  token chunk. Selector identity is stable when the truthy result
  *  doesn't flip — sessions[chatId].status is the only field read,
  *  not the slot reference. */
+/** The user-message id of the turn THIS renderer has in flight for a chat, or
+ *  null. A primitive, so a transcript re-renders only when its own pending turn
+ *  changes.
+ *
+ *  This is the honest answer to "is the tail turn in flight?", and it is why a
+ *  reopened chat no longer flashes its last turn as live: session status cannot
+ *  distinguish a mid-send rebuild from a chat that is merely being resumed, and
+ *  a turn stopped before it produced any output looks identical to a turn that
+ *  has not produced output YET. See pendingLocalTurns. */
+export function usePendingLocalTurnId(
+  chatId: string | null | undefined,
+): string | null {
+  return useSessionsStore((s) =>
+    chatId ? (s.pendingLocalTurns[chatId] ?? null) : null,
+  );
+}
+
 export function useAnyChatStreaming(chatIds: readonly string[]): boolean {
   return useSessionsStore((s) => {
     for (const id of chatIds) {

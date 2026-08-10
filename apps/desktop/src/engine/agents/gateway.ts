@@ -600,7 +600,7 @@ export class AgentGateway {
    *  agent id. Feeds each manifest entry's `runtimeUnavailable` probe.
    *
    *  WHY THIS EXISTS: the missing-runtime message tells the user to set Settings →
-   *  Agent providers → Executable path. Without this the probe never read that
+   *  Agents → Executable path. Without this the probe never read that
    *  value, so setting it changed nothing — `installed`/`authenticated` stayed
    *  false, `isRunnableAgent()` returned false, and every send was refused with
    *  "Not installed". The advice and the code disagreed, leaving no way out.
@@ -974,9 +974,14 @@ export class AgentGateway {
    *  release the session's subprocess / server child / SDK agent +
    *  session dir. Without this, every started session leaked an
    *  on-disk session dir (+ a per-session Codex server child) until app
-   *  quit. Best-effort: a teardown failure is logged, never thrown, so
-   *  closing a tab can't surface an error. */
-  async endSession(agentId: string, sessionId: string): Promise<void> {
+   *  quit. Best-effort by default so closing a tab can't surface an error.
+   *  Lifecycle callers use failClosed: archive/delete must abort when the
+   *  adapter cannot confirm that its session resource was disposed. */
+  async endSession(
+    agentId: string,
+    sessionId: string,
+    opts: { failClosed?: boolean } = {},
+  ): Promise<void> {
     const resolvedAgentId = this.sessionToAgent.get(sessionId) ?? agentId;
     this.sessionToAgent.delete(sessionId);
     this.sessionToWorkspace.delete(sessionId);
@@ -993,6 +998,7 @@ export class AgentGateway {
           `[agents] ${resolvedAgentId} disposeSession(${sessionId}) failed: ` +
             (err instanceof Error ? err.message : String(err)),
         );
+        if (opts.failClosed) throw err;
       }
     }
   }

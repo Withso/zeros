@@ -43,6 +43,7 @@
 "use strict";
 
 const fs = require("fs");
+const { execFileSync } = require("child_process");
 
 // node-pty location: the engine passes an absolute path (ZEROS_PTY_NODE_PTY)
 // resolved to the ABI-matching copy — in a packaged app that's the
@@ -84,15 +85,77 @@ function send(msg) {
   }
 }
 
+/** parentPid → child pids, read from one `ps` sweep. `-A -o` is the portable
+ *  spelling: BSD `-ax` and procps disagree, but `-A` means "every process" on
+ *  both macOS and Linux. Returns null when the table can't be read. */
+function readProcessTree() {
+  let rows = "";
+  try {
+    rows = execFileSync("ps", ["-A", "-o", "pid=,ppid="], {
+      encoding: "utf8",
+      timeout: 1000,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+  } catch {
+    return null;
+  }
+  const children = new Map();
+  for (const line of rows.split("\n")) {
+    const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const parentPid = Number(match[2]);
+    const siblings = children.get(parentPid) || [];
+    siblings.push(pid);
+    children.set(parentPid, siblings);
+  }
+  return children;
+}
+
+/** SIGKILL every process still descended from the PTY shell. Interactive job
+ *  control gives background jobs their OWN process groups, so killing only the
+ *  shell's group misses `cmd &`, `nohup`, and `disown`. Walk parent links BEFORE
+ *  killing the shell, while those jobs still have an attributable owner.
+ *  Best-effort POSIX fallback; Windows retains node-pty's own teardown.
+ *  `tree` lets a sweep over many shells (shutdown) share ONE `ps` read instead
+ *  of blocking the host's event loop for up to 1s per session. */
+function killDescendants(rootPid, tree) {
+  if (
+    process.platform === "win32" ||
+    typeof rootPid !== "number" ||
+    rootPid <= 0
+  ) {
+    return;
+  }
+  const children = tree || readProcessTree();
+  if (!children) return;
+  const descendants = [];
+  const pending = [...(children.get(rootPid) || [])];
+  while (pending.length > 0) {
+    const pid = pending.pop();
+    descendants.push(pid);
+    pending.push(...(children.get(pid) || []));
+  }
+  // Children first so a wrapper cannot reparent its own subprocess between
+  // our signals and escape attribution.
+  for (const pid of descendants.reverse()) {
+    if (pid <= 0 || pid === process.pid) continue;
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
 /** Terminate one PTY COMPLETELY. `p.kill()` SIGHUPs the shell — that fells the
- *  FOREGROUND child (e.g. the `/agents` TUI). But node-pty makes the shell a
- *  session/group leader (openpty + setsid, so pgid == pid), so we ALSO SIGKILL
- *  the whole process group: that fells any backgrounded/disowned grandchild the
- *  command left running (e.g. an MCP server), which would otherwise reparent to
- *  launchd and leak. Both best-effort. Used by BOTH the interactive `kill`
+ *  foreground child. The process-group kill covers non-interactive commands;
+ *  the descendant sweep above also covers interactive background job groups.
+ *  Both are best-effort. Used by BOTH the interactive `kill`
  *  message (the × button) AND shutdown, so a user-closed terminal is torn down
  *  exactly as thoroughly as app-quit — they must never drift apart. */
-function killProc(p) {
+function killProc(p, tree) {
+  killDescendants(p.pid, tree);
   try {
     p.kill();
   } catch {
@@ -217,8 +280,11 @@ function shutdown() {
   shuttingDown = true;
   // Same complete teardown as the interactive × (killProc): SIGHUP the shell +
   // SIGKILL its process group, so no shell or backgrounded child lingers when
-  // the engine goes away.
-  for (const p of sessions.values()) killProc(p);
+  // the engine goes away. ONE process-table read is shared across every
+  // session — quit must not serialise N blocking `ps` calls before the first
+  // shell is even signalled.
+  const tree = sessions.size > 0 ? readProcessTree() : null;
+  for (const p of sessions.values()) killProc(p, tree);
   sessions.clear();
   process.exit(0);
 }

@@ -61,6 +61,22 @@ export function shouldQueuePrompt(input: {
   );
 }
 
+/** Whether an explicit send must rebuild the chat's session BEFORE the message
+ * can go anywhere — the composer's retry affordance for a chat sitting in
+ * `failed` / `auth-required` / `reconnecting` (or one that never spawned).
+ *
+ * `warming` and `streaming` are deliberately NOT recovery states: something is
+ * already in flight for them, and shouldQueuePrompt above is what owns that
+ * case. Treating `warming` as recovery is what made a send into a slow-spawning
+ * chat (a cold Cursor host: up to three 10s attempts) look broken — the send sat
+ * on the spawn with the text still in the composer and no bubble anywhere, so
+ * every further Enter re-entered and enqueued another copy of the same message.
+ * Parking it instead shows the message immediately in the queued card and
+ * dispatches it the moment the session is ready. */
+export function sendNeedsSessionRecovery(status: SessionStatus): boolean {
+  return status !== "ready" && status !== "warming" && status !== "streaming";
+}
+
 /** The counterpart to shouldQueuePrompt: what becomes of a parked queue once
  * whatever it was parked behind has finished.
  *
@@ -80,6 +96,44 @@ export function queueReleaseAction(input: {
   // out from under the user, and a held queue survives an unhealthy settle.
   if (input.queueHeld) return "hold";
   return input.status === "ready" ? "drain" : "drop";
+}
+
+/** Stop is a promise, and a send is not atomic: sendPrompt may await a session
+ * rebuild, a settings-drift respawn, or a resume-and-retry before its
+ * AGENT_PROMPT ever reaches the engine — all while the chat already reads
+ * `streaming` and the composer shows Stop. A cancel in that window used to be
+ * addressed at a session that had no live turn yet (or none at all), so the
+ * pending prompt dispatched anyway and the agent started working right after the
+ * user stopped it.
+ *
+ * So cancellation is a per-chat GENERATION rather than a flag: a send captures
+ * it once at entry and re-reads it after every await. Monotonic, so it can
+ * neither be missed nor consumed by the wrong send, and a chat with no session
+ * still records the intent.
+ */
+export function bumpCancelGeneration(
+  generations: Map<string, number>,
+  chatId: string,
+): number {
+  const next = (generations.get(chatId) ?? 0) + 1;
+  generations.set(chatId, next);
+  return next;
+}
+
+export function cancelGeneration(
+  generations: Map<string, number>,
+  chatId: string,
+): number {
+  return generations.get(chatId) ?? 0;
+}
+
+/** Whether a cancel landed for `chatId` since `generation` was captured. */
+export function cancelledSince(
+  generations: Map<string, number>,
+  chatId: string,
+  generation: number,
+): boolean {
+  return cancelGeneration(generations, chatId) !== generation;
 }
 
 /** Remember that live pushes for an exact session arrived before its renderer

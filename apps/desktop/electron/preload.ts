@@ -12,6 +12,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
+import { isAppearanceMode } from "./appearance-mode";
 
 const INVOKE_CHANNEL = "zeros:invoke";
 const EVENT_CHANNEL = "zeros:event";
@@ -189,11 +190,7 @@ const appearanceArg = process.argv.find((a) =>
   a.startsWith("--zeros-appearance-mode="),
 );
 const appearanceMode = appearanceArg?.split("=")[1];
-if (
-  appearanceMode === "system" ||
-  appearanceMode === "light" ||
-  appearanceMode === "dark"
-) {
+if (isAppearanceMode(appearanceMode)) {
   contextBridge.exposeInMainWorld("__ZEROS_APPEARANCE_MODE__", appearanceMode);
 }
 

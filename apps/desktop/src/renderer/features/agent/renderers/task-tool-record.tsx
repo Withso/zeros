@@ -105,7 +105,7 @@ function InfoRow({
 }) {
   return (
     <div className="grid min-w-0 grid-cols-[88px_minmax(0,1fr)] gap-2">
-      <span className="text-fg3">{label}</span>
+      <span className="text-muted-fg">{label}</span>
       <span
         className={
           mono

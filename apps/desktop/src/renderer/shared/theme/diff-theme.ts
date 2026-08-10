@@ -19,7 +19,8 @@
 //
 // Syntax-token colors come from the user's unified code theme (resolveDiffTheme
 // — any Shiki bundled theme name, which @pierre/diffs resolves). The diff SURFACE
-// (--diffs-bg) is a warm Zeros bg (--sidebar-bg in workbench, --bg1 in EditCards),
+// (--diffs-bg) is a Zeros structural surface (--sidebar-bg in workbench, --bg1
+// in EditCards),
 // and the CHROME (add/remove row wash, changed-word emphasis, edge bars, line
 // numbers) is the Zeros palette — both bridged via @pierre's `--diffs-*` slots in
 // diffShadowCss() below; @pierre derives every tint from the three color bases.
@@ -51,14 +52,15 @@ export function resolveDiffTheme(codeThemeId?: string): {
  *  (custom properties inherit through the shadow root, so var(--…) resolves
  *  against zeros-tokens.css):
  *
- *  1. SURFACE — `--diffs-bg` is set to a warm Zeros surface (--sidebar-bg in
- *     workbench, --bg1 in chat EditCards), NOT @pierre's cool #000. @pierre derives
- *     context rows, gutter, and separator from it, so the whole diff matches the
- *     app. Syntax token colors still come from the picked Shiki theme.
+ *  1. SURFACE — `--diffs-bg` is set to a Zeros structural surface
+ *     (--sidebar-bg in workbench, --bg1 in chat EditCards), NOT @pierre's cool
+ *     #000. @pierre derives context rows, gutter, and separator from it, so the
+ *     whole diff matches the app. Syntax token colors still come from the picked
+ *     Shiki theme.
  *  2. PALETTE — three base overrides; @pierre DERIVES the add/remove row wash,
  *     the changed-word emphasis, the edge bars, and the line numbers from them:
  *       addition → --green-primary · deletion → --red-primary
- *       modified/selection → --highlighted-bright (neutral warm-gray; replaces
+ *       modified/selection → --highlighted-bright (structural neutral; replaces
  *       the package's navy #69b1ff). @pierre leaves the -override slots unset, so
  *       ours win. Fine-tune washes via --diffs-bg-*(-emphasis)-override.
  *  Preview: styles/Artifacts/diff-theme-preview.html. */

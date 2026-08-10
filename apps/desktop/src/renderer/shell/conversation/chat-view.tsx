@@ -13,7 +13,7 @@
 //                                 2026-06-18; replacement lands via the
 //                                 redesign branch on merge to main)
 //   - chat kind w/o agent       → AUTO-BIND to the resolved default
-//                                 (starred → codex → first runnable)
+//                                 (explicit → Codex → Claude → Cursor → first)
 //                                 then re-render as ChatBody. The
 //                                 user never sees a picker; 2026-05-23
 //                                 the legacy NoAgentView path was
@@ -29,7 +29,7 @@
 // subprocess at composer-focus time (handled by AgentChat).
 // ──────────────────────────────────────────────────────────
 
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useLayoutEffect, useRef } from "react";
 import {
   useChatById,
   usePendingAutoSend,
@@ -44,20 +44,27 @@ import { useSessionsStore } from "../../features/agent/sessions-store";
 import { sessionIdentityUpdate } from "./session-identity";
 import { useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { AgentChat } from "../../features/agent/agent-chat";
-import { envForChat } from "../../features/agent/model-catalog";
+import { agentFamily, envForChat } from "../../features/agent/model-catalog";
 import { agentAppliesConfigLive } from "../../features/agent/live-config-support";
+import { useDefaultAgent } from "../../features/settings/default-agent";
 import {
-  FALLBACK_AGENT_ID,
-  pickDefaultAgent,
-  useDefaultAgent,
-} from "../../features/settings/default-agent";
-import { useAgentsSnapshot } from "../../features/agent/agents-cache";
+  hasConfirmedAgents,
+  loadAgents,
+  useAgentsSnapshot,
+} from "../../features/agent/agents-cache";
+import { useEnabledAgents } from "../../features/agent/enabled-agents";
 import { isRemovedAgent } from "../../features/agent/agent-runnable";
 import { AgentRemovedPanel } from "../agent-removed-panel";
 import { NoFolderPanel } from "../no-folder-panel";
 import { useChatCwd } from "../use-chat-cwd";
 import { useWorkspaceProvisioning } from "../../state/pending-workspaces";
 import { finishPreparedChatView } from "./chat-intent";
+import {
+  rememberProvisionalBinding,
+  resolveAutoBindChatSettings,
+  takeProvisionalBinding,
+  type PriorChatIdentity,
+} from "./auto-bind-chat";
 
 export function ChatView({
   chatId,
@@ -86,6 +93,9 @@ export function ChatView({
   // the folder the user is actually in (not the engine root — that footgun
   // is avoided because newAgentFolder is the user's selected worktree).
   const resolvedCwd = useChatCwd();
+  // A binding made before the registry answered is a guess. Correct it here —
+  // this hook outlives AutoBindAgent, which unmounts the instant it binds.
+  useProvisionalBindingReconcile(active);
 
   if (!active) {
     // EmptyComposer (the no-chat "start a new chat" landing) no longer exists
@@ -105,7 +115,7 @@ export function ChatView({
   }
 
   // Chat has no agent bound yet — auto-bind to the resolved default
-  // (starred → codex → first runnable) and re-render as ChatBody.
+  // (explicit → Codex → Claude → Cursor → first runnable) and re-render as ChatBody.
   // The hydration step in app-shell.tsx already backfills persisted
   // records, so this branch only catches edge cases (a brand-new
   // chat created elsewhere, a corrupted record bypassing migration).
@@ -162,30 +172,58 @@ export function ChatView({
   );
 }
 
-/** Side-effect-only component: when mounted with a chat that has no
- *  agentId, resolves the default and writes it back to the store. The
- *  parent then re-renders into ChatBody on the very next tick. We
- *  render `null` during the in-flight binding (one paint at most).
+/** The identity a repaired record carries into rebinding: its former agent
+ *  name, its resumable session, and the composer configuration that was written
+ *  in the same update as the `agentId` it lost. */
+function priorIdentityOf(chat: ChatThread): PriorChatIdentity {
+  return {
+    agentName: chat.agentName,
+    sessionId: chat.sessionId,
+    model: chat.model,
+    effort: chat.effort,
+    fast: chat.fast,
+    permissionMode: chat.permissionMode,
+    lastModeId: chat.lastModeId,
+  };
+}
+
+/** Side-effect component: when mounted with a chat that has no agentId,
+ *  resolves the default and writes it back to the store. The write happens in a
+ *  LAYOUT effect, so React re-renders into ChatBody before this frame paints —
+ *  the composer is the first thing the user sees, not an intermediate state.
  *
- *  The lookup priority mirrors `pickDefaultAgent` in default-agent.ts:
- *  starred > codex > first runnable. If the registry hasn't loaded
- *  yet we bind to FALLBACK_AGENT_ID directly — the engine's failure
- *  UI will surface a "not installed" error if that's the case, which
- *  is a clearer story than parking the chat in a picker. */
+ *  The lookup priority mirrors `pickAgentForNewChat` in default-agent.ts:
+ *  explicit default > Codex > Claude > Cursor > first, relaxing from
+ *  enabled+runnable down to best-detected so the registry ALWAYS binds — a
+ *  machine with nothing signed in gets the composer's "Sign in required" flow,
+ *  never a dead pane.
+ *
+ *  Binding does NOT wait for the live registry. The agents cache hydrates its
+ *  snapshot from localStorage at module load, so it is usually already warm;
+ *  when it is genuinely cold (true first run) the product chain resolves the
+ *  guess, {@link rememberProvisionalBinding} records it, and
+ *  {@link useProvisionalBindingReconcile} corrects it as soon as the
+ *  authoritative list lands. Holding the pane behind a spinner + timeout
+ *  instead would be exactly the hidden data waterfall AGENTS.md forbids. */
 function AutoBindAgent({ chat }: { chat: ChatThread }) {
   const dispatch = useWorkspaceDispatch();
   const { agentId: starredId } = useDefaultAgent();
+  const { isEnabled } = useEnabledAgents();
   const agents = useAgentsSnapshot();
-  // Latch so the settings update triggered below cannot make this effect
+  // Latch so the settings update this triggers cannot make the effect
   // double-write the chat on its immediate re-render.
   const boundRef = useRef(false);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (boundRef.current) return;
     boundRef.current = true;
-    const resolved = agents ? pickDefaultAgent(agents, starredId) : null;
-    const agentId = resolved?.id ?? FALLBACK_AGENT_ID;
-    const agentName = resolved?.name ?? null;
+    const prior = priorIdentityOf(chat);
+    // An UNCONFIRMED snapshot means the binding is a guess; record what the chat
+    // looked like BEFORE it so the reconcile pass can re-resolve faithfully.
+    // Unconfirmed covers more than a cold null: the cache publishes `[]` when a
+    // load fails with nothing on disk, and that array reads exactly like an
+    // authoritative empty registry while being nothing of the sort.
+    if (!hasConfirmedAgents()) rememberProvisionalBinding(chat.id, prior);
     // Several ChatViews are mounted at once in a split workspace. Updating
     // this one chat must not use HYDRATE_CHATS with `activeChatId: chat.id`:
     // an agentless chat in a background pane would steal keyboard/composer
@@ -193,15 +231,90 @@ function AutoBindAgent({ chat }: { chat: ChatThread }) {
     dispatch({
       type: "UPDATE_CHAT_SETTINGS",
       id: chat.id,
-      updates: { agentId, agentName },
+      updates: resolveAutoBindChatSettings(agents, starredId, isEnabled, prior),
     });
-    // We intentionally bind on first render — re-resolving when the
-    // registry loads later would either no-op (same id) or worse,
-    // swap the agent under a chat the user is actively typing in.
+    // Bind from the FIRST render's values deliberately. A later registry answer
+    // is applied by useProvisionalBindingReconcile, which knows to leave a
+    // started chat alone; re-running here would restamp the record underneath
+    // a user who is already typing.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return null;
+}
+
+/** Replace a binding that was guessed without the registry once the
+ *  authoritative list arrives. Lives on ChatView (not AutoBindAgent, which
+ *  unmounts the moment it binds) and runs at most once per chat.
+ *
+ *  A chat that already minted a session keeps its guess: swapping the agent
+ *  under a live session is worse than an imperfect first pick, and the pill
+ *  lets the user move it. */
+function useProvisionalBindingReconcile(chat: ChatThread | null): void {
+  const dispatch = useWorkspaceDispatch();
+  const { agentId: starredId } = useDefaultAgent();
+  const { isEnabled } = useEnabledAgents();
+  const agents = useAgentsSnapshot();
+  const sessions = useAgentSessions();
+  const bridgeStatus = useBridgeStatus();
+  const chatId = chat?.kind === "chat" ? chat.id : null;
+  const boundAgentId = chat?.agentId ?? null;
+  const hasSession = Boolean(chat?.sessionId);
+
+  // The cache's only routine loader lives in AgentChat, which never mounts
+  // while a chat is agentless. On a cold cache (fresh install, new dev data
+  // dir) nothing else fills the snapshot, so kick the load here. Gated on a
+  // connected bridge (same idiom as settings-page) so a boot-time blip doesn't
+  // convert into a spurious `[]` registry; the status flip re-runs this.
+  //
+  // Keyed on CONFIRMATION, not on `agents !== null`: a failed load leaves a
+  // published `[]` behind, and stopping there meant nothing ever asked the
+  // engine again. Re-running is bounded by the snapshot's own reference —
+  // repeated failures keep publishing the same `[]`, which React bails out of —
+  // so this retries when the array actually changes or the bridge reconnects.
+  useEffect(() => {
+    if (hasConfirmedAgents() || bridgeStatus !== "connected") return;
+    void loadAgents((force) => sessions.listAgents(force)).catch(() => {
+      /* still unconfirmed; the next snapshot or bridge flip tries again */
+    });
+  }, [agents, bridgeStatus, sessions]);
+
+  useEffect(() => {
+    if (!agents || !hasConfirmedAgents() || !chatId || !boundAgentId) return;
+    // The provisional record is ONE-SHOT. Reading it against a list the cache
+    // never confirmed would spend a chat's only chance at repair on the very
+    // registry that cannot repair anything.
+    const prior = takeProvisionalBinding(chatId);
+    if (!prior || hasSession) return;
+    const settings = resolveAutoBindChatSettings(
+      agents,
+      starredId,
+      isEnabled,
+      prior,
+    );
+    // The guess was right about the provider ⇒ leave the chat's model/effort/
+    // Fast alone rather than restamping identical values. Extension agents have
+    // no family, so they are compared by exact id instead of both resolving to
+    // "" and passing for each other.
+    const resolvedFamily = agentFamily(settings.agentId);
+    const sameAgent =
+      settings.agentId === boundAgentId ||
+      (resolvedFamily !== "" && resolvedFamily === agentFamily(boundAgentId));
+    if (sameAgent) return;
+    dispatch({
+      type: "UPDATE_CHAT_SETTINGS",
+      id: chatId,
+      updates: settings,
+    });
+  }, [
+    agents,
+    boundAgentId,
+    chatId,
+    dispatch,
+    hasSession,
+    isEnabled,
+    starredId,
+  ]);
 }
 
 function ChatBody({
@@ -230,9 +343,10 @@ function ChatBody({
   // retained transcript is parked. A session created just before a workspace
   // switch must still be linked to its chat even if the chat is never revealed
   // again before application shutdown.
-  const liveSessionId = useSessionsStore(
-    (state) => state.sessions[chatId]?.sessionId ?? null,
-  );
+  const liveSessionId = useSessionsStore((state) => {
+    const slot = state.sessions[chatId];
+    return slot?.durableSessionId ?? slot?.sessionId ?? null;
+  });
   const liveNativeSessionId = useSessionsStore(
     (state) => state.sessions[chatId]?.nativeSessionId ?? null,
   );
@@ -369,8 +483,7 @@ function ChatBody({
   }, [chatId, liveSessionId, liveNativeSessionId, chat, dispatch]);
 
   // Respawn when the user changes model/effort — but ONLY for an agent that
-  // cannot absorb the change live (cursor today; see
-  // agent/live-config-support.ts).
+  // cannot absorb the change live (see agent/live-config-support.ts).
   //
   // 2026-07-29: this effect used to fire for EVERY agent, and that was a bug
   // with three faces. Claude and Codex already had the change pushed into the

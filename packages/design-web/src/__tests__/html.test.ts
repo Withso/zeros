@@ -4,6 +4,8 @@ import {
   assertSafeDesignHtmlDocument,
   assertSafeDesignHtmlFragment,
   healDesignHtmlIdentities,
+  mutateDesignNodeDeleteSource,
+  mutateDesignNodeDuplicateSource,
   mutateDesignNodeAttributeSource,
   mutateDesignNodeHtmlSource,
   mutateDesignNodeTextSource,
@@ -101,6 +103,20 @@ describe("HTML source adapter", () => {
     const healed = healDesignHtmlIdentities(inserted);
     expect(healed.source).toMatch(
       /<strong data-oid="o-[a-f0-9]{8}">New<\/strong>/,
+    );
+  });
+
+  it("duplicates a subtree with fresh stable identities and deletes it exactly", () => {
+    const duplicated = mutateDesignNodeDuplicateSource(
+      FRAME_HTML,
+      "card",
+      "card-copy",
+    );
+    expect(duplicated).toContain('data-oid="card-copy"');
+    expect(duplicated).toContain('data-oid="card-copy-label"');
+    expect(duplicated.match(/class="card"/g)).toHaveLength(2);
+    expect(mutateDesignNodeDeleteSource(duplicated, "card-copy")).toBe(
+      FRAME_HTML,
     );
   });
 

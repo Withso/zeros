@@ -48,6 +48,10 @@ export type AgentFailureKind =
   | "subprocess-exited"
   | "protocol-error"
   | "transport-closed"
+  /** Provider/account throttling. Terminal for this send (we do not amplify
+   *  a 429 with an immediate automatic replay), but the composer stays usable
+   *  and the UI presents calm retry-later copy. */
+  | "rate-limited"
   /** The persisted session
    *  identifier is gone from disk — most often because the agent's
    *  CLI deleted/cleaned up its rollout/session JSONL between

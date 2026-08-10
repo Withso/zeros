@@ -73,24 +73,8 @@ import { QuestionCard } from "./question-card";
 import { readPlan, isPlanReviewRequest } from "./renderers/plan-body";
 import { WorkspaceDirectoryPicker } from "./workspace-directory-picker";
 import { useProjects } from "../../state/use-projects";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "../../shared/ui/primitives/dropdown-menu";
 import { findProjectForFolder } from "../../state/workspace-resolution";
-import {
-  Bot,
-  Square,
-  ArrowLeft,
-  Plus,
-  Upload,
-  Paperclip,
-  FolderInput,
-  MessageSquareText,
-  Check,
-} from "lucide-react";
+import { Bot, Square, ArrowLeft, Upload, Check } from "lucide-react";
 import {
   encodeAttachments,
   reportSkippedAttachments,
@@ -103,6 +87,7 @@ import type { ComposerAttachment } from "./composer-attachments";
 // autosize was removed with the textarea, and the visual shell moved
 // off ComposerShell/ComposerTextarea/ComposerToolbar.
 import { COMPOSER_FILE_ACCEPT } from "./composer-shell";
+import { ComposerAttachmentMenu } from "./composer-attachment-menu";
 import {
   Conversation,
   ConversationContent,
@@ -115,6 +100,7 @@ import {
 } from "@/renderer/shared/ui/primitives/elements";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 import { getLiveChatDraft, setLiveChatDraft } from "./composer-live-drafts";
+import { resolveComposerPlaceholder } from "./composer-placeholder";
 import {
   composerOwnsFocus,
   isFocusHeldElsewhere,
@@ -140,8 +126,6 @@ import { computeEditBaselines } from "./renderers/tool-edit";
 import { Button, cn } from "../../shared/ui";
 import {
   ModelPill,
-  EffortPill,
-  FastPill,
   PermissionToggle,
   PlanModeFrame,
   ComposerConcealedContext,
@@ -159,25 +143,30 @@ import {
   transcriptPillLabel,
   transcriptSourceKey,
 } from "./chat-transcript-attach";
-import { useChatTranscriptSummaries } from "./use-chat-transcript-summaries";
+import {
+  useChatTranscriptSummaries,
+  warmChatTranscriptSummaries,
+} from "./use-chat-transcript-summaries";
 import type { ChatSummaryWire } from "./agent-history-client";
 import type { TranscriptMode } from "./transcript-format";
 import {
   agentFamily,
   agentHasPermissionMenu,
   agentModeForPermission,
-  agentSupportsEffort,
-  agentSupportsFast,
   coerceModeIdForModel,
-  effortLevelsFor,
-  nearestEffort,
+  envForChat,
   permissionForAgentMode,
   permissionModeShowsFrame,
   staticModesForAgent,
 } from "./model-catalog";
+import { sendNeedsSessionRecovery } from "./session-reload-lifecycle";
 import { requestAiChatTitle } from "./chat-title";
-import { getDefaultEffort, newChatBornDefaults } from "./new-chat-defaults";
-import { effectiveFavoriteModel } from "./model-favorites";
+import {
+  newChatBornDefaults,
+  rememberModelConfiguration,
+  rememberPermissionMode,
+} from "./new-chat-defaults";
+import { resolveModelConfiguration } from "./model-preferences";
 import type { AgentModelSelection } from "./agent-model-menu";
 import { ProjectContextChip } from "./project-context-chip";
 import {
@@ -203,6 +192,7 @@ import {
   turnKey,
 } from "./turn-container";
 import { TurnEventList } from "./turn-event-list";
+import { tailTurnInFlight } from "./tail-indicators";
 import { pickActiveWorkflow } from "./workflow-activity";
 import { stabilizeTurns } from "./stable-turns";
 import { TurnFooter } from "./turn-footer";
@@ -212,7 +202,11 @@ import {
   sameCheckpoints,
   type Checkpoint,
 } from "./checkpoint-rail";
-import { MAX_MESSAGES_PER_CHAT, useSessionsStore } from "./sessions-store";
+import {
+  MAX_MESSAGES_PER_CHAT,
+  usePendingLocalTurnId,
+  useSessionsStore,
+} from "./sessions-store";
 import { collectPendingQuestionToolCallIds } from "./pending-question-tools";
 import {
   windowOlderMessages as ipcWindowOlderMessages,
@@ -245,6 +239,8 @@ function labelForFailure(
         return "Sign in required";
       case "transport-closed":
         return "Disconnected";
+      case "rate-limited":
+        return "Rate limited";
       case "subprocess-exited":
         return "Agent exited";
       case "protocol-error":
@@ -279,6 +275,8 @@ function footerLabelForFailure(failure: AgentFailure | null): string | null {
       return "AGENT RESPONSE TIMEOUT";
     case "transport-closed":
       return "CONNECTION LOST";
+    case "rate-limited":
+      return "RATE LIMITED";
     case "protocol-error":
       return "AGENT RESPONSE FAILURE";
     default:
@@ -837,7 +835,7 @@ export function AgentChat({
         }
       } else {
         toast.error("Sign in failed", {
-          description: `${res.error ?? "Unknown error."} You can also sign in from Settings → Agent providers.`,
+          description: `${res.error ?? "Unknown error."} You can also sign in from Settings → Agents.`,
         });
       }
     });
@@ -946,6 +944,7 @@ export function AgentChat({
       const currentId =
         session.currentModeId ?? chatThread.lastModeId ?? autoAgentModeId;
       void session.setMode?.(planAgentModeId);
+      rememberPermissionMode(chatAgentId, planAgentModeId);
       updateChatSettings({
         lastModeId: planAgentModeId,
         permissionMode: "plan",
@@ -975,6 +974,7 @@ export function AgentChat({
     if (!chatThread || !isPlanMode) return;
     const backId = chatThread.prePlanModeId ?? autoAgentModeId;
     void session.setMode?.(backId);
+    rememberPermissionMode(chatAgentId, backId);
     updateChatSettings({
       lastModeId: backId,
       permissionMode: permissionForAgentMode(backId, chatAgentId),
@@ -1003,6 +1003,7 @@ export function AgentChat({
         return;
       }
       void session.setMode?.(modeId);
+      rememberPermissionMode(chatAgentId, modeId);
       updateChatSettings({
         lastModeId: modeId,
         permissionMode: permissionForAgentMode(modeId, chatAgentId),
@@ -1063,6 +1064,11 @@ export function AgentChat({
       ? (s.sessions[chatId]?.transcriptState ?? "resident") === "resident"
       : true,
   );
+  // Which turn (if any) this renderer has an unsettled prompt for. The tail's
+  // liveness is derived from this rather than from session status, so a chat
+  // being REOPENED — a tab switch, a workspace switch, an app reload, all of
+  // which warm a session — never repaints a finished turn as working.
+  const pendingLocalTurnId = usePendingLocalTurnId(chatId);
   const conversationStarted =
     hasSessionMessages ||
     !transcriptKnown ||
@@ -1111,24 +1117,13 @@ export function AgentChat({
     (sel: AgentModelSelection) => {
       if (!chatThread || !chatId) return;
       const born = newChatBornDefaults(sel.agentId);
-      const ladder = effortLevelsFor(sel.agentId, sel.model, null);
-      // Effort carry-over, in priority order:
-      //   1. Target is its agent's FAVORITE and the user set a default
-      //      effort in Settings → that default (favorite ⌁ Opus@max wins
-      //      over a carried high).
-      //   2. Else CARRY the current chat's effort when the target offers it
-      //      (Sol@high ↗ Opus 4.8 → still high).
-      //   3. Else the nearest ladder level below it (max ↗ Grok 4.5 → high).
-      //   4. Empty ladder (no effort knob) → keep the value; it's inert.
-      const favDefault =
-        sel.model === effectiveFavoriteModel(sel.agentId)
-          ? getDefaultEffort(sel.agentId)
-          : null;
-      const effort =
-        favDefault && ladder.includes(favDefault)
-          ? favDefault
-          : (nearestEffort(ladder, chatThread.effort) ?? chatThread.effort);
-      const fast = born.fast && agentSupportsFast(sel.agentId, sel.model, null);
+      // Exact-key restoration: a model always gets its own last effort/Fast
+      // pair. Never carry the source model's configuration across this switch.
+      const { effort, fast } = resolveModelConfiguration(
+        sel.agentId,
+        sel.model,
+        null,
+      );
       // Pristine = nothing sent yet. Both signals must agree: zero in-memory
       // messages AND the never-promoted "Untitled" title — after an engine
       // respawn the sessions slot is empty while disk history hydrates, and
@@ -1148,7 +1143,7 @@ export function AgentChat({
           effort,
           fast,
           permissionMode: born.permissionMode,
-          lastModeId: undefined,
+          lastModeId: born.lastModeId,
           prePlanModeId: undefined,
           sessionId: undefined,
         });
@@ -1163,6 +1158,7 @@ export function AgentChat({
         model: sel.model,
         effort,
         permissionMode: born.permissionMode,
+        ...(born.lastModeId ? { lastModeId: born.lastModeId } : {}),
         ...(fast ? { fast: true } : {}),
         additionalDirectories: chatThread.additionalDirectories,
         title: "Untitled",
@@ -1186,10 +1182,9 @@ export function AgentChat({
 
   // The toolbar pills the main composer
   // renders, ALSO reused in TurnPromptHeader's edit mode so editing a past
-  // prompt has the same model / fast / effort / plan / permissions
-  // affordances. Memoized on the slice of chatThread + session state the
-  // pills actually read. (2026-06-08) added Fast + the effort battery toggle
-  // + the Plan toggle.
+  // prompt has the same configured-model / permissions affordances. Effort and
+  // Fast remain editable inside ModelPill's popover and are summarized in its
+  // one visible label instead of consuming separate toolbar controls.
   const editToolbarPills = useMemo(() => {
     if (!chatThread) return null;
     return (
@@ -1198,41 +1193,23 @@ export function AgentChat({
           agentId={chatThread.agentId}
           initialize={session.initialize}
           value={chatThread.model}
+          effort={chatThread.effort}
+          fast={!!chatThread.fast}
           onSelectAgentModel={switchAgentModel}
           redirectCrossAgent={conversationStarted}
+          onConfigure={({ effort, fast }) => {
+            const effortChanged = effort !== chatThread.effort;
+            updateChatSettings({ effort, fast });
+            session.updateConfig?.();
+            if (effortChanged) maybeShowCostBumpToast("effort");
+          }}
           onChange={(v) => {
-            const ladder = effortLevelsFor(
+            const configuration = resolveModelConfiguration(
               chatThread.agentId,
               v,
               session.initialize,
             );
-            // The saved default effort belongs to the
-            // DEFAULT (favorite) model only. Switching TO the favorite
-            // re-applies it; switching to any other model CARRIES the
-            // chat's current effort, sliding to the nearest level below
-            // when the new ladder doesn't offer it (Sol@max → 5.5 lands
-            // on xhigh, → Grok lands on high) — same rule as redirects.
-            const savedDefault =
-              v === effectiveFavoriteModel(chatThread.agentId)
-                ? getDefaultEffort(chatThread.agentId)
-                : null;
-            const carried =
-              nearestEffort(ladder, chatThread.effort) ?? chatThread.effort;
-            const effortReset =
-              savedDefault && ladder.includes(savedDefault)
-                ? ({ effort: savedDefault } as const)
-                : carried !== chatThread.effort
-                  ? ({ effort: carried } as const)
-                  : {};
-            // Clear a stale Fast flag when the new model doesn't support Fast
-            // (e.g. Opus[fast] → Sonnet 5 / Haiku[no fast]). Without this the
-            // FastPill hides but `fast:true` lingers in env → confusing state.
-            const fastReset =
-              chatThread.fast &&
-              !agentSupportsFast(chatThread.agentId, v, session.initialize)
-                ? ({ fast: false } as const)
-                : {};
-            updateChatSettings({ model: v, ...effortReset, ...fastReset });
+            updateChatSettings({ model: v, ...configuration });
             // Apply to the LIVE session too, so the change takes effect on the
             // next turn instead of only on a rebuild.
             if (v) session.setModel?.(v);
@@ -1247,45 +1224,6 @@ export function AgentChat({
             if (v && v !== chatThread.model) maybeShowCostBumpToast("model");
           }}
         />
-        {agentSupportsFast(
-          chatThread.agentId,
-          chatThread.model,
-          session.initialize,
-        ) && (
-          <FastPill
-            active={!!chatThread.fast}
-            onToggle={() => {
-              updateChatSettings({ fast: !chatThread.fast });
-              // Apply to the LIVE session too (Claude SDK), so the change
-              // takes effect on the next turn instead of only on a rebuild.
-              session.updateConfig?.();
-            }}
-          />
-        )}
-        {agentSupportsEffort(
-          chatThread.agentId,
-          chatThread.model,
-          session.initialize,
-        ) && (
-          <EffortPill
-            agentId={chatThread.agentId}
-            levels={effortLevelsFor(
-              chatThread.agentId,
-              chatThread.model,
-              session.initialize,
-            )}
-            value={chatThread.effort}
-            onChange={(v) => {
-              updateChatSettings({ effort: v });
-              // Apply to the LIVE session too (Claude SDK), so the change
-              // takes effect on the next turn instead of only on a rebuild.
-              session.updateConfig?.();
-              // The prompt cache is keyed by effort level too:
-              // same one-time heads-up as a model change.
-              if (v !== chatThread.effort) maybeShowCostBumpToast("effort");
-            }}
-          />
-        )}
         {showPermissionToggle && (
           // The permission toggle sits where the Plan pill
           // used to — icon-only, cycles the agent's native modes on click,
@@ -1342,9 +1280,6 @@ export function AgentChat({
   // additionalDirectories on the next respawn (Claude resumes, so context
   // survives).
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
-  // The composer "+" menu is CONTROLLED so it can be force-closed when the
-  // permission/question card conceals the composer (see composerConcealed).
-  const [plusMenuOpen, setPlusMenuOpen] = useState(false);
   // The composer "+" → "Attach chat transcript" picker. Ephemeral: it is a
   // transient dialog, not a durable selection.
   const [transcriptPickerOpen, setTranscriptPickerOpen] = useState(false);
@@ -1388,19 +1323,25 @@ export function AgentChat({
       if (slashCommandKind(chatThread.agentId, name) !== "inline") return false;
       switch (name) {
         case "plan": {
-          const exitId =
-            effectiveModes.find((m) => /default|^ask$/i.test(m.id))?.id ??
-            "default";
-          void session.setMode?.(isPlanMode ? exitId : planAgentModeId);
+          if (isPlanMode) exitPlanMode();
+          else enterPlan();
           return true;
         }
-        case "fast":
-          updateChatSettings({ fast: !chatThread.fast });
+        case "fast": {
+          const fast = !chatThread.fast;
+          rememberModelConfiguration(chatThread.agentId, chatThread.model, {
+            fast,
+          });
+          updateChatSettings({ fast });
           // Apply to the LIVE session too (Claude SDK), so the change takes
           // effect on the next turn instead of only on a rebuild.
           session.updateConfig?.();
           return true;
+        }
         case "ultracode":
+          rememberModelConfiguration(chatThread.agentId, chatThread.model, {
+            effort: "ultracode",
+          });
           updateChatSettings({ effort: "ultracode" });
           // Apply to the LIVE session too (Claude SDK), so the change takes
           // effect on the next turn instead of only on a rebuild.
@@ -1441,6 +1382,8 @@ export function AgentChat({
             fast: chatThread.fast,
             additionalDirectories: chatThread.additionalDirectories,
             permissionMode: chatThread.permissionMode,
+            lastModeId: chatThread.lastModeId,
+            prePlanModeId: chatThread.prePlanModeId,
             title: "Untitled",
             createdAt: Date.now(),
             updatedAt: Date.now(),
@@ -1461,12 +1404,12 @@ export function AgentChat({
       chatThread,
       chatId,
       session,
+      enterPlan,
+      exitPlanMode,
       dispatch,
       agentSessions,
       updateChatSettings,
       isPlanMode,
-      planAgentModeId,
-      effectiveModes,
     ],
   );
 
@@ -1534,7 +1477,7 @@ export function AgentChat({
     attachmentImagesActive: surfaceActive,
     originUrl: composerOriginUrl,
     availableCommands: session.availableCommands,
-    placeholder: 'Type your message… "/" for commands, "@" for files',
+    placeholder: resolveComposerPlaceholder(conversationStarted),
     onSubmit: () => submitRef.current(),
     onEscape: () => queueKeysRef.current.escape(),
     onModEnter: () => queueKeysRef.current.modEnter(),
@@ -1598,9 +1541,9 @@ export function AgentChat({
   // chats keep this component mounted, and without it every hidden tab
   // re-pulls the folder's chat list on every DB_CHANGED tick (AGENTS.md:
   // hidden surfaces are inert). The other two are the surfaces that consume
-  // it: the row (empty chat only) and the "+" picker (any time). Opening the
-  // "+" menu is the pointer intent that warms the list before the user reaches
-  // the item inside it, so the dialog opens with data rather than empty.
+  // it: the row (empty chat only) and the "+" picker (any time). The small menu
+  // calls warmChatTranscriptSummaries on pointer/focus intent, so it can stay
+  // locally stateful and the dialog still opens from the exact-key cache.
   const transcriptRowLive =
     session.transcriptState === "resident" &&
     session.messages.length === 0 &&
@@ -1623,9 +1566,11 @@ export function AgentChat({
     useChatTranscriptSummaries(
       chatThread?.folder,
       chatId,
-      surfaceActive &&
-        (transcriptRowLive || plusMenuOpen || transcriptPickerOpen),
+      surfaceActive && (transcriptRowLive || transcriptPickerOpen),
     );
+  const warmTranscriptPicker = useCallback(() => {
+    warmChatTranscriptSummaries(chatThread?.folder, chatId);
+  }, [chatThread?.folder, chatId]);
   // The provenance block's shape hangs on this ONE question, and `null` for
   // "not known yet" is the load-bearing third answer — see
   // provenanceBlockShape. Derived from the same array the row renders, so the
@@ -1646,10 +1591,18 @@ export function AgentChat({
   // Every in-flight attach, so handleSend can wait for the ones the user
   // asked for rather than sending without them. See the top of handleSend.
   const transcriptAttachesRef = useRef<Set<Promise<void>>>(new Set());
-  // True only while a send is parked on those reads — the one stretch of
-  // handleSend that can be re-entered with the composer still full. See the
-  // top of handleSend.
+  // True while a send is being PREPARED — from the first keystroke-triggered
+  // submit until the composer is cleared and the prompt has been handed to the
+  // provider. Every stretch in there can be re-entered with the composer still
+  // full (a cold transcript read, a session rebuild), and each re-entry
+  // snapshots the same composer and sends it again. See handleSend.
   const sendInFlightRef = useRef(false);
+  // The rendered half of the same fact, for the ONE stretch a user can actually
+  // notice: a send parked on a cold transcript read or a session rebuild, which
+  // on a cold provider host takes tens of seconds. The submit button shows the
+  // spinner ("submitted") for it, so a composer that still holds the text reads
+  // as "working on it" instead of an unresponsive button.
+  const [sendPreparing, setSendPreparing] = useState(false);
 
   // "Is this chat attached" is derived from the composer DOCUMENT, never from
   // a second list: that is what makes removing a chip with its × un-add the
@@ -2653,7 +2606,7 @@ export function AgentChat({
         // instead of stacking identical copies.
         id: `agent-error-${chatId ?? agentLabel}`,
         description: isAuth
-          ? `Open Settings → Agent providers to sign in to ${agentLabel}.`
+          ? `Open Settings → Agents to sign in to ${agentLabel}.`
           : advice,
       });
     }
@@ -2784,17 +2737,14 @@ export function AgentChat({
   // composer must close: popover content portals to <body>, so once the
   // trigger loses its layout box Radix's popper has a zero-rect anchor and
   // re-parks the still-open popover at the viewport's top-left corner. The
-  // "+" menu closes via plusMenuOpen below; the ModelPill popover via
-  // ComposerConcealedContext (composer-pills.tsx).
+  // local ComposerAttachmentMenu and ModelPill both derive closed from this
+  // value in the same render.
   const composerConcealed =
     !surfaceActive || permissionCardActive || questionCardActive;
   // Live mirror for the always-focus guardian's document listener, so it can
   // read the current concealment without re-subscribing on every card toggle.
   const composerConcealedRef = useRef(composerConcealed);
   composerConcealedRef.current = composerConcealed;
-  useEffect(() => {
-    if (composerConcealed) setPlusMenuOpen(false);
-  }, [composerConcealed]);
 
   // Auto-focus this chat's composer whenever it becomes the single active
   // ("focused") chat window. Creating a new tab, switching tabs, clicking into
@@ -2956,7 +2906,7 @@ export function AgentChat({
       agentId: session.agentId ?? chatThread?.agentId ?? null,
     });
 
-  const handleSend = async (
+  const runSend = async (
     override?: string,
     extras?: {
       /** Inline summary imports from prior chats. Serialized
@@ -2993,29 +2943,19 @@ export function AgentChat({
     // This is not the forbidden "click handler awaits I/O": Send is the
     // commit, and a commit must include what the user staged.
     //
-    // The guard is what makes that await safe to add. Everything that stops
-    // this composer being sent twice — clearComposer, the empty check —
-    // happens AFTER it, so awaiting here opens a window in which a second
-    // Enter re-enters, snapshots the same composer state, and sends it again.
-    // Before this the only awaits ahead of the snapshot resolved in
-    // microtasks, which two keypresses cannot interleave with; a cold
-    // transcript read is real I/O, and a composer sitting visibly untouched
-    // with a spinner on the pill is exactly when someone presses Enter again.
-    //
-    // Scoped INSIDE the `size > 0` check on purpose: the guard then exists
-    // only while this send is genuinely parked on a read, so no other caller
-    // — the EmptyComposer hand-off, the queued-submission flush, "Continue" —
-    // can ever be turned away by it. Same shape as saveQueuedEdit's
-    // queueSaveInFlightRef.
+    // handleSend's single-flight guard is what makes that await safe: everything
+    // that stops this composer being sent twice — clearComposer, the empty check
+    // — happens further down, so awaiting here (or at the session rebuild below)
+    // opens a window in which a second Enter re-enters, snapshots the same
+    // composer state, and sends it again.
     const hydrateNeeded = session.transcriptState !== "resident";
     if (hydrateNeeded || transcriptAttachesRef.current.size > 0) {
-      if (sendInFlightRef.current) return;
-      sendInFlightRef.current = true;
+      setSendPreparing(true);
       try {
         if (hydrateNeeded) await session.hydrateChat();
         await Promise.allSettled([...transcriptAttachesRef.current]);
       } finally {
-        sendInFlightRef.current = false;
+        setSendPreparing(false);
       }
     }
     // A disconnected/failed cold read deliberately leaves the composer intact.
@@ -3131,19 +3071,19 @@ export function AgentChat({
         const agentLabel = targetAgent.name ?? targetAgent.id;
         if (!targetAgent.installed) {
           toast.error(`${agentLabel}: Not installed`, {
-            description: `Open Settings → Agent providers to install ${agentLabel}.`,
+            description: `Open Settings → Agents to install ${agentLabel}.`,
           });
         } else {
           toast.error(`${agentLabel}: Sign in required`, {
-            description: `Open Settings → Agent providers to sign in to ${agentLabel}.`,
+            description: `Open Settings → Agents to sign in to ${agentLabel}.`,
           });
         }
         return;
       }
     }
-    // If the session bounced to warming / reconnecting / failed /
-    // auth-required, kick a fresh ensureSession and wait for it before
-    // sending. Both error states are recoverable BY EXPLICIT SEND:
+    // If the session bounced to reconnecting / failed / auth-required (or never
+    // spawned), kick a fresh ensureSession and wait for it before sending. Both
+    // error states are recoverable BY EXPLICIT SEND:
     // `auth-required` — the user just fixed their key in Settings →
     // Providers and the error copy says "then send again"; the live session
     // cached the REJECTED key at spawn, so a rebuild re-derives env from the
@@ -3152,18 +3092,38 @@ export function AgentChat({
     // which rebuilds (the host respawns half-open after its hold-off).
     // Either way: if the rebuild fails again we land back here — no retry
     // loop, one attempt per explicit user send.
-    if (session.status !== "ready") {
+    //
+    // `warming` is deliberately NOT one of them (see sendNeedsSessionRecovery):
+    // a spawn is already in flight, so awaiting it here only held the composer
+    // hostage — text intact, no bubble, nothing to read as progress — for the
+    // whole spawn. The provider parks the send instead (visible immediately in
+    // the queued card) and dispatches it when the session lands.
+    if (sendNeedsSessionRecovery(session.status)) {
       const targetAgentId = session.agentId ?? chatThread?.agentId;
       if (!targetAgentId) return;
+      setSendPreparing(true);
       try {
         // No `force` needed: ensureSession already counts auth-required as
         // "not healthy" and rebuilds (keeping its concurrent-send de-dup);
         // it only early-returns for healthy ready/streaming sessions. cwd
         // resolution rides ensureSession's resolveSpawnCwd (slot + chat
-        // store fallback), same as the pre-existing warming path.
-        await session.startSession(targetAgentId);
+        // store fallback).
+        //
+        // The chat's composer env MUST ride along. Without it the rebuilt
+        // session is stamped with an empty applied-env key, so sendPrompt's
+        // settings-drift reconcile immediately force-respawns it AGAIN — two
+        // cold spawns for one send (and on Cursor, two host boots) before the
+        // prompt goes anywhere. It also runs the provider's default model for
+        // the window in between, contradicting the pill.
+        await session.startSession(targetAgentId, {
+          env: chatThread
+            ? envForChat(chatThread, session.initialize)
+            : undefined,
+        });
       } catch {
         return;
+      } finally {
+        setSendPreparing(false);
       }
     }
     // Serialize each summary import into a <from_previous_chat>
@@ -3268,6 +3228,32 @@ export function AgentChat({
       .catch(() => {
         /* error surfaces via session.error */
       });
+  };
+
+  /** Single-flight entry point for every send (button, Enter keymap, "Continue",
+   *  the EmptyComposer hand-off, the provisioning auto-send).
+   *
+   *  runSend clears the composer only at its END, and the stretches before that
+   *  can await real I/O: a cold transcript read, and — the one that made this
+   *  visible — a session rebuild, which on a cold provider host runs for tens of
+   *  seconds. A composer sitting visibly untouched is exactly when someone
+   *  presses Enter again, and every re-entry snapshotted the same text and sent
+   *  it again: the reported "nothing happens, so I keep pressing Enter, and then
+   *  the same message shows up several times, all queued".
+   *
+   *  Dropping a re-entry is safe by construction — the composer has not been
+   *  touched, so it is the very message the in-flight call is already sending. */
+  const handleSend = async (
+    override?: string,
+    extras?: Parameters<typeof runSend>[1],
+  ): Promise<void> => {
+    if (sendInFlightRef.current) return;
+    sendInFlightRef.current = true;
+    try {
+      await runSend(override, extras);
+    } finally {
+      sendInFlightRef.current = false;
+    }
   };
   // ── Queued-messages card actions ─────────────────────────
   // (Part of the queued-messages redesign — see QueuedMessagesCard.)
@@ -3538,6 +3524,10 @@ export function AgentChat({
     // ever mounted simultaneously.
     if (activeChatId !== chatId) return;
     if (session.status !== "ready" || session.pendingPermission) return;
+    // A send is already being prepared, so handleSend would drop this one — and
+    // the consume below would still retire it, losing the submission. Wait: this
+    // effect re-runs when `sendPreparing` clears.
+    if (sendInFlightRef.current) return;
     // Thread the EmptyComposer's summary imports + image
     // attachments + bubble metadata through to the first send. Without
     // this, the user's imported context chips were dropped on the way
@@ -3565,6 +3555,9 @@ export function AgentChat({
     chatId,
     activeChatId,
     surfaceActive,
+    // Re-arm once a send that was being prepared has finished, so a submission
+    // that arrived during that window still goes out.
+    sendPreparing,
   ]);
 
   // If a user queues a first turn and then deliberately clears the composer
@@ -3596,6 +3589,9 @@ export function AgentChat({
     if (!chatId || !pendingAutoSend || workspaceProvisioning) return;
     if (session.status !== "ready" || session.pendingPermission) return;
     if (composerEmpty) return;
+    // Don't retire the intent into a send that handleSend would drop because
+    // another one is mid-preparation; this effect re-runs when that clears.
+    if (sendInFlightRef.current) return;
     // Consume first so React Strict effects and unrelated store notifications
     // cannot dispatch the same first turn twice while handleSend is awaiting.
     dispatch({ type: "CONSUME_AUTO_SEND", chatId });
@@ -3608,6 +3604,7 @@ export function AgentChat({
     session.pendingPermission,
     chatId,
     composerEmpty,
+    sendPreparing,
   ]);
 
   // ⌥+click in the browser-tab element picker
@@ -3628,7 +3625,18 @@ export function AgentChat({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingAppend, chatId, surfaceActive]);
 
-  const handleAttachFiles = () => fileInputRef.current?.click();
+  const handleAttachFiles = useCallback(
+    () => fileInputRef.current?.click(),
+    [],
+  );
+  const openTranscriptPicker = useCallback(
+    () => setTranscriptPickerOpen(true),
+    [],
+  );
+  const openWorkspacePicker = useCallback(
+    () => setWorkspacePickerOpen(true),
+    [],
+  );
   // The editor owns the file-read + validation pipeline (insertFiles); this
   // wrapper just resets the file input so the same file can be re-picked.
   const handleFileInput = async (files: FileList | null) => {
@@ -3644,7 +3652,7 @@ export function AgentChat({
   // composer state chip + toast layer.
 
   return (
-    <div className="zeros-agent-surface text-fg1 [container-type:inline-size] flex h-full min-h-0 flex-col bg-transparent text-sm">
+    <div className="zeros-agent-surface text-fg1 [container-type:inline-size] flex h-full min-h-0 flex-col bg-transparent text-sm [container-name:agent-chat]">
       {/* The Zeros Foundation-aligned chat
           header is suppressed when the caller passes any `headerActions`
           (truthy or an empty fragment). The Conversation pane path always passes
@@ -3832,6 +3840,17 @@ export function AgentChat({
                 i,
               );
               const ownsProviderFooter = isProviderTurnTail(turns, i);
+              // One answer for the shimmer AND the footer (see tailTurnInFlight):
+              // they are two halves of the same claim, and computing them apart
+              // is what let a reopened chat show the working shimmer while
+              // hiding this turn's own STOPPED BY USER pill.
+              const turnIsPendingLocal =
+                !!turn.userPrompt && pendingLocalTurnId === turn.userPrompt.id;
+              const turnInFlight = tailTurnInFlight({
+                sessionStreaming: isStreaming,
+                pendingLocalTurn: turnIsPendingLocal,
+                hasEvents: turn.events.length > 0,
+              });
               return (
                 <React.Fragment key={turnKey(turn)}>
                   <TurnContainer turn={turn} isActive={isVisualTail}>
@@ -3923,22 +3942,17 @@ export function AgentChat({
                     turn id) get one — the rare leading "system turn" has nothing
                     to reset to. */}
                     {/* A turn counts as IN FLIGHT while streaming — and also
-                    while the session is "warming" with the turn still empty:
-                    that's a send pending session (re)creation (Cursor's
-                    newSession takes seconds; engine-respawn rebuilds too).
-                    Without the warming clause the just-sent turn flashed as
-                    SETTLED — a "0s ⧉ …" footer, no shimmer — until the first
-                    event arrived. Scoped to empty
-                    turns so REOPENING a chat (also "warming") never repaints
-                    its last completed turn as live. */}
+                    while THIS renderer's own send for it is still pending
+                    session (re)creation (Cursor's newSession takes seconds;
+                    engine-respawn rebuilds too), which would otherwise flash
+                    the just-sent turn as SETTLED ("0s ⧉ …", no shimmer) until
+                    the first event arrived. Keyed on the pending TURN, never on
+                    session status: reopening a chat warms the session too, and
+                    that is how a stopped turn used to come back to life. */}
                     <TurnEventList
                       events={turn.events}
                       isActive={isActiveProviderSegment}
-                      isStreaming={
-                        isStreaming ||
-                        (session.status === "warming" &&
-                          turn.events.length === 0)
-                      }
+                      isStreaming={turnInFlight}
                       showActivity={isVisualTail}
                       activityEvents={turn.providerEvents}
                       activityStartedAt={
@@ -3957,12 +3971,7 @@ export function AgentChat({
                             turnId={turn.recordedTurnId ?? turn.userPrompt.id}
                             events={turn.providerEvents}
                             startedAt={turn.recordedStartedAt}
-                            live={
-                              isVisualTail &&
-                              (isStreaming ||
-                                (session.status === "warming" &&
-                                  turn.events.length === 0))
-                            }
+                            live={isVisualTail && turnInFlight}
                             fallbackStopReason={
                               isVisualTail && session.status !== "streaming"
                                 ? session.lastStopReason
@@ -3973,11 +3982,13 @@ export function AgentChat({
                                 ? footerLabelForFailure(session.failure)
                                 : null
                             }
-                            retrying={
-                              isVisualTail &&
-                              (session.status === "warming" ||
-                                session.status === "reconnecting")
-                            }
+                            // "An auto-rebuild is re-running THIS turn" — which
+                            // only happens while this renderer's own send owns
+                            // it (rebuildAndRetry / the resume-and-retry hop).
+                            // It used to read session status, so merely
+                            // REOPENING a chat suppressed a genuinely failed
+                            // turn's AGENT STOPPED pill until the resume landed.
+                            retrying={isVisualTail && turnIsPendingLocal}
                             isLastTurn={isVisualTail}
                             // One-click resume after a token-cap /
                             // budget stop: functionally the user typing
@@ -4240,8 +4251,7 @@ export function AgentChat({
             `is-drag-active` classes ride through so the existing
             dropzone overlay + drag styling still bind. Submit status
             flips to "ready"/"error" so PromptInputSubmit renders the
-            canonical CornerDownLeftIcon — replacing the old custom
-            ArrowUp button. The streaming-state Stop button stays a
+            canonical ArrowUp icon. The streaming-state Stop button stays a
             plain destructive Button (labeled, not icon-only) per the
             existing UX call. */}
           {/* Provider (not a DOM wrapper): tells popover-bearing pills inside
@@ -4335,81 +4345,23 @@ export function AgentChat({
                   everything lives in the text flow). Linked workspaces remain
                   in the AddedDirectories row above. */}
                   {composerEditorContent}
-                  <PromptInputToolbar className="min-w-0 gap-1.5 pt-1 pr-0 pb-1 pl-0">
+                  <PromptInputToolbar
+                    data-permission-feedback-boundary=""
+                    className="min-w-0 flex-nowrap gap-1.5 pt-1 pr-0 pb-1 pl-0"
+                  >
                     {/* gap-0.5: exactly 2px between the + / model / fast /
                     effort / permission pills. */}
-                    <PromptInputTools className="gap-0.5">
-                      {/* "+" menu — add an attachment or link a workspace/folder
-                      (the latter opens WorkspaceDirectoryPicker). Both actions
-                      are deferred past the menu close so the file dialog /
-                      modal don't fight Radix's focus-restore. */}
-                      <DropdownMenu
-                        // Controlled + derived-closed: `&& !composerConcealed`
-                        // closes it in the SAME render the composer hides (no
-                        // one-frame strand of the open menu at the viewport
-                        // origin); the composerConcealed effect above resets the
-                        // state so the menu doesn't spring back open when the
-                        // composer returns.
-                        open={plusMenuOpen && !composerConcealed}
-                        onOpenChange={setPlusMenuOpen}
-                      >
-                        <Tooltip label="Attach or link">
-                          <DropdownMenuTrigger asChild>
-                            <Button
-                              variant="ghost"
-                              size="icon-sm"
-                              type="button"
-                              aria-label="Add attachment or link a workspace"
-                              className="rounded-sm"
-                            >
-                              <Plus size={14} />
-                            </Button>
-                          </DropdownMenuTrigger>
-                        </Tooltip>
-                        <DropdownMenuContent align="start" side="top">
-                          <DropdownMenuItem
-                            onSelect={() =>
-                              window.setTimeout(handleAttachFiles, 0)
-                            }
-                          >
-                            <Paperclip size={14} />
-                            Add attachment
-                          </DropdownMenuItem>
-                          {/* The pill row is gated on an empty transcript, so
-                            it is gone after the first send. That is right for
-                            the row and wrong as the feature's only door:
-                            "three turns in, I realise the agent needs the
-                            other chat's history" is at least as common as
-                            knowing it up front. Same picker, concise only —
-                            there is no pill to right-click from here, and a
-                            user reaching this from a menu mid-chat is not the
-                            one who wants archaeology. */}
-                          <DropdownMenuItem
-                            onSelect={() =>
-                              window.setTimeout(
-                                () => setTranscriptPickerOpen(true),
-                                0,
-                              )
-                            }
-                          >
-                            <MessageSquareText size={14} />
-                            Attach chat transcript
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            onSelect={() =>
-                              window.setTimeout(
-                                () => setWorkspacePickerOpen(true),
-                                0,
-                              )
-                            }
-                          >
-                            <FolderInput size={14} />
-                            Link workspaces
-                          </DropdownMenuItem>
-                          {/* Permission modes moved OUT of this menu (2026-07-10):
-                          they're cycled by the PermissionToggle in the pill row. */}
-                        </DropdownMenuContent>
-                      </DropdownMenu>
+                    <PromptInputTools className="min-w-0 flex-nowrap gap-0.5">
+                      {/* The locally stateful menu opens without re-rendering
+                      AgentChat. Modal/file actions remain deferred past Radix
+                      focus restoration inside the island. */}
+                      <ComposerAttachmentMenu
+                        concealed={composerConcealed}
+                        onAttachFiles={handleAttachFiles}
+                        onAttachTranscript={openTranscriptPicker}
+                        onLinkWorkspace={openWorkspacePicker}
+                        onIntent={warmTranscriptPicker}
+                      />
                       <input
                         ref={fileInputRef}
                         type="file"
@@ -4418,15 +4370,18 @@ export function AgentChat({
                         style={{ display: "none" }}
                         onChange={(e) => void handleFileInput(e.target.files)}
                       />
-                      {/* Model · Fast · Effort · Plan · Permissions — the
-                      single shared pill block (also used in the edit
-                      composer). Renders null when chatThread is absent. */}
+                      {/* Configured model · Permissions — the shared pill block
+                      (also used in the edit composer). Effort/Fast are part of
+                      the model label and edited in its popover. */}
                       {editToolbarPills}
                     </PromptInputTools>
                     {/* Right cluster: [context ring] [send] (+ save tick while
                     editing a queued message). Grouped so the toolbar's
                     justify-between keeps tools left / actions right. */}
-                    <div className="flex shrink-0 items-center gap-1.5">
+                    <div
+                      data-composer-toolbar-actions=""
+                      className="flex shrink-0 items-center gap-1.5"
+                    >
                       {/* Context gauge — the ring + breakdown popover.
                       ALWAYS present: empty ring + "Send a message to see
                       context usage." before the first turn, disabled ring +
@@ -4441,7 +4396,7 @@ export function AgentChat({
                         compactDisabled={composerStreaming || !canSend}
                       />
                       {/* Unified send/stop: PromptInputSubmit renders
-                    Send (CornerDownLeft) when ready, Square (outlined, not
+                    Send (ArrowUp) when ready, Square (outlined, not
                     filled) when streaming. The form's onSubmit handler
                     above already calls session.cancel() when streaming, so
                     clicking the same button while in flight halts the
@@ -4451,26 +4406,39 @@ export function AgentChat({
                         label={
                           composerStreaming
                             ? "Stop agent"
-                            : editingQueuedId
-                              ? "Save message"
-                              : "Send"
+                            : sendPreparing
+                              ? "Starting the agent…"
+                              : editingQueuedId
+                                ? "Save message"
+                                : "Send"
                         }
-                        shortcut={composerStreaming ? undefined : "↵"}
+                        shortcut={
+                          composerStreaming || sendPreparing ? undefined : "↵"
+                        }
                       >
                         <PromptInputSubmit
+                          // `submitted` = this send is parked on a cold
+                          // transcript read or a session (re)build with the
+                          // text still in the composer. Without it the button
+                          // looked idle-but-dead for the whole spawn, which is
+                          // what made people press Enter again and again.
                           status={
                             isErrorState
                               ? "error"
                               : composerStreaming
                                 ? "streaming"
-                                : "ready"
+                                : sendPreparing
+                                  ? "submitted"
+                                  : "ready"
                           }
                           disabled={
                             composerStreaming
                               ? false
-                              : editingQueuedId
-                                ? composerEmpty
-                                : !canSend
+                              : sendPreparing
+                                ? true
+                                : editingQueuedId
+                                  ? composerEmpty
+                                  : !canSend
                           }
                           className="disabled:bg-bg2-hover disabled:text-fg2 size-8 disabled:opacity-100"
                         >

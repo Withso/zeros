@@ -80,6 +80,7 @@ import {
 } from "../../state/chat-panes";
 import { WorkbenchToggleButton } from "../workbench/toggle-button";
 import {
+  getPaneLayout,
   useChatPanesStore,
   usePaneLayout,
 } from "../../state/chat-panes-store";
@@ -99,15 +100,64 @@ import { useWorkspaceProvisioning } from "../../state/pending-workspaces";
 import { beginContinuousLayoutResize } from "../terminal/continuous-layout-resize";
 import {
   CHAT_TAB_DRAG_MIME,
-  MIN_PANE_HEIGHT,
-  MIN_PANE_WIDTH,
   PANE_TERMINAL_HOST_CLS,
+  canSplitPaneTree,
+  clampPaneSplitRatio,
   clearTabDrag,
+  growablePaneSurfaceWidth,
+  paneTreeMinimumSize,
+  type PaneTreeMinimumSize,
   usePanePortalsStore,
   useTabDragStore,
 } from "./pane-portal-store";
+import {
+  CONVERSATION_COLUMN_ATTR,
+  WORKBENCH_COLUMN_ATTR,
+  WORKBENCH_MIN_PX,
+} from "./pane-sizing";
 
 // ── Layout constants ─────────────────────────────────────
+
+/** Workbench's live element, reached from any node inside the pane tree. It is
+ * the conversation column's sibling in the two-column row. */
+function workbenchPaneFor(surface: HTMLElement): HTMLElement | null {
+  const column = surface.closest<HTMLElement>(`[${CONVERSATION_COLUMN_ATTR}]`);
+  return (
+    column?.parentElement?.querySelector<HTMLElement>(
+      `[${WORKBENCH_COLUMN_ATTR}]`,
+    ) ?? null
+  );
+}
+
+/** What the split gate is allowed to spend: the pane surface as it stands, plus
+ * (for the first horizontal split only) the width Workbench can surrender above
+ * its own 200px floor. Nothing beyond that is reachable without the user
+ * resizing the window, so offering a split against it produces a clipped row. */
+function measureSplitCapacity(surface: HTMLElement | null): {
+  containerWidth: number;
+  containerHeight: number;
+  growableWidth: number;
+} {
+  if (!surface) {
+    return {
+      containerWidth: Number.NaN,
+      containerHeight: Number.NaN,
+      growableWidth: Number.NaN,
+    };
+  }
+  const rect = surface.getBoundingClientRect();
+  const workbenchWidth =
+    workbenchPaneFor(surface)?.getBoundingClientRect().width ?? 0;
+  return {
+    containerWidth: rect.width,
+    containerHeight: rect.height,
+    growableWidth: growablePaneSurfaceWidth(
+      rect.width,
+      workbenchWidth,
+      WORKBENCH_MIN_PX,
+    ),
+  };
+}
 
 /** No-workspace placeholder band — matches the per-pane tab strip height
  *  (STRIP_SHELL_CLS in conversation/chat-tabs.tsx) so the top chrome doesn't jump
@@ -164,9 +214,11 @@ const EMPTY_CHATS: ChatThread[] = [];
 export function ConversationPaneLayout({
   workbenchCollapsed = false,
   onToggleWorkbench,
+  onMinimumSizeChange,
 }: {
   workbenchCollapsed?: boolean;
   onToggleWorkbench?: () => void;
+  onMinimumSizeChange?: (minimumSize: PaneTreeMinimumSize) => void;
 } = {}) {
   const paneSurfaceRef = useRef<HTMLDivElement | null>(null);
   const activeChatId = useActiveChatId();
@@ -284,10 +336,37 @@ export function ConversationPaneLayout({
 
   // ── Pane layout + membership ─────────────────────────
   const layout = usePaneLayout(activeWorkspacePath);
+  const minimumSize = useMemo(
+    () => paneTreeMinimumSize(layout.root),
+    [layout.root],
+  );
+  useLayoutEffect(() => {
+    onMinimumSizeChange?.(minimumSize);
+  }, [minimumSize, onMinimumSizeChange]);
   const splitPane = useChatPanesStore((s) => s.splitPane);
   const moveChatToPane = useChatPanesStore((s) => s.moveChatToPane);
   const setPaneActiveChat = useChatPanesStore((s) => s.setPaneActiveChat);
   const beginAssignNextChat = useChatPanesStore((s) => s.beginAssignNextChat);
+
+  /** Revalidate at the mutation boundary. ResizeObserver keeps menu state in
+   * sync for presentation, but a resize and click/drop can race by one frame.
+   * Reading the current store tree + live surface here prevents that stale
+   * frame from creating a split whose final tree cannot fit. */
+  const canSplitAtCurrentSize = useCallback(
+    (paneId: string, direction: SplitDirection, collapsedPaneId?: string) => {
+      if (!activeWorkspacePath) return false;
+      const currentLayout = getPaneLayout(activeWorkspacePath);
+      if (leafIds(currentLayout.root).length >= MAX_PANES) return false;
+      return canSplitPaneTree({
+        root: currentLayout.root,
+        targetPaneId: paneId,
+        direction,
+        ...measureSplitCapacity(paneSurfaceRef.current),
+        collapsedPaneId,
+      });
+    },
+    [activeWorkspacePath],
+  );
 
   const chatsByPane = useMemo(() => {
     const map = new Map<string, ChatThread[]>();
@@ -444,6 +523,7 @@ export function ConversationPaneLayout({
     (paneId: string, dir: "right" | "down") => {
       if (!activeWorkspacePath) return;
       const direction: SplitDirection = dir === "right" ? "row" : "column";
+      if (!canSplitAtCurrentSize(paneId, direction)) return;
       const paneChats = chatsByPane.get(paneId) ?? EMPTY_CHATS;
       if (paneChats.length >= 2) {
         // Move this pane's active tab into the new pane.
@@ -484,6 +564,7 @@ export function ConversationPaneLayout({
     },
     [
       activeWorkspacePath,
+      canSplitAtCurrentSize,
       chatsByPane,
       layout,
       splitPane,
@@ -505,11 +586,30 @@ export function ConversationPaneLayout({
         dispatch({ type: "SET_ACTIVE_CHAT", id: chatId });
         return;
       }
-      // Splitting with the pane's only tab onto itself is a no-op (the
-      // source pane would collapse right back).
+      const dropZone = zone;
+      // Moving a pane's only tab into its own new child would make the source
+      // collapse immediately. Treat that gesture as the equivalent menu split:
+      // keep this tab in place and spawn its companion in the new right/bottom
+      // pane, so the promised split actually happens.
       const fromChats = chatsByPane.get(fromPane) ?? EMPTY_CHATS;
-      if (fromPane === paneId && fromChats.length <= 1) return;
-      const direction: SplitDirection = zone === "right" ? "row" : "column";
+      if (fromPane === paneId && fromChats.length <= 1) {
+        handleSplit(paneId, dropZone);
+        return;
+      }
+      const direction: SplitDirection = dropZone === "right" ? "row" : "column";
+      const collapsedPaneId =
+        fromPane !== paneId &&
+        fromChats.length === 1 &&
+        fromChats[0]?.id === chatId
+          ? fromPane
+          : undefined;
+      if (!canSplitAtCurrentSize(paneId, direction, collapsedPaneId)) {
+        if (fromPane !== paneId) {
+          moveChatToPane(activeWorkspacePath, chatId, paneId);
+        }
+        dispatch({ type: "SET_ACTIVE_CHAT", id: chatId });
+        return;
+      }
       const newPane = splitPane(activeWorkspacePath, paneId, direction, chatId);
       if (newPane) {
         dispatch({ type: "SET_ACTIVE_CHAT", id: chatId });
@@ -526,6 +626,8 @@ export function ConversationPaneLayout({
       chatsByPane,
       moveChatToPane,
       splitPane,
+      handleSplit,
+      canSplitAtCurrentSize,
       dispatch,
     ],
   );
@@ -588,7 +690,11 @@ export function ConversationPaneLayout({
   }
 
   return (
-    <div ref={paneSurfaceRef} className="flex min-h-0 min-w-0 flex-1">
+    <div
+      ref={paneSurfaceRef}
+      data-pane-layout-surface=""
+      className="flex min-h-0 min-w-0 flex-1"
+    >
       <PaneNodeView node={layout.root} ctx={ctx} />
     </div>
   );
@@ -614,6 +720,8 @@ function SplitView({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const firstRef = useRef<HTMLDivElement | null>(null);
   const secondRef = useRef<HTMLDivElement | null>(null);
+  const firstMinimum = paneTreeMinimumSize(node.first);
+  const secondMinimum = paneTreeMinimumSize(node.second);
 
   return (
     <div
@@ -625,7 +733,13 @@ function SplitView({
     >
       <div
         ref={firstRef}
-        style={{ flexGrow: node.ratio, flexShrink: 1, flexBasis: 0 }}
+        style={{
+          flexGrow: node.ratio,
+          flexShrink: 1,
+          flexBasis: 0,
+          minWidth: isRow ? firstMinimum.width : 0,
+          minHeight: isRow ? 0 : firstMinimum.height,
+        }}
         className="flex min-h-0 min-w-0 overflow-hidden"
       >
         <PaneNodeView node={node.first} ctx={ctx} />
@@ -637,10 +751,18 @@ function SplitView({
         containerRef={containerRef}
         firstRef={firstRef}
         secondRef={secondRef}
+        firstMinPx={isRow ? firstMinimum.width : firstMinimum.height}
+        secondMinPx={isRow ? secondMinimum.width : secondMinimum.height}
       />
       <div
         ref={secondRef}
-        style={{ flexGrow: 1 - node.ratio, flexShrink: 1, flexBasis: 0 }}
+        style={{
+          flexGrow: 1 - node.ratio,
+          flexShrink: 1,
+          flexBasis: 0,
+          minWidth: isRow ? secondMinimum.width : 0,
+          minHeight: isRow ? 0 : secondMinimum.height,
+        }}
         className="flex min-h-0 min-w-0 overflow-hidden"
       >
         <PaneNodeView node={node.second} ctx={ctx} />
@@ -658,6 +780,8 @@ function PaneSplitter({
   containerRef,
   firstRef,
   secondRef,
+  firstMinPx,
+  secondMinPx,
 }: {
   direction: SplitDirection;
   splitId: string;
@@ -665,6 +789,8 @@ function PaneSplitter({
   containerRef: React.RefObject<HTMLDivElement | null>;
   firstRef: React.RefObject<HTMLDivElement | null>;
   secondRef: React.RefObject<HTMLDivElement | null>;
+  firstMinPx: number;
+  secondMinPx: number;
 }) {
   const isRow = direction === "row";
   const setSplitRatio = useChatPanesStore((s) => s.setSplitRatio);
@@ -677,18 +803,27 @@ function PaneSplitter({
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) return null;
       const size = isRow ? rect.width : rect.height;
-      if (size <= 0) return null;
-      const raw = isRow
-        ? (clientX - rect.left) / size
-        : (clientY - rect.top) / size;
-      const minPx = isRow ? MIN_PANE_WIDTH : MIN_PANE_HEIGHT;
-      // When the container can't honor both pixel minimums, pin 50/50.
-      if (size < minPx * 2) return 0.5;
-      const minRatio = Math.max(0.1, minPx / size);
-      return Math.min(1 - minRatio, Math.max(minRatio, raw));
+      const pointerOffset = isRow ? clientX - rect.left : clientY - rect.top;
+      return clampPaneSplitRatio(pointerOffset, size, firstMinPx, secondMinPx);
     },
-    [containerRef, isRow],
+    [containerRef, firstMinPx, isRow, secondMinPx],
   );
+
+  const resetToBalanced = useCallback(() => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const size = isRow ? rect.width : rect.height;
+    const ratio = clampPaneSplitRatio(size / 2, size, firstMinPx, secondMinPx);
+    if (ratio !== null) setSplitRatio(folder, splitId, ratio);
+  }, [
+    containerRef,
+    firstMinPx,
+    folder,
+    isRow,
+    secondMinPx,
+    setSplitRatio,
+    splitId,
+  ]);
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
@@ -802,7 +937,7 @@ function PaneSplitter({
         isRow ? "w-1.5 cursor-ew-resize" : "h-1.5 cursor-ns-resize",
       )}
       onPointerDown={onPointerDown}
-      onDoubleClick={() => setSplitRatio(folder, splitId, 0.5)}
+      onDoubleClick={resetToBalanced}
       {...hintHandlers}
     >
       {/* Resting 1px seam so the two panes read as separate surfaces. The
@@ -900,27 +1035,54 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
     [paneId, getOrCreateHost, preserveHostBeforeMove],
   );
 
-  // Split availability — a pane must fit two pixel-minimum halves.
+  // Split availability is evaluated against the WHOLE hypothetical tree. This
+  // lets flexbox redistribute existing siblings when the outer conversation
+  // surface has enough room, while the first right split can deliberately grow
+  // that surface — bounded by Workbench's own floor, see measureSplitCapacity —
+  // toward two 360px leaves. Local state changes only when a threshold is
+  // crossed, so live outer-seam resizing never re-renders the whole tree.
+  // Starts false and is measured in the layout effect below, before this
+  // commit paints: an unmeasured "probably yes" is how a split that cannot fit
+  // gets offered in the first place.
   const rootRef = useRef<HTMLElement | null>(null);
-  const [canSplit, setCanSplit] = useState({ right: true, down: true });
+  const [canSplit, setCanSplit] = useState({ right: false, down: false });
   useLayoutEffect(() => {
     const el = rootRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
+    if (!el) return;
+    const surface = el.closest<HTMLElement>("[data-pane-layout-surface]");
+    if (!surface) return;
     const measure = () => {
-      const rect = el.getBoundingClientRect();
+      const capacity = measureSplitCapacity(surface);
       const next = {
-        right: rect.width >= MIN_PANE_WIDTH * 2 + 6,
-        down: rect.height >= MIN_PANE_HEIGHT * 2 + 6,
+        right: canSplitPaneTree({
+          root: ctx.layout.root,
+          targetPaneId: paneId,
+          direction: "row",
+          ...capacity,
+        }),
+        down: canSplitPaneTree({
+          root: ctx.layout.root,
+          targetPaneId: paneId,
+          direction: "column",
+          ...capacity,
+        }),
       };
       setCanSplit((prev) =>
         prev.right === next.right && prev.down === next.down ? prev : next,
       );
     };
+    // Measure first: an environment without ResizeObserver still gets one
+    // correct answer instead of a permanently disabled split menu.
     measure();
+    if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(measure);
-    observer.observe(el);
+    observer.observe(surface);
+    // Workbench's width is half of the growth budget, so its seam drags and
+    // collapse toggle have to re-measure too.
+    const workbench = workbenchPaneFor(surface);
+    if (workbench) observer.observe(workbench);
     return () => observer.disconnect();
-  }, []);
+  }, [ctx.layout.root, paneId]);
 
   const atPaneCap = ctx.paneCount >= MAX_PANES;
 
@@ -1011,7 +1173,10 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
           ctx.workbenchCollapsed &&
           ctx.onToggleWorkbench &&
           paneId === ctx.topRightPaneId ? (
-            <WorkbenchToggleButton workbenchCollapsed onToggle={ctx.onToggleWorkbench} />
+            <WorkbenchToggleButton
+              workbenchCollapsed
+              onToggle={ctx.onToggleWorkbench}
+            />
           ) : undefined
         }
       />
@@ -1060,7 +1225,7 @@ function isTabDrag(e: React.DragEvent): boolean {
 }
 
 /** Zone for a drag position. Split bands demote to "center" when the
- *  pane can't actually split that way (too small / at the pane cap) —
+ *  resulting tree can't fit that split (or is at the pane cap) —
  *  the drop then MOVES the tab instead of silently doing nothing, and
  *  the highlight never promises a split that won't happen. */
 function zoneForEvent(
@@ -1101,11 +1266,49 @@ function PaneDropOverlay({
 
   if (!active) return null;
 
+  const splitAvailability = (overlay: HTMLDivElement) => {
+    const surface = overlay.closest<HTMLElement>("[data-pane-layout-surface]");
+    if (!surface || !drag || ctx.paneCount >= MAX_PANES) {
+      return {
+        right: ctx.paneCount < MAX_PANES && canSplitRight,
+        down: ctx.paneCount < MAX_PANES && canSplitDown,
+      };
+    }
+    const sourceChats = ctx.chatsByPane.get(drag.fromPaneId) ?? EMPTY_CHATS;
+    const collapsedPaneId =
+      drag.fromPaneId !== paneId &&
+      sourceChats.length === 1 &&
+      sourceChats[0]?.id === drag.chatId
+        ? drag.fromPaneId
+        : undefined;
+    // Same measured budget as the pane menu and the mutation boundary, so the
+    // band a drop advertises is exactly the split the drop will be allowed to
+    // perform — including the first right split's growth into Workbench slack.
+    const capacity = measureSplitCapacity(surface);
+    return {
+      right: canSplitPaneTree({
+        root: ctx.layout.root,
+        targetPaneId: paneId,
+        direction: "row",
+        ...capacity,
+        collapsedPaneId,
+      }),
+      down: canSplitPaneTree({
+        root: ctx.layout.root,
+        targetPaneId: paneId,
+        direction: "column",
+        ...capacity,
+        collapsedPaneId,
+      }),
+    };
+  };
+
   const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     if (!isTabDrag(e)) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
-    const next = zoneForEvent(e, canSplitRight, canSplitDown);
+    const availability = splitAvailability(e.currentTarget);
+    const next = zoneForEvent(e, availability.right, availability.down);
     setZone((prev) => (prev === next ? prev : next));
   };
 
@@ -1113,7 +1316,8 @@ function PaneDropOverlay({
     if (!isTabDrag(e)) return;
     e.preventDefault();
     // Recompute from the event — the state value can lag a frame.
-    const dropZone = zoneForEvent(e, canSplitRight, canSplitDown);
+    const availability = splitAvailability(e.currentTarget);
+    const dropZone = zoneForEvent(e, availability.right, availability.down);
     setZone(null);
     const chatId =
       e.dataTransfer.getData(CHAT_TAB_DRAG_MIME) ||

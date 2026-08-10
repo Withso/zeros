@@ -32,8 +32,10 @@ if (Object.keys(WEB_MANIFEST.dependencies || {}).length > 0) {
 // installs optional native packages for the CI host, so a raw inventory would
 // describe Linux on preflight and macOS on release. Replace every recognized
 // host variant with the exact optional packages that enter the shipped app.
-// Codex's platform binary is intentionally absent because electron-builder
-// excludes it and the app resolves the user's PATH installation instead.
+// Codex's platform package IS one of them: scripts/stage-codex-cli.mjs copies
+// its whole vendor target into binaries/codex-runtime and electron-builder
+// ships that through extraResources, so its native binaries are redistributed
+// and must carry their terms.
 const PACKAGED_DESKTOP_PLATFORM = "macOS arm64";
 const PACKAGED_PLATFORM_PACKAGES = [
   {
@@ -47,11 +49,24 @@ const PACKAGED_PLATFORM_PACKAGES = [
     license: "SEE LICENSE IN LICENSE.md",
   },
   {
+    // Declared as an npm ALIAS (`npm:@openai/codex@<version>-darwin-arm64`),
+    // so the dependency key is not the published package name — the resolver
+    // below records the real `@openai/codex@…-darwin-arm64` identity.
+    parentName: "@openai/codex",
+    packageName: "@openai/codex-darwin-arm64",
+    license: "Apache-2.0",
+  },
+  {
     parentName: "@vscode/ripgrep",
     packageName: "@vscode/ripgrep-darwin-arm64",
     license: "MIT",
   },
 ];
+
+/** Version suffix npm's Codex platform aliases carry (`0.146.0-darwin-arm64`).
+ *  Their package NAME stays `@openai/codex`, so the platform variant can only
+ *  be told apart from the JS wrapper by this suffix. */
+const CODEX_PLATFORM_VERSION = /-(?:darwin|linux|win32)-(?:arm64|x64|ia32)$/;
 
 // These packages intentionally publish terms-governed license files instead
 // of an SPDX identifier. New Unknown entries fail closed until reviewed.
@@ -172,7 +187,21 @@ const isHostPlatformRecord = (record) =>
   record.name.startsWith("@cursor/sdk-") ||
   record.name.startsWith("@vscode/ripgrep-") ||
   (record.name === "@openai/codex" &&
-    /-(?:darwin|linux|win32)-(?:arm64|x64|ia32)$/.test(record.version));
+    CODEX_PLATFORM_VERSION.test(record.version));
+
+/** Resolve an optionalDependencies entry to the identity it is PUBLISHED
+ *  under. Most are plain versions, but Codex declares npm aliases
+ *  (`@openai/codex-darwin-arm64: npm:@openai/codex@0.146.0-darwin-arm64`),
+ *  where the dependency key names no real package — recording the key would
+ *  put a name in the inventory that does not exist on the registry and cannot
+ *  be matched against the lockfile. */
+function resolvePlatformIdentity(target, spec) {
+  const alias = /^npm:(@[^/]+\/[^@]+|[^@]+)@(.+)$/.exec(spec ?? "");
+  return {
+    name: alias ? alias[1] : target.packageName,
+    version: alias ? alias[2] : spec,
+  };
+}
 
 function normalizePackagedPlatformRecords(records) {
   const normalized = records.filter((record) => !isHostPlatformRecord(record));
@@ -190,28 +219,31 @@ function normalizePackagedPlatformRecords(records) {
     const manifest = JSON.parse(
       readFileSync(join(parent.packagePath, "package.json"), "utf8"),
     );
-    const version = manifest.optionalDependencies?.[target.packageName];
+    const { name, version } = resolvePlatformIdentity(
+      target,
+      manifest.optionalDependencies?.[target.packageName],
+    );
     if (typeof version !== "string" || !/^\d+\.\d+\.\d+/.test(version)) {
       throw new Error(
         `${target.packageName}: exact optional dependency is missing from ${target.parentName}`,
       );
     }
-    if (!ROOT_LOCKFILE.includes(`  '${target.packageName}@${version}':`)) {
+    if (!ROOT_LOCKFILE.includes(`  '${name}@${version}':`)) {
       throw new Error(
-        `${target.packageName}@${version}: release target is missing from pnpm-lock.yaml`,
+        `${name}@${version}: release target is missing from pnpm-lock.yaml`,
       );
     }
 
     normalized.push({
       ...parent,
-      name: target.packageName,
+      name,
       version,
       license: target.license,
       surfaces: new Set([
         `desktop packaged runtime (${PACKAGED_DESKTOP_PLATFORM})`,
       ]),
       documentIds: [],
-      documentSourceLabel: `${target.packageName}@${version} — terms supplied by ${parent.name}@${parent.version}`,
+      documentSourceLabel: `${name}@${version} — terms supplied by ${parent.name}@${parent.version}`,
     });
   }
 
@@ -410,19 +442,27 @@ for (const record of records) {
   directDocuments.set(`${record.name}@${record.version}`, documents);
 }
 
-// Generated Codex bindings ship even though the npm wrapper archive omits its
-// license. Keep their exact pinned upstream license and NOTICE in the bundle.
-const codex = records.find((record) => record.name === "@openai/codex");
-if (codex) {
-  const generatedDir = join(
-    ROOT,
-    "apps/desktop/src/engine/agents/adapters/codex/generated",
-  );
+// Two different Codex artifacts ship, and NEITHER npm archive carries a
+// standalone license file: the generated protocol bindings (in-tree) and the
+// staged native runtime staged into Contents/Resources by
+// scripts/stage-codex-cli.mjs. Both come from openai/codex under Apache-2.0,
+// whose section 4(d) requires the NOTICE to travel with any redistribution, so
+// pin the exact upstream LICENSE and NOTICE to each record.
+const codexGeneratedDir = join(
+  ROOT,
+  "apps/desktop/src/engine/agents/adapters/codex/generated",
+);
+for (const codex of records.filter(
+  (record) => record.name === "@openai/codex",
+)) {
+  const artifact = CODEX_PLATFORM_VERSION.test(codex.version)
+    ? "staged native runtime"
+    : "generated protocol";
   directDocuments.set(
     `${codex.name}@${codex.version}`,
     ["LICENSE", "NOTICE"].map((name) => ({
-      label: `${codex.name}@${codex.version} generated protocol — ${name}`,
-      text: normalizeText(readFileSync(join(generatedDir, name), "utf8")),
+      label: `${codex.name}@${codex.version} ${artifact} — ${name}`,
+      text: normalizeText(readFileSync(join(codexGeneratedDir, name), "utf8")),
     })),
   );
 }
@@ -494,9 +534,9 @@ const lines = [
   "no production dependencies; generation fails if that changes. Optional",
   "JavaScript dependencies are included. Host-native optional packages are",
   "normalized to the macOS arm64",
-  "release contents: the staged Claude runtime, packaged Cursor runtime, and",
-  "packaged ripgrep binary are included; the explicitly excluded Codex platform",
-  "binary is not. Electron's distribution also carries its Chromium notices",
+  "release contents: the staged Claude runtime, the staged Codex runtime, the",
+  "packaged Cursor runtime, and the packaged ripgrep binary are all included.",
+  "Electron's distribution also carries its Chromium notices",
   "file. See THIRD-PARTY-NOTICES.md for the vendor release requirements.",
   "",
   "A package archive that omitted a standalone license file is explicitly",

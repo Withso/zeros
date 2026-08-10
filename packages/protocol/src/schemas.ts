@@ -171,6 +171,9 @@ function assertInboundPayload(env: Record<string, unknown>): void {
     case "AGENT_STEER":
       if (!isNonEmptyStr(env.sessionId)) bad("sessionId");
       if (!Array.isArray(env.prompt)) bad("prompt");
+      // Optional correlation id — metadata only. Reject non-strings so a remote
+      // client cannot smuggle structured payload into the active-turn record.
+      if (env.promptId !== undefined && !isStr(env.promptId)) bad("promptId");
       break;
     case "AGENT_CANCEL":
     case "AGENT_CLOSE_SESSION":

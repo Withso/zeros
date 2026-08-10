@@ -15,7 +15,7 @@
 // turn predates recording or the chat isn't a git repo.
 // ──────────────────────────────────────────────────────────
 
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 import {
   Copy,
   Check,
@@ -54,6 +54,12 @@ import {
   type TurnInfo,
   type TurnUsageInfo,
 } from "@/renderer/platform/turns";
+import {
+  invalidateTurnRows,
+  turnRowCache,
+  turnRowKey,
+} from "@/renderer/state/read-caches";
+import { useCachedRead } from "@/renderer/state/use-cached-read";
 import { FileTypeIcon } from "./composer-editor/file-type-icon";
 import { formatElapsed } from "@/renderer/shared/ui/loading";
 import { partitionTurn } from "./turn-partition";
@@ -73,6 +79,12 @@ import {
 } from "@/renderer/shell/workspace-file-data-cache";
 
 const PILL_PAGE = 10;
+
+/** A settled turn row is effectively immutable — one write at finishTurn, then
+ *  only reset/undo, which invalidate the key explicitly. This window exists to
+ *  catch out-of-band edits (another device, retention nulling an old snapshot
+ *  oid) without making the common case pay for them. */
+const TURN_ROW_MAX_AGE_MS = 30_000;
 
 export function isInterruptedTurn(
   turn: Pick<TurnInfo, "status" | "stopReason"> | null,
@@ -356,27 +368,29 @@ export const TurnFooter = memo(function TurnFooter({
   // reading it here doesn't defeat this component's memo. Used to cancel an
   // in-flight turn before a reset spans it.
   const sessions = useAgentSessions();
-  const [turn, setTurn] = useState<TurnInfo | null>(null);
   const [visible, setVisible] = useState(PILL_PAGE);
   const [copied, setCopied] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  // Once settled, fetch the recorded turn (authored files + real duration).
-  useEffect(() => {
-    if (live || !turnId) return;
-    let cancelled = false;
-    void turnGet(chatId, turnId)
-      .then((t) => {
-        if (!cancelled) setTurn(t);
-      })
-      .catch(() => {
-        // Bridge briefly absent / op failed — keep the placeholder footer.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [chatId, turnId, live]);
+  // The recorded turn (authoritative duration, status/stop reason, usage,
+  // authored files) as keyed server state: a remount — every chat-tab switch,
+  // workspace switch, and app reload rebuilds this transcript — paints the last
+  // confirmed row synchronously and revalidates behind it. Read from a local
+  // `useState(null)` + fetch-on-mount before, which meant a reopened chat's
+  // stopped turn rendered as a plain settled turn (no STOPPED BY USER pill)
+  // until the bridge answered.
+  //
+  // `enabled` keeps a LIVE turn from reading a row that is still being written;
+  // the fetch runs as soon as it settles. A missing row (null) is a legitimate
+  // value — turns predating recording, or non-git chats.
+  const turnRead = useCachedRead(
+    turnRowCache,
+    turnId ? turnRowKey(chatId, turnId) : null,
+    () => turnGet(chatId, turnId),
+    { maxAgeMs: TURN_ROW_MAX_AGE_MS, enabled: !live },
+  );
+  const turn = turnRead.data ?? null;
 
   // The agent's concluding answer text (what the copy button copies).
   const outputText = useMemo(() => {
@@ -418,6 +432,9 @@ export const TurnFooter = memo(function TurnFooter({
     async (resetId: string) => {
       try {
         const res = await turnUndoReset({ resetId });
+        // Rows come back (and the target's status changes) — every cached row
+        // for this chat is now suspect.
+        invalidateTurnRows();
         const n = res.restored.filter(
           (o) =>
             o.result === "restored" ||
@@ -482,6 +499,9 @@ export const TurnFooter = memo(function TurnFooter({
         toast.error("Couldn’t reset — engine unavailable.");
         return;
       }
+      // This turn's row and every later one just changed (truncated / restored
+      // files), so no cached row survives the reset.
+      invalidateTurnRows();
       // Reflect the rollback immediately on THIS device. turns.reset already
       // truncated the chat's messages in SQLite; this is the in-memory half
       // (the same primitive the edit-&-resubmit flow uses). Without it the
@@ -791,7 +811,7 @@ export const TurnFooter = memo(function TurnFooter({
             <Play className="size-3" strokeWidth={2} />
             Continue
           </button>
-          <span className="text-fg3 text-2xxs leading-snug">
+          <span className="text-muted-fg text-2xxs leading-snug">
             {continueReason === "max_tokens"
               ? "Resumes in the same session — full context is kept, so the answer picks up where the token cap cut it off."
               : "Starts a fresh turn under a new budget cap — work already done is kept."}

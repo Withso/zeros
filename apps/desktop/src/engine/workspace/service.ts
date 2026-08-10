@@ -91,6 +91,7 @@ import {
 } from "../git";
 import { resolveRepoScript, resolveRunActions } from "../settings/repo-scripts";
 import { isRunSessionId, runActionOneShot } from "@zeros/protocol/run-actions";
+import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
 import type { DesignOperation } from "@zeros/design-core";
 import type {
   RunActionStatus,
@@ -803,10 +804,10 @@ function designSelectionStrings(
 function designSelectionRects(
   value: unknown,
 ): Array<{ x: number; y: number; width: number; height: number }> {
-  if (!Array.isArray(value) || value.length > 16) {
+  if (!Array.isArray(value) || value.length > DESIGN_SELECTION_NODE_LIMIT) {
     throw new GitError({
       code: "VALIDATION_FAILED",
-      message: "rects must be an array of at most 16 rectangles",
+      message: `rects must be an array of at most ${DESIGN_SELECTION_NODE_LIMIT} rectangles`,
     });
   }
   return value.map((item) => {
@@ -1179,9 +1180,9 @@ export class WorkspaceService {
     this.runLogGetter = fn;
   }
   /** Resolve + kick off a workspace's background setup PTY (host shell — LOCAL
-   *  ONLY). Shared by workspace.rerunSetup and the post-restore auto-setup so an
-   *  unarchived worktree gets its gitignored deps (node_modules, .venv, …) back —
-   *  bulk ignored dependencies aren't captured in the archive checkpoint.
+   *  ONLY). Used by workspace.rerunSetup and create-from-branch so dependency
+   *  setup is explicit for an existing workspace and automatic only for a newly
+   *  created checkout.
    *  Returns whether a setup command was found + started; no-op (false) when the
    *  repo has no setup configured or the runner isn't wired (e.g. unit tests).
    *  Fire-and-forget — the PTY runs in the background (Setup tab), so callers
@@ -1460,19 +1461,31 @@ export class WorkspaceService {
     } catch {
       /* not an id — resolve as a real path below */
     }
-    // A path within the primary checkout (the root OR any subdir) → local-main.
-    // redactChatFolderForRemote only matches the EXACT root, so a terminal opened
-    // in a subdir of the main repo would otherwise resolve to nothing.
     const f = WorkspaceService.normalizeFolder(cwdOrId);
     const root = WorkspaceService.normalizeFolder(this.root);
-    if (f === root || f.startsWith(root + "/")) return LOCAL_MAIN_WORKSPACE_ID;
-    // Otherwise the owning managed workspace, via the SAME folder→id mapping the
+    // Resolve a managed workspace before falling back to local-main. This is
+    // load-bearing for a separately registered, more-specific owner nested
+    // below the engine root: lifecycle cleanup must never cross that boundary.
+    // The mapping itself chooses the longest matching workspace path.
+    // Use the SAME folder→id mapping the
     // chat redaction uses (under a workspace → its id; an unmanaged folder → an
     // ext:<hash> token or the raw string, both → null).
-    const mapped = this.redactChatFolderForRemote(cwdOrId, listWorkspaces({}));
+    // An unreadable state DB degrades to the containment answer below rather
+    // than throwing — callers here are gates and cleanup paths, and the old
+    // root-first order never surfaced a DB error to them.
+    let mapped: string | null = null;
+    try {
+      mapped = this.redactChatFolderForRemote(cwdOrId, listWorkspaces({}));
+    } catch {
+      mapped = null;
+    }
     if (mapped === LOCAL_MAIN_WORKSPACE_ID) return LOCAL_MAIN_WORKSPACE_ID;
-    if (!mapped || mapped === cwdOrId || mapped.startsWith("ext:")) return null;
-    return mapped;
+    if (mapped && mapped !== cwdOrId && !mapped.startsWith("ext:"))
+      return mapped;
+    // A path within the primary checkout (the root OR any otherwise-unowned
+    // subdir) belongs to the synthetic local-main workspace.
+    if (f === root || f.startsWith(root + "/")) return LOCAL_MAIN_WORKSPACE_ID;
+    return null;
   }
 
   /** A synthetic entry for the primary checkout so a remote client can browse
@@ -1543,10 +1556,16 @@ export class WorkspaceService {
     if (f === WorkspaceService.normalizeFolder(this.root)) {
       return LOCAL_MAIN_WORKSPACE_ID;
     }
+    let owner: Workspace | null = null;
+    let ownerPathLength = -1;
     for (const w of workspaces) {
       const wp = WorkspaceService.normalizeFolder(w.path);
-      if (f === wp || f.startsWith(wp + "/")) return w.id;
+      if ((f === wp || f.startsWith(wp + "/")) && wp.length > ownerPathLength) {
+        owner = w;
+        ownerPathLength = wp.length;
+      }
     }
+    if (owner) return owner.id;
     // Unknown folder: emit a stable opaque token, never the raw path.
     return `ext:${createHash("sha1").update(f).digest("hex").slice(0, 12)}`;
   }
@@ -2044,7 +2063,7 @@ export class WorkspaceService {
         const nodeIds = designSelectionStrings(
           params.nodeIds ?? [],
           "nodeIds",
-          16,
+          DESIGN_SELECTION_NODE_LIMIT,
           256,
         );
         if (nodeIds.length > 0) {
@@ -4286,26 +4305,7 @@ export class WorkspaceService {
         });
       case "workspace.restore": {
         const workspaceId = reqStr(params, "workspaceId");
-        const result = await restoreWorkspace(workspaceId);
-        // Re-run the repo setup script in the background so the worktree's
-        // gitignored deps (node_modules, .venv, …) — which aren't captured in the
-        // archive checkpoint — come back, so restore lands in the same state a
-        // fresh create would.
-        // LOCAL-ONLY (restore isn't remote-allowed; this guard is defence in
-        // depth) and fire-and-forget: a setup miss must never fail the restore.
-        if (!remote) {
-          try {
-            const ws = getWorkspaceById(workspaceId);
-            if (ws) await this.triggerWorkspaceSetup(ws);
-          } catch (err) {
-            console.warn(
-              `[restore] background setup failed to start for ${workspaceId}: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            );
-          }
-        }
-        return result;
+        return restoreWorkspace(workspaceId);
       }
       case "workspace.delete": {
         const workspaceId = reqStr(params, "workspaceId");
@@ -4342,9 +4342,9 @@ export class WorkspaceService {
           // which skips seeding for remote creates.
           seedFiles: !remote,
         });
-        // Branch/PR workspaces need the same dependency recovery as ordinary
-        // create and restore. Resolution is quick; the setup PTY itself is
-        // background and local-only.
+        // Branch/PR workspaces need the same dependency setup as an ordinary
+        // newly created workspace. Resolution is quick; the setup PTY itself
+        // is background and local-only.
         if (!remote) {
           // A bounded create-time seed scan may still be completing. Do not let
           // setup read a half-copied .env/.npmrc, and do not hold the create RPC

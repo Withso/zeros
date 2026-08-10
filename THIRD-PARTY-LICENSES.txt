@@ -15,9 +15,9 @@ in the desktop application. The independently locked web app currently has
 no production dependencies; generation fails if that changes. Optional
 JavaScript dependencies are included. Host-native optional packages are
 normalized to the macOS arm64
-release contents: the staged Claude runtime, packaged Cursor runtime, and
-packaged ripgrep binary are included; the explicitly excluded Codex platform
-binary is not. Electron's distribution also carries its Chromium notices
+release contents: the staged Claude runtime, the staged Codex runtime, the
+packaged Cursor runtime, and the packaged ripgrep binary are all included.
+Electron's distribution also carries its Chromium notices
 file. See THIRD-PARTY-NOTICES.md for the vendor release requirements.
 
 A package archive that omitted a standalone license file is explicitly
@@ -622,6 +622,12 @@ PACKAGE INVENTORY (581 resolved package/version records)
 @openai/codex@0.146.0
   License: Apache-2.0
   Surfaces: root pnpm workspace
+  Source: https://github.com/openai/codex
+  License documents: 9d71575ecfd9, d17f227e4df5
+
+@openai/codex@0.146.0-darwin-arm64
+  License: Apache-2.0
+  Surfaces: desktop packaged runtime (macOS arm64)
   Source: https://github.com/openai/codex
   License documents: 9d71575ecfd9, d17f227e4df5
 
@@ -2327,7 +2333,7 @@ js-tokens@4.0.0
   Source: https://github.com/lydell/js-tokens
   License documents: 2213d91c6062
 
-js-yaml@4.3.0
+js-yaml@4.3.1
   License: MIT
   Surfaces: root pnpm workspace
   Author: Vladimir Zapparov <dervus.grim@gmail.com>
@@ -2819,13 +2825,6 @@ nanoid@3.3.17
   Author: Andrey Sitnik <andrey@sitnik.ru>
   Source: https://github.com/ai/nanoid
   License documents: da4db1480d9b
-
-nanoid@5.1.11
-  License: MIT
-  Surfaces: root pnpm workspace
-  Author: Andrey Sitnik <andrey@sitnik.es>
-  Source: https://github.com/ai/nanoid
-  License documents: 4383cb2c3608
 
 negotiator@1.0.0
   License: MIT
@@ -3931,7 +3930,7 @@ zwitch@2.0.4
   Source: https://github.com/wooorm/zwitch
   License documents: ca4662cb5d1b
 
-LICENSE AND NOTICE TEXTS (259 unique documents)
+LICENSE AND NOTICE TEXTS (258 unique documents)
 ------------------------
 
 ================================================================================
@@ -6870,34 +6869,6 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ================================================================================
-DOCUMENT 4383cb2c3608
-SHA-256: 4383cb2c3608397ce7a4159502614ed66890f8999c2a9c056dd3b1024d6721f0
-Applies to: nanoid@5.1.11
-Source labels: nanoid@5.1.11 — LICENSE
-================================================================================
-
-The MIT License (MIT)
-
-Copyright 2017 Andrey Sitnik <andrey@sitnik.es>
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software is furnished to do so,
-subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
-FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
-COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
-IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
-CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-================================================================================
 DOCUMENT 4495d9f249dc
 SHA-256: 4495d9f249dc5ef38a7c6de31897c4d172d3d9ba7415295fbc753c6d3a1bb4bd
 Applies to: fast-content-type-parse@3.0.0
@@ -9363,8 +9334,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT 9d71575ecfd9
 SHA-256: 9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915
-Applies to: @openai/codex@0.146.0
-Source labels: @openai/codex@0.146.0 generated protocol — NOTICE
+Applies to: @openai/codex@0.146.0, @openai/codex@0.146.0-darwin-arm64
+Source labels: @openai/codex@0.146.0 generated protocol — NOTICE; @openai/codex@0.146.0-darwin-arm64 staged native runtime — NOTICE
 ================================================================================
 
 OpenAI Codex
@@ -9521,8 +9492,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT a07bc24468b9
 SHA-256: a07bc24468b9654ce76a547d47a2db282d07733b715db4c73a98bd63961f9550
-Applies to: js-yaml@4.3.0
-Source labels: js-yaml@4.3.0 — LICENSE
+Applies to: js-yaml@4.3.1
+Source labels: js-yaml@4.3.1 — LICENSE
 ================================================================================
 
 (The MIT License)
@@ -11794,8 +11765,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT d17f227e4df5
 SHA-256: d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc
-Applies to: @bufbuild/protobuf@1.10.0, @connectrpc/connect-node@1.7.0, @connectrpc/connect-web@1.7.0, @connectrpc/connect@1.7.0, @openai/codex-sdk@0.146.0, @openai/codex@0.146.0, @pierre/theming@0.0.1, clean-git-ref@2.0.1
-Source labels: @bufbuild/protobuf@1.10.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-node@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-web@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @openai/codex-sdk@0.146.0 — LICENSE; @openai/codex@0.146.0 generated protocol — LICENSE; @pierre/theming@0.0.1 — declared Apache-2.0 terms (archive omitted a standalone file); clean-git-ref@2.0.1 — declared Apache-2.0 terms (archive omitted a standalone file)
+Applies to: @bufbuild/protobuf@1.10.0, @connectrpc/connect-node@1.7.0, @connectrpc/connect-web@1.7.0, @connectrpc/connect@1.7.0, @openai/codex-sdk@0.146.0, @openai/codex@0.146.0, @openai/codex@0.146.0-darwin-arm64, @pierre/theming@0.0.1, clean-git-ref@2.0.1
+Source labels: @bufbuild/protobuf@1.10.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-node@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-web@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @openai/codex-sdk@0.146.0 — LICENSE; @openai/codex@0.146.0 generated protocol — LICENSE; @openai/codex@0.146.0-darwin-arm64 staged native runtime — LICENSE; @pierre/theming@0.0.1 — declared Apache-2.0 terms (archive omitted a standalone file); clean-git-ref@2.0.1 — declared Apache-2.0 terms (archive omitted a standalone file)
 ================================================================================
 
                                  Apache License

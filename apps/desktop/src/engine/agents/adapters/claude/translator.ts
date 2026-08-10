@@ -235,7 +235,18 @@ interface ClaudeResultEvent {
 interface ClaudeToolResultBlock {
   type: "tool_result";
   tool_use_id: string;
-  content?: string | Array<{ type: string; text?: string }>;
+  content?:
+    | string
+    | Array<{
+        type: string;
+        text?: string;
+        source?: {
+          type?: string;
+          media_type?: string;
+          data?: string;
+          url?: string;
+        };
+      }>;
   is_error?: boolean;
 }
 
@@ -333,6 +344,32 @@ export class ClaudeStreamTranslator {
    *  until the tool_use block has streamed through onAssistant. */
   toolCallIdFor(nativeToolUseId: string): string | undefined {
     return this.toolCallIds.get(nativeToolUseId);
+  }
+
+  /** Host-side MCP elicitation has no assistant tool_use block, so synthesize
+   * the durable question row and register its native id for settle-time stamps. */
+  emitBlockingQuestionToolCall(
+    nativeToolUseId: string,
+    title: string,
+    rawInput: unknown,
+  ): string {
+    const existing = this.toolCallIds.get(nativeToolUseId);
+    if (existing) return existing;
+    const toolCallId = `tool-${randomUUID()}`;
+    this.toolCallIds.set(nativeToolUseId, toolCallId);
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId,
+        nativeToolCallId: nativeToolUseId,
+        title,
+        kind: "question",
+        status: "in_progress",
+        rawInput,
+      },
+    });
+    return toolCallId;
   }
 
   /** Claude tool_use_ids whose corresponding tool_result
@@ -1861,7 +1898,7 @@ export class ClaudeStreamTranslator {
       }
       const toolCallId =
         this.toolCallIds.get(tool.tool_use_id) ?? tool.tool_use_id;
-      const text = toolResultText(tool);
+      const content = toolResultContent(tool);
       this.emit({
         sessionId: this.sessionId,
         update: {
@@ -1871,14 +1908,7 @@ export class ClaudeStreamTranslator {
           rawOutput: structuredPatch
             ? { structuredPatch }
             : (structuredTaskOutput ?? tool.content),
-          content: text
-            ? [
-                {
-                  type: "content",
-                  content: { type: "text", text } as ContentBlock,
-                },
-              ]
-            : null,
+          content: content.length > 0 ? content : null,
         },
       });
     }
@@ -2457,17 +2487,66 @@ function readStructuredPatch(result: unknown): unknown[] | null {
   return valid ? sp : null;
 }
 
-function toolResultText(t: ClaudeToolResultBlock): string {
-  if (typeof t.content === "string") return stripToolUseError(t.content);
-  if (Array.isArray(t.content)) {
-    return t.content
-      .map((c) =>
-        typeof c?.text === "string" ? stripToolUseError(c.text) : "",
-      )
-      .filter(Boolean)
-      .join("\n");
+function toolResultContent(
+  result: ClaudeToolResultBlock,
+): Array<{ type: "content"; content: ContentBlock }> {
+  if (typeof result.content === "string") {
+    const text = stripToolUseError(result.content);
+    return text ? [{ type: "content", content: { type: "text", text } }] : [];
   }
-  return "";
+  if (!Array.isArray(result.content)) return [];
+
+  return result.content.flatMap<{
+    type: "content";
+    content: ContentBlock;
+  }>((block) => {
+    if (block.type === "text" && typeof block.text === "string") {
+      const text = stripToolUseError(block.text);
+      return text
+        ? [
+            {
+              type: "content" as const,
+              content: { type: "text" as const, text },
+            },
+          ]
+        : [];
+    }
+    const source = block.source;
+    if (
+      block.type === "image" &&
+      source?.type === "base64" &&
+      typeof source.data === "string" &&
+      source.data.length > 0 &&
+      typeof source.media_type === "string" &&
+      source.media_type.startsWith("image/")
+    ) {
+      return [
+        {
+          type: "content" as const,
+          content: {
+            type: "image" as const,
+            data: source.data,
+            mimeType: source.media_type,
+          },
+        },
+      ];
+    }
+    // Lenient tail, matching the pre-image behavior: an MCP server that emits
+    // text under a wrapper type (or no type at all) still renders instead of
+    // vanishing from the tool output.
+    if (typeof block.text === "string") {
+      const text = stripToolUseError(block.text);
+      return text
+        ? [
+            {
+              type: "content" as const,
+              content: { type: "text" as const, text },
+            },
+          ]
+        : [];
+    }
+    return [];
+  });
 }
 
 function readScheduledWakeupResultTimestamp(

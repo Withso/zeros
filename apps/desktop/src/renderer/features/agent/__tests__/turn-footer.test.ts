@@ -25,11 +25,15 @@ import {
   canPreviewTurnFileDiff,
   isInterruptedTurn,
   TurnFilePill,
+  TurnFooter,
   turnFooterFiles,
   turnFooterStatusLabel,
 } from "../turn-footer";
 import { TooltipProvider } from "@/renderer/shared/ui/primitives/tooltip";
 import { pickStartedAt } from "../activity-hud";
+import { ActionsCtx } from "../sessions-context";
+import { turnRowCache, turnRowKey } from "@/renderer/state/read-caches";
+import type { TurnInfo } from "@/renderer/platform/turns";
 
 describe("TurnFilePill cache ownership", () => {
   beforeEach(() => useWorkspaceFileDiffSnapshot.mockClear());
@@ -272,5 +276,74 @@ describe("continuableStopReason — the Continue action gate", () => {
 
   it("falls back to the live stop reason before the turn row lands", () => {
     expect(continuableStopReason(null, "max_tokens")).toBe("max_tokens");
+  });
+});
+
+// A reopened chat rebuilds its whole transcript, so this footer is REMOUNTED on
+// every chat-tab switch, workspace switch, and app reload. It used to start each
+// of those from `useState(null)` and fetch, so a stopped turn rendered as an
+// ordinary settled turn — no pill — until the bridge answered. The row is keyed
+// server state now: the retained snapshot paints the truth on the first frame.
+describe("turn footer first paint after a reopen", () => {
+  const row = (over: Partial<TurnInfo> = {}): TurnInfo => ({
+    chatId: "chat-1",
+    turnId: "user-1",
+    workspaceId: null,
+    folder: null,
+    agentId: "cursor",
+    ord: 1,
+    summary: "hi",
+    startedAt: 1_000,
+    endedAt: 2_000,
+    stopReason: "cancelled",
+    status: "cancelled",
+    preSnapshot: null,
+    postSnapshot: null,
+    files: [],
+    ...over,
+  });
+
+  const renderFooter = () =>
+    renderToStaticMarkup(
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(
+          ActionsCtx.Provider,
+          { value: {} as never },
+          createElement(TurnFooter, {
+            chatId: "chat-1",
+            turnId: "user-1",
+            events: [],
+            startedAt: 1_000,
+            live: false,
+          }),
+        ),
+      ),
+    );
+
+  beforeEach(() => turnRowCache.clear());
+
+  it("paints STOPPED BY USER from the retained row, with no fetch first", () => {
+    turnRowCache.setData(turnRowKey("chat-1", "user-1"), row());
+    expect(renderFooter()).toContain("STOPPED BY USER");
+  });
+
+  it("dates a stopped turn from the row, not from its (absent) events", () => {
+    // The exact reported turn: stopped a second after sending, so it has no
+    // events to date it and nothing but the row to explain it. The recorded
+    // 1s must survive — the elapsed timer counting from the prompt is the
+    // reload glitch, not the truth.
+    turnRowCache.setData(
+      turnRowKey("chat-1", "user-1"),
+      row({ startedAt: 1_000, endedAt: 2_000 }),
+    );
+    const html = renderFooter();
+    expect(html).toContain("STOPPED BY USER");
+    expect(html).toContain("1s");
+  });
+
+  it("without a cached row there is nothing to paint — hence the cache", () => {
+    expect(renderFooter()).not.toContain("STOPPED BY USER");
   });
 });

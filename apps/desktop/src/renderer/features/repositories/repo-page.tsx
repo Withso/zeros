@@ -193,7 +193,7 @@ function RepoWorkspaceRow({
           {row.title}
         </span>
         {row.branch !== row.title && (
-          <span className="text-fg3 hidden min-w-0 truncate font-mono text-xs sm:block">
+          <span className="text-muted-fg hidden min-w-0 truncate font-mono text-xs sm:block">
             {row.branch}
           </span>
         )}

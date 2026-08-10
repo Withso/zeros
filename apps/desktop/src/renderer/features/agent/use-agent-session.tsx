@@ -102,6 +102,11 @@ export interface AgentUsage {
 export interface AgentSessionState {
   agentId: string | null;
   agentName: string | null;
+  /** Provider-native id persisted onto the ChatThread for the next app launch.
+   * Usually identical to `sessionId`; differs temporarily when a degraded
+   * resume keeps the requested id as this engine's live routing alias but the
+   * adapter created a replacement provider session. */
+  durableSessionId: string | null;
   sessionId: string | null;
   nativeSessionId: string | null;
   /** The chat's folder, captured

@@ -27,6 +27,13 @@ import type { ChildProcess } from "node:child_process";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 
+/** Return this from an inbound request handler when the peer has already
+ * retired the request (for example via Codex `serverRequest/resolved`). The
+ * handler Promise still needs to settle so local closures can be released,
+ * but writing a late JSON-RPC response would target an id the peer no longer
+ * owns. */
+export const JSON_RPC_NO_RESPONSE = Symbol("json-rpc-no-response");
+
 /** Hard cap on a single un-newlined JSON-RPC line, mirroring the NDJSON
  *  parser's 8 MB cap. A line that exceeds it is dropped (resync to next newline)
  *  so a runaway CLI can't OOM the engine and kill every in-flight chat. */
@@ -59,6 +66,9 @@ export class JsonRpcRequestError extends Error {
 }
 
 export interface JsonRpcInboundRequest {
+  /** The peer-authored JSON-RPC id. Exposing it lets adapters correlate a
+   * later serverRequest/resolved notification with the UI resolver they
+   * minted for this request. */
   id: number | string;
   method: string;
 }
@@ -295,6 +305,7 @@ export class JsonRpcStdioClient {
     }
     try {
       const result = await handler(params, { id, method });
+      if (result === JSON_RPC_NO_RESPONSE) return;
       this.writeFrame({ jsonrpc: "2.0", id, result: result ?? null });
     } catch (err) {
       if (err instanceof JsonRpcResponseSuppressedError) return;

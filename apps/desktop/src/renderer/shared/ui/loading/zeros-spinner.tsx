@@ -18,10 +18,10 @@
 //     in fast (FADE_IN_MS), dots LEAVING fade out slower (FADE_OUT_MS).
 //
 //   • GRID — behind the piece, all 16 cells carry a faint resting dot
-//     (--loader-rest → --fg3 by default; see TONE_COLORS). A
+//     (--loader-rest → --muted-fg by default; see TONE_COLORS). A
 //     one-directional diagonal fade (zeros-grid-fade keyframe in
 //     styles/global/animations.css) sweeps TL → BR: each resting dot fades from
-//     --fg3 @ 40% down to 0 by mid-cycle and HOLDS there, then snaps back
+//     --muted-fg @ 40% down to 0 by mid-cycle and HOLDS there, then snaps back
 //     only at the loop boundary — it never fades back in mid-loop. The
 //     fade lives on the resting layer ONLY, so it never dims the piece.
 //
@@ -77,7 +77,7 @@ const LIT = 0.7;
 const LAP_MS = 12 * (HOLD_MS + FADE_IN_MS);
 
 // ── Resting grid + fade ────────────────────────────────────
-/** Peak opacity of a resting (inactive) dot — --fg3 @ 40% — and its
+/** Peak opacity of a resting (inactive) dot — --muted-fg @ 40% — and its
  *  static value under reduced-motion. The fade dissolves from here to 0. */
 const REST_OPACITY = 0.4;
 /** One full fade cycle — the shared lap, so exactly one sweep runs per
@@ -182,7 +182,7 @@ export type ZerosSpinnerTone = "default" | "inverted" | "inherit";
  *    inverted — primary-button fills: the on-inverted foreground for
  *               both layers (the 70%/40% opacity split keeps them
  *               distinct) so the piece never vanishes against the
- *               near-white (Shade) / near-black (Light) fill.
+ *               near-white (dark themes) / near-black (Light) fill.
  *    inherit  — currentColor: for bespoke fills (green Merge, red
  *               destructive, tone-flipping PR-island actions) where the
  *               button's own text color already carries the theme logic
@@ -193,7 +193,7 @@ const TONE_COLORS: Record<
 > = {
   default: {
     active: "var(--loader-active, var(--fg2))",
-    rest: "var(--loader-rest, var(--fg3))",
+    rest: "var(--loader-rest, var(--muted-fg))",
   },
   inverted: {
     active: "var(--loader-active-inverted, var(--primary-button-fg))",
@@ -407,7 +407,7 @@ export function ZerosSpinner({
               gridRowStart: y + 1,
             }}
           >
-            {/* Resting layer — faint --fg3 background dot. The one-way
+            {/* Resting layer — faint --muted-fg background dot. The one-way
                 diagonal fade lives HERE only, so it never dims the piece. */}
             <span
               ref={x === 0 && y === 0 ? restOriginRef : undefined}

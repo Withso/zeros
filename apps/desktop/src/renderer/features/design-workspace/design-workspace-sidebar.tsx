@@ -15,9 +15,9 @@ import {
 const SIDEBAR_BASE_CLS =
   "bg-bg1 relative flex min-h-0 flex-col overflow-hidden";
 const SIDEBAR_OPEN_CLS =
-  "[flex:calc(var(--zeros-design-column-2-ratio,0.3)*100)_1_0px] min-w-[min(320px,42%)] max-w-[min(1200px,50%)]";
+  "[flex:calc(var(--zeros-design-column-2-ratio,0.2)*100)_1_0px] min-w-[min(240px,34%)] max-w-[min(1200px,50%)]";
 const SIDEBAR_WIDE_CLS =
-  "[flex:calc(var(--zeros-design-column-2-ratio,0.3)*100)_1_0px] min-w-[min(320px,42%)] max-w-none";
+  "[flex:calc(var(--zeros-design-column-2-ratio,0.2)*100)_1_0px] min-w-[min(240px,34%)] max-w-none";
 const RESIZE_HANDLE_CLS =
   "absolute inset-y-0 right-0 z-20 w-1.5 cursor-ew-resize";
 const DRAG_THRESHOLD_PX = 3;
@@ -30,9 +30,7 @@ export function DesignWorkspaceSidebar({
   canvasCollapsed?: boolean;
 }) {
   const sectionRef = useRef<HTMLElement | null>(null);
-  const [ratio, setRatio] = useState(
-    readPersistedDesignWorkspaceSidebarRatio,
-  );
+  const [ratio, setRatio] = useState(readPersistedDesignWorkspaceSidebarRatio);
   const { hintHandlers, hint } = useResizeHint("Drag to resize");
 
   useLayoutEffect(() => {
@@ -156,6 +154,7 @@ export function DesignWorkspaceSidebar({
     <section
       ref={sectionRef}
       id="design-workspace-sidebar"
+      data-design-workspace-surface=""
       aria-label="Design workspace sidebar"
       className={cn(
         SIDEBAR_BASE_CLS,

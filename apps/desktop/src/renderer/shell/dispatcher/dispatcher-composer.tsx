@@ -4,7 +4,7 @@
 //
 // The new-workspace dispatcher's body. Reuses the SAME TipTap composer
 // (useComposerEditor) the chat surfaces use, the shared pill block
-// (AgentModelPicker · Fast · Effort · Permissions), the same "+" menu (Add
+// (configured AgentModelPicker · Permissions), the same "+" menu (Add
 // attachment / Link workspaces), and a primary "Create" button in place of
 // Send. There is no live agent session here — the editor only serializes
 // text + inline mention/attachment pills, and the pill state + linked dirs +
@@ -39,33 +39,28 @@ import {
   useComposerEditor,
   type ComposerSerialized,
 } from "../../features/agent/composer-editor";
-import {
-  EffortPill,
-  FastPill,
-  PermissionToggle,
-} from "../../features/agent/composer-pills";
+import { PermissionToggle } from "../../features/agent/composer-pills";
 import {
   agentHasPermissionMenu,
-  agentSupportsEffort,
-  agentSupportsFast,
   coerceModeIdForModel,
-  effortLevelsFor,
   nativeModeIdForPosture,
-  nearestEffort,
   permissionForAgentMode,
 } from "../../features/agent/model-catalog";
 import {
-  getDefaultEffort,
   newChatBornDefaults,
+  rememberPermissionMode,
 } from "../../features/agent/new-chat-defaults";
-import { effectiveFavoriteModel } from "../../features/agent/model-favorites";
-import { pickDefaultAgent } from "../../features/settings/default-agent";
+import { resolveModelConfiguration } from "../../features/agent/model-preferences";
+import { pickAgentForNewChat } from "../../features/settings/default-agent";
 import { COMPOSER_FILE_ACCEPT } from "../../features/agent/composer-shell";
 import { AddedDirectories } from "../../features/agent/added-directories";
 import { WorkspaceDirectoryPicker } from "../../features/agent/workspace-directory-picker";
 import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
 import type { ChatEffort, ChatPermissionMode } from "../../state/store";
-import { AgentModelPicker, type AgentModelSelection } from "./agent-model-picker";
+import {
+  AgentModelPicker,
+  type AgentModelSelection,
+} from "./agent-model-picker";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 
 /** Everything the parent needs to create + (optionally) dispatch. `serialized`
@@ -110,7 +105,8 @@ export function DispatcherComposer({
   const [selection, setSelection] = useState<AgentModelSelection | null>(null);
   const [effort, setEffort] = useState<ChatEffort>("high");
   const [fast, setFast] = useState(false);
-  const [permissionMode, setPermissionMode] = useState<ChatPermissionMode>("auto");
+  const [permissionMode, setPermissionMode] =
+    useState<ChatPermissionMode>("auto");
   // The EXACT native mode id chosen (kept alongside the posture so a dispatcher
   // pick round-trips losslessly — see DispatcherCreatePayload.lastModeId). Seeded
   // from the born posture and updated on every Permissions-menu pick.
@@ -122,47 +118,49 @@ export function DispatcherComposer({
   // Seed the agent/model + pill posture from the default ("starred") agent the
   // first time the registry resolves. newChatBornDefaults is the same source of
   // truth every other spawn path stamps a chat with, so the dispatcher can't
-  // drift from "+" → Chat / ⌘T.
+  // drift from "+" → Chat / ⌘T — and so is pickAgentForNewChat: the dispatcher
+  // CREATES a chat, so it relaxes down the same tiers rather than refusing.
+  // The strict picker returns null once every runnable agent is disabled, which
+  // left this surface with a dead Create button and no explanation.
   useEffect(() => {
     if (selection || !agents) return;
-    const agent = pickDefaultAgent(agents);
+    const agent = pickAgentForNewChat(agents);
     if (!agent) return;
     const born = newChatBornDefaults(agent.id);
-    setSelection({ agentId: agent.id, agentName: agent.name, model: born.model });
+    setSelection({
+      agentId: agent.id,
+      agentName: agent.name,
+      model: born.model,
+    });
     setEffort(born.effort);
     setFast(born.fast);
     setPermissionMode(born.permissionMode);
-    setModeId(nativeModeIdForPosture(agent.id, born.permissionMode));
+    setModeId(
+      born.lastModeId ?? nativeModeIdForPosture(agent.id, born.permissionMode),
+    );
   }, [agents, selection]);
 
-  // Picking a model (possibly a different agent) re-derives the effort/fast
-  // posture for that agent+model so the pills stay valid (Sonnet has no
-  // xhigh/ultracode; Cursor has no effort knob, etc.).
+  // Picking a model restores that exact model's own effort/Fast memory.
   const handleSelect = (next: AgentModelSelection) => {
     const agentChanged = selection?.agentId !== next.agentId;
     setSelection(next);
     const born = newChatBornDefaults(next.agentId);
-    const ladder = effortLevelsFor(next.agentId, next.model, null);
-    // Match the chat composer's selection contract: the favorite model's saved
-    // default effort wins; otherwise carry the
-    // current effort, sliding to the nearest ladder level below when the
-    // picked model doesn't offer it (max → Grok lands on high).
-    const favDefault =
-      next.model === effectiveFavoriteModel(next.agentId)
-        ? getDefaultEffort(next.agentId)
-        : null;
-    setEffort(
-      favDefault && ladder.includes(favDefault)
-        ? favDefault
-        : (nearestEffort(ladder, effort) ?? effort),
+    const configuration = resolveModelConfiguration(
+      next.agentId,
+      next.model,
+      null,
     );
-    setFast(agentSupportsFast(next.agentId, next.model, null) ? born.fast : false);
+    setEffort(configuration.effort);
+    setFast(configuration.fast);
     // A native mode id can't cross families (Claude "accept-edits" is meaningless
     // to Codex), so reset the permission to the new agent's born default when the
     // AGENT changes. A model swap WITHIN one agent keeps the user's pick.
     if (agentChanged) {
       setPermissionMode(born.permissionMode);
-      setModeId(nativeModeIdForPosture(next.agentId, born.permissionMode));
+      setModeId(
+        born.lastModeId ??
+          nativeModeIdForPosture(next.agentId, born.permissionMode),
+      );
     }
   };
 
@@ -220,6 +218,7 @@ export function DispatcherComposer({
   // carries. Mirrors agent-chat's selectNativeMode, minus the live session (none
   // exists pre-create).
   const selectNativeMode = (id: string) => {
+    rememberPermissionMode(agentId, id);
     setModeId(id);
     setPermissionMode(permissionForAgentMode(id, agentId));
   };
@@ -244,7 +243,7 @@ export function DispatcherComposer({
       {suggestionPopup}
       {dragActive && (
         <div
-          className="pointer-events-none absolute inset-0 z-[5] flex flex-col items-center justify-center gap-1.5 bg-bg3/75 p-3 text-xs text-fg2"
+          className="bg-bg3/75 text-fg2 pointer-events-none absolute inset-0 z-[5] flex flex-col items-center justify-center gap-1.5 p-3 text-xs"
           aria-hidden="true"
         >
           <Paperclip size={18} />
@@ -257,7 +256,7 @@ export function DispatcherComposer({
           submitRef.current();
         }}
       >
-        <PromptInputBody className="items-stretch border-0 bg-transparent dark:bg-transparent rounded-none shadow-none p-0 gap-0 has-[[data-slot=input-group-control]:focus-visible]:ring-0">
+        <PromptInputBody className="items-stretch gap-0 rounded-none border-0 bg-transparent p-0 shadow-none has-[[data-slot=input-group-control]:focus-visible]:ring-0 dark:bg-transparent">
           {/* Linked workspaces (Claude /add-dir) — removable chips above the
               editor, same as the chat composer. */}
           {linkedDirs.length > 0 && (
@@ -273,9 +272,9 @@ export function DispatcherComposer({
           {/* TipTap editor — tall body so it reads as a "what do you want to
               work on?" canvas. Full-width with an px-4 text inset. */}
           <div className="min-h-[96px] px-4 pt-3">{editorContent}</div>
-          <PromptInputToolbar className="min-w-0 gap-1.5 px-4 pb-3 pt-1.5">
-            {/* gap-0.5: exactly 2px between the + / model / fast / effort /
-                permission pills, matching the chat composer (2026-07-10). */}
+          <PromptInputToolbar className="min-w-0 gap-1.5 px-4 pt-1.5 pb-3">
+            {/* gap-0.5: exactly 2px between + / configured model / permission,
+                matching the chat composer. */}
             <PromptInputTools className="gap-0.5">
               {/* "+" menu — add an attachment, link a workspace, or set the
                   permission posture. The same composer affordance the chat uses.
@@ -328,19 +327,14 @@ export function DispatcherComposer({
               <AgentModelPicker
                 agents={agents}
                 value={selection}
+                effort={effort}
+                fast={fast}
+                onConfigure={(configuration) => {
+                  setEffort(configuration.effort);
+                  setFast(configuration.fast);
+                }}
                 onChange={handleSelect}
               />
-              {agentSupportsFast(agentId, model, null) && (
-                <FastPill active={fast} onToggle={() => setFast((v) => !v)} />
-              )}
-              {agentSupportsEffort(agentId, model, null) && (
-                <EffortPill
-                  agentId={agentId}
-                  levels={effortLevelsFor(agentId, model, null)}
-                  value={effort}
-                  onChange={setEffort}
-                />
-              )}
               {/* The permission toggle is icon-only, cycles the agent's native
                   modes on click,
                   names the current mode on hover. The current id is coerced to
@@ -388,7 +382,9 @@ export function DispatcherComposer({
         onLink={(dir) =>
           setLinkedDirs((prev) => (prev.includes(dir) ? prev : [...prev, dir]))
         }
-        onUnlink={(dir) => setLinkedDirs((prev) => prev.filter((d) => d !== dir))}
+        onUnlink={(dir) =>
+          setLinkedDirs((prev) => prev.filter((d) => d !== dir))
+        }
       />
     </div>
   );

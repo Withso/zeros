@@ -28,6 +28,10 @@ const CSS = `:root { --accent: #7c3aed; }
   gap: 4px;
   color: red;
 }
+@keyframes card-enter {
+  0% { opacity: 0; }
+  100% { opacity: 1; }
+}
 `;
 
 describe("Design Foundation 1.0 acceptance", () => {
@@ -169,9 +173,10 @@ describe("Design Foundation 1.0 acceptance", () => {
       confidence: "correlated",
       winner: { file: "styles.css", value: "24px" },
     });
-    expect(
-      (await api.readFoundation({ documentId: initial.documentId })).manifest,
-    ).toMatchObject({
+    const foundation = await api.readFoundation({
+      documentId: initial.documentId,
+    });
+    expect(foundation.manifest).toMatchObject({
       components: [{ id: "status-badge" }],
       parameters: [{ id: "accent", value: "#2563eb" }],
       variants: [
@@ -181,6 +186,16 @@ describe("Design Foundation 1.0 acceptance", () => {
         },
       ],
     });
+    expect(foundation.keyframes).toEqual([
+      {
+        file: "styles.css",
+        name: "card-enter",
+        keyframes: [
+          { offset: 0, styles: { opacity: "0" } },
+          { offset: 100, styles: { opacity: "1" } },
+        ],
+      },
+    ]);
 
     await expect(
       api.apply({

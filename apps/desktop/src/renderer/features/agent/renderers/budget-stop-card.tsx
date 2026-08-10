@@ -44,7 +44,7 @@ export const BudgetStopRecordCard: Renderer<AgentToolMessage> = memo(
           Budget
         </span>
         {/* Muted scope pill — budget caps are Claude-only for now. */}
-        <span className="bg-bg1-hover text-fg3 text-xxs flex shrink-0 items-center rounded-sm px-1.5 py-0.5 font-mono tracking-wide uppercase">
+        <span className="bg-bg1-hover text-muted-fg text-xxs flex shrink-0 items-center rounded-sm px-1.5 py-0.5 font-mono tracking-wide uppercase">
           Claude
         </span>
       </span>
@@ -62,7 +62,7 @@ export const BudgetStopRecordCard: Renderer<AgentToolMessage> = memo(
           per-turn budget was reached, so the turn ended cleanly. Everything
           completed so far is kept.
         </span>
-        <span className="text-fg3 text-[11.5px]">
+        <span className="text-muted-fg text-[11.5px]">
           Budget caps are Claude Code only for now — Codex &amp; Cursor expose
           no budget hook yet. Continue below starts a fresh turn under a new
           cap, or raise it in Settings → Models.

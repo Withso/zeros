@@ -23,10 +23,16 @@ async function browserUseRpc(
   return await new Promise((resolve, reject) => {
     const socket = connect(path);
     let buffered = Buffer.alloc(0);
-    socket.once("error", reject);
-    socket.setTimeout(5_000, () => {
+    let settled = false;
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
       socket.destroy();
-      reject(
+      reject(error);
+    };
+    socket.once("error", fail);
+    socket.setTimeout(5_000, () => {
+      fail(
         new Error(
           `Browser Use RPC timed out: ${method}${typeof params.method === "string" ? `/${params.method}` : ""}`,
         ),
@@ -43,18 +49,26 @@ async function browserUseRpc(
     });
     socket.on("data", (chunk) => {
       buffered = Buffer.concat([buffered, chunk]);
-      if (buffered.byteLength < 4) return;
-      const length =
-        endianness() === "LE"
-          ? buffered.readUInt32LE(0)
-          : buffered.readUInt32BE(0);
-      if (buffered.byteLength < length + 4) return;
-      socket.end();
-      const reply = JSON.parse(
-        buffered.subarray(4, length + 4).toString("utf8"),
-      ) as Record<string, unknown>;
-      if (reply.error) reject(new Error(JSON.stringify(reply.error)));
-      else resolve(reply);
+      while (buffered.byteLength >= 4) {
+        const length =
+          endianness() === "LE"
+            ? buffered.readUInt32LE(0)
+            : buffered.readUInt32BE(0);
+        if (buffered.byteLength < length + 4) return;
+        const reply = JSON.parse(
+          buffered.subarray(4, length + 4).toString("utf8"),
+        ) as Record<string, unknown>;
+        buffered = buffered.subarray(length + 4);
+        // The Browser Use pipe publishes live state notifications on the same
+        // socket before the command response. Ignore those and wait for this
+        // request's matching JSON-RPC id.
+        if (reply.id !== id) continue;
+        settled = true;
+        socket.end();
+        if (reply.error) reject(new Error(JSON.stringify(reply.error)));
+        else resolve(reply);
+        return;
+      }
     });
   });
 }

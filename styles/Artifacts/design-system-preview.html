@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -8,32 +8,33 @@
 :root{
   color-scheme:dark;
 
-  /* ── BACKGROUNDS (9 surfaces) ── */
-  --bg1:hsl(25 5% 7%); --bg1-hover:hsl(8 5% 12%); --bg1-highlight:hsl(25 5% 10%);
-  --bg2:hsl(25 4% 12%); --bg2-hover:hsl(15 3% 15%);
-  --bg3:hsl(15 4% 16%); --bg3-hover:hsl(15 3% 20%);
-  --bg4:hsl(5 1% 24%); --bg5:hsl(8 0% 37%);
+  /* ── BACKGROUNDS (neutral Dark; exact L values from the app) ── */
+  --bg0:hsl(0 0% 5%); --bg1:hsl(0 0% 8%); --bg1-hover:hsl(0 0% 12%); --bg1-highlight:hsl(0 0% 9%);
+  --pane-bg:var(--bg1);
+  --bg2:hsl(0 0% 13%); --bg2-hover:hsl(0 0% 15%);
+  --bg3:var(--sidebar-bg); --bg3-hover:var(--sidebar-bg-hover);
+  --bg4:hsl(0 0% 24%); --bg5:hsl(0 0% 37%);
 
   /* ── FOREGROUNDS (text + icons only) ── */
-  --fg1:hsl(0 2% 92%); --fg2:hsl(20 4% 66%); --fg3:hsl(15 1% 44%); --muted-fg:hsl(15 4% 44%);
+  --fg1:hsl(0 0% 92%); --fg2:hsl(0 0% 66%); --fg3:hsl(0 0% 44%); --muted-fg:hsl(0 0% 44%);
 
   /* ── SIDEBAR (repository navigation) ── */
-  --sidebar-bg:hsl(25 5% 9%); --sidebar-bg-hover:hsl(25 2% 15%);
+  --sidebar-bg:hsl(0 0% 10%); --sidebar-bg-hover:hsl(0 0% 15%);
 
   /* ── BORDERS (borders only) ── */
-  --border1:hsl(8 3% 14%); --border2:hsl(25 1% 18%); --border3:hsl(15 0% 24%); --border4:hsl(15 0% 30%);
+  --border1:hsl(0 0% 14%); --border2:hsl(0 0% 18%); --border3:hsl(0 0% 24%); --border4:hsl(0 0% 30%);
 
   /* ── ELEVATION + SCRIM ── */
   --shadow-dropdown:0 8px 24px rgba(0,0,0,.35);
   --scrim:hsl(0 0% 0% / 0.8);
 
-  /* ── HIGHLIGHTED (brand accent) ── */
-  --highlighted-bg:hsl(25 5% 15%);
-  --highlighted-bright:hsl(25 5% 65%);
+  /* ── HIGHLIGHTED (neutral interaction emphasis) ── */
+  --highlighted-bg:hsl(0 0% 12%);
+  --highlighted-bright:hsl(0 0% 65%);
 
   /* ── INVERTED PAIR + COMPONENT ALIASES (button intents) ── */
-  --inverted-bg:hsl(0 2% 92%); --inverted-fg:hsl(5 7% 5%);
-  --primary-button-bg:var(--inverted-bg); --primary-button-hover:hsl(25 2% 83%); --primary-button-fg:var(--inverted-fg);
+  --inverted-bg:hsl(0 0% 92%); --inverted-fg:hsl(0 0% 5%);
+  --primary-button-bg:var(--inverted-bg); --primary-button-hover:hsl(0 0% 83%); --primary-button-fg:var(--inverted-fg);
 
   /* ── COLOR PALETTES (6 families) ── */
   --red-primary:hsl(0 91% 71%);   --red-secondary:hsl(7 83% 39%);  --red-secondary-fg:hsl(0 0% 100%); --red-bg:hsl(13 81% 14%);   --red-fg:hsl(20 97% 72%);
@@ -47,18 +48,32 @@
   --radius-sm:4px; --radius-md:6px; --radius-lg:8px;
 }
 
+/* Orka black preserves the app's former warm-gray structural palette. */
+:root[data-theme="dark"][data-theme-palette="orka-black"]{
+  --bg0:hsl(5 10% 5%); --bg1:hsl(5 5% 7%); --bg1-hover:hsl(8 5% 12%); --bg1-highlight:hsl(25 5% 9%);
+  --bg2:hsl(25 4% 12%); --bg2-hover:hsl(25 3% 15%);
+  --bg4:hsl(5 1% 24%); --bg5:hsl(8 0% 37%);
+  --fg1:hsl(0 2% 92%); --fg2:hsl(20 4% 66%); --fg3:hsl(15 1% 44%); --muted-fg:hsl(15 4% 44%);
+  --sidebar-bg:hsl(25 5% 9%); --sidebar-bg-hover:hsl(25 2% 15%);
+  --border1:hsl(8 3% 14%); --border2:hsl(25 1% 18%); --border3:hsl(15 0% 24%); --border4:hsl(15 0% 30%);
+  --highlighted-bg:hsl(5 8% 12%); --highlighted-bright:hsl(25 5% 65%);
+  --inverted-bg:hsl(0 2% 92%); --inverted-fg:hsl(5 7% 5%);
+  --primary-button-hover:hsl(25 2% 83%);
+}
+
 /* ── LIGHT THEME — [data-theme="light"] overrides (toggle top-right).
    Warm off-whites over the same taxonomy; bg1 + bg3 are BOTH pure white
    (popover lift = shadow + border). Ramp steps below are theme-static. */
 [data-theme="light"]{
   color-scheme:light;
+  --bg0:hsl(0 0% 98%);
   --bg1:hsl(0 0% 100%); --bg1-hover:hsl(0 4% 95%); --bg1-highlight:hsl(0 0% 97%);
   --bg2:hsl(60 4% 95%); --bg2-hover:hsl(60 4% 91%);
   --bg3:hsl(0 0% 100%); --bg3-hover:hsl(0 0% 95%);
   --bg4:hsl(0 0% 94%); --bg5:hsl(0 0% 88%);
   --fg1:hsl(20 7% 16%); --fg2:hsl(20 4% 37%); --fg3:hsl(20 4% 56%); --muted-fg:hsl(20 4% 68%);
   --sidebar-bg:hsl(60 9% 98%); --sidebar-bg-hover:hsl(60 2% 92%);
-  --border1:hsl(30 9% 91%); --border2:hsl(30 9% 91%); --border3:hsl(60 3% 85%); --border4:hsl(0 1% 83%);
+  --border1:hsl(30 9% 91%); --border2:hsl(30 9% 88%); --border3:hsl(60 3% 85%); --border4:hsl(0 1% 83%);
   --shadow-dropdown:0 8px 24px rgba(0,0,0,.12);
   --scrim:hsl(0 0% 0% / 0.4);
   --highlighted-bg:hsl(30 5% 92%); --highlighted-bright:hsl(25 5% 45%);
@@ -339,16 +354,20 @@ textarea.inp{resize:vertical;min-height:60px;line-height:1.5}
 </style>
 </head>
 <body>
-<button class="themetoggle" id="themeToggle" type="button" aria-pressed="false">☾ Dark</button>
+<button class="themetoggle" id="themeToggle" type="button" aria-label="Cycle theme">☾ Dark</button>
 <script>
 (function(){
   var btn=document.getElementById('themeToggle'),root=document.documentElement;
-  function render(){var light=root.getAttribute('data-theme')==='light';
-    btn.textContent=light?'☀ Light':'☾ Dark';btn.setAttribute('aria-pressed',String(light));}
+  var themes=['dark','orka-black','light'];
+  function current(){return root.getAttribute('data-theme')==='light'?'light':
+    root.getAttribute('data-theme-palette')==='orka-black'?'orka-black':'dark';}
+  function apply(theme){root.setAttribute('data-theme',theme==='light'?'light':'dark');
+    if(theme==='orka-black')root.setAttribute('data-theme-palette','orka-black');
+    else root.removeAttribute('data-theme-palette');render();}
+  function render(){var theme=current();
+    btn.textContent=theme==='light'?'☀ Light':theme==='orka-black'?'◐ Orka black':'☾ Dark';}
   btn.addEventListener('click',function(){
-    if(root.getAttribute('data-theme')==='light'){root.removeAttribute('data-theme');}
-    else{root.setAttribute('data-theme','light');}
-    render();});
+    apply(themes[(themes.indexOf(current())+1)%themes.length]);});
   render();
 })();
 </script>
@@ -357,10 +376,10 @@ textarea.inp{resize:vertical;min-height:60px;line-height:1.5}
   <h1>Zeros — Design System</h1>
   <p class="lede">The complete token reference for the Zeros Mac app: every primitive in
   <code>styles/zeros-tokens.css</code>, how each one is used, the usage rules &amp; anti-patterns, and a live
-  component library (mirroring <code>apps/desktop/src/renderer/shared/ui/primitives/</code>). Two themes ship: <em>Zeros Shade</em>
-  (dark — muted warm-gray, HSL) and <em>Light</em> (warm off-whites, added 2026-07-11) — flip this page with the
-  toggle (top right), which swaps <code>data-theme="light"</code> on <code>&lt;html&gt;</code> exactly like the app's
-  appearance store. Rendered on the real app canvas (<code>--bg1</code>). For semantic color
+  component library (mirroring <code>apps/desktop/src/renderer/shared/ui/primitives/</code>). Three palettes ship:
+  neutral <em>Dark</em>, <em>Orka black</em> (the former warm-gray dark palette), and <em>Light</em>. The top-right
+  toggle mirrors the app's binary <code>data-theme</code> polarity plus the Orka-only
+  <code>data-theme-palette</code> selector. Rendered on the real app canvas (<code>--bg1</code>). For semantic color
   applied to real UI, see <a href="color-palette-preview.html">color-palette-preview.html</a>.</p>
 </header>
 
@@ -381,19 +400,20 @@ textarea.inp{resize:vertical;min-height:60px;line-height:1.5}
 
 <!-- ═══════════ TOKENS ═══════════ -->
 <section id="backgrounds">
-  <div class="h2">Backgrounds <small>9 surfaces · <code>bg-bg1</code> … <code>bg-bg5</code> + hovers</small></div>
+  <div class="h2">Backgrounds <small>10 surfaces · <code>bg-bg0</code> … <code>bg-bg5</code> + hovers</small></div>
   <p class="secintro">Surface depth ladder: canvas → composer → popover. Hover states are <em>surface-scoped</em> —
   the hover for a <code>--bg1</code> surface is <code>--bg1-hover</code>, never a jump to <code>--bg3</code>.</p>
   <div class="tokens">
-    <div class="tok"><div class="chip" style="background:var(--bg1)"></div><div class="meta"><div class="name">--bg1</div><div class="val">hsl(25 5% 7%)</div><div class="cls">bg-bg1</div><div class="use">Default canvas / chat window / app body</div></div></div>
-    <div class="tok"><div class="chip" style="background:var(--bg1-hover)"></div><div class="meta"><div class="name">--bg1-hover</div><div class="val">hsl(8 5% 12%)</div><div class="cls">bg-bg1-hover</div><div class="use">Hover on bg1 (tool-call rows, canvas tabs)</div></div></div>
-    <div class="tok"><div class="chip" style="background:var(--bg1-highlight)"></div><div class="meta"><div class="name">--bg1-highlight</div><div class="val">hsl(25 5% 10%)</div><div class="cls">bg-bg1-highlight</div><div class="use">Lifted content above bg1 (callouts, blocks)</div></div></div>
-    <div class="tok"><div class="chip" style="background:var(--bg2)"></div><div class="meta"><div class="name">--bg2</div><div class="val">hsl(25 4% 12%)</div><div class="cls">bg-bg2</div><div class="use">Composer surface, raised pane above bg1</div></div></div>
-    <div class="tok"><div class="chip" style="background:var(--bg2-hover)"></div><div class="meta"><div class="name">--bg2-hover</div><div class="val">hsl(15 3% 15%)</div><div class="cls">bg-bg2-hover</div><div class="use">Hover on bg2 (composer icon buttons)</div></div></div>
-    <div class="tok"><div class="chip" style="background:var(--bg3)"></div><div class="meta"><div class="name">--bg3</div><div class="val">hsl(15 4% 16%)</div><div class="cls">bg-bg3</div><div class="use">Popover / dropdown / dialog / card / selected chrome</div></div></div>
-    <div class="tok"><div class="chip" style="background:var(--bg3-hover)"></div><div class="meta"><div class="name">--bg3-hover</div><div class="val">hsl(15 3% 20%)</div><div class="cls">bg-bg3-hover</div><div class="use">Menu-item hover inside a popover</div></div></div>
-    <div class="tok"><div class="chip" style="background:var(--bg4)"></div><div class="meta"><div class="name">--bg4</div><div class="val">hsl(5 1% 24%)</div><div class="cls">bg-bg4</div><div class="use">Rare — reserved for specific cases</div></div></div>
-    <div class="tok"><div class="chip" style="background:var(--bg5)"></div><div class="meta"><div class="name">--bg5</div><div class="val">hsl(8 0% 37%)</div><div class="cls">bg-bg5</div><div class="use">Rare — reserved for specific cases</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--bg0)"></div><div class="meta"><div class="name">--bg0</div><div class="val">hsl(0 0% 5%)</div><div class="cls">bg-bg0</div><div class="use">Inactive chat-window fill below bg1</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--bg1)"></div><div class="meta"><div class="name">--bg1</div><div class="val">hsl(0 0% 8%)</div><div class="cls">bg-bg1</div><div class="use">Default canvas / active chat window / app body</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--bg1-hover)"></div><div class="meta"><div class="name">--bg1-hover</div><div class="val">hsl(0 0% 12%)</div><div class="cls">bg-bg1-hover</div><div class="use">Hover on bg1 (tool-call rows, canvas tabs)</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--bg1-highlight)"></div><div class="meta"><div class="name">--bg1-highlight</div><div class="val">hsl(0 0% 9%)</div><div class="cls">bg-bg1-highlight</div><div class="use">Lifted content above bg1 (callouts, blocks)</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--bg2)"></div><div class="meta"><div class="name">--bg2</div><div class="val">hsl(0 0% 13%)</div><div class="cls">bg-bg2</div><div class="use">Composer surface, raised pane above bg1</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--bg2-hover)"></div><div class="meta"><div class="name">--bg2-hover</div><div class="val">hsl(0 0% 15%)</div><div class="cls">bg-bg2-hover</div><div class="use">Hover on bg2 (composer icon buttons)</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--bg3)"></div><div class="meta"><div class="name">--bg3</div><div class="val">var(--sidebar-bg) · hsl(0 0% 10%)</div><div class="cls">bg-bg3</div><div class="use">Floating popover / dropdown / menu surface only</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--bg3-hover)"></div><div class="meta"><div class="name">--bg3-hover</div><div class="val">var(--sidebar-bg-hover) · hsl(0 0% 15%)</div><div class="cls">bg-bg3-hover</div><div class="use">Menu-item hover inside a popover</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--bg4)"></div><div class="meta"><div class="name">--bg4</div><div class="val">hsl(0 0% 24%)</div><div class="cls">bg-bg4</div><div class="use">Rare — reserved for specific cases</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--bg5)"></div><div class="meta"><div class="name">--bg5</div><div class="val">hsl(0 0% 37%)</div><div class="cls">bg-bg5</div><div class="use">Rare — reserved for specific cases</div></div></div>
   </div>
 </section>
 
@@ -402,10 +422,10 @@ textarea.inp{resize:vertical;min-height:60px;line-height:1.5}
   <p class="secintro">Three-and-a-bit tiers. <em>The default is <code>fg2</code></em>; reach for <code>fg1</code> only when text/icon should pop
   (selected, highlighted, focal output). <code>--fg3</code> is the faint-metadata tier; <code>--muted-fg</code> is placeholders / empty states.</p>
   <div class="fgrow">
-    <div class="line"><span class="swatch" style="color:var(--fg1)">--fg1 · highlighted / selected / focal</span><span class="desc">hsl(0 2% 92%) · text-fg1 · markdown body, titles, active labels</span></div>
-    <div class="line"><span class="swatch" style="color:var(--fg2)">--fg2 · DEFAULT text + icon</span><span class="desc">hsl(20 4% 66%) · text-fg2 · everything by default</span></div>
-    <div class="line"><span class="swatch" style="color:var(--fg3)">--fg3 · faint metadata</span><span class="desc">hsl(15 1% 44%) · timestamps, counts, backlog/cancelled</span></div>
-    <div class="line"><span class="swatch" style="color:var(--muted-fg)">--muted-fg · placeholder / empty</span><span class="desc">hsl(15 4% 44%) · text-muted-fg · input placeholders, empty-state icons</span></div>
+    <div class="line"><span class="swatch" style="color:var(--fg1)">--fg1 · highlighted / selected / focal</span><span class="desc">hsl(0 0% 92%) · text-fg1 · markdown body, titles, active labels</span></div>
+    <div class="line"><span class="swatch" style="color:var(--fg2)">--fg2 · DEFAULT text + icon</span><span class="desc">hsl(0 0% 66%) · text-fg2 · everything by default</span></div>
+    <div class="line"><span class="swatch" style="color:var(--fg3)">--fg3 · faint metadata</span><span class="desc">hsl(0 0% 44%) · timestamps, counts, backlog/cancelled</span></div>
+    <div class="line"><span class="swatch" style="color:var(--muted-fg)">--muted-fg · placeholder / empty</span><span class="desc">hsl(0 0% 44%) · text-muted-fg · input placeholders, empty-state icons</span></div>
   </div>
 </section>
 
@@ -414,8 +434,8 @@ textarea.inp{resize:vertical;min-height:60px;line-height:1.5}
   <p class="secintro">The workspace sidebar gets its own surface pair. The settings sidebar uses the default tokens
   (<code>bg-bg1</code> / <code>bg-bg2</code>).</p>
   <div class="tokens">
-    <div class="tok"><div class="chip" style="background:var(--sidebar-bg)"></div><div class="meta"><div class="name">--sidebar-bg</div><div class="val">hsl(25 5% 9%)</div><div class="cls">bg-sidebar-bg</div><div class="use">Workspace sidebar background</div></div></div>
-    <div class="tok"><div class="chip" style="background:var(--sidebar-bg-hover)"></div><div class="meta"><div class="name">--sidebar-bg-hover</div><div class="val">hsl(25 2% 15%)</div><div class="cls">bg-sidebar-bg-hover</div><div class="use">Row hover + selected state</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--sidebar-bg)"></div><div class="meta"><div class="name">--sidebar-bg</div><div class="val">hsl(0 0% 10%)</div><div class="cls">bg-sidebar-bg</div><div class="use">Workspace sidebar background</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--sidebar-bg-hover)"></div><div class="meta"><div class="name">--sidebar-bg-hover</div><div class="val">hsl(0 0% 15%)</div><div class="cls">bg-sidebar-bg-hover</div><div class="use">Row hover + selected state</div></div></div>
   </div>
 </section>
 
@@ -433,13 +453,13 @@ textarea.inp{resize:vertical;min-height:60px;line-height:1.5}
 </section>
 
 <section id="highlighted">
-  <div class="h2">Highlighted <small>brand accent — anchor moments, focus, code-link</small></div>
+  <div class="h2">Highlighted <small>neutral interaction emphasis — messages and focus</small></div>
   <p class="secintro"><code>--highlighted-bright</code> is the focus / accent-border cue (it is <em>not</em> a button fill).
   <code>--highlighted-bg</code> is for load-bearing anchor moments (user message bubble); text on it uses <code>fg1</code>/<code>fg2</code>.
   Values are HSL (source of truth).</p>
   <div class="tokens">
-    <div class="tok"><div class="chip" style="background:var(--highlighted-bg)"></div><div class="meta"><div class="name">--highlighted-bg</div><div class="val">hsl(25 5% 15%)</div><div class="cls">bg-highlighted-bg</div><div class="use">User-message bubble, selected states (text on it: fg1/fg2)</div></div></div>
-    <div class="tok"><div class="chip" style="background:var(--highlighted-bright)"></div><div class="meta"><div class="name">--highlighted-bright</div><div class="val">hsl(25 5% 65%)</div><div class="cls">border-highlighted-bright</div><div class="use">Input focus, accent borders, focus ring, brand cue</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--highlighted-bg)"></div><div class="meta"><div class="name">--highlighted-bg</div><div class="val">hsl(0 0% 12%)</div><div class="cls">bg-highlighted-bg</div><div class="use">User-message bubble (text on it: fg1/fg2)</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--highlighted-bright)"></div><div class="meta"><div class="name">--highlighted-bright</div><div class="val">hsl(0 0% 65%)</div><div class="cls">border-highlighted-bright</div><div class="use">Input focus and brighter neutral borders</div></div></div>
   </div>
 </section>
 
@@ -448,9 +468,9 @@ textarea.inp{resize:vertical;min-height:60px;line-height:1.5}
   <p class="secintro">The only component-level aliases. Primary button = inverted fill (<code>--fg1</code> on <code>--bg1</code>), one per screen.
   The aliases point at the <b>inverted pair</b> (<code>--inverted-bg</code>/<code>--inverted-fg</code>) — the one surface that flips polarity per theme (near-white on dark, near-black on light); the Switch's ON track uses the same pair.</p>
   <div class="tokens">
-    <div class="tok"><div class="chip" style="background:var(--primary-button-bg)"></div><div class="meta"><div class="name">--primary-button-bg</div><div class="val">→ var(--inverted-bg) · hsl(0 2% 92%)</div><div class="cls">bg-primary-button-bg</div><div class="use">Filled focal CTA fill (also badge/tooltip)</div></div></div>
-    <div class="tok"><div class="chip" style="background:var(--primary-button-hover)"></div><div class="meta"><div class="name">--primary-button-hover</div><div class="val">hsl(25 2% 83%)</div><div class="cls">hover:bg-primary-button-hover</div><div class="use">Own value — lifted neutral for hover</div></div></div>
-    <div class="tok"><div class="chip" style="background:var(--primary-button-fg)"></div><div class="meta"><div class="name">--primary-button-fg</div><div class="val">→ var(--inverted-fg) · hsl(5 7% 5%)</div><div class="cls">text-primary-button-fg</div><div class="use">Text/icon on the filled CTA</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--primary-button-bg)"></div><div class="meta"><div class="name">--primary-button-bg</div><div class="val">→ var(--inverted-bg) · hsl(0 0% 92%)</div><div class="cls">bg-primary-button-bg</div><div class="use">Filled focal CTA fill (also badge/tooltip)</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--primary-button-hover)"></div><div class="meta"><div class="name">--primary-button-hover</div><div class="val">hsl(0 0% 83%)</div><div class="cls">hover:bg-primary-button-hover</div><div class="use">Own value — lifted neutral for hover</div></div></div>
+    <div class="tok"><div class="chip" style="background:var(--primary-button-fg)"></div><div class="meta"><div class="name">--primary-button-fg</div><div class="val">→ var(--inverted-fg) · hsl(0 0% 5%)</div><div class="cls">text-primary-button-fg</div><div class="use">Text/icon on the filled CTA</div></div></div>
   </div>
 </section>
 

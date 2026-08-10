@@ -259,11 +259,12 @@ export interface AdvertisedModel {
   value: string;
   label: string;
   badge?: string;
-  /** Ordered reasoning-effort ladder (low→high). Omit when the model has no
-   *  effort knob; the renderer then hides the EffortPill (or, absent any
-   *  advertisement, falls back to its family default). */
+  /** Ordered reasoning-effort ladder (low→high). An explicit empty array means
+   *  the live runtime says this model has no effort knob. Omit only when the
+   *  adapter has no capability answer and the renderer may use its fallback. */
   effortLevels?: string[];
-  /** Whether this model supports Fast mode (drives the FastPill). */
+  /** Whether this model supports Fast mode (drives the FastPill). Explicit
+   *  false is authoritative; omit only when capability is unknown. */
   supportsFast?: boolean;
 }
 
@@ -640,6 +641,10 @@ export interface RequestPermissionRequest {
   sessionId: SessionId;
   toolCall: ToolCall;
   options: PermissionOption[];
+  /** The adapter already resolved this gate without user input. The renderer
+   * records the privacy-safe decision metadata but must not render a card or
+   * send a second response. */
+  autoResolution?: PermissionOptionKind;
   /** Optional provider-authored question copy. This changes only the title of
    * the existing PermissionCard; it never selects a different renderer. */
   title?: string;
@@ -649,6 +654,11 @@ export interface RequestPermissionRequest {
   /** Render the engine-supplied option names verbatim while retaining the
    * existing PermissionCard rows, shortcuts, colors, and response semantics. */
   useOptionNames?: boolean;
+  /** Whether an allow-always/reject-always choice may create or consume a
+   * Zeros-side tool-title policy. Defaults to true for compatibility. Native
+   * provider policy/amendment decisions set false so a broader local rule can
+   * neither replace nor replay a provider-owned decision. */
+  allowLocalPolicies?: boolean;
   /** Vendor correlation id (SDK control request_id / Codex RequestId).
    *  Used by the renderer to dedupe a replayed request on reconnect — the
    *  SDK re-arms in-flight requests on initialize and the adapter mints a
@@ -682,6 +692,9 @@ export interface QuestionOption {
   label: string;
   description?: string;
   preview?: string;
+  /** Selecting this option clears every sibling selection; selecting a normal
+   *  option clears any exclusive sibling. Used by MCP None/Skip sentinels. */
+  exclusive?: boolean;
 }
 
 export interface QuestionSpec {
@@ -697,6 +710,18 @@ export interface QuestionSpec {
   options: QuestionOption[];
   /** Render the "0  Type something…" free-text last row. */
   allowOther: boolean;
+  /** Provider-supplied initial selections. MCP form defaults use these so the
+   *  user can review/modify the complete payload before submitting. */
+  defaultOptionIds?: string[];
+  /** Provider-supplied initial free-text value (never used for secrets). */
+  defaultFreeText?: string;
+  /** An explicitly active empty text field is a valid answer. Used only when
+   * the provider schema permits a zero-length string. */
+  allowEmptyFreeText?: boolean;
+  /** Preserve leading/trailing whitespace instead of applying the legacy
+   * human-answer trim. JSON Schema string length/pattern rules can make that
+   * whitespace semantically significant. */
+  preserveFreeText?: boolean;
   /** Codex isSecret → masked input; value never logged. */
   secret?: boolean;
 }
@@ -714,6 +739,9 @@ export interface QuestionRequest {
   /** true = a resolver is parked on the engine (block-and-resume); false =
    *  non-blocking fallback (answer delivered as the next prompt). */
   blocking: boolean;
+  /** Show distinct Decline and Cancel actions. MCP elicitation needs both:
+   *  decline is an explicit refusal, while cancel is dismissal/abandonment. */
+  allowDecline?: boolean;
   /** Epoch ms when the engine's response timeout fires and the question is
    *  auto-skipped (the agent proceeds with its default). Stamped by the
    *  adapter when it arms the timer; the card shows a countdown near expiry.
@@ -735,6 +763,7 @@ export interface QuestionAnswer {
 
 export type QuestionOutcome =
   | { outcome: "answered"; answers: QuestionAnswer[] }
+  | { outcome: "declined" }
   | { outcome: "dismissed" };
 
 export interface QuestionResponse {
@@ -789,6 +818,10 @@ export interface TurnUsage {
 export interface PromptResponse {
   stopReason: StopReason;
   usage?: TurnUsage;
+  /** Model the adapter actually sent/observed for this turn. May differ from
+   * the requested composer model after a provider fallback or variant
+   * resolution. Metadata only; adapters omit it when the protocol is silent. */
+  effectiveModel?: string;
   userMessageId?: string;
 }
 
@@ -835,6 +868,11 @@ export interface LoadSessionResponse {
    *  it must be re-injected on the next prompt). Engine-internal; the renderer
    *  ignores it. */
   resumedFresh?: boolean;
+  /** A degraded resume created a new provider-native session id. The current
+   * engine may continue routing through the requested id as an alias, but the
+   * renderer persists this replacement for the next app restart so it does not
+   * repeatedly attempt the permanently stale id. */
+  replacementSessionId?: SessionId;
 }
 
 export interface ListSessionsResponse {

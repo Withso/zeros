@@ -23,14 +23,14 @@ export const CONVERSATION_RATIO_VAR = "--zeros-column-2-ratio";
 // the row: both columns simply double.
 export const CONVERSATION_RATIO_DEFAULT = 0.5;
 // Storage-sanity bounds only — the real floors/caps are pixel-aware
-// (CSS `min-w-[320px]` / `max-w-[min(2400px,70%)]` and the drag-time
+// (CSS `min-w-[360px]` / `max-w-[min(2400px,70%)]` and the drag-time
 // `clampConversationRatio`). 0.7 mirrors the CSS 70% cap so a persisted
 // value never disagrees with what CSS would render.
 export const CONVERSATION_RATIO_MIN = 0.1;
 export const CONVERSATION_RATIO_MAX = 0.7;
-/** Conversation pane's pixel floor — must match `min-w-[320px]` in
+/** Conversation pane's pixel floor — must match `min-w-[360px]` in
  *  CONVERSATION_DEFAULT_WIDTH_CLS (conversation/conversation-pane.tsx). */
-export const CONVERSATION_MIN_PX = 320;
+export const CONVERSATION_MIN_PX = 360;
 /** Conversation pane's pixel ceiling — must match the `2400px` leg of the CSS
  *  `max-w-[min(2400px,70%)]` cap. */
 export const CONVERSATION_MAX_PX = 2400;
@@ -38,6 +38,13 @@ export const CONVERSATION_MAX_PX = 2400;
  *  (workbench/workbench-pane.tsx). The drag clamp reserves it so workbench never gets
  *  crushed mid-drag. */
 export const WORKBENCH_MIN_PX = 200;
+
+/** Marker attributes on the two columns of the conversation/workbench row.
+ *  The split gate measures Workbench's live width through them (its slack above
+ *  WORKBENCH_MIN_PX is the only room the conversation column can borrow), and
+ *  the seam drag already targets column 3 by the same name. */
+export const CONVERSATION_COLUMN_ATTR = "data-zeros-column-2";
+export const WORKBENCH_COLUMN_ATTR = "data-zeros-column-3";
 
 /** Where the ratio lives across launches. */
 export const CONVERSATION_RATIO_KEY = "zeros.column2.ratio";
@@ -108,23 +115,34 @@ export function flushPendingConversationRatioPaint(
 /** Clamp a persisted (or just-computed) ratio into the global bounds. */
 export function sanitizeConversationRatio(value: number): number {
   if (!Number.isFinite(value)) return CONVERSATION_RATIO_DEFAULT;
-  return Math.min(Math.max(value, CONVERSATION_RATIO_MIN), CONVERSATION_RATIO_MAX);
+  return Math.min(
+    Math.max(value, CONVERSATION_RATIO_MIN),
+    CONVERSATION_RATIO_MAX,
+  );
 }
 
 /** Clamp a live drag ratio against the actual row width: conversation pane keeps
- *  its 320px floor and 2400px ceiling, workbench keeps its 200px floor,
+ *  its 360px floor and 2400px ceiling, workbench keeps its 200px floor,
  *  and the 70% share cap always applies. Mirrors the CSS
  *  `min-w`/`max-w` bounds exactly so the live drag matches what CSS
  *  renders — no snap on pointer release. The result always lands
  *  inside the sanitize bounds, so the value the drag paints is
  *  byte-identical to the value persist() will store — the two can
  *  never diverge, even on degenerate row widths. */
-export function clampConversationRatio(raw: number, rowWidth: number): number {
+export function clampConversationRatio(
+  raw: number,
+  rowWidth: number,
+  conversationMinPx = CONVERSATION_MIN_PX,
+): number {
   if (!Number.isFinite(raw)) return CONVERSATION_RATIO_DEFAULT;
+  const effectiveConversationMin =
+    Number.isFinite(conversationMinPx) && conversationMinPx > 0
+      ? conversationMinPx
+      : CONVERSATION_MIN_PX;
   let min = CONVERSATION_RATIO_MIN;
   let max = CONVERSATION_RATIO_MAX;
   if (Number.isFinite(rowWidth) && rowWidth > 0) {
-    min = Math.max(min, CONVERSATION_MIN_PX / rowWidth);
+    min = Math.max(min, effectiveConversationMin / rowWidth);
     max = Math.min(
       max,
       (rowWidth - WORKBENCH_MIN_PX) / rowWidth,

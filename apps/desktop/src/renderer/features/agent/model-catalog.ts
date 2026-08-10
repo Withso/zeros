@@ -33,6 +33,7 @@ import type {
   ChatEffort,
   ChatPermissionMode,
 } from "../../state/store";
+import { getSetting } from "../../platform/settings";
 import {
   getClaudeBudgetCapUsd,
   getClaudeFallbackModel,
@@ -45,14 +46,14 @@ export type ModelOption = {
   label: string;
   badge?: string;
   /** Per-model reasoning-effort ladder (ordered low→high). Authoritative for
-   *  the EffortPill. Live discovery overlays this onto the curated entry when a
-   *  match is found; otherwise the curated value stands. */
+   *  the EffortPill. Exact live discovery overrides the bundled fallback when
+   *  present; otherwise the curated value stands. */
   effortLevels?: ChatEffort[];
   /** Whether this model supports Fast mode (drives the FastPill). */
   supportsFast?: boolean;
   /** Minimum agent CLI version this model needs (e.g. Fable 5 → "2.1.170").
-   *  Gated by {@link modelsForAgent} against the agent-advertised
-   *  `_meta.cliVersion` so a model never silently downgrades on an older CLI. */
+   *  Verified at build time by models:verify; runtime availability/capability
+   *  comes from the pinned CLI's live discovery response. */
   minCliVersion?: string;
 };
 
@@ -129,7 +130,7 @@ const MODEL_ENV_VARS: Record<string, string> = catalog.modelEnvVars ?? {};
 const ALIASES: Record<string, Record<string, string>> = catalog.aliases ?? {};
 
 /** Per-family fallback favorite: the model a new chat opens on
- *  when the user hasn't starred one — claude → Opus 4.8, codex → 5.6 Sol,
+ *  when the user hasn't selected one — claude → Opus 5, codex → GPT-5.6 Sol,
  *  cursor → Composer 2.5. Curated in models-v1.json so the catalog stays the
  *  single source of truth; validated against family membership here (a typo'd
  *  id degrades to the family's first curated model instead of a dead value). */
@@ -144,6 +145,147 @@ export function defaultFavoriteModelFor(family: string): string | null {
   const pinned = DEFAULT_FAVORITES[family];
   if (pinned && list.some((m) => m.value === pinned)) return pinned;
   return list[0]?.value ?? null;
+}
+
+// ── The one global default-model selection (READ side) ────
+//
+// The star's storage keys and its read path live here, not in
+// model-favorites.ts, for one reason: this module has to answer "what model
+// does a null `ChatThread.model` actually mean?" — and it must answer it the
+// SAME way the pill and the picker do. model-favorites imports this module
+// for agentFamily/modelsForAgent/defaultFavoriteModelFor, so it cannot be
+// imported back without a cycle; the read side therefore lives at the bottom
+// of the dependency chain and model-favorites re-exports it. WRITES + the
+// pub/sub bus stay in model-favorites (nothing here needs them).
+//
+// Before this move the two sides disagreed: display resolved a null model to
+// the favorite while the capability gates and the spawn env resolved it to
+// `models[0]`, so a null-model Claude chat rendered "Opus 5" while the engine
+// ran Fable 5 with a Fast flag Opus supports and Fable does not.
+
+export const DEFAULT_MODEL_SELECTION_KEY = "default-model-selection";
+export const LEGACY_DEFAULT_AGENT_KEY = "default-agent-id";
+export const LEGACY_FAVORITE_MODELS_KEY = "favorite-models-by-family";
+
+export interface FavoriteModelSelection {
+  /** Canonical agent family for the model. */
+  agentId: string;
+  /** Null means use that family's current catalog fallback. */
+  model: string | null;
+}
+
+function sanitizeSelection(value: unknown): FavoriteModelSelection | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const agentId =
+    typeof raw.agentId === "string" ? agentFamily(raw.agentId) : "";
+  if (!agentId) return null;
+  const model =
+    typeof raw.model === "string" && raw.model.trim().length > 0
+      ? raw.model.trim()
+      : null;
+  return { agentId, model };
+}
+
+/** The curated (family → model) pairs a pre-redesign `favorite-models-by-family`
+ *  map really carries. Keys route through agentFamily, so a wrapper id
+ *  ("claude-code") lands on the same family its model belongs to. */
+export function curatedLegacyFavorites(
+  favorites: unknown,
+): Map<string, string> {
+  const curated = new Map<string, string>();
+  if (!favorites || typeof favorites !== "object" || Array.isArray(favorites)) {
+    return curated;
+  }
+  for (const [key, value] of Object.entries(
+    favorites as Record<string, unknown>,
+  )) {
+    const family = agentFamily(key);
+    if (!family || typeof value !== "string" || !value.trim()) continue;
+    curated.set(family, value.trim());
+  }
+  return curated;
+}
+
+/** The one family a legacy favorites map can speak for on its own.
+ *
+ *  The star is a single global identity now, so a map naming exactly one
+ *  curated family IS that identity — and it has to be read this way, because
+ *  the old composer star deliberately never wrote `default-agent-id`. Anyone
+ *  who starred a model without also visiting Settings has favorites and no
+ *  agent id; requiring the id dropped their choice on upgrade.
+ *
+ *  Two or more entries is a genuine ambiguity: the old model let all three
+ *  coexist and nothing in storage says which was the default. Forging one would
+ *  silently move the user's provider, so those keep resolving through the
+ *  catalog fallbacks. Returns "" when there is no sole family. */
+export function soleLegacyFavoriteFamily(favorites: unknown): string {
+  const curated = curatedLegacyFavorites(favorites);
+  if (curated.size !== 1) return "";
+  return curated.keys().next().value ?? "";
+}
+
+function legacySelection(): FavoriteModelSelection | null {
+  const favorites = getSetting<unknown>(LEGACY_FAVORITE_MODELS_KEY, null);
+  const legacyAgent = getSetting<string | null>(LEGACY_DEFAULT_AGENT_KEY, null);
+  const agentId =
+    agentFamily(legacyAgent) || soleLegacyFavoriteFamily(favorites);
+  if (!agentId) return null;
+  return {
+    agentId,
+    model: curatedLegacyFavorites(favorites).get(agentId) ?? null,
+  };
+}
+
+/** Raw user choice. Null means provider connectivity decides the fallback.
+ *
+ * PURE by contract. Every model surface calls this during render (the pill's
+ * label, the picker's ✓, Settings → Models), so normalizing the legacy keys
+ * here would make a hot selector write storage inside render. The normalizing
+ * write is one explicit boot step instead — `migrateDefaultModelSelection()` in
+ * model-favorites.ts — and resolution stays correct without it because the
+ * legacy read below is the same answer, just recomputed. */
+export function getFavoriteSelection(): FavoriteModelSelection | null {
+  return (
+    sanitizeSelection(getSetting<unknown>(DEFAULT_MODEL_SELECTION_KEY, null)) ??
+    legacySelection()
+  );
+}
+
+/** The legacy-derived selection, for the one-time boot normalization in
+ * model-favorites.ts. Null when there is nothing to move across. */
+export function legacyFavoriteSelection(): FavoriteModelSelection | null {
+  if (sanitizeSelection(getSetting<unknown>(DEFAULT_MODEL_SELECTION_KEY, null)))
+    return null;
+  return legacySelection();
+}
+
+/** The raw globally selected model only when `agentId` owns it. */
+export function getFavoriteModel(
+  agentId: string | null | undefined,
+): string | null {
+  const family = agentFamily(agentId ?? null);
+  const selection = getFavoriteSelection();
+  return family && selection?.agentId === family ? selection.model : null;
+}
+
+/** Model a chat explicitly created for this agent should use. The one global
+ * choice wins for its owner; every other family uses its own catalog fallback.
+ * This is ALSO the meaning of a null `ChatThread.model`: see resolveModelOption
+ * and envForChatSettings, which both route their null case through here. */
+export function effectiveFavoriteModel(
+  agentId: string | null | undefined,
+): string | null {
+  const family = agentFamily(agentId ?? null);
+  if (!family) return null;
+  const selected = getFavoriteModel(agentId);
+  if (
+    selected &&
+    modelsForAgent(family, null).some((model) => model.value === selected)
+  ) {
+    return selected;
+  }
+  return defaultFavoriteModelFor(family);
 }
 
 /** Prefix-match agent id → family. Wrapper variants (claude,
@@ -194,8 +336,8 @@ export function normalizeModelSlug(family: string, id: string): string {
  *  - Claude: the Agent SDK `effort` option (low|medium|high|xhigh|max) +
  *    the `ultracode` setting.
  *  - Codex: reads ZEROS_THINKING_EFFORT → `turn/start.effort`.
- *  Cursor exposes no effort knob, so the effort toggle is hidden for it
- *  rather than writing a value nothing consumes. */
+ *  - Cursor: an advertised effort ladder swaps to a concrete catalog-backed
+ *    reasoning model variant; models without such a ladder hide the toggle. */
 export function agentSupportsEffort(
   agentId: string | null,
   model: string | null = null,
@@ -258,43 +400,10 @@ const EFFORT_LABELS_BY_FAMILY: Record<
   codex: { low: "Light", xhigh: "Extra High", ultracode: "Ultra" },
 };
 
-/** Rank of each effort tier (ladder position, low→high). Used by
- *  {@link nearestEffort} to clamp a carried effort DOWN to what a target
- *  model actually offers. */
-const EFFORT_RANK: Record<ChatEffort, number> = {
-  low: 0,
-  medium: 1,
-  high: 2,
-  xhigh: 3,
-  max: 4,
-  ultracode: 5,
-};
-
-/** The closest effort a target model's ladder offers to a requested level —
- *  the carry-over rule when switching or redirecting models:
- *  the exact level when the ladder has it, else the HIGHEST ladder level
- *  BELOW it (max → high on Grok 4.5's low/medium/high; max → xhigh on 5.5),
- *  else the ladder floor (requested below everything). Null for an empty
- *  ladder (the model has no effort knob — nothing to carry to). */
-export function nearestEffort(
-  ladder: ChatEffort[],
-  effort: ChatEffort,
-): ChatEffort | null {
-  if (ladder.length === 0) return null;
-  if (ladder.includes(effort)) return effort;
-  const want = EFFORT_RANK[effort] ?? EFFORT_RANK.high;
-  let best: ChatEffort | null = null;
-  for (const lvl of ladder) {
-    const r = EFFORT_RANK[lvl];
-    if (r <= want && (best === null || r > EFFORT_RANK[best])) best = lvl;
-  }
-  return best ?? ladder[0];
-}
-
 /** The display label for an effort level in the given agent's vocabulary. Used
- *  by the composer EffortPill + the Settings → Models default-effort dropdown so
- *  both surfaces read identically per family (e.g. Codex "Ultra", Claude
- *  "Ultracode" for the same internal level). Falls back to the default label. */
+ *  by the composer EffortPill and model menu so both surfaces read identically
+ *  per family (e.g. Codex "Ultra", Claude "Ultracode" for the same internal
+ *  level). Falls back to the default label. */
 export function effortLabel(
   agentId: string | null,
   effort: ChatEffort,
@@ -333,11 +442,59 @@ export function effortLevelsFor(
   return [];
 }
 
+/** Rank of each effort tier (ladder position, low→high). */
+const EFFORT_RANK: Record<ChatEffort, number> = {
+  low: 0,
+  medium: 1,
+  high: 2,
+  xhigh: 3,
+  max: 4,
+  ultracode: 5,
+};
+
+/** High is the product floor. For a ladder without High, its highest advertised
+ * tier is the closest equivalent; a model with no knob still carries an inert
+ * `high` in ChatThread for a stable serialized shape. Re-exported by
+ * model-preferences.ts, which owns the remembered-value side. */
+export function defaultEffortForLevels(levels: ChatEffort[]): ChatEffort {
+  if (levels.includes("high")) return "high";
+  return (
+    levels.reduce<ChatEffort | null>(
+      (highest, level) =>
+        highest === null || EFFORT_RANK[level] > EFFORT_RANK[highest]
+          ? level
+          : highest,
+      null,
+    ) ?? "high"
+  );
+}
+
+/** The effort this exact model can actually run: the stored tier when its
+ * ladder advertises it, else that ladder's default. A model with no knob keeps
+ * the stored value (nothing to clamp to).
+ *
+ * ONE clamp, shared by the composer pill's label, the model menu's editor, and
+ * the spawn env — the same reason `resolveModelOption` owns the null-model
+ * question. A stored tier can go off-ladder without any user action (a catalog
+ * update retires a tier, a hand-edited settings.toml), and the surfaces used to
+ * disagree about it: the pill read `ChatThread.effort` verbatim and rendered
+ * "Ultracode" while the popover it opened showed and applied "Max". */
+export function effectiveEffort(
+  agentId: string | null,
+  model: string | null,
+  effort: ChatEffort,
+  initialize: InitializeResponse | null = null,
+): ChatEffort {
+  const levels = effortLevelsFor(agentId, model, initialize);
+  if (levels.length === 0 || levels.includes(effort)) return effort;
+  return defaultEffortForLevels(levels);
+}
+
 /** Whether the agent+model supports Fast mode (lower-latency inference at
  *  higher token cost). Advertised per-model via the resolved option's
- *  `supportsFast` when present; otherwise the family heuristic: Claude Opus
- *  only, Codex GPT-5.x. When the model is null (agent default) we optimistically
- *  allow it for Claude/Codex — the agent silently no-ops if unsupported. */
+ *  `supportsFast` when present; otherwise the cold-start family heuristic:
+ *  Claude Opus only, Codex GPT-5.x. Null resolves through the same visible
+ *  default model as the composer before this fallback is considered. */
 export function agentSupportsFast(
   agentId: string | null,
   model: string | null,
@@ -370,6 +527,57 @@ export function displayModelLabel(
     (_m, g) => ` ${g.replace(/\s+/g, "")}`,
   );
   return out.trim();
+}
+
+export interface ConfiguredModelLabelParts {
+  model: string;
+  metadata: string[];
+}
+
+/** The semantic parts of the composer's one model label. Keeping configuration
+ * separate lets renderers visually subordinate effort/Fast without splitting
+ * them back into independent controls. Capability-gating here prevents stale
+ * stored flags from claiming a model supports an option it cannot run, and the
+ * effort is clamped through `effectiveEffort` so the label names the tier the
+ * menu edits and the engine receives — never a retired one. */
+export function configuredModelLabelParts(
+  agentId: string | null,
+  model: string | null,
+  label: string,
+  effort: ChatEffort,
+  fast: boolean,
+  initialize: InitializeResponse | null = null,
+): ConfiguredModelLabelParts {
+  const metadata: string[] = [];
+  if (agentSupportsEffort(agentId, model, initialize)) {
+    metadata.push(
+      effortLabel(agentId, effectiveEffort(agentId, model, effort, initialize)),
+    );
+  }
+  if (fast && agentSupportsFast(agentId, model, initialize)) {
+    metadata.push("Fast");
+  }
+  return { model: displayModelLabel(agentId, label), metadata };
+}
+
+/** One compact accessible/plain-text label for non-visual consumers. */
+export function configuredModelLabel(
+  agentId: string | null,
+  model: string | null,
+  label: string,
+  effort: ChatEffort,
+  fast: boolean,
+  initialize: InitializeResponse | null = null,
+): string {
+  const parts = configuredModelLabelParts(
+    agentId,
+    model,
+    label,
+    effort,
+    fast,
+    initialize,
+  );
+  return [parts.model, ...parts.metadata].join(" ");
 }
 
 // ── Permission posture ⇆ native agent mode ───────────────
@@ -682,23 +890,32 @@ function extractMetaModels(
 
 /** Resolve the {@link ModelOption} for a picked model value against the (curated,
  *  capability-overlaid) list, preferring an exact match then an alias-normalized
- *  one. Returns null when `model` is null/unset or not found — so callers fall
- *  back to family heuristics. */
-function resolveModelOption(
+ *  one. A null/unset `model` resolves to the agent's global default (the star,
+ *  falling back to the catalog head) — the single definition of "what a null
+ *  ChatThread.model means", shared by the capability gates, the spawn env, and
+ *  the composer pill's label. Returns null only when the agent has no models. */
+export function resolveModelOption(
   agentId: string | null,
   model: string | null,
   initialize: InitializeResponse | null,
 ): ModelOption | null {
   const family = agentFamily(agentId);
   const list = modelsForAgent(agentId, initialize);
-  // A null/empty model means "the agent's catalog default" — the very model the
-  // ModelPill DISPLAYS as active (models[0]) when the user hasn't picked or
-  // starred one. Resolve to it so the Effort/Fast capability gates match what the
-  // pill shows. Without this a fresh Cursor chat displays "Composer 2.5" but the
-  // gates read the cursor family heuristic (false) and HIDE the Fast toggle that
-  // Composer 2.5 supports — likewise Codex/Claude defaults read their true
-  // curated capabilities instead of an optimistic family guess.
-  if (!model) return list[0] ?? null;
+  // A null/empty model means "the agent's global default" — the very model the
+  // ModelPill DISPLAYS as active. Resolve it through the SAME favorite-first
+  // chain the pill uses so the Effort/Fast capability gates match what the pill
+  // shows. Without this a fresh Cursor chat displays "Composer 2.5" but the
+  // gates read the cursor family heuristic (false) and HIDE the Fast toggle
+  // that Composer 2.5 supports; and a null-model Claude chat displayed the
+  // starred Opus 5 while the gates read models[0] (Fable 5) — a model with a
+  // different Fast capability than the one on screen.
+  if (!model) {
+    const favorite = effectiveFavoriteModel(agentId);
+    const starred = favorite
+      ? list.find((m) => m.value === favorite)
+      : undefined;
+    return starred ?? list[0] ?? null;
+  }
   const exact = list.find((m) => m.value === model);
   if (exact) return exact;
   const norm = normalizeModelSlug(family, model);
@@ -728,14 +945,10 @@ export function modelsForAgent(
   if (curated.length === 0) return advertised ?? [];
   if (!advertised) return curated;
 
-  // Overlay live per-model capabilities (effort + fast) onto the curated
-  // entries — but CURATED WINS. Live only FILLS a capability the curated entry
-  // OMITS; it never overrides one the curated entry set explicitly. This is what
-  // makes the effort/fast toggles deterministic: a model the catalog marks with
-  // an empty effort ladder (Haiku) or supportsFast:false (Sonnet 5) can't have a
-  // toggle flip on when late live discovery advertises something different. The
-  // curated catalog is the source of truth for WHICH models show AND (when set)
-  // their capabilities; live discovery is a best-effort fallback for gaps.
+  // The bundled catalog owns WHICH models are displayed. Exact live metadata
+  // owns what this installed runtime/account can actually execute. In
+  // particular, [] and false are meaningful authoritative answers; preserving
+  // a bundled true/full ladder would expose controls that the provider rejects.
   const liveBySlug = new Map<string, ModelOption>();
   for (const m of advertised)
     liveBySlug.set(normalizeModelSlug(family, m.value), m);
@@ -744,10 +957,10 @@ export function modelsForAgent(
     if (!live) return c;
     return {
       ...c,
-      ...(c.effortLevels === undefined && live.effortLevels
+      ...(live.effortLevels !== undefined
         ? { effortLevels: live.effortLevels }
         : {}),
-      ...(c.supportsFast === undefined && typeof live.supportsFast === "boolean"
+      ...(typeof live.supportsFast === "boolean"
         ? { supportsFast: live.supportsFast }
         : {}),
     };
@@ -793,7 +1006,8 @@ export const EFFORT_ENV_VAR = "ZEROS_THINKING_EFFORT";
 
 /** Env var carrying the composer's Fast-mode toggle ("1" when on). Zeros
  *  convention. Read by the Claude SDK adapter (→ `fastMode` setting) and the
- *  Codex app-server adapter (→ `service_tier: "fast"`). */
+ *  Codex app-server adapter (→ `service_tier: "fast"`), or by Cursor to choose
+ *  a live-catalog fast model variant. */
 export const FAST_MODE_ENV_VAR = "ZEROS_FAST_MODE";
 
 /** Env var carrying the composer's local permission posture
@@ -896,22 +1110,50 @@ export function envForChatSettings(args: {
 }): Record<string, string> {
   const env: Record<string, string> = {};
   const modelEnv = modelEnvVarForAgent(args.agentId, args.initialize);
-  // A null model means "the agent's catalog default". Resolve it to the SAME
-  // model the ModelPill displays (models[0] — see ModelPill's activeValue)
-  // and SEND it, instead of omitting the env var and letting the agent CLI
-  // fall back to its own configured default — which can silently differ
-  // from what the pill shows (2026-07-13: pill displayed the catalog default
-  // while the engine ran the user's ~/.claude model). Unknown families with
-  // no catalog still omit (nothing displayed to contradict).
+  // A null model means "the agent's global default". Resolve it to the SAME
+  // model the ModelPill displays (resolveModelOption's null branch — favorite
+  // first, catalog head as the floor) and SEND it, instead of omitting the env
+  // var and letting the agent CLI fall back to its own configured default —
+  // which can silently differ from what the pill shows (2026-07-13: pill
+  // displayed the catalog default while the engine ran the user's ~/.claude
+  // model). Resolving through the shared chain is what keeps the engine on the
+  // model the user can actually see: sending models[0] here while the pill
+  // rendered the starred model ran Fable 5 under an "Opus 5" label. Unknown
+  // families with no catalog still omit (nothing displayed to contradict).
   const model =
     args.model ??
-    modelsForAgent(args.agentId, args.initialize)[0]?.value ??
+    resolveModelOption(args.agentId, null, args.initialize)?.value ??
     null;
   if (model && modelEnv) env[modelEnv] = model;
-  env[EFFORT_ENV_VAR] = args.effort;
+  // Send the tier this model can actually run. The pill's label and the menu's
+  // editor apply the same clamp, so a stored tier that went off-ladder (retired
+  // by a catalog update, hand-edited into settings.toml) can never make the
+  // engine run something other than what is on screen. An unknown string is
+  // passed through untouched — an extension agent owns its own vocabulary.
+  const family = agentFamily(args.agentId);
+  const nativeFamily =
+    family === "claude" || family === "codex" || family === "cursor";
+  if (
+    !nativeFamily ||
+    agentSupportsEffort(args.agentId, model, args.initialize)
+  ) {
+    env[EFFORT_ENV_VAR] = Object.prototype.hasOwnProperty.call(
+      EFFORT_RANK,
+      args.effort,
+    )
+      ? effectiveEffort(
+          args.agentId,
+          model,
+          args.effort as ChatEffort,
+          args.initialize,
+        )
+      : args.effort;
+  }
   // Only emit the fast flag when ON, so an off→off toggle never perturbs the
   // env tuple (the respawn key) for agents that don't support it.
-  if (args.fast) env[FAST_MODE_ENV_VAR] = "1";
+  if (args.fast && agentSupportsFast(args.agentId, model, args.initialize)) {
+    env[FAST_MODE_ENV_VAR] = "1";
+  }
   // Same: only carry extra dirs when there's at least one, so the empty case
   // never changes the env tuple. JSON encodes any path safely (spaces/commas).
   const dirs = (args.additionalDirectories ?? []).filter(

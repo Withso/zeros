@@ -90,7 +90,13 @@ const ENTRY = "apps/desktop/src/engine/agents/adapters/codex/app-server.ts";
 
 function die(msg, detail) {
   console.error(`\n✗ FAIL — ${msg}`);
-  if (detail) console.error(String(detail).split("\n").map((l) => `    ${l}`).join("\n"));
+  if (detail)
+    console.error(
+      String(detail)
+        .split("\n")
+        .map((l) => `    ${l}`)
+        .join("\n"),
+    );
   process.exit(1);
 }
 
@@ -124,7 +130,13 @@ for (const signal of ["uncaughtException", "unhandledRejection"]) {
  *  ERR_PACKAGE_PATH_NOT_EXPORTED and this gate would die naming the wrong cause
  *  (the same trap check-runtime-pins.mjs documents). */
 function installedCodexVersion() {
-  const pkg = path.join(ROOT, "node_modules", "@openai", "codex", "package.json");
+  const pkg = path.join(
+    ROOT,
+    "node_modules",
+    "@openai",
+    "codex",
+    "package.json",
+  );
   if (!fs.existsSync(pkg)) {
     die(
       "@openai/codex is not installed — run `pnpm install --frozen-lockfile`.",
@@ -157,6 +169,16 @@ async function loadAppServer() {
 
 const expected = installedCodexVersion();
 const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-codex-smoke-"));
+// This is a protocol/artifact smoke, not a user's configured Codex session.
+// Keep its SQLite state beside the throwaway cwd so the check remains truly
+// credential-free and works when launched by another coding agent whose
+// sandbox can write tmp/workspace paths but intentionally cannot write
+// ~/.codex. buildSpawnEnvWithLoginPath preserves the AMBIENT CODEX_HOME by
+// design, so seed process.env before boot rather than trying to pass a
+// per-child override that the config-root guard would correctly reject.
+const codexHome = path.join(cwd, "codex-home");
+fs.mkdirSync(codexHome, { recursive: true });
+process.env.CODEX_HOME = codexHome;
 
 console.log(`▸ entry:    ${ENTRY}`);
 console.log(`▸ expected: codex ${expected} (installed @openai/codex)`);
@@ -169,7 +191,9 @@ try {
   die("could not compile the codex app-server module", err?.message ?? err);
 }
 if (typeof mod.bootCodexAppServerRuntime !== "function") {
-  die(`${ENTRY} no longer exports bootCodexAppServerRuntime — update this gate.`);
+  die(
+    `${ENTRY} no longer exports bootCodexAppServerRuntime — update this gate.`,
+  );
 }
 
 let handle;
@@ -216,7 +240,9 @@ if (!handle.cliVersion) {
   );
 }
 
-console.log(`▸ resolved: ${handle.binarySource?.path} (${handle.binarySource?.source})`);
+console.log(
+  `▸ resolved: ${handle.binarySource?.path} (${handle.binarySource?.source})`,
+);
 console.log(`▸ reported: codex ${handle.cliVersion ?? "unknown"}`);
 console.log(`▸ userAgent: ${handle.initializeResponse?.userAgent ?? "(none)"}`);
 
@@ -236,14 +262,20 @@ const curatedCodex = (() => {
     );
     return (cat.families?.codex ?? []).map((m) => m.value).filter(Boolean);
   } catch (err) {
-    problems.push(`could not read catalogs/models-v1.json: ${err?.message ?? err}`);
+    problems.push(
+      `could not read catalogs/models-v1.json: ${err?.message ?? err}`,
+    );
     return null;
   }
 })();
 
 let liveIds = null;
 try {
-  const res = await handle.request("model/list", { includeHidden: true }, { timeoutMs: 20_000 });
+  const res = await handle.request(
+    "model/list",
+    { includeHidden: true },
+    { timeoutMs: 20_000 },
+  );
   // An ANSWER we cannot read is drift, not a blip. `model/list` is the binary's
   // authoritative RPC, so a missing `data` array means the response shape moved
   // under us — precisely the protocol regression this gate exists to catch. The
@@ -287,7 +319,9 @@ try {
   // This is the ONLY skip left, and the asymmetry is deliberate: a request that
   // never landed is a blip, while one that ANSWERED is held to its answer (both
   // branches above are hard failures). Do not "even these out".
-  console.log(`▸ models:   model/list unavailable (${String(err?.message ?? err).slice(0, 90)}) — id check SKIPPED`);
+  console.log(
+    `▸ models:   model/list unavailable (${String(err?.message ?? err).slice(0, 90)}) — id check SKIPPED`,
+  );
 }
 
 // UNCONDITIONAL, and deliberately not an `else` arm of the check below: an empty
@@ -296,13 +330,17 @@ try {
 // been skipped — so the normal case (model/list healthy, `families.codex` emptied
 // or its `value` key renamed) printed an id count and exited 0.
 if (curatedCodex?.length === 0) {
-  problems.push("catalogs/models-v1.json lists no codex models — the id check ran against nothing.");
+  problems.push(
+    "catalogs/models-v1.json lists no codex models — the id check ran against nothing.",
+  );
 }
 
 if (liveIds) {
   console.log(
     `▸ models:   ${liveIds.size} offered by the pinned binary, checking ` +
-      (curatedCodex ? `${curatedCodex.length} curated id(s)` : "nothing (catalog unreadable)"),
+      (curatedCodex
+        ? `${curatedCodex.length} curated id(s)`
+        : "nothing (catalog unreadable)"),
   );
   for (const id of curatedCodex ?? []) {
     if (!liveIds.has(id)) {
@@ -334,6 +372,8 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
-console.log(`\n✓ PASS — codex ${handle.cliVersion} booted, completed the app-server`);
+console.log(
+  `\n✓ PASS — codex ${handle.cliVersion} booted, completed the app-server`,
+);
 console.log("  initialize handshake, and matches the installed pin.");
 process.exit(0);

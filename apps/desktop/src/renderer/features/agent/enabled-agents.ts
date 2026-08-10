@@ -79,6 +79,14 @@ function getSnapshot(): PersistedShape {
   return current;
 }
 
+/** Synchronous counterpart to the hook for spawn/default resolution paths.
+ * Reads storage when the module snapshot is still first-run null so cold boot,
+ * tests, and non-React callers all apply the same enabled-agent contract. */
+export function isAgentEnabled(id: string, isBeta?: boolean): boolean {
+  const persisted = current ?? readPersisted();
+  return persisted ? persisted.ids.includes(id) : !isBeta;
+}
+
 // Cross-tab sync — in Electron this covers devtools-in-a-separate-
 // window and any future multi-window setup.
 if (typeof window !== "undefined") {
@@ -105,10 +113,8 @@ export function useEnabledAgents(): UseEnabledAgentsApi {
   const persisted = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
   const isEnabled = useCallback(
-    (id: string, isBeta?: boolean): boolean => {
-      if (!persisted) return !isBeta; // first-run: non-beta on, beta off
-      return persisted.ids.includes(id);
-    },
+    (id: string, isBeta?: boolean): boolean =>
+      persisted ? persisted.ids.includes(id) : !isBeta,
     [persisted],
   );
 

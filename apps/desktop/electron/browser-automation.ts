@@ -2494,13 +2494,18 @@ async function updateAgentPointer(
   if (!Number.isFinite(x) || !Number.isFinite(y)) return;
   lease.pointer = { x, y, action, updatedAt: Date.now() };
   try {
-    await lease.view.webContents.executeJavaScript(
-      agentPointerOverlayScript(lease.pointer),
-      true,
+    await withTimeout(
+      lease.view.webContents.executeJavaScript(
+        agentPointerOverlayScript(lease.pointer),
+        true,
+      ),
+      1_000,
+      "Agent pointer overlay timed out.",
     );
   } catch {
+    // The overlay is cosmetic and must never block the authoritative input.
     // A navigation can replace the document between an input command and its
-    // decoration. The next input event reinstalls the inert overlay.
+    // decoration; the next input event reinstalls the inert overlay.
   }
 }
 

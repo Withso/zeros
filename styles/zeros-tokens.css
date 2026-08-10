@@ -8,19 +8,19 @@
    family. Component aliases (primary-button-*) are thin
    aliases over the primitives.
 
-   THEMES: dark default — "Zeros Shade" — plus a light theme.
-   Zeros Shade is a muted warm-gray
-   palette (hues 5-25°, chroma 0-7%); it lives directly in
-   `:root` and is what every mode other than light renders.
-   The light theme is a `[data-theme="light"]` override block —
-   warm off-whites over the same taxonomy. The
-   appearance store writes `data-theme` on <html>.
+   THEMES: neutral dark default, "Orka black" (the preserved
+   warm-gray dark palette), and light. `data-theme` remains the
+   resolved APPEARANCE (`dark` / `light`) because Tailwind, native
+   controls, code themes, and embedded surfaces depend on that
+   polarity. The opt-in Orka black palette is selected separately
+   by `data-theme-palette="orka-black"` on the dark root.
 
    ─── STRUCTURE ──────────────────────────────────────────────
    1. Imports + setup (Tailwind, Geist Variable font, @source, dark variant)
    2. @theme inline — wire primitive tokens to Tailwind utilities
-   3. :root — Zeros Shade primitive values (the theme)
-   4. @layer base — default border-color + focus outline
+   3. :root — neutral dark primitives + shared dark status palettes
+   4. Dark-palette + light-theme override blocks
+   5. @layer base — default border-color + focus outline
 
    ─── TOKEN TAXONOMY ─────────────────────────────────────────
 
@@ -50,10 +50,19 @@
      --bg4                  rare — reserved for specific use cases
      --bg5                  rare — reserved for specific use cases
 
-   FOREGROUNDS (3 tiers — TEXT + ICONS ONLY, never borders):
+   FOREGROUNDS (4 tiers — TEXT + ICONS ONLY, never borders):
      --fg1                  selected / highlighted text (titles, output, agent chat body)
      --fg2                  default text + icon color across the app
-     --muted-fg             placeholder text + empty-state icons
+     --fg3                  MIDDLE tier — exactly ONE step quieter than --fg2.
+                            For content that must read as secondary to the text
+                            beside it while staying comfortably legible: input
+                            placeholders, .gitignore'd rows in the file tree.
+                            Reach for this (not --muted-fg) whenever the
+                            reference point is --fg2 rather than the canvas.
+     --muted-fg             QUIETEST tier — supplemental metadata (timestamps,
+                            counts, SHAs), disabled content, empty-state icons.
+                            Two steps below --fg2; appropriate only where the
+                            content is genuinely incidental.
 
    REPOSITORY NAVIGATION (not the settings sidebar):
      --sidebar-bg           workspace sidebar background
@@ -65,8 +74,10 @@
      --border3              secondary button, dropdown TRIGGER, input field
      --border4              highlighted state of border3 consumers (dropdown hover)
 
-   HIGHLIGHTED (brand accents — cool blue family in Zeros Shade):
+   HIGHLIGHTED (neutral interaction emphasis in both dark palettes):
      --highlighted-bg              user-message bg in chat (text on it: fg1/fg2)
+                                   neutral dark aliases this to --bg2; Orka
+                                   black and light keep their own values
      --highlighted-bright          input focus border, brighter accent borders
 
    INVERTED (polarity-flipping surface — always the OPPOSITE of bg1):
@@ -92,7 +103,11 @@
      hover on bg3 surface → --bg3-hover
      hover on sidebar     → --sidebar-bg-hover
 
-   Foregrounds: default --fg2, selected/highlighted --fg1, placeholder --muted-fg.
+   Foregrounds: default --fg2, selected/highlighted --fg1. Below the default,
+   pick by REFERENCE POINT: --fg3 when the thing it must read quieter than is
+   the --fg2 text beside it (placeholders, ignored file-tree rows); --muted-fg
+   when the content is incidental to the surface itself (timestamps, counts,
+   disabled text, empty-state icons).
 
    Buttons:
      Primary    → bg-primary-button-bg + text-primary-button-fg, hover: bg-primary-button-hover
@@ -107,7 +122,9 @@
 
    Inputs:
      bg-bg{N} (matches parent), border-border3, focus border-highlighted-bright
-     placeholder text-muted-fg, value text-fg1
+     value text-fg1, placeholder:text-fg3 (the composer's ProseMirror
+     placeholder uses var(--fg3) directly — same tier, one weight app-wide).
+     A placeholder at --fg2 reads as a FILLED value; do not go back to it.
 
    Dropdowns:
      trigger: bg-bg{N} + border-border3, hover bg-bg2-hover + border-border4
@@ -137,7 +154,6 @@
  * except light. */
 @custom-variant dark (&:is([data-theme="dark"] *));
 
-
 /* ──────────────────────────────────────────────────────────
    1. TAILWIND v4 @theme inline — wire primitives → utility classes
    ──────────────────────────────────────────────────────────
@@ -150,11 +166,10 @@
   /* Fonts → font-sans, font-mono */
   --font-sans:
     "Geist Variable", ui-sans-serif, system-ui, -apple-system,
-    BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
-    Arial, sans-serif;
+    BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono:
-    "Geist Mono Variable", ui-monospace, SFMono-Regular,
-    "SF Mono", Menlo, Consolas, monospace;
+    "Geist Mono Variable", ui-monospace, SFMono-Regular, "SF Mono", Menlo,
+    Consolas, monospace;
 
   /* ── TYPE SCALE — sub-`sm` steps + `xs` override ──
    * Tailwind ships `text-sm` (14px) and up; the app needs finer steps
@@ -224,7 +239,7 @@
   --color-border3: var(--border3);
   --color-border4: var(--border4);
 
-  /* ── HIGHLIGHTED (brand accent — Orka Black family) ── */
+  /* ── HIGHLIGHTED (theme-adaptive interaction emphasis) ── */
   --color-highlighted-bg: var(--highlighted-bg);
   --color-highlighted-bright: var(--highlighted-bright);
 
@@ -330,13 +345,18 @@
   --color-brown-950: var(--brown-950);
 }
 
-
 /* ──────────────────────────────────────────────────────────
-   2. PRIMITIVE TOKENS — Zeros Shade (the default dark theme)
+   2. PRIMITIVE TOKENS — neutral dark (the default dark theme)
    ──────────────────────────────────────────────────────────
-   `:root` is Zeros Shade — a muted warm-gray palette (hues
-   5-25°, chroma 0-10%) with a cool blue accent. The light theme
-   overrides these values in the `[data-theme="light"]` block. */
+   Structural dark tokens in `:root` are achromatic HSL: hue and
+   saturation are both zero, and every one keeps the former dark
+   palette's lightness EXCEPT bg2, which is deliberately one point
+   lighter (L13) to lift the composer and raised cards off the canvas.
+   Neutral Dark also aliases --highlighted-bg to --bg2 so the
+   user-message bubble and the composer read as one surface family.
+   Meaning-bearing status palettes remain chromatic; see COLOR PALETTES
+   below. Orka black restores the former warm structural values in its
+   override block, and Light overrides the full palette. */
 
 :root {
   /* Native UA hint — form controls, scrollbars, selection.
@@ -344,17 +364,19 @@
   color-scheme: dark;
 
   /* ── BACKGROUNDS ── */
-  --bg0:           hsl(5 10% 5%);   /* #0E0C0B — INACTIVE chat window fill (below bg1) */
-  --bg1:           hsl(5 5% 7%);    /* #0E0C0C — default canvas / app backdrop + active chat window */
+  --bg0: hsl(0 0% 5%); /* #0D0D0D — INACTIVE chat window fill (below bg1) */
+  --bg1: hsl(
+    0 0% 7%
+  ); /* #121212 — default canvas / app backdrop + active chat window */
   /* Contextual chat-window surface. Defaults to bg1 so the ACTIVE window (and
    * any chat chrome rendered outside a pane) looks exactly like the plain app
    * canvas; ChatPane overrides it to bg0 on unfocused panes. Consumers use
    * bg-(--pane-bg) / from-(--pane-bg) so they re-tint with their pane. */
-  --pane-bg:       var(--bg1);
-  --bg1-hover:     hsl(8 5% 12%);   /* #201D1D — hover on bg1 (tool calls, tabs) */
-  --bg1-highlight: hsl(25 5% 9%);   /* #181716 — highlighted content above bg1 */
-  --bg2:           hsl(25 4% 12%);  /* #201E1D — composer surface */
-  --bg2-hover:     hsl(25 3% 15%);  /* #292928 — hover on bg2 */
+  --pane-bg: var(--bg1);
+  --bg1-hover: hsl(0 0% 12%); /* #1F1F1F — hover on bg1 (tool calls, tabs) */
+  --bg1-highlight: hsl(0 0% 9%); /* #171717 — highlighted content above bg1 */
+  --bg2: hsl(0 0% 13%); /* #212121 — composer surface */
+  --bg2-hover: hsl(0 0% 15%); /* #262626 — hover on bg2 */
   /* bg3 is a FLOATING-SURFACE-ONLY token (popover / dropdown / menu / select /
    * command) — always on TOP of a background, NEVER a fill/chip/selected state.
    * Aliased to --sidebar-bg so a floating panel sits one subtle step above the
@@ -362,26 +384,34 @@
    * border2 + --shadow-dropdown, mirroring the light theme where bg3 == bg1.
    * (--sidebar-bg / --sidebar-bg-hover are defined a few lines below; CSS
    * custom properties resolve var() lazily, so the forward reference is fine.) */
-  --bg3:           var(--sidebar-bg);        /* = #151413 — floating popover surface */
-  --bg3-hover:     var(--sidebar-bg-hover);  /* = #272625 — hover on bg3 (menu items) */
-  --bg4:           hsl(5 1% 24%);   /* #3E3D3D — rare */
-  --bg5:           hsl(8 0% 37%);   /* #5E5E5E — rare */
+  --bg3: var(--sidebar-bg); /* = #171717 — floating popover surface */
+  --bg3-hover: var(
+    --sidebar-bg-hover
+  ); /* = #262626 — hover on bg3 (menu items) */
+  --bg4: hsl(0 0% 24%); /* #3D3D3D — rare */
+  --bg5: hsl(0 0% 37%); /* #5E5E5E — rare */
 
   /* ── FOREGROUNDS (text + icons only — NEVER used for borders) ── */
-  --fg1:        hsl(0 2% 92%);   /* #EBEAEA — selected/highlighted text + icons */
-  --fg2:        hsl(20 4% 66%);  /* #ACA7A5 — default text + icon across app */
-  --fg3:        hsl(15 1% 44%);  /* #71706F — third-tier foreground (alias of --muted-fg) */
-  --muted-fg:   hsl(15 4% 44%);  /* #756E6C — placeholder + empty-state icons */
+  --fg1: hsl(0 0% 94%); /* #F0F0F0 — selected/highlighted text + icons */
+  --fg2: hsl(0 0% 72%); /* #B8B8B8 — default text + icon across app */
+  /* MIDDLE tier — one step below --fg2 (see TOKEN TAXONOMY).
+   * Placed 60% of the way from --muted-fg up to --fg2 in log-contrast space:
+   * 6.58:1 on bg1, between fg2's 9.41:1 and muted-fg's 3.80:1. Orka black and
+   * Light re-derive the SAME relative position in their own bands rather than
+   * copying this lightness — in Light a higher L means LESS contrast, so
+   * copying `60` there would invert the tier order. */
+  --fg3: hsl(0 0% 60%); /* #999999 — middle tier (one step below fg2) */
+  --muted-fg: hsl(0 0% 44%); /* #707070 — quietest tier (app-wide 3rd tier) */
 
   /* ── REPOSITORY NAVIGATION (not the settings sidebar) ── */
-  --sidebar-bg:       hsl(25 5% 9%);   /* #151413 */
-  --sidebar-bg-hover: hsl(25 2% 15%);  /* #272625 */
+  --sidebar-bg: hsl(0 0% 9%); /* #171717 */
+  --sidebar-bg-hover: hsl(0 0% 15%); /* #262626 */
 
   /* ── BORDERS ── */
-  --border1: hsl(8 3% 14%);   /* #252323 — default for bg1 surfaces */
-  --border2: hsl(25 1% 18%);  /* #2E2E2D — sidebar / composer focus / bg2 */
-  --border3: hsl(15 0% 24%);  /* #3D3D3D — secondary btn / dropdown / input */
-  --border4: hsl(15 0% 30%);  /* #4D4D4D — highlighted state of border3 */
+  --border1: hsl(0 0% 14%); /* #242424 — default for bg1 surfaces */
+  --border2: hsl(0 0% 18%); /* #2E2E2E — sidebar / composer focus / bg2 */
+  --border3: hsl(0 0% 24%); /* #3D3D3D — secondary btn / dropdown / input */
+  --border4: hsl(0 0% 30%); /* #4D4D4D — highlighted state of border3 */
 
   /* ── ELEVATION ──
    * Lift for floating surfaces (popover / dropdown / context menu).
@@ -392,31 +422,36 @@
    * right over a dark UI but crushing over a light one (see light block). */
   --scrim: hsl(0 0% 0% / 0.8);
 
-  /* ── HIGHLIGHTED (canvas-hue bg + warm-grey accent) ── */
-  /* User-message bubble. Sits in bg0/bg1's hue family (5) rather than the old
-   * warm 25 and one step darker (15% → 12%), so the bubble reads as a quiet
-   * inset on the canvas instead of a raised warm slab. Its 12% L is now just
-   * BELOW border1 (14%), which is what gives the bubble its faint outline —
-   * keep any hover chip painted on this surface at bg2-hover (15%) or above,
-   * or it disappears into the fill (turn-container.tsx "More" pill). */
-  --highlighted-bg:               hsl(5 8% 12%);    /* #211D1C — user msg bg (text on it: fg1/fg2) */
-  --highlighted-bright:           hsl(25 5% 65%);    /* #AAA5A1 — input focus border, brighter accents */
+  /* ── HIGHLIGHTED (neutral interaction emphasis) ── */
+  /* User-message bubble. Neutral Dark ALIASES this to bg2 so the bubble reads
+   * as the same raised surface as the composer the message was typed in (Orka
+   * black and Light keep their own literal values, so this alias is
+   * neutral-Dark-only). At 13% L it still sits just BELOW border1 (14%), which
+   * gives the bubble its faint outline — keep any hover chip painted on this
+   * surface at bg2-hover (15%) or above, or it disappears into the fill
+   * (turn-container.tsx "More" pill). */
+  --highlighted-bg: var(--bg2); /* = #212121 — user msg bg (text: fg1/fg2) */
+  --highlighted-bright: hsl(
+    0 0% 65%
+  ); /* #A6A6A6 — input focus border, brighter accents */
 
   /* ── INVERTED (polarity-flipping pair) ──
    * The one surface that is always the OPPOSITE of bg1: near-white
    * in the dark theme, near-black in light. --inverted-fg is the
    * text/icon color ON it — the pair always ships together.
    * Consumers: primary button (via the aliases below), switch ON track. */
-  --inverted-bg: hsl(0 2% 92%);   /* #EBEAEA — near-white on dark */
-  --inverted-fg: hsl(5 7% 5%);    /* #0E0C0C — dark text/icon on the inverted fill */
+  --inverted-bg: hsl(0 0% 92%); /* #EBEBEB — near-white on dark */
+  --inverted-fg: hsl(
+    0 0% 5%
+  ); /* #0D0D0D — dark text/icon on the inverted fill */
 
   /* ── COMPONENT ALIASES (button intents) ──
    * primary-button-bg / primary-button-fg are aliases over the
    * inverted pair. The hover is its own value per theme (a lifted
    * neutral that reads against primary-button-bg). */
-  --primary-button-bg:    var(--inverted-bg);     /* #EBEAEA */
-  --primary-button-hover: hsl(25 2% 83%);         /* #D5D4D3 — lifted neutral */
-  --primary-button-fg:    var(--inverted-fg);     /* #0E0C0C */
+  --primary-button-bg: var(--inverted-bg); /* #EBEBEB */
+  --primary-button-hover: hsl(0 0% 83%); /* #D4D4D4 — lifted neutral */
+  --primary-button-fg: var(--inverted-fg); /* #0D0D0D */
 
   /* ── COLOR PALETTES (6 families — explicit HSL, beyond neutral) ──────
    * primary = vivid accent / icon / border · bg = dark tinted surface ·
@@ -429,34 +464,40 @@
    * fills + delete icons. Full 50–950 ramps live in the palette preview
    * (styles/Artifacts/color-palette-preview.html); add a shade here only if a
    * specific step is actually needed. */
-  --red-primary:    hsl(0 91% 71%);    /* #F87272 — −N counts, error accents */
-  --red-secondary:  hsl(7 83% 39%);    /* #B72311 — solid delete fills + delete icons */
-  --red-secondary-fg: hsl(0 0% 100%);  /* #FFFFFF — text/icon on SOLID --red-secondary
+  --red-primary: hsl(0 91% 71%); /* #F87272 — −N counts, error accents */
+  --red-secondary: hsl(
+    7 83% 39%
+  ); /* #B72311 — solid delete fills + delete icons */
+  --red-secondary-fg: hsl(
+    0 0% 100%
+  ); /* #FFFFFF — text/icon on SOLID --red-secondary
                                         * fills. THEME-STATIC (white in both themes —
                                         * the red fill stays vivid in light, so fg1,
                                         * which flips dark, can't sit on it). */
-  --red-bg:         hsl(13 81% 14%);   /* #421407 — error container surface */
-  --red-fg:         hsl(20 97% 72%);   /* #FDA274 — text/icon on --red-bg */
+  --red-bg: hsl(13 81% 14%); /* #421407 — error container surface */
+  --red-fg: hsl(20 97% 72%); /* #FDA274 — text/icon on --red-bg */
 
-  --green-primary:  hsl(142 69% 58%);  /* #4ADE80 — +N counts, success accents */
-  --green-bg:       hsl(120 23% 17%);  /* #213521 — success container surface */
-  --green-fg:       hsl(142 75% 73%);  /* #87EEAC — text/icon on --green-bg */
+  --green-primary: hsl(142 69% 58%); /* #4ADE80 — +N counts, success accents */
+  --green-bg: hsl(120 23% 17%); /* #213521 — success container surface */
+  --green-fg: hsl(142 75% 73%); /* #87EEAC — text/icon on --green-bg */
 
-  --yellow-primary: hsl(37 75% 60%);  /* #E6AB4C — warning · modified · in-progress */
-  --yellow-bg:      hsl(38 68% 17%);   /* #49330E — warning container surface */
-  --yellow-fg:      hsl(44 100% 50%);  /* #FFB900 — text/icon on --yellow-bg */
+  --yellow-primary: hsl(
+    37 75% 60%
+  ); /* #E6AB4C — warning · modified · in-progress */
+  --yellow-bg: hsl(38 68% 17%); /* #49330E — warning container surface */
+  --yellow-fg: hsl(44 100% 50%); /* #FFB900 — text/icon on --yellow-bg */
 
-  --blue-primary:   hsl(205 80% 73%);  /* #83C3F1 — info · links · accents */
-  --blue-bg:        hsl(226 57% 18%);  /* #142048 — info container surface */
-  --blue-fg:        hsl(211 96% 78%);  /* #92C5FD — text/icon on --blue-bg */
+  --blue-primary: hsl(205 80% 73%); /* #83C3F1 — info · links · accents */
+  --blue-bg: hsl(226 57% 18%); /* #142048 — info container surface */
+  --blue-fg: hsl(211 96% 78%); /* #92C5FD — text/icon on --blue-bg */
 
   --violet-primary: hsl(271 80% 73%); /* #BC83F1 — done · merged */
-  --violet-bg:      hsl(255 21% 18%);  /* #2A2539 — done container surface */
-  --violet-fg:      hsl(265 66% 77%);  /* #BE9EEB — text/icon on --violet-bg */
+  --violet-bg: hsl(255 21% 18%); /* #2A2539 — done container surface */
+  --violet-fg: hsl(265 66% 77%); /* #BE9EEB — text/icon on --violet-bg */
 
-  --brown-primary:  hsl(9 46% 72%);   /* #D9A298 — file paths · warm accents */
-  --brown-bg:       hsl(10 15% 15%);  /* #2D2321 — brown container surface */
-  --brown-fg:       hsl(10 80% 72%);  /* #F1917E — text/icon on --brown-bg */
+  --brown-primary: hsl(9 46% 72%); /* #D9A298 — file paths · warm accents */
+  --brown-bg: hsl(10 15% 15%); /* #2D2321 — brown container surface */
+  --brown-fg: hsl(10 80% 72%); /* #F1917E — text/icon on --brown-bg */
 
   /* ── COLOR RAMPS (50–950 — THEME-STATIC absolute scales) ──
    * Full per-family scales for the rare case a specific shade is needed. Wired
@@ -476,7 +517,9 @@
   --red-500: hsl(0 91% 71%);
   --red-600: hsl(3 84% 52%);
   --red-700: hsl(7 83% 39%);
-  --red-750: hsl(10 58% 31%); /* #7b3021 — muted brick · PR-status closed chip border (off-ramp accent, mirrors --violet-750) */
+  --red-750: hsl(
+    10 58% 31%
+  ); /* #7b3021 — muted brick · PR-status closed chip border (off-ramp accent, mirrors --violet-750) */
   --red-800: hsl(10 82% 27%);
   --red-900: hsl(13 81% 14%);
   --red-950: hsl(13 81% 10%);
@@ -525,7 +568,9 @@
   --violet-500: hsl(271 80% 73%);
   --violet-600: hsl(267 80% 59%);
   --violet-700: hsl(263 61% 46%);
-  --violet-750: hsl(259 41% 42%); /* #5B3F96 — muted violet · PR-status chip border (off-ramp accent) */
+  --violet-750: hsl(
+    259 41% 42%
+  ); /* #5B3F96 — muted violet · PR-status chip border (off-ramp accent) */
   --violet-800: hsl(259 41% 32%);
   --violet-900: hsl(255 21% 18%);
   --violet-950: hsl(255 21% 13%);
@@ -538,18 +583,73 @@
   --brown-500: hsl(9 46% 72%);
   --brown-600: hsl(7 38% 58%);
   --brown-700: hsl(6 30% 45%);
-  --brown-800: hsl(7 23% 35%);   /* #6D4944 — muted brown · PR-status chip border (raised from the ramp for a visible outline) */
+  --brown-800: hsl(
+    7 23% 35%
+  ); /* #6D4944 — muted brown · PR-status chip border (raised from the ramp for a visible outline) */
   --brown-900: hsl(10 15% 15%);
   --brown-950: hsl(10 15% 10%);
 }
 
+/* ──────────────────────────────────────────────────────────
+   2b. ORKA BLACK — preserved warm dark palette
+   ──────────────────────────────────────────────────────────
+   Orka black is the former default dark palette, byte-for-byte at
+   the token-value level. Only structural neutrals need overrides:
+   status families, ramps, elevation, scrim, and aliases remain shared
+   with neutral Dark. Requiring BOTH attributes keeps `data-theme` as
+   the dark/light polarity contract for Tailwind and embedded surfaces. */
+
+:root[data-theme="dark"][data-theme-palette="orka-black"] {
+  /* ── BACKGROUNDS ── */
+  --bg0: hsl(5 10% 5%); /* #0E0C0B — INACTIVE chat window fill (below bg1) */
+  --bg1: hsl(
+    5 5% 7%
+  ); /* #131111 — default canvas / app backdrop + active chat window */
+  --bg1-hover: hsl(8 5% 12%); /* #201D1D — hover on bg1 (tool calls, tabs) */
+  --bg1-highlight: hsl(25 5% 9%); /* #181716 — highlighted content above bg1 */
+  --bg2: hsl(25 4% 12%); /* #201E1D — composer surface */
+  --bg2-hover: hsl(25 3% 15%); /* #272625 — hover on bg2 */
+  --bg4: hsl(5 1% 24%); /* #3E3D3D — rare */
+  --bg5: hsl(8 0% 37%); /* #5E5E5E — rare */
+
+  /* ── FOREGROUNDS ── */
+  --fg1: hsl(0 2% 92%); /* #EBEAEA — selected/highlighted text + icons */
+  --fg2: hsl(20 4% 66%); /* #ACA7A5 — default text + icon across app */
+  /* MIDDLE tier — 5.98:1 on Orka's bg1, the same
+   * relative position between muted-fg and fg2 that neutral Dark's L60 holds.
+   * Orka's --fg2 is L66 (not L72), so copying L60 here would leave a far
+   * tighter fg2/fg3 gap than intended. */
+  --fg3: hsl(15 1% 57%); /* #929190 — middle tier (one step below fg2) */
+  /* Adopts the former --fg3 value (sat 1%, not 4%): every one of the ~191
+   * migrated consumers rendered at that exact color, so this keeps Orka black
+   * pixel-identical for them. */
+  --muted-fg: hsl(15 1% 44%); /* #71706F — quietest tier (app-wide 3rd tier) */
+
+  /* ── REPOSITORY NAVIGATION ── */
+  --sidebar-bg: hsl(25 5% 9%); /* #181716 */
+  --sidebar-bg-hover: hsl(25 2% 15%); /* #272625 */
+
+  /* ── BORDERS ── */
+  --border1: hsl(8 3% 14%); /* #252323 — default for bg1 surfaces */
+  --border2: hsl(25 1% 18%); /* #2E2E2D — sidebar / composer focus / bg2 */
+  --border3: hsl(15 0% 24%); /* #3D3D3D — secondary btn / dropdown / input */
+  --border4: hsl(15 0% 30%); /* #4D4D4D — highlighted state of border3 */
+
+  /* ── HIGHLIGHTED + INVERTED + COMPONENT HOVER ── */
+  --highlighted-bg: hsl(5 8% 12%); /* #211D1C — user msg bg */
+  --highlighted-bright: hsl(25 5% 65%); /* #AAA5A1 — focus / brighter borders */
+  --inverted-bg: hsl(0 2% 92%); /* #EBEAEA — near-white on dark */
+  --inverted-fg: hsl(5 7% 5%); /* #0E0C0C — content on inverted fill */
+  --primary-button-hover: hsl(25 2% 83%); /* #D5D4D3 — lifted warm neutral */
+}
 
 /* ──────────────────────────────────────────────────────────
-   2b. LIGHT THEME — [data-theme="light"] overrides
+   2c. LIGHT THEME — [data-theme="light"] overrides
    ──────────────────────────────────────────────────────────
    Warm off-whites over the same taxonomy. Same specificity as
-   `:root` (both target <html>), later in the file, so it wins
-   whenever the appearance store writes data-theme="light".
+   `:root` for the values it replaces and mutually exclusive with
+   the Orka selector, so it wins whenever the appearance store writes
+   data-theme="light".
    Notes on the ramp shape:
      • bg1 and bg3 are BOTH pure white — in light mode, popovers
        get their lift from --shadow-dropdown + border, not fill.
@@ -563,34 +663,46 @@
   color-scheme: light;
 
   /* ── BACKGROUNDS ── */
-  --bg0:           hsl(0 0% 98%);   /* #FAFAFA — INACTIVE chat window fill (below bg1) */
-  --bg1:           hsl(0 0% 100%);  /* #FFFFFF — default canvas / app backdrop + active chat window */
-  --bg1-hover:     hsl(0 4% 95%);   /* #F3F2F2 — hover on bg1 (tool calls, tabs) */
-  --bg1-highlight: hsl(0 0% 97%);   /* #F7F7F7 — highlighted content above bg1 */
-  --bg2:           hsl(60 4% 95%);  /* #F3F3F2 — composer surface */
-  --bg2-hover:     hsl(60 4% 91%);  /* #E9E9E7 — hover on bg2 */
+  --bg0: hsl(0 0% 98%); /* #FAFAFA — INACTIVE chat window fill (below bg1) */
+  --bg1: hsl(
+    0 0% 100%
+  ); /* #FFFFFF — default canvas / app backdrop + active chat window */
+  --bg1-hover: hsl(0 4% 95%); /* #F3F2F2 — hover on bg1 (tool calls, tabs) */
+  --bg1-highlight: hsl(0 0% 97%); /* #F7F7F7 — highlighted content above bg1 */
+  --bg2: hsl(60 4% 95%); /* #F3F3F2 — composer surface */
+  --bg2-hover: hsl(60 4% 91%); /* #E9E9E7 — hover on bg2 */
   /* Floating popover surface = the bg1 canvas itself; lift is border2 +
    * --shadow-dropdown (bg3 == bg1 in light — see the dark block's note). */
-  --bg3:           var(--bg1);        /* = #FFFFFF — floating popover surface */
-  --bg3-hover:     var(--bg1-hover);  /* = #F3F2F2 — hover on bg3 (menu items) */
-  --bg4:           hsl(0 0% 94%);   /* #F0F0F0 — rare (deepest chip grey) */
-  --bg5:           hsl(0 0% 88%);   /* #E0E0E0 — rare (one step past bg4) */
+  --bg3: var(--bg1); /* = #FFFFFF — floating popover surface */
+  --bg3-hover: var(--bg1-hover); /* = #F3F2F2 — hover on bg3 (menu items) */
+  --bg4: hsl(0 0% 94%); /* #F0F0F0 — rare (deepest chip grey) */
+  --bg5: hsl(0 0% 88%); /* #E0E0E0 — rare (one step past bg4) */
 
   /* ── FOREGROUNDS ── */
-  --fg1:        hsl(20 7% 16%);   /* #2C2826 — selected/highlighted text + icons */
-  --fg2:        hsl(20 4% 37%);   /* #625D5B — default text + icon across app; passes AA on white at 6.5:1 */
-  --fg3:        hsl(20 4% 56%);   /* #938D8A — third-tier foreground */
-  --muted-fg:   hsl(20 4% 68%);   /* #B1ACAA — placeholder + empty-state icons */
+  --fg1: hsl(20 7% 16%); /* #2C2826 — selected/highlighted text + icons */
+  --fg2: hsl(
+    20 4% 37%
+  ); /* #625D5B — default text + icon across app; passes AA on white at 6.5:1 */
+  /* MIDDLE tier. Light INVERTS the lightness axis: a
+   * higher L means LESS contrast on a white canvas, so this sits BELOW
+   * --muted-fg's L (44 vs 56), not above it. 4.97:1 on bg1 — the same relative
+   * position between muted-fg and fg2 that neutral Dark's L60 holds. */
+  --fg3: hsl(20 4% 44%); /* #756F6C — middle tier (one step below fg2) */
+  /* Adopts the former --fg3 value (L56, not L68). The ~191 migrated consumers
+   * already rendered at L56, so they stay identical; the 25 review-surface
+   * consumers that were already on --muted-fg rise from 2.24:1 to 3.26:1,
+   * which is the intended fix — L68 was too faint for metadata text. */
+  --muted-fg: hsl(20 4% 56%); /* #938D8A — quietest tier (app-wide 3rd tier) */
 
   /* ── SIDEBAR ── */
-  --sidebar-bg:       hsl(60 9% 98%);  /* #FAFAF9 */
-  --sidebar-bg-hover: hsl(60 2% 92%);  /* #EBEBEA */
+  --sidebar-bg: hsl(60 9% 98%); /* #FAFAF9 */
+  --sidebar-bg-hover: hsl(60 2% 92%); /* #EBEBEA */
 
   /* ── BORDERS ── */
-  --border1: hsl(30 9% 91%);   /* #EAE8E6 — default for bg1 surfaces */
-  --border2: hsl(30 9% 88%);   /* #EAE8E6 — sidebar / composer focus / bg2 */
-  --border3: hsl(60 3% 85%);   /* #DADAD8 — secondary btn / dropdown / input */
-  --border4: hsl(0 1% 83%);    /* #D5D4D4 — highlighted state of border3 */
+  --border1: hsl(30 9% 91%); /* #EAE8E6 — default for bg1 surfaces */
+  --border2: hsl(30 9% 88%); /* #E3E0DE — sidebar / composer focus / bg2 */
+  --border3: hsl(60 3% 85%); /* #DADAD8 — secondary btn / dropdown / input */
+  --border4: hsl(0 1% 83%); /* #D5D4D4 — highlighted state of border3 */
 
   /* ── ELEVATION ── softer, wider wash — a light UI reads shadow
    * against white, so lower alpha than the dark theme's 0.35. */
@@ -599,45 +711,52 @@
   --scrim: hsl(0 0% 0% / 0.4);
 
   /* ── HIGHLIGHTED ── */
-  --highlighted-bg:     hsl(30 5% 92%);  /* #ECEBEA — user msg bg (text on it: fg1/fg2) */
-  --highlighted-bright: hsl(25 5% 45%);  /* #79726D — input focus border, brighter accents */
+  --highlighted-bg: hsl(
+    30 5% 92%
+  ); /* #ECEBEA — user msg bg (text on it: fg1/fg2) */
+  --highlighted-bright: hsl(
+    25 5% 45%
+  ); /* #79726D — input focus border, brighter accents */
 
   /* ── INVERTED (near-black in light) ── */
-  --inverted-bg: hsl(20 7% 16%);  /* #2C2826 — warm near-black */
-  --inverted-fg: hsl(0 0% 100%);  /* #FFFFFF — text/icon on the inverted fill */
+  --inverted-bg: hsl(20 7% 16%); /* #2C2826 — warm near-black */
+  --inverted-fg: hsl(0 0% 100%); /* #FFFFFF — text/icon on the inverted fill */
 
   /* ── COMPONENT ALIASES ── bg/fg follow the inverted pair via the
    * :root aliases; only the hover needs its own light value (a
    * lifted warm charcoal that reads against the near-black fill). */
-  --primary-button-hover: hsl(22 6% 25%);  /* #433E3B */
+  --primary-button-hover: hsl(22 6% 25%); /* #433E3B */
 
   /* ── COLOR PALETTES (6 families — light anchors) ── */
-  --red-primary:    hsl(0 72% 51%);    /* #DC2728 — −N counts, error accents */
-  --red-secondary:  hsl(0 72% 50%);    /* #DC2625 — solid delete fills + delete icons */
-  --red-bg:         hsl(18 87% 91%);   /* #FCDFD3 — error container surface */
-  --red-fg:         hsl(18 89% 40%);   /* #C2410B — text/icon on --red-bg */
+  --red-primary: hsl(0 72% 51%); /* #DC2728 — −N counts, error accents */
+  --red-secondary: hsl(
+    0 72% 50%
+  ); /* #DC2625 — solid delete fills + delete icons */
+  --red-bg: hsl(18 87% 91%); /* #FCDFD3 — error container surface */
+  --red-fg: hsl(18 89% 40%); /* #C2410B — text/icon on --red-bg */
 
-  --green-primary:  hsl(142 75% 36%);  /* #17A34A — +N counts, success accents */
-  --green-bg:       hsl(134 38% 89%);  /* #D7EDDC — success container surface */
-  --green-fg:       hsl(142 70% 30%);  /* #17803D — text/icon on --green-bg */
+  --green-primary: hsl(142 75% 36%); /* #17A34A — +N counts, success accents */
+  --green-bg: hsl(134 38% 89%); /* #D7EDDC — success container surface */
+  --green-fg: hsl(142 70% 30%); /* #17803D — text/icon on --green-bg */
 
-  --yellow-primary: hsl(37 90% 60%);   /* #F5AE3D — warning · modified · in-progress */
-  --yellow-bg:      hsl(48 97% 89%);   /* #FEF3C6 — warning container surface */
-  --yellow-fg:      hsl(37 100% 51%);  /* #FF9F05 — text/icon on --yellow-bg */
+  --yellow-primary: hsl(
+    37 90% 60%
+  ); /* #F5AE3D — warning · modified · in-progress */
+  --yellow-bg: hsl(48 97% 89%); /* #FEF3C6 — warning container surface */
+  --yellow-fg: hsl(37 100% 51%); /* #FF9F05 — text/icon on --yellow-bg */
 
-  --blue-primary:   hsl(221 83% 53%);  /* #2463EB — info · links · accents */
-  --blue-bg:        hsl(214 100% 97%); /* #EFF6FF — info container surface */
-  --blue-fg:        hsl(224 77% 48%);  /* #1C4ED8 — text/icon on --blue-bg */
+  --blue-primary: hsl(221 83% 53%); /* #2463EB — info · links · accents */
+  --blue-bg: hsl(214 100% 97%); /* #EFF6FF — info container surface */
+  --blue-fg: hsl(224 77% 48%); /* #1C4ED8 — text/icon on --blue-bg */
 
-  --violet-primary: hsl(271 80% 51%);  /* #851EE6 — done · merged */
-  --violet-bg:      hsl(274 93% 94%);  /* #F2E2FE — done container surface */
-  --violet-fg:      hsl(263 61% 46%);  /* #642EBB — text/icon on --violet-bg */
+  --violet-primary: hsl(271 80% 51%); /* #851EE6 — done · merged */
+  --violet-bg: hsl(274 93% 94%); /* #F2E2FE — done container surface */
+  --violet-fg: hsl(263 61% 46%); /* #642EBB — text/icon on --violet-bg */
 
-  --brown-primary:  hsl(5 35% 50%);    /* #AC5A53 — file paths · warm accents */
-  --brown-bg:       hsl(5 74% 91%);    /* #F9DAD7 — brown container surface */
-  --brown-fg:       hsl(0 20% 40%);    /* #7A5252 — text/icon on --brown-bg */
+  --brown-primary: hsl(5 35% 50%); /* #AC5A53 — file paths · warm accents */
+  --brown-bg: hsl(5 74% 91%); /* #F9DAD7 — brown container surface */
+  --brown-fg: hsl(0 20% 40%); /* #7A5252 — text/icon on --brown-bg */
 }
-
 
 /* ──────────────────────────────────────────────────────────
    3. Tailwind v4 default border-color + focus-visible outline
@@ -646,7 +765,7 @@
    `currentColor`. Without this base-layer override, every `border`
    utility paints with the element's text color. shadcn's official
    Tailwind v4 setup guide uses this pattern; we point at our
-   default border (border1) and our brand accent for focus outlines. */
+   default border (border1) and our emphasis token for focus outlines. */
 
 @layer base {
   *,

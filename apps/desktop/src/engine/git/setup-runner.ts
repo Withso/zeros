@@ -90,6 +90,10 @@ interface SetupEntry {
 export class SetupManager {
   /** workspaceId → the CURRENT run's buffer + session id. */
   private readonly entries = new Map<string, SetupEntry>();
+  /** Starts whose login-shell environment is still resolving. They have no
+   *  PTY or entry yet, so stop()/archive needs this separate cancellation
+   *  handle to prevent a setup shell from appearing after shutdown. */
+  private readonly starting = new Map<string, { cancelled: boolean }>();
   /** Monotonic run counter → a unique session id per run (rerun-race guard). */
   private gen = 0;
 
@@ -97,6 +101,9 @@ export class SetupManager {
     private readonly pty: PtyService,
     /** Nudge clients (DB_CHANGED) that a workspace's setup_state changed. */
     private readonly onChange: (workspaceId: string | null) => void,
+    /** Injectable because resolving the login-shell PATH is asynchronous; the
+     *  cancellation seam must be deterministic in unit tests. */
+    private readonly envBuilder: typeof buildSetupCommandEnv = buildSetupCommandEnv,
   ) {}
 
   /** On engine start the in-memory buffers are empty, so any workspace row still
@@ -146,6 +153,12 @@ export class SetupManager {
     const cwd = ws?.path ?? args.target!.cwd;
     const repoRoot = ws?.repoRoot ?? args.target!.repoRoot;
     const baseBranch = ws?.baseBranch ?? args.target!.baseBranch;
+    // A newer rerun supersedes a start that has not spawned yet. Its finally
+    // block checks identity, so it cannot retire this replacement's slot.
+    const priorFlight = this.starting.get(args.workspaceId);
+    if (priorFlight) priorFlight.cancelled = true;
+    const flight = { cancelled: false };
+    this.starting.set(args.workspaceId, flight);
     // Orphan the previous run BEFORE killing it, then kill.
     //
     // The ordering is the whole point. appendData/handleExit ignore an exit whose
@@ -169,32 +182,62 @@ export class SetupManager {
     // in that window found no live PTY to kill: it flipped the row to "stopped"
     // and returned, then create() spawned the install anyway — an unkillable
     // script running in a worktree the UI says is idle.
-    const env = await buildSetupCommandEnv({
-      workspaceId: args.workspaceId,
-      worktreePath: cwd,
-      repoRoot,
-      baseBranch,
-    });
-    const sessionId = setupSessionId(args.workspaceId, ++this.gen);
-    this.entries.set(args.workspaceId, {
-      sessionId,
-      command: args.command,
-      log: "",
-      truncated: false,
-      state: "running",
-      stopRequested: false,
-      onPassed: args.onPassed,
-    });
-    this.setState(args.workspaceId, "running");
-    this.pty.create({
-      sessionId,
-      resolvedCwd: cwd,
-      command: args.command,
-      env,
-      cols: 120,
-      rows: 30,
-      scrubEnv: false, // env is supplied verbatim (already scrubbed)
-    });
+    try {
+      const env = await this.envBuilder({
+        workspaceId: args.workspaceId,
+        worktreePath: cwd,
+        repoRoot,
+        baseBranch,
+      });
+      // Stop/archive can land while the login-shell PATH probe is awaiting.
+      // The request has already been acknowledged, but no child may spawn now.
+      if (flight.cancelled) return;
+      const sessionId = setupSessionId(args.workspaceId, ++this.gen);
+      this.entries.set(args.workspaceId, {
+        sessionId,
+        command: args.command,
+        log: "",
+        truncated: false,
+        state: "running",
+        stopRequested: false,
+        onPassed: args.onPassed,
+      });
+      this.setState(args.workspaceId, "running");
+      this.pty.create({
+        sessionId,
+        resolvedCwd: cwd,
+        command: args.command,
+        env,
+        cols: 120,
+        rows: 30,
+        scrubEnv: false, // env is supplied verbatim (already scrubbed)
+      });
+    } finally {
+      if (this.starting.get(args.workspaceId) === flight) {
+        this.starting.delete(args.workspaceId);
+      }
+    }
+  }
+
+  /** Cancel a start that has NOT spawned yet, without touching a live PTY.
+   *  Retires the slot so an immediate rerun isn't blocked by a flight that is
+   *  only going to abort; the aborting start's `finally` checks identity, so
+   *  handing the slot over here is safe. Returns true when one was retired.
+   *
+   *  Separate from stop() because the archive/delete reaper must cancel these
+   *  BEFORE it enumerates processes — a pre-spawn flight owns no PTY to
+   *  enumerate, and its login-shell probe would otherwise spend the lifecycle
+   *  drain deadline on a child that must never exist. Killing live PTYs that
+   *  early would be actively wrong: PtyService.kill() drops the session
+   *  synchronously and waitForExit() resolves true for an unknown one, so a
+   *  setup PTY killed before enumeration is invisible to the reaper's exit
+   *  wait and the worktree could be removed while the install still runs. */
+  cancelPendingStart(workspaceId: string): boolean {
+    const flight = this.starting.get(workspaceId);
+    if (!flight) return false;
+    flight.cancelled = true;
+    this.starting.delete(workspaceId);
+    return true;
   }
 
   /** Stop a live run without treating it as a failure. Flags the entry so the
@@ -202,6 +245,11 @@ export class SetupManager {
    *  a snappy UI, and kills the PTY. With no live PTY (the run already ended,
    *  or the engine restarted mid-run) it just clears a stale "running" marker. */
   stop(workspaceId: string): void {
+    // A pre-spawn flight never published "running" itself, so a user-driven
+    // Stop publishes the stopped state on its behalf.
+    if (this.cancelPendingStart(workspaceId)) {
+      this.setState(workspaceId, "stopped");
+    }
     const entry = this.entries.get(workspaceId);
     if (entry && this.pty.has(entry.sessionId)) {
       entry.stopRequested = true;

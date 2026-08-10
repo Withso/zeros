@@ -28,7 +28,13 @@
 // ──────────────────────────────────────────────────────────
 
 import { memo, useMemo } from "react";
-import { CircleCheck, Clock, MessageSquare, SkipForward } from "lucide-react";
+import {
+  CircleCheck,
+  CircleX,
+  Clock,
+  MessageSquare,
+  SkipForward,
+} from "lucide-react";
 
 import type { AgentToolMessage } from "../use-agent-session";
 import type { Renderer } from "./types";
@@ -55,7 +61,7 @@ function StatusChip({
   children: React.ReactNode;
 }) {
   return (
-    <span className="border-border1 text-fg2 flex shrink-0 items-center gap-1 rounded-sm border px-1.5 py-0.5 font-mono text-xxs tracking-wide uppercase">
+    <span className="border-border1 text-fg2 text-xxs flex shrink-0 items-center gap-1 rounded-sm border px-1.5 py-0.5 font-mono tracking-wide uppercase">
       {icon}
       {children}
     </span>
@@ -96,11 +102,19 @@ export const QuestionRecordCard: Renderer<AgentToolMessage> = memo(
         Awaiting response
       </StatusChip>
     ) : stamp?.outcome === "answered" ? (
-      <StatusChip icon={<CircleCheck className="size-2.5" aria-hidden="true" />}>
+      <StatusChip
+        icon={<CircleCheck className="size-2.5" aria-hidden="true" />}
+      >
         Answered
       </StatusChip>
+    ) : stamp?.outcome === "declined" ? (
+      <StatusChip icon={<CircleX className="size-2.5" aria-hidden="true" />}>
+        Declined
+      </StatusChip>
     ) : stamp?.outcome === "skipped" ? (
-      <StatusChip icon={<SkipForward className="size-2.5" aria-hidden="true" />}>
+      <StatusChip
+        icon={<SkipForward className="size-2.5" aria-hidden="true" />}
+      >
         Skipped
       </StatusChip>
     ) : null;
@@ -108,7 +122,7 @@ export const QuestionRecordCard: Renderer<AgentToolMessage> = memo(
     // The detail body — same container recipe as the other tool rows'
     // expanded views (Bash output / raw input): rounded, bg-bg2/60, 14px.
     const detail = awaiting ? undefined : (
-      <div className="flex flex-col gap-3 rounded-md bg-bg2/60 p-2.5 text-sm leading-relaxed">
+      <div className="bg-bg2/60 flex flex-col gap-3 rounded-md p-2.5 text-sm leading-relaxed">
         {stamp?.outcome === "answered" ? (
           // Question ↔ answer pairs only — no scope tags, no option list.
           (stamp.answers && stamp.answers.length > 0

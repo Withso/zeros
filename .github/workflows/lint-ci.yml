@@ -6,12 +6,13 @@ name: Lint CI workflows
 # mode for a repo whose merge gate IS the CI. The whole dir is linted so a rename
 # can't let a broken-but-unchanged file ride.
 #
-# Workflow changes are infrastructure changes: invalid expressions, action refs,
-# or shell blocks now fail the PR instead of publishing an advisory green check.
+# This job is a required ruleset context, so the pull_request trigger must stay
+# unfiltered. A path-filtered required workflow leaves unrelated PRs permanently
+# at "Expected — Waiting for status to be reported" because no check run exists.
+# The repository is small enough to lint every workflow on every PR.
 
 on:
   pull_request:
-    paths: [".github/workflows/**"]
   # A workflow-lint check marked Required must also exist on merge-queue SHAs.
   merge_group:
   push:

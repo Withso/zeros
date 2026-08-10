@@ -503,10 +503,10 @@ function resolveCodexCliPaths(): {
     console.error(
       `[Zeros] Pinned Codex CLI not found below ${managedPackageRoot} ` +
         `(target ${triple ?? `${process.platform}-${process.arch}`}) — Codex will ` +
-        "fall back to an explicit override or global `codex`. Repackage after " +
+        "remain unavailable instead of silently running an unpinned global CLI. Repackage after " +
         "running `pnpm stage:codex-cli`.",
     );
-    return { binary: null, version: null, managedPackageRoot: null };
+    return { binary, version: null, managedPackageRoot };
   }
   return { binary, version, managedPackageRoot };
 }

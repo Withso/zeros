@@ -28,6 +28,16 @@ export interface WorkspaceFadeVisibility {
   beforePinnedRight: boolean;
 }
 
+/** A short boundary hairline belongs only between two unselected destinations.
+ *  The carrier remains in flow when hidden so selecting a tab never changes
+ *  spacing, scroll width, or sticky offsets. */
+export function navigationBoundarySeparatorVisible(
+  leftActive: boolean,
+  rightActive: boolean,
+): boolean {
+  return !leftActive && !rightActive;
+}
+
 /** The workspace to land on when the primary checkout is not an offered
  * destination — the leftmost tab, so "somewhere sensible" matches what the
  * strip shows. Returns null for a cold or worktree-less repo. Shared with the

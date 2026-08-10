@@ -26,6 +26,10 @@
 // folded into the Providers panel. Provider auth-method + binary-path
 // overrides live in provider-prefs.ts, consumed at session spawn time.
 //
+// 2026-08-08: nav LABELS only — Preferences → "General", Agent providers →
+// "Agents", Git → "Git & PR". `SectionId`s are untouched, so persisted
+// `settings:active-section` values and deep links keep resolving.
+//
 // Repositories live in their own repository scope rather than a bottom sidebar
 // group; the
 // per-repo detail gained a background-less section nav. Repo settings are
@@ -45,18 +49,16 @@ import { useScrollMemoryRef } from "../../shell/scroll-memory";
 import { useInstantViewSwitch } from "../../shared/ui/use-instant-view-switch";
 import {
   Palette,
-  Settings2,
+  Settings,
   ArrowLeft,
   Building2,
-  Check,
-  ChevronDown,
-  Plug,
+  Astroid,
   Plus,
   SquareTerminal,
   Blocks,
   KeyRound,
-  Brain,
-  GitBranch,
+  Box,
+  GitPullRequest,
   FlaskConical,
   CircleUser,
   CircleCheck,
@@ -145,19 +147,17 @@ import { isRunnableAgent } from "../agent/agent-runnable";
 import {
   agentFamily,
   displayModelLabel,
-  effortLabel,
-  effortLevelsFor,
   modelsForAgent,
 } from "../agent/model-catalog";
-import { useFavoriteModel } from "../agent/model-favorites";
+import {
+  effectiveFavoriteModel,
+  useFavoritesVersion,
+} from "../agent/model-favorites";
 import {
   CHAT_TITLE_MODEL_OPTIONS,
   mirrorModelsToSettings,
-  setDefaultEffort,
   starFavoriteModel,
   useChatTitleModel,
-  useDefaultEffort,
-  useDefaultFastMode,
   useDefaultPlanMode,
 } from "../agent/new-chat-defaults";
 import {
@@ -168,17 +168,8 @@ import {
   useClaudeFallbackModel,
   useClaudeIdleTimeoutMinutes,
 } from "../agent/reliability-settings";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "../../shared/ui/primitives/dropdown-menu";
 import { AgentIcon } from "../agent/agent-icon";
 import { useDefaultAgent, pickDefaultAgentId } from "./default-agent";
-import type { ChatEffort } from "../../state/store";
 import { CodexPlatformPanel } from "./codex-platform-panel";
 
 type SectionId =
@@ -202,14 +193,28 @@ type SectionDef = {
   id: SectionId;
   label: string;
   icon: LucideIcon;
+  /** Optional per-row nav override, appended AFTER `SIDEBAR_ENTRY_CLS` so
+   *  twMerge lets it win (see `INTERNAL_NAV_CLS`). */
+  navClassName?: string;
   Panel: ComponentType<{ surfaceActive?: boolean }>;
 };
+
+// Internal's nav row is the ONE coloured entry in the rail — label AND icon
+// carry `--brown-primary` (the warm accent) in every state, so a staff-only
+// tab reads as staff-only at a glance instead of sitting silently among the
+// fg2 rows. Declared ABOVE `SECTIONS` because the array evaluates at module
+// load and a `const` below would be in its temporal dead zone. Every state
+// SIDEBAR_ENTRY_CLS paints (rest / hover / active / active+hover, row + svg)
+// is restated here so twMerge — which keeps the LAST class per group+modifier
+// — swaps them all; miss one and that state falls back to fg1/fg2.
+const INTERNAL_NAV_CLS =
+  "text-brown-primary hover:text-brown-primary data-[state=active]:text-brown-primary data-[state=active]:hover:text-brown-primary [&>svg]:text-brown-primary data-[state=active]:[&>svg]:text-brown-primary";
 
 const SECTIONS: SectionDef[] = [
   {
     id: "general",
-    label: "Preferences",
-    icon: Settings2,
+    label: "General",
+    icon: Settings,
     Panel: GeneralPanel,
   },
   {
@@ -221,13 +226,13 @@ const SECTIONS: SectionDef[] = [
   {
     id: "models",
     label: "Models",
-    icon: Brain,
+    icon: Box,
     Panel: ModelsPanel,
   },
   {
     id: "providers",
-    label: "Agent providers",
-    icon: Plug,
+    label: "Agents",
+    icon: Astroid,
     Panel: ProvidersPanel,
   },
   {
@@ -253,8 +258,8 @@ const SECTIONS: SectionDef[] = [
   },
   {
     id: "git",
-    label: "Git",
-    icon: GitBranch,
+    label: "Git & PR",
+    icon: GitPullRequest,
     Panel: GitDefaultsPanel,
   },
   // "mcp" left Settings entirely (2026-07-22): MCP servers are managed on the
@@ -306,6 +311,7 @@ const SECTIONS: SectionDef[] = [
     id: "internal",
     label: "Internal",
     icon: Lock,
+    navClassName: INTERNAL_NAV_CLS,
     Panel: InternalPanel,
   },
 ];
@@ -465,15 +471,21 @@ function loadInitialSection(): string {
 // without it the label pops to fg1 on hover. The selected row keeps
 // `fg1` even while hovered via the higher-specificity
 // `data-[state=active]:hover:text-fg1`.
+// ICON SIZE: 14px, set in CSS — NOT via each icon's `size` prop. The Button
+// primitive paints `[&_svg]:size-4` on every button, and a CSS width/height
+// beats the `width`/`height` ATTRIBUTES lucide's `size` prop emits, so
+// `<Icon size={14} />` alone still rendered 16px. `[&_svg]:size-3.5` reuses
+// the primitive's exact selector so twMerge drops the 16px rule outright
+// rather than leaving two rules to fight on source order.
 const SIDEBAR_ENTRY_CLS =
-  "flex h-auto w-full min-w-0 items-center justify-start gap-2.5 rounded-md border-0 bg-transparent px-2.5 py-1.5 text-left text-sm font-normal text-fg2 transition-colors duration-150 ease-out hover:bg-sidebar-bg-hover hover:text-fg2 data-[state=active]:bg-sidebar-bg-hover data-[state=active]:text-fg1 data-[state=active]:hover:text-fg1 [&>svg]:shrink-0 [&>svg]:text-fg2 data-[state=active]:[&>svg]:text-fg1";
+  "flex h-auto w-full min-w-0 items-center justify-start gap-2.5 rounded-md border-0 bg-transparent px-2.5 py-1.5 text-left text-sm font-normal text-fg2 transition-colors duration-150 ease-out hover:bg-sidebar-bg-hover hover:text-fg2 data-[state=active]:bg-sidebar-bg-hover data-[state=active]:text-fg1 data-[state=active]:hover:text-fg1 [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg2 data-[state=active]:[&>svg]:text-fg1";
 
 // Group label in the section list ("Personal" / "Agents" / …) — a quiet,
 // non-interactive divider. `pt-5` opens a clear gap above it (the FIRST
-// label overrides to `pt-1`); `text-fg3` keeps it subordinate to
+// label overrides to `pt-1`); `text-muted-fg` keeps it subordinate to
 // the row labels.
 const SETTINGS_GROUP_HEADER_CLS =
-  "select-none px-2.5 pb-1.5 pt-5 text-xs font-normal text-fg3";
+  "select-none px-2.5 pb-1.5 pt-5 text-xs font-normal text-muted-fg";
 
 export function SettingsPage() {
   const pageSurfaceRef = useRef<HTMLDivElement | null>(null);
@@ -696,7 +708,7 @@ export function SettingsPage() {
               className={cn(SIDEBAR_ENTRY_CLS, "mb-2")}
               onClick={handleBack}
             >
-              <ArrowLeft size={16} strokeWidth={1.5} />
+              <ArrowLeft size={14} strokeWidth={1.5} />
               <span>Back</span>
             </Button>
           </Tooltip>
@@ -729,6 +741,7 @@ export function SettingsPage() {
                       key={section.id}
                       icon={section.icon}
                       label={section.label}
+                      className={section.navClassName}
                       isActive={
                         selection.scope === "user" &&
                         selection.section === section.id
@@ -845,12 +858,15 @@ function SectionNavButton({
   icon: Icon,
   label,
   isActive,
+  className,
   onClick,
   onIntent,
 }: {
   icon: LucideIcon;
   label: string;
   isActive: boolean;
+  /** Per-row override, merged AFTER the shared entry class so it wins. */
+  className?: string;
   onClick: () => void;
   onIntent?: () => void;
 }) {
@@ -860,7 +876,7 @@ function SectionNavButton({
       role="tab"
       aria-selected={isActive}
       data-state={isActive ? "active" : "inactive"}
-      className={SIDEBAR_ENTRY_CLS}
+      className={cn(SIDEBAR_ENTRY_CLS, className)}
       onClick={onClick}
       // Called, never forwarded bare: React hands a handler the synthetic
       // event, which `prefetchGithubAuthSnapshot` would take as its `fetcher`.
@@ -880,8 +896,9 @@ function SectionNavButton({
 // ── General ─────────────────────────────────────────────
 
 function GeneralPanel() {
-  // Home for general user preferences (the "Preferences" tab; the id
-  // stays `general` for persisted-selection compat). Currently empty —
+  // Home for general user preferences (the "General" tab — labelled
+  // "Preferences" until 2026-08-08; the id has always been `general`, so
+  // persisted selections are unaffected). Currently empty —
   // the old archived-chats toggle that lived here was removed as dead
   // pre-revamp wiring. Kept as the landing section; new general
   // preferences slot in as <SettingsSection>s alongside this empty state.
@@ -941,7 +958,7 @@ function SignInMethodRow({
         // Linking isn't implemented yet (no linkIdentity flow), so we show a
         // plain status label rather than an inert, permanently-disabled
         // "Connect" button that implies an action the user can't take.
-        <span className="text-fg3 shrink-0 text-xs">Not linked</span>
+        <span className="text-muted-fg shrink-0 text-xs">Not linked</span>
       )}
     </SettingsRow>
   );
@@ -991,7 +1008,7 @@ function AccountPanel() {
               )}
               <div className="text-fg2 truncate text-sm">{email}</div>
               {primaryProvider && (
-                <div className="text-fg3 text-xs">
+                <div className="text-muted-fg text-xs">
                   Signed in with {providerLabel(primaryProvider)}
                 </div>
               )}
@@ -1122,16 +1139,12 @@ function IntegrationsPanel({
 // "coming soon" panel is a step backwards: register the section only once it
 // has something to show.
 
-// ── Models — the default agent + effort + plan/fast for new chats ──
+// ── Models — one global default model + plan posture ──
 //
-// Settings picks the default AGENT (falls back to claude
-// when unset); the MODEL each agent's new chats open on is that family's
-// favorite ★ — starred in the composer's model dropdown, falling back to the
-// catalog's defaultFavorites (Opus 4.8 / 5.6 Sol / Composer 2.5). The row
-// shows the resolved favorite read-only so the user sees exactly what a new
-// chat will use. Effort options follow that model's ladder (Cursor has no
-// effort knob → the dropdown hides). All values feed newChatBornDefaults()
-// at spawn time.
+// Agent + model form one global default identity (and one star across the model
+// menu). With no choice, connected providers resolve Codex → Claude → Cursor;
+// their family fallbacks are GPT-5.6 Sol / Opus 5 / Composer 2.5. Effort and
+// Fast are edited and remembered per exact model in the model menu.
 
 /** The Models tab groups its rows into filled sections: a borderless
  *  subtle-fill card with `--border1` hairlines
@@ -1179,15 +1192,20 @@ function ModelsPanel() {
   // The effective default agent: the user's star if runnable, else the
   // fallback (codex) — so the picker mirrors what new chats actually use.
   const effectiveAgentId =
-    modelAgents.find((a) => a.id === defaultAgentId)?.id ??
+    modelAgents.find(
+      (agent) =>
+        agent.id === defaultAgentId ||
+        agentFamily(agent.id) === agentFamily(defaultAgentId),
+    )?.id ??
     pickDefaultAgentId(agents ?? []) ??
     modelAgents[0]?.id ??
     null;
 
-  const { favorite } = useFavoriteModel(effectiveAgentId);
-  const defaultEffort = useDefaultEffort(effectiveAgentId);
+  // Read the effective model synchronously from the same atomic selection as
+  // the agent. A family switch must never paint one frame with the prior
+  // family's model in the new provider's Select.
+  useFavoritesVersion();
   const [planDefault, setPlanDefault] = useDefaultPlanMode();
-  const [fastDefault, setFastDefault] = useDefaultFastMode();
   const [titleModel, setTitleModel] = useChatTitleModel();
   // Claude reliability knobs (fallback model + per-turn budget).
   const [fallbackModel, setFallbackModel] = useClaudeFallbackModel();
@@ -1223,13 +1241,12 @@ function ModelsPanel() {
   // falls down the Haiku → Luna → Composer chain to a connected one.
   const connectedFamilies = new Set(modelAgents.map((a) => agentFamily(a.id)));
 
-  // The model a new chat of the default agent opens on — the family's
-  // effective favorite (user ★, else the catalog fallback). Shown read-only;
-  // it's changed by starring a model in the composer's model dropdown.
+  // The one model a new chat opens on. Selecting it here moves the global star.
   const agentModels = effectiveAgentId
     ? modelsForAgent(effectiveAgentId, null)
     : [];
-  const currentModel = favorite ?? agentModels[0]?.value ?? null;
+  const currentModel =
+    effectiveFavoriteModel(effectiveAgentId) ?? agentModels[0]?.value ?? null;
   const currentModelLabel = currentModel
     ? displayModelLabel(
         effectiveAgentId,
@@ -1237,16 +1254,6 @@ function ModelsPanel() {
           currentModel,
       )
     : null;
-
-  // Effort options follow the favorite model; clamp a stale saved effort to
-  // the model's ladder (e.g. a favorite change Opus→Sonnet drops "ultracode").
-  const effortLevels = effortLevelsFor(effectiveAgentId, currentModel, null);
-  let effortValue: ChatEffort = defaultEffort ?? "high";
-  if (effortLevels.length > 0 && !effortLevels.includes(effortValue)) {
-    effortValue = effortLevels.includes("high")
-      ? "high"
-      : effortLevels[effortLevels.length - 1];
-  }
 
   const pickAgent = (agentId: string) => {
     if (!agentId) return;
@@ -1291,89 +1298,29 @@ function ModelsPanel() {
                 )}
               </SelectContent>
             </Select>
-            {/* The default-model trigger shows
-                the agent's current favorite; the list is that agent's models
-                (picking one stars it — kept in sync with the composer ★ via
-                the favorites bus) and, after a separator, an "Effort" section
-                that sets the default effort for that default model. One menu,
-                two checkmark groups — a Radix Select can't hold both, so this
-                is a DropdownMenu styled like the Select trigger. */}
+            {/* Picking a model moves the one global favorite star. Effort/Fast
+                stay model-owned and are edited from the composer's model menu. */}
             {effectiveAgentId && currentModel && (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button
-                    type="button"
-                    aria-label="Default model and effort"
-                    className="border-border3 hover:border-border4 hover:bg-bg2 data-[state=open]:border-border4 data-[state=open]:bg-bg2 flex h-8 w-fit min-w-[150px] items-center justify-between gap-2 rounded-sm border bg-transparent px-3 py-2 text-sm whitespace-nowrap shadow-xs outline-none"
-                  >
-                    <span className="truncate">{currentModelLabel}</span>
-                    <ChevronDown className="text-fg2 size-4 shrink-0 opacity-50" />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="min-w-[200px]">
-                  {agentModels.map((m) => {
-                    const isCurrent = m.value === currentModel;
-                    return (
-                      <DropdownMenuItem
-                        key={m.value}
-                        data-selected={isCurrent || undefined}
-                        onSelect={() =>
-                          starFavoriteModel(effectiveAgentId, m.value)
-                        }
-                      >
-                        <span className="flex-1 truncate">
-                          {displayModelLabel(effectiveAgentId, m.label)}
-                        </span>
-                        {isCurrent ? (
-                          <Check className="text-fg1 ml-2 size-3.5 shrink-0" />
-                        ) : (
-                          <span
-                            className="ml-2 size-3.5 shrink-0"
-                            aria-hidden
-                          />
-                        )}
-                      </DropdownMenuItem>
-                    );
-                  })}
-                  {effortLevels.length > 0 && (
-                    <>
-                      {/* Use border3 because the default bg3 separator is
-                          invisible on the bg3 popover. */}
-                      <DropdownMenuSeparator className="bg-border3" />
-                      <DropdownMenuLabel className="text-fg2">
-                        Effort
-                      </DropdownMenuLabel>
-                      {effortLevels.map((lvl) => {
-                        const isCurrent = lvl === effortValue;
-                        return (
-                          <DropdownMenuItem
-                            key={lvl}
-                            data-selected={isCurrent || undefined}
-                            onSelect={() =>
-                              setDefaultEffort(
-                                effectiveAgentId,
-                                lvl as ChatEffort,
-                              )
-                            }
-                          >
-                            <span className="flex-1 truncate">
-                              {effortLabel(effectiveAgentId, lvl)}
-                            </span>
-                            {isCurrent ? (
-                              <Check className="text-fg1 ml-2 size-3.5 shrink-0" />
-                            ) : (
-                              <span
-                                className="ml-2 size-3.5 shrink-0"
-                                aria-hidden
-                              />
-                            )}
-                          </DropdownMenuItem>
-                        );
-                      })}
-                    </>
-                  )}
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <Select
+                value={currentModel}
+                onValueChange={(model) =>
+                  starFavoriteModel(effectiveAgentId, model)
+                }
+              >
+                <SelectTrigger
+                  className="min-w-[150px]"
+                  aria-label="Default model"
+                >
+                  <SelectValue>{currentModelLabel}</SelectValue>
+                </SelectTrigger>
+                <SelectContent className="min-w-[180px]">
+                  {agentModels.map((model) => (
+                    <SelectItem key={model.value} value={model.value}>
+                      {displayModelLabel(effectiveAgentId, model.label)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             )}
           </div>
         </SettingsRow>
@@ -1416,16 +1363,6 @@ function ModelsPanel() {
             checked={planDefault}
             onCheckedChange={setPlanDefault}
             aria-label="Default to plan mode"
-          />
-        </SettingsRow>
-        <SettingsRow
-          label="Default to fast mode"
-          hint="Start new chats in fast mode"
-        >
-          <Switch
-            checked={fastDefault}
-            onCheckedChange={setFastDefault}
-            aria-label="Default to fast mode"
           />
         </SettingsRow>
       </SettingsList>
@@ -1523,7 +1460,7 @@ function ModelsPanel() {
               hint="The turn ends cleanly when it reaches this amount."
             >
               <div className="flex items-center gap-1.5">
-                <span className="text-fg3 text-xs">$</span>
+                <span className="text-muted-fg text-xs">$</span>
                 <Input
                   type="number"
                   min={0.5}
@@ -1949,17 +1886,18 @@ function InternalPanel() {
 // history block). Tokens are concrete HSL values in
 // zeros-tokens.css.
 //
-// 2026-07-07: the variant themes (orka-night / neutral /
-// zeros-blue) were retired — "Zeros Shade" in :root is the app's
-// one dark theme.
 // 2026-07-11: the light theme shipped ([data-theme="light"] block
 // in zeros-tokens.css), so Light joins the picker and System now
 // genuinely follows macOS.
+// 2026-08-08: Dark's structural tokens became neutral; bg1, bg2, and
+// sidebar-bg moved one lightness point up. The previous warm palette is
+// preserved unchanged as Orka black.
 
 const THEME_OPTIONS: Array<{ value: ThemeMode; label: string }> = [
   { value: "system", label: "System" },
   { value: "light", label: "Light" },
   { value: "dark", label: "Dark" },
+  { value: "orka-black", label: "Orka black" },
 ];
 
 function AppearancePanel() {
@@ -1976,7 +1914,7 @@ function AppearancePanel() {
       <SettingsList>
         <SettingsRow
           label="Theme"
-          hint="Dark is Zeros Shade, the app's dark theme. System follows the macOS appearance setting."
+          hint="Dark uses a neutral palette. Orka black preserves the previous warm-gray dark palette. System follows macOS."
         >
           <Select
             value={prefs.mode}
@@ -1997,7 +1935,7 @@ function AppearancePanel() {
         <div>
           <SettingsRow
             label="Code theme"
-            hint="Syntax highlighting colors for code blocks, diffs, the editor, and the terminal. Picked per theme — Dark and Light each remember their own."
+            hint="Syntax highlighting for code blocks, diffs, the editor, and the terminal. Dark and Orka black share one dark-theme choice; Light remembers its own."
           >
             <Select
               value={prefs.codeTheme}
