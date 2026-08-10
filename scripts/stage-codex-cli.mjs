@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 // Stage the complete pinned Codex native runtime for electron-builder.
 //
-// The packaged engine is a Bun single-file binary and has no node_modules to
-// resolve @openai/codex's optional platform package from. Shipping only the
-// main executable is also insufficient: Codex locates its code-mode host,
-// ripgrep, and resources relative to the vendor target directory. Preserve that
-// directory shape at a stable, version-free path in Contents/Resources.
+// The packaged engine is a Bun single-file binary and cannot resolve
+// @openai/codex's optional platform dependency. Preserve the wrapper's
+// vendor/<triple> layout because the native runtime resolves its code-mode
+// host, ripgrep, and sandbox resources relative to that managed package root.
 
-import { createRequire } from "node:module";
+import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
@@ -22,116 +21,73 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const __filename = fileURLToPath(import.meta.url);
-const repoRoot = resolve(dirname(__filename), "..");
+const filename = fileURLToPath(import.meta.url);
+const repoRoot = resolve(dirname(filename), "..");
 const require = createRequire(join(repoRoot, "package.json"));
 
+/** Stable names consumed by electron-builder.yml and packaging checks. */
 export const STAGED_RUNTIME_DIR = "binaries/codex-runtime";
 export const STAGED_VERSION_FILE = "binaries/codex-cli-version.txt";
 
-const TARGETS = {
-  "darwin-arm64": {
-    triple: "aarch64-apple-darwin",
-    package: "@openai/codex-darwin-arm64",
-  },
-  "darwin-x64": {
-    triple: "x86_64-apple-darwin",
-    package: "@openai/codex-darwin-x64",
-  },
-  "linux-arm64": {
-    triple: "aarch64-unknown-linux-musl",
-    package: "@openai/codex-linux-arm64",
-  },
-  "linux-x64": {
-    triple: "x86_64-unknown-linux-musl",
-    package: "@openai/codex-linux-x64",
-  },
-  "win32-arm64": {
-    triple: "aarch64-pc-windows-msvc",
-    package: "@openai/codex-win32-arm64",
-  },
-  "win32-x64": {
-    triple: "x86_64-pc-windows-msvc",
-    package: "@openai/codex-win32-x64",
-  },
-};
-
-function targetFor(platform = process.platform, arch = process.arch) {
-  const target = TARGETS[`${platform}-${arch}`];
+export function codexTargetFor(platform, arch) {
+  const targets = {
+    "darwin:x64": {
+      packageName: "@openai/codex-darwin-x64",
+      triple: "x86_64-apple-darwin",
+    },
+    "darwin:arm64": {
+      packageName: "@openai/codex-darwin-arm64",
+      triple: "aarch64-apple-darwin",
+    },
+    "linux:x64": {
+      packageName: "@openai/codex-linux-x64",
+      triple: "x86_64-unknown-linux-musl",
+    },
+    "linux:arm64": {
+      packageName: "@openai/codex-linux-arm64",
+      triple: "aarch64-unknown-linux-musl",
+    },
+    "win32:x64": {
+      packageName: "@openai/codex-win32-x64",
+      triple: "x86_64-pc-windows-msvc",
+    },
+    "win32:arm64": {
+      packageName: "@openai/codex-win32-arm64",
+      triple: "aarch64-pc-windows-msvc",
+    },
+  };
+  const target = targets[`${platform}:${arch}`];
   if (!target) {
     throw new Error(
-      `[stage-codex-cli] unsupported platform ${platform}-${arch}`,
+      `[stage-codex-cli] unsupported Codex target ${platform}-${arch}`,
     );
   }
   return target;
 }
 
-export function resolveCodexRuntimeSource() {
-  const wrapperPackageJson = require.resolve("@openai/codex/package.json");
-  const wrapper = JSON.parse(readFileSync(wrapperPackageJson, "utf8"));
-  const target = targetFor();
-  const fromWrapper = createRequire(wrapperPackageJson);
-  let platformPackageJson;
+function readJson(path, label) {
   try {
-    platformPackageJson = fromWrapper.resolve(`${target.package}/package.json`);
-  } catch {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
     throw new Error(
-      `[stage-codex-cli] ${target.package} is missing. It is an optional ` +
-        `dependency of @openai/codex; reinstall with optional dependencies.`,
+      `[stage-codex-cli] could not read ${label} at ${path}: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  const sourceRoot = join(
-    dirname(platformPackageJson),
-    "vendor",
-    target.triple,
-  );
-  const runtimeManifest = join(sourceRoot, "codex-package.json");
-  const executable = join(
-    sourceRoot,
-    "bin",
-    process.platform === "win32" ? "codex.exe" : "codex",
-  );
-  if (!existsSync(runtimeManifest) || !existsSync(executable)) {
-    throw new Error(
-      `[stage-codex-cli] corrupt ${target.package}: expected ${runtimeManifest} ` +
-        `and ${executable}`,
-    );
-  }
-  const manifest = JSON.parse(readFileSync(runtimeManifest, "utf8"));
-  if (
-    manifest.target !== target.triple ||
-    manifest.version !== wrapper.version
-  ) {
-    throw new Error(
-      `[stage-codex-cli] runtime mismatch: wrapper=${wrapper.version}, ` +
-        `runtime=${manifest.version}, target=${manifest.target}; expected ${target.triple}`,
-    );
-  }
-  return {
-    sourceRoot,
-    executable,
-    version: wrapper.version,
-    package: target.package,
-    triple: target.triple,
-  };
 }
 
-function stageTree(sourceRoot, destinationRoot) {
-  let files = 0;
-  let bytes = 0;
-  let hardlinks = 0;
-  let copies = 0;
-  const visit = (source, destination) => {
+function collectRuntimeFiles(sourceRoot, relativeRoot) {
+  const files = [];
+  const visit = (source, relativePath) => {
     const lexical = lstatSync(source);
     const actual = lexical.isSymbolicLink() ? realpathSync(source) : source;
     const stat = statSync(actual);
     if (stat.isDirectory()) {
-      mkdirSync(destination, { recursive: true });
       for (const entry of readdirSync(actual)) {
-        visit(join(actual, entry), join(destination, entry));
+        visit(join(actual, entry), join(relativePath, entry));
       }
       return;
     }
@@ -140,56 +96,176 @@ function stageTree(sourceRoot, destinationRoot) {
         `[stage-codex-cli] refusing non-file/empty runtime entry ${source}`,
       );
     }
-    mkdirSync(dirname(destination), { recursive: true });
-    try {
-      linkSync(actual, destination);
-      hardlinks += 1;
-    } catch {
-      copyFileSync(actual, destination);
-      copies += 1;
-    }
-    chmodSync(destination, stat.mode & 0o777);
-    files += 1;
-    bytes += stat.size;
+    files.push({
+      source: actual,
+      relativePath,
+      executable: (stat.mode & 0o111) !== 0,
+      size: stat.size,
+    });
   };
-  visit(sourceRoot, destinationRoot);
-  return { files, bytes, hardlinks, copies };
+  visit(sourceRoot, relativeRoot);
+  return files;
+}
+
+/** Resolve through the wrapper package so pnpm's non-hoisted optional package
+ * remains visible. Every file below vendor/<triple> is staged; selecting only
+ * the main binary would omit Linux sandbox assets and auxiliary executables. */
+export function resolveCodexRuntimeSource({
+  platform = process.platform,
+  arch = process.arch,
+} = {}) {
+  const wrapperPackagePath = require.resolve("@openai/codex/package.json");
+  const wrapperPackage = readJson(wrapperPackagePath, "@openai/codex manifest");
+  if (typeof wrapperPackage.version !== "string" || !wrapperPackage.version) {
+    throw new Error("[stage-codex-cli] @openai/codex has no valid version");
+  }
+
+  const { packageName, triple } = codexTargetFor(platform, arch);
+  const fromWrapper = createRequire(wrapperPackagePath);
+  let platformPackagePath;
+  try {
+    platformPackagePath = fromWrapper.resolve(`${packageName}/package.json`);
+  } catch (error) {
+    throw new Error(
+      `[stage-codex-cli] could not resolve ${packageName} from ${wrapperPackagePath}. ` +
+        "Reinstall dependencies with optional packages enabled.",
+      { cause: error },
+    );
+  }
+
+  const platformPackage = readJson(
+    platformPackagePath,
+    `${packageName} manifest`,
+  );
+  if (
+    typeof platformPackage.version !== "string" ||
+    !platformPackage.version.startsWith(`${wrapperPackage.version}-`)
+  ) {
+    throw new Error(
+      `[stage-codex-cli] platform runtime ${JSON.stringify(platformPackage.version)} ` +
+        `does not match @openai/codex ${wrapperPackage.version}`,
+    );
+  }
+
+  const targetRoot = join(dirname(platformPackagePath), "vendor", triple);
+  const runtimeManifest = readJson(
+    join(targetRoot, "codex-package.json"),
+    "Codex runtime manifest",
+  );
+  if (
+    runtimeManifest.version !== wrapperPackage.version ||
+    runtimeManifest.target !== triple
+  ) {
+    throw new Error(
+      `[stage-codex-cli] runtime manifest mismatch: wrapper=${wrapperPackage.version}, ` +
+        `runtime=${runtimeManifest.version}, target=${runtimeManifest.target}; expected ${triple}`,
+    );
+  }
+
+  const files = [
+    {
+      source: wrapperPackagePath,
+      relativePath: "package.json",
+      executable: false,
+      size: statSync(wrapperPackagePath).size,
+    },
+    ...collectRuntimeFiles(targetRoot, join("vendor", triple)),
+  ];
+  const executableName = platform === "win32" ? "codex.exe" : "codex";
+  const binaryRelativePath = join("vendor", triple, "bin", executableName);
+  if (!files.some((file) => file.relativePath === binaryRelativePath)) {
+    throw new Error(
+      `[stage-codex-cli] ${packageName} is incomplete; missing ${binaryRelativePath}`,
+    );
+  }
+  return {
+    version: wrapperPackage.version,
+    packageName,
+    triple,
+    files,
+    binaryRelativePath,
+  };
+}
+
+export function stageFile(source, destination, executable) {
+  mkdirSync(dirname(destination), { recursive: true });
+  const sourceMode = statSync(source).mode & 0o777;
+  let method;
+  // chmod on a hardlink also mutates the source inode in node_modules. Keep
+  // the fast path only when the source already has the packaged mode we need;
+  // otherwise make an independent copy before normalizing it.
+  if (executable && sourceMode !== 0o755) {
+    copyFileSync(source, destination);
+    method = "copy";
+  } else {
+    method = "hardlink";
+    try {
+      linkSync(source, destination);
+    } catch {
+      copyFileSync(source, destination);
+      method = "copy";
+    }
+  }
+  if (executable && method === "copy") chmodSync(destination, 0o755);
+  return method;
 }
 
 export function stageCodexCli({ quiet = false } = {}) {
   const source = resolveCodexRuntimeSource();
-  const destination = join(repoRoot, STAGED_RUNTIME_DIR);
-  rmSync(destination, { recursive: true, force: true });
-  const staged = stageTree(source.sourceRoot, destination);
-  const stagedExecutable = join(
-    destination,
-    "bin",
-    process.platform === "win32" ? "codex.exe" : "codex",
-  );
-  chmodSync(stagedExecutable, 0o755);
+  const runtimeRoot = join(repoRoot, STAGED_RUNTIME_DIR);
+  const versionPath = join(repoRoot, STAGED_VERSION_FILE);
+  rmSync(runtimeRoot, { recursive: true, force: true });
+  rmSync(versionPath, { force: true });
 
-  const versionDestination = join(repoRoot, STAGED_VERSION_FILE);
-  mkdirSync(dirname(versionDestination), { recursive: true });
-  writeFileSync(versionDestination, `${source.version}\n`, "utf8");
+  const methods = new Set();
+  let totalSize = 0;
+  for (const file of source.files) {
+    totalSize += file.size;
+    methods.add(
+      stageFile(
+        file.source,
+        join(runtimeRoot, file.relativePath),
+        file.executable,
+      ),
+    );
+  }
+  mkdirSync(dirname(versionPath), { recursive: true });
+  writeFileSync(versionPath, `${source.version}\n`, "utf8");
+
+  const binaryPath = join(runtimeRoot, source.binaryRelativePath);
+  const probe = spawnSync(binaryPath, ["--version"], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      CODEX_MANAGED_PACKAGE_ROOT: runtimeRoot,
+    },
+  });
+  const probeOutput = `${probe.stdout ?? ""}\n${probe.stderr ?? ""}`.trim();
+  if (probe.status !== 0 || !probeOutput.includes(source.version)) {
+    throw new Error(
+      `[stage-codex-cli] staged runtime probe failed (status=${probe.status}): ${probeOutput || "no output"}`,
+    );
+  }
 
   if (!quiet) {
     console.log(
-      `[stage-codex-cli] ${source.package} ${source.version} → ` +
-        `${STAGED_RUNTIME_DIR} (${staged.files} files, ` +
-        `${(staged.bytes / 1024 / 1024).toFixed(1)} MiB, ` +
-        `${staged.hardlinks} hardlinks, ${staged.copies} copies)`,
+      `[stage-codex-cli] ${[...methods].join("+")} ${source.packageName} → ` +
+        `${STAGED_RUNTIME_DIR} (${source.files.length} files, ` +
+        `${(totalSize / 1024 / 1024).toFixed(1)} MiB, codex ${source.version})`,
     );
   }
   return {
-    destination,
-    stagedExecutable,
-    versionDestination,
+    runtimeRoot,
+    versionPath,
+    binaryPath,
     version: source.version,
-    ...staged,
+    triple: source.triple,
+    files: source.files.length,
+    size: totalSize,
   };
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === resolve(__filename)) {
+if (process.argv[1] && resolve(process.argv[1]) === resolve(filename)) {
   try {
     stageCodexCli();
   } catch (error) {

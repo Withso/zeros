@@ -37,6 +37,8 @@
 
 import { randomUUID } from "node:crypto";
 
+import type { ToolCallContent } from "@zeros/protocol/agent-events";
+
 import { isDevRuntime } from "../../../runtime";
 import type { ContentBlock, SessionNotification, TurnUsage } from "../../types";
 
@@ -595,6 +597,8 @@ export class CodexAppServerTranslator {
             : typeof output === "string"
               ? output
               : "";
+        const dynamicContent =
+          item.type === "dynamicToolCall" ? dynamicToolContent(item) : null;
         this.emit({
           sessionId: this.sessionId,
           update: {
@@ -602,8 +606,9 @@ export class CodexAppServerTranslator {
             toolCallId,
             status,
             rawOutput: output,
-            content:
-              contentText.length > 0
+            content: dynamicContent
+              ? dynamicContent
+              : contentText.length > 0
                 ? [
                     {
                       type: "content",
@@ -903,6 +908,7 @@ type ThreadItemUnion =
   | {
       type: "dynamicToolCall";
       id: string;
+      namespace?: string | null;
       tool: string;
       arguments?: unknown;
       contentItems?: unknown;
@@ -983,7 +989,9 @@ function describeItem(item: ThreadItemUnion): string {
     case "mcpToolCall":
       return `${item.server}:${item.tool}`;
     case "dynamicToolCall":
-      return item.tool || "tool";
+      return item.namespace
+        ? `${item.namespace}/${item.tool || "tool"}`
+        : item.tool || "tool";
     case "webSearch":
       return `Searching ${truncate(item.query ?? "web", 40)}`;
     case "imageView":
@@ -1133,7 +1141,11 @@ function toolInput(item: ThreadItemUnion): unknown {
         arguments: item.arguments,
       };
     case "dynamicToolCall":
-      return { tool: item.tool, arguments: item.arguments };
+      return {
+        namespace: item.namespace ?? null,
+        tool: item.tool,
+        arguments: item.arguments,
+      };
     case "collabAgentToolCall":
       // `prompt` first — the SubagentCard reads it for both the header
       // excerpt and the expandable Prompt block.
@@ -1174,6 +1186,83 @@ function toolOutput(item: ThreadItemUnion): unknown {
     return item.result;
   }
   return null;
+}
+
+/** Convert Responses-compatible dynamic-tool output into Zeros-owned content
+ * blocks. The mapping is provider-neutral: browser, workspace, or future tools
+ * all persist through the same canonical transcript contract. */
+function dynamicToolContent(
+  item: Extract<ThreadItemUnion, { type: "dynamicToolCall" }>,
+): ToolCallContent[] | null {
+  if (!Array.isArray(item.contentItems)) return null;
+  const content: ToolCallContent[] = [];
+  for (const candidate of item.contentItems) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const value = candidate as Record<string, unknown>;
+    if (value.type === "inputText" && typeof value.text === "string") {
+      content.push({
+        type: "content",
+        content: { type: "text", text: value.text },
+      });
+      continue;
+    }
+    if (value.type === "inputImage") {
+      const block =
+        typeof value.imageUrl === "string"
+          ? dynamicMediaContent(value.imageUrl, "image")
+          : null;
+      content.push({
+        type: "content",
+        content: block ?? unrenderableDynamicMedia("image"),
+      });
+      continue;
+    }
+    if (value.type === "inputAudio") {
+      const block =
+        typeof value.audioUrl === "string"
+          ? dynamicMediaContent(value.audioUrl, "audio")
+          : null;
+      content.push({
+        type: "content",
+        content: block ?? unrenderableDynamicMedia("audio"),
+      });
+    }
+  }
+  return content.length > 0 ? content : null;
+}
+
+function unrenderableDynamicMedia(kind: "image" | "audio"): ContentBlock {
+  return {
+    type: "text",
+    text: `Dynamic tool ${kind} output could not be rendered.`,
+  };
+}
+
+function dynamicMediaContent(
+  uri: string,
+  kind: "image" | "audio",
+): ContentBlock | null {
+  const data = /^data:([^;,]+)(?:;[^,]*)?;base64,([a-z0-9+/=]+)$/i.exec(uri);
+  if (data) {
+    const mimeType = data[1]!;
+    if (!mimeType.toLowerCase().startsWith(`${kind}/`)) return null;
+    return kind === "image"
+      ? { type: "image", mimeType, data: data[2]! }
+      : { type: "audio", mimeType, data: data[2]! };
+  }
+  try {
+    const parsed = new URL(uri);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      return null;
+    }
+    return {
+      type: "resource_link",
+      uri: parsed.href,
+      name: `Dynamic tool ${kind}`,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function truncate(s: string, n: number): string {

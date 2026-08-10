@@ -11,18 +11,18 @@
 // Protocol summary (verified against the codex version pinned in
 // `package.json#codexProtocolVersion`; generated bindings at
 // `./generated/v2/`):
-//   - Client → Server requests: initialize, thread/start, thread/resume,
-//     turn/start, turn/interrupt, account/*, mcpServer/*, etc.
-//     (~80 methods total).
+//   - Client → Server requests: 128 generated methods. This harness wraps the
+//     interactive lifecycle directly and keeps the rest available only to
+//     typed, Codex-only engine integrations.
 //   - Client → Server notifications: only `initialized` (post-init).
-//   - Server → Client requests: item/{commandExecution,fileChange,
-//     permissions}/requestApproval, account/chatgptAuthTokens/refresh,
-//     attestation/generate.
-//   - Server → Client notifications: ~60 events including thread/started,
+//   - Server → Client requests: all 11 methods are deliberately handled or
+//     provider-conditional; none can silently strand the app-server.
+//   - Server → Client notifications: 72 generated events including thread/started,
 //     turn/{started,completed}, item/{started,completed}, item/agentMessage/
 //     delta, item/reasoning/textDelta, item/commandExecution/outputDelta,
 //     item/fileChange/patchUpdated, error, account/{updated,rateLimits/
-//     updated,login/completed}, warning, deprecationNotice.
+//     updated,login/completed}, warning, and deprecationNotice. See
+//     protocol-coverage.json for the exact canonical/handled/forwarded split.
 //
 // Lifecycle:
 //   bootCodexAppServerRuntime(opts)
@@ -91,6 +91,16 @@ import type { AskForApproval as GenAskForApproval } from "./generated/v2/AskForA
 import type { UserInput as GenUserInput } from "./generated/v2/UserInput";
 import type { ThreadStartParams as GenThreadStartParams } from "./generated/v2/ThreadStartParams";
 import type { TurnStartParams as GenTurnStartParams } from "./generated/v2/TurnStartParams";
+import type { AttestationGenerateResponse as GenAttestationGenerateResponse } from "./generated/v2/AttestationGenerateResponse";
+import type { ChatgptAuthTokensRefreshParams as GenChatgptAuthTokensRefreshParams } from "./generated/v2/ChatgptAuthTokensRefreshParams";
+import type { ChatgptAuthTokensRefreshResponse as GenChatgptAuthTokensRefreshResponse } from "./generated/v2/ChatgptAuthTokensRefreshResponse";
+import type { CurrentTimeReadResponse as GenCurrentTimeReadResponse } from "./generated/v2/CurrentTimeReadResponse";
+import type { DynamicToolCallParams as GenDynamicToolCallParams } from "./generated/v2/DynamicToolCallParams";
+import type { DynamicToolCallResponse as GenDynamicToolCallResponse } from "./generated/v2/DynamicToolCallResponse";
+import type { ClientRequest as GenClientRequest } from "./generated/ClientRequest";
+import type { InitializeCapabilities as GenInitializeCapabilities } from "./generated/InitializeCapabilities";
+import type { ServerNotificationEnvelope as GenServerNotificationEnvelope } from "./generated/ServerNotificationEnvelope";
+import type { ServerRequest as GenServerRequest } from "./generated/ServerRequest";
 
 /** Content blocks accepted by `turn/start.input`. */
 export type CodexUserInput = GenUserInput;
@@ -114,6 +124,159 @@ export type CodexThreadStartParams = GenThreadStartParams;
 
 /** `turn/start` params. */
 export type CodexTurnStartParams = GenTurnStartParams;
+
+/** Method/params pairs derived directly from the generated app-server unions.
+ * Product integrations can opt into these helpers without adding an arbitrary
+ * string RPC surface to a renderer or shared Zeros protocol. */
+export type CodexClientRequestMethod = GenClientRequest["method"];
+export type CodexClientRequestParams<Method extends CodexClientRequestMethod> =
+  Extract<GenClientRequest, { method: Method }>["params"];
+export type CodexServerNotificationMethod =
+  GenServerNotificationEnvelope["method"];
+export type CodexServerNotificationParams<
+  Method extends CodexServerNotificationMethod,
+> = Extract<GenServerNotificationEnvelope, { method: Method }>["params"];
+
+type CodexHostRequestResponses = {
+  "account/chatgptAuthTokens/refresh": GenChatgptAuthTokensRefreshResponse;
+  "attestation/generate": GenAttestationGenerateResponse;
+  "currentTime/read": GenCurrentTimeReadResponse;
+  "item/tool/call": GenDynamicToolCallResponse;
+};
+
+type CodexHostRequestMethod = keyof CodexHostRequestResponses;
+type CodexHostRequestParams<Method extends CodexHostRequestMethod> = Extract<
+  GenServerRequest,
+  { method: Method }
+>["params"];
+
+type CodexHostRequestRegistrar = Pick<JsonRpcStdioClient, "onRequest">;
+
+function registerTypedCodexHostRequest<Method extends CodexHostRequestMethod>(
+  client: CodexHostRequestRegistrar,
+  method: Method,
+  handler: (
+    params: CodexHostRequestParams<Method>,
+  ) =>
+    | CodexHostRequestResponses[Method]
+    | Promise<CodexHostRequestResponses[Method]>,
+): void {
+  client.onRequest(method, async (params) =>
+    handler(params as CodexHostRequestParams<Method>),
+  );
+}
+
+export interface CodexHostRequestOptions {
+  /** Injectable only for deterministic tests; runtime callers use Date.now. */
+  now?: () => number;
+  /** Execute a client-defined tool advertised through thread/start. */
+  onDynamicToolCall?: (
+    params: GenDynamicToolCallParams,
+  ) => Promise<GenDynamicToolCallResponse> | GenDynamicToolCallResponse;
+  /** External-host token refresh for Codex's explicit
+   * `chatgptAuthTokens` login mode. This must never be wired to an unrelated
+   * Zeros application token. */
+  refreshChatgptAuthTokens?: (
+    params: GenChatgptAuthTokensRefreshParams,
+  ) =>
+    | Promise<GenChatgptAuthTokensRefreshResponse>
+    | GenChatgptAuthTokensRefreshResponse;
+  /** Optional upstream attestation provider. */
+  generateAttestation?: () =>
+    | Promise<GenAttestationGenerateResponse>
+    | GenAttestationGenerateResponse;
+}
+
+export function buildInitializeCapabilities({
+  requestAttestation,
+}: {
+  requestAttestation: boolean;
+}): GenInitializeCapabilities {
+  return {
+    experimentalApi: true,
+    requestAttestation,
+    mcpServerOpenaiFormElicitation: true,
+  };
+}
+
+/** Register generated, server-initiated host requests that do not belong to
+ * the approval/question lifecycle. Optional providers remain explicit seams;
+ * their absence never borrows credentials or capabilities from Zeros. */
+export function registerCodexHostRequestHandlers(
+  client: CodexHostRequestRegistrar,
+  options: CodexHostRequestOptions = {},
+): void {
+  const now = options.now ?? Date.now;
+  registerTypedCodexHostRequest(client, "currentTime/read", () => ({
+    currentTimeAt: Math.floor(now() / 1_000),
+  }));
+  registerTypedCodexHostRequest(client, "item/tool/call", async (params) => {
+    if (!options.onDynamicToolCall) {
+      return {
+        success: false,
+        contentItems: [
+          {
+            type: "inputText",
+            text: "No host handler is registered for this dynamic tool.",
+          },
+        ],
+      };
+    }
+    try {
+      return await options.onDynamicToolCall(params);
+    } catch (error) {
+      return {
+        success: false,
+        contentItems: [
+          {
+            type: "inputText",
+            text: `Dynamic tool failed: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+      };
+    }
+  });
+  if (options.refreshChatgptAuthTokens) {
+    registerTypedCodexHostRequest(
+      client,
+      "account/chatgptAuthTokens/refresh",
+      async (params) =>
+        validateChatgptAuthTokensRefreshResponse(
+          await options.refreshChatgptAuthTokens!(params),
+        ),
+    );
+  }
+  if (options.generateAttestation) {
+    registerTypedCodexHostRequest(client, "attestation/generate", async () => {
+      const response = await options.generateAttestation!();
+      if (!response || typeof response.token !== "string" || !response.token) {
+        throw new Error(
+          "The host attestation provider returned an empty token.",
+        );
+      }
+      return response;
+    });
+  }
+}
+
+function validateChatgptAuthTokensRefreshResponse(
+  response: GenChatgptAuthTokensRefreshResponse,
+): GenChatgptAuthTokensRefreshResponse {
+  if (
+    !response ||
+    typeof response.accessToken !== "string" ||
+    !response.accessToken ||
+    typeof response.chatgptAccountId !== "string" ||
+    !response.chatgptAccountId ||
+    (response.chatgptPlanType !== null &&
+      typeof response.chatgptPlanType !== "string")
+  ) {
+    throw new Error(
+      "The ChatGPT authentication provider returned an invalid refresh response.",
+    );
+  }
+  return response;
+}
 
 /** Server-initiated approval request shape passed to the adapter.
  *  The adapter stores `permissionId` for routing and eventually calls
@@ -198,6 +361,12 @@ export interface CodexAppServerBootOptions {
    *  call — timeout, server-side resolution, or dispose. Lets the adapter
    *  evict its own pending entry and tell the renderer to drop the card. */
   onUserInputSettled?: (questionId: string) => void;
+  /** Execute an experimental client-defined tool advertised on thread/start. */
+  onDynamicToolCall?: CodexHostRequestOptions["onDynamicToolCall"];
+  /** External-host refresh for the explicit `chatgptAuthTokens` mode. */
+  refreshChatgptAuthTokens?: CodexHostRequestOptions["refreshChatgptAuthTokens"];
+  /** Presence opts into upstream attestation during initialize. */
+  generateAttestation?: CodexHostRequestOptions["generateAttestation"];
   /** Called with each line the server writes to stderr. */
   onStderr?: (line: string) => void;
   /** Called when the server exits (gracefully or otherwise). */
@@ -309,6 +478,20 @@ export interface CodexAppServerHandle {
     params?: unknown,
     opts?: { timeoutMs?: number },
   ): Promise<T>;
+
+  /** Generated method/params dispatch for Codex-only engine integrations.
+   * This remains inside the adapter and is not a renderer capability bridge. */
+  requestTyped<Method extends CodexClientRequestMethod, Result = unknown>(
+    method: Method,
+    params: CodexClientRequestParams<Method>,
+    opts?: { timeoutMs?: number },
+  ): Promise<Result>;
+
+  /** Generated notification dispatch for Codex-only engine integrations. */
+  onNotificationTyped<Method extends CodexServerNotificationMethod>(
+    method: Method,
+    handler: (params: CodexServerNotificationParams<Method>) => void,
+  ): () => void;
 
   /** Tear down: stop the in-flight turn, close JSON-RPC, kill child. */
   dispose(): Promise<void>;
@@ -452,6 +635,11 @@ export async function bootCodexAppServerRuntime(
       }
     },
   });
+  registerCodexHostRequestHandlers(client, {
+    onDynamicToolCall: opts.onDynamicToolCall,
+    refreshChatgptAuthTokens: opts.refreshChatgptAuthTokens,
+    generateAttestation: opts.generateAttestation,
+  });
 
   // ── Handshake: initialize ─────────────────────────────────
   let initResp: CodexInitializeResponse;
@@ -464,27 +652,11 @@ export async function bootCodexAppServerRuntime(
           version: opts.clientInfo.version,
           title: opts.clientInfo.title ?? null,
         },
-        capabilities: {
-          // Opt into experimental API methods — REQUIRED for the blocking
-          // question channel: `item/tool/requestUserInput` (and its whole
-          // Tool* payload family) is marked EXPERIMENTAL in the app-server
-          // protocol and is only offered when the client declares it can
-          // handle it. Without this the model itself refuses ("I can't open
-          // the question-card tool from this mode") because the tool is
-          // never in its toolset. Safe to enable broadly: our JSON-RPC
-          // client answers any UNHANDLED experimental server→client request
-          // with a clean -32601 (no hang), and unknown notifications drop.
-          experimentalApi: true,
-          // Zeros does not mint the opaque upstream attestation token. State
-          // that explicitly so app-server never issues a request we cannot
-          // satisfy (the generated capability is a required boolean).
-          requestAttestation: false,
-          // We normalize both standard MCP forms and OpenAI's extended form
-          // envelope onto the shared blocking-question UI. Unsupported field
-          // shapes fail closed with `cancel`, which is the app-server contract
-          // required before advertising this capability.
-          mcpServerOpenaiFormElicitation: true,
-        },
+        // The helper keeps experimental question/dynamic-tool delivery on and
+        // advertises attestation only when its host request can be answered.
+        capabilities: buildInitializeCapabilities({
+          requestAttestation: !!opts.generateAttestation,
+        }),
       },
       { timeoutMs: INITIALIZE_TIMEOUT_MS },
     );
@@ -505,13 +677,6 @@ export async function bootCodexAppServerRuntime(
         `Upgrade to >= ${MIN_CLI_VERSION} via 'npm install -g @openai/codex@latest'.`,
     );
   }
-
-  // ── Handshake: initialized notification ──────────────────
-  //
-  // Codex app-server requires the client to send `initialized` once
-  // after the initialize response. Until we do, the server holds back
-  // some notifications (e.g. account/updated).
-  client.notify("initialized", {});
 
   // ── Approval round-trip: ACP-style permissionId resolver map ──
   //
@@ -602,14 +767,6 @@ export async function bootCodexAppServerRuntime(
   wireApproval("item/permissions/requestApproval");
   wireApproval("execCommandApproval");
   wireApproval("applyPatchApproval");
-
-  // Codex asks the host for wall-clock time instead of trusting the model's
-  // training cutoff. It is a server→client request in the generated protocol,
-  // not a notification; leaving it unregistered returns -32601 and needlessly
-  // deprives otherwise healthy turns of an exact timestamp.
-  client.onRequest("currentTime/read", () => ({
-    currentTimeAt: Math.floor(Date.now() / 1000),
-  }));
 
   // ── Blocking question round-trips ──────────────────────
   // Twin of the approval flow. Codex's own requestUserInput has no cancel
@@ -766,6 +923,11 @@ export async function bootCodexAppServerRuntime(
     pending.resolve(JSON_RPC_NO_RESPONSE);
     opts.onUserInputSettled?.(questionId);
   });
+
+  // Codex starts ordinary notification and host-request delivery after this
+  // acknowledgement. Register every blocking handler first so the first frame
+  // cannot race a partially initialized host.
+  client.notify("initialized", {});
 
   // ── Track turn lifecycle for runTurn correlation ─────────
   //
@@ -1097,12 +1259,20 @@ export async function bootCodexAppServerRuntime(
       return subscribe(method, handler);
     },
 
+    onNotificationTyped(method, handler) {
+      return subscribe(method, handler as (params: unknown) => void);
+    },
+
     request<T>(
       method: string,
       params?: unknown,
       rpcOpts?: { timeoutMs?: number },
     ) {
       return requestWithRetry<T>(method, params ?? {}, rpcOpts);
+    },
+
+    requestTyped(method, params, rpcOpts) {
+      return requestWithRetry(method, params, rpcOpts);
     },
 
     dispose() {

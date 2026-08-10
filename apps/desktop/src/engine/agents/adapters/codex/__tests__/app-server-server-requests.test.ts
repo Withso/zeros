@@ -196,6 +196,76 @@ describe("codex app-server initiated requests", () => {
     await runtime.dispose();
   });
 
+  it("wires optional auth, attestation, and dynamic-tool providers into the runtime", async () => {
+    const fake = createFakeProcess();
+    harness.proc = fake.proc;
+    const onDynamicToolCall = vi.fn(async () => ({
+      success: true,
+      contentItems: [{ type: "inputText" as const, text: "tool complete" }],
+    }));
+    const runtime = await bootCodexAppServerRuntime({
+      cwd: "/tmp/project",
+      clientInfo: { name: "Zeros-test", version: "0.0.0" },
+      onDynamicToolCall,
+      refreshChatgptAuthTokens: async () => ({
+        accessToken: "fresh-token",
+        chatgptAccountId: "account-1",
+        chatgptPlanType: "plus",
+      }),
+      generateAttestation: async () => ({ token: "opaque-attestation" }),
+    });
+
+    const initialize = await fake.waitFor(
+      (frame) => frame.method === "initialize",
+    );
+    expect(initialize.params).toMatchObject({
+      capabilities: { requestAttestation: true },
+    });
+
+    fake.send({
+      jsonrpc: "2.0",
+      id: 51,
+      method: "item/tool/call",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        callId: "call-1",
+        namespace: "workspace",
+        tool: "inspect",
+        arguments: {},
+      },
+    });
+    expect((await fake.waitFor((frame) => frame.id === 51)).result).toEqual({
+      success: true,
+      contentItems: [{ type: "inputText", text: "tool complete" }],
+    });
+
+    fake.send({
+      jsonrpc: "2.0",
+      id: 52,
+      method: "account/chatgptAuthTokens/refresh",
+      params: { reason: "unauthorized", previousAccountId: "account-1" },
+    });
+    expect((await fake.waitFor((frame) => frame.id === 52)).result).toEqual({
+      accessToken: "fresh-token",
+      chatgptAccountId: "account-1",
+      chatgptPlanType: "plus",
+    });
+
+    fake.send({
+      jsonrpc: "2.0",
+      id: 53,
+      method: "attestation/generate",
+      params: {},
+    });
+    expect((await fake.waitFor((frame) => frame.id === 53)).result).toEqual({
+      token: "opaque-attestation",
+    });
+    expect(onDynamicToolCall).toHaveBeenCalledOnce();
+
+    await runtime.dispose();
+  });
+
   it("round-trips a deprecated exec approval instead of returning method-not-found", async () => {
     const fake = createFakeProcess();
     harness.proc = fake.proc;

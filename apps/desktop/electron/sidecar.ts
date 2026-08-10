@@ -439,6 +439,21 @@ function resolveClaudeCliPaths(): {
   return { binary, version };
 }
 
+function codexTargetTriple(
+  platform = process.platform,
+  arch = process.arch,
+): string | null {
+  const triples: Record<string, string> = {
+    "darwin:x64": "x86_64-apple-darwin",
+    "darwin:arm64": "aarch64-apple-darwin",
+    "linux:x64": "x86_64-unknown-linux-musl",
+    "linux:arm64": "aarch64-unknown-linux-musl",
+    "win32:x64": "x86_64-pc-windows-msvc",
+    "win32:arm64": "aarch64-pc-windows-msvc",
+  };
+  return triples[`${platform}:${arch}`] ?? null;
+}
+
 /** Resolve the complete pinned Codex runtime staged in Resources. Development
  *  uses the same optional platform package directly; production must never
  *  depend on a user's PATH because that can select a different CLI/version than
@@ -447,14 +462,19 @@ function resolveClaudeCliPaths(): {
 function resolveCodexCliPaths(): {
   binary: string | null;
   version: string | null;
+  managedPackageRoot: string | null;
 } {
   let binary: string | null = null;
   let version: string | null = null;
+  let managedPackageRoot: string | null = null;
 
   if (IS_PACKAGED) {
+    const triple = codexTargetTriple();
+    managedPackageRoot = path.join(process.resourcesPath, "codex-runtime");
     const staged = path.join(
-      process.resourcesPath,
-      "codex-runtime",
+      managedPackageRoot,
+      "vendor",
+      triple ?? "unsupported-target",
       "bin",
       process.platform === "win32" ? "codex.exe" : "codex",
     );
@@ -489,6 +509,7 @@ function resolveCodexCliPaths(): {
     // hiding exactly the staging regression this pin exists to prevent.
     try {
       const wrapperPackageJson = require.resolve("@openai/codex/package.json");
+      managedPackageRoot = path.dirname(wrapperPackageJson);
       const wrapper = JSON.parse(readFileSync(wrapperPackageJson, "utf8")) as {
         version?: string;
       };
@@ -553,7 +574,7 @@ function resolveCodexCliPaths(): {
         "unpinned `codex` on PATH. Run `pnpm stage:codex-cli`.",
     );
   }
-  return { binary, version };
+  return { binary, version, managedPackageRoot };
 }
 
 /** Prove the engine event loop can answer, not merely that its kernel listener
@@ -1291,22 +1312,21 @@ async function doSpawnEngine(
     extraEnv.ZEROS_CLAUDE_CLI_VERSION = claudeCli.version;
   }
 
-  // Codex native runtime. The compiled engine cannot require.resolve the npm
-  // platform package, so hand it the staged executable and exact pinned version.
-  // Explicit environment overrides remain authoritative for diagnostics/tests.
+  // Codex native runtime. Keep the executable, version, and managed package
+  // root atomic: an explicit binary override must not inherit metadata from a
+  // different staged runtime.
   const codexCli = resolveCodexCliPaths();
   if (codexCli.binary && !process.env.ZEROS_CODEX_CLI_PATH) {
     extraEnv.ZEROS_CODEX_CLI_PATH = codexCli.binary;
-  }
-  // The version is only claimed alongside the binary it describes. Announcing a
-  // bundled version we are not going to run would make the provider list report
-  // the pin while the adapter executes some other `codex` from PATH.
-  if (
-    codexCli.binary &&
-    codexCli.version &&
-    !process.env.ZEROS_CODEX_CLI_VERSION
-  ) {
-    extraEnv.ZEROS_CODEX_CLI_VERSION = codexCli.version;
+    if (codexCli.version && !process.env.ZEROS_CODEX_CLI_VERSION) {
+      extraEnv.ZEROS_CODEX_CLI_VERSION = codexCli.version;
+    }
+    if (
+      codexCli.managedPackageRoot &&
+      !process.env.CODEX_MANAGED_PACKAGE_ROOT
+    ) {
+      extraEnv.CODEX_MANAGED_PACKAGE_ROOT = codexCli.managedPackageRoot;
+    }
   }
 
   // Account-binding config for the engine. The verifier is provider-neutral
