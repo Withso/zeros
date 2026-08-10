@@ -30,10 +30,9 @@ The top-level layout is intentional:
 | Path                    | Responsibility                                                                                            |
 | ----------------------- | --------------------------------------------------------------------------------------------------------- |
 | `apps/desktop/`         | Cross-platform desktop product (currently macOS): Electron main/preload, local engine, and React renderer |
-| `apps/control-plane/`   | Railway-hosted API and database migrations                                                                |
+| `apps/control-plane/`   | Railway-hosted API, feedback delivery, and database migrations                                          |
 | `apps/web/`             | Cloudflare Pages hub, auth handoff, and edge functions                                                    |
 | `apps/marketing/`       | Public marketing site source assembled into the web deployment                                            |
-| `apps/feedback-worker/` | Cloudflare Worker for authenticated feedback delivery                                                     |
 | `packages/protocol/`    | Shared transport schemas, messages, validation, and redaction                                             |
 | `catalogs/`             | Versioned provider/model catalog data and schemas                                                         |
 | `scripts/`              | Repository-wide build, release, audit, and maintenance automation                                         |

@@ -60,6 +60,7 @@ import {
   listIgnoredEntries,
   listWorkspaces,
   listRemoteRestrictedWorkspaceIds,
+  reassignLocalWorkspaceOrganization,
   getWorkingDirectories,
   setWorkingDirectories,
   setWorkspaceRemoteRestricted,
@@ -1074,6 +1075,15 @@ const workspaceKind = (
   throw new GitError({
     code: "VALIDATION_FAILED",
     message: `'${key}' must be "code" or "design"`,
+  });
+};
+const workspacePlacement = (p: Params): "local" | "cloud" | undefined => {
+  const value = p.placement;
+  if (value === undefined || value === null || value === "") return undefined;
+  if (value === "local" || value === "cloud") return value;
+  throw new GitError({
+    code: "VALIDATION_FAILED",
+    message: `'placement' must be "local" or "cloud"`,
   });
 };
 const strArr = (p: Params, k: string): string[] =>
@@ -2748,6 +2758,8 @@ export class WorkspaceService {
         return createWorkspace({
           repoRoot,
           kind: workspaceKind(params),
+          organizationId: optStr(params, "organizationId"),
+          placement: workspacePlacement(params),
           repoSlug: optStr(params, "repoSlug"),
           baseBranch: optStr(params, "baseBranch"),
           prompt: optStr(params, "prompt"),
@@ -2767,6 +2779,22 @@ export class WorkspaceService {
           // repo-resident script run.
           allowAutoSetup: true,
         });
+      }
+
+      // LOCAL-ONLY ownership repair after a confirmed organization leave or
+      // deletion. Local worktrees remain the user's files and move to Personal;
+      // cloud rows stay attached to their server tenant.
+      case "workspace.reassignLocalOrganization": {
+        if (remote) {
+          throw new GitError({
+            code: "REMOTE_RESTRICTED",
+            message: "Workspace ownership repair is desktop-only.",
+          });
+        }
+        return reassignLocalWorkspaceOrganization(
+          reqStr(params, "fromOrganizationId"),
+          reqStr(params, "toOrganizationId"),
+        );
       }
 
       // ── Write: prepare a workspace identity for instant navigation. ──
@@ -4388,6 +4416,7 @@ export class WorkspaceService {
         const result = await createWorkspaceFromBranch({
           repoRoot: reqStr(params, "repoRoot"),
           repoSlug: optStr(params, "repoSlug"),
+          organizationId: optStr(params, "organizationId"),
           branchName: reqStr(params, "branchName"),
           sourceTool: optStr(params, "sourceTool") as DetectedTool | undefined,
           prNumber: optNum(params, "prNumber"),
@@ -4427,6 +4456,7 @@ export class WorkspaceService {
           worktreePath: reqStr(params, "worktreePath"),
           branchName: reqStr(params, "branchName"),
           repoSlug: optStr(params, "repoSlug"),
+          organizationId: optStr(params, "organizationId"),
           sourceTool: optStr(params, "sourceTool") as DetectedTool | undefined,
         });
       case "workspace.proposeBranchName":

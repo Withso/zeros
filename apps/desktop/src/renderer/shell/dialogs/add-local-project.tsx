@@ -40,6 +40,11 @@ import {
 } from "../../state/projects-store";
 import { recordAdoptedWorktree } from "../../state/adopted-worktrees";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
+import { localWorkspaceOwner } from "../../features/team/organization-capabilities";
+import {
+  getActiveOrganizationIdSnapshot,
+  getActiveOrganizationSnapshot,
+} from "../../features/team/team-store";
 
 // Display names for the tool that created a worktree Zeros is adopting. These
 // are interop labels, not endorsements: `DetectedTool` (apps/desktop/src/engine/git/types.ts)
@@ -95,6 +100,12 @@ export function AddLocalProjectDialog({
       });
       return;
     }
+    // Ownership is part of the user's adoption intent. Capture it before any
+    // project registration or bridge work so a switch cannot retarget the row.
+    const owner = localWorkspaceOwner(
+      getActiveOrganizationSnapshot(),
+      getActiveOrganizationIdSnapshot(),
+    );
     setBusy(true);
     try {
       // Register the PRIMARY checkout as the project (so Local main is the real
@@ -126,6 +137,7 @@ export function AddLocalProjectDialog({
         worktreePath: inspect.path,
         branchName: inspect.branch,
         repoSlug: project.repoSlug,
+        organizationId: owner.organizationId,
         sourceTool: inspect.sourceTool,
       });
       // Teach the renderer's path→project resolver about this external path —

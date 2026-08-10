@@ -1,19 +1,17 @@
 // ──────────────────────────────────────────────────────────
-// Team store — ONE cached `/v1/me` shared by the settings sidebar and the
-// Administration panels (Team / Members), so "does this user have any
-// teams?" is answered once per session, not per panel mount.
+// Organization store — ONE cached `/v1/me` shared by the Home switcher,
+// staff-feature gate, compatibility administration components, and engine
+// settings courier.
 //
-// Teams are OPTIONAL (2026-07-22): nothing is auto-created at sign-in, so
-// zero teams is a first-class state — the sidebar swaps the Administration
-// tabs for a "+ Create team" entry, and the engine team layer simply stays
-// clear. The store reconciles the persisted active-team selection on every
-// load: a vanished team (deleted / left) falls back to the first remaining
-// team, or null.
+// Every authenticated account now has a permanent Personal organization. A
+// zero-organization response remains a tolerated mixed-version/error state.
+// The persisted `team:*` keys are compatibility contracts from the flat-Team
+// era; their values now identify tenant-root organizations.
 //
 // Stale-while-revalidate: `me` keeps its last value during a reload so
 // the sidebar never flashes between the tabs and the create entry.
 // Cleared on sign-out (InviteDeepLinkHandler in app-shell.tsx) so account
-// A's teams can never render for account B.
+// A's organizations can never render for account B.
 // ──────────────────────────────────────────────────────────
 
 import { useEffect, useSyncExternalStore } from "react";
@@ -26,11 +24,19 @@ import {
   type TeamSummary,
 } from "./control-plane";
 import {
+  clearActiveOrganizationSelectionHint,
+  getActiveOrganizationIsPersonalHint,
   getActiveTeamId,
-  setActiveTeamId,
+  setActiveOrganizationSelection,
   subscribeActiveTeam,
 } from "./active-team";
 import { requestTeamResync } from "./team-sync";
+import {
+  hasOrganizationOwnershipHistory,
+  hasRecordedOrganizationOwnership,
+  recordOrganizationHierarchySeen,
+  reconcileOrganizationWorkspaceOwnership,
+} from "./organization-membership-history";
 
 export type TeamStoreStatus = "idle" | "loading" | "ready" | "error";
 
@@ -45,14 +51,17 @@ const listeners = new Set<() => void>();
 let inflight: Promise<Me | null> | null = null;
 // Bumped by clearTeamStore (sign-out): an in-flight fetch started under the
 // PREVIOUS account discards its result instead of re-emitting account A's
-// teams after the store was cleared for account B.
+// organizations after the store was cleared for account B.
 let generation = 0;
 
-// Sidebar-gating hint persisted across launches: whether the last confirmed
-// load had ≥1 team. Lets a zero-team user's Settings open straight to the
-// "+ Create team" entry instead of flashing the Administration tabs
-// until the first fetch confirms. Advisory only — the live store state wins
-// the moment it's ready.
+/** Capture when starting work that may outlive the current signed-in account.
+ * `clearTeamStore` advances this token before Account B can mount. */
+export function getOrganizationStoreGeneration(): number {
+  return generation;
+}
+
+// Persisted compatibility hint. The key name predates the restored hierarchy;
+// it now records whether `/v1/me` returned any tenant-root organizations.
 const HAS_TEAMS_KEY = "team:has-teams";
 /** Pre-2026-07-25 name. Without the carry-forward this returns null after an
  *  upgrade, `zeroTeams` computes false while the first fetch is in flight, and
@@ -76,7 +85,65 @@ export function getTeamStoreState(): TeamStoreState {
   return state;
 }
 
-/** Fetch `/v1/me` (single-flight) and reconcile the active-team selection.
+export function getActiveOrganizationSnapshot(): TeamSummary | null {
+  const organizations = state.me?.organizations ?? state.me?.teams ?? [];
+  const activeId = getActiveTeamId();
+  return (
+    organizations.find((organization) => organization.id === activeId) ??
+    organizations[0] ??
+    null
+  );
+}
+
+/** Exact owner for a local create intent. A confirmed membership-history
+ * entry keeps cold-start/outage creates under the durable selection; an
+ * unproven flat-Team-era id deliberately falls back to legacy Personal. */
+export function getActiveOrganizationIdSnapshot(): string | null {
+  const active = getActiveOrganizationSnapshot();
+  if (active) return active.id;
+  const persisted = getActiveTeamId();
+  return hasRecordedOrganizationOwnership(persisted) ? persisted : null;
+}
+
+/** Commit an exact `/v1/me` snapshot from either the visible store refresh or
+ * the bridge-aware background sync. Sharing this publication prevents the
+ * switcher from retaining a deleted/left organization for 15 minutes while
+ * workspace ownership has already moved back to Personal. */
+export function acceptOrganizationSnapshot(
+  me: Me,
+  expectedGeneration: number = generation,
+): boolean {
+  if (expectedGeneration !== generation) return false;
+  const current = getActiveTeamId();
+  const organizations = me.organizations ?? me.teams;
+  const personal = organizations.find(
+    (organization) => organization.isPersonal,
+  );
+  // One-time flat-Team → hierarchy normalization. Legacy SQLite rows are
+  // intentionally Personal/null-owned, so retaining a promoted collaborative
+  // selection would make the entire existing workspace collection disappear.
+  const firstHierarchySnapshot =
+    personal != null && !hasOrganizationOwnershipHistory(me.user.id);
+  const selected =
+    (firstHierarchySnapshot ? personal : undefined) ??
+    organizations.find((organization) => organization.id === current) ??
+    organizations[0] ??
+    null;
+  // An authoritative empty response is a tolerated mixed-version/provisioning
+  // state, not evidence that the durable owner was deleted. Keep the selection
+  // so later creates and a recovered snapshot retain their semantic owner.
+  if (selected) {
+    setActiveOrganizationSelection(selected.id, selected.isPersonal);
+  }
+  if (firstHierarchySnapshot && personal && getActiveTeamId() === personal.id) {
+    recordOrganizationHierarchySeen(me.user.id);
+  }
+  setSetting(HAS_TEAMS_KEY, organizations.length > 0);
+  emit({ me, status: "ready", error: null });
+  return true;
+}
+
+/** Fetch `/v1/me` (single-flight) and reconcile the active organization.
  *  Errors land in `state.error` AND reject-free: callers just re-render. */
 export function refreshTeams(): Promise<Me | null> {
   if (!CONTROL_PLANE_URL) return Promise.resolve(null);
@@ -90,28 +157,30 @@ export function refreshTeams(): Promise<Me | null> {
       // belongs to the previous account. Drop it: no emit, no active-team
       // write.
       if (gen !== generation) return null;
-      // Keep the persisted selection valid: a deleted/left team falls back to
-      // the first remaining team; zero teams → null (clears the engine layer
-      // via the active-team subscribe → team-sync chain).
-      const current = getActiveTeamId();
-      if (!current || !me.teams.some((t) => t.id === current)) {
-        setActiveTeamId(me.teams[0]?.id ?? null);
-        // setActiveTeamId no-ops (no subscriber event) when the id is
-        // ALREADY null — e.g. the last team vanished server-side while
-        // nothing was selected. Kick the engine sync explicitly so a stale
-        // team settings doc can't linger until the 15-minute interval.
-        if (!current && me.teams.length === 0) requestTeamResync();
+      // Keep the persisted selection valid: a deleted/left organization falls
+      // back to Personal/first. A mixed-version empty list retains that durable
+      // selection but explicitly clears the engine layer below.
+      const organizations = me.organizations ?? me.teams;
+      acceptOrganizationSnapshot(me);
+      // Empty snapshots deliberately do not publish a selection change. Re-kick
+      // the courier so any previously applied remote settings are still cleared.
+      if (organizations.length === 0) {
+        requestTeamResync();
       }
-      setSetting(HAS_TEAMS_KEY, me.teams.length > 0);
-      emit({ me, status: "ready", error: null });
+      void reconcileOrganizationWorkspaceOwnership(me).catch((error) => {
+        console.warn(
+          "[organization] local workspace ownership repair deferred:",
+          error instanceof Error ? error.message : error,
+        );
+      });
       return me;
     } catch (err) {
       if (gen !== generation) return null;
       const message =
         err instanceof ControlPlaneError
           ? err.message
-          : "Couldn't reach the team service";
-      // Keep the last-known teams (stale beats blank); surface the error.
+          : "Couldn't reach the organization service";
+      // Keep the last-known organizations (stale beats blank); surface error.
       emit({ ...state, status: "error", error: message });
       return null;
     }
@@ -124,12 +193,28 @@ export function refreshTeams(): Promise<Me | null> {
   return run;
 }
 
-/** Sign-out: drop the cache (and orphan any in-flight fetch) so the next
- *  account starts clean. */
-export function clearTeamStore(): void {
+/** Drop the cache (and orphan any in-flight fetch) so the next account starts
+ * clean. A renderer cold reload keeps the durable selection; a real account
+ * boundary opts into clearing it so another account cannot inherit its owner. */
+export function clearTeamStore(
+  options: { resetSelection?: boolean } = {},
+): void {
   generation += 1;
   inflight = null;
+  const previousId = getActiveTeamId();
+  const previousHint = getActiveOrganizationIsPersonalHint();
+  if (options.resetSelection) {
+    setActiveOrganizationSelection(null, null);
+  } else {
+    clearActiveOrganizationSelectionHint();
+  }
   emit({ me: null, status: "idle", error: null });
+  // Clearing can be a no-op for the active-selection publisher. Re-kick the
+  // courier explicitly so it captures this generation and clears/refetches.
+  const selectionPublished =
+    previousId !== getActiveTeamId() ||
+    previousHint !== getActiveOrganizationIsPersonalHint();
+  if (!selectionPublished) requestTeamResync();
 }
 
 function subscribe(listener: () => void): () => void {
@@ -137,7 +222,7 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-/** The cached me/teams; auto-loads on first mounted use. */
+/** The cached account/organizations; auto-loads on first mounted use. */
 export function useTeams(): TeamStoreState & {
   reload: () => Promise<Me | null>;
 } {
@@ -148,15 +233,26 @@ export function useTeams(): TeamStoreState & {
   return { ...snapshot, reload: refreshTeams };
 }
 
-/** The active team resolved against the cached list (selection falls back to
- *  the first team while a stale id reconciles), or null when the user has no
- *  teams. Re-renders on BOTH store and active-team changes. */
+/** Organization-first name for new surfaces; `useTeams` remains a source
+ * compatibility export while released settings code is retired. */
+export const useOrganizations = useTeams;
+
+/** The active organization resolved against the cached list (selection falls
+ *  back to Personal/first while a stale id reconciles). Re-renders on both
+ *  store and compatibility active-team-key changes. */
 export function useActiveTeam(): TeamSummary | null {
   const { me } = useTeams();
   const activeId = useSyncExternalStore(subscribeActiveTeam, getActiveTeamId);
-  if (!me || me.teams.length === 0) return null;
-  return me.teams.find((t) => t.id === activeId) ?? me.teams[0] ?? null;
+  const organizations = me?.organizations ?? me?.teams ?? [];
+  if (organizations.length === 0) return null;
+  return (
+    organizations.find((organization) => organization.id === activeId) ??
+    organizations[0] ??
+    null
+  );
 }
+
+export const useActiveOrganization = useActiveTeam;
 
 // ── Create-team dialog bus ───────────────────────────────
 //

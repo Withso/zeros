@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -11,13 +11,16 @@ import {
   getWorkspaceMeta,
   insertWorkspace,
   listWorkspaces,
+  reassignLocalWorkspaceOrganization,
   setDetachState,
   setStateRootForTesting,
   setWorkspaceMeta,
   updateWorkspace,
   deleteWorkspaceRow,
   clearDetachState,
+  writeWorktreeSeed,
 } from "../state";
+import { worktreeSeedPath } from "../../db/paths";
 import type { Workspace } from "../types";
 
 function sampleWorkspace(overrides: Partial<Workspace> = {}): Workspace {
@@ -34,6 +37,8 @@ function sampleWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     baseBranch: "main",
     path: `/tmp/worktrees/test-repo/${id}`,
     kind: "code",
+    organizationId: null,
+    placement: "local",
     status: "in-progress",
     createdAt: now,
     archivedAt: null,
@@ -73,6 +78,65 @@ describe("state", () => {
     insertWorkspace(ws);
     const got = getWorkspaceById(ws.id);
     expect(got).toEqual(ws);
+  });
+
+  it("round-trips organization ownership and cloud placement metadata", () => {
+    const ws = sampleWorkspace({
+      organizationId: "org_123",
+      placement: "cloud",
+    });
+    insertWorkspace(ws);
+    expect(getWorkspaceById(ws.id)).toMatchObject({
+      organizationId: "org_123",
+      placement: "cloud",
+    });
+  });
+
+  it("reassigns orphaned local rows to Personal without adopting cloud rows", () => {
+    insertWorkspace(
+      sampleWorkspace({ id: "ws_local", organizationId: "org_old" }),
+    );
+    insertWorkspace(
+      sampleWorkspace({
+        id: "ws_cloud",
+        organizationId: "org_old",
+        placement: "cloud",
+      }),
+    );
+    insertWorkspace(
+      sampleWorkspace({ id: "ws_other", organizationId: "org_other" }),
+    );
+
+    expect(reassignLocalWorkspaceOrganization("org_old", "personal_1")).toEqual(
+      { changes: 1, repoSlugs: ["test-repo"] },
+    );
+    expect(getWorkspaceById("ws_local")?.organizationId).toBe("personal_1");
+    expect(getWorkspaceById("ws_cloud")?.organizationId).toBe("org_old");
+    expect(getWorkspaceById("ws_other")?.organizationId).toBe("org_other");
+  });
+
+  it("updates crash-recovery ownership when a local row moves to Personal", async () => {
+    const workspacePath = path.join(
+      stateRoot,
+      "worktrees",
+      "test-repo",
+      "ws_local",
+    );
+    await mkdir(workspacePath, { recursive: true });
+    const workspace = sampleWorkspace({
+      id: "ws_local",
+      path: workspacePath,
+      organizationId: "org_old",
+    });
+    insertWorkspace(workspace);
+    writeWorktreeSeed(workspace);
+
+    reassignLocalWorkspaceOrganization("org_old", "personal_1");
+
+    const recovered = JSON.parse(
+      await readFile(worktreeSeedPath(workspacePath), "utf8"),
+    ) as Workspace;
+    expect(recovered.organizationId).toBe("personal_1");
   });
 
   // Workspace names are allocated colours with no random tail (2026-07-29),

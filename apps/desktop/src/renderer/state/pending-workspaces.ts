@@ -37,6 +37,10 @@ export interface PendingWorkspaceCreate {
   repoSlug: string;
   /** Optional only for old test/cache shapes; newly prepared rows always set it. */
   kind?: "code" | "design";
+  /** Captured at click time so switching organizations while prepare is in
+   * flight cannot move the optimistic row to another tenant. */
+  organizationId?: string | null;
+  placement?: "local" | "cloud";
   /** The announced final path (workspace.prepareCreate) — known before
    *  checkout, but not created until workspace.create owns the operation. */
   path?: string;
@@ -69,6 +73,8 @@ export function beginPendingCreate(args: {
   repoRoot: string;
   repoSlug: string;
   kind?: "code" | "design";
+  organizationId?: string | null;
+  placement?: "local" | "cloud";
   path?: string;
   branch?: string;
 }): string {

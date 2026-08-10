@@ -1341,6 +1341,14 @@ async function createWorkspaceInner(
     });
   }
   const kind: WorkspaceKind = input.kind === "design" ? "design" : "code";
+  const placement = input.placement === "cloud" ? "cloud" : "local";
+  const organizationId = input.organizationId?.trim() || null;
+  if (placement === "cloud" && !organizationId) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: "Cloud workspaces must belong to an organization",
+    });
+  }
   // Phase timings, logged on success below. Create sits on a renderer RPC with
   // a finite budget; when it runs long in the field, this line in the log store
   // says WHICH phase ate the time (fetch/base, checkout, seed scan, file hooks)
@@ -1470,6 +1478,8 @@ async function createWorkspaceInner(
   const workspace: Workspace = {
     id: workspaceId,
     kind,
+    organizationId,
+    placement,
     repoSlug,
     repoRoot: input.repoRoot,
     branch,

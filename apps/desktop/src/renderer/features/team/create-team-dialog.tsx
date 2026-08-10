@@ -23,7 +23,7 @@ import {
   DialogTitle,
 } from "../../shared/ui/primitives/dialog";
 import { controlPlane } from "./control-plane";
-import { setActiveTeamId } from "./active-team";
+import { setActiveOrganizationSelection } from "./active-team";
 import { requestTeamResync } from "./team-sync";
 import { refreshTeams } from "./team-store";
 import { TEAM_LOGO_ACCEPT, fileToTeamLogo } from "./team-logo";
@@ -97,7 +97,7 @@ export function CreateTeamDialog({
       }
 
       await refreshTeams();
-      setActiveTeamId(team.id);
+      setActiveOrganizationSelection(team.id, false);
       requestTeamResync();
       onOpenChange(false);
       toast.success(`${team.name} created`);

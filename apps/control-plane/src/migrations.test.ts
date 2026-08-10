@@ -110,19 +110,25 @@ d("migration ladder", () => {
     expect(ran).toEqual([LADDER[LADDER.length - 1]]);
   });
 
-  it("replays from every intermediate revision", async () => {
-    // A deployment can be at ANY prior revision (a long-lived staging box, a
-    // restored backup, a rollback). Every suffix of the ladder must apply to
-    // the state its prefix leaves. This deliberately runs the full ladder once
-    // per starting revision, which can exceed Vitest's 5s default on hosted
-    // Postgres even while every migration is making healthy progress.
-    for (let k = 0; k < LADDER.length; k++) {
-      await reset();
-      await applyThrough(k);
-      const ran = await runMigrations(pool);
-      expect(ran, `applying from revision ${k}`).toEqual(LADDER.slice(k));
-    }
-  }, 20_000);
+  it(
+    "replays from every intermediate revision",
+    async () => {
+      // A deployment can be at ANY prior revision (a long-lived staging box, a
+      // restored backup, a rollback). Every suffix of the ladder must apply to
+      // the state its prefix leaves. This deliberately runs the full ladder once
+      // per starting revision, which can exceed Vitest's default on hosted
+      // Postgres even while every migration is making healthy progress.
+      for (let k = 0; k < LADDER.length; k++) {
+        await reset();
+        await applyThrough(k);
+        const ran = await runMigrations(pool);
+        expect(ran, `applying from revision ${k}`).toEqual(LADDER.slice(k));
+      }
+    },
+    // This matrix executes O(n²) real DDL as the ladder grows. Keep a scoped
+    // ceiling for a genuine hang while allowing for shared-runner I/O variance.
+    30_000,
+  );
 });
 
 // ── Per-migration data-preservation ──────────────────────
@@ -195,7 +201,14 @@ d("0006 org→team preserves existing data", () => {
       [TEAM],
     );
 
-    await runMigrations(pool); // ← 0006
+    // Apply ONLY 0006. The ladder now continues by restoring the two-level
+    // model in 0009; letting runMigrations apply every later file would make
+    // this historical migration's assertions inspect the wrong revision.
+    const file = LADDER.find((name) => name.startsWith("0006_"))!;
+    await pool.query("BEGIN");
+    await pool.query(readFileSync(path.join(MIGRATIONS_DIR, file), "utf8"));
+    await pool.query("INSERT INTO schema_migrations (name) VALUES ($1)", [file]);
+    await pool.query("COMMIT");
   });
   afterAll(async () => {
     await pool.end();
@@ -296,5 +309,255 @@ d("0006 org→team preserves existing data", () => {
     expect(await asUser(STRANGER, "SELECT count(*)::int n FROM teams")).toEqual({ n: 0 });
     expect(await asUser(STRANGER, "SELECT count(*)::int n FROM team_settings")).toEqual({ n: 0 });
     expect(await asUser(STRANGER, "SELECT count(*)::int n FROM audit_log")).toEqual({ n: 0 });
+  });
+});
+
+d("0009 organization→team hierarchy preserves flat-Team data", () => {
+  let pool: pg.Pool;
+  const ORG = "aaaaaaaa-0000-0000-0000-000000000001";
+  const OWNER = "11111111-1111-1111-1111-111111111111";
+  const MEMBER = "22222222-2222-2222-2222-222222222222";
+  const STRANGER = "33333333-3333-3333-3333-333333333333";
+  const SQUAT = "aaaaaaaa-0000-0000-0000-000000000002";
+
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: url, max: 3 });
+    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
+    await pool.query(`
+      CREATE TABLE schema_migrations (
+        name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now()
+      )
+    `);
+    for (const file of LADDER.filter((name) => name < "0009")) {
+      await pool.query("BEGIN");
+      await pool.query(readFileSync(path.join(MIGRATIONS_DIR, file), "utf8"));
+      await pool.query("INSERT INTO schema_migrations (name) VALUES ($1)", [file]);
+      await pool.query("COMMIT");
+    }
+
+    await pool.query(
+      `INSERT INTO users (id, email, display_name)
+       VALUES ($1, 'owner@example.com', 'Ada'),
+              ($2, 'member@example.com', NULL),
+              ($3, 'stranger@example.com', 'Lin')`,
+      [OWNER, MEMBER, STRANGER],
+    );
+    await pool.query(
+      `INSERT INTO teams (id, slug, name, logo, created_by)
+       VALUES ($1, 'acme', 'Acme', 'data:image/png;base64,iVBORw0KGgo=', $2),
+              ($3, 'personal-33333333333333333333333333333333',
+               'Legacy slug squatter', NULL, $2)`,
+      [ORG, OWNER, SQUAT],
+    );
+    await pool.query(
+      `INSERT INTO team_members (team_id, user_id, role)
+       VALUES ($1, $2, 'owner'), ($1, $3, 'member')`,
+      [ORG, OWNER, MEMBER],
+    );
+    await pool.query(
+      `INSERT INTO invitations (team_id, email, token_hash, invited_by)
+       VALUES ($1, 'invite@example.com', '\\x00112233'::bytea, $2)`,
+      [ORG, OWNER],
+    );
+    await pool.query(
+      `INSERT INTO team_settings (team_id, scope, doc)
+       VALUES ($1, '*', '{"git":{"base_branch":"main"}}'::jsonb)`,
+      [ORG],
+    );
+    await pool.query(
+      `INSERT INTO billing_customers (team_id, stripe_customer_id)
+       VALUES ($1, 'cus_123')`,
+      [ORG],
+    );
+    await pool.query(
+      `INSERT INTO billing_subscriptions (id, team_id, status, plan, seats)
+       VALUES ('sub_123', $1, 'active', 'pro', 4)`,
+      [ORG],
+    );
+    await pool.query(
+      `INSERT INTO github_installations (
+         github_installation_id, app_variant, team_id, account_login,
+         account_type, target_type, all_repositories
+       ) VALUES (9001, 'github.com', $1, 'acme', 'Organization',
+                 'Organization', true)`,
+      [ORG],
+    );
+    await pool.query(
+      `INSERT INTO audit_log (team_id, actor_id, action)
+       VALUES ($1, $2, 'team.created'), ($1, $2, 'subteam.created')`,
+      [ORG, OWNER],
+    );
+
+    await runMigrations(pool);
+  });
+
+  afterAll(async () => {
+    await pool.end();
+  });
+
+  it("promotes every flat-Team id to an organization without identity loss", async () => {
+    const result = await pool.query(
+      `SELECT id, slug, name, logo, created_by, is_personal,
+              cloud_workspaces_allowed
+       FROM organizations WHERE id = $1`,
+      [ORG],
+    );
+    expect(result.rows[0]).toMatchObject({
+      id: ORG,
+      slug: "acme",
+      name: "Acme",
+      created_by: OWNER,
+      is_personal: false,
+      cloud_workspaces_allowed: true,
+    });
+    expect(result.rows[0].logo).toContain("data:image/png");
+  });
+
+  it("creates one default child team and mirrors organization members", async () => {
+    const teams = await pool.query<{ id: string; org_id: string }>(
+      `SELECT id, org_id FROM teams
+       WHERE org_id = $1 AND is_default AND deleted_at IS NULL`,
+      [ORG],
+    );
+    expect(teams.rows).toHaveLength(1);
+    expect(teams.rows[0]!.id).not.toBe(ORG);
+    const members = await pool.query(
+      `SELECT user_id, role FROM team_members
+       WHERE team_id = $1 ORDER BY user_id`,
+      [teams.rows[0]!.id],
+    );
+    expect(members.rows).toEqual([
+      { user_id: OWNER, role: "maintainer" },
+      { user_id: MEMBER, role: "member" },
+    ]);
+  });
+
+  it("allows a soft-deleted team slug to be recreated without reviving its identity", async () => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const original = await client.query<{ id: string }>(
+        `UPDATE teams SET deleted_at = now()
+         WHERE org_id = $1 AND is_default
+         RETURNING id`,
+        [ORG],
+      );
+      const replacement = await client.query<{ id: string }>(
+        `INSERT INTO teams (org_id, slug, name, is_default, created_by)
+         VALUES ($1, 'default', 'Default', true, $2)
+         RETURNING id`,
+        [ORG, OWNER],
+      );
+      expect(replacement.rows[0]!.id).not.toBe(original.rows[0]!.id);
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
+  });
+
+  it("backfills one permanent, local-only Personal organization per user", async () => {
+    const personal = await pool.query(
+      `SELECT created_by, name, cloud_workspaces_allowed
+       FROM organizations WHERE is_personal ORDER BY created_by`,
+    );
+    expect(personal.rows).toEqual([
+      { created_by: OWNER, name: "Ada", cloud_workspaces_allowed: false },
+      { created_by: MEMBER, name: "Personal", cloud_workspaces_allowed: false },
+      { created_by: STRANGER, name: "Lin", cloud_workspaces_allowed: false },
+    ]);
+    const shells = await pool.query<{ n: number }>(`
+      SELECT count(*)::int AS n
+      FROM organizations o
+      JOIN organization_members om
+        ON om.org_id = o.id AND om.user_id = o.created_by AND om.role = 'owner'
+      JOIN teams t ON t.org_id = o.id AND t.is_default
+      JOIN team_members tm
+        ON tm.team_id = t.id AND tm.user_id = o.created_by
+       AND tm.role = 'maintainer'
+      WHERE o.is_personal
+    `);
+    expect(shells.rows[0]!.n).toBe(3);
+  });
+
+  it("allocates Personal when a legacy organization already owns its preferred slug", async () => {
+    const result = await pool.query<{ id: string; slug: string }>(
+      `SELECT id, slug FROM organizations
+       WHERE created_by = $1 AND is_personal`,
+      [STRANGER],
+    );
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0]!.slug).toMatch(
+      /^personal-33333333333333333333333333333333-[0-9a-f]{32}$/,
+    );
+    expect(
+      await pool.query(`SELECT id FROM organizations WHERE id = $1`, [SQUAT]),
+    ).toMatchObject({ rows: [{ id: SQUAT }] });
+  });
+
+  it("preserves invitation, settings, billing, and GitHub organization keys", async () => {
+    expect((await pool.query(`SELECT org_id FROM invitations`)).rows).toEqual([
+      { org_id: ORG },
+    ]);
+    expect(
+      (await pool.query(`SELECT org_id, doc FROM organization_settings`)).rows[0],
+    ).toMatchObject({ org_id: ORG, doc: { git: { base_branch: "main" } } });
+    expect((await pool.query(`SELECT org_id FROM billing_customers`)).rows).toEqual([
+      { org_id: ORG },
+    ]);
+    expect((await pool.query(`SELECT org_id FROM billing_subscriptions`)).rows).toEqual([
+      { org_id: ORG },
+    ]);
+    expect((await pool.query(`SELECT org_id FROM github_installations`)).rows).toEqual([
+      { org_id: ORG },
+    ]);
+  });
+
+  it("restores organization and team audit namespaces without merging them", async () => {
+    const actions = await pool.query<{ action: string }>(
+      `SELECT action FROM audit_log WHERE org_id = $1 ORDER BY action`,
+      [ORG],
+    );
+    expect(actions.rows.map((row) => row.action)).toEqual([
+      "organization.created",
+      "team.created",
+    ]);
+  });
+
+  it("enforces that every child-team member is already an organization member", async () => {
+    const team = await pool.query<{ id: string }>(
+      `SELECT id FROM teams WHERE org_id = $1 AND is_default`,
+      [ORG],
+    );
+    await expect(
+      pool.query(
+        `INSERT INTO team_members (team_id, org_id, user_id, role)
+         VALUES ($1, $2, $3, 'member')`,
+        [team.rows[0]!.id, ORG, STRANGER],
+      ),
+    ).rejects.toThrow(/team_members_org_id_user_id_fkey|foreign key/i);
+  });
+
+  it("keeps RLS scoped by organization, including each user's Personal shell", async () => {
+    const visible = async (userId: string) => {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("SET LOCAL ROLE zeros_app");
+        await client.query("SELECT set_config('app.user_id', $1, true)", [userId]);
+        const result = await client.query<{ id: string; is_personal: boolean }>(
+          `SELECT id, is_personal FROM organizations ORDER BY id`,
+        );
+        await client.query("COMMIT");
+        return result.rows;
+      } finally {
+        client.release();
+      }
+    };
+    const ownerRows = await visible(OWNER);
+    expect(ownerRows.some((row) => row.id === ORG)).toBe(true);
+    expect(ownerRows.filter((row) => row.is_personal)).toHaveLength(1);
+    const strangerRows = await visible(STRANGER);
+    expect(strangerRows.some((row) => row.id === ORG)).toBe(false);
+    expect(strangerRows.filter((row) => row.is_personal)).toHaveLength(1);
   });
 });

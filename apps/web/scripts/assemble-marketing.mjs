@@ -42,6 +42,7 @@ const REPO_ROOT = path.resolve(WEB_APP, "../..");
 const MARKETING = path.join(REPO_ROOT, "apps", "marketing");
 const MARKETING_DIST = path.join(MARKETING, "dist");
 const PUBLIC_SRC = path.join(WEB_APP, "public");
+const ZEROS_TOKENS = path.join(REPO_ROOT, "styles", "zeros-tokens.css");
 const OUT = path.join(WEB_APP, "dist");
 const LEGAL_FILES = [
   [path.join(REPO_ROOT, "LICENSE"), "LICENSE.txt"],
@@ -131,12 +132,34 @@ function assemble() {
   // 2) App static defaults — overwrite marketing if any. 404.html is
   // load-bearing: without it, Pages' implicit SPA mode serves index.html
   // with 200 for every unmatched path on BOTH hosts.
-  for (const name of ["_headers", "robots.txt", "404.html"]) {
+  for (const name of [
+    "_headers",
+    "robots.txt",
+    "404.html",
+    "dashboard.css",
+    "dashboard.js",
+  ]) {
     const src = path.join(PUBLIC_SRC, name);
     if (existsSync(src)) {
       writeFileSync(path.join(OUT, name), readFileSync(src));
     }
   }
+
+  // The dashboard consumes the SAME primitive values as the desktop. Strip
+  // Tailwind's build-only setup (`@theme`, package imports, source scanning)
+  // and publish the concrete :root/theme blocks verbatim. This keeps the web
+  // surface token-linked without forcing the Cloudflare package to install the
+  // Electron renderer's entire Tailwind dependency graph.
+  const tokenSource = readFileSync(ZEROS_TOKENS, "utf8");
+  const concreteStart = tokenSource.indexOf("\n:root {");
+  if (concreteStart < 0) {
+    console.error(`Couldn't locate concrete :root tokens in ${ZEROS_TOKENS}`);
+    process.exit(1);
+  }
+  writeFileSync(
+    path.join(OUT, "dashboard-tokens.css"),
+    `/* Generated from styles/zeros-tokens.css — do not edit here. */\n${tokenSource.slice(concreteStart + 1)}`,
+  );
 
   // 3) Distribution terms for the browser bundle. The root inventory covers
   // the exact standalone marketing lockfile used above, not only the root

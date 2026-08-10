@@ -34,6 +34,7 @@ describe("dbChangedKinds", () => {
 
   it.each([
     "workspace.setRemoteRestricted",
+    "workspace.reassignLocalOrganization",
     "workspace.archive",
     "workspace.delete",
     "workspace.createFromBranch",
@@ -75,6 +76,18 @@ describe("dbChangedKinds", () => {
     expect(dbChangedKinds("gh.prSync", { number: 191 })).toEqual([
       "workspaces",
     ]);
+  });
+
+  it("publishes ownership repair only when local rows moved, including to the originator", () => {
+    expect(
+      dbChangedKinds("workspace.reassignLocalOrganization", { changes: 0 }),
+    ).toBeNull();
+    expect(
+      dbChangedKinds("workspace.reassignLocalOrganization", { changes: 2 }),
+    ).toEqual(["workspaces"]);
+    expect(
+      dbChangedIncludesOriginator("workspace.reassignLocalOrganization"),
+    ).toBe(true);
   });
 
   it.each([

@@ -21,7 +21,7 @@ loopback transport. Keep validation and authorization at those boundaries.
 ## Renderer layout
 
 - `features/` contains product capabilities such as agents, repositories,
-  browser, design workspaces, teams, settings, and authentication.
+  browser, design workspaces, organization context, settings, and authentication.
 - `shell/` composes conversation and workbench surfaces plus window-level
   navigation, dialogs, terminal, and pull-request UI.
 - `platform/` adapts native/bridge/browser APIs.

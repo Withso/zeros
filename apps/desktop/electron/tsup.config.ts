@@ -42,6 +42,12 @@ export default defineConfig({
     __ZEROS_CONTROL_PLANE_URL_BAKED__: JSON.stringify(
       process.env.VITE_CONTROL_PLANE_URL || "",
     ),
+    // Auth redemption/refresh happens in Electron main, not the renderer. Bake
+    // the same channel-specific web origin there or Alpha/Beta silently fall
+    // back to Production after the browser handoff.
+    __ZEROS_APP_BASE_URL_BAKED__: JSON.stringify(
+      process.env.VITE_APP_BASE_URL || "",
+    ),
   },
   external: [
     "electron",

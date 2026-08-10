@@ -121,6 +121,8 @@ import {
   useExperimentalFeature,
 } from "../features/settings/experimental-features";
 import { useInternalFeatureActive } from "../features/settings/internal-features";
+import { useActiveOrganization } from "../features/team/team-store";
+import { filterRowsForOrganization } from "../features/team/organization-capabilities";
 import { createWorkspaceForProject } from "./create-workspace";
 import { toast } from "../shared/ui/primitives/elements";
 import { Tooltip } from "../shared/ui/primitives/tooltip";
@@ -814,12 +816,17 @@ function ArchivedWorkspacePicker({ project }: { project: Project }) {
   const [restoringId, setRestoringId] = useState<string | null>(null);
   const openWorkspace = useOpenWorkspace();
   const designWorkspacesActive = useInternalFeatureActive("designWorkspaces");
+  const activeOrganization = useActiveOrganization();
   const { workspaces, loading, error, refresh } = useArchivedWorkspaces(
     project.repoSlug,
   );
   const accessibleWorkspaces = useMemo(
-    () => filterWorkspacesForDesignAccess(workspaces, designWorkspacesActive),
-    [designWorkspacesActive, workspaces],
+    () =>
+      filterRowsForOrganization(
+        filterWorkspacesForDesignAccess(workspaces, designWorkspacesActive),
+        activeOrganization,
+      ),
+    [activeOrganization, designWorkspacesActive, workspaces],
   );
 
   const allForProject = useMemo(
@@ -977,6 +984,7 @@ export function TopBar() {
   const designWorkspacesActive =
     designWorkspacesInternalActive &&
     (nativeRuntime.ready || nativeRuntime.expectedElectron);
+  const activeOrganization = useActiveOrganization();
   const activeFolder = useWorkspaceStore(selectActiveFolder);
   // True while the active folder is a freshly-announced worktree whose create
   // is still landing — the list-validation effect below must not bounce it.
@@ -1057,8 +1065,12 @@ export function TopBar() {
   const [workInLocalMain] = useExperimentalFeature("workInLocalMain");
 
   const accessibleWorkspaces = useMemo(
-    () => filterWorkspacesForDesignAccess(workspaces, designWorkspacesActive),
-    [designWorkspacesActive, workspaces],
+    () =>
+      filterRowsForOrganization(
+        filterWorkspacesForDesignAccess(workspaces, designWorkspacesActive),
+        activeOrganization,
+      ),
+    [activeOrganization, designWorkspacesActive, workspaces],
   );
   const activeFolderConfirmedWorkspace = useMemo(
     () => findWorkspaceForFolder(activeFolder, workspaces),
@@ -1101,11 +1113,14 @@ export function TopBar() {
   const rawPendingCreates = usePendingCreatesAll();
   const allPendingCreates = useMemo(
     () =>
-      filterPendingCreatesForDesignAccess(
-        rawPendingCreates,
-        designWorkspacesActive,
+      filterRowsForOrganization(
+        filterPendingCreatesForDesignAccess(
+          rawPendingCreates,
+          designWorkspacesActive,
+        ),
+        activeOrganization,
       ),
-    [designWorkspacesActive, rawPendingCreates],
+    [activeOrganization, designWorkspacesActive, rawPendingCreates],
   );
   const realWorkspaces = useMemo(
     () =>
@@ -1128,11 +1143,14 @@ export function TopBar() {
   );
   const pendingCreates = useMemo(
     () =>
-      filterPendingCreatesForDesignAccess(
-        rawProjectPendingCreates,
-        designWorkspacesActive,
+      filterRowsForOrganization(
+        filterPendingCreatesForDesignAccess(
+          rawProjectPendingCreates,
+          designWorkspacesActive,
+        ),
+        activeOrganization,
       ),
-    [designWorkspacesActive, rawProjectPendingCreates],
+    [activeOrganization, designWorkspacesActive, rawProjectPendingCreates],
   );
   const dedupedPendingCreates = useMemo(
     () => dedupePendingCreates(pendingCreates, realWorkspaces),

@@ -7,6 +7,8 @@
 // auth.zeros.build era keep working until they expire.
 
 export interface Env {
+  /** Explicit deployment identity. Required by the Cloudflare build guard. */
+  ZEROS_DEPLOY_ENV?: "alpha" | "beta" | "production";
   AUTH0_DOMAIN: string;
   AUTH0_CLIENT_ID: string;
   AUTH0_CLIENT_SECRET: string;
@@ -29,6 +31,8 @@ export interface Env {
    * Defaults to zeros.build,www.zeros.build,zeros.design.
    */
   MARKETING_HOSTS?: string;
+  /** Authenticated organization API. Defaults to https://api.zeros.build. */
+  CONTROL_PLANE_URL?: string;
   SESSIONS: KVNamespace;
   /**
    * Cloudflare Pages static-asset binding. Used by `_middleware.ts` to serve the
@@ -111,20 +115,20 @@ export async function getSession(env: Env, request: Request): Promise<SessionDat
  *  would wrongly nuke a LIVE session. A short KV lock collapses that to one
  *  revalidation at a time (best-effort; KV isn't atomic, but it removes the
  *  common multi-tab case). */
-export async function getVerifiedSession(
+export async function getVerifiedSessionWithId(
   env: Env,
   request: Request,
-): Promise<SessionData | null> {
+): Promise<{ sessionId: string; data: SessionData } | null> {
   const found = await getSessionWithId(env, request);
   if (!found) return null;
   const { sessionId, data } = found;
 
   const age = Date.now() - (data.verifiedAt ?? 0);
-  if (age < SESSION_REVALIDATE_AFTER_MS) return data; // still fresh
-  if (!data.refreshToken) return data; // nothing to re-prove with; leave as-is
+  if (age < SESSION_REVALIDATE_AFTER_MS) return found; // still fresh
+  if (!data.refreshToken) return found; // nothing to re-prove with; leave as-is
 
   const lockKey = `reval-lock:${sessionId}`;
-  if (await env.SESSIONS.get(lockKey)) return data; // another request is on it
+  if (await env.SESSIONS.get(lockKey)) return found; // another request is on it
   await env.SESSIONS.put(lockKey, "1", { expirationTtl: 60 });
 
   const granted = await refreshGrant(env, data.refreshToken);
@@ -136,13 +140,24 @@ export async function getVerifiedSession(
       verifiedAt: Date.now(),
     };
     await putSession(env, sessionId, updated, SESSION_TTL_S);
-    return updated;
+    return { sessionId, data: updated };
   }
   if (granted.terminal) {
     await env.SESSIONS.delete(`session:${sessionId}`);
     return null;
   }
-  return data; // transient outage — keep the session, retry on the next read
+  return found; // transient outage — keep the session, retry on the next read
+}
+
+/** Verified session data for page-render callers that do not need to rotate it
+ * again. API proxy callers use the with-id variant so verification and
+ * upstream authorization share one coherent KV snapshot. */
+export async function getVerifiedSession(
+  env: Env,
+  request: Request,
+): Promise<SessionData | null> {
+  const found = await getVerifiedSessionWithId(env, request);
+  return found?.data ?? null;
 }
 
 type RefreshResponse = { access_token: string; refresh_token?: string; expires_in: number };

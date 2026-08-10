@@ -1,13 +1,21 @@
 # Web hub and edge functions
 
-One Cloudflare Pages project (**`zeros-web`**) serves **both**:
+One frontend codebase is deployed as three isolated Cloudflare Pages projects:
+`zeros-web-alpha`, `zeros-web-beta`, and `zeros-web`. Cloudflare Pages exposes
+only Production plus one shared Preview configuration per project, so separate
+projects are required for true Alpha/Beta/Production bindings and secrets.
+
+The Production project (**`zeros-web`**) serves **both**:
 
 | Host                                        | Surface                                                        |
 | ------------------------------------------- | -------------------------------------------------------------- |
-| **`app.zeros.build`**                       | Session-aware hub, Auth0 (`/auth/*`), desktop handoff, invites |
+| **`app.zeros.build`**                       | Organization dashboard, Auth0 (`/auth/*`), desktop handoff, invites |
 | **`zeros.build`** (+ `www`, `zeros.design`) | Marketing SPA (Vite/React from `apps/marketing`)               |
 
 Host routing lives in `functions/_middleware.ts` + `lib/hosts.ts`. Marketing traffic is served via `env.ASSETS.fetch()` so `functions/index.ts` never steals `/` on the marketing host. Session cookies stay **host-only** on `app.zeros.build` (never `Domain=.zeros.build`).
+
+See [`docs/deployment-environments.md`](../../docs/deployment-environments.md)
+for project/domain/branch mappings and the promotion runbook.
 
 > **Standalone, NOT a pnpm workspace member.** Own `package.json` / lockfile for Functions deps. Marketing is built from the monorepo via `scripts/cf-install-marketing.mjs` + `scripts/assemble-marketing.mjs`.
 
@@ -16,11 +24,13 @@ Host routing lives in `functions/_middleware.ts` + `lib/hosts.ts`. Marketing tra
 ### `app.zeros.build`
 
 ```
-GET  /   (and /launch alias)   → session-aware HUB (lib/hub.ts)
+GET  /                         → signed-in management dashboard; signed-out hub
+GET  /launch                   → session-aware desktop handoff
 GET  /auth/start|callback|logout
 GET  /github/connected         → GitHub App completion + Open Zeros handoff
 GET  /invite?token=
 POST /handoff/{mint,redeem,refresh,revoke}
+GET|POST|PATCH|DELETE /api/v1/* → allowlisted same-origin control-plane proxy
 ```
 
 ### `zeros.build` (marketing)
@@ -37,7 +47,7 @@ GET  /THIRD-PARTY-LICENSES.txt → generated exact-version license bundle
 GET  /robots.txt               → Allow: /  (middleware; not the app Disallow)
 ```
 
-App-only paths hit on a marketing host (`/auth/*`, `/handoff/*`, `/github/connected`, `/launch`, `/invite`) **302 → `app.zeros.build`**.
+App-only paths hit on a marketing host (`/auth/*`, `/handoff/*`, `/api/*`, `/github/connected`, `/launch`, `/invite`) **302 → `app.zeros.build`**.
 
 ## Local development
 
@@ -59,7 +69,7 @@ npm run typecheck
 npm test               # host classification unit tests
 ```
 
-## Cloudflare Pages project (`zeros-web`) — settings
+## Cloudflare Pages projects — shared settings
 
 The Builds UI has **no Install command field** (only Framework / Build command /
 Output / Root). Marketing deps are installed inside `npm run build` via a
@@ -76,34 +86,45 @@ After changing `apps/marketing/package.json`, regenerate that lockfile:
 | **Build command**          | `npm run build`                                                              |
 | **Build output directory** | `dist` ← change from `public`                                                |
 | **Root directory**         | `apps/web`                                                                   |
-| **Production branch**      | `main`                                                                       |
-| **KV binding**             | `SESSIONS`                                                                   |
-| **Custom domains**         | `app.zeros.build` **and** `zeros.build` (+ `www` / `zeros.design` as needed) |
+| **Production branch**      | Alpha: `main`; Beta/Production: selected `release/X.Y.Z`                     |
+| **KV binding**             | `SESSIONS` — a different namespace in every project                         |
+| **Custom domains**         | Channel app domain; only Production also owns marketing domains             |
 
-### Environment variables (Production + Preview)
+Disable Preview deployments on these release projects. Configure the following
+in each project's Production environment:
 
 | Name                  | Required | Notes                                                  |
 | --------------------- | -------- | ------------------------------------------------------ |
+| `ZEROS_DEPLOY_ENV`    | yes      | `alpha`, `beta`, or `production`; build fails on drift |
 | `AUTH0_DOMAIN`        | yes      | `login.zeros.build`                                    |
 | `AUTH0_CLIENT_ID`     | yes      | Regular Web App client                                 |
 | `AUTH0_CLIENT_SECRET` | yes      | **secret**                                             |
-| `AUTH0_AUDIENCE`      | optional | defaults to `https://api.zeros.build`                  |
-| `APP_ORIGIN`          | optional | defaults to `https://app.zeros.build`                  |
+| `AUTH0_AUDIENCE`      | yes      | matching channel API origin                            |
+| `APP_ORIGIN`          | yes      | matching channel app origin                            |
 | `APP_HOSTS`           | optional | comma list; defaults to hostname of `APP_ORIGIN`       |
 | `MARKETING_ORIGIN`    | optional | defaults to `https://zeros.build`                      |
 | `MARKETING_HOSTS`     | optional | defaults to `zeros.build,www.zeros.build,zeros.design` |
+| `CONTROL_PLANE_URL`   | yes      | matching channel API origin; server-side only          |
 
 `ASSETS` is provided automatically by Pages (static output). Do not add it manually.
 
-### Auth0 (unchanged if `app.zeros.build` stays the app host)
+`CONTROL_PLANE_URL` is never exposed to browser code. The dashboard sends
+same-origin requests through `functions/api/[[path]].ts`; that proxy reads the
+verified KV session, keeps bearer and refresh tokens server-side, permits only
+the organization-management route set, bounds request bodies, and returns
+JSON with `no-store` caching. Mutations require a same-origin `Origin`, JSON
+content type, and `X-Zeros-Request: dashboard`.
 
-1. Allowed Callback URLs include `https://app.zeros.build/auth/callback`
-2. Allowed Logout URLs include `https://app.zeros.build/`
-3. Keep social-only (Google + GitHub); database connection disabled
+### Auth0
+
+Use a separate Regular Web Application for each environment with that
+environment's callback and logout origin. Keep social-only (Google + GitHub);
+database connection disabled. The exact matrix is in the deployment guide.
 
 ## Manual cutover checklist (dashboard)
 
-Do this **after** this branch is on `main` (or a preview you trust):
+Do this only after the same release commit has passed Alpha and Beta. Keep
+automatic Production deployments disabled:
 
 1. **zeros-web → Settings → Builds**
    - Framework preset: `None`
@@ -111,9 +132,13 @@ Do this **after** this branch is on `main` (or a preview you trust):
    - Build output directory: **`dist`** (change from `public`)
    - Root directory: `apps/web`
    - No Install command field in this UI — `npm run build` installs marketing deps itself.
-2. **Trigger a production deploy** and confirm:
-   - `https://app.zeros.build/` → Sign in / Launch hub
-   - `https://<preview>.pages.dev/` → hub (unknown hosts default to app)
+2. Point the Production branch at the validated, frozen `release/X.Y.Z`. Keep
+   automatic Production deployments off and trigger a protected Pages deploy
+   hook for that branch (or the Pages deployment API). Confirm its commit is the
+   exact Beta SHA, then confirm:
+   - `https://app.zeros.build/` → sign in, then the organization dashboard
+   - `https://app.zeros.build/launch` → desktop Launch handoff
+   - the deployment's `pages.dev` URL → hub (unknown hosts default to app)
 3. **Custom domains → Add `zeros.build`** (and `www` / `zeros.design` if used)
    - Keep the **old marketing Pages project** live until step 5
 4. **Verify on apex:**
@@ -134,16 +159,20 @@ apps/web/
   functions/_middleware.ts     → host gate + per-host CSP/robots
   functions/index.ts           → /        (hub — app host only)
   functions/launch.ts          → /launch
+  functions/api/[[path]].ts    → same-origin management API proxy
   functions/invite.ts          → /invite
   functions/github/connected.ts → /github/connected
   functions/auth/*             → Auth0 PKCE
   functions/handoff/*          → desktop ticket APIs
   lib/hosts.ts                 → host classification + CSP
   lib/hub.ts                   → hub HTML
+  lib/dashboard.mjs            → token-based signed-in dashboard HTML
+  lib/control-plane-proxy.ts   → server-side API/session boundary
   lib/oauth.ts                 → Auth0 + cookies (APP_ORIGIN-aware)
   lib/session.ts               → KV session + Env
   public/_headers              → app CSP defaults (source; copied into dist/)
   public/robots.txt            → app Disallow (source; marketing overridden in middleware)
+  public/dashboard.{css,js}    → responsive management client
   public/404.html              → static 404 for both hosts (disables Pages' implicit SPA fallback)
   dist/{LICENSE.txt,THIRD-PARTY-*} → generated distribution notices (copied at build time)
   scripts/assemble-marketing.mjs
@@ -163,4 +192,7 @@ apps/web/
 | Unknown path (either host) | Static `404.html` with a real 404 status — without that file, Pages' implicit SPA mode would serve the marketing homepage with 200 on `app.zeros.build/<unknown>` |
 | `*.pages.dev` / localhost  | Default to **app** (OAuth/hub); set `MARKETING_HOSTS` to preview marketing                                                                                        |
 | Session cookies            | Still host-only on app; never widened for marketing                                                                                                               |
+| Dashboard credentials      | Auth0 grants stay in KV; browser boot data contains identity and organization summaries only                                                                      |
+| Dashboard mutations        | Same-origin JSON plus custom-header gate; route and body allowlists reject ambient-cookie form attacks                                                            |
+| Personal                   | Name follows provider identity, local-only, permanent, and collaboration/billing sections are disabled                                                            |
 | Schema URLs                | Still served at `zeros.build/schemas/*` after cutover                                                                                                             |

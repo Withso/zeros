@@ -68,10 +68,9 @@ Vite values are shipped in the renderer bundle.
 | Path                    | Purpose                                                 | Deployment/runtime             |
 | ----------------------- | ------------------------------------------------------- | ------------------------------ |
 | `apps/desktop/`         | Electron main/preload, local engine, and React renderer | macOS desktop app              |
-| `apps/control-plane/`   | Authenticated API and database migrations               | Railway                        |
+| `apps/control-plane/`   | Authenticated API, feedback, and database migrations     | Railway                        |
 | `apps/web/`             | Auth handoff, web hub, and edge functions               | Cloudflare Pages               |
 | `apps/marketing/`       | Public website source assembled by `apps/web`           | Cloudflare Pages               |
-| `apps/feedback-worker/` | Authenticated feedback delivery                         | Cloudflare Workers             |
 | `packages/protocol/`    | Shared messages, schemas, validation, and redaction     | Internal workspace package     |
 | `catalogs/`             | Versioned provider and model metadata                   | Bundled data                   |
 | `scripts/`              | Build, audit, release, and maintenance tooling          | Repository automation          |
@@ -103,6 +102,8 @@ flowchart LR
 
 See [REPOSITORY-ARCHITECTURE.md](REPOSITORY-ARCHITECTURE.md) for ownership,
 dependency boundaries, deployment roots, and the migration report.
+The hosted Alpha/Beta/Production topology and promotion runbook are in
+[docs/deployment-environments.md](docs/deployment-environments.md).
 
 ## Data, telemetry, and security
 

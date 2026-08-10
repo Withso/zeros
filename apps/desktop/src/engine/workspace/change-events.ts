@@ -34,6 +34,7 @@ const WORKSPACE_MUTATIONS = new Set([
   "workspace.create",
   "workspace.setStatus",
   "workspace.setRemoteRestricted",
+  "workspace.reassignLocalOrganization",
   // Rewrites the worktree — folders appear/disappear on disk — so every
   // file-list and git-status consumer has to re-read.
   "workspace.setWorkingDirectories",
@@ -173,7 +174,13 @@ export const LONG_LIFECYCLE_OPS = new Set([
  *      the same lag more quietly. Echoing costs one small resolve the poll was
  *      going to force moments later regardless. */
 export function dbChangedIncludesOriginator(op: string): boolean {
-  return LONG_LIFECYCLE_OPS.has(op) || SETTINGS_MUTATIONS.has(op);
+  return (
+    LONG_LIFECYCLE_OPS.has(op) ||
+    SETTINGS_MUTATIONS.has(op) ||
+    // This maintenance op has no optimistic renderer mutation; the desktop
+    // that requested it must refresh its workspace collections too.
+    op === "workspace.reassignLocalOrganization"
+  );
 }
 
 /** Which renderer server-state collections a successful operation changed. */
@@ -189,6 +196,14 @@ export function dbChangedKinds(op: string, result?: unknown): string[] | null {
   // The periodic PR detector is a read until it actually finds and persists a
   // PR. Avoid turning a once-per-minute null probe into a global Git refresh.
   if (op === "gh.prSync" && result == null) return null;
+  if (
+    op === "workspace.reassignLocalOrganization" &&
+    !!result &&
+    typeof result === "object" &&
+    (result as { changes?: unknown }).changes === 0
+  ) {
+    return null;
+  }
   // Context-graph mutations that changed nothing on disk (the idempotent
   // re-scaffold, an already-in-scope share toggle) don't invalidate anything.
   if (

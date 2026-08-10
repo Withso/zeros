@@ -30,6 +30,11 @@ not create a second, incompatible workspace model.
 
 ## Initial product scope
 
+Cloud workspaces are organization-owned. Personal is permanently local-only;
+see [organizations, teams, and workspace ownership](../organizations-and-teams.md).
+Organization capability metadata is necessary but never replaces server-side
+membership, plan, quota, and repository authorization.
+
 The first supported release should provide:
 
 1. creation from an authorized repository and revision;
@@ -40,7 +45,7 @@ The first supported release should provide:
 6. desktop status and recovery UI; and
 7. quotas, audit records, and owner-visible cost/lifecycle information.
 
-Team collaboration, mobile control, provider choice, enterprise deployment, and
+Expanded team collaboration, mobile control, provider choice, enterprise deployment, and
 cross-device local-workspace synchronization build on these contracts but do not
 need to block the first single-owner release.
 

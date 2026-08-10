@@ -5,7 +5,7 @@
 | Data                                                                       | Live authority                     | Durable authority                                                              |
 | -------------------------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------ |
 | Repository content                                                         | Running engine/working tree        | Configured Git remote plus explicit checkpoints for uncommitted recovery       |
-| Workspace identity, owner/team, lifecycle intent, provider binding         | Control plane                      | Control-plane database                                                         |
+| Workspace identity, organization/team owner, lifecycle intent, provider binding | Control plane                 | Control-plane database                                                         |
 | Chat, turns, agent sessions, run state, and recoverable workspace metadata | Running engine while active        | Durable cloud record                                                           |
 | Presence and transient UI state                                            | Active client/engine session       | Not durable unless explicitly promoted to a product preference                 |
 | Secrets                                                                    | Narrow runtime credential boundary | Approved server secret store or user OS credential store; never the transcript |

@@ -57,6 +57,7 @@ import {
   setSecret,
 } from "../../secret-store";
 import { withCrossProcessFileLock } from "../../cross-process-lock";
+import { appBaseUrl } from "../../app-base-url";
 
 const TOKENS_KEY = "auth-session:tokens";
 const REFRESH_SKEW_MS = 60_000;
@@ -117,13 +118,7 @@ export function onMainAuthSessionChanged(
 /** Base URL of the web hub that hosts /handoff/*. Fixed to the deployed app in
  *  prod; overridable via env ONLY for local/preview iteration — matches
  *  auth-handoff.ts's handoffBaseUrl(). */
-function handoffBaseUrl(): string {
-  const raw =
-    process.env.ZEROS_APP_BASE_URL ||
-    process.env.VITE_APP_BASE_URL ||
-    "https://app.zeros.build";
-  return raw.replace(/\/+$/, "");
-}
+const handoffBaseUrl = appBaseUrl;
 
 function decodeJwtExp(token: string): number | null {
   try {

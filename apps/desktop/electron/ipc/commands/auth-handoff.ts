@@ -50,6 +50,7 @@ import crypto from "node:crypto";
 import type { CommandHandler } from "../router";
 import { deleteSecret, getSecret, setSecret } from "../../secret-store";
 import { persistSession } from "./auth-session";
+import { appBaseUrl } from "../../app-base-url";
 
 // safeStorage account for the single pending handoff verifier. Distinct from the
 // "supabase:" session namespace (auth-storage.ts) so the two never collide.
@@ -58,13 +59,7 @@ const PENDING_KEY = "handoff-verifier:pending";
 /** Base URL of the web hub that hosts /handoff/redeem. Fixed to the deployed app
  *  in prod; overridable via env ONLY for local/preview iteration. NEVER
  *  renderer-supplied (that would let an XSS point the handoff at an attacker). */
-function handoffBaseUrl(): string {
-  const raw =
-    process.env.ZEROS_APP_BASE_URL ||
-    process.env.VITE_APP_BASE_URL ||
-    "https://app.zeros.build";
-  return raw.replace(/\/+$/, "");
-}
+const handoffBaseUrl = appBaseUrl;
 
 function b64url(buf: Buffer): string {
   return buf

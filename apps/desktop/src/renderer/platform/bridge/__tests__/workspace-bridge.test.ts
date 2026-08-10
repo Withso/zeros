@@ -19,6 +19,8 @@ import {
   bridgeGhPrMarkReady,
   bridgeGhPrMerge,
   bridgeWorkspaceArchive,
+  bridgeWorkspaceAdoptExisting,
+  bridgeWorkspaceCreateFromBranch,
   bridgeWorkspaceCreateFromBranchStatus,
   bridgeWorkspaceDelete,
   bridgeWorkspaceLifecycleStatus,
@@ -366,6 +368,57 @@ describe("workspace archive / restore bridge", () => {
     expect(seen).toEqual({
       type: "WORKSPACE_REQUEST",
       op: "workspace.createFromBranchStatus",
+    });
+  });
+
+  it("carries the intent-time organization through branch and adoption requests", async () => {
+    const fromBranch: { params?: Record<string, unknown> } = {};
+    await bridgeWorkspaceCreateFromBranch(
+      {
+        request: async (message: { params?: Record<string, unknown> }) => {
+          fromBranch.params = message.params;
+          return {
+            type: "WORKSPACE_RESPONSE",
+            op: "workspace.createFromBranch",
+            result: { workspaceId: "ws1", branch: "feature/a", path: "/wt/a" },
+          };
+        },
+      } as unknown as RuntimeClient,
+      {
+        repoRoot: "/repo",
+        branchName: "feature/a",
+        organizationId: "org_active",
+      },
+    );
+    expect(fromBranch.params).toMatchObject({
+      organizationId: "org_active",
+    });
+
+    const adopted: { params?: Record<string, unknown> } = {};
+    await bridgeWorkspaceAdoptExisting(
+      {
+        request: async (message: { params?: Record<string, unknown> }) => {
+          adopted.params = message.params;
+          return {
+            type: "WORKSPACE_RESPONSE",
+            op: "workspace.adoptExisting",
+            result: {
+              workspaceId: "ws2",
+              branch: "feature/b",
+              path: "/wt/b",
+            },
+          };
+        },
+      } as unknown as RuntimeClient,
+      {
+        repoRoot: "/repo",
+        worktreePath: "/wt/b",
+        branchName: "feature/b",
+        organizationId: "org_active",
+      },
+    );
+    expect(adopted.params).toMatchObject({
+      organizationId: "org_active",
     });
   });
 

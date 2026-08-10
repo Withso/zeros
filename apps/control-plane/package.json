@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
-  "description": "Zeros control plane for identity, teams, invitations, audit, and optional GitHub App coordination.",
+  "description": "Zeros control plane for identity, organizations, teams, feedback, invitations, audit, and optional GitHub App coordination.",
   "type": "module",
   "packageManager": "pnpm@10.28.0",
   "engines": {

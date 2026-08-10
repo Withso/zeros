@@ -170,6 +170,8 @@ export function closeState(): void {
 interface WorkspaceRow {
   id: string;
   kind: string;
+  organization_id: string | null;
+  placement: string;
   repo_slug: string;
   repo_root: string;
   branch: string;
@@ -193,6 +195,8 @@ function rowToWorkspace(r: WorkspaceRow): Workspace {
   return {
     id: r.id,
     kind: r.kind === "design" ? "design" : "code",
+    organizationId: r.organization_id,
+    placement: r.placement === "cloud" ? "cloud" : "local",
     repoSlug: r.repo_slug,
     repoRoot: r.repo_root,
     branch: r.branch,
@@ -218,15 +222,17 @@ export function insertWorkspace(w: Workspace): void {
   handle
     .prepare(
       `INSERT INTO workspaces
-        (id, kind, repo_slug, repo_root, branch, base_branch, path, status,
+        (id, kind, organization_id, placement, repo_slug, repo_root, branch, base_branch, path, status,
          created_at, archived_at, stash_ref, archived_head, archive_snapshot,
          pr_number, pr_state, pr_url,
          agent_id, last_active_at, setup_state)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       w.id,
       w.kind === "design" ? "design" : "code",
+      w.organizationId ?? null,
+      w.placement === "cloud" ? "cloud" : "local",
       w.repoSlug,
       w.repoRoot,
       w.branch,
@@ -408,6 +414,52 @@ export function updateWorkspace(id: string, patch: WorkspacePatch): void {
   handle
     .prepare(`UPDATE workspaces SET ${setClause} WHERE id = ?`)
     .run(...values, id);
+}
+
+/** Move only device-local workspace rows after the signed-in user loses an
+ * organization. Cloud rows remain under their server tenant and must be
+ * resolved by the future cloud control plane, never silently adopted locally. */
+export function reassignLocalWorkspaceOrganization(
+  fromOrganizationId: string,
+  toOrganizationId: string,
+): { changes: number; repoSlugs: string[] } {
+  if (
+    !fromOrganizationId ||
+    !toOrganizationId ||
+    fromOrganizationId === toOrganizationId
+  ) {
+    return { changes: 0, repoSlugs: [] };
+  }
+  const handle = open();
+  const result = handle.transaction(() => {
+    const affected = handle
+      .prepare<[string], WorkspaceRow>(
+        `SELECT * FROM workspaces
+         WHERE organization_id = ? AND placement = 'local'
+         ORDER BY repo_slug, id`,
+      )
+      .all(fromOrganizationId);
+    const repoSlugs = Array.from(
+      new Set(affected.map((row) => row.repo_slug)),
+    );
+    const result = handle
+      .prepare(
+        `UPDATE workspaces SET organization_id = ?
+         WHERE organization_id = ? AND placement = 'local'`,
+      )
+      .run(toOrganizationId, fromOrganizationId);
+    return { changes: result.changes, repoSlugs, affected };
+  })();
+
+  // Keep the best-effort database-loss recovery copy semantically aligned.
+  // Do not create seeds that lifecycle operations deliberately removed (for
+  // example, archived workspaces); only rewrite an existing recovery record.
+  for (const row of result.affected) {
+    const workspace = rowToWorkspace(row);
+    if (!existsSync(worktreeSeedPath(workspace.path))) continue;
+    writeWorktreeSeed({ ...workspace, organizationId: toOrganizationId });
+  }
+  return { changes: result.changes, repoSlugs: result.repoSlugs };
 }
 
 export function deleteWorkspaceRow(id: string): void {
@@ -923,6 +975,22 @@ export function removeWorktreeSeed(worktreePath: string): void {
   }
 }
 
+function recoveredWorkspaceOwnership(seed: Partial<Workspace>): {
+  organizationId: string | null;
+  placement: "local" | "cloud";
+} {
+  const organizationId =
+    typeof seed.organizationId === "string" && seed.organizationId.trim()
+      ? seed.organizationId.trim()
+      : null;
+  return {
+    organizationId,
+    // Recovery is best-effort. A cloud marker without an owner cannot satisfy
+    // the durable placement invariant, so retain the checkout as local.
+    placement: seed.placement === "cloud" && organizationId ? "cloud" : "local",
+  };
+}
+
 /** Scan the app-data seed dir for `workspace.json` seeds and re-insert any
  *  missing workspace whose worktree still exists. The current home for seeds
  *  (the in-worktree `.zeros/workspace.json` was retired). Uses each seed's own
@@ -963,6 +1031,7 @@ function seedFromAppData(): { inserted: number; skipped: number } {
     insertWorkspace({
       id: seed.id,
       kind: seed.kind === "design" ? "design" : "code",
+      ...recoveredWorkspaceOwnership(seed),
       repoSlug: seed.repoSlug ?? path.basename(path.dirname(seed.path)),
       repoRoot: seed.repoRoot,
       branch: seed.branch,
@@ -1033,6 +1102,7 @@ function seedFromRoot(root: string): { inserted: number; skipped: number } {
       const ws: Workspace = {
         id: seed.id,
         kind: seed.kind === "design" ? "design" : "code",
+        ...recoveredWorkspaceOwnership(seed),
         repoSlug: seed.repoSlug ?? repoSlug,
         repoRoot: seed.repoRoot,
         branch: seed.branch,

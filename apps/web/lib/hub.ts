@@ -7,7 +7,8 @@
 // explicitly, so there is no provider-level "Site URL" fallback to rescue
 // anymore) — otherwise the user lands on a context-less page after sign-in
 // instead of seeing "Launch Zeros". After sign-in everyone returns to the
-// canonical hub (root `/`), which then reads the context from the URL or cookie.
+// canonical hub (root `/`) when context exists; an explicit context-less
+// `/launch` entry remains on `/launch` and shows desktop guidance.
 //
 // Three outcomes:
 //   • signed out                  → "Continue with Google / GitHub" right here
@@ -16,18 +17,24 @@
 //   • signed in + handoff context → "Launch Zeros" (mint a ticket, deep-link it,
 //                                    opening the desktop-supplied `scheme` — one of
 //                                    the per-channel schemes in lib/schemes.mjs)
-//   • signed in, no context       → "open the desktop app"
+//   • signed in, no context       → organization management dashboard
 //
 // scheme/nonce/challenge are validated (scheme allow-list + base64url/uuid
 // charset) before being echoed into the page, so they can't inject markup/JS.
 
-import { getVerifiedSession, type Env } from "./session";
+import { getVerifiedSessionWithId, type Env } from "./session";
 import { TOKENISH } from "./handoff-security";
 import { html, shell } from "./page";
 import { appOrigin } from "./hosts";
 // Per-channel deep-link allow-list — see lib/schemes.mjs. Imported, never
 // re-declared: a local copy here is what dropped Alpha's sign-in handoff.
 import { SCHEMES } from "./schemes.mjs";
+import {
+  dashboardPage,
+  dashboardReturnUrl,
+  type DashboardMe,
+} from "./dashboard.mjs";
+import { proxyControlPlane } from "./control-plane-proxy";
 
 const HANDOFF_COOKIE = "zeros_handoff";
 const HANDOFF_TTL_S = 600; // 10 min — matches the desktop's pending-nonce window.
@@ -101,6 +108,42 @@ function signOutLink(env: Env): string {
   return `<a class="msg" href="${signOutUrl(env)}" style="display:inline-block;margin-top:1rem;color:#a1a1aa;text-decoration:underline;">Sign out</a>`;
 }
 
+async function dashboard(
+  request: Request,
+  env: Env,
+  verified: NonNullable<
+    Awaited<ReturnType<typeof getVerifiedSessionWithId>>
+  >,
+): Promise<string> {
+  const user = verified.data;
+  let me: DashboardMe | null = null;
+  let loadError: string | null = null;
+  try {
+    // Use the same server-only boundary as browser revalidation. In particular,
+    // this rotates and retries an expired access token once instead of rendering
+    // a false outage until the user presses Retry.
+    const headers = new Headers({ accept: "application/json" });
+    const cookie = request.headers.get("Cookie");
+    if (cookie) headers.set("Cookie", cookie);
+    const response = await proxyControlPlane(
+      new Request(new URL("/api/v1/me", request.url), { headers }),
+      env,
+      verified,
+    );
+    if (!response.ok) throw new Error(`status ${response.status}`);
+    me = (await response.json()) as DashboardMe;
+  } catch {
+    loadError = "Couldn't reach the organization service. Your account is still signed in.";
+  }
+  return dashboardPage({
+    session: user,
+    me,
+    requestUrl: request.url,
+    signOutHref: signOutUrl(env),
+    loadError,
+  });
+}
+
 function signedInNoHandoff(env: Env): string {
   return `<div class="title">You're signed in</div>
           <div class="sub">Open the Zeros desktop app and choose “Sign in” to connect this account.</div>
@@ -158,10 +201,13 @@ export async function renderHub(request: Request, env: Env): Promise<Response> {
 
   // Verified read: re-proves a stale session against Auth0 and drops it if the
   // user was deleted/blocked, so we never render "signed in" for a dead account.
-  const user = await getVerifiedSession(env, request);
+  const verified = await getVerifiedSessionWithId(env, request);
+  const user = verified?.data ?? null;
 
   const finish = (body: string): Response => {
     const res = html(body);
+    res.headers.set("Cache-Control", "no-store");
+    res.headers.set("Pragma", "no-cache");
     // Persist the (fresh, URL-supplied) context so it survives OAuth.
     if (valid(fromUrl)) setHandoffCookie(res.headers, fromUrl);
     return res;
@@ -170,14 +216,16 @@ export async function renderHub(request: Request, env: Env): Promise<Response> {
   if (!user) {
     // Carry the context through the OAuth round-trip so the return comes back
     // to the hub with it (the cookie is the belt-and-suspenders fallback).
-    const q = hasHandoff
-      ? `?scheme=${encodeURIComponent(ctx.scheme)}&nonce=${encodeURIComponent(ctx.nonce)}&challenge=${encodeURIComponent(ctx.challenge)}`
-      : "";
-    const self = `${appOrigin(env)}/${q}`;
+    const self = hasHandoff
+      ? `${appOrigin(env)}/?scheme=${encodeURIComponent(ctx.scheme)}&nonce=${encodeURIComponent(ctx.nonce)}&challenge=${encodeURIComponent(ctx.challenge)}`
+      : dashboardReturnUrl(appOrigin(env), request.url);
     return finish(shell("Sign in to Zeros", signedOut(self)));
   }
   if (!hasHandoff) {
-    return finish(shell("Signed in", signedInNoHandoff(env)));
+    if (url.pathname === "/launch") {
+      return finish(shell("Signed in", signedInNoHandoff(env)));
+    }
+    return finish(await dashboard(request, env, verified!));
   }
   return finish(shell("Launch Zeros", launchInner(env, ctx)));
 }

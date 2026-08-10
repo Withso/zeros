@@ -362,12 +362,6 @@ importers:
         specifier: ^9.0.5
         version: 9.0.5
 
-  apps/feedback-worker:
-    dependencies:
-      jose:
-        specifier: ^6.0.0
-        version: 6.2.2
-
   apps/marketing:
     dependencies:
       lucide-react:

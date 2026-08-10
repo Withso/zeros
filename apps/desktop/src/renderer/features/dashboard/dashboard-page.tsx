@@ -52,10 +52,7 @@ import {
 } from "../../state/pending-workspaces";
 import { useWorkspaceHasChanges } from "../../shell/pr/use-workspace-has-changes";
 import { useOpenWorkspace } from "../../state/use-open-workspace";
-import {
-  saveDashboardRepoFilter,
-  useDashboardRepoFilter,
-} from "./preferences";
+import { saveDashboardRepoFilter, useDashboardRepoFilter } from "./preferences";
 import {
   deleteWorkspacePermanently,
   restoreWorkspaceWithFeedback,
@@ -65,6 +62,8 @@ import { branchDisplayName } from "../../shared/lib/branch-name";
 import { formatCompactAge } from "../agent/format-age";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { ghPrMerge, ghPrSync, type Workspace } from "../../platform/git";
+import { useActiveOrganization } from "../team/team-store";
+import { filterRowsForOrganization } from "../team/organization-capabilities";
 
 const REPO_CHIP_CLS =
   "inline-flex size-5 shrink-0 items-center justify-center rounded-sm bg-bg2-hover text-xxs font-medium leading-none text-fg2";
@@ -116,15 +115,15 @@ export function DashboardPage() {
   const { projects } = useProjects();
   const chats = useChats();
   const { workspaces: liveWorkspaces, loading } = useLiveWorkspaces();
-  const designWorkspacesActive =
-    useInternalFeatureActive("designWorkspaces");
+  const designWorkspacesActive = useInternalFeatureActive("designWorkspaces");
+  const activeOrganization = useActiveOrganization();
   const accessibleLiveWorkspaces = useMemo(
     () =>
-      filterWorkspacesForDesignAccess(
-        liveWorkspaces,
-        designWorkspacesActive,
+      filterRowsForOrganization(
+        filterWorkspacesForDesignAccess(liveWorkspaces, designWorkspacesActive),
+        activeOrganization,
       ),
-    [designWorkspacesActive, liveWorkspaces],
+    [activeOrganization, designWorkspacesActive, liveWorkspaces],
   );
   // Destructive membership is confirmed-only: a busy row stays in its current
   // status column until the engine publishes the archive/delete result.
@@ -135,20 +134,23 @@ export function DashboardPage() {
   const rawPending = usePendingCreatesAll();
   const allPending = useMemo(
     () =>
-      filterPendingCreatesForDesignAccess(
-        rawPending,
-        designWorkspacesActive,
+      filterRowsForOrganization(
+        filterPendingCreatesForDesignAccess(rawPending, designWorkspacesActive),
+        activeOrganization,
       ),
-    [designWorkspacesActive, rawPending],
+    [activeOrganization, designWorkspacesActive, rawPending],
   );
   const { workspaces: rawArchivedWorkspaces } = useArchivedWorkspaces();
   const archivedWorkspaces = useMemo(
     () =>
-      filterWorkspacesForDesignAccess(
-        rawArchivedWorkspaces,
-        designWorkspacesActive,
+      filterRowsForOrganization(
+        filterWorkspacesForDesignAccess(
+          rawArchivedWorkspaces,
+          designWorkspacesActive,
+        ),
+        activeOrganization,
       ),
-    [designWorkspacesActive, rawArchivedWorkspaces],
+    [activeOrganization, designWorkspacesActive, rawArchivedWorkspaces],
   );
   const openWorkspace = useOpenWorkspace();
   // Persist the requested repository identity. A removed/stale slug derives to

@@ -1,27 +1,37 @@
 // ──────────────────────────────────────────────────────────
-// Authorization spine — ONE helper, used by every team-scoped route.
+// Authorization spine — ONE helper, used by every organization-scoped route.
 // Role is looked up in Postgres on every request (never trusted from
 // the client, never baked into the JWT — revocation must be instant).
 // ──────────────────────────────────────────────────────────
 
 import type { Tx } from "./db.js";
 
-export type TeamRole = "owner" | "admin" | "member";
+export type OrganizationRole = "owner" | "admin" | "member";
+/** Released clients still call this role TeamRole. The values were always
+ * tenant-wide; keep the source alias until the legacy `/v1/teams` API retires. */
+export type TeamRole = OrganizationRole;
 
-const ROLE_RANK: Record<TeamRole, number> = { member: 0, admin: 1, owner: 2 };
+const ROLE_RANK: Record<OrganizationRole, number> = {
+  member: 0,
+  admin: 1,
+  owner: 2,
+};
 
-export function roleAtLeast(role: TeamRole, min: TeamRole): boolean {
+export function roleAtLeast(
+  role: OrganizationRole,
+  min: OrganizationRole,
+): boolean {
   return ROLE_RANK[role] >= ROLE_RANK[min];
 }
 
 /** Staff role — product-wide, NOT team-scoped, and deliberately NOT ranked
- *  against TeamRole (see apps/control-plane/migrations/0007_staff_role.sql for why the
+ *  against OrganizationRole (see migrations 0007/0009 for why the
  *  two must not share an axis). null ⇒ not staff. */
 export type StaffRole = "developer";
 
 export class HttpError extends Error {
   constructor(
-    public status: 400 | 401 | 403 | 404 | 409 | 422 | 429 | 503,
+    public status: 400 | 401 | 403 | 404 | 409 | 422 | 429 | 502 | 503,
     public code: string,
     message: string,
   ) {
@@ -29,37 +39,42 @@ export class HttpError extends Error {
   }
 }
 
-/** Load the acting user's role in a team; 404 (not 403) when the team is
- *  invisible to them — don't leak which team ids exist. */
-export async function requireMembership(
+/** Load the acting user's role in an organization; 404 (not 403) when the
+ * organization is invisible to them — don't leak tenant ids. */
+export async function requireOrganizationMembership(
   tx: Tx,
-  teamId: string,
+  orgId: string,
   userId: string,
-): Promise<TeamRole> {
-  const { rows } = await tx.query<{ role: TeamRole }>(
-    `SELECT tm.role
-     FROM team_members tm
-     JOIN teams t ON t.id = tm.team_id AND t.deleted_at IS NULL
-     WHERE tm.team_id = $1 AND tm.user_id = $2`,
-    [teamId, userId],
+): Promise<OrganizationRole> {
+  const { rows } = await tx.query<{ role: OrganizationRole }>(
+    `SELECT om.role
+     FROM organization_members om
+     JOIN organizations o ON o.id = om.org_id AND o.deleted_at IS NULL
+     WHERE om.org_id = $1 AND om.user_id = $2`,
+    [orgId, userId],
   );
   const role = rows[0]?.role;
-  if (!role) throw new HttpError(404, "not_found", "Team not found");
+  if (!role)
+    throw new HttpError(404, "not_found", "Organization not found");
   return role;
 }
 
-export async function requireRole(
+export async function requireOrganizationRole(
   tx: Tx,
-  teamId: string,
+  orgId: string,
   userId: string,
-  min: TeamRole,
-): Promise<TeamRole> {
-  const role = await requireMembership(tx, teamId, userId);
+  min: OrganizationRole,
+): Promise<OrganizationRole> {
+  const role = await requireOrganizationMembership(tx, orgId, userId);
   if (!roleAtLeast(role, min)) {
     throw new HttpError(403, "forbidden", `Requires ${min} role`);
   }
   return role;
 }
+
+/** Compatibility aliases for modules shipped during the flat-Team era. */
+export const requireMembership = requireOrganizationMembership;
+export const requireRole = requireOrganizationRole;
 
 /** Gate a route on staff. Takes the role off the AuthedUser the auth
  *  middleware already resolved, which re-reads it from Postgres on every

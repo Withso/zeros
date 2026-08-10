@@ -1293,29 +1293,34 @@ export function AppShellBody() {
 /** Above the AuthGate so a zeros://invite deep link is captured even when
  *  signed out or cold-launching, and the pending token is dropped on sign-out
  *  so it cannot bleed into the next account. Navigation
- *  to Settings → Team is set via the store + persisted section key;
- *  harmless while signed out, and the post-sign-in mount lands there. */
+ *  to Settings is set via the store + persisted section key; harmless while
+ *  signed out, and the post-sign-in mount opens the invite over General. */
 function InviteDeepLinkHandler() {
   const dispatch = useWorkspaceDispatch();
-  const { status } = useAuth();
+  const { status, userId } = useAuth();
   const openTeamForInvite = React.useCallback(() => {
-    setSetting("settings:active-section", "user:team");
+    setSetting("settings:active-section", "user:general");
     dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
   }, [dispatch]);
   useInviteDeepLink(openTeamForInvite);
   const prevStatus = React.useRef(status);
+  const prevUserId = React.useRef(userId);
   React.useEffect(() => {
-    if (
-      prevStatus.current === "authenticated" &&
-      status === "unauthenticated"
-    ) {
+    const signedOut =
+      prevStatus.current === "authenticated" && status === "unauthenticated";
+    const accountChanged =
+      prevUserId.current !== null &&
+      userId !== null &&
+      prevUserId.current !== userId;
+    if (signedOut || accountChanged) {
       clearPendingInviteToken();
       // Account A's team list must not render for account B (or flash the
       // Administration tabs for a zero-team next account).
-      clearTeamStore();
+      clearTeamStore({ resetSelection: true });
     }
     prevStatus.current = status;
-  }, [status]);
+    prevUserId.current = userId;
+  }, [status, userId]);
   return null;
 }
 

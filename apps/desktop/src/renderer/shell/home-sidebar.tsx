@@ -64,6 +64,9 @@ import {
 import { useHomeSidebarResizeDrag } from "./use-home-sidebar-drag";
 import { useResizeHint } from "./use-resize-hint";
 import { useInternalFeatureActive } from "../features/settings/internal-features";
+import { OrganizationSwitcher } from "../features/team/organization-switcher";
+import { useActiveOrganization } from "../features/team/team-store";
+import { filterRowsForOrganization } from "../features/team/organization-capabilities";
 
 // One shared row shape, mirroring the settings sidebar entry (settings-page.tsx
 // SIDEBAR_ENTRY_CLS) so both nav rails read as the same control: fg2 at rest,
@@ -166,14 +169,22 @@ export function HomeSidebar() {
   const { workspaces } = useLiveWorkspaces();
   const rawPending = usePendingCreatesAll();
   const designWorkspacesActive = useInternalFeatureActive("designWorkspaces");
+  const activeOrganization = useActiveOrganization();
   const accessibleWorkspaces = useMemo(
-    () => filterWorkspacesForDesignAccess(workspaces, designWorkspacesActive),
-    [designWorkspacesActive, workspaces],
+    () =>
+      filterRowsForOrganization(
+        filterWorkspacesForDesignAccess(workspaces, designWorkspacesActive),
+        activeOrganization,
+      ),
+    [activeOrganization, designWorkspacesActive, workspaces],
   );
   const allPending = useMemo(
     () =>
-      filterPendingCreatesForDesignAccess(rawPending, designWorkspacesActive),
-    [designWorkspacesActive, rawPending],
+      filterRowsForOrganization(
+        filterPendingCreatesForDesignAccess(rawPending, designWorkspacesActive),
+        activeOrganization,
+      ),
+    [activeOrganization, designWorkspacesActive, rawPending],
   );
   const { openProject, openGithubProject, quickStart } = useAddProject();
   const { session, email } = useAuth();
@@ -204,6 +215,15 @@ export function HomeSidebar() {
         role="tablist"
         aria-label="Home navigation"
       >
+        <OrganizationSwitcher
+          onOrganizationChanged={() =>
+            dispatch({ type: "SET_ACTIVE_PAGE", page: "dashboard" })
+          }
+          onOpenSettings={() =>
+            dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" })
+          }
+        />
+        <div className="bg-border1 -mx-1 mb-2 h-px" />
         <Button
           type="button"
           variant="ghost"

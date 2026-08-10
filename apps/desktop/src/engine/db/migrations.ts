@@ -843,6 +843,20 @@ const MIGRATION_30_CHAT_IDENTITY_COMPATIBILITY = `
 SELECT 1;
 `;
 
+/** v31 — semantic owner and execution placement. Existing rows predate
+ * organization selection and are therefore interpreted as Personal; NULL is
+ * retained as that compatibility marker. All existing worktrees are local.
+ * A cloud row must name an organization, while Personal's local-only rule is
+ * enforced by the control-plane capability and desktop create gate. */
+const MIGRATION_31_WORKSPACE_OWNER = `
+ALTER TABLE workspaces ADD COLUMN organization_id TEXT;
+ALTER TABLE workspaces ADD COLUMN placement TEXT NOT NULL DEFAULT 'local'
+  CHECK (placement IN ('local', 'cloud'))
+  CHECK (placement = 'local' OR organization_id IS NOT NULL);
+CREATE INDEX idx_workspaces_organization
+  ON workspaces(organization_id, placement, archived_at);
+`;
+
 /** The ordered migration list. Append only — NEVER edit or reorder a shipped
  *  entry; add a new one. */
 export const MIGRATIONS: Migration[] = [
@@ -992,6 +1006,11 @@ export const MIGRATIONS: Migration[] = [
     name: "chat identity compatibility repair for draft v28/v29",
     up: MIGRATION_30_CHAT_IDENTITY_COMPATIBILITY,
   },
+  {
+    version: 31,
+    name: "workspaces: organization owner + local/cloud placement",
+    up: MIGRATION_31_WORKSPACE_OWNER,
+  },
 ];
 
 /** Run all pending migrations in order, each in its own transaction. Idempotent
@@ -1039,6 +1058,15 @@ function tableColumns(db: Database.Database, table: string): Set<string> {
       }>
     ).map((column) => column.name),
   );
+}
+
+/** This feature branch briefly recorded workspace ownership as v28 before the
+ * provider-identity v28-v30 ladder landed on main. Those columns were created
+ * atomically, so their presence means v31's ALTERs must be skipped while its
+ * final version marker is still recorded. */
+function hasFeatureBranchWorkspaceOwnerColumns(db: Database.Database): boolean {
+  const columns = tableColumns(db, "workspaces");
+  return columns.has("organization_id") && columns.has("placement");
 }
 
 /** Repair databases that saw the feature-branch draft v28/v29. Those versions
@@ -1221,6 +1249,13 @@ export function runMigrations(db: Database.Database): void {
         skipSql = true;
       }
       if (m.version === 30) repairDraftChatIdentityColumns(db);
+      if (m.version === 31 && hasFeatureBranchWorkspaceOwnerColumns(db)) {
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_workspaces_organization
+            ON workspaces(organization_id, placement, archived_at)
+        `);
+        skipSql = true;
+      }
       // Early dev builds applied a draft v21 before payload_json existed.
       // SQLite has no portable ADD COLUMN IF NOT EXISTS, so v22 is an ordinary
       // tracked ALTER for those databases and a recorded no-op for fresh/final

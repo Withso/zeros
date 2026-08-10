@@ -77,6 +77,11 @@ import {
   type DispatcherCreatePayload,
 } from "./dispatcher-composer";
 import { CreateFromSource, type DispatcherBase } from "./create-from-source";
+import {
+  getActiveOrganizationIdSnapshot,
+  getActiveOrganizationSnapshot,
+} from "../../features/team/team-store";
+import { localWorkspaceOwner } from "../../features/team/organization-capabilities";
 
 interface DispatcherModalProps {
   open: boolean;
@@ -170,6 +175,13 @@ export function DispatcherModal({
   const handleCreate = async (payload: DispatcherCreatePayload) => {
     const project = selectedProject;
     if (!project || busy) return;
+    // Organization selection is part of the create intent. Snapshot it before
+    // any asynchronous reservation so a switch during prepare cannot retarget
+    // the new workspace.
+    const owner = localWorkspaceOwner(
+      getActiveOrganizationSnapshot(),
+      getActiveOrganizationIdSnapshot(),
+    );
     // Optimistic create, three beats:
     //   1. prepareCreate reserves identity + final path without touching disk.
     //   2. Navigate NOW: close the modal, add the chat bound to the announced
@@ -208,6 +220,7 @@ export function DispatcherModal({
     const pendingToken = beginPendingCreate({
       repoRoot: project.repoRoot,
       repoSlug: project.repoSlug,
+      ...owner,
       path: prepared.path,
       branch: prepared.branch,
     });
@@ -289,6 +302,7 @@ export function DispatcherModal({
       await workspaceCreate({
         repoRoot: project.repoRoot,
         repoSlug: project.repoSlug,
+        ...owner,
         agentId: payload.selection.agentId,
         preparedId: prepared.workspaceId,
         preparedBranch: prepared.branch,

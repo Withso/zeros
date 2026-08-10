@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 // ──────────────────────────────────────────────────────────
-// check-vite-env-sync — keep the production VITE_* secret-set a reviewable invariant
+// check-vite-env-sync — keep the production VITE_* build set reviewable
 // ──────────────────────────────────────────────────────────
 //
 // VITE_* values are inlined into the renderer bundle at BUILD time
 // (import.meta.env) and `.env` is gitignored (absent in CI), so a production
-// build (`release.yml` → build:ui) MUST inject them from repo secrets. A VITE_
+// build (`release.yml` → build:ui) MUST inject them from environment-scoped
+// Actions variables/secrets. A VITE_
 // var the app uses but release.yml does NOT inject ships a DMG without it →
-// analytics + feedback go dark, with no failing test (the exact "production
-// build shipped broken" bug). This guard makes the
-// prod secret-set a first-class invariant. It reads NAMES only, never values.
+// analytics or environment routing goes dark, with no failing test. This guard
+// makes the production build set a first-class invariant. It reads names only,
+// never values; release-environment.ts validates the public URL values.
 //
 // Checks (NAMES only):
 //   1. Every VITE_ var used in src/ is documented in .env.example.
@@ -24,9 +25,11 @@ import { execFileSync } from "node:child_process";
 // Required in EVERY production build — a missing one breaks the shipped app.
 // Auth has no entry here: the desktop never talks to Auth0 directly, only to
 // app.zeros.build (see apps/desktop/electron/ipc/commands/auth-session.ts).
-const PROD_REQUIRED = ["VITE_POSTHOG_KEY_PROD", "VITE_FEEDBACK_URL"];
-// Injected but allowed to resolve to "" (code falls back to a default).
-//
+const PROD_REQUIRED = [
+  "VITE_POSTHOG_KEY_PROD",
+  "VITE_APP_BASE_URL",
+  "VITE_CONTROL_PLANE_URL",
+];
 // VITE_ZEROS_CHANNEL: release.yml does NOT inject it — Production's renderer channel
 // comes from the `import.meta.env.DEV ? "dev" : "stable"` fallback in
 // apps/desktop/src/renderer/config/release-channel.ts. (An earlier version of this comment claimed release.yml
@@ -38,12 +41,6 @@ const PROD_REQUIRED = ["VITE_POSTHOG_KEY_PROD", "VITE_FEEDBACK_URL"];
 // the removed VITE_INTERNAL_USER_EMAILS was inlined into the renderer bundle,
 // so it shipped maintainer addresses inside every .app while hiding nothing.
 // Re-adding a VITE_* var for that purpose would be a regression.
-const PROD_OPTIONAL = [
-  "VITE_POSTHOG_HOST",
-  "VITE_APP_BASE_URL",
-  "VITE_ZEROS_CHANNEL",
-  "VITE_CONTROL_PLANE_URL",
-];
 // Intentionally NOT in a prod build (a packaged app always runs in prod mode).
 const DEV_ONLY = ["VITE_POSTHOG_KEY_DEV"];
 

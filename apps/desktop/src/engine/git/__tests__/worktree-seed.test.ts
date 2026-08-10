@@ -73,6 +73,22 @@ describe("worktree recovery seed (app-data; .zeros retired)", () => {
     expect(getWorkspaceById(ws.id)?.path).toBe(ws.path);
   });
 
+  it("coerces an ownerless cloud seed to local during best-effort recovery", () => {
+    const ws = makeWs(root);
+    mkdirSync(path.dirname(worktreeSeedPath(ws.path)), { recursive: true });
+    writeFileSync(
+      worktreeSeedPath(ws.path),
+      JSON.stringify({ ...ws, organizationId: null, placement: "cloud" }),
+      "utf8",
+    );
+
+    expect(seedFromDisk()).toMatchObject({ inserted: 1 });
+    expect(getWorkspaceById(ws.id)).toMatchObject({
+      organizationId: null,
+      placement: "local",
+    });
+  });
+
   it("does NOT resurrect a workspace whose worktree folder is gone", () => {
     const ws = makeWs(root);
     insertWorkspace(ws);

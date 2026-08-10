@@ -1,7 +1,9 @@
 # Control plane
 
-Railway-hosted API for Zeros identity, teams, invitations, team settings,
-GitHub App coordination, audit records, and rate limiting. It owns its Postgres
+Railway-hosted API for Zeros identity, organizations, child teams, invitations,
+organization settings,
+GitHub App coordination, authenticated feedback delivery, audit records, and
+rate limiting. It owns its Postgres
 schema and is deployed independently from the desktop application.
 
 ## Runtime boundary
@@ -14,6 +16,8 @@ schema and is deployed independently from the desktop application.
 - `GET /healthz` is public so Railway can evaluate service health.
 - GitHub App support is optional. Missing configuration disables only the
   `/v1/github/*` routes; it does not prevent the service from starting.
+- Feedback delivery is optional at boot. `POST /v1/feedback` answers a clear
+  503 until Intercom and/or Linear is configured.
 
 The app has its own package manifest and lockfile because it is a separate
 container build. Run its commands with `pnpm --dir apps/control-plane ...` or
@@ -52,7 +56,7 @@ Core environment variables:
 | `PORT` | HTTP port, default `8080` |
 | `NODE_ENV` | Use `production` for production-safe error responses |
 
-The optional GitHub App and invitation-email variables are documented in
+The optional GitHub App, invitation-email, and feedback variables are documented in
 [`.env.example`](.env.example). Secrets belong in Railway's secret store and
 must never be exposed through renderer `VITE_*` variables.
 
@@ -65,6 +69,19 @@ before accepting traffic.
 Released migrations are immutable, including comments. Add a new migration for
 every schema or data change; editing an applied file does not cause it to run
 again and makes the repository diverge from deployed databases.
+
+A migration whose header contains `zeros:requires-controlled-downtime` is
+blocked in `NODE_ENV=production` until its exact filename appears in
+`CONTROL_PLANE_MIGRATION_APPROVALS`. Migration `0009` uses this guard because
+the prior server binary cannot run against its renamed schema. Follow the
+one-time procedure in
+[`docs/deployment-environments.md`](../../docs/deployment-environments.md);
+do not approve it during a rolling deploy.
+
+The current tenant hierarchy is Account → Personal/Organization → Team →
+Member. Personal is permanent and local-only; every tenant currently receives
+one default child team. The compatibility and rollout contract is documented in
+[`docs/organizations-and-teams.md`](../../docs/organizations-and-teams.md).
 
 Two checks protect the migration ladder:
 
@@ -87,7 +104,12 @@ Configure the Railway service root as `apps/control-plane`. The colocated
 [`railway.json`](railway.json) configures `/healthz`, restart behavior, and the
 Dockerfile builder.
 
-Before production deployment:
+Use one Railway project with persistent `alpha`, `beta`, and `production`
+environments. Each environment has its own control-plane instance, Postgres,
+Auth0 audience, GitHub App, feedback destinations, and public domain.
+Production autodeploy stays disabled; only Alpha tracks `main`.
+
+Before a production deployment:
 
 1. Provision PostgreSQL with backups and a pinned supported major version.
 2. Set `DATABASE_URL`, `AUTH0_DOMAIN`, `AUTH_AUDIENCE`, and
@@ -96,12 +118,34 @@ Before production deployment:
 4. Run the verification commands below against the exact commit being
    deployed.
 5. Confirm startup migrations complete before directing traffic to the new
-   instance.
+   instance. Use expand/contract migrations for ordinary rolling deploys.
+
+The authoritative topology, variable matrix, promotion flow, and migration
+runbook live in
+[`docs/deployment-environments.md`](../../docs/deployment-environments.md).
 
 The service and desktop release independently. API changes therefore remain
 backward compatible until deployed desktop versions no longer use the previous
 contract. Add new fields or routes first; remove old ones only after observed
 client migration.
+
+## Organization API
+
+The authenticated surface is organization-first:
+
+| Route | Purpose |
+| --- | --- |
+| `GET /v1/me` | Account plus Personal-first organization summaries and capability metadata |
+| `POST /v1/organizations` | Create an organization, owner membership, and default team atomically |
+| `GET/PATCH/DELETE /v1/organizations/:id` | Read or manage an organization; Personal mutation is rejected |
+| `/v1/organizations/:id/members` | Membership, role, leave, and last-owner-safe removal operations |
+| `/v1/organizations/:id/invitations` | Exact-email, expiring organization invitations |
+| `GET/POST /v1/organizations/:id/teams` | List the default team; additional creation returns a capability error for now |
+| `GET /v1/organizations/:id/billing` | Organization-scoped plan/seat metadata; payment management remains disabled |
+| `/v1/organizations/:id/settings` | Remote organization settings; Personal reads empty/local-only and rejects writes |
+
+`/v1/teams` mirrors the tenant-root operations for mixed-version desktop
+clients. Its IDs are organization IDs, not child-team IDs.
 
 ## Optional GitHub App
 
@@ -125,6 +169,35 @@ Webhooks are unnecessary until a webhook consumer exists. A partial or invalid
 configuration is logged and leaves the GitHub routes unavailable while the
 rest of the control plane remains healthy.
 
+## Optional feedback destinations
+
+The desktop posts authenticated reports to `POST /v1/feedback` on this service.
+Configure Intercom with `INTERCOM_TOKEN` and/or Linear with
+`LINEAR_API_KEY` + `LINEAR_TEAM_ID`; see [`.env.example`](.env.example) for
+optional regions, type-to-tag maps, labels, and PostHog links.
+
+Create these three tags in Intercom and these three issue labels in Linear
+before setting their ID maps:
+
+| Map key    | Display name    |
+| ---------- | --------------- |
+| `bug`      | Bug or Issue    |
+| `feedback` | Feedback        |
+| `feature`  | Feature Request |
+
+Copy the provider IDs—not the display names—into `INTERCOM_TAG_IDS` and
+`LINEAR_LABEL_IDS`. Do not create a separate `issue` entry. The API still
+accepts `issue` from released desktop builds and normalizes it to `bug` before
+selecting either provider ID.
+
+Identity always comes from the verified Auth0 user, never the JSON body. The
+body is strict, messages and scrubbed logs are bounded, and the route has both
+a pre-auth five-per-minute Railway client-IP limit and a five-per-minute
+per-user limit. Its larger body allowance applies only after both authentication
+and those limits. Intercom and Linear delivery are independent; the request
+succeeds when either accepts it. Full scrubbed logs go to a private Linear
+upload while Intercom receives only a readable tail.
+
 ## Security model
 
 - Authentication middleware fails closed on invalid, expired, wrong-issuer,
@@ -133,9 +206,12 @@ rest of the control plane remains healthy.
   PostgreSQL row-level security under a non-owner, non-superuser role.
 - Invitation tokens are random, single-use, expiring values stored only as
   hashes.
+- Personal cannot be mutated, deleted, invited into, or used for remotely
+  persisted settings through the API.
 - OAuth codes, access tokens, refresh tokens, invitation tokens, and database
   credentials must never appear in logs or error bodies.
-- Rate limits run before expensive authentication and external-provider work.
+- Per-user rate limits run before external-provider work; Auth0 and signup
+  protections bound identity provisioning separately.
 - Public responses do not reveal whether an unrelated account exists.
 
 See [`src/routes.ts`](src/routes.ts) for the HTTP surface and

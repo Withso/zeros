@@ -1,7 +1,8 @@
 name: Release
 
-# Manual-only trigger. Run with:
-#   gh workflow run release.yml      (or the Actions tab ▸ Release ▸ Run workflow)
+# Manual-only trigger. Run from the Beta-validated release branch with:
+#   gh workflow run release.yml --ref release/X.Y.Z
+# or select that branch in Actions ▸ Release ▸ Run workflow.
 #
 # Pipeline (THREE jobs): gate on the Vitest suite → BUILD + sign + submit the
 # .dmg/.zip/.zip.blockmap/latest-mac.yml to Apple's notary (no waiting) and
@@ -21,12 +22,10 @@ name: Release
 # (`gh run rerun <id> --failed`) — it re-downloads the SAME signed artifact and
 # re-polls Apple with NO rebuild. The expensive part runs once.
 #
-# Version is AUTO-COMPUTED (release.config.json + scripts/compute-version.mjs):
-# PATCH auto-increments by +1 per release (0.0.1 → 0.0.2 → 0.0.3 …); MAJOR/MINOR
-# are MANUAL — run `pnpm version:set X.Y.Z` on main and commit
-# release.config.json BEFORE triggering (e.g. `version:set 0.1.0` for a feature
-# drop, `version:set 1.0.0` for a milestone). The workflow reads the committed
-# config + the existing release tags, so the version can never silently desync.
+# Version comes from the required `release/X.Y.Z` branch. Cut that branch from
+# the Alpha commit selected for Beta, stabilize it there, then dispatch this
+# workflow on the same branch. The branch name, Beta build, stable artifacts,
+# and vX.Y.Z tag therefore stay on one exact commit lineage.
 #
 # Signing: Developer-ID signed + notarized, ALWAYS. The CSC_*/APPLE_* repo
 # secrets are mandatory and asserted up front ("Require signing credentials"),
@@ -65,27 +64,18 @@ jobs:
     # this job via `needs:`, so gating here gates the whole pipeline.
     if: github.event.repository.fork == false
     steps:
-      - name: Assert release runs on main or a release branch
-        # PREFERRED: dispatch from `release/X.Y.Z`. That branch is the exact commit
-        # Beta was cut from and validated on, so Production ships what was tested.
-        # Before this, release.yml only accepted `main` and rebuilt main HEAD at
-        # dispatch time — so any commits that landed after the validated Beta shipped
-        # untested, and the bytes tested in Beta were never the bytes released.
-        #
-        # `main` is still accepted for back-compat (and for a hotfix straight off
-        # main), in which case the version falls back to the tag-derived next patch.
-        # Any OTHER ref is rejected: workflow_dispatch lets you pick anything, and a
-        # feature branch would compute a wrong or duplicate version and tag the wrong
-        # commit.
+      - name: Require a Beta-validated release branch
+        # Production is a promotion, never a rebuild of moving `main` state.
+        # workflow_dispatch lets an operator select any ref, so enforce the exact
+        # branch contract before checkout, dependency installation, or macOS work.
         run: |
-          case "$GITHUB_REF" in
-            refs/heads/main|refs/heads/release/*) ;;
-            *)
-              echo "::error::Release must be dispatched from 'main' or 'release/X.Y.Z' (got: $GITHUB_REF)."
-              exit 1
-              ;;
-          esac
-          echo "Releasing from $GITHUB_REF"
+          BRANCH_VERSION="${GITHUB_REF#refs/heads/release/}"
+          if [ "$GITHUB_REF" = "refs/heads/release/$BRANCH_VERSION" ] && printf '%s' "$BRANCH_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Releasing Beta-validated branch $GITHUB_REF"
+          else
+            echo "::error::Production must be dispatched from 'release/X.Y.Z' after Beta validation (got: $GITHUB_REF)."
+            exit 1
+          fi
 
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -150,7 +140,7 @@ jobs:
     # rebuild — see the header.
     runs-on: macos-latest
     # Signing/notarization credentials belong to this protected environment,
-    # restricted to main and release/** with required reviewers.
+    # restricted to release/** with required reviewers.
     environment: production
     # Expose the computed version to the `notarize` job (release tag + asset
     # names + title) so it never recomputes and risks a mismatch.
@@ -195,10 +185,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Full history + tags. The contiguous patch number is computed from the
-          # existing vMAJOR.MINOR.* release tags (scripts/compute-version.mjs), and
-          # generated notes diff against history. fetch-depth:0 alone does not
-          # reliably bring tags on checkout@v4, so request them explicitly.
+          # Full history + tags support generated notes and the early duplicate-tag
+          # check. fetch-depth:0 alone does not reliably bring tags on checkout,
+          # so request them explicitly.
           fetch-depth: 0
           fetch-tags: true
 
@@ -216,36 +205,22 @@ jobs:
 
       - name: Compute version
         id: version
-        # On a `release/X.Y.Z` branch the version is X.Y.Z — taken from the branch
-        # name, because cutting that branch IS the decision about which version this
-        # is. Deterministic: the same branch always produces the same version, so
-        # Production and the Beta cut from it agree, and a re-run is idempotent.
-        #
-        # On `main` it falls back to compute-version.mjs (next patch after the highest
-        # vMAJOR.MINOR.PATCH tag) — the pre-existing behavior, kept for hotfixes.
+        # The release branch name is the version decision. Deterministic naming
+        # keeps Production identical to the Beta cut and makes retries idempotent.
         run: |
           set -euo pipefail
-          case "$GITHUB_REF" in
-            refs/heads/release/*)
-              BRANCH_VERSION="${GITHUB_REF#refs/heads/release/}"
-              if ! printf '%s' "$BRANCH_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-                echo "::error::release branch must be named 'release/X.Y.Z' (got: release/$BRANCH_VERSION)."
-                exit 1
-              fi
-              VERSION="$BRANCH_VERSION"
-              echo "Version from release branch: $VERSION"
-              # Refuse to re-release an already-tagged version — `gh release create`
-              # would fail later anyway, but far past the expensive build+notarize.
-              if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
-                echo "::error::tag v${VERSION} already exists — bump the release branch or delete the tag."
-                exit 1
-              fi
-              ;;
-            *)
-              VERSION=$(node scripts/compute-version.mjs)
-              echo "Computed version (from tags): $VERSION"
-              ;;
-          esac
+          VERSION="${GITHUB_REF#refs/heads/release/}"
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::release branch must be named 'release/X.Y.Z' (got: $GITHUB_REF)."
+            exit 1
+          fi
+          echo "Version from release branch: $VERSION"
+          # Refuse to re-release an already-tagged version — `gh release create`
+          # would fail later anyway, but far past the expensive build+notarize.
+          if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+            echo "::error::tag v${VERSION} already exists — bump the release branch or delete the tag."
+            exit 1
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Write version into package.json
@@ -277,30 +252,33 @@ jobs:
         # cross-compile can only link.
         run: pnpm smoke:engine
 
+      - name: Verify Production hosted-environment routing
+        env:
+          VITE_APP_BASE_URL: ${{ vars.VITE_APP_BASE_URL || secrets.VITE_APP_BASE_URL }}
+          VITE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL || secrets.VITE_CONTROL_PLANE_URL }}
+        run: pnpm exec tsx scripts/release-environment.ts production
+
       - name: Compile Electron main + preload
         env:
-          # Public origin baked into main.cjs for the GitHub App handoff. The
-          # client secret remains backend-only.
-          VITE_CONTROL_PLANE_URL: ${{ secrets.VITE_CONTROL_PLANE_URL }}
+          # Public origins baked into main.cjs for auth + GitHub handoffs. The
+          # client secrets remain backend-only.
+          VITE_APP_BASE_URL: ${{ vars.VITE_APP_BASE_URL || secrets.VITE_APP_BASE_URL }}
+          VITE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL || secrets.VITE_CONTROL_PLANE_URL }}
         run: pnpm electron:compile
 
       - name: Build Vite renderer
         # VITE_* values are inlined into the renderer bundle at BUILD time
         # (import.meta.env). They MUST be present on this step or the packaged
-        # app ships without them — analytics + feedback go dark (auth has no
-        # VITE_* dependency: the desktop never talks to Auth0 directly, only to
-        # app.zeros.build). .env is gitignored (absent in CI), so
-        # these come from repo secrets. The DEV PostHog key is intentionally
-        # omitted (a packaged build always runs in prod mode). POSTHOG_HOST and
-        # APP_BASE_URL are optional pass-throughs: if the secret is unset they
-        # resolve to "" and the code falls back to its defaults
-        # (us.i.posthog.com / https://app.zeros.build).
+        # app ships without them — analytics or environment routing goes dark.
+        # .env is gitignored (absent in CI), so these come from the protected
+        # GitHub Environment. The DEV PostHog key is intentionally omitted (a
+        # packaged build always runs in prod mode). POSTHOG_HOST may be blank;
+        # the app/API origins are required and value-checked above.
         env:
           VITE_POSTHOG_KEY_PROD: ${{ secrets.VITE_POSTHOG_KEY_PROD }}
           VITE_POSTHOG_HOST: ${{ secrets.VITE_POSTHOG_HOST }}
-          VITE_FEEDBACK_URL: ${{ secrets.VITE_FEEDBACK_URL }}
-          VITE_APP_BASE_URL: ${{ secrets.VITE_APP_BASE_URL }}
-          VITE_CONTROL_PLANE_URL: ${{ secrets.VITE_CONTROL_PLANE_URL }}
+          VITE_APP_BASE_URL: ${{ vars.VITE_APP_BASE_URL || secrets.VITE_APP_BASE_URL }}
+          VITE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL || secrets.VITE_CONTROL_PLANE_URL }}
         run: pnpm build:ui
 
       - name: Package .dmg + .zip with electron-builder (sign only)
@@ -571,9 +549,8 @@ jobs:
 
           # --target pins the NEW tag to the commit that was actually built,
           # notarized and verified above. Without it `gh release create` creates
-          # vX.Y.Z on the DEFAULT branch's HEAD — which was harmless while this
-          # workflow only accepted `main`, but is wrong now that `release/X.Y.Z` is
-          # the preferred ref: the tag would point at main HEAD while the shipped
+          # vX.Y.Z on the DEFAULT branch's HEAD rather than the required
+          # `release/X.Y.Z` ref: the tag would point at main HEAD while the shipped
           # artifacts came from the release branch, silently breaking the "the bytes
           # tested in Beta are the bytes shipped" property this pipeline exists for.
           # release-alpha.yml / release-beta.yml already pass --target for the same

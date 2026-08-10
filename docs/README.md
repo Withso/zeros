@@ -7,6 +7,12 @@ contributors after the change that introduced them has shipped.
   renderer's loading, caching, navigation, and retained-surface invariants.
 - [Navigation state persistence](navigation-state-persistence.md) documents
   owner-keyed selection and cleanup behavior.
+- [Organizations, teams, and workspace ownership](organizations-and-teams.md)
+  defines Personal, tenant and child-team identity, roles, placement metadata,
+  browser-management boundaries, and compatibility contracts.
+- [Hosted deployment environments](deployment-environments.md) defines the
+  Alpha → Beta → Production topology, isolation rules, promotion flow, and
+  controlled rollout requirements.
 - [Agent identity model](agent-identity-model.md) defines Zeros workspace,
   conversation, execution, and provider-binding ownership and lifecycle.
 - [Design Foundation 1.0](design-foundation-1.0.md) defines the canonical

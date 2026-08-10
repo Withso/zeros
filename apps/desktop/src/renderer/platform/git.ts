@@ -75,6 +75,7 @@ import {
   bridgeWorkspaceDelete,
   bridgeWorkspaceArchive,
   bridgeWorkspaceSetStatus,
+  bridgeWorkspaceReassignLocalOrganization,
   bridgeWorkspaceRestore,
   bridgeWorkspaceContinueOnNewBranch,
   bridgeWorkspaceAdoptExisting,
@@ -207,6 +208,12 @@ export interface Workspace {
   /** Optional for rolling compatibility with an older engine. Missing means
    * code; current engines always return an explicit kind. */
   kind?: "code" | "design";
+  /** Semantic tenant owner. Null/missing rows predate organizations and belong
+   * to Personal; current engines always return an explicit nullable value. */
+  organizationId?: string | null;
+  /** Where execution is provisioned. Optional only for rolling compatibility;
+   * legacy rows are local. */
+  placement?: "local" | "cloud";
   repoSlug: string;
   repoRoot: string;
   branch: string;
@@ -325,6 +332,8 @@ export interface CreatedWorkspace {
 export type CreateWorkspaceArgs = {
   repoRoot: string;
   kind?: "code" | "design";
+  organizationId?: string | null;
+  placement?: "local" | "cloud";
   repoSlug?: string;
   baseBranch?: string;
   prompt?: string;
@@ -406,6 +415,16 @@ export async function workspaceCreate(
   // create path hits it.
   void refreshDetectedOpenApps();
   return created;
+}
+
+export async function workspaceReassignLocalOrganization(args: {
+  fromOrganizationId: string;
+  toOrganizationId: string;
+}): Promise<{ changes: number; repoSlugs: string[] }> {
+  return bridgeWorkspaceReassignLocalOrganization(
+    requireBridge("repair local workspace ownership"),
+    args,
+  );
 }
 
 export async function designFrames(
@@ -878,6 +897,7 @@ export async function workspaceContinueOnNewBranch(args: {
 export async function workspaceCreateFromBranch(args: {
   repoRoot: string;
   repoSlug?: string;
+  organizationId: string | null;
   branchName: string;
   sourceTool?: DetectedTool;
   /** Attach an existing PR when opening it by its head branch (so the Review
@@ -901,6 +921,7 @@ export async function workspaceAdoptExisting(args: {
   worktreePath: string;
   branchName: string;
   repoSlug?: string;
+  organizationId: string | null;
   sourceTool?: DetectedTool;
 }): Promise<CreatedWorkspace> {
   const created = await bridgeWorkspaceAdoptExisting(

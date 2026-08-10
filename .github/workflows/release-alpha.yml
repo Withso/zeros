@@ -217,21 +217,27 @@ jobs:
       - name: Smoke-test packaged engine (health + workspace lifecycle)
         run: pnpm smoke:engine
 
+      - name: Verify Alpha hosted-environment routing
+        env:
+          VITE_APP_BASE_URL: ${{ vars.VITE_APP_BASE_URL || secrets.VITE_APP_BASE_URL }}
+          VITE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL || secrets.VITE_CONTROL_PLANE_URL }}
+        run: pnpm exec tsx scripts/release-environment.ts alpha
+
       - name: Compile Electron main + preload (bakes channel=alpha)
         env:
-          VITE_CONTROL_PLANE_URL: ${{ secrets.VITE_CONTROL_PLANE_URL }}
+          VITE_APP_BASE_URL: ${{ vars.VITE_APP_BASE_URL || secrets.VITE_APP_BASE_URL }}
+          VITE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL || secrets.VITE_CONTROL_PLANE_URL }}
         run: pnpm electron:compile
 
       - name: Build Vite renderer
-        # Same VITE_* secret-set as the prod build (analytics, feedback) PLUS
+        # Same VITE_* set as the prod build (analytics + environment URLs) PLUS
         # VITE_ZEROS_CHANNEL=alpha so the renderer's feature flags resolve to the
         # alpha channel.
         env:
           VITE_POSTHOG_KEY_PROD: ${{ secrets.VITE_POSTHOG_KEY_PROD }}
           VITE_POSTHOG_HOST: ${{ secrets.VITE_POSTHOG_HOST }}
-          VITE_FEEDBACK_URL: ${{ secrets.VITE_FEEDBACK_URL }}
-          VITE_APP_BASE_URL: ${{ secrets.VITE_APP_BASE_URL }}
-          VITE_CONTROL_PLANE_URL: ${{ secrets.VITE_CONTROL_PLANE_URL }}
+          VITE_APP_BASE_URL: ${{ vars.VITE_APP_BASE_URL || secrets.VITE_APP_BASE_URL }}
+          VITE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL || secrets.VITE_CONTROL_PLANE_URL }}
           VITE_ZEROS_CHANNEL: alpha
         run: pnpm build:ui
 

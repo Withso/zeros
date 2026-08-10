@@ -9,13 +9,13 @@
   "type": "module",
   "description": "Cloudflare Pages hub for authentication handoff, app launch, and host-routed marketing delivery.",
   "scripts": {
-    "build": "node scripts/assemble-marketing.mjs",
-    "build:standalone": "node scripts/assemble-marketing.mjs --standalone-install",
+    "build": "node scripts/verify-deployment-env.mjs && node scripts/assemble-marketing.mjs",
+    "build:standalone": "node scripts/verify-deployment-env.mjs && node scripts/assemble-marketing.mjs --standalone-install",
     "assemble": "node scripts/assemble-marketing.mjs --skip-build",
     "dev": "npm run build && npx wrangler@4 pages dev dist --port 8788 --ip 127.0.0.1 --compatibility-date=2026-07-10 --kv SESSIONS --binding MARKETING_HOSTS=127.0.0.1,localhost",
     "dev:app": "npm run build && npx wrangler@4 pages dev dist --port 8788 --ip 127.0.0.1 --compatibility-date=2026-07-10 --kv SESSIONS",
     "typecheck": "tsc --noEmit",
-    "test": "node --test lib/github-completion.test.mjs lib/hosts.test.mjs lib/page.test.mjs lib/schemes.test.mjs"
+    "test": "npm run typecheck && node --test lib/*.test.mjs"
   },
   "dependencies": {},
   "devDependencies": {

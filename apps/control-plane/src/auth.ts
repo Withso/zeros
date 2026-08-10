@@ -1,10 +1,9 @@
 // ──────────────────────────────────────────────────────────
 // Auth — verify Auth0-issued JWTs locally (JWKS) and JIT-mirror the user.
 //
-// Sign-in provisions only the user row; teams are optional after migration
-// 0005. A user creates one
-// explicitly via POST /v1/teams or joins one via an invite. Zero teams
-// is a fully supported state.
+// Sign-in provisions the user row plus the account's permanent Personal
+// organization and its default team. Collaborative organizations remain
+// explicit: a user creates one or joins one by invitation.
 //
 // The JWT proves WHO (sub, email); the database decides WHAT (authz.ts).
 // jose's createRemoteJWKSet caches keys in memory and re-fetches only
@@ -21,13 +20,17 @@ import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 import type { MiddlewareHandler } from "hono";
 import type pg from "pg";
 import type { Config } from "./config.js";
-import { withSystemTx } from "./db.js";
+import { withSystemTx, type Tx } from "./db.js";
 import { HttpError, type StaffRole } from "./authz.js";
 
 export type AuthedUser = {
   id: string;
+  /** Stable identity-provider subject. Kept server-side so integrations can
+   *  preserve their external identity across the feedback-worker migration. */
+  providerSub: string;
   email: string;
   displayName: string | null;
+  avatarUrl: string | null;
   /** Product-wide staff role, or null for the ordinary case. Re-read from
    *  Postgres on every request by ensureUser below — never taken from a claim,
    *  so revoking it needs no token expiry. Gates Settings → Internal in the
@@ -140,12 +143,25 @@ export function createAuthMiddleware(
       );
     }
     const displayName = claimString(payload, "name") || claimString(payload, "nickname") || null;
+    const picture = claimString(payload, "picture");
+    // Provider avatars are presentation metadata only. Keep an untrusted claim
+    // out of data:/javascript: sinks and cap it before mirroring to Postgres.
+    let avatarUrl: string | null = null;
+    if (picture && picture.length <= 2_048) {
+      try {
+        const parsed = new URL(picture);
+        if (parsed.protocol === "https:") avatarUrl = parsed.toString();
+      } catch {
+        // Invalid provider claim: omit it; identity still authenticates.
+      }
+    }
 
     const user = await ensureUser(pool, {
       provider: "auth0",
       providerSub: sub,
       email,
       displayName,
+      avatarUrl,
     });
     c.set("user", user);
     await next();
@@ -180,25 +196,51 @@ function chargeSignupBudget(now: number): void {
 }
 
 /**
- * JIT provisioning, idempotent under concurrency: identity link → user row.
- * No team is created — teams are optional and explicitly created/joined.
+ * JIT provisioning, idempotent under concurrency: identity link → user row →
+ * permanent Personal organization → default team. Collaborative organizations
+ * are still explicitly created/joined.
  * Parallel first requests are serialized by the unique indexes
  * (provider+sub, email) and settle via ON CONFLICT / row re-reads.
  */
 export async function ensureUser(
   pool: pg.Pool,
-  input: { provider: string; providerSub: string; email: string; displayName: string | null },
+  input: {
+    provider: string;
+    providerSub: string;
+    email: string;
+    displayName: string | null;
+    avatarUrl?: string | null;
+  },
 ): Promise<AuthedUser> {
   return withSystemTx(pool, async (tx) => {
-    const linked = await tx.query<{ user_id: string }>(
+    let linked = await tx.query<{ user_id: string }>(
       `SELECT user_id FROM user_identities WHERE provider = $1 AND provider_sub = $2`,
       [input.provider, input.providerSub],
     );
+    if (!linked.rows[0]) {
+      // Serialize only the first-request path for one provider identity, then
+      // re-read after acquiring the lock. Unique constraints reject duplicates,
+      // but without this lock the losing transaction surfaces an opaque 500
+      // instead of reusing the row the winner just provisioned. Hash collisions
+      // cause harmless extra serialization.
+      await tx.query(
+        `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+        [
+          `identity:${input.provider.length}:${input.provider}:${input.providerSub}`,
+        ],
+      );
+      linked = await tx.query<{ user_id: string }>(
+        `SELECT user_id FROM user_identities
+         WHERE provider = $1 AND provider_sub = $2`,
+        [input.provider, input.providerSub],
+      );
+    }
 
     let row: {
       id: string;
       email: string;
       display_name: string | null;
+      avatar_url: string | null;
       staff_role: StaffRole | null;
     };
     if (linked.rows[0]) {
@@ -214,10 +256,16 @@ export async function ensureUser(
              WHEN NOT EXISTS (SELECT 1 FROM users WHERE email = $2 AND id <> $1) THEN $2
              ELSE email
            END,
-           display_name = COALESCE(display_name, $3)
+           display_name = COALESCE(display_name, $3),
+           avatar_url = COALESCE($4, avatar_url)
          WHERE id = $1
-         RETURNING id, email, display_name, staff_role`,
-        [linked.rows[0].user_id, input.email, input.displayName],
+         RETURNING id, email, display_name, avatar_url, staff_role`,
+        [
+          linked.rows[0].user_id,
+          input.email,
+          input.displayName,
+          input.avatarUrl ?? null,
+        ],
       );
       row = updated.rows[0]!;
       if (row.email !== input.email) {
@@ -230,6 +278,13 @@ export async function ensureUser(
       // BEFORE creating anything, so a flood of fresh Auth0 subs can't mass-
       // provision rows. Throws 429 past the window cap.
       chargeSignupBudget(Date.now());
+      // Different provider identities can race with the same case-insensitive
+      // email. Serialize that narrower signup branch so the loser observes the
+      // committed owner below and receives the deliberate account_exists 409.
+      await tx.query(
+        `SELECT pg_advisory_xact_lock(hashtextextended($1, 1))`,
+        [`email:${input.email.toLowerCase()}`],
+      );
       // No identity link yet for this (provider, sub). If a DIFFERENT identity
       // already owns this email, this is a SECOND sign-in method for the same
       // person (e.g. GitHub after Google). We deliberately do NOT auto-link on
@@ -250,10 +305,10 @@ export async function ensureUser(
         );
       }
       const inserted = await tx.query<typeof row>(
-        `INSERT INTO users (email, display_name)
-         VALUES ($1, $2)
-         RETURNING id, email, display_name, staff_role`,
-        [input.email, input.displayName],
+        `INSERT INTO users (email, display_name, avatar_url)
+         VALUES ($1, $2, $3)
+         RETURNING id, email, display_name, avatar_url, staff_role`,
+        [input.email, input.displayName, input.avatarUrl ?? null],
       );
       row = inserted.rows[0]!;
       await tx.query(
@@ -264,13 +319,153 @@ export async function ensureUser(
       );
     }
 
+    await ensurePersonalOrganization(tx, row);
+
     return {
       id: row.id,
+      providerSub: input.providerSub,
       email: row.email,
       displayName: row.display_name,
+      avatarUrl: row.avatar_url,
       staffRole: row.staff_role,
     };
   });
+}
+
+/**
+ * Make Personal a database invariant, not a first-page side effect. Running on
+ * every authenticated request repairs an interrupted/manual import and updates
+ * the fallback "Personal" label if an identity provider later supplies a name.
+ */
+export async function ensurePersonalOrganization(
+  tx: Tx,
+  user: {
+    id: string;
+    display_name: string | null;
+  },
+): Promise<void> {
+  const displayName = user.display_name?.trim() || "Personal";
+  const preferredSlug = `personal-${user.id.replaceAll("-", "")}`;
+  const existing = await tx.query<{
+    id: string;
+    name: string;
+    has_organization_membership: boolean;
+    default_team_id: string | null;
+    has_team_membership: boolean;
+  }>(
+    `SELECT o.id, o.name,
+            EXISTS (
+              SELECT 1 FROM organization_members om
+              WHERE om.org_id = o.id AND om.user_id = $1 AND om.role = 'owner'
+            ) AS has_organization_membership,
+            dt.id AS default_team_id,
+            EXISTS (
+              SELECT 1 FROM team_members tm
+              WHERE tm.team_id = dt.id AND tm.user_id = $1
+                AND tm.role = 'maintainer'
+            ) AS has_team_membership
+     FROM organizations o
+     LEFT JOIN LATERAL (
+       SELECT t.id FROM teams t
+       WHERE t.org_id = o.id AND t.is_default AND t.deleted_at IS NULL
+       ORDER BY t.id LIMIT 1
+     ) dt ON true
+     WHERE o.created_by = $1 AND o.is_personal AND o.deleted_at IS NULL`,
+    [user.id],
+  );
+  const current = existing.rows[0];
+  const invariantComplete = Boolean(
+    current?.has_organization_membership &&
+    current.default_team_id &&
+    current.has_team_membership,
+  );
+  if (current && invariantComplete) {
+    // A provider name may arrive after the first token. Promote only the
+    // literal fallback so a future user-editable name is never overwritten.
+    if (displayName !== "Personal" && current.name === "Personal") {
+      await tx.query(
+        `UPDATE organizations SET name = $2
+         WHERE id = $1 AND is_personal AND name = 'Personal'`,
+        [current.id, displayName],
+      );
+    }
+    return;
+  }
+
+  let orgId = current?.id ?? null;
+  let createdPersonal = false;
+  if (!orgId) {
+    let slug = preferredSlug;
+    for (let attempt = 0; attempt < 5 && !orgId; attempt++) {
+      // Targetless DO NOTHING covers both the per-owner invariant and a slug
+      // squatter that commits between attempts. The follow-up owner read
+      // distinguishes a concurrent same-user winner from a slug collision.
+      const created = await tx.query<{ id: string }>(
+        `INSERT INTO organizations (
+           slug, name, created_by, is_personal, cloud_workspaces_allowed
+         )
+         VALUES ($1, $2, $3, true, false)
+         ON CONFLICT DO NOTHING
+         RETURNING id`,
+        [slug, displayName, user.id],
+      );
+      if (created.rows[0]) {
+        orgId = created.rows[0].id;
+        createdPersonal = true;
+        break;
+      }
+      const selected = await tx.query<{ id: string }>(
+        `SELECT id FROM organizations
+         WHERE created_by = $1 AND is_personal AND deleted_at IS NULL`,
+        [user.id],
+      );
+      orgId = selected.rows[0]?.id ?? null;
+      slug = `${preferredSlug}-${randomBytes(16).toString("hex")}`;
+    }
+  }
+  if (!orgId) throw new Error("Couldn't provision Personal organization");
+
+  // A provider name may arrive after the first token. Promote only the literal
+  // fallback so a future user-editable profile name is never overwritten.
+  if (displayName !== "Personal") {
+    await tx.query(
+      `UPDATE organizations SET name = $2
+       WHERE id = $1 AND is_personal AND name = 'Personal'`,
+      [orgId, displayName],
+    );
+  }
+
+  await tx.query(
+    `INSERT INTO organization_members (org_id, user_id, role)
+     VALUES ($1, $2, 'owner')
+     ON CONFLICT (org_id, user_id) DO NOTHING`,
+    [orgId, user.id],
+  );
+  await tx.query(
+    `INSERT INTO teams (org_id, slug, name, is_default, created_by)
+     SELECT $1, 'default', 'Default', true, $2
+     WHERE NOT EXISTS (
+       SELECT 1 FROM teams
+       WHERE org_id = $1 AND is_default AND deleted_at IS NULL
+     )
+     ON CONFLICT DO NOTHING`,
+    [orgId, user.id],
+  );
+  await tx.query(
+    `INSERT INTO team_members (team_id, org_id, user_id, role)
+     SELECT t.id, t.org_id, $2, 'maintainer'
+     FROM teams t
+     WHERE t.org_id = $1 AND t.is_default AND t.deleted_at IS NULL
+     ON CONFLICT (team_id, user_id) DO NOTHING`,
+    [orgId, user.id],
+  );
+  if (createdPersonal) {
+    await tx.query(
+      `INSERT INTO audit_log (org_id, actor_id, action, subject)
+       VALUES ($1, $2, 'organization.personal_created', '{}'::jsonb)`,
+      [orgId, user.id],
+    );
+  }
 }
 
 /** Short random slug suffix (base36) — collision-avoidance, not security. */
@@ -287,5 +482,5 @@ export function slugify(name: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 40);
-  return s || "team";
+  return s || "organization";
 }

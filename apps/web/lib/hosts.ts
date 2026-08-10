@@ -102,6 +102,8 @@ export function isAppOnlyPath(pathname: string): boolean {
     pathname === "/launch" ||
     pathname === "/invite" ||
     pathname === "/github/connected" ||
+    pathname === "/api" ||
+    pathname.startsWith("/api/") ||
     pathname.startsWith("/auth/") ||
     pathname.startsWith("/handoff/")
   );

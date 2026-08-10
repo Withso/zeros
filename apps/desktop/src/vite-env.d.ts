@@ -7,12 +7,10 @@ interface ImportMetaEnv {
   readonly VITE_POSTHOG_KEY_PROD?: string;
   /** PostHog host. Defaults to US Cloud. */
   readonly VITE_POSTHOG_HOST?: string;
-  /** Feedback Worker URL (apps/feedback-worker). */
-  readonly VITE_FEEDBACK_URL?: string;
-  /** Shared token gating the feedback Worker. Low-sensitivity (client-sent) —
-   *  it only permits submitting feedback, no Intercom/Linear power on its own. */
   /** Public base URL of the hosted web app (https://app.zeros.build). */
   readonly VITE_APP_BASE_URL?: string;
+  /** Public base URL of this channel's Railway control plane. */
+  readonly VITE_CONTROL_PLANE_URL?: string;
   /** Release channel baked into the bundle at build:
    *  "dev" | "alpha" | "beta" | "stable". Drives renderer feature-flag gating
    *  (apps/desktop/src/renderer/config/release-channel.ts).

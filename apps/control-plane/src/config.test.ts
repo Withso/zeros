@@ -166,3 +166,173 @@ describe("GitHub backend configuration", () => {
     ).toBe("a-separate-binding-key-value");
   });
 });
+
+describe("feedback backend configuration", () => {
+  it("keeps feedback optional when no destination is configured", () => {
+    expect(loadConfig(baseEnv()).feedback).toBeNull();
+  });
+
+  it("loads Intercom and Linear credentials only on the backend", () => {
+    const feedback = loadConfig({
+      ...baseEnv(),
+      INTERCOM_TOKEN: "test-intercom-token",
+      INTERCOM_REGION: "eu",
+      INTERCOM_ADMIN_ID: "admin-1",
+      INTERCOM_TAG_IDS: '{"bug":"tag-1"}',
+      INTERCOM_APP_ID: "workspace-1",
+      LINEAR_API_KEY: "test-linear-key",
+      LINEAR_TEAM_ID: "team-1",
+      LINEAR_LABEL_IDS: '{"feature":"label-1"}',
+      POSTHOG_PROJECT_URL: "https://eu.posthog.com/project/123/",
+    }).feedback;
+
+    expect(feedback).toEqual({
+      intercom: {
+        token: "test-intercom-token",
+        region: "eu",
+        adminId: "admin-1",
+        tagIds: { bug: "tag-1" },
+        appId: "workspace-1",
+      },
+      linear: {
+        apiKey: "test-linear-key",
+        teamId: "team-1",
+        labelIds: { feature: "label-1" },
+      },
+      posthogProjectUrl: "https://eu.posthog.com/project/123",
+    });
+  });
+
+  it("normalizes legacy issue maps into the canonical bug mapping", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const feedback = loadConfig({
+      ...baseEnv(),
+      INTERCOM_TOKEN: "test-intercom-token",
+      INTERCOM_ADMIN_ID: "admin-1",
+      INTERCOM_TAG_IDS: '{"issue":"legacy-issue-tag"}',
+      LINEAR_API_KEY: "test-linear-key",
+      LINEAR_TEAM_ID: "team-1",
+      LINEAR_LABEL_IDS:
+        '{"issue":"legacy-issue-label","bug":"canonical-bug-label"}',
+    }).feedback;
+
+    expect(feedback?.intercom?.tagIds).toEqual({
+      bug: "legacy-issue-tag",
+    });
+    expect(feedback?.linear?.labelIds).toEqual({
+      bug: "canonical-bug-label",
+    });
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('legacy "issue"'),
+    );
+    warn.mockRestore();
+  });
+
+  it("disables only an incomplete destination and keeps the service bootable", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const feedback = loadConfig({
+      ...baseEnv(),
+      INTERCOM_REGION: "au",
+      LINEAR_API_KEY: "test-linear-key",
+      LINEAR_TEAM_ID: "team-1",
+    }).feedback;
+
+    expect(feedback?.intercom).toBeNull();
+    expect(feedback?.linear?.teamId).toBe("team-1");
+    expect(error).toHaveBeenCalledWith(
+      expect.stringContaining("INTERCOM_TOKEN is missing"),
+    );
+    error.mockRestore();
+  });
+
+  it("does not send to the wrong Intercom region when the region is invalid", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const feedback = loadConfig({
+      ...baseEnv(),
+      INTERCOM_TOKEN: "test-intercom-token",
+      INTERCOM_REGION: "mars",
+    }).feedback;
+
+    expect(feedback).toBeNull();
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("DISABLED"));
+    error.mockRestore();
+  });
+
+  it("ignores malformed optional maps without disabling delivery", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const feedback = loadConfig({
+      ...baseEnv(),
+      INTERCOM_TOKEN: "test-intercom-token",
+      INTERCOM_TAG_IDS: "not-json",
+      LINEAR_API_KEY: "test-linear-key",
+      LINEAR_TEAM_ID: "team-1",
+      LINEAR_LABEL_IDS: '{"unknown":"label"}',
+      POSTHOG_PROJECT_URL: "http://not-secure.example/project/1",
+    }).feedback;
+
+    expect(feedback?.intercom?.tagIds).toEqual({});
+    expect(feedback?.linear?.labelIds).toEqual({});
+    expect(feedback?.posthogProjectUrl).toBeNull();
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
+  });
+});
+
+describe("Railway deployment environment isolation", () => {
+  it("accepts the matching Alpha and release-branch Beta/Production wiring", () => {
+    for (const [name, audience, branch] of [
+      ["alpha", "https://api-alpha.zeros.build", "main"],
+      ["beta", "https://api-beta.zeros.build", "release/1.2.3"],
+      ["production", "https://api.zeros.build", "release/1.2.3"],
+    ] as const) {
+      expect(() =>
+        loadConfig({
+          ...baseEnv(),
+          AUTH_AUDIENCE: audience,
+          RAILWAY_PROJECT_ID: "project-1",
+          RAILWAY_ENVIRONMENT_NAME: name,
+          RAILWAY_GIT_BRANCH: branch,
+        }),
+      ).not.toThrow();
+    }
+  });
+
+  it("rejects an unknown Railway environment or cross-environment audience", () => {
+    expect(() =>
+      loadConfig({
+        ...baseEnv(),
+        RAILWAY_PROJECT_ID: "project-1",
+        RAILWAY_ENVIRONMENT_NAME: "staging",
+      }),
+    ).toThrow(/alpha, beta, or production/);
+    expect(() =>
+      loadConfig({
+        ...baseEnv(),
+        RAILWAY_PROJECT_ID: "project-1",
+        RAILWAY_ENVIRONMENT_NAME: "alpha",
+        RAILWAY_GIT_BRANCH: "main",
+      }),
+    ).toThrow(/api-alpha/);
+  });
+
+  it("refuses a Git-connected production deployment directly from main", () => {
+    expect(() =>
+      loadConfig({
+        ...baseEnv(),
+        RAILWAY_PROJECT_ID: "project-1",
+        RAILWAY_ENVIRONMENT_NAME: "production",
+        RAILWAY_GIT_BRANCH: "main",
+      }),
+    ).toThrow(/expected release\/X\.Y\.Z/);
+  });
+
+  it("refuses hosted deployments whose source branch cannot be proven", () => {
+    expect(() =>
+      loadConfig({
+        ...baseEnv(),
+        RAILWAY_PROJECT_ID: "project-1",
+        RAILWAY_ENVIRONMENT_NAME: "production",
+      }),
+    ).toThrow(/requires a Git-connected deployment/);
+  });
+});

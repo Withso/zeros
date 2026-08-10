@@ -112,6 +112,16 @@ describe("Zeros DB — migration ladder data safety (forward-only)", () => {
         dflt_value: "'code'",
       });
       expect(
+        workspaceColumns.find((column) => column.name === "placement"),
+      ).toMatchObject({
+        name: "placement",
+        notnull: 1,
+        dflt_value: "'local'",
+      });
+      expect(
+        workspaceColumns.find((column) => column.name === "organization_id"),
+      ).toMatchObject({ name: "organization_id", notnull: 0 });
+      expect(
         chatColumns.some((column) => column.name === "provider_binding"),
       ).toBe(true);
       expect(
@@ -123,6 +133,87 @@ describe("Zeros DB — migration ladder data safety (forward-only)", () => {
       // schema_migrations guard holds).
       expect(() => runMigrations(db)).not.toThrow();
       expect(appliedVersions(db)).toHaveLength(latest);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("migration 31 backfills legacy workspaces as local and reserves cloud for an organization owner", () => {
+    const db = new Database(":memory:");
+    try {
+      // Stop before the conditional v22 repair; runMigrations owns that path.
+      // The row still crosses every workspace migration, including v31.
+      applyUpTo(db, 21);
+      db.prepare(
+        `INSERT INTO workspaces
+           (id, repo_slug, repo_root, branch, base_branch, path,
+            status, created_at)
+         VALUES ('ws_legacy', 'repo', '/repo', 'zeros/Cream',
+                 'main', '/workspaces/Cream', 'in-progress', 1)`,
+      ).run();
+
+      runMigrations(db);
+
+      expect(
+        db
+          .prepare(
+            `SELECT organization_id, placement FROM workspaces
+             WHERE id = 'ws_legacy'`,
+          )
+          .get(),
+      ).toEqual({ organization_id: null, placement: "local" });
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO workspaces
+               (id, kind, repo_slug, repo_root, branch, base_branch, path,
+                status, created_at, placement)
+             VALUES ('ws_bad', 'code', 'repo', '/repo', 'zeros/Blue',
+                     'main', '/workspaces/Blue', 'in-progress', 2, 'cloud')`,
+          )
+          .run(),
+      ).toThrow(/CHECK/i);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("upgrades a feature-branch database that recorded workspace ownership as migration 28", () => {
+    const db = new Database(":memory:");
+    try {
+      applyUpTo(db, 27);
+      db.exec(`
+        ALTER TABLE workspaces ADD COLUMN organization_id TEXT;
+        ALTER TABLE workspaces ADD COLUMN placement TEXT NOT NULL DEFAULT 'local'
+          CHECK (placement IN ('local', 'cloud'))
+          CHECK (placement = 'local' OR organization_id IS NOT NULL);
+        CREATE INDEX idx_workspaces_organization
+          ON workspaces(organization_id, placement, archived_at);
+        INSERT INTO schema_migrations (version, name)
+          VALUES (28, 'workspaces: organization owner + local/cloud placement');
+      `);
+
+      expect(() => runMigrations(db)).not.toThrow();
+      expect(appliedVersions(db).at(-1)).toBe(latestSchemaVersion());
+
+      const workspaceColumns = db
+        .prepare("PRAGMA table_info(workspaces)")
+        .all() as { name: string }[];
+      const chatColumns = db.prepare("PRAGMA table_info(chats)").all() as {
+        name: string;
+      }[];
+      expect(
+        workspaceColumns.some((column) => column.name === "organization_id"),
+      ).toBe(true);
+      expect(
+        workspaceColumns.some((column) => column.name === "placement"),
+      ).toBe(true);
+      expect(
+        chatColumns.some((column) => column.name === "provider_binding"),
+      ).toBe(true);
+      expect(
+        chatColumns.some((column) => column.name === "provider_metadata"),
+      ).toBe(true);
     } finally {
       db.close();
     }
