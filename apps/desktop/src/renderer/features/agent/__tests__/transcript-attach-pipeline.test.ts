@@ -61,6 +61,7 @@ function chat(id: string, over: Partial<ChatRow> = {}): ChatRow {
     createdAt: 1,
     updatedAt: 1,
     sessionId: null,
+    nativeSessionId: null,
     pinned: false,
     archived: false,
     sourceChatId: null,

@@ -75,7 +75,79 @@ describe("CodexAppServerTranslator", () => {
       });
 
       expect(env.out.unknown).toEqual([]);
-      expect(env.out.emitted).toEqual([]);
+      expect(env.out.emitted).toHaveLength(1);
+      expect(env.out.emitted[0]?.update).toMatchObject({
+        sessionUpdate: "tool_call",
+        title: "Plan · 0/1 complete",
+        status: "in_progress",
+        content: [
+          {
+            type: "content",
+            content: { type: "text", text: "- [ ] Fix it" },
+          },
+        ],
+      });
+    });
+
+    it("updates one durable plan row as aggregate plan state changes", () => {
+      env.t.handle("turn/plan/updated", {
+        threadId: "t1",
+        turnId: "u1",
+        explanation: "Implementation sequence",
+        plan: [
+          { step: "Inspect", status: "completed" },
+          { step: "Implement", status: "inProgress" },
+        ],
+      });
+      env.t.handle("turn/plan/updated", {
+        threadId: "t1",
+        turnId: "u1",
+        explanation: "Implementation sequence",
+        plan: [
+          { step: "Inspect", status: "completed" },
+          { step: "Implement", status: "completed" },
+        ],
+      });
+
+      const [started, completed] = env.out.emitted.map((entry) => entry.update);
+      expect(started).toMatchObject({
+        sessionUpdate: "tool_call",
+        title: "Plan · 1/2 complete",
+        status: "in_progress",
+      });
+      expect(completed).toMatchObject({
+        sessionUpdate: "tool_call_update",
+        toolCallId: (started as { toolCallId: string }).toolCallId,
+        title: "Plan · 2/2 complete",
+        status: "completed",
+      });
+    });
+
+    it("preserves MCP progress on the matching tool row", () => {
+      env.t.handle("item/started", {
+        item: {
+          type: "mcpToolCall",
+          id: "mcp-1",
+          server: "docs",
+          tool: "search",
+          arguments: { query: "browser" },
+        },
+      });
+      const started = env.out.emitted[0]!.update as { toolCallId: string };
+
+      env.t.handle("item/mcpToolCall/progress", {
+        threadId: "t1",
+        turnId: "u1",
+        itemId: "mcp-1",
+        message: "Searching documentation…",
+      });
+
+      expect(env.out.emitted[1]?.update).toMatchObject({
+        sessionUpdate: "tool_call_update",
+        toolCallId: started.toolCallId,
+        status: "in_progress",
+        rawOutput: { progress: "Searching documentation…" },
+      });
     });
 
     it("turn/completed with status=completed sets stopReason=end_turn", () => {
@@ -696,6 +768,201 @@ describe("CodexAppServerTranslator", () => {
     });
   });
 
+  describe("dynamic browser evidence", () => {
+    it("maps text, screenshot, and durable artifact metadata into chat content", () => {
+      env.t.handle("item/started", {
+        item: {
+          type: "dynamicToolCall",
+          id: "browser-shot-1",
+          tool: "screenshot",
+          arguments: {},
+          status: "inProgress",
+        },
+      });
+      env.t.handle("item/completed", {
+        item: {
+          type: "dynamicToolCall",
+          id: "browser-shot-1",
+          tool: "screenshot",
+          arguments: {},
+          status: "completed",
+          success: true,
+          contentItems: [
+            {
+              type: "inputText",
+              text: JSON.stringify({
+                title: "Checkout",
+                url: "https://example.com/checkout",
+                artifact: {
+                  kind: "browser-screenshot",
+                  path: "/tmp/browser-shot.jpg",
+                  mimeType: "image/jpeg",
+                  size: 4,
+                },
+              }),
+            },
+            {
+              type: "inputImage",
+              imageUrl: "data:image/jpeg;base64,anBlZw==",
+            },
+          ],
+        },
+      });
+
+      const completed = env.out.emitted.find(
+        (notification) =>
+          notification.update.sessionUpdate === "tool_call_update" &&
+          notification.update.status === "completed",
+      );
+      expect(completed?.update).toMatchObject({
+        content: [
+          {
+            type: "content",
+            content: {
+              type: "text",
+              text: expect.stringContaining("Checkout"),
+            },
+          },
+          {
+            type: "content",
+            content: {
+              type: "image",
+              data: "anBlZw==",
+              mimeType: "image/jpeg",
+            },
+          },
+          {
+            type: "content",
+            content: {
+              type: "resource_link",
+              uri: "file:///tmp/browser-shot.jpg",
+              name: "browser-shot.jpg",
+              mimeType: "image/jpeg",
+            },
+          },
+        ],
+      });
+    });
+
+    it("maps completed browser downloads into durable local resources", () => {
+      env.t.handle("item/started", {
+        item: {
+          type: "dynamicToolCall",
+          id: "browser-download-1",
+          namespace: "zeros_browser",
+          tool: "click",
+          arguments: { ref: "b4" },
+          status: "inProgress",
+        },
+      });
+      env.t.handle("item/completed", {
+        item: {
+          type: "dynamicToolCall",
+          id: "browser-download-1",
+          namespace: "zeros_browser",
+          tool: "click",
+          arguments: { ref: "b4" },
+          status: "completed",
+          success: true,
+          contentItems: [
+            {
+              type: "inputText",
+              text: JSON.stringify({
+                title: "Reports",
+                downloads: [
+                  {
+                    kind: "browser-download",
+                    path: "/tmp/browser-report.pdf",
+                    name: "browser-report.pdf",
+                    mimeType: "application/pdf",
+                    size: 42,
+                  },
+                ],
+              }),
+            },
+          ],
+        },
+      });
+
+      const completed = env.out.emitted.find(
+        (notification) =>
+          notification.update.sessionUpdate === "tool_call_update" &&
+          notification.update.status === "completed",
+      );
+      expect(completed?.update).toMatchObject({
+        content: expect.arrayContaining([
+          {
+            type: "content",
+            content: {
+              type: "resource_link",
+              uri: "file:///tmp/browser-report.pdf",
+              name: "browser-report.pdf",
+              mimeType: "application/pdf",
+              size: 42,
+              title: "Browser download evidence",
+            },
+          },
+        ]),
+      });
+    });
+
+    it("maps a browser trace into a durable JSON resource", () => {
+      env.t.handle("item/started", {
+        item: {
+          type: "dynamicToolCall",
+          id: "browser-trace-1",
+          namespace: "zeros_browser",
+          tool: "trace",
+          arguments: {},
+          status: "inProgress",
+        },
+      });
+      env.t.handle("item/completed", {
+        item: {
+          type: "dynamicToolCall",
+          id: "browser-trace-1",
+          namespace: "zeros_browser",
+          tool: "trace",
+          arguments: {},
+          status: "completed",
+          success: true,
+          contentItems: [
+            {
+              type: "inputText",
+              text: JSON.stringify({
+                artifact: {
+                  kind: "browser-trace",
+                  path: "/tmp/browser-trace.json",
+                  mimeType: "application/json",
+                  size: 84,
+                },
+              }),
+            },
+          ],
+        },
+      });
+
+      const completed = env.out.emitted.find(
+        (notification) =>
+          notification.update.sessionUpdate === "tool_call_update" &&
+          notification.update.status === "completed",
+      );
+      expect(completed?.update).toMatchObject({
+        content: expect.arrayContaining([
+          expect.objectContaining({
+            type: "content",
+            content: expect.objectContaining({
+              type: "resource_link",
+              uri: "file:///tmp/browser-trace.json",
+              mimeType: "application/json",
+              title: "Browser trace evidence",
+            }),
+          }),
+        ]),
+      });
+    });
+  });
+
   describe("collab agent tool calls (codex multi-agent)", () => {
     it("spawnAgent emits kind=subagent with the prompt in rawInput", () => {
       env.t.handle("item/started", {
@@ -1205,6 +1472,218 @@ describe("CodexAppServerTranslator", () => {
   });
 
   describe("forward compatibility", () => {
+    it("renders native model reroutes as the shared fallback card", () => {
+      env.t.handle("model/rerouted", {
+        threadId: "t1",
+        turnId: "u1",
+        fromModel: "gpt-5.4",
+        toModel: "gpt-5.4-mini",
+        reason: "overloaded",
+      });
+      expect(env.out.emitted).toHaveLength(1);
+      expect(env.out.emitted[0].update).toEqual(
+        expect.objectContaining({
+          sessionUpdate: "tool_call",
+          title: "Model switched",
+          kind: "model_switch",
+          status: "completed",
+          rawInput: expect.objectContaining({
+            fromModel: "gpt-5.4",
+            toModel: "gpt-5.4-mini",
+            reason: "overloaded",
+          }),
+        }),
+      );
+    });
+
+    it("projects native hook lifecycle into one correlated workflow row", () => {
+      env.t.handle("hook/started", {
+        threadId: "t1",
+        turnId: "u1",
+        run: { id: "hook-1", eventName: "after_agent", status: "running" },
+      });
+      env.t.handle("hook/completed", {
+        threadId: "t1",
+        turnId: "u1",
+        run: { id: "hook-1", eventName: "after_agent", status: "completed" },
+      });
+      expect(env.out.emitted.map((item) => item.update)).toEqual([
+        expect.objectContaining({ sessionUpdate: "tool_call", title: "Hook · after_agent", status: "in_progress" }),
+        expect.objectContaining({ sessionUpdate: "tool_call_update", status: "completed" }),
+      ]);
+    });
+
+    it("projects native auto-approval review lifecycle into one row", () => {
+      env.t.handle("item/autoApprovalReview/started", {
+        reviewId: "review-1",
+        targetItemId: "item-1",
+        action: { type: "command" },
+        review: { status: "running" },
+      });
+      env.t.handle("item/autoApprovalReview/completed", {
+        reviewId: "review-1",
+        targetItemId: "item-1",
+        action: { type: "command" },
+        review: { status: "approved" },
+        decisionSource: "autoReview",
+      });
+      expect(env.out.emitted.map((item) => item.update)).toEqual([
+        expect.objectContaining({ sessionUpdate: "tool_call", title: "Approval review", status: "in_progress" }),
+        expect.objectContaining({
+          sessionUpdate: "tool_call_update",
+          status: "completed",
+          rawOutput: expect.objectContaining({
+            event: expect.objectContaining({ reviewId: "review-1" }),
+          }),
+        }),
+      ]);
+    });
+
+    it("surfaces environment and safety state without unknown drops", () => {
+      env.t.handle("thread/environment/connected", { environmentId: "env-1" });
+      env.t.handle("model/safetyBuffering/updated", {
+        model: "gpt-5.4",
+        showBufferingUi: true,
+        reasons: ["policy verification"],
+      });
+      expect(env.out.emitted.map((item) => item.update)).toEqual([
+        expect.objectContaining({ sessionUpdate: "error_notice", code: "environment_connected" }),
+        expect.objectContaining({ sessionUpdate: "error_notice", code: "model_safety_buffering" }),
+      ]);
+      expect(env.out.unknown).toHaveLength(0);
+    });
+
+    it("projects external config import and MCP connection notifications", () => {
+      env.t.handle("externalAgentConfig/import/progress", {
+        importId: "import-1",
+        itemTypeResults: [],
+      });
+      env.t.handle("externalAgentConfig/import/completed", {
+        importId: "import-1",
+        itemTypeResults: [{ itemType: "skills", status: "success" }],
+      });
+      env.t.handle("mcpServer/oauthLogin/completed", {
+        name: "github",
+        success: true,
+      });
+      expect(env.out.emitted.map((item) => item.update)).toEqual([
+        expect.objectContaining({ sessionUpdate: "tool_call", title: "Import agent configuration", status: "in_progress" }),
+        expect.objectContaining({ sessionUpdate: "tool_call_update", status: "completed" }),
+        expect.objectContaining({ sessionUpdate: "error_notice", code: "mcp_oauth_complete" }),
+      ]);
+    });
+
+    it("projects realtime lifecycle and transcript notifications", () => {
+      env.t.handle("thread/realtime/started", {
+        threadId: "t1",
+        realtimeSessionId: "rt-1",
+        version: "v3",
+      });
+      env.t.handle("thread/realtime/transcript/delta", {
+        threadId: "t1",
+        role: "assistant",
+        delta: "Hello",
+      });
+      env.t.handle("thread/realtime/transcript/done", {
+        threadId: "t1",
+        role: "assistant",
+        text: "Hello",
+      });
+      env.t.handle("thread/realtime/closed", {
+        threadId: "t1",
+        reason: "user_stopped",
+      });
+
+      expect(env.out.emitted.map((item) => item.update)).toEqual([
+        expect.objectContaining({
+          sessionUpdate: "tool_call",
+          title: "Realtime conversation",
+          status: "in_progress",
+        }),
+        expect.objectContaining({
+          sessionUpdate: "realtime_status",
+          status: "active",
+        }),
+        expect.objectContaining({
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Hello" },
+        }),
+        expect.objectContaining({
+          sessionUpdate: "tool_call_update",
+          status: "in_progress",
+          rawOutput: expect.objectContaining({ transcript: "Hello" }),
+        }),
+        expect.objectContaining({
+          sessionUpdate: "realtime_status",
+          status: "closed",
+        }),
+        expect.objectContaining({
+          sessionUpdate: "tool_call_update",
+          status: "completed",
+        }),
+      ]);
+      expect(env.out.unknown).toHaveLength(0);
+    });
+
+    it("surfaces realtime and Windows sandbox failures", () => {
+      env.t.handle("thread/realtime/error", {
+        threadId: "t1",
+        message: "microphone disconnected",
+      });
+      env.t.handle("windowsSandbox/setupCompleted", {
+        mode: "elevated",
+        success: false,
+        error: "administrator approval was denied",
+      });
+      env.t.handle("windows/worldWritableWarning", {
+        samplePaths: ["C:\\shared"],
+        extraCount: 2,
+        failedScan: false,
+      });
+
+      expect(env.out.emitted.map((item) => item.update)).toEqual([
+        expect.objectContaining({ sessionUpdate: "realtime_status", status: "error" }),
+        expect.objectContaining({ sessionUpdate: "tool_call", status: "failed" }),
+        expect.objectContaining({
+          sessionUpdate: "tool_call",
+          title: "Windows sandbox setup",
+          status: "failed",
+        }),
+        expect.objectContaining({
+          sessionUpdate: "error_notice",
+          code: "windows_world_writable",
+        }),
+      ]);
+      expect(env.out.unknown).toHaveLength(0);
+    });
+
+    it("routes realtime PCM audio ephemerally without persisting its bytes", () => {
+      env.t.handle("thread/realtime/outputAudio/delta", {
+        threadId: "t1",
+        audio: {
+          data: "AQID",
+          sampleRate: 24_000,
+          numChannels: 1,
+          samplesPerChannel: 2,
+          itemId: "audio-1",
+        },
+      });
+
+      expect(env.out.emitted.map((item) => item.update)).toEqual([
+        expect.objectContaining({
+          sessionUpdate: "realtime_audio",
+          data: "AQID",
+          sampleRate: 24_000,
+        }),
+        expect.objectContaining({
+          sessionUpdate: "tool_call",
+          rawOutput: {
+            audio: expect.not.objectContaining({ data: expect.anything() }),
+          },
+        }),
+      ]);
+    });
+
     it("dispatches account/* notifications without surfacing them as bubbles", () => {
       env.t.handle("account/updated", {
         authMode: "chatgpt",
@@ -1217,11 +1696,11 @@ describe("CodexAppServerTranslator", () => {
     });
 
     it("calls onUnknown for methods the translator doesn't model", () => {
-      env.t.handle("remoteControl/status/changed", {
+      env.t.handle("future/protocolNotification", {
         status: "disabled",
       });
       expect(env.out.unknown).toHaveLength(1);
-      expect(env.out.unknown[0].method).toBe("remoteControl/status/changed");
+      expect(env.out.unknown[0].method).toBe("future/protocolNotification");
     });
   });
 });

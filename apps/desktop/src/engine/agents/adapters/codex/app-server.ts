@@ -15,9 +15,9 @@
 //     turn/start, turn/interrupt, account/*, mcpServer/*, etc.
 //     (~80 methods total).
 //   - Client → Server notifications: only `initialized` (post-init).
-//   - Server → Client requests: item/{commandExecution,fileChange,
-//     permissions}/requestApproval, account/chatgptAuthTokens/refresh,
-//     attestation/generate.
+//   - Server → Client requests: approvals, blocking user input, MCP
+//     elicitation, dynamic tools, auth refresh, attestation, and host time.
+//     `protocol-coverage.json` records the exact support state of every method.
 //   - Server → Client notifications: ~60 events including thread/started,
 //     turn/{started,completed}, item/{started,completed}, item/agentMessage/
 //     delta, item/reasoning/textDelta, item/commandExecution/outputDelta,
@@ -54,8 +54,10 @@ import {
 import type { McpServerRegistration } from "../../types";
 import {
   JSON_RPC_NO_RESPONSE,
-  JsonRpcStdioClient,
   JsonRpcRequestError,
+  JsonRpcResponseSuppressedError,
+  JsonRpcStdioClient,
+  type RequestHandler,
 } from "../shared/jsonrpc";
 import { buildSpawnEnvWithLoginPath } from "../shared/login-shell-path";
 import { resolveCodexBinary, type CodexBinarySource } from "./binary-resolver";
@@ -88,9 +90,29 @@ export interface CodexInitializeResponse {
 import type { SandboxMode as GenSandboxMode } from "./generated/v2/SandboxMode";
 import type { SandboxPolicy as GenSandboxPolicy } from "./generated/v2/SandboxPolicy";
 import type { AskForApproval as GenAskForApproval } from "./generated/v2/AskForApproval";
+import type { ApprovalsReviewer as GenApprovalsReviewer } from "./generated/v2/ApprovalsReviewer";
 import type { UserInput as GenUserInput } from "./generated/v2/UserInput";
 import type { ThreadStartParams as GenThreadStartParams } from "./generated/v2/ThreadStartParams";
 import type { TurnStartParams as GenTurnStartParams } from "./generated/v2/TurnStartParams";
+import type { CurrentTimeReadResponse as GenCurrentTimeReadResponse } from "./generated/v2/CurrentTimeReadResponse";
+import type { McpServerElicitationRequestParams as GenMcpServerElicitationRequestParams } from "./generated/v2/McpServerElicitationRequestParams";
+import type { McpServerElicitationRequestResponse as GenMcpServerElicitationRequestResponse } from "./generated/v2/McpServerElicitationRequestResponse";
+import type { ServerRequestResolvedNotification as GenServerRequestResolvedNotification } from "./generated/v2/ServerRequestResolvedNotification";
+import type { RequestId as GenRequestId } from "./generated/RequestId";
+import type { DynamicToolCallParams as GenDynamicToolCallParams } from "./generated/v2/DynamicToolCallParams";
+import type { DynamicToolCallResponse as GenDynamicToolCallResponse } from "./generated/v2/DynamicToolCallResponse";
+import type { ChatgptAuthTokensRefreshParams as GenChatgptAuthTokensRefreshParams } from "./generated/v2/ChatgptAuthTokensRefreshParams";
+import type { ChatgptAuthTokensRefreshResponse as GenChatgptAuthTokensRefreshResponse } from "./generated/v2/ChatgptAuthTokensRefreshResponse";
+import type { AttestationGenerateResponse as GenAttestationGenerateResponse } from "./generated/v2/AttestationGenerateResponse";
+import type { InitializeCapabilities as GenInitializeCapabilities } from "./generated/InitializeCapabilities";
+import {
+  createCodexThreadClient,
+  type CodexThreadClient,
+} from "./app-server-thread-client";
+import {
+  createCodexCapabilitiesClient,
+  type CodexCapabilitiesClient,
+} from "./app-server-capabilities-client";
 
 /** Content blocks accepted by `turn/start.input`. */
 export type CodexUserInput = GenUserInput;
@@ -109,11 +131,123 @@ export type CodexSandboxPolicy = GenSandboxPolicy;
  *  `{ "granular": {...} }` map for the Granular variant. */
 export type CodexApprovalPolicy = GenAskForApproval;
 
+/** ApprovalsReviewer — routes interactive approval requests either to the
+ *  user or Codex's native risk-based Auto-review agent. */
+export type CodexApprovalsReviewer = GenApprovalsReviewer;
+
 /** `thread/start` params. */
 export type CodexThreadStartParams = GenThreadStartParams;
 
 /** `turn/start` params. */
 export type CodexTurnStartParams = GenTurnStartParams;
+
+export function buildInitializeCapabilities(options: {
+  requestAttestation: boolean;
+}): GenInitializeCapabilities {
+  return {
+    experimentalApi: true,
+    requestAttestation: options.requestAttestation,
+    mcpServerOpenaiFormElicitation: true,
+  };
+}
+
+interface CodexHostRequestRegistrar {
+  onRequest(method: string, handler: RequestHandler): void;
+}
+
+/** Register non-interactive requests that the desktop host can answer without
+ * renderer state or user approval. Keeping these handlers in a testable seam
+ * prevents a generated server request from being mistaken for a notification
+ * and silently dropped. */
+export function registerCodexHostRequestHandlers(
+  client: CodexHostRequestRegistrar,
+  options: {
+    now?: () => number;
+    onDynamicToolCall?: (
+      params: GenDynamicToolCallParams,
+    ) => Promise<GenDynamicToolCallResponse> | GenDynamicToolCallResponse;
+    refreshChatgptAuthTokens?: (
+      params: GenChatgptAuthTokensRefreshParams,
+    ) =>
+      | Promise<GenChatgptAuthTokensRefreshResponse>
+      | GenChatgptAuthTokensRefreshResponse;
+    generateAttestation?: () =>
+      | Promise<GenAttestationGenerateResponse>
+      | GenAttestationGenerateResponse;
+  } = {},
+): void {
+  const now = options.now ?? Date.now;
+  client.onRequest("currentTime/read", () => {
+    const response: GenCurrentTimeReadResponse = {
+      currentTimeAt: Math.floor(now() / 1_000),
+    };
+    return response;
+  });
+  client.onRequest("item/tool/call", async (params) => {
+    if (!options.onDynamicToolCall) {
+      return {
+        success: false,
+        contentItems: [
+          {
+            type: "inputText",
+            text: "This Zeros session has no browser host available.",
+          },
+        ],
+      } satisfies GenDynamicToolCallResponse;
+    }
+    try {
+      return await options.onDynamicToolCall(
+        params as GenDynamicToolCallParams,
+      );
+    } catch (error) {
+      return {
+        success: false,
+        contentItems: [
+          {
+            type: "inputText",
+            text: `Browser tool failed: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+      } satisfies GenDynamicToolCallResponse;
+    }
+  });
+  if (options.refreshChatgptAuthTokens) {
+    client.onRequest("account/chatgptAuthTokens/refresh", async (params) => {
+      const response = await options.refreshChatgptAuthTokens!(
+        params as GenChatgptAuthTokensRefreshParams,
+      );
+      return validateChatgptAuthTokensRefreshResponse(response);
+    });
+  }
+  if (options.generateAttestation) {
+    client.onRequest("attestation/generate", async () => {
+      const response = await options.generateAttestation!();
+      if (!response || typeof response.token !== "string" || !response.token) {
+        throw new Error("The host attestation provider returned an empty token.");
+      }
+      return response;
+    });
+  }
+}
+
+function validateChatgptAuthTokensRefreshResponse(
+  response: GenChatgptAuthTokensRefreshResponse,
+): GenChatgptAuthTokensRefreshResponse {
+  if (
+    !response ||
+    typeof response.accessToken !== "string" ||
+    !response.accessToken ||
+    typeof response.chatgptAccountId !== "string" ||
+    !response.chatgptAccountId ||
+    (response.chatgptPlanType !== null &&
+      typeof response.chatgptPlanType !== "string")
+  ) {
+    throw new Error(
+      "The ChatGPT authentication provider returned an invalid refresh response.",
+    );
+  }
+  return response;
+}
 
 /** Server-initiated approval request shape passed to the adapter.
  *  The adapter stores `permissionId` for routing and eventually calls
@@ -130,6 +264,8 @@ export interface CodexApprovalRequest {
   /** Stable id Zeros mints; survives across method-specific decision
    *  shapes (used as the lookup key in respondToPermission). */
   permissionId: string;
+  /** Native JSON-RPC request id echoed by `serverRequest/resolved`. */
+  requestId: GenRequestId;
   /** Server method name — tells the adapter which response shape to send. */
   method: CodexApprovalMethod;
   params: Record<string, unknown>;
@@ -162,6 +298,15 @@ export interface CodexUserInputRequest {
   expiresAt?: number;
   /** Raw method-specific params. */
   params: Record<string, unknown>;
+}
+
+/** A server-initiated MCP form or URL elicitation. The adapter projects it
+ * through the same blocking question surface while preserving its native
+ * response shape. */
+export interface CodexMcpElicitationRequest {
+  questionId: string;
+  requestId: GenRequestId;
+  params: GenMcpServerElicitationRequestParams;
 }
 
 export interface CodexAppServerBootOptions {
@@ -198,6 +343,27 @@ export interface CodexAppServerBootOptions {
    *  call — timeout, server-side resolution, or dispose. Lets the adapter
    *  evict its own pending entry and tell the renderer to drop the card. */
   onUserInputSettled?: (questionId: string) => void;
+  /** MCP `elicitation/create` request received from a configured server. */
+  onMcpElicitationRequest?: (request: CodexMcpElicitationRequest) => void;
+  /** An MCP elicitation was cleared without a local response. */
+  onMcpElicitationSettled?: (questionId: string) => void;
+  /** Execute an experimental client-defined tool advertised on thread/start. */
+  onDynamicToolCall?: (
+    params: GenDynamicToolCallParams,
+  ) => Promise<GenDynamicToolCallResponse> | GenDynamicToolCallResponse;
+  /** External-host ChatGPT token refresh. This is only for the unstable
+   * `chatgptAuthTokens` mode; ordinary `chatgpt` login remains Codex-managed
+   * and must not reuse the unrelated Zeros/Auth0 access token. */
+  refreshChatgptAuthTokens?: (
+    params: GenChatgptAuthTokensRefreshParams,
+  ) =>
+    | Promise<GenChatgptAuthTokensRefreshResponse>
+    | GenChatgptAuthTokensRefreshResponse;
+  /** Native upstream-attestation provider. Presence opts into the protocol;
+   * absence keeps requestAttestation false so app-server omits the header. */
+  generateAttestation?: () =>
+    | Promise<GenAttestationGenerateResponse>
+    | GenAttestationGenerateResponse;
   /** Called with each line the server writes to stderr. */
   onStderr?: (line: string) => void;
   /** Called when the server exits (gracefully or otherwise). */
@@ -206,7 +372,8 @@ export interface CodexAppServerBootOptions {
   logTag?: string;
 }
 
-export interface CodexAppServerHandle {
+export interface CodexAppServerHandle
+  extends CodexThreadClient, CodexCapabilitiesClient {
   /** What initialize returned. Includes userAgent string we parse for
    *  the version check. */
   readonly initializeResponse: CodexInitializeResponse;
@@ -293,6 +460,13 @@ export interface CodexAppServerHandle {
    *  (ToolRequestUserInputResponse or McpServerElicitationRequestResponse).
    *  No-op if unknown. */
   respondToUserInput(questionId: string, response: unknown): void;
+
+  /** Resolve a pending MCP elicitation with
+   * `McpServerElicitationRequestResponse`. No-op if already settled. */
+  respondToMcpElicitation(
+    questionId: string,
+    response: GenMcpServerElicitationRequestResponse,
+  ): void;
 
   /** Subscribe to a server-to-client notification by method name.
    *  Returns an unsubscribe function. Multiple subscribers per method
@@ -452,6 +626,11 @@ export async function bootCodexAppServerRuntime(
       }
     },
   });
+  registerCodexHostRequestHandlers(client, {
+    onDynamicToolCall: opts.onDynamicToolCall,
+    refreshChatgptAuthTokens: opts.refreshChatgptAuthTokens,
+    generateAttestation: opts.generateAttestation,
+  });
 
   // ── Handshake: initialize ─────────────────────────────────
   let initResp: CodexInitializeResponse;
@@ -464,7 +643,7 @@ export async function bootCodexAppServerRuntime(
           version: opts.clientInfo.version,
           title: opts.clientInfo.title ?? null,
         },
-        capabilities: {
+        capabilities: buildInitializeCapabilities({
           // Opt into experimental API methods — REQUIRED for the blocking
           // question channel: `item/tool/requestUserInput` (and its whole
           // Tool* payload family) is marked EXPERIMENTAL in the app-server
@@ -474,17 +653,8 @@ export async function bootCodexAppServerRuntime(
           // never in its toolset. Safe to enable broadly: our JSON-RPC
           // client answers any UNHANDLED experimental server→client request
           // with a clean -32601 (no hang), and unknown notifications drop.
-          experimentalApi: true,
-          // Zeros does not mint the opaque upstream attestation token. State
-          // that explicitly so app-server never issues a request we cannot
-          // satisfy (the generated capability is a required boolean).
-          requestAttestation: false,
-          // We normalize both standard MCP forms and OpenAI's extended form
-          // envelope onto the shared blocking-question UI. Unsupported field
-          // shapes fail closed with `cancel`, which is the app-server contract
-          // required before advertising this capability.
-          mcpServerOpenaiFormElicitation: true,
-        },
+          requestAttestation: !!opts.generateAttestation,
+        }),
       },
       { timeoutMs: INITIALIZE_TIMEOUT_MS },
     );
@@ -505,13 +675,6 @@ export async function bootCodexAppServerRuntime(
         `Upgrade to >= ${MIN_CLI_VERSION} via 'npm install -g @openai/codex@latest'.`,
     );
   }
-
-  // ── Handshake: initialized notification ──────────────────
-  //
-  // Codex app-server requires the client to send `initialized` once
-  // after the initialize response. Until we do, the server holds back
-  // some notifications (e.g. account/updated).
-  client.notify("initialized", {});
 
   // ── Approval round-trip: ACP-style permissionId resolver map ──
   //
@@ -591,6 +754,7 @@ export async function bootCodexAppServerRuntime(
         touchActiveTurnActivity();
         opts.onApprovalRequest({
           permissionId,
+          requestId: context.id,
           method,
           params: (params ?? {}) as Record<string, unknown>,
         });
@@ -702,6 +866,60 @@ export async function bootCodexAppServerRuntime(
     safeMcpResponse("cancel"),
   );
 
+  // ── MCP elicitation round-trip ───────────────────────────
+  interface PendingMcpElicitationEntry {
+    resolve: (response: GenMcpServerElicitationRequestResponse) => void;
+    reject: (error: Error) => void;
+    requestId: GenRequestId;
+    timer: NodeJS.Timeout;
+  }
+  const pendingMcpElicitations = new Map<string, PendingMcpElicitationEntry>();
+  if (!opts.onUserInputRequest) client.onRequest("mcpServer/elicitation/request", (params, inbound) => {
+    return new Promise<GenMcpServerElicitationRequestResponse>(
+      (resolve, reject) => {
+        const questionId = randomUUID();
+        const request = (params ?? {}) as GenMcpServerElicitationRequestParams;
+        // Zeros deliberately does not advertise
+        // mcpServerOpenaiFormElicitation. If a server sends that extended
+        // variant anyway, cancel safely instead of projecting an arbitrary
+        // unvalidated schema into the renderer.
+        if (request.mode === "openai/form") {
+          console.warn(
+            `[${logTag}] received unadvertised MCP openai/form elicitation — cancelling`,
+          );
+          resolve(cancelledMcpElicitationResponse());
+          return;
+        }
+        if (!opts.onMcpElicitationRequest) {
+          resolve(cancelledMcpElicitationResponse());
+          return;
+        }
+        const timer = setTimeout(() => {
+          if (!pendingMcpElicitations.has(questionId)) return;
+          pendingMcpElicitations.delete(questionId);
+          console.warn(
+            `[${logTag}] MCP elicitation ${questionId} timed out after ${APPROVAL_TIMEOUT_MS}ms — cancelling`,
+          );
+          resolve(cancelledMcpElicitationResponse());
+          opts.onMcpElicitationSettled?.(questionId);
+        }, APPROVAL_TIMEOUT_MS);
+        timer.unref?.();
+        pendingMcpElicitations.set(questionId, {
+          resolve,
+          reject,
+          requestId: inbound.id,
+          timer,
+        });
+        touchActiveTurnActivity();
+        opts.onMcpElicitationRequest({
+          questionId,
+          requestId: inbound.id,
+          params: request,
+        });
+      },
+    );
+  });
+
   // ── Fan-out for general notifications ────────────────────
   const notifSubscribers = new Map<string, Set<(params: unknown) => void>>();
   const subscribe = (
@@ -765,7 +983,26 @@ export async function bootCodexAppServerRuntime(
     clearTimeout(pending.timer);
     pending.resolve(JSON_RPC_NO_RESPONSE);
     opts.onUserInputSettled?.(questionId);
+    return;
   });
+
+  subscribe("serverRequest/resolved", (params) => {
+    const requestKey = codexRequestKey(
+      (params as GenServerRequestResolvedNotification | null)?.requestId,
+    );
+    if (!requestKey) return;
+    for (const [questionId, pending] of pendingMcpElicitations) {
+      if (codexRequestKey(pending.requestId) !== requestKey) continue;
+      pendingMcpElicitations.delete(questionId);
+      clearTimeout(pending.timer);
+      pending.reject(new JsonRpcResponseSuppressedError());
+      opts.onMcpElicitationSettled?.(questionId);
+      return;
+    }
+  });
+
+  // Register all blocking handlers before acknowledging initialization.
+  client.notify("initialized", {});
 
   // ── Track turn lifecycle for runTurn correlation ─────────
   //
@@ -926,12 +1163,20 @@ export async function bootCodexAppServerRuntime(
           `codex ${method} failed after ${OVERLOAD_MAX_RETRIES + 1} attempts`,
         );
   };
+  const threadClient = createCodexThreadClient((method, params) =>
+    requestWithRetry(method, params),
+  );
+  const capabilitiesClient = createCodexCapabilitiesClient((method, params) =>
+    requestWithRetry(method, params),
+  );
 
   return {
     initializeResponse: initResp,
     cliVersion,
     binarySource,
     child: proc.child,
+    ...threadClient,
+    ...capabilitiesClient,
 
     async startThread(params) {
       const result = await requestWithRetry<{
@@ -1093,6 +1338,19 @@ export async function bootCodexAppServerRuntime(
       pending.resolve(response);
     },
 
+    respondToMcpElicitation(questionId, response) {
+      const pending = pendingMcpElicitations.get(questionId);
+      if (!pending) {
+        console.log(
+          `[${logTag}] respondToMcpElicitation: unknown id ${questionId}`,
+        );
+        return;
+      }
+      pendingMcpElicitations.delete(questionId);
+      clearTimeout(pending.timer);
+      pending.resolve(response);
+    },
+
     onNotification(method, handler) {
       return subscribe(method, handler);
     },
@@ -1132,6 +1390,12 @@ export async function bootCodexAppServerRuntime(
           pendingUserInputs.delete(questionId);
           pendingUserInputByRpcId.delete(pending.rpcRequestId);
           opts.onUserInputSettled?.(questionId);
+        }
+        for (const [questionId, pending] of pendingMcpElicitations) {
+          clearTimeout(pending.timer);
+          pending.resolve(cancelledMcpElicitationResponse());
+          pendingMcpElicitations.delete(questionId);
+          opts.onMcpElicitationSettled?.(questionId);
         }
         for (const w of turnWaiters.values()) w.resolve("cancelled");
         turnWaiters.clear();
@@ -1285,6 +1549,12 @@ export function buildMcpServerOverrides(
     // TOML, so arrays/tables are emitted as TOML literals.
     if (s.transport === "http") {
       args.push("-c", `${base}.url="${escapeTomlString(s.url)}"`);
+      if (s.bearerTokenEnvVar) {
+        args.push(
+          "-c",
+          `${base}.bearer_token_env_var="${escapeTomlString(s.bearerTokenEnvVar)}"`,
+        );
+      }
       if (s.headers && Object.keys(s.headers).length > 0) {
         args.push("-c", `${base}.http_headers=${tomlInlineTable(s.headers)}`);
       }
@@ -1339,6 +1609,18 @@ function escapeTomlString(s: string): string {
         (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
       )
   );
+}
+
+function codexRequestKey(requestId: unknown): string | null {
+  if (typeof requestId === "string") return `string:${requestId}`;
+  if (typeof requestId === "number" && Number.isFinite(requestId)) {
+    return `number:${requestId}`;
+  }
+  return null;
+}
+
+function cancelledMcpElicitationResponse(): GenMcpServerElicitationRequestResponse {
+  return { action: "cancel", content: null, _meta: null };
 }
 
 /** Method-appropriate "auto-deny" response when no approval handler is

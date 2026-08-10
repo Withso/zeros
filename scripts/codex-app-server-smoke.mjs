@@ -61,10 +61,14 @@
 // model. `agents:smoke` is where live turns belong.
 //
 // ── WHAT THIS DOES *NOT* PROVE — read before trusting it ──
-// It proves the installed pin is executable and protocol-compatible. Packaging
-// correctness is separately guarded by stage-codex-cli.mjs,
-// check-packaging-paths.mjs, and the sidecar's ZEROS_CODEX_CLI_PATH handoff.
-// Point ZEROS_CODEX_CLI_PATH at a staged binary to exercise that exact artifact.
+// It proves the binary selected for this invocation is good; it is not by
+// itself a signed-app or installer smoke test. Source checkouts exercise the
+// BUNDLED tier. Packaging stages the complete pinned runtime under
+// Resources/codex-runtime and sidecar.ts forwards ZEROS_CODEX_CLI_PATH plus
+// CODEX_MANAGED_PACKAGE_ROOT to the engine. Point those variables at the staged
+// runtime to exercise exactly the same override tier before building an app.
+// A release still needs check:packaging-paths and a launched packaged-app smoke
+// to prove Electron copied and can execute those resources after signing.
 //
 // Resolving via PATH is therefore treated as a FAILURE here, not a pass: in a
 // source checkout it means the @openai/codex platform package did not install,

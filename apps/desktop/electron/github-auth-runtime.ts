@@ -24,7 +24,10 @@ import {
   createGithubCredentialStore,
   migrateLegacyGithubCredential,
 } from "./github-credential-store";
-import { githubCredentialForEngine } from "./github-engine-credential";
+import {
+  githubCredentialForEngine,
+  githubCredentialForEngineLazyOwner,
+} from "./github-engine-credential";
 import { getSessionUserForMain } from "./ipc/commands/auth-session";
 
 interface GithubSettingsTable {
@@ -112,9 +115,9 @@ export async function replaceGithubAppCredentialIfCurrent(
  *  The method-addressed durable store remains the source of truth. */
 async function selectedWorkingCredential(): Promise<GithubCredential | null> {
   const selected = await githubCredentialStore.getSelectedCredential();
-  return githubCredentialForEngine(
+  return githubCredentialForEngineLazyOwner(
     selected,
-    getSessionUserForMain()?.sub ?? null,
+    () => getSessionUserForMain()?.sub ?? null,
   );
 }
 

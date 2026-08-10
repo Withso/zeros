@@ -796,6 +796,23 @@ ALTER TABLE workspaces ADD COLUMN kind TEXT NOT NULL DEFAULT 'code'
 CREATE INDEX idx_workspaces_kind ON workspaces(kind, archived_at);
 `;
 
+/** v28 — keep Zeros' live runtime identity separate from the provider's
+ * durable resume handle. Codex app-server assigns a native thread id after
+ * thread/start, while the already-running browser/MCP lease is owned by the
+ * preallocated Zeros session id. Persisting both prevents fresh-on-reopen
+ * conversations without rebinding the browser task. */
+const MIGRATION_28_CHAT_NATIVE_SESSION_ID = `
+ALTER TABLE chats ADD COLUMN native_session_id TEXT;
+`;
+
+/** v29 — preserve the provider's typed Git metadata independently from the
+ * active workspace checkout. A resumed Codex thread may have been created on a
+ * different branch; keeping the native snapshot prevents a renderer refresh
+ * from fabricating or silently discarding that history metadata. */
+const MIGRATION_29_CHAT_NATIVE_GIT_INFO = `
+ALTER TABLE chats ADD COLUMN native_git_info TEXT;
+`;
+
 /** The ordered migration list. Append only — NEVER edit or reorder a shipped
  *  entry; add a new one. */
 export const MIGRATIONS: Migration[] = [
@@ -929,6 +946,16 @@ export const MIGRATIONS: Migration[] = [
     version: 27,
     name: "workspaces.kind (code or design workspace)",
     up: MIGRATION_27_WORKSPACE_KIND,
+  },
+  {
+    version: 28,
+    name: "chats.native_session_id (provider-native durable resume handle)",
+    up: MIGRATION_28_CHAT_NATIVE_SESSION_ID,
+  },
+  {
+    version: 29,
+    name: "chats.native_git_info (provider-native thread Git metadata)",
+    up: MIGRATION_29_CHAT_NATIVE_GIT_INFO,
   },
 ];
 

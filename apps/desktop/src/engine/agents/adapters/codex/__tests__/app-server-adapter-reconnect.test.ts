@@ -41,6 +41,11 @@ const rt = vi.hoisted(() => ({
   /** Generic JSON-RPC requests the adapter fires (method, params) — e.g.
    *  compactContext → thread/compact/start. */
   requests: [] as Array<[string, unknown]>,
+  resumeThreadIds: [] as string[],
+  nativeActions: [] as Array<[string, unknown]>,
+  disposeCount: 0,
+  initialGoal: null as null | Record<string, unknown>,
+  capabilityCalls: [] as Array<[string, unknown]>,
   /** `model/list` payload. Overridable so a test can model an app-server that
    *  omits the capability fields entirely, which must read as "unknown" rather
    *  than as an authoritative "no effort knob / no Fast". */
@@ -73,10 +78,24 @@ vi.mock("../app-server", () => ({
           sandbox: { type: "workspaceWrite" },
           raw: {},
         }),
-        resumeThread: async (p: { threadId: string }) => ({
-          threadId: p.threadId,
-          raw: {},
-        }),
+        resumeThread: async (p: { threadId: string }) => {
+          rt.resumeThreadIds.push(p.threadId);
+          return {
+            threadId: p.threadId,
+            raw: {
+              thread: {
+                id: p.threadId,
+                name: "Native resumed title",
+                isPinned: true,
+                gitInfo: {
+                  sha: "abc123",
+                  branch: "santhosh",
+                  originUrl: "https://example.test/zeros.git",
+                },
+              },
+            },
+          };
+        },
         runTurn: async (
           params: unknown,
           o: { onTurnStarted?: (id: string) => void },
@@ -115,14 +134,55 @@ vi.mock("../app-server", () => ({
           }
           return {};
         }),
-        dispose: async () => {},
+        archiveThread: async (params: unknown) => {
+          rt.nativeActions.push(["archive", params]);
+          return {};
+        },
+        unarchiveThread: async (params: unknown) => {
+          rt.nativeActions.push(["unarchive", params]);
+          return {};
+        },
+        deleteThread: async (params: unknown) => {
+          rt.nativeActions.push(["delete", params]);
+          return {};
+        },
+        setThreadName: async (params: unknown) => {
+          rt.nativeActions.push(["name", params]);
+          return {};
+        },
+        getThreadGoal: async () => ({ goal: rt.initialGoal }),
+        readAccountUsage: async () => {
+          rt.capabilityCalls.push(["account.usage", undefined]);
+          return { usage: "ok" };
+        },
+        listSkills: async (params: unknown) => {
+          rt.capabilityCalls.push(["skills.list", params]);
+          return { data: [] };
+        },
+        listMcpServerStatus: async (params: unknown) => {
+          rt.capabilityCalls.push(["mcp.status", params]);
+          return {
+            data: [{
+              name: "docs",
+              authStatus: "notLoggedIn",
+              tools: {},
+              resources: [],
+              resourceTemplates: [],
+              serverInfo: null,
+            }],
+            nextCursor: null,
+          };
+        },
+        dispose: async () => {
+          rt.disposeCount += 1;
+        },
       };
     },
   ),
 }));
 
 // Avoid real filesystem work for the per-session dir.
-vi.mock("../../session-paths", () => ({
+vi.mock("../../../session-paths", () => ({
   ensureSessionDir: vi.fn(async () => ({
     root: "/tmp/s",
     env: "/tmp/s/env",
@@ -146,6 +206,7 @@ function makeAdapter() {
     onQuestionRequest: vi.fn(),
     onAgentStderr: vi.fn(),
     onAgentExit: vi.fn(),
+    onNativeThreadEvent: vi.fn(),
   };
   const ctx: AgentAdapterContext = {
     projectRoot: "/tmp/proj",
@@ -165,11 +226,219 @@ describe("codex mid-turn reconnect + per-session crash signalling", () => {
     rt.lastOnUserInputRequest = null;
     rt.runTurnImpl = null;
     rt.requests = [];
+    rt.resumeThreadIds = [];
+    rt.nativeActions = [];
+    rt.disposeCount = 0;
+    rt.initialGoal = null;
+    rt.capabilityCalls = [];
     rt.modelList = null;
     rt.notificationHandlers.clear();
   });
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("returns Codex's native thread id and uses it for a later resume", async () => {
+    const { adapter } = makeAdapter();
+    const created = await adapter.newSession({ cwd: "/tmp/proj" });
+
+    expect(created.session.sessionId).not.toBe("thread-1");
+    expect(created.session.nativeSessionId).toBe("thread-1");
+
+    const loaded = await adapter.loadSession({
+      sessionId: "zeros-runtime-2",
+      nativeSessionId: "thread-native-resume",
+      cwd: "/tmp/proj",
+    });
+    expect(rt.resumeThreadIds).toContain("thread-native-resume");
+    expect(loaded.nativeThreadMetadata).toEqual({
+      name: "Native resumed title",
+      isPinned: true,
+      gitInfo: {
+        sha: "abc123",
+        branch: "santhosh",
+        originUrl: "https://example.test/zeros.git",
+      },
+    });
+  });
+
+  it("projects native lifecycle metadata only for the parent Codex thread", async () => {
+    const { adapter, emit } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+
+    rt.notificationHandlers.get("thread/archived")?.({
+      threadId: "thread-1",
+    });
+    rt.notificationHandlers.get("thread/name/updated")?.({
+      threadId: "thread-1",
+      threadName: "Native title",
+    });
+    rt.notificationHandlers.get("thread/deleted")?.({
+      threadId: "child-thread",
+    });
+
+    expect(emit.onNativeThreadEvent).toHaveBeenCalledTimes(2);
+    expect(emit.onNativeThreadEvent).toHaveBeenNthCalledWith(1, "codex", {
+      sessionId: session.sessionId,
+      nativeThreadId: "thread-1",
+      event: "archived",
+    });
+    expect(emit.onNativeThreadEvent).toHaveBeenNthCalledWith(2, "codex", {
+      sessionId: session.sessionId,
+      nativeThreadId: "thread-1",
+      event: "name-updated",
+      name: "Native title",
+    });
+  });
+
+  it("applies native lifecycle actions through live and short-lived runtimes", async () => {
+    const { adapter } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+
+    await adapter.updateNativeThread?.({
+      sessionId: session.sessionId,
+      nativeThreadId: "thread-1",
+      cwd: "/tmp/proj",
+      action: "archive",
+    });
+    await adapter.updateNativeThread?.({
+      sessionId: "not-live",
+      nativeThreadId: "thread-cold",
+      cwd: "/tmp/proj",
+      action: "delete",
+    });
+
+    expect(rt.nativeActions).toEqual([
+      ["archive", { threadId: "thread-1" }],
+      ["delete", { threadId: "thread-cold" }],
+    ]);
+    expect(rt.disposeCount).toBe(1);
+  });
+
+  it("projects native Codex goal updates into canonical session state", async () => {
+    const { adapter, emit } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+
+    rt.notificationHandlers.get("thread/goal/updated")?.({
+      threadId: "thread-1",
+      turnId: null,
+      goal: {
+        threadId: "thread-1",
+        objective: "Ship browser compatibility",
+        status: "active",
+        tokenBudget: 50_000,
+        tokensUsed: 1_250,
+        timeUsedSeconds: 30,
+        createdAt: 10,
+        updatedAt: 20,
+      },
+    });
+    rt.notificationHandlers.get("thread/goal/cleared")?.({
+      threadId: "thread-1",
+    });
+    rt.notificationHandlers.get("thread/goal/updated")?.({
+      threadId: "child-thread",
+      goal: { objective: "Ignore child" },
+    });
+
+    expect(emit.onSessionUpdate).toHaveBeenCalledWith("codex", {
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: "native_goal_update",
+        goal: expect.objectContaining({
+          objective: "Ship browser compatibility",
+          status: "active",
+          tokenBudget: 50_000,
+          tokensUsed: 1_250,
+        }),
+      },
+    });
+    expect(emit.onSessionUpdate).toHaveBeenCalledWith("codex", {
+      sessionId: session.sessionId,
+      update: { sessionUpdate: "native_goal_update", goal: null },
+    });
+    expect(emit.onSessionUpdate).toHaveBeenCalledTimes(2);
+  });
+
+  it("hydrates an existing native goal when a Codex session opens", async () => {
+    rt.initialGoal = {
+      threadId: "thread-1",
+      objective: "Resume the release",
+      status: "paused",
+      tokenBudget: null,
+      tokensUsed: 500,
+      timeUsedSeconds: 12,
+      createdAt: 10,
+      updatedAt: 20,
+    };
+    const { adapter, emit } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    await Promise.resolve();
+
+    expect(emit.onSessionUpdate).toHaveBeenCalledWith("codex", {
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: "native_goal_update",
+        goal: expect.objectContaining({
+          objective: "Resume the release",
+          status: "paused",
+        }),
+      },
+    });
+  });
+
+  it("serves capabilities through live and short-lived app-server runtimes", async () => {
+    const { adapter } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+
+    await expect(
+      adapter.callCodexCapability?.({
+        operation: "account.usage.read",
+        cwd: "/tmp/proj",
+        sessionId: session.sessionId,
+      }),
+    ).resolves.toEqual({ usage: "ok" });
+    await expect(
+      adapter.callCodexCapability?.({
+        operation: "skills.list",
+        cwd: "/tmp/proj",
+        params: { cwds: ["/tmp/proj"] },
+      }),
+    ).resolves.toEqual({ data: [] });
+
+    expect(rt.capabilityCalls).toEqual([
+      ["account.usage", undefined],
+      ["skills.list", { cwds: ["/tmp/proj"] }],
+    ]);
+    expect(rt.disposeCount).toBe(1);
+  });
+
+  it("merges live MCP startup and reauthentication notifications into status reads", async () => {
+    const { adapter } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+
+    rt.notificationHandlers.get("mcpServer/startupStatus/updated")?.({
+      threadId: "thread-1",
+      name: "docs",
+      status: "failed",
+      error: "credentials expired",
+      failureReason: "reauthenticationRequired",
+    });
+
+    await expect(adapter.callCodexCapability?.({
+      operation: "mcp.status.list",
+      cwd: "/tmp/proj",
+      sessionId: session.sessionId,
+      params: { threadId: "thread-1", limit: 100 },
+    })).resolves.toEqual({
+      data: [expect.objectContaining({
+        name: "docs",
+        status: "failed",
+        error: "credentials expired",
+        failureReason: "reauthenticationRequired",
+      })],
+      nextCursor: null,
+    });
   });
 
   it("advertises explicit live max and unsupported Fast capabilities", async () => {

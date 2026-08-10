@@ -184,6 +184,37 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
     expect(KNOWN_MESSAGE_TYPES).toContain("AGENT_BINARY_RESOLVED");
   });
 
+  it("validates the optional provider-native identity on session resume", () => {
+    const b = { ...base, source: "browser" as const };
+    expect(
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_LOAD_SESSION",
+        agentId: "codex",
+        sessionId: "zeros-session-1",
+        nativeSessionId: "codex-thread-1",
+      }).type,
+    ).toBe("AGENT_LOAD_SESSION");
+    expect(() =>
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_LOAD_SESSION",
+        agentId: "codex",
+        sessionId: "zeros-session-1",
+        nativeSessionId: "",
+      }),
+    ).toThrow(/nativeSessionId/);
+    expect(() =>
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_LOAD_SESSION",
+        agentId: "codex",
+        sessionId: "zeros-session-1",
+        nativeSessionId: "x".repeat(201),
+      }),
+    ).toThrow(/nativeSessionId/);
+  });
+
   it("safeParseBridgeMessage returns null on a malformed write payload", () => {
     const b = { ...base, source: "browser" as const };
     expect(
@@ -204,5 +235,116 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
         rows: 24,
       }),
     ).not.toBeNull();
+  });
+
+  it("validates the local Codex SDK job request surface", () => {
+    const b = { ...base, source: "browser" as const };
+    for (const type of [
+      "CODEX_JOB_START",
+      "CODEX_JOB_GET",
+      "CODEX_JOB_LIST",
+      "CODEX_JOB_CANCEL",
+      "CODEX_JOB_SNAPSHOT",
+      "CODEX_JOBS_LIST",
+    ]) {
+      expect(KNOWN_MESSAGE_TYPES).toContain(type);
+    }
+
+    expect(
+      parseBridgeMessage({
+        ...b,
+        type: "CODEX_JOB_START",
+        cwd: "/tmp/project",
+        prompt: "Run the tests",
+        sandboxMode: "workspace-write",
+        reasoningEffort: "high",
+        networkAccessEnabled: false,
+        timeoutMs: 60_000,
+      }).type,
+    ).toBe("CODEX_JOB_START");
+    expect(
+      parseBridgeMessage({ ...b, type: "CODEX_JOB_LIST" }).type,
+    ).toBe("CODEX_JOB_LIST");
+    expect(
+      parseBridgeMessage({ ...b, type: "CODEX_JOB_GET", jobId: "job-1" })
+        .type,
+    ).toBe("CODEX_JOB_GET");
+    expect(
+      parseBridgeMessage({ ...b, type: "CODEX_JOB_CANCEL", jobId: "job-1" })
+        .type,
+    ).toBe("CODEX_JOB_CANCEL");
+  });
+
+  it("rejects malformed or oversized Codex SDK job requests at the wire boundary", () => {
+    const b = { ...base, source: "browser" as const };
+    const start = (overrides: Record<string, unknown>) =>
+      parseBridgeMessage({
+        ...b,
+        type: "CODEX_JOB_START",
+        cwd: "/tmp/project",
+        prompt: "Run the tests",
+        ...overrides,
+      });
+
+    expect(() => start({ cwd: "" })).toThrow(/cwd/);
+    expect(() => start({ prompt: "" })).toThrow(/prompt/);
+    expect(() => start({ prompt: "x".repeat(100_001) })).toThrow(/prompt/);
+    expect(() => start({ sandboxMode: "danger-full-access" })).toThrow(
+      /sandboxMode/,
+    );
+    expect(() => start({ reasoningEffort: "ultra" })).toThrow(
+      /reasoningEffort/,
+    );
+    expect(() => start({ networkAccessEnabled: "yes" })).toThrow(
+      /networkAccessEnabled/,
+    );
+    expect(() => start({ timeoutMs: 999 })).toThrow(/timeoutMs/);
+    expect(() => start({ timeoutMs: 30 * 60_000 + 1 })).toThrow(/timeoutMs/);
+    expect(() =>
+      start({ outputSchema: { description: "x".repeat(128_001) } }),
+    ).toThrow(/outputSchema/);
+    expect(() =>
+      parseBridgeMessage({ ...b, type: "CODEX_JOB_GET", jobId: "" }),
+    ).toThrow(/jobId/);
+    expect(() =>
+      parseBridgeMessage({ ...b, type: "CODEX_JOB_CANCEL", jobId: 5 }),
+    ).toThrow(/jobId/);
+  });
+
+  it("validates local Codex capability calls at the wire boundary", () => {
+    const b = { ...base, source: "browser" as const };
+    expect(
+      parseBridgeMessage({
+        ...b,
+        type: "CODEX_CAPABILITY_REQUEST",
+        operation: "account.usage.read",
+        cwd: "/tmp/project",
+      }).type,
+    ).toBe("CODEX_CAPABILITY_REQUEST");
+    expect(() =>
+      parseBridgeMessage({
+        ...b,
+        type: "CODEX_CAPABILITY_REQUEST",
+        operation: "raw.jsonrpc",
+        cwd: "/tmp/project",
+      }),
+    ).toThrow(/operation/);
+    expect(() =>
+      parseBridgeMessage({
+        ...b,
+        type: "CODEX_CAPABILITY_REQUEST",
+        operation: "account.read",
+        cwd: "",
+      }),
+    ).toThrow(/cwd/);
+    expect(() =>
+      parseBridgeMessage({
+        ...b,
+        type: "CODEX_CAPABILITY_REQUEST",
+        operation: "plugins.install",
+        cwd: "/tmp/project",
+        params: { payload: "x".repeat(256_001) },
+      }),
+    ).toThrow(/params/);
   });
 });

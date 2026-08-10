@@ -66,6 +66,9 @@ importers:
       '@openai/codex':
         specifier: 0.146.0
         version: 0.146.0
+      '@openai/codex-sdk':
+        specifier: 0.146.0
+        version: 0.146.0
       '@pierre/diffs':
         specifier: 1.2.11
         version: 1.2.11(@shikijs/themes@4.0.2)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -192,6 +195,9 @@ importers:
       electron-updater:
         specifier: ^6.8.9
         version: 6.8.9
+      entities:
+        specifier: ^6.0.1
+        version: 6.0.1
       fix-path:
         specifier: ^5.0.0
         version: 5.0.0
@@ -1682,6 +1688,10 @@ packages:
 
   '@octokit/types@16.0.0':
     resolution: {integrity: sha512-sKq+9r1Mm4efXW1FCk7hFSeJo4QKreL/tTbR0rz/qx/r1Oa2VV83LTA/H/MuCOX7uCIJmQVRKBcbmWoySjAnSg==}
+
+  '@openai/codex-sdk@0.146.0':
+    resolution: {integrity: sha512-lhlcfmufd4EvjquERH3HNG0/fuxPQJBjFsAjtP2LJjAsuyMZk245ci8xfvT4QoZ7Vnbe15y7rj/NtMNcUJIJOg==}
+    engines: {node: '>=18'}
 
   '@openai/codex@0.146.0':
     resolution: {integrity: sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw==}
@@ -8388,6 +8398,10 @@ snapshots:
   '@octokit/types@16.0.0':
     dependencies:
       '@octokit/openapi-types': 27.0.0
+
+  '@openai/codex-sdk@0.146.0':
+    dependencies:
+      '@openai/codex': 0.146.0
 
   '@openai/codex@0.146.0':
     optionalDependencies:

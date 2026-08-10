@@ -61,6 +61,11 @@ import { loadPolicies, savePolicies, type PolicyRule } from "./policies";
 import { effortAdoptedEnvKey } from "./model-catalog";
 import { useWorkspaceStore } from "../../state/workspace-store";
 import type { ChatEffort } from "../../state/store";
+import {
+  clearAllCodexRealtimeState,
+  clearCodexRealtimeState,
+  publishCodexRealtimeUpdate,
+} from "./realtime-voice-state";
 
 const MAX_STDERR_LINES = 200;
 const MAX_BACKGROUND_TASKS_PER_CHAT = 100;
@@ -235,6 +240,7 @@ export const BLANK: AgentSessionState = {
   agentName: null,
   durableSessionId: null,
   sessionId: null,
+  nativeSessionId: null,
   cwd: null,
   initialize: null,
   session: null,
@@ -253,6 +259,7 @@ export const BLANK: AgentSessionState = {
   activeTurnStartedAt: null,
   availableModes: [],
   currentModeId: null,
+  nativeGoal: null,
   usage: BLANK_USAGE,
   availableCommands: [],
   availableSubagents: [],
@@ -665,6 +672,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
   },
 
   removeSession: (chatId) => {
+    clearCodexRealtimeState(chatId);
     // Clear any pending scroll-persist debounce timer first. Otherwise
     // a debounce timer scheduled in the last second writes to a
     // deleted chat_id row (SQLite UPSERT recreates the row) AFTER the
@@ -709,6 +717,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
   },
 
   clearAll: () => {
+    clearAllCodexRealtimeState();
     set({
       sessions: {},
       warmAgentIds: new Set(),
@@ -749,7 +758,25 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       stopReason?: AgentSessionState["lastStopReason"];
       startedAt?: number;
       effort?: string;
+      goal?: AgentSessionState["nativeGoal"];
+      threadId?: string;
+      status?: "active" | "closed" | "error";
+      realtimeSessionId?: string;
+      message?: string;
+      data?: string;
+      sampleRate?: number;
+      numChannels?: number;
+      samplesPerChannel?: number | null;
+      itemId?: string | null;
     };
+
+    if (
+      upd.sessionUpdate === "realtime_status" ||
+      upd.sessionUpdate === "realtime_audio"
+    ) {
+      publishCodexRealtimeUpdate(chatId, notification.update as never);
+      return;
+    }
 
     // Lifecycle is exact-session state. Content may legitimately arrive with
     // an engine-stamped chatId during a bind race, but a terminal event from a
@@ -782,6 +809,11 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           activeTurnStartedAt: null,
         });
       }
+      return;
+    }
+
+    if (upd.sessionUpdate === "native_goal_update") {
+      get().patchSession(chatId, { nativeGoal: upd.goal ?? null });
       return;
     }
 

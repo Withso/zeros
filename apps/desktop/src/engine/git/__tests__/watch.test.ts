@@ -121,6 +121,46 @@ describe("startGitWatcher", () => {
     await waitFor(() => changes > before);
   });
 
+  it("does not recurse into nested agent worktree roots", async () => {
+    const root = await mkdtemp(join(tmpdir(), "zeros-nested-tool-watch-"));
+    roots.push(root);
+    await mkdir(join(root, ".git", "logs"), { recursive: true });
+    await writeFile(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
+    await writeFile(join(root, ".git", "index"), "index");
+    await writeFile(join(root, ".git", "logs", "HEAD"), "");
+    const nested = join(root, ".claude", "worktrees", "nested");
+    await mkdir(nested, { recursive: true });
+    await writeFile(join(nested, ".git"), "gitdir: /outside/common.git\n");
+    const nestedFile = join(nested, "generated.txt");
+    await writeFile(nestedFile, "before\n");
+
+    let changes = 0;
+    const watcher = startGitWatcher(
+      () => [{ root, workspaceId: "workspace-parent" }],
+      () => {
+        changes += 1;
+      },
+      {
+        pollIntervalMs: 25,
+        worktreeDebounceMs: 10,
+        awaitWriteFinishMs: 20,
+        usePolling: true,
+        worktreePollIntervalMs: 10,
+      },
+    );
+    watchers.push(watcher);
+    await watcher.ready;
+
+    await writeFile(nestedFile, "after\n");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(changes).toBe(0);
+
+    // The parent checkout remains live; the exclusion is narrowly scoped to
+    // the nested tool-owned worktree container.
+    await writeFile(join(root, "visible.txt"), "hello\n");
+    await waitFor(() => changes > 0);
+  });
+
   it("invalidates when terminal git changes the index without a source event", async () => {
     const root = await mkdtemp(join(tmpdir(), "zeros-git-state-watch-"));
     roots.push(root);

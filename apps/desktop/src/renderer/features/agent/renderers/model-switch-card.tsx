@@ -25,7 +25,7 @@ import { EventRow, type EventMeta } from "./event-row";
 interface SwitchInfo {
   fromModel: string | null;
   toModel: string | null;
-  reason: "overloaded" | "refusal" | null;
+  reason: "overloaded" | "refusal" | "highRiskCyberActivity" | null;
 }
 
 function readSwitchInfo(input: unknown): SwitchInfo {
@@ -37,7 +37,9 @@ function readSwitchInfo(input: unknown): SwitchInfo {
     fromModel: typeof obj.fromModel === "string" ? obj.fromModel : null,
     toModel: typeof obj.toModel === "string" ? obj.toModel : null,
     reason:
-      obj.reason === "overloaded" || obj.reason === "refusal"
+      obj.reason === "overloaded" ||
+      obj.reason === "refusal" ||
+      obj.reason === "highRiskCyberActivity"
         ? obj.reason
         : null,
   };
@@ -68,7 +70,11 @@ export const ModelSwitchRecordCard: Renderer<AgentToolMessage> = memo(
     const detail = (
       <div className="bg-bg2/60 flex flex-col gap-1.5 rounded-md p-2.5 text-sm leading-relaxed">
         <span className="text-fg2">
-          {info.reason === "refusal" ? (
+          {info.reason === "highRiskCyberActivity" ? (
+            <>
+              Codex routed this request from {from ? <b className="text-fg1 font-semibold">{from}</b> : "the primary model"} to <b className="text-fg1 font-semibold">{to}</b> for cyber-safety handling.
+            </>
+          ) : info.reason === "refusal" ? (
             <>
               {from ? (
                 <b className="text-fg1 font-semibold">{from}</b>
@@ -91,8 +97,10 @@ export const ModelSwitchRecordCard: Renderer<AgentToolMessage> = memo(
             </>
           )}
         </span>
-        <span className="text-muted-fg text-[11.5px]">
-          {info.reason === "refusal" ? (
+        <span className="text-fg3 text-[11.5px]">
+          {info.reason === "highRiskCyberActivity" ? (
+            <>Safety routing applies to this turn · review the result normally</>
+          ) : info.reason === "refusal" ? (
             <>The session continues on the fallback · no action needed</>
           ) : (
             <>

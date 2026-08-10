@@ -75,10 +75,9 @@ function filePathFromMarkdownTarget(target: EventTarget | null): string | null {
   return null;
 }
 
-/** Open a file in workbench when the user activates a file reference in the
- *  agent's markdown, and route the ACTIVE workspace's PR link to the workbench
- *  PR tab; otherwise let the event proceed (text selection, other external
- *  links, in-page anchors). */
+/** Open file/PR destinations in their native workbench surfaces, then route an
+ * ordinary safe web link into the retained Browser. Unsupported schemes and
+ * in-page anchors keep their normal fallback behavior. */
 function handleMarkdownActivate(e: SyntheticEvent, ctx: RendererContext): void {
   const path = filePathFromMarkdownTarget(e.target);
   if (path && ctx.openFile) {
@@ -91,6 +90,10 @@ function handleMarkdownActivate(e: SyntheticEvent, ctx: RendererContext): void {
   const anchor = e.target instanceof HTMLElement ? e.target.closest("a") : null;
   const href = anchor?.getAttribute("href") ?? "";
   if (href && ctx.openPrUrl?.(href)) {
+    e.preventDefault();
+    return;
+  }
+  if (href && ctx.openBrowserUrl?.(href)) {
     e.preventDefault();
   }
 }

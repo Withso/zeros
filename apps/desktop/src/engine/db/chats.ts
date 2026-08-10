@@ -76,6 +76,14 @@ export interface ChatRow {
   createdAt: number;
   updatedAt: number;
   sessionId: string | null;
+  /** Provider-owned durable resume handle. For Codex this is the native
+   * app-server thread id; `sessionId` remains the live Zeros/browser lease. */
+  nativeSessionId: string | null;
+  nativeGitInfo?: {
+    sha: string | null;
+    branch: string | null;
+    originUrl: string | null;
+  } | null;
   pinned: boolean;
   archived: boolean;
   sourceChatId: string | null;
@@ -98,6 +106,8 @@ interface ChatDbRow {
   created_at: number | null;
   updated_at: number | null;
   session_id: string | null;
+  native_session_id: string | null;
+  native_git_info: string | null;
   pinned: number;
   archived: number;
   source_chat_id: string | null;
@@ -126,6 +136,26 @@ function parseDirs(raw: string | null | undefined): string[] {
   }
 }
 
+function parseNativeGitInfo(raw: unknown): ChatRow["nativeGitInfo"] {
+  let value = raw;
+  if (typeof raw === "string") {
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const info = value as Record<string, unknown>;
+  const nullableString = (entry: unknown): string | null =>
+    typeof entry === "string" ? entry : null;
+  return {
+    sha: nullableString(info.sha),
+    branch: nullableString(info.branch),
+    originUrl: nullableString(info.originUrl),
+  };
+}
+
 function toChatRow(r: ChatDbRow): ChatRow {
   return {
     id: r.id,
@@ -143,6 +173,8 @@ function toChatRow(r: ChatDbRow): ChatRow {
     createdAt: r.created_at ?? 0,
     updatedAt: r.updated_at ?? 0,
     sessionId: r.session_id,
+    nativeSessionId: r.native_session_id,
+    nativeGitInfo: parseNativeGitInfo(r.native_git_info),
     pinned: r.pinned === 1,
     archived: r.archived === 1,
     sourceChatId: r.source_chat_id,
@@ -169,6 +201,8 @@ function toDbParams(c: ChatRow): Record<string, string | number | null> {
     created_at: typeof c.createdAt === "number" ? c.createdAt : 0,
     updated_at: typeof c.updatedAt === "number" ? c.updatedAt : 0,
     session_id: c.sessionId ?? null,
+    native_session_id: c.nativeSessionId ?? null,
+    native_git_info: c.nativeGitInfo ? JSON.stringify(c.nativeGitInfo) : null,
     pinned: c.pinned ? 1 : 0,
     archived: c.archived ? 1 : 0,
     source_chat_id: c.sourceChatId ?? null,
@@ -184,12 +218,12 @@ const UPSERT_SQL = `
 INSERT INTO chats (id, folder, agent_id, agent_name, model, effort, permission_mode,
                    last_mode_id, pre_plan_mode_id, fast,
                    additional_directories, title,
-                   created_at, updated_at, session_id, pinned, archived, source_chat_id, kind,
+                   created_at, updated_at, session_id, native_session_id, native_git_info, pinned, archived, source_chat_id, kind,
                    workspace_id, rev)
 VALUES (@id, @folder, @agent_id, @agent_name, @model, @effort, @permission_mode,
         @last_mode_id, @pre_plan_mode_id, @fast,
         @additional_directories, @title,
-        @created_at, @updated_at, @session_id, @pinned, @archived, @source_chat_id, @kind,
+        @created_at, @updated_at, @session_id, @native_session_id, @native_git_info, @pinned, @archived, @source_chat_id, @kind,
         @workspace_id, @rev)
 ON CONFLICT(id) DO UPDATE SET
   folder=excluded.folder, agent_id=excluded.agent_id, agent_name=excluded.agent_name,
@@ -197,7 +231,9 @@ ON CONFLICT(id) DO UPDATE SET
   last_mode_id=excluded.last_mode_id, pre_plan_mode_id=excluded.pre_plan_mode_id,
   fast=excluded.fast, additional_directories=excluded.additional_directories,
   title=excluded.title, updated_at=excluded.updated_at,
-  session_id=excluded.session_id, pinned=excluded.pinned, archived=excluded.archived,
+  session_id=excluded.session_id, native_session_id=excluded.native_session_id,
+  native_git_info=excluded.native_git_info,
+  pinned=excluded.pinned, archived=excluded.archived,
   source_chat_id=excluded.source_chat_id, kind=excluded.kind,
   workspace_id=excluded.workspace_id, rev=excluded.rev`;
 // NOTE: created_at is intentionally NOT in the UPDATE set. It is immutable after
@@ -239,6 +275,8 @@ export function coerceChatRow(o: unknown): ChatRow | null {
     createdAt: num(r.createdAt),
     updatedAt: num(r.updatedAt),
     sessionId: strOrNull(r.sessionId),
+    nativeSessionId: strOrNull(r.nativeSessionId),
+    nativeGitInfo: parseNativeGitInfo(r.nativeGitInfo),
     pinned: r.pinned === true,
     archived: r.archived === true,
     sourceChatId: strOrNull(r.sourceChatId),
@@ -253,7 +291,7 @@ export function listChats(): ChatRow[] {
       `SELECT id, folder, agent_id, agent_name, model, effort, permission_mode,
               last_mode_id, pre_plan_mode_id, fast,
               additional_directories, title,
-              created_at, updated_at, session_id, pinned, archived, source_chat_id, kind
+              created_at, updated_at, session_id, native_session_id, native_git_info, pinned, archived, source_chat_id, kind
        FROM chats ORDER BY updated_at DESC`,
     )
     .all() as ChatDbRow[];
@@ -271,7 +309,7 @@ export function getChat(id: string): ChatRow | null {
       `SELECT id, folder, agent_id, agent_name, model, effort, permission_mode,
               last_mode_id, pre_plan_mode_id, fast,
               additional_directories, title,
-              created_at, updated_at, session_id, pinned, archived, source_chat_id, kind
+              created_at, updated_at, session_id, native_session_id, native_git_info, pinned, archived, source_chat_id, kind
        FROM chats WHERE id = ?`,
     )
     .get(id) as ChatDbRow | undefined;
@@ -555,7 +593,7 @@ export function listChatsSince(since: number): ChatRow[] {
       `SELECT id, folder, agent_id, agent_name, model, effort, permission_mode,
               last_mode_id, pre_plan_mode_id, fast,
               additional_directories, title,
-              created_at, updated_at, session_id, pinned, archived, source_chat_id, kind
+              created_at, updated_at, session_id, native_session_id, pinned, archived, source_chat_id, kind
        FROM chats WHERE rev > ? ORDER BY rev`,
     )
     .all(since) as ChatDbRow[];

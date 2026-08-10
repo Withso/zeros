@@ -20,6 +20,8 @@ const rt = vi.hoisted(() => ({
   bootOptions: null as CodexAppServerBootOptions | null,
   notificationHandlers: new Map<string, Set<(params: unknown) => void>>(),
   respondCalls: [] as Array<{ permissionId: string; response: unknown }>,
+  requestCalls: [] as Array<{ method: string; params: unknown }>,
+  runTurnCalls: [] as unknown[],
   userInputCalls: [] as Array<{ questionId: string; response: unknown }>,
   startThreadCalls: [] as Array<Record<string, unknown>>,
   runTurnImpl: null as null | (() => Promise<unknown>),
@@ -53,7 +55,8 @@ vi.mock("../app-server", () => ({
         model: "gpt-5",
         raw: {},
       }),
-      runTurn: async () => {
+      runTurn: async (params: unknown) => {
+        rt.runTurnCalls.push(params);
         if (!rt.runTurnImpl) {
           return { turnId: "turn-1", status: "completed", raw: {} };
         }
@@ -75,7 +78,10 @@ vi.mock("../app-server", () => ({
         handlers.add(handler);
         return () => handlers?.delete(handler);
       },
-      request: vi.fn(async () => ({})),
+      request: vi.fn(async (method: string, params: unknown) => {
+        rt.requestCalls.push({ method, params });
+        return {};
+      }),
       dispose: async () => {},
     };
   }),
@@ -124,6 +130,7 @@ function raiseApproval(
 ): void {
   const request: CodexApprovalRequest = {
     permissionId,
+    requestId: `native-${permissionId}`,
     method,
     params,
   };
@@ -160,6 +167,8 @@ describe("codex permission settlement receipts", () => {
     rt.bootOptions = null;
     rt.notificationHandlers.clear();
     rt.respondCalls = [];
+    rt.requestCalls = [];
+    rt.runTurnCalls = [];
     rt.userInputCalls = [];
     rt.startThreadCalls = [];
     rt.runTurnImpl = null;
@@ -397,6 +406,52 @@ describe("codex permission settlement receipts", () => {
       "question-stale",
       session.sessionId,
       { outcome: "dismissed" },
+    );
+  });
+
+  it("applies Approve for me through native auto-review without restarting the session", async () => {
+    const { adapter } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+
+    await adapter.setMode({
+      sessionId: session.sessionId,
+      modeId: "auto-edit",
+    });
+    await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+
+    expect(rt.requestCalls).toContainEqual({
+      method: "thread/settings/update",
+      params: expect.objectContaining({
+        threadId: "thread-1",
+        approvalPolicy: "on-request",
+        approvalsReviewer: "auto_review",
+        sandboxPolicy: expect.objectContaining({ type: "workspaceWrite" }),
+      }),
+    });
+    expect(rt.runTurnCalls.at(-1)).toEqual(
+      expect.objectContaining({
+        approvalPolicy: "on-request",
+        approvalsReviewer: "auto_review",
+        sandboxPolicy: expect.objectContaining({ type: "workspaceWrite" }),
+      }),
+    );
+
+    await adapter.setMode({ sessionId: session.sessionId, modeId: "ask" });
+    await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+
+    expect(rt.requestCalls.at(-1)).toEqual({
+      method: "thread/settings/update",
+      params: expect.objectContaining({
+        threadId: "thread-1",
+        approvalPolicy: "untrusted",
+        approvalsReviewer: "user",
+      }),
+    });
+    expect(rt.runTurnCalls.at(-1)).toEqual(
+      expect.objectContaining({
+        approvalPolicy: "untrusted",
+        approvalsReviewer: "user",
+      }),
     );
   });
 });

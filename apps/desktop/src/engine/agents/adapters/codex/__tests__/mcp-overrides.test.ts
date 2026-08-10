@@ -16,6 +16,21 @@ describe("buildMcpServerOverrides — Codex -c MCP config", () => {
     expect(args.join(" ")).not.toContain(".type=");
   });
 
+  it("keeps HTTP bearer secrets in an environment variable", () => {
+    const args = buildMcpServerOverrides([
+      {
+        name: "zeros_browser",
+        transport: "http",
+        url: "http://127.0.0.1:43123/mcp",
+        bearerTokenEnvVar: "ZEROS_BROWSER_AUTOMATION_TOKEN",
+      },
+    ]);
+    expect(args).toContain(
+      'mcp_servers.zeros_browser.bearer_token_env_var="ZEROS_BROWSER_AUTOMATION_TOKEN"',
+    );
+    expect(args.join(" ")).not.toContain("host-token");
+  });
+
   it("emits command/args/env for a stdio server", () => {
     const args = buildMcpServerOverrides([
       { name: "ctx7", transport: "stdio", command: "npx", args: ["-y", "@upstash/context7-mcp"], env: { DEBUG: "1" } },

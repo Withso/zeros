@@ -30,7 +30,7 @@ TERMS-GOVERNED COMPONENTS — RELEASE REVIEW REQUIRED
 - @anthropic-ai/claude-agent-sdk@0.3.221: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 - @cursor/sdk@1.0.26: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 
-PACKAGE INVENTORY (580 resolved package/version records)
+PACKAGE INVENTORY (581 resolved package/version records)
 -----------------
 
 @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.221
@@ -612,6 +612,12 @@ PACKAGE INVENTORY (580 resolved package/version records)
   Author: Gregor Martynus (https://twitter.com/gr2m)
   Source: https://github.com/octokit/types.ts
   License documents: 8cd41c03a45e
+
+@openai/codex-sdk@0.146.0
+  License: Apache-2.0
+  Surfaces: root pnpm workspace
+  Source: https://github.com/openai/codex
+  License documents: d17f227e4df5
 
 @openai/codex@0.146.0
   License: Apache-2.0
@@ -11759,8 +11765,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT d17f227e4df5
 SHA-256: d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc
-Applies to: @bufbuild/protobuf@1.10.0, @connectrpc/connect-node@1.7.0, @connectrpc/connect-web@1.7.0, @connectrpc/connect@1.7.0, @openai/codex@0.146.0, @openai/codex@0.146.0-darwin-arm64, @pierre/theming@0.0.1, clean-git-ref@2.0.1
-Source labels: @bufbuild/protobuf@1.10.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-node@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-web@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @openai/codex@0.146.0 generated protocol — LICENSE; @openai/codex@0.146.0-darwin-arm64 staged native runtime — LICENSE; @pierre/theming@0.0.1 — declared Apache-2.0 terms (archive omitted a standalone file); clean-git-ref@2.0.1 — declared Apache-2.0 terms (archive omitted a standalone file)
+Applies to: @bufbuild/protobuf@1.10.0, @connectrpc/connect-node@1.7.0, @connectrpc/connect-web@1.7.0, @connectrpc/connect@1.7.0, @openai/codex-sdk@0.146.0, @openai/codex@0.146.0, @openai/codex@0.146.0-darwin-arm64, @pierre/theming@0.0.1, clean-git-ref@2.0.1
+Source labels: @bufbuild/protobuf@1.10.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-node@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-web@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @openai/codex-sdk@0.146.0 — LICENSE; @openai/codex@0.146.0 generated protocol — LICENSE; @openai/codex@0.146.0-darwin-arm64 staged native runtime — LICENSE; @pierre/theming@0.0.1 — declared Apache-2.0 terms (archive omitted a standalone file); clean-git-ref@2.0.1 — declared Apache-2.0 terms (archive omitted a standalone file)
 ================================================================================
 
                                  Apache License

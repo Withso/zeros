@@ -65,7 +65,7 @@ export class JsonRpcRequestError extends Error {
   }
 }
 
-export interface InboundRequestContext {
+export interface JsonRpcInboundRequest {
   /** The peer-authored JSON-RPC id. Exposing it lets adapters correlate a
    * later serverRequest/resolved notification with the UI resolver they
    * minted for this request. */
@@ -75,9 +75,19 @@ export interface InboundRequestContext {
 
 export type RequestHandler = (
   params: unknown,
-  context: InboundRequestContext,
+  request: JsonRpcInboundRequest,
 ) => unknown | Promise<unknown>;
 export type NotificationHandler = (params: unknown) => void;
+
+/** Stop an inbound handler without writing a JSON-RPC response. This is only
+ * valid after the peer has explicitly reported that it already resolved or
+ * cleared the request (Codex `serverRequest/resolved`). */
+export class JsonRpcResponseSuppressedError extends Error {
+  constructor(message = "peer already resolved the inbound request") {
+    super(message);
+    this.name = "JsonRpcResponseSuppressedError";
+  }
+}
 
 export interface JsonRpcClientOptions {
   /** Tag emitted into log lines (e.g. "codex"). */
@@ -298,6 +308,7 @@ export class JsonRpcStdioClient {
       if (result === JSON_RPC_NO_RESPONSE) return;
       this.writeFrame({ jsonrpc: "2.0", id, result: result ?? null });
     } catch (err) {
+      if (err instanceof JsonRpcResponseSuppressedError) return;
       const jrErr =
         err instanceof JsonRpcRequestError
           ? { code: err.code, message: err.message, data: err.data }

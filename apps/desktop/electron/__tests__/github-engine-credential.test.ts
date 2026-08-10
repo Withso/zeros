@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { githubCredentialForEngine } from "../github-engine-credential";
+import {
+  githubCredentialForEngine,
+  githubCredentialForEngineLazyOwner,
+} from "../github-engine-credential";
 
 describe("host-to-engine GitHub credential projection", () => {
   const appCredential = {
@@ -56,5 +59,27 @@ describe("host-to-engine GitHub credential projection", () => {
       gitHttpUsername: "x-access-token",
     } as const;
     expect(githubCredentialForEngine(pat, null, 1_000_000)).toEqual(pat);
+  });
+
+  it("does not read the signed-in owner unless an App credential needs it", () => {
+    let ownerReads = 0;
+    const readOwner = () => {
+      ownerReads += 1;
+      return "auth0|owner";
+    };
+    const pat = {
+      method: "pat",
+      accessToken: "personal-access",
+      gitHost: "github.com",
+      gitHttpUsername: "x-access-token",
+    } as const;
+
+    expect(githubCredentialForEngineLazyOwner(null, readOwner)).toBeNull();
+    expect(githubCredentialForEngineLazyOwner(pat, readOwner)).toEqual(pat);
+    expect(ownerReads).toBe(0);
+    expect(
+      githubCredentialForEngineLazyOwner(appCredential, readOwner, 1_000_000),
+    ).toMatchObject({ method: "github-app" });
+    expect(ownerReads).toBe(1);
   });
 });

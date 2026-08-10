@@ -451,14 +451,27 @@ function repoIgnoresCase(repoRoot: string): Promise<boolean> {
   return pending;
 }
 
-/** Run one `git ls-files` and split its NUL-delimited output. */
-async function lsFiles(
+interface LsFilesResult {
+  paths: string[];
+  /**
+   * `git ls-files` normally returns files when `--directory` is absent. A
+   * trailing slash in that mode is an opaque nested repository/worktree
+   * boundary: Git matched something inside it but deliberately did not walk
+   * through the inner `.git` checkout. Passing that directory to the copy
+   * hook would recursively clone an unrelated working tree, including its
+   * dependency/build output and `.git` pointer file.
+   */
+  opaqueDirectories: string[];
+}
+
+/** Run one `git ls-files` and preserve its opaque-directory signal. */
+async function lsFilesDetailed(
   repoRoot: string,
   args: string[],
   pathspecs: string[] | null,
   timeoutMs: number,
   maxBufferBytes = 16 * 1024 * 1024,
-): Promise<string[]> {
+): Promise<LsFilesResult> {
   const icase =
     pathspecs && pathspecs.length > 0 ? await repoIgnoresCase(repoRoot) : false;
   const { stdout } = await runFile(
@@ -488,10 +501,32 @@ async function lsFiles(
       timeoutMs,
     },
   );
-  return stdout
-    .split("\0")
-    .map((p) => p.replace(/\/+$/, "")) // normalize any trailing slash on dir entries
-    .filter(Boolean);
+  const paths: string[] = [];
+  const opaqueDirectories: string[] = [];
+  for (const raw of stdout.split("\0")) {
+    if (!raw) continue;
+    const normalized = raw.replace(/\/+$/, "");
+    if (!normalized) continue;
+    if (raw.endsWith("/")) {
+      opaqueDirectories.push(normalized);
+      continue;
+    }
+    paths.push(normalized);
+  }
+  return { paths, opaqueDirectories };
+}
+
+/** File-only convenience for secondary preview/attribution queries. */
+async function lsFiles(
+  repoRoot: string,
+  args: string[],
+  pathspecs: string[] | null,
+  timeoutMs: number,
+  maxBufferBytes = 16 * 1024 * 1024,
+): Promise<string[]> {
+  return (
+    await lsFilesDetailed(repoRoot, args, pathspecs, timeoutMs, maxBufferBytes)
+  ).paths;
 }
 
 /** Write the pattern list to a throwaway file git can read as an exclude
@@ -598,9 +633,9 @@ async function enumerateMatches(
     // user-configured file inside a fully-ignored dir (certs/server.pem →
     // "certs/"). Both verified empirically; the flag changes matching semantics
     // and user config must never be compromised.
-    const paths =
+    const listed =
       src.source === "default"
-        ? await lsFiles(
+        ? await lsFilesDetailed(
             repoRoot,
             ["-o", "-i", "--exclude-standard"],
             prune,
@@ -608,7 +643,7 @@ async function enumerateMatches(
             maxBufferBytes,
           )
         : await withExcludeFile(src, (excludeFile) =>
-            lsFiles(
+            lsFilesDetailed(
               repoRoot,
               ["-o", "-i", `--exclude-from=${excludeFile}`],
               prune,
@@ -616,7 +651,18 @@ async function enumerateMatches(
               maxBufferBytes,
             ),
           );
-    return { paths, complete: true, warnings, prune };
+    if (listed.opaqueDirectories.length > 0) {
+      const examples = listed.opaqueDirectories
+        .slice(0, 3)
+        .map((p) => `"${p}"`)
+        .join(", ");
+      warnings.push(
+        `files-to-copy: skipped ${listed.opaqueDirectories.length} opaque nested Git ` +
+          `worktree/repository director${listed.opaqueDirectories.length === 1 ? "y" : "ies"}` +
+          (examples ? ` reported while matching files (${examples})` : ""),
+      );
+    }
+    return { paths: listed.paths, complete: true, warnings, prune };
   } catch (err) {
     warnings.push(
       `files-to-copy: git ls-files failed (will retry in background): ${err instanceof Error ? err.message : String(err)}`,

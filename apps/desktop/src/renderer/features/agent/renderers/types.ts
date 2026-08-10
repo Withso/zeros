@@ -137,6 +137,13 @@ export interface RendererContext {
    *  Returns true when handled (caller preventDefaults); false lets the
    *  link open externally as usual. Wired by agent-chat. */
   openPrUrl?: (url: string) => boolean;
+  /** Route an ordinary safe http(s) link into the active workspace's retained
+   * Browser tab. Returns false when the URL fails the browser trust boundary,
+   * allowing the anchor's external fallback to continue. */
+  openBrowserUrl?: (url: string) => boolean;
+  /** Explicitly override one Guardian-denied action. The renderer receives the
+   * complete serialized assessment event preserved by the Codex translator. */
+  approveGuardianDeniedAction?: (event: unknown) => Promise<void>;
 }
 
 export type Renderer<M extends AgentMessage> = ComponentType<{

@@ -22,6 +22,7 @@ import type {
   ContentBlock,
   InitializeResponse,
   NewSessionResponse,
+  NativeThreadGoal,
   QuestionRequest,
   QuestionResponse,
   RequestPermissionRequest,
@@ -107,6 +108,7 @@ export interface AgentSessionState {
    * adapter created a replacement provider session. */
   durableSessionId: string | null;
   sessionId: string | null;
+  nativeSessionId: string | null;
   /** The chat's folder, captured
    *  on first ensureSession + restored on rebuilds. Without this, the
    *  silent-retry path called ensureSession({ force:true })
@@ -165,6 +167,8 @@ export interface AgentSessionState {
   /** Currently active mode id (echoed back by session/set_mode and
    *  current_mode_update notifications). */
   currentModeId: string | null;
+  /** Provider-native persistent goal for this conversation (Codex). */
+  nativeGoal: NativeThreadGoal | null;
   /** Token accounting for the context pill + usage popover. */
   usage: AgentUsage;
   /** Slash-command palette advertised by the agent via

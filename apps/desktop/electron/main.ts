@@ -88,7 +88,7 @@ import {
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { registerIpcHandlers } from "./ipc/router";
+import { registerIpcHandlers, setCommand } from "./ipc/router";
 import { registerIframeSessionCommands } from "./ipc/iframe-session";
 import { registerIframePickerCommands } from "./ipc/iframe-picker";
 import { installIframeHeaderStripping } from "./iframe-headers";
@@ -105,7 +105,7 @@ import {
   MAIN_WINDOW_MIN_WIDTH,
   readPersistedWindowState,
 } from "./window-state";
-import { setMainWindow, emitEvent } from "./ipc/events";
+import { setMainWindow, emitEvent, getMainWindow } from "./ipc/events";
 import {
   defaultProjectRoot,
   shutdown as shutdownSidecar,
@@ -122,7 +122,13 @@ import { installDevToolsGuard } from "./devtools";
 import { setupDeepLink } from "./deep-link";
 import { setupUpdater } from "./updater";
 import { IS_DEV, IS_PACKAGED } from "./runtime-mode";
-import { watchSecrets } from "./secret-store";
+import {
+  deleteSecret,
+  getSecret,
+  hasSecret,
+  setSecret,
+  watchSecrets,
+} from "./secret-store";
 import { setTokenStore as setGithubTokenStore } from "../src/engine/git/github";
 import {
   githubSelectedTokenStore,
@@ -147,6 +153,24 @@ import {
   installDesignProtocol,
   registerDesignProtocolPrivileges,
 } from "./design-protocol";
+import {
+  startBrowserAutomationServer,
+  type BrowserSessionBounds,
+  type BrowserAutomationServerHandle,
+} from "./browser-automation";
+import { attachOrRestoreBrowserSession } from "./browser-session-restore";
+import type { BrowserConfirmationDecision } from "./browser-confirmations";
+
+let browserAutomationServer: BrowserAutomationServerHandle | null = null;
+const MANAGED_BROWSER_TOKEN_KEY = "browser.managed-cloud.token";
+
+function isBrowserBounds(value: unknown): value is BrowserSessionBounds {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const bounds = value as Record<string, unknown>;
+  return [bounds.x, bounds.y, bounds.width, bounds.height].every(
+    (entry) => typeof entry === "number" && Number.isInteger(entry),
+  );
+}
 
 // Custom schemes must be privileged before Electron reaches ready. The handler
 // itself is installed after ready, before the first renderer window loads.
@@ -1205,6 +1229,179 @@ app.whenReady().then(async () => {
   registerAllCommands();
   installDesignProtocol();
 
+  // Codex dynamic browser tools execute in a main-owned, ephemeral Electron
+  // profile. Start its authenticated loopback bridge before the engine child so
+  // the child inherits the endpoint and advertises the browser namespace on
+  // thread/start. Failure is non-fatal: sessions simply omit browser tools.
+  delete process.env.ZEROS_BROWSER_AUTOMATION_URL;
+  delete process.env.ZEROS_BROWSER_AUTOMATION_TOKEN;
+  const browserAutomationReady = startBrowserAutomationServer({
+    artifactRoot: path.join(app.getPath("userData"), "browser-artifacts"),
+    onSessionState: (state) => emitEvent("browser-session-state", state),
+    onConfirmationRequest: (request) =>
+      emitEvent("browser-confirmation-request", request),
+  })
+    .then((handle) => {
+      browserAutomationServer = handle;
+      process.env.ZEROS_BROWSER_AUTOMATION_URL = handle.url;
+      process.env.ZEROS_BROWSER_AUTOMATION_TOKEN = handle.token;
+      console.log("[Zeros] isolated Codex browser host ready");
+    })
+    .catch((error) => {
+      console.warn(
+        `[Zeros] isolated Codex browser host unavailable: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+
+  setCommand("browser_session_attach", async (args) => {
+    const taskId = typeof args.taskId === "string" ? args.taskId : "";
+    const bounds = args.bounds;
+    const target = getMainWindow();
+    if (!target || !isBrowserBounds(bounds)) {
+      return null;
+    }
+    await browserAutomationReady;
+    if (!browserAutomationServer) return null;
+    // Native browser leases are process-owned and disappear on quit, while
+    // workbench tabs and their last URL are durable. Recreate the lease from
+    // that exact persisted URL before attaching instead of demoting the tab to
+    // an iframe (which many public sites intentionally refuse to render in).
+    const restoreUrl =
+      typeof args.restoreUrl === "string" ? args.restoreUrl.trim() : "";
+    return attachOrRestoreBrowserSession(
+      browserAutomationServer,
+      taskId,
+      target,
+      bounds,
+      restoreUrl,
+    );
+  });
+  setCommand("browser_session_detach", (args) => {
+    const taskId = typeof args.taskId === "string" ? args.taskId : "";
+    return browserAutomationServer?.detach(taskId) ?? false;
+  });
+  setCommand("browser_session_control", async (args) => {
+    const taskId = typeof args.taskId === "string" ? args.taskId : "";
+    const tool = args.tool;
+    if (
+      tool !== "open" &&
+      tool !== "back" &&
+      tool !== "forward" &&
+      tool !== "reload"
+    ) {
+      throw new Error("Unsupported browser control action.");
+    }
+    if (!browserAutomationServer) {
+      throw new Error("Browser session is unavailable.");
+    }
+    return browserAutomationServer.control(
+      taskId,
+      tool,
+      typeof args.arguments === "object" && args.arguments !== null
+        ? (args.arguments as Record<string, unknown>)
+        : {},
+    );
+  });
+  setCommand("browser_confirmation_respond", (args) => {
+    const confirmationId =
+      typeof args.confirmationId === "string" ? args.confirmationId : "";
+    const decision = args.decision;
+    if (
+      decision !== "allow-once" &&
+      decision !== "allow-site" &&
+      decision !== "deny"
+    ) {
+      throw new Error("Unsupported browser confirmation decision.");
+    }
+    if (!browserAutomationServer) return false;
+    return browserAutomationServer.respondToConfirmation(
+      confirmationId,
+      decision as BrowserConfirmationDecision,
+    );
+  });
+  setCommand("browser_approval_policy_set", (args) => {
+    if (args.policy !== "ask" && args.policy !== "auto-approve") {
+      throw new Error("Unsupported browser approval policy.");
+    }
+    browserAutomationServer?.setApprovalPolicy(args.policy);
+    return { policy: args.policy };
+  });
+  setCommand("browser_session_policy_update", (args) => {
+    const taskId = typeof args.taskId === "string" ? args.taskId : "";
+    if (args.action !== "clear-site-approvals") {
+      throw new Error("Unsupported browser policy action.");
+    }
+    if (!browserAutomationServer) return { cleared: 0 };
+    return {
+      cleared: browserAutomationServer.clearSiteApprovals(taskId),
+    };
+  });
+  setCommand("browser_developer_cdp_set", (args) => {
+    if (typeof args.enabled !== "boolean") {
+      throw new Error("Developer CDP setting must be boolean.");
+    }
+    browserAutomationServer?.setDeveloperCdpEnabled(args.enabled);
+    return { enabled: args.enabled };
+  });
+  setCommand("browser_provider_set", async (args) => {
+    if (!browserAutomationServer) {
+      throw new Error("Browser session is unavailable.");
+    }
+    const configuration =
+      args.provider === "managed-cloud"
+        ? {
+            provider: "managed-cloud" as const,
+            endpoint: args.endpoint,
+            bearerToken: getSecret(MANAGED_BROWSER_TOKEN_KEY) ?? undefined,
+          }
+        : args;
+    await browserAutomationServer.setProvider(configuration as never);
+    return browserAutomationServer.providerConfiguration();
+  });
+  setCommand("browser_provider_probe", async () => {
+    if (!browserAutomationServer) {
+      throw new Error("Browser session is unavailable.");
+    }
+    return browserAutomationServer.probeProvider();
+  });
+  setCommand("browser_computer_use_request", async () => {
+    if (!browserAutomationServer) {
+      throw new Error("Browser session is unavailable.");
+    }
+    return browserAutomationServer.requestComputerUsePermissions();
+  });
+  setCommand("browser_cloud_token_set", async (args) => {
+    if (typeof args.token !== "string" || !args.token.trim()) {
+      throw new Error("Managed browser token must be non-empty.");
+    }
+    setSecret(MANAGED_BROWSER_TOKEN_KEY, args.token.trim());
+    const current = browserAutomationServer?.providerConfiguration();
+    if (current?.provider === "managed-cloud") {
+      await browserAutomationServer?.setProvider({
+        provider: "managed-cloud",
+        endpoint: current.endpoint,
+        bearerToken: args.token.trim(),
+      });
+    }
+    return { saved: true };
+  });
+  setCommand("browser_cloud_token_has", () => ({
+    present: hasSecret(MANAGED_BROWSER_TOKEN_KEY),
+  }));
+  setCommand("browser_cloud_token_delete", async () => {
+    deleteSecret(MANAGED_BROWSER_TOKEN_KEY);
+    const current = browserAutomationServer?.providerConfiguration();
+    if (current?.provider === "managed-cloud") {
+      await browserAutomationServer?.setProvider({
+        provider: "managed-cloud",
+        endpoint: current.endpoint,
+      });
+    }
+    return { deleted: true };
+  });
+
   // PATH repair and engine startup are critical background work, not a window
   // creation prerequisite. Register a spawn barrier so the child still inherits
   // the repaired PATH, then start the single-flight boot before loading the UI.
@@ -1238,7 +1435,11 @@ app.whenReady().then(async () => {
     emitEvent("github-credential-store-changed", {});
   });
   app.on("will-quit", disposeGithubSessionSync);
-  setEngineSpawnBarrier(githubAuthReady);
+  setEngineSpawnBarrier(
+    Promise.all([githubAuthReady, browserAutomationReady]).then(
+      () => undefined,
+    ),
+  );
   const root = defaultProjectRoot();
   const engineBoot = spawnEngine(root);
 
@@ -1328,6 +1529,8 @@ app.on("window-all-closed", () => {
 // Kill the engine child before exit. `before-quit` fires once, even
 // if multiple windows close, so the shutdown is single-threaded.
 app.on("before-quit", () => {
+  void browserAutomationServer?.stop();
+  browserAutomationServer = null;
   shutdownSidecar();
   // Interactive PTYs are now engine-owned (apps/desktop/src/renderer/platform/pty.ts → engine bridge),
   // and the engine reaps them on its own shutdown (Engine.stop → pty.killAll).

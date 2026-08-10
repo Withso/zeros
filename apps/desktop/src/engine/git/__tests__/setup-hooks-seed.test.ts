@@ -78,6 +78,20 @@ describe("runSetupHooks — file provisioning", () => {
     expect(await readFile(path.join(worktreePath, ".env"), "utf8")).toBe("A=1");
   });
 
+  it("refuses to recursively seed a nested Git checkout", async () => {
+    const nested = path.join(repoRoot, ".claude", "worktrees", "nested");
+    await mkdir(nested, { recursive: true });
+    await writeFile(path.join(nested, ".git"), "gitdir: /outside/common.git\n");
+    await writeFile(path.join(nested, "large-output.bin"), "do not copy");
+
+    await expect(
+      hooks({ seedPaths: [".claude/worktrees/nested"] }),
+    ).resolves.toBeUndefined();
+    expect(
+      existsSync(path.join(worktreePath, ".claude", "worktrees", "nested")),
+    ).toBe(false);
+  });
+
   it("a missing seed source warns and is skipped, never fatal", async () => {
     await writeFile(path.join(repoRoot, ".env"), "A=1");
     await expect(

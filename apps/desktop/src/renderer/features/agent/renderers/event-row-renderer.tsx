@@ -13,9 +13,13 @@
 // has its own EventRow-based record (QuestionRecordCard).
 // ──────────────────────────────────────────────────────────
 
-import { memo } from "react";
+import { memo, useState } from "react";
+import { FolderOpen } from "lucide-react";
 
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
+import { Button } from "@/renderer/shared/ui";
+import { revealInFinder } from "@/renderer/platform/app";
+import { toast } from "@/renderer/shared/ui/primitives/elements";
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
 import { EventRow } from "./event-row";
 import { isImagePath } from "./event-meta";
@@ -23,7 +27,12 @@ import { CodeWithGutter, HighlightedCode } from "./highlighted-code";
 import { parseReadBody } from "./read-lines";
 import { asDisplayString } from "./raw-output";
 import { getLang } from "./syntax";
-import type { Renderer } from "./types";
+import type { Renderer, RendererContext } from "./types";
+import { localArtifactPath } from "./browser-artifact-resource";
+import {
+  guardianDeniedEvent,
+  guardianReviewRationale,
+} from "./guardian-review";
 
 /** Pick a shiki language for a tool's expandable output. We syntax-highlight
  *  ONLY actual code — Read/Edit, by the file's language — because that's where
@@ -56,7 +65,12 @@ function readPathOf(tool: AgentToolMessage): string | null {
   const input = (
     tool.rawInput && typeof tool.rawInput === "object" ? tool.rawInput : {}
   ) as Record<string, unknown>;
-  for (const v of [input.file_path, input.path, input.filePath, input.target_file]) {
+  for (const v of [
+    input.file_path,
+    input.path,
+    input.filePath,
+    input.target_file,
+  ]) {
     if (typeof v === "string" && v) return v;
   }
   return null;
@@ -68,7 +82,11 @@ function readToolText(tool: AgentToolMessage): string | null {
     const parts: string[] = [];
     for (const block of tool.content) {
       const b = block as any;
-      if (b.type === "content" && b.content?.type === "text" && typeof b.content.text === "string") {
+      if (
+        b.type === "content" &&
+        b.content?.type === "text" &&
+        typeof b.content.text === "string"
+      ) {
         parts.push(b.content.text);
       } else if (b.type === "text" && typeof b.text === "string") {
         parts.push(b.text);
@@ -96,16 +114,20 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
     ) {
       return (
         <div
-          className="flex items-center gap-2 py-1 text-sm text-fg1"
+          className="text-fg1 flex items-center gap-2 py-1 text-sm"
           role="status"
           aria-live="polite"
         >
-          <ZerosSpinner size={16} label="Reconnecting agent" className="shrink-0" />
+          <ZerosSpinner
+            size={16}
+            label="Reconnecting agent"
+            className="shrink-0"
+          />
           <span>Reconnecting agent</span>
         </div>
       );
     }
-    const detail = renderDetail(message);
+    const detail = renderDetail(message, ctx);
     return <EventRow message={message} ctx={ctx} detail={detail} />;
   },
 );
@@ -116,9 +138,22 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
  *  User-feedback driven: "max height ~7-8 lines is enough." */
 const DETAIL_MAX_H = "max-h-[200px]";
 
-function renderDetail(message: AgentMessage): React.ReactNode {
+function renderDetail(
+  message: AgentMessage,
+  ctx: RendererContext,
+): React.ReactNode {
   if (message.kind === "tool") {
     const tool = message as AgentToolMessage;
+    const deniedEvent = guardianDeniedEvent(tool.rawOutput);
+    if (deniedEvent) {
+      return (
+        <GuardianDeniedAction
+          event={deniedEvent}
+          rationale={guardianReviewRationale(tool.rawOutput)}
+          onApprove={ctx.approveGuardianDeniedAction}
+        />
+      );
+    }
 
     // READ of a text file → a line-numbered, syntax-highlighted code view with
     // the ACTUAL lines read (e.g. 1222–1280, not 1–60). Image reads fall through
@@ -128,7 +163,11 @@ function renderDetail(message: AgentMessage): React.ReactNode {
       if (text && text.length > 0) {
         const { code, startLine } = parseReadBody(text, tool.rawInput);
         return (
-          <CodeWithGutter code={code} lang={langForTool(tool)} startLine={startLine} />
+          <CodeWithGutter
+            code={code}
+            lang={langForTool(tool)}
+            startLine={startLine}
+          />
         );
       }
     }
@@ -136,6 +175,7 @@ function renderDetail(message: AgentMessage): React.ReactNode {
     if (tool.content && tool.content.length > 0) {
       const texts: string[] = [];
       const images: string[] = [];
+      const resources: Array<{ path: string; name: string }> = [];
       for (const block of tool.content) {
         const b = block as any;
         if (b.type === "content") {
@@ -152,12 +192,28 @@ function renderDetail(message: AgentMessage): React.ReactNode {
           } else if (c?.type === "image" && typeof c.uri === "string") {
             images.push(c.uri);
           } else if (c?.type === "resource_link" && typeof c.uri === "string") {
-            texts.push(`@${c.uri.replace(/^file:\/\//, "")}`);
+            const path = localArtifactPath(c.uri);
+            if (path) {
+              resources.push({
+                path,
+                name:
+                  typeof c.title === "string" && c.title.trim()
+                    ? c.title
+                    : typeof c.name === "string" && c.name.trim()
+                      ? c.name
+                      : "Browser artifact",
+              });
+            } else {
+              texts.push(`@${c.uri.replace(/^file:\/\//, "")}`);
+            }
           } else if (c?.type === "resource" && c.resource) {
             // Embedded resource — show its inline text or a path marker.
-            if (typeof c.resource.text === "string") texts.push(c.resource.text);
+            if (typeof c.resource.text === "string")
+              texts.push(c.resource.text);
             else if (typeof c.resource.uri === "string")
-              texts.push(`@${String(c.resource.uri).replace(/^file:\/\//, "")}`);
+              texts.push(
+                `@${String(c.resource.uri).replace(/^file:\/\//, "")}`,
+              );
           }
         } else if (b.type === "text" && typeof b.text === "string") {
           // Defensive: a FLAT (un-wrapped) text block from a non-conformant
@@ -173,7 +229,7 @@ function renderDetail(message: AgentMessage): React.ReactNode {
         // `terminal` blocks carry no inline text here — the rawOutput
         // fallback below covers shell/terminal output.
       }
-      if (texts.length > 0 || images.length > 0) {
+      if (texts.length > 0 || images.length > 0 || resources.length > 0) {
         return (
           <div className={`${DETAIL_MAX_H} overflow-y-auto`}>
             {images.map((src, i) => (
@@ -181,8 +237,28 @@ function renderDetail(message: AgentMessage): React.ReactNode {
                 key={i}
                 src={src}
                 alt="tool output"
-                className="mb-2 max-h-[320px] max-w-full rounded-md border border-border1"
+                className="border-border1 mb-2 max-h-[320px] max-w-full rounded-md border"
               />
+            ))}
+            {resources.map((resource) => (
+              <button
+                key={resource.path}
+                type="button"
+                className="border-border1 bg-bg2 text-fg2 hover:text-fg1 mb-2 flex max-w-full items-center gap-1.5 rounded-sm border px-2 py-1 text-xs"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void revealInFinder(resource.path).catch((error) => {
+                    toast.error(
+                      error instanceof Error
+                        ? error.message
+                        : "Browser artifact could not be revealed.",
+                    );
+                  });
+                }}
+              >
+                <FolderOpen className="size-3.5 shrink-0" />
+                <span className="truncate">Show {resource.name} in Finder</span>
+              </button>
             ))}
             {texts.length > 0 && (
               <HighlightedCode
@@ -216,25 +292,21 @@ function renderDetail(message: AgentMessage): React.ReactNode {
         <HighlightedCode
           code={JSON.stringify(tool.rawInput, null, 2)}
           lang="json"
-          className={`${DETAIL_MAX_H} overflow-y-auto rounded-md bg-bg2/60 p-2 font-mono text-xs leading-relaxed text-fg1 [&_pre]:whitespace-pre-wrap [&_pre]:break-words`}
+          className={`${DETAIL_MAX_H} bg-bg2/60 text-fg1 overflow-y-auto rounded-md p-2 font-mono text-xs leading-relaxed [&_pre]:break-words [&_pre]:whitespace-pre-wrap`}
         />
       );
     }
     // Last resort: show a stub so the row is still inspectable. Never
     // returns null for a tool — `expandable` in EventRow then drives
     // the +/- affordance off `detail !== undefined`.
-    return (
-      <div className="text-xs italic text-muted-fg">
-        (no captured output)
-      </div>
-    );
+    return <div className="text-fg3 text-xs italic">(no captured output)</div>;
   }
   if (message.kind === "text" && (message as any).role === "thought") {
     const text = (message as any).text as string;
     if (!text) return null;
     return (
       <div
-        className={`${DETAIL_MAX_H} overflow-y-auto whitespace-pre-wrap text-sm leading-relaxed text-fg2`}
+        className={`${DETAIL_MAX_H} text-fg2 overflow-y-auto text-sm leading-relaxed whitespace-pre-wrap`}
       >
         {text}
       </div>
@@ -246,10 +318,56 @@ function renderDetail(message: AgentMessage): React.ReactNode {
     const m = message as { message?: string };
     if (!m.message) return null;
     return (
-      <div className="whitespace-pre-wrap text-sm text-fg2">
-        {m.message}
-      </div>
+      <div className="text-fg2 text-sm whitespace-pre-wrap">{m.message}</div>
     );
   }
   return null;
+}
+
+function GuardianDeniedAction({
+  event,
+  rationale,
+  onApprove,
+}: {
+  event: unknown;
+  rationale: string;
+  onApprove?: (event: unknown) => Promise<void>;
+}) {
+  const [state, setState] = useState<"idle" | "approving" | "approved">(
+    "idle",
+  );
+  return (
+    <div className="border-warning/30 bg-warning/5 flex flex-col gap-2 rounded-md border p-3">
+      <p className="text-fg1 text-sm">{rationale}</p>
+      <div>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={!onApprove || state !== "idle"}
+          onClick={(clickEvent) => {
+            clickEvent.stopPropagation();
+            if (!onApprove || state !== "idle") return;
+            setState("approving");
+            void onApprove(event).then(
+              () => setState("approved"),
+              (error) => {
+                setState("idle");
+                toast.error(
+                  error instanceof Error
+                    ? error.message
+                    : "Guardian retry could not be approved.",
+                );
+              },
+            );
+          }}
+        >
+          {state === "approving"
+            ? "Approving…"
+            : state === "approved"
+              ? "Approved"
+              : "Approve and retry"}
+        </Button>
+      </div>
+    </div>
+  );
 }

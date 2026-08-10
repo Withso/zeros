@@ -19,7 +19,13 @@
 //   - URL bar tracks internal navigation
 //   - ⋯ menu: Hard Reload + Clear Cache + Clear Cookies via IPC
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -27,6 +33,7 @@ import {
   MousePointer2,
   Palette,
   RotateCw,
+  ShieldCheck,
   Globe,
   GitFork,
   X,
@@ -55,7 +62,7 @@ import {
   type PendingChatSubmission,
   type PendingComposerAppend,
 } from "../../../state/store";
-import { useNativeRuntime } from "../../../platform/runtime";
+import { nativeInvoke, useNativeRuntime } from "../../../platform/runtime";
 import {
   BROWSER_DEFAULT_HEIGHT,
   BROWSER_DEFAULT_WIDTH,
@@ -65,7 +72,15 @@ import {
   type WorkbenchTab,
 } from "../tab-model";
 import { Button } from "../../../shared/ui";
-import { isLoopbackUrl, normalizeBrowserUrl } from "./localhost-url";
+import {
+  isLoopbackUrl,
+  normalizeBrowserUrl,
+  resolveBrowserAddressInput,
+} from "./localhost-url";
+import {
+  browserNativeSessionId,
+  shouldUseNativeBrowserSurface,
+} from "./browser-surface-routing";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -77,6 +92,7 @@ import {
 import { toast } from "../../../shared/ui/primitives/elements";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import type { ComposerAttachment } from "@/renderer/features/agent/composer-attachments";
+import { useBrowserSessionAgentPresence } from "@/renderer/features/browser/browser-session-activity-store";
 
 // URL normalization lives in ./localhost-url. Browser navigation accepts
 // ordinary http(s) sites; Design/Canvas are gated separately to loopback URLs.
@@ -93,7 +109,285 @@ interface BrowserTabProps {
   scope?: string;
 }
 
-export function BrowserTab({ tab, active, scope }: BrowserTabProps) {
+export function BrowserTab(props: BrowserTabProps) {
+  return shouldUseNativeBrowserSurface(props.tab) ? (
+    <NativeBrowserTab {...props} />
+  ) : (
+    <IframeBrowserTab {...props} />
+  );
+}
+
+export function browserActivityLabel(tool?: string): string {
+  if (!tool) return "Working";
+  if (tool === "open" || tool === "Page.navigate") return "Navigating";
+  if (tool === "Page.captureScreenshot") return "Capturing screenshot";
+  if (
+    tool === "Runtime.evaluate" ||
+    tool.startsWith("DOM.") ||
+    tool.startsWith("Accessibility.")
+  ) {
+    return "Inspecting page";
+  }
+  if (tool.startsWith("Network.")) return "Inspecting network";
+  if (tool.startsWith("Input.")) return "Interacting";
+  return "Working";
+}
+
+/** Mount the Electron-owned browser used by Codex into this exact rectangle.
+ * The user and agent therefore interact with one WebContents, including its
+ * navigation state, DOM, cookies, and live page. */
+function NativeBrowserTab({ tab, active, scope }: BrowserTabProps) {
+  const dispatch = useWorkspaceDispatch();
+  const taskId = browserNativeSessionId(tab);
+  const agentOwned = Boolean(tab.browserSessionId);
+  const hostRef = useRef<HTMLDivElement>(null);
+  const [address, setAddress] = useState(tab.url ?? "");
+  const [restoring, setRestoring] = useState(false);
+  const [surfaceError, setSurfaceError] = useState<string | null>(null);
+  const presence = useBrowserSessionAgentPresence(taskId);
+  const working = presence.active;
+  const awaitingConfirmation =
+    presence.activity?.status === "awaiting-confirmation";
+  const activity = browserActivityLabel(presence.activity?.tool);
+  const updateTab = useCallback(
+    (updates: Partial<Omit<WorkbenchTab, "id" | "type">>) => {
+      dispatch({ type: "UPDATE_WORKBENCH_TAB", id: tab.id, scope, updates });
+    },
+    [dispatch, scope, tab.id],
+  );
+
+  useEffect(() => setAddress(tab.url ?? ""), [tab.url]);
+
+  useLayoutEffect(() => {
+    const host = hostRef.current;
+    if (!active || !host) {
+      void nativeInvoke("browser_session_detach", { taskId }).catch(() => {});
+      return;
+    }
+    let disposed = false;
+    let frame = 0;
+    let request: Promise<unknown> | null = null;
+    let rerun = false;
+    const attach = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        if (disposed || !host.isConnected) return;
+        const rect = host.getBoundingClientRect();
+        if (rect.width < 1 || rect.height < 1) return;
+        if (request) {
+          rerun = true;
+          return;
+        }
+        setRestoring(true);
+        request = nativeInvoke("browser_session_attach", {
+          taskId,
+          restoreUrl: normalizeBrowserUrl(tab.url ?? "") ?? undefined,
+          bounds: {
+            x: Math.round(rect.left),
+            y: Math.round(rect.top),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+          },
+        })
+          .then((state) => {
+            if (!disposed) {
+              setRestoring(false);
+              setSurfaceError(
+                state ? null : "The native browser session is unavailable.",
+              );
+            }
+          })
+          .catch((error) => {
+            if (!disposed) {
+              setRestoring(false);
+              setSurfaceError(
+                error instanceof Error
+                  ? error.message
+                  : "The native browser session could not be restored.",
+              );
+            }
+          })
+          .finally(() => {
+            request = null;
+            if (!disposed && rerun) {
+              rerun = false;
+              attach();
+            }
+          });
+      });
+    };
+    const observer = new ResizeObserver(attach);
+    observer.observe(host);
+    window.addEventListener("resize", attach);
+    window.addEventListener("scroll", attach, true);
+    attach();
+    return () => {
+      disposed = true;
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener("resize", attach);
+      window.removeEventListener("scroll", attach, true);
+      void nativeInvoke("browser_session_detach", { taskId }).catch(() => {});
+    };
+  }, [active, tab.url, taskId]);
+
+  const control = useCallback(
+    async (
+      tool: "open" | "back" | "forward" | "reload",
+      args?: Record<string, unknown>,
+    ) => {
+      try {
+        const result = (await nativeInvoke("browser_session_control", {
+          taskId,
+          tool,
+          arguments: args ?? {},
+        })) as {
+          success?: boolean;
+          contentItems?: Array<{ type?: string; text?: string }>;
+        };
+        if (result?.success === false) {
+          const message = result.contentItems?.find(
+            (item) => item.type === "inputText" && item.text,
+          )?.text;
+          throw new Error(message || "Browser action failed.");
+        }
+        if (tool === "open" && typeof args?.url === "string") {
+          updateTab({ url: args.url, title: new URL(args.url).hostname });
+        }
+        setSurfaceError(null);
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : "Browser action failed.",
+        );
+      }
+    },
+    [taskId, updateTab],
+  );
+
+  const navigate = useCallback(() => {
+    const url = resolveBrowserAddressInput(address);
+    if (!url) {
+      toast.error("Enter a valid web address or search.");
+      return;
+    }
+    setAddress(url);
+    void control("open", { url });
+  }, [address, control]);
+
+  const clearSiteApprovals = useCallback(async () => {
+    try {
+      const result = await nativeInvoke<{ cleared?: number }>(
+        "browser_session_policy_update",
+        { taskId, action: "clear-site-approvals" },
+      );
+      const cleared = Number(result?.cleared ?? 0);
+      toast.success(
+        cleared > 0
+          ? `Cleared ${cleared} browser site approval${cleared === 1 ? "" : "s"}.`
+          : "No browser site approvals were active.",
+      );
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Browser approvals could not be cleared.",
+      );
+    }
+  }, [taskId]);
+
+  return (
+    <div className="bg-bg1 flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div className="border-border1 bg-bg1 flex h-10 shrink-0 items-center gap-1 border-b px-1.5">
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Back"
+          onClick={() => void control("back")}
+        >
+          <ChevronLeft className="size-4" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Forward"
+          onClick={() => void control("forward")}
+        >
+          <ChevronRight className="size-4" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Reload"
+          onClick={() => void control("reload")}
+        >
+          <RotateCw className="size-4" />
+        </Button>
+        <form
+          className="min-w-0 flex-1"
+          onSubmit={(event) => {
+            event.preventDefault();
+            navigate();
+          }}
+        >
+          <input
+            aria-label="Browser address"
+            value={address}
+            onChange={(event) => setAddress(event.target.value)}
+            className="border-border1 bg-bg2 text-fg1 focus:border-border2 h-7 w-full rounded-sm border px-2 text-xs outline-none"
+            spellCheck={false}
+          />
+        </form>
+        {agentOwned ? (
+          <Tooltip label="Clear this task's browser site approvals">
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Clear browser site approvals"
+              onClick={() => void clearSiteApprovals()}
+            >
+              <ShieldCheck className="size-4" />
+            </Button>
+          </Tooltip>
+        ) : null}
+        <div
+          className="text-fg2 flex min-w-[112px] items-center justify-end gap-1.5 px-1 text-[11px]"
+          aria-live="polite"
+          title={working ? `Agent controlling — ${activity}` : undefined}
+        >
+          {working ? (
+            <ZerosSpinner size={12} label="Agent using browser" />
+          ) : null}
+          <span>
+            {awaitingConfirmation
+              ? "Approval required"
+              : working
+                ? `Agent controlling · ${activity}`
+                : agentOwned
+                  ? "Shared browser"
+                  : restoring
+                    ? "Restoring browser"
+                    : "Browser"}
+          </span>
+        </div>
+      </div>
+      <div
+        ref={hostRef}
+        className="bg-bg1 relative min-h-0 flex-1"
+        aria-label={
+          agentOwned ? "Shared agent browser content" : "Browser content"
+        }
+      >
+        {surfaceError ? (
+          <div className="text-fg2 absolute inset-0 flex items-center justify-center p-8 text-center text-sm">
+            {surfaceError}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   const dispatch = useWorkspaceDispatch();
   const updateTab = useCallback(
     (updates: Partial<Omit<WorkbenchTab, "id" | "type">>) => {
@@ -210,7 +504,14 @@ export function BrowserTab({ tab, active, scope }: BrowserTabProps) {
   // tab strip label updates and a reload restores the right URL.
   useEffect(() => {
     const url = webview.state.currentUrl;
-    if (!webview.state.isLoading && url && url !== tab.url) {
+    // Public URLs switch to the native WebContentsView immediately. Waiting
+    // for an iframe load event leaves frame-blocking sites permanently white
+    // and never gives BrowserTab a chance to choose the reliable surface.
+    if (
+      url &&
+      url !== tab.url &&
+      (!webview.state.isLoading || !isLoopbackUrl(url))
+    ) {
       updateTab({ url });
     }
   }, [webview.state.currentUrl, webview.state.isLoading, tab.url, updateTab]);
@@ -951,9 +1252,9 @@ function BrowserChrome({
   const handleSubmit = useCallback(
     (e: React.FormEvent<HTMLFormElement>) => {
       e.preventDefault();
-      const url = normalizeBrowserUrl(address);
+      const url = resolveBrowserAddressInput(address);
       if (!url) {
-        toast.error("Enter a valid http(s) URL");
+        toast.error("Enter a search or valid http(s) URL");
         return;
       }
       setAddress(url);
@@ -1007,7 +1308,7 @@ function BrowserChrome({
         </Button>
       </Tooltip>
 
-      {/* URL omnibox — accepts canonical or scheme-less http(s) addresses. */}
+      {/* URL omnibox — accepts addresses or a Google search query. */}
       <form onSubmit={handleSubmit} className="min-w-0 flex-1">
         <div
           className={[
@@ -1037,7 +1338,7 @@ function BrowserChrome({
               setFocused(false);
               setAddress(state.currentUrl);
             }}
-            placeholder={electron ? "Enter URL" : "Mac app only"}
+            placeholder={electron ? "Search or enter URL" : "Mac app only"}
             disabled={!electron}
             spellCheck={false}
             autoCorrect="off"
@@ -1596,7 +1897,7 @@ function EmptyState({ onNavigate }: { onNavigate: (url: string) => void }) {
       <Globe className="text-fg2 size-7" />
       <p className="text-fg2 m-0 text-sm">Open a site or preview your app</p>
       <p className="text-fg2 m-0 max-w-[420px] text-xs leading-[1.55]">
-        Enter any http(s) URL in the address bar. Design and Canvas tools appear
+        Search or enter any http(s) URL. Design and Canvas tools appear
         automatically for locally running sites.
       </p>
       <div className="mt-1 flex flex-wrap items-center justify-center gap-1.5">

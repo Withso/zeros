@@ -50,6 +50,7 @@ describe("experimental feature flags", () => {
     const store = await freshStore();
     expect(store.isExperimentalEnabled("terminalAgents")).toBe(true);
     expect(store.isExperimentalEnabled("workInLocalMain")).toBe(false);
+    expect(store.isExperimentalEnabled("developerBrowserCdp")).toBe(false);
   });
 
   it("flips one flag without disturbing the others", async () => {

@@ -67,7 +67,7 @@ vi.mock("../app-server", () => ({
   })),
 }));
 
-vi.mock("../../session-paths", () => ({
+vi.mock("../../../session-paths", () => ({
   ensureSessionDir: vi.fn(async () => ({
     root: "/tmp/s",
     env: "/tmp/s/env",

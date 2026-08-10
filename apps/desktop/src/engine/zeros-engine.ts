@@ -15,7 +15,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { EngineCache } from "./cache";
 import { CSSResolver } from "./css-resolver";
 import { CSSFileWriter } from "./css-writer";
@@ -31,6 +31,7 @@ import {
   engineBasePort,
   ENGINE_PORT_SPAN,
   isDevRuntime,
+  shouldUsePollingFileWatchers,
 } from "./runtime";
 import { engineRuntimeDir, zerosDataDir } from "./db/paths";
 import {
@@ -59,6 +60,17 @@ import {
   disposePtyHost,
 } from "./pty/node-pty-spawn";
 import { disposeCursorHost } from "./agents/adapters/cursor-sdk/host/host-client";
+import { resolveCodexBinary } from "./agents/adapters/codex/binary-resolver";
+import { CodexSdkJobManager } from "./agents/adapters/codex/sdk-jobs";
+import {
+  CodexJobBridge,
+  isCodexJobRequest,
+} from "./agents/adapters/codex/codex-job-bridge";
+import {
+  CodexCapabilityBridge,
+  isCodexCapabilityRequest,
+  type CodexCapabilityInvocation,
+} from "./agents/adapters/codex/codex-capability-bridge";
 import { getLoginShellPath } from "./agents/adapters/shared/login-shell-path";
 import { TerminalRegistry } from "./pty/registry";
 import {
@@ -107,6 +119,9 @@ import {
 import { canonicalResourceUri } from "./agents/gateway/oauth-url";
 import { resolveClaudeBinary } from "./agents/claude-binary";
 import { AgentFailureError, type AgentGatewayOptions } from "./agents/types";
+import { projectNativeThreadEvent } from "./agents/native-thread-lifecycle";
+import { nativeThreadActionsForChatMutation } from "./agents/native-thread-actions";
+import { forkCodexChat } from "./agents/codex-thread-fork";
 import {
   detectFramework,
   findProjectRoot,
@@ -147,7 +162,7 @@ import {
   clearTurnSnapshots,
   type TurnFile,
 } from "./db/turns";
-import { getChatLocation } from "./db/chats";
+import { getChat, getChatLocation, upsertChat, type ChatRow } from "./db/chats";
 import {
   authoredPathsFromMessages,
   deleteSnapshotRefs,
@@ -526,6 +541,17 @@ export class ZerosEngine {
   // Native per-CLI adapter runtime — multiplexes the per-agent
   // adapter implementations behind a single gateway surface.
   private agents: AgentGateway;
+  /** Lazily constructed because interactive app-server chat must not pay the
+   * SDK startup/import path. Headless jobs require the pinned absolute runtime;
+   * PATH fallback is deliberately rejected. */
+  private codexJobManager: CodexSdkJobManager | null = null;
+  private codexJobManagerPromise: Promise<CodexSdkJobManager> | null = null;
+  private readonly codexJobBridge = new CodexJobBridge(() =>
+    this.getCodexJobManager(),
+  );
+  private readonly codexCapabilityBridge = new CodexCapabilityBridge(
+    (request) => this.handleCodexCapability(request),
+  );
 
   private root: string;
   private port: number;
@@ -1063,6 +1089,51 @@ export class ZerosEngine {
           );
           // Persist the transcript as it streams; the engine is the source.
           this.persistSessionUpdate(sessionId, notification);
+        },
+        onNativeThreadEvent: (agentId, event) => {
+          const chatId = this.sessionChat.get(event.sessionId);
+          if (!chatId) return;
+          try {
+            const projection = projectNativeThreadEvent(chatId, event);
+            if (projection === "updated" || projection === "deleted") {
+              this.router.broadcast(
+                createMessage({
+                  type: "DB_CHANGED",
+                  source: "engine",
+                  kinds: ["chats"],
+                }),
+              );
+            }
+            if (projection === "deleted") {
+              this.router.clearOwner(event.sessionId);
+              this.sessionAgent.delete(event.sessionId);
+              this.sessionChat.delete(event.sessionId);
+              this.sessionWorkspace.delete(event.sessionId);
+              this.sessionMessages.delete(event.sessionId);
+              this.sessionLoadResponses.delete(event.sessionId);
+              this.clearPendingAgentInteractions(event.sessionId);
+            } else if (projection === "closed") {
+              // Keep the durable chat row: a closed native thread remains
+              // resumable. The scoped exit moves only this chat out of its
+              // live state; the next send/load performs thread/resume.
+              this.routeSessionScoped(
+                event.sessionId,
+                createMessage({
+                  type: "AGENT_AGENT_EXITED",
+                  source: "engine",
+                  agentId,
+                  sessionId: event.sessionId,
+                  code: 0,
+                  signal: null,
+                }),
+              );
+            }
+          } catch (error) {
+            console.error(
+              `[agents] failed to project native thread event ${event.event}:`,
+              error,
+            );
+          }
         },
         onPermissionRequest: (
           agentId: string,
@@ -1715,7 +1786,7 @@ export class ZerosEngine {
       // the watcher already coalesces changes. A 1.5s interval keeps packaged
       // idle CPU bounded while retaining prompt external-edit invalidation.
       {
-        usePolling: !isDevRuntime(),
+        usePolling: shouldUsePollingFileWatchers(),
         worktreePollIntervalMs: 1_500,
       },
     );
@@ -1744,6 +1815,8 @@ export class ZerosEngine {
   async stop(): Promise<void> {
     if (!this.running) return;
     this.running = false;
+
+    this.codexJobManager?.cancelAll();
 
     if (this.bindingSweep) {
       clearInterval(this.bindingSweep);
@@ -2052,6 +2125,14 @@ export class ZerosEngine {
       await this.handleAgentMessage(msg, client);
       return;
     }
+    if (isCodexJobRequest(msg)) {
+      await this.codexJobBridge.handle(msg, client);
+      return;
+    }
+    if (isCodexCapabilityRequest(msg)) {
+      await this.codexCapabilityBridge.handle(msg, client);
+      return;
+    }
     switch (msg.type) {
       case "CONNECTED": {
         // Version negotiation. A remote client may lag the engine after a
@@ -2164,6 +2245,27 @@ export class ZerosEngine {
       default:
         break;
     }
+  }
+
+  private getCodexJobManager(): Promise<CodexSdkJobManager> {
+    if (this.codexJobManager) return Promise.resolve(this.codexJobManager);
+    if (this.codexJobManagerPromise) return this.codexJobManagerPromise;
+
+    this.codexJobManagerPromise = (async () => {
+      const resolved = await resolveCodexBinary();
+      if (resolved.source === "fallback" || !path.isAbsolute(resolved.path)) {
+        throw new Error(
+          "Headless Codex jobs require the pinned packaged Codex runtime.",
+        );
+      }
+      const manager = new CodexSdkJobManager({ codexPath: resolved.path });
+      this.codexJobManager = manager;
+      return manager;
+    })().catch((error) => {
+      this.codexJobManagerPromise = null;
+      throw error;
+    });
+    return this.codexJobManagerPromise;
   }
 
   /** Resolve an agent's on-disk CLI binary for the embedded terminal. LOCAL
@@ -3027,6 +3129,30 @@ export class ZerosEngine {
             loadOpts.workspaceId,
             loadOpts.cwd,
           );
+          // A relay may resume only the exact provider thread already bound to
+          // an engine-owned chat row. Without this check, separating the public
+          // Zeros session id from Codex's native thread id would let an
+          // untrusted client name an arbitrary native rollout while satisfying
+          // only the workspace clamp. Local desktop remains the machine owner.
+          if (client.kind !== "local") {
+            const persistedChat = msg.chatId ? getChat(msg.chatId) : null;
+            const persistedNativeId =
+              persistedChat?.nativeSessionId ?? persistedChat?.sessionId;
+            const requestedNativeId = msg.nativeSessionId ?? msg.sessionId;
+            if (
+              !persistedChat ||
+              persistedChat.sessionId !== msg.sessionId ||
+              !persistedNativeId ||
+              persistedNativeId !== requestedNativeId
+            ) {
+              throw new AgentFailureError({
+                kind: "protocol-error",
+                message:
+                  "The requested native Codex thread is not bound to this chat.",
+                stage: "loadSession",
+              });
+            }
+          }
           this.router.setOwner(msg.sessionId, client.id);
           this.sessionAgent.set(msg.sessionId, msg.agentId);
           if (msg.chatId) this.sessionChat.set(msg.sessionId, msg.chatId);
@@ -3040,6 +3166,7 @@ export class ZerosEngine {
                 msg.agentId,
                 msg.sessionId,
                 {
+                  nativeSessionId: msg.nativeSessionId,
                   cwd: loadOpts.cwd,
                   env: loadOpts.env,
                   workspaceId: loadOpts.workspaceId,
@@ -3798,6 +3925,94 @@ export class ZerosEngine {
     this.messagesChangedTimer.unref?.();
   }
 
+  private nativeChatsBeforeMutation(
+    op: string,
+    params: Record<string, unknown>,
+  ): Map<string, ChatRow> {
+    const ids: string[] = [];
+    if (op === "chats.delete" && typeof params.id === "string") {
+      ids.push(params.id);
+    } else if (op === "chats.upsert") {
+      const id = (params.chat as { id?: unknown } | undefined)?.id;
+      if (typeof id === "string") ids.push(id);
+    } else if (op === "chats.bulkUpsert" && Array.isArray(params.chats)) {
+      for (const raw of params.chats) {
+        const id = (raw as { id?: unknown } | null)?.id;
+        if (typeof id === "string") ids.push(id);
+      }
+    }
+    const rows = new Map<string, ChatRow>();
+    for (const id of new Set(ids)) {
+      const row = getChat(id);
+      if (row) rows.set(id, row);
+    }
+    return rows;
+  }
+
+  private async syncNativeThreadMutations(
+    beforeRows: Map<string, ChatRow>,
+  ): Promise<void> {
+    for (const [chatId, before] of beforeRows) {
+      const actions = nativeThreadActionsForChatMutation(
+        before,
+        getChat(chatId),
+      );
+      for (const action of actions) {
+        try {
+          await this.agents.updateNativeThread(before.agentId ?? "", action);
+        } catch (error) {
+          console.error(
+            `[agents] native thread ${action.action} failed for chat ${chatId}:`,
+            error,
+          );
+        }
+      }
+    }
+  }
+
+  private async handleCodexCapability(
+    request: CodexCapabilityInvocation,
+  ): Promise<unknown> {
+    if (request.operation !== "thread.fork") {
+      return this.agents.callCodexCapability(request);
+    }
+    const sessionId = request.sessionId ?? "";
+    const result = await forkCodexChat(
+      sessionId,
+      request.cwd,
+      request.params,
+      {
+        getSourceChat: (candidateSessionId) => {
+          const chatId = this.sessionChat.get(candidateSessionId);
+          return chatId ? getChat(chatId) : null;
+        },
+        invoke: (params) =>
+          this.agents.callCodexCapability({
+            ...request,
+            params,
+          }),
+        persist: (chat) => upsertChat(chat),
+        rollbackNative: (nativeThreadId, forkSessionId, cwd) =>
+          this.agents.updateNativeThread("codex", {
+            sessionId: forkSessionId,
+            nativeThreadId,
+            cwd,
+            action: "delete",
+          }),
+        createId: randomUUID,
+        now: Date.now,
+      },
+    );
+    this.router.broadcast(
+      createMessage({
+        type: "DB_CHANGED",
+        source: "engine",
+        kinds: ["chats"],
+      }),
+    );
+    return result;
+  }
+
   // ── Remote Workspace API ───────────────────────────────
 
   /** Dispatch a WORKSPACE_REQUEST (files / git read+write) to the workspace
@@ -3862,6 +4077,7 @@ export class ZerosEngine {
       // begins. This closes the cross-window stage/write/rebase-vs-archive gap.
       const lifecycleMutationWorkspaceId =
         this.workspace.lifecycleMutationWorkspaceId(op, params);
+      const nativeChatsBefore = this.nativeChatsBeforeMutation(op, params);
       const startedAt = Date.now();
       const operation = this.workspace.handle(op, params, {
         remote: client.kind !== "local",
@@ -3872,6 +4088,12 @@ export class ZerosEngine {
             operation,
           )
         : await operation;
+      // Mirror user-facing chat lifecycle metadata to Codex's native thread
+      // store. Native notifications bypass this workspace path, so their DB
+      // projection cannot echo back into duplicate RPCs.
+      if (nativeChatsBefore.size > 0) {
+        void this.syncNativeThreadMutations(nativeChatsBefore);
+      }
       // Leave evidence for the slow ones. Workspace ops log NOTHING today (the
       // error line below is gated on isWriteOp), so a save that outlived its
       // RPC budget left main.log with no trace it was ever dispatched — the

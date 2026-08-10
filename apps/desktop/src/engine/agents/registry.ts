@@ -391,9 +391,9 @@ function readClaudeBundledCliVersion(): string | null {
 function readCodexBundledVersion(): string | null {
   if (cachedCodexVersion !== undefined) return cachedCodexVersion;
   cachedCodexVersion = null;
-  // Packaged-first ordering matches Claude: sidecar.ts reads the version file
-  // written by stage-codex-cli.mjs and passes it through this env var because
-  // require.resolve is unavailable in the Bun-compiled engine.
+  // Same packaged-first ordering as Claude above: require.resolve is dead in the
+  // bun-compiled engine, so Electron main forwards the version written by
+  // scripts/stage-codex-cli.mjs beside the staged native runtime.
   const fromEnv = process.env.ZEROS_CODEX_CLI_VERSION?.trim();
   if (fromEnv) {
     cachedCodexVersion = fromEnv;

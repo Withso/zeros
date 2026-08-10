@@ -93,6 +93,7 @@ import { resolveBridgeWorkspaceIdForCwd } from "../../platform/bridge/workspace-
 import { synthesizeReplayPrompt } from "./replay";
 import { activeProviderTurnId } from "./turn-grouping";
 import { ActionsCtx, type SessionsActions } from "./sessions-context";
+import { mergeNativeThreadMetadata } from "./native-thread-metadata";
 import {
   bumpCancelGeneration,
   cancelGeneration,
@@ -1356,6 +1357,7 @@ export function AgentSessionsProvider({
               status: "warming",
               durableSessionId: resp.session.sessionId,
               sessionId: resp.session.sessionId,
+              nativeSessionId: resp.session.nativeSessionId ?? null,
               session: resp.session,
               initialize: resp.initialize,
               availableModes: resp.session.modes?.availableModes ?? [],
@@ -3480,6 +3482,7 @@ export function AgentSessionsProvider({
         agentName: options?.agentName ?? agentId,
         durableSessionId: sessionId,
         sessionId,
+        nativeSessionId: options?.nativeSessionId ?? null,
         cwd: resolvedCwd,
         status: "warming",
         transcriptState: existing?.transcriptState ?? BLANK.transcriptState,
@@ -3529,6 +3532,7 @@ export function AgentSessionsProvider({
             agentId,
             chatId, // Bind the resumed session to its chat for persistence.
             sessionId,
+            nativeSessionId: options?.nativeSessionId,
             cwd: resolvedCwd ?? undefined,
             workspaceId: resumeWorkspaceId ?? undefined,
             env: mergedEnv,
@@ -3568,6 +3572,8 @@ export function AgentSessionsProvider({
           status: "warming",
           durableSessionId: replacementSessionId ?? resp.sessionId,
           sessionId: resp.sessionId,
+          nativeSessionId:
+            resp.response.nativeSessionId ?? options?.nativeSessionId ?? null,
           availableModes: resp.response.modes?.availableModes ?? [],
           currentModeId: resp.response.modes?.currentModeId ?? null,
           error: null,
@@ -3580,6 +3586,19 @@ export function AgentSessionsProvider({
           // this resumed session was actually loaded with.
           appliedChatEnvKey: chatEnvDriftKey(options?.env),
         });
+        if (resp.response.nativeThreadMetadata) {
+          const workspace = useWorkspaceStore.getState();
+          const chat = workspace.chats.find((candidate) => candidate.id === chatId);
+          if (chat) {
+            const reconciled = mergeNativeThreadMetadata(
+              chat,
+              resp.response.nativeThreadMetadata,
+            );
+            if (reconciled !== chat) {
+              workspace.dispatch({ type: "MERGE_CHATS", chats: [reconciled] });
+            }
+          }
+        }
         // Re-attach prompt telemetry correlation for a still-running turn so
         // permission/finish events after reload keep the original prompt_id.
         if (resp.promptActive === true && resp.promptId) {

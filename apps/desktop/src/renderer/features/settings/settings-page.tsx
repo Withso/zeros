@@ -62,6 +62,7 @@ import {
   FlaskConical,
   CircleUser,
   CircleCheck,
+  Orbit,
   LogOut,
   Lock,
   UsersRound,
@@ -94,6 +95,15 @@ import { ProvidersPanel } from "./providers-panel";
 import { TerminalAgentsSection } from "./terminal-agents-section";
 import { GitDefaultsSection } from "./git-defaults-section";
 import { useExperimentalFeature } from "./experimental-features";
+import { nativeInvoke } from "../../platform/runtime";
+import {
+  applyBrowserProviderSettings,
+  browserProviderForSelection,
+  browserProviderWithEndpoint,
+  useBrowserApprovalPolicy,
+  useBrowserProviderSettings,
+  type BrowserProviderSettings,
+} from "../browser/browser-provider-settings";
 import { useInternalFeature, useIsInternalUser } from "./internal-features";
 import {
   UserEnvironmentPanel,
@@ -160,12 +170,14 @@ import {
 } from "../agent/reliability-settings";
 import { AgentIcon } from "../agent/agent-icon";
 import { useDefaultAgent, pickDefaultAgentId } from "./default-agent";
+import { CodexPlatformPanel } from "./codex-platform-panel";
 
 type SectionId =
   | "general"
   | "appearance"
   | "models"
   | "providers"
+  | "codex"
   | "terminal-agents"
   | "environment"
   | "git"
@@ -222,6 +234,12 @@ const SECTIONS: SectionDef[] = [
     label: "Agents",
     icon: Astroid,
     Panel: ProvidersPanel,
+  },
+  {
+    id: "codex",
+    label: "Codex platform",
+    icon: Orbit,
+    Panel: CodexPlatformPanel,
   },
   // Gated by the `terminalAgents` experimental flag — hidden from the
   // sidebar (and not resolvable as an active section) until the user
@@ -315,7 +333,10 @@ const SECTION_GROUPS: Array<{ label: string; ids: SectionId[] }> = [
       "internal",
     ],
   },
-  { label: "Agents", ids: ["models", "providers", "terminal-agents"] },
+  {
+    label: "Agents",
+    ids: ["models", "providers", "codex", "terminal-agents"],
+  },
   { label: "Workspace", ids: ["environment", "git"] },
   { label: "Administration", ids: ["team", "members"] },
 ];
@@ -1485,6 +1506,149 @@ function ExperimentalPanel() {
     useExperimentalFeature("terminalAgents");
   const [workInLocalMain, setWorkInLocalMain] =
     useExperimentalFeature("workInLocalMain");
+  const [developerBrowserCdp, setDeveloperBrowserCdp] = useExperimentalFeature(
+    "developerBrowserCdp",
+  );
+  const [browserProvider, setBrowserProvider] = useBrowserProviderSettings();
+  const [browserApprovalPolicy, setBrowserApprovalPolicy] =
+    useBrowserApprovalPolicy();
+  const [browserEndpointDraft, setBrowserEndpointDraft] = useState(
+    browserProvider.provider === "shared-chrome" || browserProvider.provider === "managed-cloud"
+      ? browserProvider.endpoint
+      : "",
+  );
+  const [browserProbe, setBrowserProbe] = useState<
+    { state: "idle" | "checking" | "ready" | "error"; message: string }
+  >({ state: "idle", message: "" });
+  const [cloudBrowserToken, setCloudBrowserToken] = useState("");
+  const [cloudBrowserTokenPresent, setCloudBrowserTokenPresent] =
+    useState(false);
+  useEffect(() => {
+    setBrowserEndpointDraft(
+      browserProvider.provider === "shared-chrome" || browserProvider.provider === "managed-cloud"
+        ? browserProvider.endpoint
+        : "",
+    );
+  }, [browserProvider]);
+  useEffect(() => {
+    if (browserProvider.provider !== "managed-cloud") return;
+    void nativeInvoke<{ present?: boolean }>("browser_cloud_token_has", {}).then(
+      (result) => setCloudBrowserTokenPresent(result.present === true),
+      () => setCloudBrowserTokenPresent(false),
+    );
+  }, [browserProvider.provider]);
+  const showBrowserProbe = (
+    result: Record<string, unknown>,
+    provider: BrowserProviderSettings = browserProvider,
+  ) => {
+    if (provider.provider === "system-computer-use") {
+      const supported = result.supported === true;
+      const accessibility = result.accessibility === true;
+      const screenRecording = result.screenRecording === true;
+      setBrowserProbe({
+        state:
+          supported && accessibility && screenRecording ? "ready" : "error",
+        message: supported
+          ? `Accessibility: ${accessibility ? "granted" : "required"} · Screen Recording: ${screenRecording ? "granted" : "required"}`
+          : "System Computer Use requires macOS",
+      });
+      return;
+    }
+    if (provider.provider === "shared-chrome") {
+      setBrowserProbe({
+        state: "ready",
+        message: `Connected · ${typeof result.pages === "number" ? result.pages : 0} open tabs`,
+      });
+      return;
+    }
+    if (provider.provider === "managed-cloud") {
+      setBrowserProbe({ state: "ready", message: "Cloud browser connected" });
+      return;
+    }
+    setBrowserProbe({ state: "ready", message: "Isolated browser is ready" });
+  };
+  const applyBrowserProvider = async (next: BrowserProviderSettings) => {
+    setBrowserProbe({ state: "checking", message: "Applying…" });
+    try {
+      await applyBrowserProviderSettings(
+        next,
+        (settings) => nativeInvoke("browser_provider_set", settings),
+        setBrowserProvider,
+      );
+      const result = (await nativeInvoke(
+        "browser_provider_probe",
+        {},
+      )) as Record<string, unknown>;
+      showBrowserProbe(result, next);
+    } catch (error) {
+      setBrowserProbe({
+        state: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+  const applyBrowserEndpoint = async () => {
+    try {
+      await applyBrowserProvider(
+        browserProviderWithEndpoint(browserProvider, browserEndpointDraft),
+      );
+    } catch (error) {
+      setBrowserProbe({
+        state: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+  const saveCloudBrowserToken = async () => {
+    if (!cloudBrowserToken.trim()) return;
+    setBrowserProbe({ state: "checking", message: "Saving encrypted token…" });
+    try {
+      await nativeInvoke("browser_cloud_token_set", {
+        token: cloudBrowserToken.trim(),
+      });
+      setCloudBrowserToken("");
+      setCloudBrowserTokenPresent(true);
+      await applyBrowserProvider(browserProvider);
+    } catch (error) {
+      setBrowserProbe({
+        state: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+  const probeBrowserProvider = async () => {
+    setBrowserProbe({ state: "checking", message: "Checking…" });
+    try {
+      const result = (await nativeInvoke(
+        "browser_provider_probe",
+        {},
+      )) as Record<string, unknown>;
+      showBrowserProbe(result);
+    } catch (error) {
+      setBrowserProbe({
+        state: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+  const requestComputerUsePermissions = async () => {
+    setBrowserProbe({
+      state: "checking",
+      message: "Requesting macOS permissions…",
+    });
+    try {
+      const result = (await nativeInvoke(
+        "browser_computer_use_request",
+        {},
+      )) as Record<string, unknown>;
+      showBrowserProbe(result);
+    } catch (error) {
+      setBrowserProbe({
+        state: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
   return (
     <div className="flex flex-col gap-6">
       <p className={HINT_CLS}>
@@ -1511,6 +1675,159 @@ function ExperimentalPanel() {
             onCheckedChange={setWorkInLocalMain}
             aria-label="Show the main workspace in the top bar"
           />
+        </SettingsRow>
+        <SettingsRow
+          label="Developer browser CDP"
+          hint="Allows raw Chrome DevTools Protocol commands in isolated agent browsers. These commands follow the app-wide Browser approvals policy below."
+        >
+          <Switch
+            checked={developerBrowserCdp}
+            onCheckedChange={setDeveloperBrowserCdp}
+            aria-label="Allow developer browser CDP commands"
+          />
+        </SettingsRow>
+        <SettingsRow
+          label="Agent browser"
+          hint="Isolated is the safest default. Shared Chrome and managed cloud use dedicated CDP targets. System Computer Use controls the visible Mac only after explicit macOS permission and per-action confirmation."
+        >
+          <div className="flex min-w-[280px] flex-col items-end gap-2">
+            <Select
+              value={browserProvider.provider}
+              onValueChange={(value) => void applyBrowserProvider(browserProviderForSelection(value))}
+            >
+              <SelectTrigger className="min-w-[180px]" aria-label="Agent browser provider">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="isolated">Isolated in-app browser</SelectItem>
+                <SelectItem value="shared-chrome">Shared Chrome (local)</SelectItem>
+                <SelectItem value="managed-cloud">Managed cloud browser</SelectItem>
+                <SelectItem value="system-computer-use">
+                  System Computer Use (macOS)
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            {browserProvider.provider === "shared-chrome" ? (
+              <Input
+                className="w-[280px]"
+                aria-label="Shared Chrome DevTools endpoint"
+                value={browserEndpointDraft}
+                onChange={(event) => setBrowserEndpointDraft(event.target.value)}
+                placeholder="http://127.0.0.1:9222"
+              />
+            ) : null}
+            {browserProvider.provider === "managed-cloud" ? (
+              <>
+                <Input
+                  className="w-[280px]"
+                  aria-label="Managed cloud browser endpoint"
+                  value={browserEndpointDraft}
+                  onChange={(event) => setBrowserEndpointDraft(event.target.value)}
+                  placeholder="https://provider.example.com/cdp"
+                />
+                <div className="flex w-[280px] gap-2">
+                  <Input
+                    type="password"
+                    aria-label="Managed cloud browser token"
+                    value={cloudBrowserToken}
+                    onChange={(event) => setCloudBrowserToken(event.target.value)}
+                    placeholder={
+                      cloudBrowserTokenPresent
+                        ? "Encrypted token saved"
+                        : "Bearer token"
+                    }
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={!cloudBrowserToken.trim()}
+                    onClick={() => void saveCloudBrowserToken()}
+                  >
+                    Save
+                  </Button>
+                  {cloudBrowserTokenPresent ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() =>
+                        void nativeInvoke("browser_cloud_token_delete", {}).then(
+                          () => setCloudBrowserTokenPresent(false),
+                        )
+                      }
+                    >
+                      Remove
+                    </Button>
+                  ) : null}
+                </div>
+              </>
+            ) : null}
+            {(browserProvider.provider === "shared-chrome" || browserProvider.provider === "managed-cloud") && browserEndpointDraft.trim() !== browserProvider.endpoint ? (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={!browserEndpointDraft.trim() || browserProbe.state === "checking"}
+                onClick={() => void applyBrowserEndpoint()}
+              >
+                Apply endpoint
+              </Button>
+            ) : null}
+            {browserProvider.provider === "system-computer-use" ? (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={browserProbe.state === "checking"}
+                onClick={() => void requestComputerUsePermissions()}
+              >
+                Request macOS permissions
+              </Button>
+            ) : null}
+            <div className="flex items-center gap-2">
+              {browserProbe.message ? (
+                <span
+                  className={cn(
+                    "max-w-[260px] text-right text-xs",
+                    browserProbe.state === "error" ? "text-danger" : "text-fg2",
+                  )}
+                >
+                  {browserProbe.message}
+                </span>
+              ) : null}
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={browserProbe.state === "checking"}
+                onClick={() => void probeBrowserProvider()}
+              >
+                Test connection
+              </Button>
+            </div>
+          </div>
+        </SettingsRow>
+        <SettingsRow
+          label="Browser approvals"
+          hint="Controls consequential web actions for every agent task in this app. Automatic approval applies immediately to active sessions; System Computer Use still asks before controlling the visible Mac."
+        >
+          <Select
+            value={browserApprovalPolicy}
+            onValueChange={(value) =>
+              setBrowserApprovalPolicy(
+                value === "auto-approve" ? "auto-approve" : "ask",
+              )
+            }
+          >
+            <SelectTrigger
+              className="min-w-[220px]"
+              aria-label="Browser approval policy"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="ask">Ask for consequential actions</SelectItem>
+              <SelectItem value="auto-approve">
+                Approve browser actions automatically
+              </SelectItem>
+            </SelectContent>
+          </Select>
         </SettingsRow>
       </SettingsList>
     </div>

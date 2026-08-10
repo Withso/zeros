@@ -350,6 +350,25 @@ describe("normalizeWorkbenchTabs", () => {
     ).toBe(true);
   });
 
+  it("sanitizes persisted native browser task bindings", () => {
+    const valid = createBrowserTab({
+      url: "https://example.com",
+      browserSessionId: "session-1",
+    });
+    const invalid = {
+      ...createBrowserTab({ url: "https://example.org" }),
+      browserSessionId: "bad/task?id",
+    };
+    const out = normalizeWorkbenchTabs([valid, invalid]);
+
+    expect(out.find((tab) => tab.id === valid.id)?.browserSessionId).toBe(
+      "session-1",
+    );
+    expect(out.find((tab) => tab.id === invalid.id)?.browserSessionId).toBe(
+      undefined,
+    );
+  });
+
   it("keeps exactly one fixed Files home and ignores non-File fixed flags", () => {
     const out = normalizeWorkbenchTabs([
       {

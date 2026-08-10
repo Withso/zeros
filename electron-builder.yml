@@ -51,9 +51,10 @@ files:
   # scripts/stage-claude-cli.mjs). Without this negation the app carries the blob
   # twice: ~250 MiB of dead weight in the asar plus the usable copy.
   - "!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**"
-  # EXCLUDE Codex's npm platform package from app.asar too. Its complete native
-  # vendor target ships once through the executable extraResources copy below;
-  # an asar copy is both non-executable and hundreds of MiB of duplicate weight.
+  # EXCLUDE the Codex platform package from app.asar. Its native runtime ships
+  # exactly once through the staged `codex-runtime` extraResource below, where
+  # the bun-compiled engine can execute it and retain the vendor-relative
+  # codex-code-mode-host + ripgrep paths.
   - "!**/node_modules/@openai/codex-*/**"
 
 # The bun-compiled engine binary sits outside dist-electron, so bundle
@@ -112,12 +113,15 @@ extraResources:
     to: claude
   - from: binaries/claude-cli-version.txt
     to: claude-cli-version.txt
-  # Pinned Codex native runtime. Preserve the vendor target layout because the
-  # main binary locates its code-mode host, ripgrep, and resources relatively.
-  # stage-codex-cli.mjs creates this at beforePack; sidecar.ts passes the binary
-  # and version to the compiled engine through ZEROS_CODEX_CLI_PATH/_VERSION.
+  # The pinned Codex CLI runtime. scripts/stage-codex-cli.mjs preserves the
+  # platform package's vendor/<triple> layout because Codex resolves its code
+  # mode host and ripgrep relative to that managed package root. Electron main
+  # passes the executable and version to the engine through ZEROS_CODEX_CLI_PATH
+  # / ZEROS_CODEX_CLI_VERSION, so packaged chat never drifts to a global CLI.
   - from: binaries/codex-runtime
     to: codex-runtime
+    filter:
+      - "**/*"
   - from: binaries/codex-cli-version.txt
     to: codex-cli-version.txt
   # Repository and third-party terms must travel with every binary release.
@@ -189,6 +193,8 @@ mac:
   # block into Info.plist so macOS LaunchServices routes zeros://
   # URLs to our .app.
   extendInfo:
+    NSMicrophoneUsageDescription: >-
+      Zeros uses the microphone only when you start Codex realtime voice in a task.
     CFBundleURLTypes:
       - CFBundleURLName: Zeros
         CFBundleURLSchemes:

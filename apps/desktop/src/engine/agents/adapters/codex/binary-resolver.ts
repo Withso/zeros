@@ -73,16 +73,18 @@ export async function resolveCodexBinary(
     );
   }
 
-  // 2. Staged native runtime handed over by Electron main. require.resolve
-  //    below CANNOT work in the packaged app, because
+  // 2. Bundled native runtime handed over by Electron main. This fixes the
+  //    packaged path: the require.resolve below CANNOT work there, because
   //    the packaged engine is a `bun build --compile` single-file binary with no
   //    node_modules on disk, so packaged builds fall through to step 4 and run
   //    whatever `codex` is on the user's PATH — a DIFFERENT, unpinned CLI from the
   //    one dev runs. (Same root cause as the Claude "Native CLI binary not found"
   //    failure; see claude-sdk/binary-resolver.ts for the full write-up.)
   //
-  //    scripts/stage-codex-cli.mjs preserves the entire platform vendor tree;
-  //    sidecar.ts points this variable at its bin/codex entry.
+  //    scripts/stage-codex-cli.mjs preserves the platform vendor layout under
+  //    Contents/Resources/codex-runtime, and sidecar.ts passes the executable
+  //    here through ZEROS_CODEX_CLI_PATH. A smoke harness can use the same env
+  //    contract against the staged artifact.
   const fromEnv = process.env.ZEROS_CODEX_CLI_PATH?.trim();
   if (fromEnv) {
     if (await pathExists(fromEnv)) {

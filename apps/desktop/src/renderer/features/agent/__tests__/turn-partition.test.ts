@@ -15,6 +15,12 @@ const systemText = (id: string): AgentMessage =>
   ({ kind: "text", role: "system", id }) as unknown as AgentMessage;
 const thought = (id: string): AgentMessage =>
   ({ kind: "text", role: "thought", id }) as unknown as AgentMessage;
+const errorNotice = (id: string): AgentMessage =>
+  ({
+    kind: "error_notice",
+    id,
+    severity: "warning",
+  }) as unknown as AgentMessage;
 const backgroundTask = (
   id: string,
   status: "in_progress" | "completed" | "failed" = "completed",
@@ -80,6 +86,17 @@ describe("partitionTurn", () => {
       backgroundTask("background-settled"),
     ]);
     expect(ids(working)).toEqual(["t1", "background-settled"]);
+    expect(ids(finalOutput)).toEqual(["answer"]);
+  });
+
+  it("keeps late adapter notices in the working group without hiding a restored answer", () => {
+    const { working, finalOutput } = partitionTurn([
+      tool("t1"),
+      agentText("answer"),
+      errorNotice("cancelled-mcp-a"),
+      errorNotice("cancelled-mcp-b"),
+    ]);
+    expect(ids(working)).toEqual(["t1", "cancelled-mcp-a", "cancelled-mcp-b"]);
     expect(ids(finalOutput)).toEqual(["answer"]);
   });
 

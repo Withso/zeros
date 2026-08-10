@@ -90,6 +90,10 @@ export interface WorkbenchTab {
    * Blank tabs are always visible/tree-only; direct path tabs start collapsed. */
   fileTreeVisible?: boolean;
   url?: string;
+  /** Zeros agent session whose Electron-owned browser WebContents is mounted
+   * into this tab. Omitted for ordinary iframe/Design browser tabs. Persisted
+   * only as a reconnect hint; a missing native lease falls back to the iframe. */
+  browserSessionId?: string;
   canvasMode?: boolean;
   viewportWidth?: number;
   viewportHeight?: number;
@@ -138,7 +142,7 @@ function baseName(p: string): string {
 /** Canonical persisted browser URLs are always explicit http(s), bounded, and
  *  credential-free. Unlike address-bar normalization this never guesses a
  *  scheme: persistence is a trust boundary, not user input assistance. */
-function canonicalBrowsableHttpUrl(raw: unknown): string {
+export function canonicalBrowsableHttpUrl(raw: unknown): string {
   if (typeof raw !== "string") return "";
   try {
     const url = new URL(raw.trim());
@@ -321,13 +325,20 @@ export function planWorkbenchFileOpen(
 export function createBrowserTab(opts?: {
   url?: string;
   title?: string;
+  browserSessionId?: string;
 }): WorkbenchTab {
   const url = canonicalBrowsableHttpUrl(opts?.url);
+  const browserSessionId =
+    typeof opts?.browserSessionId === "string" &&
+    /^[A-Za-z0-9._:-]{1,200}$/.test(opts.browserSessionId.trim())
+      ? opts.browserSessionId.trim()
+      : undefined;
   return {
     id: nextId("browser"),
     type: "browser",
     title: url ? opts?.title?.trim().slice(0, 512) || "Browser" : "Browser",
     url,
+    ...(browserSessionId ? { browserSessionId } : {}),
   };
 }
 
@@ -631,12 +642,18 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
         };
       }
       const url = canonicalBrowsableHttpUrl(tab.url);
+      const browserSessionId =
+        typeof tab.browserSessionId === "string" &&
+        /^[A-Za-z0-9._:-]{1,200}$/.test(tab.browserSessionId.trim())
+          ? tab.browserSessionId.trim()
+          : undefined;
       return {
         ...tab,
         pinned: false,
         fixed: undefined,
         title: url ? tab.title.trim().slice(0, 512) || "Browser" : "Browser",
         url,
+        browserSessionId,
         canvasMode: url ? tab.canvasMode : false,
         variants: Array.isArray(tab.variants) ? tab.variants : undefined,
         reviewSubtab: undefined,

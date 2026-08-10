@@ -48,6 +48,8 @@ const ENGINE_BINARY = "binaries/zeros-engine-aarch64-apple-darwin";
 // The Claude Code runtime is staged at pack time too (gitignored). Keep in sync
 // with scripts/stage-claude-cli.mjs's STAGED_BINARY / STAGED_VERSION_FILE.
 const CLAUDE_STAGED = ["binaries/claude", "binaries/claude-cli-version.txt"];
+// The Codex runtime is staged at pack time with its vendor/<triple> layout.
+// Keep in sync with stage-codex-cli.mjs's exported stable names.
 const CODEX_STAGED = [
   "binaries/codex-runtime",
   "binaries/codex-cli-version.txt",
@@ -161,8 +163,8 @@ for (const from of froms) {
     }
     continue; // built artifact, gitignored — name-match only
   }
-  // Staged at pack time by scripts/stage-claude-cli.mjs (gitignored, like the
-  // engine binary) — name-matched against that script's constants below.
+  // Staged at pack time (gitignored, like the engine binary) — name-matched
+  // against the staging scripts' stable constants below.
   if (CLAUDE_STAGED.includes(from) || CODEX_STAGED.includes(from)) continue;
   if (!existsSync(from))
     errs.push(`extraResources from: "${from}" does not exist`);
@@ -192,8 +194,9 @@ for (const staged of CODEX_STAGED) {
   if (!froms.includes(staged)) {
     errs.push(
       `electron-builder.yml has no extraResources \`from: ${staged}\` — the packaged ` +
-        `engine would fall back to an unpinned Codex from PATH. Keep this in sync ` +
-        `with scripts/stage-codex-cli.mjs.`,
+        "app would fall back to an unpinned global Codex CLI and could speak a " +
+        "different app-server protocol. Keep this in sync with " +
+        "scripts/stage-codex-cli.mjs.",
     );
   }
 }
@@ -217,7 +220,8 @@ if (!/stage-claude-cli\.mjs/.test(beforePackSource)) {
 if (!/stage-codex-cli\.mjs/.test(beforePackSource)) {
   errs.push(
     "scripts/electron-before-pack.cjs no longer invokes stage-codex-cli.mjs — " +
-      "the packaged engine would silently fall back to an unpinned Codex on PATH",
+      "binaries/codex-runtime would never be created and packaged Codex would " +
+      "silently drift to PATH",
   );
 }
 // The npm copy of the ~250 MiB platform package must stay OUT of the asar: it is
@@ -235,7 +239,9 @@ if (
 if (!/!\*\*\/node_modules\/@openai\/codex-\*\/\*\*/.test(yml)) {
   errs.push(
     "electron-builder.yml `files:` must exclude **/node_modules/@openai/codex-*/** — " +
-      "the staged native runtime already ships through extraResources",
+      "the staged runtime already ships from Resources/codex-runtime, so packing " +
+      "the platform package into app.asar would duplicate hundreds of MiB and " +
+      "still be non-executable there",
   );
 }
 
@@ -311,7 +317,7 @@ if (errs.length > 0) {
 }
 console.log(
   `✓ check:packaging-paths — ${froms.length} extraResources + beforePack/afterPack + icon + ` +
-    `${entitlements.length} entitlements resolve; engine binary, Claude/Codex runtime staging, and ` +
+    `${entitlements.length} entitlements resolve; engine binary, Claude + Codex runtime staging, and ` +
     `updater assets for stable + ${channelReleaseWorkflows.length} channel workflow(s) ` +
     `(${channelReleaseWorkflows.map((w) => w.label.split(" ")[0]).join(", ")}) are guarded`,
 );

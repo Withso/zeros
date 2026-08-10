@@ -34,6 +34,8 @@ import type {
 export interface StartForChatOptions extends StartSessionOptions {
   /** Absolute path the agent subprocess should use as cwd. */
   cwd?: string;
+  /** Provider-native durable resume handle (Codex app-server thread id). */
+  nativeSessionId?: string;
   /** Force a fresh session even when one is already ready. Used when
    *  the user changes model/effort. */
   force?: boolean;

@@ -8,6 +8,7 @@
 
 const HTTP_SCHEME_RE = /^https?:\/\//i;
 const ANY_SCHEME_RE = /^[a-z][a-z\d+.-]*:\/\//i;
+const EXPLICIT_SCHEME_RE = /^[a-z][a-z\d+.-]*:/i;
 
 /** True for loopback / local-dev hostnames: `localhost` (and
  *  `*.localhost` per RFC 6761), the IPv4 loopback block 127.0.0.0/8,
@@ -80,6 +81,23 @@ export function normalizeBrowserUrl(raw: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** Resolve omnibox input like the Codex desktop browser: URL-shaped text
+ * navigates directly; ordinary text becomes a Google search. Explicit non-web
+ * schemes remain rejected rather than being searched or handed to Chromium. */
+export function resolveBrowserAddressInput(raw: string): string | null {
+  const value = raw.trim();
+  if (!value || value.length > 4096) return null;
+  if (HTTP_SCHEME_RE.test(value) || looksLikeBrowserUrl(value)) {
+    return normalizeBrowserUrl(value);
+  }
+  // Check after localhost:PORT detection — `localhost:3000` resembles a URI
+  // scheme lexically but is a valid local development address.
+  if (EXPLICIT_SCHEME_RE.test(value)) return null;
+  const search = new URL("https://www.google.com/search");
+  search.searchParams.set("q", value);
+  return search.href;
 }
 
 function looksLikeLocalHostInput(value: string): boolean {

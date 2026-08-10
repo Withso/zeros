@@ -39,6 +39,7 @@ import { Button } from "@/renderer/shared/ui/primitives/button";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 import { hasShortcutPriorityClaim } from "./shortcut-priority";
 import { isInFocusedPane } from "./pane-focus";
+import { questionExternalUrl } from "./question-external-url";
 import type {
   QuestionRequest,
   QuestionResponse,
@@ -48,6 +49,7 @@ import type {
 interface QuestionCardProps {
   request: QuestionRequest;
   onRespond: (response: QuestionResponse) => void;
+  onOpenExternalUrl?: (url: string) => boolean;
 }
 
 /** Per-question working answer. */
@@ -158,7 +160,11 @@ function isAnswered(q: QuestionSpec, s: QState): boolean {
   return false;
 }
 
-export function QuestionCard({ request, onRespond }: QuestionCardProps) {
+export function QuestionCard({
+  request,
+  onRespond,
+  onOpenExternalUrl,
+}: QuestionCardProps) {
   const questions = request.questions;
   const [index, setIndex] = useState(0);
   const [answers, setAnswers] = useState<Record<string, QState>>(() => {
@@ -171,6 +177,7 @@ export function QuestionCard({ request, onRespond }: QuestionCardProps) {
   const q = questions[Math.min(index, questions.length - 1)];
   const qs = answers[q.id] ?? blankState(q);
   const multi = isMulti(q);
+  const externalUrl = useMemo(() => questionExternalUrl(q), [q]);
   const allAnswered = useMemo(
     () =>
       questions.every((qq) => isAnswered(qq, answers[qq.id] ?? blankState(qq))),
@@ -372,8 +379,31 @@ export function QuestionCard({ request, onRespond }: QuestionCardProps) {
         <div className="flex items-start gap-2">
           {/* Scope/header chip (e.g. COMPONENT SOURCE) intentionally not
             rendered. */}
-          <div className="text-fg1 min-w-0 flex-1 text-sm font-medium">
-            {q.prompt}
+          <div className="text-fg1 flex min-w-0 flex-1 flex-col gap-1 text-sm font-medium">
+            <span>{q.prompt}</span>
+            {externalUrl ? (
+              <a
+                href={externalUrl.href}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(event) => {
+                  if (
+                    event.button !== 0 ||
+                    event.metaKey ||
+                    event.ctrlKey ||
+                    event.altKey ||
+                    event.shiftKey
+                  )
+                    return;
+                  if (onOpenExternalUrl?.(externalUrl.href)) {
+                    event.preventDefault();
+                  }
+                }}
+                className="text-fg2 hover:text-fg1 w-fit text-xs font-normal underline underline-offset-2 transition-colors"
+              >
+                Open verification page ({externalUrl.host})
+              </a>
+            ) : null}
           </div>
           {showCountdown ? (
             <Tooltip label="Skips to default">

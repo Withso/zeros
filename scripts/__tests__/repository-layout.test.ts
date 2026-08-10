@@ -286,6 +286,15 @@ describe("repository layout contracts", () => {
     expect(generator).toContain("apps/web gained production dependencies");
   });
 
+  it("keeps parse5's decoder available to the packaged Electron main process", () => {
+    const rootPackage = JSON.parse(read("package.json")) as {
+      dependencies: Record<string, string>;
+    };
+
+    expect(rootPackage.dependencies.parse5).toBe("^7.3.0");
+    expect(rootPackage.dependencies.entities).toBe("^6.0.1");
+  });
+
   it("stages the pinned Codex runtime instead of falling back to PATH", () => {
     const rootPackage = read("package.json");
     const beforePack = read("scripts/electron-before-pack.cjs");
@@ -308,8 +317,12 @@ describe("repository layout contracts", () => {
     // app.asar even though its platform package is excluded, so a version
     // handed over without the binary it describes would have the provider list
     // advertise the pin while the adapter ran an unpinned `codex` from PATH.
-    expect(sidecar.replace(/\s+/g, "")).toContain(
-      "codexCli.binary&&codexCli.version&&!process.env.ZEROS_CODEX_CLI_VERSION",
+    const compactSidecar = sidecar.replace(/\s+/g, "");
+    expect(compactSidecar).toContain(
+      "codexCli.binary&&!process.env.ZEROS_CODEX_CLI_PATH",
+    );
+    expect(compactSidecar).toContain(
+      "codexCli.version&&!process.env.ZEROS_CODEX_CLI_VERSION",
     );
 
     // Staging the vendor target redistributes the platform package's native

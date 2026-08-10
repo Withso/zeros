@@ -91,9 +91,9 @@ exports.default = async function beforePack(context) {
     { cwd: projectDir, env: process.env, stdio: "inherit" },
   );
 
-  // Codex has the same compiled-engine/node_modules boundary. Stage its whole
-  // native vendor target (main binary + code-mode host + ripgrep/resources),
-  // then sidecar.ts supplies the pinned executable and version to the engine.
+  // Stage the complete pinned Codex vendor tree. The packaged engine cannot
+  // require.resolve @openai/codex from its bun single-file image, and falling
+  // back to a user's global CLI violates the generated app-server protocol pin.
   execFileSync(
     process.execPath,
     [path.join(projectDir, "scripts", "stage-codex-cli.mjs")],
