@@ -13,58 +13,64 @@ const rt = vi.hoisted(() => ({
 }));
 
 vi.mock("../app-server", () => ({
-  bootCodexAppServerRuntime: vi.fn(async () => ({
-    initializeResponse: {
-      userAgent: "codex_cli 0.146.0",
-      codexHome: "/tmp",
-      platformFamily: "unix",
-      platformOs: "linux",
-    },
-    cliVersion: "0.146.0",
-    binarySource: { source: "path", path: "codex" },
-    child: { pid: 1234, killed: false },
-    startThread: async () => ({
-      threadId: "thread-steer",
-      model: "gpt-5",
-      approvalPolicy: "on-request",
-      sandbox: { type: "workspaceWrite" },
-      raw: {},
-    }),
-    resumeThread: async (params: { threadId: string }) => ({
-      threadId: params.threadId,
-      raw: {},
-    }),
-    runTurn: async (
-      _params: unknown,
-      options: { onTurnStarted?: (turnId: string) => void },
-    ) => {
-      options.onTurnStarted?.("turn-active");
-      return new Promise<unknown>((resolve) => {
-        rt.resolveTurn = resolve;
-      });
-    },
-    interruptTurn: async (threadId: string, turnId: string) => {
-      rt.interruptCalls.push({ threadId, turnId });
-    },
-    respondToPermission: vi.fn(),
-    respondToUserInput: vi.fn(),
-    onNotification: (method: string, handler: (params: unknown) => void) => {
-      let handlers = rt.handlers.get(method);
-      if (!handlers) {
-        handlers = new Set();
-        rt.handlers.set(method, handlers);
-      }
-      handlers.add(handler);
-      return () => handlers?.delete(handler);
-    },
-    request: vi.fn(async (method: string, params: Record<string, unknown>) => {
-      rt.requests.push({ method, params });
-      if (method === "skills/list") return { data: [] };
-      if (method === "turn/steer") return { turnId: "turn-active" };
-      return {};
-    }),
-    dispose: vi.fn(async () => {}),
-  })),
+  bootCodexAppServerRuntime: vi.fn(async () => {
+    const request = vi.fn(
+      async (method: string, params: Record<string, unknown>) => {
+        rt.requests.push({ method, params });
+        if (method === "skills/list") return { data: [] };
+        if (method === "turn/steer") return { turnId: "turn-active" };
+        return {};
+      },
+    );
+    return {
+      initializeResponse: {
+        userAgent: "codex_cli 0.146.0",
+        codexHome: "/tmp",
+        platformFamily: "unix",
+        platformOs: "linux",
+      },
+      cliVersion: "0.146.0",
+      binarySource: { source: "path", path: "codex" },
+      child: { pid: 1234, killed: false },
+      startThread: async () => ({
+        threadId: "thread-steer",
+        model: "gpt-5",
+        approvalPolicy: "on-request",
+        sandbox: { type: "workspaceWrite" },
+        raw: {},
+      }),
+      resumeThread: async (params: { threadId: string }) => ({
+        threadId: params.threadId,
+        raw: {},
+      }),
+      runTurn: async (
+        _params: unknown,
+        options: { onTurnStarted?: (turnId: string) => void },
+      ) => {
+        options.onTurnStarted?.("turn-active");
+        return new Promise<unknown>((resolve) => {
+          rt.resolveTurn = resolve;
+        });
+      },
+      interruptTurn: async (threadId: string, turnId: string) => {
+        rt.interruptCalls.push({ threadId, turnId });
+      },
+      respondToPermission: vi.fn(),
+      respondToUserInput: vi.fn(),
+      onNotification: (method: string, handler: (params: unknown) => void) => {
+        let handlers = rt.handlers.get(method);
+        if (!handlers) {
+          handlers = new Set();
+          rt.handlers.set(method, handlers);
+        }
+        handlers.add(handler);
+        return () => handlers?.delete(handler);
+      },
+      request,
+      requestTyped: request,
+      dispose: vi.fn(async () => {}),
+    };
+  }),
 }));
 
 vi.mock("../../session-paths", () => ({
@@ -74,6 +80,7 @@ vi.mock("../../session-paths", () => ({
     log: "/tmp/s/log",
     telemetry: "/tmp/s/tel",
   })),
+  writeSessionMeta: vi.fn(async () => {}),
   removeSessionDir: vi.fn(async () => {}),
 }));
 

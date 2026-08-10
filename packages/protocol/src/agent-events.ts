@@ -23,7 +23,14 @@
 
 // ── Identifiers ─────────────────────────────────────────────
 
-export type SessionId = string;
+import type {
+  ExecutionId,
+  ProviderBinding,
+  ProviderMetadata,
+} from "./identities";
+
+/** @deprecated Agent "session" on the Zeros wire is an execution route. */
+export type SessionId = ExecutionId;
 export type ToolCallId = string;
 export type SessionModeId = string;
 export type SessionModelId = string;
@@ -259,11 +266,12 @@ export interface AdvertisedModel {
   value: string;
   label: string;
   badge?: string;
-  /** Ordered reasoning-effort ladder (low→high). Omit when the model has no
-   *  effort knob; the renderer then hides the EffortPill (or, absent any
-   *  advertisement, falls back to its family default). */
+  /** Ordered reasoning-effort ladder (low→high). An explicit empty array means
+   *  the live runtime says this model has no effort knob. Omit only when the
+   *  adapter has no capability answer and the renderer may use its fallback. */
   effortLevels?: string[];
-  /** Whether this model supports Fast mode (drives the FastPill). */
+  /** Whether this model supports Fast mode (drives the FastPill). Explicit
+   *  false is authoritative; omit only when capability is unknown. */
   supportsFast?: boolean;
 }
 
@@ -392,19 +400,15 @@ export type SessionUpdate =
   | ErrorNoticeUpdate
   | UsageUpdateNotification
   | SessionInfoUpdateNotification
+  | ProviderBindingUpdateNotification
   | TurnStateUpdateNotification;
 
 /** Engine-authored lifecycle notification for a provider turn. Unlike the
  * AGENT_PROMPT RPC response, this survives renderer reload/re-adoption because
  * it is routed as a session-scoped push to the current client.
  *
- * Purely additive and wire-compatible in both directions, so it deliberately
- * does NOT bump PROTOCOL_VERSION (same reasoning as PTY_LIST_RESULT's
- * `processPids`): applyUpdate ignores an unrecognised `sessionUpdate`, so an old
- * client simply keeps its RPC-response-only behaviour, and a new client against
- * an older engine sees no `promptActive` on AGENT_SESSION_LOADED and resolves to
- * `ready` exactly as it does today. Bumping would strand a remote peer
- * against a desktop engine that has not shipped yet. */
+ * The update remains additive for older clients; the identity model also
+ * standardizes the enclosing execution route without a protocol bump. */
 export interface TurnStateUpdateNotification {
   sessionUpdate: "turn_state";
   /** Opening user-message id; identical to the durable turn-row key. */
@@ -564,9 +568,22 @@ export interface SessionInfoUpdateNotification {
   updatedAt?: string;
 }
 
+/** The adapter learned or replaced its durable native resume identity. This is
+ * conversation metadata, not an execution-route change. Claude emits it after
+ * the SDK's init frame reveals session_id; degraded resumes may emit a native
+ * replacement too. */
+export interface ProviderBindingUpdateNotification {
+  sessionUpdate: "provider_binding_update";
+  providerBinding: ProviderBinding;
+  providerMetadata?: ProviderMetadata;
+}
+
 /** Top-level notification carried by AGENT_SESSION_UPDATE bridge
  *  messages. Maps `sessionId` to the session state it mutates. */
 export interface SessionNotification {
+  /** Canonical Zeros-owned live route. */
+  executionId?: ExecutionId;
+  /** @deprecated Compatibility alias for executionId. */
   sessionId: SessionId;
   update: SessionUpdate;
 }
@@ -606,6 +623,11 @@ export interface RequestPermissionRequest {
   /** Render the engine-supplied option names verbatim while retaining the
    * existing PermissionCard rows, shortcuts, colors, and response semantics. */
   useOptionNames?: boolean;
+  /** Whether an allow-always/reject-always choice may create or consume a
+   * Zeros-side tool-title policy. Defaults to true for compatibility. Native
+   * provider policy/amendment decisions set false so a broader local rule can
+   * neither replace nor replay a provider-owned decision. */
+  allowLocalPolicies?: boolean;
   /** Vendor correlation id (SDK control request_id / Codex RequestId).
    *  Used by the renderer to dedupe a replayed request on reconnect — the
    *  SDK re-arms in-flight requests on initialize and the adapter mints a
@@ -639,6 +661,9 @@ export interface QuestionOption {
   label: string;
   description?: string;
   preview?: string;
+  /** Selecting this option clears every sibling selection; selecting a normal
+   *  option clears any exclusive sibling. Used by MCP None/Skip sentinels. */
+  exclusive?: boolean;
 }
 
 export interface QuestionSpec {
@@ -654,6 +679,18 @@ export interface QuestionSpec {
   options: QuestionOption[];
   /** Render the "0  Type something…" free-text last row. */
   allowOther: boolean;
+  /** Provider-supplied initial selections. MCP form defaults use these so the
+   *  user can review/modify the complete payload before submitting. */
+  defaultOptionIds?: string[];
+  /** Provider-supplied initial free-text value (never used for secrets). */
+  defaultFreeText?: string;
+  /** An explicitly active empty text field is a valid answer. Used only when
+   * the provider schema permits a zero-length string. */
+  allowEmptyFreeText?: boolean;
+  /** Preserve leading/trailing whitespace instead of applying the legacy
+   * human-answer trim. JSON Schema string length/pattern rules can make that
+   * whitespace semantically significant. */
+  preserveFreeText?: boolean;
   /** Codex isSecret → masked input; value never logged. */
   secret?: boolean;
 }
@@ -671,6 +708,9 @@ export interface QuestionRequest {
   /** true = a resolver is parked on the engine (block-and-resume); false =
    *  non-blocking fallback (answer delivered as the next prompt). */
   blocking: boolean;
+  /** Show distinct Decline and Cancel actions. MCP elicitation needs both:
+   *  decline is an explicit refusal, while cancel is dismissal/abandonment. */
+  allowDecline?: boolean;
   /** Epoch ms when the engine's response timeout fires and the question is
    *  auto-skipped (the agent proceeds with its default). Stamped by the
    *  adapter when it arms the timer; the card shows a countdown near expiry.
@@ -692,6 +732,7 @@ export interface QuestionAnswer {
 
 export type QuestionOutcome =
   | { outcome: "answered"; answers: QuestionAnswer[] }
+  | { outcome: "declined" }
   | { outcome: "dismissed" };
 
 export interface QuestionResponse {
@@ -755,6 +796,7 @@ export interface PromptResponse {
 
 export interface SessionInfo {
   sessionId: SessionId;
+  providerBinding?: ProviderBinding;
   cwd: string;
   title?: string;
   updatedAt?: string;
@@ -762,12 +804,20 @@ export interface SessionInfo {
 }
 
 export interface NewSessionResponse {
+  /** Canonical Zeros-owned live route, never persisted as provider identity. */
+  executionId: ExecutionId;
+  /** @deprecated Compatibility alias for executionId. */
   sessionId: SessionId;
+  providerBinding?: ProviderBinding;
+  providerMetadata?: ProviderMetadata;
   modes?: SessionModeState;
   models?: SessionModelState;
 }
 
 export interface LoadSessionResponse {
+  executionId?: ExecutionId;
+  providerBinding?: ProviderBinding;
+  providerMetadata?: ProviderMetadata;
   modes?: SessionModeState;
   models?: SessionModelState;
   /** The adapter could NOT resume a prior transcript and started a FRESH
@@ -778,10 +828,9 @@ export interface LoadSessionResponse {
    *  it must be re-injected on the next prompt). Engine-internal; the renderer
    *  ignores it. */
   resumedFresh?: boolean;
-  /** A degraded resume created a new provider-native session id. The current
-   * engine may continue routing through the requested id as an alias, but the
-   * renderer persists this replacement for the next app restart so it does not
-   * repeatedly attempt the permanently stale id. */
+  /** Protocol-v8 downgrade compatibility: a degraded resume created a new
+   * provider-native locator. Identity-aware renderers persist providerBinding;
+   * older clients still read this field to avoid retrying the stale locator. */
   replacementSessionId?: SessionId;
 }
 

@@ -93,6 +93,7 @@ import {
 import { resolveRepoScript, resolveRunActions } from "../settings/repo-scripts";
 import { isRunSessionId, runActionOneShot } from "@zeros/protocol/run-actions";
 import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
+import { sameProviderBinding } from "@zeros/protocol/identities";
 import type { DesignOperation } from "@zeros/design-core";
 import type {
   RunActionStatus,
@@ -222,6 +223,7 @@ import {
   upsertChat,
   deleteChat,
   bulkUpsertChats,
+  clearChatProviderIdentity,
   coerceChatRow,
   setChatWorkspaceResolver,
   type ChatRow,
@@ -663,7 +665,9 @@ const REMOTE_READABLE = new Set<string>([
  *  They ARE part of the remote allowlist (deny-by-default), so an unknown
  *  mutation op is still refused. Enumerated 1:1 from the non-read helpers in
  *  apps/desktop/src/renderer/platform/bridge/workspace-bridge.ts (chats.* upserts/deletes + messages.*
- *  import/clear/truncate). Local desktop clients bypass the gate entirely. */
+ *  import/clear/truncate), except chats.clearProviderIdentity: that removes a
+ *  host-learned provider capability and is deliberately local-only. Local
+ *  desktop clients bypass the gate entirely. */
 const REMOTE_METADATA_OPS = new Set<string>([
   "chats.upsert",
   "chats.delete",
@@ -697,21 +701,58 @@ const REMOTE_WRITE_DENYLIST = [
 ] as const;
 
 /** A remote client may freely edit its OWN chat metadata (title, pin, model,
- *  effort…), but two fields are host-local capabilities it must not set from an
- *  untrusted wire object:
+ *  effort…), but some fields are host-local capabilities or identity learned
+ *  by the host and must survive an incomplete untrusted wire object:
  *    • `additionalDirectories` widens the host Claude agent's sanctioned
  *      filesystem scope (→ ZEROS_ADDITIONAL_DIRS → SDK `Options.additionalDirectories`
  *      on the next respawn). Letting a paired-but-untrusted device upsert arbitrary
  *      absolute paths would expand local file access with no host prompt — the same
  *      class of leak the `RESOLVE_AGENT_BINARY` handler refuses for remote clients.
  *    • `fast` flips run mode (cost/behavior) and has no remote picker.
+ *    • `providerBinding` / `providerMetadata` attach the chat to the provider's
+ *      durable conversation. Protocol-v8 peers predating these fields omit them;
+ *      their routine sync must not detach every host conversation.
  *  On a remote upsert we keep whatever the host already persisted (or the safe
- *  default for a brand-new chat), never the value off the wire. Local desktop
- *  writes bypass this entirely. See the remote-client trust boundary. */
+ *  default for a brand-new chat) for capabilities. Provider identity is
+ *  slightly different: the engine can learn it from a stream immediately
+ *  before the local renderer archives/unmounts, so an incomplete SAME-agent
+ *  write from either client must preserve the newer DB value. Changing agent
+ *  is still the explicit clear boundary. See the remote-client trust boundary. */
+function preserveProviderIdentity(
+  c: ChatRow,
+  existing: ChatRow | null = getChat(c.id),
+): ChatRow {
+  const incomingProviderBinding =
+    c.providerBinding?.providerId === c.agentId ? c.providerBinding : null;
+  const existingProviderBinding =
+    existing?.providerBinding?.providerId === c.agentId
+      ? existing.providerBinding
+      : null;
+  // Once SQLite has a same-agent binding it is the host-authoritative value:
+  // the engine writes provider refinements there before notifying renderers,
+  // so either a missing OR a different incoming value may be a stale surface
+  // racing that notification. Replacing it requires the explicit guarded
+  // clear operation (or an agent switch), after which a new binding can attach.
+  const providerBinding =
+    existingProviderBinding ?? incomingProviderBinding ?? null;
+  const providerMetadata = existingProviderBinding
+    ? sameProviderBinding(existingProviderBinding, incomingProviderBinding)
+      ? (c.providerMetadata ?? existing?.providerMetadata ?? null)
+      : (existing?.providerMetadata ?? null)
+    : incomingProviderBinding
+      ? (c.providerMetadata ?? null)
+      : null;
+  return {
+    ...c,
+    providerBinding,
+    providerMetadata: providerBinding ? providerMetadata : null,
+  };
+}
+
 function preserveHostOnlyFields(c: ChatRow): ChatRow {
   const existing = getChat(c.id);
   return {
-    ...c,
+    ...preserveProviderIdentity(c, existing),
     additionalDirectories: existing?.additionalDirectories ?? [],
     fast: existing?.fast ?? false,
   };
@@ -1190,9 +1231,9 @@ export class WorkspaceService {
     this.runLogGetter = fn;
   }
   /** Resolve + kick off a workspace's background setup PTY (host shell — LOCAL
-   *  ONLY). Shared by workspace.rerunSetup and the post-restore auto-setup so an
-   *  unarchived worktree gets its gitignored deps (node_modules, .venv, …) back —
-   *  bulk ignored dependencies aren't captured in the archive checkpoint.
+   *  ONLY). Used by workspace.rerunSetup and create-from-branch so dependency
+   *  setup is explicit for an existing workspace and automatic only for a newly
+   *  created checkout.
    *  Returns whether a setup command was found + started; no-op (false) when the
    *  repo has no setup configured or the runner isn't wired (e.g. unit tests).
    *  Fire-and-forget — the PTY runs in the background (Setup tab), so callers
@@ -1471,19 +1512,31 @@ export class WorkspaceService {
     } catch {
       /* not an id — resolve as a real path below */
     }
-    // A path within the primary checkout (the root OR any subdir) → local-main.
-    // redactChatFolderForRemote only matches the EXACT root, so a terminal opened
-    // in a subdir of the main repo would otherwise resolve to nothing.
     const f = WorkspaceService.normalizeFolder(cwdOrId);
     const root = WorkspaceService.normalizeFolder(this.root);
-    if (f === root || f.startsWith(root + "/")) return LOCAL_MAIN_WORKSPACE_ID;
-    // Otherwise the owning managed workspace, via the SAME folder→id mapping the
+    // Resolve a managed workspace before falling back to local-main. This is
+    // load-bearing for a separately registered, more-specific owner nested
+    // below the engine root: lifecycle cleanup must never cross that boundary.
+    // The mapping itself chooses the longest matching workspace path.
+    // Use the SAME folder→id mapping the
     // chat redaction uses (under a workspace → its id; an unmanaged folder → an
     // ext:<hash> token or the raw string, both → null).
-    const mapped = this.redactChatFolderForRemote(cwdOrId, listWorkspaces({}));
+    // An unreadable state DB degrades to the containment answer below rather
+    // than throwing — callers here are gates and cleanup paths, and the old
+    // root-first order never surfaced a DB error to them.
+    let mapped: string | null = null;
+    try {
+      mapped = this.redactChatFolderForRemote(cwdOrId, listWorkspaces({}));
+    } catch {
+      mapped = null;
+    }
     if (mapped === LOCAL_MAIN_WORKSPACE_ID) return LOCAL_MAIN_WORKSPACE_ID;
-    if (!mapped || mapped === cwdOrId || mapped.startsWith("ext:")) return null;
-    return mapped;
+    if (mapped && mapped !== cwdOrId && !mapped.startsWith("ext:"))
+      return mapped;
+    // A path within the primary checkout (the root OR any otherwise-unowned
+    // subdir) belongs to the synthetic local-main workspace.
+    if (f === root || f.startsWith(root + "/")) return LOCAL_MAIN_WORKSPACE_ID;
+    return null;
   }
 
   /** A synthetic entry for the primary checkout so a remote client can browse
@@ -1554,10 +1607,16 @@ export class WorkspaceService {
     if (f === WorkspaceService.normalizeFolder(this.root)) {
       return LOCAL_MAIN_WORKSPACE_ID;
     }
+    let owner: Workspace | null = null;
+    let ownerPathLength = -1;
     for (const w of workspaces) {
       const wp = WorkspaceService.normalizeFolder(w.path);
-      if (f === wp || f.startsWith(wp + "/")) return w.id;
+      if ((f === wp || f.startsWith(wp + "/")) && wp.length > ownerPathLength) {
+        owner = w;
+        ownerPathLength = wp.length;
+      }
     }
+    if (owner) return owner.id;
     // Unknown folder: emit a stable opaque token, never the raw path.
     return `ext:${createHash("sha1").update(f).digest("hex").slice(0, 12)}`;
   }
@@ -3449,7 +3508,11 @@ export class WorkspaceService {
       }
       case "chats.upsert": {
         const c = coerceChatRow(params.chat);
-        if (c) upsertChat(remote ? preserveHostOnlyFields(c) : c);
+        if (c) {
+          upsertChat(
+            remote ? preserveHostOnlyFields(c) : preserveProviderIdentity(c),
+          );
+        }
         return { ok: true };
       }
       case "chats.delete": {
@@ -3463,12 +3526,22 @@ export class WorkspaceService {
         deleteChat(id);
         return { ok: true };
       }
+      case "chats.clearProviderIdentity": {
+        const chatId = reqStr(params, "chatId");
+        const agentId = reqStr(params, "agentId");
+        const resumeId = reqStr(params, "resumeId");
+        return {
+          ok: clearChatProviderIdentity(chatId, agentId, resumeId),
+        };
+      }
       case "chats.bulkUpsert": {
         const raw = Array.isArray(params.chats) ? params.chats : [];
         const rows = raw
           .map(coerceChatRow)
           .filter((c): c is ChatRow => c !== null)
-          .map((c) => (remote ? preserveHostOnlyFields(c) : c));
+          .map((c) =>
+            remote ? preserveHostOnlyFields(c) : preserveProviderIdentity(c),
+          );
         bulkUpsertChats(rows);
         return { ok: true };
       }
@@ -4315,26 +4388,7 @@ export class WorkspaceService {
         });
       case "workspace.restore": {
         const workspaceId = reqStr(params, "workspaceId");
-        const result = await restoreWorkspace(workspaceId);
-        // Re-run the repo setup script in the background so the worktree's
-        // gitignored deps (node_modules, .venv, …) — which aren't captured in the
-        // archive checkpoint — come back, so restore lands in the same state a
-        // fresh create would.
-        // LOCAL-ONLY (restore isn't remote-allowed; this guard is defence in
-        // depth) and fire-and-forget: a setup miss must never fail the restore.
-        if (!remote) {
-          try {
-            const ws = getWorkspaceById(workspaceId);
-            if (ws) await this.triggerWorkspaceSetup(ws);
-          } catch (err) {
-            console.warn(
-              `[restore] background setup failed to start for ${workspaceId}: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            );
-          }
-        }
-        return result;
+        return restoreWorkspace(workspaceId);
       }
       case "workspace.delete": {
         const workspaceId = reqStr(params, "workspaceId");
@@ -4372,9 +4426,9 @@ export class WorkspaceService {
           // which skips seeding for remote creates.
           seedFiles: !remote,
         });
-        // Branch/PR workspaces need the same dependency recovery as ordinary
-        // create and restore. Resolution is quick; the setup PTY itself is
-        // background and local-only.
+        // Branch/PR workspaces need the same dependency setup as an ordinary
+        // newly created workspace. Resolution is quick; the setup PTY itself
+        // is background and local-only.
         if (!remote) {
           // A bounded create-time seed scan may still be completing. Do not let
           // setup read a half-copied .env/.npmrc, and do not hold the create RPC

@@ -29,6 +29,8 @@ import * as path from "node:path";
 import { Readable } from "node:stream";
 import * as readline from "node:readline";
 
+import { providerBindingForResume } from "@zeros/protocol/identities";
+
 import type { ListSessionsResponse } from "../../types";
 
 function codexHome(): string {
@@ -186,10 +188,12 @@ export async function listCodexSessions(
   return {
     sessions: sessions.map((s) => ({
       sessionId: s.sessionId,
+      providerBinding: providerBindingForResume("codex", s.sessionId),
+      cwd: s.cwd ?? opts.cwd ?? "",
       title: s.title ?? "Untitled",
       // engine SessionInfo doesn't require createdAt but many
       // clients show it; emit as _meta for forward compat.
       _meta: s.createdAt ? { createdAt: s.createdAt, cwd: s.cwd } : undefined,
     })),
-  } as never;
+  };
 }

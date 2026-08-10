@@ -13,6 +13,8 @@ import {
   getWorkspaceLifecycleStatus,
   listRemoteRestrictedWorkspaceIds,
 } from "../../git";
+import { insertWorkspace } from "../../git/state";
+import type { Workspace } from "../../git/types";
 import { getDesignRuntimeAudit } from "../../design/runtime-audits";
 import {
   getWorkspaceDesignApi,
@@ -944,6 +946,252 @@ describe("WorkspaceService", () => {
     }
   });
 
+  it("preserves a host provider binding when a stale chat upsert omits it", async () => {
+    const { setZerosDbPathForTesting, closeZerosDb } = await import("../../db");
+    const { updateChatProviderIdentity } = await import("../../db/chats");
+    setZerosDbPathForTesting(path.join(dir, "zeros-provider-binding.db"));
+    try {
+      await svc.handle("chats.upsert", {
+        chat: {
+          id: "provider-owned",
+          folder: dir,
+          agentId: "codex",
+          title: "Local title",
+          sessionId: "dead-execution-must-not-win",
+          providerBinding: {
+            version: 1,
+            providerId: "codex",
+            kind: "native",
+            resumeId: "codex-thread-1",
+            scopeId: "codex-root-1",
+          },
+          providerMetadata: {
+            version: 1,
+            git: { sha: "abc123", branch: "main", originUrl: null },
+          },
+        },
+      });
+
+      // A protocol-v8 peer predating providerBinding still echoes sessionId.
+      // Its metadata edit may apply, but it cannot erase the host's durable
+      // provider identity or replace the compatibility locator with a route.
+      await svc.handle(
+        "chats.bulkUpsert",
+        {
+          chats: [
+            {
+              id: "provider-owned",
+              folder: dir,
+              agentId: "codex",
+              title: "Remote title",
+              sessionId: "stale-remote-execution",
+            },
+          ],
+        },
+        { remote: true },
+      );
+
+      const result = (await svc.handle("chats.list")) as {
+        chats: Array<{
+          id: string;
+          title: string;
+          archived: boolean;
+          sessionId: string | null;
+          providerBinding?: {
+            providerId: string;
+            resumeId: string;
+            scopeId?: string;
+          } | null;
+          providerMetadata?: {
+            git?: { sha: string | null; branch: string | null };
+          } | null;
+        }>;
+      };
+      expect(
+        result.chats.find((chat) => chat.id === "provider-owned"),
+      ).toMatchObject({
+        title: "Remote title",
+        sessionId: "codex-thread-1",
+        providerBinding: {
+          providerId: "codex",
+          resumeId: "codex-thread-1",
+          scopeId: "codex-root-1",
+        },
+        providerMetadata: {
+          git: { sha: "abc123", branch: "main" },
+        },
+      });
+
+      // The desktop's archive write can race a provider_binding_update learned
+      // directly by the engine. It is trusted, but its pre-event ChatThread is
+      // still stale; same-agent omission must preserve the newer DB identity.
+      await svc.handle("chats.bulkUpsert", {
+        chats: [
+          {
+            id: "provider-owned",
+            folder: dir,
+            agentId: "codex",
+            title: "Archived locally",
+            archived: true,
+            providerBinding: null,
+            providerMetadata: null,
+          },
+        ],
+      });
+      const afterLocal = (await svc.handle("chats.list")) as typeof result;
+      expect(
+        afterLocal.chats.find((chat) => chat.id === "provider-owned"),
+      ).toMatchObject({
+        title: "Archived locally",
+        archived: true,
+        sessionId: "codex-thread-1",
+        providerBinding: {
+          providerId: "codex",
+          resumeId: "codex-thread-1",
+        },
+      });
+
+      // The engine may refine a legacy/older binding to a native provider
+      // handle immediately before the renderer archives the tab. A stale
+      // non-null renderer snapshot is no more authoritative than an omitted
+      // binding and must not roll SQLite back to the dead provider thread.
+      updateChatProviderIdentity(
+        "provider-owned",
+        "codex",
+        {
+          version: 1,
+          providerId: "codex",
+          kind: "native",
+          resumeId: "codex-thread-2",
+          scopeId: "codex-root-2",
+        },
+        {
+          version: 1,
+          git: { sha: "def456", branch: "feature", originUrl: null },
+        },
+      );
+      await svc.handle("chats.bulkUpsert", {
+        chats: [
+          {
+            id: "provider-owned",
+            folder: dir,
+            agentId: "codex",
+            title: "Stale local snapshot",
+            providerBinding: {
+              version: 1,
+              providerId: "codex",
+              kind: "native",
+              resumeId: "codex-thread-1",
+              scopeId: "codex-root-1",
+            },
+            providerMetadata: {
+              version: 1,
+              git: { sha: "abc123", branch: "main", originUrl: null },
+            },
+          },
+        ],
+      });
+      const afterStaleBinding = (await svc.handle(
+        "chats.list",
+      )) as typeof result;
+      expect(
+        afterStaleBinding.chats.find((chat) => chat.id === "provider-owned"),
+      ).toMatchObject({
+        title: "Stale local snapshot",
+        sessionId: "codex-thread-2",
+        providerBinding: {
+          providerId: "codex",
+          resumeId: "codex-thread-2",
+          scopeId: "codex-root-2",
+        },
+        providerMetadata: {
+          git: { sha: "def456", branch: "feature" },
+        },
+      });
+
+      // Changing provider is the explicit clear boundary; a Codex binding must
+      // never leak into Claude merely because the incoming row omitted one.
+      await svc.handle("chats.upsert", {
+        chat: {
+          id: "provider-owned",
+          folder: dir,
+          agentId: "claude",
+          title: "Switched provider",
+        },
+      });
+      const switched = (await svc.handle("chats.list")) as typeof result;
+      expect(
+        switched.chats.find((chat) => chat.id === "provider-owned"),
+      ).toMatchObject({
+        title: "Switched provider",
+        providerBinding: null,
+        providerMetadata: null,
+      });
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+    }
+  });
+
+  it("clears provider identity only through an explicit compare-and-clear operation", async () => {
+    const { setZerosDbPathForTesting, closeZerosDb } = await import("../../db");
+    setZerosDbPathForTesting(path.join(dir, "zeros-provider-clear.db"));
+    try {
+      expect(svc.isRemoteAllowed("chats.clearProviderIdentity")).toBe(false);
+      await svc.handle("chats.upsert", {
+        chat: {
+          id: "provider-clear",
+          folder: dir,
+          agentId: "codex",
+          title: "Bound",
+          providerBinding: {
+            version: 1,
+            providerId: "codex",
+            kind: "native",
+            resumeId: "thread-to-clear",
+          },
+          providerMetadata: { version: 1 },
+        },
+      });
+
+      // A stale reset naming the wrong binding must not erase a newer one.
+      await svc.handle("chats.clearProviderIdentity", {
+        chatId: "provider-clear",
+        agentId: "codex",
+        resumeId: "older-thread",
+      });
+      let result = (await svc.handle("chats.list")) as {
+        chats: Array<{
+          id: string;
+          sessionId: string | null;
+          providerBinding?: { resumeId: string } | null;
+          providerMetadata?: { version: number } | null;
+        }>;
+      };
+      expect(
+        result.chats.find((chat) => chat.id === "provider-clear")
+          ?.providerBinding?.resumeId,
+      ).toBe("thread-to-clear");
+
+      await svc.handle("chats.clearProviderIdentity", {
+        chatId: "provider-clear",
+        agentId: "codex",
+        resumeId: "thread-to-clear",
+      });
+      result = (await svc.handle("chats.list")) as typeof result;
+      expect(
+        result.chats.find((chat) => chat.id === "provider-clear"),
+      ).toMatchObject({
+        sessionId: null,
+        providerBinding: null,
+        providerMetadata: null,
+      });
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+    }
+  });
+
   it("workspaceIdForCwd canonicalizes an id OR a real path to a workspace id", () => {
     // The primary checkout's real PATH (what the desktop + a remote client with
     // relaxed redaction send as cwd) resolves to the synthetic local-main id —
@@ -960,6 +1208,37 @@ describe("WorkspaceService", () => {
     expect(svc.workspaceIdForCwd("/nope/zzz/qqq")).toBeNull();
     expect(svc.workspaceIdForCwd("not-a-real-id")).toBeNull();
     expect(svc.workspaceIdForCwd(undefined)).toBeNull();
+  });
+
+  it("workspaceIdForCwd chooses a more-specific managed owner below the engine root", () => {
+    const nestedPath = path.join(dir, "nested-workspace");
+    fs.mkdirSync(nestedPath, { recursive: true });
+    const now = Date.now();
+    insertWorkspace({
+      id: "ws_nested-owner",
+      repoSlug: "nested",
+      repoRoot: dir,
+      branch: "zeros/nested-owner",
+      baseBranch: "main",
+      path: nestedPath,
+      status: "in-progress",
+      createdAt: now,
+      archivedAt: null,
+      stashRef: null,
+      prNumber: null,
+      prState: null,
+      prUrl: null,
+      agentId: null,
+      lastActiveAt: now,
+      setupState: null,
+    } satisfies Workspace);
+
+    expect(svc.workspaceIdForCwd(path.join(nestedPath, "src"))).toBe(
+      "ws_nested-owner",
+    );
+    expect(svc.workspaceIdForCwd(path.join(dir, "ordinary-subdir"))).toBe(
+      LOCAL_MAIN_WORKSPACE_ID,
+    );
   });
 
   it("reads a file under local-main", async () => {
@@ -2212,7 +2491,7 @@ describe("WorkspaceService", () => {
     for (const entry of created) expect(fs.existsSync(entry.path)).toBe(true);
   });
 
-  it("re-runs the repo setup script in the background after restore (deps recovery)", async () => {
+  it("does not run the repo setup script after restoring a workspace", async () => {
     // createWorkspace needs a base commit; repoSlug is passed explicitly since
     // the test repo has no origin. Configure a setup script via repo settings.
     fs.writeFileSync(path.join(dir, "README.md"), "# x\n");
@@ -2247,8 +2526,8 @@ describe("WorkspaceService", () => {
       repoSlug: "svcrepo",
     });
 
-    // Archive never runs setup; restore does (so gitignored deps like
-    // node_modules — absent from the archive stash — come back, like create).
+    // Neither archive nor restore should run setup. Restoring a workspace must
+    // not execute repository-configured commands implicitly.
     await svc.handle("workspace.archive", {
       workspaceId: created.workspaceId,
       stashUncommitted: true,
@@ -2259,9 +2538,7 @@ describe("WorkspaceService", () => {
       workspaceId: created.workspaceId,
     })) as { restoredAt: number };
     expect(result.restoredAt).toBeGreaterThan(0);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.id).toBe(created.workspaceId);
-    expect(calls[0]!.command).toContain("echo deps");
+    expect(calls).toHaveLength(0);
   });
 
   it("runs setup for the ROWLESS trunk via repoRoot (local:<slug>, no workspace row)", async () => {

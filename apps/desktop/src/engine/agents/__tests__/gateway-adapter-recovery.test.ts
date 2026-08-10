@@ -41,14 +41,14 @@ describe("AgentGateway session/adapter recovery classification", () => {
 
   it("throws session-expired (NOT protocol-error) when the route survived but the adapter map was cleared", async () => {
     const gw = makeGateway() as unknown as {
-      sessionToAgent: Map<string, string>;
+      executionToAgent: Map<string, string>;
       adapters: Map<string, AgentAdapter>;
       prompt(a: string, s: string, p: unknown[]): Promise<unknown>;
     };
     // A route exists (renderer's sessionId still maps to "claude") but the
     // adapter is gone — exactly what gateway.dispose() leaves behind on an
     // engine respawn.
-    gw.sessionToAgent.set("s1", "claude");
+    gw.executionToAgent.set("s1", "claude");
 
     let caught: unknown;
     try {
@@ -64,7 +64,7 @@ describe("AgentGateway session/adapter recovery classification", () => {
 
   it("routes to the live adapter when both the route and adapter are present", async () => {
     const gw = makeGateway() as unknown as {
-      sessionToAgent: Map<string, string>;
+      executionToAgent: Map<string, string>;
       adapters: Map<string, AgentAdapter>;
       prompt(a: string, s: string, p: unknown[]): Promise<unknown>;
     };
@@ -77,7 +77,7 @@ describe("AgentGateway session/adapter recovery classification", () => {
       },
       respondToPermission: () => {},
     } as unknown as AgentAdapter);
-    gw.sessionToAgent.set("s2", "claude");
+    gw.executionToAgent.set("s2", "claude");
 
     await gw.prompt("claude", "s2", []);
     expect(seen).toEqual(["s2"]);
@@ -85,7 +85,7 @@ describe("AgentGateway session/adapter recovery classification", () => {
 
   it("classifies a missing task-stop capability at the operation boundary", async () => {
     const gw = makeGateway() as unknown as {
-      sessionToAgent: Map<string, string>;
+      executionToAgent: Map<string, string>;
       adapters: Map<string, AgentAdapter>;
       stopBackgroundTask(a: string, s: string, taskId: string): Promise<void>;
     };
@@ -93,7 +93,7 @@ describe("AgentGateway session/adapter recovery classification", () => {
       agentId: "claude",
       respondToPermission: () => {},
     } as unknown as AgentAdapter);
-    gw.sessionToAgent.set("s3", "claude");
+    gw.executionToAgent.set("s3", "claude");
 
     const failure = await gw.stopBackgroundTask("claude", "s3", "task-1").then(
       () => null,

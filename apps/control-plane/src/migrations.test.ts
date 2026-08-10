@@ -115,7 +115,9 @@ d("migration ladder", () => {
     async () => {
       // A deployment can be at ANY prior revision (a long-lived staging box, a
       // restored backup, a rollback). Every suffix of the ladder must apply to
-      // the state its prefix leaves.
+      // the state its prefix leaves. This deliberately runs the full ladder once
+      // per starting revision, which can exceed Vitest's default on hosted
+      // Postgres even while every migration is making healthy progress.
       for (let k = 0; k < LADDER.length; k++) {
         await reset();
         await applyThrough(k);

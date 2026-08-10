@@ -94,9 +94,14 @@ import { rememberProject } from "./platform/recent-projects";
 import {
   dbChatSnapshot,
   dbReplaceAllChats,
+  dbClearChatProviderIdentity,
   dbDeleteChat,
   type ChatRowWire,
 } from "./features/agent/agent-history-client";
+import {
+  persistChatRowsWithBestEffortIdentityClears,
+  providerIdentityClearForTransition,
+} from "./features/agent/chat-provider-identity-persistence";
 import {
   loadScrollPositions,
   pruneScrollPositions,
@@ -350,6 +355,8 @@ function threadToRow(c: ChatThread): ChatRowWire {
     createdAt: c.createdAt,
     updatedAt: c.updatedAt,
     sessionId: c.sessionId ?? null,
+    providerBinding: c.providerBinding ?? null,
+    providerMetadata: c.providerMetadata ?? null,
     pinned: !!c.pinned,
     archived: !!c.archived,
     sourceChatId: c.sourceChatId ?? null,
@@ -379,6 +386,8 @@ function rowToThread(r: ChatRowWire): ChatThread {
   // (== "chat" by store convention).
   const resolvedKind: "chat" | "terminal" | undefined =
     r.kind === "terminal" || r.kind === "chat" ? r.kind : undefined;
+  const providerBinding =
+    r.providerBinding?.providerId === r.agentId ? r.providerBinding : undefined;
   return {
     id: r.id,
     folder: r.folder,
@@ -397,6 +406,10 @@ function rowToThread(r: ChatRowWire): ChatThread {
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
     sessionId: r.sessionId ?? undefined,
+    providerBinding,
+    providerMetadata: providerBinding
+      ? (r.providerMetadata ?? undefined)
+      : undefined,
     pinned: r.pinned,
     archived: r.archived,
     sourceChatId: r.sourceChatId ?? undefined,
@@ -443,7 +456,33 @@ function ChatsPersistence() {
       engineRows.set(row.id, row);
       engineDeletedIdsRef.current.delete(row.id);
     }
-    void dbReplaceAllChats(rows.map(threadToRow)).catch((err) => {
+    const identityClears = rows.flatMap((row) => {
+      const clear = providerIdentityClearForTransition(
+        previous.get(row.id),
+        row,
+      );
+      return clear ? [clear] : [];
+    });
+    void (async () => {
+      // Same-agent NULL upserts ordinarily preserve an engine-learned binding,
+      // which protects against stale renderer/remote snapshots. An intentional
+      // renderer transition from a known binding to none therefore needs an
+      // explicit compare-and-clear first. The resume-id guard makes a delayed
+      // reset harmless if the engine has already learned a newer binding.
+      const failedIdentityClears =
+        await persistChatRowsWithBestEffortIdentityClears(
+          rows.map(threadToRow),
+          identityClears,
+          dbClearChatProviderIdentity,
+          dbReplaceAllChats,
+        );
+      if (failedIdentityClears.length === 0) return;
+      console.warn(
+        `[Zeros] ${failedIdentityClears.length} provider identity clear${
+          failedIdentityClears.length === 1 ? "" : "s"
+        } could not be confirmed; chat metadata was still saved.`,
+      );
+    })().catch((err) => {
       // Roll back only entries that still point at this failed batch. A newer
       // user edit or live snapshot must never be overwritten by the rollback.
       for (const row of rows) {
@@ -664,8 +703,8 @@ function ChatsPersistence() {
  *
  * In-place swap (no webview reload):
  *   1. Drop every in-memory session — they reference the dead engine's
- *      sessionIds. The persistent chat.sessionId on disk lets us
- *      replay history on the user's next chat-open.
+ *      executionIds. The persistent provider binding on the chat lets us
+ *      resume provider state on the user's next chat-open.
  *   2. Force the bridge client to re-resolve the engine port and open a
  *      fresh socket. Pending RPCs reject with a soft-fail — upstream
  *      retry loops handle it.
@@ -675,7 +714,7 @@ function ChatsPersistence() {
  *
  * Generation guard: any late callback from the old engine is dropped
  * because (a) the websocket is closed, so events stop arriving, and
- * (b) the in-memory sessionId → chatId map was wiped by disposeAll().
+ * (b) the in-memory executionId → conversationId map was wiped by disposeAll().
  */
 function ReloadOnProjectChange() {
   const sessions = useAgentSessions();

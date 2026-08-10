@@ -53,12 +53,51 @@ describe("classifyCursorSdkError", () => {
     }
   });
 
+  it("classifies Cursor's typed 429 as a calm rate-limit failure", () => {
+    const err = Object.assign(new Error("Too many requests"), {
+      name: "RateLimitError",
+      status: 429,
+      isRetryable: true,
+    });
+    const result = classifyCursorSdkError(err, "prompt");
+
+    expect(result.failure.kind).toBe("rate-limited");
+    expect(result.failure.message).toMatch(/rate.?limit/i);
+    expect(result.failure.advice).toMatch(/try again/i);
+  });
+
+  it("prefers a typed 429 over network-shaped error wording", () => {
+    const err = Object.assign(new Error("ETIMEDOUT while waiting to retry"), {
+      name: "RateLimitError",
+      status: 429,
+    });
+
+    expect(classifyCursorSdkError(err, "prompt").failure.kind).toBe(
+      "rate-limited",
+    );
+  });
+
+  it("recognizes a serialized 429 after it crosses the Cursor host boundary", () => {
+    const result = classifyCursorSdkError(
+      new Error("429 resource exhausted: rate limit reached"),
+      "prompt",
+    );
+    expect(result.failure.kind).toBe("rate-limited");
+  });
+
   it("falls back to protocol-error for unknown failures", () => {
     const result = classifyCursorSdkError(
       new Error("some unexpected internal failure"),
       "prompt",
     );
     expect(result.failure.kind).toBe("protocol-error");
+  });
+
+  it("classifies nullish host errors without throwing its own TypeError", () => {
+    for (const value of [null, undefined]) {
+      const result = classifyCursorSdkError(value, "prompt");
+      expect(result.failure.kind).toBe("protocol-error");
+    }
   });
 
   it("classifies TLS / certificate failures with actionable guidance (HTTPS interception)", () => {
@@ -75,7 +114,9 @@ describe("classifyCursorSdkError", () => {
     );
     expect(result.failure.kind).toBe("protocol-error");
     // The pill must explain it's a network/proxy issue, not model/auth.
-    expect(result.failure.message).toMatch(/TLS|secure connection|HTTPS-inspecting/i);
+    expect(result.failure.message).toMatch(
+      /TLS|secure connection|HTTPS-inspecting/i,
+    );
     expect(result.failure.message).toMatch(/cursor\.sh|NODE_EXTRA_CA_CERTS/i);
   });
 

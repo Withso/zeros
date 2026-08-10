@@ -13,6 +13,7 @@ const CHAT_MUTATIONS = new Set([
   "chats.upsert",
   "chats.delete",
   "chats.bulkUpsert",
+  "chats.clearProviderIdentity",
 ]);
 
 const PROJECT_MUTATIONS = new Set([

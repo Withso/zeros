@@ -17,6 +17,7 @@
     "./version": "./src/version.ts",
     "./schemas": "./src/schemas.ts",
     "./github-auth": "./src/github-auth.ts",
+    "./identities": "./src/identities.ts",
     "./native-error": "./src/native-error.ts",
     "./run-actions": "./src/run-actions.ts",
     "./scrub": "./src/scrub.ts",

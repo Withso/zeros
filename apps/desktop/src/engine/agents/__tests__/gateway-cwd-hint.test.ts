@@ -28,13 +28,17 @@ function makeGateway() {
 
 type GwInternals = {
   adapters: Map<string, AgentAdapter>;
-  sessionToAgent: Map<string, string>;
-  sessionToCwd: Map<string, string>;
+  executionToAgent: Map<string, string>;
+  executionToCwd: Map<string, string>;
   sessionsCwdHinted: Set<string>;
   sessionsInstructed: Set<string>;
-  sessionToInstructionCtx: Map<
+  executionToInstructionCtx: Map<
     string,
-    { additionalDirectories: string[]; targetBranch?: string; customInstructions?: string }
+    {
+      additionalDirectories: string[];
+      targetBranch?: string;
+      customInstructions?: string;
+    }
   >;
   prompt(
     agentId: string,
@@ -44,7 +48,10 @@ type GwInternals = {
 };
 
 /** A fake adapter that records every prompt array it is handed. */
-function recordingAdapter(agentId: string, sink: ContentBlock[][]): AgentAdapter {
+function recordingAdapter(
+  agentId: string,
+  sink: ContentBlock[][],
+): AgentAdapter {
   return {
     agentId,
     prompt: async ({ prompt }: { prompt: ContentBlock[] }) => {
@@ -67,8 +74,8 @@ function bind(
   cwd?: string,
 ) {
   gw.adapters.set(agentId, recordingAdapter(agentId, sink));
-  gw.sessionToAgent.set(sessionId, agentId);
-  if (cwd) gw.sessionToCwd.set(sessionId, cwd);
+  gw.executionToAgent.set(sessionId, agentId);
+  if (cwd) gw.executionToCwd.set(sessionId, cwd);
   // Pre-mark instructed so these cwd-hint tests isolate the cwd hint from the
   // first-turn <system_instruction> (which now also injects via prompt()).
   gw.sessionsInstructed.add(sessionId);
@@ -82,12 +89,16 @@ function bindFresh(
   sessionId: string,
   sink: ContentBlock[][],
   cwd?: string,
-  ctx?: { additionalDirectories?: string[]; targetBranch?: string; customInstructions?: string },
+  ctx?: {
+    additionalDirectories?: string[];
+    targetBranch?: string;
+    customInstructions?: string;
+  },
 ) {
   gw.adapters.set(agentId, recordingAdapter(agentId, sink));
-  gw.sessionToAgent.set(sessionId, agentId);
-  if (cwd) gw.sessionToCwd.set(sessionId, cwd);
-  gw.sessionToInstructionCtx.set(sessionId, {
+  gw.executionToAgent.set(sessionId, agentId);
+  if (cwd) gw.executionToCwd.set(sessionId, cwd);
+  gw.executionToInstructionCtx.set(sessionId, {
     additionalDirectories: ctx?.additionalDirectories ?? [],
     targetBranch: ctx?.targetBranch,
     customInstructions: ctx?.customInstructions,
@@ -205,7 +216,9 @@ describe("AgentGateway.prompt system instruction", () => {
       customInstructions: "Always reply in French.",
     });
     await gw.prompt("claude", "si3", [text("hi")]);
-    expect((sink[0]![0] as { text: string }).text).toContain("Always reply in French.");
+    expect((sink[0]![0] as { text: string }).text).toContain(
+      "Always reply in French.",
+    );
   });
 
   it("does NOT inject on a pre-marked (resumed) session", async () => {
@@ -254,12 +267,16 @@ describe("AgentGateway.loadSession re-arms the system instruction on a degraded 
     gwi.adapters.set("claude", resumingAdapter("claude", sink, true));
 
     // A real existing dir so resolveAgentCwd accepts the cwd.
-    await gw.loadSession("claude", "fresh-1", { cwd: os.tmpdir() });
+    const loaded = await gw.loadSession("claude", "fresh-1", {
+      cwd: os.tmpdir(),
+    });
+    const executionId = loaded.executionId!;
     // A degraded resume must NOT be pre-marked instructed (the fresh thread has
     // no transcript carrying the preamble).
-    expect(gwi.sessionsInstructed.has("fresh-1")).toBe(false);
+    expect(executionId).not.toBe("fresh-1");
+    expect(gwi.sessionsInstructed.has(executionId)).toBe(false);
 
-    await gw.prompt("claude", "fresh-1", [text("hi")]);
+    await gw.prompt("claude", executionId, [text("hi")]);
     const head = sink[0]![0] as { text: string };
     expect(head.text).toContain("<system_instruction>");
     expect(head.text).toContain("working inside Zeros");
@@ -273,10 +290,14 @@ describe("AgentGateway.loadSession re-arms the system instruction on a degraded 
     const sink: ContentBlock[][] = [];
     gwi.adapters.set("codex", resumingAdapter("codex", sink, false));
 
-    await gw.loadSession("codex", "true-1", { cwd: os.tmpdir() });
-    expect(gwi.sessionsInstructed.has("true-1")).toBe(true);
+    const loaded = await gw.loadSession("codex", "true-1", {
+      cwd: os.tmpdir(),
+    });
+    const executionId = loaded.executionId!;
+    expect(executionId).not.toBe("true-1");
+    expect(gwi.sessionsInstructed.has(executionId)).toBe(true);
 
-    await gw.prompt("codex", "true-1", [text("hi")]);
+    await gw.prompt("codex", executionId, [text("hi")]);
     expect(sink[0]).toEqual([text("hi")]);
   });
 });

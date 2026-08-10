@@ -13,6 +13,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { randomUUID } from "node:crypto";
+import { providerBindingForResume } from "@zeros/protocol/identities";
 
 import { AgentFailureError } from "../../types";
 import { SESSION_EXPIRED_KEYWORDS } from "../shared/session-expiry";
@@ -449,7 +450,8 @@ async function loadSdk(): Promise<CursorSdkModule> {
 }
 
 interface Session {
-  zerosSessionId: string; // == SDK agentId
+  /** Zeros-owned live execution route; deliberately not the SDK agent id. */
+  zerosSessionId: string;
   cwd: string;
   apiKey: string;
   modelId: string;
@@ -696,6 +698,7 @@ export class CursorSdkAdapter implements AgentAdapter {
   }
 
   async newSession(opts: {
+    executionId?: string;
     cwd: string;
     env?: Record<string, string>;
     cliBinary?: string;
@@ -735,8 +738,9 @@ export class CursorSdkAdapter implements AgentAdapter {
       throw this.classify(err, "newSession");
     }
 
+    const executionId = opts.executionId ?? randomUUID();
     const session: Session = {
-      zerosSessionId: agent.agentId,
+      zerosSessionId: executionId,
       cwd: opts.cwd,
       apiKey,
       modelId,
@@ -748,11 +752,13 @@ export class CursorSdkAdapter implements AgentAdapter {
       mcpServers: opts.mcpServers,
       appliedAutoReview: autoReviewFor(CURSOR_DEFAULT_MODE),
     };
-    this.sessions.set(agent.agentId, session);
+    this.sessions.set(executionId, session);
 
     return {
       session: {
-        sessionId: agent.agentId,
+        executionId,
+        sessionId: executionId,
+        providerBinding: providerBindingForResume("cursor", agent.agentId),
         modes: {
           currentModeId: CURSOR_DEFAULT_MODE,
           availableModes: CURSOR_SDK_MODES,
@@ -763,13 +769,24 @@ export class CursorSdkAdapter implements AgentAdapter {
   }
 
   async loadSession(opts: {
-    sessionId: string;
+    executionId?: string;
+    providerBinding?: import("@zeros/protocol/identities").ProviderBinding;
+    sessionId?: string;
     cwd: string;
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
   }): Promise<LoadSessionResponse> {
     const apiKey = this.resolveApiKey(opts.env);
+    const executionId = opts.executionId ?? opts.sessionId ?? randomUUID();
+    const providerResumeId = opts.providerBinding?.resumeId ?? opts.sessionId;
+    if (!providerResumeId) {
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        stage: "loadSession",
+        message: "Cursor resume requires a provider agent binding.",
+      });
+    }
     // Discover the account's catalog (cached, once per process) so the model
     // is validated BEFORE create/resume — otherwise a stale id (e.g. the old
     // `composer-2-fast` default, or a persisted pick) throws "Cannot use this
@@ -790,7 +807,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     // prior transcript carrying it).
     let resumedFresh = false;
     try {
-      agent = await sdk.Agent.resume(opts.sessionId, {
+      agent = await sdk.Agent.resume(providerResumeId, {
         apiKey,
         // Bind the resolved model on resume too. `Agent.resume` reconstructs
         // the agent from Cursor's local SQLite store, which may hold NO
@@ -832,7 +849,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       if (failure.failure.kind !== "session-expired") throw failure;
       this.ctx.emit.onAgentStderr(
         AGENT_ID,
-        `[cursor-sdk] resume of ${opts.sessionId} failed (${
+        `[cursor-sdk] resume of ${providerResumeId} failed (${
           err instanceof Error ? err.message : String(err)
         }); starting a fresh agent in ${opts.cwd}.`,
       );
@@ -856,8 +873,8 @@ export class CursorSdkAdapter implements AgentAdapter {
         throw this.classify(createErr, "loadSession");
       }
     }
-    this.sessions.set(opts.sessionId, {
-      zerosSessionId: opts.sessionId,
+    this.sessions.set(executionId, {
+      zerosSessionId: executionId,
       cwd: opts.cwd,
       apiKey,
       modelId,
@@ -870,6 +887,8 @@ export class CursorSdkAdapter implements AgentAdapter {
       appliedAutoReview: autoReviewFor(CURSOR_DEFAULT_MODE),
     });
     return {
+      executionId,
+      providerBinding: providerBindingForResume("cursor", agent.agentId),
       modes: {
         currentModeId: CURSOR_DEFAULT_MODE,
         availableModes: CURSOR_SDK_MODES,
@@ -890,6 +909,10 @@ export class CursorSdkAdapter implements AgentAdapter {
       const sessions = items
         .map((it) => ({
           sessionId: String(it.agentId ?? it.id ?? ""),
+          providerBinding: providerBindingForResume(
+            "cursor",
+            String(it.agentId ?? it.id ?? ""),
+          ),
           cwd: typeof it.cwd === "string" ? it.cwd : (opts.cwd ?? ""),
           title: typeof it.name === "string" ? it.name : undefined,
           updatedAt:
@@ -898,7 +921,7 @@ export class CursorSdkAdapter implements AgentAdapter {
               : undefined,
         }))
         .filter((s) => s.sessionId);
-      return { sessions } as never;
+      return { sessions };
     } catch {
       return { sessions: [] } as never;
     }
@@ -1280,7 +1303,11 @@ export class CursorSdkAdapter implements AgentAdapter {
     try {
       await session.activeRun?.cancel();
     } catch {
-      /* best effort */
+      // Best effort, and deliberately NOT fail-closed for the lifecycle reaper:
+      // cancelling an already-finished run rejects routinely, and the SDK owns
+      // the child either way — so a throw here says nothing about whether a
+      // process survived. See CodexAppServerAdapter.disposeSession for the one
+      // teardown that does observe a real process-group stop.
     }
     try {
       session.agent.close?.();
@@ -1484,8 +1511,10 @@ export class CursorSdkAdapter implements AgentAdapter {
  *     every worktree / legacy-chat reopen). The shared
  *     SESSION_EXPIRED_KEYWORDS regex (adapters/shared/session-expiry.ts) owns the wording
  *     match and is parity-tested against the renderer-side fallback.
- *  2. Auth errors → `auth-required` so the panel flips to the Sign-in chip.
- *  3. Everything else → `protocol-error`. */
+ *  2. Rate limits → `rate-limited` with retry-later guidance (never an
+ *     immediate auto-replay that would amplify the 429).
+ *  3. Auth errors → `auth-required` so the panel flips to the Sign-in chip.
+ *  4. Everything else → `protocol-error`. */
 export function classifyCursorSdkError(
   err: unknown,
   stage: "newSession" | "loadSession" | "prompt",
@@ -1535,6 +1564,42 @@ export function classifyCursorSdkError(
       agentId: AGENT_ID,
     });
   }
+  // Prefer the SDK's typed throttle signal before message-based network
+  // classification. A RateLimitError can legitimately mention a timed-out
+  // backoff/request; replaying it as a transient disconnect would amplify the
+  // provider's 429. Duck-type because this unstable SDK surface crosses the
+  // Node-host boundary as a reconstructed Error.
+  const e = (err !== null && typeof err === "object" ? err : {}) as {
+    status?: unknown;
+    code?: unknown;
+    name?: unknown;
+    constructor?: { name?: string };
+  };
+  const status = typeof e.status === "number" ? e.status : undefined;
+  const ctorName =
+    (typeof e.name === "string" ? e.name : "") || e.constructor?.name || "";
+  const isRateLimited =
+    status === 429 ||
+    /RateLimitError/i.test(ctorName) ||
+    /\b(?:429|rate[\s_-]*limit(?:ed)?|too many requests|resource exhausted)\b/i.test(
+      message,
+    );
+  if (isRateLimited) {
+    return new AgentFailureError({
+      kind: "rate-limited",
+      message:
+        `cursor-sdk ${stage} was rate-limited by Cursor. The current send ` +
+        `stopped without an automatic replay. (${message})`,
+      stage,
+      agentId: AGENT_ID,
+      advice: "Cursor is rate-limiting requests. Try again shortly.",
+    });
+  }
+  const isAuth =
+    status === 401 ||
+    status === 403 ||
+    /AuthenticationError/i.test(ctorName) ||
+    /auth|unauthor|401|api[\s_-]?key|forbidden|403/i.test(message);
   // TLS / certificate failures connecting to Cursor's HTTP/2 backend. The SDK
   // streams the turn over TLS to api2.cursor.sh, so a cert that doesn't validate
   // ("self-signed certificate", "unable to verify", a real altname mismatch)
@@ -1575,31 +1640,6 @@ export function classifyCursorSdkError(
       agentId: AGENT_ID,
     });
   }
-  // Prefer the SDK's typed error signals over fragile message-regex alone.
-  // @cursor/sdk error classes carry an HTTP `.status` and distinct
-  // constructor names (AuthenticationError 401/403, RateLimitError 429,
-  // ConfigurationError 400/404). A real auth failure whose message doesn't
-  // happen to contain our keywords would otherwise degrade to
-  // protocol-error → a hard "Agent error" toast instead of the Sign-in
-  // chip. We duck-type rather than import the classes so the SDK's
-  // unstable type surface can't break our compile.
-  const e = err as {
-    status?: unknown;
-    code?: unknown;
-    name?: unknown;
-    constructor?: { name?: string };
-  };
-  const status = typeof e.status === "number" ? e.status : undefined;
-  // Prefer `.name` (set on the instance by the SDK's error classes AND on errors
-  // reconstructed across the Node-host boundary, where the minified
-  // constructor.name is meaningless) before falling back to constructor.name.
-  const ctorName =
-    (typeof e.name === "string" ? e.name : "") || e.constructor?.name || "";
-  const isAuth =
-    status === 401 ||
-    status === 403 ||
-    /AuthenticationError/i.test(ctorName) ||
-    /auth|unauthor|401|api[\s_-]?key|forbidden|403/i.test(message);
   // Auth failures get ACTIONABLE copy. Cursor's raw error says "If you are
   // logged in, try logging out and back in" — cursor-agent CLI advice that's
   // meaningless inside Zeros (there is no login; auth is the API key we send).

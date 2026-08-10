@@ -56,11 +56,22 @@ function fakeAdapter(opts: {
     ...(opts.native ? { nativeSystemInstruction: true } : {}),
     newSession: async (o: Record<string, unknown>) => {
       opts.calls.newSessionOpts.push(o);
-      return { session: { sessionId: opts.sessionId }, initialize: {} };
+      return {
+        session: {
+          executionId: o.executionId,
+          sessionId: o.executionId,
+        },
+        initialize: {},
+      };
     },
-    loadSession: async (o: Record<string, unknown>): Promise<LoadSessionResponse> => {
+    loadSession: async (
+      o: Record<string, unknown>,
+    ): Promise<LoadSessionResponse> => {
       opts.calls.loadSessionOpts.push(o);
-      return { resumedFresh: opts.resumedFresh ?? false } as LoadSessionResponse;
+      return {
+        executionId: o.executionId as string,
+        resumedFresh: opts.resumedFresh ?? false,
+      };
     },
     prompt: async ({ prompt }: { prompt: ContentBlock[] }) => {
       opts.calls.prompts.push(prompt);
@@ -85,10 +96,15 @@ describe("gateway native system-instruction routing", () => {
     const c = calls();
     (gw as unknown as GwInternals).adapters.set(
       "codex",
-      fakeAdapter({ agentId: "codex", native: true, sessionId: "s-native", calls: c }),
+      fakeAdapter({
+        agentId: "codex",
+        native: true,
+        sessionId: "s-native",
+        calls: c,
+      }),
     );
 
-    await gw.newSession("codex", {
+    const session = await gw.newSession("codex", {
       cwd: CWD,
       env: { ZEROS_TARGET_BRANCH: "origin/dev" },
     });
@@ -102,7 +118,7 @@ describe("gateway native system-instruction routing", () => {
     expect(instr).not.toContain("<system_instruction>");
 
     // First prompt: NO in-band block — the native channel already carried it.
-    await gw.prompt("codex", "s-native", [text("fix the login bug")]);
+    await gw.prompt("codex", session.executionId, [text("fix the login bug")]);
     expect(c.prompts[0]).toEqual([text("fix the login bug")]);
   });
 
@@ -111,19 +127,26 @@ describe("gateway native system-instruction routing", () => {
     const c = calls();
     (gw as unknown as GwInternals).adapters.set(
       "cursor",
-      fakeAdapter({ agentId: "cursor", native: false, sessionId: "s-inband", calls: c }),
+      fakeAdapter({
+        agentId: "cursor",
+        native: false,
+        sessionId: "s-inband",
+        calls: c,
+      }),
     );
 
-    await gw.newSession("cursor", { cwd: CWD });
+    const session = await gw.newSession("cursor", { cwd: CWD });
 
     expect(c.newSessionOpts[0]!.systemInstruction).toBeUndefined();
 
-    await gw.prompt("cursor", "s-inband", [text("hello")]);
-    await gw.prompt("cursor", "s-inband", [text("again")]);
+    await gw.prompt("cursor", session.executionId, [text("hello")]);
+    await gw.prompt("cursor", session.executionId, [text("again")]);
 
     // First prompt: block prepended ahead of the user's text.
     expect(c.prompts[0]).toHaveLength(2);
-    expect((c.prompts[0]![0] as { text: string }).text).toContain("<system_instruction>");
+    expect((c.prompts[0]![0] as { text: string }).text).toContain(
+      "<system_instruction>",
+    );
     expect(c.prompts[0]![1]).toEqual(text("hello"));
     // Second prompt: one-shot spent.
     expect(c.prompts[1]).toEqual([text("again")]);
@@ -143,13 +166,13 @@ describe("gateway native system-instruction routing", () => {
       }),
     );
 
-    await gw.loadSession("codex", "s-resume", { cwd: CWD });
+    const loaded = await gw.loadSession("codex", "s-resume", { cwd: CWD });
 
     const instr = c.loadSessionOpts[0]!.systemInstruction as string;
     expect(instr).toContain("working inside Zeros");
     expect(instr).not.toContain("<system_instruction>");
 
-    await gw.prompt("codex", "s-resume", [text("continue")]);
+    await gw.prompt("codex", loaded.executionId!, [text("continue")]);
     expect(c.prompts[0]).toEqual([text("continue")]);
   });
 
@@ -167,16 +190,18 @@ describe("gateway native system-instruction routing", () => {
       }),
     );
 
-    await gw.loadSession("codex", "s-fresh", { cwd: CWD });
+    const loaded = await gw.loadSession("codex", "s-fresh", { cwd: CWD });
 
     // The adapter's fresh thread/start fallback carried developerInstructions
     // (it received systemInstruction), so the session stays pre-marked.
     expect(c.loadSessionOpts[0]!.systemInstruction).toBeDefined();
     expect(
-      (gw as unknown as GwInternals).sessionsInstructed.has("s-fresh"),
+      (gw as unknown as GwInternals).sessionsInstructed.has(
+        loaded.executionId!,
+      ),
     ).toBe(true);
 
-    await gw.prompt("codex", "s-fresh", [text("keep going")]);
+    await gw.prompt("codex", loaded.executionId!, [text("keep going")]);
     expect(c.prompts[0]).toEqual([text("keep going")]);
   });
 
@@ -194,10 +219,14 @@ describe("gateway native system-instruction routing", () => {
       }),
     );
 
-    await gw.loadSession("cursor", "s-fresh-inband", { cwd: CWD });
-    await gw.prompt("cursor", "s-fresh-inband", [text("hello")]);
+    const loaded = await gw.loadSession("cursor", "s-fresh-inband", {
+      cwd: CWD,
+    });
+    await gw.prompt("cursor", loaded.executionId!, [text("hello")]);
 
     expect(c.prompts[0]).toHaveLength(2);
-    expect((c.prompts[0]![0] as { text: string }).text).toContain("<system_instruction>");
+    expect((c.prompts[0]![0] as { text: string }).text).toContain(
+      "<system_instruction>",
+    );
   });
 });

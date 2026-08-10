@@ -221,6 +221,158 @@ describe("CodexAppServerTranslator", () => {
   });
 
   describe("tool-call lifecycle", () => {
+    it("preserves dynamic-tool output as canonical Zeros content", () => {
+      env.t.handle("item/started", {
+        item: {
+          type: "dynamicToolCall",
+          id: "dynamic-1",
+          namespace: "workspace",
+          tool: "inspect",
+          arguments: { path: "README.md" },
+          status: "inProgress",
+          contentItems: null,
+          success: null,
+        },
+        threadId: "t1",
+        turnId: "u1",
+      });
+      env.t.handle("item/completed", {
+        item: {
+          type: "dynamicToolCall",
+          id: "dynamic-1",
+          namespace: "workspace",
+          tool: "inspect",
+          arguments: { path: "README.md" },
+          status: "completed",
+          success: true,
+          contentItems: [
+            { type: "inputText", text: "inspection complete" },
+            {
+              type: "inputImage",
+              imageUrl: "data:image/png;base64,aGVsbG8=",
+            },
+            {
+              type: "inputAudio",
+              audioUrl: "data:audio/wav;base64,d2F2",
+            },
+            {
+              type: "inputImage",
+              imageUrl: "https://example.com/result.png",
+            },
+          ],
+        },
+        threadId: "t1",
+        turnId: "u1",
+      });
+
+      const call = env.out.emitted.find(
+        (notification) => notification.update.sessionUpdate === "tool_call",
+      );
+      expect(call?.update).toMatchObject({
+        title: "workspace/inspect",
+        rawInput: {
+          namespace: "workspace",
+          tool: "inspect",
+          arguments: { path: "README.md" },
+        },
+      });
+      const update = env.out.emitted.find(
+        (notification) =>
+          notification.update.sessionUpdate === "tool_call_update",
+      );
+      expect(update?.update).toMatchObject({
+        status: "completed",
+        content: [
+          {
+            type: "content",
+            content: { type: "text", text: "inspection complete" },
+          },
+          {
+            type: "content",
+            content: { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+          },
+          {
+            type: "content",
+            content: { type: "audio", mimeType: "audio/wav", data: "d2F2" },
+          },
+          {
+            type: "content",
+            content: {
+              type: "resource_link",
+              uri: "https://example.com/result.png",
+              name: "Dynamic tool image",
+            },
+          },
+        ],
+      });
+    });
+
+    it("keeps an explicit transcript note for unrenderable dynamic-tool media", () => {
+      env.t.handle("item/started", {
+        item: {
+          type: "dynamicToolCall",
+          id: "dynamic-unrenderable",
+          namespace: "workspace",
+          tool: "inspect",
+          arguments: {},
+          status: "inProgress",
+          contentItems: null,
+          success: null,
+        },
+        threadId: "t1",
+        turnId: "u1",
+      });
+      env.t.handle("item/completed", {
+        item: {
+          type: "dynamicToolCall",
+          id: "dynamic-unrenderable",
+          namespace: "workspace",
+          tool: "inspect",
+          arguments: {},
+          status: "completed",
+          success: true,
+          contentItems: [
+            {
+              type: "inputImage",
+              imageUrl: "data:image/svg+xml,%3Csvg%3E%3C/svg%3E",
+            },
+            {
+              type: "inputAudio",
+              audioUrl: "data:image/png;base64,aGVsbG8=",
+            },
+          ],
+        },
+        threadId: "t1",
+        turnId: "u1",
+      });
+
+      const update = env.out.emitted.find(
+        (notification) =>
+          notification.update.sessionUpdate === "tool_call_update",
+      );
+      expect(update?.update).toMatchObject({
+        status: "completed",
+        content: [
+          {
+            type: "content",
+            content: {
+              type: "text",
+              text: "Dynamic tool image output could not be rendered.",
+            },
+          },
+          {
+            type: "content",
+            content: {
+              type: "text",
+              text: "Dynamic tool audio output could not be rendered.",
+            },
+          },
+        ],
+      });
+      const renderedContent = (update?.update as { content?: unknown }).content;
+      expect(JSON.stringify(renderedContent)).not.toContain("%3Csvg%3E");
+    });
+
     it("commandExecution: started → tool_call(execute, in_progress), completed exit 0 → completed", () => {
       env.t.handle("item/started", {
         item: {
@@ -265,6 +417,96 @@ describe("CodexAppServerTranslator", () => {
       expect(call.title).toMatch(/ls -la/);
       const update = updates[0].update as { status: string };
       expect(update.status).toBe("completed");
+    });
+
+    it("appends command output deltas instead of replacing the visible log", () => {
+      env.t.handle("item/started", {
+        item: { type: "commandExecution", id: "cmd-stream", command: "build" },
+        threadId: "t1",
+        turnId: "u1",
+      });
+      env.t.handle("item/commandExecution/outputDelta", {
+        threadId: "t1",
+        turnId: "u1",
+        itemId: "cmd-stream",
+        delta: "first line\n",
+      });
+      env.t.handle("item/commandExecution/outputDelta", {
+        threadId: "t1",
+        turnId: "u1",
+        itemId: "cmd-stream",
+        delta: "second line\n",
+      });
+
+      const updates = env.out.emitted
+        .filter((n) => n.update.sessionUpdate === "tool_call_update")
+        .map((n) => (n.update as { rawOutput?: unknown }).rawOutput);
+      expect(updates).toEqual(["first line\n", "first line\nsecond line\n"]);
+    });
+
+    it("replaces rather than re-glues an output snapshot", () => {
+      env.t.handle("item/started", {
+        item: { type: "commandExecution", id: "cmd-snap", command: "build" },
+        threadId: "t1",
+        turnId: "u1",
+      });
+      // `output` names the whole log so far, not an increment. Appending it
+      // would render "first\n" then "first\nfirst\nsecond\n".
+      env.t.handle("item/commandExecution/outputDelta", {
+        itemId: "cmd-snap",
+        output: "first\n",
+      });
+      env.t.handle("item/commandExecution/outputDelta", {
+        itemId: "cmd-snap",
+        output: "first\nsecond\n",
+      });
+      // An unchanged snapshot must not churn the timeline.
+      env.t.handle("item/commandExecution/outputDelta", {
+        itemId: "cmd-snap",
+        output: "first\nsecond\n",
+      });
+      // A later true delta resumes appending onto the snapshot.
+      env.t.handle("item/commandExecution/outputDelta", {
+        itemId: "cmd-snap",
+        delta: "third\n",
+      });
+
+      const updates = env.out.emitted
+        .filter((n) => n.update.sessionUpdate === "tool_call_update")
+        .map((n) => (n.update as { rawOutput?: unknown }).rawOutput);
+      expect(updates).toEqual([
+        "first\n",
+        "first\nsecond\n",
+        "first\nsecond\nthird\n",
+      ]);
+    });
+
+    it("bounds live output and never echoes terminal stdin into the log", () => {
+      env.t.handle("item/started", {
+        item: { type: "commandExecution", id: "cmd-bounded", command: "build" },
+        threadId: "t1",
+        turnId: "u1",
+      });
+      env.t.handle("item/commandExecution/outputDelta", {
+        itemId: "cmd-bounded",
+        delta: "x".repeat(25_000),
+      });
+      env.t.handle("item/commandExecution/outputDelta", {
+        itemId: "cmd-bounded",
+        delta: "must-not-trigger-an-identical-update",
+      });
+      env.t.handle("item/commandExecution/terminalInteraction", {
+        itemId: "cmd-bounded",
+        stdin: "secret typed into the process",
+      });
+
+      const updates = env.out.emitted.filter(
+        (n) => n.update.sessionUpdate === "tool_call_update",
+      );
+      expect(updates).toHaveLength(1);
+      const output = (updates[0].update as { rawOutput?: string }).rawOutput;
+      expect(output).toHaveLength(20_001);
+      expect(output).not.toContain("secret typed into the process");
     });
 
     it("commandExecution exit != 0 → failed", () => {
@@ -767,6 +1009,37 @@ describe("CodexAppServerTranslator", () => {
       // The translator should have unwrapped the JSON-in-JSON envelope.
       expect(upd.message).toMatch(/model X is unavailable/);
       expect(upd.noticeId).toBeTruthy();
+    });
+
+    it("classifies structured provider overload separately from auth", () => {
+      env.t.handle("error", {
+        threadId: "t1",
+        turnId: "u1",
+        willRetry: false,
+        error: {
+          codexErrorInfo: "serverOverloaded",
+          message: "Server overloaded",
+        },
+      });
+      expect(env.t.rateLimitFailure).toBe("Server overloaded");
+      expect(env.t.authQuotaFailure).toBeNull();
+    });
+
+    it("classifies a structured HTTP 429 as provider throttling", () => {
+      env.t.handle("error", {
+        threadId: "t1",
+        turnId: "u1",
+        willRetry: false,
+        error: {
+          codexErrorInfo: {
+            responseStreamConnectionFailed: { httpStatusCode: 429 },
+          },
+          message: "Request could not be completed",
+        },
+      });
+
+      expect(env.t.rateLimitFailure).toContain("429");
+      expect(env.t.authQuotaFailure).toBeNull();
     });
 
     it("each error gets its OWN notice row (no run-on blob)", () => {

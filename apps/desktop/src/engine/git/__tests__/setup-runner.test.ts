@@ -44,7 +44,10 @@ function fakePty() {
   return { svc: svc as unknown as PtyService, created, killed };
 }
 
-function sampleWorkspace(id: string, overrides: Partial<Workspace> = {}): Workspace {
+function sampleWorkspace(
+  id: string,
+  overrides: Partial<Workspace> = {},
+): Workspace {
   const now = Date.now();
   return {
     id,
@@ -249,6 +252,33 @@ describe("SetupManager", () => {
     expect(mgr.info(wsId).state).toBe("stopped");
   });
 
+  it("stop() during environment resolution cancels the pending setup spawn", async () => {
+    const wsId = "ws_stop01-moss";
+    insertWorkspace(sampleWorkspace(wsId));
+    const { svc, created } = fakePty();
+    let releaseEnv = (_env: Record<string, string>) => {};
+    const envPending = new Promise<Record<string, string>>((resolve) => {
+      releaseEnv = resolve;
+    });
+    const mgr = new SetupManager(
+      svc,
+      () => {},
+      async () => envPending,
+    );
+
+    const starting = mgr.start({
+      workspaceId: wsId,
+      command: "pnpm install",
+    });
+    mgr.stop(wsId);
+    releaseEnv({ PATH: "/bin" });
+    await starting;
+
+    expect(created).toEqual([]);
+    expect(getWorkspaceById(wsId)?.setupState).toBe("stopped");
+    expect(mgr.info(wsId).state).toBe("stopped");
+  });
+
   it("stop() after the run finished is a no-op (doesn't clobber the result)", async () => {
     const wsId = "ws_fff666-sage";
     insertWorkspace(sampleWorkspace(wsId));
@@ -281,7 +311,11 @@ describe("SetupManager", () => {
     await mgr.start({
       workspaceId: localId,
       command: "true",
-      target: { cwd: "/tmp/test-repo", repoRoot: "/tmp/test-repo", baseBranch: "" },
+      target: {
+        cwd: "/tmp/test-repo",
+        repoRoot: "/tmp/test-repo",
+        baseBranch: "",
+      },
     });
     const s1 = setupSessionId(localId, 1);
     expect(created).toContain(s1);
@@ -298,7 +332,11 @@ describe("SetupManager", () => {
     await mgr.start({
       workspaceId: localId,
       command: "sleep 999",
-      target: { cwd: "/tmp/test-repo", repoRoot: "/tmp/test-repo", baseBranch: "" },
+      target: {
+        cwd: "/tmp/test-repo",
+        repoRoot: "/tmp/test-repo",
+        baseBranch: "",
+      },
     });
     mgr.stop(localId);
     expect(mgr.info(localId).state).toBe("stopped");

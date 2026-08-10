@@ -26,8 +26,18 @@ function makeLegacyDb(): string {
       payload TEXT, created_at INTEGER, PRIMARY KEY (chat_id, ord));
   `);
   db.prepare(
-    "INSERT INTO chats (id, folder, title, created_at, updated_at, pinned, archived) VALUES (?,?,?,?,?,?,?)",
-  ).run("legacy1", "/p", "Legacy One", 1, 2, 0, 0);
+    "INSERT INTO chats (id, folder, agent_id, title, created_at, updated_at, session_id, pinned, archived) VALUES (?,?,?,?,?,?,?,?,?)",
+  ).run(
+    "legacy1",
+    "/p",
+    "claude",
+    "Legacy One",
+    1,
+    2,
+    "legacy-session-dir",
+    0,
+    0,
+  );
   const ins = db.prepare(
     "INSERT INTO agent_messages (chat_id, ord, msg_id, kind, payload, created_at) VALUES (?,?,?,?,?,?)",
   );
@@ -95,6 +105,13 @@ describe("legacy agent-history migration", () => {
 
     migrateLegacyAgentHistory();
     expect(listChats().map((c) => c.id)).toEqual(["legacy1"]);
+    expect(listChats()[0]?.providerBinding).toEqual({
+      version: 1,
+      providerId: "claude",
+      kind: "legacy",
+      resumeId: "legacy-session-dir",
+      legacySessionId: "legacy-session-dir",
+    });
     expect(windowChatMessages("legacy1", 100).map((m) => m.msgId)).toEqual([
       "m1",
       "m2",

@@ -60,6 +60,25 @@ describe("repository layout contracts", () => {
     expect(preflight).not.toContain("github-section-helpers.test.ts");
   });
 
+  it("keeps the credential-free Codex smoke inside its throwaway state root", () => {
+    const smoke = read("scripts/codex-app-server-smoke.mjs");
+
+    // This command is routinely launched by a coding agent whose sandbox can
+    // write the workspace/tmpdir but not the user's ~/.codex. The smoke claims
+    // to need no credentials, so touching ambient Codex state is both needless
+    // and enough to make the protocol check fail before initialize.
+    expect(smoke).toContain("process.env.CODEX_HOME = codexHome");
+    expect(smoke).toContain("fs.mkdirSync(codexHome, { recursive: true })");
+  });
+
+  it("explains when an agent sandbox blocks the macOS engine smoke listener", () => {
+    const smoke = read("scripts/smoke-engine.mjs");
+
+    expect(smoke).toContain('error.code === "EPERM"');
+    expect(smoke).toMatch(/local TCP listeners?.*sandbox/is);
+    expect(smoke).toMatch(/grant.*network|outside.*sandbox/is);
+  });
+
   it("keeps direct Electron compiler output at the root build boundary", () => {
     const electron = JSON.parse(
       read("apps/desktop/electron/tsconfig.json"),
@@ -245,6 +264,10 @@ describe("repository layout contracts", () => {
       "@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.221",
       "@cursor/sdk-darwin-arm64@1.0.26",
       "@vscode/ripgrep-darwin-arm64@1.18.0",
+      // The staged Codex runtime is redistributed inside Contents/Resources,
+      // so its platform package must carry terms — not just the JS wrapper.
+      // npm publishes it as an alias, hence the platform-suffixed version.
+      "@openai/codex@0.146.0-darwin-arm64",
       "@tiptap/extension-bubble-menu@3.26.0",
       "@tiptap/extension-floating-menu@3.26.0",
       "@types/trusted-types@2.0.7",
@@ -258,6 +281,75 @@ describe("repository layout contracts", () => {
     expect(licenses).not.toContain("@openai/codex@0.146.0-linux-x64");
     expect(generator).not.toContain('"--no-optional"');
     expect(generator).toContain("apps/web gained production dependencies");
+  });
+
+  it("stages the pinned Codex runtime instead of falling back to PATH", () => {
+    const rootPackage = read("package.json");
+    const beforePack = read("scripts/electron-before-pack.cjs");
+    const packaging = read("electron-builder.yml");
+    const sidecar = read("apps/desktop/electron/sidecar.ts");
+    const packagingCheck = read("scripts/check-packaging-paths.mjs");
+
+    expect(existsSync("scripts/stage-codex-cli.mjs")).toBe(true);
+    expect(rootPackage).toContain('"stage:codex-cli"');
+    expect(beforePack).toContain("stage-codex-cli.mjs");
+    expect(packaging).toContain("from: binaries/codex-runtime");
+    expect(packaging).toContain("from: binaries/codex-cli-version.txt");
+    expect(sidecar).toContain("ZEROS_CODEX_CLI_PATH");
+    expect(sidecar).toContain("ZEROS_CODEX_CLI_VERSION");
+    expect(sidecar).toContain("CODEX_MANAGED_PACKAGE_ROOT");
+    expect(packagingCheck).toContain("binaries/codex-runtime");
+    expect(packagingCheck).toContain("binaries/codex-cli-version.txt");
+
+    // A packaged build whose staging went missing must report NO bundled
+    // version. The @openai/codex wrapper's package.json survives inside
+    // app.asar even though its platform package is excluded, so a version
+    // handed over without the binary it describes would have the provider list
+    // advertise the pin while the adapter ran an unpinned `codex` from PATH.
+    const compactSidecar = sidecar.replace(/\s+/g, "");
+    expect(compactSidecar).toContain(
+      "codexCli.binary&&!process.env.ZEROS_CODEX_CLI_PATH",
+    );
+    expect(compactSidecar).toContain(
+      "codexCli.version&&!process.env.ZEROS_CODEX_CLI_VERSION",
+    );
+
+    // Staging the vendor target redistributes the platform package's native
+    // binaries, so the license inventory has to normalize it into the packaged
+    // macOS graph rather than record only the JS wrapper.
+    expect(read("scripts/generate-third-party-licenses.mjs")).toContain(
+      'packageName: "@openai/codex-darwin-arm64"',
+    );
+  });
+
+  it("does not let an enclosing Zeros parent watchdog kill the engine smoke", () => {
+    const engineSmoke = read("scripts/smoke-engine.mjs");
+
+    expect(engineSmoke).toContain('ZEROS_PARENT_PID: ""');
+  });
+
+  it("threads the active session's live model capabilities into the unified menu", () => {
+    const composerPills = read(
+      "apps/desktop/src/renderer/features/agent/composer-pills.tsx",
+    );
+    const modelMenu = read(
+      "apps/desktop/src/renderer/features/agent/agent-model-menu.tsx",
+    );
+
+    expect(composerPills).toContain("initialize={initialize}");
+    expect(modelMenu).toContain("initialize?: InitializeResponse | null");
+    expect(modelMenu).toContain(
+      "agent.id === value?.agentId ? initialize : null",
+    );
+  });
+
+  it("keeps parse5's decoder available to the packaged Electron main process", () => {
+    const rootPackage = JSON.parse(read("package.json")) as {
+      dependencies: Record<string, string>;
+    };
+
+    expect(rootPackage.dependencies.parse5).toBe("^7.3.0");
+    expect(rootPackage.dependencies.entities).toBe("^6.0.1");
   });
 
   it("licenses the standalone marketing graph and publishes its notices", () => {

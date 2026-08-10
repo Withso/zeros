@@ -310,6 +310,94 @@ const streamText = (t: string): Msg => ({
 });
 
 describe("ClaudeSdkAdapter", () => {
+  it("publishes Claude's native binding without replacing the Zeros execution route", async () => {
+    const emitted: SessionNotification[] = [];
+    const { queryFn } = makeScriptedQuery([
+      [initMsg("claude-native-1"), resultOk("claude-native-1")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
+    const { session } = await adapter.newSession({
+      executionId: "zeros-execution-1",
+      cwd: "/tmp",
+    });
+
+    expect(session.executionId).toBe("zeros-execution-1");
+    await adapter.prompt({
+      sessionId: session.executionId,
+      prompt: [textBlock("hello")] as never,
+    });
+
+    expect(
+      emitted.find(
+        (notification) =>
+          notification.update.sessionUpdate === "provider_binding_update",
+      ),
+    ).toMatchObject({
+      executionId: "zeros-execution-1",
+      sessionId: "zeros-execution-1",
+      update: {
+        providerBinding: {
+          version: 1,
+          providerId: "claude",
+          kind: "native",
+          resumeId: "claude-native-1",
+          legacySessionId: "zeros-execution-1",
+        },
+      },
+    });
+    await adapter.dispose();
+  });
+
+  it("resumes a native Claude binding into a different Zeros execution", async () => {
+    const { queryFn, captured } = makeScriptedQuery([
+      [assistantText("continued"), resultOk("claude-native-2")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const loaded = await adapter.loadSession({
+      executionId: "zeros-execution-2",
+      providerBinding: {
+        version: 1,
+        providerId: "claude",
+        kind: "native",
+        resumeId: "claude-native-2",
+      },
+      cwd: "/tmp",
+    });
+    expect(loaded.executionId).toBe("zeros-execution-2");
+    expect(loaded.providerBinding?.resumeId).toBe("claude-native-2");
+
+    await adapter.prompt({
+      sessionId: "zeros-execution-2",
+      prompt: [textBlock("continue")] as never,
+    });
+    expect(captured[0]?.resume).toBe("claude-native-2");
+    await adapter.dispose();
+  });
+
+  it("preserves an old Claude locator without replacing it with the new execution", async () => {
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
+      queryFn: makeScriptedQuery([]).queryFn,
+    });
+    const loaded = await adapter.loadSession({
+      executionId: "new-execution",
+      providerBinding: {
+        version: 1,
+        providerId: "claude",
+        kind: "native",
+        resumeId: "claude-native",
+        legacySessionId: "old-directory-locator",
+      },
+      cwd: "/tmp",
+    });
+
+    expect(loaded.providerBinding).toMatchObject({
+      resumeId: "claude-native",
+      legacySessionId: "old-directory-locator",
+    });
+    expect(loaded.providerBinding?.legacySessionId).not.toBe("new-execution");
+    await adapter.dispose();
+  });
+
   it("closes an idle Claude query at the configured deadline and lazily resumes the next turn", async () => {
     vi.useFakeTimers();
     try {
@@ -2284,6 +2372,40 @@ describe("ClaudeSdkAdapter", () => {
     await adapter.dispose();
   });
 
+  it("updateConfig applies the authoritative model snapshot to a live query", async () => {
+    const { queryFn, control } = makeScriptedQuery([[initMsg("sdk-1")]]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({
+      cwd: "/tmp",
+      env: {
+        ANTHROPIC_MODEL: "claude-opus-4-8",
+        ZEROS_THINKING_EFFORT: "high",
+      },
+    });
+    void adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
+    await tick();
+
+    await adapter.updateConfig({
+      sessionId: session.sessionId,
+      env: {
+        ANTHROPIC_MODEL: "claude-haiku-4-5",
+      },
+    });
+
+    expect(control.models.at(-1)).toBe("claude-haiku-4-5");
+    // The SDK shallow-merges flag settings: omission preserves the prior
+    // effort. A model with no effort knob therefore needs an explicit null to
+    // clear the old model's live override.
+    expect(
+      (control.flagSettings.at(-1) as { effortLevel?: string | null })
+        .effortLevel,
+    ).toBeNull();
+    await adapter.dispose();
+  });
+
   it("buildOptions carries additionalDirectories from ZEROS_ADDITIONAL_DIRS into settings.permissions", async () => {
     const { queryFn, captured } = makeScriptedQuery([
       [initMsg("sdk-1"), resultOk("sdk-1")],
@@ -2635,6 +2757,113 @@ describe("ClaudeSdkAdapter", () => {
     // xhigh present → the OUR-tier "ultracode" is appended after it.
     expect(model?.effortLevels).toEqual(["low", "high", "xhigh", "ultracode"]);
     expect(model?.supportsFast).toBe(true);
+    await adapter.dispose();
+  });
+
+  it("discoverModels advertises unsupported Fast explicitly", async () => {
+    const { queryFn } = makeScriptedQuery(
+      [[initMsg("sdk-1"), resultOk("sdk-1")]],
+      {
+        supportedModels: [
+          {
+            value: "claude-haiku-4-5",
+            displayName: "Haiku 4.5",
+            supportsEffort: false,
+            supportedEffortLevels: [],
+            supportsFastMode: false,
+          },
+        ],
+      },
+    );
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
+    await tick();
+    await tick();
+
+    const init = (await adapter.initialize()) as {
+      _meta?: {
+        models?: Array<{ value: string; supportsFast?: boolean }>;
+      };
+    };
+    expect(
+      init._meta?.models?.find((model) => model.value === "claude-haiku-4-5")
+        ?.supportsFast,
+    ).toBe(false);
+    await adapter.dispose();
+  });
+
+  it("discoverModels preserves unknown capability fields as unknown", async () => {
+    const { queryFn } = makeScriptedQuery(
+      [[initMsg("sdk-1"), resultOk("sdk-1")]],
+      {
+        supportedModels: [
+          {
+            value: "claude-opus-4-8",
+            displayName: "Opus 4.8",
+          },
+        ],
+      },
+    );
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
+    await tick();
+    await tick();
+
+    const init = (await adapter.initialize()) as {
+      _meta?: {
+        models?: Array<{
+          value: string;
+          effortLevels?: string[];
+          supportsFast?: boolean;
+        }>;
+      };
+    };
+    const model = init._meta?.models?.find(
+      (entry) => entry.value === "claude-opus-4-8",
+    );
+    expect(model).toBeDefined();
+    expect(model).not.toHaveProperty("effortLevels");
+    expect(model).not.toHaveProperty("supportsFast");
+    await adapter.dispose();
+  });
+
+  it("discoverModels keys alias rows by the SDK's canonical resolved model", async () => {
+    const { queryFn } = makeScriptedQuery(
+      [[initMsg("sdk-1"), resultOk("sdk-1")]],
+      {
+        supportedModels: [
+          {
+            value: "opus",
+            resolvedModel: "claude-opus-5",
+            displayName: "Opus",
+            supportsEffort: true,
+            supportedEffortLevels: ["high", "max"],
+            supportsFastMode: true,
+          },
+        ],
+      },
+    );
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
+    await tick();
+    await tick();
+
+    const init = (await adapter.initialize()) as {
+      _meta?: { models?: Array<{ value: string }> };
+    };
+    expect(init._meta?.models?.[0]?.value).toBe("claude-opus-5");
     await adapter.dispose();
   });
 
@@ -3087,6 +3316,234 @@ describe("ClaudeSdkAdapter AskUserQuestion", () => {
   });
 });
 
+describe("ClaudeSdkAdapter MCP elicitation", () => {
+  it("routes a native SDK form elicitation through the blocking question card", async () => {
+    const emitted: SessionNotification[] = [];
+    const questions: QuestionCapture[] = [];
+    const settles: SettleCapture[] = [];
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-elicitation"), resultOk("sdk-elicitation")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(
+      makeCtx(emitted, [], { questions, settles }),
+      { queryFn },
+    );
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const turn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("use the billing MCP")] as never,
+    });
+    await tick();
+
+    const onElicitation = captured[0]?.onElicitation as
+      | undefined
+      | ((
+          request: Record<string, unknown>,
+          options: { signal: AbortSignal },
+        ) => Promise<Record<string, unknown>>);
+    expect(onElicitation).toBeTypeOf("function");
+    const abort = new AbortController();
+    const result = onElicitation!(
+      {
+        serverName: "billing",
+        mode: "form",
+        message: "Where should the invoice go?",
+        requestedSchema: {
+          type: "object",
+          properties: {
+            email: { type: "string", title: "Email", format: "email" },
+            copies: { type: "integer", title: "Copies", minimum: 1 },
+          },
+          required: ["email", "copies"],
+        },
+      },
+      { signal: abort.signal },
+    );
+    await tick();
+
+    expect(questions).toHaveLength(1);
+    expect(questions[0].request).toMatchObject({
+      source: "native_rpc",
+      blocking: true,
+      toolCallId: expect.stringMatching(/^mcp-elicitation:/),
+      questions: [{ id: "email" }, { id: "copies" }],
+    });
+
+    expect(
+      adapter.respondToQuestion({
+        questionId: questions[0].id,
+        response: {
+          outcome: {
+            outcome: "answered",
+            answers: [
+              {
+                questionId: "email",
+                selectedOptionIds: [],
+                freeText: "person@example.com",
+              },
+              {
+                questionId: "copies",
+                selectedOptionIds: [],
+                freeText: "2",
+              },
+            ],
+          },
+        } as never,
+      }),
+    ).toBe(true);
+    expect(await result).toEqual({
+      action: "accept",
+      content: { email: "person@example.com", copies: 2 },
+    });
+    expect(settles).toMatchObject([
+      {
+        questionId: questions[0].id,
+        sessionId: session.sessionId,
+        outcome: { outcome: "answered" },
+      },
+    ]);
+
+    await turn;
+    await adapter.dispose();
+  });
+
+  it("cancels and evicts an MCP elicitation when the SDK aborts it", async () => {
+    const questions: QuestionCapture[] = [];
+    const settles: SettleCapture[] = [];
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-elicitation-abort"), resultOk("sdk-elicitation-abort")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(
+      makeCtx([], [], { questions, settles }),
+      { queryFn },
+    );
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const turn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("use MCP")] as never,
+    });
+    await tick();
+    const onElicitation = captured[0]?.onElicitation as (
+      request: Record<string, unknown>,
+      options: { signal: AbortSignal },
+    ) => Promise<Record<string, unknown>>;
+    const abort = new AbortController();
+    const result = onElicitation(
+      {
+        serverName: "github",
+        mode: "url",
+        message: "Authorize GitHub",
+        url: "https://github.com/login/oauth/authorize",
+        elicitationId: "oauth-1",
+      },
+      { signal: abort.signal },
+    );
+    await tick();
+    expect(questions).toHaveLength(1);
+
+    abort.abort();
+
+    expect(await result).toEqual({ action: "cancel" });
+    expect(settles[0]?.outcome.outcome).toBe("dismissed");
+    await turn;
+    await adapter.dispose();
+  });
+
+  it("cancels a parked MCP elicitation when Zeros disposes the session", async () => {
+    const questions: QuestionCapture[] = [];
+    const settles: SettleCapture[] = [];
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-elicitation-dispose"), resultOk("sdk-elicitation-dispose")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(
+      makeCtx([], [], { questions, settles }),
+      { queryFn },
+    );
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const turn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("use MCP")] as never,
+    });
+    await tick();
+    const onElicitation = captured[0]?.onElicitation as (
+      request: Record<string, unknown>,
+      options: { signal: AbortSignal },
+    ) => Promise<Record<string, unknown>>;
+    const independentSignal = new AbortController();
+    const result = onElicitation(
+      {
+        serverName: "billing",
+        mode: "form",
+        message: "Confirm billing details",
+        requestedSchema: { type: "object", properties: {} },
+      },
+      { signal: independentSignal.signal },
+    );
+    let resolution: Record<string, unknown> | undefined;
+    void result.then((value) => {
+      resolution = value;
+    });
+    await tick();
+    expect(questions).toHaveLength(1);
+
+    await turn;
+    await adapter.disposeSession(session.sessionId);
+    await tick();
+
+    expect(resolution).toEqual({ action: "cancel" });
+    expect(settles.at(-1)?.outcome.outcome).toBe("dismissed");
+  });
+
+  it("bounds concurrent MCP elicitations and cancels overflow", async () => {
+    const questions: QuestionCapture[] = [];
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-elicitation-bounded"), resultOk("sdk-elicitation-bounded")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(
+      makeCtx([], [], { questions, settles: [] }),
+      { queryFn },
+    );
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const turn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("use MCP")] as never,
+    });
+    await tick();
+    const onElicitation = captured[0]?.onElicitation as (
+      request: Record<string, unknown>,
+      options: { signal: AbortSignal },
+    ) => Promise<Record<string, unknown>>;
+    const abort = new AbortController();
+    const pending = Array.from({ length: 8 }, (_, index) =>
+      onElicitation(
+        {
+          serverName: "untrusted",
+          mode: "form",
+          message: `Question ${index}`,
+          requestedSchema: { type: "object", properties: {} },
+        },
+        { signal: abort.signal },
+      ),
+    );
+    const overflow = onElicitation(
+      {
+        serverName: "untrusted",
+        mode: "form",
+        message: "Overflow",
+        requestedSchema: { type: "object", properties: {} },
+      },
+      { signal: abort.signal },
+    );
+
+    expect(await overflow).toEqual({ action: "cancel" });
+    expect(questions).toHaveLength(8);
+
+    await turn;
+    await adapter.disposeSession(session.sessionId);
+    await Promise.all(pending);
+  });
+});
+
 // ── steer() — mid-turn user-message injection (queued-card "Send now") ──
 
 describe("ClaudeSdkAdapter.steer", () => {
@@ -3248,6 +3705,41 @@ describe("ClaudeSdkAdapter.steer", () => {
     expect(emitted.some((n) => n.update.sessionUpdate === "error_notice")).toBe(
       false,
     );
+    await adapter.dispose();
+  });
+
+  it("classifies provider throttling without immediately replaying the turn", async () => {
+    const { queryFn, inputsSeen } = makeScriptedQuery([
+      [
+        initMsg("sdk-rate"),
+        {
+          type: "result",
+          subtype: "error_during_execution",
+          session_id: "sdk-rate",
+          is_error: true,
+          result: "API Error: 429 rate_limit_error — retry after reset",
+        },
+      ],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+
+    let failure: { kind?: string; advice?: string } | null = null;
+    try {
+      await adapter.prompt({
+        sessionId: session.sessionId,
+        prompt: [textBlock("hi")] as never,
+      });
+    } catch (error) {
+      failure =
+        (error as { failure?: { kind?: string; advice?: string } }).failure ??
+        null;
+    }
+    expect(failure?.kind).toBe("rate-limited");
+    expect(failure?.advice).toMatch(/wait/i);
+    expect(
+      inputsSeen.filter((message) => message.type === "user"),
+    ).toHaveLength(1);
     await adapter.dispose();
   });
 

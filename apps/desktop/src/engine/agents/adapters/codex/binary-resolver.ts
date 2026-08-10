@@ -5,19 +5,19 @@
 // `codex app-server` needs the native Codex binary. Three sources, in
 // priority order:
 //
-//   1. **Bundled** — the `@openai/codex` npm wrapper at
+//   1. **User override** — an explicit Settings path.
+//
+//   2. **Packaged** — the pinned native runtime staged in app Resources and
+//      handed across the compiled-engine boundary as ZEROS_CODEX_CLI_PATH.
+//
+//   3. **Bundled (development)** — the `@openai/codex` npm wrapper at
 //      `node_modules/.bin/codex`. The wrapper handles platform
 //      detection internally (resolves the right `@openai/codex-<os>-<arch>`
 //      platform package, then execs the native binary at
 //      `vendor/<triple>/bin/codex`). Adds one Node hop but the
 //      wrapper is signal-correct (forwards SIGINT/SIGTERM cleanly).
 //
-//   2. **User override** — a `cliBinary` passed via Settings →
-//      Providers → Advanced. If the user installed Codex via Homebrew
-//      / nvm / pnpm-global / etc. and wants to use that copy, we
-//      honour it.
-//
-//   3. **System PATH** — the user's globally-installed `codex` (resolved
+//   4. **System PATH** — the user's globally-installed `codex` (resolved
 //      via login-shell PATH so Electron's minimal PATH doesn't trip us
 //      up). Falls through to here when the bundled dep failed to
 //      install (e.g. issue #14844 — optional deps not pulled on
@@ -46,6 +46,9 @@ export interface CodexBinarySource {
 /** Resolve a codex binary path. Cascading fallback:
  *
  *  - If `override` is provided and exists, use it (Settings → Providers).
+ *  - If Electron supplied `ZEROS_CODEX_CLI_PATH`, treat it as authoritative.
+ *    A missing staged file is returned so spawn reports the corrupt package;
+ *    silently running an unrelated global version would violate the pin.
  *  - If `@openai/codex` is installed in node_modules, use its `.bin/codex` wrapper.
  *  - Otherwise, return the literal `codex` so the spawning code can rely on
  *    `PATH` lookup (login-shell PATH is layered in by the runtime).
@@ -53,9 +56,11 @@ export interface CodexBinarySource {
  *  This function deliberately does NOT throw on "not found" — that's the
  *  spawning code's job (so the failure surfaces as a clean adapter error
  *  with stderr context rather than an unhandled rejection here). */
-export async function resolveCodexBinary(opts: {
-  override?: string;
-} = {}): Promise<CodexBinarySource> {
+export async function resolveCodexBinary(
+  opts: {
+    override?: string;
+  } = {},
+): Promise<CodexBinarySource> {
   // 1. Explicit override (per-session cliBinary).
   if (opts.override && opts.override.trim()) {
     const ok = await pathExists(opts.override);
@@ -68,28 +73,26 @@ export async function resolveCodexBinary(opts: {
     );
   }
 
-  // 2. Bundled wrapper handed over by Electron main. This is the tier that WOULD
-  //    fix the packaged path: the require.resolve below CANNOT work there, because
+  // 2. Staged native runtime handed over by Electron main. require.resolve
+  //    below CANNOT work in the packaged app, because
   //    the packaged engine is a `bun build --compile` single-file binary with no
   //    node_modules on disk, so packaged builds fall through to step 4 and run
   //    whatever `codex` is on the user's PATH — a DIFFERENT, unpinned CLI from the
   //    one dev runs. (Same root cause as the Claude "Native CLI binary not found"
   //    failure; see claude-sdk/binary-resolver.ts for the full write-up.)
   //
-  //    NOT YET WIRED: nothing sets ZEROS_CODEX_CLI_PATH today — apps/desktop/electron/sidecar.ts
-  //    forwards only the Claude pair, and there is no Codex staging step. Codex is a
-  //    user-installed global by design (no `bundledRuntime` in its manifest entry).
-  //    The tier exists so a future stage-codex-cli.mjs is a one-line wire-up, and so
-  //    a smoke harness can point at a real binary. Until then step 4's warning is
-  //    the honest signal that the CLI is unpinned.
+  //    scripts/stage-codex-cli.mjs preserves the entire platform vendor tree;
+  //    sidecar.ts points this variable at its bin/codex entry.
   const fromEnv = process.env.ZEROS_CODEX_CLI_PATH?.trim();
   if (fromEnv) {
     if (await pathExists(fromEnv)) {
       return { path: fromEnv, source: "bundled" };
     }
-    console.warn(
-      `[codex/binary-resolver] ZEROS_CODEX_CLI_PATH '${fromEnv}' not found — packaged staging regressed; falling back`,
+    console.error(
+      `[codex/binary-resolver] ZEROS_CODEX_CLI_PATH '${fromEnv}' not found — ` +
+        "the packaged runtime is incomplete; refusing an unpinned PATH fallback",
     );
+    return { path: fromEnv, source: "bundled" };
   }
 
   // 3. Bundled npm wrapper. Try require.resolve first so we get an

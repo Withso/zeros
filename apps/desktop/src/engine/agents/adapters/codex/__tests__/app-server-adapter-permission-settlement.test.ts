@@ -13,12 +13,14 @@ import type {
 import type {
   CodexApprovalRequest,
   CodexAppServerBootOptions,
+  CodexUserInputRequest,
 } from "../app-server";
 
 const rt = vi.hoisted(() => ({
   bootOptions: null as CodexAppServerBootOptions | null,
   notificationHandlers: new Map<string, Set<(params: unknown) => void>>(),
   respondCalls: [] as Array<{ permissionId: string; response: unknown }>,
+  userInputCalls: [] as Array<{ questionId: string; response: unknown }>,
   startThreadCalls: [] as Array<Record<string, unknown>>,
   runTurnImpl: null as null | (() => Promise<unknown>),
 }));
@@ -61,7 +63,9 @@ vi.mock("../app-server", () => ({
       respondToPermission: (permissionId: string, response: unknown) => {
         rt.respondCalls.push({ permissionId, response });
       },
-      respondToUserInput: () => {},
+      respondToUserInput: (questionId: string, response: unknown) => {
+        rt.userInputCalls.push({ questionId, response });
+      },
       onNotification: (method: string, handler: (params: unknown) => void) => {
         let handlers = rt.notificationHandlers.get(method);
         if (!handlers) {
@@ -84,6 +88,7 @@ vi.mock("../../../session-paths", () => ({
     log: "/tmp/s/log",
     telemetry: "/tmp/s/tel",
   })),
+  writeSessionMeta: vi.fn(async () => {}),
   removeSessionDir: vi.fn(async () => {}),
 }));
 
@@ -97,6 +102,7 @@ function makeAdapter() {
     onPermissionRequest: vi.fn(),
     onPermissionSettled: vi.fn(),
     onQuestionRequest: vi.fn(),
+    onQuestionSettled: vi.fn(),
     onAgentStderr: vi.fn(),
     onAgentExit: vi.fn(),
   };
@@ -125,6 +131,26 @@ function raiseApproval(
   rt.bootOptions?.onApprovalRequest?.(request);
 }
 
+function raiseQuestion(questionId: string): void {
+  const request: CodexUserInputRequest = {
+    questionId,
+    rpcRequestId: `rpc-${questionId}`,
+    method: "item/tool/requestUserInput",
+    expiresAt: Date.now() + 30_000,
+    params: {
+      itemId: `item-${questionId}`,
+      questions: [
+        {
+          id: "choice",
+          question: "Pick one",
+          options: [{ label: "A", description: "Option A" }],
+        },
+      ],
+    },
+  };
+  rt.bootOptions?.onUserInputRequest?.(request);
+}
+
 function cancelled(): RequestPermissionResponse {
   return { outcome: { outcome: "cancelled" } } as RequestPermissionResponse;
 }
@@ -135,6 +161,7 @@ describe("codex permission settlement receipts", () => {
     rt.bootOptions = null;
     rt.notificationHandlers.clear();
     rt.respondCalls = [];
+    rt.userInputCalls = [];
     rt.startThreadCalls = [];
     rt.runTurnImpl = null;
   });
@@ -249,6 +276,27 @@ describe("codex permission settlement receipts", () => {
     ]);
   });
 
+  it("cancels and receipts parked questions before session disposal", async () => {
+    const { adapter, emit } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    raiseQuestion("question-dispose");
+
+    await adapter.disposeSession(session.sessionId);
+
+    expect(rt.userInputCalls).toEqual([
+      {
+        questionId: "question-dispose",
+        response: { answers: { choice: { answers: [] } } },
+      },
+    ]);
+    expect(emit.onQuestionSettled).toHaveBeenCalledWith(
+      "codex",
+      "question-dispose",
+      session.sessionId,
+      { outcome: "dismissed" },
+    );
+  });
+
   it("cancels and receipts parked approvals when the user stops the turn", async () => {
     const { adapter, emit } = makeAdapter();
     const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
@@ -263,6 +311,27 @@ describe("codex permission settlement receipts", () => {
       "codex",
       "permission-1",
       session.sessionId,
+    );
+  });
+
+  it("cancels and receipts parked questions when the user stops the turn", async () => {
+    const { adapter, emit } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    raiseQuestion("question-stop");
+
+    await adapter.cancel({ sessionId: session.sessionId });
+
+    expect(rt.userInputCalls).toEqual([
+      {
+        questionId: "question-stop",
+        response: { answers: { choice: { answers: [] } } },
+      },
+    ]);
+    expect(emit.onQuestionSettled).toHaveBeenCalledWith(
+      "codex",
+      "question-stop",
+      session.sessionId,
+      { outcome: "dismissed" },
     );
   });
 
@@ -306,5 +375,29 @@ describe("codex permission settlement receipts", () => {
       session.sessionId,
     );
     expect(completed.response.effectiveModel).toBe("gpt-5");
+  });
+
+  it("drops any parked question abandoned at turn completion", async () => {
+    const { adapter, emit } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    rt.runTurnImpl = async () => {
+      raiseQuestion("question-stale");
+      return { turnId: "turn-1", status: "completed", raw: {} };
+    };
+
+    await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+
+    expect(rt.userInputCalls).toEqual([
+      {
+        questionId: "question-stale",
+        response: { answers: { choice: { answers: [] } } },
+      },
+    ]);
+    expect(emit.onQuestionSettled).toHaveBeenCalledWith(
+      "codex",
+      "question-stale",
+      session.sessionId,
+      { outcome: "dismissed" },
+    );
   });
 });

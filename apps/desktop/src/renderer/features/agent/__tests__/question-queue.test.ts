@@ -14,7 +14,14 @@ import {
   readQuestionStamp,
   type QuestionRecordStamp,
 } from "../sessions-store";
-import type { QuestionRequest } from "../../../platform/bridge/agent-events";
+import type {
+  QuestionRequest,
+  QuestionSpec,
+} from "../../../platform/bridge/agent-events";
+import {
+  isQuestionFreeTextAnswered,
+  questionFreeTextValue,
+} from "../question-card";
 
 const seed = (
   chatId: string,
@@ -67,7 +74,10 @@ describe("applyBridgeQuestionRequest — queue semantics", () => {
       req("sidA", { questionId: "q-2", nativeRequestId: "native-2" }),
     );
     const s = useSessionsStore.getState().sessions["chatA"];
-    expect(s?.pendingQuestions.map((q) => q.questionId)).toEqual(["q-1", "q-2"]);
+    expect(s?.pendingQuestions.map((q) => q.questionId)).toEqual([
+      "q-1",
+      "q-2",
+    ]);
   });
 
   it("dedupes a replayed request by nativeRequestId (fresh questionId)", () => {
@@ -234,6 +244,66 @@ describe("buildQuestionStamp", () => {
     expect(buildQuestionStamp(request, { outcome: "dismissed" })).toEqual({
       outcome: "skipped",
     });
+  });
+
+  it("retains an explicit decline as a distinct transcript outcome", () => {
+    expect(buildQuestionStamp(request, { outcome: "declined" })).toEqual({
+      outcome: "declined",
+    });
+  });
+
+  it("never persists a secret answer in the transcript stamp", () => {
+    const secretRequest = req("sidA", {
+      toolCallId: "tc-secret",
+      questions: [
+        {
+          id: "token",
+          prompt: "API token",
+          options: [],
+          allowOther: true,
+          secret: true,
+        },
+      ],
+    });
+    const stamp = buildQuestionStamp(secretRequest, {
+      outcome: "answered",
+      answers: [
+        {
+          questionId: "token",
+          selectedOptionIds: [],
+          freeText: "super-secret-value",
+        },
+      ],
+    });
+
+    expect(JSON.stringify(stamp)).not.toContain("super-secret-value");
+    expect(stamp.answers).toEqual([
+      { prompt: "API token", value: "(secret answer hidden)" },
+    ]);
+  });
+});
+
+describe("question free-text serialization", () => {
+  const question: QuestionSpec = {
+    id: "value",
+    prompt: "Value",
+    options: [],
+    allowOther: true,
+  };
+
+  it("retains legacy trimming for ordinary agent questions", () => {
+    expect(isQuestionFreeTextAnswered(question, "  answer  ")).toBe(true);
+    expect(questionFreeTextValue(question, true, "  answer  ")).toBe("answer");
+  });
+
+  it("preserves schema-significant MCP whitespace and explicit empty strings", () => {
+    const exact = { ...question, preserveFreeText: true };
+    expect(isQuestionFreeTextAnswered(exact, " ")).toBe(true);
+    expect(questionFreeTextValue(exact, true, "  answer  ")).toBe("  answer  ");
+
+    const empty = { ...exact, allowEmptyFreeText: true };
+    expect(isQuestionFreeTextAnswered(empty, "")).toBe(true);
+    expect(questionFreeTextValue(empty, true, "")).toBe("");
   });
 });
 

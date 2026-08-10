@@ -80,6 +80,7 @@ import { useEnabledAgents } from "./enabled-agents";
 import { isRunnableAgent } from "./agent-runnable";
 import { pickDefaultAgent } from "../settings/default-agent";
 import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
+import type { InitializeResponse } from "../../platform/bridge/agent-events";
 
 /** A resolved agent + model choice. `model` is always concrete here — a row
  *  IS a model. */
@@ -120,6 +121,23 @@ interface Row {
   model: ModelOption;
 }
 
+function effortLevelsForRow(row: Row) {
+  return (
+    row.model.effortLevels ??
+    effortLevelsFor(row.agent.id, row.model.value, null)
+  );
+}
+
+function rowSupportsEffort(row: Row): boolean {
+  return effortLevelsForRow(row).length > 0;
+}
+
+function rowSupportsFast(row: Row): boolean {
+  return typeof row.model.supportsFast === "boolean"
+    ? row.model.supportsFast
+    : agentSupportsFast(row.agent.id, row.model.value, null);
+}
+
 function agentTitle(agent: BridgeRegistryAgent, family: string): string {
   return agent.name?.trim() || FAMILY_TITLES[family] || family || agent.id;
 }
@@ -134,6 +152,7 @@ function groupTitle(agent: BridgeRegistryAgent, family: string): string {
 
 export function AgentModelMenu({
   agents: agentsProp,
+  initialize = null,
   value,
   onSelect,
   onConfigure,
@@ -146,6 +165,9 @@ export function AgentModelMenu({
   /** Registry snapshot override (the dispatcher passes its own). When
    *  omitted, the shared agents cache is used (the chat composer). */
   agents?: BridgeRegistryAgent[] | null;
+  /** Live capability snapshot for the active chat's agent. Other agent groups
+   *  have no active session here and intentionally use the curated fallback. */
+  initialize?: InitializeResponse | null;
   /** The current agent + model (drives the collapsed selected row + ✓).
    *  `model: null` resolves to the agent's effective favorite. */
   value: {
@@ -185,7 +207,10 @@ export function AgentModelMenu({
       .map((agent) => ({
         agent,
         family: agentFamily(agent.id),
-        models: modelsForAgent(agent.id, null),
+        models: modelsForAgent(
+          agent.id,
+          agent.id === value?.agentId ? initialize : null,
+        ),
       }))
       .filter((g) => g.family !== "" && g.models.length > 0)
       .sort(
@@ -194,7 +219,7 @@ export function AgentModelMenu({
     if (fromRegistry.length > 0) return fromRegistry;
     if (value?.agentId) {
       const family = agentFamily(value.agentId);
-      const models = modelsForAgent(value.agentId, null);
+      const models = modelsForAgent(value.agentId, initialize);
       if (family && models.length > 0) {
         return [
           {
@@ -206,7 +231,7 @@ export function AgentModelMenu({
       }
     }
     return [];
-  }, [registry, isEnabled, value?.agentId]);
+  }, [registry, isEnabled, value?.agentId, initialize]);
 
   const currentFamily = agentFamily(value?.agentId ?? null);
 
@@ -336,15 +361,22 @@ export function AgentModelMenu({
   const activeConfiguration: ModelConfiguration | null =
     value?.agentId && activeModel
       ? {
-          effort: effectiveEffort(value.agentId, activeModel, value.effort),
-          fast: value.fast && agentSupportsFast(value.agentId, activeModel),
+          effort: effectiveEffort(
+            value.agentId,
+            activeModel,
+            value.effort,
+            initialize,
+          ),
+          fast:
+            value.fast &&
+            agentSupportsFast(value.agentId, activeModel, initialize),
         }
       : null;
   const canConfigureActive =
     !!value?.agentId &&
     !!activeModel &&
-    (agentSupportsEffort(value.agentId, activeModel, null) ||
-      agentSupportsFast(value.agentId, activeModel, null));
+    (agentSupportsEffort(value.agentId, activeModel, initialize) ||
+      agentSupportsFast(value.agentId, activeModel, initialize));
 
   const configureActive = (next: Partial<ModelConfiguration>) => {
     if (!value?.agentId || !activeModel || !activeConfiguration) return;
@@ -457,10 +489,10 @@ export function AgentModelMenu({
         {canConfigureActive &&
           value?.agentId &&
           activeModel &&
+          activeRow &&
           activeConfiguration && (
             <ModelConfigurationEditor
-              agentId={value.agentId}
-              model={activeModel}
+              row={activeRow}
               configuration={activeConfiguration}
               onChange={configureActive}
             />
@@ -517,7 +549,7 @@ export function AgentModelMenu({
                     : resolveModelConfiguration(
                         row.agent.id,
                         row.model.value,
-                        null,
+                        row.agent.id === value?.agentId ? initialize : null,
                       );
                 const key = `${row.agent.id}:${row.model.value}`;
                 return (
@@ -666,7 +698,9 @@ export function AgentModelMenu({
                               : resolveModelConfiguration(
                                   row.agent.id,
                                   row.model.value,
-                                  null,
+                                  row.agent.id === value?.agentId
+                                    ? initialize
+                                    : null,
                                 );
                           const key = `${row.agent.id}:${row.model.value}`;
                           return (
@@ -721,10 +755,10 @@ function ModelRowDetails({
   isFavorite?: boolean;
   className?: string;
 }) {
-  const showsEffort = agentSupportsEffort(row.agent.id, row.model.value, null);
+  const showsEffort = rowSupportsEffort(row);
   const metadata = [
     showsEffort ? effortLabel(row.agent.id, configuration.effort) : null,
-    configuration.fast ? "Fast" : null,
+    configuration.fast && rowSupportsFast(row) ? "Fast" : null,
   ].filter((part): part is string => part !== null);
   return (
     <span
@@ -805,10 +839,7 @@ function FavoriteModelButton({
 }
 
 function modelCanBeConfigured(row: Row): boolean {
-  return (
-    agentSupportsEffort(row.agent.id, row.model.value, null) ||
-    agentSupportsFast(row.agent.id, row.model.value, null)
-  );
+  return rowSupportsEffort(row) || rowSupportsFast(row);
 }
 
 function SelectedModelTick() {
@@ -884,8 +915,7 @@ function ModelConfigurationPopover({
         onClick={(event) => event.stopPropagation()}
       >
         <ModelConfigurationEditor
-          agentId={row.agent.id}
-          model={row.model.value}
+          row={row}
           configuration={configuration}
           onChange={(next) =>
             rememberModelConfiguration(row.agent.id, row.model.value, next)
@@ -1211,18 +1241,18 @@ function CatalogModelRow({
 }
 
 function ModelConfigurationEditor({
-  agentId,
-  model,
+  row,
   configuration,
   onChange,
 }: {
-  agentId: string;
-  model: string;
+  row: Row;
   configuration: ModelConfiguration;
   onChange: (next: Partial<ModelConfiguration>) => void;
 }) {
-  const levels = effortLevelsFor(agentId, model, null);
-  const supportsFast = agentSupportsFast(agentId, model, null);
+  const levels = effortLevelsForRow(row);
+  const supportsFast = rowSupportsFast(row);
+  const agentId = row.agent.id;
+  const model = row.model.value;
   const reasoningHeadingId = useId();
   const optionsHeadingId = useId();
   return (

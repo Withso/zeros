@@ -1,6 +1,10 @@
 import type { ComposerAttachment } from "../features/agent/composer-attachments";
 import type { AgentTextMessageAttachment } from "../features/agent/use-agent-session";
 import type { WorkbenchScopeMap } from "../shell/workbench/tab-model";
+import type {
+  ProviderBinding,
+  ProviderMetadata,
+} from "@zeros/protocol/identities";
 
 export { normalizeChatPermissionMode } from "./chat-permission";
 
@@ -388,7 +392,7 @@ export type PendingChatSubmission = {
  *  The effort ladder Zeros exposes (per the composer effort toggle):
  *    low · medium · high · xhigh · max · ultracode
  *  Not every model supports the whole ladder — see effortLevelsFor() in
- *  model-catalog.ts (Opus = all six; Sonnet/GPT = low…xhigh; Haiku = low…high).
+ *  model-catalog.ts; exact live capabilities override the bundled fallback.
  *  Mapping to the agent: Claude takes `low|medium|high|xhigh|max` as the SDK
  *  `effort` option, and "ultracode" → `xhigh` + the `ultracode` setting
  *  (xhigh effort plus standing multi-agent-workflow permission). Codex maps
@@ -437,21 +441,21 @@ export type ChatThread = {
    *  creation so the header can render without a registry lookup. */
   agentName: string | null;
   /** Model id (agent-specific — e.g. "claude-opus-4-7" for claude).
-   *  null means "use the agent's default". Changing forces session respawn
-   *  because most agents read the model from env at spawn time. */
+   *  null means "use the agent's default". Native adapters apply changes live;
+   *  adapters without that capability pick it up on their next session. */
   model: string | null;
   /** Reasoning effort — mapped to each agent's flag/env at spawn. */
   effort: ChatEffort;
-  /** Fast mode — lower-latency inference at higher token cost. Claude maps
-   *  it to the SDK `fastMode` setting (Opus only); Codex to `service_tier:
-   *  "fast"` (GPT-5.x only). Carried via env (ZEROS_FAST_MODE) and applied on
-   *  the next session (re)spawn, like effort. undefined ≡ off. */
+  /** Fast mode — lower-latency inference at higher token cost. Claude maps it
+   *  to the SDK `fastMode` setting; Codex to `service_tier: "fast"`; Cursor to
+   *  an account-advertised fast model variant. Carried via ZEROS_FAST_MODE and
+   *  applied live by native adapters. undefined ≡ off. */
   fast?: boolean;
   /** Extra working directories Claude can access beyond `folder` (the `/add-dir`
    *  command, SDK `Options.additionalDirectories`). Absolute paths, de-duped.
-   *  Carried via env (ZEROS_ADDITIONAL_DIRS) and applied on the next session
-   *  (re)spawn, like effort/fast (Claude resumes, so context survives). Claude
-   *  only today; undefined/[] ≡ none. */
+   *  Carried via env (ZEROS_ADDITIONAL_DIRS) and applied live by the Claude
+   *  adapter; a later (re)spawn restores the same authoritative selection.
+   *  Claude only today; undefined/[] ≡ none. */
   additionalDirectories?: string[];
   /** Permission gate. Plumbed via agent session/set_mode when the agent
    *  advertises mode support; otherwise stored and applied to new
@@ -476,18 +480,14 @@ export type ChatThread = {
   title: string;
   createdAt: number;
   updatedAt: number;
-  /** Persistent agent sessionId. Source-of-truth link from a chat
-   *  in our sidebar to the on-disk transcript the agent CLI writes
-   *  (Claude: ~/.claude/projects/<hash>/<sessionId>.jsonl, Codex:
-   *  ~/.codex/sessions/...). Set in three ways:
-   *    - "Resume from recent thread" UI seeds it on chat creation.
-   *    - First successful new-session creation writes it back.
-   *    - It updates whenever the active agent forks / starts a new
-   *      session under the same chat (model swap with force=true).
-   *  Provider state is a hot cache; this field survives app restarts
-   *  and is what lets us replay history on next mount. Cleared if a
-   *  loadIntoChat fails so retry can fall through to a fresh session. */
+  /** Deprecated pre-v28 provider/session locator. Retained for boot-cache and
+   * downgrade compatibility only; never use it to route a live execution. */
   sessionId?: string;
+  /** Provider-owned durable resume identity. Zeros conversation identity stays
+   * `id`; a live runtime is separately keyed by executionId. */
+  providerBinding?: ProviderBinding;
+  /** Provider-authored descriptive state. Never drives routing or checkout. */
+  providerMetadata?: ProviderMetadata;
   /** Pinned to the top of the sidebar, independent of project grouping.
    *  Defaults to false / undefined for old records. */
   pinned?: boolean;

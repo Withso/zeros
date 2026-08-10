@@ -37,6 +37,8 @@
 
 import { randomUUID } from "node:crypto";
 
+import type { ToolCallContent } from "@zeros/protocol/agent-events";
+
 import { isDevRuntime } from "../../../runtime";
 import type { ContentBlock, SessionNotification, TurnUsage } from "../../types";
 
@@ -58,6 +60,11 @@ type ToolKind =
   | "question"
   | "compaction"
   | "other";
+
+// The renderer clips raw tool output at 20k characters. Keep one extra
+// character so it can display its truncation marker while bounding the
+// translator's live per-item accumulator.
+const MAX_STREAMED_TOOL_OUTPUT_CHARS = 20_001;
 
 export interface CodexAppServerTranslatorOptions {
   sessionId: string;
@@ -119,11 +126,36 @@ export class CodexAppServerTranslator {
     return toolCallId;
   }
 
+  /** MCP elicitation is a server request rather than a streamed ThreadItem, so
+   * it has no item/started row of its own. Emit the same durable question row
+   * from the request so awaiting/answered/skipped remains visible in history. */
+  emitBlockingQuestionToolCall(
+    nativeToolCallId: string | undefined,
+    title: string,
+    rawInput: unknown,
+  ): string | undefined {
+    if (!nativeToolCallId) return undefined;
+    const toolCallId = this.ensureToolCallId(nativeToolCallId);
+    this.emitToolCallUpsert(toolCallId, {
+      nativeToolCallId,
+      title,
+      kind: "question",
+      status: "in_progress",
+      rawInput,
+    });
+    return toolCallId;
+  }
+
   /** Codex item.id → cumulative text we've emitted for that item.
    *  Used to compute the delta from full-text updates. (The delta
    *  events carry only the diff; the lifecycle events sometimes
    *  carry the full accumulated text.) */
   private readonly emittedMessageText = new Map<string, string>();
+
+  /** Codex command output notifications are true deltas. Session updates,
+   * however, replace a tool card's rawOutput snapshot. Retain one cumulative
+   * value per live item so every replacement grows monotonically. */
+  private readonly emittedToolOutput = new Map<string, string>();
 
   /** Per-turn messageId prefix. Codex's item ids reset across turns,
    *  so prefixing keeps streaming deltas of the same item coalesced
@@ -146,6 +178,7 @@ export class CodexAppServerTranslator {
    *  AgentFailure so the green dot updates instead of the failure living
    *  only as a chat bubble. Null otherwise. */
   private turnFailureLabel: string | null = null;
+  private turnRateLimitLabel: string | null = null;
   /** Per-turn token usage (tokenUsage.last) for analytics. */
   private lastTurnUsage: TurnUsage | undefined;
 
@@ -175,6 +208,11 @@ export class CodexAppServerTranslator {
    *  flip the green dot instead of living only as a chat bubble. */
   get authQuotaFailure(): string | null {
     return this.turnFailureLabel;
+  }
+
+  /** Provider throttling/overload captured from structured CodexErrorInfo. */
+  get rateLimitFailure(): string | null {
+    return this.turnRateLimitLabel;
   }
 
   /** Per-turn token usage for LLM analytics (no cost over
@@ -208,9 +246,11 @@ export class CodexAppServerTranslator {
     this.toolCallIds.clear();
     this.emittedToolCallIds.clear();
     this.emittedMessageText.clear();
+    this.emittedToolOutput.clear();
     this.hasSeenTurnTerminal = false;
     this.lastStopReason = "end_turn";
     this.turnFailureLabel = null;
+    this.turnRateLimitLabel = null;
     this.lastTurnUsage = undefined;
     this.retryBurstNoticed = false;
   }
@@ -323,6 +363,7 @@ export class CodexAppServerTranslator {
       // — there is no `.code`. The error identity is in codexErrorInfo.
       const cls = classifyCodexErrorInfo(p?.turn?.error?.codexErrorInfo);
       if (cls.authQuota) this.turnFailureLabel = cls.label;
+      if (cls.rateLimited) this.turnRateLimitLabel = cls.label;
       this.lastStopReason = cls.stopReason;
     } else {
       this.lastStopReason = "end_turn";
@@ -518,6 +559,7 @@ export class CodexAppServerTranslator {
     const p = params as { item?: ThreadItemUnion };
     const item = p?.item;
     if (!item || typeof item.type !== "string") return;
+    this.emittedToolOutput.delete(item.id);
 
     switch (item.type) {
       case "agentMessage":
@@ -555,6 +597,8 @@ export class CodexAppServerTranslator {
             : typeof output === "string"
               ? output
               : "";
+        const dynamicContent =
+          item.type === "dynamicToolCall" ? dynamicToolContent(item) : null;
         this.emit({
           sessionId: this.sessionId,
           update: {
@@ -562,8 +606,9 @@ export class CodexAppServerTranslator {
             toolCallId,
             status,
             rawOutput: output,
-            content:
-              contentText.length > 0
+            content: dynamicContent
+              ? dynamicContent
+              : contentText.length > 0
                 ? [
                     {
                       type: "content",
@@ -626,24 +671,43 @@ export class CodexAppServerTranslator {
     this.emitMessageDelta(p.itemId, true, this.appendDelta(p.itemId, p.delta));
   }
 
-  private onToolOutputDelta(params: unknown, _method: string): void {
+  private onToolOutputDelta(params: unknown, method: string): void {
     const p = params as { itemId?: string; delta?: string; output?: string };
     if (typeof p?.itemId !== "string") return;
     const toolCallId = this.toolCallIds.get(p.itemId);
     if (!toolCallId) return;
-    const text =
-      typeof p.delta === "string"
-        ? p.delta
-        : typeof p.output === "string"
-          ? p.output
-          : "";
+    // terminalInteraction reports what Codex wrote to stdin, not command
+    // output. It is a lifecycle beat and must not pollute the visible log.
+    if (method === "item/commandExecution/terminalInteraction") return;
+    // The two payload shapes are NOT interchangeable, and the field name is
+    // the only thing that distinguishes them. `delta` is an increment and must
+    // be appended; `output` names a whole-log snapshot and must REPLACE, or
+    // each notification re-glues everything already shown ("abc" →
+    // "abcabcdef"). Every method wired above carries `delta` in the pinned
+    // 0.146 schema, so the snapshot arm is a guard against a future/legacy
+    // shape rather than a live path — which is exactly why it must not
+    // silently inherit append semantics.
+    const previous = this.emittedToolOutput.get(p.itemId) ?? "";
+    let text: string;
+    if (typeof p.delta === "string" && p.delta) {
+      if (previous.length >= MAX_STREAMED_TOOL_OUTPUT_CHARS) return;
+      text = (previous + p.delta).slice(0, MAX_STREAMED_TOOL_OUTPUT_CHARS);
+    } else if (typeof p.output === "string" && p.output) {
+      text = p.output.slice(0, MAX_STREAMED_TOOL_OUTPUT_CHARS);
+      // A capped snapshot repeats its first N chars forever; re-emitting an
+      // identical rawOutput would churn the timeline for no visible change.
+      if (text === previous) return;
+    } else {
+      return;
+    }
+    this.emittedToolOutput.set(p.itemId, text);
     this.emit({
       sessionId: this.sessionId,
       update: {
         sessionUpdate: "tool_call_update",
         toolCallId,
         status: "in_progress",
-        rawOutput: text || null,
+        rawOutput: text,
       },
     });
   }
@@ -696,6 +760,7 @@ export class CodexAppServerTranslator {
     }
     this.hasSeenTurnTerminal = true;
     if (cls.authQuota) this.turnFailureLabel = cls.label;
+    if (cls.rateLimited) this.turnRateLimitLabel = cls.label;
     this.lastStopReason = cls.stopReason;
 
     const message = extractErrorMessage(p?.error?.message) || cls.label;
@@ -843,6 +908,7 @@ type ThreadItemUnion =
   | {
       type: "dynamicToolCall";
       id: string;
+      namespace?: string | null;
       tool: string;
       arguments?: unknown;
       contentItems?: unknown;
@@ -923,7 +989,9 @@ function describeItem(item: ThreadItemUnion): string {
     case "mcpToolCall":
       return `${item.server}:${item.tool}`;
     case "dynamicToolCall":
-      return item.tool || "tool";
+      return item.namespace
+        ? `${item.namespace}/${item.tool || "tool"}`
+        : item.tool || "tool";
     case "webSearch":
       return `Searching ${truncate(item.query ?? "web", 40)}`;
     case "imageView":
@@ -1073,7 +1141,11 @@ function toolInput(item: ThreadItemUnion): unknown {
         arguments: item.arguments,
       };
     case "dynamicToolCall":
-      return { tool: item.tool, arguments: item.arguments };
+      return {
+        namespace: item.namespace ?? null,
+        tool: item.tool,
+        arguments: item.arguments,
+      };
     case "collabAgentToolCall":
       // `prompt` first — the SubagentCard reads it for both the header
       // excerpt and the expandable Prompt block.
@@ -1116,6 +1188,83 @@ function toolOutput(item: ThreadItemUnion): unknown {
   return null;
 }
 
+/** Convert Responses-compatible dynamic-tool output into Zeros-owned content
+ * blocks. The mapping is provider-neutral: browser, workspace, or future tools
+ * all persist through the same canonical transcript contract. */
+function dynamicToolContent(
+  item: Extract<ThreadItemUnion, { type: "dynamicToolCall" }>,
+): ToolCallContent[] | null {
+  if (!Array.isArray(item.contentItems)) return null;
+  const content: ToolCallContent[] = [];
+  for (const candidate of item.contentItems) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const value = candidate as Record<string, unknown>;
+    if (value.type === "inputText" && typeof value.text === "string") {
+      content.push({
+        type: "content",
+        content: { type: "text", text: value.text },
+      });
+      continue;
+    }
+    if (value.type === "inputImage") {
+      const block =
+        typeof value.imageUrl === "string"
+          ? dynamicMediaContent(value.imageUrl, "image")
+          : null;
+      content.push({
+        type: "content",
+        content: block ?? unrenderableDynamicMedia("image"),
+      });
+      continue;
+    }
+    if (value.type === "inputAudio") {
+      const block =
+        typeof value.audioUrl === "string"
+          ? dynamicMediaContent(value.audioUrl, "audio")
+          : null;
+      content.push({
+        type: "content",
+        content: block ?? unrenderableDynamicMedia("audio"),
+      });
+    }
+  }
+  return content.length > 0 ? content : null;
+}
+
+function unrenderableDynamicMedia(kind: "image" | "audio"): ContentBlock {
+  return {
+    type: "text",
+    text: `Dynamic tool ${kind} output could not be rendered.`,
+  };
+}
+
+function dynamicMediaContent(
+  uri: string,
+  kind: "image" | "audio",
+): ContentBlock | null {
+  const data = /^data:([^;,]+)(?:;[^,]*)?;base64,([a-z0-9+/=]+)$/i.exec(uri);
+  if (data) {
+    const mimeType = data[1]!;
+    if (!mimeType.toLowerCase().startsWith(`${kind}/`)) return null;
+    return kind === "image"
+      ? { type: "image", mimeType, data: data[2]! }
+      : { type: "audio", mimeType, data: data[2]! };
+  }
+  try {
+    const parsed = new URL(uri);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      return null;
+    }
+    return {
+      type: "resource_link",
+      uri: parsed.href,
+      name: `Dynamic tool ${kind}`,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function truncate(s: string, n: number): string {
   if (s.length <= n) return s;
   return s.slice(0, n - 1) + "…";
@@ -1127,43 +1276,72 @@ function truncate(s: string, n: number): string {
  *  should surface as an AgentFailure, plus a human label. */
 function classifyCodexErrorInfo(info: unknown): {
   authQuota: boolean;
+  rateLimited: boolean;
   stopReason: "end_turn" | "max_turn_requests" | "refusal" | "cancelled";
   label: string;
 } {
+  const tagged =
+    info && typeof info === "object" ? (info as Record<string, unknown>) : null;
   const tag =
     typeof info === "string"
       ? info
-      : info && typeof info === "object"
-        ? (Object.keys(info as object)[0] ?? "")
+      : tagged
+        ? (Object.keys(tagged)[0] ?? "")
         : "";
+  const detail = tagged?.[tag];
+  const httpStatusCode =
+    detail && typeof detail === "object"
+      ? (detail as Record<string, unknown>).httpStatusCode
+      : undefined;
+  if (httpStatusCode === 429) {
+    return {
+      authQuota: false,
+      rateLimited: true,
+      stopReason: "end_turn",
+      label: `${tag || "Request"} (HTTP 429)`,
+    };
+  }
+  if (httpStatusCode === 401 || httpStatusCode === 403) {
+    return {
+      authQuota: true,
+      rateLimited: false,
+      stopReason: "end_turn",
+      label: `${tag || "Request"} (HTTP ${httpStatusCode})`,
+    };
+  }
   switch (tag) {
     case "unauthorized":
       return {
         authQuota: true,
+        rateLimited: false,
         stopReason: "end_turn",
         label: "Not signed in (unauthorized)",
       };
     case "usageLimitExceeded":
       return {
-        authQuota: true,
+        authQuota: false,
+        rateLimited: true,
         stopReason: "end_turn",
         label: "Usage limit exceeded",
       };
     case "contextWindowExceeded":
       return {
         authQuota: false,
+        rateLimited: false,
         stopReason: "max_turn_requests",
         label: "Context window exceeded",
       };
     case "serverOverloaded":
       return {
         authQuota: false,
+        rateLimited: true,
         stopReason: "end_turn",
         label: "Server overloaded",
       };
     default:
       return {
         authQuota: false,
+        rateLimited: false,
         stopReason: "end_turn",
         label: tag || "error",
       };

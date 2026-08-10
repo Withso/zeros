@@ -175,6 +175,7 @@ export function ModelPill({
 
   return (
     <AgentModelMenu
+      initialize={initialize}
       value={{ agentId, model: activeValue, effort, fast }}
       open={open && !concealed}
       onOpenChange={setOpen}
@@ -305,8 +306,8 @@ export function EffortPill({
 // ── FastPill ─────────────────────────────────────────────
 //
 // Fast mode — lower-latency inference at higher token cost. Claude maps it to
-// the SDK `fastMode` setting (Opus only); Codex to `service_tier: "fast"`
-// (GPT-5.x). Off = outline bolt only; On = engaged chrome + filled bolt +
+// the SDK `fastMode` setting, Codex to `service_tier: "fast"`, and Cursor to a
+// live-catalog fast model variant. Off = outline bolt only; On = engaged chrome + filled bolt +
 // no label. The parent only renders this when the model supports it
 // (agentSupportsFast).
 

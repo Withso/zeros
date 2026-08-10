@@ -5,12 +5,18 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
+  bindFailureWasSuperseded,
+  bindStillOwnsSessionSlot,
   bumpCancelGeneration,
   cancelGeneration,
   cancelledSince,
   loadedSessionStatus,
   markPrebindDirty,
+  queuedSendNowAction,
   queueReleaseAction,
+  recoveredSessionIdentity,
+  recoveryLoadLocator,
+  resumeFailureInvalidatesBinding,
   sendNeedsSessionRecovery,
   shouldQueuePrompt,
   takePrebindDirty,
@@ -55,6 +61,52 @@ describe("session reload lifecycle", () => {
         flushing: false,
       }),
     ).toBe(true);
+  });
+
+  it("rejects stale bind callbacks after close or a replacement execution", () => {
+    expect(
+      bindStillOwnsSessionSlot({
+        cancelled: true,
+        expectedExecutionId: "old-execution",
+        slotExecutionId: "old-execution",
+      }),
+    ).toBe(false);
+    expect(
+      bindStillOwnsSessionSlot({
+        cancelled: false,
+        expectedExecutionId: "old-execution",
+        slotExecutionId: "new-execution",
+      }),
+    ).toBe(false);
+    expect(
+      bindStillOwnsSessionSlot({
+        cancelled: false,
+        expectedExecutionId: "current-execution",
+        slotExecutionId: "current-execution",
+      }),
+    ).toBe(true);
+  });
+
+  it("steers a queued message into an adopted engine turn", () => {
+    // A renderer reload loses sendingChatsRef, but the loaded execution remains
+    // authoritative and reports status=streaming. Treating the missing local
+    // lock as idle dequeues the row, calls normal sendPrompt, and then drops it
+    // at sendPrompt's streaming guard without ever delivering it.
+    expect(
+      queuedSendNowAction({ status: "streaming", hasLocalSend: false }),
+    ).toBe("steer");
+  });
+
+  it("only flushes send-now while idle and waits through preparation", () => {
+    expect(queuedSendNowAction({ status: "ready", hasLocalSend: false })).toBe(
+      "flush",
+    );
+    expect(queuedSendNowAction({ status: "warming", hasLocalSend: true })).toBe(
+      "wait",
+    );
+    expect(queuedSendNowAction({ status: "ready", hasLocalSend: true })).toBe(
+      "wait",
+    );
   });
 
   it("queues a send while session loading is still resolving", () => {
@@ -250,6 +302,41 @@ describe("session reload lifecycle", () => {
     );
   });
 
+  it("rejects a stale provider binding from a superseded execution", () => {
+    const store = useSessionsStore.getState();
+    store.setSession("chat-1", {
+      ...BLANK,
+      agentId: "claude",
+      executionId: "new-execution",
+      sessionId: "new-execution",
+      providerBinding: {
+        version: 1,
+        providerId: "claude",
+        kind: "native",
+        resumeId: "new-provider-session",
+      },
+    });
+
+    store.applyBridgeUpdate({
+      executionId: "old-execution",
+      sessionId: "old-execution",
+      chatId: "chat-1",
+      update: {
+        sessionUpdate: "provider_binding_update",
+        providerBinding: {
+          version: 1,
+          providerId: "claude",
+          kind: "native",
+          resumeId: "old-provider-session",
+        },
+      },
+    } as SessionNotification);
+
+    expect(
+      useSessionsStore.getState().sessions["chat-1"]?.providerBinding?.resumeId,
+    ).toBe("new-provider-session");
+  });
+
   it("reconciles missed pre-bind output only for the exact adopted session", () => {
     const dirty = new Map<string, string>();
     markPrebindDirty(dirty, "chat-1", "old-session");
@@ -320,6 +407,50 @@ describe("stopping a send that has not gone out yet", () => {
 // case — the message shows in the queued card at once and dispatches when the
 // session is ready.
 describe("send-time session recovery", () => {
+  it("resumes through the durable provider binding and retries on the replacement execution", () => {
+    const providerBinding = {
+      version: 1,
+      providerId: "codex",
+      kind: "native",
+      resumeId: "provider-thread-1",
+      legacySessionId: "provider-compat-1",
+    } as const;
+
+    // The dead execution id is deliberately not an input: it must never be
+    // reinterpreted as a provider resume locator after the engine restarts.
+    expect(recoveryLoadLocator(providerBinding)).toEqual({
+      providerBinding,
+      sessionId: "provider-compat-1",
+    });
+    expect(recoveryLoadLocator(null)).toEqual({});
+
+    const replacementBinding = {
+      ...providerBinding,
+      resumeId: "provider-thread-2",
+    };
+    expect(
+      recoveredSessionIdentity(
+        {
+          executionId: "replacement-execution",
+          sessionId: "replacement-execution",
+          response: {
+            providerBinding: replacementBinding,
+            providerMetadata: { version: 1 },
+          },
+        },
+        {
+          providerBinding,
+          providerMetadata: null,
+        },
+      ),
+    ).toEqual({
+      executionId: "replacement-execution",
+      sessionId: "replacement-execution",
+      providerBinding: replacementBinding,
+      providerMetadata: { version: 1 },
+    });
+  });
+
   it("recovers only from states with nothing in flight", () => {
     expect(sendNeedsSessionRecovery("failed")).toBe(true);
     expect(sendNeedsSessionRecovery("auth-required")).toBe(true);
@@ -328,6 +459,50 @@ describe("send-time session recovery", () => {
     expect(sendNeedsSessionRecovery("ready")).toBe(false);
     expect(sendNeedsSessionRecovery("warming")).toBe(false);
     expect(sendNeedsSessionRecovery("streaming")).toBe(false);
+  });
+
+  it("forgets a binding only when the provider confirms it expired", () => {
+    expect(
+      resumeFailureInvalidatesBinding({
+        kind: "session-expired",
+        message: "thread not found",
+        stage: "loadSession",
+      }),
+    ).toBe(true);
+    expect(
+      resumeFailureInvalidatesBinding({
+        kind: "auth-required",
+        message: "sign in",
+        stage: "loadSession",
+      }),
+    ).toBe(false);
+    expect(
+      resumeFailureInvalidatesBinding({
+        kind: "transport-closed",
+        message: "engine restarted",
+        stage: "loadSession",
+      }),
+    ).toBe(false);
+  });
+
+  it("treats a superseded bind as a harmless lifecycle race", () => {
+    const failure = {
+      kind: "lifecycle-superseded" as const,
+      message: "A newer bind owns this conversation.",
+      stage: "loadSession" as const,
+    };
+
+    expect(bindFailureWasSuperseded(failure)).toBe(true);
+    expect(resumeFailureInvalidatesBinding(failure)).toBe(false);
+
+    const legacyEngineFailure = {
+      kind: "session-expired" as const,
+      message:
+        "The conversation was closed or superseded while its agent session was starting.",
+      stage: "loadSession" as const,
+    };
+    expect(bindFailureWasSuperseded(legacyEngineFailure)).toBe(true);
+    expect(resumeFailureInvalidatesBinding(legacyEngineFailure)).toBe(false);
   });
 
   it("hands a warming chat's send to the queue instead", () => {

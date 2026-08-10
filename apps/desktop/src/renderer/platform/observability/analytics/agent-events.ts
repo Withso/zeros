@@ -247,7 +247,7 @@ export function trackAgentPermissionDecided(args: {
 export function trackAgentQuestionAnswered(args: {
   chatId: string;
   agentId: string;
-  outcome: "answered" | "dismissed";
+  outcome: "answered" | "declined" | "dismissed";
   source?: string | null;
   questionCount: number;
   blocking: boolean;
@@ -431,6 +431,7 @@ function gitErrorKind(error: unknown): string {
 const NON_BUG_AGENT_FAILURE_KINDS = new Set<string>([
   "auth-required",
   "session-expired",
+  "lifecycle-superseded",
   "timeout",
   "transport-closed",
   "rate-limited",
