@@ -81,7 +81,9 @@ export async function runSetupHooks(opts: SetupHookOptions): Promise<void> {
       // The from-branch (worktree.ts seedWorktreeFiles) and late-seed passes
       // already skip these; this loop used to be the one that didn't.
       if (pathExists(path.join(opts.worktreePath, rel))) continue;
-      await copyFromRepo(opts.repoRoot, opts.worktreePath, rel);
+      await copyFromRepo(opts.repoRoot, opts.worktreePath, rel, {
+        rejectNestedGitCheckout: true,
+      });
     } catch (err) {
       console.warn(
         `[setup-hooks] files-to-copy: skipped "${rel}": ${err instanceof Error ? err.message : String(err)}`,
@@ -439,6 +441,7 @@ export async function copyFromRepo(
   repoRoot: string,
   worktreePath: string,
   rel: string,
+  options: { rejectNestedGitCheckout?: boolean } = {},
 ): Promise<void> {
   const { src, dst } = resolveContainedPaths(
     repoRoot,
@@ -456,6 +459,20 @@ export async function copyFromRepo(
       cause: err,
     });
   }
+  // Automatic files-to-copy discovery must never recurse through another Git
+  // checkout. Git can collapse a nested worktree match to its directory row;
+  // without this gate one `.env.example` inside it copies the entire checkout.
+  // Explicit copyPaths keep their caller-authored behavior for compatibility.
+  if (
+    options.rejectNestedGitCheckout &&
+    st.isDirectory() &&
+    (await hasGitMarker(src))
+  ) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: `files-to-copy: refusing to recursively copy nested Git checkout "${rel}"`,
+    });
+  }
   // BEFORE the mkdir, not after: `copyFile` opens with O_CREAT|O_TRUNC and
   // follows a link at the destination, and `mkdir -p` follows one at any
   // parent — so a link the base branch committed (`.env.local →
@@ -464,12 +481,16 @@ export async function copyFromRepo(
   await assertContainedDestination(worktreePath, dst);
   await mkdir(path.dirname(dst), { recursive: true });
   if (st.isDirectory()) {
-    await copyDirRecursive(src, dst, worktreePath);
+    await copyDirRecursive(src, dst, worktreePath, options);
   } else if (st.isSymbolicLink()) {
     await recreateSymlink(src, dst, worktreePath, rel);
   } else {
     await copyFile(src, dst);
   }
+}
+
+async function hasGitMarker(directory: string): Promise<boolean> {
+  return (await lstat(path.join(directory, ".git")).catch(() => null)) !== null;
 }
 
 /** Re-create a symlink at `dst` pointing at the same target — but never one
@@ -514,6 +535,7 @@ async function copyDirRecursive(
   src: string,
   dst: string,
   worktreePath: string,
+  options: { rejectNestedGitCheckout?: boolean },
 ): Promise<void> {
   await mkdir(dst, { recursive: true });
   const entries = await readdir(src, { withFileTypes: true });
@@ -528,7 +550,13 @@ async function copyDirRecursive(
     // one lstat, not a re-walk.
     await assertRealPathComponent(wtAbs, d);
     if (e.isDirectory()) {
-      await copyDirRecursive(s, d, worktreePath);
+      if (options.rejectNestedGitCheckout && (await hasGitMarker(s))) {
+        console.warn(
+          `[setup-hooks] files-to-copy: ignored nested Git checkout boundary "${label}"; separate checkouts are not copied`,
+        );
+        continue;
+      }
+      await copyDirRecursive(s, d, worktreePath, options);
     } else if (e.isSymbolicLink()) {
       // An escaping link found INSIDE a copied tree is skipped, not fatal.
       // A standard virtualenv ships `.venv/bin/python → /usr/bin/python3` and

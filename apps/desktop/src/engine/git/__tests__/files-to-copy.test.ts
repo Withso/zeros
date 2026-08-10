@@ -116,6 +116,48 @@ describe("resolveFilesToCopy", () => {
     expect(r.paths).toEqual([".env"]); // .env.example is tracked → already in the worktree
   });
 
+  it("does not turn an ignored nested Git worktree into an implicit .env seed", async () => {
+    // A linked worktree is an opaque repository boundary to the outer
+    // checkout. When an inner tracked `.env.example` matches the `.env*`
+    // pathspec, `git ls-files -o -i` reports the WHOLE nested worktree path
+    // with a trailing slash instead of the inner file. Treating that row as a
+    // seed recursively copied every file in every Claude worktree.
+    await initRepo(repoRoot, ".env*\n.claude/worktrees/\n");
+    await write(".env.example", "template");
+    await execFileAsync("git", ["add", "-f", ".env.example"], {
+      cwd: repoRoot,
+    });
+    await execFileAsync("git", ["commit", "-q", "-m", "track env template"], {
+      cwd: repoRoot,
+    });
+    await mkdir(path.join(repoRoot, ".claude", "worktrees"), {
+      recursive: true,
+    });
+    await execFileAsync(
+      "git",
+      [
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "test/nested-env-template",
+        path.join(repoRoot, ".claude", "worktrees", "nested"),
+        "main",
+      ],
+      { cwd: repoRoot },
+    );
+
+    const r = await resolveFilesToCopy(repoRoot);
+
+    expect(r.source).toBe("default");
+    expect(r.paths).toEqual([]);
+    expect(r.warnings).toEqual([
+      expect.stringContaining(
+        "found 1 separate Git checkout while scanning",
+      ),
+    ]);
+  });
+
   it("matches gitignored files in subdirectories (basename pattern, any depth)", async () => {
     await initRepo(repoRoot, ".env*\n");
     await mkdir(path.join(repoRoot, "packages", "app"), { recursive: true });

@@ -341,6 +341,15 @@ describe("repository layout contracts", () => {
     );
   });
 
+  it("keeps parse5's decoder available to the packaged Electron main process", () => {
+    const rootPackage = JSON.parse(read("package.json")) as {
+      dependencies: Record<string, string>;
+    };
+
+    expect(rootPackage.dependencies.parse5).toBe("^7.3.0");
+    expect(rootPackage.dependencies.entities).toBe("^6.0.1");
+  });
+
   it("licenses the standalone marketing graph and publishes its notices", () => {
     const licenses = read("THIRD-PARTY-LICENSES.txt");
     const generator = read("scripts/generate-third-party-licenses.mjs");
