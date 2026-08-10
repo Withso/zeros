@@ -946,6 +946,85 @@ describe("WorkspaceService", () => {
     }
   });
 
+  it("preserves a host provider binding when a remote bulk upsert omits it", async () => {
+    const { setZerosDbPathForTesting, closeZerosDb } = await import("../../db");
+    setZerosDbPathForTesting(path.join(dir, "zeros-provider-binding.db"));
+    try {
+      await svc.handle("chats.upsert", {
+        chat: {
+          id: "provider-owned",
+          folder: dir,
+          agentId: "codex",
+          title: "Local title",
+          sessionId: "dead-execution-must-not-win",
+          providerBinding: {
+            version: 1,
+            providerId: "codex",
+            kind: "native",
+            resumeId: "codex-thread-1",
+            scopeId: "codex-root-1",
+          },
+          providerMetadata: {
+            version: 1,
+            git: { sha: "abc123", branch: "main", originUrl: null },
+          },
+        },
+      });
+
+      // A protocol-v8 peer predating providerBinding still echoes sessionId.
+      // Its metadata edit may apply, but it cannot erase the host's durable
+      // provider identity or replace the compatibility locator with a route.
+      await svc.handle(
+        "chats.bulkUpsert",
+        {
+          chats: [
+            {
+              id: "provider-owned",
+              folder: dir,
+              agentId: "codex",
+              title: "Remote title",
+              sessionId: "stale-remote-execution",
+            },
+          ],
+        },
+        { remote: true },
+      );
+
+      const result = (await svc.handle("chats.list")) as {
+        chats: Array<{
+          id: string;
+          title: string;
+          sessionId: string | null;
+          providerBinding?: {
+            providerId: string;
+            resumeId: string;
+            scopeId?: string;
+          } | null;
+          providerMetadata?: {
+            git?: { sha: string | null; branch: string | null };
+          } | null;
+        }>;
+      };
+      expect(
+        result.chats.find((chat) => chat.id === "provider-owned"),
+      ).toMatchObject({
+        title: "Remote title",
+        sessionId: "codex-thread-1",
+        providerBinding: {
+          providerId: "codex",
+          resumeId: "codex-thread-1",
+          scopeId: "codex-root-1",
+        },
+        providerMetadata: {
+          git: { sha: "abc123", branch: "main" },
+        },
+      });
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+    }
+  });
+
   it("workspaceIdForCwd canonicalizes an id OR a real path to a workspace id", () => {
     // The primary checkout's real PATH (what the desktop + a remote client with
     // relaxed redaction send as cwd) resolves to the synthetic local-main id —

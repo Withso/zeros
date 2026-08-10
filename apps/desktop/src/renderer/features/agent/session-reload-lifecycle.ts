@@ -1,5 +1,67 @@
 import type { SessionStatus } from "./use-agent-session";
-import { isRecoverable, type AgentFailure } from "../../platform/bridge/failure";
+import {
+  isRecoverable,
+  type AgentFailure,
+} from "../../platform/bridge/failure";
+import type {
+  ProviderBinding,
+  ProviderMetadata,
+} from "@zeros/protocol/identities";
+
+/** Durable locator fields for a load-session recovery request.
+ *
+ * A failed execution id is intentionally not accepted here: after an engine
+ * restart it is neither a live route nor a provider resume handle. The
+ * compatibility sessionId, when present, is derived only from the durable
+ * provider binding so a protocol-v8 engine can still resume it. With no
+ * binding, chatId on the surrounding request performs a conversation-only
+ * probe for an execution that survived a renderer reload. */
+export function recoveryLoadLocator(
+  providerBinding: ProviderBinding | null | undefined,
+): { providerBinding?: ProviderBinding; sessionId?: string } {
+  if (!providerBinding) return {};
+  return {
+    providerBinding,
+    sessionId: providerBinding.legacySessionId ?? providerBinding.resumeId,
+  };
+}
+
+/** Identity patch and prompt route produced by a successful recovery load.
+ * The engine may mint a replacement execution even though the durable provider
+ * conversation stays the same, so all subsequent routing must use the load
+ * response rather than the dead execution captured before recovery. */
+export function recoveredSessionIdentity(
+  loaded: {
+    executionId?: string | null;
+    sessionId?: string | null;
+    response?: {
+      providerBinding?: ProviderBinding;
+      providerMetadata?: ProviderMetadata;
+    };
+  },
+  previous: {
+    providerBinding?: ProviderBinding | null;
+    providerMetadata?: ProviderMetadata | null;
+  },
+): {
+  executionId: string;
+  sessionId: string;
+  providerBinding: ProviderBinding | null;
+  providerMetadata: ProviderMetadata | null;
+} | null {
+  const executionId = loaded.executionId ?? loaded.sessionId;
+  if (!executionId) return null;
+  const providerBinding =
+    loaded.response?.providerBinding ?? previous.providerBinding ?? null;
+  return {
+    executionId,
+    sessionId: executionId,
+    providerBinding,
+    providerMetadata: providerBinding
+      ? (loaded.response?.providerMetadata ?? previous.providerMetadata ?? null)
+      : null,
+  };
+}
 
 /** The engine survives a local renderer reload. Its prompt activity is the
  * authoritative lifecycle signal; a successfully loaded active session must

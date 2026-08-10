@@ -11,6 +11,8 @@ import {
   loadedSessionStatus,
   markPrebindDirty,
   queueReleaseAction,
+  recoveredSessionIdentity,
+  recoveryLoadLocator,
   sendNeedsSessionRecovery,
   shouldQueuePrompt,
   takePrebindDirty,
@@ -355,6 +357,50 @@ describe("stopping a send that has not gone out yet", () => {
 // case — the message shows in the queued card at once and dispatches when the
 // session is ready.
 describe("send-time session recovery", () => {
+  it("resumes through the durable provider binding and retries on the replacement execution", () => {
+    const providerBinding = {
+      version: 1,
+      providerId: "codex",
+      kind: "native",
+      resumeId: "provider-thread-1",
+      legacySessionId: "provider-compat-1",
+    } as const;
+
+    // The dead execution id is deliberately not an input: it must never be
+    // reinterpreted as a provider resume locator after the engine restarts.
+    expect(recoveryLoadLocator(providerBinding)).toEqual({
+      providerBinding,
+      sessionId: "provider-compat-1",
+    });
+    expect(recoveryLoadLocator(null)).toEqual({});
+
+    const replacementBinding = {
+      ...providerBinding,
+      resumeId: "provider-thread-2",
+    };
+    expect(
+      recoveredSessionIdentity(
+        {
+          executionId: "replacement-execution",
+          sessionId: "replacement-execution",
+          response: {
+            providerBinding: replacementBinding,
+            providerMetadata: { version: 1 },
+          },
+        },
+        {
+          providerBinding,
+          providerMetadata: null,
+        },
+      ),
+    ).toEqual({
+      executionId: "replacement-execution",
+      sessionId: "replacement-execution",
+      providerBinding: replacementBinding,
+      providerMetadata: { version: 1 },
+    });
+  });
+
   it("recovers only from states with nothing in flight", () => {
     expect(sendNeedsSessionRecovery("failed")).toBe(true);
     expect(sendNeedsSessionRecovery("auth-required")).toBe(true);

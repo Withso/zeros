@@ -101,6 +101,8 @@ import {
   loadedSessionStatus,
   markPrebindDirty,
   queueReleaseAction,
+  recoveredSessionIdentity,
+  recoveryLoadLocator,
   shouldQueuePrompt,
   statusForFailure,
   takePrebindDirty,
@@ -1909,18 +1911,32 @@ export function AgentSessionsProvider({
           (m) => m.kind === "text" && m.role === "agent",
         );
 
-        // Re-establish the SAME session id in the (usually freshly-respawned)
-        // engine via loadSession, then retry THIS prompt on it. --resume gives
-        // the agent its context from Claude's own on-disk transcript, so NO
-        // replay preamble / "Continuing session" banner is needed. Returns the
-        // prompt result, or null if loadSession didn't re-establish (caller
-        // then falls back to a cold rebuild).
-        const tryResumeSameSession = async (
-          sessionId: string,
-        ): Promise<
+        // Re-establish the SAME provider conversation in the (usually freshly
+        // respawned) engine via its durable binding, then retry THIS prompt on
+        // the replacement execution returned by loadSession. A dead execution
+        // id is never a resume locator. Returns the prompt result, or null if
+        // loadSession didn't re-establish (caller then cold-rebuilds).
+        const tryResumeSameSession = async (): Promise<
           AgentPromptCompleteMessage | AgentPromptFailedMessage | null
         > => {
           try {
+            // Prefer the newest exact-chat slot: providers can publish a
+            // stronger native binding after this send captured `current`.
+            // Fall back to the durable chat row for older/cold slots that did
+            // not yet receive the binding during renderer hydration.
+            const recoverySlot = getStore().sessions[chatId] ?? current;
+            const persistedChat = useWorkspaceStore
+              .getState()
+              .chats.find((chat) => chat.id === chatId);
+            const recoveryProviderBinding =
+              recoverySlot.providerBinding ??
+              (persistedChat?.providerBinding?.providerId === current.agentId
+                ? persistedChat.providerBinding
+                : null);
+            const recoveryProviderMetadata =
+              recoverySlot.providerMetadata ??
+              persistedChat?.providerMetadata ??
+              null;
             const presetEnv = await deriveProviderEnv(current.agentId!);
             const mcpSecretEnv = await deriveMcpSecretEnv(
               bridge,
@@ -1954,7 +1970,7 @@ export function AgentSessionsProvider({
                 type: "AGENT_LOAD_SESSION",
                 agentId: current.agentId!,
                 chatId,
-                sessionId,
+                ...recoveryLoadLocator(recoveryProviderBinding),
                 cwd: current.cwd ?? undefined,
                 workspaceId: resumeWorkspaceId ?? undefined,
                 env: mergedEnv,
@@ -1963,13 +1979,22 @@ export function AgentSessionsProvider({
               60_000,
             );
             if (loaded.type !== "AGENT_SESSION_LOADED") return null;
+            const recovered = recoveredSessionIdentity(loaded, {
+              providerBinding: recoveryProviderBinding,
+              providerMetadata: recoveryProviderMetadata,
+            });
+            if (!recovered) return null;
+            // Publish the new route before any retry (or a Stop observed after
+            // the load). The old execution disappeared with the engine and can
+            // no longer receive prompts, cancellation, or lifecycle events.
+            getStore().patchSession(chatId, recovered);
             // The resume above can take up to a minute with the chat still
             // showing Stop. Re-check before re-sending: rebuildAndRetry treats
             // null as "couldn't resume" and its own post-await check turns that
             // into a clean stop rather than a cold rebuild.
             if (stoppedByUser()) return null;
             promptRetryCount += 1;
-            return await runPrompt(sessionId, prompt);
+            return await runPrompt(recovered.executionId, prompt);
           } catch {
             return null;
           }
@@ -2000,7 +2025,7 @@ export function AgentSessionsProvider({
               error: null,
               failure: null,
             });
-            const resumed = await tryResumeSameSession(current.sessionId);
+            const resumed = await tryResumeSameSession();
             if (stoppedByUser()) {
               settleStoppedSend();
               return null;

@@ -696,23 +696,45 @@ const REMOTE_WRITE_DENYLIST = [
 ] as const;
 
 /** A remote client may freely edit its OWN chat metadata (title, pin, model,
- *  effort…), but two fields are host-local capabilities it must not set from an
- *  untrusted wire object:
+ *  effort…), but some fields are host-local capabilities or identity learned
+ *  by the host and must survive an incomplete untrusted wire object:
  *    • `additionalDirectories` widens the host Claude agent's sanctioned
  *      filesystem scope (→ ZEROS_ADDITIONAL_DIRS → SDK `Options.additionalDirectories`
  *      on the next respawn). Letting a paired-but-untrusted device upsert arbitrary
  *      absolute paths would expand local file access with no host prompt — the same
  *      class of leak the `RESOLVE_AGENT_BINARY` handler refuses for remote clients.
  *    • `fast` flips run mode (cost/behavior) and has no remote picker.
+ *    • `providerBinding` / `providerMetadata` attach the chat to the provider's
+ *      durable conversation. Protocol-v8 peers predating these fields omit them;
+ *      their routine sync must not detach every host conversation.
  *  On a remote upsert we keep whatever the host already persisted (or the safe
- *  default for a brand-new chat), never the value off the wire. Local desktop
- *  writes bypass this entirely. See the remote-client trust boundary. */
+ *  default for a brand-new chat) for capabilities. A valid provider binding can
+ *  advance through sync, but an absent/cross-provider binding preserves the
+ *  host copy and its matching metadata. Local desktop writes bypass this
+ *  entirely. See the remote-client trust boundary. */
 function preserveHostOnlyFields(c: ChatRow): ChatRow {
   const existing = getChat(c.id);
+  const incomingProviderBinding =
+    c.providerBinding?.providerId === c.agentId ? c.providerBinding : null;
+  const existingProviderBinding =
+    existing?.providerBinding?.providerId === c.agentId
+      ? existing.providerBinding
+      : null;
+  const providerBinding =
+    incomingProviderBinding ?? existingProviderBinding ?? null;
+  const providerMetadata = incomingProviderBinding
+    ? (c.providerMetadata ??
+      (existingProviderBinding?.resumeId === incomingProviderBinding.resumeId
+        ? existing?.providerMetadata
+        : null) ??
+      null)
+    : (existing?.providerMetadata ?? null);
   return {
     ...c,
     additionalDirectories: existing?.additionalDirectories ?? [],
     fast: existing?.fast ?? false,
+    providerBinding,
+    providerMetadata: providerBinding ? providerMetadata : null,
   };
 }
 
