@@ -123,6 +123,63 @@ export function shouldQueuePrompt(input: {
   );
 }
 
+/** Route an explicit "Send now" for a queued row from authoritative session
+ * lifecycle, not from the renderer-local prompt promise. A reloaded renderer
+ * has no local send lock for the engine turn it adopted, but status remains
+ * `streaming`; that row must steer into the live turn. Conversely, a local
+ * prompt still preparing can momentarily own the lock before status becomes
+ * streaming, so it must keep the row parked instead of steering into nothing. */
+export function queuedSendNowAction(input: {
+  status: SessionStatus;
+  hasLocalSend: boolean;
+}): "steer" | "flush" | "wait" {
+  if (input.status === "streaming") return "steer";
+  if (input.hasLocalSend || input.status === "warming") return "wait";
+  return "flush";
+}
+
+/** Whether closing the visual tab must retain its runtime shell until work
+ * settles. Closing a tab is navigation, so any fact capable of producing more
+ * transcript, a queued send, or an interaction keeps the execution alive in
+ * the background. Reconnecting alone is not work: with no local operation or
+ * queue behind it, an archived dead route can be released immediately. */
+export function sessionNeedsBackgroundRetention(input: {
+  status: SessionStatus;
+  hasLocalSend: boolean;
+  hasQueuedSends: boolean;
+  queueHeld: boolean;
+  ensuring: boolean;
+  pendingInteraction: boolean;
+  hasBackgroundTasks: boolean;
+  hasForegroundWorkflows: boolean;
+}): boolean {
+  return (
+    input.status === "streaming" ||
+    input.status === "warming" ||
+    input.hasLocalSend ||
+    input.hasQueuedSends ||
+    input.queueHeld ||
+    input.ensuring ||
+    input.pendingInteraction ||
+    input.hasBackgroundTasks ||
+    input.hasForegroundWorkflows
+  );
+}
+
+/** Resolve the deferred reaper from durable tab visibility plus the latest
+ * exact-session work snapshot. Kept pure so the two important races stay
+ * explicit: a History reopen cancels the reaper, while an archived chat is
+ * closed only after its final operation settles. */
+export function deferredArchiveCloseAction(input: {
+  requested: boolean;
+  archived: boolean;
+  hasPendingWork: boolean;
+}): "none" | "cancel" | "wait" | "close" {
+  if (!input.requested) return "none";
+  if (!input.archived) return "cancel";
+  return input.hasPendingWork ? "wait" : "close";
+}
+
 /** Whether an explicit send must rebuild the chat's session BEFORE the message
  * can go anywhere — the composer's retry affordance for a chat sitting in
  * `failed` / `auth-required` / `reconnecting` (or one that never spawned).

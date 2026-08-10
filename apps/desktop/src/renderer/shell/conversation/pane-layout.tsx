@@ -88,6 +88,7 @@ import { ChatTabs } from "./chat-tabs";
 import {
   isChatDiscardableOnClose,
   messageCountForChatClose,
+  tabCloseResourceAction,
 } from "./chat-close";
 import {
   captureScrollWithin,
@@ -227,7 +228,7 @@ export function ConversationPaneLayout({
   const newAgentFolder = useNewAgentFolder();
   const dispatch = useWorkspaceDispatch();
   const sessions = useAgentSessions();
-  const { closeSession } = sessions;
+  const { archiveSession, closeSession } = sessions;
 
   const activeFolder = useWorkspaceStore(selectActiveFolder);
   const pendingWorkspaceValidationFolder = useWorkspaceStore(
@@ -435,15 +436,6 @@ export function ConversationPaneLayout({
       const sessionSlot = useSessionsStore.getState().sessions[chat.id];
       const messageCount = messageCountForChatClose(sessionSlot);
 
-      // Reap the backing resource (see conversation/chat-tabs history: a
-      // terminal tab's PTY must be EXPLICITLY killed; a chat tab reaps
-      // its engine session, transcript kept on disk).
-      if (chat.kind === "terminal") {
-        void ptyKill({ sessionId: chat.id });
-      } else {
-        closeSession(chat.id);
-      }
-
       // A never-used "Untitled" tab (no message, no rename/title, no typed
       // draft) is DISCARDED so it never clutters the History menu; every
       // other close ARCHIVES (soft-delete, restorable from History). See
@@ -457,6 +449,22 @@ export function ConversationPaneLayout({
         liveDraft: getLiveChatDraft(chat.id),
         storedDraft: useWorkspaceStore.getState().chatComposerDrafts[chat.id],
       });
+
+      // Closing a USED chat is navigation, not Stop. Let its active turn and
+      // FIFO finish in the background; archiveSession reaps the execution once
+      // it is genuinely idle. Only a pristine discarded chat tears down now.
+      // Terminals remain explicit process resources and are killed on close.
+      switch (tabCloseResourceAction({ kind: chat.kind, discard })) {
+        case "kill-terminal":
+          void ptyKill({ sessionId: chat.id });
+          break;
+        case "close-session":
+          closeSession(chat.id);
+          break;
+        case "archive-session":
+          archiveSession(chat.id);
+          break;
+      }
       dispatch({ type: discard ? "DELETE_CHAT" : "ARCHIVE_CHAT", id: chat.id });
 
       if (wasActive) {
@@ -496,6 +504,7 @@ export function ConversationPaneLayout({
     [
       chatsByPane,
       visibleChats,
+      archiveSession,
       closeSession,
       dispatch,
       sessions,

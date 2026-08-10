@@ -94,3 +94,23 @@ export function isChatDiscardableOnClose(inputs: ChatCloseInputs): boolean {
   if (draftHasContent(inputs.storedDraft)) return false;
   return true;
 }
+
+export type TabCloseResourceAction =
+  | "archive-session"
+  | "close-session"
+  | "kill-terminal";
+
+/** Resource lifecycle paired with the tab's archive/discard decision.
+ *
+ * A used chat is only removed from the visible tab strip. Its agent and queued
+ * sends may still be working, so the sessions provider lets them finish in the
+ * background and reaps the idle execution afterward. A pristine discarded tab
+ * has no work to preserve and can close immediately. Terminals remain explicit
+ * PTY resources and are killed on close as before. */
+export function tabCloseResourceAction(input: {
+  kind: ChatThread["kind"];
+  discard: boolean;
+}): TabCloseResourceAction {
+  if (input.kind === "terminal") return "kill-terminal";
+  return input.discard ? "close-session" : "archive-session";
+}

@@ -98,11 +98,14 @@ import {
   bumpCancelGeneration,
   cancelGeneration,
   cancelledSince,
+  deferredArchiveCloseAction,
   loadedSessionStatus,
   markPrebindDirty,
+  queuedSendNowAction,
   queueReleaseAction,
   recoveredSessionIdentity,
   recoveryLoadLocator,
+  sessionNeedsBackgroundRetention,
   shouldQueuePrompt,
   statusForFailure,
   takePrebindDirty,
@@ -376,6 +379,11 @@ export function AgentSessionsProvider({
   // loaded. The local send promise/finally does not exist in that case, so the
   // bridge listener reaches the normal queue release through this late-bound ref.
   const releaseQueueRef = useRef<(chatId: string) => void>(() => {});
+  /** Used-chat tab closes are soft: the execution and its renderer FIFO remain
+   * live until every foreground/background operation settles. */
+  const deferredArchiveCloseRef = useRef(new Set<string>());
+  /** Late-bound because transcript eviction is declared before closeSession. */
+  const closeSessionNowRef = useRef<(chatId: string) => void>(() => {});
   const reconcileChatMessagesRef = useRef<(chatId: string) => Promise<void>>(
     async () => {},
   );
@@ -1071,6 +1079,56 @@ export function AgentSessionsProvider({
    *  out from under the user mid-edit. releaseQueue drains if idle+ready. */
   const queueHeldRef = useRef(new Set<string>());
 
+  const sessionHasPendingBackgroundWork = useCallback(
+    (chatId: string): boolean => {
+      const slot = getStore().sessions[chatId];
+      if (!slot) return false;
+      const queued = (sendQueueRef.current.get(chatId)?.length ?? 0) > 0;
+      return sessionNeedsBackgroundRetention({
+        status: slot.status,
+        hasLocalSend: sendingChatsRef.current.has(chatId),
+        hasQueuedSends: queued,
+        queueHeld: queueHeldRef.current.has(chatId) && queued,
+        ensuring: ensureInFlightRef.current.has(chatId),
+        pendingInteraction:
+          slot.pendingPermission != null ||
+          (slot.pendingQuestions?.length ?? 0) > 0,
+        hasBackgroundTasks:
+          slot.backgroundTasks.length > 0 || slot.waitingForBackgroundTasks,
+        hasForegroundWorkflows: slot.workflows.some(
+          (workflow) =>
+            workflow.status === "running" || workflow.status === "paused",
+        ),
+      });
+    },
+    [getStore],
+  );
+
+  /** Reap one archived session only after its last turn, FIFO send, gate, task,
+   * or bind has settled. A History reopen cancels the deferred reaper. */
+  const finishDeferredArchiveClose = useCallback(
+    (chatId: string): boolean => {
+      const chat = useWorkspaceStore
+        .getState()
+        .chats.find((candidate) => candidate.id === chatId);
+      const action = deferredArchiveCloseAction({
+        requested: deferredArchiveCloseRef.current.has(chatId),
+        // A deleted chat is no longer visible either and should be reaped.
+        archived: chat?.archived ?? true,
+        hasPendingWork: sessionHasPendingBackgroundWork(chatId),
+      });
+      if (action === "cancel") {
+        deferredArchiveCloseRef.current.delete(chatId);
+      } else if (action === "close") {
+        deferredArchiveCloseRef.current.delete(chatId);
+        closeSessionNowRef.current(chatId);
+        return true;
+      }
+      return false;
+    },
+    [sessionHasPendingBackgroundWork],
+  );
+
   /** chatId → cancel generation. Bumped by every cancel() and re-read by an
    *  in-flight sendPrompt after each await, so a Stop is honoured even while the
    *  send is still parked on a session rebuild / resume and has therefore not
@@ -1090,12 +1148,18 @@ export function AgentSessionsProvider({
     );
     for (const [chatId, slot] of Object.entries(store.sessions)) {
       if (!openChatIds.has(chatId)) {
-        pendingHydratesRef.current.delete(chatId);
-        invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
-        invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
-        persistedMessageRefsRef.current.delete(chatId);
-        store.detachSession(chatId);
-        continue;
+        if (deferredArchiveCloseRef.current.has(chatId)) {
+          if (finishDeferredArchiveClose(chatId)) continue;
+          // Keep the lightweight routing shell while background work is live.
+          // The normal gate below may still evict the heavyweight transcript.
+        } else {
+          pendingHydratesRef.current.delete(chatId);
+          invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
+          invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
+          persistedMessageRefsRef.current.delete(chatId);
+          store.detachSession(chatId);
+          continue;
+        }
       }
       const queued = (sendQueueRef.current.get(chatId)?.length ?? 0) > 0;
       if (
@@ -1129,7 +1193,7 @@ export function AgentSessionsProvider({
       }
       store.evictTranscript(chatId);
     }
-  }, [getStore]);
+  }, [finishDeferredArchiveClose, getStore]);
 
   const setRetainedChatIds = useCallback<SessionsActions["setRetainedChatIds"]>(
     (chatIds) => {
@@ -1140,6 +1204,11 @@ export function AgentSessionsProvider({
         [...next].every((chatId) => previous.has(chatId))
       ) {
         return;
+      }
+      // This set is published only by the committed bounded chat deck, so it
+      // is an authoritative reopen rather than speculative hover intent.
+      for (const chatId of next) {
+        deferredArchiveCloseRef.current.delete(chatId);
       }
       retainedChatIdsRef.current = next;
       evictUnretainedTranscripts();
@@ -3113,9 +3182,15 @@ export function AgentSessionsProvider({
         sendQueueRef.current.set(chatId, [entry, ...cur]);
       };
 
+      const sendNowAction = queuedSendNowAction({
+        status: slot.status,
+        hasLocalSend: sendingChatsRef.current.has(chatId),
+      });
+      if (sendNowAction === "wait") return false;
+
       // Idle chat (queue parked behind a hold, or a non-ready settle): "send
       // now" is a plain out-of-order flush through the normal prompt path.
-      if (!sendingChatsRef.current.has(chatId)) {
+      if (sendNowAction === "flush") {
         claim();
         flushBubbleRef.current.set(chatId, messageId);
         void sendPromptRef.current?.(...entry.args);
@@ -3213,6 +3288,7 @@ export function AgentSessionsProvider({
 
   const reset = useCallback<SessionsActions["reset"]>(
     (chatId) => {
+      deferredArchiveCloseRef.current.delete(chatId);
       prebindDirtySessionsRef.current.delete(chatId);
       pendingHydratesRef.current.delete(chatId);
       invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
@@ -3741,6 +3817,7 @@ export function AgentSessionsProvider({
   );
 
   const disposeAll = useCallback<SessionsActions["disposeAll"]>(() => {
+    deferredArchiveCloseRef.current.clear();
     getStore().clearAll();
     prebindDirtySessionsRef.current.clear();
     pendingHydratesRef.current.clear();
@@ -3755,6 +3832,7 @@ export function AgentSessionsProvider({
 
   const closeSession = useCallback<SessionsActions["closeSession"]>(
     (chatId) => {
+      deferredArchiveCloseRef.current.delete(chatId);
       prebindDirtySessionsRef.current.delete(chatId);
       pendingHydratesRef.current.delete(chatId);
       invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
@@ -3780,12 +3858,28 @@ export function AgentSessionsProvider({
         });
       }
       // Always detach locally — including while the bridge is disconnected or
-      // before a session id exists. Otherwise closed/archived cold slots are
-      // themselves an unbounded map. Detach deliberately preserves the scroll
-      // anchor and policies; only explicit reset/delete removes those.
+      // before a session id exists. Otherwise explicitly closed/discarded cold
+      // slots are themselves an unbounded map. Detach deliberately preserves
+      // the scroll anchor and policies; only explicit reset/delete removes those.
       getStore().detachSession(chatId);
     },
     [bridge, getStore],
+  );
+  closeSessionNowRef.current = closeSession;
+
+  const archiveSession = useCallback<SessionsActions["archiveSession"]>(
+    (chatId) => {
+      if (!getStore().sessions[chatId]) return;
+      if (!sessionHasPendingBackgroundWork(chatId)) {
+        closeSession(chatId);
+        return;
+      }
+      // Do not clear the FIFO, detach the slot, or send AGENT_CLOSE_SESSION.
+      // The tab's ARCHIVE_CHAT dispatch follows synchronously; completion and
+      // task updates later release this exact id once it is truly idle.
+      deferredArchiveCloseRef.current.add(chatId);
+    },
+    [closeSession, getStore, sessionHasPendingBackgroundWork],
   );
 
   // The actions object is stable across renders. No `sessions` field —
@@ -3816,6 +3910,7 @@ export function AgentSessionsProvider({
       loadIntoChat,
       hydrateChat,
       setRetainedChatIds,
+      archiveSession,
       closeSession,
       disposeAll,
     }),
@@ -3843,10 +3938,28 @@ export function AgentSessionsProvider({
       loadIntoChat,
       hydrateChat,
       setRetainedChatIds,
+      archiveSession,
       closeSession,
       disposeAll,
     ],
   );
+
+  // A deferred tab close can become idle through an engine-owned turn settle,
+  // a permission/question resolution, or a background-task snapshot — none of
+  // those necessarily has a local sendPrompt finally. Observe only changed
+  // exact slots and let the shared pending-work predicate decide when to reap.
+  useEffect(() => {
+    let previous = useSessionsStore.getState().sessions;
+    return useSessionsStore.subscribe((state) => {
+      if (state.sessions === previous) return;
+      const before = previous;
+      previous = state.sessions;
+      for (const chatId of [...deferredArchiveCloseRef.current]) {
+        if (state.sessions[chatId] === before[chatId]) continue;
+        finishDeferredArchiveClose(chatId);
+      }
+    });
+  }, [finishDeferredArchiveClose]);
 
   // ── Persistence subscription ────────────────────────────
   //

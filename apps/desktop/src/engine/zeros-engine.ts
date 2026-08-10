@@ -2882,7 +2882,14 @@ export class ZerosEngine {
             this.refuseSessionAccess(msg.id, msg.agentId, client);
             return;
           }
-          // Fire-and-forget teardown of a closed chat's engine resources.
+          // An explicit close/discard is cancellation, but it still has to
+          // settle the accepted turn BEFORE routing and adapter state vanish.
+          // The old order deleted activePromptContexts first and disposed the
+          // Claude query underneath its prompt promise; when that promise did
+          // not return, the durable turn row remained `running` forever.
+          const promptSettled = await this.cancelLiveAgentSessions([
+            msg.sessionId,
+          ]);
           const conversationId = this.sessionChat.get(msg.sessionId);
           this.router.clearOwner(msg.sessionId);
           this.sessionAgent.delete(msg.sessionId);
@@ -2890,7 +2897,13 @@ export class ZerosEngine {
           this.sessionWorkspace.delete(msg.sessionId);
           this.sessionMessages.delete(msg.sessionId);
           this.sessionLoadResponses.delete(msg.sessionId);
-          this.activePromptContexts.delete(msg.sessionId);
+          // A wedged adapter is still owned by the cancel-settle watchdog. Do
+          // not erase its record/timer; it will publish + persist cancellation
+          // even if disposeSession never makes the prompt promise return.
+          if (promptSettled) {
+            this.activePromptContexts.delete(msg.sessionId);
+            this.promptSessions.delete(msg.sessionId);
+          }
           this.clearPendingAgentInteractions(msg.sessionId);
           if (
             conversationId &&
@@ -3752,8 +3765,14 @@ export class ZerosEngine {
   private async cancelLiveAgentSessions(
     sessionIds: Iterable<string>,
   ): Promise<boolean> {
-    const live = [...new Set(sessionIds)].filter((sessionId) =>
-      this.promptSessions.has(sessionId),
+    // activePromptContexts is installed before the pre-snapshot awaits and
+    // promptSessions only after preparation. Looking at promptSessions alone
+    // leaves a close/archive race where an accepted prompt is invisible and
+    // gets dispatched after its session has already been disposed.
+    const live = [...new Set(sessionIds)].filter(
+      (sessionId) =>
+        this.promptSessions.has(sessionId) ||
+        this.activePromptContexts.has(sessionId),
     );
     if (live.length === 0) return true;
     await Promise.all(
@@ -3775,12 +3794,20 @@ export class ZerosEngine {
     );
     const deadline = Date.now() + 3000;
     while (
-      live.some((sessionId) => this.promptSessions.has(sessionId)) &&
+      live.some(
+        (sessionId) =>
+          this.promptSessions.has(sessionId) ||
+          this.activePromptContexts.has(sessionId),
+      ) &&
       Date.now() < deadline
     ) {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    return live.every((sessionId) => !this.promptSessions.has(sessionId));
+    return live.every(
+      (sessionId) =>
+        !this.promptSessions.has(sessionId) &&
+        !this.activePromptContexts.has(sessionId),
+    );
   }
 
   // ── Turn recording (v13: footer / per-turn changes / reset) ──────────

@@ -57,9 +57,11 @@ interface TestEngineInternals {
   agents: {
     prompt: (...args: unknown[]) => Promise<unknown>;
     cancel: (...args: unknown[]) => Promise<void>;
+    endSession: (...args: unknown[]) => Promise<void>;
     loadSession: (...args: unknown[]) => Promise<unknown>;
   };
   sessionAgent: Map<string, string>;
+  sessionChat: Map<string, string>;
   promptSessions: Set<string>;
   activePromptContexts: Map<string, ActivePromptRecord>;
   activeTurnSnapshots: Map<string, TurnSnapshotRecord>;
@@ -119,6 +121,18 @@ function cancelMessage(): EngineMessage {
     source: "browser",
     timestamp: 2,
     agentId: "cursor",
+    sessionId: "session-1",
+  } as EngineMessage;
+}
+
+function closeMessage(): EngineMessage {
+  return {
+    type: "AGENT_CLOSE_SESSION",
+    id: "close-req-1",
+    source: "browser",
+    timestamp: 3,
+    agentId: "claude",
+    executionId: "session-1",
     sessionId: "session-1",
   } as EngineMessage;
 }
@@ -342,6 +356,90 @@ describe("an adapter that never acknowledges the cancel", () => {
     expect(finishTurn).toHaveBeenCalledWith(snapshot, "cancelled", "cancelled");
     expect(record.turnRowSettled).toBe(true);
     expect(state.activeTurnSnapshots.has("session-1")).toBe(false);
+  });
+});
+
+describe("explicit session close during a live turn", () => {
+  it("cancels a prompt accepted in the pre-dispatch window", async () => {
+    const { state } = testEngine(29_898);
+    const { client, messages } = testClient();
+    state.router.register(client);
+    state.sessionAgent.set("session-1", "claude");
+    state.sessionChat.set("session-1", "chat-1");
+    const prompt = vi.spyOn(state.agents, "prompt");
+    const cancel = vi
+      .spyOn(state.agents, "cancel")
+      .mockResolvedValue(undefined);
+    const endSession = vi
+      .spyOn(state.agents, "endSession")
+      .mockResolvedValue(undefined);
+
+    const promptFlight = state.handleMessage(
+      promptMessage({ agentId: "claude" }),
+      client,
+    );
+    expect(state.activePromptContexts.has("session-1")).toBe(true);
+    const closeFlight = state.handleMessage(closeMessage(), client);
+    await Promise.all([promptFlight, closeFlight]);
+
+    expect(prompt).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledWith("claude", "session-1");
+    expect(endSession).toHaveBeenCalledWith("claude", "session-1");
+    expect(turnStates(messages)).toContainEqual({
+      state: "cancelled",
+      stopReason: "cancelled",
+    });
+  });
+
+  it("cancels and settles the turn before disposing its execution", async () => {
+    const { state } = testEngine(29_899);
+    const { client, messages } = testClient();
+    state.router.register(client);
+    state.sessionAgent.set("session-1", "claude");
+    state.sessionChat.set("session-1", "chat-1");
+
+    let releasePrompt!: () => void;
+    const promptGate = new Promise<void>((resolve) => {
+      releasePrompt = resolve;
+    });
+    const prompt = vi
+      .spyOn(state.agents, "prompt")
+      .mockImplementation(async () => {
+        await promptGate;
+        return { stopReason: "cancelled" };
+      });
+    const cancel = vi
+      .spyOn(state.agents, "cancel")
+      .mockResolvedValue(undefined);
+    const endSession = vi
+      .spyOn(state.agents, "endSession")
+      .mockResolvedValue(undefined);
+
+    const promptFlight = state.handleMessage(
+      promptMessage({ agentId: "claude" }),
+      client,
+    );
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
+    const closeFlight = state.handleMessage(closeMessage(), client);
+
+    try {
+      await vi.waitFor(() => expect(cancel).toHaveBeenCalledTimes(1));
+    } finally {
+      releasePrompt();
+      await Promise.all([promptFlight, closeFlight]);
+    }
+
+    expect(cancel).toHaveBeenCalledWith("claude", "session-1");
+    expect(endSession).toHaveBeenCalledWith("claude", "session-1");
+    expect(cancel.mock.invocationCallOrder[0]).toBeLessThan(
+      endSession.mock.invocationCallOrder[0],
+    );
+    expect(turnStates(messages)).toContainEqual({
+      state: "cancelled",
+      stopReason: "cancelled",
+    });
+    expect(state.activePromptContexts.has("session-1")).toBe(false);
+    expect(state.promptSessions.has("session-1")).toBe(false);
   });
 });
 

@@ -99,13 +99,21 @@ provider. A binding whose `providerId` does not match the selected agent is
 rejected at the renderer reducer, database trust boundary, gateway, and resume
 dispatcher.
 
-### Close, archive, and delete
+### Tab close, execution close, archive, and delete
 
-Closing a live chat disposes the execution and removes both directions of the
-in-memory conversation/execution mapping. Durable chat state and the provider
-binding remain available for reopening. Archive/delete policy continues to be
-owned by the Zeros conversation/workspace lifecycle, never by a provider
-thread API.
+Closing a used chat tab is navigation, not cancellation. The conversation is
+archived out of the visible strip, while an active turn, queued sends,
+permission/question gate, background task, or foreground workflow keeps its
+execution alive. When that work becomes idle, the renderer explicitly closes
+the execution and removes both directions of the in-memory
+conversation/execution mapping. Reopening from History before then cancels the
+deferred close and reuses the exact live route.
+
+A pristine discarded tab can close immediately. Explicit reset/delete and
+workspace lifecycle operations cancel and settle an accepted turn before they
+dispose its execution. In every case, durable chat state and the provider
+binding remain available according to the conversation's archive/delete
+policy; provider thread APIs never own that product lifecycle.
 
 ## Wire compatibility
 

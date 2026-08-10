@@ -8,12 +8,15 @@ import {
   bumpCancelGeneration,
   cancelGeneration,
   cancelledSince,
+  deferredArchiveCloseAction,
   loadedSessionStatus,
   markPrebindDirty,
+  queuedSendNowAction,
   queueReleaseAction,
   recoveredSessionIdentity,
   recoveryLoadLocator,
   sendNeedsSessionRecovery,
+  sessionNeedsBackgroundRetention,
   shouldQueuePrompt,
   takePrebindDirty,
 } from "../session-reload-lifecycle";
@@ -57,6 +60,94 @@ describe("session reload lifecycle", () => {
         flushing: false,
       }),
     ).toBe(true);
+  });
+
+  it("steers a queued message into an adopted engine turn", () => {
+    // A renderer reload loses sendingChatsRef, but the loaded execution remains
+    // authoritative and reports status=streaming. Treating the missing local
+    // lock as idle dequeues the row, calls normal sendPrompt, and then drops it
+    // at sendPrompt's streaming guard without ever delivering it.
+    expect(
+      queuedSendNowAction({ status: "streaming", hasLocalSend: false }),
+    ).toBe("steer");
+  });
+
+  it("only flushes send-now while idle and waits through preparation", () => {
+    expect(
+      queuedSendNowAction({ status: "ready", hasLocalSend: false }),
+    ).toBe("flush");
+    expect(
+      queuedSendNowAction({ status: "warming", hasLocalSend: true }),
+    ).toBe("wait");
+    expect(
+      queuedSendNowAction({ status: "ready", hasLocalSend: true }),
+    ).toBe("wait");
+  });
+
+  it("retains every session resource that can still produce user-visible work", () => {
+    const idle = {
+      status: "ready" as const,
+      hasLocalSend: false,
+      hasQueuedSends: false,
+      queueHeld: false,
+      ensuring: false,
+      pendingInteraction: false,
+      hasBackgroundTasks: false,
+      hasForegroundWorkflows: false,
+    };
+    expect(sessionNeedsBackgroundRetention(idle)).toBe(false);
+    expect(
+      sessionNeedsBackgroundRetention({ ...idle, status: "streaming" }),
+    ).toBe(true);
+    expect(
+      sessionNeedsBackgroundRetention({ ...idle, hasQueuedSends: true }),
+    ).toBe(true);
+    expect(
+      sessionNeedsBackgroundRetention({ ...idle, ensuring: true }),
+    ).toBe(true);
+    expect(
+      sessionNeedsBackgroundRetention({ ...idle, pendingInteraction: true }),
+    ).toBe(true);
+    expect(
+      sessionNeedsBackgroundRetention({ ...idle, hasBackgroundTasks: true }),
+    ).toBe(true);
+    expect(
+      sessionNeedsBackgroundRetention({
+        ...idle,
+        hasForegroundWorkflows: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("reaps an archived execution only after work settles and cancels on reopen", () => {
+    expect(
+      deferredArchiveCloseAction({
+        requested: false,
+        archived: true,
+        hasPendingWork: false,
+      }),
+    ).toBe("none");
+    expect(
+      deferredArchiveCloseAction({
+        requested: true,
+        archived: true,
+        hasPendingWork: true,
+      }),
+    ).toBe("wait");
+    expect(
+      deferredArchiveCloseAction({
+        requested: true,
+        archived: true,
+        hasPendingWork: false,
+      }),
+    ).toBe("close");
+    expect(
+      deferredArchiveCloseAction({
+        requested: true,
+        archived: false,
+        hasPendingWork: false,
+      }),
+    ).toBe("cancel");
   });
 
   it("queues a send while session loading is still resolving", () => {

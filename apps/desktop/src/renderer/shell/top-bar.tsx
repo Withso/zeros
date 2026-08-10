@@ -43,6 +43,7 @@ import { useAgentSessions } from "../features/agent/sessions-hooks";
 import {
   useAnyChatAwaitingKind,
   useAnyChatStreaming,
+  useSessionsStore,
 } from "../features/agent/sessions-store";
 import {
   isLocalMainWorkspace,
@@ -1211,12 +1212,19 @@ export function TopBar() {
   ]);
 
   const chatIdsByWorkspace = useMemo(() => {
-    const liveChats = chats.filter((chat) => !chat.archived);
+    // Archived tabs normally leave no live slot. A tab closed mid-turn keeps
+    // its lightweight slot until background work + queued sends settle, so
+    // include exactly those resident archived ids and keep the workspace's
+    // working/awaiting indicator honest while the chat is offscreen.
+    const residentSessions = useSessionsStore.getState().sessions;
+    const activityChats = chats.filter(
+      (chat) => !chat.archived || residentSessions[chat.id] != null,
+    );
     const ids = new Map<string, string[]>();
     for (const workspace of realWorkspaces) {
       ids.set(
         workspace.id,
-        liveChats
+        activityChats
           .filter((chat) => findWorkspaceForFolder(chat.folder, [workspace]))
           .map((chat) => chat.id),
       );

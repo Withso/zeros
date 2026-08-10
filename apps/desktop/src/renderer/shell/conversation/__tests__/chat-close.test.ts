@@ -8,6 +8,7 @@ import {
   draftHasContent,
   isChatDiscardableOnClose,
   messageCountForChatClose,
+  tabCloseResourceAction,
   type ChatCloseInputs,
 } from "../chat-close";
 import type { ComposerDraft } from "../../../state/store";
@@ -134,5 +135,22 @@ describe("messageCountForChatClose", () => {
     expect(
       messageCountForChatClose({ messages: [], hasTranscript: false }),
     ).toBe(0);
+  });
+});
+
+describe("tabCloseResourceAction", () => {
+  it("lets a used chat finish in the background instead of closing its execution", () => {
+    expect(tabCloseResourceAction({ kind: "chat", discard: false })).toBe(
+      "archive-session",
+    );
+  });
+
+  it("still tears down a discarded pristine chat and kills a terminal", () => {
+    expect(tabCloseResourceAction({ kind: "chat", discard: true })).toBe(
+      "close-session",
+    );
+    expect(tabCloseResourceAction({ kind: "terminal", discard: false })).toBe(
+      "kill-terminal",
+    );
   });
 });
