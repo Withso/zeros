@@ -40,10 +40,16 @@ describe("design workspace agent isolation", () => {
       /isDesignWorkspaceProcessTarget\(msg\.workspaceId\)[\s\S]{0,120}isDesignWorkspaceProcessTarget\(msg\.cwd\)/,
     );
     const listSessionsCase = engine.match(
-      /case "AGENT_LIST_SESSIONS":([\s\S]*?)case "AGENT_LOAD_SESSION":/,
+      /case "AGENT_LIST_SESSIONS":([\s\S]*?)case "AGENT_FORK_CONVERSATION":/,
     )?.[1];
     expect(listSessionsCase).toContain("assertAgentWorkspaceNotDesign");
     expect(listSessionsCase).not.toContain(
+      "assertAgentWorkspaceProcessStartAllowed",
+    );
+    const forkConversationCase = engine.match(
+      /case "AGENT_FORK_CONVERSATION":([\s\S]*?)case "AGENT_LOAD_SESSION":/,
+    )?.[1];
+    expect(forkConversationCase).toContain(
       "assertAgentWorkspaceProcessStartAllowed",
     );
   });

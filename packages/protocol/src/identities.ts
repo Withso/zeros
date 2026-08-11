@@ -42,9 +42,9 @@ export interface ProviderGitMetadata {
   originUrl: string | null;
 }
 
-/** Descriptive provider state is deliberately separate from identity. It may
- * inform labels/reconciliation, but must never switch a checkout or route an
- * execution. */
+/** Descriptive provider state is deliberately separate from identity. It is a
+ * compatibility/diagnostic snapshot, never authority for product metadata,
+ * checkout selection, or execution routing. */
 export interface ProviderMetadata {
   version: 1;
   git?: ProviderGitMetadata;

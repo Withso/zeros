@@ -8,8 +8,8 @@ upstream authority; generated bindings for the version pinned in
 This integration is intentionally split into two layers:
 
 - The Codex harness owns process startup, JSON-RPC, initialization, generated
-  method/parameter types, Codex host requests, thread/turn transport, and
-  translation into Zeros' canonical agent events.
+  method/parameter types, Codex host requests, thread/turn transport (including
+  typed start/resume/fork), and translation into Zeros' canonical agent events.
 - Zeros owns live execution identity, durable conversation identity,
   [provider-binding persistence](agent-identity-model.md),
   lifecycle projection, browser/tool implementations, skills, plugins, apps,
@@ -90,6 +90,20 @@ and audio items are converted into Zeros-owned content blocks. Remote HTTP(S)
 media remains a resource link. No browser artifact schema or product-specific
 path is embedded in the Codex translator.
 
+## Provider binding adapter
+
+Codex `thread.id` is stored only inside the common `ProviderBinding`; the live
+route remains a separately minted Zeros `executionId`. Common resume and fork
+commands call the adapter without exposing an arbitrary Codex RPC bridge to the
+renderer. `thread/fork` returns a new opaque binding and no live execution.
+
+The only Codex thread lifecycle notification projected into product state is an
+exact-parent `thread/deleted`, translated to binding detachment. The adapter
+deliberately ignores Codex archive/unarchive/close/name/pin as Zeros metadata,
+and it does not send Zeros title/pin/archive/delete changes back to Codex.
+Codex `gitInfo` remains available in the pinned harness response types but is
+not reconciled into Zeros workspace or chat metadata.
+
 ## Packaged runtime and sandbox resources
 
 Packaged Electron builds cannot resolve Codex's optional platform npm package
@@ -121,8 +135,8 @@ must not be claimed from macOS or Linux CI.
 The Codex harness itself does not define or own:
 
 - Zeros conversation/execution identifiers, provider-binding persistence,
-  database migrations, fork/archive/rename/pin synchronization, or lifecycle
-  projection;
+  database migrations, destination-conversation creation, archive/rename/pin
+  synchronization, or product lifecycle policy;
 - renderer capability RPC, Codex settings panels, marketplace/plugin/app UI,
   or SDK jobs;
 - browser automation, browser leases, native views, CDP, or MCP browser

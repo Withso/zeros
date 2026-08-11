@@ -13,7 +13,12 @@ import { ZerosEngine } from "../index";
 import { MessageRouter } from "../transport/router";
 import type { TransportClient } from "../transport/types";
 import { closeZerosDb, openZerosDb, setZerosDbPathForTesting } from "../db";
-import { getChat, upsertChat } from "../db/chats";
+import {
+  getChat,
+  updateChatProviderIdentity,
+  upsertChat,
+  type ChatRow,
+} from "../db/chats";
 import { AgentFailureError } from "../agents/types";
 
 interface ActivePromptRecord {
@@ -39,6 +44,7 @@ interface TestEngineInternals {
       ) => void;
     };
     loadSession: (...args: unknown[]) => Promise<unknown>;
+    forkProviderBinding: (...args: unknown[]) => Promise<unknown>;
     prompt: (...args: unknown[]) => Promise<unknown>;
     endSession: (...args: unknown[]) => Promise<unknown>;
   };
@@ -56,6 +62,16 @@ interface TestEngineInternals {
   >;
   workspace: { resolveCwd: (workspaceId: string) => string };
   pty: { isWithinAllowed: (dir: string) => boolean };
+  agentSpawnOpts(
+    message: unknown,
+    client: TransportClient,
+    stage: "newSession" | "loadSession" | "forkSession",
+  ): Promise<{
+    cwd?: string;
+    env?: Record<string, string>;
+    workspaceId?: string;
+    cliBinary?: string;
+  }>;
   activePromptIsLive(prompt: ActivePromptRecord): boolean;
   handleMessage(message: EngineMessage, client: TransportClient): Promise<void>;
   handleDisconnect(client: TransportClient): void;
@@ -83,6 +99,33 @@ function activePrompt(
     promptId: "prompt-reload-1",
     startedAt: 1_234,
     lastActivityAt: Date.now(),
+    ...overrides,
+  };
+}
+
+function persistedChat(id: string, overrides: Partial<ChatRow> = {}): ChatRow {
+  return {
+    id,
+    folder: process.cwd(),
+    agentId: "codex",
+    agentName: "Codex",
+    model: null,
+    effort: "high",
+    permissionMode: "auto",
+    lastModeId: null,
+    prePlanModeId: null,
+    fast: false,
+    additionalDirectories: [],
+    title: id,
+    createdAt: 1,
+    updatedAt: 1,
+    sessionId: null,
+    providerBinding: null,
+    providerMetadata: null,
+    pinned: false,
+    archived: false,
+    sourceChatId: null,
+    kind: "chat",
     ...overrides,
   };
 }
@@ -645,6 +688,188 @@ describe("agent session continuity across a local renderer reload", () => {
     }
   });
 
+  it("prefers the persisted binding and folder over a stale local resume courier", async () => {
+    const dbDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "zeros-authoritative-resume-"),
+    );
+    setZerosDbPathForTesting(path.join(dbDir, "zeros.db"));
+    const persistedBinding = {
+      version: 1 as const,
+      providerId: "codex",
+      kind: "native" as const,
+      resumeId: "thread-current-in-db",
+      scopeId: "session-current",
+    };
+    const staleBinding = {
+      ...persistedBinding,
+      resumeId: "thread-stale-in-renderer",
+    };
+    try {
+      upsertChat(
+        persistedChat("authoritative-conversation", {
+          sessionId: persistedBinding.resumeId,
+          providerBinding: persistedBinding,
+        }),
+      );
+      const engine = new ZerosEngine({ root: process.cwd(), port: 29_903 });
+      const state = internals(engine);
+      const { client } = testClient();
+      state.router.register(client);
+      const loadSession = vi
+        .spyOn(state.agents, "loadSession")
+        .mockResolvedValue({
+          executionId: "execution-authoritative-resume",
+          providerBinding: persistedBinding,
+        });
+
+      await state.handleMessage(
+        {
+          type: "AGENT_LOAD_SESSION",
+          id: "load-authoritative-resume",
+          source: "browser",
+          timestamp: 1,
+          agentId: "codex",
+          chatId: "authoritative-conversation",
+          providerBinding: staleBinding,
+          cwd: os.tmpdir(),
+        },
+        client,
+      );
+
+      expect(loadSession).toHaveBeenCalledWith(
+        "codex",
+        persistedBinding,
+        expect.objectContaining({ cwd: process.cwd() }),
+      );
+      expect(getChat("authoritative-conversation")?.providerBinding).toEqual(
+        persistedBinding,
+      );
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+      fs.rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not resurrect a detached persisted chat from a stale local binding", async () => {
+    const dbDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "zeros-authoritative-detach-"),
+    );
+    setZerosDbPathForTesting(path.join(dbDir, "zeros.db"));
+    const staleBinding = {
+      version: 1 as const,
+      providerId: "codex",
+      kind: "native" as const,
+      resumeId: "thread-already-detached",
+    };
+    try {
+      upsertChat(persistedChat("detached-conversation"));
+      const engine = new ZerosEngine({ root: process.cwd(), port: 29_904 });
+      const state = internals(engine);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      const loadSession = vi.spyOn(state.agents, "loadSession");
+
+      await state.handleMessage(
+        {
+          type: "AGENT_LOAD_SESSION",
+          id: "load-stale-detached-binding",
+          source: "browser",
+          timestamp: 1,
+          agentId: "codex",
+          chatId: "detached-conversation",
+          providerBinding: staleBinding,
+          cwd: os.tmpdir(),
+        },
+        client,
+      );
+
+      expect(loadSession).not.toHaveBeenCalled();
+      expect(messages).toEqual([
+        expect.objectContaining({
+          type: "AGENT_ERROR",
+          failure: expect.objectContaining({ kind: "session-expired" }),
+        }),
+      ]);
+      expect(getChat("detached-conversation")?.providerBinding).toBeNull();
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+      fs.rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a cold resume when its persisted binding changes during preparation", async () => {
+    const dbDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "zeros-authoritative-resume-race-"),
+    );
+    setZerosDbPathForTesting(path.join(dbDir, "zeros.db"));
+    const originalBinding = {
+      version: 1 as const,
+      providerId: "codex",
+      kind: "native" as const,
+      resumeId: "thread-before-preparation",
+    };
+    const replacementBinding = {
+      ...originalBinding,
+      resumeId: "thread-after-preparation",
+    };
+    try {
+      upsertChat(
+        persistedChat("resume-race-conversation", {
+          sessionId: originalBinding.resumeId,
+          providerBinding: originalBinding,
+        }),
+      );
+      const engine = new ZerosEngine({ root: process.cwd(), port: 29_905 });
+      const state = internals(engine);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      vi.spyOn(state, "agentSpawnOpts").mockImplementation(async () => {
+        updateChatProviderIdentity(
+          "resume-race-conversation",
+          "codex",
+          replacementBinding,
+          null,
+        );
+        return { cwd: process.cwd() };
+      });
+      const loadSession = vi.spyOn(state.agents, "loadSession");
+
+      await state.handleMessage(
+        {
+          type: "AGENT_LOAD_SESSION",
+          id: "load-binding-race",
+          source: "browser",
+          timestamp: 1,
+          agentId: "codex",
+          chatId: "resume-race-conversation",
+          providerBinding: originalBinding,
+          cwd: process.cwd(),
+        },
+        client,
+      );
+
+      expect(loadSession).not.toHaveBeenCalled();
+      expect(messages).toEqual([
+        expect.objectContaining({
+          type: "AGENT_ERROR",
+          failure: expect.objectContaining({
+            kind: "lifecycle-superseded",
+            stage: "loadSession",
+          }),
+        }),
+      ]);
+      expect(getChat("resume-race-conversation")?.providerBinding).toEqual(
+        replacementBinding,
+      );
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+      fs.rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps session-to-agent identity when only the local renderer disconnects", () => {
     const engine = new ZerosEngine({ root: process.cwd(), port: 29_881 });
     const state = internals(engine);
@@ -656,6 +881,467 @@ describe("agent session continuity across a local renderer reload", () => {
     state.handleDisconnect(client);
 
     expect(state.sessionAgent.get("session-1")).toBe("claude");
+  });
+});
+
+describe("Zeros-owned conversation fork and provider detachment", () => {
+  it("attaches an opaque fork binding to a pre-existing destination conversation", async () => {
+    const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-fork-bind-"));
+    setZerosDbPathForTesting(path.join(dbDir, "zeros.db"));
+    const sourceBinding = {
+      version: 1 as const,
+      providerId: "codex",
+      kind: "native" as const,
+      resumeId: "thread-source",
+      scopeId: "session-source",
+    };
+    const forkBinding = {
+      ...sourceBinding,
+      resumeId: "thread-fork",
+    };
+    try {
+      upsertChat(
+        persistedChat("source-conversation", {
+          title: "Zeros source title",
+          sessionId: sourceBinding.resumeId,
+          providerBinding: sourceBinding,
+          pinned: true,
+        }),
+      );
+      upsertChat(
+        persistedChat("destination-conversation", {
+          title: "Zeros destination title",
+          createdAt: 2,
+          updatedAt: 2,
+          archived: true,
+          sourceChatId: "source-conversation",
+        }),
+      );
+      const engine = new ZerosEngine({ root: process.cwd(), port: 29_898 });
+      const state = internals(engine);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      const fork = vi
+        .spyOn(state.agents, "forkProviderBinding")
+        .mockResolvedValue(forkBinding);
+
+      await state.handleMessage(
+        {
+          type: "AGENT_FORK_CONVERSATION",
+          id: "fork-conversation",
+          source: "browser",
+          timestamp: 1,
+          agentId: "codex",
+          sourceChatId: "source-conversation",
+          destinationChatId: "destination-conversation",
+        },
+        client,
+      );
+
+      expect(fork).toHaveBeenCalledWith(
+        "codex",
+        sourceBinding,
+        expect.objectContaining({
+          cwd: process.cwd(),
+        }),
+      );
+      expect(getChat("destination-conversation")).toMatchObject({
+        title: "Zeros destination title",
+        pinned: false,
+        archived: true,
+        sourceChatId: "source-conversation",
+        providerBinding: forkBinding,
+        providerMetadata: null,
+      });
+      expect(getChat("source-conversation")?.providerBinding).toEqual(
+        sourceBinding,
+      );
+      expect(messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "DB_CHANGED",
+            kinds: ["chats"],
+          }),
+          expect.objectContaining({
+            type: "AGENT_CONVERSATION_FORKED",
+            sourceChatId: "source-conversation",
+            destinationChatId: "destination-conversation",
+            providerBinding: forkBinding,
+          }),
+        ]),
+      );
+      expect(state.sessionAgent.size).toBe(0);
+      expect(state.conversationExecution.size).toBe(0);
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+      fs.rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
+  it("turns an exact provider deletion into binding detachment only", () => {
+    const dbDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "zeros-provider-detach-"),
+    );
+    setZerosDbPathForTesting(path.join(dbDir, "zeros.db"));
+    const binding = {
+      version: 1 as const,
+      providerId: "codex",
+      kind: "native" as const,
+      resumeId: "thread-delete-me",
+      scopeId: "session-tree",
+    };
+    try {
+      upsertChat(
+        persistedChat("conversation-kept", {
+          title: "Zeros remains authoritative",
+          sessionId: binding.resumeId,
+          providerBinding: binding,
+          providerMetadata: {
+            version: 1,
+            git: { sha: "legacy", branch: "legacy", originUrl: null },
+          },
+          pinned: true,
+          archived: true,
+        }),
+      );
+      const engine = new ZerosEngine({ root: process.cwd(), port: 29_899 });
+      const state = internals(engine);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      state.router.setOwner("execution-current", client.id);
+      state.sessionAgent.set("execution-current", "codex");
+      state.sessionChat.set("execution-current", "conversation-kept");
+      state.conversationExecution.set("conversation-kept", "execution-current");
+      state.sessionLoadResponses.set("execution-current", {
+        executionId: "execution-current",
+        providerBinding: binding,
+        providerMetadata: {
+          version: 1,
+          git: { sha: "legacy", branch: "legacy", originUrl: null },
+        },
+      });
+
+      state.agents.events.onSessionUpdate("codex", {
+        executionId: "execution-current",
+        sessionId: "execution-current",
+        update: {
+          sessionUpdate: "provider_binding_detached",
+          providerBinding: binding,
+          reason: "provider_deleted",
+        },
+      });
+
+      expect(getChat("conversation-kept")).toMatchObject({
+        title: "Zeros remains authoritative",
+        pinned: true,
+        archived: true,
+        sessionId: null,
+        providerBinding: null,
+        providerMetadata: null,
+      });
+      expect(
+        state.sessionLoadResponses.get("execution-current")?.providerBinding,
+      ).toBeUndefined();
+      expect(
+        state.sessionLoadResponses.get("execution-current")?.providerMetadata,
+      ).toBeUndefined();
+      expect(messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: "DB_CHANGED", kinds: ["chats"] }),
+          expect.objectContaining({
+            type: "AGENT_SESSION_UPDATE",
+            notification: expect.objectContaining({
+              update: expect.objectContaining({
+                sessionUpdate: "provider_binding_detached",
+              }),
+            }),
+          }),
+        ]),
+      );
+
+      const messageCountAfterDetach = messages.length;
+      state.agents.events.onSessionUpdate("codex", {
+        executionId: "execution-current",
+        sessionId: "execution-current",
+        update: {
+          sessionUpdate: "provider_binding_update",
+          providerBinding: binding,
+        },
+      });
+      expect(getChat("conversation-kept")?.providerBinding).toBeNull();
+      expect(
+        state.sessionLoadResponses.get("execution-current")?.providerBinding,
+      ).toBeUndefined();
+      expect(messages).toHaveLength(messageCountAfterDetach);
+
+      const replacement = { ...binding, resumeId: "thread-replacement" };
+      state.agents.events.onSessionUpdate("codex", {
+        executionId: "execution-current",
+        sessionId: "execution-current",
+        update: {
+          sessionUpdate: "provider_binding_update",
+          providerBinding: replacement,
+        },
+      });
+      expect(getChat("conversation-kept")?.providerBinding).toEqual(
+        replacement,
+      );
+      state.agents.events.onSessionUpdate("codex", {
+        executionId: "execution-current",
+        sessionId: "execution-current",
+        update: {
+          sessionUpdate: "provider_binding_detached",
+          providerBinding: binding,
+          reason: "provider_deleted",
+        },
+      });
+      expect(getChat("conversation-kept")?.providerBinding).toEqual(
+        replacement,
+      );
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+      fs.rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not resurrect a binding deleted while native resume is resolving", async () => {
+    const dbDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "zeros-provider-detach-race-"),
+    );
+    setZerosDbPathForTesting(path.join(dbDir, "zeros.db"));
+    const binding = {
+      version: 1 as const,
+      providerId: "codex",
+      kind: "native" as const,
+      resumeId: "thread-deleted-during-resume",
+      scopeId: "session-tree",
+    };
+    try {
+      upsertChat(
+        persistedChat("conversation-resuming", {
+          sessionId: binding.resumeId,
+          providerBinding: binding,
+          providerMetadata: {
+            version: 1,
+            git: { sha: "legacy", branch: "legacy", originUrl: null },
+          },
+        }),
+      );
+      const engine = new ZerosEngine({ root: process.cwd(), port: 29_901 });
+      const state = internals(engine);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      vi.spyOn(state.agents, "loadSession").mockImplementation(
+        async (...args: unknown[]) => {
+          const opts = args[2] as {
+            onExecutionCreated?: (executionId: string) => void;
+          };
+          const executionId = "execution-detached-during-resume";
+          opts.onExecutionCreated?.(executionId);
+          state.agents.events.onSessionUpdate("codex", {
+            executionId,
+            sessionId: executionId,
+            update: {
+              sessionUpdate: "provider_binding_detached",
+              providerBinding: binding,
+              reason: "provider_deleted",
+            },
+          });
+          return {
+            executionId,
+            providerBinding: binding,
+            providerMetadata: {
+              version: 1,
+              git: { sha: "late", branch: "late", originUrl: null },
+            },
+          };
+        },
+      );
+
+      await state.handleMessage(
+        {
+          type: "AGENT_LOAD_SESSION",
+          id: "load-detached-during-resume",
+          source: "browser",
+          timestamp: 1,
+          agentId: "codex",
+          chatId: "conversation-resuming",
+          providerBinding: binding,
+          cwd: process.cwd(),
+        },
+        client,
+      );
+
+      expect(getChat("conversation-resuming")).toMatchObject({
+        sessionId: null,
+        providerBinding: null,
+        providerMetadata: null,
+      });
+      const loaded = messages.find(
+        (message) => message.type === "AGENT_SESSION_LOADED",
+      );
+      expect(loaded).toMatchObject({
+        type: "AGENT_SESSION_LOADED",
+        response: { executionId: "execution-detached-during-resume" },
+      });
+      if (loaded?.type !== "AGENT_SESSION_LOADED") {
+        throw new Error("Expected a loaded-session receipt");
+      }
+      expect(loaded.response.providerBinding).toBeUndefined();
+      expect(loaded.response.providerMetadata).toBeUndefined();
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+      fs.rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not start a new source turn while a latest-state fork is in flight", async () => {
+    const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-fork-lock-"));
+    setZerosDbPathForTesting(path.join(dbDir, "zeros.db"));
+    const sourceBinding = {
+      version: 1 as const,
+      providerId: "codex",
+      kind: "native" as const,
+      resumeId: "thread-source-lock",
+      scopeId: "session-source-lock",
+    };
+    const forkBinding = {
+      ...sourceBinding,
+      resumeId: "thread-fork-lock",
+    };
+    try {
+      upsertChat(
+        persistedChat("source-lock", {
+          sessionId: sourceBinding.resumeId,
+          providerBinding: sourceBinding,
+        }),
+      );
+      upsertChat(
+        persistedChat("destination-lock", {
+          sourceChatId: "source-lock",
+        }),
+      );
+      const engine = new ZerosEngine({ root: process.cwd(), port: 29_902 });
+      const state = internals(engine);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      state.sessionAgent.set("execution-source-lock", "codex");
+      state.sessionChat.set("execution-source-lock", "source-lock");
+      state.conversationExecution.set("source-lock", "execution-source-lock");
+      let resolveFork!: (binding: typeof forkBinding) => void;
+      const fork = vi
+        .spyOn(state.agents, "forkProviderBinding")
+        .mockReturnValue(
+          new Promise((resolve) => {
+            resolveFork = resolve;
+          }),
+        );
+      const prompt = vi.spyOn(state.agents, "prompt");
+
+      const forkRequest = state.handleMessage(
+        {
+          type: "AGENT_FORK_CONVERSATION",
+          id: "fork-lock",
+          source: "browser",
+          timestamp: 1,
+          agentId: "codex",
+          sourceChatId: "source-lock",
+          destinationChatId: "destination-lock",
+        },
+        client,
+      );
+      await vi.waitFor(() => expect(fork).toHaveBeenCalledOnce());
+
+      await state.handleMessage(
+        {
+          type: "AGENT_PROMPT",
+          id: "prompt-during-fork",
+          source: "browser",
+          timestamp: 1,
+          agentId: "codex",
+          executionId: "execution-source-lock",
+          prompt: [{ type: "text", text: "race the fork" }],
+        } as EngineMessage,
+        client,
+      );
+
+      expect(prompt).not.toHaveBeenCalled();
+      expect(messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "AGENT_PROMPT_FAILED",
+            error: expect.stringContaining("fork to finish"),
+          }),
+        ]),
+      );
+      resolveFork(forkBinding);
+      await forkRequest;
+      expect(getChat("destination-lock")?.providerBinding).toEqual(forkBinding);
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+      fs.rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
+  it("requires a remote fork to name the exact persisted workspace", async () => {
+    const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-remote-fork-"));
+    setZerosDbPathForTesting(path.join(dbDir, "zeros.db"));
+    const binding = {
+      version: 1 as const,
+      providerId: "codex",
+      kind: "native" as const,
+      resumeId: "thread-source",
+    };
+    try {
+      upsertChat(
+        persistedChat("remote-source", {
+          sessionId: binding.resumeId,
+          providerBinding: binding,
+        }),
+      );
+      upsertChat(
+        persistedChat("remote-destination", {
+          sourceChatId: "remote-source",
+        }),
+      );
+      const engine = new ZerosEngine({ root: process.cwd(), port: 29_900 });
+      const state = internals(engine);
+      const { client, messages } = testClient("relay", "cloud");
+      state.router.register(client);
+      const fork = vi
+        .spyOn(state.agents, "forkProviderBinding")
+        .mockResolvedValue({ ...binding, resumeId: "must-not-fork" });
+
+      await state.handleMessage(
+        {
+          type: "AGENT_FORK_CONVERSATION",
+          id: "remote-fork-without-workspace",
+          source: "browser",
+          timestamp: 1,
+          agentId: "codex",
+          sourceChatId: "remote-source",
+          destinationChatId: "remote-destination",
+        },
+        client,
+      );
+
+      expect(fork).not.toHaveBeenCalled();
+      expect(getChat("remote-destination")?.providerBinding).toBeNull();
+      expect(messages).toEqual([
+        expect.objectContaining({
+          type: "AGENT_ERROR",
+          code: "AGENT_PROTOCOL_ERROR",
+        }),
+      ]);
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+      fs.rmSync(dbDir, { recursive: true, force: true });
+    }
   });
 });
 

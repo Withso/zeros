@@ -35,6 +35,11 @@ function gatewayWith(adapter: AgentAdapter) {
       executionId?: string;
       providerBinding?: ProviderBinding;
     }>;
+    forkProviderBinding(
+      agentId: string,
+      binding: ProviderBinding,
+      opts: { cwd: string },
+    ): Promise<ProviderBinding>;
   };
   gateway.adapters.set(adapter.agentId, adapter);
   return gateway;
@@ -227,5 +232,73 @@ describe("AgentGateway identity lifecycle", () => {
     expect(disposeSession).toHaveBeenCalledWith(requestedExecutionId);
     expect(disposeSession).not.toHaveBeenCalledWith("provider-owned-route");
     expect(disposeSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("forks an opaque provider binding without creating a Zeros execution", async () => {
+    const source: ProviderBinding = {
+      version: 1,
+      providerId: "future-agent",
+      kind: "native",
+      resumeId: "provider-source",
+      scopeId: "provider-lineage",
+    };
+    const forked: ProviderBinding = {
+      ...source,
+      resumeId: "provider-fork",
+    };
+    const forkProviderBinding = vi.fn(async () => ({
+      providerBinding: forked,
+    }));
+    const gateway = gatewayWith({
+      agentId: "future-agent",
+      forkProviderBinding,
+    } as unknown as AgentAdapter);
+
+    await expect(
+      gateway.forkProviderBinding("future-agent", source, {
+        cwd: "/tmp",
+      }),
+    ).resolves.toEqual(forked);
+    expect(forkProviderBinding).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerBinding: source,
+        cwd: "/tmp",
+      }),
+    );
+    expect(gateway.executionToAgent.size).toBe(0);
+  });
+
+  it("rejects unsupported forks and provider-owned binding substitution", async () => {
+    const source: ProviderBinding = {
+      version: 1,
+      providerId: "future-agent",
+      kind: "native",
+      resumeId: "provider-source",
+    };
+    const unsupported = gatewayWith({
+      agentId: "future-agent",
+    } as AgentAdapter);
+    await expect(
+      unsupported.forkProviderBinding("future-agent", source, { cwd: "/tmp" }),
+    ).rejects.toMatchObject({
+      failure: { kind: "protocol-error", stage: "forkSession" },
+    });
+
+    const substituting = gatewayWith({
+      agentId: "future-agent",
+      forkProviderBinding: async () => ({
+        providerBinding: {
+          version: 1,
+          providerId: "codex",
+          kind: "native",
+          resumeId: "foreign-thread",
+        },
+      }),
+    } as unknown as AgentAdapter);
+    await expect(
+      substituting.forkProviderBinding("future-agent", source, { cwd: "/tmp" }),
+    ).rejects.toMatchObject({
+      failure: { kind: "protocol-error", stage: "forkSession" },
+    });
   });
 });

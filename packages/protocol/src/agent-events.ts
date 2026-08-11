@@ -401,6 +401,7 @@ export type SessionUpdate =
   | UsageUpdateNotification
   | SessionInfoUpdateNotification
   | ProviderBindingUpdateNotification
+  | ProviderBindingDetachedNotification
   | TurnStateUpdateNotification;
 
 /** Engine-authored lifecycle notification for a provider turn. Unlike the
@@ -576,6 +577,15 @@ export interface ProviderBindingUpdateNotification {
   sessionUpdate: "provider_binding_update";
   providerBinding: ProviderBinding;
   providerMetadata?: ProviderMetadata;
+}
+
+/** A provider confirmed that one exact durable reference no longer exists.
+ * This never deletes, archives, renames, or unpins the Zeros conversation; the
+ * engine compare-and-clears only the matching opaque binding. */
+export interface ProviderBindingDetachedNotification {
+  sessionUpdate: "provider_binding_detached";
+  providerBinding: ProviderBinding;
+  reason: "provider_deleted";
 }
 
 /** Top-level notification carried by AGENT_SESSION_UPDATE bridge

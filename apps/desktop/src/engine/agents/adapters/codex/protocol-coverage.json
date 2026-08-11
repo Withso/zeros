@@ -6,11 +6,11 @@
       "initialize",
       "thread/start",
       "thread/resume",
+      "thread/fork",
       "turn/start",
       "turn/interrupt"
     ],
     "generated-only": [
-      "thread/fork",
       "thread/archive",
       "thread/delete",
       "thread/unsubscribe",
@@ -181,10 +181,9 @@
       "configWarning",
       "account/login/completed"
     ],
-    "handled": ["serverRequest/resolved"],
+    "handled": ["serverRequest/resolved", "thread/deleted"],
     "forwarded": [
       "thread/archived",
-      "thread/deleted",
       "thread/unarchived",
       "thread/closed",
       "skills/changed",

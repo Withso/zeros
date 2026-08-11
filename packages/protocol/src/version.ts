@@ -13,7 +13,7 @@
 // ──────────────────────────────────────────────────────────
 
 /** Current wire-protocol version this build speaks. */
-export const PROTOCOL_VERSION = 8 as const;
+export const PROTOCOL_VERSION = 9 as const;
 
 /** Oldest protocol version this build will still accept from a peer. */
 export const MIN_SUPPORTED_PROTOCOL = 2 as const;
