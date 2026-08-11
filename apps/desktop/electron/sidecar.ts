@@ -1070,6 +1070,17 @@ let spawnChain: Promise<unknown> = Promise.resolve();
 // it while the renderer can paint its validated boot snapshot in parallel.
 let engineSpawnBarrier: Promise<void> = Promise.resolve();
 
+/** Private main→engine capability courier. Kept outside process.env so shell,
+ * updater, and other main-process children cannot inherit the browser bearer.
+ * The engine captures and scrubs these two names before it spawns an agent. */
+let browserServiceEnvironment: { url: string; token: string } | null = null;
+
+export function setBrowserServiceEnvironment(
+  value: { url: string; token: string } | null,
+): void {
+  browserServiceEnvironment = value;
+}
+
 export function setEngineSpawnBarrier(barrier: Promise<unknown>): void {
   engineSpawnBarrier = barrier.then(
     () => undefined,
@@ -1256,6 +1267,10 @@ async function doSpawnEngine(
   }
 
   const extraEnv: Record<string, string> = {};
+  if (browserServiceEnvironment) {
+    extraEnv.ZEROS_BROWSER_SERVICE_URL = browserServiceEnvironment.url;
+    extraEnv.ZEROS_BROWSER_SERVICE_TOKEN = browserServiceEnvironment.token;
+  }
   if (secretsFile) extraEnv.ZEROS_SECRETS_FILE = secretsFile;
   if (legacyAgentDb) extraEnv.ZEROS_LEGACY_AGENT_DB = legacyAgentDb;
 

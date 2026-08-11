@@ -19,6 +19,7 @@ import { AgentFailureError } from "../../types";
 import { SESSION_EXPIRED_KEYWORDS } from "../shared/session-expiry";
 import type {
   AgentAdapter,
+  AgentBrowserTools,
   AgentAdapterContext,
   ContentBlock,
   InitializeResponse,
@@ -32,6 +33,7 @@ import type {
   StopReason,
   TurnUsage,
 } from "../../types";
+import { cursorBrowserCustomTools } from "../../../browser/adapter-tools";
 import { CursorSdkTranslator } from "./translator";
 import {
   loadSubagentTranscript,
@@ -468,6 +470,7 @@ interface Session {
    *  toggles into/out of Auto mode — autoReview is create-time only. */
   env?: Record<string, string>;
   mcpServers?: McpServerRegistration[];
+  browserTools?: AgentBrowserTools;
   /** The autoReview value currently baked into `agent` (set at create/resume).
    *  A mode change flips the DESIRED value (autoReviewFor(modeId)); when it
    *  diverges, the next prompt rebuilds the agent to reconcile. */
@@ -703,6 +706,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
+    browserTools?: AgentBrowserTools;
   }): Promise<{ session: NewSessionResponse; initialize: InitializeResponse }> {
     const apiKey = this.resolveApiKey(opts.env);
     // Discover the account's catalog (cached, once per process) so the model
@@ -730,6 +734,7 @@ export class CursorSdkAdapter implements AgentAdapter {
           opts.cwd,
           opts.env,
           autoReviewFor(CURSOR_DEFAULT_MODE),
+          opts.browserTools,
         ),
         mode: sdkModeFor(CURSOR_DEFAULT_MODE),
         ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
@@ -750,6 +755,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       cancelRequested: false,
       env: opts.env,
       mcpServers: opts.mcpServers,
+      browserTools: opts.browserTools,
       appliedAutoReview: autoReviewFor(CURSOR_DEFAULT_MODE),
     };
     this.sessions.set(executionId, session);
@@ -776,6 +782,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
+    browserTools?: AgentBrowserTools;
   }): Promise<LoadSessionResponse> {
     const apiKey = this.resolveApiKey(opts.env);
     const executionId = opts.executionId ?? opts.sessionId ?? randomUUID();
@@ -827,6 +834,7 @@ export class CursorSdkAdapter implements AgentAdapter {
           opts.cwd,
           opts.env,
           autoReviewFor(CURSOR_DEFAULT_MODE),
+          opts.browserTools,
         ),
         ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
       });
@@ -864,6 +872,7 @@ export class CursorSdkAdapter implements AgentAdapter {
             opts.cwd,
             opts.env,
             autoReviewFor(CURSOR_DEFAULT_MODE),
+            opts.browserTools,
           ),
           mode: sdkModeFor(CURSOR_DEFAULT_MODE),
           ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
@@ -884,6 +893,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       cancelRequested: false,
       env: opts.env,
       mcpServers: opts.mcpServers,
+      browserTools: opts.browserTools,
       appliedAutoReview: autoReviewFor(CURSOR_DEFAULT_MODE),
     });
     return {
@@ -1257,7 +1267,12 @@ export class CursorSdkAdapter implements AgentAdapter {
         apiKey: session.apiKey,
         model: { id: session.modelId },
         cwd: session.cwd,
-        local: this.buildLocalOpts(session.cwd, session.env, want),
+        local: this.buildLocalOpts(
+          session.cwd,
+          session.env,
+          want,
+          session.browserTools,
+        ),
         ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
       });
       session.appliedAutoReview = want;
@@ -1449,6 +1464,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     cwd: string,
     env?: Record<string, string>,
     autoReview = false,
+    browserTools?: AgentBrowserTools,
   ): Record<string, unknown> {
     const local: Record<string, unknown> = {
       cwd,
@@ -1462,6 +1478,9 @@ export class CursorSdkAdapter implements AgentAdapter {
       // Zeros. Mirrors the Claude adapter's settingSources:["user","project",
       // "local"]. Zeros' own injected mcpServers still win on name collision.
       settingSources: ["user", "project", "team", "mdm", "plugins"],
+      ...(browserTools
+        ? { customTools: cursorBrowserCustomTools(browserTools) }
+        : {}),
     };
     if (env?.CURSOR_SANDBOX === "1") {
       local.sandboxOptions = { enabled: true };

@@ -20,6 +20,8 @@
 //   auth-error / auth-handoff   (deep-link OAuth handoff)
 //   updater-status     { ... } (auto-updater progress)
 //   main-process-error { ... }
+//   browser-confirmation-request { ... } (trusted consequence prompt)
+//   browser-session-state { ... } (Zeros-owned browser activity)
 //   browser-frame-navigated { frameName, url, title, loading, inPage?, cancelled?, cancelledUrl? }
 // ──────────────────────────────────────────────────────────
 

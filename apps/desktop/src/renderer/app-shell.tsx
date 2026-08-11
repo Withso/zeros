@@ -57,6 +57,7 @@ import { FeedbackDialog } from "./shell/dialogs/feedback-dialog";
 import { onFeedbackDialogRequest } from "./shell/feedback-controller";
 import { isFeedbackConfigured } from "./features/feedback/submit-feedback";
 import { ModelsSettingsSync } from "./features/agent/models-settings-sync";
+import { BrowserConfirmationController } from "./features/browser/browser-confirmation-controller";
 import { TopBar } from "./shell/top-bar";
 import { ConversationPane } from "./shell/conversation/conversation-pane";
 import { WorkbenchPane } from "./shell/workbench/workbench-pane";
@@ -1283,6 +1284,7 @@ export function AppShellBody() {
           <ReloadOnProjectChange />
           <ChatsPersistence />
           <ModelsSettingsSync />
+          <BrowserConfirmationController />
           <ShellRouter />
         </AgentSessionsProvider>
       </BridgeProvider>

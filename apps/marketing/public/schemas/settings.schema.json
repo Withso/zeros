@@ -518,6 +518,20 @@
         }
       }
     },
+    "browser": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Expose the isolated Zeros browser tools to local agents."
+        },
+        "provider": {
+          "type": "string",
+          "const": "isolated",
+          "description": "Browser execution backend. Currently supports isolated only."
+        }
+      }
+    },
     "tool_approvals_enabled": {
       "type": "boolean"
     },

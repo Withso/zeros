@@ -42,7 +42,9 @@ import * as path from "node:path";
 import { homedir } from "node:os";
 
 import {
+  createSdkMcpServer,
   query,
+  tool,
   type AccountInfo,
   type ElicitationRequest,
   type ElicitationResult,
@@ -59,17 +61,23 @@ import {
   type UserDialogRequest,
   type UserDialogResult,
 } from "@anthropic-ai/claude-agent-sdk";
+import { z } from "zod";
 
 import type {
   AdvertisedModel,
   AvailableCommand,
 } from "@zeros/protocol/agent-events";
 import type { AccountDetails } from "@zeros/protocol/messages";
+import type {
+  BrowserJsonValue,
+  BrowserToolDefinition,
+} from "@zeros/protocol/browser-tools";
 import { buildQuestionStamp } from "@zeros/protocol/agent-messages";
 
 import {
   AgentFailureError,
   type AgentAdapter,
+  type AgentBrowserTools,
   type AgentAdapterContext,
   type ContentBlock,
   type InitializeResponse,
@@ -547,6 +555,113 @@ function readAgentCountFromDetail(detail: string | null): number | null {
   return match ? Number(match[1]) : null;
 }
 
+/** Claude exposes in-process callback tools through an SDK-owned transport.
+ * This adapter-private wrapper is not a Zeros MCP registration: schemas,
+ * execution, identity, policy, and artifacts all remain owned by the common
+ * browser service. */
+export function createClaudeBrowserServer(binding: AgentBrowserTools) {
+  return createSdkMcpServer({
+    name: "zeros_browser",
+    version: "1.0.0",
+    alwaysLoad: true,
+    instructions:
+      "Use these Zeros-owned browser tools for isolated website navigation and testing. Consequential actions are confirmed by Zeros.",
+    tools: claudeBrowserTools(binding),
+  });
+}
+
+export function claudeBrowserTools(binding: AgentBrowserTools) {
+  return binding.definitions.map((definition) =>
+    tool(
+      definition.name,
+      definition.description,
+      browserZodShape(definition),
+      async (args) => {
+        const result = await binding.execute(
+          definition.name,
+          args as BrowserJsonValue,
+        );
+        return {
+          content: result.content.map((item) =>
+            item.type === "text"
+              ? { type: "text" as const, text: item.text }
+              : {
+                  type: "image" as const,
+                  data: item.data,
+                  mimeType: item.mimeType,
+                },
+          ),
+          isError: !result.success,
+        };
+      },
+      { alwaysLoad: true },
+    ),
+  );
+}
+
+function browserZodShape(
+  definition: BrowserToolDefinition,
+): Record<string, z.ZodType> {
+  const required = new Set(definition.inputSchema.required ?? []);
+  return Object.fromEntries(
+    Object.entries(definition.inputSchema.properties).map(([name, schema]) => {
+      const value = browserZodValue(schema);
+      return [name, required.has(name) ? value : value.optional()];
+    }),
+  );
+}
+
+function browserZodValue(value: BrowserJsonValue): z.ZodType {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return z.unknown();
+  }
+  const schema = value as Record<string, BrowserJsonValue>;
+  if (schema.type === "string") {
+    let result = z.string();
+    if (typeof schema.maxLength === "number")
+      result = result.max(schema.maxLength);
+    if (typeof schema.pattern === "string")
+      result = result.regex(new RegExp(schema.pattern));
+    return result;
+  }
+  if (schema.type === "integer") {
+    let result = z.number().int();
+    if (typeof schema.minimum === "number") result = result.min(schema.minimum);
+    if (typeof schema.maximum === "number") result = result.max(schema.maximum);
+    return result;
+  }
+  if (schema.type === "boolean") return z.boolean();
+  if (schema.type === "array") {
+    let result = z.array(browserZodValue(schema.items ?? null));
+    if (typeof schema.maxItems === "number")
+      result = result.max(schema.maxItems);
+    return result;
+  }
+  if (schema.type === "object") {
+    const properties =
+      schema.properties &&
+      typeof schema.properties === "object" &&
+      !Array.isArray(schema.properties)
+        ? (schema.properties as Record<string, BrowserJsonValue>)
+        : {};
+    const required = new Set(
+      Array.isArray(schema.required)
+        ? schema.required.filter(
+            (entry): entry is string => typeof entry === "string",
+          )
+        : [],
+    );
+    const shape = Object.fromEntries(
+      Object.entries(properties).map(([name, child]) => {
+        const parsed = browserZodValue(child);
+        return [name, required.has(name) ? parsed : parsed.optional()];
+      }),
+    );
+    return z.object(shape).strict();
+  }
+  return z.unknown();
+}
+
 interface SdkSession {
   /** Zeros-side ephemeral routing id (returned to the renderer; never durable). */
   readonly zerosSessionId: string;
@@ -559,6 +674,7 @@ interface SdkSession {
    *  workspace layers, RCE-gated). Undefined → fall back to the global
    *  ctx.mcpServers in buildOptions. */
   mcpServers?: McpServerRegistration[];
+  browserTools?: AgentBrowserTools;
   permissionMode: ClaudeMode;
   /** Live model override set via setModel(). Wins over env.ANTHROPIC_MODEL
    *  (the creation-time choice) in buildOptions, and is applied to an alive
@@ -855,6 +971,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
+    browserTools?: AgentBrowserTools;
   }): Promise<{ session: NewSessionResponse; initialize: InitializeResponse }> {
     const initialize = await this.initialize();
     const zerosSessionId = opts.executionId ?? randomUUID();
@@ -889,6 +1006,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
+    browserTools?: AgentBrowserTools;
   }): Promise<LoadSessionResponse> {
     const executionId = opts.executionId ?? opts.sessionId ?? randomUUID();
     const existing = this.sessions.get(executionId);
@@ -897,6 +1015,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       existing.env = opts.env;
       existing.cliBinary = opts.cliBinary?.trim() || undefined;
       existing.mcpServers = opts.mcpServers;
+      existing.browserTools = opts.browserTools;
       this.refreshIdleTeardown(existing);
       return loadResponseWithModes(existing.permissionMode);
     }
@@ -959,6 +1078,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       env?: Record<string, string>;
       cliBinary?: string;
       mcpServers?: McpServerRegistration[];
+      browserTools?: AgentBrowserTools;
     },
   ): SdkSession {
     return {
@@ -967,6 +1087,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       env: opts.env,
       cliBinary: opts.cliBinary?.trim() || undefined,
       mcpServers: opts.mcpServers,
+      browserTools: opts.browserTools,
       // Fresh chat → honour the user's configured default mode (settings.json
       // hierarchy); a persisted per-chat mode overrides via reconcile.
       permissionMode: resolveDefaultPermissionMode(opts.cwd),
@@ -2207,6 +2328,18 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       if (/^AskUserQuestion$/i.test(toolName)) {
         return this.handleAskUserQuestionTool(state, input, options);
       }
+      // Claude models custom callbacks as SDK-internal MCP calls. The common
+      // Zeros browser service already owns the action-aware policy gate, so a
+      // second generic Claude permission card would be both redundant and less
+      // precise. Match only the exact product server and canonical inventory.
+      if (
+        state.browserTools &&
+        state.browserTools.definitions.some(
+          ({ name }) => toolName === `mcp__zeros_browser__${name}`,
+        )
+      ) {
+        return Promise.resolve({ behavior: "allow", updatedInput: input });
+      }
       const permissionId = randomUUID();
       const toolCallId = options.toolUseID ?? `${Date.now()}`;
       // "Allow for this project" persists an ALLOW RULE to localSettings
@@ -3102,7 +3235,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // Per-session registry (gateway-resolved for this cwd: user + repo +
     // workspace layers, RCE-gated) wins; fall back to the global view.
     const sessionMcp = state.mcpServers ?? this.ctx.mcpServers;
-    const mcpServers =
+    const configuredMcpServers =
       sessionMcp.length > 0
         ? Object.fromEntries(
             sessionMcp.map((s) => [
@@ -3122,6 +3255,15 @@ export class ClaudeSdkAdapter implements AgentAdapter {
             ]),
           )
         : undefined;
+    const browserServer = state.browserTools
+      ? createClaudeBrowserServer(state.browserTools)
+      : undefined;
+    // The product-owned adapter binding wins a name collision with ordinary
+    // user MCP configuration, preventing a user server from impersonating the
+    // tool names that bypass Claude's generic gate above.
+    const mcpServers = browserServer
+      ? { ...(configuredMcpServers ?? {}), zeros_browser: browserServer }
+      : configuredMcpServers;
 
     // Resolve the `claude` executable OURSELVES rather than letting the SDK do
     // it. See binary-resolver.ts — the SDK's lookup can only work where a real

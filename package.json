@@ -34,6 +34,7 @@
     "stage:claude-cli": "node scripts/stage-claude-cli.mjs",
     "stage:codex-cli": "node scripts/stage-codex-cli.mjs",
     "smoke:engine": "node scripts/smoke-engine.mjs",
+    "smoke:browser-service": "node scripts/browser-service-smoke.mjs",
     "smoke:packaged-pty": "node scripts/packaged-pty-smoke.mjs",
     "version:current": "node scripts/compute-version.mjs",
     "version:set": "node scripts/compute-version.mjs --set",

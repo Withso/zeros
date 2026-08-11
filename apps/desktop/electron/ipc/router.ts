@@ -138,6 +138,7 @@ const commandTable: Record<string, CommandHandler> = {
   "iframe:clear-cookies": notImpl("iframe:clear-cookies", 0),
   "iframe-picker:capture-region": notImpl("iframe-picker:capture-region", 0),
   "browser:reinject-picker": notImpl("browser:reinject-picker", 0),
+  browser_confirmation_respond: notImpl("browser_confirmation_respond", 0),
 
   // ── Workspace lifecycle ──────────────────────────────────
   // (lifecycle list/create/archive/etc. moved to the engine bridge; only the

@@ -33,6 +33,12 @@ import type {
   TurnUsage,
 } from "@zeros/protocol/agent-events";
 import type { ExecutionId, ProviderBinding } from "@zeros/protocol/identities";
+import type {
+  BrowserJsonValue,
+  BrowserToolDefinition,
+  BrowserToolName,
+  BrowserToolResult,
+} from "@zeros/protocol/browser-tools";
 import type { AccountDetails } from "@zeros/protocol/messages";
 
 // ── Failure taxonomy ─────────────────────────────────────
@@ -191,6 +197,19 @@ export interface AgentAdapterContext {
   emit: AgentGatewayEvents;
 }
 
+/** Zeros-owned browser capability attached to one product conversation.
+ * Provider adapters may translate this contract into their native tool
+ * transport, but must treat the browser session id as opaque and must never
+ * derive it from a provider thread/session or a live execution id. */
+export interface AgentBrowserTools {
+  readonly browserSessionId: string;
+  readonly definitions: readonly BrowserToolDefinition[];
+  execute(
+    tool: BrowserToolName,
+    args: BrowserJsonValue,
+  ): Promise<BrowserToolResult>;
+}
+
 export interface AgentAdapter {
   readonly agentId: string;
 
@@ -222,6 +241,7 @@ export interface AgentAdapter {
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
+    browserTools?: AgentBrowserTools;
     systemInstruction?: string;
   }): Promise<{ session: NewSessionResponse; initialize: InitializeResponse }>;
 
@@ -239,6 +259,7 @@ export interface AgentAdapter {
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
+    browserTools?: AgentBrowserTools;
     systemInstruction?: string;
   }): Promise<LoadSessionResponse>;
 

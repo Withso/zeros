@@ -38,6 +38,10 @@ import { resolveWorkspaceTargetRef } from "../git/target-branch";
 import { mergeSpawnEnv } from "../settings/spawn-env";
 import { applyUserProviderConfig } from "../settings/provider-env";
 import {
+  acquireZerosBrowserTools,
+  stripBrowserServiceCredentials,
+} from "../browser/browser-tool-client";
+import {
   AGENT_MANIFEST,
   bundledRuntimeVersion,
   findAgent,
@@ -486,6 +490,40 @@ export class AgentGateway {
     }
   }
 
+  /** Resolve the optional product-owned browser capability independently from
+   * provider configuration. Browser startup failures degrade only this
+   * capability; they never prevent the selected agent from starting. */
+  private async resolveBrowserTools(
+    agentId: string,
+    workspaceId: string | undefined,
+    conversationId: string | undefined,
+    mainRepoRoot?: string,
+  ) {
+    if (!workspaceId || !conversationId) return undefined;
+    try {
+      const workspaceRoot = getWorkspaceById(workspaceId)?.path;
+      if (!workspaceRoot) {
+        throw new Error("The owning Zeros workspace path is unavailable.");
+      }
+      return (
+        (await acquireZerosBrowserTools({
+          workspaceId,
+          conversationId,
+          workspaceRoot,
+          mainRepoRoot,
+        })) ?? undefined
+      );
+    } catch (error) {
+      this.events.onAgentStderr(
+        agentId,
+        `[zeros-browser] capability unavailable: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return undefined;
+    }
+  }
+
   // ── Engine-facing gateway API ───────────────────────────
 
   async listAgents(): Promise<EnrichedRegistryAgent[]> {
@@ -775,6 +813,8 @@ export class AgentGateway {
        *  renderer is the source of truth). If cwd is missing, the
        *  workspace's path is used. */
       workspaceId?: string;
+      /** Durable Zeros conversation identity owning optional product tools. */
+      conversationId?: string;
       /** Optional CLI binary override from Settings → Providers →
        *  Advanced. Threaded down to the adapter so the per-turn spawn
        *  uses this in place of the registry's `cliBinary`. */
@@ -825,6 +865,7 @@ export class AgentGateway {
       { env: merged, cliBinary: opts.cliBinary },
       mainRepoRoot,
     );
+    spawn.env = stripBrowserServiceCredentials(spawn.env);
     // Native-instruction adapters (Codex) take the first-turn orientation on
     // their protocol's own channel at thread creation; everyone else gets it
     // prepended in-band on the first prompt (withSystemInstruction).
@@ -836,6 +877,12 @@ export class AgentGateway {
     );
     const executionId = randomUUID();
     const mcpServers = await this.resolveSessionMcp(agentId, cwd, mainRepoRoot);
+    const browserTools = await this.resolveBrowserTools(
+      agentId,
+      opts.workspaceId,
+      opts.conversationId,
+      mainRepoRoot,
+    );
     opts.onExecutionCreated?.(executionId);
     let session: NewSessionResponse;
     try {
@@ -845,6 +892,7 @@ export class AgentGateway {
         env: spawn.env,
         cliBinary: spawn.cliBinary,
         mcpServers,
+        ...(browserTools ? { browserTools } : {}),
         ...(systemInstruction ? { systemInstruction } : {}),
       }));
     } catch (err) {
@@ -901,6 +949,7 @@ export class AgentGateway {
       cwd?: string;
       env?: Record<string, string>;
       workspaceId?: string;
+      conversationId?: string;
       cliBinary?: string;
       /** Publish the engine-owned route before adapter.loadSession can emit
        * updates. The caller must remove provisional routing if load rejects. */
@@ -942,6 +991,7 @@ export class AgentGateway {
       { env: merged, cliBinary: opts.cliBinary },
       mainRepoRoot,
     );
+    spawn.env = stripBrowserServiceCredentials(spawn.env);
     const instructionCtx = this.parseInstructionCtx(spawn.env);
     const systemInstruction = this.nativeInstructionFor(
       adapter,
@@ -949,6 +999,12 @@ export class AgentGateway {
       instructionCtx,
     );
     const mcpServers = await this.resolveSessionMcp(agentId, cwd, mainRepoRoot);
+    const browserTools = await this.resolveBrowserTools(
+      agentId,
+      opts.workspaceId,
+      opts.conversationId,
+      mainRepoRoot,
+    );
     opts.onExecutionCreated?.(executionId);
     let response: LoadSessionResponse;
     try {
@@ -961,6 +1017,7 @@ export class AgentGateway {
         env: spawn.env,
         cliBinary: spawn.cliBinary,
         mcpServers,
+        ...(browserTools ? { browserTools } : {}),
         ...(systemInstruction ? { systemInstruction } : {}),
       });
     } catch (err) {
@@ -1074,6 +1131,7 @@ export class AgentGateway {
       { env: merged, cliBinary: opts.cliBinary },
       mainRepoRoot,
     );
+    spawn.env = stripBrowserServiceCredentials(spawn.env);
     const instructionCtx = this.parseInstructionCtx(spawn.env);
     const systemInstruction = this.nativeInstructionFor(
       adapter,

@@ -6,6 +6,10 @@ describe("resolveSettings — precedence", () => {
     const r = resolveSettings({});
     expect(r.effective.git).toEqual({ remote: "origin", base_branch: "main" });
     expect(r.effective.scripts).toEqual({ run_mode: "concurrent" });
+    expect(r.effective.browser).toEqual({
+      enabled: true,
+      provider: "isolated",
+    });
     expect(r.sources["git.remote"]).toBe("default");
     expect(r.sources["scripts.run_mode"]).toBe("default");
     expect(r.warnings).toEqual([]);
@@ -139,6 +143,22 @@ describe("resolveSettings — layer hygiene", () => {
       r.warnings.some((w) => w.startsWith("repo: tool_approvals_enabled")),
     ).toBe(true);
     expect(r.warnings.some((w) => w.startsWith("repo: workspaces"))).toBe(true);
+  });
+
+  it("resolves one engine-owned browser posture for every agent", () => {
+    const disabled = resolveSettings({
+      user: { browser: { enabled: false } },
+      repo: { browser: { enabled: true, provider: "isolated" } },
+    });
+    expect(disabled.effective.browser).toEqual({
+      enabled: false,
+      provider: "isolated",
+    });
+    expect(disabled.sources["browser.enabled"]).toBe("user");
+    expect(disabled.sources["browser.provider"]).toBe("default");
+    expect(
+      disabled.warnings.some((warning) => warning.startsWith("repo: browser")),
+    ).toBe(true);
   });
 
   it("drops invalid leaves with warnings but keeps valid siblings", () => {

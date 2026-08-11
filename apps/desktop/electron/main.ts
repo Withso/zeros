@@ -88,6 +88,7 @@ import {
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isBrowserConfirmationDecision } from "@zeros/protocol/browser-tools";
 import { registerIpcHandlers } from "./ipc/router";
 import { registerIframeSessionCommands } from "./ipc/iframe-session";
 import { registerIframePickerCommands } from "./ipc/iframe-picker";
@@ -105,11 +106,18 @@ import {
   MAIN_WINDOW_MIN_WIDTH,
   readPersistedWindowState,
 } from "./window-state";
-import { setMainWindow, emitEvent } from "./ipc/events";
+import {
+  getMainWindow,
+  setMainWindow,
+  emitEvent,
+  whenRendererReady,
+} from "./ipc/events";
+import { setCommand } from "./ipc/router";
 import {
   defaultProjectRoot,
   shutdown as shutdownSidecar,
   setEngineSpawnBarrier,
+  setBrowserServiceEnvironment,
   spawnEngine,
   startEngineCodeWatcher,
   startWatchdog,
@@ -147,6 +155,12 @@ import {
   installDesignProtocol,
   registerDesignProtocolPrivileges,
 } from "./design-protocol";
+import {
+  startZerosBrowserService,
+  type ZerosBrowserServiceHandle,
+} from "./browser/service";
+
+let browserService: ZerosBrowserServiceHandle | null = null;
 
 // Custom schemes must be privileged before Electron reaches ready. The handler
 // itself is installed after ready, before the first renderer window loads.
@@ -1205,6 +1219,19 @@ app.whenReady().then(async () => {
   registerAllCommands();
   installDesignProtocol();
 
+  setCommand("browser_confirmation_respond", (args) => {
+    const confirmationId = args.confirmationId;
+    const decision = args.decision;
+    if (
+      typeof confirmationId !== "string" ||
+      !isBrowserConfirmationDecision(decision)
+    ) {
+      throw new Error("Invalid Zeros browser confirmation response.");
+    }
+    return (
+      browserService?.respondToConfirmation(confirmationId, decision) ?? false
+    );
+  });
   // PATH repair and engine startup are critical background work, not a window
   // creation prerequisite. Register a spawn barrier so the child still inherits
   // the repaired PATH, then start the single-flight boot before loading the UI.
@@ -1232,13 +1259,50 @@ app.whenReady().then(async () => {
       );
     }
   });
+  // Start the product-owned isolated browser before the engine child. The
+  // endpoint and bearer are per boot, stay in main/engine memory, and are not
+  // couriered into provider subprocesses.
+  setBrowserServiceEnvironment(null);
+  const browserReady = startZerosBrowserService({
+    artifactRoot: path.join(zerosDataDir(), "browser-artifacts"),
+    isTrustedSurfaceAvailable: () => getMainWindow() !== null,
+    onConfirmationRequest: (request) => {
+      const confirmationWindow = getMainWindow();
+      void whenRendererReady().then(() => {
+        // Never move an authorization prompt across trusted renderer
+        // lifecycles. The agent can retry after a replacement window mounts.
+        if (!confirmationWindow || getMainWindow() !== confirmationWindow) {
+          browserService?.respondToConfirmation(request.id, "deny");
+          return;
+        }
+        emitEvent("browser-confirmation-request", request);
+      });
+    },
+    onSessionState: (state) => emitEvent("browser-session-state", state),
+  })
+    .then((service) => {
+      browserService = service;
+      setBrowserServiceEnvironment({
+        url: service.baseUrl,
+        token: service.token,
+      });
+    })
+    .catch((error) => {
+      // Browser automation is optional. Keep the editor/agents usable while
+      // making the missing capability diagnosable without logging its token.
+      console.warn(
+        `[Zeros] isolated browser service unavailable: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
   const disposeGithubSessionSync = onMainAuthSessionChanged(async () => {
     await pushGithubCredentialToEngine();
     await scheduleGithubAppRefresh();
     emitEvent("github-credential-store-changed", {});
   });
   app.on("will-quit", disposeGithubSessionSync);
-  setEngineSpawnBarrier(githubAuthReady);
+  setEngineSpawnBarrier(Promise.all([githubAuthReady, browserReady]));
   const root = defaultProjectRoot();
   const engineBoot = spawnEngine(root);
 
@@ -1252,6 +1316,13 @@ app.whenReady().then(async () => {
 
   const win = createMainWindow();
   setMainWindow(win);
+  win.on("closed", () => {
+    void browserService?.revokeConfirmationSurface();
+  });
+  win.webContents.on(
+    "did-start-loading",
+    () => void browserService?.revokeConfirmationSurface(),
+  );
 
   // Main-owned update checks continue even when the macOS window is closed.
   // Start only after setMainWindow so the initial event cannot pollute the
@@ -1313,6 +1384,13 @@ app.whenReady().then(async () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       const next = createMainWindow();
       setMainWindow(next);
+      next.on("closed", () => {
+        void browserService?.revokeConfirmationSurface();
+      });
+      next.webContents.on(
+        "did-start-loading",
+        () => void browserService?.revokeConfirmationSurface(),
+      );
       registerIframeSessionCommands({ mainWindow: next });
       registerIframePickerCommands({ mainWindow: next });
     }
@@ -1329,6 +1407,10 @@ app.on("window-all-closed", () => {
 // if multiple windows close, so the shutdown is single-threaded.
 app.on("before-quit", () => {
   shutdownSidecar();
+  const service = browserService;
+  browserService = null;
+  setBrowserServiceEnvironment(null);
+  if (service) void service.stop().catch(() => {});
   // Interactive PTYs are now engine-owned (apps/desktop/src/renderer/platform/pty.ts → engine bridge),
   // and the engine reaps them on its own shutdown (Engine.stop → pty.killAll).
   // Killing the sidecar above tears the engine down, so there are no

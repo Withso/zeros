@@ -11,7 +11,11 @@
 // provenance is what renders "Inherited from User" in the repo settings UI.
 // ──────────────────────────────────────────────────────────
 
-import { sanitizeLayer, type RawSettingsDoc, type SettingsLayerName } from "./schema";
+import {
+  sanitizeLayer,
+  type RawSettingsDoc,
+  type SettingsLayerName,
+} from "./schema";
 
 /** Resolver-level fallbacks. Deliberately minimal: only values the product
  *  treats as universal defaults today; behavior toggles stay undefined until
@@ -23,6 +27,10 @@ export const DEFAULT_SETTINGS: RawSettingsDoc = {
   },
   scripts: {
     run_mode: "concurrent",
+  },
+  browser: {
+    enabled: true,
+    provider: "isolated",
   },
 };
 
@@ -76,7 +84,10 @@ function clone<T>(v: T): T {
 
 /** Remove provenance entries at and under `path` (a leaf being replaced by a
  *  table, or a table being replaced by a leaf, must not leave stale entries). */
-function clearSourcesUnder(sources: Record<string, SettingsLayerName>, path: string): void {
+function clearSourcesUnder(
+  sources: Record<string, SettingsLayerName>,
+  path: string,
+): void {
   delete sources[path];
   const prefix = `${path}.`;
   for (const key of Object.keys(sources)) {
@@ -118,15 +129,16 @@ export function resolveSettings(layers: SettingsLayers): ResolvedSettings {
   const sources: Record<string, SettingsLayerName> = {};
   const warnings: string[] = [];
 
-  const ordered: Array<[SettingsLayerName, RawSettingsDoc | null | undefined]> = [
-    ["default", DEFAULT_SETTINGS],
-    ["user", layers.user],
-    ["team", layers.team],
-    ["repo", layers.repo],
-    ["repo-local", layers.repoLocal],
-    ["workspace-local", layers.workspaceLocal],
-    ["managed", layers.managed],
-  ];
+  const ordered: Array<[SettingsLayerName, RawSettingsDoc | null | undefined]> =
+    [
+      ["default", DEFAULT_SETTINGS],
+      ["user", layers.user],
+      ["team", layers.team],
+      ["repo", layers.repo],
+      ["repo-local", layers.repoLocal],
+      ["workspace-local", layers.workspaceLocal],
+      ["managed", layers.managed],
+    ];
 
   for (const [layer, raw] of ordered) {
     if (!raw) continue;

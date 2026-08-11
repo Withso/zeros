@@ -107,6 +107,7 @@ describe("sanitizeLayer", () => {
     const doc = {
       models: { default: "fable-5" },
       workspaces: { path: "/x" },
+      browser: { enabled: true, provider: "isolated" },
       tool_approvals_enabled: true,
       github: {
         auth_method: "github-app",
@@ -122,7 +123,46 @@ describe("sanitizeLayer", () => {
 
     const repo = sanitizeLayer(doc, "repo");
     expect(repo.doc).toEqual({});
-    expect(repo.warnings).toHaveLength(5);
+    expect(repo.warnings).toHaveLength(6);
+  });
+
+  it("keeps browser posture engine-owned and rejects provider escape hatches", () => {
+    expect(
+      sanitizeLayer(
+        { browser: { enabled: false, provider: "isolated" } },
+        "user",
+      ),
+    ).toEqual({
+      doc: { browser: { enabled: false, provider: "isolated" } },
+      warnings: [],
+    });
+
+    const invalid = sanitizeLayer(
+      {
+        browser: {
+          enabled: true,
+          provider: "shared-chrome",
+          developer_cdp_enabled: true,
+        },
+      },
+      "user",
+    );
+    expect(invalid.doc).toEqual({
+      browser: { enabled: true },
+    });
+    expect(invalid.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("browser.provider"),
+        expect.stringContaining("browser.developer_cdp_enabled"),
+      ]),
+    );
+
+    const repo = sanitizeLayer(
+      { browser: { enabled: true, provider: "isolated" } },
+      "repo",
+    );
+    expect(repo.doc.browser).toBeUndefined();
+    expect(repo.warnings).toEqual([expect.stringContaining("user-only")]);
   });
 
   it("round-trips every Models setting and validates Claude's idle timeout", () => {

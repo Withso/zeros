@@ -2754,6 +2754,7 @@ export class ZerosEngine {
                   cwd: spawnOpts.cwd,
                   env: spawnOpts.env,
                   workspaceId: spawnOpts.workspaceId,
+                  conversationId: msg.chatId,
                   cliBinary: spawnOpts.cliBinary,
                   onExecutionCreated: (executionId) => {
                     if (
@@ -4132,6 +4133,7 @@ export class ZerosEngine {
                     cwd: loadOpts.cwd,
                     env: loadOpts.env,
                     workspaceId: loadOpts.workspaceId,
+                    conversationId: msg.chatId,
                     cliBinary: loadOpts.cliBinary,
                     onExecutionCreated: (executionId) => {
                       if (

@@ -44,6 +44,7 @@ import {
 
 import type {
   AgentAdapter,
+  AgentBrowserTools,
   AgentAdapterContext,
   ContentBlock,
   InitializeResponse,
@@ -75,6 +76,10 @@ import {
 } from "../shared/mcp-elicitation";
 import { isDevRuntime } from "../../../runtime";
 import { openExternalUrl } from "../../gateway/open-url";
+import {
+  codexBrowserDynamicTools,
+  createCodexBrowserToolHandler,
+} from "./browser-tools";
 
 import {
   bootCodexAppServerRuntime,
@@ -443,6 +448,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
+    browserTools?: AgentBrowserTools;
     systemInstruction?: string;
   }): Promise<{ session: NewSessionResponse; initialize: InitializeResponse }> {
     const { session } = await this.bootSession({
@@ -450,6 +456,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       env: opts.env,
       cliBinary: opts.cliBinary,
       mcpServers: opts.mcpServers,
+      browserTools: opts.browserTools,
       systemInstruction: opts.systemInstruction,
       kind: "new",
       zerosSessionId: opts.executionId,
@@ -487,6 +494,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
+    browserTools?: AgentBrowserTools;
     systemInstruction?: string;
   }): Promise<LoadSessionResponse> {
     // Resume the provider thread into a separately-minted Zeros execution. The
@@ -508,6 +516,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       env: opts.env,
       cliBinary: opts.cliBinary,
       mcpServers: opts.mcpServers,
+      browserTools: opts.browserTools,
       systemInstruction: opts.systemInstruction,
       kind: "resume",
       resumeThreadId,
@@ -1406,6 +1415,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     /** Per-session MCP registry (gateway-resolved for this cwd); undefined →
      *  the global ctx.mcpServers. */
     mcpServers?: McpServerRegistration[];
+    /** Provider-neutral Zeros browser binding, translated only at the app-server seam. */
+    browserTools?: AgentBrowserTools;
     /** Zeros' first-turn instruction body → `developerInstructions` on
      *  thread/start AND thread/resume (see `nativeSystemInstruction`). */
     systemInstruction?: string;
@@ -1443,6 +1454,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // eslint-disable-next-line prefer-const -- assigned after runtime boot; closures above capture the live ref.
     let session!: CodexSession;
     let runtime: CodexAppServerHandle;
+    const onDynamicToolCall = createCodexBrowserToolHandler(opts.browserTools);
     try {
       runtime = await bootCodexAppServerRuntime({
         cwd: opts.cwd,
@@ -1450,6 +1462,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         cliBinary: opts.cliBinary,
         clientInfo: CLIENT_INFO,
         mcpServers: opts.mcpServers ?? this.ctx.mcpServers,
+        ...(onDynamicToolCall ? { onDynamicToolCall } : {}),
         logTag: `codex-app-server:${zerosSessionId.slice(0, 8)}`,
         onApprovalRequest: (request) =>
           this.handleApprovalRequest(session, request),
@@ -1532,6 +1545,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
               opts.env,
               initialMode,
               opts.systemInstruction,
+              opts.browserTools,
             ),
           );
           threadId = fresh.threadId;
@@ -1546,6 +1560,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
             opts.env,
             initialMode,
             opts.systemInstruction,
+            opts.browserTools,
           ),
         );
         threadId = result.threadId;
@@ -2364,6 +2379,7 @@ export function buildThreadStartParams(
    *  (the native channel — layers on Codex's built-in system prompt; never
    *  baseInstructions, which would REPLACE it). */
   systemInstruction?: string,
+  browserTools?: AgentBrowserTools,
 ): CodexThreadStartParams {
   const model = env?.OPENAI_MODEL;
   const { approvalPolicy, sandboxMode } = modePolicyFor(modeId);
@@ -2371,6 +2387,9 @@ export function buildThreadStartParams(
     cwd,
     ...(model ? { model } : {}),
     ...(systemInstruction ? { developerInstructions: systemInstruction } : {}),
+    ...(browserTools
+      ? { dynamicTools: codexBrowserDynamicTools(browserTools) }
+      : {}),
     approvalPolicy,
     sandbox: sandboxMode,
   };
