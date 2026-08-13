@@ -22,6 +22,10 @@
 import { app, safeStorage } from "electron";
 import fs from "node:fs";
 import path from "node:path";
+import {
+  ensureSafeStorageEncryption,
+  prepareSafeStorageEncryption,
+} from "./safe-storage-availability";
 
 /** The directory holding secrets.json. Shared dev login: apps/desktop/electron/main.ts sets
  *  ZEROS_SHARED_SECRETS_DIR to the channel-PRIMARY data dir (com.zeros.dev) so
@@ -134,13 +138,16 @@ function withSecretsLock<T>(fn: () => T): T {
   }
 }
 
+function electronSafeStorage() {
+  return {
+    isEncryptionAvailable: () => safeStorage.isEncryptionAvailable(),
+    setUsePlainTextEncryption: (usePlainText: boolean) =>
+      safeStorage.setUsePlainTextEncryption(usePlainText),
+  };
+}
+
 function ensureEncryptionAvailable(): void {
-  if (!safeStorage.isEncryptionAvailable()) {
-    throw new Error(
-      "OS keystore unavailable — cannot encrypt secrets. " +
-        "On macOS this usually means Keychain access was denied.",
-    );
-  }
+  ensureSafeStorageEncryption(process.platform, electronSafeStorage());
 }
 
 export function setSecret(account: string, value: string): void {
@@ -156,6 +163,11 @@ export function setSecret(account: string, value: string): void {
 }
 
 export function getSecret(account: string): string | null {
+  // Linux cloud-agent: enable the plaintext safeStorage key before decrypt so
+  // session restore uses the same encryptor as setSecret. macOS: this is a
+  // no-op unless Keychain already works; a denied Keychain still returns null
+  // below instead of throwing (the historical getSecret contract).
+  prepareSafeStorageEncryption(process.platform, electronSafeStorage());
   const data = readAll();
   const b64 = data[account];
   if (typeof b64 !== "string" || b64.length === 0) return null;
